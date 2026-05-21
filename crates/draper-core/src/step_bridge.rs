@@ -27,10 +27,35 @@ pub fn step_to_shape(doc: &StepDocument, shape: &mut Shape) {
 
     log::debug!("Geometry pass complete: {} vertices created", ctx.shape.vertices().len());
 
-    // Second pass: create topology (vertices, edges, wires, faces, shells, solids)
-    for id in &doc.entity_order {
-        if let Some(entity) = doc.get_entity(*id) {
-            ctx.process_topology_entity(entity);
+    // Second pass: create topology in dependency order
+    // STEP files can reference entities with higher IDs, so we must
+    // process in dependency order rather than file order.
+    let topo_types_in_order: &[&[&str]] = &[
+        // 1. VERTEX_POINT (depends on CARTESIAN_POINT from geometry pass)
+        &["VERTEX_POINT"],
+        // 2. EDGE_CURVE (depends on VERTEX_POINT, LINE, CIRCLE)
+        &["EDGE_CURVE"],
+        // 3. ORIENTED_EDGE (depends on EDGE_CURVE)
+        &["ORIENTED_EDGE"],
+        // 4. EDGE_LOOP, POLY_LOOP (depends on ORIENTED_EDGE, CARTESIAN_POINT)
+        &["EDGE_LOOP", "POLY_LOOP"],
+        // 5. FACE_OUTER_BOUND, FACE_BOUND (depends on EDGE_LOOP/POLY_LOOP)
+        &["FACE_OUTER_BOUND", "FACE_BOUND"],
+        // 6. ADVANCED_FACE (depends on FACE_OUTER_BOUND, surface)
+        &["ADVANCED_FACE"],
+        // 7. CLOSED_SHELL, OPEN_SHELL (depends on ADVANCED_FACE)
+        &["CLOSED_SHELL", "OPEN_SHELL"],
+        // 8. MANIFOLD_SOLID_BREP (depends on CLOSED_SHELL)
+        &["MANIFOLD_SOLID_BREP"],
+    ];
+
+    for type_group in topo_types_in_order {
+        for id in &doc.entity_order {
+            if let Some(entity) = doc.get_entity(*id) {
+                if type_group.contains(&entity.type_name.as_str()) {
+                    ctx.process_topology_entity(entity);
+                }
+            }
         }
     }
 
@@ -164,20 +189,16 @@ impl<'a> BridgeContext<'a> {
             }
             "ORIENTED_EDGE" => {
                 // ORIENTED_EDGE(name, *, *, edge_ref, orientation)
-                if let Some(edge_ref) = entity.ref_param(4) {
+                // param(0)=name, param(1)=*, param(2)=*, param(3)=edge_ref, param(4)=orientation
+                if let Some(edge_ref) = entity.ref_param(3) {
                     if let Some(&topo_id) = self.id_map.get(&edge_ref) {
                         self.id_map.insert(entity.id, topo_id);
+                        log::trace!("ORIENTED_EDGE #{} → edge_ref=#{} → topo_id={}", entity.id, edge_ref, topo_id);
+                    } else {
+                        log::warn!("ORIENTED_EDGE #{}: edge_ref #{} not found in id_map", entity.id, edge_ref);
                     }
                 } else {
-                    // Fallback: try param index 3 (some files use different ordering)
-                    for i in 0..entity.parameters.len() {
-                        if let Some(ref_id) = entity.ref_param(i) {
-                            if let Some(&topo_id) = self.id_map.get(&ref_id) {
-                                self.id_map.insert(entity.id, topo_id);
-                                break;
-                            }
-                        }
-                    }
+                    log::warn!("ORIENTED_EDGE #{}: no edge reference at param(3)", entity.id);
                 }
             }
             "EDGE_LOOP" => {
@@ -269,8 +290,11 @@ impl<'a> BridgeContext<'a> {
         let end_ref = entity.ref_param(2).unwrap_or(0);
         let curve_ref = entity.ref_param(3);
 
-        let start_topo = self.id_map.get(&start_ref).copied();
-        let end_topo = self.id_map.get(&end_ref).copied();
+        // Resolve vertex references — the refs may point to VERTEX_POINT entities
+        // which may not have been processed yet. Resolve them directly through
+        // the STEP document: VERTEX_POINT → CARTESIAN_POINT → vertex TopoId
+        let start_topo = self.resolve_vertex_ref(start_ref);
+        let end_topo = self.resolve_vertex_ref(end_ref);
 
         let curve = curve_ref.and_then(|r| self.doc.get_entity(r))
             .and_then(|e| self.parse_curve(e));
@@ -280,9 +304,41 @@ impl<'a> BridgeContext<'a> {
             self.id_map.insert(entity.id, id);
         } else {
             log::warn!(
-                "EDGE_CURVE #{}: missing vertex refs (start={}, end={})",
-                entity.id, start_ref, end_ref
+                "EDGE_CURVE #{}: missing vertex refs (start={}, end={}, start_topo={:?}, end_topo={:?})",
+                entity.id, start_ref, end_ref, start_topo, end_topo
             );
+        }
+    }
+
+    /// Resolve a vertex reference to a TopoId.
+    ///
+    /// The reference may be:
+    /// 1. A VERTEX_POINT entity (which references a CARTESIAN_POINT)
+    /// 2. A CARTESIAN_POINT entity directly (for POLY_LOOP cases)
+    /// 3. Already in id_map from a previous processing step
+    fn resolve_vertex_ref(&self, vertex_ref: u64) -> Option<TopoId> {
+        // First, check if already in id_map
+        if let Some(&topo_id) = self.id_map.get(&vertex_ref) {
+            return Some(topo_id);
+        }
+
+        // Try to resolve through the STEP document
+        let entity = self.doc.get_entity(vertex_ref)?;
+
+        match entity.type_name.as_str() {
+            "VERTEX_POINT" => {
+                // VERTEX_POINT references a CARTESIAN_POINT
+                if let Some(cp_ref) = entity.ref_param(1) {
+                    self.id_map.get(&cp_ref).copied()
+                } else {
+                    None
+                }
+            }
+            "CARTESIAN_POINT" => {
+                // Direct reference to a CARTESIAN_POINT
+                self.id_map.get(&vertex_ref).copied()
+            }
+            _ => None,
         }
     }
 
@@ -294,17 +350,27 @@ impl<'a> BridgeContext<'a> {
                 .iter()
                 .filter_map(|p| {
                     if let Parameter::Reference(ref_id) = p {
-                        if let Some(oe_entity) = self.doc.get_entity(*ref_id) {
-                            // ORIENTED_EDGE('', *, *, edge_ref, orientation)
-                            let edge_ref = oe_entity.ref_param(4).unwrap_or(0);
-                            let orientation = match oe_entity.param(5) {
-                                Some(Parameter::Enumeration(s)) => s != "F",
-                                Some(Parameter::Omitted) => true,
-                                _ => true,
+                        // Look up the ORIENTED_EDGE entity in our id_map first.
+                        // The ORIENTED_EDGE was processed in process_topology_entity and
+                        // its id_map entry points to the underlying EDGE_CURVE's TopoId.
+                        if let Some(&edge_topo) = self.id_map.get(ref_id) {
+                            // Determine orientation from the ORIENTED_EDGE entity
+                            let orientation = if let Some(oe_entity) = self.doc.get_entity(*ref_id) {
+                                // ORIENTED_EDGE(name, *, *, edge_ref, orientation)
+                                // param(4) = orientation (.T. or .F.)
+                                match oe_entity.param(4) {
+                                    Some(Parameter::Enumeration(s)) => s != "F",
+                                    _ => true,
+                                }
+                            } else {
+                                true
                             };
-                            if let Some(&edge_topo) = self.id_map.get(&edge_ref) {
-                                return Some(OrientedEdge { edge_id: edge_topo, orientation });
-                            }
+                            return Some(OrientedEdge { edge_id: edge_topo, orientation });
+                        } else {
+                            log::warn!(
+                                "EDGE_LOOP #{}: ORIENTED_EDGE ref #{} not found in id_map",
+                                entity.id, ref_id
+                            );
                         }
                     }
                     None
@@ -312,8 +378,12 @@ impl<'a> BridgeContext<'a> {
                 .collect();
 
             if !oriented_edges.is_empty() {
+                let edge_count = oriented_edges.len();
                 let id = self.shape.add_wire(oriented_edges);
                 self.id_map.insert(entity.id, id);
+                log::trace!("EDGE_LOOP #{}: {} oriented edges → wire {}", entity.id, edge_count, id);
+            } else {
+                log::warn!("EDGE_LOOP #{}: no oriented edges resolved", entity.id);
             }
         }
     }
@@ -361,7 +431,19 @@ impl<'a> BridgeContext<'a> {
             .and_then(|r| self.doc.get_entity(r))
             .and_then(|e| self.parse_surface(e));
 
+        // Get the face orientation from param(3)
+        let same_sense = match entity.param(3) {
+            Some(Parameter::Enumeration(s)) => s == "T",
+            Some(Parameter::Omitted) => true,
+            _ => true,
+        };
+
         let face_id = self.shape.add_face(surface);
+
+        // Set face orientation
+        if let Some(TopoShape::Face(face)) = self.shape.get_mut(face_id) {
+            face.orientation = same_sense;
+        }
 
         // Set boundaries
         if let Some(bound_list) = entity.list_param(1) {
@@ -382,18 +464,26 @@ impl<'a> BridgeContext<'a> {
                             self.shape.add_face_inner_wire(face_id, wire_topo);
                         }
                         first_bound = false;
+                    } else {
+                        log::warn!(
+                            "ADVANCED_FACE #{}: bound ref #{} not found in id_map",
+                            entity.id, bound_ref
+                        );
                     }
                 }
             }
         }
 
         self.id_map.insert(entity.id, face_id);
-        log::trace!("ADVANCED_FACE #{}: surface={:?}, face_id={}", entity.id, surface_ref, face_id);
+        log::trace!(
+            "ADVANCED_FACE #{}: surface={:?}, same_sense={}, face_id={}",
+            entity.id, surface_ref, same_sense, face_id
+        );
     }
 
     fn process_shell(&mut self, entity: &StepEntity) {
-        // CLOSED_SHELL(name, (face_list))
-        let face_list = entity.list_param(0);
+        // CLOSED_SHELL/OPEN_SHELL(name, (face_list))
+        let face_list = entity.list_param(1);
         if let Some(faces) = face_list {
             let face_ids: Vec<TopoId> = faces
                 .iter()

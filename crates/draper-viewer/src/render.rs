@@ -85,7 +85,7 @@ fn compute_camera_matrices(
     (view, proj)
 }
 
-fn project_point(vp: &Mat4, point: &draper_geometry::point::Point3, rect: Rect) -> Option<Pos2> {
+fn project_point(vp: &Mat4, point: &draper_geometry::point::Point3, rect: Rect) -> Option<(Pos2, f32)> {
     let p = Vec4::new(point.x as f32, point.y as f32, point.z as f32, 1.0);
     let clip = *vp * p;
 
@@ -95,15 +95,17 @@ fn project_point(vp: &Mat4, point: &draper_geometry::point::Point3, rect: Rect) 
 
     let ndc_x = clip.x / clip.w;
     let ndc_y = clip.y / clip.w;
+    let ndc_z = clip.z / clip.w;
 
-    if ndc_x < -1.5 || ndc_x > 1.5 || ndc_y < -1.5 || ndc_y > 1.5 {
+    // Use a generous clip range to avoid popping artifacts
+    if ndc_x < -2.0 || ndc_x > 2.0 || ndc_y < -2.0 || ndc_y > 2.0 {
         return None;
     }
 
     let screen_x = rect.left() + (ndc_x + 1.0) * 0.5 * rect.width();
     let screen_y = rect.top() + (1.0 - ndc_y) * 0.5 * rect.height();
 
-    Some(Pos2::new(screen_x, screen_y))
+    Some((Pos2::new(screen_x, screen_y), ndc_z))
 }
 
 fn draw_axes(painter: &Painter, vp: &Mat4, rect: Rect) {
@@ -117,15 +119,15 @@ fn draw_axes(painter: &Painter, vp: &Mat4, rect: Rect) {
     let y = project_point(vp, &y_end, rect);
     let z = project_point(vp, &z_end, rect);
 
-    if let (Some(o), Some(x)) = (o, x) {
+    if let (Some((o, _)), Some((x, _))) = (o, x) {
         painter.line_segment([o, x], Stroke::new(2.0, Color32::RED));
         painter.text(x, Align2::LEFT_CENTER, "X", FontId::proportional(12.0), Color32::RED);
     }
-    if let (Some(o), Some(y)) = (o, y) {
+    if let (Some((o, _)), Some((y, _))) = (o, y) {
         painter.line_segment([o, y], Stroke::new(2.0, Color32::GREEN));
         painter.text(y, Align2::LEFT_CENTER, "Y", FontId::proportional(12.0), Color32::GREEN);
     }
-    if let (Some(o), Some(z)) = (o, z) {
+    if let (Some((o, _)), Some((z, _))) = (o, z) {
         painter.line_segment([o, z], Stroke::new(2.0, Color32::BLUE));
         painter.text(z, Align2::LEFT_CENTER, "Z", FontId::proportional(12.0), Color32::BLUE);
     }
@@ -148,7 +150,7 @@ fn draw_wireframe_mesh(painter: &Painter, mesh: &TriangleMesh, vp: &Mat4, rect: 
             let pb = project_point(vp, b, rect);
             let pc = project_point(vp, c, rect);
 
-            if let (Some(pa), Some(pb), Some(pc)) = (pa, pb, pc) {
+            if let (Some((pa, _)), Some((pb, _)), Some((pc, _))) = (pa, pb, pc) {
                 painter.line_segment([pa, pb], Stroke::new(1.0, color));
                 painter.line_segment([pb, pc], Stroke::new(1.0, color));
                 painter.line_segment([pc, pa], Stroke::new(1.0, color));
@@ -160,7 +162,7 @@ fn draw_wireframe_mesh(painter: &Painter, mesh: &TriangleMesh, vp: &Mat4, rect: 
 fn draw_solid_mesh(painter: &Painter, mesh: &TriangleMesh, vp: &Mat4, rect: Rect) {
     // For solid rendering, we use filled triangles with basic shading.
     // Project all triangles, compute simple face normals for lighting,
-    // and draw back-to-front (painter's algorithm — not ideal but works for simple models).
+    // and draw back-to-front (painter's algorithm) using clip-space Z for depth.
 
     let mut projected_tris: Vec<(f32, [Pos2; 3], Color32)> = Vec::new();
 
@@ -180,7 +182,7 @@ fn draw_solid_mesh(painter: &Painter, mesh: &TriangleMesh, vp: &Mat4, rect: Rect
             let pb = project_point(vp, b, rect);
             let pc = project_point(vp, c, rect);
 
-            if let (Some(pa), Some(pb), Some(pc)) = (pa, pb, pc) {
+            if let (Some((pa, za)), Some((pb, zb)), Some((pc, zc))) = (pa, pb, pc) {
                 // Compute face normal for simple lighting
                 let ab = Vec3::new(
                     (b.x - a.x) as f32,
@@ -203,15 +205,15 @@ fn draw_solid_mesh(painter: &Painter, mesh: &TriangleMesh, vp: &Mat4, rect: Rect
                 let g = (160.0 * intensity) as u8;
                 let b_val = (220.0 * intensity) as u8;
 
-                // Depth for sorting (average Z in clip space)
-                let depth = (pa.y + pb.y + pc.y) / 3.0;
+                // Depth for sorting: average NDC Z (higher Z = further from camera in RHS)
+                let depth = (za + zb + zc) / 3.0;
 
                 projected_tris.push((depth, [pa, pb, pc], Color32::from_rgb(r, g, b_val)));
             }
         }
     }
 
-    // Sort by depth (painter's algorithm — back to front)
+    // Sort by depth (painter's algorithm — back to front, largest Z first)
     projected_tris.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
     // Draw triangles
