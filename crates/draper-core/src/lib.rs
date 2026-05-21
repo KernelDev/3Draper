@@ -1,14 +1,16 @@
 //! # draper-core
 //!
 //! The high-level API for 3Draper — combines STEP I/O, geometry,
-//! topology, and mesh generation into a unified interface.
+//! topology, mesh generation, and programmatic modeling into a unified interface.
 
 pub mod document;
+pub mod engine;
 pub mod error;
 pub mod scene;
 pub mod step_bridge;
 
 pub use document::*;
+pub use engine::*;
 pub use error::*;
 pub use scene::*;
 pub use step_bridge::*;
@@ -24,6 +26,7 @@ pub use draper_geometry::{
 pub use draper_mesh::triangulate::TriangleMesh;
 pub use draper_step::ast::{StepDocument, StepEntity, StructureNode};
 pub use draper_topology::{
+    builder::ShapeBuilder,
     entity::*,
     shape::Shape,
 };

@@ -1,6 +1,7 @@
 //! Document — the main high-level container for a 3D model.
 //!
 //! A Document wraps a STEP model, a B-rep Shape, and generated meshes.
+//! It supports both loading from STEP files and programmatic construction.
 
 use crate::error::{CoreError, CoreResult};
 use crate::scene::Scene;
@@ -11,6 +12,7 @@ use draper_step::ast::{StepDocument, StructureNode};
 use draper_step::bridge::{parse_step, write_step};
 use draper_step::StepModel;
 use draper_topology::shape::Shape;
+use std::collections::HashMap;
 use std::path::Path;
 
 /// The main document type for 3Draper.
@@ -27,6 +29,10 @@ pub struct Document {
     pub scene: Scene,
     /// The file path this document was loaded from (if any).
     pub file_path: Option<String>,
+    /// Per-solid part names (from programmatic construction).
+    pub part_names: HashMap<u64, String>,
+    /// Per-solid colors (RGB, 0.0-1.0 range).
+    pub part_colors: HashMap<u64, [f32; 3]>,
 }
 
 impl Document {
@@ -39,7 +45,45 @@ impl Document {
             meshes: Vec::new(),
             scene: Scene::new(),
             file_path: None,
+            part_names: HashMap::new(),
+            part_colors: HashMap::new(),
         }
+    }
+
+    /// Create a document from a programmatically built shape.
+    pub fn from_shape(shape: Shape) -> Self {
+        let mut doc = Self {
+            step_model: None,
+            step_doc: None,
+            shape,
+            meshes: Vec::new(),
+            scene: Scene::new(),
+            file_path: None,
+            part_names: HashMap::new(),
+            part_colors: HashMap::new(),
+        };
+        doc.regenerate_meshes();
+        doc.scene = Scene::from_shape(&doc.shape);
+        doc
+    }
+
+    /// Create a document from an engine model.
+    pub fn from_engine(engine: crate::engine::EngineModel) -> Self {
+        let part_names = engine.part_names;
+        let part_colors = engine.part_colors;
+        let mut doc = Self {
+            step_model: None,
+            step_doc: None,
+            shape: engine.shape,
+            meshes: Vec::new(),
+            scene: Scene::new(),
+            file_path: None,
+            part_names,
+            part_colors,
+        };
+        doc.regenerate_meshes();
+        doc.scene = Scene::from_shape(&doc.shape);
+        doc
     }
 
     /// Load a STEP file.
@@ -59,6 +103,8 @@ impl Document {
             meshes: Vec::new(),
             scene: Scene::new(),
             file_path: Some(path.to_string_lossy().to_string()),
+            part_names: HashMap::new(),
+            part_colors: HashMap::new(),
         };
 
         // Generate meshes from the shape

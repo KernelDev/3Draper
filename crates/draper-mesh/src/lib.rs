@@ -14,6 +14,7 @@
 //! 5. 3D mapping and quality control
 //! 6. Iterative refinement
 
+pub mod boolean;
 pub mod delaunay;
 pub mod earcut;
 pub mod generate;
