@@ -3,6 +3,9 @@
 //! Provides Constrained Delaunay Triangulation (CDT) for face meshing.
 //! Boundary edges from B-rep wires are preserved as constraint edges,
 //! ensuring the triangulation respects the original topology.
+//!
+//! Key function: `cdt_with_constraints` — builds a CDT from a set of
+//! points and constraint edges, supporting holes and nested contours.
 
 use draper_geometry::point::Point2;
 use spade::{ConstrainedDelaunayTriangulation, Point2 as SpadePoint2, Triangulation};
@@ -57,108 +60,23 @@ fn deduplicate_points(vertices: &[Point2], eps: f64) -> (Vec<Point2>, Vec<u32>) 
     (deduped, index_map)
 }
 
-/// Triangulate a simple polygon (no holes) using Constrained Delaunay Triangulation.
+/// Build a CDT from a set of 2D points with constraint edges.
 ///
-/// Boundary edges are added as constraints to preserve the polygon outline.
-/// Returns a list of triangle indices (3 indices per triangle), referencing the
-/// original input point indices.
+/// This is the primary CDT entry point for the production pipeline.
+/// It:
+/// 1. Deduplicates input points
+/// 2. Inserts all vertices into the triangulation
+/// 3. Adds all constraint edges (preserving topology)
+/// 4. Extracts triangle indices mapped back to original indices
 ///
-/// If CDT fails (e.g., due to intersecting constraints), returns an empty Vec
-/// and the caller should fall back to ear-clipping.
-pub fn cdt_polygon(vertices: &[Point2]) -> Vec<u32> {
-    if vertices.len() < 3 {
+/// Returns triangle indices (3 per triangle) referencing the input point array.
+pub fn cdt_with_constraints(points: &[Point2], constraints: &[(usize, usize)]) -> Vec<u32> {
+    if points.len() < 3 {
         return Vec::new();
     }
 
     // Deduplicate points
-    let (deduped, index_map) = deduplicate_points(vertices, 1e-10);
-    if deduped.len() < 3 {
-        return Vec::new();
-    }
-
-    // Build CDT with constraint edges along the polygon boundary
-    let mut cdt = ConstrainedDelaunayTriangulation::<MeshPoint>::new();
-
-    // Insert deduplicated vertices
-    let mut handles: Vec<spade::handles::FixedVertexHandle> = Vec::with_capacity(deduped.len());
-    for (i, pt) in deduped.iter().enumerate() {
-        let mesh_pt = MeshPoint {
-            pos: SpadePoint2::new(pt.u, pt.v),
-            original_index: i as u32,
-        };
-        match cdt.insert(mesh_pt) {
-            Ok(handle) => handles.push(handle),
-            Err(e) => {
-                log::debug!("CDT: failed to insert point at index {}: {:?}", i, e);
-                return Vec::new();
-            }
-        }
-    }
-
-    // Add constraint edges along the polygon boundary.
-    // Use try_add_constraint to avoid panics from intersecting edges.
-    for i in 0..vertices.len() {
-        let j = (i + 1) % vertices.len();
-        let di = index_map[i] as usize;
-        let dj = index_map[j] as usize;
-        if di != dj && di < handles.len() && dj < handles.len() {
-            let result = cdt.try_add_constraint(handles[di], handles[dj]);
-            if result.is_empty() {
-                // Constraint intersects an existing constraint — this means
-                // the polygon is self-intersecting or complex.
-                // Fall back to no-constraint Delaunay and let caller handle it.
-                log::debug!(
-                    "CDT: constraint edge ({},{}) intersects existing constraint, skipping",
-                    di, dj
-                );
-            }
-        }
-    }
-
-    // Extract triangle indices in deduplicated space, then map back to original indices
-    let deduped_indices = extract_inner_triangles(&cdt);
-
-    if deduped_indices.is_empty() {
-        return Vec::new();
-    }
-
-    // Build reverse map: deduplicated index -> original index
-    // For each deduplicated index, use the first original index that maps to it
-    let mut reverse_map = vec![0u32; deduped.len()];
-    for (orig_idx, &dedup_idx) in index_map.iter().enumerate() {
-        reverse_map[dedup_idx as usize] = orig_idx as u32;
-    }
-
-    // Map deduplicated indices back to original indices
-    deduped_indices
-        .into_iter()
-        .map(|idx| reverse_map[idx as usize])
-        .collect()
-}
-
-/// Triangulate a polygon with holes using Constrained Delaunay Triangulation.
-///
-/// The outer boundary and each hole boundary are added as constraint edges.
-/// Only triangles inside the outer boundary and outside all holes are kept.
-///
-/// Returns a list of triangle indices (3 indices per triangle), referencing the
-/// combined point array: [outer_points, hole1_points, hole2_points, ...].
-pub fn cdt_polygon_with_holes(
-    outer: &[Point2],
-    holes: &[Vec<Point2>],
-) -> Vec<u32> {
-    if outer.len() < 3 {
-        return Vec::new();
-    }
-
-    // Build combined point array
-    let mut all_points: Vec<Point2> = outer.to_vec();
-    for hole in holes {
-        all_points.extend_from_slice(hole);
-    }
-
-    // Deduplicate all points
-    let (deduped, index_map) = deduplicate_points(&all_points, 1e-10);
+    let (deduped, index_map) = deduplicate_points(points, 1e-10);
     if deduped.len() < 3 {
         return Vec::new();
     }
@@ -177,68 +95,128 @@ pub fn cdt_polygon_with_holes(
             Ok(handle) => handles.push(handle),
             Err(e) => {
                 log::debug!("CDT: failed to insert point at index {}: {:?}", i, e);
-                return Vec::new();
+                continue;
             }
         }
     }
 
-    // Add constraint edges for outer boundary
-    for i in 0..outer.len() {
-        let j = (i + 1) % outer.len();
-        let di = index_map[i] as usize;
-        let dj = index_map[j] as usize;
-        if di != dj && di < handles.len() && dj < handles.len() {
-            let result = cdt.try_add_constraint(handles[di], handles[dj]);
-            if result.is_empty() {
-                log::debug!("CDT: outer constraint ({},{}) intersects, skipping", di, dj);
-            }
+    if handles.len() < 3 {
+        return Vec::new();
+    }
+
+    // Add constraint edges
+    let mut constraints_added = 0;
+    let mut constraints_skipped = 0;
+    for &(a, b) in constraints {
+        if a >= points.len() || b >= points.len() {
+            continue;
+        }
+        let da = index_map[a] as usize;
+        let db = index_map[b] as usize;
+        if da == db {
+            continue;
+        }
+        if da >= handles.len() || db >= handles.len() {
+            continue;
+        }
+        let result = cdt.try_add_constraint(handles[da], handles[db]);
+        if result.is_empty() {
+            constraints_skipped += 1;
+        } else {
+            constraints_added += 1;
         }
     }
 
-    // Add constraint edges for each hole boundary
-    let mut offset = outer.len();
-    for hole in holes {
-        for i in 0..hole.len() {
-            let j = (i + 1) % hole.len();
-            let hi = index_map[offset + i] as usize;
-            let hj = index_map[offset + j] as usize;
-            if hi != hj && hi < handles.len() && hj < handles.len() {
-                let result = cdt.try_add_constraint(handles[hi], handles[hj]);
-                if result.is_empty() {
-                    log::debug!("CDT: hole constraint ({},{}) intersects, skipping", hi, hj);
-                }
-            }
-        }
-        offset += hole.len();
-    }
+    log::trace!(
+        "CDT: {} points, {} constraints added, {} skipped",
+        deduped.len(),
+        constraints_added,
+        constraints_skipped,
+    );
 
-    // Extract triangles and map back to original indices
+    // Extract triangle indices
     let deduped_indices = extract_inner_triangles(&cdt);
 
     if deduped_indices.is_empty() {
         return Vec::new();
     }
 
-    // Build reverse map: deduplicated index -> original index
+    // Build reverse map: deduplicated index → original index
     let mut reverse_map = vec![0u32; deduped.len()];
     for (orig_idx, &dedup_idx) in index_map.iter().enumerate() {
         reverse_map[dedup_idx as usize] = orig_idx as u32;
     }
 
     // Map deduplicated indices back to original indices
-    let mapped_indices: Vec<u32> = deduped_indices
+    deduped_indices
         .into_iter()
         .map(|idx| reverse_map[idx as usize])
+        .collect()
+}
+
+/// Triangulate a simple polygon (no holes) using Constrained Delaunay Triangulation.
+///
+/// Boundary edges are added as constraints to preserve the polygon outline.
+/// Returns a list of triangle indices (3 indices per triangle), referencing the
+/// original input point indices.
+pub fn cdt_polygon(vertices: &[Point2]) -> Vec<u32> {
+    if vertices.len() < 3 {
+        return Vec::new();
+    }
+
+    // Build constraints for the polygon boundary
+    let constraints: Vec<(usize, usize)> = (0..vertices.len())
+        .map(|i| (i, (i + 1) % vertices.len()))
         .collect();
 
-    // Filter out triangles that are outside the outer boundary or inside holes
+    cdt_with_constraints(vertices, &constraints)
+}
+
+/// Triangulate a polygon with holes using Constrained Delaunay Triangulation.
+///
+/// The outer boundary and each hole boundary are added as constraint edges.
+/// Only triangles inside the outer boundary and outside all holes are kept.
+pub fn cdt_polygon_with_holes(outer: &[Point2], holes: &[Vec<Point2>]) -> Vec<u32> {
+    if outer.len() < 3 {
+        return Vec::new();
+    }
+
+    // Build combined point array
+    let mut all_points: Vec<Point2> = outer.to_vec();
+    for hole in holes {
+        all_points.extend_from_slice(hole);
+    }
+
+    // Build constraints for outer and hole boundaries
+    let mut constraints: Vec<(usize, usize)> = Vec::new();
+
+    // Outer boundary
+    for i in 0..outer.len() {
+        constraints.push((i, (i + 1) % outer.len()));
+    }
+
+    // Hole boundaries
+    let mut offset = outer.len();
+    for hole in holes {
+        for i in 0..hole.len() {
+            constraints.push((offset + i, offset + (i + 1) % hole.len()));
+        }
+        offset += hole.len();
+    }
+
+    // Build CDT
+    let mapped_indices = cdt_with_constraints(&all_points, &constraints);
+
+    if mapped_indices.is_empty() {
+        return Vec::new();
+    }
+
+    // Filter out triangles outside the outer boundary or inside holes
     filter_triangles_inside_polygon(&mapped_indices, &all_points, outer, holes)
 }
 
 /// Extract triangle indices from the CDT, mapping back to deduplicated point indices.
-fn extract_inner_triangles(
-    cdt: &ConstrainedDelaunayTriangulation<MeshPoint>,
-) -> Vec<u32> {
+fn extract_inner_triangles(cdt: &ConstrainedDelaunayTriangulation<MeshPoint>) -> Vec<u32> {
     let mut triangles = Vec::new();
 
     for face in cdt.inner_faces() {
@@ -259,8 +237,6 @@ fn extract_inner_triangles(
 }
 
 /// Filter triangles to keep only those inside the polygon boundary and outside holes.
-///
-/// Uses point-in-polygon test on the centroid of each triangle.
 fn filter_triangles_inside_polygon(
     indices: &[u32],
     all_points: &[Point2],
@@ -282,18 +258,15 @@ fn filter_triangles_inside_polygon(
             continue;
         }
 
-        // Compute centroid
         let centroid = Point2::new(
             (all_points[ai].u + all_points[bi].u + all_points[ci].u) / 3.0,
             (all_points[ai].v + all_points[bi].v + all_points[ci].v) / 3.0,
         );
 
-        // Must be inside outer boundary
         if !point_in_polygon(&centroid, outer) {
             continue;
         }
 
-        // Must be outside all holes
         let mut inside_hole = false;
         for hole in holes {
             if point_in_polygon(&centroid, hole) {
@@ -301,7 +274,6 @@ fn filter_triangles_inside_polygon(
                 break;
             }
         }
-
         if inside_hole {
             continue;
         }
@@ -315,9 +287,6 @@ fn filter_triangles_inside_polygon(
 }
 
 /// Test if a point is inside a polygon using the ray-casting algorithm.
-///
-/// Counts the number of crossings of a horizontal ray from the test point
-/// to +infinity with the polygon edges. An odd count means the point is inside.
 pub fn point_in_polygon(point: &Point2, polygon: &[Point2]) -> bool {
     if polygon.len() < 3 {
         return false;
@@ -331,7 +300,6 @@ pub fn point_in_polygon(point: &Point2, polygon: &[Point2]) -> bool {
         let pi = &polygon[i];
         let pj = &polygon[j];
 
-        // Check if the ray from point to +infinity in X direction crosses edge (pi, pj)
         if ((pi.v > point.v) != (pj.v > point.v))
             && (point.u < (pj.u - pi.u) * (point.v - pi.v) / (pj.v - pi.v) + pi.u)
         {
@@ -342,10 +310,7 @@ pub fn point_in_polygon(point: &Point2, polygon: &[Point2]) -> bool {
     inside
 }
 
-/// Triangulate a set of boundary points that form a face.
-///
-/// Primary entry point for face triangulation using CDT.
-/// Returns triangle indices referencing the original point list.
+/// Legacy entry point for face triangulation using CDT.
 pub fn triangulate_face_boundary(
     points_2d: &[Point2],
     holes_2d: &[Vec<Point2>],
@@ -406,6 +371,24 @@ mod tests {
         let triangles = cdt_polygon_with_holes(&outer, &[hole]);
         assert!(triangles.len() >= 6, "Expected at least 6 indices, got {}", triangles.len());
         assert!(triangles.len() % 3 == 0, "Triangle indices should be a multiple of 3");
+    }
+
+    #[test]
+    fn test_cdt_with_constraints() {
+        let points = vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(2.0, 0.0),
+            Point2::new(2.0, 2.0),
+            Point2::new(0.0, 2.0),
+            Point2::new(1.0, 1.0), // Interior point
+        ];
+        let constraints = vec![
+            (0, 1), (1, 2), (2, 3), (3, 0), // Outer boundary
+        ];
+
+        let triangles = cdt_with_constraints(&points, &constraints);
+        assert!(triangles.len() >= 9, "Expected at least 9 indices, got {}", triangles.len());
+        assert!(triangles.len() % 3 == 0);
     }
 
     #[test]

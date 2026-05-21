@@ -1,9 +1,18 @@
 //! Topological entities — the core of the B-rep model.
 //!
 //! Each entity has a unique ID and references geometric data.
+//! The topology follows the STEP B-rep hierarchy:
+//! Vertex → Edge → Wire → Face → Shell → Solid → Compound
+//!
+//! Key design principles (from the triangulation guide):
+//! - Edges carry both 3D curves AND 2D pcurves (one per face)
+//! - Seam edges are explicitly marked for periodic surfaces
+//! - Face carries UV domain bounds for proper parameterization
+//! - Tolerance is tracked at every level for healing/validation
 
 use draper_geometry::curve::Curve;
-use draper_geometry::point::Point3;
+use draper_geometry::pcurve::PCurveOnFace;
+use draper_geometry::point::{Point2, Point3};
 use draper_geometry::surface::Surface;
 use serde::{Deserialize, Serialize};
 
@@ -20,10 +29,14 @@ pub struct Vertex {
 }
 
 /// An oriented edge — a curve bounded by two vertices.
+///
+/// An edge may be shared by multiple faces. For each face it belongs to,
+/// it has a corresponding pcurve (2D curve in the face's UV parameter space).
+/// This is critical for constrained Delaunay triangulation in UV space.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Edge {
     pub id: TopoId,
-    /// The geometric curve supporting this edge.
+    /// The 3D geometric curve supporting this edge.
     pub curve: Option<Curve>,
     /// Start vertex.
     pub start_vertex: TopoId,
@@ -35,6 +48,13 @@ pub struct Edge {
     pub orientation: bool,
     /// Tolerance.
     pub tolerance: f64,
+    /// Whether this edge is a seam on a periodic surface.
+    /// A seam edge connects the same vertex at u_min and u_max (or v_min/v_max).
+    /// In UV space, it appears as two separate curves at opposite boundaries.
+    pub is_seam: bool,
+    /// PCurves for this edge, one per face it borders.
+    /// Key = face_id, Value = pcurve information.
+    pub pcurves: Vec<PCurveOnFace>,
 }
 
 /// An oriented edge reference within a wire.
@@ -46,6 +66,9 @@ pub struct OrientedEdge {
 }
 
 /// A wire — a sequence of connected edges forming a closed or open loop.
+///
+/// Wires represent boundaries of faces. The outer wire goes CCW,
+/// inner wires (holes) go CW when viewed from outside the face.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Wire {
     pub id: TopoId,
@@ -53,9 +76,14 @@ pub struct Wire {
     pub edges: Vec<OrientedEdge>,
     /// Whether the wire is closed.
     pub closed: bool,
+    /// Whether this wire is a seam wire (on a periodic surface boundary).
+    pub is_seam: bool,
 }
 
 /// A face — a portion of a surface bounded by wires.
+///
+/// The face carries both the 3D surface and UV domain information.
+/// The outer wire defines the outer boundary; inner wires define holes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Face {
     pub id: TopoId,
@@ -67,6 +95,47 @@ pub struct Face {
     pub inner_wires: Vec<TopoId>,
     /// Orientation: true = normal points outward, false = reversed.
     pub orientation: bool,
+    /// UV parameter bounds for the face's surface.
+    /// This defines the valid parameter domain for triangulation.
+    pub uv_bounds: Option<UVBounds>,
+    /// Whether this face is on a periodic surface (has seam edges).
+    pub has_seam: bool,
+}
+
+/// UV parameter bounds for a face.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct UVBounds {
+    pub u_min: f64,
+    pub u_max: f64,
+    pub v_min: f64,
+    pub v_max: f64,
+}
+
+impl UVBounds {
+    pub fn new(u_min: f64, u_max: f64, v_min: f64, v_max: f64) -> Self {
+        Self { u_min, u_max, v_min, v_max }
+    }
+
+    pub fn u_range(&self) -> f64 {
+        self.u_max - self.u_min
+    }
+
+    pub fn v_range(&self) -> f64 {
+        self.v_max - self.v_min
+    }
+
+    /// Check if a UV point is within these bounds.
+    pub fn contains(&self, u: f64, v: f64) -> bool {
+        u >= self.u_min && u <= self.u_max && v >= self.v_min && v <= self.v_max
+    }
+
+    /// Compute the center of the UV domain.
+    pub fn center(&self) -> Point2 {
+        Point2::new(
+            (self.u_min + self.u_max) / 2.0,
+            (self.v_min + self.v_max) / 2.0,
+        )
+    }
 }
 
 /// A shell — a collection of connected faces.
@@ -173,6 +242,8 @@ impl Edge {
             parameter_range,
             orientation: true,
             tolerance: 1e-7,
+            is_seam: false,
+            pcurves: Vec::new(),
         }
     }
 
@@ -186,6 +257,8 @@ impl Edge {
             parameter_range: Some(parameter_range),
             orientation: true,
             tolerance: 1e-7,
+            is_seam: true,
+            pcurves: Vec::new(),
         }
     }
 
@@ -197,12 +270,34 @@ impl Edge {
             (self.end_vertex, self.start_vertex)
         }
     }
+
+    /// Add a pcurve for a specific face.
+    pub fn add_pcurve(&mut self, pcurve: PCurveOnFace) {
+        // Remove existing pcurve for the same face if present
+        self.pcurves.retain(|pc| pc.face_id != pcurve.face_id);
+        self.pcurves.push(pcurve);
+    }
+
+    /// Get the pcurve for a specific face.
+    pub fn get_pcurve(&self, face_id: TopoId) -> Option<&PCurveOnFace> {
+        self.pcurves.iter().find(|pc| pc.face_id == face_id)
+    }
+
+    /// Check if this edge is degenerate (zero length).
+    pub fn is_degenerate(&self) -> bool {
+        self.start_vertex == self.end_vertex
+    }
 }
 
 impl Wire {
     pub fn new(id: TopoId, edges: Vec<OrientedEdge>) -> Self {
         let closed = !edges.is_empty(); // Wires in STEP are typically closed
-        Self { id, edges, closed }
+        Self { id, edges, closed, is_seam: false }
+    }
+
+    /// Create a seam wire.
+    pub fn seam_wire(id: TopoId, edges: Vec<OrientedEdge>) -> Self {
+        Self { id, edges, closed: true, is_seam: true }
     }
 
     /// Get the number of edges in this wire.
@@ -223,6 +318,8 @@ impl Face {
             outer_wire: None,
             inner_wires: Vec::new(),
             orientation: true,
+            uv_bounds: None,
+            has_seam: false,
         }
     }
 
@@ -233,6 +330,11 @@ impl Face {
 
     pub fn with_inner_wire(mut self, wire_id: TopoId) -> Self {
         self.inner_wires.push(wire_id);
+        self
+    }
+
+    pub fn with_uv_bounds(mut self, bounds: UVBounds) -> Self {
+        self.uv_bounds = Some(bounds);
         self
     }
 }
