@@ -24,6 +24,9 @@ pub enum StepError {
 
     #[error("Encoding error: {0}")]
     Encoding(String),
+
+    #[error("STEP conversion warning: {0}")]
+    Conversion(String),
 }
 
 pub type StepResult<T> = Result<T, StepError>;

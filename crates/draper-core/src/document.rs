@@ -1,20 +1,23 @@
 //! Document — the main high-level container for a 3D model.
 //!
-//! A Document wraps a STEP document, a B-rep Shape, and generated meshes.
+//! A Document wraps a STEP model, a B-rep Shape, and generated meshes.
 
 use crate::error::{CoreError, CoreResult};
 use crate::scene::Scene;
 use crate::step_bridge;
 use draper_mesh::generate::generate_mesh;
 use draper_mesh::triangulate::TriangleMesh;
-use draper_step::ast::StepDocument;
-use draper_step::parser::{parse_step, write_step};
+use draper_step::ast::{StepDocument, StructureNode};
+use draper_step::bridge::{parse_step, write_step};
+use draper_step::StepModel;
 use draper_topology::shape::Shape;
 use std::path::Path;
 
 /// The main document type for 3Draper.
 pub struct Document {
-    /// The STEP document (raw parsed data).
+    /// The STEP model (step-io typed IR).
+    pub step_model: Option<StepModel>,
+    /// The STEP document (backward-compatible AST for structure tree).
     pub step_doc: Option<StepDocument>,
     /// The B-rep shape (constructed from STEP or built programmatically).
     pub shape: Shape,
@@ -30,6 +33,7 @@ impl Document {
     /// Create a new empty document.
     pub fn new() -> Self {
         Self {
+            step_model: None,
             step_doc: None,
             shape: Shape::new(),
             meshes: Vec::new(),
@@ -41,18 +45,21 @@ impl Document {
     /// Load a STEP file.
     pub fn open_step(path: &Path) -> CoreResult<Self> {
         let content = std::fs::read_to_string(path)?;
-        let step_doc = parse_step(&content)?;
+        log::info!("Read {} bytes from {}", content.len(), path.display());
+
+        let parsed = parse_step(&content)?;
+
+        // Convert step-io's StepModel to our B-rep Shape
+        let shape = step_bridge::step_model_to_shape(&parsed.model);
 
         let mut doc = Self {
-            step_doc: Some(step_doc.clone()),
-            shape: Shape::new(),
+            step_model: Some(parsed.model),
+            step_doc: Some(parsed.document.clone()),
+            shape,
             meshes: Vec::new(),
             scene: Scene::new(),
             file_path: Some(path.to_string_lossy().to_string()),
         };
-
-        // Convert STEP entities to B-rep shape
-        step_bridge::step_to_shape(&step_doc, &mut doc.shape);
 
         // Generate meshes from the shape
         doc.regenerate_meshes();
@@ -65,16 +72,27 @@ impl Document {
 
     /// Save the document as a STEP file.
     pub fn save_step(&self, path: &Path) -> CoreResult<()> {
-        let step_doc = if let Some(ref doc) = self.step_doc {
-            doc.clone()
-        } else {
-            // Generate a STEP document from the shape
-            step_bridge::shape_to_step(&self.shape)?
-        };
+        // If we have the original StepModel, use step-io's writer
+        if let Some(ref model) = self.step_model {
+            let model_clone = model.clone();
+            let mut output = Vec::new();
+            model_clone.write_to(&mut output).map_err(|e| {
+                CoreError::InvalidOperation(format!("STEP write error: {:?}", e))
+            })?;
+            std::fs::write(path, &output)?;
+            return Ok(());
+        }
 
-        let content = write_step(&step_doc);
-        std::fs::write(path, content)?;
-        Ok(())
+        // Fallback: use our backward-compatible writer
+        if let Some(ref doc) = self.step_doc {
+            let content = write_step(doc);
+            std::fs::write(path, content)?;
+            return Ok(());
+        }
+
+        Err(CoreError::InvalidOperation(
+            "No STEP data to save. Open a STEP file first.".to_string(),
+        ))
     }
 
     /// Save as STEP to the same file it was loaded from.
@@ -129,8 +147,6 @@ impl Default for Document {
         Self::new()
     }
 }
-
-use draper_step::ast::StructureNode;
 
 /// Statistics about the document.
 #[derive(Debug, Clone)]

@@ -1,606 +1,403 @@
-//! Bridge between STEP AST and B-rep Shape.
+//! Bridge between step-io's StepModel and our B-rep Shape.
 //!
-//! Converts STEP entity instances into topological and geometric objects.
+//! Converts step-io's typed arena-based IR (StepModel with GeometryPool and
+//! TopologyPool) into our custom B-rep Shape with topological entities.
 
 use draper_geometry::curve::{Circle, Curve, Line};
 use draper_geometry::direction::{Axis2Placement3D, Direction3};
 use draper_geometry::point::Point3;
-use draper_geometry::surface::{ConicalSurface, CylindricalSurface, Plane, SphericalSurface, Surface};
-use draper_step::ast::{Parameter, StepDocument, StepEntity};
+use draper_geometry::surface::{
+    ConicalSurface, CylindricalSurface, Plane, SphericalSurface, Surface, ToroidalSurface,
+};
+use draper_step::{
+    Curve as StepCurve, CurveId, Direction3 as StepDir3,
+    NurbsCurve, Orientation,
+    Point3 as StepPt3, Placement3dId,
+    StepModel, Surface as StepSurface,
+};
 use draper_topology::entity::*;
 use draper_topology::shape::Shape;
 
-use crate::error::CoreResult;
-
-/// Convert a STEP document to a B-rep Shape.
-pub fn step_to_shape(doc: &StepDocument, shape: &mut Shape) {
-    let ctx = &mut BridgeContext { doc, shape, id_map: Default::default() };
-
-    log::info!("Converting STEP document to B-rep shape ({} entities)", doc.entities.len());
-
-    // First pass: create all geometry (points, directions, curves, surfaces)
-    for id in &doc.entity_order {
-        if let Some(entity) = doc.get_entity(*id) {
-            ctx.process_geometry_entity(entity);
-        }
-    }
-
-    log::debug!("Geometry pass complete: {} vertices created", ctx.shape.vertices().len());
-
-    // Second pass: create topology in dependency order
-    // STEP files can reference entities with higher IDs, so we must
-    // process in dependency order rather than file order.
-    let topo_types_in_order: &[&[&str]] = &[
-        // 1. VERTEX_POINT (depends on CARTESIAN_POINT from geometry pass)
-        &["VERTEX_POINT"],
-        // 2. EDGE_CURVE (depends on VERTEX_POINT, LINE, CIRCLE)
-        &["EDGE_CURVE"],
-        // 3. ORIENTED_EDGE (depends on EDGE_CURVE)
-        &["ORIENTED_EDGE"],
-        // 4. EDGE_LOOP, POLY_LOOP (depends on ORIENTED_EDGE, CARTESIAN_POINT)
-        &["EDGE_LOOP", "POLY_LOOP"],
-        // 5. FACE_OUTER_BOUND, FACE_BOUND (depends on EDGE_LOOP/POLY_LOOP)
-        &["FACE_OUTER_BOUND", "FACE_BOUND"],
-        // 6. ADVANCED_FACE (depends on FACE_OUTER_BOUND, surface)
-        &["ADVANCED_FACE"],
-        // 7. CLOSED_SHELL, OPEN_SHELL (depends on ADVANCED_FACE)
-        &["CLOSED_SHELL", "OPEN_SHELL"],
-        // 8. MANIFOLD_SOLID_BREP (depends on CLOSED_SHELL)
-        &["MANIFOLD_SOLID_BREP"],
-    ];
-
-    for type_group in topo_types_in_order {
-        for id in &doc.entity_order {
-            if let Some(entity) = doc.get_entity(*id) {
-                if type_group.contains(&entity.type_name.as_str()) {
-                    ctx.process_topology_entity(entity);
-                }
-            }
-        }
-    }
-
-    log::debug!(
-        "Topology pass complete: {} edges, {} faces, {} solids",
-        ctx.shape.edges().len(),
-        ctx.shape.faces().len(),
-        ctx.shape.solids().len()
-    );
-
-    // Find root shapes
-    let roots: Vec<TopoId> = shape.solids().iter().map(|s| s.id).collect();
-    let compound_roots: Vec<TopoId> = shape.find_by_type(ShapeType::Compound)
-        .iter().map(|s| s.id()).collect();
-
-    let all_roots = [roots, compound_roots].concat();
-    let root_count = all_roots.len();
-    if !all_roots.is_empty() {
-        shape.set_roots(all_roots);
-    }
-
-    log::info!("STEP → Shape conversion complete: {} root shapes", root_count);
+/// Convert a step-io StepModel to a B-rep Shape.
+///
+/// This is the primary conversion pipeline: StepModel (typed arenas) → Shape (B-rep).
+/// The conversion resolves all geometry references through the arenas and
+/// creates our custom topological entities with embedded geometric data.
+pub fn step_model_to_shape(model: &StepModel) -> Shape {
+    let mut ctx = ConversionContext::new(model);
+    ctx.convert();
+    ctx.shape
 }
 
-/// Convert a B-rep Shape back to a STEP document.
-pub fn shape_to_step(shape: &Shape) -> CoreResult<StepDocument> {
-    let mut doc = StepDocument::new();
+/// Convert a step-io StepModel back to a StepDocument (for write support).
+/// This is a placeholder — step-io has its own writer.
+pub fn shape_to_step_model(_shape: &Shape) -> StepModel {
+    let model = StepModel::default();
+    log::warn!("shape_to_step_model: conversion not yet implemented, returning empty model");
+    model
+}
 
-    // Set header
-    doc.header.file_description.description.push("3Draper exported file".to_string());
-    doc.header.file_description.implementation_level = "2;1".to_string();
-    doc.header.file_name.name = "3draper_export.stp".to_string();
-    doc.header.file_name.time_stamp = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-    doc.header.file_name.author.push("3Draper".to_string());
-    doc.header.file_name.organization.push("3Draper".to_string());
-    doc.header.file_name.preprocessor_version = "3Draper 0.1".to_string();
-    doc.header.file_name.originating_system = "3Draper".to_string();
-    doc.header.file_name.authorization = "".to_string();
-    doc.header.file_schema.schemas.push("AUTOMOTIVE_DESIGN".to_string());
+struct ConversionContext<'a> {
+    model: &'a StepModel,
+    shape: Shape,
+    /// Maps step-io VertexId to our TopoId
+    vertex_map: std::collections::HashMap<u32, TopoId>,
+    /// Maps step-io EdgeId to our TopoId
+    edge_map: std::collections::HashMap<u32, TopoId>,
+    /// Maps step-io WireId to our TopoId
+    wire_map: std::collections::HashMap<u32, TopoId>,
+    /// Maps step-io FaceId to our TopoId
+    face_map: std::collections::HashMap<u32, TopoId>,
+    /// Maps step-io ShellId to our TopoId
+    shell_map: std::collections::HashMap<u32, TopoId>,
+    /// Scale factor based on units (convert to mm)
+    scale: f64,
+}
 
-    let mut next_id = 1u64;
-
-    // Write all entities — simplified exporter
-    for vertex in shape.vertices() {
-        let id = next_id;
-        next_id += 1;
-
-        let pt_id = next_id;
-        next_id += 1;
-        doc.entity_order.push(pt_id);
-        doc.entities.insert(pt_id, StepEntity {
-            id: pt_id,
-            type_name: "CARTESIAN_POINT".to_string(),
-            parameters: vec![
-                Parameter::String(String::new()),
-                Parameter::List(vec![
-                    Parameter::Real(vertex.point.x),
-                    Parameter::Real(vertex.point.y),
-                    Parameter::Real(vertex.point.z),
-                ]),
-            ],
+impl<'a> ConversionContext<'a> {
+    fn new(model: &'a StepModel) -> Self {
+        let scale = model.units.as_ref().map_or(1.0, |u| match u.length {
+            draper_step::LengthUnit::Millimetre => 1.0,
+            draper_step::LengthUnit::Metre => 1000.0,
+            draper_step::LengthUnit::Centimetre => 10.0,
+            draper_step::LengthUnit::Inch => 25.4,
+            draper_step::LengthUnit::Foot => 304.8,
         });
 
-        doc.entity_order.push(id);
-        doc.entities.insert(id, StepEntity {
-            id,
-            type_name: "VERTEX_POINT".to_string(),
-            parameters: vec![
-                Parameter::String(String::new()),
-                Parameter::Reference(pt_id),
-            ],
-        });
-    }
+        log::info!("Unit scale factor: {} (converting to mm)", scale);
 
-    Ok(doc)
-}
-
-struct BridgeContext<'a> {
-    doc: &'a StepDocument,
-    shape: &'a mut Shape,
-    /// Maps STEP entity IDs to TopoIds.
-    id_map: std::collections::HashMap<u64, TopoId>,
-}
-
-impl<'a> BridgeContext<'a> {
-    fn process_geometry_entity(&mut self, entity: &StepEntity) {
-        match entity.type_name.as_str() {
-            "CARTESIAN_POINT" => {
-                if let Some(point) = self.parse_cartesian_point(entity) {
-                    let id = self.shape.add_vertex(point);
-                    self.id_map.insert(entity.id, id);
-                }
-            }
-            "DIRECTION" => {
-                let id = self.shape.alloc_id_internal();
-                self.id_map.insert(entity.id, id);
-            }
-            "VECTOR" => {
-                let id = self.shape.alloc_id_internal();
-                self.id_map.insert(entity.id, id);
-            }
-            "AXIS2_PLACEMENT_3D" => {
-                let id = self.shape.alloc_id_internal();
-                self.id_map.insert(entity.id, id);
-            }
-            "LINE" | "CIRCLE" | "ELLIPSE" | "B_SPLINE_CURVE_WITH_KNOTS" | "B_SPLINE_CURVE" => {
-                let id = self.shape.alloc_id_internal();
-                self.id_map.insert(entity.id, id);
-            }
-            "PLANE" | "CYLINDRICAL_SURFACE" | "CONICAL_SURFACE" | "SPHERICAL_SURFACE"
-            | "TOROIDAL_SURFACE" | "B_SPLINE_SURFACE_WITH_KNOTS" | "B_SPLINE_SURFACE"
-            | "SURFACE_OF_REVOLUTION" | "SURFACE_OF_LINEAR_EXTRUSION" => {
-                let id = self.shape.alloc_id_internal();
-                self.id_map.insert(entity.id, id);
-            }
-            _ => {}
+        Self {
+            model,
+            shape: Shape::new(),
+            vertex_map: std::collections::HashMap::new(),
+            edge_map: std::collections::HashMap::new(),
+            wire_map: std::collections::HashMap::new(),
+            face_map: std::collections::HashMap::new(),
+            shell_map: std::collections::HashMap::new(),
+            scale,
         }
     }
 
-    fn process_topology_entity(&mut self, entity: &StepEntity) {
-        match entity.type_name.as_str() {
-            "VERTEX_POINT" => {
-                if let Some(ref_id) = entity.ref_param(1) {
-                    if let Some(&topo_id) = self.id_map.get(&ref_id) {
-                        self.id_map.insert(entity.id, topo_id);
-                    }
-                }
-            }
-            "EDGE_CURVE" => {
-                self.process_edge_curve(entity);
-            }
-            "ORIENTED_EDGE" => {
-                // ORIENTED_EDGE(name, *, *, edge_ref, orientation)
-                // param(0)=name, param(1)=*, param(2)=*, param(3)=edge_ref, param(4)=orientation
-                if let Some(edge_ref) = entity.ref_param(3) {
-                    if let Some(&topo_id) = self.id_map.get(&edge_ref) {
-                        self.id_map.insert(entity.id, topo_id);
-                        log::trace!("ORIENTED_EDGE #{} → edge_ref=#{} → topo_id={}", entity.id, edge_ref, topo_id);
+    fn convert(&mut self) {
+        // Phase 1: Convert vertices (CARTESIAN_POINT → Vertex with Point3)
+        self.convert_vertices();
+
+        // Phase 2: Convert edges (EDGE_CURVE → Edge with Curve)
+        self.convert_edges();
+
+        // Phase 3: Convert wires (EDGE_LOOP → Wire with OrientedEdges)
+        self.convert_wires();
+
+        // Phase 4: Convert faces (ADVANCED_FACE → Face with Surface)
+        self.convert_faces();
+
+        // Phase 5: Convert shells (CLOSED_SHELL → Shell)
+        self.convert_shells();
+
+        // Phase 6: Convert solids (MANIFOLD_SOLID_BREP → Solid)
+        self.convert_solids();
+
+        log::info!(
+            "Conversion complete: {} vertices, {} edges, {} faces, {} shells, {} solids",
+            self.shape.vertices().len(),
+            self.shape.edges().len(),
+            self.shape.faces().len(),
+            self.shape.shells().len(),
+            self.shape.solids().len(),
+        );
+    }
+
+    /// Convert step-io vertices to our vertices.
+    fn convert_vertices(&mut self) {
+        for (i, vertex) in self.model.topology.vertices.iter().enumerate() {
+            let step_point = &self.model.geometry.points[vertex.point];
+            let point = self.convert_point(*step_point);
+            let topo_id = self.shape.add_vertex(point);
+            self.vertex_map.insert(i as u32, topo_id);
+        }
+        log::debug!("Converted {} vertices", self.model.topology.vertices.len());
+    }
+
+    /// Convert step-io edges to our edges.
+    fn convert_edges(&mut self) {
+        for (i, edge) in self.model.topology.edges.iter().enumerate() {
+            let curve = self.convert_curve(edge.curve);
+
+            let (start_vid, end_vid) = edge.vertices;
+            let start_topo = self.vertex_map.get(&start_vid.0).copied();
+            let end_topo = self.vertex_map.get(&end_vid.0).copied();
+
+            match (start_topo, end_topo) {
+                (Some(sv), Some(ev)) => {
+                    let param_range = if edge.trim != (0.0, 0.0) {
+                        Some(edge.trim)
                     } else {
-                        log::warn!("ORIENTED_EDGE #{}: edge_ref #{} not found in id_map", entity.id, edge_ref);
-                    }
-                } else {
-                    log::warn!("ORIENTED_EDGE #{}: no edge reference at param(3)", entity.id);
+                        None
+                    };
+                    let id = self.shape.add_edge(curve, sv, ev, param_range);
+                    self.edge_map.insert(i as u32, id);
                 }
-            }
-            "EDGE_LOOP" => {
-                self.process_edge_loop(entity);
-            }
-            "POLY_LOOP" => {
-                self.process_poly_loop(entity);
-            }
-            "FACE_OUTER_BOUND" | "FACE_BOUND" => {
-                if let Some(ref_id) = entity.ref_param(1) {
-                    if let Some(&topo_id) = self.id_map.get(&ref_id) {
-                        self.id_map.insert(entity.id, topo_id);
-                    }
-                }
-            }
-            "ADVANCED_FACE" => {
-                self.process_advanced_face(entity);
-            }
-            "CLOSED_SHELL" | "OPEN_SHELL" => {
-                self.process_shell(entity);
-            }
-            "MANIFOLD_SOLID_BREP" => {
-                self.process_solid(entity);
-            }
-            _ => {
-                if !self.id_map.contains_key(&entity.id) {
-                    let id = self.shape.alloc_id_internal();
-                    self.id_map.insert(entity.id, id);
+                _ => {
+                    log::warn!(
+                        "Edge #{}: missing vertices (start={:?}, end={:?})",
+                        i, start_topo, end_topo
+                    );
                 }
             }
         }
+        log::debug!("Converted {} edges", self.model.topology.edges.len());
     }
 
-    fn parse_cartesian_point(&self, entity: &StepEntity) -> Option<Point3> {
-        // CARTESIAN_POINT(name, (x, y, z))
-        let coords = entity.list_param(1)?;
-        match coords.len() {
-            3 => Some(Point3::new(
-                self.param_real(&coords[0])?,
-                self.param_real(&coords[1])?,
-                self.param_real(&coords[2])?,
-            )),
-            2 => Some(Point3::new(
-                self.param_real(&coords[0])?,
-                self.param_real(&coords[1])?,
-                0.0,
-            )),
-            _ => None,
-        }
-    }
-
-    fn parse_direction(&self, entity: &StepEntity) -> Option<Direction3> {
-        // DIRECTION(name, (x, y, z))
-        let coords = entity.list_param(1)?;
-        Direction3::new(
-            self.param_real(coords.get(0)?)?,
-            self.param_real(coords.get(1)?)?,
-            if coords.len() > 2 { self.param_real(coords.get(2)?)? } else { 0.0 },
-        )
-    }
-
-    fn parse_axis2_placement(&self, entity: &StepEntity) -> Option<Axis2Placement3D> {
-        // AXIS2_PLACEMENT_3D(name, location_ref, axis_ref, ref_direction_ref)
-        let location_ref = entity.ref_param(1)?;
-        let location_entity = self.doc.get_entity(location_ref)?;
-        let location = self.parse_cartesian_point(location_entity)?;
-
-        let axis = if let Some(axis_ref) = entity.ref_param(2) {
-            self.doc.get_entity(axis_ref)
-                .and_then(|e| self.parse_direction(e))
-                .unwrap_or(Direction3::Z)
-        } else {
-            Direction3::Z
-        };
-
-        let ref_direction = if let Some(ref_dir_ref) = entity.ref_param(3) {
-            self.doc.get_entity(ref_dir_ref)
-                .and_then(|e| self.parse_direction(e))
-        } else {
-            None
-        };
-
-        Some(Axis2Placement3D::new(location, axis, ref_direction))
-    }
-
-    fn process_edge_curve(&mut self, entity: &StepEntity) {
-        // EDGE_CURVE(name, start_vertex_ref, end_vertex_ref, curve_ref, same_sense)
-        let start_ref = entity.ref_param(1).unwrap_or(0);
-        let end_ref = entity.ref_param(2).unwrap_or(0);
-        let curve_ref = entity.ref_param(3);
-
-        // Resolve vertex references — the refs may point to VERTEX_POINT entities
-        // which may not have been processed yet. Resolve them directly through
-        // the STEP document: VERTEX_POINT → CARTESIAN_POINT → vertex TopoId
-        let start_topo = self.resolve_vertex_ref(start_ref);
-        let end_topo = self.resolve_vertex_ref(end_ref);
-
-        let curve = curve_ref.and_then(|r| self.doc.get_entity(r))
-            .and_then(|e| self.parse_curve(e));
-
-        if let (Some(sv), Some(ev)) = (start_topo, end_topo) {
-            let id = self.shape.add_edge(curve, sv, ev, None);
-            self.id_map.insert(entity.id, id);
-        } else {
-            log::warn!(
-                "EDGE_CURVE #{}: missing vertex refs (start={}, end={}, start_topo={:?}, end_topo={:?})",
-                entity.id, start_ref, end_ref, start_topo, end_topo
-            );
-        }
-    }
-
-    /// Resolve a vertex reference to a TopoId.
-    ///
-    /// The reference may be:
-    /// 1. A VERTEX_POINT entity (which references a CARTESIAN_POINT)
-    /// 2. A CARTESIAN_POINT entity directly (for POLY_LOOP cases)
-    /// 3. Already in id_map from a previous processing step
-    fn resolve_vertex_ref(&self, vertex_ref: u64) -> Option<TopoId> {
-        // First, check if already in id_map
-        if let Some(&topo_id) = self.id_map.get(&vertex_ref) {
-            return Some(topo_id);
-        }
-
-        // Try to resolve through the STEP document
-        let entity = self.doc.get_entity(vertex_ref)?;
-
-        match entity.type_name.as_str() {
-            "VERTEX_POINT" => {
-                // VERTEX_POINT references a CARTESIAN_POINT
-                if let Some(cp_ref) = entity.ref_param(1) {
-                    self.id_map.get(&cp_ref).copied()
-                } else {
-                    None
-                }
-            }
-            "CARTESIAN_POINT" => {
-                // Direct reference to a CARTESIAN_POINT
-                self.id_map.get(&vertex_ref).copied()
-            }
-            _ => None,
-        }
-    }
-
-    fn process_edge_loop(&mut self, entity: &StepEntity) {
-        // EDGE_LOOP(name, (oriented_edge_list))
-        let edge_list = entity.list_param(1);
-        if let Some(edges) = edge_list {
-            let oriented_edges: Vec<OrientedEdge> = edges
+    /// Convert step-io wires to our wires.
+    fn convert_wires(&mut self) {
+        for (i, wire) in self.model.topology.wires.iter().enumerate() {
+            let oriented_edges: Vec<OrientedEdge> = wire
+                .edges
                 .iter()
-                .filter_map(|p| {
-                    if let Parameter::Reference(ref_id) = p {
-                        // Look up the ORIENTED_EDGE entity in our id_map first.
-                        // The ORIENTED_EDGE was processed in process_topology_entity and
-                        // its id_map entry points to the underlying EDGE_CURVE's TopoId.
-                        if let Some(&edge_topo) = self.id_map.get(ref_id) {
-                            // Determine orientation from the ORIENTED_EDGE entity
-                            let orientation = if let Some(oe_entity) = self.doc.get_entity(*ref_id) {
-                                // ORIENTED_EDGE(name, *, *, edge_ref, orientation)
-                                // param(4) = orientation (.T. or .F.)
-                                match oe_entity.param(4) {
-                                    Some(Parameter::Enumeration(s)) => s != "F",
-                                    _ => true,
-                                }
-                            } else {
-                                true
-                            };
-                            return Some(OrientedEdge { edge_id: edge_topo, orientation });
-                        } else {
-                            log::warn!(
-                                "EDGE_LOOP #{}: ORIENTED_EDGE ref #{} not found in id_map",
-                                entity.id, ref_id
-                            );
+                .filter_map(|oe| {
+                    self.edge_map.get(&oe.edge.0).copied().map(|edge_id| {
+                        let orientation = matches!(oe.orientation, Orientation::Forward);
+                        OrientedEdge {
+                            edge_id,
+                            orientation,
                         }
-                    }
-                    None
+                    })
                 })
                 .collect();
 
             if !oriented_edges.is_empty() {
-                let edge_count = oriented_edges.len();
                 let id = self.shape.add_wire(oriented_edges);
-                self.id_map.insert(entity.id, id);
-                log::trace!("EDGE_LOOP #{}: {} oriented edges → wire {}", entity.id, edge_count, id);
-            } else {
-                log::warn!("EDGE_LOOP #{}: no oriented edges resolved", entity.id);
+                self.wire_map.insert(i as u32, id);
+            } else if wire.vertex.is_some() {
+                // Degenerate wire (VERTEX_LOOP) — create a single-vertex wire
+                let empty_wire_id = self.shape.add_wire(Vec::new());
+                self.wire_map.insert(i as u32, empty_wire_id);
             }
         }
+        log::debug!("Converted {} wires", self.model.topology.wires.len());
     }
 
-    fn process_poly_loop(&mut self, entity: &StepEntity) {
-        // POLY_LOOP(name, (point_ref_list))
-        // A POLY_LOOP directly references CARTESIAN_POINT entities.
-        // We create a wire from edges between consecutive vertices.
-        let point_refs = entity.list_param(1);
-        if let Some(refs) = point_refs {
-            let vertex_topo_ids: Vec<TopoId> = refs
-                .iter()
-                .filter_map(|p| {
-                    if let Parameter::Reference(ref_id) = p {
-                        self.id_map.get(ref_id).copied()
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+    /// Convert step-io faces to our faces.
+    fn convert_faces(&mut self) {
+        for (i, face) in self.model.topology.faces.iter().enumerate() {
+            let surface = self.convert_surface(face.surface);
 
-            if vertex_topo_ids.len() >= 2 {
-                let mut oriented_edges = Vec::new();
-                for i in 0..vertex_topo_ids.len() {
-                    let j = (i + 1) % vertex_topo_ids.len();
-                    let sv = vertex_topo_ids[i];
-                    let ev = vertex_topo_ids[j];
-                    let edge_id = self.shape.add_edge(None, sv, ev, None);
-                    oriented_edges.push(OrientedEdge { edge_id, orientation: true });
-                }
+            let face_id = self.shape.add_face(surface);
 
-                if !oriented_edges.is_empty() {
-                    let wire_id = self.shape.add_wire(oriented_edges);
-                    self.id_map.insert(entity.id, wire_id);
-                    log::trace!("POLY_LOOP #{}: {} vertices → wire {}", entity.id, vertex_topo_ids.len(), wire_id);
-                }
+            // Set face orientation
+            if let Some(TopoShape::Face(f)) = self.shape.get_mut(face_id) {
+                f.orientation = matches!(face.orientation, Orientation::Forward);
             }
-        }
-    }
 
-    fn process_advanced_face(&mut self, entity: &StepEntity) {
-        // ADVANCED_FACE(name, (bound_list), surface_ref, same_sense)
-        let surface_ref = entity.ref_param(2);
-        let surface = surface_ref
-            .and_then(|r| self.doc.get_entity(r))
-            .and_then(|e| self.parse_surface(e));
-
-        // Get the face orientation from param(3)
-        let same_sense = match entity.param(3) {
-            Some(Parameter::Enumeration(s)) => s == "T",
-            Some(Parameter::Omitted) => true,
-            _ => true,
-        };
-
-        let face_id = self.shape.add_face(surface);
-
-        // Set face orientation
-        if let Some(TopoShape::Face(face)) = self.shape.get_mut(face_id) {
-            face.orientation = same_sense;
-        }
-
-        // Set boundaries
-        if let Some(bound_list) = entity.list_param(1) {
+            // Set boundaries
             let mut first_bound = true;
-            for bound_param in bound_list {
-                if let Parameter::Reference(bound_ref) = bound_param {
-                    if let Some(&wire_topo) = self.id_map.get(bound_ref) {
-                        // Determine if this is outer or inner bound
-                        let is_outer = if let Some(bound_entity) = self.doc.get_entity(*bound_ref) {
-                            bound_entity.type_name == "FACE_OUTER_BOUND"
-                        } else {
-                            first_bound
-                        };
+            for &wire_id in &face.bounds {
+                if let Some(wire_topo) = self.wire_map.get(&wire_id.0).copied() {
+                    // Determine if this is the outer or inner bound
+                    let step_wire = &self.model.topology.wires[wire_id];
+                    let is_outer = step_wire.is_outer;
 
-                        if is_outer && first_bound {
-                            self.shape.set_face_outer_wire(face_id, wire_topo);
-                        } else {
-                            self.shape.add_face_inner_wire(face_id, wire_topo);
-                        }
-                        first_bound = false;
+                    if is_outer && first_bound {
+                        self.shape.set_face_outer_wire(face_id, wire_topo);
                     } else {
-                        log::warn!(
-                            "ADVANCED_FACE #{}: bound ref #{} not found in id_map",
-                            entity.id, bound_ref
-                        );
+                        self.shape.add_face_inner_wire(face_id, wire_topo);
                     }
+                    first_bound = false;
                 }
             }
-        }
 
-        self.id_map.insert(entity.id, face_id);
-        log::trace!(
-            "ADVANCED_FACE #{}: surface={:?}, same_sense={}, face_id={}",
-            entity.id, surface_ref, same_sense, face_id
-        );
+            self.face_map.insert(i as u32, face_id);
+        }
+        log::debug!("Converted {} faces", self.model.topology.faces.len());
     }
 
-    fn process_shell(&mut self, entity: &StepEntity) {
-        // CLOSED_SHELL/OPEN_SHELL(name, (face_list))
-        let face_list = entity.list_param(1);
-        if let Some(faces) = face_list {
-            let face_ids: Vec<TopoId> = faces
+    /// Convert step-io shells to our shells.
+    fn convert_shells(&mut self) {
+        for (i, shell) in self.model.topology.shells.iter().enumerate() {
+            let face_ids: Vec<TopoId> = shell
+                .faces
                 .iter()
-                .filter_map(|p| {
-                    if let Parameter::Reference(ref_id) = p {
-                        self.id_map.get(ref_id).copied()
-                    } else {
-                        None
-                    }
-                })
+                .filter_map(|fid| self.face_map.get(&fid.0).copied())
                 .collect();
 
             if !face_ids.is_empty() {
-                let face_count = face_ids.len();
                 let id = self.shape.add_shell(face_ids);
-                self.id_map.insert(entity.id, id);
-                log::trace!("{} #{}: {} faces → shell {}", entity.type_name, entity.id, face_count, id);
+                self.shell_map.insert(i as u32, id);
             }
         }
+        log::debug!("Converted {} shells", self.model.topology.shells.len());
     }
 
-    fn process_solid(&mut self, entity: &StepEntity) {
-        // MANIFOLD_SOLID_BREP(name, shell_ref)
-        let shell_ref = entity.ref_param(1).unwrap_or(0);
-        if let Some(&shell_topo) = self.id_map.get(&shell_ref) {
-            let id = self.shape.add_solid(shell_topo);
-            self.id_map.insert(entity.id, id);
-            log::trace!("MANIFOLD_SOLID_BREP #{}: shell={} → solid={}", entity.id, shell_ref, id);
-        } else {
-            log::warn!("MANIFOLD_SOLID_BREP #{}: shell ref #{} not found in id_map", entity.id, shell_ref);
+    /// Convert step-io solids to our solids.
+    fn convert_solids(&mut self) {
+        for (i, solid) in self.model.topology.solids.iter().enumerate() {
+            // shells[0] is the outer shell
+            if let Some(outer_shell_id) = solid.shells.first() {
+                if let Some(shell_topo) = self.shell_map.get(&outer_shell_id.0).copied() {
+                    let solid_id = self.shape.add_solid(shell_topo);
+
+                    // Add inner shells (voids) if any
+                    for inner_shell_id in solid.shells.iter().skip(1) {
+                        if let Some(inner_topo) = self.shell_map.get(&inner_shell_id.0).copied() {
+                            if let Some(TopoShape::Solid(s)) = self.shape.get_mut(solid_id) {
+                                s.inner_shells.push(inner_topo);
+                            }
+                        }
+                    }
+
+                    log::trace!(
+                        "Solid #{}: outer_shell={} ({} shells total)",
+                        i, shell_topo, solid.shells.len()
+                    );
+                }
+            }
         }
+        log::debug!("Converted {} solids", self.model.topology.solids.len());
     }
 
-    fn parse_curve(&self, entity: &StepEntity) -> Option<Curve> {
-        match entity.type_name.as_str() {
-            "LINE" => {
-                let point_ref = entity.ref_param(1)?;
-                let point_entity = self.doc.get_entity(point_ref)?;
-                let origin = self.parse_cartesian_point(point_entity)?;
+    // ---- Geometry conversion helpers ----
 
-                let vector_ref = entity.ref_param(2)?;
-                let vector_entity = self.doc.get_entity(vector_ref)?;
-                let dir_ref = vector_entity.ref_param(1)?;
-                let dir_entity = self.doc.get_entity(dir_ref)?;
-                let direction = self.parse_direction(dir_entity)?;
+    fn convert_point(&self, p: StepPt3) -> Point3 {
+        Point3::new(p.x * self.scale, p.y * self.scale, p.z * self.scale)
+    }
 
+    fn convert_direction(&self, d: StepDir3) -> Direction3 {
+        Direction3::new(d.x, d.y, d.z).unwrap_or(Direction3::Z)
+    }
+
+    fn convert_axis2_placement(&self, placement_id: Placement3dId) -> Axis2Placement3D {
+        let placement = &self.model.geometry.placements[placement_id];
+        let location = self.convert_point(self.model.geometry.points[placement.location]);
+
+        let axis = placement
+            .axis
+            .map(|dir_id| self.convert_direction(self.model.geometry.directions[dir_id]))
+            .unwrap_or(Direction3::Z);
+
+        let ref_direction = placement
+            .ref_direction
+            .map(|dir_id| self.convert_direction(self.model.geometry.directions[dir_id]));
+
+        Axis2Placement3D::new(location, axis, ref_direction)
+    }
+
+    fn convert_curve(&self, curve_id: CurveId) -> Option<Curve> {
+        let curve = &self.model.geometry.curves[curve_id];
+        match curve {
+            StepCurve::Line(line) => {
+                let origin = self.convert_point(self.model.geometry.points[line.point]);
+                let direction = self.convert_direction(self.model.geometry.directions[line.direction]);
                 Some(Curve::Line(Line::new(origin, direction)))
             }
-            "CIRCLE" => {
-                let axis_ref = entity.ref_param(1)?;
-                let axis_entity = self.doc.get_entity(axis_ref)?;
-                let axis = self.parse_axis2_placement(axis_entity)?;
-                let radius = entity.real_param(2)?;
-
+            StepCurve::Circle(circle) => {
+                let axis = self.convert_axis2_placement(circle.position);
+                let radius = circle.radius * self.scale;
                 Some(Curve::Circle(Circle::new(axis, radius)))
             }
-            _ => {
-                log::debug!("Unsupported curve type: {}", entity.type_name);
-                None
+            StepCurve::Ellipse(ellipse) => {
+                // For now, approximate ellipse as a circle using the larger semi-axis
+                // TODO: Implement proper ellipse support
+                let axis = self.convert_axis2_placement(ellipse.position);
+                let radius = ellipse.semi_axis_1.max(ellipse.semi_axis_2) * self.scale;
+                log::debug!(
+                    "Approximating ellipse as circle (semi_axis_1={}, semi_axis_2={}, radius={})",
+                    ellipse.semi_axis_1, ellipse.semi_axis_2, radius
+                );
+                Some(Curve::Circle(Circle::new(axis, radius)))
+            }
+            StepCurve::Nurbs(nurbs) => {
+                // For now, approximate NURBS curve as a line between first and last control points
+                // TODO: Implement proper NURBS curve evaluation
+                self.approximate_nurbs_curve(nurbs)
             }
         }
     }
 
-    fn parse_surface(&self, entity: &StepEntity) -> Option<Surface> {
-        match entity.type_name.as_str() {
-            "PLANE" => {
-                let axis_ref = entity.ref_param(1)?;
-                let axis_entity = self.doc.get_entity(axis_ref)?;
-                let axis = self.parse_axis2_placement(axis_entity)?;
+    fn convert_surface(&self, surface_id: draper_step::SurfaceId) -> Option<Surface> {
+        let surface = &self.model.geometry.surfaces[surface_id];
+        match surface {
+            StepSurface::Plane(plane) => {
+                let axis = self.convert_axis2_placement(plane.position);
                 Some(Surface::Plane(Plane::new(axis)))
             }
-            "CYLINDRICAL_SURFACE" => {
-                let axis_ref = entity.ref_param(1)?;
-                let axis_entity = self.doc.get_entity(axis_ref)?;
-                let axis = self.parse_axis2_placement(axis_entity)?;
-                let radius = entity.real_param(2)?;
+            StepSurface::Cylinder(cyl) => {
+                let axis = self.convert_axis2_placement(cyl.position);
+                let radius = cyl.radius * self.scale;
                 Some(Surface::CylindricalSurface(CylindricalSurface::new(axis, radius)))
             }
-            "CONICAL_SURFACE" => {
-                let axis_ref = entity.ref_param(1)?;
-                let axis_entity = self.doc.get_entity(axis_ref)?;
-                let axis = self.parse_axis2_placement(axis_entity)?;
-                let radius = entity.real_param(2)?;
-                let semi_angle = entity.real_param(3).unwrap_or(std::f64::consts::FRAC_PI_4);
+            StepSurface::Cone(cone) => {
+                let axis = self.convert_axis2_placement(cone.position);
+                let radius = cone.radius * self.scale;
+                let semi_angle = cone.semi_angle;
                 Some(Surface::ConicalSurface(ConicalSurface::new(axis, radius, semi_angle)))
             }
-            "SPHERICAL_SURFACE" => {
-                let center_ref = entity.ref_param(1)?;
-                let center_entity = self.doc.get_entity(center_ref)?;
-                let axis = self.parse_axis2_placement(center_entity)?;
-                let radius = entity.real_param(2)?;
+            StepSurface::Sphere(sphere) => {
+                let axis = self.convert_axis2_placement(sphere.position);
+                let radius = sphere.radius * self.scale;
                 Some(Surface::SphericalSurface(SphericalSurface::new(axis, radius)))
             }
-            _ => {
-                log::debug!("Unsupported surface type: {}", entity.type_name);
+            StepSurface::Torus(torus) => {
+                let axis = self.convert_axis2_placement(torus.position);
+                let major_radius = torus.major_radius * self.scale;
+                let minor_radius = torus.minor_radius * self.scale;
+                Some(Surface::ToroidalSurface(ToroidalSurface::new(axis, major_radius, minor_radius)))
+            }
+            StepSurface::Revolution(rev) => {
+                // Surface of revolution — TODO: implement properly
+                let _curve = self.convert_curve(rev.swept_curve);
+                let axis_placement = &self.model.geometry.placements_1d[rev.axis_placement];
+                let _location = self.convert_point(self.model.geometry.points[axis_placement.location]);
+                let _axis_dir = self.convert_direction(self.model.geometry.directions[axis_placement.axis]);
+                log::debug!("SurfaceOfRevolution: not yet fully supported, using faceted fallback");
+                None
+            }
+            StepSurface::Extrusion(ext) => {
+                // Surface of linear extrusion — TODO: implement properly
+                let _curve = self.convert_curve(ext.swept_curve);
+                let _dir = self.convert_direction(self.model.geometry.directions[ext.extrusion_direction]);
+                let _depth = ext.depth * self.scale;
+                log::debug!("SurfaceOfLinearExtrusion: not yet fully supported, using faceted fallback");
+                None
+            }
+            StepSurface::Nurbs(nurbs) => {
+                log::debug!(
+                    "NURBS surface: not yet supported, using faceted fallback ({}x{} control points)",
+                    nurbs.u_degree, nurbs.v_degree
+                );
                 None
             }
         }
     }
 
-    fn param_real(&self, param: &Parameter) -> Option<f64> {
-        match param {
-            Parameter::Real(v) => Some(*v),
-            Parameter::Integer(v) => Some(*v as f64),
-            _ => None,
+    /// Approximate a NURBS curve by sampling control points.
+    fn approximate_nurbs_curve(&self, nurbs: &NurbsCurve) -> Option<Curve> {
+        if nurbs.control_points.len() < 2 {
+            return None;
         }
-    }
-}
 
-// Internal helper for Shape
-trait ShapeInternal {
-    fn alloc_id_internal(&mut self) -> TopoId;
-}
+        // Use first and last control points to create a line approximation
+        let first = self.convert_point(self.model.geometry.points[nurbs.control_points[0]]);
+        let last = self.convert_point(self.model.geometry.points[*nurbs.control_points.last()?]);
 
-impl ShapeInternal for Shape {
-    fn alloc_id_internal(&mut self) -> TopoId {
-        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1_000_000);
-        COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        if nurbs.control_points.len() == 2 {
+            let direction = Direction3::new(
+                last.x - first.x,
+                last.y - first.y,
+                last.z - first.z,
+            )?;
+            Some(Curve::Line(Line::new(first, direction)))
+        } else {
+            log::debug!(
+                "Approximating NURBS curve (degree={}, {} control points) as line",
+                nurbs.degree,
+                nurbs.control_points.len()
+            );
+            let direction = Direction3::new(
+                last.x - first.x,
+                last.y - first.y,
+                last.z - first.z,
+            )?;
+            Some(Curve::Line(Line::new(first, direction)))
+        }
     }
 }

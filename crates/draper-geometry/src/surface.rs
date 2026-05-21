@@ -246,6 +246,10 @@ pub struct ToroidalSurface {
 }
 
 impl ToroidalSurface {
+    pub fn new(axis: Axis2Placement3D, major_radius: f64, minor_radius: f64) -> Self {
+        Self { axis, major_radius, minor_radius }
+    }
+
     /// u = angle around the main axis (0 to 2PI),
     /// v = angle around the tube (0 to 2PI).
     pub fn point_at(&self, u: f64, v: f64) -> Point3 {

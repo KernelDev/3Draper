@@ -3,6 +3,9 @@
 //! Represents the parsed structure of a STEP exchange file:
 //! - HEADER section (file_description, file_name, file_schema)
 //! - DATA section (entities with references)
+//!
+//! This module provides backward-compatible types for the structure tree
+//! and entity lookup. The actual parsing is done by step-io.
 
 use std::collections::HashMap;
 
@@ -141,8 +144,6 @@ impl StepDocument {
     }
 
     /// Build a structural tree of the document for display.
-    /// Returns top-level entities (PRODUCT, SHAPE_DEFINITION_REPRESENTATION, etc.)
-    /// grouped for hierarchical display.
     pub fn structure_tree(&self) -> StructureNode {
         let mut root = StructureNode {
             name: "STEP Document".to_string(),
@@ -161,13 +162,11 @@ impl StepDocument {
                 children: Vec::new(),
             };
 
-            // Find related shape definitions
             self.build_subtree(product.id, &mut product_node);
-
             root.children.push(product_node);
         }
 
-        // If no products found, just list all top-level entities
+        // If no products found, just list top-level entities
         if products.is_empty() {
             for id in &self.entity_order {
                 if let Some(entity) = self.entities.get(id) {
@@ -188,7 +187,6 @@ impl StepDocument {
     }
 
     fn build_subtree(&self, parent_id: u64, parent_node: &mut StructureNode) {
-        // Find entities that reference parent_id
         for id in &self.entity_order {
             if let Some(entity) = self.entities.get(id) {
                 if entity.references(parent_id) {
@@ -206,7 +204,6 @@ impl StepDocument {
     }
 
     fn extract_entity_name(&self, entity: &StepEntity) -> String {
-        // Try to find a name parameter
         for param in &entity.parameters {
             if let Parameter::String(s) = param {
                 if !s.is_empty() {
@@ -314,6 +311,30 @@ pub struct StructureNode {
     pub type_name: String,
     pub entity_id: Option<u64>,
     pub children: Vec<StructureNode>,
+}
+
+impl StepHeader {
+    /// Create a default STEP header.
+    pub fn new_default() -> Self {
+        Self {
+            file_description: FileDescription {
+                description: vec![String::new()],
+                implementation_level: "2;1".to_string(),
+            },
+            file_name: FileName {
+                name: String::new(),
+                time_stamp: String::new(),
+                author: vec![String::new()],
+                organization: vec![String::new()],
+                preprocessor_version: String::new(),
+                originating_system: String::new(),
+                authorization: String::new(),
+            },
+            file_schema: FileSchema {
+                schemas: vec!["AUTOMOTIVE_DESIGN".to_string()],
+            },
+        }
+    }
 }
 
 impl Default for StepDocument {
