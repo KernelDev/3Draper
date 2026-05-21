@@ -1,0 +1,13 @@
+/target
+**/*.rs.bk
+Cargo.lock
+*.swp
+*.swo
+*~
+.vscode
+.idea
+*.so
+*.dylib
+*.dll
+*.a
+*.lib

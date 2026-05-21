@@ -1,0 +1,11 @@
+[package]
+name = "draper-geometry"
+version.workspace = true
+edition.workspace = true
+description = "Custom geometry kernel for 3Draper — points, curves, surfaces, transforms"
+
+[dependencies]
+glam = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true }

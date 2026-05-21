@@ -1,0 +1,11 @@
+[package]
+name = "draper-topology"
+version.workspace = true
+edition.workspace = true
+description = "B-rep topology kernel for 3Draper — Vertex/Edge/Wire/Face/Shell/Solid"
+
+[dependencies]
+draper-geometry = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true }

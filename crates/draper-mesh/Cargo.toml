@@ -1,0 +1,14 @@
+[package]
+name = "draper-mesh"
+version.workspace = true
+edition.workspace = true
+description = "Mesh generation and triangulation for 3Draper"
+
+[dependencies]
+draper-geometry = { workspace = true }
+draper-topology = { workspace = true }
+spade = { workspace = true }
+glam = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true }

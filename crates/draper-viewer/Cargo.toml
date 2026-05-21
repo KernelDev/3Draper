@@ -1,0 +1,24 @@
+[package]
+name = "draper-viewer"
+version.workspace = true
+edition.workspace = true
+description = "3Draper minimal STEP file viewer"
+
+[[bin]]
+name = "draper-viewer"
+path = "src/main.rs"
+
+[dependencies]
+draper-core = { workspace = true }
+draper-geometry = { workspace = true }
+draper-topology = { workspace = true }
+draper-mesh = { workspace = true }
+draper-step = { workspace = true }
+eframe = { workspace = true }
+egui = { workspace = true }
+egui_extras = { workspace = true }
+wgpu = { workspace = true }
+glam = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+rfd = { workspace = true }

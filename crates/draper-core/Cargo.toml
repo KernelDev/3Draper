@@ -1,0 +1,16 @@
+[package]
+name = "draper-core"
+version.workspace = true
+edition.workspace = true
+description = "3Draper core — high-level API combining STEP I/O, geometry, topology, and mesh"
+
+[dependencies]
+draper-step = { workspace = true }
+draper-geometry = { workspace = true }
+draper-topology = { workspace = true }
+draper-mesh = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
