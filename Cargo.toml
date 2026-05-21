@@ -21,8 +21,8 @@ description = "3Draper — cross-platform 3D kernel with STEP support and C FFI"
 # Math
 glam = { version = "0.29", features = ["serde"] }
 
-# Triangulation (external — allowed)
-spade = "2.6"
+# Triangulation (external — allowed, forked for custom modifications)
+spade = "2"
 
 # STEP parsing
 nom = "7.1"
@@ -57,3 +57,12 @@ draper-topology = { path = "crates/draper-topology" }
 draper-mesh = { path = "crates/draper-mesh" }
 draper-core = { path = "crates/draper-core" }
 draper-ffi = { path = "crates/draper-ffi" }
+
+# Patch spade to use our local fork for custom modifications
+# This allows us to add features like:
+# - Better constrained Delaunay with hole support
+# - Steiner point insertion for mesh quality
+# - Adaptive refinement based on surface curvature
+# - Faster CDT for large meshes
+[patch.crates-io]
+spade = { path = "vendor/spade" }

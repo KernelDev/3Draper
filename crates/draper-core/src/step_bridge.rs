@@ -150,6 +150,12 @@ impl<'a> ConversionContext<'a> {
     }
 
     /// Convert step-io wires to our wires.
+    ///
+    /// IMPORTANT: STEP files may list oriented edges in non-consecutive order
+    /// within an edge_loop. We must reorder them so that the end vertex of
+    /// edge[i] matches the start vertex of edge[i+1], forming a proper
+    /// closed loop. Without this, the wire traversal produces zigzag paths
+    /// that cause CDT triangulation failures.
     fn convert_wires(&mut self) {
         for (i, wire) in self.model.topology.wires.iter().enumerate() {
             let oriented_edges: Vec<OrientedEdge> = wire
@@ -167,7 +173,9 @@ impl<'a> ConversionContext<'a> {
                 .collect();
 
             if !oriented_edges.is_empty() {
-                let id = self.shape.add_wire(oriented_edges);
+                // Reorder edges to form a consecutive path
+                let ordered_edges = reorder_wire_edges(&oriented_edges, &self.shape);
+                let id = self.shape.add_wire(ordered_edges);
                 self.wire_map.insert(i as u32, id);
             } else if wire.vertex.is_some() {
                 // Degenerate wire (VERTEX_LOOP) — create a single-vertex wire
@@ -441,5 +449,126 @@ impl<'a> ConversionContext<'a> {
             )?;
             Some(Curve::Line(Line::new(first, direction)))
         }
+    }
+}
+
+/// Reorder oriented edges in a wire so they form a consecutive closed path.
+///
+/// In STEP files, oriented edges within an EDGE_LOOP may be listed in arbitrary
+/// order. This function reorders them so that the end vertex of edge[i] equals
+/// the start vertex of edge[i+1], forming a proper closed loop suitable for
+/// boundary traversal and CDT triangulation.
+///
+/// Algorithm:
+/// 1. Build a connectivity map: from_vertex → (edge_index, to_vertex)
+/// 2. Start from the first edge's start vertex
+/// 3. Walk the chain: from current vertex, find the next edge that starts here
+/// 4. If the chain is complete (all edges used), return the ordered list
+/// 5. If not, fall back to the original order
+fn reorder_wire_edges(edges: &[OrientedEdge], shape: &Shape) -> Vec<OrientedEdge> {
+    if edges.len() <= 2 {
+        return edges.to_vec();
+    }
+
+    use std::collections::HashMap;
+
+    // Build connectivity: start_vertex → Vec<(edge_index, end_vertex)>
+    let mut from_map: HashMap<TopoId, Vec<(usize, TopoId)>> = HashMap::new();
+
+    for (i, oe) in edges.iter().enumerate() {
+        let edge = match shape.get(oe.edge_id) {
+            Some(TopoShape::Edge(e)) => e,
+            _ => continue,
+        };
+        let (start, end) = if oe.orientation {
+            (edge.start_vertex, edge.end_vertex)
+        } else {
+            (edge.end_vertex, edge.start_vertex)
+        };
+        from_map.entry(start).or_default().push((i, end));
+    }
+
+    // Find a good starting edge: pick the first edge that has a unique start vertex
+    // (i.e., only one edge starts from that vertex). This avoids ambiguity.
+    let mut start_edge_idx = 0;
+    for (i, oe) in edges.iter().enumerate() {
+        let edge = match shape.get(oe.edge_id) {
+            Some(TopoShape::Edge(e)) => e,
+            _ => continue,
+        };
+        let start = if oe.orientation {
+            edge.start_vertex
+        } else {
+            edge.end_vertex
+        };
+        if let Some(candidates) = from_map.get(&start) {
+            if candidates.len() == 1 {
+                start_edge_idx = i;
+                break;
+            }
+        }
+    }
+
+    // Get the starting vertex
+    let first_edge = &edges[start_edge_idx];
+    let first_edge_data = match shape.get(first_edge.edge_id) {
+        Some(TopoShape::Edge(e)) => e,
+        _ => return edges.to_vec(),
+    };
+    let start_vertex = if first_edge.orientation {
+        first_edge_data.start_vertex
+    } else {
+        first_edge_data.end_vertex
+    };
+
+    // Walk the chain
+    let mut ordered = Vec::with_capacity(edges.len());
+    let mut used = vec![false; edges.len()];
+    let mut current_vertex = start_vertex;
+
+    for _ in 0..edges.len() {
+        // Find an unused edge that starts from current_vertex
+        if let Some(candidates) = from_map.get(&current_vertex) {
+            let mut found = false;
+            for &(idx, to_v) in candidates {
+                if !used[idx] {
+                    ordered.push(edges[idx]);
+                    used[idx] = true;
+                    current_vertex = to_v;
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                log::warn!(
+                    "Wire reordering: no edge starting from vertex {} at step {}",
+                    current_vertex,
+                    ordered.len()
+                );
+                break;
+            }
+        } else {
+            log::warn!(
+                "Wire reordering: no edges from vertex {} at step {}",
+                current_vertex,
+                ordered.len()
+            );
+            break;
+        }
+    }
+
+    if ordered.len() == edges.len() {
+        log::trace!(
+            "Wire reordering: successfully reordered {} edges",
+            ordered.len()
+        );
+        ordered
+    } else {
+        log::warn!(
+            "Wire reordering: only ordered {}/{} edges, using original order",
+            ordered.len(),
+            edges.len()
+        );
+        edges.to_vec()
     }
 }

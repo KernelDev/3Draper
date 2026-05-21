@@ -1,0 +1,3 @@
+[submodule "vendor/spade"]
+	path = vendor/spade
+	url = https://github.com/Stoeoef/spade.git

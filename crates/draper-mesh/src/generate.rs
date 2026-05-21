@@ -82,8 +82,13 @@ fn generate_face_mesh(shape: &Shape, face: &Face, mesh: &mut TriangleMesh) {
 
 /// Extract ordered 3D boundary points from a wire.
 ///
-/// Walks the wire's edges and collects vertices, discretizing
-/// curved edges (circles, etc.) into multiple points.
+/// This function builds a proper polygon boundary from the wire's oriented edges,
+/// even when the edges are NOT listed in consecutive order (which is common in
+/// STEP files). It uses an undirected adjacency approach:
+/// 1. For each oriented edge, determine its two endpoint vertices
+/// 2. Build an UNDIRECTED adjacency graph: vertex → list of (neighbor_vertex, curve_intermediates)
+/// 3. Walk the graph to form a closed polygon by always choosing the next unvisited neighbor
+/// 4. For curved edges, insert intermediate discretization points in the correct direction
 fn extract_wire_points(shape: &Shape, wire_id: Option<TopoId>) -> Vec<Point3> {
     let wire_id = match wire_id {
         Some(id) => id,
@@ -95,75 +100,144 @@ fn extract_wire_points(shape: &Shape, wire_id: Option<TopoId>) -> Vec<Point3> {
         _ => return Vec::new(),
     };
 
-    let mut points = Vec::new();
+    if wire.edges.is_empty() {
+        return Vec::new();
+    }
 
-    for (i, oriented_edge) in wire.edges.iter().enumerate() {
+    // Build UNDIRECTED adjacency graph
+    // For each edge, add connections in BOTH directions
+    use std::collections::HashMap;
+
+    /// Info about an edge connecting two vertices.
+    struct EdgeInfo {
+        /// The other vertex this edge connects to.
+        other_vertex: TopoId,
+        /// Intermediate curve points when traversing from current vertex to other_vertex.
+        intermediates: Vec<Point3>,
+    }
+
+    let mut adjacency: HashMap<TopoId, Vec<EdgeInfo>> = HashMap::new();
+
+    for oriented_edge in &wire.edges {
         let edge = match shape.get(oriented_edge.edge_id) {
             Some(TopoShape::Edge(e)) => e,
             _ => continue,
         };
 
-        // Determine the vertex order based on orientation
-        let (first_vertex, second_vertex) = if oriented_edge.orientation {
-            (edge.start_vertex, edge.end_vertex)
+        let first_vertex = if oriented_edge.orientation {
+            edge.start_vertex
         } else {
-            (edge.end_vertex, edge.start_vertex)
+            edge.end_vertex
+        };
+        let second_vertex = if oriented_edge.orientation {
+            edge.end_vertex
+        } else {
+            edge.start_vertex
         };
 
-        // Get the first and second vertex points
-        let first_pt = match shape.get(first_vertex) {
-            Some(TopoShape::Vertex(v)) => v.point,
-            _ => continue,
-        };
-        let second_pt = match shape.get(second_vertex) {
-            Some(TopoShape::Vertex(v)) => v.point,
-            _ => continue,
+        // Compute intermediate points in the oriented direction (first→second)
+        let forward_intermediates = if let Some(ref curve) = edge.curve {
+            let mut pts = discretize_curve(curve, CIRCLE_SEGMENTS);
+            if pts.len() > 2 {
+                if !oriented_edge.orientation {
+                    pts.reverse();
+                }
+                pts.iter().skip(1).take(pts.len() - 2).copied().collect()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
         };
 
-        // Add the first vertex point (skip if duplicate of the last point)
-        let should_add_first = points.last().map_or(true, |last: &Point3| {
-            (last.x - first_pt.x).abs() > 1e-10
-                || (last.y - first_pt.y).abs() > 1e-10
-                || (last.z - first_pt.z).abs() > 1e-10
+        // Compute intermediate points in the reverse direction (second→first)
+        let reverse_intermediates = {
+            let mut rev = forward_intermediates.clone();
+            rev.reverse();
+            rev
+        };
+
+        // Add UNDIRECTED connections (both directions)
+        adjacency.entry(first_vertex).or_default().push(EdgeInfo {
+            other_vertex: second_vertex,
+            intermediates: forward_intermediates,
         });
 
-        if should_add_first {
-            points.push(first_pt);
-        }
+        adjacency.entry(second_vertex).or_default().push(EdgeInfo {
+            other_vertex: first_vertex,
+            intermediates: reverse_intermediates,
+        });
+    }
 
-        // For curved edges, add intermediate points along the curve
-        if let Some(ref curve) = edge.curve {
-            let intermediates = discretize_curve(curve, CIRCLE_SEGMENTS);
-            // Skip the first and last intermediate points as they coincide with vertices
-            if intermediates.len() > 2 {
-                for pt in intermediates.iter().skip(1).take(intermediates.len() - 2) {
-                    points.push(*pt);
+    // Walk the adjacency graph to form a closed polygon
+    // Start from any vertex
+    let start_vertex = match adjacency.keys().next().copied() {
+        Some(v) => v,
+        None => return Vec::new(),
+    };
+
+    let mut points = Vec::new();
+    let mut current_vertex = start_vertex;
+    let mut used_edges: std::collections::HashSet<(TopoId, TopoId)> = std::collections::HashSet::new();
+
+    // Add the first vertex point
+    if let Some(TopoShape::Vertex(v)) = shape.get(current_vertex) {
+        points.push(v.point);
+    }
+
+    for step in 0..wire.edges.len() {
+        let neighbors = match adjacency.get(&current_vertex) {
+            Some(n) => n,
+            None => {
+                log::debug!(
+                    "Wire #{}: dead end at vertex {} after {} steps",
+                    wire_id, current_vertex, step
+                );
+                break;
+            }
+        };
+
+        // Find the first unvisited neighbor
+        let mut found = false;
+        for info in neighbors {
+            let edge_key = if current_vertex < info.other_vertex {
+                (current_vertex, info.other_vertex)
+            } else {
+                (info.other_vertex, current_vertex)
+            };
+
+            if used_edges.contains(&edge_key) {
+                continue;
+            }
+
+            used_edges.insert(edge_key);
+
+            // Add intermediate curve points (if any)
+            points.extend_from_slice(&info.intermediates);
+
+            // Add the next vertex point (deduplicate with last point)
+            if let Some(TopoShape::Vertex(v)) = shape.get(info.other_vertex) {
+                let should_add = points.last().map_or(true, |last: &Point3| {
+                    (last.x - v.point.x).abs() > 1e-10
+                        || (last.y - v.point.y).abs() > 1e-10
+                        || (last.z - v.point.z).abs() > 1e-10
+                });
+                if should_add {
+                    points.push(v.point);
                 }
             }
+
+            current_vertex = info.other_vertex;
+            found = true;
+            break;
         }
 
-        // Add the second vertex point.
-        // For the last edge of a closed wire, skip it if it equals the first point.
-        let is_last = i == wire.edges.len() - 1;
-        if is_last && wire.closed && !points.is_empty() {
-            let first = points[0];
-            if (first.x - second_pt.x).abs() < 1e-10
-                && (first.y - second_pt.y).abs() < 1e-10
-                && (first.z - second_pt.z).abs() < 1e-10
-            {
-                continue; // Closing point matches the start — skip
-            }
-        }
-
-        // Check for duplicate with the last point before adding
-        let should_add_second = points.last().map_or(true, |last: &Point3| {
-            (last.x - second_pt.x).abs() > 1e-10
-                || (last.y - second_pt.y).abs() > 1e-10
-                || (last.z - second_pt.z).abs() > 1e-10
-        });
-
-        if should_add_second {
-            points.push(second_pt);
+        if !found {
+            log::debug!(
+                "Wire #{}: no unvisited neighbor at vertex {} after {} steps",
+                wire_id, current_vertex, step
+            );
+            break;
         }
     }
 
@@ -484,32 +558,19 @@ fn project_2d_to_surface(pt_2d: Point2, surface: &Surface) -> Point3 {
     // For each surface type, interpret (u, v) as surface parameters
     match surface {
         Surface::Plane(_) => {
-            // For a plane, the 2D projection IS the parameterization
-            // We need to reconstruct from the projection, but we don't have
-            // the coordinate system here. Use the surface's own parameterization.
-            // The pt_2d values are distances in the local plane system.
             surface.point_at(pt_2d.u, pt_2d.v)
         }
         Surface::CylindricalSurface(_) => {
-            // Map u to angle (0..2PI), v to height
-            let u = pt_2d.u;
-            let v = pt_2d.v;
-            surface.point_at(u, v)
+            surface.point_at(pt_2d.u, pt_2d.v)
         }
         Surface::ConicalSurface(_) => {
-            let u = pt_2d.u;
-            let v = pt_2d.v;
-            surface.point_at(u, v)
+            surface.point_at(pt_2d.u, pt_2d.v)
         }
         Surface::SphericalSurface(_) => {
-            let u = pt_2d.u;
-            let v = pt_2d.v;
-            surface.point_at(u, v)
+            surface.point_at(pt_2d.u, pt_2d.v)
         }
         Surface::ToroidalSurface(_) => {
-            let u = pt_2d.u;
-            let v = pt_2d.v;
-            surface.point_at(u, v)
+            surface.point_at(pt_2d.u, pt_2d.v)
         }
         _ => {
             // For unsupported surface types, just evaluate at the 2D parameters
