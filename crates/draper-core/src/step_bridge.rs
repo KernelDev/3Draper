@@ -3,11 +3,12 @@
 //! Converts step-io's typed arena-based IR (StepModel with GeometryPool and
 //! TopologyPool) into our custom B-rep Shape with topological entities.
 
-use draper_geometry::curve::{Circle, Curve, Line};
+use draper_geometry::curve::{Circle, Curve, Ellipse, Line};
 use draper_geometry::direction::{Axis2Placement3D, Direction3};
 use draper_geometry::point::Point3;
 use draper_geometry::surface::{
-    ConicalSurface, CylindricalSurface, Plane, SphericalSurface, Surface, ToroidalSurface,
+    ConicalSurface, CylindricalSurface, Plane, SphericalSurface, Surface,
+    SurfaceOfLinearExtrusion, SurfaceOfRevolution, ToroidalSurface,
 };
 use draper_step::{
     Curve as StepCurve, CurveId, Direction3 as StepDir3,
@@ -295,15 +296,14 @@ impl<'a> ConversionContext<'a> {
                 Some(Curve::Circle(Circle::new(axis, radius)))
             }
             StepCurve::Ellipse(ellipse) => {
-                // For now, approximate ellipse as a circle using the larger semi-axis
-                // TODO: Implement proper ellipse support
                 let axis = self.convert_axis2_placement(ellipse.position);
-                let radius = ellipse.semi_axis_1.max(ellipse.semi_axis_2) * self.scale;
+                let semi_axis_1 = ellipse.semi_axis_1 * self.scale;
+                let semi_axis_2 = ellipse.semi_axis_2 * self.scale;
                 log::debug!(
-                    "Approximating ellipse as circle (semi_axis_1={}, semi_axis_2={}, radius={})",
-                    ellipse.semi_axis_1, ellipse.semi_axis_2, radius
+                    "Converting ellipse (semi_axis_1={}, semi_axis_2={})",
+                    semi_axis_1, semi_axis_2
                 );
-                Some(Curve::Circle(Circle::new(axis, radius)))
+                Some(Curve::Ellipse(Ellipse::new(axis, semi_axis_1, semi_axis_2)))
             }
             StepCurve::Nurbs(nurbs) => {
                 // For now, approximate NURBS curve as a line between first and last control points
@@ -343,21 +343,63 @@ impl<'a> ConversionContext<'a> {
                 Some(Surface::ToroidalSurface(ToroidalSurface::new(axis, major_radius, minor_radius)))
             }
             StepSurface::Revolution(rev) => {
-                // Surface of revolution — TODO: implement properly
-                let _curve = self.convert_curve(rev.swept_curve);
+                // Surface of revolution: a curve swept around an axis
+                let generatrix = match self.convert_curve(rev.swept_curve) {
+                    Some(c) => c,
+                    None => {
+                        log::warn!("SurfaceOfRevolution: failed to convert swept curve, using faceted fallback");
+                        return None;
+                    }
+                };
                 let axis_placement = &self.model.geometry.placements_1d[rev.axis_placement];
-                let _location = self.convert_point(self.model.geometry.points[axis_placement.location]);
-                let _axis_dir = self.convert_direction(self.model.geometry.directions[axis_placement.axis]);
-                log::debug!("SurfaceOfRevolution: not yet fully supported, using faceted fallback");
-                None
+                let location = self.convert_point(self.model.geometry.points[axis_placement.location]);
+                let axis_dir = self.convert_direction(self.model.geometry.directions[axis_placement.axis]);
+
+                // Build an Axis2Placement3D from the axis1 placement.
+                // The axis direction is the Z-axis; we need to compute a ref_direction
+                // perpendicular to it for the X-axis.
+                let ref_dir = if axis_dir.dot(draper_geometry::direction::Direction3::X).abs() < 0.9 {
+                    axis_dir.cross(draper_geometry::direction::Direction3::X)
+                } else {
+                    axis_dir.cross(draper_geometry::direction::Direction3::Y)
+                };
+                let axis2 = draper_geometry::direction::Axis2Placement3D::new(location, axis_dir, Some(ref_dir));
+
+                log::debug!(
+                    "SurfaceOfRevolution: generatrix={:?}, axis_loc=({:.3},{:.3},{:.3})",
+                    std::mem::discriminant(&generatrix),
+                    location.x, location.y, location.z
+                );
+
+                Some(Surface::SurfaceOfRevolution(SurfaceOfRevolution {
+                    generatrix,
+                    axis: axis2,
+                }))
             }
             StepSurface::Extrusion(ext) => {
-                // Surface of linear extrusion — TODO: implement properly
-                let _curve = self.convert_curve(ext.swept_curve);
-                let _dir = self.convert_direction(self.model.geometry.directions[ext.extrusion_direction]);
-                let _depth = ext.depth * self.scale;
-                log::debug!("SurfaceOfLinearExtrusion: not yet fully supported, using faceted fallback");
-                None
+                // Surface of linear extrusion: a curve swept along a direction
+                let generatrix = match self.convert_curve(ext.swept_curve) {
+                    Some(c) => c,
+                    None => {
+                        log::warn!("SurfaceOfLinearExtrusion: failed to convert swept curve, using faceted fallback");
+                        return None;
+                    }
+                };
+                let direction = self.convert_direction(self.model.geometry.directions[ext.extrusion_direction]);
+
+                log::debug!(
+                    "SurfaceOfLinearExtrusion: generatrix={:?}, dir=({:.3},{:.3},{:.3}), depth={:.3}",
+                    std::mem::discriminant(&generatrix),
+                    direction.x, direction.y, direction.z,
+                    ext.depth * self.scale
+                );
+
+                Some(Surface::SurfaceOfLinearExtrusion(
+                    SurfaceOfLinearExtrusion {
+                        generatrix,
+                        direction,
+                    }
+                ))
             }
             StepSurface::Nurbs(nurbs) => {
                 log::debug!(
