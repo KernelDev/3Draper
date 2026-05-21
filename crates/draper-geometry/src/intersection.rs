@@ -3,7 +3,7 @@
 //! Provides algorithms for computing intersections between geometric primitives
 //! and projecting points onto curves and surfaces.
 
-use crate::curve::{Circle, Curve, Line};
+use crate::curve::Curve;
 use crate::direction::Direction3;
 use crate::point::Point3;
 use crate::surface::Surface;

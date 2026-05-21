@@ -4,7 +4,6 @@
 
 use crate::earcut;
 use crate::triangulate::TriangleMesh;
-use draper_geometry::direction::Direction3;
 use draper_geometry::point::{Point2, Point3};
 use draper_geometry::surface::Surface;
 use draper_topology::entity::*;
@@ -51,7 +50,7 @@ fn generate_planar_face_mesh(
     plane: &draper_geometry::surface::Plane,
     mesh: &mut TriangleMesh,
 ) {
-    let normal = plane.axis.axis;
+    let _normal = plane.axis.axis;
     let origin = plane.axis.location;
     let u_dir = plane.axis.ref_direction;
     let v_dir = plane.axis.y_direction();
@@ -107,8 +106,8 @@ fn generate_planar_face_mesh(
 
 /// Generate mesh for a parametric surface by sampling.
 fn generate_parametric_face_mesh(
-    shape: &Shape,
-    face: &Face,
+    _shape: &Shape,
+    _face: &Face,
     surface: &Surface,
     mesh: &mut TriangleMesh,
     u_samples: usize,

@@ -3,8 +3,6 @@
 use crate::render::RenderState;
 use crate::structure_tree;
 use draper_core::document::Document;
-use draper_core::Point3;
-use draper_mesh::triangulate::TriangleMesh;
 use draper_step::ast::StructureNode;
 use egui::*;
 use std::path::PathBuf;
@@ -20,8 +18,8 @@ pub struct DraperViewer {
     camera_yaw: f32,
     camera_pitch: f32,
     camera_target: [f32; 3],
-    is_dragging: bool,
-    last_mouse_pos: Option<Pos2>,
+    _is_dragging: bool,
+    _last_mouse_pos: Option<Pos2>,
     file_path: Option<PathBuf>,
 }
 
@@ -38,24 +36,37 @@ impl DraperViewer {
             camera_yaw: 45.0,
             camera_pitch: 30.0,
             camera_target: [0.0, 0.0, 0.0],
-            is_dragging: false,
-            last_mouse_pos: None,
+            _is_dragging: false,
+            _last_mouse_pos: None,
             file_path: None,
         }
     }
 
     fn open_file(&mut self, path: PathBuf) {
         self.status_message = format!("Loading {}...", path.display());
+        log::info!("Opening STEP file: {}", path.display());
 
         match Document::open_step(&path) {
             Ok(doc) => {
+                let stats = doc.statistics();
                 self.structure_tree = doc.structure_tree();
                 self.status_message = format!(
-                    "Loaded: {} — {} vertices, {} faces, {} triangles",
+                    "Loaded: {} — {} vertices, {} edges, {} faces, {} solids, {} triangles",
                     path.file_name().unwrap_or_default().to_string_lossy(),
-                    doc.statistics().total_vertices,
-                    doc.statistics().total_faces,
-                    doc.statistics().total_triangles,
+                    stats.total_vertices,
+                    stats.total_edges,
+                    stats.total_faces,
+                    stats.total_solids,
+                    stats.total_triangles,
+                );
+
+                log::info!(
+                    "STEP file loaded: {} vertices, {} edges, {} faces, {} solids, {} triangles",
+                    stats.total_vertices,
+                    stats.total_edges,
+                    stats.total_faces,
+                    stats.total_solids,
+                    stats.total_triangles
                 );
 
                 // Set camera to fit the model
@@ -64,12 +75,32 @@ impl DraperViewer {
                     let center = bb.center();
                     self.camera_target = [center.x as f32, center.y as f32, center.z as f32];
                     self.camera_distance = (bb.diagonal() * 1.5) as f32;
+                    if self.camera_distance < 1.0 {
+                        self.camera_distance = 50.0; // Fallback for very small models
+                    }
+                    log::info!(
+                        "Camera: target=({:.1}, {:.1}, {:.1}), distance={:.1}",
+                        center.x, center.y, center.z, self.camera_distance
+                    );
+                } else {
+                    // No mesh generated — set camera based on B-rep bounding box
+                    let bb = doc.shape.bounding_box();
+                    if !bb.is_empty() {
+                        let center = bb.center();
+                        self.camera_target = [center.x as f32, center.y as f32, center.z as f32];
+                        self.camera_distance = (bb.diagonal() * 1.5) as f32;
+                        if self.camera_distance < 1.0 {
+                            self.camera_distance = 50.0;
+                        }
+                    }
+                    log::warn!("No mesh generated from B-rep — using shape bounding box for camera");
                 }
 
                 self.file_path = Some(path);
                 self.document = Some(doc);
             }
             Err(e) => {
+                log::error!("Failed to load STEP file: {}", e);
                 self.status_message = format!("Error loading file: {}", e);
             }
         }

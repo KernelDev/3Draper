@@ -5,16 +5,18 @@
 use draper_geometry::curve::{Circle, Curve, Line};
 use draper_geometry::direction::{Axis2Placement3D, Direction3};
 use draper_geometry::point::Point3;
-use draper_geometry::surface::{CylindricalSurface, Plane, SphericalSurface, Surface};
+use draper_geometry::surface::{ConicalSurface, CylindricalSurface, Plane, SphericalSurface, Surface};
 use draper_step::ast::{Parameter, StepDocument, StepEntity};
 use draper_topology::entity::*;
 use draper_topology::shape::Shape;
 
-use crate::error::{CoreError, CoreResult};
+use crate::error::CoreResult;
 
 /// Convert a STEP document to a B-rep Shape.
 pub fn step_to_shape(doc: &StepDocument, shape: &mut Shape) {
     let ctx = &mut BridgeContext { doc, shape, id_map: Default::default() };
+
+    log::info!("Converting STEP document to B-rep shape ({} entities)", doc.entities.len());
 
     // First pass: create all geometry (points, directions, curves, surfaces)
     for id in &doc.entity_order {
@@ -23,6 +25,8 @@ pub fn step_to_shape(doc: &StepDocument, shape: &mut Shape) {
         }
     }
 
+    log::debug!("Geometry pass complete: {} vertices created", ctx.shape.vertices().len());
+
     // Second pass: create topology (vertices, edges, wires, faces, shells, solids)
     for id in &doc.entity_order {
         if let Some(entity) = doc.get_entity(*id) {
@@ -30,15 +34,25 @@ pub fn step_to_shape(doc: &StepDocument, shape: &mut Shape) {
         }
     }
 
+    log::debug!(
+        "Topology pass complete: {} edges, {} faces, {} solids",
+        ctx.shape.edges().len(),
+        ctx.shape.faces().len(),
+        ctx.shape.solids().len()
+    );
+
     // Find root shapes
     let roots: Vec<TopoId> = shape.solids().iter().map(|s| s.id).collect();
     let compound_roots: Vec<TopoId> = shape.find_by_type(ShapeType::Compound)
         .iter().map(|s| s.id()).collect();
-    
+
     let all_roots = [roots, compound_roots].concat();
+    let root_count = all_roots.len();
     if !all_roots.is_empty() {
         shape.set_roots(all_roots);
     }
+
+    log::info!("STEP → Shape conversion complete: {} root shapes", root_count);
 }
 
 /// Convert a B-rep Shape back to a STEP document.
@@ -59,8 +73,7 @@ pub fn shape_to_step(shape: &Shape) -> CoreResult<StepDocument> {
 
     let mut next_id = 1u64;
 
-    // Write all entities
-    // This is a simplified exporter — a full one would need to handle all entity types
+    // Write all entities — simplified exporter
     for vertex in shape.vertices() {
         let id = next_id;
         next_id += 1;
@@ -112,8 +125,6 @@ impl<'a> BridgeContext<'a> {
                 }
             }
             "DIRECTION" => {
-                // Directions are stored in the id_map for reference by other entities
-                // We don't create topological entities for them
                 let id = self.shape.alloc_id_internal();
                 self.id_map.insert(entity.id, id);
             }
@@ -142,8 +153,6 @@ impl<'a> BridgeContext<'a> {
     fn process_topology_entity(&mut self, entity: &StepEntity) {
         match entity.type_name.as_str() {
             "VERTEX_POINT" => {
-                // The vertex was already created in the geometry pass if it has a CARTESIAN_POINT
-                // But we need to handle the case where it references an existing point
                 if let Some(ref_id) = entity.ref_param(1) {
                     if let Some(&topo_id) = self.id_map.get(&ref_id) {
                         self.id_map.insert(entity.id, topo_id);
@@ -154,15 +163,28 @@ impl<'a> BridgeContext<'a> {
                 self.process_edge_curve(entity);
             }
             "ORIENTED_EDGE" => {
-                // Oriented edges reference an EDGE_CURVE with an orientation flag
+                // ORIENTED_EDGE(name, *, *, edge_ref, orientation)
                 if let Some(edge_ref) = entity.ref_param(4) {
                     if let Some(&topo_id) = self.id_map.get(&edge_ref) {
                         self.id_map.insert(entity.id, topo_id);
+                    }
+                } else {
+                    // Fallback: try param index 3 (some files use different ordering)
+                    for i in 0..entity.parameters.len() {
+                        if let Some(ref_id) = entity.ref_param(i) {
+                            if let Some(&topo_id) = self.id_map.get(&ref_id) {
+                                self.id_map.insert(entity.id, topo_id);
+                                break;
+                            }
+                        }
                     }
                 }
             }
             "EDGE_LOOP" => {
                 self.process_edge_loop(entity);
+            }
+            "POLY_LOOP" => {
+                self.process_poly_loop(entity);
             }
             "FACE_OUTER_BOUND" | "FACE_BOUND" => {
                 if let Some(ref_id) = entity.ref_param(1) {
@@ -181,7 +203,6 @@ impl<'a> BridgeContext<'a> {
                 self.process_solid(entity);
             }
             _ => {
-                // Store a mapping for unknown types so references can be resolved
                 if !self.id_map.contains_key(&entity.id) {
                     let id = self.shape.alloc_id_internal();
                     self.id_map.insert(entity.id, id);
@@ -257,6 +278,11 @@ impl<'a> BridgeContext<'a> {
         if let (Some(sv), Some(ev)) = (start_topo, end_topo) {
             let id = self.shape.add_edge(curve, sv, ev, None);
             self.id_map.insert(entity.id, id);
+        } else {
+            log::warn!(
+                "EDGE_CURVE #{}: missing vertex refs (start={}, end={})",
+                entity.id, start_ref, end_ref
+            );
         }
     }
 
@@ -268,8 +294,8 @@ impl<'a> BridgeContext<'a> {
                 .iter()
                 .filter_map(|p| {
                     if let Parameter::Reference(ref_id) = p {
-                        // The oriented edge itself has orientation info
                         if let Some(oe_entity) = self.doc.get_entity(*ref_id) {
+                            // ORIENTED_EDGE('', *, *, edge_ref, orientation)
                             let edge_ref = oe_entity.ref_param(4).unwrap_or(0);
                             let orientation = match oe_entity.param(5) {
                                 Some(Parameter::Enumeration(s)) => s != "F",
@@ -277,10 +303,7 @@ impl<'a> BridgeContext<'a> {
                                 _ => true,
                             };
                             if let Some(&edge_topo) = self.id_map.get(&edge_ref) {
-                                return Some(OrientedEdge {
-                                    edge_id: edge_topo,
-                                    orientation,
-                                });
+                                return Some(OrientedEdge { edge_id: edge_topo, orientation });
                             }
                         }
                     }
@@ -291,6 +314,42 @@ impl<'a> BridgeContext<'a> {
             if !oriented_edges.is_empty() {
                 let id = self.shape.add_wire(oriented_edges);
                 self.id_map.insert(entity.id, id);
+            }
+        }
+    }
+
+    fn process_poly_loop(&mut self, entity: &StepEntity) {
+        // POLY_LOOP(name, (point_ref_list))
+        // A POLY_LOOP directly references CARTESIAN_POINT entities.
+        // We create a wire from edges between consecutive vertices.
+        let point_refs = entity.list_param(1);
+        if let Some(refs) = point_refs {
+            let vertex_topo_ids: Vec<TopoId> = refs
+                .iter()
+                .filter_map(|p| {
+                    if let Parameter::Reference(ref_id) = p {
+                        self.id_map.get(ref_id).copied()
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            if vertex_topo_ids.len() >= 2 {
+                let mut oriented_edges = Vec::new();
+                for i in 0..vertex_topo_ids.len() {
+                    let j = (i + 1) % vertex_topo_ids.len();
+                    let sv = vertex_topo_ids[i];
+                    let ev = vertex_topo_ids[j];
+                    let edge_id = self.shape.add_edge(None, sv, ev, None);
+                    oriented_edges.push(OrientedEdge { edge_id, orientation: true });
+                }
+
+                if !oriented_edges.is_empty() {
+                    let wire_id = self.shape.add_wire(oriented_edges);
+                    self.id_map.insert(entity.id, wire_id);
+                    log::trace!("POLY_LOOP #{}: {} vertices → wire {}", entity.id, vertex_topo_ids.len(), wire_id);
+                }
             }
         }
     }
@@ -306,23 +365,30 @@ impl<'a> BridgeContext<'a> {
 
         // Set boundaries
         if let Some(bound_list) = entity.list_param(1) {
+            let mut first_bound = true;
             for bound_param in bound_list {
                 if let Parameter::Reference(bound_ref) = bound_param {
                     if let Some(&wire_topo) = self.id_map.get(bound_ref) {
                         // Determine if this is outer or inner bound
-                        if let Some(bound_entity) = self.doc.get_entity(*bound_ref) {
-                            if bound_entity.type_name == "FACE_OUTER_BOUND" {
-                                self.shape.set_face_outer_wire(face_id, wire_topo);
-                            } else {
-                                self.shape.add_face_inner_wire(face_id, wire_topo);
-                            }
+                        let is_outer = if let Some(bound_entity) = self.doc.get_entity(*bound_ref) {
+                            bound_entity.type_name == "FACE_OUTER_BOUND"
+                        } else {
+                            first_bound
+                        };
+
+                        if is_outer && first_bound {
+                            self.shape.set_face_outer_wire(face_id, wire_topo);
+                        } else {
+                            self.shape.add_face_inner_wire(face_id, wire_topo);
                         }
+                        first_bound = false;
                     }
                 }
             }
         }
 
         self.id_map.insert(entity.id, face_id);
+        log::trace!("ADVANCED_FACE #{}: surface={:?}, face_id={}", entity.id, surface_ref, face_id);
     }
 
     fn process_shell(&mut self, entity: &StepEntity) {
@@ -341,8 +407,10 @@ impl<'a> BridgeContext<'a> {
                 .collect();
 
             if !face_ids.is_empty() {
+                let face_count = face_ids.len();
                 let id = self.shape.add_shell(face_ids);
                 self.id_map.insert(entity.id, id);
+                log::trace!("{} #{}: {} faces → shell {}", entity.type_name, entity.id, face_count, id);
             }
         }
     }
@@ -353,18 +421,19 @@ impl<'a> BridgeContext<'a> {
         if let Some(&shell_topo) = self.id_map.get(&shell_ref) {
             let id = self.shape.add_solid(shell_topo);
             self.id_map.insert(entity.id, id);
+            log::trace!("MANIFOLD_SOLID_BREP #{}: shell={} → solid={}", entity.id, shell_ref, id);
+        } else {
+            log::warn!("MANIFOLD_SOLID_BREP #{}: shell ref #{} not found in id_map", entity.id, shell_ref);
         }
     }
 
     fn parse_curve(&self, entity: &StepEntity) -> Option<Curve> {
         match entity.type_name.as_str() {
             "LINE" => {
-                // LINE(name, point_ref, vector_ref)
                 let point_ref = entity.ref_param(1)?;
                 let point_entity = self.doc.get_entity(point_ref)?;
                 let origin = self.parse_cartesian_point(point_entity)?;
 
-                // Vector has a direction and magnitude
                 let vector_ref = entity.ref_param(2)?;
                 let vector_entity = self.doc.get_entity(vector_ref)?;
                 let dir_ref = vector_entity.ref_param(1)?;
@@ -381,7 +450,10 @@ impl<'a> BridgeContext<'a> {
 
                 Some(Curve::Circle(Circle::new(axis, radius)))
             }
-            _ => None,
+            _ => {
+                log::debug!("Unsupported curve type: {}", entity.type_name);
+                None
+            }
         }
     }
 
@@ -400,6 +472,14 @@ impl<'a> BridgeContext<'a> {
                 let radius = entity.real_param(2)?;
                 Some(Surface::CylindricalSurface(CylindricalSurface::new(axis, radius)))
             }
+            "CONICAL_SURFACE" => {
+                let axis_ref = entity.ref_param(1)?;
+                let axis_entity = self.doc.get_entity(axis_ref)?;
+                let axis = self.parse_axis2_placement(axis_entity)?;
+                let radius = entity.real_param(2)?;
+                let semi_angle = entity.real_param(3).unwrap_or(std::f64::consts::FRAC_PI_4);
+                Some(Surface::ConicalSurface(ConicalSurface::new(axis, radius, semi_angle)))
+            }
             "SPHERICAL_SURFACE" => {
                 let center_ref = entity.ref_param(1)?;
                 let center_entity = self.doc.get_entity(center_ref)?;
@@ -407,7 +487,10 @@ impl<'a> BridgeContext<'a> {
                 let radius = entity.real_param(2)?;
                 Some(Surface::SphericalSurface(SphericalSurface::new(axis, radius)))
             }
-            _ => None,
+            _ => {
+                log::debug!("Unsupported surface type: {}", entity.type_name);
+                None
+            }
         }
     }
 
@@ -418,10 +501,6 @@ impl<'a> BridgeContext<'a> {
             _ => None,
         }
     }
-
-    fn param_real_owned(&self, param: Parameter) -> Option<f64> {
-        self.param_real(&param)
-    }
 }
 
 // Internal helper for Shape
@@ -431,8 +510,6 @@ trait ShapeInternal {
 
 impl ShapeInternal for Shape {
     fn alloc_id_internal(&mut self) -> TopoId {
-        // Use a high ID range to avoid conflicts with real topological entities
-        // This is a bit of a hack — in a production system we'd have a cleaner approach
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1_000_000);
         COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     }

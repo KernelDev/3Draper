@@ -1,10 +1,10 @@
 //! Surface primitives — parametric surfaces in 3D.
 
-use crate::curve::{BSplineCurve, Circle, Ellipse, Line};
+use crate::curve::BSplineCurve;
 use crate::direction::Axis2Placement3D;
 use crate::point::Point3;
 use crate::transform::Transform3;
-use glam::DVec3;
+
 use serde::{Deserialize, Serialize};
 
 /// A parametric surface in 3D. Parameters (u, v) map to 3D point.
@@ -254,14 +254,14 @@ impl ToroidalSurface {
         let y = self.axis.y_direction().to_dvec3();
         let z = self.axis.axis.to_dvec3();
 
-        let R = self.major_radius;
-        let r = self.minor_radius;
+        let r = self.major_radius;
+        let minor_r = self.minor_radius;
 
         Point3::from_dvec3(
             center
-                + x * ((R + r * v.cos()) * u.cos())
-                + y * ((R + r * v.cos()) * u.sin())
-                + z * (r * v.sin()),
+                + x * ((r + minor_r * v.cos()) * u.cos())
+                + y * ((r + minor_r * v.cos()) * u.sin())
+                + z * (minor_r * v.sin()),
         )
     }
 

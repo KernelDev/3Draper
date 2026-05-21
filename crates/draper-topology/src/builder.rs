@@ -2,7 +2,6 @@
 
 use crate::entity::*;
 use crate::shape::Shape;
-use draper_geometry::curve::Curve;
 use draper_geometry::direction::Axis2Placement3D;
 use draper_geometry::point::Point3;
 use draper_geometry::surface::{CylindricalSurface, Plane, Surface};
@@ -136,8 +135,8 @@ impl ShapeBuilder {
         let center_top = Point3::new(0.0, 0.0, height);
 
         // Vertices
-        let v_center_b = shape.add_vertex(center_bottom);
-        let v_center_t = shape.add_vertex(center_top);
+        let _v_center_b = shape.add_vertex(center_bottom);
+        let _v_center_t = shape.add_vertex(center_top);
 
         // We need at least 4 points on each circle to approximate
         let segments = 16;

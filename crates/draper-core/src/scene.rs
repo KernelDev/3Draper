@@ -3,7 +3,7 @@
 //! The scene provides a hierarchical structure for rendering and
 //! interaction, mapping to the topological shape structure.
 
-use draper_geometry::point::{BoundingBox3, Point3};
+use draper_geometry::point::BoundingBox3;
 use draper_geometry::transform::Transform3;
 use draper_topology::entity::*;
 use draper_topology::shape::Shape;

@@ -1,8 +1,6 @@
 //! Earcut-style triangulation for simple polygons.
 //!
-//! Implements a 2D ear-clipping algorithm that can be used for
-//! triangulating planar faces. For more complex surfaces, use
-//! the Delaunay triangulation via the `spade` crate.
+//! Implements a 2D ear-clipping algorithm for triangulating planar faces.
 
 use draper_geometry::point::Point2;
 
@@ -14,105 +12,95 @@ pub fn ear_clip_polygon(vertices: &[Point2]) -> Vec<u32> {
     }
 
     let n = vertices.len();
-    let mut indices: Vec<u32> = (0..n as u32).collect();
-    let mut triangles = Vec::new();
 
-    // Determine winding order
-    let mut area = 0.0f64;
+    // Compute signed area to determine winding
+    let mut signed_area = 0.0f64;
     for i in 0..n {
         let j = (i + 1) % n;
-        area += vertices[i].u * vertices[j].v;
-        area -= vertices[j].u * vertices[i].v;
+        signed_area += vertices[i].u * vertices[j].v;
+        signed_area -= vertices[j].u * vertices[i].v;
     }
 
-    if area > 0.0 {
+    // Build index list; ensure CCW winding for our algorithm
+    let mut indices: Vec<u32> = (0..n as u32).collect();
+    if signed_area < 0.0 {
+        // CW input — reverse to CCW
         indices.reverse();
     }
 
+    let mut triangles = Vec::new();
     let mut remaining = n;
-    let mut fail_count = 0;
-    let mut current = 0;
 
-    while remaining > 2 {
-        if fail_count > 2 * remaining {
-            // Degenerate polygon
-            break;
+    while remaining > 3 {
+        let mut ear_found = false;
+
+        for i in 0..remaining {
+            let prev = if i == 0 { remaining - 1 } else { i - 1 };
+            let next = (i + 1) % remaining;
+
+            let pi = indices[prev] as usize;
+            let pj = indices[i] as usize;
+            let pk = indices[next] as usize;
+
+            // Check convexity (CCW: cross product should be positive)
+            let cross = (vertices[pj].u - vertices[pi].u) * (vertices[pk].v - vertices[pi].v)
+                      - (vertices[pj].v - vertices[pi].v) * (vertices[pk].u - vertices[pi].u);
+
+            if cross < 0.0 {
+                continue; // Reflex vertex, not an ear
+            }
+
+            // Check that no other vertex is inside this triangle
+            let mut is_ear = true;
+            for m in 0..remaining {
+                let pm = indices[m] as usize;
+                if pm == pi || pm == pj || pm == pk {
+                    continue;
+                }
+
+                if point_in_triangle(
+                    vertices[pm].u, vertices[pm].v,
+                    vertices[pi].u, vertices[pi].v,
+                    vertices[pj].u, vertices[pj].v,
+                    vertices[pk].u, vertices[pk].v,
+                ) {
+                    is_ear = false;
+                    break;
+                }
+            }
+
+            if is_ear {
+                triangles.push(indices[prev]);
+                triangles.push(indices[i]);
+                triangles.push(indices[next]);
+                indices.remove(i);
+                remaining -= 1;
+                ear_found = true;
+                break;
+            }
         }
 
-        let i = current;
-        let j = (current + 1) % remaining;
-        let k = (current + 2) % remaining;
-
-        let pi = indices[i] as usize;
-        let pj = indices[j] as usize;
-        let pk = indices[k] as usize;
-
-        if is_ear(vertices, &indices, i, j, k, remaining) {
-            triangles.push(indices[i]);
-            triangles.push(indices[j]);
-            triangles.push(indices[k]);
-
-            // Remove the ear tip
-            indices.remove(j);
-            remaining -= 1;
-            fail_count = 0;
-            current = if current > 0 { current - 1 } else { 0 };
-        } else {
-            fail_count += 1;
-            current = (current + 1) % remaining;
+        if !ear_found {
+            break; // Degenerate polygon
         }
+    }
+
+    // Last triangle
+    if remaining == 3 {
+        triangles.push(indices[0]);
+        triangles.push(indices[1]);
+        triangles.push(indices[2]);
     }
 
     triangles
 }
 
-fn is_ear(
-    vertices: &[Point2],
-    indices: &[u32],
-    i: usize,
-    j: usize,
-    k: usize,
-    remaining: usize,
+fn point_in_triangle(
+    px: f64, py: f64,
+    ax: f64, ay: f64,
+    bx: f64, by: f64,
+    cx: f64, cy: f64,
 ) -> bool {
-    let pi = indices[i] as usize;
-    let pj = indices[j] as usize;
-    let pk = indices[k] as usize;
-
-    let ax = vertices[pi].u;
-    let ay = vertices[pi].v;
-    let bx = vertices[pj].u;
-    let by = vertices[pj].v;
-    let cx = vertices[pk].u;
-    let cy = vertices[pk].v;
-
-    // Check if the triangle is convex (CCW winding)
-    let cross = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
-    if cross <= 0.0 {
-        return false;
-    }
-
-    // Check if any other vertex is inside the triangle
-    for m in 0..remaining {
-        let pm = indices[m] as usize;
-        if pm == pi || pm == pj || pm == pk {
-            continue;
-        }
-
-        if point_in_triangle(
-            vertices[pm].u,
-            vertices[pm].v,
-            ax, ay,
-            bx, by,
-            cx, cy,
-        ) {
-            return false;
-        }
-    }
-
-    true
-}
-
-fn point_in_triangle(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64, cx: f64, cy: f64) -> bool {
     let d1 = sign(px, py, ax, ay, bx, by);
     let d2 = sign(px, py, bx, by, cx, cy);
     let d3 = sign(px, py, cx, cy, ax, ay);

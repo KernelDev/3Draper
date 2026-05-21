@@ -2,7 +2,7 @@
 
 use crate::direction::Direction3;
 use crate::point::Point3;
-use glam::{DAffine3, DVec3, EulerRot};
+use glam::{DAffine3, DVec3};
 use serde::{Deserialize, Serialize};
 
 /// A 3D affine transformation.

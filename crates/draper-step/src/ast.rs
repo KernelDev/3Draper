@@ -57,7 +57,7 @@ pub struct StepEntity {
 }
 
 /// A parameter value in a STEP entity.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Parameter {
     /// An integer literal.
     Integer(i64),

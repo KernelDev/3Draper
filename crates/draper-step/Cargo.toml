@@ -5,7 +5,6 @@ edition.workspace = true
 description = "Custom STEP (ISO 10303-21) file parser for 3Draper"
 
 [dependencies]
-nom = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }

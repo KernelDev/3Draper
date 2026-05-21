@@ -3,10 +3,9 @@
 //! Each entity has a unique ID and references geometric data.
 
 use draper_geometry::curve::Curve;
-use draper_geometry::point::{BoundingBox3, Point3};
+use draper_geometry::point::Point3;
 use draper_geometry::surface::Surface;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Unique identifier for a topological entity.
 pub type TopoId = u64;

@@ -204,7 +204,7 @@ fn draw_solid_mesh(painter: &Painter, mesh: &TriangleMesh, vp: &Mat4, rect: Rect
                 let b_val = (220.0 * intensity) as u8;
 
                 // Depth for sorting (average Z in clip space)
-                let depth = ((pa.y + pb.y + pc.y) / 3.0);
+                let depth = (pa.y + pb.y + pc.y) / 3.0;
 
                 projected_tris.push((depth, [pa, pb, pc], Color32::from_rgb(r, g, b_val)));
             }
