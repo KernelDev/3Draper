@@ -159,26 +159,44 @@ impl CylinderSurface {
 }
 
 /// A conical surface.
+///
+/// Parameterization: v=0 is the base circle with the given radius,
+/// v increases toward the apex where radius reaches 0.
+/// Height from base to apex = radius / tan(half_angle).
 #[derive(Clone, Debug)]
 pub struct ConeSurface {
-    pub apex: Point3d,
-    pub axis: Direction3d,
-    pub half_angle: f64, // radians
-    pub radius: f64,     // radius at v=0
+    pub origin: Point3d,    // Center of base circle
+    pub axis: Direction3d,   // Direction from base toward apex
+    pub half_angle: f64,     // Half-angle in radians
+    pub radius: f64,         // Base radius (at v=0)
 }
 
 impl ConeSurface {
+    /// Create a cone along the Z axis with base at z=0.
+    /// The base has the given radius, and the apex is at z = radius / tan(half_angle).
     pub fn new_z(radius: f64, half_angle: f64) -> Self {
         Self {
-            apex: Point3d::new(0.0, 0.0, -radius / half_angle.tan()),
+            origin: Point3d::ORIGIN,
             axis: Direction3d::Z,
             half_angle,
             radius,
         }
     }
 
+    /// Height from base to apex.
+    pub fn height(&self) -> f64 {
+        if self.half_angle.abs() < 1e-10 {
+            f64::INFINITY
+        } else {
+            self.radius / self.half_angle.tan()
+        }
+    }
+
+    /// Evaluate: u = angle in radians [0, 2pi], v = height from base along axis.
+    /// At v=0: radius = self.radius (base). At v=height(): radius = 0 (apex).
     pub fn point_at(&self, u: f64, v: f64) -> Point3d {
-        let r = self.radius + v * self.half_angle.tan();
+        // Radius decreases linearly from base to apex
+        let r = (self.radius - v * self.half_angle.tan()).max(0.0);
         let x_dir = if self.axis.is_parallel_to(&Direction3d::Z) {
             Direction3d::X
         } else {
@@ -187,10 +205,34 @@ impl ConeSurface {
         let y_dir = self.axis.cross(&x_dir);
 
         Point3d::new(
-            self.apex.x + r * (u.cos() * x_dir.x + u.sin() * y_dir.x) + v * self.axis.x,
-            self.apex.y + r * (u.cos() * x_dir.y + u.sin() * y_dir.y) + v * self.axis.y,
-            self.apex.z + r * (u.cos() * x_dir.z + u.sin() * y_dir.z) + v * self.axis.z,
+            self.origin.x + r * (u.cos() * x_dir.x + u.sin() * y_dir.x) + v * self.axis.x,
+            self.origin.y + r * (u.cos() * x_dir.y + u.sin() * y_dir.y) + v * self.axis.y,
+            self.origin.z + r * (u.cos() * x_dir.z + u.sin() * y_dir.z) + v * self.axis.z,
         )
+    }
+
+    /// Normal at (u, v) — points outward.
+    pub fn normal_at(&self, u: f64, _v: f64) -> Direction3d {
+        let x_dir = if self.axis.is_parallel_to(&Direction3d::Z) {
+            Direction3d::X
+        } else {
+            self.axis.cross(&Direction3d::Z)
+        };
+        let y_dir = self.axis.cross(&x_dir);
+        // Normal to cone: perpendicular to the slant surface
+        // The slant has angle half_angle from the axis
+        let radial = Direction3d::new(
+            u.cos() * x_dir.x + u.sin() * y_dir.x,
+            u.cos() * x_dir.y + u.sin() * y_dir.y,
+            u.cos() * x_dir.z + u.sin() * y_dir.z,
+        ).unwrap_or(Direction3d::X);
+        // Normal = radial * cos(half_angle) - axis * sin(half_angle)
+        let ha = self.half_angle;
+        Direction3d::new(
+            radial.x * ha.cos() - self.axis.x * ha.sin(),
+            radial.y * ha.cos() - self.axis.y * ha.sin(),
+            radial.z * ha.cos() - self.axis.z * ha.sin(),
+        ).unwrap_or(radial)
     }
 }
 
@@ -346,6 +388,7 @@ impl Surface {
         match self {
             Surface::Plane(p) => p.normal_at(u, v),
             Surface::Cylinder(c) => c.normal_at(u, v),
+            Surface::Cone(c) => c.normal_at(u, v),
             Surface::Sphere(s) => s.normal_at(u, v),
             Surface::Torus(t) => t.normal_at(u, v),
             _ => {
@@ -386,7 +429,7 @@ impl Surface {
                 radius: c.radius,
             }),
             Surface::Cone(c) => Surface::Cone(ConeSurface {
-                apex: t.transform_point(&c.apex),
+                origin: t.transform_point(&c.origin),
                 axis: t.transform_direction(&c.axis),
                 half_angle: c.half_angle,
                 radius: c.radius,

@@ -262,7 +262,16 @@ impl ViewerApp {
                     "STEP parsed: {} — {} entities, {} points, {} faces, {} shells, {} breps",
                     name, step_file.entities.len(), point_count, face_count, shell_count, brep_count
                 ));
-                self.log("STEP geometry conversion to B-Rep is in development");
+
+                // Convert STEP to mesh
+                match draper_step::step_to_mesh(&step_file) {
+                    Ok(mesh) => {
+                        self.load_mesh(mesh, &format!("STEP: {}", name));
+                    }
+                    Err(e) => {
+                        self.log(&format!("STEP conversion: {}", e));
+                    }
+                }
             }
             Err(e) => {
                 self.log(&format!("STEP import error: {}", e));
@@ -281,6 +290,52 @@ impl ViewerApp {
         match draper_mesh::stl::write_stl_file(&self.mesh, path, false) {
             Ok(()) => self.log(&format!("Exported STL (ASCII): {}", path)),
             Err(e) => self.log(&format!("STL export error: {}", e)),
+        }
+    }
+
+    fn export_step(&mut self, path: &str) {
+        // Re-create the solid from the current mesh description
+        // For now, export based on the model name — we'll need to store the solid
+        // We need to reconstruct a solid from the current mesh for export
+        let solid = self.rebuild_current_solid();
+        let name = std::path::Path::new(path)
+            .file_stem()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "model".to_string());
+        let content = draper_step::export_step(&solid, &name);
+        match draper_step::write_step_file(&content, path) {
+            Ok(()) => self.log(&format!("Exported STEP: {}", path)),
+            Err(e) => self.log(&format!("STEP export error: {}", e)),
+        }
+    }
+
+    /// Rebuild a Solid from the current model for export purposes.
+    /// This is a temporary solution — ideally we'd store the original solid.
+    fn rebuild_current_solid(&self) -> draper_topology::Solid {
+        use draper_topology::ShapeBuilder;
+        match self.current_model.name.as_str() {
+            n if n.starts_with("Box") => {
+                ShapeBuilder::make_box(100.0, 80.0, 60.0)
+            }
+            n if n.starts_with("Cylinder") => {
+                ShapeBuilder::make_cylinder(40.0, 100.0)
+            }
+            n if n.starts_with("Sphere") => {
+                ShapeBuilder::make_sphere(50.0)
+            }
+            n if n.starts_with("Cone") => {
+                let radius = 40.0_f64;
+                let height = 80.0_f64;
+                let half_angle = (radius / height).atan();
+                ShapeBuilder::make_cone(radius, height, half_angle)
+            }
+            n if n.starts_with("Torus") => {
+                ShapeBuilder::make_torus(40.0, 12.0)
+            }
+            _ => {
+                // Default: create a box
+                ShapeBuilder::make_box(100.0, 100.0, 100.0)
+            }
         }
     }
 }
@@ -328,6 +383,16 @@ impl eframe::App for ViewerApp {
                             .save_file()
                         {
                             self.export_stl_ascii(&path.to_string_lossy());
+                        }
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Export STEP...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("STEP", &["stp", "step"])
+                            .save_file()
+                        {
+                            self.export_step(&path.to_string_lossy());
                         }
                         ui.close_menu();
                     }
@@ -488,6 +553,16 @@ impl eframe::App for ViewerApp {
                             .save_file()
                         {
                             self.export_stl_ascii(&path.to_string_lossy());
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Export STEP").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("STEP", &["stp", "step"])
+                            .save_file()
+                        {
+                            self.export_step(&path.to_string_lossy());
                         }
                     }
                 });

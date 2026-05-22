@@ -29,8 +29,8 @@ impl Default for TriangulationParams {
         Self {
             max_edge_length: 1.0,
             max_deviation: 0.01,
-            angular_samples: 32,
-            height_samples: 2,
+            angular_samples: 48,
+            height_samples: 8,
         }
     }
 }
@@ -460,19 +460,57 @@ fn collect_face_boundary_points(face: &Face) -> Vec<Point3d> {
     points
 }
 
-/// Estimate the v parameter range for a face.
+/// Estimate the v parameter range for a face by sampling its edges
+/// and projecting sample points onto the surface's axis direction.
 fn estimate_v_range(face: &Face) -> Option<(f64, f64)> {
-    // Try to infer from the surface type
     if let Some(ref surface) = face.surface {
         match surface {
-            Surface::Cylinder(cyl) => Some((0.0, 1.0)), // Will need proper bounds
-            Surface::Cone(_) => Some((0.0, 1.0)),
+            Surface::Cylinder(cyl) => {
+                let (v_min, v_max) = compute_axis_v_range(face, &cyl.origin, &cyl.axis);
+                if v_min < v_max { Some((v_min, v_max)) } else { Some((0.0, 1.0)) }
+            }
+            Surface::Cone(cone) => {
+                let (v_min, v_max) = compute_axis_v_range(face, &cone.origin, &cone.axis);
+                if v_min < v_max { Some((v_min, v_max)) } else { Some((0.0, 1.0)) }
+            }
             Surface::Revolution(rev) => Some(rev.profile.param_range()),
             Surface::Extrusion(ext) => Some(ext.profile.param_range()),
             _ => None,
         }
     } else {
         None
+    }
+}
+
+/// Compute the v parameter range for an axis-based surface (Cylinder, Cone)
+/// by sampling the face's edges and projecting each sample point onto the axis.
+/// v = dot(point - origin, axis)
+fn compute_axis_v_range(face: &Face, origin: &Point3d, axis: &Direction3d) -> (f64, f64) {
+    let mut v_min = f64::MAX;
+    let mut v_max = f64::MIN;
+
+    for edge in &face.edges {
+        for i in 0..64 {
+            let t = i as f64 / 63.0;
+            if let Some(p) = edge.point_at(t) {
+                // Project point onto axis: v = dot(p - origin, axis)
+                let v = (p.x - origin.x) * axis.x
+                      + (p.y - origin.y) * axis.y
+                      + (p.z - origin.z) * axis.z;
+                v_min = v_min.min(v);
+                v_max = v_max.max(v);
+            }
+        }
+    }
+
+    // If no edges, try the outer_wire coedges by looking for edge geometry
+    if v_min >= v_max {
+        // Fallback: use a default range
+        (0.0, 1.0)
+    } else {
+        // Add a small margin to avoid clipping at exact boundaries
+        let margin = (v_max - v_min) * 0.001;
+        (v_min - margin, v_max + margin)
     }
 }
 

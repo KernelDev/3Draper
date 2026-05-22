@@ -202,8 +202,40 @@ fn export_surface(out: &mut String, surface: &Surface, id_counter: &mut i64) -> 
 
             let surface_id = alloc_id(id_counter);
             out.push_str(&format!(
-                "#{} = TOROIDAL_SURFACE('',#{},{});\n",
-                surface_id, axis2_id, torus.major_radius
+                "#{} = TOROIDAL_SURFACE('',#{},{},{});\n",
+                surface_id, axis2_id, torus.major_radius, torus.minor_radius
+            ));
+
+            surface_id
+        }
+        Surface::Cone(cone) => {
+            let pt_id = alloc_id(id_counter);
+            out.push_str(&format!(
+                "#{} = CARTESIAN_POINT('',({},{},{}));\n",
+                pt_id, cone.origin.x, cone.origin.y, cone.origin.z
+            ));
+
+            let dir_id = alloc_id(id_counter);
+            out.push_str(&format!(
+                "#{} = DIRECTION('',({},{},{}));\n",
+                dir_id, cone.axis.x, cone.axis.y, cone.axis.z
+            ));
+
+            let ref_dir_id = alloc_id(id_counter);
+            out.push_str(&format!(
+                "#{} = DIRECTION('',(1.,0.,0.));\n", ref_dir_id
+            ));
+
+            let axis2_id = alloc_id(id_counter);
+            out.push_str(&format!(
+                "#{} = AXIS2_PLACEMENT_3D('',#{},#{},#{});\n",
+                axis2_id, pt_id, dir_id, ref_dir_id
+            ));
+
+            let surface_id = alloc_id(id_counter);
+            out.push_str(&format!(
+                "#{} = CONICAL_SURFACE('',#{},{},{});\n",
+                surface_id, axis2_id, cone.radius, cone.half_angle
             ));
 
             surface_id

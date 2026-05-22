@@ -1032,6 +1032,7 @@ name = "draper-step"
 version = "0.1.0"
 dependencies = [
  "draper-geometry",
+ "draper-mesh",
  "draper-topology",
  "log",
  "thiserror 2.0.18",
