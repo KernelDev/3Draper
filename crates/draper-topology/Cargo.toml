@@ -1,0 +1,8 @@
+[package]
+name = "draper-topology"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+draper-geometry = { workspace = true }
+thiserror = { workspace = true }
