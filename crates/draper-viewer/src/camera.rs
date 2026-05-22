@@ -113,16 +113,21 @@ impl OrbitCamera {
     }
 
     /// Compute perspective projection matrix (column-major 4x4).
+    ///
+    /// Uses wgpu/Vulkan Z range convention [0, 1] (NOT OpenGL [-1, 1]).
+    /// This is critical — with OpenGL convention, all geometry with z_ndc < 0
+    /// gets clipped by wgpu, making the near half of the scene invisible.
     pub fn projection_matrix(&self, aspect: f32) -> [[f32; 4]; 4] {
         let fov_rad = self.fov.to_radians();
         let f = 1.0 / (fov_rad * 0.5).tan();
-        let range = self.far - self.near;
+        // z_range is negative (near < far), which is correct for the formula
+        let z_range = self.near - self.far;
 
         [
             [f / aspect, 0.0, 0.0, 0.0],
             [0.0, f, 0.0, 0.0],
-            [0.0, 0.0, -(self.far + self.near) / range, -1.0],
-            [0.0, 0.0, -(2.0 * self.far * self.near) / range, 0.0],
+            [0.0, 0.0, self.far / z_range, -1.0],
+            [0.0, 0.0, self.near * self.far / z_range, 0.0],
         ]
     }
 

@@ -143,7 +143,8 @@ impl ViewerApp {
         };
         self.mesh = mesh;
         self.mesh_dirty = true;
-        self.status = format!("{} loaded", name);
+        self.status = format!("{} loaded ({} vertices, {} triangles)",
+            name, self.current_model.vertex_count, self.current_model.triangle_count);
     }
 
     fn load_box(&mut self) {
@@ -192,12 +193,60 @@ impl ViewerApp {
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "STL file".to_string());
-                self.load_mesh(mesh, &name);
-                self.status = format!("Imported: {}", name);
+                self.load_mesh(mesh, &format!("STL: {}", name));
             }
             Err(e) => {
-                self.status = format!("Import error: {}", e);
+                self.status = format!("STL import error: {}", e);
             }
+        }
+    }
+
+    fn import_step_file(&mut self, path: &str) {
+        match draper_step::parse_step_file(path) {
+            Ok(step_file) => {
+                let name = std::path::Path::new(path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "STEP file".to_string());
+
+                // Count relevant geometry entities
+                let mut point_count = 0;
+                let mut face_count = 0;
+                let mut shell_count = 0;
+                let mut brep_count = 0;
+
+                for entity in &step_file.entities {
+                    match entity.type_name.as_str() {
+                        "CARTESIAN_POINT" => point_count += 1,
+                        "ADVANCED_FACE" | "FACE_OUTER_BOUND" | "FACE_BOUND" => face_count += 1,
+                        "CLOSED_SHELL" | "OPEN_SHELL" => shell_count += 1,
+                        "MANIFOLD_SOLID_BREP" => brep_count += 1,
+                        _ => {}
+                    }
+                }
+
+                self.status = format!(
+                    "STEP: {} ({} entities, {} points, {} faces, {} shells, {} breps) — geometry conversion in development",
+                    name, step_file.entities.len(), point_count, face_count, shell_count, brep_count
+                );
+            }
+            Err(e) => {
+                self.status = format!("STEP import error: {}", e);
+            }
+        }
+    }
+
+    fn export_stl_binary(&mut self, path: &str) {
+        match draper_mesh::stl::write_stl_file(&self.mesh, path, true) {
+            Ok(()) => self.status = format!("Exported STL (binary): {}", path),
+            Err(e) => self.status = format!("STL export error: {}", e),
+        }
+    }
+
+    fn export_stl_ascii(&mut self, path: &str) {
+        match draper_mesh::stl::write_stl_file(&self.mesh, path, false) {
+            Ok(()) => self.status = format!("Exported STL (ASCII): {}", path),
+            Err(e) => self.status = format!("STL export error: {}", e),
         }
     }
 }
@@ -206,6 +255,84 @@ impl eframe::App for ViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Request repaint for continuous rendering
         ctx.request_repaint();
+
+        // === Top menu bar ===
+        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            egui::menu::bar(ui, |ui| {
+                ui.menu_button("File", |ui| {
+                    if ui.button("Import STL...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("STL", &["stl"])
+                            .pick_file()
+                        {
+                            self.import_stl_file(&path.to_string_lossy());
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button("Import STEP...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("STEP", &["stp", "step"])
+                            .pick_file()
+                        {
+                            self.import_step_file(&path.to_string_lossy());
+                        }
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Export STL (Binary)...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("STL", &["stl"])
+                            .save_file()
+                        {
+                            self.export_stl_binary(&path.to_string_lossy());
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button("Export STL (ASCII)...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("STL", &["stl"])
+                            .save_file()
+                        {
+                            self.export_stl_ascii(&path.to_string_lossy());
+                        }
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Quit").clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+                ui.menu_button("View", |ui| {
+                    ui.checkbox(&mut self.wireframe, "Wireframe");
+                    ui.checkbox(&mut self.show_axes, "Show axes");
+                    ui.checkbox(&mut self.show_grid, "Show grid");
+                    ui.separator();
+                    if ui.button("Reset Camera").clicked() {
+                        let (bbox_min, bbox_max) = self.mesh.bounding_box();
+                        self.camera.fit_to_bounding_box(
+                            [bbox_min.x as f32, bbox_min.y as f32, bbox_min.z as f32],
+                            [bbox_max.x as f32, bbox_max.y as f32, bbox_max.z as f32],
+                        );
+                    }
+                    if ui.button("Top View").clicked() {
+                        self.camera.azimuth = 0.0;
+                        self.camera.elevation = 89.0_f32.to_radians();
+                    }
+                    if ui.button("Front View").clicked() {
+                        self.camera.azimuth = 0.0;
+                        self.camera.elevation = 0.0;
+                    }
+                    if ui.button("Right View").clicked() {
+                        self.camera.azimuth = 90.0_f32.to_radians();
+                        self.camera.elevation = 0.0;
+                    }
+                    if ui.button("Isometric View").clicked() {
+                        self.camera.azimuth = -45.0_f32.to_radians();
+                        self.camera.elevation = 30.0_f32.to_radians();
+                    }
+                });
+            });
+        });
 
         // === Side panel (controls) ===
         egui::SidePanel::left("controls")
@@ -254,6 +381,40 @@ impl eframe::App for ViewerApp {
                             .pick_file()
                         {
                             self.import_stl_file(&path.to_string_lossy());
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("STEP:");
+                    if ui.button("Open...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("STEP", &["stp", "step"])
+                            .pick_file()
+                        {
+                            self.import_step_file(&path.to_string_lossy());
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+
+                // --- Export ---
+                ui.separator();
+                ui.heading(egui::RichText::new("Export").size(14.0));
+                ui.horizontal(|ui| {
+                    if ui.button("STL Binary").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("STL", &["stl"])
+                            .save_file()
+                        {
+                            self.export_stl_binary(&path.to_string_lossy());
+                        }
+                    }
+                    if ui.button("STL ASCII").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("STL", &["stl"])
+                            .save_file()
+                        {
+                            self.export_stl_ascii(&path.to_string_lossy());
                         }
                     }
                 });
