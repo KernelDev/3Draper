@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/draper-geometry",
+    "crates/draper-topology",
+    "crates/draper-step",
+    "crates/draper-mesh",
+    "crates/draper-core",
+    "crates/draper-ffi",
+    "crates/draper-viewer",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/KernelDev/3Draper"
+
+[workspace.dependencies]
+# Internal crates
+draper-geometry = { path = "crates/draper-geometry" }
+draper-topology = { path = "crates/draper-topology" }
+draper-step = { path = "crates/draper-step" }
+draper-mesh = { path = "crates/draper-mesh" }
+draper-core = { path = "crates/draper-core" }
+
+# Math & numerics
+nalgebra = "0.33"
+num-traits = "0.2"
+approx = "0.5"
+
+# Algorithms
+spade = "2"
+petgraph = "0.7"
+rayon = "1.10"
+thiserror = "2"
+anyhow = "1"
+
+# Rendering
+egui = "0.31"
+eframe = { version = "0.31", features = ["wgpu", "default_fonts"] }
+wgpu = "24"
+
+# FFI
+cbindgen = "0.27"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"

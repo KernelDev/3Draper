@@ -1,0 +1,23 @@
+[package]
+name = "draper-viewer"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "draper-viewer"
+path = "src/main.rs"
+
+[dependencies]
+draper-geometry = { workspace = true }
+draper-topology = { workspace = true }
+draper-mesh = { workspace = true }
+draper-core = { workspace = true }
+draper-step = { workspace = true }
+eframe = { workspace = true }
+egui = { workspace = true }
+egui-wgpu = { version = "0.31" }
+wgpu = { workspace = true }
+bytemuck = { version = "1", features = ["derive"] }
+log = { workspace = true }
+env_logger = { workspace = true }
+rfd = "0.15"
