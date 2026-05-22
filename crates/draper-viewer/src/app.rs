@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use crate::camera::OrbitCamera;
 use crate::renderer::{
     MeshVertex, SceneCallback, SceneResources, SceneUniforms,
-    create_scene_resources, update_mesh_buffers, update_uniforms, resize_depth_texture,
+    create_scene_resources, update_mesh_buffers, update_uniforms,
 };
 use draper_core::engine::{EngineConfig, build_engine};
 use draper_topology::ShapeBuilder;
@@ -77,8 +77,6 @@ pub struct ViewerApp {
     current_model: ModelEntry,
     /// Whether mesh needs GPU upload.
     mesh_dirty: bool,
-    /// Current viewport size for depth texture.
-    viewport_size: (u32, u32),
     /// Show grid.
     show_grid: bool,
     /// Show axes.
@@ -125,7 +123,6 @@ impl ViewerApp {
             status: "Ready — select a model from the panel".to_string(),
             current_model,
             mesh_dirty: false,
-            viewport_size: (1200, 800),
             show_grid: true,
             show_axes: true,
         }
@@ -358,7 +355,7 @@ impl eframe::App for ViewerApp {
                     self.mesh_dirty = false;
                 }
 
-                // Update uniforms and resize depth texture
+                // Update uniforms
                 if let Some(ref rs) = self.render_state {
                     let aspect = rect.width() / rect.height();
                     let view = self.camera.view_matrix();
@@ -388,22 +385,15 @@ impl eframe::App for ViewerApp {
                     if let Some(ref resources) = *guard {
                         update_uniforms(resources, &rs.queue, &uniforms);
                     }
-                    drop(guard);
-
-                    // Resize depth texture if needed
-                    if (width, height) != self.viewport_size {
-                        let mut guard = self.gpu_resources.lock().unwrap();
-                        if let Some(ref mut resources) = *guard {
-                            resize_depth_texture(resources, &rs.device, width, height);
-                        }
-                        self.viewport_size = (width, height);
-                    }
                 }
 
                 // Create the wgpu paint callback
+                // The offscreen resize is handled inside prepare() automatically
                 let callback = SceneCallback {
                     resources: self.gpu_resources.clone(),
                     wireframe: self.wireframe,
+                    viewport_width: width,
+                    viewport_height: height,
                 };
 
                 let paint_callback = egui_wgpu::Callback::new_paint_callback(

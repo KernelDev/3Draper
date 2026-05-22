@@ -53,7 +53,10 @@ pub struct SceneResources {
     pub index_count: u32,
     pub uniform_buffer: wgpu::Buffer,
     pub mesh_bind_group: wgpu::BindGroup,
+
+    // Bind group layouts (needed for resize recreation)
     pub mesh_bind_group_layout: wgpu::BindGroupLayout,
+    pub blit_bind_group_layout: wgpu::BindGroupLayout,
 
     // Offscreen render target
     pub offscreen_color: wgpu::TextureView,
@@ -86,7 +89,7 @@ impl CallbackTrait for SceneCallback {
     fn prepare(
         &self,
         device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        _queue: &wgpu::Queue,
         _screen_descriptor: &ScreenDescriptor,
         egui_encoder: &mut wgpu::CommandEncoder,
         callback_resources: &mut CallbackResources,
@@ -112,20 +115,8 @@ impl CallbackTrait for SceneCallback {
             resize_offscreen(resources, device, w, h);
         }
 
-        // Update uniforms
-        queue.write_buffer(
-            &resources.uniform_buffer,
-            0,
-            bytemuck::cast_slice(&[SceneUniforms {
-                mvp: [[0.0; 4]; 4], // will be updated by the app via update_uniforms
-                model: [[0.0; 4]; 4],
-                light_dir: [0.3, 0.6, 0.8, 0.15],
-                camera_pos: [0.0, 0.0, 0.0, 0.0],
-            }]),
-        );
-
-        // Render mesh to offscreen texture
-        let mesh_pass = egui_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        // Render mesh to offscreen texture (with depth attachment)
+        let mut mesh_pass = egui_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("3Draper offscreen mesh render"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &resources.offscreen_color,
@@ -139,35 +130,6 @@ impl CallbackTrait for SceneCallback {
                 view: &resources.offscreen_depth,
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-        });
-
-        // We can't use the mutable borrow of guard with the render pass
-        // So drop the guard and re-borrow after
-        drop(mesh_pass);
-
-        // Re-borrow and do the actual rendering
-        let resources = guard.as_ref().unwrap();
-
-        let mut mesh_pass = egui_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("3Draper offscreen mesh render"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &resources.offscreen_color,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load, // We already cleared above, so load
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &resources.offscreen_depth,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
@@ -200,11 +162,11 @@ impl CallbackTrait for SceneCallback {
 
     fn paint(
         &self,
-        info: PaintCallbackInfo,
+        _info: PaintCallbackInfo,
         render_pass: &mut wgpu::RenderPass<'static>,
         callback_resources: &CallbackResources,
     ) {
-        let Some(result) = callback_resources.get::<OffscreenResult>() else {
+        let Some(_result) = callback_resources.get::<OffscreenResult>() else {
             return;
         };
 
@@ -214,9 +176,11 @@ impl CallbackTrait for SceneCallback {
             return;
         };
 
+        // The blit pipeline has depth_stencil: None, so it's compatible
+        // with egui's render pass (which has no depth attachment).
         render_pass.set_pipeline(&resources.blit_pipeline);
         render_pass.set_bind_group(0, &resources.blit_bind_group, &[]);
-        render_pass.draw(0, 3, 0, 1); // Fullscreen triangle
+        render_pass.draw(0..3, 0..1); // Fullscreen triangle
     }
 }
 
@@ -285,10 +249,6 @@ struct VertexOutput {
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32) -> VertexOutput {
     var out: VertexOutput;
-    // vertex_index 0 → (-1, -1), 1 → (3, -1), 2 → (-1, 3)
-    let x = f32(i32(vi) - 1) * 2.0 - step(1.0, f32(vi) - 1.0) * 2.0;
-    let y = f32(i32(vi & 1u) * -2 + 1);
-    // Simpler: standard fullscreen triangle
     let positions = array<vec2<f32>, 3>(
         vec2<f32>(-1.0, -1.0),
         vec2<f32>( 3.0, -1.0),
@@ -472,8 +432,8 @@ fn resize_offscreen(resources: &mut SceneResources, device: &wgpu::Device, width
 
     // Recreate blit bind group with new texture view
     resources.blit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("3Draper blit bind group"),
-        layout: &resources.mesh_bind_group_layout, // reuse layout if compatible, else need separate
+        label: Some("3Draper blit bind group (resized)"),
+        layout: &resources.blit_bind_group_layout,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -504,7 +464,7 @@ pub fn create_scene_resources(
         source: wgpu::ShaderSource::Wgsl(MESH_SHADER_SRC.into()),
     });
 
-    // ── Mesh bind group layout (uniform buffer) ──
+    // ── Mesh bind group layout (uniform buffer only) ──
     let mesh_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("3Draper mesh bind group layout"),
         entries: &[
@@ -629,7 +589,8 @@ pub fn create_scene_resources(
         index_count,
         uniform_buffer,
         mesh_bind_group,
-        mesh_bind_group_layout: blit_bind_group_layout, // Store blit layout for resize
+        mesh_bind_group_layout,
+        blit_bind_group_layout,
         offscreen_color,
         offscreen_depth,
         offscreen_width: 1280,
