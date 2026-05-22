@@ -31,8 +31,6 @@ approx = "0.5"
 
 # Algorithms
 spade = "2"
-petgraph = "0.7"
-rayon = "1.10"
 thiserror = "2"
 anyhow = "1"
 

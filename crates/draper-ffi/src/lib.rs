@@ -2,6 +2,11 @@
 //! C FFI bindings for the 3Draper kernel.
 //!
 //! Provides a C-compatible API for creating, manipulating, and exporting 3D models.
+//!
+//! This crate is only available on native targets (not wasm32).
+
+// All FFI code is native-only — cdylib/staticlib/cbindgen don't work on wasm.
+#![cfg(not(target_arch = "wasm32"))]
 
 use draper_core::{
     Document, engine::{EngineConfig, build_engine},

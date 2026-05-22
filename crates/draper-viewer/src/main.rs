@@ -1,14 +1,19 @@
 //! 3Draper Viewer — high-performance 3D model viewer using egui/wgpu.
+//!
+//! Supports both native and web (wasm32) targets.
 
 mod app;
 mod camera;
 mod renderer;
 
-use std::sync::Arc;
-use egui_wgpu::{WgpuSetup, WgpuSetupCreateNew};
+// ─── Native entry point ──────────────────────────────────────────────────
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     env_logger::init();
+
+    use std::sync::Arc;
+    use egui_wgpu::{WgpuSetup, WgpuSetupCreateNew};
 
     let wgpu_setup = WgpuSetupCreateNew {
         // Request POLYGON_MODE_LINE feature for wireframe rendering
@@ -55,4 +60,46 @@ fn main() {
             Ok(Box::new(app::ViewerApp::new(cc)))
         }),
     );
+}
+
+// ─── Web (wasm32) entry point ────────────────────────────────────────────
+
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    // Web entry: use eframe's WebRunner
+    // The actual startup is handled by the wasm_bindgen start function below.
+    // This main() is never called on wasm — the #[wasm_bindgen(start)] function is.
+}
+
+#[cfg(target_arch = "wasm32")]
+mod web_entry {
+    use eframe::WebRunner;
+    use wasm_bindgen::prelude::*;
+    use wasm_bindgen_futures::wasm_bindgen;
+
+    /// This is the entry point for the web version.
+    /// It is called automatically when the wasm module is loaded.
+    #[wasm_bindgen(start)]
+    pub async fn start() {
+        console_log::init_with_level(log::Level::Info).ok();
+
+        let web_options = eframe::WebOptions::default();
+
+        // Get the canvas element by ID
+        let window = web_sys::window().expect("no window");
+        let document = window.document().expect("no document");
+        let canvas = document
+            .get_element_by_id("the_canvas_id")
+            .expect("failed to find the_canvas_id")
+            .unchecked_into::<web_sys::HtmlCanvasElement>();
+
+        WebRunner::new()
+            .start(
+                canvas,
+                web_options,
+                Box::new(|cc| Ok(Box::new(crate::app::ViewerApp::new(cc)))),
+            )
+            .await
+            .expect("failed to start eframe");
+    }
 }

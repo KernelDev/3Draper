@@ -429,7 +429,8 @@ pub fn export_compound_step(compound: &Compound, name: &str) -> String {
     }
 }
 
-/// Write STEP content to a file.
+/// Write STEP content to a file (native only — not available on wasm).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn write_step_file(content: &str, path: &str) -> io::Result<()> {
     let mut file = std::fs::File::create(path)?;
     file.write_all(content.as_bytes())

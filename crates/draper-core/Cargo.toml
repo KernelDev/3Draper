@@ -10,4 +10,6 @@ draper-mesh = { workspace = true }
 draper-step = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
+
+[dev-dependencies]
 env_logger = { workspace = true }

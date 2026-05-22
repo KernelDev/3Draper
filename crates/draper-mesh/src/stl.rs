@@ -69,6 +69,7 @@ pub fn export_stl_binary(mesh: &TriangleMesh, name: &str) -> Vec<u8> {
 }
 
 /// Write STL to a file.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn write_stl_file(mesh: &TriangleMesh, path: &str, binary: bool) -> io::Result<()> {
     let mut file = std::fs::File::create(path)?;
     if binary {
@@ -81,20 +82,19 @@ pub fn write_stl_file(mesh: &TriangleMesh, path: &str, binary: bool) -> io::Resu
     Ok(())
 }
 
-/// Import a binary STL file.
-pub fn import_stl_binary(path: &str) -> io::Result<TriangleMesh> {
-    let mut file = std::fs::File::open(path)?;
-    let mut data = Vec::new();
-    file.read_to_end(&mut data)?;
-
+/// Import an STL file from raw bytes (works on all platforms including wasm).
+///
+/// This is the primary API for web/WASM builds where filesystem access
+/// is not available. Pass the raw bytes of the STL file.
+pub fn import_stl_from_bytes(data: &[u8]) -> io::Result<TriangleMesh> {
     if data.len() < 84 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "STL file too small"));
     }
 
     // Check if it's ASCII or binary
     let header = String::from_utf8_lossy(&data[..80]);
-    if header.trim().starts_with("solid") && !is_likely_binary(&data) {
-        return import_stl_ascii_from_data(&data);
+    if header.trim().starts_with("solid") && !is_likely_binary(data) {
+        return import_stl_ascii_from_data(data);
     }
 
     // Binary STL
@@ -133,6 +133,15 @@ pub fn import_stl_binary(path: &str) -> io::Result<TriangleMesh> {
 
     mesh.compute_face_normals();
     Ok(mesh)
+}
+
+/// Import a binary STL file from a filesystem path (native only).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn import_stl_binary(path: &str) -> io::Result<TriangleMesh> {
+    let mut file = std::fs::File::open(path)?;
+    let mut data = Vec::new();
+    file.read_to_end(&mut data)?;
+    import_stl_from_bytes(&data)
 }
 
 /// Check if data is likely binary STL (even if header starts with 'solid').

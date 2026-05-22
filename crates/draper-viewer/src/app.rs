@@ -66,6 +66,17 @@ struct LogEntry {
     message: String,
 }
 
+/// Result of an async file load (used on wasm).
+#[derive(Debug)]
+enum FileLoadResult {
+    Step { name: String, content: String },
+    Stl { name: String, data: Vec<u8> },
+}
+
+/// Shared state for async file loading on wasm.
+#[cfg(target_arch = "wasm32")]
+type SharedFileResult = Arc<Mutex<Option<FileLoadResult>>>;
+
 /// The viewer application.
 pub struct ViewerApp {
     /// Current mesh to display.
@@ -90,6 +101,9 @@ pub struct ViewerApp {
     log: Vec<LogEntry>,
     /// Auto-scroll log.
     log_auto_scroll: bool,
+    /// Shared file result for async web file loading.
+    #[cfg(target_arch = "wasm32")]
+    file_result: SharedFileResult,
 }
 
 impl ViewerApp {
@@ -142,6 +156,9 @@ impl ViewerApp {
             *gpu_resources.lock().unwrap() = Some(resources);
         }
 
+        #[cfg(target_arch = "wasm32")]
+        let file_result = Arc::new(Mutex::new(None));
+
         let mut app = Self {
             mesh,
             gpu_resources,
@@ -154,6 +171,8 @@ impl ViewerApp {
             show_axes: true,
             log: Vec::new(),
             log_auto_scroll: true,
+            #[cfg(target_arch = "wasm32")]
+            file_result,
         };
         app.log("3Draper Viewer started");
         app.log(&format!("Default model: Box 100x100x100 ({} vertices, {} triangles)",
@@ -219,6 +238,9 @@ impl ViewerApp {
         self.load_mesh(mesh, "ICE Engine (I4)");
     }
 
+    // ─── Native file I/O (uses rfd + filesystem) ─────────────────────────
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn import_stl_file(&mut self, path: &str) {
         match draper_mesh::import_stl_binary(path) {
             Ok(mesh) => {
@@ -234,6 +256,7 @@ impl ViewerApp {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn import_step_file(&mut self, path: &str) {
         match draper_step::parse_step_file(path) {
             Ok(step_file) => {
@@ -241,54 +264,7 @@ impl ViewerApp {
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "STEP file".to_string());
-
-                // Count relevant geometry entities
-                let mut point_count = 0;
-                let mut face_count = 0;
-                let mut shell_count = 0;
-                let mut brep_count = 0;
-                let mut surface_types: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-
-                for entity in &step_file.entities {
-                    match entity.type_name.as_str() {
-                        "CARTESIAN_POINT" => point_count += 1,
-                        "ADVANCED_FACE" | "FACE_OUTER_BOUND" | "FACE_BOUND" => face_count += 1,
-                        "CLOSED_SHELL" | "OPEN_SHELL" => shell_count += 1,
-                        "MANIFOLD_SOLID_BREP" | "FACETED_BREP" => brep_count += 1,
-                        _ => {
-                            if entity.type_name.contains("SURFACE") || entity.type_name.contains("PLANE") {
-                                *surface_types.entry(entity.type_name.clone()).or_insert(0) += 1;
-                            }
-                        }
-                    }
-                }
-
-                let surface_summary: Vec<String> = surface_types.iter()
-                    .map(|(k, v)| format!("{}({})", k, v))
-                    .collect();
-
-                self.log(&format!(
-                    "STEP parsed: {} — {} entities, {} points, {} faces, {} shells, {} breps",
-                    name, step_file.entities.len(), point_count, face_count, shell_count, brep_count
-                ));
-                if !surface_summary.is_empty() {
-                    self.log(&format!("STEP surfaces: {}", surface_summary.join(", ")));
-                }
-
-                // Convert STEP to mesh
-                match draper_step::step_to_mesh(&step_file) {
-                    Ok(mesh) => {
-                        let vcount = mesh.vertex_count();
-                        let tcount = mesh.triangle_count();
-                        self.log(&format!(
-                            "STEP converted: {} vertices, {} triangles", vcount, tcount
-                        ));
-                        self.load_mesh(mesh, &format!("STEP: {}", name));
-                    }
-                    Err(e) => {
-                        self.log(&format!("STEP conversion: {}", e));
-                    }
-                }
+                self.process_step_file(&step_file, &name);
             }
             Err(e) => {
                 self.log(&format!("STEP import error: {}", e));
@@ -296,6 +272,7 @@ impl ViewerApp {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn export_stl_binary(&mut self, path: &str) {
         match draper_mesh::stl::write_stl_file(&self.mesh, path, true) {
             Ok(()) => self.log(&format!("Exported STL (binary): {}", path)),
@@ -303,6 +280,7 @@ impl ViewerApp {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn export_stl_ascii(&mut self, path: &str) {
         match draper_mesh::stl::write_stl_file(&self.mesh, path, false) {
             Ok(()) => self.log(&format!("Exported STL (ASCII): {}", path)),
@@ -310,10 +288,8 @@ impl ViewerApp {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn export_step(&mut self, path: &str) {
-        // Re-create the solid from the current mesh description
-        // For now, export based on the model name — we'll need to store the solid
-        // We need to reconstruct a solid from the current mesh for export
         let solid = self.rebuild_current_solid();
         let name = std::path::Path::new(path)
             .file_stem()
@@ -323,6 +299,211 @@ impl ViewerApp {
         match draper_step::write_step_file(&content, path) {
             Ok(()) => self.log(&format!("Exported STEP: {}", path)),
             Err(e) => self.log(&format!("STEP export error: {}", e)),
+        }
+    }
+
+    // ─── Shared file processing (used by both native and web) ─────────────
+
+    /// Process a parsed STEP file (common logic for native and web).
+    fn process_step_file(&mut self, step_file: &draper_step::StepFile, name: &str) {
+        // Count relevant geometry entities
+        let mut point_count = 0;
+        let mut face_count = 0;
+        let mut shell_count = 0;
+        let mut brep_count = 0;
+        let mut surface_types: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+        for entity in &step_file.entities {
+            match entity.type_name.as_str() {
+                "CARTESIAN_POINT" => point_count += 1,
+                "ADVANCED_FACE" | "FACE_OUTER_BOUND" | "FACE_BOUND" => face_count += 1,
+                "CLOSED_SHELL" | "OPEN_SHELL" => shell_count += 1,
+                "MANIFOLD_SOLID_BREP" | "FACETED_BREP" => brep_count += 1,
+                _ => {
+                    if entity.type_name.contains("SURFACE") || entity.type_name.contains("PLANE") {
+                        *surface_types.entry(entity.type_name.clone()).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+
+        let surface_summary: Vec<String> = surface_types.iter()
+            .map(|(k, v)| format!("{}({})", k, v))
+            .collect();
+
+        self.log(&format!(
+            "STEP parsed: {} — {} entities, {} points, {} faces, {} shells, {} breps",
+            name, step_file.entities.len(), point_count, face_count, shell_count, brep_count
+        ));
+        if !surface_summary.is_empty() {
+            self.log(&format!("STEP surfaces: {}", surface_summary.join(", ")));
+        }
+
+        // Convert STEP to mesh
+        match draper_step::step_to_mesh(step_file) {
+            Ok(mesh) => {
+                let vcount = mesh.vertex_count();
+                let tcount = mesh.triangle_count();
+                self.log(&format!(
+                    "STEP converted: {} vertices, {} triangles", vcount, tcount
+                ));
+                self.load_mesh(mesh, &format!("STEP: {}", name));
+            }
+            Err(e) => {
+                self.log(&format!("STEP conversion: {}", e));
+            }
+        }
+    }
+
+    /// Import STL from bytes (used by web file loading).
+    fn import_stl_from_bytes(&mut self, data: &[u8], name: &str) {
+        match draper_mesh::import_stl_from_bytes(data) {
+            Ok(mesh) => {
+                self.load_mesh(mesh, &format!("STL: {}", name));
+            }
+            Err(e) => {
+                self.log(&format!("STL import error: {}", e));
+            }
+        }
+    }
+
+    /// Import STEP from string (used by web file loading).
+    fn import_step_from_str(&mut self, content: &str, name: &str) {
+        match draper_step::parse_step(content) {
+            Ok(step_file) => {
+                self.process_step_file(&step_file, name);
+            }
+            Err(e) => {
+                self.log(&format!("STEP import error: {}", e));
+            }
+        }
+    }
+
+    // ─── Web file loading (uses web-sys for file input) ───────────────────
+
+    /// Trigger a file input dialog on the web for STL files.
+    #[cfg(target_arch = "wasm32")]
+    fn trigger_stl_file_input(&mut self) {
+        use wasm_bindgen::prelude::*;
+
+        let window = web_sys::window().unwrap();
+        let document = window.document().unwrap();
+        let input = document.create_element("input").unwrap();
+        input.set_attribute("type", "file").unwrap();
+        input.set_attribute("accept", ".stl").unwrap();
+        input.set_attribute("style", "display:none").unwrap();
+
+        let input_elem: web_sys::HtmlInputElement = input.clone().unchecked_into();
+        let html_elem: web_sys::HtmlElement = input.clone().unchecked_into();
+        let shared_result = self.file_result.clone();
+
+        // Clone input_elem for use inside the closure
+        let input_elem_for_closure = input_elem.clone();
+
+        let onchange = Closure::wrap(Box::new(move |_: web_sys::Event| {
+            if let Some(files) = input_elem_for_closure.files() {
+                if let Some(file) = files.get(0) {
+                    let file_name = file.name();
+                    let reader = web_sys::FileReader::new().unwrap();
+                    let reader_clone = reader.clone();
+                    let shared = shared_result.clone();
+
+                    let onload = Closure::wrap(Box::new(move |_: web_sys::Event| {
+                        if let Ok(result) = reader_clone.result() {
+                            // Convert ArrayBuffer to Vec<u8>
+                            let array_buffer: js_sys::ArrayBuffer = result.into();
+                            let uint8_array = js_sys::Uint8Array::new(&array_buffer);
+                            let data = uint8_array.to_vec();
+                            *shared.lock().unwrap() = Some(FileLoadResult::Stl {
+                                name: file_name.clone(),
+                                data,
+                            });
+                        }
+                    }) as Box<dyn FnMut(_)>);
+
+                    reader.set_onload(Some(onload.as_ref().unchecked_ref()));
+                    onload.forget(); // Leak the closure to keep it alive
+                    let _ = reader.read_as_array_buffer(&file);
+                }
+            }
+        }) as Box<dyn FnMut(_)>);
+
+        input_elem.set_onchange(Some(onchange.as_ref().unchecked_ref()));
+        onchange.forget(); // Leak the closure to keep it alive
+
+        let body = document.body().unwrap();
+        let _ = body.append_child(&input);
+        html_elem.click();
+        // The input element will be cleaned up when the page unloads
+    }
+
+    /// Trigger a file input dialog on the web for STEP files.
+    #[cfg(target_arch = "wasm32")]
+    fn trigger_step_file_input(&mut self) {
+        use wasm_bindgen::prelude::*;
+
+        let window = web_sys::window().unwrap();
+        let document = window.document().unwrap();
+        let input = document.create_element("input").unwrap();
+        input.set_attribute("type", "file").unwrap();
+        input.set_attribute("accept", ".stp,.step").unwrap();
+        input.set_attribute("style", "display:none").unwrap();
+
+        let input_elem: web_sys::HtmlInputElement = input.clone().unchecked_into();
+        let html_elem: web_sys::HtmlElement = input.clone().unchecked_into();
+        let shared_result = self.file_result.clone();
+
+        // Clone input_elem for use inside the closure
+        let input_elem_for_closure = input_elem.clone();
+
+        let onchange = Closure::wrap(Box::new(move |_: web_sys::Event| {
+            if let Some(files) = input_elem_for_closure.files() {
+                if let Some(file) = files.get(0) {
+                    let file_name = file.name();
+                    let reader = web_sys::FileReader::new().unwrap();
+                    let reader_clone = reader.clone();
+                    let shared = shared_result.clone();
+
+                    let onload = Closure::wrap(Box::new(move |_: web_sys::Event| {
+                        if let Ok(result) = reader_clone.result() {
+                            // Read as text for STEP files
+                            if let Some(text) = result.as_string() {
+                                *shared.lock().unwrap() = Some(FileLoadResult::Step {
+                                    name: file_name.clone(),
+                                    content: text,
+                                });
+                            }
+                        }
+                    }) as Box<dyn FnMut(_)>);
+
+                    reader.set_onload(Some(onload.as_ref().unchecked_ref()));
+                    onload.forget();
+                    let _ = reader.read_as_text(&file);
+                }
+            }
+        }) as Box<dyn FnMut(_)>);
+
+        input_elem.set_onchange(Some(onchange.as_ref().unchecked_ref()));
+        onchange.forget();
+
+        let body = document.body().unwrap();
+        let _ = body.append_child(&input);
+        html_elem.click();
+    }
+
+    /// Check for loaded web files and process them.
+    #[cfg(target_arch = "wasm32")]
+    fn process_web_file_loads(&mut self) {
+        let result = self.file_result.lock().unwrap().take();
+        if let Some(file_result) = result {
+            match file_result {
+                FileLoadResult::Step { name, content } => {
+                    self.import_step_from_str(&content, &name);
+                }
+                FileLoadResult::Stl { name, data } => {
+                    self.import_stl_from_bytes(&data, &name);
+                }
+            }
         }
     }
 
@@ -362,59 +543,80 @@ impl eframe::App for ViewerApp {
         // Request repaint for continuous rendering
         ctx.request_repaint();
 
+        // Process any pending web file loads
+        #[cfg(target_arch = "wasm32")]
+        self.process_web_file_loads();
+
         // === Top menu bar ===
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.button("Import STL...").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("STL", &["stl"])
-                            .pick_file()
-                        {
-                            self.import_stl_file(&path.to_string_lossy());
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        if ui.button("Import STL...").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("STL", &["stl"])
+                                .pick_file()
+                            {
+                                self.import_stl_file(&path.to_string_lossy());
+                            }
+                            ui.close_menu();
                         }
-                        ui.close_menu();
-                    }
-                    if ui.button("Import STEP...").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("STEP", &["stp", "step"])
-                            .pick_file()
-                        {
-                            self.import_step_file(&path.to_string_lossy());
+                        if ui.button("Import STEP...").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("STEP", &["stp", "step"])
+                                .pick_file()
+                            {
+                                self.import_step_file(&path.to_string_lossy());
+                            }
+                            ui.close_menu();
                         }
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button("Export STL (Binary)...").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("STL", &["stl"])
-                            .save_file()
-                        {
-                            self.export_stl_binary(&path.to_string_lossy());
+                        ui.separator();
+                        if ui.button("Export STL (Binary)...").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("STL", &["stl"])
+                                .save_file()
+                            {
+                                self.export_stl_binary(&path.to_string_lossy());
+                            }
+                            ui.close_menu();
                         }
-                        ui.close_menu();
-                    }
-                    if ui.button("Export STL (ASCII)...").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("STL", &["stl"])
-                            .save_file()
-                        {
-                            self.export_stl_ascii(&path.to_string_lossy());
+                        if ui.button("Export STL (ASCII)...").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("STL", &["stl"])
+                                .save_file()
+                            {
+                                self.export_stl_ascii(&path.to_string_lossy());
+                            }
+                            ui.close_menu();
                         }
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button("Export STEP...").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("STEP", &["stp", "step"])
-                            .save_file()
-                        {
-                            self.export_step(&path.to_string_lossy());
+                        ui.separator();
+                        if ui.button("Export STEP...").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("STEP", &["stp", "step"])
+                                .save_file()
+                            {
+                                self.export_step(&path.to_string_lossy());
+                            }
+                            ui.close_menu();
                         }
-                        ui.close_menu();
+                        ui.separator();
                     }
-                    ui.separator();
+
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        if ui.button("Import STL...").clicked() {
+                            self.trigger_stl_file_input();
+                            ui.close_menu();
+                        }
+                        if ui.button("Import STEP...").clicked() {
+                            self.trigger_step_file_input();
+                            ui.close_menu();
+                        }
+                    }
+
                     if ui.button("Quit").clicked() {
+                        #[cfg(not(target_arch = "wasm32"))]
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
@@ -528,61 +730,94 @@ impl eframe::App for ViewerApp {
                 // --- Import ---
                 ui.separator();
                 ui.heading(egui::RichText::new("Import").size(14.0));
-                ui.horizontal(|ui| {
-                    ui.label("STL:");
-                    if ui.button("Open...").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("STL", &["stl"])
-                            .pick_file()
-                        {
-                            self.import_stl_file(&path.to_string_lossy());
+
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    ui.horizontal(|ui| {
+                        ui.label("STL:");
+                        if ui.button("Open...").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("STL", &["stl"])
+                                .pick_file()
+                            {
+                                self.import_stl_file(&path.to_string_lossy());
+                            }
                         }
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("STEP:");
-                    if ui.button("Open...").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("STEP", &["stp", "step"])
-                            .pick_file()
-                        {
-                            self.import_step_file(&path.to_string_lossy());
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("STEP:");
+                        if ui.button("Open...").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("STEP", &["stp", "step"])
+                                .pick_file()
+                            {
+                                self.import_step_file(&path.to_string_lossy());
+                            }
                         }
-                    }
-                });
+                    });
+                }
+
+                #[cfg(target_arch = "wasm32")]
+                {
+                    ui.horizontal(|ui| {
+                        ui.label("STL:");
+                        if ui.button("Open...").clicked() {
+                            self.trigger_stl_file_input();
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("STEP:");
+                        if ui.button("Open...").clicked() {
+                            self.trigger_step_file_input();
+                        }
+                    });
+                }
+
                 ui.add_space(4.0);
 
                 // --- Export ---
                 ui.separator();
                 ui.heading(egui::RichText::new("Export").size(14.0));
-                ui.horizontal(|ui| {
-                    if ui.button("STL Binary").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("STL", &["stl"])
-                            .save_file()
-                        {
-                            self.export_stl_binary(&path.to_string_lossy());
+
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    ui.horizontal(|ui| {
+                        if ui.button("STL Binary").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("STL", &["stl"])
+                                .save_file()
+                            {
+                                self.export_stl_binary(&path.to_string_lossy());
+                            }
                         }
-                    }
-                    if ui.button("STL ASCII").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("STL", &["stl"])
-                            .save_file()
-                        {
-                            self.export_stl_ascii(&path.to_string_lossy());
+                        if ui.button("STL ASCII").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("STL", &["stl"])
+                                .save_file()
+                            {
+                                self.export_stl_ascii(&path.to_string_lossy());
+                            }
                         }
-                    }
-                });
-                ui.horizontal(|ui| {
-                    if ui.button("Export STEP").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("STEP", &["stp", "step"])
-                            .save_file()
-                        {
-                            self.export_step(&path.to_string_lossy());
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Export STEP").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("STEP", &["stp", "step"])
+                                .save_file()
+                            {
+                                self.export_step(&path.to_string_lossy());
+                            }
                         }
-                    }
-                });
+                    });
+                }
+
+                #[cfg(target_arch = "wasm32")]
+                {
+                    ui.label(egui::RichText::new("(Export not available on web)")
+                        .size(11.0)
+                        .color(egui::Color32::GRAY));
+                }
+
                 ui.add_space(4.0);
 
                 // --- Display ---

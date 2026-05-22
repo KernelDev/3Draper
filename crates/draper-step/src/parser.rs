@@ -54,7 +54,8 @@ pub fn parse_step(input: &str) -> Result<StepFile, StepParseError> {
     Ok(file)
 }
 
-/// Parse a STEP file from a file path.
+/// Parse a STEP file from a file path (native only — not available on wasm).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn parse_step_file(path: &str) -> Result<StepFile, StepParseError> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| StepParseError::IoError(e.to_string()))?;

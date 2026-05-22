@@ -7,6 +7,11 @@ edition.workspace = true
 name = "draper-viewer"
 path = "src/main.rs"
 
+[features]
+default = ["native"]
+native = ["rfd", "env_logger"]
+web = ["web-sys", "wasm-bindgen", "console_log", "wasm-bindgen-futures", "js-sys"]
+
 [dependencies]
 draper-geometry = { workspace = true }
 draper-topology = { workspace = true }
@@ -19,5 +24,27 @@ egui-wgpu = { version = "0.31" }
 wgpu = { workspace = true }
 bytemuck = { version = "1", features = ["derive"] }
 log = { workspace = true }
-env_logger = { workspace = true }
-rfd = "0.15"
+
+# Native-only dependencies
+rfd = { version = "0.15", optional = true }
+env_logger = { version = "0.11", optional = true }
+
+# Web-only dependencies
+web-sys = { version = "0.3", optional = true, features = [
+    "HtmlInputElement",
+    "HtmlElement",
+    "HtmlCanvasElement",
+    "File",
+    "FileReader",
+    "FileList",
+    "Event",
+    "EventTarget",
+    "Blob",
+    "Document",
+    "Window",
+    "Element",
+] }
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+console_log = { version = "1", optional = true }
+js-sys = { version = "0.3", optional = true }
