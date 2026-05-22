@@ -1,5 +1,30 @@
+# Build artifacts
 /target
 *.swp
 *.swo
 *~
+
+# Environment / secrets
 .env
+
+# Workspace files (not part of the project)
+/skills
+/download
+/upload
+/3draper-src
+/worklog.md
+/agent-ctx
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
