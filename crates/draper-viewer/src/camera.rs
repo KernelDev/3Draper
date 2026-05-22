@@ -102,7 +102,9 @@ impl OrbitCamera {
         // Translation component
         let tx = -(right[0] * pos[0] + right[1] * pos[1] + right[2] * pos[2]);
         let ty = -(up[0] * pos[0] + up[1] * pos[1] + up[2] * pos[2]);
-        let tz = -(fwd[0] * pos[0] + fwd[1] * pos[1] + fwd[2] * pos[2]);
+        // Note: third row of rotation is -fwd, so tz = +dot(fwd, pos)
+        // (standard lookAt: row3 = [-fwd, dot(fwd, eye)])
+        let tz = fwd[0] * pos[0] + fwd[1] * pos[1] + fwd[2] * pos[2];
 
         [
             [right[0], up[0], -fwd[0], 0.0],

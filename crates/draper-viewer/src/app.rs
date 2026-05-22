@@ -59,6 +59,13 @@ pub struct ModelEntry {
     pub triangle_count: usize,
 }
 
+/// Log entry with timestamp.
+#[derive(Clone, Debug)]
+struct LogEntry {
+    time: String,
+    message: String,
+}
+
 /// The viewer application.
 pub struct ViewerApp {
     /// Current mesh to display.
@@ -71,8 +78,6 @@ pub struct ViewerApp {
     camera: OrbitCamera,
     /// Show wireframe.
     wireframe: bool,
-    /// Status message.
-    status: String,
     /// Model info.
     current_model: ModelEntry,
     /// Whether mesh needs GPU upload.
@@ -81,9 +86,32 @@ pub struct ViewerApp {
     show_grid: bool,
     /// Show axes.
     show_axes: bool,
+    /// Log entries.
+    log: Vec<LogEntry>,
+    /// Auto-scroll log.
+    log_auto_scroll: bool,
 }
 
 impl ViewerApp {
+    fn log(&mut self, msg: &str) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let secs = (now % 3600) / 60;
+        let mins = (now % 86400) / 3600;
+        let time = format!("{:02}:{:02}:{:02}", (now / 3600) % 24, mins, secs);
+        self.log.push(LogEntry {
+            time,
+            message: msg.to_string(),
+        });
+        // Keep last 500 entries
+        if self.log.len() > 500 {
+            self.log.drain(0..self.log.len() - 500);
+        }
+        self.log_auto_scroll = true;
+    }
+
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let render_state = cc.wgpu_render_state.clone();
 
@@ -114,18 +142,23 @@ impl ViewerApp {
             *gpu_resources.lock().unwrap() = Some(resources);
         }
 
-        Self {
+        let mut app = Self {
             mesh,
             gpu_resources,
             render_state,
             camera,
             wireframe: false,
-            status: "Ready — select a model from the panel".to_string(),
             current_model,
             mesh_dirty: false,
             show_grid: true,
             show_axes: true,
-        }
+            log: Vec::new(),
+            log_auto_scroll: true,
+        };
+        app.log("3Draper Viewer started");
+        app.log(&format!("Default model: Box 100x100x100 ({} vertices, {} triangles)",
+            app.current_model.vertex_count, app.current_model.triangle_count));
+        app
     }
 
     fn load_mesh(&mut self, mesh: TriangleMesh, name: &str) {
@@ -143,8 +176,8 @@ impl ViewerApp {
         };
         self.mesh = mesh;
         self.mesh_dirty = true;
-        self.status = format!("{} loaded ({} vertices, {} triangles)",
-            name, self.current_model.vertex_count, self.current_model.triangle_count);
+        self.log(&format!("Loaded: {} ({} vertices, {} triangles)",
+            name, self.current_model.vertex_count, self.current_model.triangle_count));
     }
 
     fn load_box(&mut self) {
@@ -196,7 +229,7 @@ impl ViewerApp {
                 self.load_mesh(mesh, &format!("STL: {}", name));
             }
             Err(e) => {
-                self.status = format!("STL import error: {}", e);
+                self.log(&format!("STL import error: {}", e));
             }
         }
     }
@@ -225,28 +258,29 @@ impl ViewerApp {
                     }
                 }
 
-                self.status = format!(
-                    "STEP: {} ({} entities, {} points, {} faces, {} shells, {} breps) — geometry conversion in development",
+                self.log(&format!(
+                    "STEP parsed: {} — {} entities, {} points, {} faces, {} shells, {} breps",
                     name, step_file.entities.len(), point_count, face_count, shell_count, brep_count
-                );
+                ));
+                self.log("STEP geometry conversion to B-Rep is in development");
             }
             Err(e) => {
-                self.status = format!("STEP import error: {}", e);
+                self.log(&format!("STEP import error: {}", e));
             }
         }
     }
 
     fn export_stl_binary(&mut self, path: &str) {
         match draper_mesh::stl::write_stl_file(&self.mesh, path, true) {
-            Ok(()) => self.status = format!("Exported STL (binary): {}", path),
-            Err(e) => self.status = format!("STL export error: {}", e),
+            Ok(()) => self.log(&format!("Exported STL (binary): {}", path)),
+            Err(e) => self.log(&format!("STL export error: {}", e)),
         }
     }
 
     fn export_stl_ascii(&mut self, path: &str) {
         match draper_mesh::stl::write_stl_file(&self.mesh, path, false) {
-            Ok(()) => self.status = format!("Exported STL (ASCII): {}", path),
-            Err(e) => self.status = format!("STL export error: {}", e),
+            Ok(()) => self.log(&format!("Exported STL (ASCII): {}", path)),
+            Err(e) => self.log(&format!("STL export error: {}", e)),
         }
     }
 }
@@ -333,6 +367,43 @@ impl eframe::App for ViewerApp {
                 });
             });
         });
+
+        // === Bottom panel: log ===
+        egui::TopBottomPanel::bottom("log_panel")
+            .min_height(100.0)
+            .default_height(140.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.heading(egui::RichText::new("Log").size(12.0));
+                    ui.separator();
+                    if ui.button("Clear").clicked() {
+                        self.log.clear();
+                    }
+                    if ui.button("Copy All").clicked() {
+                        let all_text: String = self.log.iter()
+                            .map(|e| format!("[{}] {}", e.time, e.message))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        ui.ctx().copy_text(all_text);
+                    }
+                    ui.separator();
+                    ui.checkbox(&mut self.log_auto_scroll, "Auto-scroll");
+                });
+                egui::ScrollArea::vertical()
+                    .stick_to_bottom(self.log_auto_scroll)
+                    .show(ui, |ui| {
+                        for entry in &self.log {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(format!("[{}]", entry.time))
+                                    .size(10.0)
+                                    .color(egui::Color32::from_rgb(120, 120, 140)));
+                                ui.label(egui::RichText::new(&entry.message)
+                                    .size(10.0));
+                            });
+                        }
+                    });
+            });
 
         // === Side panel (controls) ===
         egui::SidePanel::left("controls")
@@ -442,7 +513,11 @@ impl eframe::App for ViewerApp {
                 ui.label(egui::RichText::new(format!("Model: {}", self.current_model.name)).size(12.0));
                 ui.label(egui::RichText::new(format!("Vertices: {}", self.current_model.vertex_count)).size(12.0));
                 ui.label(egui::RichText::new(format!("Triangles: {}", self.current_model.triangle_count)).size(12.0));
-                ui.label(egui::RichText::new(format!("Distance: {:.1}", self.camera.distance)).size(11.0).color(egui::Color32::GRAY));
+                let cam_pos = self.camera.position();
+                ui.label(egui::RichText::new(format!("Camera: ({:.0}, {:.0}, {:.0})", cam_pos[0], cam_pos[1], cam_pos[2]))
+                    .size(11.0).color(egui::Color32::GRAY));
+                ui.label(egui::RichText::new(format!("Distance: {:.1}", self.camera.distance))
+                    .size(11.0).color(egui::Color32::GRAY));
 
                 ui.add_space(8.0);
                 ui.separator();
@@ -451,14 +526,6 @@ impl eframe::App for ViewerApp {
                         .size(10.0)
                         .color(egui::Color32::from_rgb(160, 160, 160))
                 );
-
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                    ui.label(
-                        egui::RichText::new(&self.status)
-                            .size(11.0)
-                            .color(egui::Color32::from_rgb(100, 200, 100))
-                    );
-                });
             });
 
         // === Central 3D viewport ===
