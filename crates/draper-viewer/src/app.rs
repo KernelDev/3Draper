@@ -403,6 +403,7 @@ impl eframe::App for ViewerApp {
                 // Create the wgpu paint callback
                 let callback = SceneCallback {
                     resources: self.gpu_resources.clone(),
+                    wireframe: self.wireframe,
                 };
 
                 let paint_callback = egui_wgpu::Callback::new_paint_callback(

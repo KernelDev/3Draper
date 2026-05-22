@@ -47,12 +47,14 @@ pub struct SceneResources {
     pub bind_group: wgpu::BindGroup,
     pub depth_texture: wgpu::Texture,
     pub depth_texture_view: wgpu::TextureView,
-    pub wireframe_pipeline: wgpu::RenderPipeline,
+    /// Wireframe pipeline — only available if device supports POLYGON_MODE_LINE.
+    pub wireframe_pipeline: Option<wgpu::RenderPipeline>,
 }
 
 /// The wgpu callback that renders the 3D scene.
 pub struct SceneCallback {
     pub resources: Arc<std::sync::Mutex<Option<SceneResources>>>,
+    pub wireframe: bool,
 }
 
 impl CallbackTrait for SceneCallback {
@@ -80,7 +82,15 @@ impl CallbackTrait for SceneCallback {
             return;
         }
 
-        render_pass.set_pipeline(&resources.pipeline);
+        // Use wireframe pipeline if requested and available, otherwise solid
+        let pipeline = if self.wireframe {
+            resources.wireframe_pipeline.as_ref()
+                .unwrap_or(&resources.pipeline)
+        } else {
+            &resources.pipeline
+        };
+
+        render_pass.set_pipeline(pipeline);
         render_pass.set_bind_group(0, &resources.bind_group, &[]);
         render_pass.set_vertex_buffer(0, resources.vertex_buffer.slice(..));
         render_pass.set_index_buffer(
@@ -325,7 +335,7 @@ pub fn create_scene_resources(
     // Depth texture (initial size, will be resized)
     let (depth_texture, depth_texture_view) = create_depth_texture(device, 1200, 800);
 
-    // Pipelines
+    // Solid pipeline (always available)
     let pipeline = create_pipeline(
         device, format, &shader, &bind_group_layout,
         "3Draper solid pipeline",
@@ -333,12 +343,18 @@ pub fn create_scene_resources(
         wgpu::PolygonMode::Fill,
     );
 
-    let wireframe_pipeline = create_pipeline(
-        device, format, &shader, &bind_group_layout,
-        "3Draper wireframe pipeline",
-        wgpu::PrimitiveTopology::TriangleList,
-        wgpu::PolygonMode::Line,
-    );
+    // Wireframe pipeline — only if device supports POLYGON_MODE_LINE
+    let wireframe_pipeline = if device.features().contains(wgpu::Features::POLYGON_MODE_LINE) {
+        Some(create_pipeline(
+            device, format, &shader, &bind_group_layout,
+            "3Draper wireframe pipeline",
+            wgpu::PrimitiveTopology::TriangleList,
+            wgpu::PolygonMode::Line,
+        ))
+    } else {
+        log::warn!("Wireframe mode not supported: device lacks POLYGON_MODE_LINE feature");
+        None
+    };
 
     SceneResources {
         pipeline,
