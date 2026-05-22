@@ -456,7 +456,12 @@ pub fn create_scene_resources(
     indices: &[u32],
 ) -> SceneResources {
     let device = &render_state.device;
-    let format = render_state.target_format;
+    let surface_format = render_state.target_format;
+
+    // The offscreen color texture uses a fixed format independent of the surface.
+    // The mesh pipeline must match the offscreen format, NOT the surface format,
+    // because it renders into the offscreen texture.
+    let offscreen_color_format = wgpu::TextureFormat::Rgba8UnormSrgb;
 
     // ── Mesh shader ──
     let mesh_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -481,16 +486,16 @@ pub fn create_scene_resources(
         ],
     });
 
-    // ── Mesh pipeline ──
+    // ── Mesh pipeline (renders into offscreen texture → use offscreen format) ──
     let mesh_pipeline = create_mesh_pipeline(
-        device, format, &mesh_shader, &mesh_bind_group_layout,
+        device, offscreen_color_format, &mesh_shader, &mesh_bind_group_layout,
         "3Draper mesh pipeline (fill)",
         wgpu::PolygonMode::Fill,
     );
 
     let wireframe_pipeline = if device.features().contains(wgpu::Features::POLYGON_MODE_LINE) {
         Some(create_mesh_pipeline(
-            device, format, &mesh_shader, &mesh_bind_group_layout,
+            device, offscreen_color_format, &mesh_shader, &mesh_bind_group_layout,
             "3Draper mesh pipeline (wireframe)",
             wgpu::PolygonMode::Line,
         ))
@@ -557,7 +562,8 @@ pub fn create_scene_resources(
         ],
     });
 
-    let blit_pipeline = create_blit_pipeline(device, format, &blit_shader, &blit_bind_group_layout);
+    // Blit pipeline renders into egui's render pass → use surface format
+    let blit_pipeline = create_blit_pipeline(device, surface_format, &blit_shader, &blit_bind_group_layout);
 
     let blit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("3Draper blit sampler"),
