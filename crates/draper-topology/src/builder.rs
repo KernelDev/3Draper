@@ -138,28 +138,24 @@ impl ShapeBuilder {
 
         // === Lateral face (cylinder surface) ===
         // Seam edge at u=0 (from bottom to top)
-        let seam_line = Line::through_points(
-            Point3d::new(radius, 0.0, 0.0),
-            Point3d::new(radius, 0.0, height),
-        ).unwrap();
+        let seam_p1 = Point3d::new(radius, 0.0, 0.0);
+        let seam_p2 = Point3d::new(radius, 0.0, height);
+        let seam_distance = seam_p1.distance_to(&seam_p2);
+        let seam_line = Line::through_points(seam_p1, seam_p2).unwrap();
         let seam_edge = Edge {
             id: TopoId::new(),
             curve: Some(Curve3d::Line(seam_line)),
-            param_range: (0.0, 1.0),
+            param_range: (0.0, seam_distance), // Use actual distance so point_at(1) = p2
             vertex_start: None,
             vertex_end: None,
             forward: true,
             tolerance: 1e-6,
         };
 
-        // Bottom arc edge
-        let bottom_arc = Arc::new(
-            Circle::new_xy(bottom_center, radius),
-            0.0, 2.0 * PI,
-        );
+        // Bottom arc edge — param_range is angle in radians for Circle::point_at
         let bottom_arc_edge = Edge {
             id: TopoId::new(),
-            curve: Some(Curve3d::Arc(bottom_arc)),
+            curve: Some(Curve3d::Circle(Circle::new_xy(bottom_center, radius))),
             param_range: (0.0, 2.0 * PI),
             vertex_start: None,
             vertex_end: None,
@@ -167,14 +163,10 @@ impl ShapeBuilder {
             tolerance: 1e-6,
         };
 
-        // Top arc edge
-        let top_arc = Arc::new(
-            Circle::new_xy(top_center, radius),
-            0.0, 2.0 * PI,
-        );
+        // Top arc edge — param_range is angle in radians for Circle::point_at
         let top_arc_edge = Edge {
             id: TopoId::new(),
-            curve: Some(Curve3d::Arc(top_arc)),
+            curve: Some(Curve3d::Circle(Circle::new_xy(top_center, radius))),
             param_range: (0.0, 2.0 * PI),
             vertex_start: None,
             vertex_end: None,
@@ -186,7 +178,7 @@ impl ShapeBuilder {
         let seam_rev_edge = Edge {
             id: seam_edge.id, // Same edge, opposite direction
             curve: seam_edge.curve.clone(),
-            param_range: (1.0, 0.0),
+            param_range: (seam_distance, 0.0), // Reversed param range
             vertex_start: seam_edge.vertex_end,
             vertex_end: seam_edge.vertex_start,
             forward: false,
@@ -282,7 +274,8 @@ impl ShapeBuilder {
     /// Create a cone.
     pub fn make_cone(radius: f64, height: f64, half_angle: f64) -> Solid {
         let cone_surface = ConeSurface::new_z(radius, half_angle);
-        // Simplified: create bottom disk + lateral cone surface
+
+        // Bottom disk face
         let bottom_circle = Circle::new_xy(Point3d::ORIGIN, radius);
         let bottom_edge = Edge {
             id: TopoId::new(),
@@ -298,9 +291,12 @@ impl ShapeBuilder {
         let mut bottom_face = Face::new(Surface::Plane(Plane::xy()), bottom_wire);
         bottom_face.edges = vec![bottom_edge.clone()];
 
+        // Lateral cone face — seam from base edge to apex
         let apex = Point3d::new(0.0, 0.0, height);
-        let seam_line = Line::through_points(Point3d::new(radius, 0.0, 0.0), apex).unwrap();
-        let seam_edge = Edge::new(Curve3d::Line(seam_line), (0.0, 1.0));
+        let seam_p1 = Point3d::new(radius, 0.0, 0.0);
+        let seam_distance = seam_p1.distance_to(&apex);
+        let seam_line = Line::through_points(seam_p1, apex).unwrap();
+        let seam_edge = Edge::new(Curve3d::Line(seam_line), (0.0, seam_distance));
 
         let lateral_coedges = vec![
             CoEdge::new(seam_edge.id, true),

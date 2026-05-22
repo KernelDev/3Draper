@@ -247,25 +247,42 @@ impl ViewerApp {
                 let mut face_count = 0;
                 let mut shell_count = 0;
                 let mut brep_count = 0;
+                let mut surface_types: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
                 for entity in &step_file.entities {
                     match entity.type_name.as_str() {
                         "CARTESIAN_POINT" => point_count += 1,
                         "ADVANCED_FACE" | "FACE_OUTER_BOUND" | "FACE_BOUND" => face_count += 1,
                         "CLOSED_SHELL" | "OPEN_SHELL" => shell_count += 1,
-                        "MANIFOLD_SOLID_BREP" => brep_count += 1,
-                        _ => {}
+                        "MANIFOLD_SOLID_BREP" | "FACETED_BREP" => brep_count += 1,
+                        _ => {
+                            if entity.type_name.contains("SURFACE") || entity.type_name.contains("PLANE") {
+                                *surface_types.entry(entity.type_name.clone()).or_insert(0) += 1;
+                            }
+                        }
                     }
                 }
+
+                let surface_summary: Vec<String> = surface_types.iter()
+                    .map(|(k, v)| format!("{}({})", k, v))
+                    .collect();
 
                 self.log(&format!(
                     "STEP parsed: {} — {} entities, {} points, {} faces, {} shells, {} breps",
                     name, step_file.entities.len(), point_count, face_count, shell_count, brep_count
                 ));
+                if !surface_summary.is_empty() {
+                    self.log(&format!("STEP surfaces: {}", surface_summary.join(", ")));
+                }
 
                 // Convert STEP to mesh
                 match draper_step::step_to_mesh(&step_file) {
                     Ok(mesh) => {
+                        let vcount = mesh.vertex_count();
+                        let tcount = mesh.triangle_count();
+                        self.log(&format!(
+                            "STEP converted: {} vertices, {} triangles", vcount, tcount
+                        ));
                         self.load_mesh(mesh, &format!("STEP: {}", name));
                     }
                     Err(e) => {

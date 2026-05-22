@@ -96,9 +96,16 @@ impl Edge {
     }
 
     /// Create a linear edge between two points.
+    ///
+    /// The param_range is set to `(0.0, distance)` where `distance` is the
+    /// Euclidean distance between `p1` and `p2`. This ensures that
+    /// `point_at(0.0) == p1` and `point_at(1.0) == p2`, because
+    /// `Line::through_points` stores a **normalized** direction vector and
+    /// `Line::point_at(t)` moves `t` units along that direction.
     pub fn new_line(p1: Point3d, p2: Point3d) -> Self {
+        let distance = p1.distance_to(&p2);
         let curve = Curve3d::Line(draper_geometry::Line::through_points(p1, p2).unwrap());
-        let mut edge = Self::new(curve, (0.0, 1.0));
+        let mut edge = Self::new(curve, (0.0, distance));
         edge.vertex_start = Some(TopoId::new());
         edge.vertex_end = Some(TopoId::new());
         edge

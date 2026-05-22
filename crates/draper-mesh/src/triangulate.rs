@@ -467,11 +467,22 @@ fn estimate_v_range(face: &Face) -> Option<(f64, f64)> {
         match surface {
             Surface::Cylinder(cyl) => {
                 let (v_min, v_max) = compute_axis_v_range(face, &cyl.origin, &cyl.axis);
-                if v_min < v_max { Some((v_min, v_max)) } else { Some((0.0, 1.0)) }
+                if v_min < v_max {
+                    Some((v_min, v_max))
+                } else {
+                    // Fallback: try to infer from the surface's bounding box
+                    // For a cylinder, v is the height. Use a large default.
+                    Some((0.0, 100.0))
+                }
             }
             Surface::Cone(cone) => {
                 let (v_min, v_max) = compute_axis_v_range(face, &cone.origin, &cone.axis);
-                if v_min < v_max { Some((v_min, v_max)) } else { Some((0.0, 1.0)) }
+                if v_min < v_max {
+                    Some((v_min, v_max))
+                } else {
+                    // Fallback: use cone height as max v
+                    Some((0.0, cone.height().min(100.0)))
+                }
             }
             Surface::Revolution(rev) => Some(rev.profile.param_range()),
             Surface::Extrusion(ext) => Some(ext.profile.param_range()),
@@ -489,11 +500,11 @@ fn compute_axis_v_range(face: &Face, origin: &Point3d, axis: &Direction3d) -> (f
     let mut v_min = f64::MAX;
     let mut v_max = f64::MIN;
 
+    // Sample from face.edges (direct edge geometry)
     for edge in &face.edges {
         for i in 0..64 {
             let t = i as f64 / 63.0;
             if let Some(p) = edge.point_at(t) {
-                // Project point onto axis: v = dot(p - origin, axis)
                 let v = (p.x - origin.x) * axis.x
                       + (p.y - origin.y) * axis.y
                       + (p.z - origin.z) * axis.z;
@@ -503,12 +514,43 @@ fn compute_axis_v_range(face: &Face, origin: &Point3d, axis: &Direction3d) -> (f
         }
     }
 
-    // If no edges, try the outer_wire coedges by looking for edge geometry
+    // Also try sampling from the outer wire coedges (look up edge by ID)
     if v_min >= v_max {
-        // Fallback: use a default range
+        if let Some(ref wire) = face.outer_wire {
+            for coedge in &wire.coedges {
+                let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+                if let Some(edge) = edge {
+                    for i in 0..64 {
+                        let t = i as f64 / 63.0;
+                        let t_actual = if coedge.forward { t } else { 1.0 - t };
+                        if let Some(p) = edge.point_at(t_actual) {
+                            let v = (p.x - origin.x) * axis.x
+                                  + (p.y - origin.y) * axis.y
+                                  + (p.z - origin.z) * axis.z;
+                            v_min = v_min.min(v);
+                            v_max = v_max.max(v);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if v_min >= v_max {
+        // Fallback: compute from bounding box of all sampled 3D boundary points
+        let boundary_pts = collect_face_boundary_points(face);
+        for p in &boundary_pts {
+            let v = (p.x - origin.x) * axis.x
+                  + (p.y - origin.y) * axis.y
+                  + (p.z - origin.z) * axis.z;
+            v_min = v_min.min(v);
+            v_max = v_max.max(v);
+        }
+    }
+
+    if v_min >= v_max {
         (0.0, 1.0)
     } else {
-        // Add a small margin to avoid clipping at exact boundaries
         let margin = (v_max - v_min) * 0.001;
         (v_min - margin, v_max + margin)
     }
