@@ -409,26 +409,54 @@ fn triangulate_generic_surface(face: &Face, surface: &Surface, params: &Triangul
 }
 
 /// Collect boundary points from a face's wires.
+/// Uses the edge geometry stored in `face.edges` to sample actual boundary curves.
 fn collect_face_boundary_points(face: &Face) -> Vec<Point3d> {
     let mut points = Vec::new();
 
     if let Some(ref wire) = face.outer_wire {
-        let n_samples = 64; // Points per edge
+        let n_samples = 32; // Points per edge
         for coedge in &wire.coedges {
-            // Sample the edge curve
-            for i in 0..n_samples {
-                let t = i as f64 / n_samples as f64;
-                // For now, we just sample the surface boundary
-                // In a full implementation, we'd look up the edge by ID
+            // Look up the edge by ID in the face's stored edges
+            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+            if let Some(edge) = edge {
+                // Sample the edge curve
+                for i in 0..n_samples {
+                    let t = i as f64 / n_samples as f64;
+                    // If coedge is reversed relative to edge, reverse the parameter
+                    let t_sampled = if coedge.forward { t } else { 1.0 - t };
+                    if let Some(p) = edge.point_at(t_sampled) {
+                        points.push(p);
+                    }
+                }
+            } else {
+                // Fallback: try to sample the surface boundary
+                // This is less accurate but better than nothing
                 if let Some(ref surface) = face.surface {
-                    let p = surface.point_at(t * 2.0 * PI, 0.0);
-                    points.push(p);
+                    for i in 0..n_samples {
+                        let t = i as f64 / n_samples as f64;
+                        let p = surface.point_at(t * 2.0 * PI, 0.0);
+                        points.push(p);
+                    }
                 }
             }
         }
     }
 
-    points.dedup_by(|a, b| a.is_coincident_with(b));
+    // Remove duplicate points (within tolerance)
+    if !points.is_empty() {
+        let mut unique = vec![points[0]];
+        for p in &points[1..] {
+            if !unique.last().unwrap().is_coincident_with(p) {
+                unique.push(*p);
+            }
+        }
+        // Also check last vs first (closed loop)
+        if unique.len() > 1 && unique.last().unwrap().is_coincident_with(&unique[0]) {
+            unique.pop();
+        }
+        points = unique;
+    }
+
     points
 }
 

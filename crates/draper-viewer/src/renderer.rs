@@ -37,7 +37,7 @@ impl MeshVertex {
 pub struct SceneUniforms {
     pub mvp: [[f32; 4]; 4],
     pub model: [[f32; 4]; 4],
-    pub light_dir: [f32; 4],  // xyz = direction, w = ambient
+    pub light_dir: [f32; 4],  // xyz = direction (normalized, FROM camera), w = ambient
     pub camera_pos: [f32; 4], // xyz = position, w = unused
 }
 
@@ -220,18 +220,30 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let normal = normalize(in.world_normal);
+    // Light direction is FROM the camera (headlight)
     let light_dir = normalize(uniforms.light_dir.xyz);
     let ambient = uniforms.light_dir.w;
 
+    // Diffuse — headlight ensures front-facing surfaces are always lit
     let ndotl = max(dot(normal, light_dir), 0.0);
 
+    // Two-sided lighting: flip normal if it faces away from camera
     let view_dir = normalize(uniforms.camera_pos.xyz - in.world_pos);
-    let half_dir = normalize(light_dir + view_dir);
-    let ndoth = max(dot(normal, half_dir), 0.0);
-    let specular = pow(ndoth, 64.0) * 0.4;
+    let effective_normal = select(-normal, normal, dot(normal, view_dir) >= 0.0);
+    let ndotl_effective = max(dot(effective_normal, light_dir), 0.0);
 
+    // Specular (Blinn-Phong)
+    let half_dir = normalize(light_dir + view_dir);
+    let ndoth = max(dot(effective_normal, half_dir), 0.0);
+    let specular = pow(ndoth, 64.0) * 0.35;
+
+    // Base color — pleasant steel-blue for CAD models
     let base_color = vec3<f32>(0.35, 0.55, 0.78);
-    let color = base_color * (ambient + ndotl * 0.7) + vec3<f32>(1.0) * specular;
+
+    // Combine: ambient + diffuse + specular
+    // Use effective_normal for diffuse so both sides are lit
+    let color = base_color * (ambient + ndotl_effective * 0.65) + vec3<f32>(1.0) * specular;
+
     return vec4<f32>(color, 1.0);
 }
 "#;
@@ -312,7 +324,10 @@ fn create_mesh_pipeline(
             topology: wgpu::PrimitiveTopology::TriangleList,
             strip_index_format: None,
             front_face: wgpu::FrontFace::Ccw,
-            cull_mode: Some(wgpu::Face::Back),
+            // IMPORTANT: Disable backface culling. Our triangulation may produce
+            // CW or CCW triangles depending on face.forward and surface type.
+            // With culling enabled, half the model can be invisible.
+            cull_mode: None,
             polygon_mode,
             unclipped_depth: false,
             conservative: false,
@@ -320,7 +335,9 @@ fn create_mesh_pipeline(
         depth_stencil: Some(wgpu::DepthStencilState {
             format: wgpu::TextureFormat::Depth32Float,
             depth_write_enabled: true,
-            depth_compare: wgpu::CompareFunction::Less,
+            // Use LessEqual instead of Less so that equal-depth faces are also drawn.
+            // This helps with wireframe overlays and two-sided rendering.
+            depth_compare: wgpu::CompareFunction::LessEqual,
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
@@ -514,7 +531,7 @@ pub fn create_scene_resources(
         contents: bytemuck::cast_slice(&[SceneUniforms {
             mvp: [[0.0; 4]; 4],
             model: [[0.0; 4]; 4],
-            light_dir: [0.3, 0.6, 0.8, 0.15],
+            light_dir: [0.0, 0.0, 1.0, 0.25],
             camera_pos: [0.0, 0.0, 0.0, 0.0],
         }]),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,

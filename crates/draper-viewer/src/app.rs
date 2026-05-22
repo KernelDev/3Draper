@@ -162,7 +162,7 @@ impl ViewerApp {
     }
 
     fn load_mesh(&mut self, mesh: TriangleMesh, name: &str) {
-        // Auto-fit camera
+        // Auto-fit camera to new model center
         let (bbox_min, bbox_max) = mesh.bounding_box();
         self.camera.fit_to_bounding_box(
             [bbox_min.x as f32, bbox_min.y as f32, bbox_min.z as f32],
@@ -370,8 +370,8 @@ impl eframe::App for ViewerApp {
 
         // === Bottom panel: log ===
         egui::TopBottomPanel::bottom("log_panel")
-            .min_height(100.0)
-            .default_height(140.0)
+            .min_height(80.0)
+            .default_height(120.0)
             .resizable(true)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -398,8 +398,10 @@ impl eframe::App for ViewerApp {
                                 ui.label(egui::RichText::new(format!("[{}]", entry.time))
                                     .size(10.0)
                                     .color(egui::Color32::from_rgb(120, 120, 140)));
-                                ui.label(egui::RichText::new(&entry.message)
-                                    .size(10.0));
+                                // Make log messages selectable/copyable
+                                ui.add(egui::Label::new(
+                                    egui::RichText::new(&entry.message).size(10.0)
+                                ).wrap());
                             });
                         }
                     });
@@ -540,7 +542,7 @@ impl eframe::App for ViewerApp {
                 // Handle mouse input for camera
                 let is_hovering = response.hovered();
 
-                // Rotation: left mouse drag
+                // Rotation: left mouse drag — orbits around model center
                 if response.dragged_by(egui::PointerButton::Primary) {
                     let delta = response.drag_delta();
                     self.camera.rotate(delta.x, delta.y);
@@ -552,11 +554,18 @@ impl eframe::App for ViewerApp {
                     self.camera.pan(delta.x, delta.y, rect.width(), rect.height());
                 }
 
-                // Zoom: scroll wheel
+                // Zoom: scroll wheel — zoom toward mouse cursor position
                 if is_hovering {
                     let scroll = ui.input(|i| i.smooth_scroll_delta);
                     if scroll.y != 0.0 {
-                        self.camera.zoom(scroll.y);
+                        // Compute normalized mouse position (-1 to 1) relative to viewport center
+                        let mouse_pos_opt = ui.input(|i| i.pointer.latest_pos());
+                        let mouse_norm = mouse_pos_opt.map(|pos| {
+                            let nx = ((pos.x - rect.center().x) / (rect.width() * 0.5)).clamp(-1.0, 1.0);
+                            let ny = -((pos.y - rect.center().y) / (rect.height() * 0.5)).clamp(-1.0, 1.0);
+                            [nx, ny]
+                        });
+                        self.camera.zoom(scroll.y, mouse_norm);
                     }
                 }
 
@@ -583,7 +592,7 @@ impl eframe::App for ViewerApp {
                     self.mesh_dirty = false;
                 }
 
-                // Update uniforms
+                // Update uniforms — compute headlight from camera direction
                 if let Some(ref rs) = self.render_state {
                     let aspect = rect.width() / rect.height();
                     let view = self.camera.view_matrix();
@@ -601,11 +610,14 @@ impl eframe::App for ViewerApp {
                     ];
 
                     let cam_pos = self.camera.position();
+                    let cam_fwd = self.camera.forward();
 
+                    // Headlight: light comes FROM the camera direction toward the model
+                    // This ensures that whatever we look at is well-lit from the front
                     let uniforms = SceneUniforms {
                         mvp,
                         model,
-                        light_dir: [0.3, 0.6, 0.8, 0.15], // xyz = direction, w = ambient
+                        light_dir: [cam_fwd[0], cam_fwd[1], cam_fwd[2], 0.25], // xyz = direction from camera, w = ambient
                         camera_pos: [cam_pos[0], cam_pos[1], cam_pos[2], 0.0],
                     };
 
@@ -616,7 +628,6 @@ impl eframe::App for ViewerApp {
                 }
 
                 // Create the wgpu paint callback
-                // The offscreen resize is handled inside prepare() automatically
                 let callback = SceneCallback {
                     resources: self.gpu_resources.clone(),
                     wireframe: self.wireframe,

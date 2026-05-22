@@ -235,6 +235,9 @@ pub struct Face {
     pub forward: bool,
     /// Tolerance.
     pub tolerance: f64,
+    /// Edge geometry stored directly in the face for triangulation.
+    /// Maps edge ID → Edge object so triangulation can sample edge curves.
+    pub edges: Vec<Edge>,
 }
 
 impl Face {
@@ -247,6 +250,7 @@ impl Face {
             inner_wires: Vec::new(),
             forward: true,
             tolerance: 1e-6,
+            edges: Vec::new(),
         }
     }
 
@@ -259,6 +263,7 @@ impl Face {
             inner_wires: Vec::new(),
             forward: true,
             tolerance: 1e-6,
+            edges: Vec::new(),
         }
     }
 
@@ -276,6 +281,7 @@ impl Face {
             inner_wires: self.inner_wires.clone(),
             forward: !self.forward,
             tolerance: self.tolerance,
+            edges: self.edges.clone(),
         }
     }
 }

@@ -68,18 +68,28 @@ impl OrbitCamera {
         ]
     }
 
-    /// Compute view matrix (column-major 4x4).
-    pub fn view_matrix(&self) -> [[f32; 4]; 4] {
+    /// Get the forward direction (from camera toward target), normalized.
+    pub fn forward(&self) -> [f32; 3] {
         let pos = self.position();
-
-        // Forward direction (from camera to target)
         let fwd = [
             self.target[0] - pos[0],
             self.target[1] - pos[1],
             self.target[2] - pos[2],
         ];
-        let fwd_len = (fwd[0] * fwd[0] + fwd[1] * fwd[1] + fwd[2] * fwd[2]).sqrt();
-        let fwd = [fwd[0] / fwd_len, fwd[1] / fwd_len, fwd[2] / fwd_len];
+        let len = (fwd[0] * fwd[0] + fwd[1] * fwd[1] + fwd[2] * fwd[2]).sqrt();
+        if len > 1e-10 {
+            [fwd[0] / len, fwd[1] / len, fwd[2] / len]
+        } else {
+            [0.0, 0.0, -1.0]
+        }
+    }
+
+    /// Compute view matrix (column-major 4x4).
+    pub fn view_matrix(&self) -> [[f32; 4]; 4] {
+        let pos = self.position();
+
+        // Forward direction (from camera to target)
+        let fwd = self.forward();
 
         // Right = fwd cross (0,1,0)
         let up_world = [0.0_f32, 1.0, 0.0];
@@ -102,8 +112,6 @@ impl OrbitCamera {
         // Translation component
         let tx = -(right[0] * pos[0] + right[1] * pos[1] + right[2] * pos[2]);
         let ty = -(up[0] * pos[0] + up[1] * pos[1] + up[2] * pos[2]);
-        // Note: third row of rotation is -fwd, so tz = +dot(fwd, pos)
-        // (standard lookAt: row3 = [-fwd, dot(fwd, eye)])
         let tz = fwd[0] * pos[0] + fwd[1] * pos[1] + fwd[2] * pos[2];
 
         [
@@ -117,8 +125,6 @@ impl OrbitCamera {
     /// Compute perspective projection matrix (column-major 4x4).
     ///
     /// Uses wgpu/Vulkan Z range convention [0, 1] (NOT OpenGL [-1, 1]).
-    /// This is critical — with OpenGL convention, all geometry with z_ndc < 0
-    /// gets clipped by wgpu, making the near half of the scene invisible.
     pub fn projection_matrix(&self, aspect: f32) -> [[f32; 4]; 4] {
         let fov_rad = self.fov.to_radians();
         let f = 1.0 / (fov_rad * 0.5).tan();
@@ -133,7 +139,7 @@ impl OrbitCamera {
         ]
     }
 
-    /// Rotate the camera by the given deltas.
+    /// Rotate the camera by the given deltas (orbit around target).
     pub fn rotate(&mut self, delta_x: f32, delta_y: f32) {
         self.azimuth += delta_x * 0.01;
         self.elevation += delta_y * 0.01;
@@ -142,11 +148,60 @@ impl OrbitCamera {
     }
 
     /// Zoom the camera by the given delta.
-    pub fn zoom(&mut self, delta: f32) {
+    /// When `mouse_norm` is Some([nx, ny]), zoom toward the point under the cursor
+    /// in normalized device coordinates (-1 to 1). When None, zoom toward target center.
+    pub fn zoom(&mut self, delta: f32, mouse_norm: Option<[f32; 2]>) {
         // Exponential zoom for consistent feel
         let factor = 1.0 - delta * 0.001;
-        self.distance *= factor;
-        self.distance = self.distance.max(1.0).min(100000.0);
+        let new_distance = (self.distance * factor).max(1.0).min(100000.0);
+        let zoom_ratio = new_distance / self.distance;
+
+        if let Some([nx, ny]) = mouse_norm {
+            // Zoom toward the mouse cursor position
+            // Compute the world-space point under the cursor at the target depth
+            let _pos = self.position();
+            let fwd = self.forward();
+
+            // Right and up vectors
+            let up_world = [0.0_f32, 1.0, 0.0];
+            let right = [
+                fwd[1] * up_world[2] - fwd[2] * up_world[1],
+                fwd[2] * up_world[0] - fwd[0] * up_world[2],
+                fwd[0] * up_world[1] - fwd[1] * up_world[0],
+            ];
+            let right_len = (right[0] * right[0] + right[1] * right[1] + right[2] * right[2]).sqrt();
+            let right = [right[0] / right_len, right[1] / right_len, right[2] / right_len];
+
+            let up = [
+                right[1] * fwd[2] - right[2] * fwd[1],
+                right[2] * fwd[0] - right[0] * fwd[2],
+                right[0] * fwd[1] - right[1] * fwd[0],
+            ];
+
+            // Scale nx, ny by the viewport half-size at the target distance
+            let fov_rad = self.fov.to_radians();
+            let half_height = self.distance * (fov_rad * 0.5).tan();
+            let aspect = 1.0; // We'll use normalized coords directly
+
+            // The point on the target plane under the mouse cursor (relative to target)
+            let offset_x = nx * half_height * aspect;
+            let offset_y = ny * half_height;
+
+            // World-space point under cursor at target depth
+            let cursor_world = [
+                self.target[0] + right[0] * offset_x + up[0] * offset_y,
+                self.target[1] + right[1] * offset_x + up[1] * offset_y,
+                self.target[2] + right[2] * offset_x + up[2] * offset_y,
+            ];
+
+            // Move target toward cursor_world by (1 - zoom_ratio)
+            let blend = 1.0 - zoom_ratio;
+            self.target[0] += (cursor_world[0] - self.target[0]) * blend;
+            self.target[1] += (cursor_world[1] - self.target[1]) * blend;
+            self.target[2] += (cursor_world[2] - self.target[2]) * blend;
+        }
+
+        self.distance = new_distance;
     }
 
     /// Pan the camera by the given screen-space deltas.
@@ -157,14 +212,7 @@ impl OrbitCamera {
         let dy = delta_y * pan_speed;
 
         // Move target in camera's right/up directions
-        let pos = self.position();
-        let fwd = [
-            self.target[0] - pos[0],
-            self.target[1] - pos[1],
-            self.target[2] - pos[2],
-        ];
-        let fwd_len = (fwd[0] * fwd[0] + fwd[1] * fwd[1] + fwd[2] * fwd[2]).sqrt();
-        let fwd = [fwd[0] / fwd_len, fwd[1] / fwd_len, fwd[2] / fwd_len];
+        let fwd = self.forward();
 
         let up_world = [0.0_f32, 1.0, 0.0];
         let right = [

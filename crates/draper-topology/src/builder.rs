@@ -88,7 +88,8 @@ impl ShapeBuilder {
             .unwrap_or_else(|| Plane::from_origin_and_normal(p0, Direction3d::Z));
 
         let mut face = Face::new(Surface::Plane(plane), wire);
-        // Store edges in face for later retrieval
+        // Store edges in face so triangulation can sample edge curves
+        face.edges = vec![e0, e1, e2, e3];
         face
     }
 
@@ -114,6 +115,7 @@ impl ShapeBuilder {
         let bottom_coedge = CoEdge::new(bottom_edge.id, false); // Reversed for bottom (looking from -Z)
         let bottom_wire = Wire::new(vec![bottom_coedge]);
         let mut bottom_face = Face::new(Surface::Plane(Plane::xy()), bottom_wire);
+        bottom_face.edges = vec![bottom_edge];
 
         // === Top face (disk) ===
         let top_circle = Circle::new_xy(top_center, radius);
@@ -132,6 +134,7 @@ impl ShapeBuilder {
             Surface::Plane(Plane::from_origin_and_normal(top_center, Direction3d::Z)),
             top_wire,
         );
+        top_face.edges = vec![top_edge];
 
         // === Lateral face (cylinder surface) ===
         // Seam edge at u=0 (from bottom to top)
@@ -198,7 +201,8 @@ impl ShapeBuilder {
         ];
 
         let lateral_wire = Wire::new(lateral_coedges);
-        let lateral_face = Face::new(Surface::Cylinder(cyl_surface), lateral_wire);
+        let mut lateral_face = Face::new(Surface::Cylinder(cyl_surface), lateral_wire);
+        lateral_face.edges = vec![seam_edge, top_arc_edge, seam_rev_edge, bottom_arc_edge];
 
         let shell = Shell::new_closed(vec![bottom_face, top_face, lateral_face]);
         Solid::new(shell)
@@ -258,7 +262,8 @@ impl ShapeBuilder {
             CoEdge::new(seam_rev_edge_id, false),
         ];
         let front_wire = Wire::new(front_coedges);
-        let front_face = Face::new(Surface::Sphere(sphere_surface.clone()), front_wire);
+        let mut front_face = Face::new(Surface::Sphere(sphere_surface.clone()), front_wire);
+        front_face.edges = vec![seam_edge.clone(), equator_edge.clone()];
 
         // Back face (pi <= u <= 2pi) — simplified as another face
         let back_coedges = vec![
@@ -267,7 +272,8 @@ impl ShapeBuilder {
             CoEdge::new(seam_rev_edge_id, true),
         ];
         let back_wire = Wire::new(back_coedges);
-        let back_face = Face::new(Surface::Sphere(sphere_surface), back_wire);
+        let mut back_face = Face::new(Surface::Sphere(sphere_surface), back_wire);
+        back_face.edges = vec![seam_edge, equator_edge];
 
         let shell = Shell::new_closed(vec![front_face, back_face]);
         Solid::new(shell)
@@ -289,7 +295,8 @@ impl ShapeBuilder {
         };
         let bottom_coedge = CoEdge::new(bottom_edge.id, false);
         let bottom_wire = Wire::new(vec![bottom_coedge]);
-        let bottom_face = Face::new(Surface::Plane(Plane::xy()), bottom_wire);
+        let mut bottom_face = Face::new(Surface::Plane(Plane::xy()), bottom_wire);
+        bottom_face.edges = vec![bottom_edge.clone()];
 
         let apex = Point3d::new(0.0, 0.0, height);
         let seam_line = Line::through_points(Point3d::new(radius, 0.0, 0.0), apex).unwrap();
@@ -301,7 +308,8 @@ impl ShapeBuilder {
             CoEdge::new(seam_edge.id, false),
         ];
         let lateral_wire = Wire::new(lateral_coedges);
-        let lateral_face = Face::new(Surface::Cone(cone_surface), lateral_wire);
+        let mut lateral_face = Face::new(Surface::Cone(cone_surface), lateral_wire);
+        lateral_face.edges = vec![seam_edge, bottom_edge];
 
         let shell = Shell::new_closed(vec![bottom_face, lateral_face]);
         Solid::new(shell)
@@ -329,7 +337,8 @@ impl ShapeBuilder {
 
         let coedges = vec![CoEdge::new(edge_v.id, true)];
         let wire = Wire::new(coedges);
-        let face = Face::new(Surface::Torus(torus_surface), wire);
+        let mut face = Face::new(Surface::Torus(torus_surface), wire);
+        face.edges = vec![edge_v];
 
         let shell = Shell::new_closed(vec![face]);
         Solid::new(shell)
@@ -405,7 +414,8 @@ impl ShapeBuilder {
         let wire = Wire::new(coedges);
 
         let plane = Plane::from_three_points(&points[0], &points[1], &points[2])?;
-        let face = Face::new(Surface::Plane(plane), wire);
+        let mut face = Face::new(Surface::Plane(plane), wire);
+        face.edges = edges;
         Some(face)
     }
 
@@ -424,6 +434,8 @@ impl ShapeBuilder {
         let coedge = CoEdge::new(edge.id, true);
         let wire = Wire::new(vec![coedge]);
         let plane = Plane::from_origin_and_normal(center, normal);
-        Face::new(Surface::Plane(plane), wire)
+        let mut face = Face::new(Surface::Plane(plane), wire);
+        face.edges = vec![edge];
+        face
     }
 }
