@@ -1,14 +1,18 @@
 //! wgpu-based 3D renderer for draper-viewer.
 //!
-//! Uses a proper GPU pipeline with depth buffer and Phong lighting
-//! for high-performance rendering of triangle meshes.
+//! Renders the 3D scene to an offscreen texture (with depth buffer) in the
+//! `prepare` callback, then blits the result to the egui render pass in the
+//! `paint` callback. This is the standard approach for custom wgpu rendering
+//! within egui, since egui's render pass does not include a depth attachment.
 
 use std::sync::Arc;
-use egui_wgpu::{CallbackTrait, CallbackResources, RenderState};
+use egui_wgpu::{CallbackTrait, CallbackResources, RenderState, ScreenDescriptor};
 use egui::PaintCallbackInfo;
 use wgpu::util::DeviceExt;
 
-/// Vertex format: position + normal.
+// ─── Vertex / Uniform types ──────────────────────────────────────────────
+
+/// Vertex format for the 3D mesh: position + normal.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MeshVertex {
@@ -17,99 +21,208 @@ pub struct MeshVertex {
 }
 
 impl MeshVertex {
-    const DESC: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+    const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<MeshVertex>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &wgpu::vertex_attr_array![
-            0 => Float32x3,  // position
-            1 => Float32x3,  // normal
+            0 => Float32x3,
+            1 => Float32x3,
         ],
     };
 }
 
-/// Uniform buffer for MVP matrices.
+/// Uniform buffer for MVP matrices + lighting.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SceneUniforms {
     pub mvp: [[f32; 4]; 4],
     pub model: [[f32; 4]; 4],
-    pub light_dir: [f32; 4],  // w = ambient intensity
-    pub camera_pos: [f32; 4], // w = unused
+    pub light_dir: [f32; 4],  // xyz = direction, w = ambient
+    pub camera_pos: [f32; 4], // xyz = position, w = unused
 }
 
-/// GPU resources for the 3D scene.
+// ─── Offscreen resources ─────────────────────────────────────────────────
+
+/// All GPU resources needed for offscreen 3D rendering + blit.
 pub struct SceneResources {
-    pub pipeline: wgpu::RenderPipeline,
+    // Mesh rendering
+    pub mesh_pipeline: wgpu::RenderPipeline,
+    pub wireframe_pipeline: Option<wgpu::RenderPipeline>,
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
     pub index_count: u32,
     pub uniform_buffer: wgpu::Buffer,
-    pub bind_group: wgpu::BindGroup,
-    pub depth_texture: wgpu::Texture,
-    pub depth_texture_view: wgpu::TextureView,
-    /// Wireframe pipeline — only available if device supports POLYGON_MODE_LINE.
-    pub wireframe_pipeline: Option<wgpu::RenderPipeline>,
+    pub mesh_bind_group: wgpu::BindGroup,
+    pub mesh_bind_group_layout: wgpu::BindGroupLayout,
+
+    // Offscreen render target
+    pub offscreen_color: wgpu::TextureView,
+    pub offscreen_depth: wgpu::TextureView,
+    pub offscreen_width: u32,
+    pub offscreen_height: u32,
+
+    // Blit (fullscreen quad to display offscreen texture in egui pass)
+    pub blit_pipeline: wgpu::RenderPipeline,
+    pub blit_bind_group: wgpu::BindGroup,
+    pub blit_sampler: wgpu::Sampler,
 }
+
+/// Stored in CallbackResources so paint() can access the offscreen texture.
+pub struct OffscreenResult {
+    pub color_view: wgpu::TextureView,
+}
+
+// ─── SceneCallback ───────────────────────────────────────────────────────
 
 /// The wgpu callback that renders the 3D scene.
 pub struct SceneCallback {
     pub resources: Arc<std::sync::Mutex<Option<SceneResources>>>,
     pub wireframe: bool,
+    pub viewport_width: u32,
+    pub viewport_height: u32,
 }
 
 impl CallbackTrait for SceneCallback {
+    fn prepare(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        _screen_descriptor: &ScreenDescriptor,
+        egui_encoder: &mut wgpu::CommandEncoder,
+        callback_resources: &mut CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        let mut guard = self.resources.lock().unwrap();
+        let resources = match guard.as_mut() {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+
+        if resources.index_count == 0 {
+            return Vec::new();
+        }
+
+        let w = self.viewport_width;
+        let h = self.viewport_height;
+        if w == 0 || h == 0 {
+            return Vec::new();
+        }
+
+        // Resize offscreen textures if viewport size changed
+        if w != resources.offscreen_width || h != resources.offscreen_height {
+            resize_offscreen(resources, device, w, h);
+        }
+
+        // Update uniforms
+        queue.write_buffer(
+            &resources.uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[SceneUniforms {
+                mvp: [[0.0; 4]; 4], // will be updated by the app via update_uniforms
+                model: [[0.0; 4]; 4],
+                light_dir: [0.3, 0.6, 0.8, 0.15],
+                camera_pos: [0.0, 0.0, 0.0, 0.0],
+            }]),
+        );
+
+        // Render mesh to offscreen texture
+        let mesh_pass = egui_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("3Draper offscreen mesh render"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &resources.offscreen_color,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.08, g: 0.08, b: 0.12, a: 1.0 }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &resources.offscreen_depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        // We can't use the mutable borrow of guard with the render pass
+        // So drop the guard and re-borrow after
+        drop(mesh_pass);
+
+        // Re-borrow and do the actual rendering
+        let resources = guard.as_ref().unwrap();
+
+        let mut mesh_pass = egui_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("3Draper offscreen mesh render"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &resources.offscreen_color,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load, // We already cleared above, so load
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &resources.offscreen_depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        let pipeline = if self.wireframe {
+            resources.wireframe_pipeline.as_ref().unwrap_or(&resources.mesh_pipeline)
+        } else {
+            &resources.mesh_pipeline
+        };
+
+        mesh_pass.set_pipeline(pipeline);
+        mesh_pass.set_bind_group(0, &resources.mesh_bind_group, &[]);
+        mesh_pass.set_vertex_buffer(0, resources.vertex_buffer.slice(..));
+        mesh_pass.set_index_buffer(resources.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        mesh_pass.draw_indexed(0..resources.index_count, 0, 0..1);
+
+        drop(mesh_pass);
+
+        // Store the offscreen result for paint()
+        callback_resources.insert(OffscreenResult {
+            color_view: resources.offscreen_color.clone(),
+        });
+
+        Vec::new()
+    }
+
     fn paint(
         &self,
         info: PaintCallbackInfo,
         render_pass: &mut wgpu::RenderPass<'static>,
-        _callback_resources: &CallbackResources,
+        callback_resources: &CallbackResources,
     ) {
-        let resources_guard = self.resources.lock().unwrap();
-        let resources = match resources_guard.as_ref() {
-            Some(r) => r,
-            None => return,
+        let Some(result) = callback_resources.get::<OffscreenResult>() else {
+            return;
         };
 
-        if resources.index_count == 0 {
+        // Get the blit pipeline from resources
+        let guard = self.resources.lock().unwrap();
+        let Some(resources) = guard.as_ref() else {
             return;
-        }
-
-        let viewport = info.viewport_in_pixels();
-        let width = viewport.width_px as u32;
-        let height = viewport.height_px as u32;
-
-        if width == 0 || height == 0 {
-            return;
-        }
-
-        // Use wireframe pipeline if requested and available, otherwise solid
-        let pipeline = if self.wireframe {
-            resources.wireframe_pipeline.as_ref()
-                .unwrap_or(&resources.pipeline)
-        } else {
-            &resources.pipeline
         };
 
-        render_pass.set_pipeline(pipeline);
-        render_pass.set_bind_group(0, &resources.bind_group, &[]);
-        render_pass.set_vertex_buffer(0, resources.vertex_buffer.slice(..));
-        render_pass.set_index_buffer(
-            resources.index_buffer.slice(..),
-            wgpu::IndexFormat::Uint32,
-        );
-        render_pass.draw_indexed(0..resources.index_count, 0, 0..1);
+        render_pass.set_pipeline(&resources.blit_pipeline);
+        render_pass.set_bind_group(0, &resources.blit_bind_group, &[]);
+        render_pass.draw(0, 3, 0, 1); // Fullscreen triangle
     }
 }
 
-/// Create the WGSL shader module.
-fn create_shader_module(device: &wgpu::Device) -> wgpu::ShaderModule {
-    device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("3Draper mesh shader"),
-        source: wgpu::ShaderSource::Wgsl(SHADER_SRC.into()),
-    })
-}
+// ─── Shaders ─────────────────────────────────────────────────────────────
 
-const SHADER_SRC: &str = r#"
+const MESH_SHADER_SRC: &str = r#"
 struct Uniforms {
     mvp: mat4x4<f32>,
     model: mat4x4<f32>,
@@ -146,36 +259,70 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let light_dir = normalize(uniforms.light_dir.xyz);
     let ambient = uniforms.light_dir.w;
 
-    // Diffuse lighting
     let ndotl = max(dot(normal, light_dir), 0.0);
 
-    // Specular (Blinn-Phong)
     let view_dir = normalize(uniforms.camera_pos.xyz - in.world_pos);
     let half_dir = normalize(light_dir + view_dir);
     let ndoth = max(dot(normal, half_dir), 0.0);
     let specular = pow(ndoth, 64.0) * 0.4;
 
-    // Base color (steel blue)
     let base_color = vec3<f32>(0.35, 0.55, 0.78);
-
-    let color = base_color * (ambient + ndotl * 0.7) + vec3<f32>(1.0, 1.0, 1.0) * specular;
+    let color = base_color * (ambient + ndotl * 0.7) + vec3<f32>(1.0) * specular;
     return vec4<f32>(color, 1.0);
 }
 "#;
 
-/// Create the render pipeline.
-fn create_pipeline(
+const BLIT_SHADER_SRC: &str = r#"
+@group(0) @binding(0) var offscreen_tex: texture_2d<f32>;
+@group(0) @binding(1) var offscreen_sampler: sampler;
+
+struct VertexOutput {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+// Fullscreen triangle: 3 vertices cover the entire screen
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> VertexOutput {
+    var out: VertexOutput;
+    // vertex_index 0 → (-1, -1), 1 → (3, -1), 2 → (-1, 3)
+    let x = f32(i32(vi) - 1) * 2.0 - step(1.0, f32(vi) - 1.0) * 2.0;
+    let y = f32(i32(vi & 1u) * -2 + 1);
+    // Simpler: standard fullscreen triangle
+    let positions = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 3.0, -1.0),
+        vec2<f32>(-1.0,  3.0),
+    );
+    let uvs = array<vec2<f32>, 3>(
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(2.0, 1.0),
+        vec2<f32>(0.0, -1.0),
+    );
+    out.clip_pos = vec4<f32>(positions[vi], 0.0, 1.0);
+    out.uv = uvs[vi];
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    return textureSample(offscreen_tex, offscreen_sampler, in.uv);
+}
+"#;
+
+// ─── Pipeline creation helpers ────────────────────────────────────────────
+
+fn create_mesh_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
     shader: &wgpu::ShaderModule,
-    bind_group_layout: &wgpu::BindGroupLayout,
+    layout: &wgpu::BindGroupLayout,
     label: &str,
-    topology: wgpu::PrimitiveTopology,
     polygon_mode: wgpu::PolygonMode,
 ) -> wgpu::RenderPipeline {
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some(label),
-        bind_group_layouts: &[bind_group_layout],
+        bind_group_layouts: &[layout],
         push_constant_ranges: &[],
     });
 
@@ -185,7 +332,7 @@ fn create_pipeline(
         vertex: wgpu::VertexState {
             module: shader,
             entry_point: Some("vs_main"),
-            buffers: &[MeshVertex::DESC],
+            buffers: &[MeshVertex::LAYOUT],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
@@ -202,7 +349,7 @@ fn create_pipeline(
             compilation_options: Default::default(),
         }),
         primitive: wgpu::PrimitiveState {
-            topology,
+            topology: wgpu::PrimitiveTopology::TriangleList,
             strip_index_format: None,
             front_face: wgpu::FrontFace::Ccw,
             cull_mode: Some(wgpu::Face::Back),
@@ -227,14 +374,80 @@ fn create_pipeline(
     })
 }
 
-/// Create or recreate depth texture for the given dimensions.
-pub fn create_depth_texture(
+fn create_blit_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("3Draper blit pipeline layout"),
+        bind_group_layouts: &[layout],
+        push_constant_ranges: &[],
+    });
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("3Draper blit pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent::REPLACE,
+                    alpha: wgpu::BlendComponent::REPLACE,
+                }),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil: None, // No depth for the blit — egui pass has no depth attachment
+        multisample: wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        multiview: None,
+        cache: None,
+    })
+}
+
+// ─── Offscreen texture management ────────────────────────────────────────
+
+fn create_offscreen_textures(
     device: &wgpu::Device,
     width: u32,
     height: u32,
-) -> (wgpu::Texture, wgpu::TextureView) {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("3Draper depth texture"),
+) -> (wgpu::TextureView, wgpu::TextureView) {
+    let color = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("3Draper offscreen color"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+
+    let depth = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("3Draper offscreen depth"),
         size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
@@ -243,9 +456,38 @@ pub fn create_depth_texture(
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[],
     });
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    (texture, view)
+
+    (
+        color.create_view(&wgpu::TextureViewDescriptor::default()),
+        depth.create_view(&wgpu::TextureViewDescriptor::default()),
+    )
 }
+
+fn resize_offscreen(resources: &mut SceneResources, device: &wgpu::Device, width: u32, height: u32) {
+    let (color_view, depth_view) = create_offscreen_textures(device, width, height);
+    resources.offscreen_color = color_view;
+    resources.offscreen_depth = depth_view;
+    resources.offscreen_width = width;
+    resources.offscreen_height = height;
+
+    // Recreate blit bind group with new texture view
+    resources.blit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("3Draper blit bind group"),
+        layout: &resources.mesh_bind_group_layout, // reuse layout if compatible, else need separate
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&resources.offscreen_color),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&resources.blit_sampler),
+            },
+        ],
+    });
+}
+
+// ─── Public API ──────────────────────────────────────────────────────────
 
 /// Initialize all GPU resources for the scene.
 pub fn create_scene_resources(
@@ -256,12 +498,15 @@ pub fn create_scene_resources(
     let device = &render_state.device;
     let format = render_state.target_format;
 
-    // Shader
-    let shader = create_shader_module(device);
+    // ── Mesh shader ──
+    let mesh_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("3Draper mesh shader"),
+        source: wgpu::ShaderSource::Wgsl(MESH_SHADER_SRC.into()),
+    });
 
-    // Bind group layout
-    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("3Draper uniform bind group layout"),
+    // ── Mesh bind group layout (uniform buffer) ──
+    let mesh_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("3Draper mesh bind group layout"),
         entries: &[
             wgpu::BindGroupLayoutEntry {
                 binding: 0,
@@ -276,54 +521,43 @@ pub fn create_scene_resources(
         ],
     });
 
-    // Vertex buffer
-    let vertex_buffer = if vertices.is_empty() {
-        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("3Draper vertex buffer (empty)"),
-            contents: bytemuck::cast_slice(&[MeshVertex { position: [0.0; 3], normal: [0.0; 3] }]),
-            usage: wgpu::BufferUsages::VERTEX,
-        })
+    // ── Mesh pipeline ──
+    let mesh_pipeline = create_mesh_pipeline(
+        device, format, &mesh_shader, &mesh_bind_group_layout,
+        "3Draper mesh pipeline (fill)",
+        wgpu::PolygonMode::Fill,
+    );
+
+    let wireframe_pipeline = if device.features().contains(wgpu::Features::POLYGON_MODE_LINE) {
+        Some(create_mesh_pipeline(
+            device, format, &mesh_shader, &mesh_bind_group_layout,
+            "3Draper mesh pipeline (wireframe)",
+            wgpu::PolygonMode::Line,
+        ))
     } else {
-        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("3Draper vertex buffer"),
-            contents: bytemuck::cast_slice(vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        })
+        None
     };
 
-    // Index buffer
-    let index_buffer = if indices.is_empty() {
-        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("3Draper index buffer (empty)"),
-            contents: bytemuck::cast_slice(&[0u32]),
-            usage: wgpu::BufferUsages::INDEX,
-        })
-    } else {
-        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("3Draper index buffer"),
-            contents: bytemuck::cast_slice(indices),
-            usage: wgpu::BufferUsages::INDEX,
-        })
-    };
-
+    // ── Vertex / index buffers ──
+    let vertex_buffer = create_vertex_buffer(device, vertices);
+    let index_buffer = create_index_buffer(device, indices);
     let index_count = indices.len() as u32;
 
-    // Uniform buffer (will be updated every frame)
+    // ── Uniform buffer ──
     let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("3Draper uniform buffer"),
         contents: bytemuck::cast_slice(&[SceneUniforms {
             mvp: [[0.0; 4]; 4],
             model: [[0.0; 4]; 4],
-            light_dir: [0.3, 0.5, 0.8, 0.2],
+            light_dir: [0.3, 0.6, 0.8, 0.15],
             camera_pos: [0.0, 0.0, 0.0, 0.0],
         }]),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
 
-    // Bind group
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("3Draper uniform bind group"),
-        layout: &bind_group_layout,
+    let mesh_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("3Draper mesh bind group"),
+        layout: &mesh_bind_group_layout,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -332,51 +566,82 @@ pub fn create_scene_resources(
         ],
     });
 
-    // Depth texture (initial size, will be resized)
-    let (depth_texture, depth_texture_view) = create_depth_texture(device, 1200, 800);
+    // ── Offscreen textures (initial size) ──
+    let (offscreen_color, offscreen_depth) = create_offscreen_textures(device, 1280, 800);
 
-    // Solid pipeline (always available)
-    let pipeline = create_pipeline(
-        device, format, &shader, &bind_group_layout,
-        "3Draper solid pipeline",
-        wgpu::PrimitiveTopology::TriangleList,
-        wgpu::PolygonMode::Fill,
-    );
+    // ── Blit pipeline ──
+    let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("3Draper blit shader"),
+        source: wgpu::ShaderSource::Wgsl(BLIT_SHADER_SRC.into()),
+    });
 
-    // Wireframe pipeline — only if device supports POLYGON_MODE_LINE
-    let wireframe_pipeline = if device.features().contains(wgpu::Features::POLYGON_MODE_LINE) {
-        Some(create_pipeline(
-            device, format, &shader, &bind_group_layout,
-            "3Draper wireframe pipeline",
-            wgpu::PrimitiveTopology::TriangleList,
-            wgpu::PolygonMode::Line,
-        ))
-    } else {
-        log::warn!("Wireframe mode not supported: device lacks POLYGON_MODE_LINE feature");
-        None
-    };
+    let blit_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("3Draper blit bind group layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    multisampled: false,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+
+    let blit_pipeline = create_blit_pipeline(device, format, &blit_shader, &blit_bind_group_layout);
+
+    let blit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("3Draper blit sampler"),
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+
+    let blit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("3Draper blit bind group"),
+        layout: &blit_bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&offscreen_color),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&blit_sampler),
+            },
+        ],
+    });
 
     SceneResources {
-        pipeline,
+        mesh_pipeline,
+        wireframe_pipeline,
         vertex_buffer,
         index_buffer,
         index_count,
         uniform_buffer,
-        bind_group,
-        depth_texture,
-        depth_texture_view,
-        wireframe_pipeline,
+        mesh_bind_group,
+        mesh_bind_group_layout: blit_bind_group_layout, // Store blit layout for resize
+        offscreen_color,
+        offscreen_depth,
+        offscreen_width: 1280,
+        offscreen_height: 800,
+        blit_pipeline,
+        blit_bind_group,
+        blit_sampler,
     }
 }
 
-/// Update the mesh data in GPU buffers.
-pub fn update_mesh_buffers(
-    resources: &mut SceneResources,
-    device: &wgpu::Device,
-    vertices: &[MeshVertex],
-    indices: &[u32],
-) {
-    resources.vertex_buffer = if vertices.is_empty() {
+fn create_vertex_buffer(device: &wgpu::Device, vertices: &[MeshVertex]) -> wgpu::Buffer {
+    if vertices.is_empty() {
         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("3Draper vertex buffer (empty)"),
             contents: bytemuck::cast_slice(&[MeshVertex { position: [0.0; 3], normal: [0.0; 3] }]),
@@ -388,9 +653,11 @@ pub fn update_mesh_buffers(
             contents: bytemuck::cast_slice(vertices),
             usage: wgpu::BufferUsages::VERTEX,
         })
-    };
+    }
+}
 
-    resources.index_buffer = if indices.is_empty() {
+fn create_index_buffer(device: &wgpu::Device, indices: &[u32]) -> wgpu::Buffer {
+    if indices.is_empty() {
         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("3Draper index buffer (empty)"),
             contents: bytemuck::cast_slice(&[0u32]),
@@ -402,31 +669,26 @@ pub fn update_mesh_buffers(
             contents: bytemuck::cast_slice(indices),
             usage: wgpu::BufferUsages::INDEX,
         })
-    };
+    }
+}
 
+/// Update mesh data in GPU buffers.
+pub fn update_mesh_buffers(
+    resources: &mut SceneResources,
+    device: &wgpu::Device,
+    vertices: &[MeshVertex],
+    indices: &[u32],
+) {
+    resources.vertex_buffer = create_vertex_buffer(device, vertices);
+    resources.index_buffer = create_index_buffer(device, indices);
     resources.index_count = indices.len() as u32;
 }
 
-/// Update the uniform buffer with new MVP matrices.
+/// Update the uniform buffer.
 pub fn update_uniforms(
     resources: &SceneResources,
     queue: &wgpu::Queue,
     uniforms: &SceneUniforms,
 ) {
     queue.write_buffer(&resources.uniform_buffer, 0, bytemuck::cast_slice(&[*uniforms]));
-}
-
-/// Resize depth texture if needed.
-pub fn resize_depth_texture(
-    resources: &mut SceneResources,
-    device: &wgpu::Device,
-    width: u32,
-    height: u32,
-) {
-    if width == 0 || height == 0 {
-        return;
-    }
-    let (dt, dtv) = create_depth_texture(device, width, height);
-    resources.depth_texture = dt;
-    resources.depth_texture_view = dtv;
 }
