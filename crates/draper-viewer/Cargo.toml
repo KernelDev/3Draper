@@ -15,5 +15,9 @@ draper-core = { workspace = true }
 draper-step = { workspace = true }
 eframe = { workspace = true }
 egui = { workspace = true }
+egui-wgpu = { version = "0.31" }
+wgpu = { workspace = true }
+bytemuck = { version = "1", features = ["derive"] }
 log = { workspace = true }
 env_logger = { workspace = true }
+rfd = "0.15"
