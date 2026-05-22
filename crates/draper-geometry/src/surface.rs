@@ -1,449 +1,437 @@
-//! Surface primitives — parametric surfaces in 3D.
+//! Parametric surfaces in 3D space.
 
-use crate::curve::BSplineCurve;
-use crate::direction::Axis2Placement3D;
-use crate::point::Point3;
-use crate::transform::Transform3;
+use crate::{Direction3d, Point3d, Point2d, Vec3d, Transform, curve::Curve3d};
+use std::fmt;
 
-use serde::{Deserialize, Serialize};
-
-/// A parametric surface in 3D. Parameters (u, v) map to 3D point.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// A parametric surface: S(u,v) -> Point3d.
+#[derive(Clone, Debug)]
 pub enum Surface {
+    /// Plane: S(u,v) = origin + u*u_dir + v*v_dir
     Plane(Plane),
-    CylindricalSurface(CylindricalSurface),
-    ConicalSurface(ConicalSurface),
-    SphericalSurface(SphericalSurface),
-    ToroidalSurface(ToroidalSurface),
-    SurfaceOfRevolution(SurfaceOfRevolution),
-    SurfaceOfLinearExtrusion(SurfaceOfLinearExtrusion),
-    BSplineSurface(BSplineSurface),
-    OffsetSurface(OffsetSurface),
-    RectangularTrimmedSurface(RectangularTrimmedSurface),
+    /// Cylinder along an axis
+    Cylinder(CylinderSurface),
+    /// Cone along an axis
+    Cone(ConeSurface),
+    /// Sphere
+    Sphere(SphereSurface),
+    /// Torus
+    Torus(TorusSurface),
+    /// Surface of revolution
+    Revolution(RevolutionSurface),
+    /// Extruded surface
+    Extrusion(ExtrusionSurface),
+    /// NURBS surface
+    Nurbs(NurbsSurface),
+}
+
+/// A plane in 3D space.
+#[derive(Clone, Debug)]
+pub struct Plane {
+    pub origin: Point3d,
+    pub u_dir: Direction3d,
+    pub v_dir: Direction3d,
+    pub normal: Direction3d,
+}
+
+impl Plane {
+    /// Create a plane in the XY plane.
+    pub fn xy() -> Self {
+        Self {
+            origin: Point3d::ORIGIN,
+            u_dir: Direction3d::X,
+            v_dir: Direction3d::Y,
+            normal: Direction3d::Z,
+        }
+    }
+
+    /// Create a plane in the XZ plane.
+    pub fn xz() -> Self {
+        Self {
+            origin: Point3d::ORIGIN,
+            u_dir: Direction3d::X,
+            v_dir: Direction3d::Z,
+            normal: Direction3d::Y,
+        }
+    }
+
+    /// Create a plane in the YZ plane.
+    pub fn yz() -> Self {
+        Self {
+            origin: Point3d::ORIGIN,
+            u_dir: Direction3d::Y,
+            v_dir: Direction3d::Z,
+            normal: Direction3d::X,
+        }
+    }
+
+    /// Create a plane from origin and normal.
+    pub fn from_origin_and_normal(origin: Point3d, normal: Direction3d) -> Self {
+        let u_dir = if normal.is_parallel_to(&Direction3d::Y) {
+            normal.cross(&Direction3d::X)
+        } else {
+            normal.cross(&Direction3d::Y)
+        };
+        let v_dir = normal.cross(&u_dir);
+        Self { origin, u_dir, v_dir, normal }
+    }
+
+    /// Create a plane through three points.
+    pub fn from_three_points(p1: &Point3d, p2: &Point3d, p3: &Point3d) -> Option<Self> {
+        let v1 = Vec3d::new(p2.x - p1.x, p2.y - p1.y, p2.z - p1.z);
+        let v2 = Vec3d::new(p3.x - p1.x, p3.y - p1.y, p3.z - p1.z);
+        let normal = v1.cross(&v2).normalize()?;
+        let u_dir = v1.normalize()?;
+        let v_dir = normal.cross(&u_dir);
+        Some(Self { origin: *p1, u_dir, v_dir, normal })
+    }
+
+    pub fn point_at(&self, u: f64, v: f64) -> Point3d {
+        Point3d::new(
+            self.origin.x + u * self.u_dir.x + v * self.v_dir.x,
+            self.origin.y + u * self.u_dir.y + v * self.v_dir.y,
+            self.origin.z + u * self.u_dir.z + v * self.v_dir.z,
+        )
+    }
+
+    pub fn normal_at(&self, _u: f64, _v: f64) -> Direction3d {
+        self.normal
+    }
+}
+
+/// A cylindrical surface.
+#[derive(Clone, Debug)]
+pub struct CylinderSurface {
+    pub origin: Point3d,
+    pub axis: Direction3d,
+    pub radius: f64,
+}
+
+impl CylinderSurface {
+    /// Create a cylinder along the Z axis.
+    pub fn new_z(radius: f64) -> Self {
+        Self {
+            origin: Point3d::ORIGIN,
+            axis: Direction3d::Z,
+            radius,
+        }
+    }
+
+    /// Create a cylinder at a given origin along a given axis.
+    pub fn new(origin: Point3d, axis: Direction3d, radius: f64) -> Self {
+        Self { origin, axis, radius }
+    }
+
+    /// Evaluate: u = angle in radians [0, 2pi], v = height along axis.
+    pub fn point_at(&self, u: f64, v: f64) -> Point3d {
+        let x_dir = if self.axis.is_parallel_to(&Direction3d::Z) {
+            Direction3d::X
+        } else {
+            self.axis.cross(&Direction3d::Z)
+        };
+        let y_dir = self.axis.cross(&x_dir);
+
+        Point3d::new(
+            self.origin.x + self.radius * (u.cos() * x_dir.x + u.sin() * y_dir.x) + v * self.axis.x,
+            self.origin.y + self.radius * (u.cos() * x_dir.y + u.sin() * y_dir.y) + v * self.axis.y,
+            self.origin.z + self.radius * (u.cos() * x_dir.z + u.sin() * y_dir.z) + v * self.axis.z,
+        )
+    }
+
+    /// Normal at (u, v) — points outward.
+    pub fn normal_at(&self, u: f64, _v: f64) -> Direction3d {
+        let x_dir = if self.axis.is_parallel_to(&Direction3d::Z) {
+            Direction3d::X
+        } else {
+            self.axis.cross(&Direction3d::Z)
+        };
+        let y_dir = self.axis.cross(&x_dir);
+        Direction3d::new(
+            u.cos() * x_dir.x + u.sin() * y_dir.x,
+            u.cos() * x_dir.y + u.sin() * y_dir.y,
+            u.cos() * x_dir.z + u.sin() * y_dir.z,
+        ).unwrap_or(Direction3d::X)
+    }
+
+    /// Parametric range: u in [0, 2pi], v in [-inf, inf].
+    pub fn u_range(&self) -> (f64, f64) {
+        (0.0, 2.0 * std::f64::consts::PI)
+    }
+}
+
+/// A conical surface.
+#[derive(Clone, Debug)]
+pub struct ConeSurface {
+    pub apex: Point3d,
+    pub axis: Direction3d,
+    pub half_angle: f64, // radians
+    pub radius: f64,     // radius at v=0
+}
+
+impl ConeSurface {
+    pub fn new_z(radius: f64, half_angle: f64) -> Self {
+        Self {
+            apex: Point3d::new(0.0, 0.0, -radius / half_angle.tan()),
+            axis: Direction3d::Z,
+            half_angle,
+            radius,
+        }
+    }
+
+    pub fn point_at(&self, u: f64, v: f64) -> Point3d {
+        let r = self.radius + v * self.half_angle.tan();
+        let x_dir = if self.axis.is_parallel_to(&Direction3d::Z) {
+            Direction3d::X
+        } else {
+            self.axis.cross(&Direction3d::Z)
+        };
+        let y_dir = self.axis.cross(&x_dir);
+
+        Point3d::new(
+            self.apex.x + r * (u.cos() * x_dir.x + u.sin() * y_dir.x) + v * self.axis.x,
+            self.apex.y + r * (u.cos() * x_dir.y + u.sin() * y_dir.y) + v * self.axis.y,
+            self.apex.z + r * (u.cos() * x_dir.z + u.sin() * y_dir.z) + v * self.axis.z,
+        )
+    }
+}
+
+/// A spherical surface.
+#[derive(Clone, Debug)]
+pub struct SphereSurface {
+    pub center: Point3d,
+    pub radius: f64,
+}
+
+impl SphereSurface {
+    pub fn new(center: Point3d, radius: f64) -> Self {
+        Self { center, radius }
+    }
+
+    /// Evaluate: u = azimuthal angle [0, 2pi], v = polar angle [0, pi].
+    pub fn point_at(&self, u: f64, v: f64) -> Point3d {
+        Point3d::new(
+            self.center.x + self.radius * v.sin() * u.cos(),
+            self.center.y + self.radius * v.sin() * u.sin(),
+            self.center.z + self.radius * v.cos(),
+        )
+    }
+
+    pub fn normal_at(&self, u: f64, v: f64) -> Direction3d {
+        Direction3d::new(
+            v.sin() * u.cos(),
+            v.sin() * u.sin(),
+            v.cos(),
+        ).unwrap_or(Direction3d::Z)
+    }
+}
+
+/// A toroidal surface.
+#[derive(Clone, Debug)]
+pub struct TorusSurface {
+    pub center: Point3d,
+    pub axis: Direction3d,
+    pub major_radius: f64, // R — distance from center to tube center
+    pub minor_radius: f64, // r — tube radius
+}
+
+impl TorusSurface {
+    pub fn new_z(center: Point3d, major_radius: f64, minor_radius: f64) -> Self {
+        Self { center, axis: Direction3d::Z, major_radius, minor_radius }
+    }
+
+    /// Evaluate: u = angle around main ring [0, 2pi], v = angle around tube [0, 2pi].
+    pub fn point_at(&self, u: f64, v: f64) -> Point3d {
+        let x_dir = Direction3d::X;
+        let y_dir = Direction3d::Y;
+        let r = self.major_radius + self.minor_radius * v.cos();
+        Point3d::new(
+            self.center.x + r * u.cos() * x_dir.x + r * u.sin() * y_dir.x,
+            self.center.y + r * u.cos() * x_dir.y + r * u.sin() * y_dir.y,
+            self.center.z + self.minor_radius * v.sin(),
+        )
+    }
+
+    pub fn normal_at(&self, u: f64, v: f64) -> Direction3d {
+        let x_dir = Direction3d::X;
+        let y_dir = Direction3d::Y;
+        let nx = v.cos() * u.cos() * x_dir.x + v.cos() * u.sin() * y_dir.x;
+        let ny = v.cos() * u.cos() * x_dir.y + v.cos() * u.sin() * y_dir.y;
+        let nz = v.sin();
+        Direction3d::new(nx, ny, nz).unwrap_or(Direction3d::Z)
+    }
+}
+
+/// Surface of revolution.
+#[derive(Clone, Debug)]
+pub struct RevolutionSurface {
+    /// The profile curve in the XZ plane (revolved around Z axis).
+    pub profile: Curve3d,
+    /// Axis of revolution.
+    pub axis: Direction3d,
+    /// Origin point on the axis.
+    pub origin: Point3d,
+}
+
+impl RevolutionSurface {
+    pub fn new(profile: Curve3d, axis: Direction3d, origin: Point3d) -> Self {
+        Self { profile, axis, origin }
+    }
+
+    /// Evaluate: u = revolution angle [0, 2pi], v = parameter on profile curve.
+    pub fn point_at(&self, u: f64, v: f64) -> Point3d {
+        let p = self.profile.point_at(v);
+        // Profile is in XZ plane, revolve around Z
+        let cos_u = u.cos();
+        let sin_u = u.sin();
+        Point3d::new(
+            self.origin.x + p.x * cos_u,
+            self.origin.y + p.x * sin_u,
+            self.origin.z + p.z,
+        )
+    }
+}
+
+/// Extruded surface — a curve swept along a direction.
+#[derive(Clone, Debug)]
+pub struct ExtrusionSurface {
+    /// The profile curve.
+    pub profile: Curve3d,
+    /// Direction of extrusion.
+    pub direction: Direction3d,
+}
+
+impl ExtrusionSurface {
+    pub fn new(profile: Curve3d, direction: Direction3d) -> Self {
+        Self { profile, direction }
+    }
+
+    /// Evaluate: u = parameter on profile curve, v = extrusion distance.
+    pub fn point_at(&self, u: f64, v: f64) -> Point3d {
+        let p = self.profile.point_at(u);
+        Point3d::new(
+            p.x + v * self.direction.x,
+            p.y + v * self.direction.y,
+            p.z + v * self.direction.z,
+        )
+    }
+}
+
+/// NURBS surface.
+#[derive(Clone, Debug)]
+pub struct NurbsSurface {
+    pub u_degree: usize,
+    pub v_degree: usize,
+    pub control_points: Vec<Vec<Point3d>>,
+    pub weights: Vec<Vec<f64>>,
+    pub u_knots: Vec<f64>,
+    pub v_knots: Vec<f64>,
 }
 
 impl Surface {
-    /// Evaluate the surface at parameters (u, v).
-    pub fn point_at(&self, u: f64, v: f64) -> Point3 {
+    /// Evaluate the surface at (u, v).
+    pub fn point_at(&self, u: f64, v: f64) -> Point3d {
         match self {
-            Surface::Plane(s) => s.point_at(u, v),
-            Surface::CylindricalSurface(s) => s.point_at(u, v),
-            Surface::ConicalSurface(s) => s.point_at(u, v),
-            Surface::SphericalSurface(s) => s.point_at(u, v),
-            Surface::ToroidalSurface(s) => s.point_at(u, v),
-            Surface::SurfaceOfRevolution(s) => s.point_at(u, v),
-            Surface::SurfaceOfLinearExtrusion(s) => s.point_at(u, v),
-            Surface::BSplineSurface(s) => s.point_at(u, v),
-            Surface::OffsetSurface(s) => s.point_at(u, v),
-            Surface::RectangularTrimmedSurface(s) => s.basis_surface.point_at(
-                s.u1 + u * (s.u2 - s.u1),
-                s.v1 + v * (s.v2 - s.v1),
-            ),
+            Surface::Plane(p) => p.point_at(u, v),
+            Surface::Cylinder(c) => c.point_at(u, v),
+            Surface::Cone(c) => c.point_at(u, v),
+            Surface::Sphere(s) => s.point_at(u, v),
+            Surface::Torus(t) => t.point_at(u, v),
+            Surface::Revolution(r) => r.point_at(u, v),
+            Surface::Extrusion(e) => e.point_at(u, v),
+            Surface::Nurbs(n) => nurbs_surface_eval(n, u, v),
         }
     }
 
-    /// Compute the surface normal at (u, v) via finite differences.
-    pub fn normal_at(&self, u: f64, v: f64) -> crate::direction::Direction3 {
-        let eps = 1e-5;
-        let p = self.point_at(u, v);
-        let pu = self.point_at(u + eps, v);
-        let pv = self.point_at(u, v + eps);
-
-        let du = pu - p;
-        let dv = pv - p;
-
-        let normal = du.cross(dv);
-        crate::direction::Direction3::new(normal.x, normal.y, normal.z)
-            .unwrap_or(crate::direction::Direction3::Z)
-    }
-
-    /// Get approximate bounding box by sampling the surface.
-    pub fn bounding_box(&self, u_samples: usize, v_samples: usize) -> crate::point::BoundingBox3 {
-        let mut bb = crate::point::BoundingBox3::empty();
-        for i in 0..=u_samples {
-            for j in 0..=v_samples {
-                let u = i as f64 / u_samples as f64;
-                let v = j as f64 / v_samples as f64;
-                bb.extend(self.point_at(u, v));
+    /// Get the surface normal at (u, v).
+    pub fn normal_at(&self, u: f64, v: f64) -> Direction3d {
+        match self {
+            Surface::Plane(p) => p.normal_at(u, v),
+            Surface::Cylinder(c) => c.normal_at(u, v),
+            Surface::Sphere(s) => s.normal_at(u, v),
+            Surface::Torus(t) => t.normal_at(u, v),
+            _ => {
+                // Numerical differentiation fallback
+                let eps = 1e-7;
+                let p0 = self.point_at(u, v);
+                let pu = self.point_at(u + eps, v);
+                let pv = self.point_at(u, v + eps);
+                let du = Vec3d::new(pu.x - p0.x, pu.y - p0.y, pu.z - p0.z);
+                let dv = Vec3d::new(pv.x - p0.x, pv.y - p0.y, pv.z - p0.z);
+                du.cross(&dv).normalize().unwrap_or(Direction3d::Z)
             }
         }
-        bb
     }
 
-    pub fn transform(&self, tf: &Transform3) -> Surface {
+    /// Check if the surface is periodic in u.
+    pub fn is_u_periodic(&self) -> bool {
+        matches!(self, Surface::Cylinder(_) | Surface::Cone(_) | Surface::Sphere(_) | Surface::Torus(_) | Surface::Revolution(_))
+    }
+
+    /// Check if the surface is periodic in v.
+    pub fn is_v_periodic(&self) -> bool {
+        matches!(self, Surface::Sphere(_) | Surface::Torus(_))
+    }
+
+    /// Transform the surface.
+    pub fn transform(&self, t: &Transform) -> Surface {
         match self {
-            Surface::Plane(s) => Surface::Plane(s.transform(tf)),
-            Surface::CylindricalSurface(s) => Surface::CylindricalSurface(s.transform(tf)),
-            Surface::ConicalSurface(s) => Surface::ConicalSurface(s.transform(tf)),
-            Surface::SphericalSurface(s) => Surface::SphericalSurface(s.transform(tf)),
-            Surface::ToroidalSurface(s) => Surface::ToroidalSurface(s.transform(tf)),
-            Surface::SurfaceOfRevolution(s) => Surface::SurfaceOfRevolution(s.transform(tf)),
-            Surface::SurfaceOfLinearExtrusion(s) => Surface::SurfaceOfLinearExtrusion(s.transform(tf)),
-            Surface::BSplineSurface(s) => Surface::BSplineSurface(s.transform(tf)),
-            Surface::OffsetSurface(s) => Surface::OffsetSurface(s.transform(tf)),
-            Surface::RectangularTrimmedSurface(s) => Surface::RectangularTrimmedSurface(RectangularTrimmedSurface {
-                basis_surface: Box::new(s.basis_surface.transform(tf)),
-                u1: s.u1,
-                u2: s.u2,
-                v1: s.v1,
-                v2: s.v2,
+            Surface::Plane(p) => Surface::Plane(Plane {
+                origin: t.transform_point(&p.origin),
+                u_dir: t.transform_direction(&p.u_dir),
+                v_dir: t.transform_direction(&p.v_dir),
+                normal: t.transform_direction(&p.normal),
+            }),
+            Surface::Cylinder(c) => Surface::Cylinder(CylinderSurface {
+                origin: t.transform_point(&c.origin),
+                axis: t.transform_direction(&c.axis),
+                radius: c.radius,
+            }),
+            Surface::Cone(c) => Surface::Cone(ConeSurface {
+                apex: t.transform_point(&c.apex),
+                axis: t.transform_direction(&c.axis),
+                half_angle: c.half_angle,
+                radius: c.radius,
+            }),
+            Surface::Sphere(s) => Surface::Sphere(SphereSurface {
+                center: t.transform_point(&s.center),
+                radius: s.radius,
+            }),
+            Surface::Torus(tor) => Surface::Torus(TorusSurface {
+                center: t.transform_point(&tor.center),
+                axis: t.transform_direction(&tor.axis),
+                major_radius: tor.major_radius,
+                minor_radius: tor.minor_radius,
+            }),
+            Surface::Revolution(r) => Surface::Revolution(RevolutionSurface {
+                profile: r.profile.transform(t),
+                axis: t.transform_direction(&r.axis),
+                origin: t.transform_point(&r.origin),
+            }),
+            Surface::Extrusion(e) => Surface::Extrusion(ExtrusionSurface {
+                profile: e.profile.transform(t),
+                direction: t.transform_direction(&e.direction),
+            }),
+            Surface::Nurbs(n) => Surface::Nurbs(NurbsSurface {
+                u_degree: n.u_degree,
+                v_degree: n.v_degree,
+                control_points: n.control_points.iter().map(|row| {
+                    row.iter().map(|p| t.transform_point(p)).collect()
+                }).collect(),
+                weights: n.weights.clone(),
+                u_knots: n.u_knots.clone(),
+                v_knots: n.v_knots.clone(),
             }),
         }
     }
 }
 
-/// A plane defined by a position and normal.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Plane {
-    pub axis: Axis2Placement3D,
-}
-
-impl Plane {
-    pub fn new(axis: Axis2Placement3D) -> Self {
-        Self { axis }
+/// Simple NURBS surface evaluation (placeholder — uses bilinear interpolation for now).
+fn nurbs_surface_eval(nurbs: &NurbsSurface, u: f64, v: f64) -> Point3d {
+    // Simplified: just return the closest control point for now
+    // A full implementation would use de Boor's algorithm in 2D
+    if nurbs.control_points.is_empty() || nurbs.control_points[0].is_empty() {
+        return Point3d::ORIGIN;
     }
-
-    /// u and v are distances along the local X and Y axes from the origin.
-    pub fn point_at(&self, u: f64, v: f64) -> Point3 {
-        let center = self.axis.location.to_dvec3();
-        let x = self.axis.ref_direction.to_dvec3();
-        let y = self.axis.y_direction().to_dvec3();
-        Point3::from_dvec3(center + x * u + y * v)
-    }
-
-    pub fn transform(&self, tf: &Transform3) -> Plane {
-        Plane {
-            axis: Axis2Placement3D {
-                location: tf.transform_point(self.axis.location),
-                axis: tf.transform_direction(self.axis.axis),
-                ref_direction: tf.transform_direction(self.axis.ref_direction),
-            },
-        }
-    }
-}
-
-/// A cylindrical surface.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CylindricalSurface {
-    pub axis: Axis2Placement3D,
-    pub radius: f64,
-}
-
-impl CylindricalSurface {
-    pub fn new(axis: Axis2Placement3D, radius: f64) -> Self {
-        Self { axis, radius }
-    }
-
-    /// u = angle (0 to 2PI), v = distance along axis.
-    pub fn point_at(&self, u: f64, v: f64) -> Point3 {
-        let center = self.axis.location.to_dvec3();
-        let x = self.axis.ref_direction.to_dvec3();
-        let y = self.axis.y_direction().to_dvec3();
-        let z = self.axis.axis.to_dvec3();
-
-        Point3::from_dvec3(
-            center + x * (self.radius * u.cos()) + y * (self.radius * u.sin()) + z * v,
-        )
-    }
-
-    pub fn transform(&self, tf: &Transform3) -> CylindricalSurface {
-        CylindricalSurface {
-            axis: Axis2Placement3D {
-                location: tf.transform_point(self.axis.location),
-                axis: tf.transform_direction(self.axis.axis),
-                ref_direction: tf.transform_direction(self.axis.ref_direction),
-            },
-            radius: self.radius * tf.scale(),
-        }
-    }
-}
-
-/// A conical surface.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ConicalSurface {
-    pub axis: Axis2Placement3D,
-    pub radius: f64,
-    pub semi_angle: f64, // Half-angle of the cone
-}
-
-impl ConicalSurface {
-    pub fn new(axis: Axis2Placement3D, radius: f64, semi_angle: f64) -> Self {
-        Self { axis, radius, semi_angle }
-    }
-
-    /// u = angle (0 to 2PI), v = distance along axis.
-    pub fn point_at(&self, u: f64, v: f64) -> Point3 {
-        let center = self.axis.location.to_dvec3();
-        let x = self.axis.ref_direction.to_dvec3();
-        let y = self.axis.y_direction().to_dvec3();
-        let z = self.axis.axis.to_dvec3();
-
-        let r = self.radius + v * self.semi_angle.tan();
-        Point3::from_dvec3(
-            center + x * (r * u.cos()) + y * (r * u.sin()) + z * v,
-        )
-    }
-
-    pub fn transform(&self, tf: &Transform3) -> ConicalSurface {
-        ConicalSurface {
-            axis: Axis2Placement3D {
-                location: tf.transform_point(self.axis.location),
-                axis: tf.transform_direction(self.axis.axis),
-                ref_direction: tf.transform_direction(self.axis.ref_direction),
-            },
-            radius: self.radius * tf.scale(),
-            semi_angle: self.semi_angle,
-        }
-    }
-}
-
-/// A spherical surface.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SphericalSurface {
-    pub axis: Axis2Placement3D,
-    pub radius: f64,
-}
-
-impl SphericalSurface {
-    pub fn new(axis: Axis2Placement3D, radius: f64) -> Self {
-        Self { axis, radius }
-    }
-
-    /// u = azimuthal angle (0 to 2PI), v = polar angle (-PI/2 to PI/2).
-    pub fn point_at(&self, u: f64, v: f64) -> Point3 {
-        let center = self.axis.location.to_dvec3();
-        let x = self.axis.ref_direction.to_dvec3();
-        let y = self.axis.y_direction().to_dvec3();
-        let z = self.axis.axis.to_dvec3();
-
-        let r = self.radius;
-        let cos_v = v.cos();
-        Point3::from_dvec3(
-            center + x * (r * cos_v * u.cos())
-                + y * (r * cos_v * u.sin())
-                + z * (r * v.sin()),
-        )
-    }
-
-    pub fn transform(&self, tf: &Transform3) -> SphericalSurface {
-        SphericalSurface {
-            axis: Axis2Placement3D {
-                location: tf.transform_point(self.axis.location),
-                axis: tf.transform_direction(self.axis.axis),
-                ref_direction: tf.transform_direction(self.axis.ref_direction),
-            },
-            radius: self.radius * tf.scale(),
-        }
-    }
-}
-
-/// A toroidal surface.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ToroidalSurface {
-    pub axis: Axis2Placement3D,
-    pub major_radius: f64,
-    pub minor_radius: f64,
-}
-
-impl ToroidalSurface {
-    pub fn new(axis: Axis2Placement3D, major_radius: f64, minor_radius: f64) -> Self {
-        Self { axis, major_radius, minor_radius }
-    }
-
-    /// u = angle around the main axis (0 to 2PI),
-    /// v = angle around the tube (0 to 2PI).
-    pub fn point_at(&self, u: f64, v: f64) -> Point3 {
-        let center = self.axis.location.to_dvec3();
-        let x = self.axis.ref_direction.to_dvec3();
-        let y = self.axis.y_direction().to_dvec3();
-        let z = self.axis.axis.to_dvec3();
-
-        let r = self.major_radius;
-        let minor_r = self.minor_radius;
-
-        Point3::from_dvec3(
-            center
-                + x * ((r + minor_r * v.cos()) * u.cos())
-                + y * ((r + minor_r * v.cos()) * u.sin())
-                + z * (minor_r * v.sin()),
-        )
-    }
-
-    pub fn transform(&self, tf: &Transform3) -> ToroidalSurface {
-        ToroidalSurface {
-            axis: Axis2Placement3D {
-                location: tf.transform_point(self.axis.location),
-                axis: tf.transform_direction(self.axis.axis),
-                ref_direction: tf.transform_direction(self.axis.ref_direction),
-            },
-            major_radius: self.major_radius * tf.scale(),
-            minor_radius: self.minor_radius * tf.scale(),
-        }
-    }
-}
-
-/// A surface of revolution.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SurfaceOfRevolution {
-    /// The profile curve that is revolved.
-    pub generatrix: crate::curve::Curve,
-    /// The axis of revolution.
-    pub axis: Axis2Placement3D,
-}
-
-impl SurfaceOfRevolution {
-    /// u = angle of revolution (0 to 2PI), v = parameter along the profile curve.
-    pub fn point_at(&self, u: f64, v: f64) -> Point3 {
-        let profile_pt = self.generatrix.point_at(v);
-        let center = self.axis.location.to_dvec3();
-        let x = self.axis.ref_direction.to_dvec3();
-        let y = self.axis.y_direction().to_dvec3();
-        let z = self.axis.axis.to_dvec3();
-
-        // Project profile point onto the axis coordinate system
-        let rel = profile_pt.to_dvec3() - center;
-        let along = rel.dot(z); // distance along axis
-        let perp_x = rel.dot(x); // distance in X direction
-        let perp_y = rel.dot(y); // distance in Y direction
-        let radius = (perp_x * perp_x + perp_y * perp_y).sqrt();
-
-        Point3::from_dvec3(
-            center + x * (radius * u.cos()) + y * (radius * u.sin()) + z * along,
-        )
-    }
-
-    pub fn transform(&self, tf: &Transform3) -> SurfaceOfRevolution {
-        SurfaceOfRevolution {
-            generatrix: self.generatrix.transform(tf),
-            axis: Axis2Placement3D {
-                location: tf.transform_point(self.axis.location),
-                axis: tf.transform_direction(self.axis.axis),
-                ref_direction: tf.transform_direction(self.axis.ref_direction),
-            },
-        }
-    }
-}
-
-/// A surface of linear extrusion.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SurfaceOfLinearExtrusion {
-    /// The profile curve that is extruded.
-    pub generatrix: crate::curve::Curve,
-    /// The direction of extrusion.
-    pub direction: crate::direction::Direction3,
-}
-
-impl SurfaceOfLinearExtrusion {
-    /// u = parameter along profile curve, v = distance along extrusion direction.
-    pub fn point_at(&self, u: f64, v: f64) -> Point3 {
-        let profile_pt = self.generatrix.point_at(u);
-        profile_pt + self.direction.to_dvec3() * v
-    }
-
-    pub fn transform(&self, tf: &Transform3) -> SurfaceOfLinearExtrusion {
-        SurfaceOfLinearExtrusion {
-            generatrix: self.generatrix.transform(tf),
-            direction: tf.transform_direction(self.direction),
-        }
-    }
-}
-
-/// A B-Spline surface.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct BSplineSurface {
-    pub poles: Vec<Vec<Point3>>,
-    pub u_knots: Vec<f64>,
-    pub v_knots: Vec<f64>,
-    pub u_multiplicities: Vec<u32>,
-    pub v_multiplicities: Vec<u32>,
-    pub u_degree: u32,
-    pub v_degree: u32,
-    pub u_periodic: bool,
-    pub v_periodic: bool,
-}
-
-impl BSplineSurface {
-    /// Evaluate using tensor product of De Boor's algorithm.
-    pub fn point_at(&self, u: f64, v: f64) -> Point3 {
-        // Evaluate each row at parameter u to get intermediate points,
-        // then evaluate those at parameter v.
-        let n_rows = self.poles.len();
-        if n_rows == 0 {
-            return Point3::ORIGIN;
-        }
-
-        let intermediate: Vec<Point3> = self
-            .poles
-            .iter()
-            .map(|row| {
-                let curve = BSplineCurve {
-                    poles: row.clone(),
-                    knots: self.u_knots.clone(),
-                    multiplicities: self.u_multiplicities.clone(),
-                    degree: self.u_degree,
-                    periodic: self.u_periodic,
-                };
-                curve.point_at(u)
-            })
-            .collect();
-
-        let v_curve = BSplineCurve {
-            poles: intermediate,
-            knots: self.v_knots.clone(),
-            multiplicities: self.v_multiplicities.clone(),
-            degree: self.v_degree,
-            periodic: self.v_periodic,
-        };
-        v_curve.point_at(v)
-    }
-
-    pub fn transform(&self, tf: &Transform3) -> BSplineSurface {
-        BSplineSurface {
-            poles: self
-                .poles
-                .iter()
-                .map(|row| row.iter().map(|p| tf.transform_point(*p)).collect())
-                .collect(),
-            u_knots: self.u_knots.clone(),
-            v_knots: self.v_knots.clone(),
-            u_multiplicities: self.u_multiplicities.clone(),
-            v_multiplicities: self.v_multiplicities.clone(),
-            u_degree: self.u_degree,
-            v_degree: self.v_degree,
-            u_periodic: self.u_periodic,
-            v_periodic: self.v_periodic,
-        }
-    }
-}
-
-/// An offset surface.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct OffsetSurface {
-    pub basis_surface: Box<Surface>,
-    pub distance: f64,
-}
-
-impl OffsetSurface {
-    pub fn point_at(&self, u: f64, v: f64) -> Point3 {
-        let base_pt = self.basis_surface.point_at(u, v);
-        let normal = self.basis_surface.normal_at(u, v);
-        base_pt + normal.to_dvec3() * self.distance
-    }
-
-    pub fn transform(&self, tf: &Transform3) -> OffsetSurface {
-        OffsetSurface {
-            basis_surface: Box::new(self.basis_surface.transform(tf)),
-            distance: self.distance * tf.scale(),
-        }
-    }
-}
-
-/// A rectangularly trimmed surface.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RectangularTrimmedSurface {
-    pub basis_surface: Box<Surface>,
-    pub u1: f64,
-    pub u2: f64,
-    pub v1: f64,
-    pub v2: f64,
+    let ni = ((u * nurbs.control_points.len() as f64) as usize).min(nurbs.control_points.len() - 1);
+    let nj = ((v * nurbs.control_points[0].len() as f64) as usize).min(nurbs.control_points[0].len() - 1);
+    nurbs.control_points[ni][nj]
 }

@@ -2,10 +2,9 @@
 name = "draper-geometry"
 version.workspace = true
 edition.workspace = true
-description = "Custom geometry kernel for 3Draper — points, curves, surfaces, transforms"
 
 [dependencies]
-glam = { workspace = true }
+nalgebra = { workspace = true }
+num-traits = { workspace = true }
+approx = { workspace = true }
 thiserror = { workspace = true }
-log = { workspace = true }
-serde = { workspace = true }

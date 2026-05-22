@@ -1,127 +1,74 @@
-//! Shape traversal — iterate over the B-rep hierarchy.
+//! Topology traversal utilities.
 
 use crate::entity::*;
-use crate::shape::Shape;
+use draper_geometry::Point3d;
 
-/// Visitor pattern for traversing a shape's topology.
-pub trait TopoVisitor {
-    fn visit_vertex(&mut self, _vertex: &Vertex, _shape: &Shape) {}
-    fn visit_edge(&mut self, _edge: &Edge, _shape: &Shape) {}
-    fn visit_wire(&mut self, _wire: &Wire, _shape: &Shape) {}
-    fn visit_face(&mut self, _face: &Face, _shape: &Shape) {}
-    fn visit_shell(&mut self, _shell: &Shell, _shape: &Shape) {}
-    fn visit_solid(&mut self, _solid: &Solid, _shape: &Shape) {}
-    fn visit_compound(&mut self, _compound: &Compound, _shape: &Shape) {}
+/// Traverse all faces of a solid.
+pub fn solid_faces(solid: &Solid) -> Vec<&Face> {
+    solid.faces()
 }
 
-/// Traverse the entire shape, calling the visitor for each entity.
-pub fn traverse_shape(shape: &Shape, visitor: &mut dyn TopoVisitor) {
-    for entity in shape.entities.values() {
-        match entity {
-            TopoShape::Vertex(v) => visitor.visit_vertex(v, shape),
-            TopoShape::Edge(e) => visitor.visit_edge(e, shape),
-            TopoShape::Wire(w) => visitor.visit_wire(w, shape),
-            TopoShape::Face(f) => visitor.visit_face(f, shape),
-            TopoShape::Shell(s) => visitor.visit_shell(&s, shape),
-            TopoShape::Solid(s) => visitor.visit_solid(&s, shape),
-            TopoShape::Compound(c) => visitor.visit_compound(&c, shape),
+/// Traverse all edges of a face (from its wires).
+pub fn face_edges(face: &Face) -> Vec<TopoId> {
+    let mut edges = Vec::new();
+    if let Some(ref wire) = face.outer_wire {
+        for coedge in &wire.coedges {
+            edges.push(coedge.edge);
         }
     }
-}
-
-/// Traverse the shape starting from a specific entity, following references.
-pub fn traverse_from(shape: &Shape, id: TopoId, visitor: &mut dyn TopoVisitor) {
-    if let Some(entity) = shape.get(id) {
-        match entity {
-            TopoShape::Solid(solid) => {
-                visitor.visit_solid(solid, shape);
-                if let Some(TopoShape::Shell(shell)) = shape.get(solid.outer_shell) {
-                    visitor.visit_shell(shell, shape);
-                    for &face_id in &shell.faces {
-                        if let Some(TopoShape::Face(face)) = shape.get(face_id) {
-                            visitor.visit_face(face, shape);
-                            if let Some(wire_id) = face.outer_wire {
-                                traverse_wire(shape, wire_id, visitor);
-                            }
-                            for &wire_id in &face.inner_wires {
-                                traverse_wire(shape, wire_id, visitor);
-                            }
-                        }
-                    }
-                }
-            }
-            TopoShape::Compound(compound) => {
-                visitor.visit_compound(compound, shape);
-                for &child_id in &compound.children {
-                    traverse_from(shape, child_id, visitor);
-                }
-            }
-            _ => {}
+    for wire in &face.inner_wires {
+        for coedge in &wire.coedges {
+            edges.push(coedge.edge);
         }
     }
+    edges
 }
 
-fn traverse_wire(shape: &Shape, wire_id: TopoId, visitor: &mut dyn TopoVisitor) {
-    if let Some(TopoShape::Wire(wire)) = shape.get(wire_id) {
-        visitor.visit_wire(wire, shape);
-        for oriented_edge in &wire.edges {
-            if let Some(TopoShape::Edge(edge)) = shape.get(oriented_edge.edge_id) {
-                visitor.visit_edge(edge, shape);
-                if let Some(TopoShape::Vertex(v)) = shape.get(edge.start_vertex) {
-                    visitor.visit_vertex(v, shape);
-                }
-                if let Some(TopoShape::Vertex(v)) = shape.get(edge.end_vertex) {
-                    visitor.visit_vertex(v, shape);
+/// Traverse all faces of a compound.
+pub fn compound_faces(compound: &Compound) -> Vec<&Face> {
+    let mut faces = Vec::new();
+    for solid in &compound.solids {
+        faces.extend(solid.faces());
+    }
+    for sub in &compound.compounds {
+        faces.extend(compound_faces(sub));
+    }
+    faces
+}
+
+/// Traverse all solids of a compound (recursively).
+pub fn compound_solids(compound: &Compound) -> Vec<&Solid> {
+    let mut solids = Vec::new();
+    solids.extend(&compound.solids);
+    for sub in &compound.compounds {
+        solids.extend(compound_solids(sub));
+    }
+    solids
+}
+
+/// Get the bounding box of a solid (approximate).
+pub fn solid_bounding_box(solid: &Solid, n_samples: usize) -> (Point3d, Point3d) {
+    let mut min = Point3d::new(f64::MAX, f64::MAX, f64::MAX);
+    let mut max = Point3d::new(f64::MIN, f64::MIN, f64::MIN);
+
+    for face in solid.faces() {
+        if let Some(ref surface) = face.surface {
+            // Sample the surface
+            for i in 0..=n_samples {
+                for j in 0..=n_samples {
+                    let u = i as f64 / n_samples as f64;
+                    let v = j as f64 / n_samples as f64;
+                    let p = surface.point_at(u * 2.0 * std::f64::consts::PI, v * std::f64::consts::PI);
+                    min.x = min.x.min(p.x);
+                    min.y = min.y.min(p.y);
+                    min.z = min.z.min(p.z);
+                    max.x = max.x.max(p.x);
+                    max.y = max.y.max(p.y);
+                    max.z = max.z.max(p.z);
                 }
             }
         }
     }
-}
 
-/// A simple visitor that counts each type of entity.
-#[derive(Debug, Default)]
-pub struct CountVisitor {
-    pub vertices: usize,
-    pub edges: usize,
-    pub wires: usize,
-    pub faces: usize,
-    pub shells: usize,
-    pub solids: usize,
-    pub compounds: usize,
-}
-
-impl TopoVisitor for CountVisitor {
-    fn visit_vertex(&mut self, _: &Vertex, _: &Shape) {
-        self.vertices += 1;
-    }
-    fn visit_edge(&mut self, _: &Edge, _: &Shape) {
-        self.edges += 1;
-    }
-    fn visit_wire(&mut self, _: &Wire, _: &Shape) {
-        self.wires += 1;
-    }
-    fn visit_face(&mut self, _: &Face, _: &Shape) {
-        self.faces += 1;
-    }
-    fn visit_shell(&mut self, _: &Shell, _: &Shape) {
-        self.shells += 1;
-    }
-    fn visit_solid(&mut self, _: &Solid, _: &Shape) {
-        self.solids += 1;
-    }
-    fn visit_compound(&mut self, _: &Compound, _: &Shape) {
-        self.compounds += 1;
-    }
-}
-
-/// A visitor that collects all vertex points.
-#[derive(Debug, Default)]
-pub struct VertexCollector {
-    pub points: Vec<draper_geometry::point::Point3>,
-}
-
-impl TopoVisitor for VertexCollector {
-    fn visit_vertex(&mut self, vertex: &Vertex, _: &Shape) {
-        self.points.push(vertex.point);
-    }
+    (min, max)
 }

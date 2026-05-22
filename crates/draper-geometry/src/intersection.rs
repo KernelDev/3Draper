@@ -1,172 +1,174 @@
-//! Intersection and projection utilities.
-//!
-//! Provides algorithms for computing intersections between geometric primitives
-//! and projecting points onto curves and surfaces.
+//! Geometric intersection algorithms.
 
-use crate::curve::Curve;
-use crate::direction::Direction3;
-use crate::point::Point3;
-use crate::surface::Surface;
+use crate::{Point3d, Direction3d, Vec3d, curve::*, surface::*, tolerance::TOLERANCE};
 
-/// Result of an intersection computation.
-#[derive(Debug, Clone)]
-pub struct IntersectionPoint {
-    pub point: Point3,
-    pub u1: f64,
-    pub v1: Option<f64>,
-    pub u2: f64,
-    pub v2: Option<f64>,
+/// Result of a curve-curve intersection.
+#[derive(Clone, Debug)]
+pub struct CurveCurveIntersection {
+    pub point: Point3d,
+    pub param1: f64,
+    pub param2: f64,
 }
 
-/// Find the intersection of a ray with a surface.
-/// Returns a list of (parameter on surface u, v, t along ray) tuples.
-pub fn ray_surface_intersection(
-    ray_origin: Point3,
-    ray_direction: Direction3,
-    surface: &Surface,
-    tolerance: f64,
-) -> Vec<(f64, f64, f64)> {
-    // Use Newton-Raphson iteration on the surface
-    // For now, use a grid-based search followed by refinement
-    let mut results = Vec::new();
-
-    let grid_size = 20;
-    for i in 0..grid_size {
-        for j in 0..grid_size {
-            let u = i as f64 / (grid_size - 1) as f64;
-            let v = j as f64 / (grid_size - 1) as f64;
-
-            let surf_pt = surface.point_at(u, v);
-            let to_point = surf_pt - ray_origin;
-            let t = to_point.dot(ray_direction.to_dvec3());
-
-            if t < 0.0 {
-                continue;
-            }
-
-            let closest_on_ray = ray_origin + ray_direction.to_dvec3() * t;
-            let dist = closest_on_ray.distance_to(surf_pt);
-
-            if dist < tolerance {
-                results.push((u, v, t));
-            }
-        }
-    }
-
-    results
+/// Result of a curve-surface intersection.
+#[derive(Clone, Debug)]
+pub struct CurveSurfaceIntersection {
+    pub point: Point3d,
+    pub curve_param: f64,
+    pub surface_u: f64,
+    pub surface_v: f64,
 }
 
-/// Project a point onto a surface, returning the closest (u, v) parameters.
-pub fn project_point_to_surface(
-    point: Point3,
-    surface: &Surface,
-    tolerance: f64,
-    max_iterations: usize,
-) -> Option<(f64, f64)> {
-    // Initial guess: sample the surface and find the closest point
-    let mut best_u = 0.5;
-    let mut best_v = 0.5;
-    let mut best_dist = f64::MAX;
-
-    let grid_size = 20;
-    for i in 0..=grid_size {
-        for j in 0..=grid_size {
-            let u = i as f64 / grid_size as f64;
-            let v = j as f64 / grid_size as f64;
-            let surf_pt = surface.point_at(u, v);
-            let dist = point.distance_to(surf_pt);
-            if dist < best_dist {
-                best_dist = dist;
-                best_u = u;
-                best_v = v;
-            }
-        }
-    }
-
-    // Newton-Raphson refinement
-    let eps = 1e-7;
-    for _ in 0..max_iterations {
-        let s = surface.point_at(best_u, best_v);
-        let su = surface.point_at(best_u + eps, best_v);
-        let sv = surface.point_at(best_u, best_v + eps);
-
-        let ds_du = (su - s) / eps;
-        let ds_dv = (sv - s) / eps;
-
-        let diff = point - s;
-
-        // Solve: [ds_du . ds_du, ds_du . ds_dv] [du]   [diff . ds_du]
-        //        [ds_dv . ds_du, ds_dv . ds_dv] [dv] = [diff . ds_dv]
-        let a11 = ds_du.dot(ds_du);
-        let a12 = ds_du.dot(ds_dv);
-        let a22 = ds_dv.dot(ds_dv);
-        let b1 = diff.dot(ds_du);
-        let b2 = diff.dot(ds_dv);
-
-        let det = a11 * a22 - a12 * a12;
-        if det.abs() < 1e-20 {
-            break;
-        }
-
-        let du = (a22 * b1 - a12 * b2) / det;
-        let dv = (a11 * b2 - a12 * b1) / det;
-
-        best_u += du;
-        best_v += dv;
-
-        if du.abs() < tolerance && dv.abs() < tolerance {
-            break;
-        }
-    }
-
-    Some((best_u, best_v))
+/// Result of a surface-surface intersection curve.
+#[derive(Clone, Debug)]
+pub struct SurfaceSurfaceIntersection {
+    /// Polylines approximating the intersection curve.
+    pub polylines: Vec<Vec<Point3d>>,
 }
 
-/// Find the closest point on a curve to a given point.
-pub fn project_point_to_curve(
-    point: Point3,
-    curve: &Curve,
-    tolerance: f64,
-    max_iterations: usize,
-) -> Option<f64> {
-    // Sample the curve and find the closest parameter
-    let mut best_t = 0.5;
-    let mut best_dist = f64::MAX;
-
-    let samples = 100;
-    for i in 0..=samples {
-        let t = i as f64 / samples as f64;
-        let curve_pt = curve.point_at(t);
-        let dist = point.distance_to(curve_pt);
-        if dist < best_dist {
-            best_dist = dist;
-            best_t = t;
-        }
+/// Intersect a line with a plane.
+pub fn intersect_line_plane(line: &Line, plane: &Plane) -> Option<Point3d> {
+    let denom = plane.normal.x * line.direction.x
+        + plane.normal.y * line.direction.y
+        + plane.normal.z * line.direction.z;
+    if denom.abs() < TOLERANCE {
+        return None; // Parallel
     }
+    let dx = plane.origin.x - line.origin.x;
+    let dy = plane.origin.y - line.origin.y;
+    let dz = plane.origin.z - line.origin.z;
+    let t = (plane.normal.x * dx + plane.normal.y * dy + plane.normal.z * dz) / denom;
+    Some(line.point_at(t))
+}
 
-    // Newton-Raphson refinement
-    let eps = 1e-7;
-    for _ in 0..max_iterations {
-        let p = curve.point_at(best_t);
-        let pu = curve.point_at(best_t + eps);
+/// Intersect a line with a cylinder surface.
+pub fn intersect_line_cylinder(line: &Line, cyl: &CylinderSurface) -> Vec<Point3d> {
+    // Transform line into cylinder's local coordinate system
+    // For Z-axis cylinder: solve (x0 + t*dx)^2 + (y0 + t*dy)^2 = R^2
+    let x_dir = if cyl.axis.is_parallel_to(&Direction3d::Z) {
+        Direction3d::X
+    } else {
+        cyl.axis.cross(&Direction3d::Z)
+    };
+    let y_dir = cyl.axis.cross(&x_dir);
 
-        let dp_dt = (pu - p) / eps;
-        let diff = point - p;
+    // Project line origin onto local XY plane
+    let dx0 = line.origin.x - cyl.origin.x;
+    let dy0 = line.origin.y - cyl.origin.y;
+    let dz0 = line.origin.z - cyl.origin.z;
 
-        let numerator = diff.dot(dp_dt);
-        let denominator = dp_dt.dot(dp_dt);
+    let x0 = dx0 * x_dir.x + dy0 * x_dir.y + dz0 * x_dir.z;
+    let y0 = dx0 * y_dir.x + dy0 * y_dir.y + dz0 * y_dir.z;
+    let dx = line.direction.x * x_dir.x + line.direction.y * x_dir.y + line.direction.z * x_dir.z;
+    let dy = line.direction.x * y_dir.x + line.direction.y * y_dir.y + line.direction.z * y_dir.z;
 
-        if denominator.abs() < 1e-20 {
+    // Solve x0+t*dx)^2 + (y0+t*dy)^2 = R^2
+    let a = dx * dx + dy * dy;
+    let b = 2.0 * (x0 * dx + y0 * dy);
+    let c = x0 * x0 + y0 * y0 - cyl.radius * cyl.radius;
+
+    solve_quadratic(a, b, c)
+        .into_iter()
+        .filter_map(|t| {
+            if t.is_finite() {
+                Some(line.point_at(t))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Intersect a line with a sphere.
+pub fn intersect_line_sphere(line: &Line, sphere: &SphereSurface) -> Vec<Point3d> {
+    let oc = Vec3d::new(
+        line.origin.x - sphere.center.x,
+        line.origin.y - sphere.center.y,
+        line.origin.z - sphere.center.z,
+    );
+    let dir = Vec3d::new(line.direction.x, line.direction.y, line.direction.z);
+    let a = dir.dot(&dir);
+    let b = 2.0 * oc.dot(&dir);
+    let c = oc.dot(&oc) - sphere.radius * sphere.radius;
+    solve_quadratic(a, b, c)
+        .into_iter()
+        .filter_map(|t| {
+            if t.is_finite() {
+                Some(line.point_at(t))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Solve quadratic equation a*t^2 + b*t + c = 0.
+fn solve_quadratic(a: f64, b: f64, c: f64) -> Vec<f64> {
+    if a.abs() < TOLERANCE {
+        // Linear: b*t + c = 0
+        if b.abs() < TOLERANCE {
+            return vec![];
+        }
+        return vec![-c / b];
+    }
+    let disc = b * b - 4.0 * a * c;
+    if disc < -TOLERANCE {
+        return vec![];
+    }
+    if disc.abs() < TOLERANCE {
+        return vec![-b / (2.0 * a)];
+    }
+    let sqrt_disc = disc.sqrt();
+    let t1 = (-b - sqrt_disc) / (2.0 * a);
+    let t2 = (-b + sqrt_disc) / (2.0 * a);
+    vec![t1, t2]
+}
+
+/// Find the closest point on a curve to a given 3D point.
+/// Uses Newton-Raphson iteration.
+pub fn closest_point_on_curve(curve: &Curve3d, point: &Point3d, initial_guess: f64, max_iter: usize) -> f64 {
+    let mut t = initial_guess;
+    let eps = 1e-10;
+
+    for _ in 0..max_iter {
+        let p = curve.point_at(t);
+        let (p_min, p_max) = curve.param_range();
+        let dt = (p_max - p_min) * 1e-7;
+        let p_plus = curve.point_at(t + dt);
+
+        // First derivative (numerical)
+        let d = Vec3d::new(
+            (p_plus.x - p.x) / dt,
+            (p_plus.y - p.y) / dt,
+            (p_plus.z - p.z) / dt,
+        );
+
+        // Second derivative (numerical)
+        let p_minus = curve.point_at(t - dt);
+        let dd = Vec3d::new(
+            (p_plus.x - 2.0 * p.x + p_minus.x) / (dt * dt),
+            (p_plus.y - 2.0 * p.y + p_minus.y) / (dt * dt),
+            (p_plus.z - 2.0 * p.z + p_minus.z) / (dt * dt),
+        );
+
+        let diff = Vec3d::new(p.x - point.x, p.y - point.y, p.z - point.z);
+        let f = d.dot(&diff);
+        let fp = d.dot(&d) + dd.dot(&diff);
+
+        if fp.abs() < eps {
             break;
         }
 
-        let dt = numerator / denominator;
-        best_t += dt;
+        let step = f / fp;
+        t -= step;
 
-        if dt.abs() < tolerance {
+        // Clamp to parametric range
+        t = t.max(p_min).min(p_max);
+
+        if step.abs() < eps {
             break;
         }
     }
 
-    Some(best_t)
+    t
 }

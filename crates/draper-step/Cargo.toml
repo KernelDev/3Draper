@@ -2,11 +2,9 @@
 name = "draper-step"
 version.workspace = true
 edition.workspace = true
-description = "STEP (ISO 10303-21) file parser for 3Draper — powered by step-io"
 
 [dependencies]
-step-io = "0.1.0-alpha.1"
-chrono = { workspace = true }
+draper-geometry = { workspace = true }
+draper-topology = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
-serde = { workspace = true }

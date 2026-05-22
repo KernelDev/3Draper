@@ -1,312 +1,311 @@
-//! Curve primitives — parametric curves in 3D space.
+//! Parametric curves in 3D space.
 
-use crate::direction::Direction3;
-use crate::point::Point3;
-use crate::transform::Transform3;
-use serde::{Deserialize, Serialize};
+use crate::{Direction3d, Point3d, Point2d, Vec3d, Transform};
+use std::fmt;
 
-/// A parametric curve in 3D.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Curve {
+/// Parametric range [u_min, u_max].
+pub type ParamRange = (f64, f64);
+
+/// A parametric curve in 3D space.
+#[derive(Clone, Debug)]
+pub enum Curve3d {
+    /// Line: P(t) = origin + t * direction
     Line(Line),
+    /// Circle in 3D space defined by center, normal, radius
     Circle(Circle),
+    /// Ellipse in 3D space
     Ellipse(Ellipse),
-    BSplineCurve(BSplineCurve),
-    OffsetCurve(OffsetCurve),
-    TrimmedCurve(TrimmedCurve),
+    /// Arc (trimmed circle segment)
+    Arc(Arc),
+    /// NURBS curve
+    Nurbs(NurbsCurve),
 }
 
-impl Curve {
+/// A line in 3D.
+#[derive(Clone, Debug)]
+pub struct Line {
+    pub origin: Point3d,
+    pub direction: Direction3d,
+}
+
+impl Line {
+    pub fn new(origin: Point3d, direction: Direction3d) -> Self {
+        Self { origin, direction }
+    }
+
+    /// Create a line through two points.
+    pub fn through_points(p1: Point3d, p2: Point3d) -> Option<Self> {
+        let dir = Direction3d::new(
+            p2.x - p1.x,
+            p2.y - p1.y,
+            p2.z - p1.z,
+        )?;
+        Some(Self { origin: p1, direction: dir })
+    }
+
+    /// Evaluate point at parameter t.
+    pub fn point_at(&self, t: f64) -> Point3d {
+        Point3d::new(
+            self.origin.x + t * self.direction.x,
+            self.origin.y + t * self.direction.y,
+            self.origin.z + t * self.direction.z,
+        )
+    }
+
+    /// Evaluate derivative at parameter t.
+    pub fn derivative_at(&self, _t: f64) -> Vec3d {
+        Vec3d::new(self.direction.x, self.direction.y, self.direction.z)
+    }
+}
+
+/// A circle in 3D space.
+#[derive(Clone, Debug)]
+pub struct Circle {
+    pub center: Point3d,
+    pub normal: Direction3d,
+    pub radius: f64,
+    /// X-axis of the circle's local coordinate system
+    pub x_axis: Direction3d,
+}
+
+impl Circle {
+    /// Create a circle in the XY plane.
+    pub fn new_xy(center: Point3d, radius: f64) -> Self {
+        Self {
+            center,
+            normal: Direction3d::Z,
+            radius,
+            x_axis: Direction3d::X,
+        }
+    }
+
+    /// Create a circle with arbitrary orientation.
+    pub fn new(center: Point3d, normal: Direction3d, radius: f64) -> Self {
+        let x_axis = if normal.is_parallel_to(&Direction3d::Z) {
+            Direction3d::X
+        } else {
+            normal.cross(&Direction3d::Z)
+        };
+        Self { center, normal, radius, x_axis }
+    }
+
+    /// Evaluate point at angle t (radians).
+    pub fn point_at(&self, t: f64) -> Point3d {
+        let y_axis = self.normal.cross(&self.x_axis);
+        Point3d::new(
+            self.center.x + self.radius * (t.cos() * self.x_axis.x + t.sin() * y_axis.x),
+            self.center.y + self.radius * (t.cos() * self.x_axis.y + t.sin() * y_axis.y),
+            self.center.z + self.radius * (t.cos() * self.x_axis.z + t.sin() * y_axis.z),
+        )
+    }
+
+    /// Evaluate first derivative at angle t.
+    pub fn derivative_at(&self, t: f64) -> Vec3d {
+        let y_axis = self.normal.cross(&self.x_axis);
+        Vec3d::new(
+            self.radius * (-t.sin() * self.x_axis.x + t.cos() * y_axis.x),
+            self.radius * (-t.sin() * self.x_axis.y + t.cos() * y_axis.y),
+            self.radius * (-t.sin() * self.x_axis.z + t.cos() * y_axis.z),
+        )
+    }
+
+    /// Circumference.
+    pub fn circumference(&self) -> f64 {
+        2.0 * std::f64::consts::PI * self.radius
+    }
+}
+
+/// An ellipse in 3D space.
+#[derive(Clone, Debug)]
+pub struct Ellipse {
+    pub center: Point3d,
+    pub normal: Direction3d,
+    pub semi_major: f64,
+    pub semi_minor: f64,
+    pub x_axis: Direction3d,
+}
+
+impl Ellipse {
+    pub fn new_xy(center: Point3d, semi_major: f64, semi_minor: f64) -> Self {
+        Self {
+            center,
+            normal: Direction3d::Z,
+            semi_major,
+            semi_minor,
+            x_axis: Direction3d::X,
+        }
+    }
+
+    pub fn point_at(&self, t: f64) -> Point3d {
+        let y_axis = self.normal.cross(&self.x_axis);
+        Point3d::new(
+            self.center.x + self.semi_major * t.cos() * self.x_axis.x + self.semi_minor * t.sin() * y_axis.x,
+            self.center.y + self.semi_major * t.cos() * self.x_axis.y + self.semi_minor * t.sin() * y_axis.y,
+            self.center.z + self.semi_major * t.cos() * self.x_axis.z + self.semi_minor * t.sin() * y_axis.z,
+        )
+    }
+}
+
+/// An arc (trimmed circle segment).
+#[derive(Clone, Debug)]
+pub struct Arc {
+    pub circle: Circle,
+    pub start_angle: f64,
+    pub end_angle: f64,
+}
+
+impl Arc {
+    pub fn new(circle: Circle, start_angle: f64, end_angle: f64) -> Self {
+        Self { circle, start_angle, end_angle }
+    }
+
+    pub fn point_at(&self, t: f64) -> Point3d {
+        // t in [0, 1] maps to [start_angle, end_angle]
+        let angle = self.start_angle + t * (self.end_angle - self.start_angle);
+        self.circle.point_at(angle)
+    }
+
+    pub fn start_point(&self) -> Point3d {
+        self.circle.point_at(self.start_angle)
+    }
+
+    pub fn end_point(&self) -> Point3d {
+        self.circle.point_at(self.end_angle)
+    }
+}
+
+/// NURBS curve representation.
+#[derive(Clone, Debug)]
+pub struct NurbsCurve {
+    pub degree: usize,
+    pub control_points: Vec<Point3d>,
+    pub weights: Vec<f64>,
+    pub knots: Vec<f64>,
+}
+
+impl Curve3d {
     /// Evaluate the curve at parameter t.
-    pub fn point_at(&self, t: f64) -> Point3 {
+    pub fn point_at(&self, t: f64) -> Point3d {
         match self {
-            Curve::Line(c) => c.point_at(t),
-            Curve::Circle(c) => c.point_at(t),
-            Curve::Ellipse(c) => c.point_at(t),
-            Curve::BSplineCurve(c) => c.point_at(t),
-            Curve::OffsetCurve(c) => c.point_at(t),
-            Curve::TrimmedCurve(c) => c.basis_curve.point_at(
-                c.trim1 + t * (c.trim2 - c.trim1),
-            ),
+            Curve3d::Line(line) => line.point_at(t),
+            Curve3d::Circle(circle) => circle.point_at(t),
+            Curve3d::Ellipse(ellipse) => ellipse.point_at(t),
+            Curve3d::Arc(arc) => arc.point_at(t),
+            Curve3d::Nurbs(nurbs) => nurbs_eval(nurbs, t),
         }
     }
 
-    /// Get the bounding box of this curve by sampling.
-    pub fn bounding_box(&self, samples: usize) -> crate::point::BoundingBox3 {
-        let mut bb = crate::point::BoundingBox3::empty();
-        for i in 0..=samples {
-            let t = i as f64 / samples as f64;
-            bb.extend(self.point_at(t));
+    /// Get the parametric range of the curve.
+    pub fn param_range(&self) -> ParamRange {
+        match self {
+            Curve3d::Line(_) => (-f64::MAX, f64::MAX),
+            Curve3d::Circle(_) => (0.0, 2.0 * std::f64::consts::PI),
+            Curve3d::Ellipse(_) => (0.0, 2.0 * std::f64::consts::PI),
+            Curve3d::Arc(arc) => (arc.start_angle, arc.end_angle),
+            Curve3d::Nurbs(nurbs) => {
+                let n = nurbs.knots.len();
+                if n > nurbs.degree {
+                    (nurbs.knots[nurbs.degree], nurbs.knots[n - nurbs.degree - 1])
+                } else {
+                    (0.0, 1.0)
+                }
+            }
         }
-        bb
     }
 
-    pub fn transform(&self, tf: &Transform3) -> Curve {
+    /// Transform the curve.
+    pub fn transform(&self, t: &Transform) -> Curve3d {
         match self {
-            Curve::Line(c) => Curve::Line(c.transform(tf)),
-            Curve::Circle(c) => Curve::Circle(c.transform(tf)),
-            Curve::Ellipse(c) => Curve::Ellipse(c.transform(tf)),
-            Curve::BSplineCurve(c) => Curve::BSplineCurve(c.transform(tf)),
-            Curve::OffsetCurve(c) => Curve::OffsetCurve(c.transform(tf)),
-            Curve::TrimmedCurve(c) => Curve::TrimmedCurve(TrimmedCurve {
-                basis_curve: Box::new(c.basis_curve.transform(tf)),
-                trim1: c.trim1,
-                trim2: c.trim2,
-                sense: c.sense,
+            Curve3d::Line(line) => Curve3d::Line(Line {
+                origin: t.transform_point(&line.origin),
+                direction: t.transform_direction(&line.direction),
+            }),
+            Curve3d::Circle(circle) => Curve3d::Circle(Circle {
+                center: t.transform_point(&circle.center),
+                normal: t.transform_direction(&circle.normal),
+                radius: circle.radius, // Approximate for non-uniform scaling
+                x_axis: t.transform_direction(&circle.x_axis),
+            }),
+            Curve3d::Ellipse(ellipse) => Curve3d::Ellipse(Ellipse {
+                center: t.transform_point(&ellipse.center),
+                normal: t.transform_direction(&ellipse.normal),
+                semi_major: ellipse.semi_major,
+                semi_minor: ellipse.semi_minor,
+                x_axis: t.transform_direction(&ellipse.x_axis),
+            }),
+            Curve3d::Arc(arc) => Curve3d::Arc(Arc {
+                circle: Circle {
+                    center: t.transform_point(&arc.circle.center),
+                    normal: t.transform_direction(&arc.circle.normal),
+                    radius: arc.circle.radius,
+                    x_axis: t.transform_direction(&arc.circle.x_axis),
+                },
+                start_angle: arc.start_angle,
+                end_angle: arc.end_angle,
+            }),
+            Curve3d::Nurbs(nurbs) => Curve3d::Nurbs(NurbsCurve {
+                degree: nurbs.degree,
+                control_points: nurbs.control_points.iter().map(|p| t.transform_point(p)).collect(),
+                weights: nurbs.weights.clone(),
+                knots: nurbs.knots.clone(),
             }),
         }
     }
 }
 
-/// An infinite line through a point in a given direction.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Line {
-    pub origin: Point3,
-    pub direction: Direction3,
-}
-
-impl Line {
-    pub fn new(origin: Point3, direction: Direction3) -> Self {
-        Self { origin, direction }
+/// Evaluate a NURBS curve at parameter t using de Boor's algorithm.
+fn nurbs_eval(nurbs: &NurbsCurve, t: f64) -> Point3d {
+    let n = nurbs.control_points.len();
+    if n == 0 {
+        return Point3d::ORIGIN;
+    }
+    if n == 1 {
+        return nurbs.control_points[0];
     }
 
-    /// Parameter t gives: origin + t * direction
-    pub fn point_at(&self, t: f64) -> Point3 {
-        self.origin + self.direction.to_dvec3() * t
+    let p = nurbs.degree;
+    // Find knot span
+    let mut k = p;
+    while k < nurbs.knots.len() - 1 && nurbs.knots[k + 1] < t {
+        k += 1;
+    }
+    k = k.min(n - 1);
+
+    // De Boor's algorithm
+    let mut pts: Vec<(f64, f64, f64)> = Vec::with_capacity(p + 1);
+    for i in 0..=p {
+        let idx = (k - p + i).min(n - 1);
+        let w = nurbs.weights[idx];
+        pts.push((
+            nurbs.control_points[idx].x * w,
+            nurbs.control_points[idx].y * w,
+            nurbs.control_points[idx].z * w,
+        ));
     }
 
-    pub fn transform(&self, tf: &Transform3) -> Line {
-        Line {
-            origin: tf.transform_point(self.origin),
-            direction: tf.transform_direction(self.direction),
-        }
-    }
-}
-
-/// A circle in 3D space.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Circle {
-    /// Position: center is at axis.location, normal is axis.axis, 
-    /// ref_direction defines where parameter 0 is.
-    pub axis: crate::direction::Axis2Placement3D,
-    pub radius: f64,
-}
-
-impl Circle {
-    pub fn new(axis: crate::direction::Axis2Placement3D, radius: f64) -> Self {
-        Self { axis, radius }
-    }
-
-    /// Evaluate at parameter t (0 to 2*PI).
-    pub fn point_at(&self, t: f64) -> Point3 {
-        let x_dir = self.axis.ref_direction.to_dvec3();
-        let y_dir = self.axis.y_direction().to_dvec3();
-        let center = self.axis.location.to_dvec3();
-
-        let pt = center + x_dir * (self.radius * t.cos()) + y_dir * (self.radius * t.sin());
-        Point3::from_dvec3(pt)
-    }
-
-    pub fn transform(&self, tf: &Transform3) -> Circle {
-        Circle {
-            axis: crate::direction::Axis2Placement3D {
-                location: tf.transform_point(self.axis.location),
-                axis: tf.transform_direction(self.axis.axis),
-                ref_direction: tf.transform_direction(self.axis.ref_direction),
-            },
-            radius: self.radius * tf.scale(),
-        }
-    }
-}
-
-/// An ellipse in 3D space.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Ellipse {
-    pub axis: crate::direction::Axis2Placement3D,
-    pub semi_axis_1: f64,
-    pub semi_axis_2: f64,
-}
-
-impl Ellipse {
-    pub fn new(axis: crate::direction::Axis2Placement3D, semi_axis_1: f64, semi_axis_2: f64) -> Self {
-        Self { axis, semi_axis_1, semi_axis_2 }
-    }
-
-    pub fn point_at(&self, t: f64) -> Point3 {
-        let x_dir = self.axis.ref_direction.to_dvec3();
-        let y_dir = self.axis.y_direction().to_dvec3();
-        let center = self.axis.location.to_dvec3();
-
-        let pt = center
-            + x_dir * (self.semi_axis_1 * t.cos())
-            + y_dir * (self.semi_axis_2 * t.sin());
-        Point3::from_dvec3(pt)
-    }
-
-    pub fn transform(&self, tf: &Transform3) -> Ellipse {
-        Ellipse {
-            axis: crate::direction::Axis2Placement3D {
-                location: tf.transform_point(self.axis.location),
-                axis: tf.transform_direction(self.axis.axis),
-                ref_direction: tf.transform_direction(self.axis.ref_direction),
-            },
-            semi_axis_1: self.semi_axis_1 * tf.scale(),
-            semi_axis_2: self.semi_axis_2 * tf.scale(),
-        }
-    }
-}
-
-/// A B-Spline curve.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct BSplineCurve {
-    /// Control points.
-    pub poles: Vec<Point3>,
-    /// Knot vector.
-    pub knots: Vec<f64>,
-    /// Multiplicity of each knot.
-    pub multiplicities: Vec<u32>,
-    /// Degree of the curve.
-    pub degree: u32,
-    /// Whether the curve is periodic.
-    pub periodic: bool,
-}
-
-impl BSplineCurve {
-    /// Evaluate the B-Spline curve at parameter t using De Boor's algorithm.
-    pub fn point_at(&self, t: f64) -> Point3 {
-        if self.poles.is_empty() {
-            return Point3::ORIGIN;
-        }
-
-        // Clamp t to knot range
-        let knot_min = self.knots.first().copied().unwrap_or(0.0);
-        let knot_max = self.knots.last().copied().unwrap_or(1.0);
-        let t = t.clamp(knot_min, knot_max);
-
-        // Simple evaluation: for a minimal implementation, use linear interpolation
-        // between control points when degree is low, or De Boor for higher degrees.
-        if self.degree == 1 {
-            // Linear B-spline: piecewise linear
-            let n = self.poles.len();
-            if n == 1 {
-                return self.poles[0];
-            }
-            // Find the segment
-            let knot_range = knot_max - knot_min;
-            let seg_t = if knot_range > 0.0 { (t - knot_min) / knot_range } else { 0.0 };
-            let idx = ((seg_t * (n - 1) as f64).floor() as usize).min(n - 2);
-            let local_t = seg_t * (n - 1) as f64 - idx as f64;
-            return self.poles[idx].lerp(self.poles[idx + 1], local_t);
-        }
-
-        // For higher degrees, use De Boor's algorithm
-        self.de_boor(t)
-    }
-
-    fn de_boor(&self, t: f64) -> Point3 {
-        let degree = self.degree as usize;
-        // Find the knot span
-        let k = self.find_knot_span(t);
-        
-        // Create a copy of relevant control points
-        let mut pts: Vec<glam::DVec3> = (0..=degree)
-            .map(|i| self.poles[k - degree + i].to_dvec3())
-            .collect();
-
-        // De Boor recursion
-        for r in 1..=degree {
-            for j in (r..=degree).rev() {
-                let idx = k - degree + j;
-                let knot_i = self.knot_at(idx);
-                let knot_ipr = self.knot_at(idx + degree + 1 - r);
-                let denom = knot_ipr - knot_i;
-                let alpha = if denom.abs() < 1e-10 {
-                    0.0
-                } else {
-                    (t - knot_i) / denom
-                };
-                pts[j] = pts[j - 1].lerp(pts[j], alpha);
-            }
-        }
-
-        Point3::from_dvec3(pts[degree])
-    }
-
-    fn find_knot_span(&self, t: f64) -> usize {
-        let n = self.poles.len();
-        let degree = self.degree as usize;
-        
-        // Expand knots with multiplicities
-        let expanded = self.expanded_knots();
-        
-        // Binary search for the knot span
-        let mut lo = degree;
-        let mut hi = n;
-        while hi - lo > 1 {
-            let mid = (lo + hi) / 2;
-            if expanded[mid] <= t {
-                lo = mid;
+    for r in 1..=p {
+        for j in (r..=p).rev() {
+            let i0 = k - p + j;
+            let i1 = i0 + 1;
+            let a = if i1 < nurbs.knots.len() && i0 + p - r + 1 < nurbs.knots.len() {
+                let d = nurbs.knots[i0 + p - r + 1] - nurbs.knots[i1];
+                if d.abs() < 1e-15 { 0.0 } else { (t - nurbs.knots[i1]) / d }
             } else {
-                hi = mid;
-            }
-        }
-        lo
-    }
-
-    fn knot_at(&self, idx: usize) -> f64 {
-        let expanded = self.expanded_knots();
-        expanded.get(idx).copied().unwrap_or(expanded.last().copied().unwrap_or(0.0))
-    }
-
-    fn expanded_knots(&self) -> Vec<f64> {
-        let mut result = Vec::new();
-        for (knot, &mult) in self.knots.iter().zip(self.multiplicities.iter()) {
-            for _ in 0..mult {
-                result.push(*knot);
-            }
-        }
-        result
-    }
-
-    pub fn transform(&self, tf: &Transform3) -> BSplineCurve {
-        BSplineCurve {
-            poles: self.poles.iter().map(|p| tf.transform_point(*p)).collect(),
-            knots: self.knots.clone(),
-            multiplicities: self.multiplicities.clone(),
-            degree: self.degree,
-            periodic: self.periodic,
+                0.0
+            };
+            let b = 1.0 - a;
+            pts[j] = (
+                a * pts[j].0 + b * pts[j - 1].0,
+                a * pts[j].1 + b * pts[j - 1].1,
+                a * pts[j].2 + b * pts[j - 1].2,
+            );
         }
     }
-}
 
-/// An offset curve: a curve at a constant distance from a basis curve.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct OffsetCurve {
-    pub basis_curve: Box<Curve>,
-    pub distance: f64,
-    pub direction: Direction3,
-}
-
-impl OffsetCurve {
-    pub fn point_at(&self, t: f64) -> Point3 {
-        let basis_pt = self.basis_curve.point_at(t);
-        basis_pt + self.direction.to_dvec3() * self.distance
+    let w = pts[p].0.hypot(pts[p].1.hypot(pts[p].2));
+    if w.abs() < 1e-15 {
+        Point3d::ORIGIN
+    } else {
+        Point3d::new(pts[p].0 / w, pts[p].1 / w, pts[p].2 / w)
     }
-
-    pub fn transform(&self, tf: &Transform3) -> OffsetCurve {
-        OffsetCurve {
-            basis_curve: Box::new(self.basis_curve.transform(tf)),
-            distance: self.distance * tf.scale(),
-            direction: tf.transform_direction(self.direction),
-        }
-    }
-}
-
-/// A trimmed curve: a curve limited to a parameter range.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TrimmedCurve {
-    pub basis_curve: Box<Curve>,
-    pub trim1: f64,
-    pub trim2: f64,
-    pub sense: bool, // true = same direction as basis
 }

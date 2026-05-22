@@ -9,57 +9,19 @@
 #include <stdlib.h>
 
 /**
- * Opaque handle to a Document.
+ * Opaque document handle.
  */
 typedef struct DraperDocument DraperDocument;
 
 /**
- * Opaque handle to a TriangleMesh.
+ * Opaque mesh handle.
  */
 typedef struct DraperMesh DraperMesh;
 
 /**
- * Statistics about a document.
- */
-typedef struct DraperStatistics {
-  uint64_t vertex_count;
-  uint64_t edge_count;
-  uint64_t face_count;
-  uint64_t solid_count;
-  uint64_t triangle_count;
-  uint64_t mesh_vertex_count;
-} DraperStatistics;
-
-/**
- * 3D point for FFI.
- */
-typedef struct DraperVec3 {
-  double x;
-  double y;
-  double z;
-} DraperVec3;
-
-/**
  * Create a new empty document.
  */
-struct DraperDocument *draper_document_new(void);
-
-/**
- * Open a STEP file.
- * Returns null on failure.
- */
-struct DraperDocument *draper_open_step(const char *path);
-
-/**
- * Save a document as a STEP file.
- * Returns 0 on success, -1 on failure.
- */
-int32_t draper_save_step(struct DraperDocument *doc, const char *path);
-
-/**
- * Get document statistics.
- */
-struct DraperStatistics draper_get_statistics(const struct DraperDocument *doc);
+struct DraperDocument *draper_document_new(const char *name);
 
 /**
  * Free a document.
@@ -67,40 +29,41 @@ struct DraperStatistics draper_get_statistics(const struct DraperDocument *doc);
 void draper_document_free(struct DraperDocument *doc);
 
 /**
- * Get the combined triangle mesh from the document.
- * The caller must free the mesh with draper_mesh_free().
+ * Add a box to the document.
  */
-struct DraperMesh *draper_get_mesh(const struct DraperDocument *doc);
+int32_t draper_document_add_box(struct DraperDocument *doc, double dx, double dy, double dz);
 
 /**
- * Get the number of vertices in a mesh.
+ * Add a cylinder to the document.
  */
-uint64_t draper_mesh_vertex_count(const struct DraperMesh *mesh);
+int32_t draper_document_add_cylinder(struct DraperDocument *doc, double radius, double height);
 
 /**
- * Get the number of triangles in a mesh.
+ * Add a sphere to the document.
  */
-uint64_t draper_mesh_triangle_count(const struct DraperMesh *mesh);
+int32_t draper_document_add_sphere(struct DraperDocument *doc, double radius);
 
 /**
- * Get a pointer to the vertex data.
- * Returns a pointer to an array of DraperVec3.
- * The pointer is valid as long as the mesh is alive.
+ * Add a cone to the document.
  */
-const struct DraperVec3 *draper_mesh_vertices(const struct DraperMesh *mesh);
+int32_t draper_document_add_cone(struct DraperDocument *doc, double radius, double height);
 
 /**
- * Get a pointer to the index data.
- * Returns a pointer to an array of u32 triangle indices.
- * The pointer is valid as long as the mesh is alive.
+ * Add a torus to the document.
  */
-const uint32_t *draper_mesh_indices(const struct DraperMesh *mesh);
+int32_t draper_document_add_torus(struct DraperDocument *doc,
+                                  double major_radius,
+                                  double minor_radius);
 
 /**
- * Get a pointer to the normal data (3 floats per vertex).
- * Returns null if normals are not computed.
+ * Build an ICE engine model.
  */
-const float *draper_mesh_normals(const struct DraperMesh *mesh);
+int32_t draper_document_add_engine(struct DraperDocument *doc);
+
+/**
+ * Triangulate the document and return a mesh.
+ */
+struct DraperMesh *draper_document_triangulate(struct DraperDocument *doc);
 
 /**
  * Free a mesh.
@@ -108,9 +71,42 @@ const float *draper_mesh_normals(const struct DraperMesh *mesh);
 void draper_mesh_free(struct DraperMesh *mesh);
 
 /**
- * Get the library version string.
- * The returned pointer is static and should not be freed.
+ * Get mesh vertex count.
  */
-const char *draper_version(void);
+uint32_t draper_mesh_vertex_count(const struct DraperMesh *mesh);
+
+/**
+ * Get mesh triangle count.
+ */
+uint32_t draper_mesh_triangle_count(const struct DraperMesh *mesh);
+
+/**
+ * Get mesh vertex data (x, y, z triplets).
+ * Caller must allocate buffer of size vertex_count * 3.
+ */
+uint32_t draper_mesh_get_vertices(const struct DraperMesh *mesh, double *out, uint32_t max_count);
+
+/**
+ * Get mesh triangle indices (i, j, k triplets).
+ * Caller must allocate buffer of size triangle_count * 3.
+ */
+uint32_t draper_mesh_get_triangles(const struct DraperMesh *mesh,
+                                   uint32_t *out,
+                                   uint32_t max_count);
+
+/**
+ * Export mesh to STL file.
+ */
+int32_t draper_mesh_export_stl(const struct DraperMesh *mesh, const char *path, int32_t binary);
+
+/**
+ * Export document to STEP file.
+ */
+int32_t draper_document_export_step(struct DraperDocument *doc, const char *path);
+
+/**
+ * Get the number of solids in the document.
+ */
+uint32_t draper_document_solid_count(const struct DraperDocument *doc);
 
 #endif  /* DRAPER_H */

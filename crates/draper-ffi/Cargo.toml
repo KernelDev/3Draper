@@ -2,17 +2,16 @@
 name = "draper-ffi"
 version.workspace = true
 edition.workspace = true
-description = "C FFI bindings for 3Draper — usable from any programming language"
 
 [lib]
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
-draper-core = { workspace = true }
 draper-geometry = { workspace = true }
 draper-topology = { workspace = true }
 draper-mesh = { workspace = true }
-log = { workspace = true }
+draper-core = { workspace = true }
+draper-step = { workspace = true }
 
 [build-dependencies]
-cbindgen = { workspace = true }
+cbindgen = "0.27"

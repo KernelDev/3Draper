@@ -1,186 +1,412 @@
-//! Topological entities — the core of the B-rep model.
+//! B-Rep topological entities.
 //!
-//! Each entity has a unique ID and references geometric data.
-//! The topology follows the STEP B-rep hierarchy:
-//! Vertex → Edge → Wire → Face → Shell → Solid → Compound
-//!
-//! Key design principles (from the triangulation guide):
-//! - Edges carry both 3D curves AND 2D pcurves (one per face)
-//! - Seam edges are explicitly marked for periodic surfaces
-//! - Face carries UV domain bounds for proper parameterization
-//! - Tolerance is tracked at every level for healing/validation
+//! The topology hierarchy:
+//! - Solid (collection of shells)
+//!   - Shell (closed collection of faces)
+//!     - Face (region of a surface bounded by wires)
+//!       - Wire (ordered sequence of coedges)
+//!         - CoEdge (oriented edge use within a wire)
+//!           - Edge (curve segment between two vertices)
+//!             - Vertex (point in 3D space)
 
-use draper_geometry::curve::Curve;
-use draper_geometry::pcurve::PCurveOnFace;
-use draper_geometry::point::{Point2, Point3};
-use draper_geometry::surface::Surface;
-use serde::{Deserialize, Serialize};
+use draper_geometry::{Point3d, Point2d, Curve3d, Surface};
+use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Global ID counter for topological entities.
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_id() -> u64 {
+    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Unique identifier for a topological entity.
-pub type TopoId = u64;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TopoId(u64);
+
+impl TopoId {
+    pub fn new() -> Self {
+        TopoId(next_id())
+    }
+}
+
+impl fmt::Display for TopoId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "#{}", self.0)
+    }
+}
+
+// ============================================================
+// Vertex
+// ============================================================
 
 /// A vertex — a point in 3D space.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct Vertex {
     pub id: TopoId,
-    pub point: Point3,
-    /// Tolerance for vertex position.
+    pub point: Point3d,
+    /// Tolerance for merging vertices.
     pub tolerance: f64,
 }
 
-/// An oriented edge — a curve bounded by two vertices.
-///
-/// An edge may be shared by multiple faces. For each face it belongs to,
-/// it has a corresponding pcurve (2D curve in the face's UV parameter space).
-/// This is critical for constrained Delaunay triangulation in UV space.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl Vertex {
+    pub fn new(point: Point3d) -> Self {
+        Self {
+            id: TopoId::new(),
+            point,
+            tolerance: 1e-6,
+        }
+    }
+}
+
+// ============================================================
+// Edge
+// ============================================================
+
+/// An edge — a curve segment between two vertices.
+#[derive(Clone, Debug)]
 pub struct Edge {
     pub id: TopoId,
-    /// The 3D geometric curve supporting this edge.
-    pub curve: Option<Curve>,
+    /// The 3D curve geometry.
+    pub curve: Option<Curve3d>,
+    /// Parametric range on the curve [t_min, t_max].
+    pub param_range: (f64, f64),
     /// Start vertex.
-    pub start_vertex: TopoId,
+    pub vertex_start: Option<TopoId>,
     /// End vertex.
-    pub end_vertex: TopoId,
-    /// Parameter range on the curve [t1, t2].
-    pub parameter_range: Option<(f64, f64)>,
-    /// Orientation: true = same as curve direction, false = reversed.
-    pub orientation: bool,
+    pub vertex_end: Option<TopoId>,
+    /// Whether the edge orientation matches the curve direction.
+    pub forward: bool,
     /// Tolerance.
     pub tolerance: f64,
-    /// Whether this edge is a seam on a periodic surface.
-    /// A seam edge connects the same vertex at u_min and u_max (or v_min/v_max).
-    /// In UV space, it appears as two separate curves at opposite boundaries.
-    pub is_seam: bool,
-    /// PCurves for this edge, one per face it borders.
-    /// Key = face_id, Value = pcurve information.
-    pub pcurves: Vec<PCurveOnFace>,
 }
 
-/// An oriented edge reference within a wire.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct OrientedEdge {
-    pub edge_id: TopoId,
-    /// Orientation within the wire.
-    pub orientation: bool,
+impl Edge {
+    /// Create a new edge with a curve and parametric range.
+    pub fn new(curve: Curve3d, param_range: (f64, f64)) -> Self {
+        Self {
+            id: TopoId::new(),
+            curve: Some(curve),
+            param_range,
+            vertex_start: None,
+            vertex_end: None,
+            forward: true,
+            tolerance: 1e-6,
+        }
+    }
+
+    /// Create a linear edge between two points.
+    pub fn new_line(p1: Point3d, p2: Point3d) -> Self {
+        let curve = Curve3d::Line(draper_geometry::Line::through_points(p1, p2).unwrap());
+        let mut edge = Self::new(curve, (0.0, 1.0));
+        edge.vertex_start = Some(TopoId::new());
+        edge.vertex_end = Some(TopoId::new());
+        edge
+    }
+
+    /// Evaluate the edge at parameter t in [0, 1].
+    pub fn point_at(&self, t: f64) -> Option<Point3d> {
+        self.curve.as_ref().map(|c| {
+            let (tmin, tmax) = self.param_range;
+            let param = tmin + t * (tmax - tmin);
+            c.point_at(param)
+        })
+    }
+
+    /// Start point of the edge.
+    pub fn start_point(&self) -> Option<Point3d> {
+        self.point_at(0.0)
+    }
+
+    /// End point of the edge.
+    pub fn end_point(&self) -> Option<Point3d> {
+        self.point_at(1.0)
+    }
+
+    /// Reversed edge (same geometry, opposite direction).
+    pub fn reversed(&self) -> Edge {
+        Edge {
+            id: self.id,
+            curve: self.curve.clone(),
+            param_range: (self.param_range.1, self.param_range.0),
+            vertex_start: self.vertex_end,
+            vertex_end: self.vertex_start,
+            forward: !self.forward,
+            tolerance: self.tolerance,
+        }
+    }
 }
 
-/// A wire — a sequence of connected edges forming a closed or open loop.
-///
-/// Wires represent boundaries of faces. The outer wire goes CCW,
-/// inner wires (holes) go CW when viewed from outside the face.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// ============================================================
+// CoEdge (Oriented Edge)
+// ============================================================
+
+/// A co-edge — an oriented use of an edge within a wire.
+/// Stores the 2D pcurve (parametric curve on the face's surface).
+#[derive(Clone, Debug)]
+pub struct CoEdge {
+    pub id: TopoId,
+    /// Reference to the parent edge.
+    pub edge: TopoId,
+    /// Whether the coedge orientation matches the edge orientation.
+    pub forward: bool,
+    /// 2D pcurve in the parametric space of the face's surface.
+    pub pcurve: Option<Pcurve>,
+}
+
+impl CoEdge {
+    pub fn new(edge: TopoId, forward: bool) -> Self {
+        Self {
+            id: TopoId::new(),
+            edge,
+            forward,
+            pcurve: None,
+        }
+    }
+}
+
+/// A 2D parametric curve on a surface (pcurve).
+#[derive(Clone, Debug)]
+pub struct Pcurve {
+    /// 2D polyline approximation in (u, v) space.
+    pub polyline_2d: Vec<Point2d>,
+}
+
+impl Pcurve {
+    pub fn new(polyline: Vec<Point2d>) -> Self {
+        Self { polyline_2d: polyline }
+    }
+
+    /// Create a linear pcurve between two 2D points.
+    pub fn linear(p1: Point2d, p2: Point2d) -> Self {
+        Self { polyline_2d: vec![p1, p2] }
+    }
+}
+
+// ============================================================
+// Wire
+// ============================================================
+
+/// A wire — an ordered sequence of coedges forming a closed or open loop.
+#[derive(Clone, Debug)]
 pub struct Wire {
     pub id: TopoId,
-    /// Ordered list of oriented edges.
-    pub edges: Vec<OrientedEdge>,
-    /// Whether the wire is closed.
+    /// Ordered coedges.
+    pub coedges: Vec<CoEdge>,
+    /// Whether the wire is a closed loop.
     pub closed: bool,
-    /// Whether this wire is a seam wire (on a periodic surface boundary).
-    pub is_seam: bool,
 }
 
-/// A face — a portion of a surface bounded by wires.
-///
-/// The face carries both the 3D surface and UV domain information.
-/// The outer wire defines the outer boundary; inner wires define holes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl Wire {
+    pub fn new(coedges: Vec<CoEdge>) -> Self {
+        let closed = coedges.len() > 1; // Will be validated later
+        Self {
+            id: TopoId::new(),
+            coedges,
+            closed,
+        }
+    }
+
+    /// Number of edges in the wire.
+    pub fn len(&self) -> usize {
+        self.coedges.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.coedges.is_empty()
+    }
+}
+
+// ============================================================
+// Face
+// ============================================================
+
+/// A face — a region of a surface bounded by wires.
+#[derive(Clone, Debug)]
 pub struct Face {
     pub id: TopoId,
-    /// The geometric surface supporting this face.
+    /// The surface geometry.
     pub surface: Option<Surface>,
     /// Outer boundary wire (required).
-    pub outer_wire: Option<TopoId>,
+    pub outer_wire: Option<Wire>,
     /// Inner boundary wires (holes).
-    pub inner_wires: Vec<TopoId>,
-    /// Orientation: true = normal points outward, false = reversed.
-    pub orientation: bool,
-    /// UV parameter bounds for the face's surface.
-    /// This defines the valid parameter domain for triangulation.
-    pub uv_bounds: Option<UVBounds>,
-    /// Whether this face is on a periodic surface (has seam edges).
-    pub has_seam: bool,
+    pub inner_wires: Vec<Wire>,
+    /// Whether the face normal matches the surface normal.
+    pub forward: bool,
+    /// Tolerance.
+    pub tolerance: f64,
 }
 
-/// UV parameter bounds for a face.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct UVBounds {
-    pub u_min: f64,
-    pub u_max: f64,
-    pub v_min: f64,
-    pub v_max: f64,
+impl Face {
+    /// Create a face with a surface and outer wire.
+    pub fn new(surface: Surface, outer_wire: Wire) -> Self {
+        Self {
+            id: TopoId::new(),
+            surface: Some(surface),
+            outer_wire: Some(outer_wire),
+            inner_wires: Vec::new(),
+            forward: true,
+            tolerance: 1e-6,
+        }
+    }
+
+    /// Create a planar face from a surface only (no wires — infinite face).
+    pub fn new_surface_only(surface: Surface) -> Self {
+        Self {
+            id: TopoId::new(),
+            surface: Some(surface),
+            outer_wire: None,
+            inner_wires: Vec::new(),
+            forward: true,
+            tolerance: 1e-6,
+        }
+    }
+
+    /// Add an inner wire (hole).
+    pub fn add_hole(&mut self, wire: Wire) {
+        self.inner_wires.push(wire);
+    }
+
+    /// Reversed face (normal points inward).
+    pub fn reversed(&self) -> Face {
+        Face {
+            id: self.id,
+            surface: self.surface.clone(),
+            outer_wire: self.outer_wire.clone(),
+            inner_wires: self.inner_wires.clone(),
+            forward: !self.forward,
+            tolerance: self.tolerance,
+        }
+    }
 }
 
-impl UVBounds {
-    pub fn new(u_min: f64, u_max: f64, v_min: f64, v_max: f64) -> Self {
-        Self { u_min, u_max, v_min, v_max }
-    }
+// ============================================================
+// Shell
+// ============================================================
 
-    pub fn u_range(&self) -> f64 {
-        self.u_max - self.u_min
-    }
-
-    pub fn v_range(&self) -> f64 {
-        self.v_max - self.v_min
-    }
-
-    /// Check if a UV point is within these bounds.
-    pub fn contains(&self, u: f64, v: f64) -> bool {
-        u >= self.u_min && u <= self.u_max && v >= self.v_min && v <= self.v_max
-    }
-
-    /// Compute the center of the UV domain.
-    pub fn center(&self) -> Point2 {
-        Point2::new(
-            (self.u_min + self.u_max) / 2.0,
-            (self.v_min + self.v_max) / 2.0,
-        )
-    }
-}
-
-/// A shell — a collection of connected faces.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A shell — a connected set of faces forming a closed or open surface.
+#[derive(Clone, Debug)]
 pub struct Shell {
     pub id: TopoId,
-    /// Faces in this shell.
-    pub faces: Vec<TopoId>,
+    /// Faces in the shell.
+    pub faces: Vec<Face>,
     /// Whether the shell is closed (forms a solid boundary).
     pub closed: bool,
 }
 
-/// A solid — a closed shell defining a volume.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl Shell {
+    pub fn new(faces: Vec<Face>) -> Self {
+        Self {
+            id: TopoId::new(),
+            faces,
+            closed: false,
+        }
+    }
+
+    /// Create a closed shell.
+    pub fn new_closed(faces: Vec<Face>) -> Self {
+        Self {
+            id: TopoId::new(),
+            faces,
+            closed: true,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.faces.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.faces.is_empty()
+    }
+}
+
+// ============================================================
+// Solid
+// ============================================================
+
+/// A solid — a closed 3D region bounded by shells.
+#[derive(Clone, Debug)]
 pub struct Solid {
     pub id: TopoId,
-    /// The outer shell.
-    pub outer_shell: TopoId,
+    /// Outer shell.
+    pub outer_shell: Option<Shell>,
     /// Inner shells (voids/cavities).
-    pub inner_shells: Vec<TopoId>,
+    pub inner_shells: Vec<Shell>,
 }
 
-/// A compound — a collection of shapes (for assemblies).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl Solid {
+    pub fn new(shell: Shell) -> Self {
+        Self {
+            id: TopoId::new(),
+            outer_shell: Some(shell),
+            inner_shells: Vec::new(),
+        }
+    }
+
+    /// Add an inner shell (void/cavity).
+    pub fn add_void(&mut self, shell: Shell) {
+        self.inner_shells.push(shell);
+    }
+
+    /// Get all faces from all shells.
+    pub fn faces(&self) -> Vec<&Face> {
+        let mut faces = Vec::new();
+        if let Some(ref shell) = self.outer_shell {
+            faces.extend(shell.faces.iter());
+        }
+        for shell in &self.inner_shells {
+            faces.extend(shell.faces.iter());
+        }
+        faces
+    }
+
+    /// Get all faces mutably.
+    pub fn faces_mut(&mut self) -> Vec<&mut Face> {
+        let mut faces = Vec::new();
+        if let Some(ref mut shell) = self.outer_shell {
+            faces.extend(shell.faces.iter_mut());
+        }
+        for shell in &mut self.inner_shells {
+            faces.extend(shell.faces.iter_mut());
+        }
+        faces
+    }
+}
+
+// ============================================================
+// Compound
+// ============================================================
+
+/// A compound — a collection of solids (assembly).
+#[derive(Clone, Debug)]
 pub struct Compound {
     pub id: TopoId,
-    /// Child shape IDs.
-    pub children: Vec<TopoId>,
+    pub solids: Vec<Solid>,
+    pub compounds: Vec<Compound>,
 }
 
-/// The type of a topological shape.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ShapeType {
-    Vertex,
-    Edge,
-    Wire,
-    Face,
-    Shell,
-    Solid,
-    Compound,
+impl Compound {
+    pub fn new() -> Self {
+        Self {
+            id: TopoId::new(),
+            solids: Vec::new(),
+            compounds: Vec::new(),
+        }
+    }
+
+    pub fn add_solid(&mut self, solid: Solid) {
+        self.solids.push(solid);
+    }
+
+    pub fn add_compound(&mut self, compound: Compound) {
+        self.compounds.push(compound);
+    }
 }
 
-/// A topological shape — wrapper around any topological entity.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum TopoShape {
+/// Top-level shape that can contain any topological entity.
+#[derive(Clone, Debug)]
+pub enum Shape {
     Vertex(Vertex),
     Edge(Edge),
     Wire(Wire),
@@ -188,179 +414,4 @@ pub enum TopoShape {
     Shell(Shell),
     Solid(Solid),
     Compound(Compound),
-}
-
-impl TopoShape {
-    pub fn shape_type(&self) -> ShapeType {
-        match self {
-            TopoShape::Vertex(_) => ShapeType::Vertex,
-            TopoShape::Edge(_) => ShapeType::Edge,
-            TopoShape::Wire(_) => ShapeType::Wire,
-            TopoShape::Face(_) => ShapeType::Face,
-            TopoShape::Shell(_) => ShapeType::Shell,
-            TopoShape::Solid(_) => ShapeType::Solid,
-            TopoShape::Compound(_) => ShapeType::Compound,
-        }
-    }
-
-    pub fn id(&self) -> TopoId {
-        match self {
-            TopoShape::Vertex(v) => v.id,
-            TopoShape::Edge(e) => e.id,
-            TopoShape::Wire(w) => w.id,
-            TopoShape::Face(f) => f.id,
-            TopoShape::Shell(s) => s.id,
-            TopoShape::Solid(s) => s.id,
-            TopoShape::Compound(c) => c.id,
-        }
-    }
-}
-
-impl Vertex {
-    pub fn new(id: TopoId, point: Point3) -> Self {
-        Self {
-            id,
-            point,
-            tolerance: 1e-7,
-        }
-    }
-}
-
-impl Edge {
-    pub fn new(
-        id: TopoId,
-        curve: Option<Curve>,
-        start_vertex: TopoId,
-        end_vertex: TopoId,
-        parameter_range: Option<(f64, f64)>,
-    ) -> Self {
-        Self {
-            id,
-            curve,
-            start_vertex,
-            end_vertex,
-            parameter_range,
-            orientation: true,
-            tolerance: 1e-7,
-            is_seam: false,
-            pcurves: Vec::new(),
-        }
-    }
-
-    /// Create a seam edge (start and end vertex are the same, e.g., on a cylinder).
-    pub fn seam(id: TopoId, curve: Option<Curve>, vertex: TopoId, parameter_range: (f64, f64)) -> Self {
-        Self {
-            id,
-            curve,
-            start_vertex: vertex,
-            end_vertex: vertex,
-            parameter_range: Some(parameter_range),
-            orientation: true,
-            tolerance: 1e-7,
-            is_seam: true,
-            pcurves: Vec::new(),
-        }
-    }
-
-    /// Get the vertices of this edge in the correct order based on orientation.
-    pub fn vertices(&self) -> (TopoId, TopoId) {
-        if self.orientation {
-            (self.start_vertex, self.end_vertex)
-        } else {
-            (self.end_vertex, self.start_vertex)
-        }
-    }
-
-    /// Add a pcurve for a specific face.
-    pub fn add_pcurve(&mut self, pcurve: PCurveOnFace) {
-        // Remove existing pcurve for the same face if present
-        self.pcurves.retain(|pc| pc.face_id != pcurve.face_id);
-        self.pcurves.push(pcurve);
-    }
-
-    /// Get the pcurve for a specific face.
-    pub fn get_pcurve(&self, face_id: TopoId) -> Option<&PCurveOnFace> {
-        self.pcurves.iter().find(|pc| pc.face_id == face_id)
-    }
-
-    /// Check if this edge is degenerate (zero length).
-    pub fn is_degenerate(&self) -> bool {
-        self.start_vertex == self.end_vertex
-    }
-}
-
-impl Wire {
-    pub fn new(id: TopoId, edges: Vec<OrientedEdge>) -> Self {
-        let closed = !edges.is_empty(); // Wires in STEP are typically closed
-        Self { id, edges, closed, is_seam: false }
-    }
-
-    /// Create a seam wire.
-    pub fn seam_wire(id: TopoId, edges: Vec<OrientedEdge>) -> Self {
-        Self { id, edges, closed: true, is_seam: true }
-    }
-
-    /// Get the number of edges in this wire.
-    pub fn len(&self) -> usize {
-        self.edges.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.edges.is_empty()
-    }
-}
-
-impl Face {
-    pub fn new(id: TopoId, surface: Option<Surface>) -> Self {
-        Self {
-            id,
-            surface,
-            outer_wire: None,
-            inner_wires: Vec::new(),
-            orientation: true,
-            uv_bounds: None,
-            has_seam: false,
-        }
-    }
-
-    pub fn with_outer_wire(mut self, wire_id: TopoId) -> Self {
-        self.outer_wire = Some(wire_id);
-        self
-    }
-
-    pub fn with_inner_wire(mut self, wire_id: TopoId) -> Self {
-        self.inner_wires.push(wire_id);
-        self
-    }
-
-    pub fn with_uv_bounds(mut self, bounds: UVBounds) -> Self {
-        self.uv_bounds = Some(bounds);
-        self
-    }
-}
-
-impl Shell {
-    pub fn new(id: TopoId, faces: Vec<TopoId>) -> Self {
-        Self {
-            id,
-            faces,
-            closed: true,
-        }
-    }
-}
-
-impl Solid {
-    pub fn new(id: TopoId, outer_shell: TopoId) -> Self {
-        Self {
-            id,
-            outer_shell,
-            inner_shells: Vec::new(),
-        }
-    }
-}
-
-impl Compound {
-    pub fn new(id: TopoId, children: Vec<TopoId>) -> Self {
-        Self { id, children }
-    }
 }

@@ -1,254 +1,248 @@
 //! # draper-ffi
+//! C FFI bindings for the 3Draper kernel.
 //!
-//! C FFI bindings for 3Draper.
-//!
-//! This crate exposes a C-compatible API so that the 3Draper kernel
-//! can be used from any programming language (C, C++, Python, etc.).
-//!
-//! ## Usage from C:
-//! ```c
-//! #include "draper.h"
-//!
-//! DraperDocument* doc = draper_open_step("model.stp");
-//! if (doc) {
-//!     DraperMesh* mesh = draper_get_mesh(doc);
-//!     // ... use mesh data ...
-//!     draper_mesh_free(mesh);
-//!     draper_document_free(doc);
-//! }
-//! ```
+//! Provides a C-compatible API for creating, manipulating, and exporting 3D models.
 
-use std::ffi::CStr;
+use draper_core::{
+    Document, engine::{EngineConfig, build_engine},
+};
+use draper_mesh::{
+    TriangleMesh, TriangulationParams,
+    stl::{export_stl_ascii, export_stl_binary, write_stl_file},
+};
+use draper_step::exporter::export_step;
+use draper_topology::{Solid, ShapeBuilder};
+use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
 
-use draper_core::document::Document;
-use draper_core::Point3;
-use draper_mesh::triangulate::TriangleMesh;
-
-// Opaque handle types for FFI
-
-/// Opaque handle to a Document.
+/// Opaque document handle.
 pub struct DraperDocument {
     inner: Document,
 }
 
-/// Opaque handle to a TriangleMesh.
+/// Opaque solid handle.
+pub struct DraperSolid {
+    inner: Solid,
+}
+
+/// Opaque mesh handle.
 pub struct DraperMesh {
     inner: TriangleMesh,
 }
 
-/// 3D point for FFI.
-#[repr(C)]
-pub struct DraperVec3 {
-    pub x: f64,
-    pub y: f64,
-    pub z: f64,
-}
-
-impl From<Point3> for DraperVec3 {
-    fn from(p: Point3) -> Self {
-        DraperVec3 { x: p.x, y: p.y, z: p.z }
-    }
-}
-
-/// Statistics about a document.
-#[repr(C)]
-pub struct DraperStatistics {
-    pub vertex_count: u64,
-    pub edge_count: u64,
-    pub face_count: u64,
-    pub solid_count: u64,
-    pub triangle_count: u64,
-    pub mesh_vertex_count: u64,
-}
-
-// ---- Document functions ----
-
 /// Create a new empty document.
 #[no_mangle]
-pub extern "C" fn draper_document_new() -> *mut DraperDocument {
-    let doc = DraperDocument { inner: Document::new() };
-    Box::into_raw(Box::new(doc))
-}
-
-/// Open a STEP file.
-/// Returns null on failure.
-#[no_mangle]
-pub extern "C" fn draper_open_step(path: *const c_char) -> *mut DraperDocument {
-    if path.is_null() {
-        return ptr::null_mut();
-    }
-
-    let path_str = unsafe { CStr::from_ptr(path) };
-    let path = match path_str.to_str() {
-        Ok(s) => std::path::Path::new(s),
-        Err(_) => return ptr::null_mut(),
+pub extern "C" fn draper_document_new(name: *const c_char) -> *mut DraperDocument {
+    let name_str = if name.is_null() {
+        "Untitled".to_string()
+    } else {
+        unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned()
     };
 
-    match Document::open_step(path) {
-        Ok(doc) => Box::into_raw(Box::new(DraperDocument { inner: doc })),
-        Err(e) => {
-            log::error!("Failed to open STEP file: {}", e);
-            ptr::null_mut()
-        }
-    }
-}
-
-/// Save a document as a STEP file.
-/// Returns 0 on success, -1 on failure.
-#[no_mangle]
-pub extern "C" fn draper_save_step(doc: *mut DraperDocument, path: *const c_char) -> i32 {
-    if doc.is_null() || path.is_null() {
-        return -1;
-    }
-
-    let doc = unsafe { &mut *doc };
-    let path_str = unsafe { CStr::from_ptr(path) };
-
-    match path_str.to_str() {
-        Ok(s) => {
-            let path = std::path::Path::new(s);
-            match doc.inner.save_step(path) {
-                Ok(()) => 0,
-                Err(e) => {
-                    log::error!("Failed to save STEP file: {}", e);
-                    -1
-                }
-            }
-        }
-        Err(_) => -1,
-    }
-}
-
-/// Get document statistics.
-#[no_mangle]
-pub extern "C" fn draper_get_statistics(doc: *const DraperDocument) -> DraperStatistics {
-    if doc.is_null() {
-        return DraperStatistics {
-            vertex_count: 0,
-            edge_count: 0,
-            face_count: 0,
-            solid_count: 0,
-            triangle_count: 0,
-            mesh_vertex_count: 0,
-        };
-    }
-
-    let doc = unsafe { &*doc };
-    let stats = doc.inner.statistics();
-
-    DraperStatistics {
-        vertex_count: stats.total_vertices as u64,
-        edge_count: stats.total_edges as u64,
-        face_count: stats.total_faces as u64,
-        solid_count: stats.total_solids as u64,
-        triangle_count: stats.total_triangles as u64,
-        mesh_vertex_count: stats.total_mesh_vertices as u64,
-    }
+    Box::into_raw(Box::new(DraperDocument {
+        inner: Document::new(&name_str),
+    }))
 }
 
 /// Free a document.
 #[no_mangle]
 pub extern "C" fn draper_document_free(doc: *mut DraperDocument) {
     if !doc.is_null() {
-        unsafe { drop(Box::from_raw(doc)) };
+        unsafe { drop(Box::from_raw(doc)); }
     }
 }
 
-// ---- Mesh functions ----
-
-/// Get the combined triangle mesh from the document.
-/// The caller must free the mesh with draper_mesh_free().
+/// Add a box to the document.
 #[no_mangle]
-pub extern "C" fn draper_get_mesh(doc: *const DraperDocument) -> *mut DraperMesh {
-    if doc.is_null() {
-        return ptr::null_mut();
-    }
-
-    let doc = unsafe { &*doc };
-    if let Some(mesh) = doc.inner.meshes.first() {
-        let mesh_copy = DraperMesh { inner: mesh.clone() };
-        Box::into_raw(Box::new(mesh_copy))
-    } else {
-        ptr::null_mut()
-    }
+pub extern "C" fn draper_document_add_box(
+    doc: *mut DraperDocument,
+    dx: f64, dy: f64, dz: f64,
+) -> i32 {
+    let doc = unsafe { &mut *doc };
+    let box_solid = ShapeBuilder::make_box(dx, dy, dz);
+    doc.inner.add_solid(box_solid);
+    0
 }
 
-/// Get the number of vertices in a mesh.
+/// Add a cylinder to the document.
 #[no_mangle]
-pub extern "C" fn draper_mesh_vertex_count(mesh: *const DraperMesh) -> u64 {
-    if mesh.is_null() {
-        return 0;
-    }
-    let mesh = unsafe { &*mesh };
-    mesh.inner.vertex_count() as u64
+pub extern "C" fn draper_document_add_cylinder(
+    doc: *mut DraperDocument,
+    radius: f64, height: f64,
+) -> i32 {
+    let doc = unsafe { &mut *doc };
+    let cyl = ShapeBuilder::make_cylinder(radius, height);
+    doc.inner.add_solid(cyl);
+    0
 }
 
-/// Get the number of triangles in a mesh.
+/// Add a sphere to the document.
 #[no_mangle]
-pub extern "C" fn draper_mesh_triangle_count(mesh: *const DraperMesh) -> u64 {
-    if mesh.is_null() {
-        return 0;
-    }
-    let mesh = unsafe { &*mesh };
-    mesh.inner.triangle_count() as u64
+pub extern "C" fn draper_document_add_sphere(
+    doc: *mut DraperDocument,
+    radius: f64,
+) -> i32 {
+    let doc = unsafe { &mut *doc };
+    let sphere = ShapeBuilder::make_sphere(radius);
+    doc.inner.add_solid(sphere);
+    0
 }
 
-/// Get a pointer to the vertex data.
-/// Returns a pointer to an array of DraperVec3.
-/// The pointer is valid as long as the mesh is alive.
+/// Add a cone to the document.
 #[no_mangle]
-pub extern "C" fn draper_mesh_vertices(mesh: *const DraperMesh) -> *const DraperVec3 {
-    if mesh.is_null() {
-        return ptr::null();
-    }
-    let mesh = unsafe { &*mesh };
-    // Safety: Point3 and DraperVec3 have the same layout
-    mesh.inner.vertices.as_ptr() as *const DraperVec3
+pub extern "C" fn draper_document_add_cone(
+    doc: *mut DraperDocument,
+    radius: f64, height: f64,
+) -> i32 {
+    let doc = unsafe { &mut *doc };
+    let cone = ShapeBuilder::make_cone(radius, height, (radius / height).atan());
+    doc.inner.add_solid(cone);
+    0
 }
 
-/// Get a pointer to the index data.
-/// Returns a pointer to an array of u32 triangle indices.
-/// The pointer is valid as long as the mesh is alive.
+/// Add a torus to the document.
 #[no_mangle]
-pub extern "C" fn draper_mesh_indices(mesh: *const DraperMesh) -> *const u32 {
-    if mesh.is_null() {
-        return ptr::null();
-    }
-    let mesh = unsafe { &*mesh };
-    mesh.inner.indices.as_ptr()
+pub extern "C" fn draper_document_add_torus(
+    doc: *mut DraperDocument,
+    major_radius: f64, minor_radius: f64,
+) -> i32 {
+    let doc = unsafe { &mut *doc };
+    let torus = ShapeBuilder::make_torus(major_radius, minor_radius);
+    doc.inner.add_solid(torus);
+    0
 }
 
-/// Get a pointer to the normal data (3 floats per vertex).
-/// Returns null if normals are not computed.
+/// Build an ICE engine model.
 #[no_mangle]
-pub extern "C" fn draper_mesh_normals(mesh: *const DraperMesh) -> *const f32 {
-    if mesh.is_null() {
-        return ptr::null();
+pub extern "C" fn draper_document_add_engine(doc: *mut DraperDocument) -> i32 {
+    let doc = unsafe { &mut *doc };
+    let config = EngineConfig::default();
+    let engine_doc = build_engine(&config);
+
+    // Merge engine solids into this document
+    for solid in engine_doc.solids() {
+        doc.inner.add_solid(solid.clone());
     }
-    let mesh = unsafe { &*mesh };
-    if mesh.inner.normals.is_empty() {
-        ptr::null()
-    } else {
-        mesh.inner.normals.as_ptr() as *const f32
-    }
+
+    0
+}
+
+/// Triangulate the document and return a mesh.
+#[no_mangle]
+pub extern "C" fn draper_document_triangulate(doc: *mut DraperDocument) -> *mut DraperMesh {
+    let doc = unsafe { &mut *doc };
+    let mesh = doc.inner.triangulate();
+    Box::into_raw(Box::new(DraperMesh { inner: mesh }))
 }
 
 /// Free a mesh.
 #[no_mangle]
 pub extern "C" fn draper_mesh_free(mesh: *mut DraperMesh) {
     if !mesh.is_null() {
-        unsafe { drop(Box::from_raw(mesh)) };
+        unsafe { drop(Box::from_raw(mesh)); }
     }
 }
 
-// ---- Version ----
-
-/// Get the library version string.
-/// The returned pointer is static and should not be freed.
+/// Get mesh vertex count.
 #[no_mangle]
-pub extern "C" fn draper_version() -> *const c_char {
-    static VERSION: &[u8] = b"0.1.0\0";
-    VERSION.as_ptr() as *const c_char
+pub extern "C" fn draper_mesh_vertex_count(mesh: *const DraperMesh) -> u32 {
+    if mesh.is_null() { return 0; }
+    unsafe { (*mesh).inner.vertex_count() as u32 }
+}
+
+/// Get mesh triangle count.
+#[no_mangle]
+pub extern "C" fn draper_mesh_triangle_count(mesh: *const DraperMesh) -> u32 {
+    if mesh.is_null() { return 0; }
+    unsafe { (*mesh).inner.triangle_count() as u32 }
+}
+
+/// Get mesh vertex data (x, y, z triplets).
+/// Caller must allocate buffer of size vertex_count * 3.
+#[no_mangle]
+pub extern "C" fn draper_mesh_get_vertices(
+    mesh: *const DraperMesh,
+    out: *mut f64,
+    max_count: u32,
+) -> u32 {
+    if mesh.is_null() || out.is_null() { return 0; }
+    let mesh_ref = unsafe { &(*mesh).inner };
+    let count = mesh_ref.vertex_count().min(max_count as usize);
+    let out_slice = unsafe { std::slice::from_raw_parts_mut(out, count * 3) };
+    for (i, v) in mesh_ref.vertices.iter().take(count).enumerate() {
+        out_slice[i * 3] = v.x;
+        out_slice[i * 3 + 1] = v.y;
+        out_slice[i * 3 + 2] = v.z;
+    }
+    count as u32
+}
+
+/// Get mesh triangle indices (i, j, k triplets).
+/// Caller must allocate buffer of size triangle_count * 3.
+#[no_mangle]
+pub extern "C" fn draper_mesh_get_triangles(
+    mesh: *const DraperMesh,
+    out: *mut u32,
+    max_count: u32,
+) -> u32 {
+    if mesh.is_null() || out.is_null() { return 0; }
+    let mesh_ref = unsafe { &(*mesh).inner };
+    let count = mesh_ref.triangle_count().min(max_count as usize);
+    let out_slice = unsafe { std::slice::from_raw_parts_mut(out, count * 3) };
+    for (i, tri) in mesh_ref.triangles.iter().take(count).enumerate() {
+        out_slice[i * 3] = tri[0];
+        out_slice[i * 3 + 1] = tri[1];
+        out_slice[i * 3 + 2] = tri[2];
+    }
+    count as u32
+}
+
+/// Export mesh to STL file.
+#[no_mangle]
+pub extern "C" fn draper_mesh_export_stl(
+    mesh: *const DraperMesh,
+    path: *const c_char,
+    binary: i32,
+) -> i32 {
+    if mesh.is_null() || path.is_null() { return -1; }
+    let mesh_ref = unsafe { &(*mesh).inner };
+    let path_str = unsafe { CStr::from_ptr(path) }.to_string_lossy().into_owned();
+
+    let mut mesh_copy = mesh_ref.clone();
+    mesh_copy.compute_face_normals();
+
+    match write_stl_file(&mesh_copy, &path_str, binary != 0) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// Export document to STEP file.
+#[no_mangle]
+pub extern "C" fn draper_document_export_step(
+    doc: *mut DraperDocument,
+    path: *const c_char,
+) -> i32 {
+    if doc.is_null() || path.is_null() { return -1; }
+    let doc_ref = unsafe { &(*doc).inner };
+    let path_str = unsafe { CStr::from_ptr(path) }.to_string_lossy().into_owned();
+
+    // Export each solid
+    if let Some(solid) = doc_ref.solids().first() {
+        let step_content = export_step(solid, &doc_ref.name);
+        match draper_step::exporter::write_step_file(&step_content, &path_str) {
+            Ok(()) => 0,
+            Err(_) => -1,
+        }
+    } else {
+        -1
+    }
+}
+
+/// Get the number of solids in the document.
+#[no_mangle]
+pub extern "C" fn draper_document_solid_count(doc: *const DraperDocument) -> u32 {
+    if doc.is_null() { return 0; }
+    unsafe { (*doc).inner.solid_count() as u32 }
 }

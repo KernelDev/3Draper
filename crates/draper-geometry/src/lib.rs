@@ -1,30 +1,22 @@
 //! # draper-geometry
+//! Core geometric primitives for the 3Draper kernel.
 //!
-//! Custom geometry kernel for 3Draper.
-//!
-//! Provides fundamental geometric primitives:
-//! - Points, vectors, directions
-//! - Curves: Line, Circle, Ellipse, BSpline
-//! - Surfaces: Plane, Cylinder, Cone, Sphere, Torus, BSpline Surface
-//! - PCurves: 2D curves in UV parameter space
-//! - Surface analysis: periodicity, metric tensor, curvature
-//! - Coordinate systems and transformations
-//! - Intersection and projection utilities
+//! Provides points, vectors, transformations, parametric curves and surfaces.
 
-pub mod curve;
-pub mod direction;
-pub mod intersection;
-pub mod pcurve;
 pub mod point;
-pub mod surface;
-pub mod surface_info;
+pub mod direction;
+pub mod vector;
 pub mod transform;
+pub mod curve;
+pub mod surface;
+pub mod intersection;
+pub mod tolerance;
 
-pub use curve::*;
-pub use direction::*;
-pub use intersection::*;
-pub use pcurve::*;
 pub use point::*;
-pub use surface::*;
-pub use surface_info::*;
+pub use direction::*;
+pub use vector::*;
 pub use transform::*;
+pub use curve::*;
+pub use surface::*;
+pub use intersection::*;
+pub use tolerance::*;
