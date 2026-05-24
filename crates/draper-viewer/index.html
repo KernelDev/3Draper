@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>3Draper — 3D Geometric Kernel</title>
     <meta name="description" content="3Draper: A 3D geometric kernel with B-Rep topology, STEP/STL I/O, and interactive 3D viewer running entirely in your browser via WebAssembly.">
     <link data-trunk rel="rust" data-wasm-opt="2" data-cargo-no-default-features data-cargo-features="web" />
@@ -19,6 +19,7 @@
             width: 100%;
             height: 100vh;
             display: block;
+            touch-action: none; /* Prevent browser from intercepting touch gestures */
         }
         #loading {
             position: fixed;

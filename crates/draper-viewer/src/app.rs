@@ -859,9 +859,14 @@ impl eframe::App for ViewerApp {
                 ui.add_space(8.0);
                 ui.separator();
                 ui.label(
-                    egui::RichText::new("LMB: Rotate | Scroll: Zoom | MMB: Pan")
+                    egui::RichText::new("Mouse: LMB Rotate | Scroll Zoom | MMB Pan")
                         .size(10.0)
                         .color(egui::Color32::from_rgb(160, 160, 160))
+                );
+                ui.label(
+                    egui::RichText::new("Touch: 1-finger Rotate | Pinch Zoom | 2-finger Pan")
+                        .size(10.0)
+                        .color(egui::Color32::from_rgb(140, 140, 160))
                 );
             });
 
@@ -874,33 +879,61 @@ impl eframe::App for ViewerApp {
                     egui::Sense::click_and_drag(),
                 );
 
-                // Handle mouse input for camera
-                let is_hovering = response.hovered();
+                // Handle multi-touch gestures (pinch-to-zoom, two-finger pan, two-finger rotate)
+                // This is the primary input method on mobile/touch devices.
+                let multi_touch = ui.input(|i| i.multi_touch());
+                if let Some(touch) = multi_touch {
+                    // Pinch-to-zoom: zoom_delta is a multiplier (1.0 = no change, >1 = zoom in, <1 = zoom out)
+                    if touch.zoom_delta != 1.0 {
+                        // Convert zoom_delta (multiplicative) to a scroll-like delta
+                        let zoom_delta = (touch.zoom_delta - 1.0) * 500.0;
+                        self.camera.zoom(zoom_delta, None);
+                    }
 
-                // Rotation: left mouse drag — orbits around model center
-                if response.dragged_by(egui::PointerButton::Primary) {
-                    let delta = response.drag_delta();
-                    self.camera.rotate(delta.x, delta.y);
-                }
+                    // Two-finger pan: translation_delta is in points (screen pixels)
+                    if touch.translation_delta.length() > 0.0 {
+                        self.camera.pan(
+                            touch.translation_delta.x,
+                            touch.translation_delta.y,
+                            rect.width(),
+                            rect.height(),
+                        );
+                    }
 
-                // Pan: middle mouse drag
-                if response.dragged_by(egui::PointerButton::Middle) {
-                    let delta = response.drag_delta();
-                    self.camera.pan(delta.x, delta.y, rect.width(), rect.height());
-                }
+                    // Two-finger rotation: rotation_delta is in radians
+                    if touch.rotation_delta.abs() > 0.001 {
+                        // Apply rotation around the Y axis (horizontal rotation)
+                        self.camera.rotate(touch.rotation_delta * 50.0, 0.0);
+                    }
+                } else {
+                    // No multi-touch active — handle mouse/pointer input for camera
+                    let is_hovering = response.hovered();
 
-                // Zoom: scroll wheel — zoom toward mouse cursor position
-                if is_hovering {
-                    let scroll = ui.input(|i| i.smooth_scroll_delta);
-                    if scroll.y != 0.0 {
-                        // Compute normalized mouse position (-1 to 1) relative to viewport center
-                        let mouse_pos_opt = ui.input(|i| i.pointer.latest_pos());
-                        let mouse_norm = mouse_pos_opt.map(|pos| {
-                            let nx = ((pos.x - rect.center().x) / (rect.width() * 0.5)).clamp(-1.0, 1.0);
-                            let ny = -((pos.y - rect.center().y) / (rect.height() * 0.5)).clamp(-1.0, 1.0);
-                            [nx, ny]
-                        });
-                        self.camera.zoom(scroll.y, mouse_norm);
+                    // Rotation: left mouse drag (or single-finger drag on touch) — orbits around model center
+                    if response.dragged_by(egui::PointerButton::Primary) {
+                        let delta = response.drag_delta();
+                        self.camera.rotate(delta.x, delta.y);
+                    }
+
+                    // Pan: middle mouse drag (desktop) or secondary pointer button
+                    if response.dragged_by(egui::PointerButton::Middle) {
+                        let delta = response.drag_delta();
+                        self.camera.pan(delta.x, delta.y, rect.width(), rect.height());
+                    }
+
+                    // Zoom: scroll wheel (desktop) — zoom toward mouse cursor position
+                    if is_hovering {
+                        let scroll = ui.input(|i| i.smooth_scroll_delta);
+                        if scroll.y != 0.0 {
+                            // Compute normalized mouse position (-1 to 1) relative to viewport center
+                            let mouse_pos_opt = ui.input(|i| i.pointer.latest_pos());
+                            let mouse_norm = mouse_pos_opt.map(|pos| {
+                                let nx = ((pos.x - rect.center().x) / (rect.width() * 0.5)).clamp(-1.0, 1.0);
+                                let ny = -((pos.y - rect.center().y) / (rect.height() * 0.5)).clamp(-1.0, 1.0);
+                                [nx, ny]
+                            });
+                            self.camera.zoom(scroll.y, mouse_norm);
+                        }
                     }
                 }
 
