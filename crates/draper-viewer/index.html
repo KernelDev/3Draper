@@ -75,16 +75,20 @@
     </div>
     <canvas id="the_canvas_id"></canvas>
     <script>
-        // Hide loading overlay once WASM initializes
+        // Hide loading overlay once WASM application has fully started
         var loadingEl = document.getElementById("loading");
-        window.addEventListener("load", function() {
-            setTimeout(function() {
-                if (loadingEl) {
-                    loadingEl.classList.add("fade-out");
-                    setTimeout(function() { loadingEl.style.display = "none"; }, 500);
-                }
-            }, 300);
+        function hideLoading() {
+            if (loadingEl) {
+                loadingEl.classList.add("fade-out");
+                setTimeout(function() { loadingEl.style.display = "none"; }, 600);
+            }
+        }
+        // Listen for the TrunkApplicationStarted event (dispatched after WASM init)
+        window.addEventListener("TrunkApplicationStarted", function() {
+            setTimeout(hideLoading, 100);
         });
+        // Fallback: hide after 15 seconds even if WASM fails to load
+        setTimeout(hideLoading, 15000);
     </script>
 </body>
 </html>

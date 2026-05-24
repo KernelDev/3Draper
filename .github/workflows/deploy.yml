@@ -42,7 +42,7 @@ jobs:
 
       - name: Build WASM
         working-directory: crates/draper-viewer
-        run: trunk build --release
+        run: trunk build --release --public-url /3Draper/
 
       - name: Add .nojekyll
         working-directory: crates/draper-viewer/dist
