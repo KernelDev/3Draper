@@ -18,7 +18,7 @@ draper-topology = { workspace = true }
 draper-mesh = { workspace = true }
 draper-core = { workspace = true }
 draper-step = { workspace = true }
-eframe = { workspace = true }
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu", "x11", "wayland"] }
 egui = { workspace = true }
 egui-wgpu = { version = "0.31" }
 wgpu = { workspace = true }
