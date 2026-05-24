@@ -92,6 +92,29 @@ mod web_entry {
                             backends: wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
                             ..Default::default()
                         },
+                        device_descriptor: std::sync::Arc::new(|adapter| {
+                            let base_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
+                                let mut limits = wgpu::Limits::downlevel_webgl2_defaults();
+                                // WebGL2 on many browsers only supports 6-8 color attachments.
+                                // Default downlevel_webgl2_defaults sets 8, but some only support 6.
+                                // Clamp to the adapter's actual limit to avoid errors.
+                                let adapter_limits = adapter.limits();
+                                limits.max_color_attachments = limits.max_color_attachments.min(adapter_limits.max_color_attachments);
+                                limits
+                            } else {
+                                wgpu::Limits::default()
+                            };
+
+                            wgpu::DeviceDescriptor {
+                                label: Some("3Draper wgpu device (web)"),
+                                required_features: wgpu::Features::default(),
+                                required_limits: wgpu::Limits {
+                                    max_texture_dimension_2d: 8192.min(base_limits.max_texture_dimension_2d),
+                                    ..base_limits
+                                },
+                                memory_hints: wgpu::MemoryHints::default(),
+                            }
+                        }),
                         ..Default::default()
                     }
                 ),
