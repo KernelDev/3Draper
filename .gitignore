@@ -1,6 +1,7 @@
 # Build artifacts
 /target
 /dist
+**/dist/
 *.swp
 *.swo
 *~

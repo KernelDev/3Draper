@@ -6,7 +6,7 @@ edition.workspace = true
 [lib]
 # cdylib and staticlib are only useful on native targets.
 # On wasm, this crate compiles to an empty lib (all code is cfg-gated out).
-crate-type = ["cdylib", "staticlib"]
+crate-type = ["cdylib", "staticlib", "lib"]
 
 [dependencies]
 draper-geometry = { workspace = true }
