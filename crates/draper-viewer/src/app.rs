@@ -641,20 +641,22 @@ impl eframe::App for ViewerApp {
                         );
                     }
                     if ui.button("Top View").clicked() {
-                        self.camera.azimuth = 0.0;
-                        self.camera.elevation = 89.0_f32.to_radians();
+                        self.camera.look_from_direction([0.0, -1.0, 0.0]);
                     }
                     if ui.button("Front View").clicked() {
-                        self.camera.azimuth = 0.0;
-                        self.camera.elevation = 0.0;
+                        self.camera.look_from_direction([0.0, 0.0, 1.0]);
                     }
                     if ui.button("Right View").clicked() {
-                        self.camera.azimuth = 90.0_f32.to_radians();
-                        self.camera.elevation = 0.0;
+                        self.camera.look_from_direction([-1.0, 0.0, 0.0]);
                     }
                     if ui.button("Isometric View").clicked() {
-                        self.camera.azimuth = -45.0_f32.to_radians();
-                        self.camera.elevation = 30.0_f32.to_radians();
+                        let d = 45.0_f32.to_radians();
+                        let e = 30.0_f32.to_radians();
+                        self.camera.look_from_direction([
+                            -e.cos() * d.sin(),
+                            -e.sin(),
+                            e.cos() * d.cos(),
+                        ]);
                     }
                 });
             });
@@ -1019,29 +1021,27 @@ impl eframe::App for ViewerApp {
 
 impl ViewerApp {
     fn draw_axes_overlay(&self, ui: &mut egui::Ui, rect: egui::Rect) {
-        let cos_rx = self.camera.elevation.cos();
-        let sin_rx = self.camera.elevation.sin();
-        let cos_ry = self.camera.azimuth.cos();
-        let sin_ry = self.camera.azimuth.sin();
+        // Use the camera's right and up vectors for the 2D projection
+        let cam_right = self.camera.right();
+        let cam_up = self.camera.up();
 
         let axis_len = 50.0;
-        let axes: [(f32, f32, f32, egui::Color32, &str); 3] = [
-            (axis_len, 0.0, 0.0, egui::Color32::RED, "X"),
-            (0.0, axis_len, 0.0, egui::Color32::GREEN, "Y"),
-            (0.0, 0.0, axis_len, egui::Color32::BLUE, "Z"),
+        let axes: [([f32; 3], egui::Color32, &str); 3] = [
+            ([1.0, 0.0, 0.0], egui::Color32::RED, "X"),
+            ([0.0, 1.0, 0.0], egui::Color32::GREEN, "Y"),
+            ([0.0, 0.0, 1.0], egui::Color32::BLUE, "Z"),
         ];
 
         let origin_x = rect.left() + 60.0;
         let origin_y = rect.bottom() - 60.0;
 
-        for (ax, ay, az, color, label) in axes {
-            // Rotate like the camera
-            let x1 = ax * cos_ry + az * sin_ry;
-            let z1 = -ax * sin_ry + az * cos_ry;
-            let y1 = ay * cos_rx - z1 * sin_rx;
+        for (dir, color, label) in axes {
+            // Project world axis direction onto camera right/up (screen X/Y)
+            let sx = (dir[0] * cam_right[0] + dir[1] * cam_right[1] + dir[2] * cam_right[2]) * axis_len;
+            let sy = (dir[0] * cam_up[0] + dir[1] * cam_up[1] + dir[2] * cam_up[2]) * axis_len;
 
-            let end_x = origin_x + x1;
-            let end_y = origin_y - y1;
+            let end_x = origin_x + sx;
+            let end_y = origin_y - sy;
 
             ui.painter().line_segment(
                 [egui::Pos2::new(origin_x, origin_y), egui::Pos2::new(end_x, end_y)],
