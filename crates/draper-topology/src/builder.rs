@@ -373,22 +373,16 @@ impl ShapeBuilder {
     pub fn transform_solid(solid: &mut Solid, transform: &Transform) {
         if let Some(ref mut shell) = solid.outer_shell {
             for face in &mut shell.faces {
+                // Transform surface
                 if let Some(ref mut surface) = face.surface {
                     *surface = surface.transform(transform);
                 }
-                // Transform edge curves
-                Self::transform_wire(&mut face.outer_wire, transform);
-                // Inner wires — placeholder for transform
-            }
-        }
-    }
-
-    fn transform_wire(wire: &mut Option<Wire>, transform: &Transform) {
-        if let Some(ref mut w) = wire {
-            for coedge in &mut w.coedges {
-                // We would need to look up the edge and transform its curve
-                // For now, this is a placeholder
-                let _ = (coedge, transform);
+                // Transform edge curves stored in the face
+                for edge in &mut face.edges {
+                    if let Some(ref mut curve) = edge.curve {
+                        *curve = curve.transform(transform);
+                    }
+                }
             }
         }
     }

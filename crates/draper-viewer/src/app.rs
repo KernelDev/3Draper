@@ -874,7 +874,7 @@ impl eframe::App for ViewerApp {
 
         // === Central 3D viewport ===
         egui::CentralPanel::default()
-            .frame(egui::Frame::default().fill(egui::Color32::from_rgb(30, 30, 40)))
+            .frame(egui::Frame::default().fill(egui::Color32::from_rgb(224, 228, 235)))
             .show(ctx, |ui| {
                 let (rect, response) = ui.allocate_exact_size(
                     ui.available_size(),
@@ -987,7 +987,7 @@ impl eframe::App for ViewerApp {
                     let uniforms = SceneUniforms {
                         mvp,
                         model,
-                        light_dir: [cam_fwd[0], cam_fwd[1], cam_fwd[2], 0.25], // xyz = direction from camera, w = ambient
+                        light_dir: [cam_fwd[0], cam_fwd[1], cam_fwd[2], 0.35], // xyz = direction from camera, w = ambient
                         camera_pos: [cam_pos[0], cam_pos[1], cam_pos[2], 0.0],
                     };
 
