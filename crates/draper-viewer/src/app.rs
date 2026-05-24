@@ -108,10 +108,18 @@ pub struct ViewerApp {
 
 impl ViewerApp {
     fn log(&mut self, msg: &str) {
+        #[cfg(not(target_arch = "wasm32"))]
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
+
+        #[cfg(target_arch = "wasm32")]
+        let now = {
+            let millis = js_sys::Date::now() as u64;
+            millis / 1000
+        };
+
         let secs = (now % 3600) / 60;
         let mins = (now % 86400) / 3600;
         let time = format!("{:02}:{:02}:{:02}", (now / 3600) % 24, mins, secs);
