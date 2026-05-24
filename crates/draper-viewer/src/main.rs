@@ -75,7 +75,6 @@ fn main() {
 mod web_entry {
     use eframe::WebRunner;
     use wasm_bindgen::prelude::*;
-    use wasm_bindgen_futures::wasm_bindgen;
 
     /// This is the entry point for the web version.
     /// It is called automatically when the wasm module is loaded.
@@ -83,7 +82,23 @@ mod web_entry {
     pub async fn start() {
         console_log::init_with_level(log::Level::Info).ok();
 
-        let web_options = eframe::WebOptions::default();
+        // Configure wgpu to use WebGL2 as fallback when WebGPU is not available
+        let web_options = eframe::WebOptions {
+            wgpu_options: egui_wgpu::WgpuConfiguration {
+                wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(
+                    egui_wgpu::WgpuSetupCreateNew {
+                        instance_descriptor: wgpu::InstanceDescriptor {
+                            // Try WebGPU first, fall back to WebGL2
+                            backends: wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }
+                ),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
 
         // Get the canvas element by ID
         let window = web_sys::window().expect("no window");
@@ -93,13 +108,40 @@ mod web_entry {
             .expect("failed to find the_canvas_id")
             .unchecked_into::<web_sys::HtmlCanvasElement>();
 
-        WebRunner::new()
+        let runner = WebRunner::new();
+        match runner
             .start(
                 canvas,
                 web_options,
                 Box::new(|cc| Ok(Box::new(crate::app::ViewerApp::new(cc)))),
             )
             .await
-            .expect("failed to start eframe");
+        {
+            Ok(()) => {}
+            Err(e) => {
+                let msg = format!("3Draper failed to start: {e:?}\n\nMake sure you're using a browser with WebGPU or WebGL2 support.");
+                log::error!("{msg}");
+                // Show error on the page
+                if let Some(window) = web_sys::window() {
+                    if let Some(document) = window.document() {
+                        if let Some(body) = document.body() {
+                            let error_div = document.create_element("div").unwrap();
+                            error_div.set_inner_html(&format!(
+                                "<div style='color:#ff6b6b;padding:20px;font-family:sans-serif;max-width:600px;margin:40px auto;'>\
+                                <h2>3Draper — Rendering Error</h2>\
+                                <p>{msg}</p>\
+                                <p style='color:#888;font-size:14px;'>Try using Chrome 113+, Edge 113+, or Firefox Nightly with WebGPU enabled.</p>\
+                                </div>"
+                            ));
+                            let _ = body.append_child(&error_div);
+                            // Hide loading overlay
+                            if let Some(loading) = document.get_element_by_id("loading") {
+                                loading.set_attribute("style", "display:none").ok();
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

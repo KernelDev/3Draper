@@ -10,7 +10,7 @@ path = "src/main.rs"
 [features]
 default = ["native"]
 native = ["rfd", "env_logger"]
-web = ["web-sys", "wasm-bindgen", "console_log", "wasm-bindgen-futures", "js-sys", "web-time"]
+web = ["web-sys", "wasm-bindgen", "console_log", "wasm-bindgen-futures", "js-sys", "web-time", "wgpu/webgl", "wgpu/webgpu"]
 
 [dependencies]
 draper-geometry = { workspace = true }
@@ -21,7 +21,7 @@ draper-step = { workspace = true }
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu", "x11", "wayland"] }
 egui = { workspace = true }
 egui-wgpu = { version = "0.31" }
-wgpu = { workspace = true }
+wgpu = { version = "24", features = ["webgl", "webgpu"] }
 bytemuck = { version = "1", features = ["derive"] }
 log = { workspace = true }
 
