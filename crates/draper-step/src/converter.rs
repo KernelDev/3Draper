@@ -38,23 +38,87 @@ struct FaceData {
     forward: bool,
 }
 
-/// A colored mesh instance (mesh + optional RGBA color).
-struct ColoredMesh {
-    mesh: TriangleMesh,
-    color: Option<[f32; 4]>, // RGBA, 0..1 range
+/// A mesh instance to be rendered — the mesh geometry is transformed by the given matrix
+/// and painted with the given color. Multiple instances can reference the same BREP geometry
+/// but with different transforms (e.g., a bolt inserted 6 times at different positions).
+#[derive(Clone, Debug)]
+pub struct MeshInstance {
+    /// Human-readable name (from STEP PRODUCT or NAUO).
+    pub name: String,
+    /// The triangulated mesh (already transformed to world space).
+    pub mesh: TriangleMesh,
+    /// Optional RGBA color (0..1 range).
+    pub color: Option<[f32; 4]>,
+    /// The 4×4 transform that was applied to get this instance into world space.
+    pub transform: Option<[[f64; 4]; 4]>,
+    /// The STEP entity ID of the source MANIFOLD_SOLID_BREP.
+    pub brep_id: i64,
 }
 
-/// Convert a parsed STEP file to a triangle mesh.
+/// A node in the STEP assembly tree (for structure display).
+#[derive(Clone, Debug)]
+pub struct AssemblyNode {
+    /// Name of this assembly node.
+    pub name: String,
+    /// STEP entity ID of the PRODUCT_DEFINITION.
+    pub pd_id: i64,
+    /// STEP entity ID of the MANIFOLD_SOLID_BREP (if leaf).
+    pub brep_id: Option<i64>,
+    /// Transform from parent to this node.
+    pub transform: Option<[[f64; 4]; 4]>,
+    /// Color for this node.
+    pub color: Option<[f32; 4]>,
+    /// Child nodes.
+    pub children: Vec<AssemblyNode>,
+}
+
+/// Convert a parsed STEP file to a single merged triangle mesh.
 pub fn step_to_mesh(step_file: &StepFile) -> Result<TriangleMesh, String> {
     let converter = StepConverter::new(step_file);
     converter.convert()
 }
 
-/// Convert a parsed STEP file to colored mesh instances.
-/// Returns one mesh per colored part (with per-part RGBA color).
-pub fn step_to_colored_meshes(step_file: &StepFile) -> Result<Vec<ColoredMesh>, String> {
+/// Convert a parsed STEP file to mesh instances (one per assembly leaf occurrence).
+/// Each instance has its own transform and color — the same BREP can appear
+/// multiple times with different transforms (e.g., bolt inserted 6 times).
+pub fn step_to_mesh_instances(step_file: &StepFile) -> Result<Vec<MeshInstance>, String> {
     let converter = StepConverter::new(step_file);
-    converter.convert_colored()
+    converter.convert_instances()
+}
+
+/// Get the assembly tree structure of a STEP file for display/debugging.
+pub fn step_structure(step_file: &StepFile) -> AssemblyNode {
+    let converter = StepConverter::new(step_file);
+    converter.build_assembly_tree()
+}
+
+/// Get a text representation of the STEP file structure.
+pub fn step_structure_text(step_file: &StepFile) -> String {
+    let converter = StepConverter::new(step_file);
+    let tree = converter.build_assembly_tree();
+    let mut text = String::new();
+    format_assembly_node(&tree, 0, &mut text);
+    text
+}
+
+fn format_assembly_node(node: &AssemblyNode, depth: usize, out: &mut String) {
+    let indent = "  ".repeat(depth);
+    let brep_str = match node.brep_id {
+        Some(id) => format!(" BREP=#{}", id),
+        None => String::new(),
+    };
+    let color_str = match node.color {
+        Some(c) => format!(" color=({:.2},{:.2},{:.2})", c[0], c[1], c[2]),
+        None => String::new(),
+    };
+    let tf_str = match node.transform {
+        Some(_) => " [T]".to_string(),
+        None => String::new(),
+    };
+    out.push_str(&format!("{}{} (PD=#{}){}{}{}\n", indent, node.name, node.pd_id, brep_str, color_str, tf_str));
+    for child in &node.children {
+        format_assembly_node(child, depth + 1, out);
+    }
 }
 
 struct StepConverter<'a> {
@@ -72,110 +136,91 @@ impl<'a> StepConverter<'a> {
     }
 
     fn convert(&self) -> Result<TriangleMesh, String> {
-        // Try colored assembly conversion first, then merge all into one mesh
-        let colored = self.convert_colored()?;
+        let instances = self.convert_instances()?;
         let mut mesh = TriangleMesh::new();
-        for cm in colored {
-            if let Some(color) = cm.color {
-                mesh.merge_with_color(&cm.mesh, color);
+        for inst in &instances {
+            if let Some(color) = inst.color {
+                mesh.merge_with_color(&inst.mesh, color);
             } else {
-                mesh.merge_with_color(&cm.mesh, [0.48, 0.52, 0.58, 1.0]);
+                mesh.merge_with_color(&inst.mesh, [0.48, 0.52, 0.58, 1.0]);
             }
         }
         Ok(mesh)
     }
 
-    /// Convert STEP to colored mesh instances, properly handling assembly structure
-    /// with NAUO/CDSR/ITEM_DEFINED_TRANSFORMATION transforms and STYLED_ITEM colors.
-    fn convert_colored(&self) -> Result<Vec<ColoredMesh>, String> {
+    /// Convert STEP to mesh instances, walking the assembly tree from root.
+    /// Each leaf BREP produces one mesh instance per assembly occurrence,
+    /// with the composed transform from root → leaf applied.
+    fn convert_instances(&self) -> Result<Vec<MeshInstance>, String> {
         let params = TriangulationParams::default();
         let bbox = self.compute_bounding_box();
-        let mut results: Vec<ColoredMesh> = Vec::new();
+        let color_map = self.extract_color_map();
+        let mut brep_mesh_cache: HashMap<i64, TriangleMesh> = HashMap::new();
+        let mut results: Vec<MeshInstance> = Vec::new();
 
-        // ─── Phase 1: Try assembly-based conversion via NAUO/CDSR ─────────
+        // ─── Phase 1: Assembly-based conversion via NAUO tree walk ────────
         let nauos = self.step.find_entities_by_type("NEXT_ASSEMBLY_USAGE_OCCURRENCE");
         if !nauos.is_empty() {
-            info!("Found {} NAUO assembly instances", nauos.len());
+            info!("Found {} NAUO assembly instances — walking assembly tree", nauos.len());
 
-            // Build color map: brep_id → [f32;4] color
-            let color_map = self.extract_color_map();
-
-            // Build a map: child_pd_id → list of (nauo_id, relating_pd_id)
-            let mut pd_to_nauos: HashMap<i64, Vec<(i64, i64)>> = HashMap::new();
+            // Build: parent_pd_id → Vec<(nauo_id, child_pd_id, nauo_name)>
+            let mut parent_pd_to_children: HashMap<i64, Vec<(i64, i64, String)>> = HashMap::new();
             for nauo in &nauos {
                 let (relating_pd, related_pd) = self.extract_nauo_pd_refs(nauo);
                 if let (Some(parent_pd), Some(child_pd)) = (relating_pd, related_pd) {
-                    pd_to_nauos.entry(child_pd).or_default().push((nauo.id, parent_pd));
+                    let name = self.extract_nauo_name(nauo);
+                    parent_pd_to_children.entry(parent_pd).or_default().push((nauo.id, child_pd, name));
                 }
             }
 
-            // For each NAUO that references a leaf BREP, compute composed transform
-            for nauo in &nauos {
-                let (relating_pd_id, related_pd_id) = self.extract_nauo_pd_refs(nauo);
-                if relating_pd_id.is_none() || related_pd_id.is_none() {
-                    continue;
+            // Find root PD(s): PDs that are parents but are never children
+            let parent_pds: std::collections::HashSet<i64> = parent_pd_to_children.keys().copied().collect();
+            let child_pds: std::collections::HashSet<i64> = nauos.iter()
+                .filter_map(|n| self.extract_nauo_pd_refs(n).1)
+                .collect();
+            let roots: Vec<i64> = parent_pds.difference(&child_pds).copied().collect();
+
+            if roots.is_empty() {
+                info!("No root assembly found, falling back to direct BREP conversion");
+            } else {
+                for root_pd in &roots {
+                    let root_name = self.get_product_name(*root_pd);
+                    info!("Root assembly: PD=#{} name='{}'", root_pd, root_name);
+                    self.walk_assembly_tree(
+                        *root_pd,
+                        &root_name,
+                        &None,
+                        &color_map,
+                        &mut brep_mesh_cache,
+                        &params,
+                        &bbox,
+                        &parent_pd_to_children,
+                        &mut results,
+                        &mut std::collections::HashSet::new(),
+                    );
                 }
-                let related_pd_id = related_pd_id.unwrap();
-
-                // Find the BREP for the related product (skip sub-assemblies)
-                let brep_id = self.find_pd_brep(related_pd_id);
-                if brep_id.is_none() {
-                    continue; // Sub-assembly NAUO — its children are handled separately
-                }
-                let brep_id = brep_id.unwrap();
-
-                // Compute the composed transform from leaf to root
-                let transform = self.compute_composed_transform(related_pd_id, &pd_to_nauos);
-
-                // Triangulate the BREP
-                let mesh = if let Some(shell_id) = self.find_shell_ref_by_brep_id(brep_id) {
-                    if let Some(face_data_list) = self.extract_shell_faces(shell_id) {
-                        let mut m = TriangleMesh::new();
-                        for face_data in &face_data_list {
-                            let face_mesh = self.surface_to_mesh(face_data, &params, &bbox);
-                            m.merge(&face_mesh);
-                        }
-                        m
-                    } else {
-                        continue;
-                    }
-                } else {
-                    continue;
-                };
-
-                // Apply the composed transform
-                let mut mesh = mesh;
-                if let Some(tf) = transform {
-                    mesh.transform(&tf);
-                }
-
-                let color = color_map.get(&brep_id).copied();
-                results.push(ColoredMesh { mesh, color });
             }
 
             if !results.is_empty() {
-                info!("Assembly conversion: {} colored mesh instances", results.len());
+                info!("Assembly conversion: {} mesh instances", results.len());
                 return Ok(results);
             }
         }
 
         // ─── Phase 2: No assembly structure — try direct BREP conversion ───
-        let color_map = self.extract_color_map();
-
         let breps = self.step.find_entities_by_type("MANIFOLD_SOLID_BREP");
         if !breps.is_empty() {
             for brep in &breps {
-                let shell_id = self.find_shell_ref(brep);
-                if let Some(shell_id) = shell_id {
-                    if let Some(face_data_list) = self.extract_shell_faces(shell_id) {
-                        let mut mesh = TriangleMesh::new();
-                        for face_data in &face_data_list {
-                            let face_mesh = self.surface_to_mesh(face_data, &params, &bbox);
-                            mesh.merge(&face_mesh);
-                        }
-                        let color = color_map.get(&brep.id).copied();
-                        results.push(ColoredMesh { mesh, color });
-                    }
+                let name = self.get_brep_name(brep.id);
+                if let Some(mesh) = self.triangulate_brep_cached(brep.id, &mut brep_mesh_cache, &params, &bbox) {
+                    let color = color_map.get(&brep.id).copied();
+                    results.push(MeshInstance {
+                        name,
+                        mesh,
+                        color,
+                        transform: None,
+                        brep_id: brep.id,
+                    });
                 }
             }
         }
@@ -188,17 +233,16 @@ impl<'a> StepConverter<'a> {
         let faceted = self.step.find_entities_by_type("FACETED_BREP");
         if !faceted.is_empty() {
             for fb in &faceted {
-                let shell_id = self.find_shell_ref(fb);
-                if let Some(shell_id) = shell_id {
-                    if let Some(face_data_list) = self.extract_shell_faces(shell_id) {
-                        let mut mesh = TriangleMesh::new();
-                        for face_data in &face_data_list {
-                            let face_mesh = self.surface_to_mesh(face_data, &params, &bbox);
-                            mesh.merge(&face_mesh);
-                        }
-                        let color = color_map.get(&fb.id).copied();
-                        results.push(ColoredMesh { mesh, color });
-                    }
+                let name = self.get_brep_name(fb.id);
+                if let Some(mesh) = self.triangulate_brep_cached(fb.id, &mut brep_mesh_cache, &params, &bbox) {
+                    let color = color_map.get(&fb.id).copied();
+                    results.push(MeshInstance {
+                        name,
+                        mesh,
+                        color,
+                        transform: None,
+                        brep_id: fb.id,
+                    });
                 }
             }
         }
@@ -214,17 +258,16 @@ impl<'a> StepConverter<'a> {
                 if let Some(ref_id) = self.get_ref(param) {
                     if let Some(entity) = self.step.find_entity(ref_id) {
                         if entity.type_name == "MANIFOLD_SOLID_BREP" {
-                            let shell_id = self.find_shell_ref(entity);
-                            if let Some(shell_id) = shell_id {
-                                if let Some(face_data_list) = self.extract_shell_faces(shell_id) {
-                                    let mut mesh = TriangleMesh::new();
-                                    for face_data in &face_data_list {
-                                        let face_mesh = self.surface_to_mesh(face_data, &params, &bbox);
-                                        mesh.merge(&face_mesh);
-                                    }
-                                    let color = color_map.get(&entity.id).copied();
-                                    results.push(ColoredMesh { mesh, color });
-                                }
+                            let name = self.get_brep_name(entity.id);
+                            if let Some(mesh) = self.triangulate_brep_cached(entity.id, &mut brep_mesh_cache, &params, &bbox) {
+                                let color = color_map.get(&entity.id).copied();
+                                results.push(MeshInstance {
+                                    name,
+                                    mesh,
+                                    color,
+                                    transform: None,
+                                    brep_id: entity.id,
+                                });
                             }
                         }
                     }
@@ -234,17 +277,16 @@ impl<'a> StepConverter<'a> {
                         if let Some(ref_id) = self.get_ref(item) {
                             if let Some(entity) = self.step.find_entity(ref_id) {
                                 if entity.type_name == "MANIFOLD_SOLID_BREP" {
-                                    let shell_id = self.find_shell_ref(entity);
-                                    if let Some(shell_id) = shell_id {
-                                        if let Some(face_data_list) = self.extract_shell_faces(shell_id) {
-                                            let mut mesh = TriangleMesh::new();
-                                            for face_data in &face_data_list {
-                                                let face_mesh = self.surface_to_mesh(face_data, &params, &bbox);
-                                                mesh.merge(&face_mesh);
-                                            }
-                                            let color = color_map.get(&entity.id).copied();
-                                            results.push(ColoredMesh { mesh, color });
-                                        }
+                                    let name = self.get_brep_name(entity.id);
+                                    if let Some(mesh) = self.triangulate_brep_cached(entity.id, &mut brep_mesh_cache, &params, &bbox) {
+                                        let color = color_map.get(&entity.id).copied();
+                                        results.push(MeshInstance {
+                                            name,
+                                            mesh,
+                                            color,
+                                            transform: None,
+                                            brep_id: entity.id,
+                                        });
                                     }
                                 }
                             }
@@ -270,7 +312,13 @@ impl<'a> StepConverter<'a> {
                 if let Some(surface) = self.extract_surface(entity.id) {
                     let face_data = FaceData { surface, edges: vec![], forward: true };
                     let mesh = self.surface_to_mesh(&face_data, &params, &bbox);
-                    results.push(ColoredMesh { mesh, color: None });
+                    results.push(MeshInstance {
+                        name: entity.type_name.clone(),
+                        mesh,
+                        color: None,
+                        transform: None,
+                        brep_id: entity.id,
+                    });
                 }
             }
         }
@@ -291,12 +339,292 @@ impl<'a> StepConverter<'a> {
                 mesh.add_triangle(0, i as u32, (i + 1) as u32);
             }
             if mesh.triangle_count() > 0 {
-                results.push(ColoredMesh { mesh, color: None });
+                results.push(MeshInstance {
+                    name: "Point Cloud".to_string(),
+                    mesh,
+                    color: None,
+                    transform: None,
+                    brep_id: 0,
+                });
                 return Ok(results);
             }
         }
 
         Err("No convertible surface geometry found in STEP file".to_string())
+    }
+
+    /// Recursively walk the assembly tree from a parent PD, creating mesh instances
+    /// for each leaf BREP occurrence with the correct composed transform.
+    fn walk_assembly_tree(
+        &self,
+        parent_pd_id: i64,
+        _parent_name: &str,
+        parent_transform: &Option<[[f64; 4]; 4]>,
+        color_map: &HashMap<i64, [f32; 4]>,
+        brep_mesh_cache: &mut HashMap<i64, TriangleMesh>,
+        params: &TriangulationParams,
+        bbox: &Option<(Point3d, Point3d)>,
+        parent_pd_to_children: &HashMap<i64, Vec<(i64, i64, String)>>,
+        results: &mut Vec<MeshInstance>,
+        // Track (pd_id, nauo_id) pairs to detect cycles
+        visited: &mut std::collections::HashSet<(i64, i64)>,
+    ) {
+        let children = match parent_pd_to_children.get(&parent_pd_id) {
+            Some(c) => c,
+            None => return, // Leaf with no children in the NAUO tree
+        };
+
+        for &(nauo_id, child_pd_id, ref nauo_name) in children {
+            // Cycle detection: same PD via same NAUO = infinite loop
+            if visited.contains(&(child_pd_id, nauo_id)) {
+                warn!("Cycle detected: PD=#{} via NAUO=#{}", child_pd_id, nauo_id);
+                continue;
+            }
+            visited.insert((child_pd_id, nauo_id));
+
+            // Get this NAUO's transform (CDSR → SRR → ITEM_DEFINED_TRANSFORMATION)
+            let nauo_transform = self.find_nauo_transform(nauo_id, child_pd_id);
+
+            // Compose: parent_transform * nauo_transform
+            let composed = match (parent_transform, nauo_transform) {
+                (Some(pt), Some(nt)) => Some(mat4_mul(pt, &nt)),
+                (Some(pt), None) => Some(*pt),
+                (None, Some(nt)) => Some(nt),
+                (None, None) => None,
+            };
+
+            // Check if this child PD has a direct BREP (leaf)
+            if let Some(brep_id) = self.find_pd_brep(child_pd_id) {
+                // Leaf node — triangulate BREP and create instance
+                if let Some(mesh) = self.triangulate_brep_cached(brep_id, brep_mesh_cache, params, bbox) {
+                    let mut instance_mesh = mesh.clone();
+                    if let Some(ref tf) = composed {
+                        instance_mesh.transform(tf);
+                    }
+                    let color = color_map.get(&brep_id).copied();
+                    let name = format!("{} (BREP=#{})", nauo_name, brep_id);
+                    results.push(MeshInstance {
+                        name,
+                        mesh: instance_mesh,
+                        color,
+                        transform: composed,
+                        brep_id,
+                    });
+                    info!("Instance: {} PD=#{} BREP=#{} color={:?} transform={}",
+                        nauo_name, child_pd_id, brep_id, color, composed.is_some());
+                }
+            } else {
+                // Sub-assembly — recurse into it
+                let child_name = self.get_product_name(child_pd_id);
+                self.walk_assembly_tree(
+                    child_pd_id,
+                    &child_name,
+                    &composed,
+                    color_map,
+                    brep_mesh_cache,
+                    params,
+                    bbox,
+                    parent_pd_to_children,
+                    results,
+                    visited,
+                );
+            }
+
+            visited.remove(&(child_pd_id, nauo_id));
+        }
+    }
+
+    /// Build the assembly tree for display/debugging purposes.
+    fn build_assembly_tree(&self) -> AssemblyNode {
+        let nauos = self.step.find_entities_by_type("NEXT_ASSEMBLY_USAGE_OCCURRENCE");
+        let color_map = self.extract_color_map();
+
+        // Build: parent_pd_id → Vec<(nauo_id, child_pd_id, nauo_name)>
+        let mut parent_pd_to_children: HashMap<i64, Vec<(i64, i64, String)>> = HashMap::new();
+        for nauo in &nauos {
+            let (relating_pd, related_pd) = self.extract_nauo_pd_refs(nauo);
+            if let (Some(parent_pd), Some(child_pd)) = (relating_pd, related_pd) {
+                let name = self.extract_nauo_name(nauo);
+                parent_pd_to_children.entry(parent_pd).or_default().push((nauo.id, child_pd, name));
+            }
+        }
+
+        // Find root(s)
+        let parent_pds: std::collections::HashSet<i64> = parent_pd_to_children.keys().copied().collect();
+        let child_pds: std::collections::HashSet<i64> = nauos.iter()
+            .filter_map(|n| self.extract_nauo_pd_refs(n).1)
+            .collect();
+        let roots: Vec<i64> = parent_pds.difference(&child_pds).copied().collect();
+
+        if let Some(&root_pd) = roots.first() {
+            let root_name = self.get_product_name(root_pd);
+            self.build_assembly_node_recursive(
+                root_pd, &root_name, &color_map, &parent_pd_to_children,
+                &mut std::collections::HashSet::new(),
+            )
+        } else {
+            // No assembly — build flat tree from BREPs
+            let mut node = AssemblyNode {
+                name: "No Assembly".to_string(),
+                pd_id: 0,
+                brep_id: None,
+                transform: None,
+                color: None,
+                children: Vec::new(),
+            };
+            for brep in self.step.find_entities_by_type("MANIFOLD_SOLID_BREP") {
+                let name = self.get_brep_name(brep.id);
+                let color = color_map.get(&brep.id).copied();
+                node.children.push(AssemblyNode {
+                    name,
+                    pd_id: 0,
+                    brep_id: Some(brep.id),
+                    transform: None,
+                    color,
+                    children: Vec::new(),
+                });
+            }
+            node
+        }
+    }
+
+    fn build_assembly_node_recursive(
+        &self,
+        pd_id: i64,
+        name: &str,
+        color_map: &HashMap<i64, [f32; 4]>,
+        parent_pd_to_children: &HashMap<i64, Vec<(i64, i64, String)>>,
+        visited: &mut std::collections::HashSet<i64>,
+    ) -> AssemblyNode {
+        let brep_id = self.find_pd_brep(pd_id);
+        let color = brep_id.and_then(|id| color_map.get(&id).copied());
+
+        let mut node = AssemblyNode {
+            name: name.to_string(),
+            pd_id,
+            brep_id,
+            transform: None, // Transforms are per-NAUO, set in children
+            color,
+            children: Vec::new(),
+        };
+
+        if visited.contains(&pd_id) {
+            return node; // Cycle protection
+        }
+        visited.insert(pd_id);
+
+        if let Some(children) = parent_pd_to_children.get(&pd_id) {
+            for &(nauo_id, child_pd_id, ref nauo_name) in children {
+                let nauo_transform = self.find_nauo_transform(nauo_id, child_pd_id);
+                let child_brep_id = self.find_pd_brep(child_pd_id);
+                let child_color = child_brep_id.and_then(|id| color_map.get(&id).copied());
+                let child_name = self.get_product_name(child_pd_id);
+
+                let mut child_node = self.build_assembly_node_recursive(
+                    child_pd_id, &child_name, color_map, parent_pd_to_children, visited,
+                );
+                child_node.name = format!("{} ({})", nauo_name, child_name);
+                child_node.transform = nauo_transform;
+                if child_color.is_some() {
+                    child_node.color = child_color;
+                }
+                node.children.push(child_node);
+            }
+        }
+
+        visited.remove(&pd_id);
+        node
+    }
+
+    /// Triangulate a BREP, using cache to avoid re-triangulating the same BREP multiple times.
+    fn triangulate_brep_cached(
+        &self,
+        brep_id: i64,
+        cache: &mut HashMap<i64, TriangleMesh>,
+        params: &TriangulationParams,
+        bbox: &Option<(Point3d, Point3d)>,
+    ) -> Option<TriangleMesh> {
+        if let Some(mesh) = cache.get(&brep_id) {
+            return Some(mesh.clone());
+        }
+        let mesh = self.triangulate_brep(brep_id, params, bbox)?;
+        cache.insert(brep_id, mesh.clone());
+        Some(mesh)
+    }
+
+    /// Triangulate a single BREP entity.
+    fn triangulate_brep(
+        &self,
+        brep_id: i64,
+        params: &TriangulationParams,
+        bbox: &Option<(Point3d, Point3d)>,
+    ) -> Option<TriangleMesh> {
+        let shell_id = self.find_shell_ref_by_brep_id(brep_id)?;
+        let face_data_list = self.extract_shell_faces(shell_id)?;
+        let mut mesh = TriangleMesh::new();
+        for face_data in &face_data_list {
+            let face_mesh = self.surface_to_mesh(face_data, params, bbox);
+            mesh.merge(&face_mesh);
+        }
+        Some(mesh)
+    }
+
+    /// Extract the NAUO instance name (e.g., "nut_1", "bolt_2").
+    fn extract_nauo_name(&self, nauo: &crate::schema::StepEntity) -> String {
+        // NEXT_ASSEMBLY_USAGE_OCCURRENCE('id','name','description',#relating,#related,$)
+        // The name is typically the 2nd parameter
+        for (i, param) in nauo.params.iter().enumerate() {
+            if i == 0 { continue; } // Skip ID
+            if let StepValue::String(s) = param {
+                if !s.is_empty() {
+                    return s.clone();
+                }
+            }
+        }
+        format!("NAUO_{}", nauo.id)
+    }
+
+    /// Get a human-readable product name from a PRODUCT_DEFINITION.
+    fn get_product_name(&self, pd_id: i64) -> String {
+        // PRODUCT_DEFINITION('design','',#product_ref,#framework_ref)
+        // → follow #product_ref to PRODUCT entity → get name
+        let pd = match self.step.find_entity(pd_id) {
+            Some(e) => e,
+            None => return format!("PD#{}", pd_id),
+        };
+
+        // Find PRODUCT reference in PD params
+        for param in &pd.params {
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(product) = self.step.find_entity(ref_id) {
+                    if product.type_name == "PRODUCT" {
+                        // PRODUCT('id', 'name', $, ...)
+                        for p in &product.params {
+                            if let StepValue::String(s) = p {
+                                if !s.is_empty() {
+                                    return s.clone();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        format!("PD#{}", pd_id)
+    }
+
+    /// Get a name for a BREP from its first parameter.
+    fn get_brep_name(&self, brep_id: i64) -> String {
+        if let Some(brep) = self.step.find_entity(brep_id) {
+            for param in &brep.params {
+                if let StepValue::String(s) = param {
+                    if !s.is_empty() {
+                        return format!("{} (#{})", s, brep_id);
+                    }
+                }
+            }
+        }
+        format!("BREP#{}", brep_id)
     }
 
     // ─── Assembly tree traversal ────────────────────────────────────────────
@@ -330,42 +658,6 @@ impl<'a> StepConverter<'a> {
             }
         }
         None
-    }
-
-    /// Compute the composed transform for a leaf product by walking up the assembly tree.
-    fn compute_composed_transform(
-        &self,
-        child_pd_id: i64,
-        pd_to_nauos: &HashMap<i64, Vec<(i64, i64)>>,
-    ) -> Option<[[f64; 4]; 4]> {
-        let mut transforms: Vec<[[f64; 4]; 4]> = Vec::new();
-        let mut current_pd = child_pd_id;
-        let mut visited = std::collections::HashSet::new();
-
-        while let Some(nauo_list) = pd_to_nauos.get(&current_pd) {
-            if visited.contains(&current_pd) {
-                warn!("Circular assembly reference detected at PD {}", current_pd);
-                break;
-            }
-            visited.insert(current_pd);
-
-            if let Some(&(nauo_id, parent_pd)) = nauo_list.first() {
-                if let Some(tf) = self.find_nauo_transform(nauo_id, current_pd) {
-                    transforms.push(tf);
-                }
-                current_pd = parent_pd;
-            } else {
-                break;
-            }
-        }
-
-        if transforms.is_empty() { return None; }
-
-        let mut result = transforms[0];
-        for tf in transforms.iter().skip(1) {
-            result = mat4_mul(tf, &result);
-        }
-        Some(result)
     }
 
     /// Check if a CDSR links to a specific NAUO through PRODUCT_DEFINITION_SHAPE.

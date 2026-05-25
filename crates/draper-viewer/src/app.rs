@@ -356,6 +356,9 @@ impl ViewerApp {
         let mut brep_count = 0;
         let mut nauo_count = 0;
         let mut styled_item_count = 0;
+        let mut idt_count = 0;
+        let mut cdsr_count = 0;
+        let mut srr_count = 0;
         let mut surface_types: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
         for entity in &step_file.entities {
@@ -366,7 +369,12 @@ impl ViewerApp {
                 "MANIFOLD_SOLID_BREP" | "FACETED_BREP" => brep_count += 1,
                 "NEXT_ASSEMBLY_USAGE_OCCURRENCE" => nauo_count += 1,
                 "STYLED_ITEM" => styled_item_count += 1,
+                "ITEM_DEFINED_TRANSFORMATION" => idt_count += 1,
+                "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION" => cdsr_count += 1,
                 _ => {
+                    if entity.type_name.contains("SHAPE_REPRESENTATION_RELATIONSHIP") {
+                        srr_count += 1;
+                    }
                     if entity.type_name.contains("SURFACE") || entity.type_name.contains("PLANE") {
                         *surface_types.entry(entity.type_name.clone()).or_insert(0) += 1;
                     }
@@ -379,25 +387,66 @@ impl ViewerApp {
             .collect();
 
         self.log(&format!(
-            "STEP parsed: {} — {} entities, {} points, {} faces, {} shells, {} breps, {} NAUOs, {} styled_items",
-            name, step_file.entities.len(), point_count, face_count, shell_count, brep_count, nauo_count, styled_item_count
+            "STEP parsed: {} — {} entities, {} pts, {} faces, {} shells, {} breps, {} NAUOs, {} styled, {} IDT, {} CDSR, {} SRR",
+            name, step_file.entities.len(), point_count, face_count, shell_count, brep_count, nauo_count, styled_item_count, idt_count, cdsr_count, srr_count
         ));
         if !surface_summary.is_empty() {
-            self.log(&format!("STEP surfaces: {}", surface_summary.join(", ")));
+            self.log(&format!("  Surfaces: {}", surface_summary.join(", ")));
         }
 
-        // Convert STEP to mesh
-        match draper_step::step_to_mesh(step_file) {
-            Ok(mesh) => {
+        // ── Output STEP file structure (assembly tree) ──
+        self.log("── STEP Assembly Structure ──");
+        let structure_text = draper_step::step_structure_text(step_file);
+        for line in structure_text.lines() {
+            self.log(line);
+        }
+
+        // ── Convert STEP to mesh instances ──
+        match draper_step::step_to_mesh_instances(step_file) {
+            Ok(instances) => {
+                self.log(&format!("── Mesh Rendering Tree ({} instances) ──", instances.len()));
+
+                // Group instances by BREP ID to show reuse
+                let mut brep_usage: std::collections::HashMap<i64, Vec<String>> = std::collections::HashMap::new();
+                for inst in &instances {
+                    brep_usage.entry(inst.brep_id).or_default().push(inst.name.clone());
+                }
+                for (brep_id, names) in &brep_usage {
+                    self.log(&format!("  BREP #{}: {} instances — {}", brep_id, names.len(), names.join(", ")));
+                }
+
+                // Show each instance with its transform and color
+                for (i, inst) in instances.iter().enumerate() {
+                    let color_str = match inst.color {
+                        Some(c) => format!("color=({:.2},{:.2},{:.2})", c[0], c[1], c[2]),
+                        None => "no color".to_string(),
+                    };
+                    let tf_str = match inst.transform {
+                        Some(_) => "HAS_TRANSFORM".to_string(),
+                        None => "identity".to_string(),
+                    };
+                    self.log(&format!("  [{}] {} v={} t={} {} {}", 
+                        i, inst.name, inst.mesh.vertex_count(), inst.mesh.triangle_count(), color_str, tf_str));
+                }
+
+                // Merge all instances into a single mesh for rendering
+                let mut mesh = TriangleMesh::new();
+                for inst in &instances {
+                    if let Some(color) = inst.color {
+                        mesh.merge_with_color(&inst.mesh, color);
+                    } else {
+                        mesh.merge_with_color(&inst.mesh, [0.48, 0.52, 0.58, 1.0]);
+                    }
+                }
                 let vcount = mesh.vertex_count();
                 let tcount = mesh.triangle_count();
                 self.log(&format!(
-                    "STEP converted: {} vertices, {} triangles", vcount, tcount
+                    "Total merged: {} vertices, {} triangles", vcount, tcount
                 ));
                 self.load_mesh(mesh, &format!("STEP: {}", name));
             }
             Err(e) => {
-                self.log(&format!("STEP conversion: {}", e));
+                self.log(&format!("STEP conversion error: {}", e));
             }
         }
     }
