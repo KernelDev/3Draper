@@ -591,6 +591,13 @@ impl<'a> StepConverter<'a> {
                     edge.vertex_start = Some(draper_topology::TopoId::new());
                     edge.vertex_end = Some(draper_topology::TopoId::new());
                     edge
+                } else if let Curve3d::Circle(ref circle) = curve {
+                    // For circles, compute angular range from vertex projections
+                    let (t1, t2) = project_points_on_circle(circle, p1, p2);
+                    let mut edge = TopoEdge::new(curve, (t1, t2));
+                    edge.vertex_start = Some(draper_topology::TopoId::new());
+                    edge.vertex_end = Some(draper_topology::TopoId::new());
+                    edge
                 } else {
                     // For other curves, use the default param range
                     let param_range = curve.param_range();
@@ -1119,10 +1126,9 @@ impl<'a> StepConverter<'a> {
         // Default weights (uniform)
         let weights = vec![1.0; control_points.len()];
 
-        // Find knots in remaining params
+        // Extract knots from the STEP entity parameters
         let n = control_points.len();
-        let knot_count = n + degree + 1;
-        let knots: Vec<f64> = (0..knot_count).map(|i| i as f64 / (knot_count - 1).max(1) as f64).collect();
+        let knots = self.extract_curve_knots(entity, n, degree);
 
         Some(Curve3d::Nurbs(NurbsCurve {
             degree,
@@ -1130,6 +1136,45 @@ impl<'a> StepConverter<'a> {
             weights,
             knots,
         }))
+    }
+
+    /// Extract knot vector from a B_SPLINE_CURVE entity.
+    fn extract_curve_knots(&self, entity: &crate::schema::StepEntity, n_cp: usize, degree: usize) -> Vec<f64> {
+        let expected_knot_count = n_cp + degree + 1;
+
+        // Search for knot vector in parameters after control points
+        // For B_SPLINE_CURVE_WITH_KNOTS: params typically include knot multiplicities and knot values
+        let mut knot_lists: Vec<Vec<f64>> = Vec::new();
+        for param in entity.params.iter().skip(2) {
+            if let StepValue::List(items) = param {
+                let floats: Vec<f64> = items.iter()
+                    .filter_map(|v| self.get_float(v))
+                    .collect();
+                if floats.len() >= 2 && floats.iter().all(|f| f.is_finite()) {
+                    knot_lists.push(floats);
+                }
+            }
+        }
+
+        // Try to find a knot list matching the expected length
+        if let Some(k) = knot_lists.iter().find(|l| l.len() == expected_knot_count) {
+            return k.clone();
+        }
+
+        // If we found some lists, the longest one might be the knot vector
+        if !knot_lists.is_empty() {
+            knot_lists.sort_by(|a, b| b.len().cmp(&a.len()));
+            // Check if the longest list could be knots (monotonically increasing or non-decreasing)
+            let candidate = &knot_lists[0];
+            let is_monotonic = candidate.windows(2).all(|w| w[0] <= w[1] + 1e-10);
+            if is_monotonic && candidate.len() >= degree + 2 {
+                return candidate.clone();
+            }
+        }
+
+        // Fallback: generate uniform knot vector
+        let knot_count = expected_knot_count;
+        (0..knot_count).map(|i| i as f64 / (knot_count - 1).max(1) as f64).collect()
     }
 
     /// Resolve a POLYLINE entity — return as a line segment approximation.
@@ -1249,8 +1294,8 @@ impl<'a> StepConverter<'a> {
             (100.0, plane.origin)
         };
 
-        // Create a grid of points on the plane
-        let n = 2; // 2x2 grid for a simple quad
+        // Create a 4x4 grid of points on the plane for better surface representation
+        let n = 4;
         let half = size * 0.5;
 
         for j in 0..=n {
@@ -1373,4 +1418,44 @@ fn project_point_on_line(line: &Line, point: &Point3d) -> f64 {
     let dy = point.y - line.origin.y;
     let dz = point.z - line.origin.z;
     dx * line.direction.x + dy * line.direction.y + dz * line.direction.z
+}
+
+/// Project two 3D points onto a circle and return the angular parameter range (t1, t2).
+/// The angles are computed in the circle's local coordinate system.
+/// t1 and t2 are in radians and the arc goes from t1 to t2 counterclockwise
+/// (shorter path if the arc is less than pi, otherwise longer path).
+fn project_points_on_circle(circle: &Circle, p1: &Point3d, p2: &Point3d) -> (f64, f64) {
+    let y_axis = circle.normal.cross(&circle.x_axis);
+
+    // Project p1 onto circle's local coords
+    let d1x = p1.x - circle.center.x;
+    let d1y = p1.y - circle.center.y;
+    let d1z = p1.z - circle.center.z;
+    let local1_x = d1x * circle.x_axis.x + d1y * circle.x_axis.y + d1z * circle.x_axis.z;
+    let local1_y = d1x * y_axis.x + d1y * y_axis.y + d1z * y_axis.z;
+    let t1 = local1_y.atan2(local1_x);
+
+    // Project p2
+    let d2x = p2.x - circle.center.x;
+    let d2y = p2.y - circle.center.y;
+    let d2z = p2.z - circle.center.z;
+    let local2_x = d2x * circle.x_axis.x + d2y * circle.x_axis.y + d2z * circle.x_axis.z;
+    let local2_y = d2x * y_axis.x + d2y * y_axis.y + d2z * y_axis.z;
+    let t2 = local2_y.atan2(local2_x);
+
+    let mut t1 = t1;
+    let mut t2 = t2;
+    if t2 <= t1 {
+        t2 += 2.0 * std::f64::consts::PI;
+    }
+
+    // If the arc is more than pi, the STEP file likely means the shorter arc
+    // going the other way. But we can't know for sure without the orientation.
+    // For now, take the shorter arc.
+    if t2 - t1 > std::f64::consts::PI {
+        // Use the complementary arc
+        (t2, t1 + 2.0 * std::f64::consts::PI)
+    } else {
+        (t1, t2)
+    }
 }

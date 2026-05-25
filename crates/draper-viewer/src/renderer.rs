@@ -243,12 +243,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let ndotl_rim = max(dot(effective_normal, rim_dir), 0.0);
     let rim_factor = pow(1.0 - max(dot(effective_normal, view_dir), 0.0), 2.5) * 0.12;
 
-    // Base color — blue-grey for CAD models (visible on light background)
-    let base_color = vec3<f32>(0.48, 0.52, 0.58);
+    // Base color — light blue-grey for CAD models (visible on light background)
+    let base_color = vec3<f32>(0.55, 0.60, 0.68);
 
-    // Combine lighting
-    let diffuse = ndotl_primary * 0.50 + ndotl_fill * 0.25 + ndotl_rim * 0.12;
-    let color = base_color * (ambient + diffuse) + vec3<f32>(1.0) * specular_primary + base_color * rim_factor;
+    // Combine lighting — stronger ambient for better visibility
+    let diffuse = ndotl_primary * 0.50 + ndotl_fill * 0.25 + ndotl_rim * 0.15;
+    let color = base_color * (ambient + diffuse) + vec3<f32>(0.9, 0.92, 0.95) * specular_primary + base_color * rim_factor;
 
     return vec4<f32>(color, 1.0);
 }
@@ -537,7 +537,7 @@ pub fn create_scene_resources(
         contents: bytemuck::cast_slice(&[SceneUniforms {
             mvp: [[0.0; 4]; 4],
             model: [[0.0; 4]; 4],
-            light_dir: [0.0, 0.0, 1.0, 0.25],
+            light_dir: [0.0, 0.0, 1.0, 0.30],
             camera_pos: [0.0, 0.0, 0.0, 0.0],
         }]),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,

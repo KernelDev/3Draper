@@ -987,7 +987,7 @@ impl eframe::App for ViewerApp {
                     let uniforms = SceneUniforms {
                         mvp,
                         model,
-                        light_dir: [cam_fwd[0], cam_fwd[1], cam_fwd[2], 0.35], // xyz = direction from camera, w = ambient
+                        light_dir: [cam_fwd[0], cam_fwd[1], cam_fwd[2], 0.30], // xyz = direction from camera, w = ambient
                         camera_pos: [cam_pos[0], cam_pos[1], cam_pos[2], 0.0],
                     };
 
