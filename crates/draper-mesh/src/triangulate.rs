@@ -145,7 +145,9 @@ fn triangulate_cylinder_face(face: &Face, cyl: &CylinderSurface, params: &Triang
             let u = 2.0 * PI * i as f64 / n_u as f64;
             let v = v_min + (v_max - v_min) * j as f64 / (n_v - 1) as f64;
             let p = cyl.point_at(u, v);
-            mesh.add_vertex(p);
+            let n = cyl.normal_at(u, v);
+            let idx = mesh.add_vertex(p);
+            mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
         }
     }
 
@@ -181,7 +183,9 @@ fn triangulate_sphere_face(face: &Face, sphere: &SphereSurface, params: &Triangu
             let u = 2.0 * PI * i as f64 / n_u as f64;
             let v = PI * j as f64 / n_v as f64;
             let p = sphere.point_at(u, v);
-            mesh.add_vertex(p);
+            let n = sphere.normal_at(u, v);
+            let idx = mesh.add_vertex(p);
+            mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
         }
     }
 
@@ -233,7 +237,9 @@ fn triangulate_torus_face(face: &Face, torus: &TorusSurface, params: &Triangulat
             let u = 2.0 * PI * i as f64 / n_u as f64;
             let v = 2.0 * PI * j as f64 / n_v as f64;
             let p = torus.point_at(u, v);
-            mesh.add_vertex(p);
+            let n = torus.normal_at(u, v);
+            let idx = mesh.add_vertex(p);
+            mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
         }
     }
 
@@ -272,7 +278,9 @@ fn triangulate_cone_face(face: &Face, cone: &draper_geometry::ConeSurface, param
             let u = 2.0 * PI * i as f64 / n_u as f64;
             let v = v_min + (v_max - v_min) * j as f64 / (n_v - 1) as f64;
             let p = cone.point_at(u, v);
-            mesh.add_vertex(p);
+            let n = cone.normal_at(u, v);
+            let idx = mesh.add_vertex(p);
+            mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
         }
     }
 
@@ -310,7 +318,10 @@ fn triangulate_revolution_face(face: &Face, rev: &draper_geometry::RevolutionSur
             let u = 2.0 * PI * i as f64 / n_u as f64;
             let v = v_min + (v_max - v_min) * j as f64 / (n_v - 1) as f64;
             let p = rev.point_at(u, v);
-            mesh.add_vertex(p);
+            // Use numerical normal for revolution surfaces
+            let n = face.surface.as_ref().map(|s| s.normal_at(u, v)).unwrap_or(Direction3d::Z);
+            let idx = mesh.add_vertex(p);
+            mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
         }
     }
 

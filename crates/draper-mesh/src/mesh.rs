@@ -43,6 +43,16 @@ impl TriangleMesh {
         idx
     }
 
+    /// Add a vertex normal. Call after add_vertex with the returned index.
+    pub fn add_vertex_normal(&mut self, _idx: u32, normal: [f64; 3]) {
+        if self.normals.is_none() {
+            self.normals = Some(vec![[0.0, 0.0, 1.0]; self.vertices.len() - 1]);
+        }
+        if let Some(ref mut normals) = self.normals {
+            normals.push(normal);
+        }
+    }
+
     /// Add a triangle.
     pub fn add_triangle(&mut self, i: u32, j: u32, k: u32) {
         self.triangles.push([i, j, k]);
@@ -88,6 +98,19 @@ impl TriangleMesh {
         self.vertices.extend(other.vertices.iter().cloned());
         for tri in &other.triangles {
             self.triangles.push([tri[0] + offset, tri[1] + offset, tri[2] + offset]);
+        }
+        // Merge normals
+        match (&mut self.normals, &other.normals) {
+            (Some(ref mut self_normals), Some(ref other_normals)) => {
+                self_normals.extend(other_normals.iter().cloned());
+            }
+            (None, Some(ref other_normals)) => {
+                // We need to fill in default normals for existing vertices
+                let mut combined = vec![[0.0, 0.0, 1.0]; self.vertices.len() - other.vertices.len()];
+                combined.extend(other_normals.iter().cloned());
+                self.normals = Some(combined);
+            }
+            _ => {}
         }
     }
 

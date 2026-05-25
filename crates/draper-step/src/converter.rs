@@ -533,24 +533,23 @@ impl<'a> StepConverter<'a> {
 
     /// Resolve an EDGE_CURVE entity to an Edge object.
     /// EDGE_CURVE params: [name, vertex1_ref, vertex2_ref, curve_ref, orientation]
+    /// Some files omit the name: EDGE_CURVE(#v1, #v2, #curve, .T.)
+    /// We handle both cases by scanning parameters for their entity types.
     fn resolve_edge_curve(&self, edge_curve_id: i64) -> Option<TopoEdge> {
         let ec_entity = self.step.find_entity(edge_curve_id)?;
 
-        // EDGE_CURVE('', #v1, #v2, #curve, .T.)
-        // Extract vertex endpoints
         let mut vertex_ids: Vec<i64> = Vec::new();
         let mut curve_ref_id: Option<i64> = None;
 
-        for (i, param) in ec_entity.params.iter().enumerate() {
-            if i == 0 { continue; } // Skip name
+        for param in &ec_entity.params {
             if let Some(ref_id) = self.get_ref(param) {
                 if let Some(entity) = self.step.find_entity(ref_id) {
                     if entity.type_name == "VERTEX_POINT" {
                         vertex_ids.push(ref_id);
                     } else if entity.type_name == "EDGE_CURVE" {
                         // Nested edge curve (shouldn't happen, but handle gracefully)
-                    } else if self.is_curve_type(&entity.type_name) 
-                        || entity.type_name == "SURFACE_CURVE" 
+                    } else if self.is_curve_type(&entity.type_name)
+                        || entity.type_name == "SURFACE_CURVE"
                     {
                         curve_ref_id = Some(ref_id);
                     }
@@ -711,7 +710,7 @@ impl<'a> StepConverter<'a> {
 
     /// Extract a PLANE surface.
     fn extract_plane(&self, entity: &crate::schema::StepEntity) -> Option<Surface> {
-        let axis2_id = self.get_ref(entity.params.first()?)?;
+        let axis2_id = self.find_axis2_ref(entity)?;
         let (origin, normal, u_dir) = self.resolve_axis2(axis2_id)?;
         let v_dir = normal.cross(&u_dir);
         Some(Surface::Plane(Plane { origin, u_dir, v_dir, normal }))
@@ -719,35 +718,35 @@ impl<'a> StepConverter<'a> {
 
     /// Extract a CYLINDRICAL_SURFACE.
     fn extract_cylinder(&self, entity: &crate::schema::StepEntity) -> Option<Surface> {
-        let axis2_id = self.get_ref(entity.params.first()?)?;
+        let axis2_id = self.find_axis2_ref(entity)?;
         let (origin, axis, u_dir) = self.resolve_axis2(axis2_id)?;
-        let radius = self.get_float(entity.params.get(1)?)?;
+        let radius = self.find_float_param(entity, 0)?;
         Some(Surface::Cylinder(CylinderSurface::new_with_frame(origin, axis, radius, u_dir)))
     }
 
     /// Extract a SPHERICAL_SURFACE.
     fn extract_sphere(&self, entity: &crate::schema::StepEntity) -> Option<Surface> {
-        let axis2_id = self.get_ref(entity.params.first()?)?;
+        let axis2_id = self.find_axis2_ref(entity)?;
         let (center, _axis, _u_dir) = self.resolve_axis2(axis2_id)?;
-        let radius = self.get_float(entity.params.get(1)?)?;
+        let radius = self.find_float_param(entity, 0)?;
         Some(Surface::Sphere(SphereSurface::new(center, radius)))
     }
 
     /// Extract a CONICAL_SURFACE.
     fn extract_cone(&self, entity: &crate::schema::StepEntity) -> Option<Surface> {
-        let axis2_id = self.get_ref(entity.params.first()?)?;
+        let axis2_id = self.find_axis2_ref(entity)?;
         let (origin, axis, u_dir) = self.resolve_axis2(axis2_id)?;
-        let radius = self.get_float(entity.params.get(1)?)?;
-        let half_angle = self.get_float(entity.params.get(2)?)?;
+        let radius = self.find_float_param(entity, 0)?;
+        let half_angle = self.find_float_param(entity, 1)?;
         Some(Surface::Cone(ConeSurface::new_with_frame(origin, axis, radius, half_angle.abs(), u_dir)))
     }
 
     /// Extract a TOROIDAL_SURFACE.
     fn extract_torus(&self, entity: &crate::schema::StepEntity) -> Option<Surface> {
-        let axis2_id = self.get_ref(entity.params.first()?)?;
+        let axis2_id = self.find_axis2_ref(entity)?;
         let (center, axis, u_dir) = self.resolve_axis2(axis2_id)?;
-        let major_radius = self.get_float(entity.params.get(1)?)?;
-        let minor_radius = self.get_float(entity.params.get(2)?)?;
+        let major_radius = self.find_float_param(entity, 0)?;
+        let minor_radius = self.find_float_param(entity, 1)?;
         Some(Surface::Torus(TorusSurface::new_with_frame(center, axis, major_radius, minor_radius, u_dir)))
     }
 
@@ -791,34 +790,50 @@ impl<'a> StepConverter<'a> {
     ///   ((cp_list_row1), (cp_list_row2), ...), .UNSPECIFIED., .F., .F., .F.,
     ///   knot_count_u, knot_count_v, (knots_u), (knots_v), .UNSPECIFIED.);
     fn extract_bspline_surface(&self, entity: &crate::schema::StepEntity) -> Option<Surface> {
-        // Degree u and v
-        let u_degree = self.get_float(entity.params.first()?).unwrap_or(1.0) as usize;
-        let v_degree = self.get_float(entity.params.get(1)?).unwrap_or(1.0) as usize;
+        // Degree u and v — use find_float_param to handle name prefix
+        let u_degree = self.find_float_param(entity, 0).unwrap_or(1.0) as usize;
+        let v_degree = self.find_float_param(entity, 1).unwrap_or(1.0) as usize;
 
-        // Control points: 3rd param is a list of lists
+        // Control points: search params for a list-of-lists that contains the control points
         let mut control_points: Vec<Vec<Point3d>> = Vec::new();
-        if let Some(StepValue::List(rows)) = entity.params.get(2) {
-            for row in rows {
-                if let StepValue::List(cols) = row {
-                    let mut row_pts = Vec::new();
-                    for col in cols {
-                        if let StepValue::List(coords) = col {
-                            // [x, y, z]
-                            let x = coords.get(0).and_then(|v| self.get_float(v)).unwrap_or(0.0);
-                            let y = coords.get(1).and_then(|v| self.get_float(v)).unwrap_or(0.0);
-                            let z = coords.get(2).and_then(|v| self.get_float(v)).unwrap_or(0.0);
-                            row_pts.push(Point3d::new(x, y, z));
-                        } else if let Some(ref_id) = self.get_ref(col) {
-                            // Reference to CARTESIAN_POINT
-                            if let Some(pt) = self.resolve_cartesian_point(ref_id) {
-                                row_pts.push(pt);
-                            }
-                        }
-                    }
-                    if !row_pts.is_empty() {
-                        control_points.push(row_pts);
+        for param in &entity.params {
+            if let StepValue::List(rows) = param {
+                // Check if this is a list of lists (i.e., a control point grid)
+                let mut is_cp_grid = false;
+                for row in rows {
+                    if let StepValue::List(_) = row {
+                        is_cp_grid = true;
+                        break;
                     }
                 }
+                if !is_cp_grid {
+                    continue;
+                }
+
+                for row in rows {
+                    if let StepValue::List(cols) = row {
+                        let mut row_pts = Vec::new();
+                        for col in cols {
+                            if let StepValue::List(coords) = col {
+                                // Inline [x, y, z]
+                                let x = coords.get(0).and_then(|v| self.get_float(v)).unwrap_or(0.0);
+                                let y = coords.get(1).and_then(|v| self.get_float(v)).unwrap_or(0.0);
+                                let z = coords.get(2).and_then(|v| self.get_float(v)).unwrap_or(0.0);
+                                row_pts.push(Point3d::new(x, y, z));
+                            } else if let Some(ref_id) = self.get_ref(col) {
+                                // Reference to CARTESIAN_POINT
+                                if let Some(pt) = self.resolve_cartesian_point(ref_id) {
+                                    row_pts.push(pt);
+                                }
+                            }
+                        }
+                        if !row_pts.is_empty() {
+                            control_points.push(row_pts);
+                        }
+                    }
+                }
+                // Only process the first list-of-lists found (the control point grid)
+                break;
             }
         }
 
@@ -1030,6 +1045,54 @@ impl<'a> StepConverter<'a> {
         }
     }
 
+    /// Find a reference to an AXIS2_PLACEMENT_3D (or 2D/1D variant) entity in the params list.
+    /// Handles the case where the name parameter may or may not be present.
+    fn find_axis2_ref(&self, entity: &crate::schema::StepEntity) -> Option<i64> {
+        for param in &entity.params {
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(referenced) = self.step.find_entity(ref_id) {
+                    if referenced.type_name == "AXIS2_PLACEMENT_3D"
+                        || referenced.type_name == "AXIS2_PLACEMENT_2D"
+                        || referenced.type_name == "AXIS1_PLACEMENT"
+                    {
+                        return Some(ref_id);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Find a float parameter by searching all params, skipping the first `skip` potential matches.
+    /// This handles cases where the name parameter may or may not be present.
+    fn find_float_param(&self, entity: &crate::schema::StepEntity, skip: usize) -> Option<f64> {
+        let mut found = 0;
+        for param in &entity.params {
+            if let Some(val) = self.get_float(param) {
+                if found >= skip {
+                    return Some(val);
+                }
+                found += 1;
+            }
+        }
+        None
+    }
+
+    /// Find a DIRECTION reference nested inside a VECTOR entity.
+    /// VECTOR(#direction, magnitude) — extract the direction reference.
+    fn find_direction_from_vector(&self, vector_entity: &crate::schema::StepEntity) -> Option<i64> {
+        for param in &vector_entity.params {
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(referenced) = self.step.find_entity(ref_id) {
+                    if referenced.type_name == "DIRECTION" {
+                        return Some(ref_id);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Resolve a STEP curve entity to a Curve3d.
     fn resolve_curve(&self, curve_id: i64) -> Option<Curve3d> {
         let entity = self.step.find_entity(curve_id)?;
@@ -1055,21 +1118,38 @@ impl<'a> StepConverter<'a> {
     }
 
     /// Resolve a LINE curve entity.
+    /// STEP format: `#N = LINE(#point, #direction);` or `#N = LINE('', #point, #direction);`
+    /// Also handles VECTOR references: `#N = LINE(#point, #vector);`
     fn resolve_line_curve(&self, entity: &crate::schema::StepEntity) -> Option<Curve3d> {
-        // LINE(#point, #direction)
-        let point_id = self.get_ref(entity.params.first()?)?;
-        let origin = self.resolve_cartesian_point(point_id)?;
-        let dir_id = self.get_ref(entity.params.get(1)?)?;
-        let direction = self.resolve_direction(dir_id)?;
+        let mut point_ref: Option<i64> = None;
+        let mut dir_ref: Option<i64> = None;
+
+        for param in &entity.params {
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(referenced) = self.step.find_entity(ref_id) {
+                    if referenced.type_name == "CARTESIAN_POINT" && point_ref.is_none() {
+                        point_ref = Some(ref_id);
+                    } else if referenced.type_name == "DIRECTION" && dir_ref.is_none() {
+                        dir_ref = Some(ref_id);
+                    } else if referenced.type_name == "VECTOR" && dir_ref.is_none() {
+                        // VECTOR(#direction, magnitude) — extract direction from it
+                        dir_ref = self.find_direction_from_vector(referenced);
+                    }
+                }
+            }
+        }
+
+        let origin = point_ref.and_then(|id| self.resolve_cartesian_point(id))?;
+        let direction = dir_ref.and_then(|id| self.resolve_direction(id))?;
         Some(Curve3d::Line(Line::new(origin, direction)))
     }
 
     /// Resolve a CIRCLE curve entity.
+    /// STEP format: `#N = CIRCLE('', #axis2, radius);` or `#N = CIRCLE(#axis2, radius);`
     fn resolve_circle_curve(&self, entity: &crate::schema::StepEntity) -> Option<Curve3d> {
-        // CIRCLE(#axis2_placement, radius)
-        let axis2_id = self.get_ref(entity.params.first()?)?;
+        let axis2_id = self.find_axis2_ref(entity)?;
         let (center, normal, x_axis) = self.resolve_axis2(axis2_id)?;
-        let radius = self.get_float(entity.params.get(1)?)?;
+        let radius = self.find_float_param(entity, 0)?;
         Some(Curve3d::Circle(Circle {
             center,
             normal,
@@ -1079,12 +1159,12 @@ impl<'a> StepConverter<'a> {
     }
 
     /// Resolve an ELLIPSE curve entity.
+    /// STEP format: `#N = ELLIPSE('', #axis2, semi_major, semi_minor);`
     fn resolve_ellipse_curve(&self, entity: &crate::schema::StepEntity) -> Option<Curve3d> {
-        // ELLIPSE(#axis2_placement, semi_major, semi_minor)
-        let axis2_id = self.get_ref(entity.params.first()?)?;
+        let axis2_id = self.find_axis2_ref(entity)?;
         let (center, _normal, _x_axis) = self.resolve_axis2(axis2_id)?;
-        let semi_major = self.get_float(entity.params.get(1)?)?;
-        let semi_minor = self.get_float(entity.params.get(2)?)?;
+        let semi_major = self.find_float_param(entity, 0)?;
+        let semi_minor = self.find_float_param(entity, 1)?;
         Some(Curve3d::Ellipse(draper_geometry::Ellipse::new_xy(center, semi_major, semi_minor)))
     }
 
@@ -1338,30 +1418,39 @@ impl<'a> StepConverter<'a> {
     }
 
     /// Resolve an AXIS2_PLACEMENT_3D entity to (origin, z_direction, x_direction).
+    ///
+    /// STEP AP203/AP214 format:
+    ///   `#N = AXIS2_PLACEMENT_3D('', #location, #axis, #ref_direction);`
+    /// Some files omit the name parameter:
+    ///   `#N = AXIS2_PLACEMENT_3D(#location, #axis, #ref_direction);`
+    ///
+    /// We handle both cases by scanning parameters for their entity types
+    /// instead of assuming fixed positional indices.
     fn resolve_axis2(&self, axis2_id: i64) -> Option<(Point3d, Direction3d, Direction3d)> {
         let entity = self.step.find_entity(axis2_id)?;
-        let point_id = self.get_ref(entity.params.first()?)?;
-        let origin = self.resolve_cartesian_point(point_id)?;
 
-        let z_dir = if let Some(dir_param) = entity.params.get(1) {
-            if let Some(dir_id) = self.get_ref(dir_param) {
-                self.resolve_direction(dir_id).unwrap_or(Direction3d::Z)
-            } else {
-                Direction3d::Z
-            }
-        } else {
-            Direction3d::Z
-        };
+        let mut origin: Option<Point3d> = None;
+        let mut directions: Vec<Direction3d> = Vec::new();
 
-        let x_dir = if let Some(dir_param) = entity.params.get(2) {
-            if let Some(dir_id) = self.get_ref(dir_param) {
-                self.resolve_direction(dir_id).unwrap_or_else(|| Self::default_x_dir(&z_dir))
-            } else {
-                Self::default_x_dir(&z_dir)
+        for param in &entity.params {
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(referenced) = self.step.find_entity(ref_id) {
+                    if referenced.type_name == "CARTESIAN_POINT" {
+                        if origin.is_none() {
+                            origin = self.resolve_cartesian_point(ref_id);
+                        }
+                    } else if referenced.type_name == "DIRECTION" {
+                        if let Some(dir) = self.resolve_direction(ref_id) {
+                            directions.push(dir);
+                        }
+                    }
+                }
             }
-        } else {
-            Self::default_x_dir(&z_dir)
-        };
+        }
+
+        let origin = origin?;
+        let z_dir = directions.get(0).copied().unwrap_or(Direction3d::Z);
+        let x_dir = directions.get(1).copied().unwrap_or_else(|| Self::default_x_dir(&z_dir));
 
         Some((origin, z_dir, x_dir))
     }
@@ -1433,12 +1522,10 @@ fn project_point_on_line(line: &Line, point: &Point3d) -> f64 {
 
 /// Project two 3D points onto a circle and return the angular parameter range (t1, t2).
 /// The angles are computed in the circle's local coordinate system.
-/// t1 and t2 are in radians and the arc goes from t1 to t2 counterclockwise
-/// (shorter path if the arc is less than pi, otherwise longer path).
+/// t1 and t2 are in radians and the arc goes from t1 to t2 in the positive direction.
 fn project_points_on_circle(circle: &Circle, p1: &Point3d, p2: &Point3d) -> (f64, f64) {
     let y_axis = circle.normal.cross(&circle.x_axis);
 
-    // Project p1 onto circle's local coords
     let d1x = p1.x - circle.center.x;
     let d1y = p1.y - circle.center.y;
     let d1z = p1.z - circle.center.z;
@@ -1446,7 +1533,6 @@ fn project_points_on_circle(circle: &Circle, p1: &Point3d, p2: &Point3d) -> (f64
     let local1_y = d1x * y_axis.x + d1y * y_axis.y + d1z * y_axis.z;
     let t1 = local1_y.atan2(local1_x);
 
-    // Project p2
     let d2x = p2.x - circle.center.x;
     let d2y = p2.y - circle.center.y;
     let d2z = p2.z - circle.center.z;
@@ -1454,19 +1540,15 @@ fn project_points_on_circle(circle: &Circle, p1: &Point3d, p2: &Point3d) -> (f64
     let local2_y = d2x * y_axis.x + d2y * y_axis.y + d2z * y_axis.z;
     let t2 = local2_y.atan2(local2_x);
 
-    let mut t1 = t1;
+    // Ensure t2 > t1 (positive direction arc from t1 to t2)
+    let t1 = t1;
     let mut t2 = t2;
-    if t2 <= t1 {
+    while t2 <= t1 {
         t2 += 2.0 * std::f64::consts::PI;
     }
 
-    // If the arc is more than pi, the STEP file likely means the shorter arc
-    // going the other way. But we can't know for sure without the orientation.
-    // For now, take the shorter arc.
-    if t2 - t1 > std::f64::consts::PI {
-        // Use the complementary arc
-        (t2, t1 + 2.0 * std::f64::consts::PI)
-    } else {
-        (t1, t2)
-    }
+    // Use the positive direction arc from t1 to t2 without assuming shorter arc.
+    // The STEP file's orientation flag determines direction; we preserve the
+    // natural order from p1 to p2 in the positive (counterclockwise) sense.
+    (t1, t2)
 }

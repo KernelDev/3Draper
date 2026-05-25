@@ -16,7 +16,29 @@ use eframe::egui;
 
 /// Convert TriangleMesh to GPU vertex/index data.
 fn mesh_to_gpu_data(mesh: &TriangleMesh) -> (Vec<MeshVertex>, Vec<u32>) {
-    // Compute face normals if not present
+    // If we have per-vertex normals, use them directly for smooth shading
+    if let Some(ref vertex_normals) = mesh.normals {
+        if vertex_normals.len() == mesh.vertices.len() {
+            let mut gpu_vertices = Vec::with_capacity(mesh.vertices.len());
+            let mut gpu_indices = Vec::with_capacity(mesh.triangles.len() * 3);
+
+            for (i, v) in mesh.vertices.iter().enumerate() {
+                let n = vertex_normals.get(i).map(|nn| [nn[0] as f32, nn[1] as f32, nn[2] as f32]).unwrap_or([0.0, 0.0, 1.0]);
+                gpu_vertices.push(MeshVertex {
+                    position: [v.x as f32, v.y as f32, v.z as f32],
+                    normal: n,
+                });
+            }
+            for tri in &mesh.triangles {
+                gpu_indices.push(tri[0]);
+                gpu_indices.push(tri[1]);
+                gpu_indices.push(tri[2]);
+            }
+            return (gpu_vertices, gpu_indices);
+        }
+    }
+
+    // Fallback: compute face normals and duplicate vertices per triangle
     let mut mesh = mesh.clone();
     if mesh.face_normals.is_none() {
         mesh.compute_face_normals();
@@ -24,8 +46,6 @@ fn mesh_to_gpu_data(mesh: &TriangleMesh) -> (Vec<MeshVertex>, Vec<u32>) {
 
     let normals = mesh.face_normals.as_ref();
 
-    // For proper per-vertex normals, we duplicate vertices per triangle
-    // so each vertex has the correct face normal.
     let mut gpu_vertices = Vec::with_capacity(mesh.triangles.len() * 3);
     let mut gpu_indices = Vec::with_capacity(mesh.triangles.len() * 3);
 
