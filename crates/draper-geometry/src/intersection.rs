@@ -45,11 +45,7 @@ pub fn intersect_line_plane(line: &Line, plane: &Plane) -> Option<Point3d> {
 pub fn intersect_line_cylinder(line: &Line, cyl: &CylinderSurface) -> Vec<Point3d> {
     // Transform line into cylinder's local coordinate system
     // For Z-axis cylinder: solve (x0 + t*dx)^2 + (y0 + t*dy)^2 = R^2
-    let x_dir = if cyl.axis.is_parallel_to(&Direction3d::Z) {
-        Direction3d::X
-    } else {
-        cyl.axis.cross(&Direction3d::Z)
-    };
+    let x_dir = cyl.x_dir;
     let y_dir = cyl.axis.cross(&x_dir);
 
     // Project line origin onto local XY plane

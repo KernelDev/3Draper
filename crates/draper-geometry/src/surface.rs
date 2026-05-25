@@ -114,51 +114,60 @@ pub struct CylinderSurface {
     pub origin: Point3d,
     pub axis: Direction3d,
     pub radius: f64,
+    pub x_dir: Direction3d, // reference direction for u=0
 }
 
 impl CylinderSurface {
+    /// Compute a default x_dir from the axis direction.
+    fn default_x_dir(axis: &Direction3d) -> Direction3d {
+        if axis.is_parallel_to(&Direction3d::Z) {
+            Direction3d::X
+        } else {
+            axis.cross(&Direction3d::Z)
+        }
+    }
+
     /// Create a cylinder along the Z axis.
     pub fn new_z(radius: f64) -> Self {
         Self {
             origin: Point3d::ORIGIN,
             axis: Direction3d::Z,
             radius,
+            x_dir: Direction3d::X,
         }
     }
 
     /// Create a cylinder at a given origin along a given axis.
+    /// The x_dir is computed automatically from the axis.
     pub fn new(origin: Point3d, axis: Direction3d, radius: f64) -> Self {
-        Self { origin, axis, radius }
+        let x_dir = Self::default_x_dir(&axis);
+        Self { origin, axis, radius, x_dir }
+    }
+
+    /// Create a cylinder with an explicit reference direction for u=0.
+    /// Use this when the STEP file provides the x_dir (ref_direction).
+    pub fn new_with_frame(origin: Point3d, axis: Direction3d, radius: f64, x_dir: Direction3d) -> Self {
+        Self { origin, axis, radius, x_dir }
     }
 
     /// Evaluate: u = angle in radians [0, 2pi], v = height along axis.
     pub fn point_at(&self, u: f64, v: f64) -> Point3d {
-        let x_dir = if self.axis.is_parallel_to(&Direction3d::Z) {
-            Direction3d::X
-        } else {
-            self.axis.cross(&Direction3d::Z)
-        };
-        let y_dir = self.axis.cross(&x_dir);
+        let y_dir = self.axis.cross(&self.x_dir);
 
         Point3d::new(
-            self.origin.x + self.radius * (u.cos() * x_dir.x + u.sin() * y_dir.x) + v * self.axis.x,
-            self.origin.y + self.radius * (u.cos() * x_dir.y + u.sin() * y_dir.y) + v * self.axis.y,
-            self.origin.z + self.radius * (u.cos() * x_dir.z + u.sin() * y_dir.z) + v * self.axis.z,
+            self.origin.x + self.radius * (u.cos() * self.x_dir.x + u.sin() * y_dir.x) + v * self.axis.x,
+            self.origin.y + self.radius * (u.cos() * self.x_dir.y + u.sin() * y_dir.y) + v * self.axis.y,
+            self.origin.z + self.radius * (u.cos() * self.x_dir.z + u.sin() * y_dir.z) + v * self.axis.z,
         )
     }
 
     /// Normal at (u, v) — points outward.
     pub fn normal_at(&self, u: f64, _v: f64) -> Direction3d {
-        let x_dir = if self.axis.is_parallel_to(&Direction3d::Z) {
-            Direction3d::X
-        } else {
-            self.axis.cross(&Direction3d::Z)
-        };
-        let y_dir = self.axis.cross(&x_dir);
+        let y_dir = self.axis.cross(&self.x_dir);
         Direction3d::new(
-            u.cos() * x_dir.x + u.sin() * y_dir.x,
-            u.cos() * x_dir.y + u.sin() * y_dir.y,
-            u.cos() * x_dir.z + u.sin() * y_dir.z,
+            u.cos() * self.x_dir.x + u.sin() * y_dir.x,
+            u.cos() * self.x_dir.y + u.sin() * y_dir.y,
+            u.cos() * self.x_dir.z + u.sin() * y_dir.z,
         ).unwrap_or(Direction3d::X)
     }
 
@@ -170,17 +179,12 @@ impl CylinderSurface {
     /// Project a 3D point onto the cylinder's parametric space → (u, v).
     /// u = angle in radians, v = height along axis.
     pub fn project_point(&self, point: &Point3d) -> (f64, f64) {
-        let x_dir = if self.axis.is_parallel_to(&Direction3d::Z) {
-            Direction3d::X
-        } else {
-            self.axis.cross(&Direction3d::Z)
-        };
-        let y_dir = self.axis.cross(&x_dir);
+        let y_dir = self.axis.cross(&self.x_dir);
         let dx = point.x - self.origin.x;
         let dy = point.y - self.origin.y;
         let dz = point.z - self.origin.z;
         let u = (dx * y_dir.x + dy * y_dir.y + dz * y_dir.z)
-            .atan2(dx * x_dir.x + dy * x_dir.y + dz * x_dir.z);
+            .atan2(dx * self.x_dir.x + dy * self.x_dir.y + dz * self.x_dir.z);
         let v = dx * self.axis.x + dy * self.axis.y + dz * self.axis.z;
         (u, v)
     }
@@ -197,9 +201,19 @@ pub struct ConeSurface {
     pub axis: Direction3d,   // Direction from base toward apex
     pub half_angle: f64,     // Half-angle in radians
     pub radius: f64,         // Base radius (at v=0)
+    pub x_dir: Direction3d,  // reference direction for u=0
 }
 
 impl ConeSurface {
+    /// Compute a default x_dir from the axis direction.
+    fn default_x_dir(axis: &Direction3d) -> Direction3d {
+        if axis.is_parallel_to(&Direction3d::Z) {
+            Direction3d::X
+        } else {
+            axis.cross(&Direction3d::Z)
+        }
+    }
+
     /// Create a cone along the Z axis with base at z=0.
     /// The base has the given radius, and the apex is at z = radius / tan(half_angle).
     pub fn new_z(radius: f64, half_angle: f64) -> Self {
@@ -208,7 +222,21 @@ impl ConeSurface {
             axis: Direction3d::Z,
             half_angle,
             radius,
+            x_dir: Direction3d::X,
         }
+    }
+
+    /// Create a cone with given origin, axis, radius, and half_angle.
+    /// The x_dir is computed automatically from the axis.
+    pub fn new(origin: Point3d, axis: Direction3d, radius: f64, half_angle: f64) -> Self {
+        let x_dir = Self::default_x_dir(&axis);
+        Self { origin, axis, half_angle, radius, x_dir }
+    }
+
+    /// Create a cone with an explicit reference direction for u=0.
+    /// Use this when the STEP file provides the x_dir (ref_direction).
+    pub fn new_with_frame(origin: Point3d, axis: Direction3d, radius: f64, half_angle: f64, x_dir: Direction3d) -> Self {
+        Self { origin, axis, half_angle, radius, x_dir }
     }
 
     /// Height from base to apex.
@@ -225,34 +253,24 @@ impl ConeSurface {
     pub fn point_at(&self, u: f64, v: f64) -> Point3d {
         // Radius decreases linearly from base to apex
         let r = (self.radius - v * self.half_angle.tan()).max(0.0);
-        let x_dir = if self.axis.is_parallel_to(&Direction3d::Z) {
-            Direction3d::X
-        } else {
-            self.axis.cross(&Direction3d::Z)
-        };
-        let y_dir = self.axis.cross(&x_dir);
+        let y_dir = self.axis.cross(&self.x_dir);
 
         Point3d::new(
-            self.origin.x + r * (u.cos() * x_dir.x + u.sin() * y_dir.x) + v * self.axis.x,
-            self.origin.y + r * (u.cos() * x_dir.y + u.sin() * y_dir.y) + v * self.axis.y,
-            self.origin.z + r * (u.cos() * x_dir.z + u.sin() * y_dir.z) + v * self.axis.z,
+            self.origin.x + r * (u.cos() * self.x_dir.x + u.sin() * y_dir.x) + v * self.axis.x,
+            self.origin.y + r * (u.cos() * self.x_dir.y + u.sin() * y_dir.y) + v * self.axis.y,
+            self.origin.z + r * (u.cos() * self.x_dir.z + u.sin() * y_dir.z) + v * self.axis.z,
         )
     }
 
     /// Normal at (u, v) — points outward.
     pub fn normal_at(&self, u: f64, _v: f64) -> Direction3d {
-        let x_dir = if self.axis.is_parallel_to(&Direction3d::Z) {
-            Direction3d::X
-        } else {
-            self.axis.cross(&Direction3d::Z)
-        };
-        let y_dir = self.axis.cross(&x_dir);
+        let y_dir = self.axis.cross(&self.x_dir);
         // Normal to cone: perpendicular to the slant surface
         // The slant has angle half_angle from the axis
         let radial = Direction3d::new(
-            u.cos() * x_dir.x + u.sin() * y_dir.x,
-            u.cos() * x_dir.y + u.sin() * y_dir.y,
-            u.cos() * x_dir.z + u.sin() * y_dir.z,
+            u.cos() * self.x_dir.x + u.sin() * y_dir.x,
+            u.cos() * self.x_dir.y + u.sin() * y_dir.y,
+            u.cos() * self.x_dir.z + u.sin() * y_dir.z,
         ).unwrap_or(Direction3d::X);
         // Normal = radial * cos(half_angle) - axis * sin(half_angle)
         let ha = self.half_angle;
@@ -266,17 +284,12 @@ impl ConeSurface {
     /// Project a 3D point onto the cone's parametric space → (u, v).
     /// u = angle in radians, v = height along axis.
     pub fn project_point(&self, point: &Point3d) -> (f64, f64) {
-        let x_dir = if self.axis.is_parallel_to(&Direction3d::Z) {
-            Direction3d::X
-        } else {
-            self.axis.cross(&Direction3d::Z)
-        };
-        let y_dir = self.axis.cross(&x_dir);
+        let y_dir = self.axis.cross(&self.x_dir);
         let dx = point.x - self.origin.x;
         let dy = point.y - self.origin.y;
         let dz = point.z - self.origin.z;
         let u = (dx * y_dir.x + dy * y_dir.y + dz * y_dir.z)
-            .atan2(dx * x_dir.x + dy * x_dir.y + dz * x_dir.z);
+            .atan2(dx * self.x_dir.x + dy * self.x_dir.y + dz * self.x_dir.z);
         let v = dx * self.axis.x + dy * self.axis.y + dz * self.axis.z;
         (u, v)
     }
@@ -331,46 +344,72 @@ pub struct TorusSurface {
     pub axis: Direction3d,
     pub major_radius: f64, // R — distance from center to tube center
     pub minor_radius: f64, // r — tube radius
+    pub x_dir: Direction3d,  // reference direction for u=0
 }
 
 impl TorusSurface {
+    /// Compute a default x_dir from the axis direction.
+    fn default_x_dir(axis: &Direction3d) -> Direction3d {
+        if axis.is_parallel_to(&Direction3d::Z) {
+            Direction3d::X
+        } else {
+            axis.cross(&Direction3d::Z)
+        }
+    }
+
     pub fn new_z(center: Point3d, major_radius: f64, minor_radius: f64) -> Self {
-        Self { center, axis: Direction3d::Z, major_radius, minor_radius }
+        Self { center, axis: Direction3d::Z, major_radius, minor_radius, x_dir: Direction3d::X }
+    }
+
+    /// Create a torus with given center, axis, and radii.
+    /// The x_dir is computed automatically from the axis.
+    pub fn new(center: Point3d, axis: Direction3d, major_radius: f64, minor_radius: f64) -> Self {
+        let x_dir = Self::default_x_dir(&axis);
+        Self { center, axis, major_radius, minor_radius, x_dir }
+    }
+
+    /// Create a torus with an explicit reference direction for u=0.
+    /// Use this when the STEP file provides the x_dir (ref_direction).
+    pub fn new_with_frame(center: Point3d, axis: Direction3d, major_radius: f64, minor_radius: f64, x_dir: Direction3d) -> Self {
+        Self { center, axis, major_radius, minor_radius, x_dir }
     }
 
     /// Evaluate: u = angle around main ring [0, 2pi], v = angle around tube [0, 2pi].
     pub fn point_at(&self, u: f64, v: f64) -> Point3d {
-        let x_dir = Direction3d::X;
-        let y_dir = Direction3d::Y;
+        let y_dir = self.axis.cross(&self.x_dir);
         let r = self.major_radius + self.minor_radius * v.cos();
         Point3d::new(
-            self.center.x + r * u.cos() * x_dir.x + r * u.sin() * y_dir.x,
-            self.center.y + r * u.cos() * x_dir.y + r * u.sin() * y_dir.y,
-            self.center.z + self.minor_radius * v.sin(),
+            self.center.x + r * (u.cos() * self.x_dir.x + u.sin() * y_dir.x) + self.minor_radius * v.sin() * self.axis.x,
+            self.center.y + r * (u.cos() * self.x_dir.y + u.sin() * y_dir.y) + self.minor_radius * v.sin() * self.axis.y,
+            self.center.z + r * (u.cos() * self.x_dir.z + u.sin() * y_dir.z) + self.minor_radius * v.sin() * self.axis.z,
         )
     }
 
     pub fn normal_at(&self, u: f64, v: f64) -> Direction3d {
-        let x_dir = Direction3d::X;
-        let y_dir = Direction3d::Y;
-        let nx = v.cos() * u.cos() * x_dir.x + v.cos() * u.sin() * y_dir.x;
-        let ny = v.cos() * u.cos() * x_dir.y + v.cos() * u.sin() * y_dir.y;
-        let nz = v.sin();
+        let y_dir = self.axis.cross(&self.x_dir);
+        let nx = v.cos() * (u.cos() * self.x_dir.x + u.sin() * y_dir.x) + v.sin() * self.axis.x;
+        let ny = v.cos() * (u.cos() * self.x_dir.y + u.sin() * y_dir.y) + v.sin() * self.axis.y;
+        let nz = v.cos() * (u.cos() * self.x_dir.z + u.sin() * y_dir.z) + v.sin() * self.axis.z;
         Direction3d::new(nx, ny, nz).unwrap_or(Direction3d::Z)
     }
 
     /// Project a 3D point onto the torus's parametric space → (u, v).
     /// u = angle around main ring, v = angle around tube.
     pub fn project_point(&self, point: &Point3d) -> (f64, f64) {
+        let y_dir = self.axis.cross(&self.x_dir);
         let dx = point.x - self.center.x;
         let dy = point.y - self.center.y;
         let dz = point.z - self.center.z;
-        // u = angle around main ring
-        let u = dy.atan2(dx);
+        // u = angle around main ring in the x_dir/y_dir plane
+        let u = (dx * y_dir.x + dy * y_dir.y + dz * y_dir.z)
+            .atan2(dx * self.x_dir.x + dy * self.x_dir.y + dz * self.x_dir.z);
         // v = angle around tube
-        let dist_xy = (dx * dx + dy * dy).sqrt();
-        let local_x = dist_xy - self.major_radius;
-        let local_y = dz;
+        let radial_dist = dx * self.x_dir.x + dy * self.x_dir.y + dz * self.x_dir.z;
+        let radial_y = dx * y_dir.x + dy * y_dir.y + dz * y_dir.z;
+        let dist_ring = (radial_dist * radial_dist + radial_y * radial_y).sqrt();
+        let along_axis = dx * self.axis.x + dy * self.axis.y + dz * self.axis.z;
+        let local_x = dist_ring - self.major_radius;
+        let local_y = along_axis;
         let v = local_y.atan2(local_x);
         (u, v)
     }
@@ -546,12 +585,14 @@ impl Surface {
                 origin: t.transform_point(&c.origin),
                 axis: t.transform_direction(&c.axis),
                 radius: c.radius,
+                x_dir: t.transform_direction(&c.x_dir),
             }),
             Surface::Cone(c) => Surface::Cone(ConeSurface {
                 origin: t.transform_point(&c.origin),
                 axis: t.transform_direction(&c.axis),
                 half_angle: c.half_angle,
                 radius: c.radius,
+                x_dir: t.transform_direction(&c.x_dir),
             }),
             Surface::Sphere(s) => Surface::Sphere(SphereSurface {
                 center: t.transform_point(&s.center),
@@ -562,6 +603,7 @@ impl Surface {
                 axis: t.transform_direction(&tor.axis),
                 major_radius: tor.major_radius,
                 minor_radius: tor.minor_radius,
+                x_dir: t.transform_direction(&tor.x_dir),
             }),
             Surface::Revolution(r) => Surface::Revolution(RevolutionSurface {
                 profile: r.profile.transform(t),

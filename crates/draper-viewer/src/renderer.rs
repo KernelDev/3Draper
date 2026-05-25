@@ -122,7 +122,7 @@ impl CallbackTrait for SceneCallback {
                 view: &resources.offscreen_color,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.93, g: 0.95, b: 0.97, a: 1.0 }),
+                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.90, g: 0.90, b: 0.90, a: 1.0 }),
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -228,27 +228,33 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let view_dir = normalize(uniforms.camera_pos.xyz - in.world_pos);
     let effective_normal = select(-normal, normal, dot(normal, view_dir) >= 0.0);
 
-    // Primary headlight (strong)
+    // Primary headlight (strong directional from camera)
     let ndotl_primary = max(dot(effective_normal, light_dir), 0.0);
     let half_dir_primary = normalize(light_dir + view_dir);
     let ndoth_primary = max(dot(effective_normal, half_dir_primary), 0.0);
-    let specular_primary = pow(ndoth_primary, 64.0) * 0.4;
+    let specular_primary = pow(ndoth_primary, 64.0) * 0.5;
 
-    // Secondary fill light from below-left (softer)
-    let fill_dir = normalize(vec3<f32>(-0.3, -0.5, 0.4));
+    // Secondary fill light from upper-right (brighter, more even coverage)
+    let fill_dir = normalize(vec3<f32>(0.5, 0.8, 0.3));
     let ndotl_fill = max(dot(effective_normal, fill_dir), 0.0);
+    let half_dir_fill = normalize(fill_dir + view_dir);
+    let ndoth_fill = max(dot(effective_normal, half_dir_fill), 0.0);
+    let specular_fill = pow(ndoth_fill, 48.0) * 0.25;
 
-    // Tertiary rim/back light for edge definition
-    let rim_dir = normalize(vec3<f32>(0.2, 0.4, -0.8));
-    let ndotl_rim = max(dot(effective_normal, rim_dir), 0.0);
-    let rim_factor = pow(1.0 - max(dot(effective_normal, view_dir), 0.0), 2.5) * 0.12;
+    // Tertiary back light from below-left (fills shadows)
+    let back_dir = normalize(vec3<f32>(-0.4, -0.3, -0.5));
+    let ndotl_back = max(dot(effective_normal, back_dir), 0.0);
 
-    // Base color — light blue-grey for CAD models (visible on light background)
-    let base_color = vec3<f32>(0.55, 0.60, 0.68);
+    // Rim light for edge definition
+    let rim_factor = pow(1.0 - max(dot(effective_normal, view_dir), 0.0), 3.0) * 0.15;
 
-    // Combine lighting — stronger ambient for better visibility
-    let diffuse = ndotl_primary * 0.50 + ndotl_fill * 0.25 + ndotl_rim * 0.15;
-    let color = base_color * (ambient + diffuse) + vec3<f32>(0.9, 0.92, 0.95) * specular_primary + base_color * rim_factor;
+    // Base color — brighter warm grey for good contrast on light background
+    let base_color = vec3<f32>(0.62, 0.64, 0.68);
+
+    // Combine lighting — strong ambient + multi-directional diffuse
+    let diffuse = ndotl_primary * 0.55 + ndotl_fill * 0.30 + ndotl_back * 0.15;
+    let specular = vec3<f32>(0.95, 0.95, 0.97) * (specular_primary + specular_fill);
+    let color = base_color * (ambient + diffuse) + specular + base_color * rim_factor;
 
     return vec4<f32>(color, 1.0);
 }
@@ -537,7 +543,7 @@ pub fn create_scene_resources(
         contents: bytemuck::cast_slice(&[SceneUniforms {
             mvp: [[0.0; 4]; 4],
             model: [[0.0; 4]; 4],
-            light_dir: [0.0, 0.0, 1.0, 0.30],
+            light_dir: [0.0, 0.0, 1.0, 0.45],
             camera_pos: [0.0, 0.0, 0.0, 0.0],
         }]),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,

@@ -487,7 +487,7 @@ fn estimate_v_range(face: &Face) -> Option<(f64, f64)> {
             }
             Surface::Revolution(rev) => Some(rev.profile.param_range()),
             Surface::Extrusion(ext) => Some(ext.profile.param_range()),
-            _ => None,
+            _ => Some((0.0, 100.0)),
         }
     } else {
         None
@@ -550,7 +550,7 @@ fn compute_axis_v_range(face: &Face, origin: &Point3d, axis: &Direction3d) -> (f
     }
 
     if v_min >= v_max {
-        (0.0, 1.0)
+        (0.0, 100.0)
     } else {
         let margin = (v_max - v_min) * 0.001;
         (v_min - margin, v_max + margin)
@@ -793,9 +793,10 @@ fn triangulate_cylinder_with_boundary(
         }
     }
 
+    let n_u_loop = if full_circle { n_u } else { n_u - 1 };
     for j in 0..n_v - 1 {
-        for i in 0..n_u {
-            let i_next = if full_circle || i < n_u - 1 { (i + 1) % n_u } else { i };
+        for i in 0..n_u_loop {
+            let i_next = (i + 1) % n_u;
             let v0 = (j * n_u + i) as u32;
             let v1 = (j * n_u + i_next) as u32;
             let v2 = ((j + 1) * n_u + i_next) as u32;
@@ -861,9 +862,10 @@ fn triangulate_cone_with_boundary(
         }
     }
 
+    let n_u_loop = if full_circle { n_u } else { n_u - 1 };
     for j in 0..n_v - 1 {
-        for i in 0..n_u {
-            let i_next = if full_circle || i < n_u - 1 { (i + 1) % n_u } else { i };
+        for i in 0..n_u_loop {
+            let i_next = (i + 1) % n_u;
             let v0 = (j * n_u + i) as u32;
             let v1 = (j * n_u + i_next) as u32;
             let v2 = ((j + 1) * n_u + i_next) as u32;

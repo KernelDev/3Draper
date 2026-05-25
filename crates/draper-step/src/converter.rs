@@ -26,7 +26,7 @@ use draper_geometry::{
     ConeSurface, TorusSurface, RevolutionSurface, ExtrusionSurface,
     NurbsSurface, Curve3d, Line, Circle, NurbsCurve,
 };
-use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face};
+use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary};
 use draper_topology::{Face, Wire, CoEdge, Edge as TopoEdge};
 use std::collections::HashMap;
 
@@ -402,7 +402,7 @@ impl<'a> StepConverter<'a> {
     fn extract_face_orientation(&self, face: &crate::schema::StepEntity) -> bool {
         if let Some(last_param) = face.params.last() {
             match last_param {
-                StepValue::Enum(e) => return e == ".T.",
+                StepValue::Enum(e) => return e == "T",
                 StepValue::Float(f) => return *f != 0.0,
                 StepValue::Integer(i) => return *i != 0,
                 _ => {}
@@ -516,7 +516,7 @@ impl<'a> StepConverter<'a> {
             }
             // Check for orientation enum
             if let StepValue::Enum(e) = param {
-                orientation = e == ".T.";
+                orientation = e == "T";
             }
         }
 
@@ -720,9 +720,9 @@ impl<'a> StepConverter<'a> {
     /// Extract a CYLINDRICAL_SURFACE.
     fn extract_cylinder(&self, entity: &crate::schema::StepEntity) -> Option<Surface> {
         let axis2_id = self.get_ref(entity.params.first()?)?;
-        let (origin, axis, _u_dir) = self.resolve_axis2(axis2_id)?;
+        let (origin, axis, u_dir) = self.resolve_axis2(axis2_id)?;
         let radius = self.get_float(entity.params.get(1)?)?;
-        Some(Surface::Cylinder(CylinderSurface::new(origin, axis, radius)))
+        Some(Surface::Cylinder(CylinderSurface::new_with_frame(origin, axis, radius, u_dir)))
     }
 
     /// Extract a SPHERICAL_SURFACE.
@@ -736,29 +736,19 @@ impl<'a> StepConverter<'a> {
     /// Extract a CONICAL_SURFACE.
     fn extract_cone(&self, entity: &crate::schema::StepEntity) -> Option<Surface> {
         let axis2_id = self.get_ref(entity.params.first()?)?;
-        let (origin, axis, _u_dir) = self.resolve_axis2(axis2_id)?;
+        let (origin, axis, u_dir) = self.resolve_axis2(axis2_id)?;
         let radius = self.get_float(entity.params.get(1)?)?;
         let half_angle = self.get_float(entity.params.get(2)?)?;
-        Some(Surface::Cone(ConeSurface {
-            origin,
-            axis,
-            half_angle: half_angle.abs(),
-            radius,
-        }))
+        Some(Surface::Cone(ConeSurface::new_with_frame(origin, axis, radius, half_angle.abs(), u_dir)))
     }
 
     /// Extract a TOROIDAL_SURFACE.
     fn extract_torus(&self, entity: &crate::schema::StepEntity) -> Option<Surface> {
         let axis2_id = self.get_ref(entity.params.first()?)?;
-        let (center, axis, _u_dir) = self.resolve_axis2(axis2_id)?;
+        let (center, axis, u_dir) = self.resolve_axis2(axis2_id)?;
         let major_radius = self.get_float(entity.params.get(1)?)?;
         let minor_radius = self.get_float(entity.params.get(2)?)?;
-        Some(Surface::Torus(TorusSurface {
-            center,
-            axis,
-            major_radius,
-            minor_radius,
-        }))
+        Some(Surface::Torus(TorusSurface::new_with_frame(center, axis, major_radius, minor_radius, u_dir)))
     }
 
     /// Extract a SURFACE_OF_REVOLUTION.
@@ -1257,7 +1247,28 @@ impl<'a> StepConverter<'a> {
             return triangulate_face(&face, params);
         }
 
-        // Create coedges from edges
+        // Collect 3D boundary points from edge curves by sampling each edge
+        let mut boundary_points = Vec::new();
+        for edge in &face_data.edges {
+            for i in 0..64 {
+                let t = i as f64 / 63.0;
+                if let Some(p) = edge.point_at(t) {
+                    boundary_points.push(p);
+                }
+            }
+        }
+
+        // If we have boundary points, use boundary-aware triangulation
+        if !boundary_points.is_empty() {
+            return triangulate_face_with_boundary(
+                &face_data.surface,
+                &boundary_points,
+                face_data.forward,
+                params,
+            );
+        }
+
+        // Fallback: use the old Face-based path
         let coedges: Vec<CoEdge> = face_data.edges.iter().map(|e| {
             CoEdge::new(e.id, true)
         }).collect();
