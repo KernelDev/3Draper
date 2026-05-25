@@ -1,12 +1,13 @@
 //! Face triangulation — converts B-Rep faces to triangle meshes.
 //!
 //! Uses ear-clipping for polygons and parametric sampling for curved surfaces.
+//! Supports boundary-aware trimming when boundary points are available.
 
 use crate::mesh::TriangleMesh;
 use draper_geometry::{
     Point3d, Point2d, Direction3d, Vec3d,
     Surface, Plane, CylinderSurface, SphereSurface, TorusSurface,
-    Curve3d,
+    ConeSurface, Curve3d,
 };
 use draper_topology::{Face, Wire, CoEdge, Edge, Solid, Shell, Compound};
 use std::f64::consts::PI;
@@ -659,4 +660,445 @@ fn point_in_triangle(a: &Point2d, b: &Point2d, c: &Point2d, p: &Point2d) -> bool
 /// Signed area of triangle (p, a, b) × 2.
 fn sign_area_2d(p: &Point2d, a: &Point2d, b: &Point2d) -> f64 {
     (p.u - b.u) * (a.v - b.v) - (a.u - b.u) * (p.v - b.v)
+}
+
+// ============================================================
+// Boundary-aware triangulation (new API)
+// ============================================================
+
+/// Triangulate a face with boundary points for proper trimming.
+/// This is the preferred entry point when boundary 3D points are available
+/// from STEP file topology extraction.
+pub fn triangulate_face_with_boundary(
+    surface: &Surface,
+    boundary_points: &[Point3d],
+    forward: bool,
+    params: &TriangulationParams,
+) -> TriangleMesh {
+    if boundary_points.is_empty() {
+        // No boundary — fall back to untrimmed triangulation
+        let wire = Wire::new(vec![]);
+        let mut face = Face::new(surface.clone(), wire);
+        face.forward = forward;
+        face.edges = vec![];
+        return triangulate_face(&face, params);
+    }
+
+    match surface {
+        Surface::Plane(plane) => {
+            triangulate_plane_with_boundary(plane, boundary_points, forward)
+        }
+        Surface::Cylinder(cyl) => {
+            triangulate_cylinder_with_boundary(cyl, boundary_points, forward, params)
+        }
+        Surface::Cone(cone) => {
+            triangulate_cone_with_boundary(cone, boundary_points, forward, params)
+        }
+        Surface::Sphere(sphere) => {
+            triangulate_sphere_with_boundary(sphere, boundary_points, forward, params)
+        }
+        Surface::Torus(torus) => {
+            triangulate_torus_with_boundary(torus, boundary_points, forward, params)
+        }
+        _ => {
+            // For revolution, extrusion, NURBS — sample within boundary range
+            triangulate_generic_with_boundary(surface, boundary_points, forward, params)
+        }
+    }
+}
+
+/// Triangulate a plane face with boundary points using ear clipping.
+fn triangulate_plane_with_boundary(
+    plane: &Plane,
+    boundary_points: &[Point3d],
+    forward: bool,
+) -> TriangleMesh {
+    let mut mesh = TriangleMesh::new();
+
+    // Project 3D boundary points onto the plane's 2D coordinate system
+    let points_2d: Vec<Point2d> = boundary_points.iter().map(|p| {
+        let dx = p.x - plane.origin.x;
+        let dy = p.y - plane.origin.y;
+        let dz = p.z - plane.origin.z;
+        Point2d::new(
+            dx * plane.u_dir.x + dy * plane.u_dir.y + dz * plane.u_dir.z,
+            dx * plane.v_dir.x + dy * plane.v_dir.y + dz * plane.v_dir.z,
+        )
+    }).collect();
+
+    // Ear clipping triangulation
+    let triangles = ear_clip(&points_2d);
+
+    // Add vertices and triangles
+    for p in boundary_points {
+        mesh.add_vertex(*p);
+    }
+    for tri in &triangles {
+        if forward {
+            mesh.add_triangle(tri[0], tri[1], tri[2]);
+        } else {
+            mesh.add_triangle(tri[0], tri[2], tri[1]); // Flip winding
+        }
+    }
+
+    mesh
+}
+
+/// Compute parametric (u, v) range from boundary points for a cylinder.
+fn cylinder_uv_range(cyl: &CylinderSurface, boundary_points: &[Point3d]) -> (f64, f64, f64, f64) {
+    let mut u_min = f64::MAX;
+    let mut u_max = f64::MIN;
+    let mut v_min = f64::MAX;
+    let mut v_max = f64::MIN;
+
+    for p in boundary_points {
+        let (u, v) = cyl.project_point(p);
+        u_min = u_min.min(u);
+        u_max = u_max.max(u);
+        v_min = v_min.min(v);
+        v_max = v_max.max(v);
+    }
+
+    // Add a small margin
+    let u_margin = (u_max - u_min) * 0.001;
+    let v_margin = (v_max - v_min) * 0.001;
+    (u_min - u_margin, u_max + u_margin, v_min - v_margin, v_max + v_margin)
+}
+
+/// Triangulate a cylinder face trimmed by boundary points.
+fn triangulate_cylinder_with_boundary(
+    cyl: &CylinderSurface,
+    boundary_points: &[Point3d],
+    forward: bool,
+    params: &TriangulationParams,
+) -> TriangleMesh {
+    let mut mesh = TriangleMesh::new();
+    let (u_min, u_max, v_min, v_max) = cylinder_uv_range(cyl, boundary_points);
+
+    let n_u = params.angular_samples;
+    let n_v = params.height_samples.max(2);
+
+    // If the u range covers the full circle, render full circle
+    let u_range = u_max - u_min;
+    let full_circle = u_range > 1.9 * PI;
+    let u_start = if full_circle { 0.0 } else { u_min };
+    let u_end = if full_circle { 2.0 * PI } else { u_max };
+
+    for j in 0..n_v {
+        for i in 0..n_u {
+            let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
+            let v = v_min + (v_max - v_min) * j as f64 / (n_v - 1) as f64;
+            let p = cyl.point_at(u, v);
+            mesh.add_vertex(p);
+        }
+    }
+
+    for j in 0..n_v - 1 {
+        for i in 0..n_u {
+            let i_next = if full_circle || i < n_u - 1 { (i + 1) % n_u } else { i };
+            let v0 = (j * n_u + i) as u32;
+            let v1 = (j * n_u + i_next) as u32;
+            let v2 = ((j + 1) * n_u + i_next) as u32;
+            let v3 = ((j + 1) * n_u + i) as u32;
+
+            if forward {
+                mesh.add_triangle(v0, v1, v2);
+                mesh.add_triangle(v0, v2, v3);
+            } else {
+                mesh.add_triangle(v0, v2, v1);
+                mesh.add_triangle(v0, v3, v2);
+            }
+        }
+    }
+
+    mesh
+}
+
+/// Compute parametric (u, v) range from boundary points for a cone.
+fn cone_uv_range(cone: &ConeSurface, boundary_points: &[Point3d]) -> (f64, f64, f64, f64) {
+    let mut u_min = f64::MAX;
+    let mut u_max = f64::MIN;
+    let mut v_min = f64::MAX;
+    let mut v_max = f64::MIN;
+
+    for p in boundary_points {
+        let (u, v) = cone.project_point(p);
+        u_min = u_min.min(u);
+        u_max = u_max.max(u);
+        v_min = v_min.min(v);
+        v_max = v_max.max(v);
+    }
+
+    let u_margin = (u_max - u_min) * 0.001;
+    let v_margin = (v_max - v_min) * 0.001;
+    (u_min - u_margin, u_max + u_margin, v_min - v_margin, v_max + v_margin)
+}
+
+/// Triangulate a cone face trimmed by boundary points.
+fn triangulate_cone_with_boundary(
+    cone: &ConeSurface,
+    boundary_points: &[Point3d],
+    forward: bool,
+    params: &TriangulationParams,
+) -> TriangleMesh {
+    let mut mesh = TriangleMesh::new();
+    let (u_min, u_max, v_min, v_max) = cone_uv_range(cone, boundary_points);
+
+    let n_u = params.angular_samples;
+    let n_v = params.height_samples.max(2);
+
+    let u_range = u_max - u_min;
+    let full_circle = u_range > 1.9 * PI;
+    let u_start = if full_circle { 0.0 } else { u_min };
+    let u_end = if full_circle { 2.0 * PI } else { u_max };
+
+    for j in 0..n_v {
+        for i in 0..n_u {
+            let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
+            let v = v_min + (v_max - v_min) * j as f64 / (n_v - 1) as f64;
+            let p = cone.point_at(u, v);
+            mesh.add_vertex(p);
+        }
+    }
+
+    for j in 0..n_v - 1 {
+        for i in 0..n_u {
+            let i_next = if full_circle || i < n_u - 1 { (i + 1) % n_u } else { i };
+            let v0 = (j * n_u + i) as u32;
+            let v1 = (j * n_u + i_next) as u32;
+            let v2 = ((j + 1) * n_u + i_next) as u32;
+            let v3 = ((j + 1) * n_u + i) as u32;
+
+            if forward {
+                mesh.add_triangle(v0, v1, v2);
+                mesh.add_triangle(v0, v2, v3);
+            } else {
+                mesh.add_triangle(v0, v2, v1);
+                mesh.add_triangle(v0, v3, v2);
+            }
+        }
+    }
+
+    mesh
+}
+
+/// Compute parametric (u, v) range from boundary points for a sphere.
+fn sphere_uv_range(sphere: &SphereSurface, boundary_points: &[Point3d]) -> (f64, f64, f64, f64) {
+    let mut u_min = f64::MAX;
+    let mut u_max = f64::MIN;
+    let mut v_min = f64::MAX;
+    let mut v_max = f64::MIN;
+
+    for p in boundary_points {
+        let (u, v) = sphere.project_point(p);
+        u_min = u_min.min(u);
+        u_max = u_max.max(u);
+        v_min = v_min.min(v);
+        v_max = v_max.max(v);
+    }
+
+    let u_margin = (u_max - u_min) * 0.001;
+    let v_margin = (v_max - v_min) * 0.001;
+    (u_min - u_margin, u_max + u_margin, v_min - v_margin, v_max + v_margin)
+}
+
+/// Triangulate a sphere face trimmed by boundary points.
+fn triangulate_sphere_with_boundary(
+    sphere: &SphereSurface,
+    boundary_points: &[Point3d],
+    forward: bool,
+    params: &TriangulationParams,
+) -> TriangleMesh {
+    let mut mesh = TriangleMesh::new();
+    let (u_min, u_max, v_min, v_max) = sphere_uv_range(sphere, boundary_points);
+
+    let n_u = params.angular_samples;
+    let n_v = (params.angular_samples / 2).max(4);
+
+    // Check if this is a full sphere
+    let u_range = u_max - u_min;
+    let v_range = v_max - v_min;
+    let full_u = u_range > 1.9 * PI;
+    let full_v = v_range > 0.9 * PI;
+
+    let u_start = if full_u { 0.0 } else { u_min };
+    let u_end = if full_u { 2.0 * PI } else { u_max };
+    let v_start = if full_v { 0.0 } else { v_min };
+    let v_end = if full_v { PI } else { v_max };
+
+    for j in 0..=n_v {
+        for i in 0..n_u {
+            let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
+            let v = v_start + (v_end - v_start) * j as f64 / n_v as f64;
+            let p = sphere.point_at(u, v);
+            mesh.add_vertex(p);
+        }
+    }
+
+    for j in 0..n_v {
+        for i in 0..n_u {
+            let i_next = (i + 1) % n_u;
+            let v0 = (j * n_u + i) as u32;
+            let v1 = (j * n_u + i_next) as u32;
+            let v2 = ((j + 1) * n_u + i_next) as u32;
+            let v3 = ((j + 1) * n_u + i) as u32;
+
+            if forward {
+                mesh.add_triangle(v0, v1, v2);
+                mesh.add_triangle(v0, v2, v3);
+            } else {
+                mesh.add_triangle(v0, v2, v1);
+                mesh.add_triangle(v0, v3, v2);
+            }
+        }
+    }
+
+    mesh
+}
+
+/// Compute parametric (u, v) range from boundary points for a torus.
+fn torus_uv_range(torus: &TorusSurface, boundary_points: &[Point3d]) -> (f64, f64, f64, f64) {
+    let mut u_min = f64::MAX;
+    let mut u_max = f64::MIN;
+    let mut v_min = f64::MAX;
+    let mut v_max = f64::MIN;
+
+    for p in boundary_points {
+        let (u, v) = torus.project_point(p);
+        u_min = u_min.min(u);
+        u_max = u_max.max(u);
+        v_min = v_min.min(v);
+        v_max = v_max.max(v);
+    }
+
+    let u_margin = (u_max - u_min) * 0.001;
+    let v_margin = (v_max - v_min) * 0.001;
+    (u_min - u_margin, u_max + u_margin, v_min - v_margin, v_max + v_margin)
+}
+
+/// Triangulate a torus face trimmed by boundary points.
+fn triangulate_torus_with_boundary(
+    torus: &TorusSurface,
+    boundary_points: &[Point3d],
+    forward: bool,
+    params: &TriangulationParams,
+) -> TriangleMesh {
+    let mut mesh = TriangleMesh::new();
+    let (u_min, u_max, v_min, v_max) = torus_uv_range(torus, boundary_points);
+
+    let n_u = params.angular_samples;
+    let n_v = params.angular_samples;
+
+    let u_range = u_max - u_min;
+    let v_range = v_max - v_min;
+    let full_u = u_range > 1.9 * PI;
+    let full_v = v_range > 1.9 * PI;
+
+    let u_start = if full_u { 0.0 } else { u_min };
+    let u_end = if full_u { 2.0 * PI } else { u_max };
+    let v_start = if full_v { 0.0 } else { v_min };
+    let v_end = if full_v { 2.0 * PI } else { v_max };
+
+    for j in 0..n_v {
+        for i in 0..n_u {
+            let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
+            let v = v_start + (v_end - v_start) * j as f64 / n_v as f64;
+            let p = torus.point_at(u, v);
+            mesh.add_vertex(p);
+        }
+    }
+
+    for j in 0..n_v {
+        for i in 0..n_u {
+            let i_next = (i + 1) % n_u;
+            let j_next = (j + 1) % n_v;
+            let v0 = (j * n_u + i) as u32;
+            let v1 = (j * n_u + i_next) as u32;
+            let v2 = (j_next * n_u + i_next) as u32;
+            let v3 = (j_next * n_u + i) as u32;
+
+            if forward {
+                mesh.add_triangle(v0, v1, v2);
+                mesh.add_triangle(v0, v2, v3);
+            } else {
+                mesh.add_triangle(v0, v2, v1);
+                mesh.add_triangle(v0, v3, v2);
+            }
+        }
+    }
+
+    mesh
+}
+
+/// Generic surface triangulation with boundary points.
+/// Projects boundary points to parametric space, determines the parametric range,
+/// then samples within that range.
+fn triangulate_generic_with_boundary(
+    surface: &Surface,
+    boundary_points: &[Point3d],
+    forward: bool,
+    params: &TriangulationParams,
+) -> TriangleMesh {
+    let mut mesh = TriangleMesh::new();
+    let n = params.angular_samples;
+
+    // Compute parametric range from boundary points
+    let mut u_min = f64::MAX;
+    let mut u_max = f64::MIN;
+    let mut v_min = f64::MAX;
+    let mut v_max = f64::MIN;
+
+    for p in boundary_points {
+        let (u, v) = surface.project_point(p);
+        u_min = u_min.min(u);
+        u_max = u_max.max(u);
+        v_min = v_min.min(v);
+        v_max = v_max.max(v);
+    }
+
+    // If we couldn't determine a range, use defaults
+    if u_min >= u_max || v_min >= v_max {
+        // Fall back to generic sampling
+        let wire = Wire::new(vec![]);
+        let mut face = Face::new(surface.clone(), wire);
+        face.forward = forward;
+        face.edges = vec![];
+        return triangulate_face(&face, params);
+    }
+
+    // Add margin
+    let u_margin = (u_max - u_min) * 0.001;
+    let v_margin = (v_max - v_min) * 0.001;
+    u_min -= u_margin;
+    u_max += u_margin;
+    v_min -= v_margin;
+    v_max += v_margin;
+
+    for j in 0..n {
+        for i in 0..n {
+            let u = u_min + (u_max - u_min) * i as f64 / (n - 1).max(1) as f64;
+            let v = v_min + (v_max - v_min) * j as f64 / (n - 1).max(1) as f64;
+            let p = surface.point_at(u, v);
+            mesh.add_vertex(p);
+        }
+    }
+
+    for j in 0..n - 1 {
+        for i in 0..n - 1 {
+            let v0 = (j * n + i) as u32;
+            let v1 = (j * n + i + 1) as u32;
+            let v2 = ((j + 1) * n + i + 1) as u32;
+            let v3 = ((j + 1) * n + i) as u32;
+
+            if forward {
+                mesh.add_triangle(v0, v1, v2);
+                mesh.add_triangle(v0, v2, v3);
+            } else {
+                mesh.add_triangle(v0, v2, v1);
+                mesh.add_triangle(v0, v3, v2);
+            }
+        }
+    }
+
+    mesh
 }
