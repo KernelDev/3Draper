@@ -14,6 +14,8 @@ pub struct TriangleMesh {
     pub normals: Option<Vec<[f64; 3]>>,
     /// Optional triangle normals.
     pub face_normals: Option<Vec<[f64; 3]>>,
+    /// Optional per-triangle RGBA colors (0..1 range).
+    pub triangle_colors: Option<Vec<[f32; 4]>>,
 }
 
 impl TriangleMesh {
@@ -23,6 +25,7 @@ impl TriangleMesh {
             triangles: Vec::new(),
             normals: None,
             face_normals: None,
+            triangle_colors: None,
         }
     }
 
@@ -33,6 +36,7 @@ impl TriangleMesh {
             triangles,
             normals: None,
             face_normals: None,
+            triangle_colors: None,
         }
     }
 
@@ -111,6 +115,35 @@ impl TriangleMesh {
                 self.normals = Some(combined);
             }
             _ => {}
+        }
+    }
+
+    /// Merge another mesh with a uniform color applied to all its triangles.
+    pub fn merge_with_color(&mut self, other: &TriangleMesh, color: [f32; 4]) {
+        let offset = self.vertices.len() as u32;
+        self.vertices.extend(other.vertices.iter().cloned());
+        for tri in &other.triangles {
+            self.triangles.push([tri[0] + offset, tri[1] + offset, tri[2] + offset]);
+        }
+        if self.triangle_colors.is_none() {
+            let existing_count = self.triangles.len() - other.triangles.len();
+            self.triangle_colors = Some(vec![[0.48, 0.52, 0.58, 1.0]; existing_count]);
+        }
+        if let Some(ref mut colors) = self.triangle_colors {
+            for _ in 0..other.triangles.len() {
+                colors.push(color);
+            }
+        }
+    }
+
+    /// Ensure triangle_colors matches triangles length, filling with default color if needed.
+    pub fn ensure_colors(&mut self, default: [f32; 4]) {
+        if self.triangle_colors.is_none() {
+            self.triangle_colors = Some(vec![default; self.triangles.len()]);
+        } else if let Some(ref mut colors) = self.triangle_colors {
+            while colors.len() < self.triangles.len() {
+                colors.push(default);
+            }
         }
     }
 

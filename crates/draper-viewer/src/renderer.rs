@@ -12,12 +12,13 @@ use wgpu::util::DeviceExt;
 
 // ─── Vertex / Uniform types ──────────────────────────────────────────────
 
-/// Vertex format for the 3D mesh: position + normal.
+/// Vertex format for the 3D mesh: position + normal + color.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MeshVertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
+    pub color: [f32; 3],
 }
 
 impl MeshVertex {
@@ -27,6 +28,7 @@ impl MeshVertex {
         attributes: &wgpu::vertex_attr_array![
             0 => Float32x3,
             1 => Float32x3,
+            2 => Float32x3,
         ],
     };
 }
@@ -199,12 +201,14 @@ struct Uniforms {
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
+    @location(2) color: vec3<f32>,
 };
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_normal: vec3<f32>,
     @location(1) world_pos: vec3<f32>,
+    @location(2) vertex_color: vec3<f32>,
 };
 
 @vertex
@@ -214,6 +218,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.clip_position = uniforms.mvp * vec4<f32>(in.position, 1.0);
     out.world_normal = (uniforms.model * vec4<f32>(in.normal, 0.0)).xyz;
     out.world_pos = world_pos.xyz;
+    out.vertex_color = in.color;
     return out;
 }
 
@@ -246,14 +251,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let ndotl_back = max(dot(effective_normal, back_dir), 0.0);
 
     // Rim light for edge definition
-    let rim_factor = pow(1.0 - max(dot(effective_normal, view_dir), 0.0), 3.0) * 0.15;
+    let rim_factor = pow(1.0 - max(dot(effective_normal, view_dir), 0.0), 3.0) * 0.10;
 
-    // Base color — brighter warm grey for good contrast on light background
-    let base_color = vec3<f32>(0.62, 0.64, 0.68);
+    // Base color — use per-vertex color from mesh
+    let base_color = in.vertex_color;
 
     // Combine lighting — strong ambient + multi-directional diffuse
     let diffuse = ndotl_primary * 0.55 + ndotl_fill * 0.30 + ndotl_back * 0.15;
-    let specular = vec3<f32>(0.95, 0.95, 0.97) * (specular_primary + specular_fill);
+    let specular = vec3<f32>(0.95, 0.95, 0.97) * (specular_primary * 0.3 + specular_fill);
     let color = base_color * (ambient + diffuse) + specular + base_color * rim_factor;
 
     return vec4<f32>(color, 1.0);
@@ -640,7 +645,7 @@ fn create_vertex_buffer(device: &wgpu::Device, vertices: &[MeshVertex]) -> wgpu:
     if vertices.is_empty() {
         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("3Draper vertex buffer (empty)"),
-            contents: bytemuck::cast_slice(&[MeshVertex { position: [0.0; 3], normal: [0.0; 3] }]),
+            contents: bytemuck::cast_slice(&[MeshVertex { position: [0.0; 3], normal: [0.0; 3], color: [0.48, 0.52, 0.58] }]),
             usage: wgpu::BufferUsages::VERTEX,
         })
     } else {

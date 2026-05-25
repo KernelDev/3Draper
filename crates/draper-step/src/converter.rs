@@ -29,6 +29,7 @@ use draper_geometry::{
 use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary};
 use draper_topology::{Face, Wire, CoEdge, Edge as TopoEdge};
 use std::collections::HashMap;
+use log::{info, warn};
 
 /// Extracted face data with surface and boundary edges.
 struct FaceData {
@@ -37,10 +38,23 @@ struct FaceData {
     forward: bool,
 }
 
+/// A colored mesh instance (mesh + optional RGBA color).
+struct ColoredMesh {
+    mesh: TriangleMesh,
+    color: Option<[f32; 4]>, // RGBA, 0..1 range
+}
+
 /// Convert a parsed STEP file to a triangle mesh.
 pub fn step_to_mesh(step_file: &StepFile) -> Result<TriangleMesh, String> {
     let converter = StepConverter::new(step_file);
     converter.convert()
+}
+
+/// Convert a parsed STEP file to colored mesh instances.
+/// Returns one mesh per colored part (with per-part RGBA color).
+pub fn step_to_colored_meshes(step_file: &StepFile) -> Result<Vec<ColoredMesh>, String> {
+    let converter = StepConverter::new(step_file);
+    converter.convert_colored()
 }
 
 struct StepConverter<'a> {
@@ -58,87 +72,445 @@ impl<'a> StepConverter<'a> {
     }
 
     fn convert(&self) -> Result<TriangleMesh, String> {
+        // Try colored assembly conversion first, then merge all into one mesh
+        let colored = self.convert_colored()?;
         let mut mesh = TriangleMesh::new();
+        for cm in colored {
+            if let Some(color) = cm.color {
+                mesh.merge_with_color(&cm.mesh, color);
+            } else {
+                mesh.merge_with_color(&cm.mesh, [0.48, 0.52, 0.58, 1.0]);
+            }
+        }
+        Ok(mesh)
+    }
+
+    /// Convert STEP to colored mesh instances, properly handling assembly structure
+    /// with NAUO/CDSR/ITEM_DEFINED_TRANSFORMATION transforms and STYLED_ITEM colors.
+    fn convert_colored(&self) -> Result<Vec<ColoredMesh>, String> {
         let params = TriangulationParams::default();
-
-        // Compute a model bounding box from all CARTESIAN_POINT entities
-        // This is used to estimate surface extents for untrimmed surfaces.
         let bbox = self.compute_bounding_box();
+        let mut results: Vec<ColoredMesh> = Vec::new();
 
-        // Strategy 1: Find MANIFOLD_SOLID_BREP → CLOSED_SHELL → ADVANCED_FACE → surface
+        // ─── Phase 1: Try assembly-based conversion via NAUO/CDSR ─────────
+        let nauos = self.step.find_entities_by_type("NEXT_ASSEMBLY_USAGE_OCCURRENCE");
+        if !nauos.is_empty() {
+            info!("Found {} NAUO assembly instances", nauos.len());
+
+            // Build color map: brep_id → [f32;4] color
+            let color_map = self.extract_color_map();
+
+            // Build a map: child_pd_id → list of (nauo_id, relating_pd_id)
+            let mut pd_to_nauos: HashMap<i64, Vec<(i64, i64)>> = HashMap::new();
+            for nauo in &nauos {
+                let (relating_pd, related_pd) = self.extract_nauo_pd_refs(nauo);
+                if let (Some(parent_pd), Some(child_pd)) = (relating_pd, related_pd) {
+                    pd_to_nauos.entry(child_pd).or_default().push((nauo.id, parent_pd));
+                }
+            }
+
+            // For each NAUO that references a leaf BREP, compute composed transform
+            for nauo in &nauos {
+                let (relating_pd_id, related_pd_id) = self.extract_nauo_pd_refs(nauo);
+                if relating_pd_id.is_none() || related_pd_id.is_none() {
+                    continue;
+                }
+                let related_pd_id = related_pd_id.unwrap();
+
+                // Find the BREP for the related product (skip sub-assemblies)
+                let brep_id = self.find_pd_brep(related_pd_id);
+                if brep_id.is_none() {
+                    continue; // Sub-assembly NAUO — its children are handled separately
+                }
+                let brep_id = brep_id.unwrap();
+
+                // Compute the composed transform from leaf to root
+                let transform = self.compute_composed_transform(related_pd_id, &pd_to_nauos);
+
+                // Triangulate the BREP
+                let mesh = if let Some(shell_id) = self.find_shell_ref_by_brep_id(brep_id) {
+                    if let Some(face_data_list) = self.extract_shell_faces(shell_id) {
+                        let mut m = TriangleMesh::new();
+                        for face_data in &face_data_list {
+                            let face_mesh = self.surface_to_mesh(face_data, &params, &bbox);
+                            m.merge(&face_mesh);
+                        }
+                        m
+                    } else {
+                        continue;
+                    }
+                } else {
+                    continue;
+                };
+
+                // Apply the composed transform
+                let mut mesh = mesh;
+                if let Some(tf) = transform {
+                    mesh.transform(&tf);
+                }
+
+                let color = color_map.get(&brep_id).copied();
+                results.push(ColoredMesh { mesh, color });
+            }
+
+            if !results.is_empty() {
+                info!("Assembly conversion: {} colored mesh instances", results.len());
+                return Ok(results);
+            }
+        }
+
+        // ─── Phase 2: No assembly structure — try direct BREP conversion ───
+        let color_map = self.extract_color_map();
+
         let breps = self.step.find_entities_by_type("MANIFOLD_SOLID_BREP");
-        let mut faces_converted = 0;
-        let mut unsupported_types: Vec<String> = Vec::new();
-
         if !breps.is_empty() {
             for brep in &breps {
-                // BREP typically: #N = MANIFOLD_SOLID_BREP('name', #shell_ref);
-                // The shell reference is the 2nd parameter (index 1)
                 let shell_id = self.find_shell_ref(brep);
                 if let Some(shell_id) = shell_id {
                     if let Some(face_data_list) = self.extract_shell_faces(shell_id) {
+                        let mut mesh = TriangleMesh::new();
                         for face_data in &face_data_list {
                             let face_mesh = self.surface_to_mesh(face_data, &params, &bbox);
                             mesh.merge(&face_mesh);
-                            faces_converted += 1;
                         }
+                        let color = color_map.get(&brep.id).copied();
+                        results.push(ColoredMesh { mesh, color });
                     }
                 }
             }
         }
 
-        // Strategy 2: Try FACETED_BREP (some STEP files use this)
-        if faces_converted == 0 {
-            let faceted = self.step.find_entities_by_type("FACETED_BREP");
+        if !results.is_empty() {
+            return Ok(results);
+        }
+
+        // FACETED_BREP
+        let faceted = self.step.find_entities_by_type("FACETED_BREP");
+        if !faceted.is_empty() {
             for fb in &faceted {
                 let shell_id = self.find_shell_ref(fb);
                 if let Some(shell_id) = shell_id {
                     if let Some(face_data_list) = self.extract_shell_faces(shell_id) {
+                        let mut mesh = TriangleMesh::new();
                         for face_data in &face_data_list {
                             let face_mesh = self.surface_to_mesh(face_data, &params, &bbox);
                             mesh.merge(&face_mesh);
-                            faces_converted += 1;
                         }
+                        let color = color_map.get(&fb.id).copied();
+                        results.push(ColoredMesh { mesh, color });
                     }
                 }
             }
         }
 
-        // Strategy 3: Try ADVANCED_BREP_SHAPE_REPRESENTATION
-        if faces_converted == 0 {
-            let abrep = self.step.find_entities_by_type("ADVANCED_BREP_SHAPE_REPRESENTATION");
-            for ab in &abrep {
-                // Find MANIFOLD_SOLID_BREP referenced from this
-                for param in &ab.params {
-                    if let Some(ref_id) = self.get_ref(param) {
-                        if let Some(entity) = self.step.find_entity(ref_id) {
-                            if entity.type_name == "MANIFOLD_SOLID_BREP" {
-                                let shell_id = self.find_shell_ref(entity);
-                                if let Some(shell_id) = shell_id {
-                                    if let Some(face_data_list) = self.extract_shell_faces(shell_id) {
-                                        for face_data in &face_data_list {
-                                            let face_mesh = self.surface_to_mesh(face_data, &params, &bbox);
-                                            mesh.merge(&face_mesh);
-                                            faces_converted += 1;
+        if !results.is_empty() {
+            return Ok(results);
+        }
+
+        // ADVANCED_BREP_SHAPE_REPRESENTATION
+        let abrep = self.step.find_entities_by_type("ADVANCED_BREP_SHAPE_REPRESENTATION");
+        for ab in &abrep {
+            for param in &ab.params {
+                if let Some(ref_id) = self.get_ref(param) {
+                    if let Some(entity) = self.step.find_entity(ref_id) {
+                        if entity.type_name == "MANIFOLD_SOLID_BREP" {
+                            let shell_id = self.find_shell_ref(entity);
+                            if let Some(shell_id) = shell_id {
+                                if let Some(face_data_list) = self.extract_shell_faces(shell_id) {
+                                    let mut mesh = TriangleMesh::new();
+                                    for face_data in &face_data_list {
+                                        let face_mesh = self.surface_to_mesh(face_data, &params, &bbox);
+                                        mesh.merge(&face_mesh);
+                                    }
+                                    let color = color_map.get(&entity.id).copied();
+                                    results.push(ColoredMesh { mesh, color });
+                                }
+                            }
+                        }
+                    }
+                }
+                if let StepValue::List(items) = param {
+                    for item in items {
+                        if let Some(ref_id) = self.get_ref(item) {
+                            if let Some(entity) = self.step.find_entity(ref_id) {
+                                if entity.type_name == "MANIFOLD_SOLID_BREP" {
+                                    let shell_id = self.find_shell_ref(entity);
+                                    if let Some(shell_id) = shell_id {
+                                        if let Some(face_data_list) = self.extract_shell_faces(shell_id) {
+                                            let mut mesh = TriangleMesh::new();
+                                            for face_data in &face_data_list {
+                                                let face_mesh = self.surface_to_mesh(face_data, &params, &bbox);
+                                                mesh.merge(&face_mesh);
+                                            }
+                                            let color = color_map.get(&entity.id).copied();
+                                            results.push(ColoredMesh { mesh, color });
                                         }
                                     }
                                 }
                             }
                         }
                     }
-                    // Also check inside lists
-                    if let StepValue::List(items) = param {
-                        for item in items {
-                            if let Some(ref_id) = self.get_ref(item) {
-                                if let Some(entity) = self.step.find_entity(ref_id) {
-                                    if entity.type_name == "MANIFOLD_SOLID_BREP" {
-                                        let shell_id = self.find_shell_ref(entity);
-                                        if let Some(shell_id) = shell_id {
-                                            if let Some(face_data_list) = self.extract_shell_faces(shell_id) {
-                                                for face_data in &face_data_list {
-                                                    let face_mesh = self.surface_to_mesh(face_data, &params, &bbox);
-                                                    mesh.merge(&face_mesh);
-                                                    faces_converted += 1;
+                }
+            }
+        }
+
+        if !results.is_empty() {
+            return Ok(results);
+        }
+
+        // Direct surface extraction fallback
+        let surface_types = [
+            "PLANE", "CYLINDRICAL_SURFACE", "SPHERICAL_SURFACE",
+            "CONICAL_SURFACE", "TOROIDAL_SURFACE", "SURFACE_OF_REVOLUTION",
+            "SURFACE_OF_LINEAR_EXTRUSION", "B_SPLINE_SURFACE_WITH_KNOTS",
+            "B_SPLINE_SURFACE", "BEZIER_SURFACE",
+        ];
+        for type_name in &surface_types {
+            for entity in self.step.find_entities_by_type(type_name) {
+                if let Some(surface) = self.extract_surface(entity.id) {
+                    let face_data = FaceData { surface, edges: vec![], forward: true };
+                    let mesh = self.surface_to_mesh(&face_data, &params, &bbox);
+                    results.push(ColoredMesh { mesh, color: None });
+                }
+            }
+        }
+
+        if !results.is_empty() {
+            return Ok(results);
+        }
+
+        // Point cloud fallback
+        let points: Vec<Point3d> = self.step.find_entities_by_type("CARTESIAN_POINT")
+            .iter()
+            .filter_map(|e| self.resolve_cartesian_point(e.id))
+            .collect();
+        if points.len() >= 3 {
+            let mut mesh = TriangleMesh::new();
+            for p in &points { mesh.add_vertex(*p); }
+            for i in 1..points.len().saturating_sub(1) {
+                mesh.add_triangle(0, i as u32, (i + 1) as u32);
+            }
+            if mesh.triangle_count() > 0 {
+                results.push(ColoredMesh { mesh, color: None });
+                return Ok(results);
+            }
+        }
+
+        Err("No convertible surface geometry found in STEP file".to_string())
+    }
+
+    // ─── Assembly tree traversal ────────────────────────────────────────────
+
+    /// Extract relating and related PRODUCT_DEFINITION IDs from a NAUO entity.
+    fn extract_nauo_pd_refs(&self, nauo: &crate::schema::StepEntity) -> (Option<i64>, Option<i64>) {
+        let mut pd_refs: Vec<i64> = Vec::new();
+        for param in &nauo.params {
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(entity) = self.step.find_entity(ref_id) {
+                    if entity.type_name == "PRODUCT_DEFINITION" {
+                        pd_refs.push(ref_id);
+                    }
+                }
+            }
+        }
+        (pd_refs.get(0).copied(), pd_refs.get(1).copied())
+    }
+
+    /// Find the transform for a NAUO instance by walking CDSR → SRR → ITEM_DEFINED_TRANSFORMATION.
+    fn find_nauo_transform(&self, nauo_id: i64, _related_pd_id: i64) -> Option<[[f64; 4]; 4]> {
+        let cdsrs = self.step.find_entities_by_type("CONTEXT_DEPENDENT_SHAPE_REPRESENTATION");
+        for cdsr in &cdsrs {
+            let linked = self.cdsr_links_to_nauo(cdsr, nauo_id);
+            if !linked { continue; }
+
+            if let Some(srr_id) = self.get_ref(cdsr.params.first()?) {
+                if let Some(srr_entity) = self.step.find_entity(srr_id) {
+                    return self.extract_transform_from_srr(&srr_entity);
+                }
+            }
+        }
+        None
+    }
+
+    /// Compute the composed transform for a leaf product by walking up the assembly tree.
+    fn compute_composed_transform(
+        &self,
+        child_pd_id: i64,
+        pd_to_nauos: &HashMap<i64, Vec<(i64, i64)>>,
+    ) -> Option<[[f64; 4]; 4]> {
+        let mut transforms: Vec<[[f64; 4]; 4]> = Vec::new();
+        let mut current_pd = child_pd_id;
+        let mut visited = std::collections::HashSet::new();
+
+        while let Some(nauo_list) = pd_to_nauos.get(&current_pd) {
+            if visited.contains(&current_pd) {
+                warn!("Circular assembly reference detected at PD {}", current_pd);
+                break;
+            }
+            visited.insert(current_pd);
+
+            if let Some(&(nauo_id, parent_pd)) = nauo_list.first() {
+                if let Some(tf) = self.find_nauo_transform(nauo_id, current_pd) {
+                    transforms.push(tf);
+                }
+                current_pd = parent_pd;
+            } else {
+                break;
+            }
+        }
+
+        if transforms.is_empty() { return None; }
+
+        let mut result = transforms[0];
+        for tf in transforms.iter().skip(1) {
+            result = mat4_mul(tf, &result);
+        }
+        Some(result)
+    }
+
+    /// Check if a CDSR links to a specific NAUO through PRODUCT_DEFINITION_SHAPE.
+    fn cdsr_links_to_nauo(&self, cdsr: &crate::schema::StepEntity, nauo_id: i64) -> bool {
+        for (i, param) in cdsr.params.iter().enumerate() {
+            if i == 0 { continue; }
+            if let Some(pds_id) = self.get_ref(param) {
+                if let Some(pds) = self.step.find_entity(pds_id) {
+                    for p in &pds.params {
+                        if let Some(nid) = self.get_ref(p) {
+                            if nid == nauo_id { return true; }
+                            if let Some(inner) = self.step.find_entity(nid) {
+                                for ip in &inner.params {
+                                    if let Some(ref_id) = self.get_ref(ip) {
+                                        if ref_id == nauo_id { return true; }
+                                    }
+                                    if let StepValue::List(items) = ip {
+                                        for item in items {
+                                            if let Some(ref_id) = self.get_ref(item) {
+                                                if ref_id == nauo_id { return true; }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Extract the 4x4 transform from a SHAPE_REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION.
+    fn extract_transform_from_srr(&self, srr: &crate::schema::StepEntity) -> Option<[[f64; 4]; 4]> {
+        for param in &srr.params {
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(entity) = self.step.find_entity(ref_id) {
+                    if entity.type_name == "ITEM_DEFINED_TRANSFORMATION" {
+                        return self.compute_item_defined_transform(&entity);
+                    }
+                    for inner_param in &entity.params {
+                        if let Some(inner_id) = self.get_ref(inner_param) {
+                            if let Some(inner_entity) = self.step.find_entity(inner_id) {
+                                if inner_entity.type_name == "ITEM_DEFINED_TRANSFORMATION" {
+                                    return self.compute_item_defined_transform(&inner_entity);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Compute a 4x4 transform from ITEM_DEFINED_TRANSFORMATION(origin_axis2, target_axis2).
+    fn compute_item_defined_transform(&self, idt: &crate::schema::StepEntity) -> Option<[[f64; 4]; 4]> {
+        let mut axis2_ids: Vec<i64> = Vec::new();
+        for (i, param) in idt.params.iter().enumerate() {
+            if i < 2 { continue; }
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(entity) = self.step.find_entity(ref_id) {
+                    if entity.type_name == "AXIS2_PLACEMENT_3D" {
+                        axis2_ids.push(ref_id);
+                    }
+                }
+            }
+        }
+
+        if axis2_ids.len() < 2 {
+            warn!("ITEM_DEFINED_TRANSFORMATION has {} axis2 refs (need 2)", axis2_ids.len());
+            return None;
+        }
+
+        let (origin_pt, origin_z, origin_x) = self.resolve_axis2(axis2_ids[0])?;
+        let (target_pt, target_z, target_x) = self.resolve_axis2(axis2_ids[1])?;
+
+        let origin_y = origin_z.cross(&origin_x);
+        let target_y = target_z.cross(&target_x);
+
+        let o = [
+            [origin_x.x, origin_y.x, origin_z.x, origin_pt.x],
+            [origin_x.y, origin_y.y, origin_z.y, origin_pt.y],
+            [origin_x.z, origin_y.z, origin_z.z, origin_pt.z],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+
+        let t = [
+            [target_x.x, target_y.x, target_z.x, target_pt.x],
+            [target_x.y, target_y.y, target_z.y, target_pt.y],
+            [target_x.z, target_y.z, target_z.z, target_pt.z],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+
+        let o_inv = mat4_inverse(&o)?;
+        let result = mat4_mul(&t, &o_inv);
+        Some(result)
+    }
+
+    /// Find the MANIFOLD_SOLID_BREP associated with a PRODUCT_DEFINITION.
+    fn find_pd_brep(&self, pd_id: i64) -> Option<i64> {
+        let _pd = self.step.find_entity(pd_id)?;
+
+        for pds in self.step.find_entities_by_type("PRODUCT_DEFINITION_SHAPE") {
+            let mut refs_our_pd = false;
+            for param in &pds.params {
+                if let Some(ref_id) = self.get_ref(param) {
+                    if ref_id == pd_id { refs_our_pd = true; break; }
+                }
+            }
+            if !refs_our_pd { continue; }
+
+            for sdr in self.step.find_entities_by_type("SHAPE_DEFINITION_REPRESENTATION") {
+                let mut refs_our_pds = false;
+                for param in &sdr.params {
+                    if let Some(ref_id) = self.get_ref(param) {
+                        if ref_id == pds.id { refs_our_pds = true; break; }
+                    }
+                }
+                if !refs_our_pds { continue; }
+
+                for param in &sdr.params {
+                    if let Some(sr_id) = self.get_ref(param) {
+                        if let Some(sr) = self.step.find_entity(sr_id) {
+                            if sr.type_name == "ADVANCED_BREP_SHAPE_REPRESENTATION" {
+                                for sp in &sr.params {
+                                    if let Some(brep_id) = self.get_ref(sp) {
+                                        if let Some(brep) = self.step.find_entity(brep_id) {
+                                            if brep.type_name == "MANIFOLD_SOLID_BREP" {
+                                                return Some(brep_id);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if sr.type_name == "SHAPE_REPRESENTATION" {
+                                for absr in self.step.find_entities_by_type("ADVANCED_BREP_SHAPE_REPRESENTATION") {
+                                    for ap in &absr.params {
+                                        if let Some(brep_id) = self.get_ref(ap) {
+                                            if let Some(brep) = self.step.find_entity(brep_id) {
+                                                if brep.type_name == "MANIFOLD_SOLID_BREP" {
+                                                    if self.absr_belongs_to_pd(&absr, pd_id) {
+                                                        return Some(brep_id);
+                                                    }
                                                 }
                                             }
                                         }
@@ -150,87 +522,193 @@ impl<'a> StepConverter<'a> {
                 }
             }
         }
+        None
+    }
 
-        // Strategy 4: If no BREP structure found, try to extract surfaces directly
-        if faces_converted == 0 {
-            let surface_types = [
-                "PLANE",
-                "CYLINDRICAL_SURFACE",
-                "SPHERICAL_SURFACE",
-                "CONICAL_SURFACE",
-                "TOROIDAL_SURFACE",
-                "SURFACE_OF_REVOLUTION",
-                "SURFACE_OF_LINEAR_EXTRUSION",
-                "B_SPLINE_SURFACE_WITH_KNOTS",
-                "B_SPLINE_SURFACE",
-                "BEZIER_SURFACE",
-            ];
-
-            for type_name in &surface_types {
-                for entity in self.step.find_entities_by_type(type_name) {
-                    match self.extract_surface(entity.id) {
-                        Some(surface) => {
-                            let face_data = FaceData {
-                                surface,
-                                edges: vec![],
-                                forward: true,
-                            };
-                            let face_mesh = self.surface_to_mesh(&face_data, &params, &bbox);
-                            mesh.merge(&face_mesh);
-                            faces_converted += 1;
-                        }
-                        None => {
-                            unsupported_types.push(type_name.to_string());
+    /// Check if an ADVANCED_BREP_SHAPE_REPRESENTATION belongs to a PRODUCT_DEFINITION.
+    fn absr_belongs_to_pd(&self, absr: &crate::schema::StepEntity, pd_id: i64) -> bool {
+        for sdr in self.step.find_entities_by_type("SHAPE_DEFINITION_REPRESENTATION") {
+            let mut refs_absr = false;
+            let mut refs_pds_id: Option<i64> = None;
+            for (i, param) in sdr.params.iter().enumerate() {
+                if let Some(ref_id) = self.get_ref(param) {
+                    if ref_id == absr.id { refs_absr = true; }
+                    if i == 0 { refs_pds_id = Some(ref_id); }
+                }
+            }
+            if !refs_absr { continue; }
+            if let Some(pds_id) = refs_pds_id {
+                if let Some(pds) = self.step.find_entity(pds_id) {
+                    for param in &pds.params {
+                        if let Some(ref_id) = self.get_ref(param) {
+                            if ref_id == pd_id { return true; }
                         }
                     }
                 }
             }
         }
+        false
+    }
 
-        // Strategy 5: Last resort — try to create a mesh from all point/vertex data
-        if faces_converted == 0 {
-            // Collect all CARTESIAN_POINT entities and create a point cloud mesh
-            let points: Vec<Point3d> = self.step.find_entities_by_type("CARTESIAN_POINT")
-                .iter()
-                .filter_map(|e| self.resolve_cartesian_point(e.id))
-                .collect();
+    /// Find the shell ref given a BREP entity ID.
+    fn find_shell_ref_by_brep_id(&self, brep_id: i64) -> Option<i64> {
+        let brep = self.step.find_entity(brep_id)?;
+        self.find_shell_ref(&brep)
+    }
 
-            if points.len() >= 3 {
-                // Create a convex hull approximation — just fan-triangulate the points
-                // This is a rough approximation but better than nothing
-                let mut pt_mesh = TriangleMesh::new();
-                for p in &points {
-                    pt_mesh.add_vertex(*p);
+    // ─── Color extraction ───────────────────────────────────────────────────
+
+    /// Build a map from BREP entity ID → RGBA color from STYLED_ITEM chain.
+    fn extract_color_map(&self) -> HashMap<i64, [f32; 4]> {
+        let mut color_map: HashMap<i64, [f32; 4]> = HashMap::new();
+
+        let styled_items = self.step.find_entities_by_type("STYLED_ITEM");
+        for styled in &styled_items {
+            let mut item_id: Option<i64> = None;
+            let mut style_ids: Vec<i64> = Vec::new();
+
+            for (i, param) in styled.params.iter().enumerate() {
+                if i == 0 { continue; }
+                if let Some(ref_id) = self.get_ref(param) {
+                    if let Some(entity) = self.step.find_entity(ref_id) {
+                        if entity.type_name == "MANIFOLD_SOLID_BREP" {
+                            item_id = Some(ref_id);
+                        } else if entity.type_name == "ADVANCED_BREP_SHAPE_REPRESENTATION" {
+                            for p in &entity.params {
+                                if let Some(brep_id) = self.get_ref(p) {
+                                    if let Some(brep) = self.step.find_entity(brep_id) {
+                                        if brep.type_name == "MANIFOLD_SOLID_BREP" {
+                                            item_id = Some(brep_id);
+                                        }
+                                    }
+                                }
+                            }
+                        } else if entity.type_name == "PRESENTATION_STYLE_ASSIGNMENT" {
+                            style_ids.push(ref_id);
+                        }
+                    }
                 }
-                // Simple fan triangulation from first point
-                for i in 1..points.len().saturating_sub(1) {
-                    pt_mesh.add_triangle(0, i as u32, (i + 1) as u32);
+                if let StepValue::List(items) = param {
+                    for item in items {
+                        if let Some(ref_id) = self.get_ref(item) {
+                            if let Some(entity) = self.step.find_entity(ref_id) {
+                                if entity.type_name == "PRESENTATION_STYLE_ASSIGNMENT" {
+                                    style_ids.push(ref_id);
+                                }
+                            }
+                        }
+                    }
                 }
-                if pt_mesh.triangle_count() > 0 {
-                    mesh.merge(&pt_mesh);
-                    faces_converted += pt_mesh.triangle_count() as usize;
+            }
+
+            if item_id.is_none() {
+                for param in styled.params.iter().rev() {
+                    if let Some(ref_id) = self.get_ref(param) {
+                        if let Some(entity) = self.step.find_entity(ref_id) {
+                            if entity.type_name == "MANIFOLD_SOLID_BREP" {
+                                item_id = Some(ref_id);
+                                break;
+                            }
+                        }
+                    }
                 }
+            }
+
+            let color = self.resolve_color_from_styles(&style_ids);
+            if let (Some(brep_id), Some(col)) = (item_id, color) {
+                color_map.insert(brep_id, col);
             }
         }
 
-        if faces_converted == 0 {
-            // List what entity types exist so the user can report them
-            let type_summary: Vec<String> = {
-                let mut types: HashMap<String, usize> = HashMap::new();
-                for e in &self.step.entities {
-                    *types.entry(e.type_name.clone()).or_insert(0) += 1;
-                }
-                let mut v: Vec<_> = types.into_iter().collect();
-                v.sort_by(|a, b| b.1.cmp(&a.1));
-                v.iter().take(15).map(|(t, c)| format!("{}({})", t, c)).collect()
-            };
-            return Err(format!(
-                "No convertible surface geometry found in STEP file. Top entity types: {}",
-                type_summary.join(", ")
-            ));
+        if !color_map.is_empty() {
+            info!("Extracted {} colors from STYLED_ITEMs", color_map.len());
         }
+        color_map
+    }
 
-        Ok(mesh)
+    /// Resolve color from PRESENTATION_STYLE_ASSIGNMENT chain.
+    fn resolve_color_from_styles(&self, style_ids: &[i64]) -> Option<[f32; 4]> {
+        for style_id in style_ids {
+            if let Some(psa) = self.step.find_entity(*style_id) {
+                if psa.type_name != "PRESENTATION_STYLE_ASSIGNMENT" { continue; }
+                for param in &psa.params {
+                    if let StepValue::List(items) = param {
+                        for item in items {
+                            if let Some(ref_id) = self.get_ref(item) {
+                                if let Some(color) = self.walk_style_chain(ref_id) {
+                                    return Some(color);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(ref_id) = self.get_ref(param) {
+                        if let Some(color) = self.walk_style_chain(ref_id) {
+                            return Some(color);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Walk the style chain from SURFACE_STYLE_USAGE down to COLOUR_RGB.
+    fn walk_style_chain(&self, entity_id: i64) -> Option<[f32; 4]> {
+        let entity = self.step.find_entity(entity_id)?;
+
+        match entity.type_name.as_str() {
+            "SURFACE_STYLE_USAGE" | "SURFACE_SIDE_STYLE" | "SURFACE_STYLE_FILL_AREA" | "FILL_AREA_STYLE" | "FILL_AREA_STYLE_COLOUR" => {
+                for param in &entity.params {
+                    if let Some(ref_id) = self.get_ref(param) {
+                        if let Some(color) = self.walk_style_chain(ref_id) {
+                            return Some(color);
+                        }
+                    }
+                    if let StepValue::List(items) = param {
+                        for item in items {
+                            if let Some(ref_id) = self.get_ref(item) {
+                                if let Some(color) = self.walk_style_chain(ref_id) {
+                                    return Some(color);
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            "COLOUR_RGB" => {
+                let mut rgb = [0.5f32, 0.5, 0.5];
+                let mut idx = 0;
+                for param in &entity.params {
+                    if let Some(f) = self.get_float(param) {
+                        if idx < 3 {
+                            rgb[idx] = f as f32;
+                            idx += 1;
+                        }
+                    }
+                }
+                Some([rgb[0], rgb[1], rgb[2], 1.0])
+            }
+            _ => {
+                for param in &entity.params {
+                    if let Some(ref_id) = self.get_ref(param) {
+                        if let Some(color) = self.walk_style_chain(ref_id) {
+                            return Some(color);
+                        }
+                    }
+                    if let StepValue::List(items) = param {
+                        for item in items {
+                            if let Some(ref_id) = self.get_ref(item) {
+                                if let Some(color) = self.walk_style_chain(ref_id) {
+                                    return Some(color);
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            }
+        }
     }
 
     /// Find the shell reference from a BREP entity.
@@ -1551,4 +2029,57 @@ fn project_points_on_circle(circle: &Circle, p1: &Point3d, p2: &Point3d) -> (f64
     // The STEP file's orientation flag determines direction; we preserve the
     // natural order from p1 to p2 in the positive (counterclockwise) sense.
     (t1, t2)
+}
+
+/// Multiply two 4x4 matrices (row-major storage).
+fn mat4_mul(a: &[[f64; 4]; 4], b: &[[f64; 4]; 4]) -> [[f64; 4]; 4] {
+    let mut r = [[0.0f64; 4]; 4];
+    for i in 0..4 {
+        for j in 0..4 {
+            for k in 0..4 {
+                r[i][j] += a[i][k] * b[k][j];
+            }
+        }
+    }
+    r
+}
+
+/// Compute the inverse of a 4x4 matrix using cofactor expansion.
+fn mat4_inverse(m: &[[f64; 4]; 4]) -> Option<[[f64; 4]; 4]> {
+    let s0 = m[0][0] * m[1][1] - m[1][0] * m[0][1];
+    let s1 = m[0][0] * m[1][2] - m[1][0] * m[0][2];
+    let s2 = m[0][0] * m[1][3] - m[1][0] * m[0][3];
+    let s3 = m[0][1] * m[1][2] - m[1][1] * m[0][2];
+    let s4 = m[0][1] * m[1][3] - m[1][1] * m[0][3];
+    let s5 = m[0][2] * m[1][3] - m[1][2] * m[0][3];
+
+    let c5 = m[2][2] * m[3][3] - m[3][2] * m[2][3];
+    let c4 = m[2][1] * m[3][3] - m[3][1] * m[2][3];
+    let c3 = m[2][1] * m[3][2] - m[3][1] * m[2][2];
+    let c2 = m[2][0] * m[3][3] - m[3][0] * m[2][3];
+    let c1 = m[2][0] * m[3][2] - m[3][0] * m[2][2];
+    let c0 = m[2][0] * m[3][1] - m[3][0] * m[2][1];
+
+    let det = s0 * c5 - s1 * c4 + s2 * c3 + s3 * c2 - s4 * c1 + s5 * c0;
+    if det.abs() < 1e-12 { return None; }
+    let inv_det = 1.0 / det;
+
+    Some([
+        [( m[1][1]*c5 - m[1][2]*c4 + m[1][3]*c3) * inv_det,
+         (-m[0][1]*c5 + m[0][2]*c4 - m[0][3]*c3) * inv_det,
+         ( m[3][1]*s5 - m[3][2]*s4 + m[3][3]*s3) * inv_det,
+         (-m[2][1]*s5 + m[2][2]*s4 - m[2][3]*s3) * inv_det],
+        [(-m[1][0]*c5 + m[1][2]*c2 - m[1][3]*c1) * inv_det,
+         ( m[0][0]*c5 - m[0][2]*c2 + m[0][3]*c1) * inv_det,
+         (-m[3][0]*s5 + m[3][2]*s2 - m[3][3]*s1) * inv_det,
+         ( m[2][0]*s5 - m[2][2]*s2 + m[2][3]*s1) * inv_det],
+        [( m[1][0]*c4 - m[1][1]*c2 + m[1][3]*c0) * inv_det,
+         (-m[0][0]*c4 + m[0][1]*c2 - m[0][3]*c0) * inv_det,
+         ( m[3][0]*s4 - m[3][1]*s2 + m[3][3]*s0) * inv_det,
+         (-m[2][0]*s4 + m[2][1]*s2 - m[2][3]*s0) * inv_det],
+        [(-m[1][0]*c3 + m[1][1]*c1 - m[1][2]*c0) * inv_det,
+         ( m[0][0]*c3 - m[0][1]*c1 + m[0][2]*c0) * inv_det,
+         (-m[3][0]*s3 + m[3][1]*s1 - m[3][2]*s0) * inv_det,
+         ( m[2][0]*s3 - m[2][1]*s1 + m[2][2]*s0) * inv_det],
+    ])
 }

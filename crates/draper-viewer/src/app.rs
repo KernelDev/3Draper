@@ -19,14 +19,22 @@ fn mesh_to_gpu_data(mesh: &TriangleMesh) -> (Vec<MeshVertex>, Vec<u32>) {
     // If we have per-vertex normals, use them directly for smooth shading
     if let Some(ref vertex_normals) = mesh.normals {
         if vertex_normals.len() == mesh.vertices.len() {
+            // Ensure we have per-triangle colors
+            let mut mesh = mesh.clone();
+            mesh.ensure_colors([0.48, 0.52, 0.58, 1.0]);
+            let colors = mesh.triangle_colors.as_ref();
+
             let mut gpu_vertices = Vec::with_capacity(mesh.vertices.len());
             let mut gpu_indices = Vec::with_capacity(mesh.triangles.len() * 3);
 
             for (i, v) in mesh.vertices.iter().enumerate() {
                 let n = vertex_normals.get(i).map(|nn| [nn[0] as f32, nn[1] as f32, nn[2] as f32]).unwrap_or([0.0, 0.0, 1.0]);
+                // For vertex normals path, we don't have a good per-vertex color mapping,
+                // so use a default color
                 gpu_vertices.push(MeshVertex {
                     position: [v.x as f32, v.y as f32, v.z as f32],
                     normal: n,
+                    color: [0.48, 0.52, 0.58],
                 });
             }
             for tri in &mesh.triangles {
@@ -43,8 +51,10 @@ fn mesh_to_gpu_data(mesh: &TriangleMesh) -> (Vec<MeshVertex>, Vec<u32>) {
     if mesh.face_normals.is_none() {
         mesh.compute_face_normals();
     }
+    mesh.ensure_colors([0.48, 0.52, 0.58, 1.0]);
 
     let normals = mesh.face_normals.as_ref();
+    let colors = mesh.triangle_colors.as_ref();
 
     let mut gpu_vertices = Vec::with_capacity(mesh.triangles.len() * 3);
     let mut gpu_indices = Vec::with_capacity(mesh.triangles.len() * 3);
@@ -55,12 +65,18 @@ fn mesh_to_gpu_data(mesh: &TriangleMesh) -> (Vec<MeshVertex>, Vec<u32>) {
             .map(|n| [n[0] as f32, n[1] as f32, n[2] as f32])
             .unwrap_or([0.0, 0.0, 1.0]);
 
+        let color = colors
+            .and_then(|c| c.get(i))
+            .map(|c| [c[0], c[1], c[2]])
+            .unwrap_or([0.48, 0.52, 0.58]);
+
         let base_idx = gpu_vertices.len() as u32;
         for &idx in tri {
             let v = &mesh.vertices[idx as usize];
             gpu_vertices.push(MeshVertex {
                 position: [v.x as f32, v.y as f32, v.z as f32],
                 normal,
+                color,
             });
         }
         gpu_indices.push(base_idx);
@@ -339,6 +355,8 @@ impl ViewerApp {
         let mut face_count = 0;
         let mut shell_count = 0;
         let mut brep_count = 0;
+        let mut nauo_count = 0;
+        let mut styled_item_count = 0;
         let mut surface_types: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
         for entity in &step_file.entities {
@@ -347,6 +365,8 @@ impl ViewerApp {
                 "ADVANCED_FACE" | "FACE_OUTER_BOUND" | "FACE_BOUND" => face_count += 1,
                 "CLOSED_SHELL" | "OPEN_SHELL" => shell_count += 1,
                 "MANIFOLD_SOLID_BREP" | "FACETED_BREP" => brep_count += 1,
+                "NEXT_ASSEMBLY_USAGE_OCCURRENCE" => nauo_count += 1,
+                "STYLED_ITEM" => styled_item_count += 1,
                 _ => {
                     if entity.type_name.contains("SURFACE") || entity.type_name.contains("PLANE") {
                         *surface_types.entry(entity.type_name.clone()).or_insert(0) += 1;
@@ -360,8 +380,8 @@ impl ViewerApp {
             .collect();
 
         self.log(&format!(
-            "STEP parsed: {} — {} entities, {} points, {} faces, {} shells, {} breps",
-            name, step_file.entities.len(), point_count, face_count, shell_count, brep_count
+            "STEP parsed: {} — {} entities, {} points, {} faces, {} shells, {} breps, {} NAUOs, {} styled_items",
+            name, step_file.entities.len(), point_count, face_count, shell_count, brep_count, nauo_count, styled_item_count
         ));
         if !surface_summary.is_empty() {
             self.log(&format!("STEP surfaces: {}", surface_summary.join(", ")));
