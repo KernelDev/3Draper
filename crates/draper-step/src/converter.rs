@@ -2,8 +2,8 @@
 //!
 //! Converts parsed STEP entities into a triangle mesh by:
 //! 1. Resolving entity references to build geometry
-//! 2. Creating B-Rep faces from STEP surface entities
-//! 3. Triangulating using the existing mesh pipeline
+//! 2. Creating B-Rep faces from STEP surface entities with boundary edges
+//! 3. Triangulating using the existing mesh pipeline (ear-clipping for planar faces)
 //!
 //! Supported surface types:
 //! - PLANE
@@ -15,8 +15,10 @@
 //! - SURFACE_OF_LINEAR_EXTRUSION
 //! - B_SPLINE_SURFACE_WITH_KNOTS / B_SPLINE_SURFACE / BEZIER_SURFACE
 //!
-//! Full B-Rep topology reconstruction with trimming is not yet implemented —
-//! surfaces are rendered with extents estimated from the model bounding box.
+//! Boundary extraction:
+//! - ADVANCED_FACE → FACE_BOUND → EDGE_LOOP → ORIENTED_EDGE → EDGE_CURVE
+//! - EDGE_CURVE → SURFACE_CURVE → 3D curve + vertex endpoints
+//! - Boundary edges enable proper ear-clipping triangulation of planar faces
 
 use crate::schema::{StepFile, StepValue};
 use draper_geometry::{
@@ -24,10 +26,16 @@ use draper_geometry::{
     ConeSurface, TorusSurface, RevolutionSurface, ExtrusionSurface,
     NurbsSurface, Curve3d, Line, Circle, NurbsCurve,
 };
-use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_solid, triangulate_face};
-use draper_topology::{Solid, Shell, Face, Wire};
+use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face};
+use draper_topology::{Face, Wire, CoEdge, Edge as TopoEdge};
 use std::collections::HashMap;
-use std::f64::consts::PI;
+
+/// Extracted face data with surface and boundary edges.
+struct FaceData {
+    surface: Surface,
+    edges: Vec<TopoEdge>,
+    forward: bool,
+}
 
 /// Convert a parsed STEP file to a triangle mesh.
 pub fn step_to_mesh(step_file: &StepFile) -> Result<TriangleMesh, String> {
@@ -37,7 +45,7 @@ pub fn step_to_mesh(step_file: &StepFile) -> Result<TriangleMesh, String> {
 
 struct StepConverter<'a> {
     step: &'a StepFile,
-    entity_map: HashMap<i64, usize>,
+    _entity_map: HashMap<i64, usize>,
 }
 
 impl<'a> StepConverter<'a> {
@@ -46,7 +54,7 @@ impl<'a> StepConverter<'a> {
             .enumerate()
             .map(|(i, e)| (e.id, i))
             .collect();
-        Self { step, entity_map }
+        Self { step, _entity_map: entity_map }
     }
 
     fn convert(&self) -> Result<TriangleMesh, String> {
@@ -68,9 +76,9 @@ impl<'a> StepConverter<'a> {
                 // The shell reference is the 2nd parameter (index 1)
                 let shell_id = self.find_shell_ref(brep);
                 if let Some(shell_id) = shell_id {
-                    if let Some(surfaces) = self.extract_shell_faces(shell_id) {
-                        for surface in surfaces {
-                            let face_mesh = self.surface_to_mesh(&surface, &params, &bbox);
+                    if let Some(face_data_list) = self.extract_shell_faces(shell_id) {
+                        for face_data in &face_data_list {
+                            let face_mesh = self.surface_to_mesh(face_data, &params, &bbox);
                             mesh.merge(&face_mesh);
                             faces_converted += 1;
                         }
@@ -85,9 +93,9 @@ impl<'a> StepConverter<'a> {
             for fb in &faceted {
                 let shell_id = self.find_shell_ref(fb);
                 if let Some(shell_id) = shell_id {
-                    if let Some(surfaces) = self.extract_shell_faces(shell_id) {
-                        for surface in surfaces {
-                            let face_mesh = self.surface_to_mesh(&surface, &params, &bbox);
+                    if let Some(face_data_list) = self.extract_shell_faces(shell_id) {
+                        for face_data in &face_data_list {
+                            let face_mesh = self.surface_to_mesh(face_data, &params, &bbox);
                             mesh.merge(&face_mesh);
                             faces_converted += 1;
                         }
@@ -107,9 +115,9 @@ impl<'a> StepConverter<'a> {
                             if entity.type_name == "MANIFOLD_SOLID_BREP" {
                                 let shell_id = self.find_shell_ref(entity);
                                 if let Some(shell_id) = shell_id {
-                                    if let Some(surfaces) = self.extract_shell_faces(shell_id) {
-                                        for surface in surfaces {
-                                            let face_mesh = self.surface_to_mesh(&surface, &params, &bbox);
+                                    if let Some(face_data_list) = self.extract_shell_faces(shell_id) {
+                                        for face_data in &face_data_list {
+                                            let face_mesh = self.surface_to_mesh(face_data, &params, &bbox);
                                             mesh.merge(&face_mesh);
                                             faces_converted += 1;
                                         }
@@ -126,9 +134,9 @@ impl<'a> StepConverter<'a> {
                                     if entity.type_name == "MANIFOLD_SOLID_BREP" {
                                         let shell_id = self.find_shell_ref(entity);
                                         if let Some(shell_id) = shell_id {
-                                            if let Some(surfaces) = self.extract_shell_faces(shell_id) {
-                                                for surface in surfaces {
-                                                    let face_mesh = self.surface_to_mesh(&surface, &params, &bbox);
+                                            if let Some(face_data_list) = self.extract_shell_faces(shell_id) {
+                                                for face_data in &face_data_list {
+                                                    let face_mesh = self.surface_to_mesh(face_data, &params, &bbox);
                                                     mesh.merge(&face_mesh);
                                                     faces_converted += 1;
                                                 }
@@ -162,7 +170,12 @@ impl<'a> StepConverter<'a> {
                 for entity in self.step.find_entities_by_type(type_name) {
                     match self.extract_surface(entity.id) {
                         Some(surface) => {
-                            let face_mesh = self.surface_to_mesh(&surface, &params, &bbox);
+                            let face_data = FaceData {
+                                surface,
+                                edges: vec![],
+                                forward: true,
+                            };
+                            let face_mesh = self.surface_to_mesh(&face_data, &params, &bbox);
                             mesh.merge(&face_mesh);
                             faces_converted += 1;
                         }
@@ -272,10 +285,10 @@ impl<'a> StepConverter<'a> {
         Some((min, max))
     }
 
-    /// Extract surfaces from a CLOSED_SHELL or OPEN_SHELL entity.
-    fn extract_shell_faces(&self, shell_id: i64) -> Option<Vec<Surface>> {
+    /// Extract FaceData (surface + boundary edges) from a CLOSED_SHELL or OPEN_SHELL entity.
+    fn extract_shell_faces(&self, shell_id: i64) -> Option<Vec<FaceData>> {
         let shell = self.step.find_entity(shell_id)?;
-        let mut surfaces = Vec::new();
+        let mut face_data_list = Vec::new();
 
         // CLOSED_SHELL('', (#face1, #face2, ...))
         for param in &shell.params {
@@ -283,72 +296,385 @@ impl<'a> StepConverter<'a> {
                 StepValue::List(items) => {
                     for item in items {
                         if let Some(face_id) = self.get_ref(item) {
-                            if let Some(surface) = self.extract_face_surface(face_id) {
-                                surfaces.push(surface);
+                            if let Some(face_data) = self.extract_face_data(face_id) {
+                                face_data_list.push(face_data);
                             }
                         }
                     }
                 }
                 StepValue::Ref(face_id) => {
-                    if let Some(surface) = self.extract_face_surface(*face_id) {
-                        surfaces.push(surface);
+                    if let Some(face_data) = self.extract_face_data(*face_id) {
+                        face_data_list.push(face_data);
                     }
                 }
                 _ => {}
             }
         }
 
-        if surfaces.is_empty() { None } else { Some(surfaces) }
+        if face_data_list.is_empty() { None } else { Some(face_data_list) }
+    }
+
+    /// Extract both surface geometry and boundary edges from an ADVANCED_FACE or FACE_SURFACE entity.
+    fn extract_face_data(&self, face_id: i64) -> Option<FaceData> {
+        let face_entity = self.step.find_entity(face_id)?;
+
+        match face_entity.type_name.as_str() {
+            "ADVANCED_FACE" | "FACE_SURFACE" => {
+                // Format: #N = ADVANCED_FACE('', (bounds), #surface_ref, .T.);
+                // params: [name, bounds_list, surface_ref, orientation]
+
+                // Extract surface
+                let surface = self.extract_face_surface_from_entity(face_entity)?;
+                
+                // Extract boundary edges
+                let edges = self.extract_face_bounds(face_entity);
+
+                // Extract face orientation (last param, typically .T. or .F.)
+                let forward = self.extract_face_orientation(face_entity);
+
+                Some(FaceData {
+                    surface,
+                    edges,
+                    forward,
+                })
+            }
+            _ => {
+                // Try to extract directly as a surface (no boundary info)
+                if let Some(surface) = self.extract_surface(face_id) {
+                    Some(FaceData {
+                        surface,
+                        edges: vec![],
+                        forward: true,
+                    })
+                } else {
+                    None
+                }
+            }
+        }
     }
 
     /// Extract the surface geometry from an ADVANCED_FACE or FACE_SURFACE entity.
-    fn extract_face_surface(&self, face_id: i64) -> Option<Surface> {
-        let face = self.step.find_entity(face_id)?;
+    /// This is the surface-only extraction logic (previously extract_face_surface).
+    fn extract_face_surface_from_entity(&self, face: &crate::schema::StepEntity) -> Option<Surface> {
+        // Format: #N = ADVANCED_FACE('', (bounds), #surface_ref, .T.);
+        // The surface reference is typically the 3rd parameter (index 2).
+        // But bounds can be complex (lists of lists), so we need to be smart.
 
-        match face.type_name.as_str() {
-            "ADVANCED_FACE" | "FACE_SURFACE" => {
-                // Format: #N = ADVANCED_FACE('', (bounds), #surface_ref, .T.);
-                // The surface reference is typically the 3rd parameter (index 2).
-                // But bounds can be complex (lists of lists), so we need to be smart.
+        // Try parameter index 2 first (the typical position for surface ref)
+        if let Some(param) = face.params.get(2) {
+            if let Some(surface_id) = self.get_ref(param) {
+                if let Some(surface) = self.extract_surface(surface_id) {
+                    return Some(surface);
+                }
+            }
+        }
 
-                // Try parameter index 2 first (the typical position for surface ref)
-                if let Some(param) = face.params.get(2) {
-                    if let Some(surface_id) = self.get_ref(param) {
+        // If index 2 didn't work, scan all params for the surface ref
+        // Skip the first param (usually a string name)
+        for (i, param) in face.params.iter().enumerate() {
+            if i == 0 { continue; } // Skip name
+            if let Some(surface_id) = self.get_ref(param) {
+                // Check if this ref points to a surface entity (not a bound)
+                if let Some(entity) = self.step.find_entity(surface_id) {
+                    let is_surface = matches!(
+                        entity.type_name.as_str(),
+                        "PLANE" | "CYLINDRICAL_SURFACE" | "SPHERICAL_SURFACE" |
+                        "CONICAL_SURFACE" | "TOROIDAL_SURFACE" |
+                        "SURFACE_OF_REVOLUTION" | "SURFACE_OF_LINEAR_EXTRUSION" |
+                        "B_SPLINE_SURFACE_WITH_KNOTS" | "B_SPLINE_SURFACE" |
+                        "BEZIER_SURFACE" | "RECTANGULAR_TRIMMED_SURFACE" |
+                        "OFFSET_SURFACE" | "SWEPT_SURFACE"
+                    );
+                    if is_surface {
                         if let Some(surface) = self.extract_surface(surface_id) {
                             return Some(surface);
                         }
                     }
                 }
+            }
+        }
 
-                // If index 2 didn't work, scan all params for the surface ref
-                // Skip the first param (usually a string name)
-                for (i, param) in face.params.iter().enumerate() {
-                    if i == 0 { continue; } // Skip name
-                    if let Some(surface_id) = self.get_ref(param) {
-                        // Check if this ref points to a surface entity (not a bound)
-                        if let Some(entity) = self.step.find_entity(surface_id) {
-                            let is_surface = matches!(
-                                entity.type_name.as_str(),
-                                "PLANE" | "CYLINDRICAL_SURFACE" | "SPHERICAL_SURFACE" |
-                                "CONICAL_SURFACE" | "TOROIDAL_SURFACE" |
-                                "SURFACE_OF_REVOLUTION" | "SURFACE_OF_LINEAR_EXTRUSION" |
-                                "B_SPLINE_SURFACE_WITH_KNOTS" | "B_SPLINE_SURFACE" |
-                                "BEZIER_SURFACE" | "RECTANGULAR_TRIMMED_SURFACE" |
-                                "OFFSET_SURFACE" | "SWEPT_SURFACE"
-                            );
-                            if is_surface {
-                                if let Some(surface) = self.extract_surface(surface_id) {
-                                    return Some(surface);
+        None
+    }
+
+    /// Extract the face orientation from an ADVANCED_FACE entity.
+    /// The orientation is the last parameter, typically .T. or .F.
+    fn extract_face_orientation(&self, face: &crate::schema::StepEntity) -> bool {
+        if let Some(last_param) = face.params.last() {
+            match last_param {
+                StepValue::Enum(e) => return e == ".T.",
+                StepValue::Float(f) => return *f != 0.0,
+                StepValue::Integer(i) => return *i != 0,
+                _ => {}
+            }
+        }
+        // Default to true if not found
+        true
+    }
+
+    /// Extract boundary edges from an ADVANCED_FACE entity.
+    /// Traverses: ADVANCED_FACE → bounds_list → FACE_BOUND/FACE_OUTER_BOUND →
+    ///            EDGE_LOOP → ORIENTED_EDGE → EDGE_CURVE → curve + vertices
+    fn extract_face_bounds(&self, face: &crate::schema::StepEntity) -> Vec<TopoEdge> {
+        let mut all_edges = Vec::new();
+
+        // ADVANCED_FACE params: [name, (bounds_list), surface_ref, orientation]
+        // The bounds are in params[1], which is a List of references to FACE_BOUND/FACE_OUTER_BOUND
+        for param in &face.params {
+            // Look for the bounds list — it's a StepValue::List containing references
+            if let StepValue::List(items) = param {
+                // Check if this list contains references to FACE_BOUND entities
+                let mut found_bound = false;
+                for item in items {
+                    if let Some(bound_id) = self.get_ref(item) {
+                        if let Some(bound_entity) = self.step.find_entity(bound_id) {
+                            if bound_entity.type_name == "FACE_BOUND" 
+                                || bound_entity.type_name == "FACE_OUTER_BOUND" 
+                            {
+                                found_bound = true;
+                                if let Some(loop_edges) = self.resolve_face_bound(bound_entity) {
+                                    all_edges.extend(loop_edges);
                                 }
                             }
                         }
                     }
                 }
+                // If we found bounds in this list, don't process it again as a different list type
+                if found_bound {
+                    return all_edges;
+                }
             }
-            _ => {
-                // Try to extract directly as a surface
-                if let Some(surface) = self.extract_surface(face_id) {
-                    return Some(surface);
+        }
+
+        all_edges
+    }
+
+    /// Resolve a FACE_BOUND or FACE_OUTER_BOUND entity to a list of Edge objects.
+    /// FACE_BOUND params: [name, loop_ref, orientation]
+    fn resolve_face_bound(&self, bound_entity: &crate::schema::StepEntity) -> Option<Vec<TopoEdge>> {
+        // FACE_BOUND('', #loop_ref, .T.)
+        // The loop reference is typically the 2nd parameter (index 1)
+        for (i, param) in bound_entity.params.iter().enumerate() {
+            if i == 0 { continue; } // Skip name
+            if let Some(loop_id) = self.get_ref(param) {
+                if let Some(loop_entity) = self.step.find_entity(loop_id) {
+                    if loop_entity.type_name == "EDGE_LOOP" {
+                        return Some(self.resolve_edge_loop(loop_id));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Resolve an EDGE_LOOP entity to a list of Edge objects.
+    /// EDGE_LOOP params: [name, (oriented_edge_refs)]
+    fn resolve_edge_loop(&self, loop_id: i64) -> Vec<TopoEdge> {
+        let loop_entity = match self.step.find_entity(loop_id) {
+            Some(e) => e,
+            None => return vec![],
+        };
+
+        let mut edges = Vec::new();
+
+        // EDGE_LOOP('', (#oe1, #oe2, ...))
+        for param in &loop_entity.params {
+            if let StepValue::List(items) = param {
+                for item in items {
+                    if let Some(oe_id) = self.get_ref(item) {
+                        if let Some(edge) = self.resolve_oriented_edge(oe_id) {
+                            edges.push(edge);
+                        }
+                    }
+                }
+            }
+        }
+
+        edges
+    }
+
+    /// Resolve an ORIENTED_EDGE entity to an Edge object.
+    /// ORIENTED_EDGE params: [name, *, *, edge_curve_ref, orientation]
+    fn resolve_oriented_edge(&self, oe_id: i64) -> Option<TopoEdge> {
+        let oe_entity = self.step.find_entity(oe_id)?;
+
+        // ORIENTED_EDGE('', *, *, #edge_curve_ref, .T./.F.)
+        // The edge_curve_ref is typically the 4th parameter (index 3)
+        // The orientation is typically the 5th parameter (index 4)
+        let mut edge_curve_id: Option<i64> = None;
+        let mut orientation = true;
+
+        // Find the edge curve reference and orientation
+        for (_i, param) in oe_entity.params.iter().enumerate() {
+            if let Some(ref_id) = self.get_ref(param) {
+                // Check if this reference points to an EDGE_CURVE
+                if let Some(entity) = self.step.find_entity(ref_id) {
+                    if entity.type_name == "EDGE_CURVE" {
+                        edge_curve_id = Some(ref_id);
+                    }
+                }
+            }
+            // Check for orientation enum
+            if let StepValue::Enum(e) = param {
+                orientation = e == ".T.";
+            }
+        }
+
+        let edge_curve_id = edge_curve_id?;
+        let mut edge = self.resolve_edge_curve(edge_curve_id)?;
+
+        // If the oriented edge is reversed relative to the edge curve, reverse it
+        if !orientation {
+            edge = edge.reversed();
+        }
+
+        Some(edge)
+    }
+
+    /// Resolve an EDGE_CURVE entity to an Edge object.
+    /// EDGE_CURVE params: [name, vertex1_ref, vertex2_ref, curve_ref, orientation]
+    fn resolve_edge_curve(&self, edge_curve_id: i64) -> Option<TopoEdge> {
+        let ec_entity = self.step.find_entity(edge_curve_id)?;
+
+        // EDGE_CURVE('', #v1, #v2, #curve, .T.)
+        // Extract vertex endpoints
+        let mut vertex_ids: Vec<i64> = Vec::new();
+        let mut curve_ref_id: Option<i64> = None;
+
+        for (i, param) in ec_entity.params.iter().enumerate() {
+            if i == 0 { continue; } // Skip name
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(entity) = self.step.find_entity(ref_id) {
+                    if entity.type_name == "VERTEX_POINT" {
+                        vertex_ids.push(ref_id);
+                    } else if entity.type_name == "EDGE_CURVE" {
+                        // Nested edge curve (shouldn't happen, but handle gracefully)
+                    } else if self.is_curve_type(&entity.type_name) 
+                        || entity.type_name == "SURFACE_CURVE" 
+                    {
+                        curve_ref_id = Some(ref_id);
+                    }
+                }
+            }
+        }
+
+        // Resolve vertex points
+        let p1 = vertex_ids.get(0).and_then(|id| self.resolve_vertex_point(*id));
+        let p2 = vertex_ids.get(1).and_then(|id| self.resolve_vertex_point(*id));
+
+        // If we have both vertex points but no curve ref, create a line edge
+        if curve_ref_id.is_none() {
+            if let (Some(p1), Some(p2)) = (&p1, &p2) {
+                return Some(TopoEdge::new_line(*p1, *p2));
+            }
+            return None;
+        }
+
+        let curve_ref_id = curve_ref_id.unwrap();
+
+        // Resolve the 3D curve (possibly through SURFACE_CURVE)
+        let resolved_curve_id = self.resolve_3d_curve_ref(curve_ref_id);
+        let curve = match resolved_curve_id {
+            Some(id) => self.resolve_curve(id),
+            None => self.resolve_curve(curve_ref_id),
+        };
+
+        match (curve, &p1, &p2) {
+            (Some(curve), Some(p1), Some(p2)) => {
+                // We have both curve and vertex points — create edge with vertex info
+                // Use vertex points to determine param_range for the curve
+                let edge = if let Curve3d::Line(ref line) = curve {
+                    // For lines, compute param range from vertex projections
+                    let t1 = project_point_on_line(line, p1);
+                    let t2 = project_point_on_line(line, p2);
+                    let mut edge = TopoEdge::new(curve, (t1, t2));
+                    edge.vertex_start = Some(draper_topology::TopoId::new());
+                    edge.vertex_end = Some(draper_topology::TopoId::new());
+                    edge
+                } else {
+                    // For other curves, use the default param range
+                    let param_range = curve.param_range();
+                    let mut edge = TopoEdge::new(curve, param_range);
+                    edge.vertex_start = Some(draper_topology::TopoId::new());
+                    edge.vertex_end = Some(draper_topology::TopoId::new());
+                    edge
+                };
+                Some(edge)
+            }
+            (Some(curve), _, _) => {
+                // Curve but missing vertex points — use default param range
+                let param_range = curve.param_range();
+                Some(TopoEdge::new(curve, param_range))
+            }
+            (None, Some(p1), Some(p2)) => {
+                // No curve but have vertex points — create a line edge
+                Some(TopoEdge::new_line(*p1, *p2))
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve a SURFACE_CURVE entity to get the 3D curve reference.
+    /// SURFACE_CURVE params: [name, curve3d_ref, (pcurve_refs), .PCURVE_S1.]
+    fn resolve_3d_curve_ref(&self, surface_curve_id: i64) -> Option<i64> {
+        let sc_entity = self.step.find_entity(surface_curve_id)?;
+        
+        if sc_entity.type_name != "SURFACE_CURVE" {
+            return Some(surface_curve_id); // Not a surface curve, return as-is
+        }
+
+        // SURFACE_CURVE('', #curve3d_ref, (#pcurve1, #pcurve2), .PCURVE_S1.)
+        // The 3D curve is the 2nd parameter (index 1)
+        if let Some(param) = sc_entity.params.get(1) {
+            if let Some(curve3d_id) = self.get_ref(param) {
+                if let Some(curve_entity) = self.step.find_entity(curve3d_id) {
+                    if self.is_curve_type(&curve_entity.type_name) {
+                        return Some(curve3d_id);
+                    }
+                }
+            }
+        }
+
+        // Fallback: search all params for a curve reference
+        for param in &sc_entity.params {
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(entity) = self.step.find_entity(ref_id) {
+                    if self.is_curve_type(&entity.type_name) {
+                        return Some(ref_id);
+                    }
+                }
+            }
+            // Also check inside lists (pcurve refs might be in a list)
+            if let StepValue::List(items) = param {
+                for item in items {
+                    if let Some(ref_id) = self.get_ref(item) {
+                        if let Some(entity) = self.step.find_entity(ref_id) {
+                            if self.is_curve_type(&entity.type_name) {
+                                return Some(ref_id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Resolve a VERTEX_POINT entity to a 3D point.
+    /// VERTEX_POINT params: [name, point_ref]
+    fn resolve_vertex_point(&self, vertex_id: i64) -> Option<Point3d> {
+        let vertex_entity = self.step.find_entity(vertex_id)?;
+        
+        if vertex_entity.type_name != "VERTEX_POINT" {
+            return None;
+        }
+
+        // VERTEX_POINT('', #point_ref)
+        for param in &vertex_entity.params {
+            if let Some(point_id) = self.get_ref(param) {
+                if let Some(point) = self.resolve_cartesian_point(point_id) {
+                    return Some(point);
                 }
             }
         }
@@ -554,7 +880,7 @@ impl<'a> StepConverter<'a> {
             // The two longest lists are likely the knot vectors
             knot_lists.sort_by(|a, b| b.len().cmp(&a.len()));
             let expected_u_knots = n_u + u_degree + 1;
-            let expected_v_knots = n_v + v_degree + 1;
+            let _expected_v_knots = n_v + v_degree + 1;
             // Try to match by expected length
             if let Some(k) = knot_lists.iter().find(|l| l.len() == expected_u_knots) {
                 k.clone()
@@ -638,6 +964,10 @@ impl<'a> StepConverter<'a> {
                     if self.is_curve_type(&curve_entity.type_name) {
                         return Some(ref_id);
                     }
+                    // Check if it's a SURFACE_CURVE wrapping a curve
+                    if curve_entity.type_name == "SURFACE_CURVE" {
+                        return self.resolve_3d_curve_ref(ref_id);
+                    }
                     // Indirect reference — try to find a curve within this entity
                     return self.find_nested_curve(curve_entity);
                 }
@@ -654,6 +984,10 @@ impl<'a> StepConverter<'a> {
                 if let Some(nested) = self.step.find_entity(ref_id) {
                     if self.is_curve_type(&nested.type_name) {
                         return Some(ref_id);
+                    }
+                    // Check SURFACE_CURVE
+                    if nested.type_name == "SURFACE_CURVE" {
+                        return self.resolve_3d_curve_ref(ref_id);
                     }
                     // Go one level deeper
                     let deeper = self.find_nested_curve(nested);
@@ -685,7 +1019,8 @@ impl<'a> StepConverter<'a> {
             "LINE" | "CIRCLE" | "ELLIPSE" | "B_SPLINE_CURVE_WITH_KNOTS" |
             "B_SPLINE_CURVE" | "BEZIER_CURVE" | "POLYLINE" | "TRIMMED_CURVE" |
             "COMPOSITE_CURVE" | "COMPOSITE_CURVE_SEGMENT" | "OFFSET_CURVE_3D" |
-            "HYPERBOLA" | "PARABOLA" | "RATIONAL_B_SPLINE_CURVE"
+            "HYPERBOLA" | "PARABOLA" | "RATIONAL_B_SPLINE_CURVE" |
+            "SURFACE_CURVE"
         )
     }
 
@@ -710,6 +1045,14 @@ impl<'a> StepConverter<'a> {
             "POLYLINE" => self.resolve_polyline_curve(entity),
             "TRIMMED_CURVE" => self.resolve_trimmed_curve(entity),
             "COMPOSITE_CURVE" => self.resolve_composite_curve(entity),
+            "SURFACE_CURVE" => {
+                // Unwrap SURFACE_CURVE to get the 3D curve
+                if let Some(curve3d_id) = self.resolve_3d_curve_ref(curve_id) {
+                    self.resolve_curve(curve3d_id)
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -742,11 +1085,10 @@ impl<'a> StepConverter<'a> {
     fn resolve_ellipse_curve(&self, entity: &crate::schema::StepEntity) -> Option<Curve3d> {
         // ELLIPSE(#axis2_placement, semi_major, semi_minor)
         let axis2_id = self.get_ref(entity.params.first()?)?;
-        let (center, normal, x_axis) = self.resolve_axis2(axis2_id)?;
+        let (center, _normal, _x_axis) = self.resolve_axis2(axis2_id)?;
         let semi_major = self.get_float(entity.params.get(1)?)?;
         let semi_minor = self.get_float(entity.params.get(2)?)?;
         Some(Curve3d::Ellipse(draper_geometry::Ellipse::new_xy(center, semi_major, semi_minor)))
-        // Note: we use new_xy for simplicity; a proper implementation would use the axis2
     }
 
     /// Resolve a B_SPLINE_CURVE_WITH_KNOTS entity.
@@ -848,34 +1190,47 @@ impl<'a> StepConverter<'a> {
         None
     }
 
-    /// Convert a surface to a mesh by creating a Face and triangulating it.
+    /// Convert a FaceData (surface + boundary edges) to a mesh by creating a Face
+    /// with proper wire/edges and triangulating.
     fn surface_to_mesh(
         &self,
-        surface: &Surface,
+        face_data: &FaceData,
         params: &TriangulationParams,
         bbox: &Option<(Point3d, Point3d)>,
     ) -> TriangleMesh {
-        // Create a Face with an empty wire
-        let wire = Wire::new(vec![]);
-        let mut face = Face::new(surface.clone(), wire);
-        face.forward = true;
-        face.edges = vec![];
-
-        // For flat planes without bounds, we need to create a finite surface
-        // Use the model bounding box to determine extents
-        if let Surface::Plane(ref plane) = surface {
-            return self.triangulate_bounded_plane(plane, params, bbox);
+        if face_data.edges.is_empty() {
+            // No boundary edges — fall back to bounding-box-based triangulation for planes,
+            // or standard triangulation for curved surfaces
+            if let Surface::Plane(ref plane) = face_data.surface {
+                return self.triangulate_unbounded_plane(plane, params, bbox);
+            }
+            
+            let wire = Wire::new(vec![]);
+            let mut face = Face::new(face_data.surface.clone(), wire);
+            face.forward = face_data.forward;
+            face.edges = vec![];
+            return triangulate_face(&face, params);
         }
 
-        // For other surfaces, use the standard triangulation
+        // Create coedges from edges
+        let coedges: Vec<CoEdge> = face_data.edges.iter().map(|e| {
+            CoEdge::new(e.id, true)
+        }).collect();
+        let wire = Wire::new(coedges);
+
+        let mut face = Face::new(face_data.surface.clone(), wire);
+        face.forward = face_data.forward;
+        face.edges = face_data.edges.clone();
+
         triangulate_face(&face, params)
     }
 
-    /// Triangulate a PLANE surface with a finite extent derived from the bounding box.
-    fn triangulate_bounded_plane(
+    /// Triangulate a PLANE surface with no boundary edges, using the bounding box
+    /// to determine a finite extent.
+    fn triangulate_unbounded_plane(
         &self,
         plane: &Plane,
-        params: &TriangulationParams,
+        _params: &TriangulationParams,
         bbox: &Option<(Point3d, Point3d)>,
     ) -> TriangleMesh {
         let mut mesh = TriangleMesh::new();
@@ -944,9 +1299,7 @@ impl<'a> StepConverter<'a> {
 
         let x_dir = if let Some(dir_param) = entity.params.get(2) {
             if let Some(dir_id) = self.get_ref(dir_param) {
-                self.resolve_direction(dir_id).unwrap_or_else(|| {
-                    Self::default_x_dir(&z_dir)
-                })
+                self.resolve_direction(dir_id).unwrap_or_else(|| Self::default_x_dir(&z_dir))
             } else {
                 Self::default_x_dir(&z_dir)
             }
@@ -1010,4 +1363,14 @@ impl<'a> StepConverter<'a> {
             _ => None,
         }
     }
+}
+
+/// Project a 3D point onto a line and return the parameter t.
+/// For Line: P(t) = origin + t * direction
+/// t = dot(point - origin, direction)
+fn project_point_on_line(line: &Line, point: &Point3d) -> f64 {
+    let dx = point.x - line.origin.x;
+    let dy = point.y - line.origin.y;
+    let dz = point.z - line.origin.z;
+    dx * line.direction.x + dy * line.direction.y + dz * line.direction.z
 }

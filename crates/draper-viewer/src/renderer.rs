@@ -122,7 +122,7 @@ impl CallbackTrait for SceneCallback {
                 view: &resources.offscreen_color,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.88, g: 0.90, b: 0.94, a: 1.0 }),
+                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.93, g: 0.95, b: 0.97, a: 1.0 }),
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -232,22 +232,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let ndotl_primary = max(dot(effective_normal, light_dir), 0.0);
     let half_dir_primary = normalize(light_dir + view_dir);
     let ndoth_primary = max(dot(effective_normal, half_dir_primary), 0.0);
-    let specular_primary = pow(ndoth_primary, 80.0) * 0.5;
+    let specular_primary = pow(ndoth_primary, 64.0) * 0.4;
 
-    // Secondary fill light from below-left (softer, to reduce harsh shadows)
-    let fill_dir = normalize(vec3<f32>(-0.4, -0.6, 0.3));
+    // Secondary fill light from below-left (softer)
+    let fill_dir = normalize(vec3<f32>(-0.3, -0.5, 0.4));
     let ndotl_fill = max(dot(effective_normal, fill_dir), 0.0);
 
-    // Rim/back light for edge definition
-    let rim_dir = normalize(vec3<f32>(0.0, 0.3, -1.0));
+    // Tertiary rim/back light for edge definition
+    let rim_dir = normalize(vec3<f32>(0.2, 0.4, -0.8));
     let ndotl_rim = max(dot(effective_normal, rim_dir), 0.0);
-    let rim_factor = pow(1.0 - max(dot(effective_normal, view_dir), 0.0), 3.0) * 0.15;
+    let rim_factor = pow(1.0 - max(dot(effective_normal, view_dir), 0.0), 2.5) * 0.12;
 
-    // Base color — warm steel-grey for CAD models (visible on light background)
-    let base_color = vec3<f32>(0.42, 0.48, 0.56);
+    // Base color — blue-grey for CAD models (visible on light background)
+    let base_color = vec3<f32>(0.48, 0.52, 0.58);
 
     // Combine lighting
-    let diffuse = ndotl_primary * 0.55 + ndotl_fill * 0.20 + ndotl_rim * 0.10;
+    let diffuse = ndotl_primary * 0.50 + ndotl_fill * 0.25 + ndotl_rim * 0.12;
     let color = base_color * (ambient + diffuse) + vec3<f32>(1.0) * specular_primary + base_color * rim_factor;
 
     return vec4<f32>(color, 1.0);

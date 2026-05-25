@@ -874,7 +874,7 @@ impl eframe::App for ViewerApp {
 
         // === Central 3D viewport ===
         egui::CentralPanel::default()
-            .frame(egui::Frame::default().fill(egui::Color32::from_rgb(224, 228, 235)))
+            .frame(egui::Frame::default().fill(egui::Color32::from_rgb(237, 241, 245)))
             .show(ctx, |ui| {
                 let (rect, response) = ui.allocate_exact_size(
                     ui.available_size(),

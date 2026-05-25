@@ -467,14 +467,119 @@ impl Surface {
     }
 }
 
-/// Simple NURBS surface evaluation (placeholder — uses bilinear interpolation for now).
+/// NURBS surface evaluation using de Boor's algorithm in 2D.
+/// Evaluates by performing de Boor in the u-direction for each row of control points,
+/// then de Boor in the v-direction on the resulting intermediate points.
 fn nurbs_surface_eval(nurbs: &NurbsSurface, u: f64, v: f64) -> Point3d {
-    // Simplified: just return the closest control point for now
-    // A full implementation would use de Boor's algorithm in 2D
     if nurbs.control_points.is_empty() || nurbs.control_points[0].is_empty() {
         return Point3d::ORIGIN;
     }
-    let ni = ((u * nurbs.control_points.len() as f64) as usize).min(nurbs.control_points.len() - 1);
-    let nj = ((v * nurbs.control_points[0].len() as f64) as usize).min(nurbs.control_points[0].len() - 1);
-    nurbs.control_points[ni][nj]
+
+    let n_u = nurbs.control_points.len();
+    let n_v = nurbs.control_points[0].len();
+    let p = nurbs.u_degree;
+    let q = nurbs.v_degree;
+
+    // Clamp u and v to valid knot range
+    let u_min = if nurbs.u_knots.len() > p { nurbs.u_knots[p] } else { 0.0 };
+    let u_max = if nurbs.u_knots.len() > p + 1 { nurbs.u_knots[nurbs.u_knots.len() - p - 1] } else { 1.0 };
+    let v_min = if nurbs.v_knots.len() > q { nurbs.v_knots[q] } else { 0.0 };
+    let v_max = if nurbs.v_knots.len() > q + 1 { nurbs.v_knots[nurbs.v_knots.len() - q - 1] } else { 1.0 };
+
+    let u_clamped = u.clamp(u_min, u_max);
+    let v_clamped = v.clamp(v_min, v_max);
+
+    // Find u knot span
+    let mut k_u = p;
+    while k_u < nurbs.u_knots.len() - p - 1 && nurbs.u_knots[k_u + 1] <= u_clamped {
+        k_u += 1;
+    }
+    k_u = k_u.min(n_u - 1);
+
+    // Find v knot span
+    let mut k_v = q;
+    while k_v < nurbs.v_knots.len() - q - 1 && nurbs.v_knots[k_v + 1] <= v_clamped {
+        k_v += 1;
+    }
+    k_v = k_v.min(n_v - 1);
+
+    // For each row affected by the u knot span, evaluate a NURBS curve in u
+    // This gives us p+1 intermediate control points in the v direction
+    let mut intermediate: Vec<(f64, f64, f64, f64)> = Vec::with_capacity(p + 1);
+
+    for i in 0..=p {
+        let row_idx = if k_u >= p { k_u - p + i } else { i.min(n_u - 1) };
+        if row_idx >= n_u {
+            continue;
+        }
+
+        // Collect control points and weights for this row
+        let mut pts: Vec<(f64, f64, f64, f64)> = Vec::with_capacity(q + 1);
+        for j in 0..=q {
+            let col_idx = if k_v >= q { k_v - q + j } else { j.min(n_v - 1) };
+            if col_idx >= n_v {
+                continue;
+            }
+            let cp = &nurbs.control_points[row_idx][col_idx];
+            let w = nurbs.weights.get(row_idx).and_then(|r| r.get(col_idx)).copied().unwrap_or(1.0);
+            pts.push((cp.x * w, cp.y * w, cp.z * w, w));
+        }
+
+        // De Boor in v direction
+        for r in 1..pts.len() {
+            for j in (r..pts.len()).rev() {
+                let i0 = if k_v >= q { k_v - q + j } else { j }.min(nurbs.v_knots.len().saturating_sub(1));
+                let i1 = (i0 + 1).min(nurbs.v_knots.len().saturating_sub(1));
+                let denom_idx = (i0 + q - r + 1).min(nurbs.v_knots.len().saturating_sub(1));
+
+                let d = nurbs.v_knots[denom_idx] - nurbs.v_knots[i1];
+                let a = if d.abs() < 1e-15 { 0.0 } else { (v_clamped - nurbs.v_knots[i1]) / d };
+                let b = 1.0 - a;
+
+                pts[j] = (
+                    a * pts[j].0 + b * pts[j - 1].0,
+                    a * pts[j].1 + b * pts[j - 1].1,
+                    a * pts[j].2 + b * pts[j - 1].2,
+                    a * pts[j].3 + b * pts[j - 1].3,
+                );
+            }
+        }
+
+        if !pts.is_empty() {
+            let last = pts.last().unwrap();
+            intermediate.push(*last);
+        }
+    }
+
+    // Now de Boor in u direction on the intermediate points
+    for r in 1..intermediate.len() {
+        for j in (r..intermediate.len()).rev() {
+            let i0 = if k_u >= p { k_u - p + j } else { j }.min(nurbs.u_knots.len().saturating_sub(1));
+            let i1 = (i0 + 1).min(nurbs.u_knots.len().saturating_sub(1));
+            let denom_idx = (i0 + p - r + 1).min(nurbs.u_knots.len().saturating_sub(1));
+
+            let d = nurbs.u_knots[denom_idx] - nurbs.u_knots[i1];
+            let a = if d.abs() < 1e-15 { 0.0 } else { (u_clamped - nurbs.u_knots[i1]) / d };
+            let b = 1.0 - a;
+
+            intermediate[j] = (
+                a * intermediate[j].0 + b * intermediate[j - 1].0,
+                a * intermediate[j].1 + b * intermediate[j - 1].1,
+                a * intermediate[j].2 + b * intermediate[j - 1].2,
+                a * intermediate[j].3 + b * intermediate[j - 1].3,
+            );
+        }
+    }
+
+    if intermediate.is_empty() {
+        return Point3d::ORIGIN;
+    }
+
+    let result = intermediate.last().unwrap();
+    let w = result.3;
+    if w.abs() < 1e-15 {
+        Point3d::ORIGIN
+    } else {
+        Point3d::new(result.0 / w, result.1 / w, result.2 / w)
+    }
 }
