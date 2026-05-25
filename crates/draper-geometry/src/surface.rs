@@ -96,6 +96,16 @@ impl Plane {
     pub fn normal_at(&self, _u: f64, _v: f64) -> Direction3d {
         self.normal
     }
+
+    /// Project a 3D point onto the plane's parametric space → (u, v).
+    pub fn project_point(&self, point: &Point3d) -> (f64, f64) {
+        let dx = point.x - self.origin.x;
+        let dy = point.y - self.origin.y;
+        let dz = point.z - self.origin.z;
+        let u = dx * self.u_dir.x + dy * self.u_dir.y + dz * self.u_dir.z;
+        let v = dx * self.v_dir.x + dy * self.v_dir.y + dz * self.v_dir.z;
+        (u, v)
+    }
 }
 
 /// A cylindrical surface.
@@ -155,6 +165,24 @@ impl CylinderSurface {
     /// Parametric range: u in [0, 2pi], v in [-inf, inf].
     pub fn u_range(&self) -> (f64, f64) {
         (0.0, 2.0 * std::f64::consts::PI)
+    }
+
+    /// Project a 3D point onto the cylinder's parametric space → (u, v).
+    /// u = angle in radians, v = height along axis.
+    pub fn project_point(&self, point: &Point3d) -> (f64, f64) {
+        let x_dir = if self.axis.is_parallel_to(&Direction3d::Z) {
+            Direction3d::X
+        } else {
+            self.axis.cross(&Direction3d::Z)
+        };
+        let y_dir = self.axis.cross(&x_dir);
+        let dx = point.x - self.origin.x;
+        let dy = point.y - self.origin.y;
+        let dz = point.z - self.origin.z;
+        let u = (dx * y_dir.x + dy * y_dir.y + dz * y_dir.z)
+            .atan2(dx * x_dir.x + dy * x_dir.y + dz * x_dir.z);
+        let v = dx * self.axis.x + dy * self.axis.y + dz * self.axis.z;
+        (u, v)
     }
 }
 
@@ -234,6 +262,24 @@ impl ConeSurface {
             radial.z * ha.cos() - self.axis.z * ha.sin(),
         ).unwrap_or(radial)
     }
+
+    /// Project a 3D point onto the cone's parametric space → (u, v).
+    /// u = angle in radians, v = height along axis.
+    pub fn project_point(&self, point: &Point3d) -> (f64, f64) {
+        let x_dir = if self.axis.is_parallel_to(&Direction3d::Z) {
+            Direction3d::X
+        } else {
+            self.axis.cross(&Direction3d::Z)
+        };
+        let y_dir = self.axis.cross(&x_dir);
+        let dx = point.x - self.origin.x;
+        let dy = point.y - self.origin.y;
+        let dz = point.z - self.origin.z;
+        let u = (dx * y_dir.x + dy * y_dir.y + dz * y_dir.z)
+            .atan2(dx * x_dir.x + dy * x_dir.y + dz * x_dir.z);
+        let v = dx * self.axis.x + dy * self.axis.y + dz * self.axis.z;
+        (u, v)
+    }
 }
 
 /// A spherical surface.
@@ -263,6 +309,18 @@ impl SphereSurface {
             v.sin() * u.sin(),
             v.cos(),
         ).unwrap_or(Direction3d::Z)
+    }
+
+    /// Project a 3D point onto the sphere's parametric space → (u, v).
+    /// u = azimuthal angle [0, 2pi], v = polar angle [0, pi].
+    pub fn project_point(&self, point: &Point3d) -> (f64, f64) {
+        let dx = point.x - self.center.x;
+        let dy = point.y - self.center.y;
+        let dz = point.z - self.center.z;
+        let u = dy.atan2(dx);
+        let r = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-15);
+        let v = (dz / r).clamp(-1.0, 1.0).acos();
+        (u, v)
     }
 }
 
@@ -299,6 +357,22 @@ impl TorusSurface {
         let ny = v.cos() * u.cos() * x_dir.y + v.cos() * u.sin() * y_dir.y;
         let nz = v.sin();
         Direction3d::new(nx, ny, nz).unwrap_or(Direction3d::Z)
+    }
+
+    /// Project a 3D point onto the torus's parametric space → (u, v).
+    /// u = angle around main ring, v = angle around tube.
+    pub fn project_point(&self, point: &Point3d) -> (f64, f64) {
+        let dx = point.x - self.center.x;
+        let dy = point.y - self.center.y;
+        let dz = point.z - self.center.z;
+        // u = angle around main ring
+        let u = dy.atan2(dx);
+        // v = angle around tube
+        let dist_xy = (dx * dx + dy * dy).sqrt();
+        let local_x = dist_xy - self.major_radius;
+        let local_y = dz;
+        let v = local_y.atan2(local_x);
+        (u, v)
     }
 }
 
@@ -412,6 +486,51 @@ impl Surface {
     /// Check if the surface is periodic in v.
     pub fn is_v_periodic(&self) -> bool {
         matches!(self, Surface::Sphere(_) | Surface::Torus(_))
+    }
+
+    /// Project a 3D point onto the surface's parametric space → (u, v).
+    pub fn project_point(&self, point: &Point3d) -> (f64, f64) {
+        match self {
+            Surface::Plane(p) => p.project_point(point),
+            Surface::Cylinder(c) => c.project_point(point),
+            Surface::Cone(c) => c.project_point(point),
+            Surface::Sphere(s) => s.project_point(point),
+            Surface::Torus(t) => t.project_point(point),
+            Surface::Revolution(r) => {
+                let dx = point.x - r.origin.x;
+                let dy = point.y - r.origin.y;
+                let u = dy.atan2(dx);
+                (u, 0.5) // Approximate v
+            }
+            Surface::Extrusion(e) => {
+                let dx = point.x - e.profile.point_at(0.0).x;
+                let dy = point.y - e.profile.point_at(0.0).y;
+                let dz = point.z - e.profile.point_at(0.0).z;
+                let v = dx * e.direction.x + dy * e.direction.y + dz * e.direction.z;
+                (0.5, v) // Approximate u
+            }
+            Surface::Nurbs(n) => {
+                // Grid-based closest point search
+                let mut best_u = 0.5;
+                let mut best_v = 0.5;
+                let mut best_dist = f64::MAX;
+                let steps = 10;
+                for i in 0..=steps {
+                    for j in 0..=steps {
+                        let u = i as f64 / steps as f64;
+                        let v = j as f64 / steps as f64;
+                        let p = self.point_at(u, v);
+                        let dist = (p.x - point.x).powi(2) + (p.y - point.y).powi(2) + (p.z - point.z).powi(2);
+                        if dist < best_dist {
+                            best_dist = dist;
+                            best_u = u;
+                            best_v = v;
+                        }
+                    }
+                }
+                (best_u, best_v)
+            }
+        }
     }
 
     /// Transform the surface.
