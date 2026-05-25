@@ -400,13 +400,33 @@ impl<'a> StepConverter<'a> {
     }
 
     /// Extract the 4x4 transform from a SHAPE_REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION.
+    /// Handles both simple SRR entities and complex/composite entities
+    /// (e.g., REPRESENTATION_RELATIONSHIP+REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION+SHAPE_REPRESENTATION_RELATIONSHIP).
     fn extract_transform_from_srr(&self, srr: &crate::schema::StepEntity) -> Option<[[f64; 4]; 4]> {
+        // First: check if this is a complex entity with a REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION sub-entity
+        if srr.is_complex() {
+            if let Some(rrwt_sub) = srr.find_sub_entity("REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION") {
+                // The RRWT sub-entity has a single parameter: the reference to ITEM_DEFINED_TRANSFORMATION
+                for param in &rrwt_sub.params {
+                    if let Some(ref_id) = self.get_ref(param) {
+                        if let Some(entity) = self.step.find_entity(ref_id) {
+                            if entity.type_name == "ITEM_DEFINED_TRANSFORMATION" {
+                                return self.compute_item_defined_transform(&entity);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback: search all params for direct reference to ITEM_DEFINED_TRANSFORMATION
         for param in &srr.params {
             if let Some(ref_id) = self.get_ref(param) {
                 if let Some(entity) = self.step.find_entity(ref_id) {
                     if entity.type_name == "ITEM_DEFINED_TRANSFORMATION" {
                         return self.compute_item_defined_transform(&entity);
                     }
+                    // Also search inside nested entities
                     for inner_param in &entity.params {
                         if let Some(inner_id) = self.get_ref(inner_param) {
                             if let Some(inner_entity) = self.step.find_entity(inner_id) {
@@ -689,7 +709,20 @@ impl<'a> StepConverter<'a> {
                 }
                 Some([rgb[0], rgb[1], rgb[2], 1.0])
             }
+            "DRAUGHTING_PRE_DEFINED_COLOUR" => {
+                // Named colors like 'red', 'green', 'blue', etc.
+                for param in &entity.params {
+                    if let StepValue::String(name) = param {
+                        return Some(resolve_predefined_colour(&name));
+                    }
+                    if let StepValue::Enum(name) = param {
+                        return Some(resolve_predefined_colour(&name));
+                    }
+                }
+                None
+            }
             _ => {
+                // For unknown types, try to walk deeper
                 for param in &entity.params {
                     if let Some(ref_id) = self.get_ref(param) {
                         if let Some(color) = self.walk_style_chain(ref_id) {
@@ -2082,4 +2115,30 @@ fn mat4_inverse(m: &[[f64; 4]; 4]) -> Option<[[f64; 4]; 4]> {
          (-m[3][0]*s3 + m[3][1]*s1 - m[3][2]*s0) * inv_det,
          ( m[2][0]*s3 - m[2][1]*s1 + m[2][2]*s0) * inv_det],
     ])
+}
+
+/// Resolve STEP predefined colour names to RGBA values.
+/// These follow ISO 10209-2:1993 / STEP draughting predefined colours.
+fn resolve_predefined_colour(name: &str) -> [f32; 4] {
+    match name.to_lowercase().as_str() {
+        "red" => [1.0, 0.0, 0.0, 1.0],
+        "green" => [0.0, 1.0, 0.0, 1.0],
+        "blue" => [0.0, 0.0, 1.0, 1.0],
+        "yellow" => [1.0, 1.0, 0.0, 1.0],
+        "magenta" => [1.0, 0.0, 1.0, 1.0],
+        "cyan" => [0.0, 1.0, 1.0, 1.0],
+        "black" => [0.0, 0.0, 0.0, 1.0],
+        "white" => [1.0, 1.0, 1.0, 1.0],
+        "brown" => [0.6, 0.3, 0.1, 1.0],
+        "orange" => [1.0, 0.65, 0.0, 1.0],
+        "pink" => [1.0, 0.75, 0.8, 1.0],
+        "purple" => [0.5, 0.0, 0.5, 1.0],
+        "grey" | "gray" => [0.5, 0.5, 0.5, 1.0],
+        "light grey" | "light gray" => [0.75, 0.75, 0.75, 1.0],
+        "dark grey" | "dark gray" => [0.25, 0.25, 0.25, 1.0],
+        _ => {
+            warn!("Unknown predefined colour: {}", name);
+            [0.5, 0.5, 0.5, 1.0] // Default grey
+        }
+    }
 }

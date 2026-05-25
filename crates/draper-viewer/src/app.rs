@@ -15,22 +15,30 @@ use egui_wgpu::RenderState;
 use eframe::egui;
 
 /// Convert TriangleMesh to GPU vertex/index data.
+/// Uses flat shading with face normals to properly support per-triangle colors from STEP files.
 fn mesh_to_gpu_data(mesh: &TriangleMesh) -> (Vec<MeshVertex>, Vec<u32>) {
-    // If we have per-vertex normals, use them directly for smooth shading
-    if let Some(ref vertex_normals) = mesh.normals {
-        if vertex_normals.len() == mesh.vertices.len() {
-            // Ensure we have per-triangle colors
-            let mut mesh = mesh.clone();
-            mesh.ensure_colors([0.48, 0.52, 0.58, 1.0]);
-            let colors = mesh.triangle_colors.as_ref();
+    let mut mesh = mesh.clone();
+    if mesh.face_normals.is_none() {
+        mesh.compute_face_normals();
+    }
+    mesh.ensure_colors([0.48, 0.52, 0.58, 1.0]);
 
+    let normals = mesh.face_normals.as_ref();
+    let colors = mesh.triangle_colors.as_ref();
+
+    // Check if we have meaningful per-triangle colors (not all default grey)
+    let has_real_colors = colors.map_or(false, |c| {
+        c.iter().any(|col| (col[0] - 0.48).abs() > 0.01 || (col[1] - 0.52).abs() > 0.01 || (col[2] - 0.58).abs() > 0.01)
+    });
+
+    // If we have vertex normals and no special per-triangle colors, use smooth shading
+    if let Some(ref vertex_normals) = mesh.normals {
+        if vertex_normals.len() == mesh.vertices.len() && !has_real_colors {
             let mut gpu_vertices = Vec::with_capacity(mesh.vertices.len());
             let mut gpu_indices = Vec::with_capacity(mesh.triangles.len() * 3);
 
             for (i, v) in mesh.vertices.iter().enumerate() {
                 let n = vertex_normals.get(i).map(|nn| [nn[0] as f32, nn[1] as f32, nn[2] as f32]).unwrap_or([0.0, 0.0, 1.0]);
-                // For vertex normals path, we don't have a good per-vertex color mapping,
-                // so use a default color
                 gpu_vertices.push(MeshVertex {
                     position: [v.x as f32, v.y as f32, v.z as f32],
                     normal: n,
@@ -46,16 +54,7 @@ fn mesh_to_gpu_data(mesh: &TriangleMesh) -> (Vec<MeshVertex>, Vec<u32>) {
         }
     }
 
-    // Fallback: compute face normals and duplicate vertices per triangle
-    let mut mesh = mesh.clone();
-    if mesh.face_normals.is_none() {
-        mesh.compute_face_normals();
-    }
-    mesh.ensure_colors([0.48, 0.52, 0.58, 1.0]);
-
-    let normals = mesh.face_normals.as_ref();
-    let colors = mesh.triangle_colors.as_ref();
-
+    // Flat shading: duplicate vertices per triangle with face normals and colors
     let mut gpu_vertices = Vec::with_capacity(mesh.triangles.len() * 3);
     let mut gpu_indices = Vec::with_capacity(mesh.triangles.len() * 3);
 
