@@ -490,12 +490,12 @@ fn triangulate_generic_surface(face: &Face, surface: &Surface, params: &Triangul
     // Choose resolution based on surface type and parametric range
     let n_u = if let Surface::Nurbs(_) = surface {
         // For NURBS, use a reasonable number of samples
-        params.angular_samples.min(32).max(8)
+        params.angular_samples.max(24)
     } else {
         params.angular_samples
     };
     let n_v = if let Surface::Nurbs(_) = surface {
-        params.angular_samples.min(32).max(8)
+        params.angular_samples.max(24)
     } else {
         params.angular_samples
     };
@@ -1208,14 +1208,14 @@ fn triangulate_generic_with_boundary(
     v_min = (v_min - v_margin).max(base_v_min);
     v_max = (v_max + v_margin).min(base_v_max);
 
-    // Choose resolution
+    // Choose resolution — use more samples for better quality
     let n_u = if let Surface::Nurbs(_) = surface {
-        params.angular_samples.min(32).max(8)
+        params.angular_samples.max(24)
     } else {
         params.angular_samples
     };
     let n_v = if let Surface::Nurbs(_) = surface {
-        params.angular_samples.min(32).max(8)
+        params.angular_samples.max(24)
     } else {
         params.angular_samples
     };
