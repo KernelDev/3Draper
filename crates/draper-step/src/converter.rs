@@ -92,6 +92,16 @@ pub fn step_structure(step_file: &StepFile) -> AssemblyNode {
     converter.build_assembly_tree()
 }
 
+/// Get a detailed text dump of the STEP file structure, including:
+/// - All NAUO (assembly) relationships with transforms
+/// - All PD -> BREP mappings
+/// - The full assembly tree
+/// - The mesh rendering tree (which BREPs are drawn how many times with which transforms)
+pub fn step_structure_detailed(step_file: &StepFile) -> String {
+    let converter = StepConverter::new(step_file);
+    converter.build_detailed_structure()
+}
+
 /// Get a text representation of the STEP file structure.
 pub fn step_structure_text(step_file: &StepFile) -> String {
     let converter = StepConverter::new(step_file);
@@ -118,6 +128,38 @@ fn format_assembly_node(node: &AssemblyNode, depth: usize, out: &mut String) {
     out.push_str(&format!("{}{} (PD=#{}){}{}{}\n", indent, node.name, node.pd_id, brep_str, color_str, tf_str));
     for child in &node.children {
         format_assembly_node(child, depth + 1, out);
+    }
+}
+
+/// Format assembly node with detailed transform information.
+fn format_assembly_node_detailed(node: &AssemblyNode, depth: usize, out: &mut String) {
+    let indent = "  ".repeat(depth);
+    let node_type = if node.brep_id.is_some() { "part" } else if !node.children.is_empty() { "assembly" } else { "empty" };
+    let brep_str = match node.brep_id {
+        Some(id) => format!(" BREP=#{}", id),
+        None => String::new(),
+    };
+    let color_str = match node.color {
+        Some(c) => format!(" color=({:.2},{:.2},{:.2})", c[0], c[1], c[2]),
+        None => String::new(),
+    };
+    let tf_str = match node.transform {
+        Some(tf) => {
+            let tx = tf[0][3]; let ty = tf[1][3]; let tz = tf[2][3];
+            if tx.abs() < 1e-10 && ty.abs() < 1e-10 && tz.abs() < 1e-10 {
+                " [rotation]".to_string()
+            } else {
+                format!(" [T:({:.1},{:.1},{:.1})]", tx, ty, tz)
+            }
+        }
+        None => String::new(),
+    };
+    out.push_str(&format!(
+        "{}{} [{}] (PD=#{}){}{}{}\n",
+        indent, node.name, node_type, node.pd_id, brep_str, color_str, tf_str
+    ));
+    for child in &node.children {
+        format_assembly_node_detailed(child, depth + 1, out);
     }
 }
 
@@ -393,8 +435,28 @@ impl<'a> StepConverter<'a> {
                 (None, None) => None,
             };
 
-            // Check if this child PD has a direct BREP (leaf)
-            if let Some(brep_id) = self.find_pd_brep(child_pd_id) {
+            // Check if this child PD has NAUO children (sub-assembly) FIRST.
+            // A sub-assembly can have BOTH a BREP and children. In that case,
+            // the BREP represents the assembly's own geometry (which duplicates
+            // the children), so we should recurse into children, not add the BREP.
+            let has_nauo_children = parent_pd_to_children.contains_key(&child_pd_id);
+
+            if has_nauo_children {
+                // Sub-assembly — recurse into it (even if it has a BREP)
+                let child_name = self.get_product_name(child_pd_id);
+                self.walk_assembly_tree(
+                    child_pd_id,
+                    &child_name,
+                    &composed,
+                    color_map,
+                    brep_mesh_cache,
+                    params,
+                    bbox,
+                    parent_pd_to_children,
+                    results,
+                    visited,
+                );
+            } else if let Some(brep_id) = self.find_pd_brep(child_pd_id) {
                 // Leaf node — triangulate BREP and create instance
                 if let Some(mesh) = self.triangulate_brep_cached(brep_id, brep_mesh_cache, params, bbox) {
                     let mut instance_mesh = mesh.clone();
@@ -414,20 +476,7 @@ impl<'a> StepConverter<'a> {
                         nauo_name, child_pd_id, brep_id, color, composed.is_some());
                 }
             } else {
-                // Sub-assembly — recurse into it
-                let child_name = self.get_product_name(child_pd_id);
-                self.walk_assembly_tree(
-                    child_pd_id,
-                    &child_name,
-                    &composed,
-                    color_map,
-                    brep_mesh_cache,
-                    params,
-                    bbox,
-                    parent_pd_to_children,
-                    results,
-                    visited,
-                );
+                warn!("PD=#{} has no NAUO children and no BREP — skipped", child_pd_id);
             }
 
             visited.remove(&(child_pd_id, nauo_id));
@@ -496,7 +545,9 @@ impl<'a> StepConverter<'a> {
         parent_pd_to_children: &HashMap<i64, Vec<(i64, i64, String)>>,
         visited: &mut std::collections::HashSet<i64>,
     ) -> AssemblyNode {
-        let brep_id = self.find_pd_brep(pd_id);
+        let has_nauo_children = parent_pd_to_children.contains_key(&pd_id);
+        // Only set brep_id for leaf nodes (no NAUO children)
+        let brep_id = if has_nauo_children { None } else { self.find_pd_brep(pd_id) };
         let color = brep_id.and_then(|id| color_map.get(&id).copied());
 
         let mut node = AssemblyNode {
@@ -516,7 +567,8 @@ impl<'a> StepConverter<'a> {
         if let Some(children) = parent_pd_to_children.get(&pd_id) {
             for &(nauo_id, child_pd_id, ref nauo_name) in children {
                 let nauo_transform = self.find_nauo_transform(nauo_id, child_pd_id);
-                let child_brep_id = self.find_pd_brep(child_pd_id);
+                let child_has_nauo_children = parent_pd_to_children.contains_key(&child_pd_id);
+                let child_brep_id = if child_has_nauo_children { None } else { self.find_pd_brep(child_pd_id) };
                 let child_color = child_brep_id.and_then(|id| color_map.get(&id).copied());
                 let child_name = self.get_product_name(child_pd_id);
 
@@ -534,6 +586,64 @@ impl<'a> StepConverter<'a> {
 
         visited.remove(&pd_id);
         node
+    }
+
+    /// Build a detailed text representation of the STEP file structure.
+    fn build_detailed_structure(&self) -> String {
+        let mut out = String::new();
+
+        // ── Section 1: Raw NAUO relationships ──
+        let nauos = self.step.find_entities_by_type("NEXT_ASSEMBLY_USAGE_OCCURRENCE");
+        out.push_str(&format!("== NAUO Relationships ({} total) ==\n", nauos.len()));
+        for nauo in &nauos {
+            let (relating_pd, related_pd) = self.extract_nauo_pd_refs(nauo);
+            let nauo_name = self.extract_nauo_name(nauo);
+            let parent_name = relating_pd.map(|id| self.get_product_name(id)).unwrap_or_else(|| "?".to_string());
+            let child_name = related_pd.map(|id| self.get_product_name(id)).unwrap_or_else(|| "?".to_string());
+            let transform = relating_pd.and_then(|_| {
+                related_pd.and_then(|cpid| self.find_nauo_transform(nauo.id, cpid))
+            });
+            let tf_str = match transform {
+                Some(tf) => {
+                    let tx = tf[0][3]; let ty = tf[1][3]; let tz = tf[2][3];
+                    if tx.abs() < 1e-10 && ty.abs() < 1e-10 && tz.abs() < 1e-10 {
+                        "rotation only".to_string()
+                    } else {
+                        format!("translate({:.1},{:.1},{:.1})", tx, ty, tz)
+                    }
+                }
+                None => "NO TRANSFORM".to_string(),
+            };
+            out.push_str(&format!(
+                "  NAUO#{} '{}' : {}(PD#{}) → {}(PD#{}) [{}]\n",
+                nauo.id, nauo_name,
+                parent_name, relating_pd.unwrap_or(0),
+                child_name, related_pd.unwrap_or(0),
+                tf_str
+            ));
+        }
+        out.push('\n');
+
+        // ── Section 2: PD → BREP mappings ──
+        let pds = self.step.find_entities_by_type("PRODUCT_DEFINITION");
+        out.push_str(&format!("== PD → BREP Mappings ({} PDs) ==\n", pds.len()));
+        for pd in &pds {
+            let name = self.get_product_name(pd.id);
+            let brep_id = self.find_pd_brep(pd.id);
+            match brep_id {
+                Some(bid) => out.push_str(&format!("  PD#{} ({}) → BREP#{}\n", pd.id, name, bid)),
+                None => out.push_str(&format!("  PD#{} ({}) → no BREP (assembly)\n", pd.id, name)),
+            }
+        }
+        out.push('\n');
+
+        // ── Section 3: Assembly Tree ──
+        let tree = self.build_assembly_tree();
+        out.push_str("== STEP Assembly Tree ==\n");
+        format_assembly_node_detailed(&tree, 0, &mut out);
+        out.push('\n');
+
+        out
     }
 
     /// Triangulate a BREP, using cache to avoid re-triangulating the same BREP multiple times.
@@ -586,23 +696,43 @@ impl<'a> StepConverter<'a> {
 
     /// Get a human-readable product name from a PRODUCT_DEFINITION.
     fn get_product_name(&self, pd_id: i64) -> String {
-        // PRODUCT_DEFINITION('design','',#product_ref,#framework_ref)
-        // → follow #product_ref to PRODUCT entity → get name
+        // PRODUCT_DEFINITION('design','',#product_formation,#context)
+        // → #product_formation is PRODUCT_DEFINITION_FORMATION('','',#product)
+        // → #product is PRODUCT('id', 'name', ...)
+        // The chain is: PD → PDF → PRODUCT → name
         let pd = match self.step.find_entity(pd_id) {
             Some(e) => e,
             None => return format!("PD#{}", pd_id),
         };
 
-        // Find PRODUCT reference in PD params
+        // Search for PRODUCT_DEFINITION_FORMATION reference in PD params
         for param in &pd.params {
             if let Some(ref_id) = self.get_ref(param) {
-                if let Some(product) = self.step.find_entity(ref_id) {
-                    if product.type_name == "PRODUCT" {
-                        // PRODUCT('id', 'name', $, ...)
-                        for p in &product.params {
+                if let Some(pdf) = self.step.find_entity(ref_id) {
+                    // Direct PRODUCT reference
+                    if pdf.type_name == "PRODUCT" {
+                        for p in &pdf.params {
                             if let StepValue::String(s) = p {
                                 if !s.is_empty() {
                                     return s.clone();
+                                }
+                            }
+                        }
+                    }
+                    // Follow PD → PDF → PRODUCT chain
+                    if pdf.type_name == "PRODUCT_DEFINITION_FORMATION" {
+                        for p in &pdf.params {
+                            if let Some(product_id) = self.get_ref(p) {
+                                if let Some(product) = self.step.find_entity(product_id) {
+                                    if product.type_name == "PRODUCT" {
+                                        for pp in &product.params {
+                                            if let StepValue::String(s) = pp {
+                                                if !s.is_empty() {
+                                                    return s.clone();
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -803,12 +933,26 @@ impl<'a> StepConverter<'a> {
                 for param in &sdr.params {
                     if let Some(sr_id) = self.get_ref(param) {
                         if let Some(sr) = self.step.find_entity(sr_id) {
-                            if sr.type_name == "ADVANCED_BREP_SHAPE_REPRESENTATION" {
+                            if sr.type_name.contains("ADVANCED_BREP_SHAPE_REPRESENTATION") {
+                                // Search for BREP references in both direct params and List params
                                 for sp in &sr.params {
+                                    // Direct reference
                                     if let Some(brep_id) = self.get_ref(sp) {
                                         if let Some(brep) = self.step.find_entity(brep_id) {
                                             if brep.type_name == "MANIFOLD_SOLID_BREP" {
                                                 return Some(brep_id);
+                                            }
+                                        }
+                                    }
+                                    // Reference inside a List (e.g., List([Ref(11), Ref(63)]))
+                                    if let StepValue::List(items) = sp {
+                                        for item in items {
+                                            if let Some(brep_id) = self.get_ref(item) {
+                                                if let Some(brep) = self.step.find_entity(brep_id) {
+                                                    if brep.type_name == "MANIFOLD_SOLID_BREP" {
+                                                        return Some(brep_id);
+                                                    }
+                                                }
                                             }
                                         }
                                     }

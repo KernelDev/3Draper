@@ -62,6 +62,36 @@ pub fn parse_step(input: &str) -> Result<StepFile, StepParseError> {
         }
 
         if in_data {
+            // CRITICAL: If we're collecting a multi-line entity, the continuation
+            // line must be treated as such, even if it starts with '#' after trimming.
+            // In STEP files, continuation lines often look like "  #123,#456,$);"
+            // which after trimming starts with '#' but is NOT a new entity.
+            // We distinguish by checking: if the entity_buffer has unbalanced parens,
+            // this MUST be a continuation regardless of what the line starts with.
+            if collecting_entity {
+                let open = entity_buffer.chars().filter(|c| *c == '(').count();
+                let close = entity_buffer.chars().filter(|c| *c == ')').count();
+                if open > close {
+                    // Buffer has unbalanced parens — this is definitely a continuation
+                    entity_buffer.push(' ');
+                    entity_buffer.push_str(line);
+
+                    // Check if entity is complete
+                    if line.ends_with(';') {
+                        let open2 = entity_buffer.chars().filter(|c| *c == '(').count();
+                        let close2 = entity_buffer.chars().filter(|c| *c == ')').count();
+                        if open2 == close2 || (open2 <= close2 && line.ends_with(");")) {
+                            if let Some(entity) = parse_entity_line(&entity_buffer)? {
+                                file.entities.push(entity);
+                            }
+                            entity_buffer.clear();
+                            collecting_entity = false;
+                        }
+                    }
+                    continue;
+                }
+            }
+
             if line.starts_with('#') {
                 // Start of a new entity — flush any previous buffered entity
                 if collecting_entity && !entity_buffer.is_empty() {

@@ -394,10 +394,9 @@ impl ViewerApp {
             self.log(&format!("  Surfaces: {}", surface_summary.join(", ")));
         }
 
-        // ── Output STEP file structure (assembly tree) ──
-        self.log("── STEP Assembly Structure ──");
-        let structure_text = draper_step::step_structure_text(step_file);
-        for line in structure_text.lines() {
+        // ── Output detailed STEP file structure ──
+        let detailed = draper_step::step_structure_detailed(step_file);
+        for line in detailed.lines() {
             self.log(line);
         }
 
@@ -422,7 +421,14 @@ impl ViewerApp {
                         None => "no color".to_string(),
                     };
                     let tf_str = match inst.transform {
-                        Some(_) => "HAS_TRANSFORM".to_string(),
+                        Some(tf) => {
+                            let tx = tf[0][3]; let ty = tf[1][3]; let tz = tf[2][3];
+                            if tx.abs() < 1e-10 && ty.abs() < 1e-10 && tz.abs() < 1e-10 {
+                                "rotation".to_string()
+                            } else {
+                                format!("T:({:.1},{:.1},{:.1})", tx, ty, tz)
+                            }
+                        }
                         None => "identity".to_string(),
                     };
                     self.log(&format!("  [{}] {} v={} t={} {} {}", 
