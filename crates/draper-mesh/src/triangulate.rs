@@ -352,15 +352,17 @@ fn triangulate_extrusion_face(face: &Face, ext: &draper_geometry::ExtrusionSurfa
     let n_u = params.angular_samples;
     let n_v = params.height_samples.max(2);
 
-    let (v_min, v_max) = estimate_v_range(face).unwrap_or((0.0, 1.0));
+    // Compute v range from boundary points
+    let (v_min, v_max) = compute_extrusion_v_range(face, ext);
+
+    // Compute u range from the profile curve's param range
+    let (u_min, u_max) = ext.profile.param_range();
 
     for j in 0..n_v {
         for i in 0..n_u {
-            let u = i as f64 / (n_u - 1) as f64;
-            let v = v_min + (v_max - v_min) * j as f64 / (n_v - 1) as f64;
-            let (u_min, u_max) = ext.profile.param_range();
-            let u_param = u_min + u * (u_max - u_min);
-            let p = ext.point_at(u_param, v);
+            let u = u_min + (u_max - u_min) * i as f64 / (n_u - 1).max(1) as f64;
+            let v = v_min + (v_max - v_min) * j as f64 / (n_v - 1).max(1) as f64;
+            let p = ext.point_at(u, v);
             mesh.add_vertex(p);
         }
     }
@@ -383,6 +385,56 @@ fn triangulate_extrusion_face(face: &Face, ext: &draper_geometry::ExtrusionSurfa
     }
 
     mesh
+}
+
+/// Compute the v (extrusion) parameter range for an extrusion surface
+/// by projecting boundary points onto the extrusion direction.
+fn compute_extrusion_v_range(face: &Face, ext: &draper_geometry::ExtrusionSurface) -> (f64, f64) {
+    let mut v_min = f64::MAX;
+    let mut v_max = f64::MIN;
+
+    // Sample boundary edges and project onto extrusion direction
+    for edge in &face.edges {
+        for i in 0..64 {
+            let t = i as f64 / 63.0;
+            if let Some(p) = edge.point_at(t) {
+                let v = (p.x - ext.profile.point_at(0.0).x) * ext.direction.x
+                      + (p.y - ext.profile.point_at(0.0).y) * ext.direction.y
+                      + (p.z - ext.profile.point_at(0.0).z) * ext.direction.z;
+                v_min = v_min.min(v);
+                v_max = v_max.max(v);
+            }
+        }
+    }
+
+    // Also try sampling from outer wire
+    if v_min >= v_max {
+        if let Some(ref wire) = face.outer_wire {
+            for coedge in &wire.coedges {
+                let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+                if let Some(edge) = edge {
+                    for i in 0..64 {
+                        let t = i as f64 / 63.0;
+                        let t_actual = if coedge.forward { t } else { 1.0 - t };
+                        if let Some(p) = edge.point_at(t_actual) {
+                            let v = (p.x - ext.profile.point_at(0.0).x) * ext.direction.x
+                                  + (p.y - ext.profile.point_at(0.0).y) * ext.direction.y
+                                  + (p.z - ext.profile.point_at(0.0).z) * ext.direction.z;
+                            v_min = v_min.min(v);
+                            v_max = v_max.max(v);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if v_min >= v_max {
+        (0.0, 1.0)
+    } else {
+        let margin = (v_max - v_min) * 0.001;
+        (v_min - margin, v_max + margin)
+    }
 }
 
 /// Generic surface triangulation by sampling on a grid.

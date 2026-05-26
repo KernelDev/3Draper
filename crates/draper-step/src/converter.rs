@@ -342,6 +342,116 @@ impl<'a> StepConverter<'a> {
             return Ok(results);
         }
 
+        // ─── Phase 3: SHELL_BASED_SURFACE_MODEL / MANIFOLD_SURFACE_SHAPE_REPRESENTATION ──
+        // Some STEP files use surface models instead of solid BREP models
+        let shell_models = self.step.find_entities_by_type("SHELL_BASED_SURFACE_MODEL");
+        for sm in &shell_models {
+            for param in &sm.params {
+                // Look for shell references (OPEN_SHELL, CLOSED_SHELL)
+                if let Some(shell_id) = self.get_ref(param) {
+                    if let Some(mesh) = self.triangulate_shell_by_id(shell_id, &params, &bbox) {
+                        results.push(MeshInstance {
+                            name: format!("ShellModel#{}", sm.id),
+                            mesh,
+                            color: None,
+                            transform: None,
+                            brep_id: sm.id,
+                        });
+                    }
+                }
+                if let StepValue::List(items) = param {
+                    for item in items {
+                        if let Some(shell_id) = self.get_ref(item) {
+                            if let Some(mesh) = self.triangulate_shell_by_id(shell_id, &params, &bbox) {
+                                results.push(MeshInstance {
+                                    name: format!("ShellModel#{}", sm.id),
+                                    mesh,
+                                    color: None,
+                                    transform: None,
+                                    brep_id: sm.id,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Also try MANIFOLD_SURFACE_SHAPE_REPRESENTATION
+        let msr = self.step.find_entities_by_type("MANIFOLD_SURFACE_SHAPE_REPRESENTATION");
+        for ms in &msr {
+            for param in &ms.params {
+                if let Some(ref_id) = self.get_ref(param) {
+                    if let Some(entity) = self.step.find_entity(ref_id) {
+                        if entity.type_name.contains("SHELL") {
+                            if let Some(mesh) = self.triangulate_shell_by_id(ref_id, &params, &bbox) {
+                                results.push(MeshInstance {
+                                    name: format!("SurfaceModel#{}", ms.id),
+                                    mesh,
+                                    color: None,
+                                    transform: None,
+                                    brep_id: ms.id,
+                                });
+                            }
+                        }
+                    }
+                }
+                if let StepValue::List(items) = param {
+                    for item in items {
+                        if let Some(ref_id) = self.get_ref(item) {
+                            if let Some(entity) = self.step.find_entity(ref_id) {
+                                if entity.type_name.contains("SHELL") {
+                                    if let Some(mesh) = self.triangulate_shell_by_id(ref_id, &params, &bbox) {
+                                        results.push(MeshInstance {
+                                            name: format!("SurfaceModel#{}", ms.id),
+                                            mesh,
+                                            color: None,
+                                            transform: None,
+                                            brep_id: ms.id,
+                                        });
+                                    }
+                                } else if entity.type_name.contains("SHELL_BASED_SURFACE_MODEL") {
+                                    // Follow the reference chain
+                                    for sp in &entity.params {
+                                        if let Some(shell_id) = self.get_ref(sp) {
+                                            if let Some(mesh) = self.triangulate_shell_by_id(shell_id, &params, &bbox) {
+                                                results.push(MeshInstance {
+                                                    name: format!("SurfaceModel#{}", ms.id),
+                                                    mesh,
+                                                    color: None,
+                                                    transform: None,
+                                                    brep_id: ms.id,
+                                                });
+                                            }
+                                        }
+                                        if let StepValue::List(inner) = sp {
+                                            for inner_item in inner {
+                                                if let Some(shell_id) = self.get_ref(inner_item) {
+                                                    if let Some(mesh) = self.triangulate_shell_by_id(shell_id, &params, &bbox) {
+                                                        results.push(MeshInstance {
+                                                            name: format!("SurfaceModel#{}", ms.id),
+                                                            mesh,
+                                                            color: None,
+                                                            transform: None,
+                                                            brep_id: ms.id,
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !results.is_empty() {
+            return Ok(results);
+        }
+
         // Direct surface extraction fallback
         let surface_types = [
             "PLANE", "CYLINDRICAL_SURFACE", "SPHERICAL_SURFACE",
@@ -679,6 +789,22 @@ impl<'a> StepConverter<'a> {
         Some(mesh)
     }
 
+    /// Triangulate a shell entity (CLOSED_SHELL, OPEN_SHELL) directly by its ID.
+    fn triangulate_shell_by_id(
+        &self,
+        shell_id: i64,
+        params: &TriangulationParams,
+        bbox: &Option<(Point3d, Point3d)>,
+    ) -> Option<TriangleMesh> {
+        let face_data_list = self.extract_shell_faces(shell_id)?;
+        let mut mesh = TriangleMesh::new();
+        for face_data in &face_data_list {
+            let face_mesh = self.surface_to_mesh(face_data, params, bbox);
+            mesh.merge(&face_mesh);
+        }
+        if mesh.vertex_count() == 0 { None } else { Some(mesh) }
+    }
+
     /// Extract the NAUO instance name (e.g., "nut_1", "bolt_2").
     fn extract_nauo_name(&self, nauo: &crate::schema::StepEntity) -> String {
         // NEXT_ASSEMBLY_USAGE_OCCURRENCE('id','name','description',#relating,#related,$)
@@ -932,45 +1058,39 @@ impl<'a> StepConverter<'a> {
 
                 for param in &sdr.params {
                     if let Some(sr_id) = self.get_ref(param) {
-                        if let Some(sr) = self.step.find_entity(sr_id) {
-                            if sr.type_name.contains("ADVANCED_BREP_SHAPE_REPRESENTATION") {
-                                // Search for BREP references in both direct params and List params
-                                for sp in &sr.params {
-                                    // Direct reference
-                                    if let Some(brep_id) = self.get_ref(sp) {
-                                        if let Some(brep) = self.step.find_entity(brep_id) {
-                                            if brep.type_name == "MANIFOLD_SOLID_BREP" {
-                                                return Some(brep_id);
-                                            }
-                                        }
-                                    }
-                                    // Reference inside a List (e.g., List([Ref(11), Ref(63)]))
-                                    if let StepValue::List(items) = sp {
-                                        for item in items {
-                                            if let Some(brep_id) = self.get_ref(item) {
-                                                if let Some(brep) = self.step.find_entity(brep_id) {
-                                                    if brep.type_name == "MANIFOLD_SOLID_BREP" {
-                                                        return Some(brep_id);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            if sr.type_name == "SHAPE_REPRESENTATION" {
-                                for absr in self.step.find_entities_by_type("ADVANCED_BREP_SHAPE_REPRESENTATION") {
-                                    for ap in &absr.params {
-                                        if let Some(brep_id) = self.get_ref(ap) {
-                                            if let Some(brep) = self.step.find_entity(brep_id) {
-                                                if brep.type_name == "MANIFOLD_SOLID_BREP" {
-                                                    if self.absr_belongs_to_pd(&absr, pd_id) {
-                                                        return Some(brep_id);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
+                        // Direct: SR is an ADVANCED_BREP_SHAPE_REPRESENTATION
+                        if let Some(brep_id) = self.find_brep_in_representation(sr_id) {
+                            return Some(brep_id);
+                        }
+                        // Indirect: SR is a SHAPE_REPRESENTATION linked to ABSR via SRR
+                        if let Some(brep_id) = self.find_brep_via_srr(sr_id) {
+                            return Some(brep_id);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Find a MANIFOLD_SOLID_BREP inside a SHAPE_REPRESENTATION or ADVANCED_BREP_SHAPE_REPRESENTATION.
+    fn find_brep_in_representation(&self, sr_id: i64) -> Option<i64> {
+        let sr = self.step.find_entity(sr_id)?;
+        if sr.type_name.contains("ADVANCED_BREP_SHAPE_REPRESENTATION") {
+            for sp in &sr.params {
+                if let Some(brep_id) = self.get_ref(sp) {
+                    if let Some(brep) = self.step.find_entity(brep_id) {
+                        if brep.type_name == "MANIFOLD_SOLID_BREP" {
+                            return Some(brep_id);
+                        }
+                    }
+                }
+                if let StepValue::List(items) = sp {
+                    for item in items {
+                        if let Some(brep_id) = self.get_ref(item) {
+                            if let Some(brep) = self.step.find_entity(brep_id) {
+                                if brep.type_name == "MANIFOLD_SOLID_BREP" {
+                                    return Some(brep_id);
                                 }
                             }
                         }
@@ -978,6 +1098,101 @@ impl<'a> StepConverter<'a> {
                 }
             }
         }
+        // Also check FACETED_BREP
+        if sr.type_name.contains("FACETED_BREP_SHAPE_REPRESENTATION") {
+            for sp in &sr.params {
+                if let Some(brep_id) = self.get_ref(sp) {
+                    if let Some(brep) = self.step.find_entity(brep_id) {
+                        if brep.type_name == "FACETED_BREP" || brep.type_name == "MANIFOLD_SOLID_BREP" {
+                            return Some(brep_id);
+                        }
+                    }
+                }
+                if let StepValue::List(items) = sp {
+                    for item in items {
+                        if let Some(brep_id) = self.get_ref(item) {
+                            if let Some(brep) = self.step.find_entity(brep_id) {
+                                if brep.type_name == "FACETED_BREP" || brep.type_name == "MANIFOLD_SOLID_BREP" {
+                                    return Some(brep_id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Find a BREP by following SHAPE_REPRESENTATION_RELATIONSHIP links from a SHAPE_REPRESENTATION.
+    /// Many STEP files use: SR → SRR → ABSR → BREP
+    fn find_brep_via_srr(&self, sr_id: i64) -> Option<i64> {
+        let sr = self.step.find_entity(sr_id)?;
+        if !sr.type_name.contains("SHAPE_REPRESENTATION") { return None; }
+
+        // Find all SRR entities that reference this SR
+        for srr in self.step.find_entities_by_type("SHAPE_REPRESENTATION_RELATIONSHIP") {
+            let mut refs_our_sr = false;
+            let mut other_sr_id: Option<i64> = None;
+
+            for (i, param) in srr.params.iter().enumerate() {
+                if let Some(ref_id) = self.get_ref(param) {
+                    if ref_id == sr_id {
+                        refs_our_sr = true;
+                    } else if i >= 2 {
+                        // The first two params are typically strings (name, description)
+                        // The 3rd and 4th are the two SR references
+                        if let Some(entity) = self.step.find_entity(ref_id) {
+                            if entity.type_name.contains("SHAPE_REPRESENTATION") {
+                                other_sr_id = Some(ref_id);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if refs_our_sr {
+                if let Some(other_id) = other_sr_id {
+                    // Try to find a BREP in the other representation
+                    if let Some(brep_id) = self.find_brep_in_representation(other_id) {
+                        return Some(brep_id);
+                    }
+                    // Recurse one level
+                    if let Some(brep_id) = self.find_brep_via_srr(other_id) {
+                        return Some(brep_id);
+                    }
+                }
+            }
+        }
+
+        // Also check complex SRR entities
+        for srr in self.step.find_entities_by_type("REPRESENTATION_RELATIONSHIP") {
+            let mut refs_our_sr = false;
+            let mut other_sr_id: Option<i64> = None;
+
+            for (i, param) in srr.params.iter().enumerate() {
+                if let Some(ref_id) = self.get_ref(param) {
+                    if ref_id == sr_id {
+                        refs_our_sr = true;
+                    } else if i >= 2 {
+                        if let Some(entity) = self.step.find_entity(ref_id) {
+                            if entity.type_name.contains("SHAPE_REPRESENTATION") {
+                                other_sr_id = Some(ref_id);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if refs_our_sr {
+                if let Some(other_id) = other_sr_id {
+                    if let Some(brep_id) = self.find_brep_in_representation(other_id) {
+                        return Some(brep_id);
+                    }
+                }
+            }
+        }
+
         None
     }
 
@@ -1726,15 +1941,30 @@ impl<'a> StepConverter<'a> {
     }
 
     /// Extract a SURFACE_OF_LINEAR_EXTRUSION.
-    /// Format: #N = SURFACE_OF_LINEAR_EXTRUSION('', #profile_curve, #direction);
+    /// Format: #N = SURFACE_OF_LINEAR_EXTRUSION('', #profile_curve, #direction_or_vector);
+    /// The 3rd param can be a DIRECTION or a VECTOR(#direction, magnitude).
     fn extract_extrusion(&self, entity: &crate::schema::StepEntity) -> Option<Surface> {
         // Find the profile curve
         let profile_id = self.find_curve_ref(entity, 1)?;
         let profile = self.resolve_curve(profile_id)?;
 
         // Find the extrusion direction (3rd param, index 2)
+        // Can be a DIRECTION or a VECTOR(#direction, magnitude)
         let dir_id = self.find_param_ref(entity, 2)?;
-        let direction = self.resolve_direction(dir_id)?;
+        let direction = if let Some(dir_entity) = self.step.find_entity(dir_id) {
+            if dir_entity.type_name == "DIRECTION" {
+                self.resolve_direction(dir_id)?
+            } else if dir_entity.type_name == "VECTOR" {
+                // VECTOR('', #direction, magnitude) — extract direction from it
+                let inner_dir_id = self.find_direction_from_vector(dir_entity)?;
+                self.resolve_direction(inner_dir_id)?
+            } else {
+                // Try to find a direction within the referenced entity
+                self.resolve_direction(dir_id)?
+            }
+        } else {
+            self.resolve_direction(dir_id)?
+        };
 
         Some(Surface::Extrusion(ExtrusionSurface {
             profile,
@@ -2168,7 +2398,7 @@ impl<'a> StepConverter<'a> {
             "COMPOSITE_CURVE" | "COMPOSITE_CURVE_SEGMENT" | "OFFSET_CURVE_3D" |
             "HYPERBOLA" | "PARABOLA" | "RATIONAL_B_SPLINE_CURVE" |
             "SURFACE_CURVE"
-        )
+        ) || type_name.contains("B_SPLINE_CURVE") // Handle complex entity types like "BOUNDED_CURVE+B_SPLINE_CURVE_WITH_KNOTS+..."
     }
 
     /// Find a reference in the entity's parameters at a specific index.
@@ -2231,7 +2461,14 @@ impl<'a> StepConverter<'a> {
     /// Resolve a STEP curve entity to a Curve3d.
     fn resolve_curve(&self, curve_id: i64) -> Option<Curve3d> {
         let entity = self.step.find_entity(curve_id)?;
-        match entity.type_name.as_str() {
+        let type_name = entity.type_name.as_str();
+
+        // Handle complex entity types (e.g., "BOUNDED_CURVE+B_SPLINE_CURVE_WITH_KNOTS+RATIONAL_B_SPLINE_CURVE+...")
+        if type_name.contains("B_SPLINE_CURVE") {
+            return self.resolve_bspline_curve(entity);
+        }
+
+        match type_name {
             "LINE" => self.resolve_line_curve(entity),
             "CIRCLE" => self.resolve_circle_curve(entity),
             "ELLIPSE" => self.resolve_ellipse_curve(entity),
@@ -2240,6 +2477,7 @@ impl<'a> StepConverter<'a> {
             "POLYLINE" => self.resolve_polyline_curve(entity),
             "TRIMMED_CURVE" => self.resolve_trimmed_curve(entity),
             "COMPOSITE_CURVE" => self.resolve_composite_curve(entity),
+            "OFFSET_CURVE_3D" => self.resolve_offset_curve_3d(entity),
             "SURFACE_CURVE" => {
                 // Unwrap SURFACE_CURVE to get the 3D curve
                 if let Some(curve3d_id) = self.resolve_3d_curve_ref(curve_id) {
@@ -2303,13 +2541,24 @@ impl<'a> StepConverter<'a> {
         Some(Curve3d::Ellipse(draper_geometry::Ellipse::new_xy(center, semi_major, semi_minor)))
     }
 
-    /// Resolve a B_SPLINE_CURVE_WITH_KNOTS entity.
+    /// Resolve a B_SPLINE_CURVE_WITH_KNOTS entity (or complex entity containing B_SPLINE_CURVE).
     fn resolve_bspline_curve(&self, entity: &crate::schema::StepEntity) -> Option<Curve3d> {
-        let degree = self.get_float(entity.params.first()?).unwrap_or(1.0) as usize;
+        // For complex entities, find the B_SPLINE_CURVE sub-entity for control points
+        // and B_SPLINE_CURVE_WITH_KNOTS sub-entity for knot vectors
+        // and RATIONAL_B_SPLINE_CURVE sub-entity for weights
+        let bspline_sub = entity.find_sub_entity("B_SPLINE_CURVE");
+        let knots_sub = entity.find_sub_entity("B_SPLINE_CURVE_WITH_KNOTS");
+        let rational_sub = entity.find_sub_entity("RATIONAL_B_SPLINE_CURVE");
+
+        // Use the B_SPLINE_CURVE sub-entity if available, otherwise use the entity itself
+        let cp_entity = bspline_sub.unwrap_or(entity);
+        let knot_entity = knots_sub.unwrap_or(entity);
+
+        let degree = self.get_float(cp_entity.params.first()?).unwrap_or(1.0) as usize;
 
         // Control points: 2nd param is a list of points
         let mut control_points = Vec::new();
-        if let Some(StepValue::List(items)) = entity.params.get(1) {
+        if let Some(StepValue::List(items)) = cp_entity.params.get(1) {
             for item in items {
                 if let Some(ref_id) = self.get_ref(item) {
                     if let Some(pt) = self.resolve_cartesian_point(ref_id) {
@@ -2328,12 +2577,16 @@ impl<'a> StepConverter<'a> {
             return None;
         }
 
-        // Default weights (uniform)
-        let weights = vec![1.0; control_points.len()];
+        // Extract weights from RATIONAL_B_SPLINE_CURVE sub-entity if present
+        let weights = if let Some(rational_ent) = rational_sub {
+            self.extract_curve_weights(rational_ent, control_points.len())
+        } else {
+            vec![1.0; control_points.len()]
+        };
 
-        // Extract knots from the STEP entity parameters
+        // Extract knots from the B_SPLINE_CURVE_WITH_KNOTS sub-entity if available
         let n = control_points.len();
-        let knots = self.extract_curve_knots(entity, n, degree);
+        let knots = self.extract_curve_knots(knot_entity, n, degree);
 
         Some(Curve3d::Nurbs(NurbsCurve {
             degree,
@@ -2341,6 +2594,30 @@ impl<'a> StepConverter<'a> {
             weights,
             knots,
         }))
+    }
+
+    /// Extract weight list from a RATIONAL_B_SPLINE_CURVE sub-entity.
+    /// Format: RATIONAL_B_SPLINE_CURVE(weights_list) or as part of a complex entity.
+    fn extract_curve_weights(&self, entity: &crate::schema::StepEntity, n_cp: usize) -> Vec<f64> {
+        // Search for a list of floats in the entity params
+        for param in &entity.params {
+            if let StepValue::List(items) = param {
+                let weights: Vec<f64> = items.iter()
+                    .filter_map(|v| self.get_float(v))
+                    .collect();
+                if weights.len() == n_cp {
+                    return weights;
+                }
+                // If the list has floats but wrong length, try to use what we have
+                if !weights.is_empty() && weights.len() >= 2 {
+                    let mut result = vec![1.0; n_cp];
+                    let len = weights.len().min(n_cp);
+                    result[..len].copy_from_slice(&weights[..len]);
+                    return result;
+                }
+            }
+        }
+        vec![1.0; n_cp]
     }
 
     /// Extract knot vector from a B_SPLINE_CURVE entity.
@@ -2433,6 +2710,22 @@ impl<'a> StepConverter<'a> {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Resolve an OFFSET_CURVE_3D entity — returns the basis curve (offset is approximated).
+    /// Format: OFFSET_CURVE_3D('', #basis_curve, distance, #direction, .F.)
+    fn resolve_offset_curve_3d(&self, entity: &crate::schema::StepEntity) -> Option<Curve3d> {
+        // Find the basis curve reference
+        for param in &entity.params {
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(curve_entity) = self.step.find_entity(ref_id) {
+                    if self.is_curve_type(&curve_entity.type_name) {
+                        return self.resolve_curve(ref_id);
                     }
                 }
             }
@@ -2786,4 +3079,94 @@ fn expand_knot_vector(multiplicities: &[usize], knot_values: &[f64]) -> Vec<f64>
         }
     }
     result
+}
+
+#[cfg(test)]
+mod diag_tests {
+    use super::*;
+    use crate::parse_step;
+
+    fn diagnose_file(path: &str) {
+        eprintln!("\n========================================");
+        eprintln!("FILE: {}", path);
+        eprintln!("========================================");
+        
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => { eprintln!("ERROR reading: {}", e); return; }
+        };
+        
+        let step = match parse_step(&content) {
+            Ok(s) => s,
+            Err(e) => { eprintln!("PARSE ERROR: {:?}", e); return; }
+        };
+        
+        // Count surface types found in faces
+        let faces = step.find_entities_by_type("ADVANCED_FACE");
+        let shells = step.find_entities_by_type("CLOSED_SHELL");
+        let open_shells = step.find_entities_by_type("OPEN_SHELL");
+        let breps = step.find_entities_by_type("MANIFOLD_SOLID_BREP");
+        eprintln!("  ADVANCED_FACE: {}, CLOSED_SHELL: {}, OPEN_SHELL: {}, MANIFOLD_SOLID_BREP: {}",
+            faces.len(), shells.len(), open_shells.len(), breps.len());
+
+        // For each face, find its surface type
+        let mut surface_types: HashMap<String, usize> = HashMap::new();
+        let mut faces_with_no_surface = 0;
+        for face in &faces {
+            if let Some(surface) = StepConverter::new(&step).extract_face_surface_from_entity(face) {
+                let tn = match surface {
+                    Surface::Plane(_) => "PLANE",
+                    Surface::Cylinder(_) => "CYLINDER",
+                    Surface::Cone(_) => "CONE",
+                    Surface::Sphere(_) => "SPHERE",
+                    Surface::Torus(_) => "TORUS",
+                    Surface::Revolution(_) => "REVOLUTION",
+                    Surface::Extrusion(_) => "EXTRUSION",
+                    Surface::Nurbs(_) => "NURBS",
+                };
+                *surface_types.entry(tn.to_string()).or_insert(0) += 1;
+            } else {
+                faces_with_no_surface += 1;
+                // Print what entity the surface ref points to
+                let converter = StepConverter::new(&step);
+                for (i, param) in face.params.iter().enumerate() {
+                    if i == 0 { continue; }
+                    if let Some(surface_id) = converter.get_ref(param) {
+                        if let Some(entity) = step.find_entity(surface_id) {
+                            eprintln!("    FACE #{}: ref #{} type='{}'", face.id, surface_id, entity.type_name);
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("  Surface types extracted: {:?}", surface_types);
+        eprintln!("  Faces with NO surface: {}", faces_with_no_surface);
+        
+        // Try full conversion
+        let converter = StepConverter::new(&step);
+        match converter.convert_instances() {
+            Ok(instances) => {
+                let total_verts: usize = instances.iter().map(|i| i.mesh.vertex_count()).sum();
+                let total_tris: usize = instances.iter().map(|i| i.mesh.triangle_count()).sum();
+                eprintln!("  MESH: {} instances, {} verts, {} tris", instances.len(), total_verts, total_tris);
+                for inst in &instances {
+                    eprintln!("    {} : {}v {}t color={:?}", inst.name, inst.mesh.vertex_count(), inst.mesh.triangle_count(), inst.color);
+                }
+            }
+            Err(e) => eprintln!("  CONVERSION ERROR: {}", e),
+        }
+    }
+
+    #[test]
+    fn test_brick_thin() { diagnose_file("/home/z/my-project/3Draper/test/brick_thin.stp"); }
+    #[test]
+    fn test_brick_thin_hole() { diagnose_file("/home/z/my-project/3Draper/test/brick_thin_hole.stp"); }
+    #[test]
+    fn test_brick_thin_round() { diagnose_file("/home/z/my-project/3Draper/test/brick_thin_round.stp"); }
+    #[test]
+    fn test_compressor() { diagnose_file("/home/z/my-project/3Draper/test/compressor-13920_top.stp"); }
+    #[test]
+    fn test_drill() { diagnose_file("/home/z/my-project/3Draper/test/drill_top.stp"); }
+    #[test]
+    fn test_transmission() { diagnose_file("/home/z/my-project/3Draper/test/transmission_top.stp"); }
 }

@@ -569,11 +569,29 @@ impl Surface {
                 (u, 0.5) // Approximate v
             }
             Surface::Extrusion(e) => {
+                // u: project point onto profile curve (find closest parameter)
+                // v: distance along extrusion direction
                 let dx = point.x - e.profile.point_at(0.0).x;
                 let dy = point.y - e.profile.point_at(0.0).y;
                 let dz = point.z - e.profile.point_at(0.0).z;
                 let v = dx * e.direction.x + dy * e.direction.y + dz * e.direction.z;
-                (0.5, v) // Approximate u
+                // For u, use a grid search on the profile curve
+                let (u_min, u_max) = e.profile.param_range();
+                let mut best_u = (u_min + u_max) * 0.5;
+                let mut best_dist = f64::MAX;
+                let steps = 20;
+                for i in 0..=steps {
+                    let u = u_min + (u_max - u_min) * i as f64 / steps as f64;
+                    let p = e.profile.point_at(u);
+                    let dist = (p.x - point.x + v * e.direction.x).powi(2)
+                             + (p.y - point.y + v * e.direction.y).powi(2)
+                             + (p.z - point.z + v * e.direction.z).powi(2);
+                    if dist < best_dist {
+                        best_dist = dist;
+                        best_u = u;
+                    }
+                }
+                (best_u, v)
             }
             Surface::Nurbs(n) => {
                 // Grid-based closest point search using actual knot range
