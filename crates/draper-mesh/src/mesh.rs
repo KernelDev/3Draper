@@ -16,6 +16,9 @@ pub struct TriangleMesh {
     pub face_normals: Option<Vec<[f64; 3]>>,
     /// Optional per-triangle RGBA colors (0..1 range).
     pub triangle_colors: Option<Vec<[f32; 4]>>,
+    /// Optional per-triangle face ID (TopoId of the source BRep face).
+    /// Used for selection, highlighting, and UV grid display.
+    pub triangle_face_ids: Option<Vec<u64>>,
 }
 
 impl TriangleMesh {
@@ -26,6 +29,7 @@ impl TriangleMesh {
             normals: None,
             face_normals: None,
             triangle_colors: None,
+            triangle_face_ids: None,
         }
     }
 
@@ -37,6 +41,7 @@ impl TriangleMesh {
             normals: None,
             face_normals: None,
             triangle_colors: None,
+            triangle_face_ids: None,
         }
     }
 
@@ -116,6 +121,17 @@ impl TriangleMesh {
             }
             _ => {}
         }
+        // Merge face IDs
+        if self.triangle_face_ids.is_none() && other.triangle_face_ids.is_some() {
+            let existing_count = self.triangles.len() - other.triangles.len();
+            self.triangle_face_ids = Some(vec![0; existing_count]);
+        }
+        match (&mut self.triangle_face_ids, &other.triangle_face_ids) {
+            (Some(ref mut ids), Some(ref other_ids)) => {
+                ids.extend(other_ids.iter().cloned());
+            }
+            _ => {}
+        }
     }
 
     /// Merge another mesh with a uniform color applied to all its triangles.
@@ -133,6 +149,17 @@ impl TriangleMesh {
             for _ in 0..other.triangles.len() {
                 colors.push(color);
             }
+        }
+        // Merge face IDs
+        if self.triangle_face_ids.is_none() && other.triangle_face_ids.is_some() {
+            let existing_count = self.triangles.len() - other.triangles.len();
+            self.triangle_face_ids = Some(vec![0; existing_count]);
+        }
+        match (&mut self.triangle_face_ids, &other.triangle_face_ids) {
+            (Some(ref mut ids), Some(ref other_ids)) => {
+                ids.extend(other_ids.iter().cloned());
+            }
+            _ => {}
         }
     }
 

@@ -41,6 +41,33 @@ struct FaceData {
     /// All edges combined (for backward compat with surface_to_mesh)
     edges: Vec<TopoEdge>,
     forward: bool,
+    /// STEP entity ID of the ADVANCED_FACE this data was extracted from.
+    step_face_id: i64,
+}
+
+/// Information about a single face within a BREP, for structure display and UV visualization.
+#[derive(Clone, Debug)]
+pub struct FaceInfo {
+    /// Unique face identifier (for selection and tracking).
+    pub face_id: u64,
+    /// STEP entity ID of the ADVANCED_FACE.
+    pub step_face_id: i64,
+    /// Human-readable surface type name (e.g., "Plane", "Cylinder", "Nurbs").
+    pub surface_type: String,
+    /// The surface geometry (for UV grid generation).
+    pub surface: Surface,
+    /// 3D boundary edge polylines (outer boundary).
+    pub outer_boundary: Vec<Vec<Point3d>>,
+    /// 3D boundary edge polylines (inner boundaries = holes).
+    pub inner_boundaries: Vec<Vec<Point3d>>,
+    /// UV-space boundary polylines (outer boundary).
+    pub outer_uv_boundary: Vec<Vec<Point2d>>,
+    /// UV-space boundary polylines (inner boundaries = holes).
+    pub inner_uv_boundaries: Vec<Vec<Vec<Point2d>>>,
+    /// Triangle index range [start, end) in the merged mesh for this face.
+    pub triangle_range: (usize, usize),
+    /// Whether the face normal matches the surface normal.
+    pub forward: bool,
 }
 
 /// A mesh instance to be rendered — the mesh geometry is transformed by the given matrix
@@ -58,6 +85,24 @@ pub struct MeshInstance {
     pub transform: Option<[[f64; 4]; 4]>,
     /// The STEP entity ID of the source MANIFOLD_SOLID_BREP.
     pub brep_id: i64,
+}
+
+/// A detailed mesh instance with per-face information for structure display,
+/// selection, UV grid visualization, and debugging.
+#[derive(Clone, Debug)]
+pub struct DetailedMeshInstance {
+    /// Human-readable name (from STEP PRODUCT or NAUO).
+    pub name: String,
+    /// The triangulated mesh (already transformed to world space) with per-triangle face IDs.
+    pub mesh: TriangleMesh,
+    /// Optional RGBA color (0..1 range).
+    pub color: Option<[f32; 4]>,
+    /// The 4×4 transform that was applied to get this instance into world space.
+    pub transform: Option<[[f64; 4]; 4]>,
+    /// The STEP entity ID of the source MANIFOLD_SOLID_BREP.
+    pub brep_id: i64,
+    /// Per-face information for structure display and UV visualization.
+    pub faces: Vec<FaceInfo>,
 }
 
 /// A node in the STEP assembly tree (for structure display).
@@ -89,6 +134,14 @@ pub fn step_to_mesh(step_file: &StepFile) -> Result<TriangleMesh, String> {
 pub fn step_to_mesh_instances(step_file: &StepFile) -> Result<Vec<MeshInstance>, String> {
     let converter = StepConverter::new(step_file);
     converter.convert_instances()
+}
+
+/// Convert a parsed STEP file to detailed mesh instances with per-face information.
+/// Includes face IDs, surface types, boundary polylines, and UV-space data
+/// for structure display, selection, UV grid visualization, and debugging.
+pub fn step_to_detailed_instances(step_file: &StepFile) -> Result<Vec<DetailedMeshInstance>, String> {
+    let converter = StepConverter::new(step_file);
+    converter.convert_detailed_instances()
 }
 
 /// Get the assembly tree structure of a STEP file for display/debugging.
@@ -510,6 +563,176 @@ impl<'a> StepConverter<'a> {
         Err("No convertible surface geometry found in STEP file".to_string())
     }
 
+    /// Convert STEP to detailed mesh instances with per-face information.
+    fn convert_detailed_instances(&self) -> Result<Vec<DetailedMeshInstance>, String> {
+        let params = TriangulationParams::default();
+        let bbox = self.compute_bounding_box();
+        let color_map = self.extract_color_map();
+        let mut brep_detail_cache: HashMap<i64, (TriangleMesh, Vec<FaceInfo>)> = HashMap::new();
+        let mut results: Vec<DetailedMeshInstance> = Vec::new();
+
+        // ─── Phase 1: Assembly-based conversion via NAUO tree walk ────────
+        let nauos = self.step.find_entities_by_type("NEXT_ASSEMBLY_USAGE_OCCURRENCE");
+        if !nauos.is_empty() {
+            let mut parent_pd_to_children: HashMap<i64, Vec<(i64, i64, String)>> = HashMap::new();
+            for nauo in &nauos {
+                let (relating_pd, related_pd) = self.extract_nauo_pd_refs(nauo);
+                if let (Some(parent_pd), Some(child_pd)) = (relating_pd, related_pd) {
+                    let name = self.extract_nauo_name(nauo);
+                    parent_pd_to_children.entry(parent_pd).or_default().push((nauo.id, child_pd, name));
+                }
+            }
+
+            let parent_pds: std::collections::HashSet<i64> = parent_pd_to_children.keys().copied().collect();
+            let child_pds: std::collections::HashSet<i64> = nauos.iter()
+                .filter_map(|n| self.extract_nauo_pd_refs(n).1)
+                .collect();
+            let roots: Vec<i64> = parent_pds.difference(&child_pds).copied().collect();
+
+            if !roots.is_empty() {
+                for root_pd in &roots {
+                    let root_name = self.get_product_name(*root_pd);
+                    self.walk_assembly_tree_detailed(
+                        *root_pd,
+                        &root_name,
+                        &None,
+                        &color_map,
+                        &mut brep_detail_cache,
+                        &params,
+                        &bbox,
+                        &parent_pd_to_children,
+                        &mut results,
+                        &mut std::collections::HashSet::new(),
+                    );
+                }
+            }
+
+            if !results.is_empty() {
+                return Ok(results);
+            }
+        }
+
+        // ─── Phase 2: No assembly — direct BREP conversion ───
+        let breps = self.step.find_entities_by_type("MANIFOLD_SOLID_BREP");
+        for brep in &breps {
+            let name = self.get_brep_name(brep.id);
+            if let Some((mesh, faces)) = self.triangulate_brep_detailed_cached(brep.id, &mut brep_detail_cache, &params, &bbox) {
+                let color = color_map.get(&brep.id).copied();
+                results.push(DetailedMeshInstance {
+                    name,
+                    mesh,
+                    color,
+                    transform: None,
+                    brep_id: brep.id,
+                    faces,
+                });
+            }
+        }
+
+        if !results.is_empty() {
+            return Ok(results);
+        }
+
+        // FACETED_BREP
+        let faceted = self.step.find_entities_by_type("FACETED_BREP");
+        for fb in &faceted {
+            let name = self.get_brep_name(fb.id);
+            if let Some((mesh, faces)) = self.triangulate_brep_detailed_cached(fb.id, &mut brep_detail_cache, &params, &bbox) {
+                let color = color_map.get(&fb.id).copied();
+                results.push(DetailedMeshInstance {
+                    name,
+                    mesh,
+                    color,
+                    transform: None,
+                    brep_id: fb.id,
+                    faces,
+                });
+            }
+        }
+
+        Ok(results)
+    }
+
+    fn triangulate_brep_detailed_cached(
+        &self,
+        brep_id: i64,
+        cache: &mut HashMap<i64, (TriangleMesh, Vec<FaceInfo>)>,
+        params: &TriangulationParams,
+        bbox: &Option<(Point3d, Point3d)>,
+    ) -> Option<(TriangleMesh, Vec<FaceInfo>)> {
+        if let Some(cached) = cache.get(&brep_id) {
+            return Some(cached.clone());
+        }
+        let result = self.triangulate_brep_detailed(brep_id, params, bbox)?;
+        cache.insert(brep_id, result.clone());
+        Some(result)
+    }
+
+    /// Walk assembly tree producing DetailedMeshInstance results.
+    fn walk_assembly_tree_detailed(
+        &self,
+        parent_pd_id: i64,
+        _parent_name: &str,
+        parent_transform: &Option<[[f64; 4]; 4]>,
+        color_map: &HashMap<i64, [f32; 4]>,
+        brep_detail_cache: &mut HashMap<i64, (TriangleMesh, Vec<FaceInfo>)>,
+        params: &TriangulationParams,
+        bbox: &Option<(Point3d, Point3d)>,
+        parent_pd_to_children: &HashMap<i64, Vec<(i64, i64, String)>>,
+        results: &mut Vec<DetailedMeshInstance>,
+        visited: &mut std::collections::HashSet<(i64, i64)>,
+    ) {
+        let children = match parent_pd_to_children.get(&parent_pd_id) {
+            Some(c) => c,
+            None => return,
+        };
+
+        for &(nauo_id, child_pd_id, ref nauo_name) in children {
+            if visited.contains(&(child_pd_id, nauo_id)) {
+                continue;
+            }
+            visited.insert((child_pd_id, nauo_id));
+
+            let nauo_transform = self.find_nauo_transform(nauo_id, child_pd_id);
+            let composed = match (parent_transform, nauo_transform) {
+                (Some(pt), Some(nt)) => Some(mat4_mul(pt, &nt)),
+                (Some(pt), None) => Some(*pt),
+                (None, Some(nt)) => Some(nt),
+                (None, None) => None,
+            };
+
+            let has_nauo_children = parent_pd_to_children.contains_key(&child_pd_id);
+
+            if has_nauo_children {
+                let child_name = self.get_product_name(child_pd_id);
+                self.walk_assembly_tree_detailed(
+                    child_pd_id, &child_name, &composed, color_map,
+                    brep_detail_cache, params, bbox, parent_pd_to_children,
+                    results, visited,
+                );
+            } else if let Some(brep_id) = self.find_pd_brep(child_pd_id) {
+                if let Some((mesh, faces)) = self.triangulate_brep_detailed_cached(brep_id, brep_detail_cache, params, bbox) {
+                    let mut instance_mesh = mesh.clone();
+                    if let Some(ref tf) = composed {
+                        instance_mesh.transform(tf);
+                    }
+                    let color = color_map.get(&brep_id).copied();
+                    let name = format!("{} (BREP#{})", nauo_name, brep_id);
+                    results.push(DetailedMeshInstance {
+                        name,
+                        mesh: instance_mesh,
+                        color,
+                        transform: composed,
+                        brep_id,
+                        faces,
+                    });
+                }
+            }
+
+            visited.remove(&(child_pd_id, nauo_id));
+        }
+    }
+
     /// Recursively walk the assembly tree from a parent PD, creating mesh instances
     /// for each leaf BREP occurrence with the correct composed transform.
     fn walk_assembly_tree(
@@ -839,6 +1062,119 @@ impl<'a> StepConverter<'a> {
             mesh.merge(&face_mesh);
         }
         Some(mesh)
+    }
+
+    /// Triangulate a BREP with per-face ID tracking and FaceInfo generation.
+    fn triangulate_brep_detailed(
+        &self,
+        brep_id: i64,
+        params: &TriangulationParams,
+        bbox: &Option<(Point3d, Point3d)>,
+    ) -> Option<(TriangleMesh, Vec<FaceInfo>)> {
+        let shell_id = self.find_shell_ref_by_brep_id(brep_id)?;
+        let face_data_list = self.extract_shell_faces(shell_id)?;
+        let mut mesh = TriangleMesh::new();
+        let mut face_infos = Vec::new();
+        let mut next_face_id: u64 = 1;
+
+        for (fi, face_data) in face_data_list.iter().enumerate() {
+            let face_id = next_face_id;
+            next_face_id += 1;
+            let step_face_id = face_data.step_face_id;
+
+            let surface_type = match &face_data.surface {
+                Surface::Plane(_) => "Plane".to_string(),
+                Surface::Cylinder(_) => "Cylinder".to_string(),
+                Surface::Cone(_) => "Cone".to_string(),
+                Surface::Sphere(_) => "Sphere".to_string(),
+                Surface::Torus(_) => "Torus".to_string(),
+                Surface::Revolution(_) => "Revolution".to_string(),
+                Surface::Extrusion(_) => "Extrusion".to_string(),
+                Surface::Nurbs(n) => {
+                    format!("Nurbs(deg={}/{}, cps={}x{})",
+                        n.u_degree, n.v_degree, n.control_points.len(), 
+                        n.control_points.first().map(|r| r.len()).unwrap_or(0))
+                }
+            };
+
+            let tri_start = mesh.triangle_count();
+            let face_mesh = self.surface_to_mesh(face_data, params, bbox);
+            
+            // Set face ID for all triangles in this face mesh
+            let face_tri_count = face_mesh.triangle_count();
+            let mut face_mesh_with_ids = face_mesh.clone();
+            face_mesh_with_ids.triangle_face_ids = Some(vec![face_id; face_tri_count]);
+            
+            mesh.merge(&face_mesh_with_ids);
+            let tri_end = mesh.triangle_count();
+
+            // Sample boundary edges into polylines (3D and UV)
+            let outer_boundary = self.sample_edges_to_polylines(&face_data.outer_edges);
+            let inner_boundaries: Vec<Vec<Point3d>> = face_data.inner_edges.iter()
+                .map(|edges| self.sample_edges_to_polylines(edges))
+                .collect();
+
+            // Project boundary to UV space
+            let outer_uv_boundary = self.sample_edges_to_uv_polylines(&face_data.outer_edges, &face_data.surface);
+            let inner_uv_boundaries: Vec<Vec<Vec<Point2d>>> = face_data.inner_edges.iter()
+                .map(|edges| self.sample_edges_to_uv_polylines(edges, &face_data.surface))
+                .collect();
+
+            face_infos.push(FaceInfo {
+                face_id,
+                step_face_id,
+                surface_type,
+                surface: face_data.surface.clone(),
+                outer_boundary,
+                inner_boundaries,
+                outer_uv_boundary,
+                inner_uv_boundaries,
+                triangle_range: (tri_start, tri_end),
+                forward: face_data.forward,
+            });
+        }
+        Some((mesh, face_infos))
+    }
+
+    /// Sample edges into 3D polylines for boundary visualization.
+    fn sample_edges_to_polylines(&self, edges: &[TopoEdge]) -> Vec<Point3d> {
+        let mut points = Vec::new();
+        for edge in edges {
+            if let Some(ref curve) = edge.curve {
+                let steps = 20;
+                for i in 0..=steps {
+                    let t = i as f64 / steps as f64;
+                    if let Some(p) = edge.point_at(t) {
+                        if points.last().map_or(true, |last| last.distance_to(&p) > 1e-8) {
+                            points.push(p);
+                        }
+                    }
+                }
+            }
+        }
+        points
+    }
+
+    /// Sample edges into UV-space polylines for UV grid visualization.
+    fn sample_edges_to_uv_polylines(&self, edges: &[TopoEdge], surface: &Surface) -> Vec<Vec<Point2d>> {
+        let mut polylines = Vec::new();
+        for edge in edges {
+            if let Some(ref curve) = edge.curve {
+                let mut polyline = Vec::new();
+                let steps = 20;
+                for i in 0..=steps {
+                    let t = i as f64 / steps as f64;
+                    if let Some(p) = edge.point_at(t) {
+                        let (u, v) = surface.project_point(&p);
+                        polyline.push(Point2d::new(u, v));
+                    }
+                }
+                if !polyline.is_empty() {
+                    polylines.push(polyline);
+                }
+            }
+        }
+        polylines
     }
 
     /// Triangulate a shell entity (CLOSED_SHELL, OPEN_SHELL) directly by its ID.
@@ -1558,6 +1894,7 @@ impl<'a> StepConverter<'a> {
                     inner_edges,
                     edges: all_edges,
                     forward,
+                    step_face_id: face_id,
                 })
             }
             _ => {
@@ -1569,6 +1906,7 @@ impl<'a> StepConverter<'a> {
                         inner_edges: vec![],
                         edges: vec![],
                         forward: true,
+                        step_face_id: face_id,
                     })
                 } else {
                     None
