@@ -481,6 +481,33 @@ pub struct NurbsSurface {
     pub v_knots: Vec<f64>,
 }
 
+impl NurbsSurface {
+    /// Get the valid parametric range for the u parameter.
+    /// The valid domain is [u_knots[u_degree], u_knots[n_u]] where n_u = number of control points in u.
+    pub fn u_range(&self) -> (f64, f64) {
+        let p = self.u_degree;
+        if self.u_knots.len() > p {
+            let u_min = self.u_knots[p];
+            let u_max = self.u_knots[self.u_knots.len() - p - 1];
+            (u_min, u_max)
+        } else {
+            (0.0, 1.0)
+        }
+    }
+
+    /// Get the valid parametric range for the v parameter.
+    pub fn v_range(&self) -> (f64, f64) {
+        let q = self.v_degree;
+        if self.v_knots.len() > q {
+            let v_min = self.v_knots[q];
+            let v_max = self.v_knots[self.v_knots.len() - q - 1];
+            (v_min, v_max)
+        } else {
+            (0.0, 1.0)
+        }
+    }
+}
+
 impl Surface {
     /// Evaluate the surface at (u, v).
     pub fn point_at(&self, u: f64, v: f64) -> Point3d {
@@ -549,15 +576,35 @@ impl Surface {
                 (0.5, v) // Approximate u
             }
             Surface::Nurbs(n) => {
-                // Grid-based closest point search
-                let mut best_u = 0.5;
-                let mut best_v = 0.5;
+                // Grid-based closest point search using actual knot range
+                let (u_min, u_max) = n.u_range();
+                let (v_min, v_max) = n.v_range();
+                let mut best_u = (u_min + u_max) * 0.5;
+                let mut best_v = (v_min + v_max) * 0.5;
                 let mut best_dist = f64::MAX;
-                let steps = 10;
+                // Coarse grid search
+                let steps = 20;
                 for i in 0..=steps {
                     for j in 0..=steps {
-                        let u = i as f64 / steps as f64;
-                        let v = j as f64 / steps as f64;
+                        let u = u_min + (u_max - u_min) * i as f64 / steps as f64;
+                        let v = v_min + (v_max - v_min) * j as f64 / steps as f64;
+                        let p = self.point_at(u, v);
+                        let dist = (p.x - point.x).powi(2) + (p.y - point.y).powi(2) + (p.z - point.z).powi(2);
+                        if dist < best_dist {
+                            best_dist = dist;
+                            best_u = u;
+                            best_v = v;
+                        }
+                    }
+                }
+                // Refine with a finer search around the best point
+                let refine_steps = 10;
+                let u_range = (u_max - u_min) / steps as f64;
+                let v_range = (v_max - v_min) / steps as f64;
+                for i in 0..=refine_steps {
+                    for j in 0..=refine_steps {
+                        let u = (best_u - u_range * 0.5 + u_range * i as f64 / refine_steps as f64).clamp(u_min, u_max);
+                        let v = (best_v - v_range * 0.5 + v_range * j as f64 / refine_steps as f64).clamp(v_min, v_max);
                         let p = self.point_at(u, v);
                         let dist = (p.x - point.x).powi(2) + (p.y - point.y).powi(2) + (p.z - point.z).powi(2);
                         if dist < best_dist {

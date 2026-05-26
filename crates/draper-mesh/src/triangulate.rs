@@ -386,26 +386,83 @@ fn triangulate_extrusion_face(face: &Face, ext: &draper_geometry::ExtrusionSurfa
 }
 
 /// Generic surface triangulation by sampling on a grid.
+/// For NURBS surfaces, uses the actual knot range.
 fn triangulate_generic_surface(face: &Face, surface: &Surface, params: &TriangulationParams) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
-    let n = params.angular_samples;
 
-    for j in 0..n {
-        for i in 0..n {
-            let u = 2.0 * PI * i as f64 / n as f64;
-            let v = PI * j as f64 / n as f64;
+    // Determine the parametric range based on surface type
+    let (u_min, u_max, v_min, v_max) = if let Surface::Nurbs(nurbs) = surface {
+        let (u0, u1) = nurbs.u_range();
+        let (v0, v1) = nurbs.v_range();
+        (u0, u1, v0, v1)
+    } else {
+        // Fallback for unknown surfaces — try boundary projection
+        (0.0, 2.0 * PI, 0.0, PI)
+    };
+
+    // If we have boundary edges, use them to refine the parametric range
+    let (u_min, u_max, v_min, v_max) = if let Some(ref wire) = face.outer_wire {
+        let boundary_pts = collect_face_boundary_points(face);
+        if !boundary_pts.is_empty() {
+            let mut proj_u_min = f64::MAX;
+            let mut proj_u_max = f64::MIN;
+            let mut proj_v_min = f64::MAX;
+            let mut proj_v_max = f64::MIN;
+            for p in &boundary_pts {
+                let (u, v) = surface.project_point(p);
+                proj_u_min = proj_u_min.min(u);
+                proj_u_max = proj_u_max.max(u);
+                proj_v_min = proj_v_min.min(v);
+                proj_v_max = proj_v_max.max(v);
+            }
+            // Use the intersection of knot range and projected range
+            let u0 = proj_u_min.max(u_min);
+            let u1 = proj_u_max.min(u_max);
+            let v0 = proj_v_min.max(v_min);
+            let v1 = proj_v_max.min(v_max);
+            if u0 < u1 && v0 < v1 {
+                let margin_u = (u1 - u0) * 0.01;
+                let margin_v = (v1 - v0) * 0.01;
+                (u0 - margin_u, u1 + margin_u, v0 - margin_v, v1 + margin_v)
+            } else {
+                // Projected range doesn't overlap with knot range — use knot range
+                (u_min, u_max, v_min, v_max)
+            }
+        } else {
+            (u_min, u_max, v_min, v_max)
+        }
+    } else {
+        (u_min, u_max, v_min, v_max)
+    };
+
+    // Choose resolution based on surface type and parametric range
+    let n_u = if let Surface::Nurbs(_) = surface {
+        // For NURBS, use a reasonable number of samples
+        params.angular_samples.min(32).max(8)
+    } else {
+        params.angular_samples
+    };
+    let n_v = if let Surface::Nurbs(_) = surface {
+        params.angular_samples.min(32).max(8)
+    } else {
+        params.angular_samples
+    };
+
+    for j in 0..n_v {
+        for i in 0..n_u {
+            let u = u_min + (u_max - u_min) * i as f64 / (n_u - 1).max(1) as f64;
+            let v = v_min + (v_max - v_min) * j as f64 / (n_v - 1).max(1) as f64;
             let p = surface.point_at(u, v);
             mesh.add_vertex(p);
         }
     }
 
-    for j in 0..n - 1 {
-        for i in 0..n {
-            let i_next = (i + 1) % n;
-            let v0 = (j * n + i) as u32;
-            let v1 = (j * n + i_next) as u32;
-            let v2 = ((j + 1) * n + i_next) as u32;
-            let v3 = ((j + 1) * n + i) as u32;
+    for j in 0..n_v - 1 {
+        for i in 0..n_u - 1 {
+            let v0 = (j * n_u + i) as u32;
+            let v1 = (j * n_u + i + 1) as u32;
+            let v2 = ((j + 1) * n_u + i + 1) as u32;
+            let v3 = ((j + 1) * n_u + i) as u32;
 
             if face.forward {
                 mesh.add_triangle(v0, v1, v2);
@@ -1053,7 +1110,15 @@ fn triangulate_generic_with_boundary(
     params: &TriangulationParams,
 ) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
-    let n = params.angular_samples;
+
+    // Determine the base parametric range
+    let (base_u_min, base_u_max, base_v_min, base_v_max) = if let Surface::Nurbs(nurbs) = surface {
+        let (u0, u1) = nurbs.u_range();
+        let (v0, v1) = nurbs.v_range();
+        (u0, u1, v0, v1)
+    } else {
+        (0.0, 2.0 * PI, 0.0, PI)
+    };
 
     // Compute parametric range from boundary points
     let mut u_min = f64::MAX;
@@ -1069,39 +1134,55 @@ fn triangulate_generic_with_boundary(
         v_max = v_max.max(v);
     }
 
-    // If we couldn't determine a range, use defaults
+    // Clamp the projected range to the valid parametric domain
+    u_min = u_min.max(base_u_min);
+    u_max = u_max.min(base_u_max);
+    v_min = v_min.max(base_v_min);
+    v_max = v_max.min(base_v_max);
+
+    // If we couldn't determine a range, use the base range
     if u_min >= u_max || v_min >= v_max {
-        // Fall back to generic sampling
-        let wire = Wire::new(vec![]);
-        let mut face = Face::new(surface.clone(), wire);
-        face.forward = forward;
-        face.edges = vec![];
-        return triangulate_face(&face, params);
+        u_min = base_u_min;
+        u_max = base_u_max;
+        v_min = base_v_min;
+        v_max = base_v_max;
     }
 
     // Add margin
-    let u_margin = (u_max - u_min) * 0.001;
-    let v_margin = (v_max - v_min) * 0.001;
-    u_min -= u_margin;
-    u_max += u_margin;
-    v_min -= v_margin;
-    v_max += v_margin;
+    let u_margin = (u_max - u_min) * 0.01;
+    let v_margin = (v_max - v_min) * 0.01;
+    u_min = (u_min - u_margin).max(base_u_min);
+    u_max = (u_max + u_margin).min(base_u_max);
+    v_min = (v_min - v_margin).max(base_v_min);
+    v_max = (v_max + v_margin).min(base_v_max);
 
-    for j in 0..n {
-        for i in 0..n {
-            let u = u_min + (u_max - u_min) * i as f64 / (n - 1).max(1) as f64;
-            let v = v_min + (v_max - v_min) * j as f64 / (n - 1).max(1) as f64;
+    // Choose resolution
+    let n_u = if let Surface::Nurbs(_) = surface {
+        params.angular_samples.min(32).max(8)
+    } else {
+        params.angular_samples
+    };
+    let n_v = if let Surface::Nurbs(_) = surface {
+        params.angular_samples.min(32).max(8)
+    } else {
+        params.angular_samples
+    };
+
+    for j in 0..n_v {
+        for i in 0..n_u {
+            let u = u_min + (u_max - u_min) * i as f64 / (n_u - 1).max(1) as f64;
+            let v = v_min + (v_max - v_min) * j as f64 / (n_v - 1).max(1) as f64;
             let p = surface.point_at(u, v);
             mesh.add_vertex(p);
         }
     }
 
-    for j in 0..n - 1 {
-        for i in 0..n - 1 {
-            let v0 = (j * n + i) as u32;
-            let v1 = (j * n + i + 1) as u32;
-            let v2 = ((j + 1) * n + i + 1) as u32;
-            let v3 = ((j + 1) * n + i) as u32;
+    for j in 0..n_v - 1 {
+        for i in 0..n_u - 1 {
+            let v0 = (j * n_u + i) as u32;
+            let v1 = (j * n_u + i + 1) as u32;
+            let v2 = ((j + 1) * n_u + i + 1) as u32;
+            let v3 = ((j + 1) * n_u + i) as u32;
 
             if forward {
                 mesh.add_triangle(v0, v1, v2);
