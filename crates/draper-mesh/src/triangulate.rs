@@ -679,7 +679,7 @@ fn compute_axis_v_range(face: &Face, origin: &Point3d, axis: &Direction3d) -> (f
 
 /// Ear clipping triangulation of a 2D polygon.
 /// Returns triangle indices into the original point array.
-fn ear_clip(points: &[Point2d]) -> Vec<[u32; 3]> {
+pub fn ear_clip(points: &[Point2d]) -> Vec<[u32; 3]> {
     let n = points.len();
     if n < 3 {
         return vec![];

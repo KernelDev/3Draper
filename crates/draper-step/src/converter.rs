@@ -22,11 +22,11 @@
 
 use crate::schema::{StepFile, StepValue};
 use draper_geometry::{
-    Point3d, Direction3d, Surface, Plane, CylinderSurface, SphereSurface,
+    Point3d, Point2d, Direction3d, Surface, Plane, CylinderSurface, SphereSurface,
     ConeSurface, TorusSurface, RevolutionSurface, ExtrusionSurface,
     NurbsSurface, Curve3d, Line, Circle, NurbsCurve,
 };
-use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary};
+use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary, ear_clip};
 use draper_topology::{Face, Wire, CoEdge, Edge as TopoEdge};
 use std::collections::HashMap;
 use log::{info, warn};
@@ -34,6 +34,11 @@ use log::{info, warn};
 /// Extracted face data with surface and boundary edges.
 struct FaceData {
     surface: Surface,
+    /// Edges from the outer boundary loop (FACE_OUTER_BOUND)
+    outer_edges: Vec<TopoEdge>,
+    /// Edges from inner boundary loops (FACE_BOUND = holes)
+    inner_edges: Vec<Vec<TopoEdge>>,
+    /// All edges combined (for backward compat with surface_to_mesh)
     edges: Vec<TopoEdge>,
     forward: bool,
 }
@@ -462,7 +467,7 @@ impl<'a> StepConverter<'a> {
         for type_name in &surface_types {
             for entity in self.step.find_entities_by_type(type_name) {
                 if let Some(surface) = self.extract_surface(entity.id) {
-                    let face_data = FaceData { surface, edges: vec![], forward: true };
+                    let face_data = FaceData { surface, outer_edges: vec![], inner_edges: vec![], edges: vec![], forward: true };
                     let mesh = self.surface_to_mesh(&face_data, &params, &bbox);
                     results.push(MeshInstance {
                         name: entity.type_name.clone(),
@@ -1488,15 +1493,23 @@ impl<'a> StepConverter<'a> {
                 // Extract surface
                 let surface = self.extract_face_surface_from_entity(face_entity)?;
                 
-                // Extract boundary edges
-                let edges = self.extract_face_bounds(face_entity);
+                // Extract boundary edges with inner/outer distinction
+                let (outer_edges, inner_edges) = self.extract_face_bounds_separated(face_entity);
+
+                // All edges combined for backward compat
+                let mut all_edges = outer_edges.clone();
+                for inner in &inner_edges {
+                    all_edges.extend(inner.clone());
+                }
 
                 // Extract face orientation (last param, typically .T. or .F.)
                 let forward = self.extract_face_orientation(face_entity);
 
                 Some(FaceData {
                     surface,
-                    edges,
+                    outer_edges,
+                    inner_edges,
+                    edges: all_edges,
                     forward,
                 })
             }
@@ -1505,6 +1518,8 @@ impl<'a> StepConverter<'a> {
                 if let Some(surface) = self.extract_surface(face_id) {
                     Some(FaceData {
                         surface,
+                        outer_edges: vec![],
+                        inner_edges: vec![],
                         edges: vec![],
                         forward: true,
                     })
@@ -1580,37 +1595,60 @@ impl<'a> StepConverter<'a> {
     /// Traverses: ADVANCED_FACE → bounds_list → FACE_BOUND/FACE_OUTER_BOUND →
     ///            EDGE_LOOP → ORIENTED_EDGE → EDGE_CURVE → curve + vertices
     fn extract_face_bounds(&self, face: &crate::schema::StepEntity) -> Vec<TopoEdge> {
-        let mut all_edges = Vec::new();
+        let (outer, inner) = self.extract_face_bounds_separated(face);
+        let mut all_edges = outer;
+        for loop_edges in inner {
+            all_edges.extend(loop_edges);
+        }
+        all_edges
+    }
+
+    /// Extract boundary edges from an ADVANCED_FACE entity, separating outer and inner loops.
+    /// FACE_OUTER_BOUND → outer loop (the main boundary)
+    /// FACE_BOUND → inner loop (a hole)
+    /// Returns (outer_edges, inner_loops) where inner_loops is a Vec of edge loops.
+    fn extract_face_bounds_separated(&self, face: &crate::schema::StepEntity) -> (Vec<TopoEdge>, Vec<Vec<TopoEdge>>) {
+        let mut outer_edges: Vec<TopoEdge> = Vec::new();
+        let mut inner_loops: Vec<Vec<TopoEdge>> = Vec::new();
 
         // ADVANCED_FACE params: [name, (bounds_list), surface_ref, orientation]
         // The bounds are in params[1], which is a List of references to FACE_BOUND/FACE_OUTER_BOUND
         for param in &face.params {
             // Look for the bounds list — it's a StepValue::List containing references
             if let StepValue::List(items) = param {
-                // Check if this list contains references to FACE_BOUND entities
                 let mut found_bound = false;
                 for item in items {
                     if let Some(bound_id) = self.get_ref(item) {
                         if let Some(bound_entity) = self.step.find_entity(bound_id) {
-                            if bound_entity.type_name == "FACE_BOUND" 
-                                || bound_entity.type_name == "FACE_OUTER_BOUND" 
-                            {
+                            if bound_entity.type_name == "FACE_OUTER_BOUND" {
                                 found_bound = true;
                                 if let Some(loop_edges) = self.resolve_face_bound(bound_entity) {
-                                    all_edges.extend(loop_edges);
+                                    outer_edges = loop_edges;
+                                }
+                            } else if bound_entity.type_name == "FACE_BOUND" {
+                                found_bound = true;
+                                if let Some(loop_edges) = self.resolve_face_bound(bound_entity) {
+                                    inner_loops.push(loop_edges);
                                 }
                             }
                         }
                     }
                 }
-                // If we found bounds in this list, don't process it again as a different list type
+                // If we found bounds in this list, don't process it again
                 if found_bound {
-                    return all_edges;
+                    return (outer_edges, inner_loops);
                 }
             }
         }
 
-        all_edges
+        // Fallback: if no FACE_OUTER_BOUND found but FACE_BOUND exists,
+        // treat the first FACE_BOUND as the outer boundary
+        // (some STEP files use FACE_BOUND for both outer and inner)
+        if outer_edges.is_empty() && !inner_loops.is_empty() {
+            outer_edges = inner_loops.remove(0);
+        }
+
+        (outer_edges, inner_loops)
     }
 
     /// Resolve a FACE_BOUND or FACE_OUTER_BOUND entity to a list of Edge objects.
@@ -2755,13 +2793,34 @@ impl<'a> StepConverter<'a> {
             return triangulate_face(&face, params);
         }
 
-        // Collect 3D boundary points from edge curves by sampling each edge
+        // For planar faces with inner loops (holes), use the dedicated hole-aware path
+        if let Surface::Plane(ref plane) = face_data.surface {
+            if !face_data.inner_edges.is_empty() {
+                return self.triangulate_planar_face_with_holes(
+                    plane, &face_data.outer_edges, &face_data.inner_edges, face_data.forward,
+                );
+            }
+        }
+
+        // Collect 3D boundary points from outer edge curves by sampling each edge
         let mut boundary_points = Vec::new();
-        for edge in &face_data.edges {
+        for edge in &face_data.outer_edges {
             for i in 0..64 {
                 let t = i as f64 / 63.0;
                 if let Some(p) = edge.point_at(t) {
                     boundary_points.push(p);
+                }
+            }
+        }
+
+        // If outer boundary is empty, try all edges
+        if boundary_points.is_empty() {
+            for edge in &face_data.edges {
+                for i in 0..64 {
+                    let t = i as f64 / 63.0;
+                    if let Some(p) = edge.point_at(t) {
+                        boundary_points.push(p);
+                    }
                 }
             }
         }
@@ -2787,6 +2846,99 @@ impl<'a> StepConverter<'a> {
         face.edges = face_data.edges.clone();
 
         triangulate_face(&face, params)
+    }
+
+    /// Triangulate a planar face with holes using the bridge-edge technique.
+    /// This connects each hole to the outer boundary with a pair of coincident edges,
+    /// creating a single polygon that can be ear-clipped.
+    fn triangulate_planar_face_with_holes(
+        &self,
+        plane: &Plane,
+        outer_edges: &[TopoEdge],
+        inner_loops: &[Vec<TopoEdge>],
+        forward: bool,
+    ) -> TriangleMesh {
+        let mut mesh = TriangleMesh::new();
+
+        // Sample outer boundary points
+        let outer_points_3d = self.sample_edges(outer_edges);
+        if outer_points_3d.is_empty() {
+            return mesh;
+        }
+
+        // Project all points onto the plane's 2D coordinate system
+        let project = |p: &Point3d| -> Point2d {
+            let dx = p.x - plane.origin.x;
+            let dy = p.y - plane.origin.y;
+            let dz = p.z - plane.origin.z;
+            Point2d::new(
+                dx * plane.u_dir.x + dy * plane.u_dir.y + dz * plane.u_dir.z,
+                dx * plane.v_dir.x + dy * plane.v_dir.y + dz * plane.v_dir.z,
+            )
+        };
+
+        let outer_2d: Vec<Point2d> = outer_points_3d.iter().map(|p| project(p)).collect();
+
+        // Sample inner loop (hole) points
+        let mut hole_points_3d: Vec<Vec<Point3d>> = Vec::new();
+        let mut hole_points_2d: Vec<Vec<Point2d>> = Vec::new();
+        for inner_edges in inner_loops {
+            let pts_3d = self.sample_edges(inner_edges);
+            if pts_3d.is_empty() { continue; }
+            let pts_2d: Vec<Point2d> = pts_3d.iter().map(|p| project(p)).collect();
+            hole_points_3d.push(pts_3d);
+            hole_points_2d.push(pts_2d);
+        }
+
+        // Use bridge-edge technique to merge holes into the outer polygon
+        let (merged_2d, merged_3d) = merge_holes_into_polygon(&outer_2d, &outer_points_3d, &hole_points_2d, &hole_points_3d);
+
+        // Ear clipping triangulation of the merged polygon
+        let triangles = ear_clip(&merged_2d);
+
+        // Add vertices and triangles
+        for p in &merged_3d {
+            mesh.add_vertex(*p);
+        }
+        for tri in &triangles {
+            if forward {
+                mesh.add_triangle(tri[0], tri[1], tri[2]);
+            } else {
+                mesh.add_triangle(tri[0], tri[2], tri[1]);
+            }
+        }
+
+        mesh
+    }
+
+    /// Sample points from a list of edges at uniform parameter intervals.
+    fn sample_edges(&self, edges: &[TopoEdge]) -> Vec<Point3d> {
+        let mut points = Vec::new();
+        for edge in edges {
+            for i in 0..32 {
+                let t = i as f64 / 32.0;
+                if let Some(p) = edge.point_at(t) {
+                    points.push(p);
+                }
+            }
+        }
+
+        // Remove near-duplicate consecutive points
+        if !points.is_empty() {
+            let mut unique = vec![points[0]];
+            for p in &points[1..] {
+                if !unique.last().unwrap().is_coincident_with(p) {
+                    unique.push(*p);
+                }
+            }
+            // Also check last vs first
+            if unique.len() > 1 && unique.last().unwrap().is_coincident_with(&unique[0]) {
+                unique.pop();
+            }
+            points = unique;
+        }
+
+        points
     }
 
     /// Triangulate a PLANE surface with no boundary edges, using the bounding box
@@ -3081,6 +3233,117 @@ fn expand_knot_vector(multiplicities: &[usize], knot_values: &[f64]) -> Vec<f64>
     result
 }
 
+/// Merge holes into an outer polygon using the bridge-edge technique.
+/// For each hole, find the rightmost point of the hole, then find the
+/// closest visible point on the outer polygon (or previously merged holes),
+/// and insert the hole at that point with a bridge edge.
+///
+/// The resulting polygon has all holes connected via zero-width bridges,
+/// forming a single simple polygon that can be triangulated with ear-clipping.
+fn merge_holes_into_polygon(
+    outer_2d: &[Point2d],
+    outer_3d: &[Point3d],
+    holes_2d: &[Vec<Point2d>],
+    holes_3d: &[Vec<Point3d>],
+) -> (Vec<Point2d>, Vec<Point3d>) {
+    if outer_2d.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    if holes_2d.is_empty() {
+        return (outer_2d.to_vec(), outer_3d.to_vec());
+    }
+
+    let mut poly_2d: Vec<Point2d> = outer_2d.to_vec();
+    let mut poly_3d: Vec<Point3d> = outer_3d.to_vec();
+
+    // Sort holes by rightmost point (u-coordinate) descending,
+    // so we process rightmost holes first for more stable bridge construction
+    let mut hole_indices: Vec<usize> = (0..holes_2d.len()).collect();
+    hole_indices.sort_by(|&a, &b| {
+        let max_u_a = holes_2d[a].iter().map(|p| p.u).fold(f64::NEG_INFINITY, f64::max);
+        let max_u_b = holes_2d[b].iter().map(|p| p.u).fold(f64::NEG_INFINITY, f64::max);
+        max_u_b.partial_cmp(&max_u_a).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    for hole_idx in hole_indices {
+        let hole_2d = &holes_2d[hole_idx];
+        let hole_3d = &holes_3d[hole_idx];
+        if hole_2d.is_empty() { continue; }
+
+        // Find the rightmost point of the hole
+        let (rightmost_idx, _) = hole_2d.iter().enumerate()
+            .max_by(|(_, a), (_, b)| a.u.partial_cmp(&b.u).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or((0, &hole_2d[0]));
+
+        // Find the closest point on the outer polygon to the rightmost hole point.
+        // For simplicity, find the polygon vertex that is visible from the hole's
+        // rightmost point and is closest in the u direction.
+        let hole_pt = hole_2d[rightmost_idx];
+
+        let mut best_poly_idx = 0;
+        let mut best_dist = f64::MAX;
+        for (i, pt) in poly_2d.iter().enumerate() {
+            let dx = pt.u - hole_pt.u;
+            let dy = pt.v - hole_pt.v;
+            let dist = dx * dx + dy * dy;
+            if dist < best_dist {
+                best_dist = dist;
+                best_poly_idx = i;
+            }
+        }
+
+        // Insert the hole into the polygon at the bridge point
+        // The bridge creates: ...poly[best] -> hole[rightmost] -> ...hole -> hole[rightmost] -> poly[best]...
+        // This is done by inserting the hole (rotated to start at rightmost_idx)
+        // twice at the bridge point, with the rightmost point duplicated.
+
+        // Rotate hole to start at rightmost_idx
+        let n_hole = hole_2d.len();
+        let mut rotated_hole_2d = Vec::with_capacity(n_hole + 1);
+        let mut rotated_hole_3d = Vec::with_capacity(n_hole + 1);
+        for i in 0..=n_hole {
+            let idx = (rightmost_idx + i) % n_hole;
+            rotated_hole_2d.push(hole_2d[idx]);
+            rotated_hole_3d.push(hole_3d[idx]);
+        }
+
+        // Insert: poly[..best+1] + bridge_point + hole + bridge_point + poly[best..]
+        let mut new_poly_2d = Vec::new();
+        let mut new_poly_3d = Vec::new();
+
+        // Part 1: outer polygon up to and including the bridge point
+        for i in 0..=best_poly_idx {
+            new_poly_2d.push(poly_2d[i]);
+            new_poly_3d.push(poly_3d[i]);
+        }
+
+        // Part 2: bridge to hole (rightmost point)
+        new_poly_2d.push(hole_2d[rightmost_idx]);
+        new_poly_3d.push(hole_3d[rightmost_idx]);
+
+        // Part 3: hole vertices starting from rightmost+1 going around back to rightmost
+        for i in 1..rotated_hole_2d.len() {
+            new_poly_2d.push(rotated_hole_2d[i]);
+            new_poly_3d.push(rotated_hole_3d[i]);
+        }
+
+        // Part 4: bridge back to the same outer polygon point
+        new_poly_2d.push(poly_2d[best_poly_idx]);
+        new_poly_3d.push(poly_3d[best_poly_idx]);
+
+        // Part 5: rest of outer polygon after bridge point
+        for i in (best_poly_idx + 1)..poly_2d.len() {
+            new_poly_2d.push(poly_2d[i]);
+            new_poly_3d.push(poly_3d[i]);
+        }
+
+        poly_2d = new_poly_2d;
+        poly_3d = new_poly_3d;
+    }
+
+    (poly_2d, poly_3d)
+}
+
 #[cfg(test)]
 mod diag_tests {
     use super::*;
@@ -3141,7 +3404,12 @@ mod diag_tests {
         }
         eprintln!("  Surface types extracted: {:?}", surface_types);
         eprintln!("  Faces with NO surface: {}", faces_with_no_surface);
-        
+
+        // Count FACE_BOUND vs FACE_OUTER_BOUND usage
+        let outer_bounds = step.find_entities_by_type("FACE_OUTER_BOUND").len();
+        let inner_bounds = step.find_entities_by_type("FACE_BOUND").len();
+        eprintln!("  FACE_OUTER_BOUND: {}, FACE_BOUND (holes): {}", outer_bounds, inner_bounds);
+
         // Try full conversion
         let converter = StepConverter::new(&step);
         match converter.convert_instances() {
@@ -3169,4 +3437,6 @@ mod diag_tests {
     fn test_drill() { diagnose_file("/home/z/my-project/3Draper/test/drill_top.stp"); }
     #[test]
     fn test_transmission() { diagnose_file("/home/z/my-project/3Draper/test/transmission_top.stp"); }
+    #[test]
+    fn test_3_05_078() { diagnose_file("/home/z/my-project/3Draper/test/3.05.078.stp"); }
 }
