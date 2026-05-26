@@ -787,8 +787,55 @@ impl<'a> StepConverter<'a> {
         let shell_id = self.find_shell_ref_by_brep_id(brep_id)?;
         let face_data_list = self.extract_shell_faces(shell_id)?;
         let mut mesh = TriangleMesh::new();
-        for face_data in &face_data_list {
+        for (fi, face_data) in face_data_list.iter().enumerate() {
+            let surface_type = match &face_data.surface {
+                Surface::Plane(_) => "Plane",
+                Surface::Cylinder(_) => "Cylinder",
+                Surface::Cone(_) => "Cone",
+                Surface::Sphere(_) => "Sphere",
+                Surface::Torus(_) => "Torus",
+                Surface::Revolution(_) => "Revolution",
+                Surface::Extrusion(_) => "Extrusion",
+                Surface::Nurbs(n) => {
+                    let (u0, u1) = n.u_range();
+                    let (v0, v1) = n.v_range();
+                    &format!("Nurbs(deg={}/{}, cps={}x{}, knots_u={}({:.2}..{:.2}), knots_v={}({:.2}..{:.2}))",
+                        n.u_degree, n.v_degree, n.control_points.len(), 
+                        n.control_points.first().map(|r| r.len()).unwrap_or(0),
+                        n.u_knots.len(), u0, u1, n.v_knots.len(), v0, v1)
+                }
+            };
+            let n_outer = face_data.outer_edges.len();
+            let n_inner = face_data.inner_edges.len();
+
+            // Sample the surface at a few points to check if evaluation works
+            if let Surface::Nurbs(ref n) = face_data.surface {
+                let (u0, u1) = n.u_range();
+                let (v0, v1) = n.v_range();
+                let p00 = face_data.surface.point_at(u0, v0);
+                let p_mid = face_data.surface.point_at((u0+u1)/2.0, (v0+v1)/2.0);
+                let p11 = face_data.surface.point_at(u1, v1);
+                eprintln!("BREP #{} face[{}]: {} outer={} inner={} ur={:.4}..{:.4} vr={:.4}..{:.4}", 
+                    brep_id, fi, surface_type, n_outer, n_inner, u0, u1, v0, v1);
+                eprintln!("  sample(0,0)=({:.4},{:.4},{:.4}) mid=({:.4},{:.4},{:.4}) end=({:.4},{:.4},{:.4})",
+                    p00.x, p00.y, p00.z, p_mid.x, p_mid.y, p_mid.z, p11.x, p11.y, p11.z);
+                // Print first 3 control points
+                for (ri, row) in n.control_points.iter().enumerate().take(3) {
+                    for (ci, cp) in row.iter().enumerate().take(3) {
+                        eprintln!("  cp[{}][{}]=({:.4},{:.4},{:.4})", ri, ci, cp.x, cp.y, cp.z);
+                    }
+                }
+                eprintln!("  u_knots={:?}", &n.u_knots);
+                eprintln!("  v_knots={:?}", &n.v_knots);
+            } else {
+                eprintln!("BREP #{} face[{}]: {} outer={} inner={}", brep_id, fi, surface_type, n_outer, n_inner);
+            }
+
             let face_mesh = self.surface_to_mesh(face_data, params, bbox);
+            let (fbmin, fbmax) = face_mesh.bounding_box();
+            eprintln!("  -> v={} t={} bbox=({:.2},{:.2},{:.2})..({:.2},{:.2},{:.2})",
+                face_mesh.vertex_count(), face_mesh.triangle_count(),
+                fbmin.x, fbmin.y, fbmin.z, fbmax.x, fbmax.y, fbmax.z);
             mesh.merge(&face_mesh);
         }
         Some(mesh)
@@ -1636,6 +1683,12 @@ impl<'a> StepConverter<'a> {
                 }
                 // If we found bounds in this list, don't process it again
                 if found_bound {
+                    // CRITICAL: If no FACE_OUTER_BOUND was found but FACE_BOUND entries exist,
+                    // the first FACE_BOUND is the outer boundary (not a hole).
+                    // Many STEP files use only FACE_BOUND (no FACE_OUTER_BOUND at all).
+                    if outer_edges.is_empty() && !inner_loops.is_empty() {
+                        outer_edges = inner_loops.remove(0);
+                    }
                     return (outer_edges, inner_loops);
                 }
             }
@@ -2167,19 +2220,76 @@ impl<'a> StepConverter<'a> {
         u_degree: usize,
         v_degree: usize,
     ) -> (Vec<f64>, Vec<f64>) {
-        // Try to extract from B_SPLINE_SURFACE_WITH_KNOTS format:
-        // params contain: ... (u_multiplicities), (v_multiplicities), (u_knot_values), (v_knot_values), knot_type
-
         let expected_u_knots = n_u + u_degree + 1;
         let expected_v_knots = n_v + v_degree + 1;
 
-        // First, collect all numeric lists from the entity params
+        // Strategy 1: Use positional order from B_SPLINE_SURFACE_WITH_KNOTS format.
+        // The sub-entity's params are: (u_mults), (v_mults), (u_knot_values), (v_knot_values), knot_type_enum
+        // This is the most reliable approach since the STEP format is strictly positional.
+        {
+            let lists: Vec<&[StepValue]> = entity.params.iter()
+                .filter_map(|p| if let StepValue::List(items) = p { Some(items.as_slice()) } else { None })
+                .collect();
+
+            if lists.len() >= 4 {
+                // First two are multiplicities, next two are knot values
+                let u_mults: Vec<usize> = lists[0].iter()
+                    .filter_map(|v| self.get_float(v).map(|f| f as usize))
+                    .collect();
+                let v_mults: Vec<usize> = lists[1].iter()
+                    .filter_map(|v| self.get_float(v).map(|f| f as usize))
+                    .collect();
+                let u_knot_vals: Vec<f64> = lists[2].iter()
+                    .filter_map(|v| self.get_float(v))
+                    .collect();
+                let v_knot_vals: Vec<f64> = lists[3].iter()
+                    .filter_map(|v| self.get_float(v))
+                    .collect();
+
+                if u_mults.len() == u_knot_vals.len() && v_mults.len() == v_knot_vals.len() {
+                    let u_knots = expand_knot_vector(&u_mults, &u_knot_vals);
+                    let v_knots = expand_knot_vector(&v_mults, &v_knot_vals);
+
+                    if u_knots.len() == expected_u_knots && v_knots.len() == expected_v_knots {
+                        return (u_knots, v_knots);
+                    }
+                }
+
+                // Try swapped: maybe the entity has a different param layout
+                // Some STEP writers put knot values before multiplicities
+                if lists.len() >= 4 {
+                    let u_knot_vals2: Vec<f64> = lists[0].iter()
+                        .filter_map(|v| self.get_float(v))
+                        .collect();
+                    let v_knot_vals2: Vec<f64> = lists[1].iter()
+                        .filter_map(|v| self.get_float(v))
+                        .collect();
+                    let u_mults2: Vec<usize> = lists[2].iter()
+                        .filter_map(|v| self.get_float(v).map(|f| f as usize))
+                        .collect();
+                    let v_mults2: Vec<usize> = lists[3].iter()
+                        .filter_map(|v| self.get_float(v).map(|f| f as usize))
+                        .collect();
+
+                    if u_mults2.len() == u_knot_vals2.len() && v_mults2.len() == v_knot_vals2.len() {
+                        let u_knots = expand_knot_vector(&u_mults2, &u_knot_vals2);
+                        let v_knots = expand_knot_vector(&v_mults2, &v_knot_vals2);
+
+                        if u_knots.len() == expected_u_knots && v_knots.len() == expected_v_knots {
+                            return (u_knots, v_knots);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Strategy 2: Heuristic approach — collect all numeric lists and try to distinguish
+        // multiplicities from knot values based on their properties.
         let mut numeric_lists: Vec<Vec<f64>> = Vec::new();
         let mut int_lists: Vec<Vec<usize>> = Vec::new();
 
         for param in entity.params.iter() {
             if let StepValue::List(items) = param {
-                // Try as integer list (for multiplicities)
                 let ints: Vec<usize> = items.iter()
                     .filter_map(|v| {
                         if let StepValue::Integer(i) = v { Some(*i as usize) }
@@ -2188,7 +2298,6 @@ impl<'a> StepConverter<'a> {
                     })
                     .collect();
 
-                // Try as float list (for knot values)
                 let floats: Vec<f64> = items.iter()
                     .filter_map(|v| self.get_float(v))
                     .collect();
@@ -2202,21 +2311,13 @@ impl<'a> StepConverter<'a> {
             }
         }
 
-        // Try to match multiplicities and knot values
-        // The B_SPLINE_SURFACE_WITH_KNOTS format has:
-        //   u_mults, v_mults, u_knot_values, v_knot_values
-        // Multiplicities are small integers, knot values are floats
-        // We need to find which lists are multiplicities and which are knot values
-
-        // Strategy: separate lists into "integer-like" (multiplicities) and "float" (knot values)
-        // A list is "integer-like" if all values are small positive integers (<= max_knot_count)
+        // Separate into multiplicities and knot values based on value properties
         let max_mult = (n_u + n_v + u_degree + v_degree + 10).max(20);
         let mut mult_lists: Vec<Vec<usize>> = Vec::new();
         let mut knot_value_lists: Vec<Vec<f64>> = Vec::new();
 
         for ints in &int_lists {
             if ints.iter().all(|v| *v > 0 && *v <= max_mult) {
-                // Check sum matches expected
                 let sum: usize = ints.iter().sum();
                 if sum == expected_u_knots || sum == expected_v_knots {
                     mult_lists.push(ints.clone());
@@ -2225,18 +2326,13 @@ impl<'a> StepConverter<'a> {
         }
 
         for floats in &numeric_lists {
-            // Check if this could be a knot value list (distinct values, sorted)
             if floats.windows(2).all(|w| w[0] <= w[1] + 1e-10) {
-                // Could be knot values
                 knot_value_lists.push(floats.clone());
             }
         }
 
         // Try to pair multiplicities with knot values
         if mult_lists.len() >= 2 && knot_value_lists.len() >= 2 {
-            // Find u and v pairs
-            // u_mults sum should equal expected_u_knots
-            // v_mults sum should equal expected_v_knots
             let u_mult_idx = mult_lists.iter().position(|m| m.iter().sum::<usize>() == expected_u_knots);
             let v_mult_idx = mult_lists.iter().position(|m| m.iter().sum::<usize>() == expected_v_knots);
             let u_knot_idx = knot_value_lists.iter().position(|k| k.len() > 0 &&
@@ -2255,12 +2351,10 @@ impl<'a> StepConverter<'a> {
 
             // Fallback: try all pairings
             for (mi, m) in mult_lists.iter().enumerate() {
-                let m_sum: usize = m.iter().sum();
                 for (ki, k) in knot_value_lists.iter().enumerate() {
                     if m.len() == k.len() {
                         let expanded = expand_knot_vector(m, k);
                         if expanded.len() == expected_u_knots {
-                            // This is the u pair, find v pair
                             for (mi2, m2) in mult_lists.iter().enumerate() {
                                 if mi2 == mi { continue; }
                                 for (ki2, k2) in knot_value_lists.iter().enumerate() {
@@ -2279,46 +2373,16 @@ impl<'a> StepConverter<'a> {
             }
         }
 
-        // If we have at least 2 numeric lists and the first match works
-        if knot_value_lists.len() >= 2 && mult_lists.len() >= 2 {
-            // Try expanding with first available
-            for m in &mult_lists {
-                for k in &knot_value_lists {
-                    if m.len() == k.len() {
-                        let expanded = expand_knot_vector(m, k);
-                        if expanded.len() == expected_u_knots || expanded.len() == expected_v_knots {
-                            // Found one, find the other
-                            for m2 in &mult_lists {
-                                for k2 in &knot_value_lists {
-                                    if m2.len() == k2.len() && (k2.as_ptr() != k.as_ptr() || m2.as_ptr() != m.as_ptr()) {
-                                        let expanded2 = expand_knot_vector(m2, k2);
-                                        if (expanded.len() == expected_u_knots && expanded2.len() == expected_v_knots) {
-                                            return (expanded, expanded2);
-                                        }
-                                        if (expanded2.len() == expected_u_knots && expanded.len() == expected_v_knots) {
-                                            return (expanded2, expanded);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Last resort: if we found some lists, use them as-is (possibly raw knot values without expansion)
+        // Strategy 3: Try using numeric lists directly (without multiplicity expansion)
         if numeric_lists.len() >= 2 {
             if let Some(k) = numeric_lists.iter().find(|l| l.len() == expected_u_knots) {
                 if let Some(k2) = numeric_lists.iter().find(|l| l.len() == expected_v_knots && l.as_ptr() != k.as_ptr()) {
                     return (k.clone(), k2.clone());
                 }
             }
-            // Just use the first two
-            return (numeric_lists[0].clone(), numeric_lists[1].clone());
         }
 
-        // Generate uniform knot vectors as fallback
+        // Strategy 4: Generate uniform knot vectors as fallback
         let u_n = expected_u_knots;
         let v_n = expected_v_knots;
         let u_knots = (0..u_n).map(|i| i as f64 / (u_n - 1).max(1) as f64).collect();

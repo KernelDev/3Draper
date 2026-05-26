@@ -693,9 +693,9 @@ impl Surface {
     }
 }
 
-/// NURBS surface evaluation using de Boor's algorithm in 2D.
-/// Evaluates by performing de Boor in the u-direction for each row of control points,
-/// then de Boor in the v-direction on the resulting intermediate points.
+/// NURBS surface evaluation using de Boor's algorithm.
+/// Uses tensor-product approach: evaluate B-spline in v for each relevant row,
+/// then evaluate B-spline in u on the resulting intermediate points.
 fn nurbs_surface_eval(nurbs: &NurbsSurface, u: f64, v: f64) -> Point3d {
     if nurbs.control_points.is_empty() || nurbs.control_points[0].is_empty() {
         return Point3d::ORIGIN;
@@ -712,90 +712,47 @@ fn nurbs_surface_eval(nurbs: &NurbsSurface, u: f64, v: f64) -> Point3d {
     let v_min = if nurbs.v_knots.len() > q { nurbs.v_knots[q] } else { 0.0 };
     let v_max = if nurbs.v_knots.len() > q + 1 { nurbs.v_knots[nurbs.v_knots.len() - q - 1] } else { 1.0 };
 
-    let u_clamped = u.clamp(u_min, u_max);
-    let v_clamped = v.clamp(v_min, v_max);
+    let u_c = u.clamp(u_min, u_max);
+    let v_c = v.clamp(v_min, v_max);
 
-    // Find u knot span
-    let mut k_u = p;
-    while k_u < nurbs.u_knots.len() - p - 1 && nurbs.u_knots[k_u + 1] <= u_clamped {
-        k_u += 1;
-    }
-    k_u = k_u.min(n_u - 1);
+    // Find u knot span: T[k_u] <= u_c < T[k_u+1]
+    let k_u = find_knot_span(&nurbs.u_knots, p, u_c, n_u);
+    // Find v knot span: T[k_v] <= v_c < T[k_v+1]
+    let k_v = find_knot_span(&nurbs.v_knots, q, v_c, n_v);
 
-    // Find v knot span
-    let mut k_v = q;
-    while k_v < nurbs.v_knots.len() - q - 1 && nurbs.v_knots[k_v + 1] <= v_clamped {
-        k_v += 1;
-    }
-    k_v = k_v.min(n_v - 1);
-
-    // For each row affected by the u knot span, evaluate a NURBS curve in u
-    // This gives us p+1 intermediate control points in the v direction
+    // Step 1: For each row i in [k_u-p .. k_u], evaluate B-spline in v direction
+    // This gives us p+1 intermediate points
     let mut intermediate: Vec<(f64, f64, f64, f64)> = Vec::with_capacity(p + 1);
 
     for i in 0..=p {
-        let row_idx = if k_u >= p { k_u - p + i } else { i.min(n_u - 1) };
+        let row_idx = k_u - p + i;
         if row_idx >= n_u {
+            // Out of bounds — use last valid row
+            let last = intermediate.last().copied().unwrap_or((0.0, 0.0, 0.0, 1.0));
+            intermediate.push(last);
             continue;
         }
 
-        // Collect control points and weights for this row
+        // Collect q+1 control points in v direction (weighted)
         let mut pts: Vec<(f64, f64, f64, f64)> = Vec::with_capacity(q + 1);
         for j in 0..=q {
-            let col_idx = if k_v >= q { k_v - q + j } else { j.min(n_v - 1) };
-            if col_idx >= n_v {
-                continue;
-            }
+            let col_idx = k_v - q + j;
+            let col_idx = if col_idx >= n_v { n_v - 1 } else { col_idx };
             let cp = &nurbs.control_points[row_idx][col_idx];
             let w = nurbs.weights.get(row_idx).and_then(|r| r.get(col_idx)).copied().unwrap_or(1.0);
             pts.push((cp.x * w, cp.y * w, cp.z * w, w));
         }
 
-        // De Boor in v direction
-        for r in 1..pts.len() {
-            for j in (r..pts.len()).rev() {
-                let i0 = if k_v >= q { k_v - q + j } else { j }.min(nurbs.v_knots.len().saturating_sub(1));
-                let i1 = (i0 + 1).min(nurbs.v_knots.len().saturating_sub(1));
-                let denom_idx = (i0 + q - r + 1).min(nurbs.v_knots.len().saturating_sub(1));
+        // De Boor in v direction (standard algorithm)
+        de_boor_step(&mut pts, &nurbs.v_knots, q, k_v, v_c);
 
-                let d = nurbs.v_knots[denom_idx] - nurbs.v_knots[i1];
-                let a = if d.abs() < 1e-15 { 0.0 } else { (v_clamped - nurbs.v_knots[i1]) / d };
-                let b = 1.0 - a;
-
-                pts[j] = (
-                    a * pts[j].0 + b * pts[j - 1].0,
-                    a * pts[j].1 + b * pts[j - 1].1,
-                    a * pts[j].2 + b * pts[j - 1].2,
-                    a * pts[j].3 + b * pts[j - 1].3,
-                );
-            }
-        }
-
-        if !pts.is_empty() {
-            let last = pts.last().unwrap();
-            intermediate.push(*last);
+        if let Some(&last) = pts.last() {
+            intermediate.push(last);
         }
     }
 
-    // Now de Boor in u direction on the intermediate points
-    for r in 1..intermediate.len() {
-        for j in (r..intermediate.len()).rev() {
-            let i0 = if k_u >= p { k_u - p + j } else { j }.min(nurbs.u_knots.len().saturating_sub(1));
-            let i1 = (i0 + 1).min(nurbs.u_knots.len().saturating_sub(1));
-            let denom_idx = (i0 + p - r + 1).min(nurbs.u_knots.len().saturating_sub(1));
-
-            let d = nurbs.u_knots[denom_idx] - nurbs.u_knots[i1];
-            let a = if d.abs() < 1e-15 { 0.0 } else { (u_clamped - nurbs.u_knots[i1]) / d };
-            let b = 1.0 - a;
-
-            intermediate[j] = (
-                a * intermediate[j].0 + b * intermediate[j - 1].0,
-                a * intermediate[j].1 + b * intermediate[j - 1].1,
-                a * intermediate[j].2 + b * intermediate[j - 1].2,
-                a * intermediate[j].3 + b * intermediate[j - 1].3,
-            );
-        }
-    }
+    // Step 2: De Boor in u direction on the intermediate points
+    de_boor_step(&mut intermediate, &nurbs.u_knots, p, k_u, u_c);
 
     if intermediate.is_empty() {
         return Point3d::ORIGIN;
@@ -807,5 +764,64 @@ fn nurbs_surface_eval(nurbs: &NurbsSurface, u: f64, v: f64) -> Point3d {
         Point3d::ORIGIN
     } else {
         Point3d::new(result.0 / w, result.1 / w, result.2 / w)
+    }
+}
+
+/// Find the knot span index k such that T[k] <= t < T[k+1]
+/// (with special handling for t at the end of the domain).
+fn find_knot_span(knots: &[f64], degree: usize, t: f64, n_control_points: usize) -> usize {
+    // Special case: t at or beyond the end of the domain
+    if t >= knots[n_control_points] {
+        return n_control_points - 1;
+    }
+
+    // Binary search for the knot span
+    let mut lo = degree;
+    let mut hi = n_control_points;
+    let mut mid = (lo + hi) / 2;
+    while t < knots[mid] || t >= knots[mid + 1] {
+        if t < knots[mid] {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+        mid = (lo + hi) / 2;
+    }
+    mid
+}
+
+/// Perform the de Boor refinement steps on an array of (weighted) control points.
+/// `pts` has (degree+1) elements, indexed 0..=degree.
+/// After this function, pts[degree] contains the evaluated point.
+///
+/// Implements the standard de Boor algorithm:
+///   for r = 1 .. degree:
+///     for j = degree down to r:
+///       i = k - degree + j
+///       alpha = (t - knots[i]) / (knots[i + degree + 1 - r] - knots[i])
+///       d[j] = alpha * d[j] + (1-alpha) * d[j-1]
+fn de_boor_step(pts: &mut [(f64, f64, f64, f64)], knots: &[f64], degree: usize, k: usize, t: f64) {
+    for r in 1..=degree {
+        for j in (r..=degree).rev() {
+            let i = k - degree + j;
+            let alpha = if i + degree + 1 - r < knots.len() && i < knots.len() {
+                let denom = knots[i + degree + 1 - r] - knots[i];
+                if denom.abs() < 1e-15 {
+                    0.0
+                } else {
+                    (t - knots[i]) / denom
+                }
+            } else {
+                0.0
+            };
+            let beta = 1.0 - alpha;
+
+            pts[j] = (
+                alpha * pts[j].0 + beta * pts[j - 1].0,
+                alpha * pts[j].1 + beta * pts[j - 1].1,
+                alpha * pts[j].2 + beta * pts[j - 1].2,
+                alpha * pts[j].3 + beta * pts[j - 1].3,
+            );
+        }
     }
 }

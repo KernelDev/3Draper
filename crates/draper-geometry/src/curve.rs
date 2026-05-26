@@ -260,52 +260,89 @@ fn nurbs_eval(nurbs: &NurbsCurve, t: f64) -> Point3d {
         return Point3d::ORIGIN;
     }
     if n == 1 {
-        return nurbs.control_points[0];
+        let w = nurbs.weights.get(0).copied().unwrap_or(1.0);
+        if w.abs() < 1e-15 {
+            return Point3d::ORIGIN;
+        }
+        let cp = &nurbs.control_points[0];
+        return Point3d::new(cp.x, cp.y, cp.z);
     }
 
     let p = nurbs.degree;
-    // Find knot span
-    let mut k = p;
-    while k < nurbs.knots.len() - 1 && nurbs.knots[k + 1] < t {
-        k += 1;
-    }
-    k = k.min(n - 1);
 
-    // De Boor's algorithm
-    let mut pts: Vec<(f64, f64, f64)> = Vec::with_capacity(p + 1);
+    // Clamp to valid knot range
+    let t_min = if nurbs.knots.len() > p { nurbs.knots[p] } else { 0.0 };
+    let t_max = if nurbs.knots.len() > p { nurbs.knots[nurbs.knots.len() - p - 1] } else { 1.0 };
+    let t_c = t.clamp(t_min, t_max);
+
+    // Find knot span: T[k] <= t_c < T[k+1]
+    let k = find_knot_span_curve(&nurbs.knots, p, t_c, n);
+
+    // Collect p+1 weighted control points
+    let mut pts: Vec<(f64, f64, f64, f64)> = Vec::with_capacity(p + 1);
     for i in 0..=p {
-        let idx = (k - p + i).min(n - 1);
-        let w = nurbs.weights[idx];
-        pts.push((
-            nurbs.control_points[idx].x * w,
-            nurbs.control_points[idx].y * w,
-            nurbs.control_points[idx].z * w,
-        ));
+        let idx = k - p + i;
+        let idx = if idx >= n { n - 1 } else { idx };
+        let w = nurbs.weights.get(idx).copied().unwrap_or(1.0);
+        let cp = &nurbs.control_points[idx];
+        pts.push((cp.x * w, cp.y * w, cp.z * w, w));
     }
 
-    for r in 1..=p {
-        for j in (r..=p).rev() {
-            let i0 = k - p + j;
-            let i1 = i0 + 1;
-            let a = if i1 < nurbs.knots.len() && i0 + p - r + 1 < nurbs.knots.len() {
-                let d = nurbs.knots[i0 + p - r + 1] - nurbs.knots[i1];
-                if d.abs() < 1e-15 { 0.0 } else { (t - nurbs.knots[i1]) / d }
-            } else {
-                0.0
-            };
-            let b = 1.0 - a;
-            pts[j] = (
-                a * pts[j].0 + b * pts[j - 1].0,
-                a * pts[j].1 + b * pts[j - 1].1,
-                a * pts[j].2 + b * pts[j - 1].2,
-            );
-        }
-    }
+    // De Boor's algorithm (standard)
+    de_boor_step_curve(&mut pts, &nurbs.knots, p, k, t_c);
 
-    let w = pts[p].0.hypot(pts[p].1.hypot(pts[p].2));
+    let result = pts.last().unwrap();
+    let w = result.3;
     if w.abs() < 1e-15 {
         Point3d::ORIGIN
     } else {
-        Point3d::new(pts[p].0 / w, pts[p].1 / w, pts[p].2 / w)
+        Point3d::new(result.0 / w, result.1 / w, result.2 / w)
+    }
+}
+
+/// Find knot span for curve: T[k] <= t < T[k+1]
+fn find_knot_span_curve(knots: &[f64], degree: usize, t: f64, n_control_points: usize) -> usize {
+    if t >= knots[n_control_points] {
+        return n_control_points - 1;
+    }
+    let mut lo = degree;
+    let mut hi = n_control_points;
+    let mut mid = (lo + hi) / 2;
+    while t < knots[mid] || t >= knots[mid + 1] {
+        if t < knots[mid] {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+        mid = (lo + hi) / 2;
+    }
+    mid
+}
+
+/// De Boor step for NURBS curves (4-tuple: wx, wy, wz, w).
+/// Implements the standard de Boor algorithm:
+///   for r = 1 .. degree:
+///     for j = degree down to r:
+///       i = k - degree + j
+///       alpha = (t - knots[i]) / (knots[i + degree + 1 - r] - knots[i])
+///       d[j] = alpha * d[j] + (1-alpha) * d[j-1]
+fn de_boor_step_curve(pts: &mut [(f64, f64, f64, f64)], knots: &[f64], degree: usize, k: usize, t: f64) {
+    for r in 1..=degree {
+        for j in (r..=degree).rev() {
+            let i = k - degree + j;
+            let alpha = if i + degree + 1 - r < knots.len() && i < knots.len() {
+                let denom = knots[i + degree + 1 - r] - knots[i];
+                if denom.abs() < 1e-15 { 0.0 } else { (t - knots[i]) / denom }
+            } else {
+                0.0
+            };
+            let beta = 1.0 - alpha;
+            pts[j] = (
+                alpha * pts[j].0 + beta * pts[j - 1].0,
+                alpha * pts[j].1 + beta * pts[j - 1].1,
+                alpha * pts[j].2 + beta * pts[j - 1].2,
+                alpha * pts[j].3 + beta * pts[j - 1].3,
+            );
+        }
     }
 }
