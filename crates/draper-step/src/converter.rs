@@ -2866,11 +2866,13 @@ impl<'a> StepConverter<'a> {
             }
         }
 
-        // Collect 3D boundary points from outer edge curves by sampling each edge
+        // Collect 3D boundary points from outer edge curves by sampling each edge.
+        // Use adaptive sampling: fewer samples for line edges, more for curved edges.
         let mut boundary_points = Vec::new();
         for edge in &face_data.outer_edges {
-            for i in 0..64 {
-                let t = i as f64 / 63.0;
+            let n_samples = self.edge_sample_count(edge);
+            for i in 0..n_samples {
+                let t = i as f64 / (n_samples - 1).max(1) as f64;
                 if let Some(p) = edge.point_at(t) {
                     boundary_points.push(p);
                 }
@@ -2880,14 +2882,20 @@ impl<'a> StepConverter<'a> {
         // If outer boundary is empty, try all edges
         if boundary_points.is_empty() {
             for edge in &face_data.edges {
-                for i in 0..64 {
-                    let t = i as f64 / 63.0;
+                let n_samples = self.edge_sample_count(edge);
+                for i in 0..n_samples {
+                    let t = i as f64 / (n_samples - 1).max(1) as f64;
                     if let Some(p) = edge.point_at(t) {
                         boundary_points.push(p);
                     }
                 }
             }
         }
+
+        // Deduplicate boundary points — critical for ear clipping to work correctly.
+        // Without deduplication, shared vertices between edges create zero-area triangles
+        // and self-intersecting polygons that break the triangulation.
+        boundary_points = deduplicate_points_3d(&boundary_points, 1e-6);
 
         // If we have boundary points, use boundary-aware triangulation
         if !boundary_points.is_empty() {
@@ -2976,11 +2984,25 @@ impl<'a> StepConverter<'a> {
     }
 
     /// Sample points from a list of edges at uniform parameter intervals.
+    /// Determine the number of samples to take from an edge based on its curve type.
+    /// Lines need only 2 samples (start and end), while circles/NURBS need more for curvature.
+    fn edge_sample_count(&self, edge: &TopoEdge) -> usize {
+        match &edge.curve {
+            Some(Curve3d::Line(_)) => 2,
+            Some(Curve3d::Circle(_)) => 36,
+            Some(Curve3d::Ellipse(_)) => 36,
+            Some(Curve3d::Arc(_)) => 24,
+            Some(Curve3d::Nurbs(_)) => 48,
+            None => 2,
+        }
+    }
+
     fn sample_edges(&self, edges: &[TopoEdge]) -> Vec<Point3d> {
         let mut points = Vec::new();
         for edge in edges {
-            for i in 0..32 {
-                let t = i as f64 / 32.0;
+            let n_samples = self.edge_sample_count(edge);
+            for i in 0..n_samples {
+                let t = i as f64 / (n_samples - 1).max(1) as f64;
                 if let Some(p) = edge.point_at(t) {
                     points.push(p);
                 }
@@ -2988,19 +3010,7 @@ impl<'a> StepConverter<'a> {
         }
 
         // Remove near-duplicate consecutive points
-        if !points.is_empty() {
-            let mut unique = vec![points[0]];
-            for p in &points[1..] {
-                if !unique.last().unwrap().is_coincident_with(p) {
-                    unique.push(*p);
-                }
-            }
-            // Also check last vs first
-            if unique.len() > 1 && unique.last().unwrap().is_coincident_with(&unique[0]) {
-                unique.pop();
-            }
-            points = unique;
-        }
+        points = deduplicate_points_3d(&points, 1e-6);
 
         points
     }
@@ -3162,6 +3172,40 @@ fn project_point_on_line(line: &Line, point: &Point3d) -> f64 {
     let dy = point.y - line.origin.y;
     let dz = point.z - line.origin.z;
     dx * line.direction.x + dy * line.direction.y + dz * line.direction.z
+}
+
+/// Deduplicate a list of 3D points by removing consecutive points that are within
+/// the given tolerance. Also removes the last point if it coincides with the first
+/// (closing a loop). This is essential for ear clipping algorithms which produce
+/// degenerate triangles on duplicate vertices.
+fn deduplicate_points_3d(points: &[Point3d], tolerance: f64) -> Vec<Point3d> {
+    if points.is_empty() {
+        return Vec::new();
+    }
+
+    let tol_sq = tolerance * tolerance;
+    let mut unique = vec![points[0]];
+    for p in &points[1..] {
+        let last = unique.last().unwrap();
+        let dx = p.x - last.x;
+        let dy = p.y - last.y;
+        let dz = p.z - last.z;
+        if dx * dx + dy * dy + dz * dz > tol_sq {
+            unique.push(*p);
+        }
+    }
+    // Also check last vs first (closed loop)
+    if unique.len() > 1 {
+        let first = unique[0];
+        let last = unique.last().unwrap();
+        let dx = first.x - last.x;
+        let dy = first.y - last.y;
+        let dz = first.z - last.z;
+        if dx * dx + dy * dy + dz * dz <= tol_sq {
+            unique.pop();
+        }
+    }
+    unique
 }
 
 /// Project two 3D points onto a circle and return the angular parameter range (t1, t2).

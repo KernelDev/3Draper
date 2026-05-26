@@ -89,7 +89,8 @@ pub fn triangulate_face(face: &Face, params: &TriangulationParams) -> TriangleMe
     }
 }
 
-/// Triangulate a planar face using ear clipping.
+/// Triangulate a planar face.
+/// Uses centroid fan triangulation for convex boundaries and ear clipping for non-convex.
 fn triangulate_planar_face(face: &Face, plane: &Plane, _params: &TriangulationParams) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
 
@@ -100,6 +101,9 @@ fn triangulate_planar_face(face: &Face, plane: &Plane, _params: &TriangulationPa
         // No boundary — skip
         return mesh;
     }
+
+    // Use the same logic as triangulate_plane_with_boundary
+    let forward = face.forward;
 
     // Project 3D points onto the plane's 2D coordinate system
     let points_2d: Vec<Point2d> = points_3d.iter().map(|p| {
@@ -112,19 +116,38 @@ fn triangulate_planar_face(face: &Face, plane: &Plane, _params: &TriangulationPa
         )
     }).collect();
 
-    // Ear clipping triangulation
-    let triangles = ear_clip(&points_2d);
+    let is_convex = is_convex_polygon(&points_2d);
 
-    // Add vertices and triangles
-    for p in &points_3d {
-        mesh.add_vertex(*p);
-    }
-    for tri in &triangles {
-        let face_forward = face.forward;
-        if face_forward {
-            mesh.add_triangle(tri[0], tri[1], tri[2]);
-        } else {
-            mesh.add_triangle(tri[0], tri[2], tri[1]); // Flip winding
+    if is_convex && points_3d.len() >= 3 {
+        // Centroid fan triangulation for convex polygons
+        let centroid = compute_centroid_3d(&points_3d);
+        let center_idx = mesh.add_vertex(centroid);
+        for p in &points_3d {
+            mesh.add_vertex(*p);
+        }
+        let n = points_3d.len() as u32;
+        for i in 0..n {
+            let i_next = (i + 1) % n;
+            let v1 = center_idx + 1 + i;
+            let v2 = center_idx + 1 + i_next;
+            if forward {
+                mesh.add_triangle(center_idx, v1, v2);
+            } else {
+                mesh.add_triangle(center_idx, v2, v1);
+            }
+        }
+    } else {
+        // Ear clipping for non-convex polygons
+        let triangles = ear_clip(&points_2d);
+        for p in &points_3d {
+            mesh.add_vertex(*p);
+        }
+        for tri in &triangles {
+            if forward {
+                mesh.add_triangle(tri[0], tri[1], tri[2]);
+            } else {
+                mesh.add_triangle(tri[0], tri[2], tri[1]);
+            }
         }
     }
 
@@ -827,13 +850,19 @@ pub fn triangulate_face_with_boundary(
     }
 }
 
-/// Triangulate a plane face with boundary points using ear clipping.
+/// Triangulate a plane face with boundary points.
+/// Uses centroid fan triangulation for convex boundaries (disc caps, etc.)
+/// and falls back to ear clipping for non-convex boundaries.
 fn triangulate_plane_with_boundary(
     plane: &Plane,
     boundary_points: &[Point3d],
     forward: bool,
 ) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
+
+    if boundary_points.len() < 3 {
+        return mesh;
+    }
 
     // Project 3D boundary points onto the plane's 2D coordinate system
     let points_2d: Vec<Point2d> = boundary_points.iter().map(|p| {
@@ -846,43 +875,168 @@ fn triangulate_plane_with_boundary(
         )
     }).collect();
 
-    // Ear clipping triangulation
-    let triangles = ear_clip(&points_2d);
+    // Check if the polygon is convex (most cap faces are convex discs)
+    let is_convex = is_convex_polygon(&points_2d);
 
-    // Add vertices and triangles
-    for p in boundary_points {
-        mesh.add_vertex(*p);
-    }
-    for tri in &triangles {
-        if forward {
-            mesh.add_triangle(tri[0], tri[1], tri[2]);
-        } else {
-            mesh.add_triangle(tri[0], tri[2], tri[1]); // Flip winding
+    if is_convex && boundary_points.len() >= 3 {
+        // Centroid fan triangulation — much more robust than ear clipping
+        // for convex polygons (disc caps, regular polygons, etc.)
+        // Add the centroid point as the first vertex
+        let centroid = compute_centroid_3d(boundary_points);
+        let center_idx = mesh.add_vertex(centroid);
+
+        // Add all boundary vertices
+        for p in boundary_points {
+            mesh.add_vertex(*p);
+        }
+
+        // Create fan triangles: center → boundary[i] → boundary[(i+1) % n]
+        let n = boundary_points.len() as u32;
+        for i in 0..n {
+            let i_next = (i + 1) % n;
+            let v1 = center_idx + 1 + i;       // boundary[i]
+            let v2 = center_idx + 1 + i_next;  // boundary[i+1]
+            if forward {
+                mesh.add_triangle(center_idx, v1, v2);
+            } else {
+                mesh.add_triangle(center_idx, v2, v1);
+            }
+        }
+    } else {
+        // Non-convex polygon — use ear clipping
+        let triangles = ear_clip(&points_2d);
+
+        for p in boundary_points {
+            mesh.add_vertex(*p);
+        }
+        for tri in &triangles {
+            if forward {
+                mesh.add_triangle(tri[0], tri[1], tri[2]);
+            } else {
+                mesh.add_triangle(tri[0], tri[2], tri[1]); // Flip winding
+            }
         }
     }
 
     mesh
 }
 
+/// Check if a 2D polygon is convex by verifying that all cross products
+/// of consecutive edges have the same sign.
+fn is_convex_polygon(points: &[Point2d]) -> bool {
+    if points.len() < 3 {
+        return false;
+    }
+    let n = points.len();
+    let mut sign = 0i32;
+    for i in 0..n {
+        let a = &points[i];
+        let b = &points[(i + 1) % n];
+        let c = &points[(i + 2) % n];
+        let cross = (b.u - a.u) * (c.v - a.v) - (b.v - a.v) * (c.u - a.u);
+        if cross.abs() > 1e-10 {
+            let s = if cross > 0.0 { 1 } else { -1 };
+            if sign == 0 {
+                sign = s;
+            } else if sign != s {
+                return false;
+            }
+        }
+    }
+    sign != 0
+}
+
+/// Compute the centroid (geometric center) of a set of 3D points.
+fn compute_centroid_3d(points: &[Point3d]) -> Point3d {
+    let n = points.len() as f64;
+    let mut x = 0.0;
+    let mut y = 0.0;
+    let mut z = 0.0;
+    for p in points {
+        x += p.x;
+        y += p.y;
+        z += p.z;
+    }
+    Point3d::new(x / n, y / n, z / n)
+}
+
 /// Compute parametric (u, v) range from boundary points for a cylinder.
+/// Handles the angular wraparound properly: if the u values span the ±π boundary,
+/// it adjusts the angles to ensure a contiguous angular range.
 fn cylinder_uv_range(cyl: &CylinderSurface, boundary_points: &[Point3d]) -> (f64, f64, f64, f64) {
-    let mut u_min = f64::MAX;
-    let mut u_max = f64::MIN;
     let mut v_min = f64::MAX;
     let mut v_max = f64::MIN;
 
+    // Project all points and collect angles
+    let mut angles: Vec<f64> = Vec::with_capacity(boundary_points.len());
     for p in boundary_points {
         let (u, v) = cyl.project_point(p);
-        u_min = u_min.min(u);
-        u_max = u_max.max(u);
+        angles.push(u);
         v_min = v_min.min(v);
         v_max = v_max.max(v);
     }
+
+    let (u_min, u_max) = compute_angular_range(&angles);
 
     // Add a small margin
     let u_margin = (u_max - u_min) * 0.001;
     let v_margin = (v_max - v_min) * 0.001;
     (u_min - u_margin, u_max + u_margin, v_min - v_margin, v_max + v_margin)
+}
+
+/// Compute the angular range from a list of angles, handling the ±π wraparound.
+/// Returns (angle_min, angle_max) such that all angles lie within the range
+/// and the range is the smallest contiguous arc covering all points.
+fn compute_angular_range(angles: &[f64]) -> (f64, f64) {
+    if angles.is_empty() {
+        return (0.0, 2.0 * PI);
+    }
+    if angles.len() == 1 {
+        return (angles[0], angles[0] + 2.0 * PI);
+    }
+
+    // Normalize all angles to [0, 2π)
+    let mut normalized: Vec<f64> = angles.iter()
+        .map(|a| ((a % (2.0 * PI)) + 2.0 * PI) % (2.0 * PI))
+        .collect();
+    normalized.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Find the largest gap between consecutive angles
+    let n = normalized.len();
+    let mut max_gap = 0.0f64;
+    let mut gap_end_idx = 0;
+    for i in 0..n {
+        let next = if i + 1 < n { normalized[i + 1] } else { normalized[0] + 2.0 * PI };
+        let gap = next - normalized[i];
+        if gap > max_gap {
+            max_gap = gap;
+            gap_end_idx = i + 1;
+        }
+    }
+
+    // The arc goes from the end of the largest gap to the start of the largest gap (wrapped)
+    let start_angle = normalized[gap_end_idx % n];
+    let end_angle = if gap_end_idx == 0 {
+        normalized[n - 1]
+    } else if gap_end_idx < n {
+        normalized[gap_end_idx - 1]
+    } else {
+        normalized[n - 1]
+    };
+
+    let range = if gap_end_idx == 0 {
+        // The gap wraps around 2π
+        end_angle - start_angle + 2.0 * PI
+    } else {
+        end_angle - start_angle
+    };
+
+    // If the range is close to 2π, it's a full circle
+    if range > 1.99 * PI {
+        (0.0, 2.0 * PI)
+    } else {
+        (start_angle, start_angle + range)
+    }
 }
 
 /// Triangulate a cylinder face trimmed by boundary points.
@@ -936,19 +1090,21 @@ fn triangulate_cylinder_with_boundary(
 }
 
 /// Compute parametric (u, v) range from boundary points for a cone.
+/// Handles the angular wraparound properly using the same algorithm as cylinders.
 fn cone_uv_range(cone: &ConeSurface, boundary_points: &[Point3d]) -> (f64, f64, f64, f64) {
-    let mut u_min = f64::MAX;
-    let mut u_max = f64::MIN;
     let mut v_min = f64::MAX;
     let mut v_max = f64::MIN;
 
+    // Project all points and collect angles
+    let mut angles: Vec<f64> = Vec::with_capacity(boundary_points.len());
     for p in boundary_points {
         let (u, v) = cone.project_point(p);
-        u_min = u_min.min(u);
-        u_max = u_max.max(u);
+        angles.push(u);
         v_min = v_min.min(v);
         v_max = v_max.max(v);
     }
+
+    let (u_min, u_max) = compute_angular_range(&angles);
 
     let u_margin = (u_max - u_min) * 0.001;
     let v_margin = (v_max - v_min) * 0.001;
@@ -1005,19 +1161,20 @@ fn triangulate_cone_with_boundary(
 }
 
 /// Compute parametric (u, v) range from boundary points for a sphere.
+/// Uses proper angular range computation for the u parameter.
 fn sphere_uv_range(sphere: &SphereSurface, boundary_points: &[Point3d]) -> (f64, f64, f64, f64) {
-    let mut u_min = f64::MAX;
-    let mut u_max = f64::MIN;
     let mut v_min = f64::MAX;
     let mut v_max = f64::MIN;
 
+    let mut angles: Vec<f64> = Vec::with_capacity(boundary_points.len());
     for p in boundary_points {
         let (u, v) = sphere.project_point(p);
-        u_min = u_min.min(u);
-        u_max = u_max.max(u);
+        angles.push(u);
         v_min = v_min.min(v);
         v_max = v_max.max(v);
     }
+
+    let (u_min, u_max) = compute_angular_range(&angles);
 
     let u_margin = (u_max - u_min) * 0.001;
     let v_margin = (v_max - v_min) * 0.001;
@@ -1079,19 +1236,19 @@ fn triangulate_sphere_with_boundary(
 }
 
 /// Compute parametric (u, v) range from boundary points for a torus.
+/// Uses proper angular range computation for both u and v parameters.
 fn torus_uv_range(torus: &TorusSurface, boundary_points: &[Point3d]) -> (f64, f64, f64, f64) {
-    let mut u_min = f64::MAX;
-    let mut u_max = f64::MIN;
-    let mut v_min = f64::MAX;
-    let mut v_max = f64::MIN;
+    let mut u_angles: Vec<f64> = Vec::with_capacity(boundary_points.len());
+    let mut v_angles: Vec<f64> = Vec::with_capacity(boundary_points.len());
 
     for p in boundary_points {
         let (u, v) = torus.project_point(p);
-        u_min = u_min.min(u);
-        u_max = u_max.max(u);
-        v_min = v_min.min(v);
-        v_max = v_max.max(v);
+        u_angles.push(u);
+        v_angles.push(v);
     }
+
+    let (u_min, u_max) = compute_angular_range(&u_angles);
+    let (v_min, v_max) = compute_angular_range(&v_angles);
 
     let u_margin = (u_max - u_min) * 0.001;
     let v_margin = (v_max - v_min) * 0.001;
