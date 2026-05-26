@@ -3211,6 +3211,7 @@ fn deduplicate_points_3d(points: &[Point3d], tolerance: f64) -> Vec<Point3d> {
 /// Project two 3D points onto a circle and return the angular parameter range (t1, t2).
 /// The angles are computed in the circle's local coordinate system.
 /// t1 and t2 are in radians and the arc goes from t1 to t2 in the positive direction.
+/// For full circles (p1 ≈ p2), returns a full 2π range.
 fn project_points_on_circle(circle: &Circle, p1: &Point3d, p2: &Point3d) -> (f64, f64) {
     let y_axis = circle.normal.cross(&circle.x_axis);
 
@@ -3221,6 +3222,13 @@ fn project_points_on_circle(circle: &Circle, p1: &Point3d, p2: &Point3d) -> (f64
     let local1_y = d1x * y_axis.x + d1y * y_axis.y + d1z * y_axis.z;
     let t1 = local1_y.atan2(local1_x);
 
+    // Check if p1 and p2 are approximately the same point (full circle)
+    let dist_sq = (p2.x - p1.x).powi(2) + (p2.y - p1.y).powi(2) + (p2.z - p1.z).powi(2);
+    if dist_sq < 1e-10 {
+        // Full circle — use the full 2π range starting from t1
+        return (t1, t1 + 2.0 * std::f64::consts::PI);
+    }
+
     let d2x = p2.x - circle.center.x;
     let d2y = p2.y - circle.center.y;
     let d2z = p2.z - circle.center.z;
@@ -3229,7 +3237,6 @@ fn project_points_on_circle(circle: &Circle, p1: &Point3d, p2: &Point3d) -> (f64
     let t2 = local2_y.atan2(local2_x);
 
     // Ensure t2 > t1 (positive direction arc from t1 to t2)
-    let t1 = t1;
     let mut t2 = t2;
     while t2 <= t1 {
         t2 += 2.0 * std::f64::consts::PI;
