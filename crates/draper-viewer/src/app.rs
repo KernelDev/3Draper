@@ -693,160 +693,6 @@ impl ViewerApp {
         }
     }
 
-    /// Generate UV grid SVG for the currently selected face.
-    fn generate_uv_svg(&self, face: &FaceInfo) -> String {
-        let u_divs = self.uv_grid_u;
-        let v_divs = self.uv_grid_v;
-        let svg_width = 600.0;
-        let svg_height = 600.0;
-        let margin = 40.0;
-        let draw_w = svg_width - 2.0 * margin;
-        let draw_h = svg_height - 2.0 * margin;
-
-        // Compute UV bounding box from boundary polylines
-        let mut u_min = f64::MAX;
-        let mut u_max = f64::MIN;
-        let mut v_min = f64::MAX;
-        let mut v_max = f64::MIN;
-
-        for polyline in &face.outer_uv_boundary {
-            for pt in polyline {
-                u_min = u_min.min(pt.u);
-                u_max = u_max.max(pt.u);
-                v_min = v_min.min(pt.v);
-                v_max = v_max.max(pt.v);
-            }
-        }
-        for boundary in &face.inner_uv_boundaries {
-            for polyline in boundary {
-                for pt in polyline {
-                    u_min = u_min.min(pt.u);
-                    u_max = u_max.max(pt.u);
-                    v_min = v_min.min(pt.v);
-                    v_max = v_max.max(pt.v);
-                }
-            }
-        }
-
-        if u_min >= u_max || v_min >= v_max {
-            // Try to compute from surface sampling
-            match &face.surface {
-                Surface::Nurbs(n) => {
-                    let (ur0, ur1) = n.u_range();
-                    let (vr0, vr1) = n.v_range();
-                    u_min = ur0; u_max = ur1; v_min = vr0; v_max = vr1;
-                }
-                _ => {
-                    u_min = 0.0; u_max = 1.0; v_min = 0.0; v_max = 1.0;
-                }
-            }
-        }
-
-        // Add padding
-        let u_range = (u_max - u_min).max(1e-6);
-        let v_range = (v_max - v_min).max(1e-6);
-        u_min -= u_range * 0.05;
-        u_max += u_range * 0.05;
-        v_min -= v_range * 0.05;
-        v_max += v_range * 0.05;
-
-        let map_u = |u: f64| -> f64 { margin + (u - u_min) / (u_max - u_min) * draw_w };
-        let map_v = |v: f64| -> f64 { margin + (1.0 - (v - v_min) / (v_max - v_min)) * draw_h };
-
-        let mut svg = String::new();
-        svg.push_str(&format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-            <svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\">\n",
-            svg_width as i32, svg_height as i32, svg_width as i32, svg_height as i32
-        ));
-        svg.push_str(&format!(
-            "  <rect width=\"{}\" height=\"{}\" fill=\"#1a1a2e\"/>\n",
-            svg_width as i32, svg_height as i32
-        ));
-
-        // Draw UV grid lines
-        for i in 0..=u_divs {
-            let u = u_min + (u_max - u_min) * i as f64 / u_divs as f64;
-            let x = map_u(u);
-            svg.push_str(&format!(
-                "  <line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"#334\" stroke-width=\"0.5\"/>\n",
-                x, margin, x, margin + draw_h
-            ));
-        }
-        for j in 0..=v_divs {
-            let v = v_min + (v_max - v_min) * j as f64 / v_divs as f64;
-            let y = map_v(v);
-            svg.push_str(&format!(
-                "  <line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"#334\" stroke-width=\"0.5\"/>\n",
-                margin, y, margin + draw_w, y
-            ));
-        }
-
-        // Draw outer boundary polylines
-        for polyline in &face.outer_uv_boundary {
-            if polyline.len() < 2 { continue; }
-            let mut d = format!("M {:.2} {:.2}", map_u(polyline[0].u), map_v(polyline[0].v));
-            for pt in &polyline[1..] {
-                d.push_str(&format!(" L {:.2} {:.2}", map_u(pt.u), map_v(pt.v)));
-            }
-            d.push_str(" Z");
-            svg.push_str(&format!(
-                "  <path d=\"{}\" fill=\"none\" stroke=\"#00ff88\" stroke-width=\"1.5\"/>\n", d
-            ));
-        }
-
-        // Draw inner boundary polylines (holes)
-        for boundary in &face.inner_uv_boundaries {
-            for polyline in boundary {
-                if polyline.len() < 2 { continue; }
-                let mut d = format!("M {:.2} {:.2}", map_u(polyline[0].u), map_v(polyline[0].v));
-                for pt in &polyline[1..] {
-                    d.push_str(&format!(" L {:.2} {:.2}", map_u(pt.u), map_v(pt.v)));
-                }
-                d.push_str(" Z");
-                svg.push_str(&format!(
-                    "  <path d=\"{}\" fill=\"none\" stroke=\"#ff4444\" stroke-width=\"1.5\" stroke-dasharray=\"4,2\"/>\n", d
-                ));
-            }
-        }
-
-        // Draw UV grid intersection points
-        for i in 0..=u_divs {
-            for j in 0..=v_divs {
-                let u = u_min + (u_max - u_min) * i as f64 / u_divs as f64;
-                let v = v_min + (v_max - v_min) * j as f64 / v_divs as f64;
-                let pt3d = face.surface.point_at(u, v);
-                // Only draw if the point is finite
-                if pt3d.x.is_finite() && pt3d.y.is_finite() && pt3d.z.is_finite() {
-                    let x = map_u(u);
-                    let y = map_v(v);
-                    svg.push_str(&format!(
-                        "  <circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"2\" fill=\"#6688ff\" opacity=\"0.7\"/>\n", x, y
-                    ));
-                }
-            }
-        }
-
-        // Draw axis labels
-        svg.push_str(&format!(
-            "  <text x=\"{}\" y=\"{}\" fill=\"#aaa\" font-size=\"12\" text-anchor=\"middle\">U ({:.2} .. {:.2})</text>\n",
-            margin + draw_w / 2.0, svg_height - 5.0, u_min, u_max
-        ));
-        svg.push_str(&format!(
-            "  <text x=\"10\" y=\"{}\" fill=\"#aaa\" font-size=\"12\" text-anchor=\"middle\" transform=\"rotate(-90, 10, {})\">V ({:.2} .. {:.2})</text>\n",
-            margin + draw_h / 2.0, margin + draw_h / 2.0, v_min, v_max
-        ));
-
-        // Title with face info
-        svg.push_str(&format!(
-            "  <text x=\"{}\" y=\"20\" fill=\"#fff\" font-size=\"13\" text-anchor=\"middle\">Face #{} (STEP #{}) {} forward={}</text>\n",
-            svg_width / 2.0, face.face_id, face.step_face_id, face.surface_type, face.forward
-        ));
-
-        svg.push_str("</svg>\n");
-        svg
-    }
-
     /// Handle picking: find which face is at the given screen position.
     fn pick_face_at(&self, _screen_x: f32, _screen_y: f32) -> Option<(usize, u64)> {
         // Simplified picking: iterate all instances and faces, check if any triangle 
@@ -1012,7 +858,23 @@ impl eframe::App for ViewerApp {
             });
 
         // === Right panel: Structure / Faces / UV ===
+        // Collect pending UI actions to avoid borrow checker conflicts
+        let mut pending_instance_select: Option<usize> = None;
+        let mut pending_face_select: Option<u64> = None;
+        let mut pending_svg_export = false;
+        let mut pending_copy_face_id: Option<u64> = None;
+
         if self.show_structure {
+            // Clone data needed for drawing to avoid borrow conflicts
+            let assembly_tree_clone = self.assembly_tree.clone();
+            let detailed_instances_clone = self.detailed_instances.clone();
+            let selected_instance = self.selected_instance;
+            let selected_face_id = self.selected_face_id;
+            let uv_grid_u = self.uv_grid_u;
+            let uv_grid_v = self.uv_grid_v;
+            let show_uv_grid = self.show_uv_grid;
+            let uv_svg_cache_face_id = self.uv_svg_cache.as_ref().map(|(id, _)| *id);
+
             egui::SidePanel::right("structure_panel")
                 .min_width(280.0)
                 .default_width(320.0)
@@ -1026,18 +888,14 @@ impl eframe::App for ViewerApp {
                     egui::ScrollArea::vertical()
                         .max_height(250.0)
                         .show(ui, |ui| {
-                            if let Some(ref tree) = self.assembly_tree {
-                                self.draw_assembly_node(ui, tree);
-                            } else if !self.detailed_instances.is_empty() {
-                                for (i, inst) in self.detailed_instances.iter().enumerate() {
-                                    let is_selected = self.selected_instance == Some(i);
+                            if let Some(ref tree) = assembly_tree_clone {
+                                draw_assembly_node_static(ui, tree, &detailed_instances_clone, selected_instance, &mut pending_instance_select);
+                            } else if !detailed_instances_clone.is_empty() {
+                                for (i, inst) in detailed_instances_clone.iter().enumerate() {
+                                    let is_selected = selected_instance == Some(i);
                                     let label = format!("{} (BREP#{})", inst.name, inst.brep_id);
                                     if ui.selectable_label(is_selected, &label).clicked() {
-                                        self.selected_instance = Some(i);
-                                        self.selected_face_id = None;
-                                        self.highlighted_face_id = None;
-                                        self.highlight_dirty = true;
-                                        self.uv_svg_cache = None;
+                                        pending_instance_select = Some(i);
                                     }
                                 }
                             } else {
@@ -1048,8 +906,8 @@ impl eframe::App for ViewerApp {
                     ui.separator();
 
                     // ─── Face List for Selected Instance ─────────────────
-                    if let Some(inst_idx) = self.selected_instance {
-                        if let Some(inst) = self.detailed_instances.get(inst_idx) {
+                    if let Some(inst_idx) = selected_instance {
+                        if let Some(inst) = detailed_instances_clone.get(inst_idx) {
                             ui.heading(egui::RichText::new(format!("Faces: {}", inst.name)).size(12.0));
                             ui.label(egui::RichText::new(format!("BREP #{} — {} faces", inst.brep_id, inst.faces.len()))
                                 .size(11.0).color(egui::Color32::GRAY));
@@ -1058,19 +916,13 @@ impl eframe::App for ViewerApp {
                                 .max_height(200.0)
                                 .show(ui, |ui| {
                                     for face in &inst.faces {
-                                        let is_selected = self.selected_face_id == Some(face.face_id);
+                                        let is_selected = selected_face_id == Some(face.face_id);
                                         let label = format!("F#{} STEP#{} {} [{}..{}]",
                                             face.face_id, face.step_face_id, face.surface_type,
                                             face.triangle_range.0, face.triangle_range.1);
                                         let response = ui.selectable_label(is_selected, &label);
                                         if response.clicked() {
-                                            self.selected_face_id = Some(face.face_id);
-                                            self.highlighted_face_id = Some(face.face_id);
-                                            self.highlight_dirty = true;
-                                            self.uv_svg_cache = None;
-                                            self.log(&format!("Selected face #{} (STEP #{}) {} tris=[{},{}]",
-                                                face.face_id, face.step_face_id, face.surface_type,
-                                                face.triangle_range.0, face.triangle_range.1));
+                                            pending_face_select = Some(face.face_id);
                                         }
                                         // Show tooltip on hover
                                         response.on_hover_text(format!(
@@ -1102,15 +954,15 @@ impl eframe::App for ViewerApp {
                     });
 
                     // ─── UV Grid Display ─────────────────────────────────
-                    if self.show_uv_grid {
-                        if let Some(inst_idx) = self.selected_instance {
-                            if let Some(face_id) = self.selected_face_id {
-                                if let Some(inst) = self.detailed_instances.get(inst_idx) {
+                    if show_uv_grid {
+                        if let Some(inst_idx) = selected_instance {
+                            if let Some(face_id) = selected_face_id {
+                                if let Some(inst) = detailed_instances_clone.get(inst_idx) {
                                     if let Some(face) = inst.faces.iter().find(|f| f.face_id == face_id) {
                                         // Check cache
-                                        let needs_regen = self.uv_svg_cache.as_ref().map_or(true, |(id, _)| *id != face_id);
+                                        let needs_regen = uv_svg_cache_face_id != Some(face_id);
                                         if needs_regen {
-                                            let svg = self.generate_uv_svg(face);
+                                            let svg = generate_uv_svg(face, uv_grid_u, uv_grid_v);
                                             self.uv_svg_cache = Some((face_id, svg));
                                         }
 
@@ -1124,7 +976,7 @@ impl eframe::App for ViewerApp {
                                             );
                                             // Draw UV grid background
                                             ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgb(26, 26, 46));
-                                            
+
                                             let margin = size * 0.067; // 40/600 ratio
                                             let draw_size = size - 2.0 * margin;
 
@@ -1160,8 +1012,8 @@ impl eframe::App for ViewerApp {
                                             let map_v = |v: f64| -> f32 { (margin_f64 + (1.0 - (v - v_min) / (v_max - v_min)) * draw_size_f64) as f32 };
 
                                             // Draw grid lines
-                                            let u_divs = self.uv_grid_u.min(50);
-                                            let v_divs = self.uv_grid_v.min(50);
+                                            let u_divs = uv_grid_u.min(50);
+                                            let v_divs = uv_grid_v.min(50);
                                             for i in 0..=u_divs {
                                                 let u = u_min + (u_max - u_min) * i as f64 / u_divs as f64;
                                                 let x = map_u(u);
@@ -1232,19 +1084,18 @@ impl eframe::App for ViewerApp {
                                         {
                                             ui.horizontal(|ui| {
                                                 if ui.button("Save UV as SVG...").clicked() {
-                                                    if let Some((_, ref svg_content)) = self.uv_svg_cache {
-                                                        if let Some(path) = rfd::FileDialog::new()
-                                                            .add_filter("SVG", &["svg"])
-                                                            .save_file()
-                                                        {
-                                                            match std::fs::write(&path, svg_content) {
-                                                                Ok(()) => self.log(&format!("Exported UV SVG: {}", path.to_string_lossy())),
-                                                                Err(e) => self.log(&format!("SVG export error: {}", e)),
-                                                            }
-                                                        }
-                                                    }
+                                                    pending_svg_export = true;
                                                 }
                                             });
+                                        }
+
+                                        // SVG export on web (download)
+                                        #[cfg(target_arch = "wasm32")]
+                                        {
+                                            ui.add_space(4.0);
+                                            if ui.button("Download UV as SVG").clicked() {
+                                                pending_svg_export = true;
+                                            }
                                         }
                                     }
                                 }
@@ -1259,10 +1110,10 @@ impl eframe::App for ViewerApp {
                     ui.separator();
 
                     // ─── Selected Face Info ───────────────────────────────
-                    if let Some(inst_idx) = self.selected_instance {
-                        if let Some(face_id) = self.selected_face_id {
-                            if let Some(inst) = self.detailed_instances.get(inst_idx) {
-                                if let Some(face) = inst.faces.iter().find(|f| f.face_id == face_id) {
+                    if let Some(inst_idx) = selected_instance {
+                        if let Some(fid) = selected_face_id {
+                            if let Some(inst) = detailed_instances_clone.get(inst_idx) {
+                                if let Some(face) = inst.faces.iter().find(|f| f.face_id == fid) {
                                     ui.heading(egui::RichText::new("Face Info").size(13.0));
                                     ui.label(egui::RichText::new(format!("ID: {}", face.face_id)).size(11.0));
                                     ui.label(egui::RichText::new(format!("STEP ID: #{}", face.step_face_id)).size(11.0));
@@ -1274,14 +1125,79 @@ impl eframe::App for ViewerApp {
 
                                     // Copy face ID to clipboard
                                     if ui.button("Copy Face ID").clicked() {
-                                        ui.ctx().copy_text(format!("{}", face.face_id));
-                                        self.log(&format!("Copied face ID: {}", face.face_id));
+                                        pending_copy_face_id = Some(face.face_id);
                                     }
                                 }
                             }
                         }
                     }
                 });
+        }
+
+        // Apply pending UI actions (after all borrows are released)
+        if let Some(idx) = pending_instance_select {
+            self.selected_instance = Some(idx);
+            self.selected_face_id = None;
+            self.highlighted_face_id = None;
+            self.highlight_dirty = true;
+            self.uv_svg_cache = None;
+        }
+        if let Some(fid) = pending_face_select {
+            self.selected_face_id = Some(fid);
+            self.highlighted_face_id = Some(fid);
+            self.highlight_dirty = true;
+            self.uv_svg_cache = None;
+            self.log(&format!("Selected face #{}", fid));
+        }
+        if pending_svg_export {
+            if let Some((_, ref svg_content)) = self.uv_svg_cache {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("SVG", &["svg"])
+                        .save_file()
+                    {
+                        match std::fs::write(&path, svg_content) {
+                            Ok(()) => self.log(&format!("Exported UV SVG: {}", path.to_string_lossy())),
+                            Err(e) => self.log(&format!("SVG export error: {}", e)),
+                        }
+                    }
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    // Download SVG via browser
+                    use wasm_bindgen::prelude::*;
+                    if let Some(window) = web_sys::window() {
+                        if let Some(document) = window.document() {
+                            let blob = web_sys::Blob::new_with_str_sequence(
+                                &js_sys::Array::of1(&JsValue::from_str(svg_content)),
+                            ).ok();
+                            if let Some(blob) = blob {
+                                let url = web_sys::Url::create_object_url_with_blob(&blob).ok();
+                                if let Some(url) = url {
+                                    let a = document.create_element("a").ok();
+                                    if let Some(a) = a {
+                                        let _ = a.set_attribute("href", &url);
+                                        let _ = a.set_attribute("download", "uv_grid.svg");
+                                        let _ = a.set_attribute("style", "display:none");
+                                        if let Some(body) = document.body() {
+                                            let _ = body.append_child(&a);
+                                            let html_elem: web_sys::HtmlElement = a.unchecked_into();
+                                            html_elem.click();
+                                        }
+                                    }
+                                    web_sys::Url::revoke_object_url(&url).ok();
+                                }
+                            }
+                        }
+                    }
+                    self.log("Exported UV SVG (download)");
+                }
+            }
+        }
+        if let Some(fid) = pending_copy_face_id {
+            ctx.copy_text(format!("{}", fid));
+            self.log(&format!("Copied face ID: {}", fid));
         }
 
         // === Left side panel (controls) ===
@@ -1591,47 +1507,193 @@ impl eframe::App for ViewerApp {
     }
 }
 
-impl ViewerApp {
-    /// Draw the assembly tree node recursively in the structure panel.
-    fn draw_assembly_node(&mut self, ui: &mut egui::Ui, node: &AssemblyNode) {
-        let has_children = !node.children.is_empty();
-        let brep_str = match node.brep_id {
-            Some(id) => format!(" BREP#{}", id),
-            None => String::new(),
-        };
-        let label = format!("{}{}", node.name, brep_str);
+/// Generate UV grid SVG for a face (standalone function to avoid borrow conflicts).
+fn generate_uv_svg(face: &FaceInfo, u_divs: usize, v_divs: usize) -> String {
+    let svg_width = 600.0;
+    let svg_height = 600.0;
+    let margin = 40.0;
+    let draw_w = svg_width - 2.0 * margin;
+    let draw_h = svg_height - 2.0 * margin;
 
-        // Check if this node matches a detailed instance
-        let is_selected = node.brep_id.map_or(false, |bid| {
-            self.detailed_instances.iter()
-                .position(|inst| inst.brep_id == bid)
-                .map_or(false, |idx| self.selected_instance == Some(idx))
-        });
+    // Compute UV bounding box from boundary polylines
+    let mut u_min = f64::MAX;
+    let mut u_max = f64::MIN;
+    let mut v_min = f64::MAX;
+    let mut v_max = f64::MIN;
 
-        if has_children {
-            egui::CollapsingHeader::new(egui::RichText::new(&label).size(11.0))
-                .default_open(false)
-                .show(ui, |ui| {
-                    for child in &node.children {
-                        self.draw_assembly_node(ui, child);
-                    }
-                });
-        } else {
-            let response = ui.selectable_label(is_selected, egui::RichText::new(&label).size(11.0));
-            if response.clicked() {
-                // Find the corresponding detailed instance
-                if let Some(bid) = node.brep_id {
-                    if let Some(idx) = self.detailed_instances.iter().position(|inst| inst.brep_id == bid) {
-                        self.selected_instance = Some(idx);
-                        self.selected_face_id = None;
-                        self.highlighted_face_id = None;
-                        self.highlight_dirty = true;
-                        self.uv_svg_cache = None;
-                    }
+    for polyline in &face.outer_uv_boundary {
+        for pt in polyline {
+            u_min = u_min.min(pt.u);
+            u_max = u_max.max(pt.u);
+            v_min = v_min.min(pt.v);
+            v_max = v_max.max(pt.v);
+        }
+    }
+    for boundary in &face.inner_uv_boundaries {
+        for polyline in boundary {
+            for pt in polyline {
+                u_min = u_min.min(pt.u);
+                u_max = u_max.max(pt.u);
+                v_min = v_min.min(pt.v);
+                v_max = v_max.max(pt.v);
+            }
+        }
+    }
+
+    if u_min >= u_max || v_min >= v_max {
+        match &face.surface {
+            Surface::Nurbs(n) => {
+                let (ur0, ur1) = n.u_range();
+                let (vr0, vr1) = n.v_range();
+                u_min = ur0; u_max = ur1; v_min = vr0; v_max = vr1;
+            }
+            _ => {
+                u_min = 0.0; u_max = 1.0; v_min = 0.0; v_max = 1.0;
+            }
+        }
+    }
+
+    let u_range = (u_max - u_min).max(1e-6);
+    let v_range = (v_max - v_min).max(1e-6);
+    u_min -= u_range * 0.05;
+    u_max += u_range * 0.05;
+    v_min -= v_range * 0.05;
+    v_max += v_range * 0.05;
+
+    let map_u = |u: f64| -> f64 { margin + (u - u_min) / (u_max - u_min) * draw_w };
+    let map_v = |v: f64| -> f64 { margin + (1.0 - (v - v_min) / (v_max - v_min)) * draw_h };
+
+    let mut svg = String::new();
+    svg.push_str(&format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+        <svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\">\n",
+        svg_width as i32, svg_height as i32, svg_width as i32, svg_height as i32
+    ));
+    svg.push_str(&format!(
+        "  <rect width=\"{}\" height=\"{}\" fill=\"#1a1a2e\"/>\n",
+        svg_width as i32, svg_height as i32
+    ));
+
+    for i in 0..=u_divs {
+        let u = u_min + (u_max - u_min) * i as f64 / u_divs as f64;
+        let x = map_u(u);
+        svg.push_str(&format!(
+            "  <line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"#334\" stroke-width=\"0.5\"/>\n",
+            x, margin, x, margin + draw_h
+        ));
+    }
+    for j in 0..=v_divs {
+        let v = v_min + (v_max - v_min) * j as f64 / v_divs as f64;
+        let y = map_v(v);
+        svg.push_str(&format!(
+            "  <line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"#334\" stroke-width=\"0.5\"/>\n",
+            margin, y, margin + draw_w, y
+        ));
+    }
+
+    for polyline in &face.outer_uv_boundary {
+        if polyline.len() < 2 { continue; }
+        let mut d = format!("M {:.2} {:.2}", map_u(polyline[0].u), map_v(polyline[0].v));
+        for pt in &polyline[1..] {
+            d.push_str(&format!(" L {:.2} {:.2}", map_u(pt.u), map_v(pt.v)));
+        }
+        d.push_str(" Z");
+        svg.push_str(&format!(
+            "  <path d=\"{}\" fill=\"none\" stroke=\"#00ff88\" stroke-width=\"1.5\"/>\n", d
+        ));
+    }
+
+    for boundary in &face.inner_uv_boundaries {
+        for polyline in boundary {
+            if polyline.len() < 2 { continue; }
+            let mut d = format!("M {:.2} {:.2}", map_u(polyline[0].u), map_v(polyline[0].v));
+            for pt in &polyline[1..] {
+                d.push_str(&format!(" L {:.2} {:.2}", map_u(pt.u), map_v(pt.v)));
+            }
+            d.push_str(" Z");
+            svg.push_str(&format!(
+                "  <path d=\"{}\" fill=\"none\" stroke=\"#ff4444\" stroke-width=\"1.5\" stroke-dasharray=\"4,2\"/>\n", d
+            ));
+        }
+    }
+
+    for i in 0..=u_divs {
+        for j in 0..=v_divs {
+            let u = u_min + (u_max - u_min) * i as f64 / u_divs as f64;
+            let v = v_min + (v_max - v_min) * j as f64 / v_divs as f64;
+            let pt3d = face.surface.point_at(u, v);
+            if pt3d.x.is_finite() && pt3d.y.is_finite() && pt3d.z.is_finite() {
+                let x = map_u(u);
+                let y = map_v(v);
+                svg.push_str(&format!(
+                    "  <circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"2\" fill=\"#6688ff\" opacity=\"0.7\"/>\n", x, y
+                ));
+            }
+        }
+    }
+
+    svg.push_str(&format!(
+        "  <text x=\"{}\" y=\"{}\" fill=\"#aaa\" font-size=\"12\" text-anchor=\"middle\">U ({:.2} .. {:.2})</text>\n",
+        margin + draw_w / 2.0, svg_height - 5.0, u_min, u_max
+    ));
+    svg.push_str(&format!(
+        "  <text x=\"10\" y=\"{}\" fill=\"#aaa\" font-size=\"12\" text-anchor=\"middle\" transform=\"rotate(-90, 10, {})\">V ({:.2} .. {:.2})</text>\n",
+        margin + draw_h / 2.0, margin + draw_h / 2.0, v_min, v_max
+    ));
+    svg.push_str(&format!(
+        "  <text x=\"{}\" y=\"20\" fill=\"#fff\" font-size=\"13\" text-anchor=\"middle\">Face #{} (STEP #{}) {} forward={}</text>\n",
+        svg_width / 2.0, face.face_id, face.step_face_id, face.surface_type, face.forward
+    ));
+
+    svg.push_str("</svg>\n");
+    svg
+}
+
+/// Draw an assembly tree node recursively (static function to avoid borrow conflicts).
+fn draw_assembly_node_static(
+    ui: &mut egui::Ui,
+    node: &AssemblyNode,
+    detailed_instances: &[DetailedMeshInstance],
+    selected_instance: Option<usize>,
+    pending_instance_select: &mut Option<usize>,
+) {
+    let has_children = !node.children.is_empty();
+    let brep_str = match node.brep_id {
+        Some(id) => format!(" BREP#{}", id),
+        None => String::new(),
+    };
+    let label = format!("{}{}", node.name, brep_str);
+
+    // Check if this node matches a detailed instance
+    let is_selected = node.brep_id.map_or(false, |bid| {
+        detailed_instances.iter()
+            .position(|inst| inst.brep_id == bid)
+            .map_or(false, |idx| selected_instance == Some(idx))
+    });
+
+    if has_children {
+        egui::CollapsingHeader::new(egui::RichText::new(&label).size(11.0))
+            .default_open(false)
+            .show(ui, |ui| {
+                for child in &node.children {
+                    draw_assembly_node_static(ui, child, detailed_instances, selected_instance, pending_instance_select);
+                }
+            });
+    } else {
+        let response = ui.selectable_label(is_selected, egui::RichText::new(&label).size(11.0));
+        if response.clicked() {
+            // Find the corresponding detailed instance
+            if let Some(bid) = node.brep_id {
+                if let Some(idx) = detailed_instances.iter().position(|inst| inst.brep_id == bid) {
+                    *pending_instance_select = Some(idx);
                 }
             }
         }
     }
+}
+
+impl ViewerApp {
+
 
     fn draw_axes_overlay(&self, ui: &mut egui::Ui, rect: egui::Rect) {
         let cam_right = self.camera.right();
