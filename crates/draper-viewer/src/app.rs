@@ -1154,8 +1154,10 @@ impl eframe::App for ViewerApp {
                                             u_min -= u_range * 0.05; u_max += u_range * 0.05;
                                             v_min -= v_range * 0.05; v_max += v_range * 0.05;
 
-                                            let map_u = |u: f64| -> f32 { (margin + (u - u_min) / (u_max - u_min) * draw_size as f64) as f32 };
-                                            let map_v = |v: f64| -> f32 { (margin + (1.0 - (v - v_min) / (v_max - v_min)) * draw_size as f64) as f32 };
+                                            let margin_f64 = margin as f64;
+                                            let draw_size_f64 = draw_size as f64;
+                                            let map_u = |u: f64| -> f32 { (margin_f64 + (u - u_min) / (u_max - u_min) * draw_size_f64) as f32 };
+                                            let map_v = |v: f64| -> f32 { (margin_f64 + (1.0 - (v - v_min) / (v_max - v_min)) * draw_size_f64) as f32 };
 
                                             // Draw grid lines
                                             let u_divs = self.uv_grid_u.min(50);
