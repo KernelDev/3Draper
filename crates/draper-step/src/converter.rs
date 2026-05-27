@@ -520,7 +520,7 @@ impl<'a> StepConverter<'a> {
         for type_name in &surface_types {
             for entity in self.step.find_entities_by_type(type_name) {
                 if let Some(surface) = self.extract_surface(entity.id) {
-                    let face_data = FaceData { surface, outer_edges: vec![], inner_edges: vec![], edges: vec![], forward: true };
+                    let face_data = FaceData { surface, outer_edges: vec![], inner_edges: vec![], edges: vec![], forward: true, step_face_id: entity.id };
                     let mesh = self.surface_to_mesh(&face_data, &params, &bbox);
                     results.push(MeshInstance {
                         name: entity.type_name.clone(),
@@ -1109,7 +1109,11 @@ impl<'a> StepConverter<'a> {
             let tri_end = mesh.triangle_count();
 
             // Sample boundary edges into polylines (3D and UV)
-            let outer_boundary = self.sample_edges_to_polylines(&face_data.outer_edges);
+            let outer_boundary: Vec<Vec<Point3d>> = if face_data.outer_edges.is_empty() {
+                vec![]
+            } else {
+                vec![self.sample_edges_to_polylines(&face_data.outer_edges)]
+            };
             let inner_boundaries: Vec<Vec<Point3d>> = face_data.inner_edges.iter()
                 .map(|edges| self.sample_edges_to_polylines(edges))
                 .collect();
@@ -1145,7 +1149,7 @@ impl<'a> StepConverter<'a> {
                 for i in 0..=steps {
                     let t = i as f64 / steps as f64;
                     if let Some(p) = edge.point_at(t) {
-                        if points.last().map_or(true, |last| last.distance_to(&p) > 1e-8) {
+                        if points.last().map_or(true, |last: &Point3d| last.distance_to(&p) > 1e-8) {
                             points.push(p);
                         }
                     }
