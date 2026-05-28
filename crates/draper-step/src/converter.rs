@@ -3114,13 +3114,54 @@ impl<'a> StepConverter<'a> {
     }
 
     /// Extract knot vector from a B_SPLINE_CURVE entity.
+    ///
+    /// STEP B_SPLINE_CURVE_WITH_KNOTS stores knots in compressed form:
+    ///   B_SPLINE_CURVE_WITH_KNOTS((mult1, mult2, ...), (val1, val2, ...), knot_type)
+    /// where each knot value `val_i` is repeated `mult_i` times in the actual knot vector.
+    ///
+    /// For example: ((4,4), (0.0, 45.0), .PIECEWISE_BEZIER_KNOTS.)
+    /// expands to: [0, 0, 0, 0, 45, 45, 45, 45]
     fn extract_curve_knots(&self, entity: &crate::schema::StepEntity, n_cp: usize, degree: usize) -> Vec<f64> {
         let expected_knot_count = n_cp + degree + 1;
 
-        // Search for knot vector in parameters after control points
-        // For B_SPLINE_CURVE_WITH_KNOTS: params typically include knot multiplicities and knot values
+        // --- Strategy 1: B_SPLINE_CURVE_WITH_KNOTS compressed format ---
+        // The entity params are: (multiplicities, distinct_knot_values, knot_type_enum)
+        // Try to find two consecutive lists: first = integer multiplicities, second = float knot values
+        let params = &entity.params;
+        for i in 0..params.len().saturating_sub(1) {
+            if let (StepValue::List(mult_items), StepValue::List(val_items)) = (&params[i], &params[i + 1]) {
+                // Check if first list looks like integer multiplicities and second like knot values
+                let multiplicities: Vec<usize> = mult_items.iter()
+                    .filter_map(|v| self.get_float(v).map(|f| f as usize))
+                    .collect();
+                let knot_values: Vec<f64> = val_items.iter()
+                    .filter_map(|v| self.get_float(v))
+                    .collect();
+
+                if !multiplicities.is_empty() && multiplicities.len() == knot_values.len() {
+                    // Expand: repeat each knot value by its multiplicity
+                    let mut expanded: Vec<f64> = Vec::new();
+                    for (val, &mult) in knot_values.iter().zip(multiplicities.iter()) {
+                        for _ in 0..mult {
+                            expanded.push(val);
+                        }
+                    }
+                    if expanded.len() == expected_knot_count {
+                        return expanded;
+                    }
+                    // If the expanded length is close but not exact, try it anyway
+                    // (some STEP files may have slightly different conventions)
+                    if !expanded.is_empty() && expanded.len() >= degree + 2 {
+                        return expanded;
+                    }
+                }
+            }
+        }
+
+        // --- Strategy 2: Search for a flat knot list among all params ---
+        // Some STEP files may store the full expanded knot vector directly
         let mut knot_lists: Vec<Vec<f64>> = Vec::new();
-        for param in entity.params.iter().skip(2) {
+        for param in params {
             if let StepValue::List(items) = param {
                 let floats: Vec<f64> = items.iter()
                     .filter_map(|v| self.get_float(v))
@@ -3139,7 +3180,6 @@ impl<'a> StepConverter<'a> {
         // If we found some lists, the longest one might be the knot vector
         if !knot_lists.is_empty() {
             knot_lists.sort_by(|a, b| b.len().cmp(&a.len()));
-            // Check if the longest list could be knots (monotonically increasing or non-decreasing)
             let candidate = &knot_lists[0];
             let is_monotonic = candidate.windows(2).all(|w| w[0] <= w[1] + 1e-10);
             if is_monotonic && candidate.len() >= degree + 2 {
@@ -3147,9 +3187,19 @@ impl<'a> StepConverter<'a> {
             }
         }
 
-        // Fallback: generate uniform knot vector
-        let knot_count = expected_knot_count;
-        (0..knot_count).map(|i| i as f64 / (knot_count - 1).max(1) as f64).collect()
+        // Fallback: generate uniform clamped knot vector
+        // Clamped: first (degree+1) knots = 0.0, last (degree+1) knots = 1.0
+        let mut knots = Vec::with_capacity(expected_knot_count);
+        for i in 0..expected_knot_count {
+            if i <= degree {
+                knots.push(0.0);
+            } else if i >= expected_knot_count - degree - 1 {
+                knots.push(1.0);
+            } else {
+                knots.push((i - degree) as f64 / (expected_knot_count - 2 * degree - 1) as f64);
+            }
+        }
+        knots
     }
 
     /// Resolve a POLYLINE entity — return as a line segment approximation.
