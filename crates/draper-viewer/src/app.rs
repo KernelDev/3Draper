@@ -1119,19 +1119,28 @@ impl eframe::App for ViewerApp {
                                                 }
                                             }
 
-                                            // Draw grid intersection points
+                                            // Build a combined outer boundary polygon for point-in-polygon test
+                                            let outer_uv_poly: Vec<(f64, f64)> = face.outer_uv_boundary.iter()
+                                                .flat_map(|pl| pl.iter().map(|pt| (pt.u, pt.v)))
+                                                .collect();
+
+                                            // Draw grid intersection points (only inside boundary)
                                             for i in 0..=u_divs {
                                                 for j in 0..=v_divs {
                                                     let u = u_min + (u_max - u_min) * i as f64 / u_divs as f64;
                                                     let v = v_min + (v_max - v_min) * j as f64 / v_divs as f64;
                                                     let pt3d = face.surface.point_at(u, v);
                                                     if pt3d.x.is_finite() && pt3d.y.is_finite() && pt3d.z.is_finite() {
-                                                        let x = map_u(u);
-                                                        let y = map_v(v);
-                                                        ui.painter().circle_filled(
-                                                            egui::pos2(x, y), 2.0,
-                                                            egui::Color32::from_rgba_premultiplied(102, 136, 255, 180),
-                                                        );
+                                                        // Only draw dot if inside the outer boundary polygon
+                                                        let inside = !outer_uv_poly.is_empty() && point_in_polygon(u, v, &outer_uv_poly);
+                                                        if inside {
+                                                            let x = map_u(u);
+                                                            let y = map_v(v);
+                                                            ui.painter().circle_filled(
+                                                                egui::pos2(x, y), 2.0,
+                                                                egui::Color32::from_rgba_premultiplied(102, 136, 255, 180),
+                                                            );
+                                                        }
                                                     }
                                                 }
                                             }
@@ -1685,17 +1694,26 @@ fn generate_uv_svg(face: &FaceInfo, u_divs: usize, v_divs: usize) -> String {
         }
     }
 
+    // Build outer boundary polygon for point-in-polygon clipping
+    let outer_uv_poly: Vec<(f64, f64)> = face.outer_uv_boundary.iter()
+        .flat_map(|pl| pl.iter().map(|pt| (pt.u, pt.v)))
+        .collect();
+
     for i in 0..=u_divs {
         for j in 0..=v_divs {
             let u = u_min + (u_max - u_min) * i as f64 / u_divs as f64;
             let v = v_min + (v_max - v_min) * j as f64 / v_divs as f64;
             let pt3d = face.surface.point_at(u, v);
             if pt3d.x.is_finite() && pt3d.y.is_finite() && pt3d.z.is_finite() {
-                let x = map_u(u);
-                let y = map_v(v);
-                svg.push_str(&format!(
-                    "  <circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"2\" fill=\"#6688ff\" opacity=\"0.7\"/>\n", x, y
-                ));
+                // Only draw dot if inside the outer boundary polygon
+                let inside = !outer_uv_poly.is_empty() && point_in_polygon(u, v, &outer_uv_poly);
+                if inside {
+                    let x = map_u(u);
+                    let y = map_v(v);
+                    svg.push_str(&format!(
+                        "  <circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"2\" fill=\"#6688ff\" opacity=\"0.7\"/>\n", x, y
+                    ));
+                }
             }
         }
     }
@@ -1809,4 +1827,27 @@ fn mat4_mul(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
         }
     }
     result
+}
+
+/// Point-in-polygon test using ray casting algorithm.
+/// Returns true if the point (x, y) is inside the polygon defined by vertices.
+/// Uses the even-odd rule: cast a horizontal ray from the point and count
+/// how many polygon edges it crosses. If odd, the point is inside.
+fn point_in_polygon(x: f64, y: f64, polygon: &[(f64, f64)]) -> bool {
+    if polygon.len() < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let n = polygon.len();
+    let mut j = n - 1;
+    for i in 0..n {
+        let (xi, yi) = polygon[i];
+        let (xj, yj) = polygon[j];
+        // Check if the ray from (x, y) going right crosses the edge (j, i)
+        if ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi) {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
 }

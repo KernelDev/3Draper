@@ -1204,25 +1204,30 @@ impl<'a> StepConverter<'a> {
     }
 
     /// Sample edges into UV-space polylines for UV grid visualization.
+    /// All edges in a single loop are concatenated into one polyline (matching
+    /// the behavior of `sample_edges_to_polylines`), with deduplication at
+    /// junction points to avoid duplicate vertices where edges meet.
     fn sample_edges_to_uv_polylines(&self, edges: &[TopoEdge], surface: &Surface) -> Vec<Vec<Point2d>> {
-        let mut polylines = Vec::new();
+        let mut polyline = Vec::new();
         for edge in edges {
-            if let Some(ref curve) = edge.curve {
-                let mut polyline = Vec::new();
+            if let Some(ref _curve) = edge.curve {
                 let steps = 20;
                 for i in 0..=steps {
                     let t = i as f64 / steps as f64;
                     if let Some(p) = edge.point_at(t) {
                         let (u, v) = surface.project_point(&p);
-                        polyline.push(Point2d::new(u, v));
+                        let pt = Point2d::new(u, v);
+                        // Deduplicate: skip if same as last point (at edge junctions)
+                        if polyline.last().map_or(true, |last: &Point2d| {
+                            (last.u - pt.u).abs() > 1e-8 || (last.v - pt.v).abs() > 1e-8
+                        }) {
+                            polyline.push(pt);
+                        }
                     }
-                }
-                if !polyline.is_empty() {
-                    polylines.push(polyline);
                 }
             }
         }
-        polylines
+        if polyline.is_empty() { vec![] } else { vec![polyline] }
     }
 
     /// Triangulate a shell entity (CLOSED_SHELL, OPEN_SHELL) directly by its ID.
