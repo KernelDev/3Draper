@@ -3141,7 +3141,7 @@ impl<'a> StepConverter<'a> {
                 if !multiplicities.is_empty() && multiplicities.len() == knot_values.len() {
                     // Expand: repeat each knot value by its multiplicity
                     let mut expanded: Vec<f64> = Vec::new();
-                    for (val, &mult) in knot_values.iter().zip(multiplicities.iter()) {
+                    for (&val, &mult) in knot_values.iter().zip(multiplicities.iter()) {
                         for _ in 0..mult {
                             expanded.push(val);
                         }
