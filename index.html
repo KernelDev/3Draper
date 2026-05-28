@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>3Draper — 3D Geometric Kernel</title>
+    <meta name="description" content="3Draper: A 3D geometric kernel with B-Rep topology, STEP/STL I/O, and interactive 3D viewer running entirely in your browser via WebAssembly.">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #1a1a2e;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+        }
+        #the_canvas_id {
+            width: 100%;
+            height: 100vh;
+            display: block;
+            touch-action: none;
+        }
+        #loading {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: #1a1a2e;
+            z-index: 1000;
+            transition: opacity 0.5s ease;
+        }
+        #loading.fade-out {
+            opacity: 0;
+            pointer-events: none;
+        }
+        #loading .logo {
+            font-size: 32px;
+            font-weight: 700;
+            color: #6c8ebf;
+            margin-bottom: 24px;
+            letter-spacing: 2px;
+        }
+        #loading .logo span {
+            color: #8899aa;
+            font-weight: 300;
+            font-size: 18px;
+            margin-left: 8px;
+        }
+        #loading .spinner {
+            width: 48px;
+            height: 48px;
+            border: 3px solid rgba(108, 142, 191, 0.2);
+            border-top: 3px solid #6c8ebf;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        #loading .status {
+            margin-top: 20px;
+            color: #667788;
+            font-size: 14px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div id="loading">
+        <div class="logo">3Draper<span>Viewer</span></div>
+        <div class="spinner"></div>
+        <div class="status">Loading WebAssembly module...</div>
+    </div>
+    <canvas id="the_canvas_id"></canvas>
+    <script type="module">
+        import init from './draper-viewer.js';
+
+        async function run() {
+            await init('./draper-viewer_bg.wasm');
+
+            // Hide loading overlay
+            var loadingEl = document.getElementById("loading");
+            if (loadingEl) {
+                loadingEl.classList.add("fade-out");
+                setTimeout(function() { loadingEl.style.display = "none"; }, 600);
+            }
+        }
+
+        run().catch(console.error);
+
+        // Fallback: hide after 15 seconds
+        setTimeout(function() {
+            var loadingEl = document.getElementById("loading");
+            if (loadingEl) {
+                loadingEl.classList.add("fade-out");
+                setTimeout(function() { loadingEl.style.display = "none"; }, 600);
+            }
+        }, 15000);
+    </script>
+</body>
+</html>
