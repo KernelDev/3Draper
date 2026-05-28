@@ -114,6 +114,10 @@ pub struct AssemblyNode {
     pub pd_id: i64,
     /// STEP entity ID of the MANIFOLD_SOLID_BREP (if leaf).
     pub brep_id: Option<i64>,
+    /// Index into the detailed_instances Vec that this leaf node corresponds to.
+    /// Set only for leaf nodes. Multiple leaf nodes may share the same brep_id
+    /// but each will have a unique instance_index (e.g., bolt at different positions).
+    pub instance_index: Option<usize>,
     /// Transform from parent to this node.
     pub transform: Option<[[f64; 4]; 4]>,
     /// Color for this node.
@@ -148,6 +152,43 @@ pub fn step_to_detailed_instances(step_file: &StepFile) -> Result<Vec<DetailedMe
 pub fn step_structure(step_file: &StepFile) -> AssemblyNode {
     let converter = StepConverter::new(step_file);
     converter.build_assembly_tree()
+}
+
+/// Build the assembly tree AND detailed instances together, so that each leaf
+/// AssemblyNode gets its `instance_index` populated (mapping it to the correct
+/// entry in the returned instances Vec). This solves the problem of multiple
+/// assembly nodes sharing the same brep_id (e.g., same bolt at different positions).
+pub fn step_structure_with_instances(step_file: &StepFile) -> (AssemblyNode, Vec<DetailedMeshInstance>) {
+    let converter = StepConverter::new(step_file);
+    let mut tree = converter.build_assembly_tree();
+    let instances = converter.convert_detailed_instances().unwrap_or_default();
+
+    // Walk the assembly tree leaf nodes in the same order as the NAUO tree walk
+    // that generated the instances, and assign instance_index to each leaf.
+    // The instances are created by walk_assembly_tree_detailed which visits
+    // leaf nodes in the same DFS order as build_assembly_tree.
+    let mut next_index: usize = 0;
+    assign_instance_indices(&mut tree, &instances, &mut next_index);
+
+    (tree, instances)
+}
+
+/// Recursively assign instance_index to leaf AssemblyNodes by matching them
+/// with instances in DFS order. The walk_assembly_tree_detailed function
+/// creates instances in the same DFS order as build_assembly_tree, so we
+/// can assign indices sequentially.
+fn assign_instance_indices(node: &mut AssemblyNode, instances: &[DetailedMeshInstance], next_index: &mut usize) {
+    if node.children.is_empty() {
+        // Leaf node — assign instance_index if it has a brep_id
+        if node.brep_id.is_some() && *next_index < instances.len() {
+            node.instance_index = Some(*next_index);
+            *next_index += 1;
+        }
+    } else {
+        for child in &mut node.children {
+            assign_instance_indices(child, instances, next_index);
+        }
+    }
 }
 
 /// Get a detailed text dump of the STEP file structure, including:
@@ -855,6 +896,7 @@ impl<'a> StepConverter<'a> {
                 name: "No Assembly".to_string(),
                 pd_id: 0,
                 brep_id: None,
+                instance_index: None,
                 transform: None,
                 color: None,
                 children: Vec::new(),
@@ -866,6 +908,7 @@ impl<'a> StepConverter<'a> {
                     name,
                     pd_id: 0,
                     brep_id: Some(brep.id),
+                    instance_index: None,
                     transform: None,
                     color,
                     children: Vec::new(),
@@ -892,6 +935,7 @@ impl<'a> StepConverter<'a> {
             name: name.to_string(),
             pd_id,
             brep_id,
+            instance_index: None,
             transform: None, // Transforms are per-NAUO, set in children
             color,
             children: Vec::new(),

@@ -18,7 +18,15 @@ use eframe::egui;
 
 /// Convert TriangleMesh to GPU vertex/index data.
 /// Uses flat shading with face normals to properly support per-triangle colors from STEP files.
-fn mesh_to_gpu_data(mesh: &TriangleMesh, highlighted_face_id: Option<u64>) -> (Vec<MeshVertex>, Vec<u32>) {
+/// When a face is highlighted, it gets bright yellow. When an instance is selected,
+/// triangles outside that instance are dimmed. When no face is highlighted but an
+/// instance is selected, the selected instance is drawn at full color and others are dimmed.
+fn mesh_to_gpu_data(
+    mesh: &TriangleMesh,
+    highlighted_face_id: Option<u64>,
+    selected_instance: Option<usize>,
+    instance_triangle_ranges: &[(usize, usize)],
+) -> (Vec<MeshVertex>, Vec<u32>) {
     let mut mesh = mesh.clone();
     if mesh.face_normals.is_none() {
         mesh.compute_face_normals();
@@ -34,10 +42,12 @@ fn mesh_to_gpu_data(mesh: &TriangleMesh, highlighted_face_id: Option<u64>) -> (V
         c.iter().any(|col| (col[0] - 0.48).abs() > 0.01 || (col[1] - 0.52).abs() > 0.01 || (col[2] - 0.58).abs() > 0.01)
     });
 
-    // If we have vertex normals and no special per-triangle colors, use smooth shading
-    // But if we need face ID highlighting, we must use flat shading
+    // Determine if we need per-triangle processing (face highlight, instance selection, or colors)
+    let needs_per_tri = highlighted_face_id.is_some() || selected_instance.is_some() || has_real_colors;
+
+    // If we have vertex normals and no special per-triangle processing, use smooth shading
     if let Some(ref vertex_normals) = mesh.normals {
-        if vertex_normals.len() == mesh.vertices.len() && !has_real_colors && highlighted_face_id.is_none() {
+        if vertex_normals.len() == mesh.vertices.len() && !needs_per_tri {
             let mut gpu_vertices = Vec::with_capacity(mesh.vertices.len());
             let mut gpu_indices = Vec::with_capacity(mesh.triangles.len() * 3);
 
@@ -73,11 +83,21 @@ fn mesh_to_gpu_data(mesh: &TriangleMesh, highlighted_face_id: Option<u64>) -> (V
             .map(|c| [c[0], c[1], c[2]])
             .unwrap_or([0.48, 0.52, 0.58]);
 
-        // Highlight the selected face with a bright yellow-orange color
+        // Check face-level highlighting (bright yellow for selected face)
         if let Some(hid) = highlighted_face_id {
             if let Some(ids) = face_ids {
                 if ids.get(i).map_or(false, |id| *id == hid) {
                     color = [1.0, 0.85, 0.1]; // bright yellow for selected face
+                }
+            }
+        }
+
+        // Check instance-level dimming (dim triangles not in selected instance)
+        if let Some(sel_idx) = selected_instance {
+            if let Some(&(start, end)) = instance_triangle_ranges.get(sel_idx) {
+                if i < start || i >= end {
+                    // Dim non-selected instance triangles
+                    color = [color[0] * 0.25, color[1] * 0.25, color[2] * 0.25];
                 }
             }
         }
@@ -180,6 +200,11 @@ pub struct ViewerApp {
     highlighted_face_id: Option<u64>,
     /// Whether the GPU data needs update due to highlight change.
     highlight_dirty: bool,
+
+    // ─── Instance-level highlight state ────────────────────────────
+    /// Per-instance triangle ranges in the merged mesh: Vec<(start_tri, end_tri)>
+    /// When an instance is selected, triangles outside its range are dimmed.
+    instance_triangle_ranges: Vec<(usize, usize)>,
 }
 
 impl ViewerApp {
@@ -235,7 +260,7 @@ impl ViewerApp {
 
         // Initialize GPU resources if wgpu is available
         if let Some(ref rs) = render_state {
-            let (vertices, indices) = mesh_to_gpu_data(&mesh, None);
+            let (vertices, indices) = mesh_to_gpu_data(&mesh, None, None, &[]);
             let resources = create_scene_resources(rs, &vertices, &indices);
             *gpu_resources.lock().unwrap() = Some(resources);
         }
@@ -268,6 +293,7 @@ impl ViewerApp {
             uv_svg_cache: None,
             highlighted_face_id: None,
             highlight_dirty: false,
+            instance_triangle_ranges: Vec::new(),
         };
         app.log("3Draper Viewer started");
         app.log(&format!("Default model: Box 100x100x100 ({} vertices, {} triangles)",
@@ -304,6 +330,7 @@ impl ViewerApp {
         let solid = ShapeBuilder::make_box(100.0, 80.0, 60.0);
         let mesh = triangulate_solid(&solid, &TriangulationParams::default());
         self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
         self.load_mesh(mesh, "Box 100x80x60");
     }
@@ -312,6 +339,7 @@ impl ViewerApp {
         let solid = ShapeBuilder::make_cylinder(40.0, 100.0);
         let mesh = triangulate_solid(&solid, &TriangulationParams::default());
         self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
         self.load_mesh(mesh, "Cylinder R=40 H=100");
     }
@@ -320,6 +348,7 @@ impl ViewerApp {
         let solid = ShapeBuilder::make_sphere(50.0);
         let mesh = triangulate_solid(&solid, &TriangulationParams::default());
         self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
         self.load_mesh(mesh, "Sphere R=50");
     }
@@ -331,6 +360,7 @@ impl ViewerApp {
         let solid = ShapeBuilder::make_cone(radius, height, half_angle);
         let mesh = triangulate_solid(&solid, &TriangulationParams::default());
         self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
         self.load_mesh(mesh, "Cone R=40 H=80");
     }
@@ -339,6 +369,7 @@ impl ViewerApp {
         let solid = ShapeBuilder::make_torus(40.0, 12.0);
         let mesh = triangulate_solid(&solid, &TriangulationParams::default());
         self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
         self.load_mesh(mesh, "Torus R=40 r=12");
     }
@@ -347,6 +378,7 @@ impl ViewerApp {
         let doc = build_engine(&EngineConfig::default());
         let mesh = doc.triangulate();
         self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
         self.load_mesh(mesh, "ICE Engine (I4)");
     }
@@ -362,6 +394,7 @@ impl ViewerApp {
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "STL file".to_string());
                 self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
                 self.assembly_tree = None;
                 self.load_mesh(mesh, &format!("STL: {}", name));
             }
@@ -466,52 +499,86 @@ impl ViewerApp {
             self.log(&format!("  Surfaces: {}", surface_summary.join(", ")));
         }
 
-        // Build assembly tree for structure panel
-        self.assembly_tree = Some(draper_step::step_structure(step_file));
+        // Build assembly tree AND detailed instances together so that
+        // instance_index is properly populated in the assembly tree
+        let (tree, instances) = draper_step::step_structure_with_instances(step_file);
+        self.assembly_tree = Some(tree);
 
         // ── Convert STEP to detailed mesh instances ──
-        match draper_step::step_to_detailed_instances(step_file) {
-            Ok(instances) => {
-                self.log(&format!("── Mesh Rendering Tree ({} instances) ──", instances.len()));
+        if !instances.is_empty() {
+            self.log(&format!("── Mesh Rendering Tree ({} instances) ──", instances.len()));
 
-                // Store detailed instances for structure/selection
-                self.detailed_instances = instances.clone();
+            // Store detailed instances for structure/selection
+            self.detailed_instances = instances.clone();
 
-                // Merge all instances into a single mesh for rendering
-                let mut mesh = TriangleMesh::new();
-                for inst in &instances {
-                    if let Some(color) = inst.color {
-                        mesh.merge_with_color(&inst.mesh, color);
-                    } else {
-                        mesh.merge_with_color(&inst.mesh, [0.48, 0.52, 0.58, 1.0]);
-                    }
+            // Merge all instances into a single mesh for rendering,
+            // tracking per-instance triangle ranges
+            let mut mesh = TriangleMesh::new();
+            let mut instance_ranges = Vec::new();
+            for inst in &instances {
+                let tri_start = mesh.triangle_count();
+                if let Some(color) = inst.color {
+                    mesh.merge_with_color(&inst.mesh, color);
+                } else {
+                    mesh.merge_with_color(&inst.mesh, [0.48, 0.52, 0.58, 1.0]);
                 }
-                let vcount = mesh.vertex_count();
-                let tcount = mesh.triangle_count();
-                self.log(&format!(
-                    "Total merged: {} vertices, {} triangles", vcount, tcount
-                ));
-                self.load_mesh(mesh, &format!("STEP: {}", name));
+                let tri_end = mesh.triangle_count();
+                instance_ranges.push((tri_start, tri_end));
             }
-            Err(e) => {
-                self.log(&format!("STEP detailed conversion error: {}, trying simple conversion", e));
-                // Fallback to simple conversion
-                match draper_step::step_to_mesh_instances(step_file) {
-                    Ok(instances) => {
-                        self.log(&format!("── Simple Mesh Instances: {} ──", instances.len()));
-                        let mut mesh = TriangleMesh::new();
-                        for inst in &instances {
-                            if let Some(color) = inst.color {
-                                mesh.merge_with_color(&inst.mesh, color);
-                            } else {
-                                mesh.merge_with_color(&inst.mesh, [0.48, 0.52, 0.58, 1.0]);
-                            }
+            self.instance_triangle_ranges = instance_ranges;
+
+            let vcount = mesh.vertex_count();
+            let tcount = mesh.triangle_count();
+            self.log(&format!(
+                "Total merged: {} vertices, {} triangles", vcount, tcount
+            ));
+            self.load_mesh(mesh, &format!("STEP: {}", name));
+        } else {
+            // Fallback to separate calls
+            self.log("step_structure_with_instances returned no instances, trying separate conversion");
+            self.assembly_tree = Some(draper_step::step_structure(step_file));
+            match draper_step::step_to_detailed_instances(step_file) {
+                Ok(instances) => {
+                    self.log(&format!("── Mesh Rendering Tree ({} instances) ──", instances.len()));
+                    self.detailed_instances = instances.clone();
+                    let mut mesh = TriangleMesh::new();
+                    let mut instance_ranges = Vec::new();
+                    for inst in &instances {
+                        let tri_start = mesh.triangle_count();
+                        if let Some(color) = inst.color {
+                            mesh.merge_with_color(&inst.mesh, color);
+                        } else {
+                            mesh.merge_with_color(&inst.mesh, [0.48, 0.52, 0.58, 1.0]);
                         }
-                        self.detailed_instances.clear();
-                        self.load_mesh(mesh, &format!("STEP: {}", name));
+                        let tri_end = mesh.triangle_count();
+                        instance_ranges.push((tri_start, tri_end));
                     }
-                    Err(e2) => {
-                        self.log(&format!("STEP conversion error: {}", e2));
+                    self.instance_triangle_ranges = instance_ranges;
+                    let vcount = mesh.vertex_count();
+                    let tcount = mesh.triangle_count();
+                    self.log(&format!("Total merged: {} vertices, {} triangles", vcount, tcount));
+                    self.load_mesh(mesh, &format!("STEP: {}", name));
+                }
+                Err(e) => {
+                    self.log(&format!("STEP detailed conversion error: {}, trying simple conversion", e));
+                    match draper_step::step_to_mesh_instances(step_file) {
+                        Ok(instances) => {
+                            self.log(&format!("── Simple Mesh Instances: {} ──", instances.len()));
+                            let mut mesh = TriangleMesh::new();
+                            for inst in &instances {
+                                if let Some(color) = inst.color {
+                                    mesh.merge_with_color(&inst.mesh, color);
+                                } else {
+                                    mesh.merge_with_color(&inst.mesh, [0.48, 0.52, 0.58, 1.0]);
+                                }
+                            }
+                            self.detailed_instances.clear();
+                            self.instance_triangle_ranges.clear();
+                            self.load_mesh(mesh, &format!("STEP: {}", name));
+                        }
+                        Err(e2) => {
+                            self.log(&format!("STEP conversion error: {}", e2));
+                        }
                     }
                 }
             }
@@ -889,7 +956,7 @@ impl eframe::App for ViewerApp {
                         .max_height(250.0)
                         .show(ui, |ui| {
                             if let Some(ref tree) = assembly_tree_clone {
-                                draw_assembly_node_static(ui, tree, &detailed_instances_clone, selected_instance, &mut pending_instance_select);
+                                draw_assembly_node_static(ui, tree, selected_instance, &mut pending_instance_select);
                             } else if !detailed_instances_clone.is_empty() {
                                 for (i, inst) in detailed_instances_clone.iter().enumerate() {
                                     let is_selected = selected_instance == Some(i);
@@ -913,7 +980,8 @@ impl eframe::App for ViewerApp {
                                 .size(11.0).color(egui::Color32::GRAY));
 
                             egui::ScrollArea::vertical()
-                                .max_height(200.0)
+                                .id_salt("face_list_scroll")
+                                .max_height(300.0)
                                 .show(ui, |ui| {
                                     for face in &inst.faces {
                                         let is_selected = selected_face_id == Some(face.face_id);
@@ -1448,7 +1516,7 @@ impl eframe::App for ViewerApp {
                 // Upload mesh data if dirty or highlight changed
                 if self.mesh_dirty || self.highlight_dirty {
                     if let Some(ref rs) = self.render_state {
-                        let (vertices, indices) = mesh_to_gpu_data(&self.mesh, self.highlighted_face_id);
+                        let (vertices, indices) = mesh_to_gpu_data(&self.mesh, self.highlighted_face_id, self.selected_instance, &self.instance_triangle_ranges);
                         let mut guard = self.gpu_resources.lock().unwrap();
                         if let Some(ref mut resources) = *guard {
                             update_mesh_buffers(resources, &rs.device, &vertices, &indices);
@@ -1653,7 +1721,6 @@ fn generate_uv_svg(face: &FaceInfo, u_divs: usize, v_divs: usize) -> String {
 fn draw_assembly_node_static(
     ui: &mut egui::Ui,
     node: &AssemblyNode,
-    detailed_instances: &[DetailedMeshInstance],
     selected_instance: Option<usize>,
     pending_instance_select: &mut Option<usize>,
 ) {
@@ -1662,31 +1729,29 @@ fn draw_assembly_node_static(
         Some(id) => format!(" BREP#{}", id),
         None => String::new(),
     };
-    let label = format!("{}{}", node.name, brep_str);
+    let inst_str = match node.instance_index {
+        Some(idx) => format!(" [{}]", idx),
+        None => String::new(),
+    };
+    let label = format!("{}{}{}", node.name, brep_str, inst_str);
 
-    // Check if this node matches a detailed instance
-    let is_selected = node.brep_id.map_or(false, |bid| {
-        detailed_instances.iter()
-            .position(|inst| inst.brep_id == bid)
-            .map_or(false, |idx| selected_instance == Some(idx))
-    });
+    // Use instance_index for selection (exact mapping to instance)
+    let is_selected = node.instance_index.map_or(false, |idx| selected_instance == Some(idx));
 
     if has_children {
         egui::CollapsingHeader::new(egui::RichText::new(&label).size(11.0))
             .default_open(false)
             .show(ui, |ui| {
                 for child in &node.children {
-                    draw_assembly_node_static(ui, child, detailed_instances, selected_instance, pending_instance_select);
+                    draw_assembly_node_static(ui, child, selected_instance, pending_instance_select);
                 }
             });
     } else {
         let response = ui.selectable_label(is_selected, egui::RichText::new(&label).size(11.0));
         if response.clicked() {
-            // Find the corresponding detailed instance
-            if let Some(bid) = node.brep_id {
-                if let Some(idx) = detailed_instances.iter().position(|inst| inst.brep_id == bid) {
-                    *pending_instance_select = Some(idx);
-                }
+            // Use instance_index for precise selection
+            if let Some(idx) = node.instance_index {
+                *pending_instance_select = Some(idx);
             }
         }
     }
