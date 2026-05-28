@@ -1,0 +1,10 @@
+[package]
+name = "draper-diag"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+draper-step = { path = "../crates/draper-step" }
+draper-geometry = { path = "../crates/draper-geometry" }
+draper-mesh = { path = "../crates/draper-mesh" }
+draper-topology = { path = "../crates/draper-topology" }

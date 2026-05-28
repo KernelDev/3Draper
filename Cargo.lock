@@ -818,6 +818,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "draper-diag"
+version = "0.1.0"
+dependencies = [
+ "draper-geometry",
+ "draper-mesh",
+ "draper-step",
+ "draper-topology",
+]
+
+[[package]]
 name = "draper-ffi"
 version = "0.1.0"
 dependencies = [

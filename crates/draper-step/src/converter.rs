@@ -2228,10 +2228,19 @@ impl<'a> StepConverter<'a> {
             (Some(curve), Some(p1), Some(p2)) => {
                 // We have both curve and vertex points — create edge with vertex info
                 // Use vertex points to determine param_range for the curve
+                let curve_type_name = match &curve {
+                    Curve3d::Line(_) => "Line",
+                    Curve3d::Circle(_) => "Circle",
+                    Curve3d::Ellipse(_) => "Ellipse",
+                    Curve3d::Arc(_) => "Arc",
+                    Curve3d::Nurbs(_) => "Nurbs",
+                };
                 let edge = if let Curve3d::Line(ref line) = curve {
                     // For lines, compute param range from vertex projections
                     let t1 = project_point_on_line(line, p1);
                     let t2 = project_point_on_line(line, p2);
+                    eprintln!("    EDGE_CURVE #{}: {} p1=({:.4},{:.4},{:.4}) p2=({:.4},{:.4},{:.4}) param=({:.6},{:.6})",
+                        edge_curve_id, curve_type_name, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, t1, t2);
                     let mut edge = TopoEdge::new(curve, (t1, t2));
                     edge.vertex_start = Some(draper_topology::TopoId::new());
                     edge.vertex_end = Some(draper_topology::TopoId::new());
@@ -2239,6 +2248,11 @@ impl<'a> StepConverter<'a> {
                 } else if let Curve3d::Circle(ref circle) = curve {
                     // For circles, compute angular range from vertex projections
                     let (t1, t2) = project_points_on_circle(circle, p1, p2);
+                    eprintln!("    EDGE_CURVE #{}: {} p1=({:.4},{:.4},{:.4}) p2=({:.4},{:.4},{:.4}) param=({:.6},{:.6}) center=({:.4},{:.4},{:.4}) r={:.4} normal=({:.4},{:.4},{:.4}) x_axis=({:.4},{:.4},{:.4})",
+                        edge_curve_id, curve_type_name, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, t1, t2,
+                        circle.center.x, circle.center.y, circle.center.z, circle.radius,
+                        circle.normal.x, circle.normal.y, circle.normal.z,
+                        circle.x_axis.x, circle.x_axis.y, circle.x_axis.z);
                     let mut edge = TopoEdge::new(curve, (t1, t2));
                     edge.vertex_start = Some(draper_topology::TopoId::new());
                     edge.vertex_end = Some(draper_topology::TopoId::new());
@@ -2246,6 +2260,8 @@ impl<'a> StepConverter<'a> {
                 } else {
                     // For other curves, use the default param range
                     let param_range = curve.param_range();
+                    eprintln!("    EDGE_CURVE #{}: {} p1=({:.4},{:.4},{:.4}) p2=({:.4},{:.4},{:.4}) param=({:.6},{:.6})",
+                        edge_curve_id, curve_type_name, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, param_range.0, param_range.1);
                     let mut edge = TopoEdge::new(curve, param_range);
                     edge.vertex_start = Some(draper_topology::TopoId::new());
                     edge.vertex_end = Some(draper_topology::TopoId::new());
@@ -2260,9 +2276,14 @@ impl<'a> StepConverter<'a> {
             }
             (None, Some(p1), Some(p2)) => {
                 // No curve but have vertex points — create a line edge
+                eprintln!("    EDGE_CURVE #{}: NO CURVE, falling back to LINE p1=({:.4},{:.4},{:.4}) p2=({:.4},{:.4},{:.4})",
+                    edge_curve_id, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z);
                 Some(TopoEdge::new_line(*p1, *p2))
             }
-            _ => None,
+            _ => {
+                eprintln!("    EDGE_CURVE #{}: RESOLUTION FAILED", edge_curve_id);
+                None
+            }
         }
     }
 
@@ -3047,26 +3068,56 @@ impl<'a> StepConverter<'a> {
         let cp_entity = bspline_sub.unwrap_or(entity);
         let knot_entity = knots_sub.unwrap_or(entity);
 
-        let degree = self.get_float(cp_entity.params.first()?).unwrap_or(1.0) as usize;
+        // STEP format: B_SPLINE_CURVE_WITH_KNOTS(name, degree, (control_points), form, closed, self_intersect, (multiplicities), (knot_values), knot_type)
+        // Or without name: B_SPLINE_CURVE_WITH_KNOTS(degree, (control_points), ...)
+        // The degree is the first numeric parameter; the name (if present) is a string.
 
-        // Control points: 2nd param is a list of points
+        // Find the degree: scan params for the first float value (skip string name if present)
+        let mut degree = None;
+        let mut cp_param_idx = None;
+        for (i, param) in cp_entity.params.iter().enumerate() {
+            if degree.is_none() {
+                if let Some(d) = self.get_float(param) {
+                    degree = Some(d as usize);
+                }
+            } else if cp_param_idx.is_none() {
+                // The control points list should be the next parameter after degree
+                if let StepValue::List(_) = param {
+                    cp_param_idx = Some(i);
+                }
+            }
+        }
+
+        let degree = match degree {
+            Some(d) => d,
+            None => {
+                eprintln!("    resolve_bspline_curve #{}: no degree param found in {} params", entity.id, cp_entity.params.len());
+                return None;
+            }
+        };
+
+        // Control points: find the list parameter after degree
         let mut control_points = Vec::new();
-        if let Some(StepValue::List(items)) = cp_entity.params.get(1) {
-            for item in items {
-                if let Some(ref_id) = self.get_ref(item) {
-                    if let Some(pt) = self.resolve_cartesian_point(ref_id) {
-                        control_points.push(pt);
+        if let Some(cp_idx) = cp_param_idx {
+            if let Some(StepValue::List(items)) = cp_entity.params.get(cp_idx) {
+                for item in items {
+                    if let Some(ref_id) = self.get_ref(item) {
+                        if let Some(pt) = self.resolve_cartesian_point(ref_id) {
+                            control_points.push(pt);
+                        }
+                    } else if let StepValue::List(coords) = item {
+                        let x = coords.get(0).and_then(|v| self.get_float(v)).unwrap_or(0.0);
+                        let y = coords.get(1).and_then(|v| self.get_float(v)).unwrap_or(0.0);
+                        let z = coords.get(2).and_then(|v| self.get_float(v)).unwrap_or(0.0);
+                        control_points.push(Point3d::new(x, y, z));
                     }
-                } else if let StepValue::List(coords) = item {
-                    let x = coords.get(0).and_then(|v| self.get_float(v)).unwrap_or(0.0);
-                    let y = coords.get(1).and_then(|v| self.get_float(v)).unwrap_or(0.0);
-                    let z = coords.get(2).and_then(|v| self.get_float(v)).unwrap_or(0.0);
-                    control_points.push(Point3d::new(x, y, z));
                 }
             }
         }
 
         if control_points.is_empty() {
+            eprintln!("    resolve_bspline_curve #{}: no control points (degree={}, cp_param_idx={:?}, params count={})",
+                entity.id, degree, cp_param_idx, cp_entity.params.len());
             return None;
         }
 
