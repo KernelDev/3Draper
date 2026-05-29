@@ -23,7 +23,7 @@ use eframe::egui;
 ///   highlight: 0 = normal face, 1 = highlighted face
 fn mesh_to_gpu_data(
     mesh: &TriangleMesh,
-    highlighted_face_id: Option<u64>,
+    highlighted_face: Option<(usize, u64)>,
     selected_instance: Option<usize>,
     instance_triangle_ranges: &[(usize, usize)],
 ) -> (Vec<MeshVertex>, Vec<u32>) {
@@ -43,7 +43,7 @@ fn mesh_to_gpu_data(
     });
 
     // Determine if we need per-triangle processing (face highlight, instance selection, or colors)
-    let needs_per_tri = highlighted_face_id.is_some() || selected_instance.is_some() || has_real_colors;
+    let needs_per_tri = highlighted_face.is_some() || selected_instance.is_some() || has_real_colors;
 
     // If we have vertex normals and no special per-triangle processing, use smooth shading
     if let Some(ref vertex_normals) = mesh.normals {
@@ -105,11 +105,16 @@ fn mesh_to_gpu_data(
             // If instance_triangle_ranges doesn't have this index, selection stays 0.0 (normal)
         }
 
-        // Check face-level highlighting
-        if let Some(hid) = highlighted_face_id {
-            if let Some(ids) = face_ids {
-                if ids.get(i).map_or(false, |id| *id == hid) {
-                    is_highlighted = true;
+        // Check face-level highlighting (instance-aware)
+        // highlighted_face = (instance_index, face_id) — only highlight within the correct instance
+        if let Some((hl_inst, hl_fid)) = highlighted_face {
+            if let Some(&(start, end)) = instance_triangle_ranges.get(hl_inst) {
+                if i >= start && i < end {
+                    if let Some(ids) = face_ids {
+                        if ids.get(i).map_or(false, |id| *id == hl_fid) {
+                            is_highlighted = true;
+                        }
+                    }
                 }
             }
         }
@@ -304,8 +309,8 @@ pub struct ViewerApp {
     assembly_tree: Option<AssemblyNode>,
     /// Currently selected instance index.
     selected_instance: Option<usize>,
-    /// Currently selected face ID (within the instance).
-    selected_face_id: Option<u64>,
+    /// Currently selected face: (instance_index, face_id_within_instance).
+    selected_face: Option<(usize, u64)>,
     /// Whether to show the structure panel.
     show_structure: bool,
 
@@ -317,11 +322,11 @@ pub struct ViewerApp {
     /// UV grid V subdivisions.
     uv_grid_v: usize,
     /// Cached UV grid SVG string for the selected face.
-    uv_svg_cache: Option<(u64, String)>, // (face_id, svg_content)
+    uv_svg_cache: Option<((usize, u64), String)>, // ((instance_idx, face_id), svg_content)
 
     // ─── Face highlight state ──────────────────────────────────────
-    /// Currently highlighted face ID (for 3D view highlighting).
-    highlighted_face_id: Option<u64>,
+    /// Currently highlighted face: (instance_index, face_id_within_instance).
+    highlighted_face: Option<(usize, u64)>,
     /// Whether the GPU data needs update due to highlight change.
     highlight_dirty: bool,
 
@@ -329,6 +334,9 @@ pub struct ViewerApp {
     /// Per-instance triangle ranges in the merged mesh: Vec<(start_tri, end_tri)>
     /// When an instance is selected, triangles outside its range are dimmed.
     instance_triangle_ranges: Vec<(usize, usize)>,
+    // ─── Tree navigation state ────────────────────────────────────────
+    /// Node names that should be forced open in the assembly tree (for navigation from 3D click).
+    open_tree_nodes: std::collections::HashSet<String>,
 }
 
 impl ViewerApp {
@@ -409,15 +417,16 @@ impl ViewerApp {
             detailed_instances: Vec::new(),
             assembly_tree: None,
             selected_instance: None,
-            selected_face_id: None,
+            selected_face: None,
             show_structure: true,
             show_uv_grid: false,
             uv_grid_u: 10,
             uv_grid_v: 10,
             uv_svg_cache: None,
-            highlighted_face_id: None,
+            highlighted_face: None,
             highlight_dirty: false,
             instance_triangle_ranges: Vec::new(),
+            open_tree_nodes: std::collections::HashSet::new(),
         };
         app.log("3Draper Viewer started");
         app.log(&format!("Default model: Box 100x100x100 ({} vertices, {} triangles)",
@@ -442,10 +451,11 @@ impl ViewerApp {
         self.mesh_dirty = true;
         // Reset selection when loading new model
         self.selected_instance = None;
-        self.selected_face_id = None;
-        self.highlighted_face_id = None;
+        self.selected_face = None;
+        self.highlighted_face = None;
         self.highlight_dirty = true;
         self.uv_svg_cache = None;
+        self.open_tree_nodes.clear();
         self.log(&format!("Loaded: {} ({} vertices, {} triangles)",
             name, self.current_model.vertex_count, self.current_model.triangle_count));
     }
@@ -883,14 +893,6 @@ impl ViewerApp {
             }
         }
     }
-
-    /// Handle picking: find which face is at the given screen position.
-    fn pick_face_at(&self, _screen_x: f32, _screen_y: f32) -> Option<(usize, u64)> {
-        // Simplified picking: iterate all instances and faces, check if any triangle 
-        // is under the cursor. For now, return None since true raycasting is complex.
-        // The primary selection mechanism is through the structure panel.
-        None
-    }
 }
 
 impl eframe::App for ViewerApp {
@@ -1051,7 +1053,7 @@ impl eframe::App for ViewerApp {
         // === Right panel: Structure / Faces / UV ===
         // Collect pending UI actions to avoid borrow checker conflicts
         let mut pending_instance_select: Option<usize> = None;
-        let mut pending_face_select: Option<u64> = None;
+        let mut pending_face_select: Option<(usize, u64)> = None;
         let mut pending_svg_export = false;
         let mut pending_copy_face_id: Option<u64> = None;
 
@@ -1060,11 +1062,12 @@ impl eframe::App for ViewerApp {
             let assembly_tree_clone = self.assembly_tree.clone();
             let detailed_instances_clone = self.detailed_instances.clone();
             let selected_instance = self.selected_instance;
-            let selected_face_id = self.selected_face_id;
+            let selected_face = self.selected_face;
             let uv_grid_u = self.uv_grid_u;
             let uv_grid_v = self.uv_grid_v;
             let show_uv_grid = self.show_uv_grid;
-            let uv_svg_cache_face_id = self.uv_svg_cache.as_ref().map(|(id, _)| *id);
+            let uv_svg_cache_key = self.uv_svg_cache.as_ref().map(|(key, _)| *key);
+            let open_tree_nodes = self.open_tree_nodes.clone();
 
             egui::SidePanel::right("structure_panel")
                 .min_width(280.0)
@@ -1080,7 +1083,7 @@ impl eframe::App for ViewerApp {
                         .max_height(250.0)
                         .show(ui, |ui| {
                             if let Some(ref tree) = assembly_tree_clone {
-                                draw_assembly_node_static(ui, tree, selected_instance, &mut pending_instance_select);
+                                draw_assembly_node_static(ui, tree, selected_instance, &mut pending_instance_select, &open_tree_nodes);
                             } else if !detailed_instances_clone.is_empty() {
                                 for (i, inst) in detailed_instances_clone.iter().enumerate() {
                                     let is_selected = selected_instance == Some(i);
@@ -1108,13 +1111,13 @@ impl eframe::App for ViewerApp {
                                 .max_height(300.0)
                                 .show(ui, |ui| {
                                     for face in &inst.faces {
-                                        let is_selected = selected_face_id == Some(face.face_id);
+                                        let is_selected = selected_face == Some((inst_idx, face.face_id));
                                         let label = format!("F#{} STEP#{} {} [{}..{}]",
                                             face.face_id, face.step_face_id, face.surface_type,
                                             face.triangle_range.0, face.triangle_range.1);
                                         let response = ui.selectable_label(is_selected, &label);
                                         if response.clicked() {
-                                            pending_face_select = Some(face.face_id);
+                                            pending_face_select = Some((inst_idx, face.face_id));
                                         }
                                         // Show tooltip on hover
                                         response.on_hover_text(format!(
@@ -1148,14 +1151,15 @@ impl eframe::App for ViewerApp {
                     // ─── UV Grid Display ─────────────────────────────────
                     if show_uv_grid {
                         if let Some(inst_idx) = selected_instance {
-                            if let Some(face_id) = selected_face_id {
+                            if let Some((_, face_id)) = selected_face {
                                 if let Some(inst) = detailed_instances_clone.get(inst_idx) {
                                     if let Some(face) = inst.faces.iter().find(|f| f.face_id == face_id) {
                                         // Check cache
-                                        let needs_regen = uv_svg_cache_face_id != Some(face_id);
+                                        let cache_key = (inst_idx, face_id);
+                                        let needs_regen = uv_svg_cache_key != Some(cache_key);
                                         if needs_regen {
                                             let svg = generate_uv_svg(face, uv_grid_u, uv_grid_v);
-                                            self.uv_svg_cache = Some((face_id, svg));
+                                            self.uv_svg_cache = Some((cache_key, svg));
                                         }
 
                                         // Draw UV grid in the panel using custom painting
@@ -1312,7 +1316,7 @@ impl eframe::App for ViewerApp {
 
                     // ─── Selected Face Info ───────────────────────────────
                     if let Some(inst_idx) = selected_instance {
-                        if let Some(fid) = selected_face_id {
+                        if let Some((_, fid)) = selected_face {
                             if let Some(inst) = detailed_instances_clone.get(inst_idx) {
                                 if let Some(face) = inst.faces.iter().find(|f| f.face_id == fid) {
                                     ui.heading(egui::RichText::new("Face Info").size(13.0));
@@ -1338,17 +1342,28 @@ impl eframe::App for ViewerApp {
         // Apply pending UI actions (after all borrows are released)
         if let Some(idx) = pending_instance_select {
             self.selected_instance = Some(idx);
-            self.selected_face_id = None;
-            self.highlighted_face_id = None;
+            self.selected_face = None;
+            self.highlighted_face = None;
             self.highlight_dirty = true;
             self.uv_svg_cache = None;
+            // Find the path to this instance in the assembly tree and open it
+            if let Some(ref tree) = self.assembly_tree {
+                let path = find_instance_path(tree, idx);
+                self.open_tree_nodes = path.into_iter().collect();
+            }
         }
-        if let Some(fid) = pending_face_select {
-            self.selected_face_id = Some(fid);
-            self.highlighted_face_id = Some(fid);
+        if let Some((inst_idx, fid)) = pending_face_select {
+            self.selected_instance = Some(inst_idx);
+            self.selected_face = Some((inst_idx, fid));
+            self.highlighted_face = Some((inst_idx, fid));
             self.highlight_dirty = true;
             self.uv_svg_cache = None;
-            self.log(&format!("Selected face #{}", fid));
+            self.log(&format!("Selected face #{} in instance #{}", fid, inst_idx));
+            // Find the path to this instance in the assembly tree and open it
+            if let Some(ref tree) = self.assembly_tree {
+                let path = find_instance_path(tree, inst_idx);
+                self.open_tree_nodes = path.into_iter().collect();
+            }
         }
         if pending_svg_export {
             if let Some((_, ref svg_content)) = self.uv_svg_cache {
@@ -1549,10 +1564,11 @@ impl eframe::App for ViewerApp {
                 // Clear selection button
                 if ui.button("Clear Selection").clicked() {
                     self.selected_instance = None;
-                    self.selected_face_id = None;
-                    self.highlighted_face_id = None;
+                    self.selected_face = None;
+                    self.highlighted_face = None;
                     self.highlight_dirty = true;
                     self.uv_svg_cache = None;
+                    self.open_tree_nodes.clear();
                 }
 
                 ui.add_space(4.0);
@@ -1565,8 +1581,8 @@ impl eframe::App for ViewerApp {
                 ui.label(egui::RichText::new(format!("Triangles: {}", self.current_model.triangle_count)).size(12.0));
                 ui.label(egui::RichText::new(format!("Instances: {}", self.detailed_instances.len())).size(12.0));
 
-                if let Some(fid) = self.highlighted_face_id {
-                    ui.label(egui::RichText::new(format!("Selected face: #{}", fid))
+                if let Some((inst_idx, fid)) = self.highlighted_face {
+                    ui.label(egui::RichText::new(format!("Selected face: #{} (inst #{})", fid, inst_idx))
                         .size(12.0)
                         .color(egui::Color32::from_rgb(255, 220, 50)));
                 }
@@ -1635,28 +1651,39 @@ impl eframe::App for ViewerApp {
                                     // Ctrl+click: select face
                                     if let Some(fid) = pick.face_id {
                                         self.selected_instance = Some(pick.instance_idx);
-                                        self.selected_face_id = Some(fid);
-                                        self.highlighted_face_id = Some(fid);
+                                        self.selected_face = Some((pick.instance_idx, fid));
+                                        self.highlighted_face = Some((pick.instance_idx, fid));
                                         self.highlight_dirty = true;
                                         self.uv_svg_cache = None;
                                         self.log(&format!("Picked face #{} (instance #{})", fid, pick.instance_idx));
+                                        // Navigate structure tree
+                                        if let Some(ref tree) = self.assembly_tree {
+                                            let path = find_instance_path(tree, pick.instance_idx);
+                                            self.open_tree_nodes = path.into_iter().collect();
+                                        }
                                     }
                                 } else {
                                     // Simple click: select solid/instance
                                     self.selected_instance = Some(pick.instance_idx);
-                                    self.selected_face_id = None;
-                                    self.highlighted_face_id = None;
+                                    self.selected_face = None;
+                                    self.highlighted_face = None;
                                     self.highlight_dirty = true;
                                     self.uv_svg_cache = None;
                                     self.log(&format!("Picked instance #{}", pick.instance_idx));
+                                    // Navigate structure tree
+                                    if let Some(ref tree) = self.assembly_tree {
+                                        let path = find_instance_path(tree, pick.instance_idx);
+                                        self.open_tree_nodes = path.into_iter().collect();
+                                    }
                                 }
                             } else {
                                 // Clicked on empty space — deselect
                                 self.selected_instance = None;
-                                self.selected_face_id = None;
-                                self.highlighted_face_id = None;
+                                self.selected_face = None;
+                                self.highlighted_face = None;
                                 self.highlight_dirty = true;
                                 self.uv_svg_cache = None;
+                                self.open_tree_nodes.clear();
                             }
                         }
                     }
@@ -1696,7 +1723,7 @@ impl eframe::App for ViewerApp {
                 // Upload mesh data if dirty or highlight changed
                 if self.mesh_dirty || self.highlight_dirty {
                     if let Some(ref rs) = self.render_state {
-                        let (vertices, indices) = mesh_to_gpu_data(&self.mesh, self.highlighted_face_id, self.selected_instance, &self.instance_triangle_ranges);
+                        let (vertices, indices) = mesh_to_gpu_data(&self.mesh, self.highlighted_face, self.selected_instance, &self.instance_triangle_ranges);
                         let mut guard = self.gpu_resources.lock().unwrap();
                         if let Some(ref mut resources) = *guard {
                             update_mesh_buffers(resources, &rs.device, &vertices, &indices);
@@ -1912,6 +1939,7 @@ fn draw_assembly_node_static(
     node: &AssemblyNode,
     selected_instance: Option<usize>,
     pending_instance_select: &mut Option<usize>,
+    open_tree_nodes: &std::collections::HashSet<String>,
 ) {
     let has_children = !node.children.is_empty();
     let brep_str = match node.brep_id {
@@ -1928,11 +1956,13 @@ fn draw_assembly_node_static(
     let is_selected = node.instance_index.map_or(false, |idx| selected_instance == Some(idx));
 
     if has_children {
+        let should_be_open = open_tree_nodes.contains(&node.name);
         egui::CollapsingHeader::new(egui::RichText::new(&label).size(11.0))
-            .default_open(false)
+            .default_open(should_be_open)
+            .id_salt(format!("tree_{}_{}", node.name, node.pd_id))
             .show(ui, |ui| {
                 for child in &node.children {
-                    draw_assembly_node_static(ui, child, selected_instance, pending_instance_select);
+                    draw_assembly_node_static(ui, child, selected_instance, pending_instance_select, open_tree_nodes);
                 }
             });
     } else {
@@ -2021,4 +2051,22 @@ fn point_in_polygon(x: f64, y: f64, polygon: &[(f64, f64)]) -> bool {
         j = i;
     }
     inside
+}
+
+// ─── Assembly tree path finder ─────────────────────────────────────────────
+
+/// Find the path of node names from root to the leaf node with the given instance_index.
+/// Returns a Vec of node name strings along the path (including the target leaf).
+fn find_instance_path(node: &AssemblyNode, target_instance: usize) -> Vec<String> {
+    if node.instance_index == Some(target_instance) {
+        return vec![node.name.clone()];
+    }
+    for child in &node.children {
+        let mut path = find_instance_path(child, target_instance);
+        if !path.is_empty() {
+            path.insert(0, node.name.clone());
+            return path;
+        }
+    }
+    Vec::new()
 }
