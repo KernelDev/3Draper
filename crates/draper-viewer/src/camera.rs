@@ -382,12 +382,18 @@ impl OrbitCamera {
         let dir_cam = normalize([ndc_x * half_h * aspect, ndc_y * half_h, -1.0]);
 
         // Transform to world space using camera orientation
+        // View matrix 3x3 is [right, up, -fwd] (columns).
+        // Inverse rotation (camera-to-world) is the transpose:
+        //   Row 0 = right, Row 1 = up, Row 2 = -fwd
+        // So: world = right*cx + up*cy + (-fwd)*cz
+        // For cz = -1.0 (camera looks along -Z = +fwd in world):
+        //   world = right*nx + up*ny + (-fwd)*(-1) = right*nx + up*ny + fwd
         let (right, up, fwd) = quat_basis(&self.orientation);
 
         let dir_world = normalize([
-            right[0] * dir_cam[0] + up[0] * dir_cam[1] + fwd[0] * dir_cam[2],
-            right[1] * dir_cam[0] + up[1] * dir_cam[1] + fwd[1] * dir_cam[2],
-            right[2] * dir_cam[0] + up[2] * dir_cam[1] + fwd[2] * dir_cam[2],
+            right[0] * dir_cam[0] + up[0] * dir_cam[1] + (-fwd[0]) * dir_cam[2],
+            right[1] * dir_cam[0] + up[1] * dir_cam[1] + (-fwd[1]) * dir_cam[2],
+            right[2] * dir_cam[0] + up[2] * dir_cam[1] + (-fwd[2]) * dir_cam[2],
         ]);
 
         let origin = self.position();
