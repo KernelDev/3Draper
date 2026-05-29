@@ -277,17 +277,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let lit_color = base_color * (ambient + diffuse) + specular + base_color * rim_factor;
 
     // Apply selection state AFTER lighting to preserve 3D shading
-    // selection: 0 = normal, 1 = selected instance, 2 = dimmed instance
+    // selection: 0 = normal, 1 = selected instance, 2 = non-selected instance
     var final_color = lit_color;
 
     // Selected instance: add warm highlight tint to make it stand out
     let is_selected = step(0.5, in.v_selection) * step(in.v_selection, 1.5);
-    let selected_tint = vec3<f32>(0.12, 0.10, 0.02);
+    let selected_tint = vec3<f32>(0.15, 0.12, 0.03);
     final_color = final_color + selected_tint * is_selected;
 
-    // Dimmed instance: gentle dimming (70% brightness) — still clearly visible
-    let is_dimmed = step(1.5, in.v_selection);
-    final_color = final_color * (1.0 - 0.30 * is_dimmed);
+    // Non-selected instances: NO dimming — brightness stays exactly the same
+    // Selection is indicated only by the warm tint on the selected instance
+    // and by the face highlight.
 
     // Face highlight: additive yellow-gold tint for selected face
     let highlight_tint = vec3<f32>(0.40, 0.32, 0.06);
