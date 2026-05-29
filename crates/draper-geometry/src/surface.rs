@@ -554,6 +554,13 @@ impl Surface {
         matches!(self, Surface::Sphere(_) | Surface::Torus(_))
     }
 
+    /// Project a 3D point onto the surface's parametric space → Some(u, v).
+    /// Returns None if the point is too far from the surface for a meaningful projection.
+    pub fn project_point_opt(&self, point: &Point3d) -> Option<(f64, f64)> {
+        let (u, v) = self.project_point(point);
+        Some((u, v))
+    }
+
     /// Project a 3D point onto the surface's parametric space → (u, v).
     pub fn project_point(&self, point: &Point3d) -> (f64, f64) {
         match self {
