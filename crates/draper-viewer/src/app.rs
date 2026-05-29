@@ -335,8 +335,12 @@ pub struct ViewerApp {
     /// When an instance is selected, triangles outside its range are dimmed.
     instance_triangle_ranges: Vec<(usize, usize)>,
     // ─── Tree navigation state ────────────────────────────────────────
-    /// Node names that should be forced open in the assembly tree (for navigation from 3D click).
+    /// Node keys ("name_pd_id") that should be forced open in the assembly tree.
     open_tree_nodes: std::collections::HashSet<String>,
+    /// Node key to scroll to in the assembly tree (set when selecting from 3D view).
+    scroll_to_tree_node: Option<String>,
+    /// Face ID to scroll to in the face list (set when selecting a face from 3D view).
+    scroll_to_face_id: Option<u64>,
 }
 
 impl ViewerApp {
@@ -427,6 +431,8 @@ impl ViewerApp {
             highlight_dirty: false,
             instance_triangle_ranges: Vec::new(),
             open_tree_nodes: std::collections::HashSet::new(),
+            scroll_to_tree_node: None,
+            scroll_to_face_id: None,
         };
         app.log("3Draper Viewer started");
         app.log(&format!("Default model: Box 100x100x100 ({} vertices, {} triangles)",
@@ -456,6 +462,8 @@ impl ViewerApp {
         self.highlight_dirty = true;
         self.uv_svg_cache = None;
         self.open_tree_nodes.clear();
+        self.scroll_to_tree_node = None;
+        self.scroll_to_face_id = None;
         self.log(&format!("Loaded: {} ({} vertices, {} triangles)",
             name, self.current_model.vertex_count, self.current_model.triangle_count));
     }
@@ -1068,6 +1076,8 @@ impl eframe::App for ViewerApp {
             let show_uv_grid = self.show_uv_grid;
             let uv_svg_cache_key = self.uv_svg_cache.as_ref().map(|(key, _)| *key);
             let open_tree_nodes = self.open_tree_nodes.clone();
+            let scroll_to_tree_node = self.scroll_to_tree_node.clone();
+            let scroll_to_face_id = self.scroll_to_face_id;
 
             egui::SidePanel::right("structure_panel")
                 .min_width(280.0)
@@ -1083,7 +1093,7 @@ impl eframe::App for ViewerApp {
                         .max_height(250.0)
                         .show(ui, |ui| {
                             if let Some(ref tree) = assembly_tree_clone {
-                                draw_assembly_node_static(ui, tree, selected_instance, &mut pending_instance_select, &open_tree_nodes);
+                                draw_assembly_node_static(ui, tree, selected_instance, &mut pending_instance_select, &open_tree_nodes, &scroll_to_tree_node);
                             } else if !detailed_instances_clone.is_empty() {
                                 for (i, inst) in detailed_instances_clone.iter().enumerate() {
                                     let is_selected = selected_instance == Some(i);
@@ -1116,6 +1126,10 @@ impl eframe::App for ViewerApp {
                                             face.face_id, face.step_face_id, face.surface_type,
                                             face.triangle_range.0, face.triangle_range.1);
                                         let response = ui.selectable_label(is_selected, &label);
+                                        // Scroll to this face if it's the scroll target
+                                        if scroll_to_face_id == Some(face.face_id) {
+                                            response.scroll_to_me(Some(egui::Align::Center));
+                                        }
                                         if response.clicked() {
                                             pending_face_select = Some((inst_idx, face.face_id));
                                         }
@@ -1337,6 +1351,12 @@ impl eframe::App for ViewerApp {
                         }
                     }
                 });
+            // Clear scroll/open targets after the tree has been rendered.
+            // The CollapsingState::set_open calls above already persisted the open state
+            // in egui's memory, so users can freely toggle nodes afterwards.
+            self.scroll_to_tree_node = None;
+            self.scroll_to_face_id = None;
+            self.open_tree_nodes.clear();
         }
 
         // Apply pending UI actions (after all borrows are released)
@@ -1348,8 +1368,9 @@ impl eframe::App for ViewerApp {
             self.uv_svg_cache = None;
             // Find the path to this instance in the assembly tree and open it
             if let Some(ref tree) = self.assembly_tree {
-                let path = find_instance_path(tree, idx);
+                let (path, target) = find_instance_path(tree, idx);
                 self.open_tree_nodes = path.into_iter().collect();
+                self.scroll_to_tree_node = target;
             }
         }
         if let Some((inst_idx, fid)) = pending_face_select {
@@ -1358,11 +1379,13 @@ impl eframe::App for ViewerApp {
             self.highlighted_face = Some((inst_idx, fid));
             self.highlight_dirty = true;
             self.uv_svg_cache = None;
+            self.scroll_to_face_id = Some(fid);
             self.log(&format!("Selected face #{} in instance #{}", fid, inst_idx));
             // Find the path to this instance in the assembly tree and open it
             if let Some(ref tree) = self.assembly_tree {
-                let path = find_instance_path(tree, inst_idx);
+                let (path, target) = find_instance_path(tree, inst_idx);
                 self.open_tree_nodes = path.into_iter().collect();
+                self.scroll_to_tree_node = target;
             }
         }
         if pending_svg_export {
@@ -1569,6 +1592,8 @@ impl eframe::App for ViewerApp {
                     self.highlight_dirty = true;
                     self.uv_svg_cache = None;
                     self.open_tree_nodes.clear();
+                    self.scroll_to_tree_node = None;
+                    self.scroll_to_face_id = None;
                 }
 
                 ui.add_space(4.0);
@@ -1655,11 +1680,13 @@ impl eframe::App for ViewerApp {
                                         self.highlighted_face = Some((pick.instance_idx, fid));
                                         self.highlight_dirty = true;
                                         self.uv_svg_cache = None;
+                                        self.scroll_to_face_id = Some(fid);
                                         self.log(&format!("Picked face #{} (instance #{})", fid, pick.instance_idx));
                                         // Navigate structure tree
                                         if let Some(ref tree) = self.assembly_tree {
-                                            let path = find_instance_path(tree, pick.instance_idx);
+                                            let (path, target) = find_instance_path(tree, pick.instance_idx);
                                             self.open_tree_nodes = path.into_iter().collect();
+                                            self.scroll_to_tree_node = target;
                                         }
                                     }
                                 } else {
@@ -1672,8 +1699,9 @@ impl eframe::App for ViewerApp {
                                     self.log(&format!("Picked instance #{}", pick.instance_idx));
                                     // Navigate structure tree
                                     if let Some(ref tree) = self.assembly_tree {
-                                        let path = find_instance_path(tree, pick.instance_idx);
+                                        let (path, target) = find_instance_path(tree, pick.instance_idx);
                                         self.open_tree_nodes = path.into_iter().collect();
+                                        self.scroll_to_tree_node = target;
                                     }
                                 }
                             } else {
@@ -1684,6 +1712,8 @@ impl eframe::App for ViewerApp {
                                 self.highlight_dirty = true;
                                 self.uv_svg_cache = None;
                                 self.open_tree_nodes.clear();
+                                self.scroll_to_tree_node = None;
+                                self.scroll_to_face_id = None;
                             }
                         }
                     }
@@ -1940,7 +1970,9 @@ fn draw_assembly_node_static(
     selected_instance: Option<usize>,
     pending_instance_select: &mut Option<usize>,
     open_tree_nodes: &std::collections::HashSet<String>,
+    scroll_to_tree_node: &Option<String>,
 ) {
+    let key = node_key(node);
     let has_children = !node.children.is_empty();
     let brep_str = match node.brep_id {
         Some(id) => format!(" BREP#{}", id),
@@ -1956,17 +1988,37 @@ fn draw_assembly_node_static(
     let is_selected = node.instance_index.map_or(false, |idx| selected_instance == Some(idx));
 
     if has_children {
-        let should_be_open = open_tree_nodes.contains(&node.name);
-        egui::CollapsingHeader::new(egui::RichText::new(&label).size(11.0))
-            .default_open(should_be_open)
-            .id_salt(format!("tree_{}_{}", node.name, node.pd_id))
-            .show(ui, |ui| {
-                for child in &node.children {
-                    draw_assembly_node_static(ui, child, selected_instance, pending_instance_select, open_tree_nodes);
+        let should_be_open = open_tree_nodes.contains(&key);
+        // Use CollapsingState to programmatically force open/close
+        let id = egui::Id::new(format!("tree_{}_{}", node.name, node.pd_id));
+        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+            ui.ctx(), id, false,
+        );
+        if should_be_open {
+            state.set_open(true);
+        }
+        // If the scroll target is this node's child, also ensure this node is open
+        if let Some(ref scroll_key) = scroll_to_tree_node {
+            if !state.is_open() {
+                // Check if any descendant matches the scroll target
+                if has_descendant_with_key(node, scroll_key) {
+                    state.set_open(true);
                 }
-            });
+            }
+        }
+        state.show_header(ui, |ui| {
+            ui.label(egui::RichText::new(&label).size(11.0));
+        }).body(|ui| {
+            for child in &node.children {
+                draw_assembly_node_static(ui, child, selected_instance, pending_instance_select, open_tree_nodes, scroll_to_tree_node);
+            }
+        });
     } else {
         let response = ui.selectable_label(is_selected, egui::RichText::new(&label).size(11.0));
+        // Scroll to this node if it's the scroll target
+        if scroll_to_tree_node.as_ref() == Some(&key) {
+            response.scroll_to_me(Some(egui::Align::Center));
+        }
         if response.clicked() {
             // Use instance_index for precise selection
             if let Some(idx) = node.instance_index {
@@ -1974,6 +2026,19 @@ fn draw_assembly_node_static(
             }
         }
     }
+}
+
+/// Check if any descendant of the given node has the specified key.
+fn has_descendant_with_key(node: &AssemblyNode, target_key: &str) -> bool {
+    for child in &node.children {
+        if node_key(child) == target_key {
+            return true;
+        }
+        if has_descendant_with_key(child, target_key) {
+            return true;
+        }
+    }
+    false
 }
 
 impl ViewerApp {
@@ -2055,18 +2120,26 @@ fn point_in_polygon(x: f64, y: f64, polygon: &[(f64, f64)]) -> bool {
 
 // ─── Assembly tree path finder ─────────────────────────────────────────────
 
-/// Find the path of node names from root to the leaf node with the given instance_index.
-/// Returns a Vec of node name strings along the path (including the target leaf).
-fn find_instance_path(node: &AssemblyNode, target_instance: usize) -> Vec<String> {
+/// Generate a unique key for an assembly node (used for open/scroll tracking).
+/// Uses name + pd_id to avoid collisions when multiple nodes share the same name.
+fn node_key(node: &AssemblyNode) -> String {
+    format!("{}_{}", node.name, node.pd_id)
+}
+
+/// Find the path of node keys from root to the leaf node with the given instance_index.
+/// Returns (path_keys, target_leaf_key) — path_keys for opening ancestors,
+/// target_leaf_key for scrolling to the selected item.
+fn find_instance_path(node: &AssemblyNode, target_instance: usize) -> (Vec<String>, Option<String>) {
+    let key = node_key(node);
     if node.instance_index == Some(target_instance) {
-        return vec![node.name.clone()];
+        return (vec![key.clone()], Some(key));
     }
     for child in &node.children {
-        let mut path = find_instance_path(child, target_instance);
+        let (mut path, target) = find_instance_path(child, target_instance);
         if !path.is_empty() {
-            path.insert(0, node.name.clone());
-            return path;
+            path.insert(0, key.clone());
+            return (path, target);
         }
     }
-    Vec::new()
+    (Vec::new(), None)
 }
