@@ -135,6 +135,114 @@ fn mesh_to_gpu_data(
     (gpu_vertices, gpu_indices)
 }
 
+/// Result of a mouse pick operation.
+#[derive(Clone, Debug)]
+struct PickResult {
+    /// Index of the instance that was hit (matches instance_triangle_ranges index).
+    instance_idx: usize,
+    /// Face ID (TopoId) of the triangle that was hit, if available.
+    face_id: Option<u64>,
+    /// Distance along the ray to the hit point (for depth sorting).
+    distance: f32,
+}
+
+/// Möller–Trumbore ray-triangle intersection.
+/// Returns the distance `t` along the ray if hit, or None.
+fn ray_triangle_intersect(
+    ray_origin: [f32; 3],
+    ray_dir: [f32; 3],
+    v0: [f32; 3],
+    v1: [f32; 3],
+    v2: [f32; 3],
+) -> Option<f32> {
+    const EPSILON: f32 = 1e-7;
+    let edge1 = [v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]];
+    let edge2 = [v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]];
+
+    let h = [
+        ray_dir[1] * edge2[2] - ray_dir[2] * edge2[1],
+        ray_dir[2] * edge2[0] - ray_dir[0] * edge2[2],
+        ray_dir[0] * edge2[1] - ray_dir[1] * edge2[0],
+    ];
+    let a = edge1[0] * h[0] + edge1[1] * h[1] + edge1[2] * h[2];
+    if a.abs() < EPSILON {
+        return None; // ray parallel to triangle
+    }
+    let f = 1.0 / a;
+    let s = [ray_origin[0] - v0[0], ray_origin[1] - v0[1], ray_origin[2] - v0[2]];
+    let u = f * (s[0] * h[0] + s[1] * h[1] + s[2] * h[2]);
+    if u < 0.0 || u > 1.0 {
+        return None;
+    }
+    let q = [
+        s[1] * edge1[2] - s[2] * edge1[1],
+        s[2] * edge1[0] - s[0] * edge1[2],
+        s[0] * edge1[1] - s[1] * edge1[0],
+    ];
+    let v = f * (ray_dir[0] * q[0] + ray_dir[1] * q[1] + ray_dir[2] * q[2]);
+    if v < 0.0 || u + v > 1.0 {
+        return None;
+    }
+    let t = f * (edge2[0] * q[0] + edge2[1] * q[1] + edge2[2] * q[2]);
+    if t > EPSILON {
+        Some(t)
+    } else {
+        None
+    }
+}
+
+/// Pick the closest triangle under the given screen position.
+/// Returns the instance index and face ID of the hit triangle, or None if nothing was hit.
+fn pick_at(
+    mesh: &TriangleMesh,
+    instance_triangle_ranges: &[(usize, usize)],
+    camera: &OrbitCamera,
+    screen_pos: [f32; 2],
+    viewport: (f32, f32, f32, f32),
+) -> Option<PickResult> {
+    let (ray_origin, ray_dir) = camera.screen_to_ray(screen_pos, viewport);
+
+    let face_ids = mesh.triangle_face_ids.as_ref();
+    let mut best: Option<PickResult> = None;
+
+    for (i, tri) in mesh.triangles.iter().enumerate() {
+        let v0 = mesh.vertices.get(tri[0] as usize);
+        let v1 = mesh.vertices.get(tri[1] as usize);
+        let v2 = mesh.vertices.get(tri[2] as usize);
+        let (v0, v1, v2) = match (v0, v1, v2) {
+            (Some(a), Some(b), Some(c)) => (a, b, c),
+            _ => continue,
+        };
+
+        if let Some(t) = ray_triangle_intersect(
+            ray_origin,
+            ray_dir,
+            [v0.x as f32, v0.y as f32, v0.z as f32],
+            [v1.x as f32, v1.y as f32, v1.z as f32],
+            [v2.x as f32, v2.y as f32, v2.z as f32],
+        ) {
+            let dist = best.as_ref().map_or(f32::MAX, |b| b.distance);
+            if t < dist {
+                // Determine which instance this triangle belongs to
+                let instance_idx = instance_triangle_ranges
+                    .iter()
+                    .position(|&(start, end)| i >= start && i < end)
+                    .unwrap_or(0);
+
+                let face_id = face_ids.and_then(|ids| ids.get(i)).copied();
+
+                best = Some(PickResult {
+                    instance_idx,
+                    face_id,
+                    distance: t,
+                });
+            }
+        }
+    }
+
+    best
+}
+
 /// Model entry for the scene.
 #[derive(Clone, Debug)]
 pub struct ModelEntry {
@@ -1470,7 +1578,7 @@ impl eframe::App for ViewerApp {
                 ui.add_space(8.0);
                 ui.separator();
                 ui.label(
-                    egui::RichText::new("Mouse: LMB Rotate | Scroll Zoom | MMB Pan")
+                    egui::RichText::new("LMB Select | Ctrl+LMB Face | Drag Rotate | Scroll Zoom | MMB Pan")
                         .size(10.0)
                         .color(egui::Color32::from_rgb(160, 160, 160))
                 );
@@ -1505,6 +1613,53 @@ impl eframe::App for ViewerApp {
                     }
                 } else {
                     let is_hovering = response.hovered();
+
+                    // ─── Mouse picking: click = select solid, Ctrl+click = select face ───
+                    if response.clicked_by(egui::PointerButton::Primary) {
+                        let ctrl_held = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
+                        let mouse_pos = ui.input(|i| i.pointer.latest_pos());
+                        if let Some(pos) = mouse_pos {
+                            // Convert screen position to viewport-local coordinates
+                            let local_x = pos.x - rect.min.x;
+                            let local_y = pos.y - rect.min.y;
+                            let viewport = (0.0, 0.0, rect.width(), rect.height());
+
+                            if let Some(pick) = pick_at(
+                                &self.mesh,
+                                &self.instance_triangle_ranges,
+                                &self.camera,
+                                [local_x, local_y],
+                                viewport,
+                            ) {
+                                if ctrl_held {
+                                    // Ctrl+click: select face
+                                    if let Some(fid) = pick.face_id {
+                                        self.selected_instance = Some(pick.instance_idx);
+                                        self.selected_face_id = Some(fid);
+                                        self.highlighted_face_id = Some(fid);
+                                        self.highlight_dirty = true;
+                                        self.uv_svg_cache = None;
+                                        self.log(&format!("Picked face #{} (instance #{})", fid, pick.instance_idx));
+                                    }
+                                } else {
+                                    // Simple click: select solid/instance
+                                    self.selected_instance = Some(pick.instance_idx);
+                                    self.selected_face_id = None;
+                                    self.highlighted_face_id = None;
+                                    self.highlight_dirty = true;
+                                    self.uv_svg_cache = None;
+                                    self.log(&format!("Picked instance #{}", pick.instance_idx));
+                                }
+                            } else {
+                                // Clicked on empty space — deselect
+                                self.selected_instance = None;
+                                self.selected_face_id = None;
+                                self.highlighted_face_id = None;
+                                self.highlight_dirty = true;
+                                self.uv_svg_cache = None;
+                            }
+                        }
+                    }
 
                     if response.dragged_by(egui::PointerButton::Primary) {
                         let delta = response.drag_delta();

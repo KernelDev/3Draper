@@ -360,4 +360,37 @@ impl OrbitCamera {
         self.target[1] += right[1] * dx + up[1] * dy;
         self.target[2] += right[2] * dx + up[2] * dy;
     }
+
+    /// Compute a world-space ray (origin, direction) for a given screen position.
+    ///
+    /// `screen_pos` — pixel coordinates within the viewport (origin at top-left).
+    /// `viewport` — (x, y, width, height) of the viewport rect in pixels.
+    ///
+    /// Returns `(ray_origin, ray_direction)` where direction is normalized.
+    pub fn screen_to_ray(&self, screen_pos: [f32; 2], viewport: (f32, f32, f32, f32)) -> ([f32; 3], [f32; 3]) {
+        let (_vx, _vy, vw, vh) = viewport;
+
+        // Normalized device coordinates [-1, 1]
+        let ndc_x = (2.0 * (screen_pos[0]) / vw - 1.0);
+        let ndc_y = (1.0 - 2.0 * (screen_pos[1]) / vh); // flip Y
+
+        let aspect = vw / vh;
+        let fov_rad = self.fov.to_radians();
+        let half_h = (fov_rad * 0.5).tan();
+
+        // Ray direction in camera space
+        let dir_cam = normalize([ndc_x * half_h * aspect, ndc_y * half_h, -1.0]);
+
+        // Transform to world space using camera orientation
+        let (right, up, fwd) = quat_basis(&self.orientation);
+
+        let dir_world = normalize([
+            right[0] * dir_cam[0] + up[0] * dir_cam[1] + fwd[0] * dir_cam[2],
+            right[1] * dir_cam[0] + up[1] * dir_cam[1] + fwd[1] * dir_cam[2],
+            right[2] * dir_cam[0] + up[2] * dir_cam[1] + fwd[2] * dir_cam[2],
+        ]);
+
+        let origin = self.position();
+        (origin, dir_world)
+    }
 }
