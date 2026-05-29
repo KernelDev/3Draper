@@ -981,24 +981,357 @@ pub fn triangulate_face_with_boundary(
 
     match surface {
         Surface::Plane(plane) => {
+            // Planes: ear-clipping is correct — don't change
             triangulate_plane_with_boundary(plane, boundary_points, forward)
         }
-        Surface::Cylinder(cyl) => {
-            triangulate_cylinder_with_boundary(cyl, boundary_points, forward, params)
-        }
-        Surface::Cone(cone) => {
-            triangulate_cone_with_boundary(cone, boundary_points, forward, params)
-        }
-        Surface::Sphere(sphere) => {
-            triangulate_sphere_with_boundary(sphere, boundary_points, forward, params)
-        }
-        Surface::Torus(torus) => {
-            triangulate_torus_with_boundary(torus, boundary_points, forward, params)
-        }
         _ => {
-            triangulate_generic_with_boundary(surface, boundary_points, forward, params)
+            // All curved surfaces: use UV-space boundary trimming
+            triangulate_surface_uv_trimmed(surface, boundary_points, forward, params)
         }
     }
+}
+
+// ============================================================
+// UV-space boundary trimming for curved surfaces
+// ============================================================
+
+/// Test if a 2D point is inside a closed polygon using ray casting.
+fn point_in_polygon_2d(point: &Point2d, polygon: &[Point2d]) -> bool {
+    let n = polygon.len();
+    if n < 3 { return false; }
+    let mut inside = false;
+    let px = point.u;
+    let py = point.v;
+    let mut j = n - 1;
+    for i in 0..n {
+        let xi = polygon[i].u;
+        let yi = polygon[i].v;
+        let xj = polygon[j].u;
+        let yj = polygon[j].v;
+        if ((yi > py) != (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi) {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
+/// Normalize UV polygon for periodic surfaces.
+/// Handles wrap-around when boundary points cross the ±π seam.
+fn normalize_uv_polygon(boundary_uv: &mut [Point2d], u_period: Option<f64>, v_period: Option<f64>) {
+    // Handle u-periodicity
+    if let Some(period) = u_period {
+        // Find the largest gap and normalize
+        let mut us: Vec<f64> = boundary_uv.iter().map(|p| p.u).collect();
+        us.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Check for wrap-around: if the range is close to the period,
+        // shift values that are far from the cluster
+        let u_range = us.last().unwrap() - us.first().unwrap();
+        if u_range > period * 0.5 {
+            // Find the largest gap — points on the other side of the gap
+            // should be shifted by ±period
+            let mut max_gap = 0.0f64;
+            let mut gap_idx = 0;
+            for i in 0..us.len() - 1 {
+                let gap = us[i + 1] - us[i];
+                if gap > max_gap {
+                    max_gap = gap;
+                    gap_idx = i;
+                }
+            }
+            // Points after the gap should be shifted down by period
+            // (they wrapped from +period to -period)
+            let threshold = us[gap_idx];
+            for p in boundary_uv.iter_mut() {
+                if p.u > threshold + max_gap * 0.5 {
+                    p.u -= period;
+                }
+            }
+        }
+    }
+
+    // Handle v-periodicity
+    if let Some(period) = v_period {
+        let mut vs: Vec<f64> = boundary_uv.iter().map(|p| p.v).collect();
+        vs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        let v_range = vs.last().unwrap() - vs.first().unwrap();
+        if v_range > period * 0.5 {
+            let mut max_gap = 0.0f64;
+            let mut gap_idx = 0;
+            for i in 0..vs.len() - 1 {
+                let gap = vs[i + 1] - vs[i];
+                if gap > max_gap {
+                    max_gap = gap;
+                    gap_idx = i;
+                }
+            }
+            let threshold = vs[gap_idx];
+            for p in boundary_uv.iter_mut() {
+                if p.v > threshold + max_gap * 0.5 {
+                    p.v -= period;
+                }
+            }
+        }
+    }
+}
+
+/// Get the period of the surface's u parameter, if periodic.
+fn surface_u_period(surface: &Surface) -> Option<f64> {
+    match surface {
+        Surface::Cylinder(_) | Surface::Cone(_) | Surface::Sphere(_) | Surface::Torus(_) | Surface::Revolution(_) => {
+            Some(2.0 * PI)
+        }
+        _ => None,
+    }
+}
+
+/// Get the period of the surface's v parameter, if periodic.
+fn surface_v_period(surface: &Surface) -> Option<f64> {
+    match surface {
+        Surface::Torus(_) => Some(2.0 * PI),
+        _ => None,
+    }
+}
+
+/// Triangulate a curved surface with boundary trimming in UV space.
+///
+/// Algorithm:
+/// 1. Project boundary points to UV space → UV polygon
+/// 2. Normalize UV polygon for periodic surfaces
+/// 3. Compute UV bounding box from the polygon
+/// 4. Create a UV grid inside the bounding box
+/// 5. For each grid cell, test if the center is inside the UV polygon
+/// 6. Generate triangles only for inside cells
+/// 7. Add boundary vertices and create boundary strip triangles
+fn triangulate_surface_uv_trimmed(
+    surface: &Surface,
+    boundary_points_3d: &[Point3d],
+    forward: bool,
+    params: &TriangulationParams,
+) -> TriangleMesh {
+    let mut mesh = TriangleMesh::new();
+
+    // 1. Project boundary to UV space
+    let mut boundary_uv: Vec<Point2d> = boundary_points_3d.iter()
+        .map(|p| {
+            let (u, v) = surface.project_point(p);
+            Point2d::new(u, v)
+        })
+        .collect();
+
+    if boundary_uv.len() < 3 {
+        return mesh;
+    }
+
+    // 2. Normalize UV polygon for periodic surfaces
+    let u_period = surface_u_period(surface);
+    let v_period = surface_v_period(surface);
+    normalize_uv_polygon(&mut boundary_uv, u_period, v_period);
+
+    // 3. Compute UV bounding box
+    let mut u_min = f64::MAX; let mut u_max = f64::MIN;
+    let mut v_min = f64::MAX; let mut v_max = f64::MIN;
+    for p in &boundary_uv {
+        u_min = u_min.min(p.u); u_max = u_max.max(p.u);
+        v_min = v_min.min(p.v); v_max = v_max.max(p.v);
+    }
+
+    let u_range = u_max - u_min;
+    let v_range = v_max - v_min;
+    if u_range < 1e-12 || v_range < 1e-12 {
+        return mesh;
+    }
+
+    // Add small margin
+    let margin_u = u_range * 0.001;
+    let margin_v = v_range * 0.001;
+    u_min -= margin_u; u_max += margin_u;
+    v_min -= margin_v; v_max += margin_v;
+
+    // 4. Determine grid resolution
+    let n_u = params.angular_samples.max(16);
+    let n_v = params.height_samples.max(4);
+    let du = (u_max - u_min) / n_u as f64;
+    let dv = (v_max - v_min) / n_v as f64;
+
+    // 5. For each grid cell, check if center is inside polygon
+    let mut inside = vec![vec![false; n_u]; n_v];
+    for j in 0..n_v {
+        for i in 0..n_u {
+            let cu = u_min + du * (i as f64 + 0.5);
+            let cv = v_min + dv * (j as f64 + 0.5);
+            inside[j][i] = point_in_polygon_2d(&Point2d::new(cu, cv), &boundary_uv);
+        }
+    }
+
+    // 6. Generate grid vertices (only for cells that are inside or adjacent to inside)
+    // Vertex grid is (n_u+1) x (n_v+1)
+    let mut vertex_index = vec![vec![None::<u32>; n_u + 1]; n_v + 1];
+
+    for j in 0..=n_v {
+        for i in 0..=n_u {
+            // Check if this vertex is needed (adjacent to any inside cell)
+            let mut needed = false;
+            for dj in 0..2usize {
+                for di in 0..2usize {
+                    let ci = if di == 0 { i.checked_sub(1) } else { if i < n_u { Some(i) } else { None } };
+                    let cj = if dj == 0 { j.checked_sub(1) } else { if j < n_v { Some(j) } else { None } };
+                    if let (Some(ci), Some(cj)) = (ci, cj) {
+                        if inside[cj][ci] { needed = true; }
+                    }
+                }
+            }
+
+            if needed {
+                let u = u_min + du * i as f64;
+                let v = v_min + dv * j as f64;
+                let p3d = surface.point_at(u, v);
+                let normal = surface.normal_at(u, v);
+                let idx = mesh.add_vertex(p3d);
+                mesh.add_vertex_normal(idx, [normal.x, normal.y, normal.z]);
+                vertex_index[j][i] = Some(idx);
+            }
+        }
+    }
+
+    // 7. Generate triangles for inside cells
+    for j in 0..n_v {
+        for i in 0..n_u {
+            if !inside[j][i] { continue; }
+
+            let v00 = vertex_index[j][i];
+            let v10 = vertex_index[j][i + 1];
+            let v01 = vertex_index[j + 1][i];
+            let v11 = vertex_index[j + 1][i + 1];
+
+            // Need at least 3 vertices to form a triangle
+            match (v00, v10, v01, v11) {
+                (Some(i00), Some(i10), Some(i01), Some(i11)) => {
+                    // Full quad
+                    if forward {
+                        mesh.add_triangle(i00, i10, i11);
+                        mesh.add_triangle(i00, i11, i01);
+                    } else {
+                        mesh.add_triangle(i00, i11, i10);
+                        mesh.add_triangle(i00, i01, i11);
+                    }
+                }
+                (Some(i00), Some(i10), Some(i01), None) => {
+                    if forward {
+                        mesh.add_triangle(i00, i10, i01);
+                    } else {
+                        mesh.add_triangle(i00, i01, i10);
+                    }
+                }
+                (Some(i00), Some(i10), None, Some(i11)) => {
+                    if forward {
+                        mesh.add_triangle(i00, i10, i11);
+                    } else {
+                        mesh.add_triangle(i00, i11, i10);
+                    }
+                }
+                (Some(i00), None, Some(i01), Some(i11)) => {
+                    if forward {
+                        mesh.add_triangle(i00, i01, i11);
+                    } else {
+                        mesh.add_triangle(i00, i11, i01);
+                    }
+                }
+                (None, Some(i10), Some(i01), Some(i11)) => {
+                    if forward {
+                        mesh.add_triangle(i10, i11, i01);
+                    } else {
+                        mesh.add_triangle(i10, i01, i11);
+                    }
+                }
+                _ => {
+                    // Fewer than 3 vertices available — skip this cell
+                }
+            }
+        }
+    }
+
+    // 8. Add boundary vertices and create boundary strip triangles
+    // For each boundary vertex, add it to the mesh and then create
+    // triangles connecting it to its neighbors and the nearest grid vertex
+    let n_boundary = boundary_points_3d.len();
+    if n_boundary < 3 {
+        return mesh;
+    }
+
+    let boundary_start = mesh.vertices.len() as u32;
+    for (idx_3d, p) in boundary_points_3d.iter().enumerate() {
+        let (u, v) = surface.project_point(p);
+        // Use normalized UV for finding nearest grid vertex
+        let mut nu = u;
+        let mut nv = v;
+        // Apply the same normalization as the boundary_uv
+        if let Some(period) = u_period {
+            let threshold_u = (u_min + u_max) * 0.5;
+            if nu > threshold_u + (u_max - u_min) * 0.5 {
+                nu -= period;
+            } else if nu < threshold_u - (u_max - u_min) * 0.5 {
+                nu += period;
+            }
+        }
+        if let Some(period) = v_period {
+            let threshold_v = (v_min + v_max) * 0.5;
+            if nv > threshold_v + (v_max - v_min) * 0.5 {
+                nv -= period;
+            } else if nv < threshold_v - (v_max - v_min) * 0.5 {
+                nv += period;
+            }
+        }
+
+        let normal = surface.normal_at(u, v);
+        let vidx = mesh.add_vertex(*p);
+        mesh.add_vertex_normal(vidx, [normal.x, normal.y, normal.z]);
+
+        // Find nearest grid vertex that is inside the polygon
+        let gi_f = ((nu - u_min) / du).round() as isize;
+        let gj_f = ((nv - v_min) / dv).round() as isize;
+
+        // Search in expanding radius for an inside grid vertex
+        let mut best_grid: Option<u32> = None;
+        let mut best_dist = f64::MAX;
+        let search_radius = 3isize;
+        for dj in -search_radius..=search_radius {
+            for di in -search_radius..=search_radius {
+                let gi = gi_f + di;
+                let gj = gj_f + dj;
+                if gi < 0 || gj < 0 { continue; }
+                let gi = gi as usize;
+                let gj = gj as usize;
+                if gi > n_u || gj > n_v { continue; }
+                if let Some(vidx_grid) = vertex_index[gj][gi] {
+                    let gp = &mesh.vertices[vidx_grid as usize];
+                    let dx = gp.x - p.x;
+                    let dy = gp.y - p.y;
+                    let dz = gp.z - p.z;
+                    let dist = dx * dx + dy * dy + dz * dz;
+                    if dist < best_dist {
+                        best_dist = dist;
+                        best_grid = Some(vidx_grid);
+                    }
+                }
+            }
+        }
+
+        // Create triangle: boundary[idx] → boundary[idx+1] → nearest_grid
+        if let Some(grid_idx) = best_grid {
+            let next_boundary_idx = boundary_start + ((idx_3d as u32 + 1) % n_boundary as u32);
+            let cur_boundary_idx = boundary_start + idx_3d as u32;
+            if forward {
+                mesh.add_triangle(cur_boundary_idx, next_boundary_idx, grid_idx);
+            } else {
+                mesh.add_triangle(cur_boundary_idx, grid_idx, next_boundary_idx);
+            }
+        }
+    }
+
+    mesh
 }
 
 /// Triangulate a plane face with boundary points — minimum triangles.

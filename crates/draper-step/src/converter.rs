@@ -1100,25 +1100,25 @@ impl<'a> StepConverter<'a> {
                 let p00 = face_data.surface.point_at(u0, v0);
                 let p_mid = face_data.surface.point_at((u0+u1)/2.0, (v0+v1)/2.0);
                 let p11 = face_data.surface.point_at(u1, v1);
-                eprintln!("BREP #{} face[{}]: {} outer={} inner={} ur={:.4}..{:.4} vr={:.4}..{:.4}", 
+                log::debug!("BREP #{} face[{}]: {} outer={} inner={} ur={:.4}..{:.4} vr={:.4}..{:.4}", 
                     brep_id, fi, surface_type, n_outer, n_inner, u0, u1, v0, v1);
-                eprintln!("  sample(0,0)=({:.4},{:.4},{:.4}) mid=({:.4},{:.4},{:.4}) end=({:.4},{:.4},{:.4})",
+                log::debug!("  sample(0,0)=({:.4},{:.4},{:.4}) mid=({:.4},{:.4},{:.4}) end=({:.4},{:.4},{:.4})",
                     p00.x, p00.y, p00.z, p_mid.x, p_mid.y, p_mid.z, p11.x, p11.y, p11.z);
                 // Print first 3 control points
                 for (ri, row) in n.control_points.iter().enumerate().take(3) {
                     for (ci, cp) in row.iter().enumerate().take(3) {
-                        eprintln!("  cp[{}][{}]=({:.4},{:.4},{:.4})", ri, ci, cp.x, cp.y, cp.z);
+                        log::debug!("  cp[{}][{}]=({:.4},{:.4},{:.4})", ri, ci, cp.x, cp.y, cp.z);
                     }
                 }
-                eprintln!("  u_knots={:?}", &n.u_knots);
-                eprintln!("  v_knots={:?}", &n.v_knots);
+                log::debug!("  u_knots={:?}", &n.u_knots);
+                log::debug!("  v_knots={:?}", &n.v_knots);
             } else {
-                eprintln!("BREP #{} face[{}]: {} outer={} inner={}", brep_id, fi, surface_type, n_outer, n_inner);
+                log::debug!("BREP #{} face[{}]: {} outer={} inner={}", brep_id, fi, surface_type, n_outer, n_inner);
             }
 
             let face_mesh = self.surface_to_mesh(face_data, params, bbox);
             let (fbmin, fbmax) = face_mesh.bounding_box();
-            eprintln!("  -> v={} t={} bbox=({:.2},{:.2},{:.2})..({:.2},{:.2},{:.2})",
+            log::debug!("  -> v={} t={} bbox=({:.2},{:.2},{:.2})..({:.2},{:.2},{:.2})",
                 face_mesh.vertex_count(), face_mesh.triangle_count(),
                 fbmin.x, fbmin.y, fbmin.z, fbmax.x, fbmax.y, fbmax.z);
             mesh.merge(&face_mesh);
@@ -2292,7 +2292,7 @@ impl<'a> StepConverter<'a> {
                     // For lines, compute param range from vertex projections
                     let t1 = project_point_on_line(line, p1);
                     let t2 = project_point_on_line(line, p2);
-                    eprintln!("    EDGE_CURVE #{}: {} p1=({:.4},{:.4},{:.4}) p2=({:.4},{:.4},{:.4}) param=({:.6},{:.6})",
+                    log::debug!("    EDGE_CURVE #{}: {} p1=({:.4},{:.4},{:.4}) p2=({:.4},{:.4},{:.4}) param=({:.6},{:.6})",
                         edge_curve_id, curve_type_name, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, t1, t2);
                     let mut edge = TopoEdge::new(curve, (t1, t2));
                     edge.vertex_start = Some(draper_topology::TopoId::new());
@@ -2301,7 +2301,7 @@ impl<'a> StepConverter<'a> {
                 } else if let Curve3d::Circle(ref circle) = curve {
                     // For circles, compute angular range from vertex projections
                     let (t1, t2) = project_points_on_circle(circle, p1, p2);
-                    eprintln!("    EDGE_CURVE #{}: {} p1=({:.4},{:.4},{:.4}) p2=({:.4},{:.4},{:.4}) param=({:.6},{:.6}) center=({:.4},{:.4},{:.4}) r={:.4} normal=({:.4},{:.4},{:.4}) x_axis=({:.4},{:.4},{:.4})",
+                    log::debug!("    EDGE_CURVE #{}: {} p1=({:.4},{:.4},{:.4}) p2=({:.4},{:.4},{:.4}) param=({:.6},{:.6}) center=({:.4},{:.4},{:.4}) r={:.4} normal=({:.4},{:.4},{:.4}) x_axis=({:.4},{:.4},{:.4})",
                         edge_curve_id, curve_type_name, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, t1, t2,
                         circle.center.x, circle.center.y, circle.center.z, circle.radius,
                         circle.normal.x, circle.normal.y, circle.normal.z,
@@ -2313,7 +2313,7 @@ impl<'a> StepConverter<'a> {
                 } else {
                     // For other curves, use the default param range
                     let param_range = curve.param_range();
-                    eprintln!("    EDGE_CURVE #{}: {} p1=({:.4},{:.4},{:.4}) p2=({:.4},{:.4},{:.4}) param=({:.6},{:.6})",
+                    log::debug!("    EDGE_CURVE #{}: {} p1=({:.4},{:.4},{:.4}) p2=({:.4},{:.4},{:.4}) param=({:.6},{:.6})",
                         edge_curve_id, curve_type_name, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, param_range.0, param_range.1);
                     let mut edge = TopoEdge::new(curve, param_range);
                     edge.vertex_start = Some(draper_topology::TopoId::new());
@@ -2329,12 +2329,12 @@ impl<'a> StepConverter<'a> {
             }
             (None, Some(p1), Some(p2)) => {
                 // No curve but have vertex points — create a line edge
-                eprintln!("    EDGE_CURVE #{}: NO CURVE, falling back to LINE p1=({:.4},{:.4},{:.4}) p2=({:.4},{:.4},{:.4})",
+                log::debug!("    EDGE_CURVE #{}: NO CURVE, falling back to LINE p1=({:.4},{:.4},{:.4}) p2=({:.4},{:.4},{:.4})",
                     edge_curve_id, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z);
                 Some(TopoEdge::new_line(*p1, *p2))
             }
             _ => {
-                eprintln!("    EDGE_CURVE #{}: RESOLUTION FAILED", edge_curve_id);
+                log::debug!("    EDGE_CURVE #{}: RESOLUTION FAILED", edge_curve_id);
                 None
             }
         }
@@ -3164,7 +3164,7 @@ impl<'a> StepConverter<'a> {
         let degree = match degree {
             Some(d) => d,
             None => {
-                eprintln!("    resolve_bspline_curve #{}: no degree param found in {} params", entity.id, cp_entity.params.len());
+                log::debug!("    resolve_bspline_curve #{}: no degree param found in {} params", entity.id, cp_entity.params.len());
                 return None;
             }
         };
@@ -3189,7 +3189,7 @@ impl<'a> StepConverter<'a> {
         }
 
         if control_points.is_empty() {
-            eprintln!("    resolve_bspline_curve #{}: no control points (degree={}, cp_param_idx={:?}, params count={})",
+            log::debug!("    resolve_bspline_curve #{}: no control points (degree={}, cp_param_idx={:?}, params count={})",
                 entity.id, degree, cp_param_idx, cp_entity.params.len());
             return None;
         }
