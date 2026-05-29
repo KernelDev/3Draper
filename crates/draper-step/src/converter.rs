@@ -173,20 +173,25 @@ pub fn step_structure_with_instances(step_file: &StepFile) -> (AssemblyNode, Vec
     (tree, instances)
 }
 
-/// Recursively assign instance_index to leaf AssemblyNodes by matching them
+/// Assign instance_index to leaf AssemblyNodes by matching them
 /// with instances in DFS order. The walk_assembly_tree_detailed function
 /// creates instances in the same DFS order as build_assembly_tree, so we
 /// can assign indices sequentially.
-fn assign_instance_indices(node: &mut AssemblyNode, instances: &[DetailedMeshInstance], next_index: &mut usize) {
-    if node.children.is_empty() {
-        // Leaf node — assign instance_index if it has a brep_id
-        if node.brep_id.is_some() && *next_index < instances.len() {
-            node.instance_index = Some(*next_index);
-            *next_index += 1;
-        }
-    } else {
-        for child in &mut node.children {
-            assign_instance_indices(child, instances, next_index);
+/// Uses an explicit stack to avoid stack overflow on deeply nested trees.
+fn assign_instance_indices(root: &mut AssemblyNode, instances: &[DetailedMeshInstance], next_index: &mut usize) {
+    let mut stack: Vec<&mut AssemblyNode> = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.children.is_empty() {
+            // Leaf node — assign instance_index if it has a brep_id
+            if node.brep_id.is_some() && *next_index < instances.len() {
+                node.instance_index = Some(*next_index);
+                *next_index += 1;
+            }
+        } else {
+            // Push children in reverse order so leftmost is processed first
+            for child in node.children.iter_mut().rev() {
+                stack.push(child);
+            }
         }
     }
 }
@@ -870,10 +875,8 @@ impl<'a> StepConverter<'a> {
 
         if let Some(&root_pd) = roots.first() {
             let root_name = self.get_product_name(root_pd);
-            self.build_assembly_node_recursive(
+            self.build_assembly_node_iterative(
                 root_pd, &root_name, &color_map, &parent_pd_to_children,
-                &mut std::collections::HashSet::new(),
-                0,
             )
         } else {
             // No assembly — build flat tree from BREPs
@@ -903,69 +906,86 @@ impl<'a> StepConverter<'a> {
         }
     }
 
-    fn build_assembly_node_recursive(
+    /// Build the assembly node tree using an explicit stack to avoid stack overflow.
+    fn build_assembly_node_iterative(
         &self,
-        pd_id: i64,
-        name: &str,
+        root_pd_id: i64,
+        root_name: &str,
         color_map: &HashMap<i64, [f32; 4]>,
         parent_pd_to_children: &HashMap<i64, Vec<(i64, i64, String)>>,
-        visited: &mut std::collections::HashSet<i64>,
-        depth: usize,
     ) -> AssemblyNode {
-        if depth > 200 {
-            warn!("build_assembly_node_recursive depth limit reached at PD=#{} — returning partial node", pd_id);
-            return AssemblyNode {
-                name: name.to_string(),
-                pd_id,
-                brep_id: None,
-                instance_index: None,
-                transform: None,
-                color: None,
-                children: Vec::new(),
-            };
-        }
-        let has_nauo_children = parent_pd_to_children.contains_key(&pd_id);
-        // Only set brep_id for leaf nodes (no NAUO children)
-        let brep_id = if has_nauo_children { None } else { self.find_pd_brep(pd_id) };
-        let color = brep_id.and_then(|id| color_map.get(&id).copied());
+        // Stack entries: (pd_id, name, transform, color_override)
+        // We'll build the tree bottom-up by creating leaf nodes first,
+        // then attaching them to their parents.
+        let mut visited: std::collections::HashSet<i64> = std::collections::HashSet::new();
 
-        let mut node = AssemblyNode {
-            name: name.to_string(),
-            pd_id,
-            brep_id,
-            instance_index: None,
-            transform: None, // Transforms are per-NAUO, set in children
-            color,
-            children: Vec::new(),
-        };
+        // First pass: DFS to determine processing order
+        let mut order: Vec<(i64, String, Option<[[f64; 4]; 4]>, Option<[f32; 4]>)> = Vec::new();
+        let mut dfs_stack: Vec<(i64, String, Option<[[f64; 4]; 4]>, Option<[f32; 4]>)> = vec![(root_pd_id, root_name.to_string(), None, None)];
 
-        if visited.contains(&pd_id) {
-            return node; // Cycle protection
-        }
-        visited.insert(pd_id);
+        while let Some((pd_id, name, transform, color_override)) = dfs_stack.pop() {
+            if visited.contains(&pd_id) { continue; }
+            visited.insert(pd_id);
 
-        if let Some(children) = parent_pd_to_children.get(&pd_id) {
-            for &(nauo_id, child_pd_id, ref nauo_name) in children {
-                let nauo_transform = self.find_nauo_transform(nauo_id, child_pd_id);
-                let child_has_nauo_children = parent_pd_to_children.contains_key(&child_pd_id);
-                let child_brep_id = if child_has_nauo_children { None } else { self.find_pd_brep(child_pd_id) };
-                let child_color = child_brep_id.and_then(|id| color_map.get(&id).copied());
-                let child_name = self.get_product_name(child_pd_id);
+            let has_nauo_children = parent_pd_to_children.contains_key(&pd_id);
+            let brep_id = if has_nauo_children { None } else { self.find_pd_brep(pd_id) };
+            let color = color_override.or_else(|| brep_id.and_then(|id| color_map.get(&id).copied()));
 
-                let mut child_node = self.build_assembly_node_recursive(
-                    child_pd_id, &child_name, color_map, parent_pd_to_children, visited, depth + 1,
-                );
-                child_node.name = format!("{} ({})", nauo_name, child_name);
-                child_node.transform = nauo_transform;
-                if child_color.is_some() {
-                    child_node.color = child_color;
+            order.push((pd_id, name, transform, color));
+
+            if let Some(children) = parent_pd_to_children.get(&pd_id) {
+                for &(nauo_id, child_pd_id, ref nauo_name) in children.iter().rev() {
+                    let nauo_transform = self.find_nauo_transform(nauo_id, child_pd_id);
+                    let child_has_nauo_children = parent_pd_to_children.contains_key(&child_pd_id);
+                    let child_brep_id = if child_has_nauo_children { None } else { self.find_pd_brep(child_pd_id) };
+                    let child_color = child_brep_id.and_then(|id| color_map.get(&id).copied());
+                    let child_name = self.get_product_name(child_pd_id);
+                    let display_name = format!("{} ({})", nauo_name, child_name);
+                    dfs_stack.push((child_pd_id, display_name, nauo_transform, child_color));
                 }
-                node.children.push(child_node);
             }
         }
 
-        visited.remove(&pd_id);
-        node
+        // Build nodes: since we processed DFS, order is parent-first.
+        // We need to build parent nodes and attach children.
+        // Use a map from pd_id to built node.
+        let mut node_map: HashMap<i64, AssemblyNode> = HashMap::new();
+
+        for (pd_id, name, transform, color) in order.into_iter().rev() {
+            let has_nauo_children = parent_pd_to_children.contains_key(&pd_id);
+            let brep_id = if has_nauo_children { None } else { self.find_pd_brep(pd_id) };
+
+            let mut node = AssemblyNode {
+                name,
+                pd_id,
+                brep_id,
+                instance_index: None,
+                transform,
+                color,
+                children: Vec::new(),
+            };
+
+            // Attach already-built children
+            if let Some(children) = parent_pd_to_children.get(&pd_id) {
+                for &(_, child_pd_id, _) in children {
+                    if let Some(child_node) = node_map.remove(&child_pd_id) {
+                        node.children.push(child_node);
+                    }
+                }
+            }
+
+            node_map.insert(pd_id, node);
+        }
+
+        node_map.remove(&root_pd_id).unwrap_or_else(|| AssemblyNode {
+            name: root_name.to_string(),
+            pd_id: root_pd_id,
+            brep_id: None,
+            instance_index: None,
+            transform: None,
+            color: None,
+            children: Vec::new(),
+        })
     }
 
     /// Build a detailed text representation of the STEP file structure.
@@ -1565,6 +1585,13 @@ impl<'a> StepConverter<'a> {
 
     /// Find a BREP by following SHAPE_REPRESENTATION_RELATIONSHIP links from a SHAPE_REPRESENTATION.
     /// Many STEP files use: SR → SRR → ABSR → BREP
+    ///
+    /// Strategy: collect ALL SRRs that reference this SR, then try them in priority order:
+    /// 1. SRRs whose other end is an ADVANCED_BREP_SHAPE_REPRESENTATION (direct link to BREP)
+    /// 2. SRRs whose other end is a plain SHAPE_REPRESENTATION (indirect, recurse)
+    ///
+    /// This avoids the bug where assembly-placement SRRs (complex entities with transforms)
+    /// are followed instead of the direct SR→ABSR link, causing all parts to map to the same BREP.
     fn find_brep_via_srr(&self, sr_id: i64, depth: usize) -> Option<i64> {
         if depth > 20 {
             return None;
@@ -1572,18 +1599,20 @@ impl<'a> StepConverter<'a> {
         let sr = self.step.find_entity(sr_id)?;
         if !sr.type_name.contains("SHAPE_REPRESENTATION") { return None; }
 
-        // Find all SRR entities that reference this SR
-        for srr in self.step.find_entities_by_type("SHAPE_REPRESENTATION_RELATIONSHIP") {
+        // Collect all SRR relationships that reference this SR
+        // Priority: direct ABSR links first, then plain SR links
+        let mut direct_absr_links: Vec<i64> = Vec::new();  // other SR is an ABSR
+        let mut indirect_sr_links: Vec<i64> = Vec::new();   // other SR is a plain SR
+
+        // Helper: extract the two SR references from an SRR's params
+        let extract_sr_refs = |srr: &crate::schema::StepEntity| -> (bool, Option<i64>) {
             let mut refs_our_sr = false;
             let mut other_sr_id: Option<i64> = None;
-
             for (i, param) in srr.params.iter().enumerate() {
                 if let Some(ref_id) = self.get_ref(param) {
                     if ref_id == sr_id {
                         refs_our_sr = true;
                     } else if i >= 2 {
-                        // The first two params are typically strings (name, description)
-                        // The 3rd and 4th are the two SR references
                         if let Some(entity) = self.step.find_entity(ref_id) {
                             if entity.type_name.contains("SHAPE_REPRESENTATION") {
                                 other_sr_id = Some(ref_id);
@@ -1592,46 +1621,54 @@ impl<'a> StepConverter<'a> {
                     }
                 }
             }
+            (refs_our_sr, other_sr_id)
+        };
 
-            if refs_our_sr {
-                if let Some(other_id) = other_sr_id {
-                    // Try to find a BREP in the other representation
-                    if let Some(brep_id) = self.find_brep_in_representation(other_id) {
-                        return Some(brep_id);
-                    }
-                    // Recurse one level
-                    if let Some(brep_id) = self.find_brep_via_srr(other_id, depth + 1) {
-                        return Some(brep_id);
+        // Check simple SHAPE_REPRESENTATION_RELATIONSHIP entities (these are typically SR→ABSR links)
+        for srr in self.step.find_entities_by_type("SHAPE_REPRESENTATION_RELATIONSHIP") {
+            let (refs_our_sr, other_sr_id) = extract_sr_refs(srr);
+            if !refs_our_sr { continue; }
+            if let Some(other_id) = other_sr_id {
+                if let Some(other_entity) = self.step.find_entity(other_id) {
+                    if other_entity.type_name.contains("ADVANCED_BREP_SHAPE_REPRESENTATION")
+                        || other_entity.type_name.contains("FACETED_BREP_SHAPE_REPRESENTATION") {
+                        direct_absr_links.push(other_id);
+                    } else {
+                        indirect_sr_links.push(other_id);
                     }
                 }
             }
         }
 
-        // Also check complex SRR entities
+        // Also check REPRESENTATION_RELATIONSHIP entities (may catch additional complex entities)
         for srr in self.step.find_entities_by_type("REPRESENTATION_RELATIONSHIP") {
-            let mut refs_our_sr = false;
-            let mut other_sr_id: Option<i64> = None;
-
-            for (i, param) in srr.params.iter().enumerate() {
-                if let Some(ref_id) = self.get_ref(param) {
-                    if ref_id == sr_id {
-                        refs_our_sr = true;
-                    } else if i >= 2 {
-                        if let Some(entity) = self.step.find_entity(ref_id) {
-                            if entity.type_name.contains("SHAPE_REPRESENTATION") {
-                                other_sr_id = Some(ref_id);
-                            }
-                        }
+            // Skip if this is already caught as SHAPE_REPRESENTATION_RELATIONSHIP
+            if srr.type_name.contains("SHAPE_REPRESENTATION_RELATIONSHIP") { continue; }
+            let (refs_our_sr, other_sr_id) = extract_sr_refs(srr);
+            if !refs_our_sr { continue; }
+            if let Some(other_id) = other_sr_id {
+                if let Some(other_entity) = self.step.find_entity(other_id) {
+                    if other_entity.type_name.contains("ADVANCED_BREP_SHAPE_REPRESENTATION")
+                        || other_entity.type_name.contains("FACETED_BREP_SHAPE_REPRESENTATION") {
+                        direct_absr_links.push(other_id);
+                    } else {
+                        indirect_sr_links.push(other_id);
                     }
                 }
             }
+        }
 
-            if refs_our_sr {
-                if let Some(other_id) = other_sr_id {
-                    if let Some(brep_id) = self.find_brep_in_representation(other_id) {
-                        return Some(brep_id);
-                    }
-                }
+        // Priority 1: try direct ABSR links
+        for absr_id in &direct_absr_links {
+            if let Some(brep_id) = self.find_brep_in_representation(*absr_id) {
+                return Some(brep_id);
+            }
+        }
+
+        // Priority 2: try indirect SR links (recurse)
+        for other_id in &indirect_sr_links {
+            if let Some(brep_id) = self.find_brep_via_srr(*other_id, depth + 1) {
+                return Some(brep_id);
             }
         }
 
