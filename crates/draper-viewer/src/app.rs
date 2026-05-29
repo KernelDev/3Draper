@@ -18,9 +18,8 @@ use eframe::egui;
 
 /// Convert TriangleMesh to GPU vertex/index data.
 /// Uses flat shading with face normals to properly support per-triangle colors from STEP files.
-/// When a face is highlighted, it gets bright yellow. When an instance is selected,
-/// triangles outside that instance are dimmed. When no face is highlighted but an
-/// instance is selected, the selected instance is drawn at full color and others are dimmed.
+/// Selection state (dimming/highlighting) is encoded as per-vertex attributes and applied
+/// AFTER lighting in the shader, so 3D shading is always preserved.
 fn mesh_to_gpu_data(
     mesh: &TriangleMesh,
     highlighted_face_id: Option<u64>,
@@ -57,6 +56,8 @@ fn mesh_to_gpu_data(
                     position: [v.x as f32, v.y as f32, v.z as f32],
                     normal: n,
                     color: [0.48, 0.52, 0.58],
+                    dim_factor: 1.0,
+                    highlight: 0.0,
                 });
             }
             for tri in &mesh.triangles {
@@ -78,16 +79,21 @@ fn mesh_to_gpu_data(
             .map(|n| [n[0] as f32, n[1] as f32, n[2] as f32])
             .unwrap_or([0.0, 0.0, 1.0]);
 
-        let mut color = colors
+        // Use original base color — never modify it for selection state
+        let color = colors
             .and_then(|c| c.get(i))
             .map(|c| [c[0], c[1], c[2]])
             .unwrap_or([0.48, 0.52, 0.58]);
 
-        // Check face-level highlighting (bright yellow for selected face)
+        // Compute per-triangle selection state (applied AFTER lighting in shader)
+        let mut is_highlighted = false;
+        let mut is_dimmed = false;
+
+        // Check face-level highlighting
         if let Some(hid) = highlighted_face_id {
             if let Some(ids) = face_ids {
                 if ids.get(i).map_or(false, |id| *id == hid) {
-                    color = [1.0, 0.85, 0.1]; // bright yellow for selected face
+                    is_highlighted = true;
                 }
             }
         }
@@ -96,11 +102,13 @@ fn mesh_to_gpu_data(
         if let Some(sel_idx) = selected_instance {
             if let Some(&(start, end)) = instance_triangle_ranges.get(sel_idx) {
                 if i < start || i >= end {
-                    // Dim non-selected instance triangles
-                    color = [color[0] * 0.25, color[1] * 0.25, color[2] * 0.25];
+                    is_dimmed = true;
                 }
             }
         }
+
+        let dim_factor = if is_dimmed { 0.45 } else { 1.0 };
+        let highlight = if is_highlighted { 1.0 } else { 0.0 };
 
         let base_idx = gpu_vertices.len() as u32;
         for &idx in tri {
@@ -109,6 +117,8 @@ fn mesh_to_gpu_data(
                 position: [v.x as f32, v.y as f32, v.z as f32],
                 normal,
                 color,
+                dim_factor,
+                highlight,
             });
         }
         gpu_indices.push(base_idx);
