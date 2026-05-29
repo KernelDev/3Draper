@@ -11,6 +11,7 @@ use draper_geometry::{
 };
 use draper_topology::{Face, Wire, CoEdge, Edge, Solid, Shell, Compound};
 use std::f64::consts::PI;
+use std::collections::HashMap;
 
 /// Triangulation parameters.
 #[derive(Clone, Debug)]
@@ -90,7 +91,8 @@ pub fn triangulate_face(face: &Face, params: &TriangulationParams) -> TriangleMe
 }
 
 /// Triangulate a planar face.
-/// Uses centroid fan triangulation for convex boundaries and ear clipping for non-convex.
+/// Uses simple fan triangulation for convex boundaries (no centroid vertex added)
+/// and ear clipping for non-convex.
 fn triangulate_planar_face(face: &Face, plane: &Plane, _params: &TriangulationParams) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
 
@@ -119,21 +121,20 @@ fn triangulate_planar_face(face: &Face, plane: &Plane, _params: &TriangulationPa
     let is_convex = is_convex_polygon(&points_2d);
 
     if is_convex && points_3d.len() >= 3 {
-        // Centroid fan triangulation for convex polygons
-        let centroid = compute_centroid_3d(&points_3d);
-        let center_idx = mesh.add_vertex(centroid);
+        // Simple fan triangulation — uses boundary vertex 0 as the fan center.
+        // This produces N-2 triangles for N boundary vertices (minimum for convex polygon).
         for p in &points_3d {
             mesh.add_vertex(*p);
         }
         let n = points_3d.len() as u32;
-        for i in 0..n {
-            let i_next = (i + 1) % n;
-            let v1 = center_idx + 1 + i;
-            let v2 = center_idx + 1 + i_next;
+        for i in 1..n-1 {
+            let v0 = 0u32;       // fan center = first boundary vertex
+            let v1 = i;          // boundary[i]
+            let v2 = i + 1;      // boundary[i+1]
             if forward {
-                mesh.add_triangle(center_idx, v1, v2);
+                mesh.add_triangle(v0, v1, v2);
             } else {
-                mesh.add_triangle(center_idx, v2, v1);
+                mesh.add_triangle(v0, v2, v1);
             }
         }
     } else {
@@ -851,7 +852,7 @@ pub fn triangulate_face_with_boundary(
 }
 
 /// Triangulate a plane face with boundary points.
-/// Uses centroid fan triangulation for convex boundaries (disc caps, etc.)
+/// Uses simple fan triangulation for convex boundaries (no centroid vertex)
 /// and falls back to ear clipping for non-convex boundaries.
 fn triangulate_plane_with_boundary(
     plane: &Plane,
@@ -879,27 +880,20 @@ fn triangulate_plane_with_boundary(
     let is_convex = is_convex_polygon(&points_2d);
 
     if is_convex && boundary_points.len() >= 3 {
-        // Centroid fan triangulation — much more robust than ear clipping
-        // for convex polygons (disc caps, regular polygons, etc.)
-        // Add the centroid point as the first vertex
-        let centroid = compute_centroid_3d(boundary_points);
-        let center_idx = mesh.add_vertex(centroid);
-
-        // Add all boundary vertices
+        // Simple fan triangulation — uses boundary vertex 0 as the fan center.
+        // This produces N-2 triangles for N boundary vertices (minimum for convex polygon).
         for p in boundary_points {
             mesh.add_vertex(*p);
         }
-
-        // Create fan triangles: center → boundary[i] → boundary[(i+1) % n]
         let n = boundary_points.len() as u32;
-        for i in 0..n {
-            let i_next = (i + 1) % n;
-            let v1 = center_idx + 1 + i;       // boundary[i]
-            let v2 = center_idx + 1 + i_next;  // boundary[i+1]
+        for i in 1..n-1 {
+            let v0 = 0u32;       // fan center = first boundary vertex
+            let v1 = i;          // boundary[i]
+            let v2 = i + 1;      // boundary[i+1]
             if forward {
-                mesh.add_triangle(center_idx, v1, v2);
+                mesh.add_triangle(v0, v1, v2);
             } else {
-                mesh.add_triangle(center_idx, v2, v1);
+                mesh.add_triangle(v0, v2, v1);
             }
         }
     } else {
@@ -1404,4 +1398,82 @@ fn triangulate_generic_with_boundary(
     }
 
     mesh
+}
+
+/// Merge coincident vertices in a mesh within the given tolerance.
+/// This makes closed solids watertight by ensuring that shared edge
+/// vertices between adjacent faces use the same vertex index.
+pub fn merge_coincident_vertices(mesh: &mut TriangleMesh, tolerance: f64) {
+    if mesh.vertices.is_empty() {
+        return;
+    }
+    
+    let tol_sq = tolerance * tolerance;
+    let n = mesh.vertices.len();
+    
+    // Build a mapping: old vertex index -> new vertex index
+    let mut remap: Vec<u32> = vec![0; n];
+    let mut new_vertices: Vec<Point3d> = Vec::with_capacity(n);
+    
+    // Spatial hash for fast lookup
+    let cell_size = tolerance * 10.0;
+    let mut grid: HashMap<(i64, i64, i64), Vec<u32>> = HashMap::new();
+    
+    for (i, v) in mesh.vertices.iter().enumerate() {
+        let cx = (v.x / cell_size).floor() as i64;
+        let cy = (v.y / cell_size).floor() as i64;
+        let cz = (v.z / cell_size).floor() as i64;
+        
+        let mut found = false;
+        // Check neighboring cells
+        for dx in -1i64..=1 {
+            for dy in -1i64..=1 {
+                for dz in -1i64..=1 {
+                    let key = (cx + dx, cy + dy, cz + dz);
+                    if let Some(indices) = grid.get(&key) {
+                        for &j in indices {
+                            let ov = &new_vertices[j as usize];
+                            let ddx = v.x - ov.x;
+                            let ddy = v.y - ov.y;
+                            let ddz = v.z - ov.z;
+                            if ddx*ddx + ddy*ddy + ddz*ddz < tol_sq {
+                                remap[i] = j;
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                    if found { break; }
+                }
+                if found { break; }
+            }
+            if found { break; }
+        }
+        
+        if !found {
+            let new_idx = new_vertices.len() as u32;
+            new_vertices.push(*v);
+            remap[i] = new_idx;
+            grid.entry((cx, cy, cz)).or_default().push(new_idx);
+        }
+    }
+    
+    // Apply remap to triangles and filter degenerate ones
+    let old_triangles = std::mem::take(&mut mesh.triangles);
+    for tri in &old_triangles {
+        let a = remap[tri[0] as usize];
+        let b = remap[tri[1] as usize];
+        let c = remap[tri[2] as usize];
+        // Skip degenerate triangles (collapsed vertices)
+        if a != b && b != c && a != c {
+            mesh.triangles.push([a, b, c]);
+        }
+    }
+    
+    mesh.vertices = new_vertices;
+    
+    // Rebuild normals if present
+    if mesh.normals.is_some() {
+        mesh.normals = None; // Normals are no longer valid after vertex merge
+    }
 }

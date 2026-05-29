@@ -24,7 +24,7 @@ use crate::schema::{StepFile, StepValue};
 use draper_geometry::{
     Point3d, Point2d, Direction3d, Surface, Plane, CylinderSurface, SphereSurface,
     ConeSurface, TorusSurface, RevolutionSurface, ExtrusionSurface,
-    NurbsSurface, Curve3d, Line, Circle, NurbsCurve,
+    NurbsSurface, Curve3d, Line, Circle, Ellipse, Arc, NurbsCurve,
 };
 use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary, ear_clip};
 use draper_topology::{Face, Wire, CoEdge, Edge as TopoEdge};
@@ -1123,6 +1123,8 @@ impl<'a> StepConverter<'a> {
                 fbmin.x, fbmin.y, fbmin.z, fbmax.x, fbmax.y, fbmax.z);
             mesh.merge(&face_mesh);
         }
+        // Merge coincident vertices to make the mesh watertight
+        draper_mesh::merge_coincident_vertices(&mut mesh, 1e-4);
         Some(mesh)
     }
 
@@ -1199,6 +1201,8 @@ impl<'a> StepConverter<'a> {
                 forward: face_data.forward,
             });
         }
+        // Merge coincident vertices to make the mesh watertight
+        draper_mesh::merge_coincident_vertices(&mut mesh, 1e-4);
         Some((mesh, face_infos))
     }
 
@@ -3112,10 +3116,16 @@ impl<'a> StepConverter<'a> {
     /// STEP format: `#N = ELLIPSE('', #axis2, semi_major, semi_minor);`
     fn resolve_ellipse_curve(&self, entity: &crate::schema::StepEntity) -> Option<Curve3d> {
         let axis2_id = self.find_axis2_ref(entity)?;
-        let (center, _normal, _x_axis) = self.resolve_axis2(axis2_id)?;
+        let (center, normal, x_axis) = self.resolve_axis2(axis2_id)?;
         let semi_major = self.find_float_param(entity, 0)?;
         let semi_minor = self.find_float_param(entity, 1)?;
-        Some(Curve3d::Ellipse(draper_geometry::Ellipse::new_xy(center, semi_major, semi_minor)))
+        Some(Curve3d::Ellipse(draper_geometry::Ellipse {
+            center,
+            normal,
+            semi_major,
+            semi_minor,
+            x_axis,
+        }))
     }
 
     /// Resolve a B_SPLINE_CURVE_WITH_KNOTS entity (or complex entity containing B_SPLINE_CURVE).
@@ -3316,10 +3326,10 @@ impl<'a> StepConverter<'a> {
         knots
     }
 
-    /// Resolve a POLYLINE entity — return as a line segment approximation.
+    /// Resolve a POLYLINE entity — return as a degree-1 NURBS curve
+    /// that interpolates all the polyline vertices in order.
     fn resolve_polyline_curve(&self, entity: &crate::schema::StepEntity) -> Option<Curve3d> {
         // POLYLINE('', (#pt1, #pt2, ...))
-        // Use the first and last points to create a line
         let mut points = Vec::new();
         for param in &entity.params {
             if let StepValue::List(items) = param {
@@ -3334,35 +3344,116 @@ impl<'a> StepConverter<'a> {
         }
 
         if points.len() >= 2 {
-            let line = Line::through_points(points[0], *points.last().unwrap())?;
-            Some(Curve3d::Line(line))
+            // Create a degree-1 (piecewise linear) NURBS curve through all points.
+            // For N points, we need N control points, N weights (=1), and N+2 knots.
+            // Knot vector: clamped — first 2 knots = 0.0, last 2 = (N-1), interior knots = 1,2,...,N-2
+            let n = points.len();
+            let degree = 1;
+            let weights = vec![1.0; n];
+            let mut knots = Vec::with_capacity(n + degree + 1);
+            // Clamped knot vector for degree 1
+            for _ in 0..=degree {
+                knots.push(0.0);
+            }
+            for i in 1..n-1 {
+                knots.push(i as f64);
+            }
+            for _ in 0..=degree {
+                knots.push((n - 1) as f64);
+            }
+
+            Some(Curve3d::Nurbs(NurbsCurve {
+                degree,
+                control_points: points,
+                weights,
+                knots,
+            }))
         } else {
             None
         }
     }
 
-    /// Resolve a TRIMMED_CURVE entity.
+    /// Resolve a TRIMMED_CURVE entity by extracting the basis curve and
+    /// applying trim parameters to set the correct param_range.
     fn resolve_trimmed_curve(&self, entity: &crate::schema::StepEntity, depth: usize) -> Option<Curve3d> {
         // TRIMMED_CURVE(#basis_curve, #trim1, #trim2, .T., .T., .CARTESIAN., .CARTESIAN.)
+        // trim1/trim2 can be either parameter values or point references
+        
         let basis_id = self.get_ref(entity.params.first()?)?;
-        self.resolve_curve(basis_id, depth + 1)
+        let curve = self.resolve_curve(basis_id, depth + 1)?;
+        
+        // Try to extract trim parameter values or points
+        // The 2nd and 3rd params are the trim specifications
+        let mut trim1: Option<f64> = None;
+        let mut trim2: Option<f64> = None;
+        let mut _trim_point1: Option<Point3d> = None;
+        let mut _trim_point2: Option<Point3d> = None;
+        
+        if entity.params.len() >= 3 {
+            // Trim 1
+            if let Some(param) = entity.params.get(1) {
+                if let Some(val) = self.get_float(param) {
+                    trim1 = Some(val);
+                } else if let Some(ref_id) = self.get_ref(param) {
+                    _trim_point1 = self.resolve_cartesian_point(ref_id);
+                }
+            }
+            // Trim 2
+            if let Some(param) = entity.params.get(2) {
+                if let Some(val) = self.get_float(param) {
+                    trim2 = Some(val);
+                } else if let Some(ref_id) = self.get_ref(param) {
+                    _trim_point2 = self.resolve_cartesian_point(ref_id);
+                }
+            }
+        }
+        
+        // If we have parameter values, create a new curve with adjusted param_range
+        // For circles/ellipses with angle trims, convert to Arc
+        match (&trim1, &trim2, &curve) {
+            (Some(t1), Some(t2), Curve3d::Circle(circle)) => {
+                // Trim a circle by angles — create an Arc
+                return Some(Curve3d::Arc(Arc::new(circle.clone(), *t1, *t2)));
+            }
+            (Some(_t1), Some(_t2), _) => {
+                // For other curves, we can't easily adjust param_range at the Curve3d level.
+                // The Edge struct handles param_range, so this is handled at edge creation time.
+                // Just return the untrimmed curve — the resolve_edge_curve will handle vertex-based trimming.
+            }
+            _ => {}
+        }
+        
+        // If we have trim points but no param values, project them onto the curve
+        // This is handled at the Edge level by resolve_edge_curve which uses vertex points.
+        
+        Some(curve)
     }
 
-    /// Resolve a COMPOSITE_CURVE entity.
+    /// Resolve a COMPOSITE_CURVE entity by concatenating all segments into a single
+    /// degree-1 NURBS curve (polyline approximation of the composite).
     fn resolve_composite_curve(&self, entity: &crate::schema::StepEntity, depth: usize) -> Option<Curve3d> {
         // COMPOSITE_CURVE('', (#segment1, #segment2, ...), .U.)
-        // Use the first segment as a representative curve
+        let mut all_points: Vec<Point3d> = Vec::new();
+        let mut n_segments = 0;
+        
         for param in &entity.params {
             if let StepValue::List(items) = param {
                 for item in items {
                     if let Some(ref_id) = self.get_ref(item) {
-                        // Each segment is a COMPOSITE_CURVE_SEGMENT
                         if let Some(seg_entity) = self.step.find_entity(ref_id) {
                             if seg_entity.type_name == "COMPOSITE_CURVE_SEGMENT" {
-                                // The 2nd param is the parent curve
+                                // COMPOSITE_CURVE_SEGMENT transition, parent_curve, same_sense
+                                // Find the curve reference (usually 2nd param)
                                 if let Some(curve_id) = self.find_param_ref(seg_entity, 1) {
                                     if let Some(curve) = self.resolve_curve(curve_id, depth + 1) {
-                                        return Some(curve);
+                                        // Sample the curve into ~32 points
+                                        let (t_min, t_max) = curve.param_range();
+                                        let n_samples = 32;
+                                        for i in 0..n_samples {
+                                            let t = t_min + (t_max - t_min) * i as f64 / (n_samples - 1) as f64;
+                                            all_points.push(curve.point_at(t));
+                                        }
+                                        n_segments += 1;
                                     }
                                 }
                             }
@@ -3371,7 +3462,50 @@ impl<'a> StepConverter<'a> {
                 }
             }
         }
-        None
+        
+        if all_points.len() >= 2 {
+            // Remove near-duplicate consecutive points
+            all_points = deduplicate_points_3d(&all_points, 1e-6);
+        }
+        
+        if all_points.len() >= 2 {
+            let n = all_points.len();
+            let degree = 1;
+            let weights = vec![1.0; n];
+            let mut knots = Vec::with_capacity(n + degree + 1);
+            for _ in 0..=degree { knots.push(0.0); }
+            for i in 1..n-1 { knots.push(i as f64); }
+            for _ in 0..=degree { knots.push((n - 1) as f64); }
+            
+            Some(Curve3d::Nurbs(NurbsCurve {
+                degree,
+                control_points: all_points,
+                weights,
+                knots,
+            }))
+        } else if n_segments > 0 {
+            // Fallback: try just the first segment
+            for param in &entity.params {
+                if let StepValue::List(items) = param {
+                    for item in items {
+                        if let Some(ref_id) = self.get_ref(item) {
+                            if let Some(seg_entity) = self.step.find_entity(ref_id) {
+                                if seg_entity.type_name == "COMPOSITE_CURVE_SEGMENT" {
+                                    if let Some(curve_id) = self.find_param_ref(seg_entity, 1) {
+                                        if let Some(curve) = self.resolve_curve(curve_id, depth + 1) {
+                                            return Some(curve);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        } else {
+            None
+        }
     }
 
     /// Resolve an OFFSET_CURVE_3D entity — returns the basis curve (offset is approximated).
