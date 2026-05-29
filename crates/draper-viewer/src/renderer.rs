@@ -13,15 +13,18 @@ use wgpu::util::DeviceExt;
 // ─── Vertex / Uniform types ──────────────────────────────────────────────
 
 /// Vertex format for the 3D mesh: position + normal + color + selection state.
-/// dim_factor: 1.0 = full brightness, ~0.45 = dimmed (non-selected instance)
-/// highlight: 0.0 = normal, 1.0 = highlighted (selected face)
+/// selection: encodes three states:
+///   0.0 = normal (no selection active)
+///   1.0 = selected instance (gets warm highlight tint)
+///   2.0 = dimmed instance (non-selected, slightly dimmed)
+/// highlight: 0.0 = normal face, 1.0 = highlighted face (additive tint)
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MeshVertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub color: [f32; 3],
-    pub dim_factor: f32,
+    pub selection: f32,
     pub highlight: f32,
 }
 
@@ -33,8 +36,8 @@ impl MeshVertex {
             0 => Float32x3,  // position
             1 => Float32x3,  // normal
             2 => Float32x3,  // color
-            3 => Float32,    // dim_factor
-            4 => Float32,    // highlight
+            3 => Float32,    // selection state (0=normal, 1=selected, 2=dimmed)
+            4 => Float32,    // highlight (0=normal, 1=highlighted face)
         ],
     };
 }
@@ -208,8 +211,8 @@ struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec3<f32>,
-    @location(3) dim_factor: f32,
-    @location(4) highlight: f32,
+    @location(3) selection: f32,  // 0=normal, 1=selected instance, 2=dimmed instance
+    @location(4) highlight: f32,  // 0=normal face, 1=highlighted face
 };
 
 struct VertexOutput {
@@ -217,7 +220,7 @@ struct VertexOutput {
     @location(0) world_normal: vec3<f32>,
     @location(1) world_pos: vec3<f32>,
     @location(2) vertex_color: vec3<f32>,
-    @location(3) v_dim_factor: f32,
+    @location(3) v_selection: f32,
     @location(4) v_highlight: f32,
 };
 
@@ -229,7 +232,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.world_normal = (uniforms.model * vec4<f32>(in.normal, 0.0)).xyz;
     out.world_pos = world_pos.xyz;
     out.vertex_color = in.color;
-    out.v_dim_factor = in.dim_factor;
+    out.v_selection = in.selection;
     out.v_highlight = in.highlight;
     return out;
 }
@@ -273,13 +276,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let specular = vec3<f32>(0.95, 0.95, 0.97) * (specular_primary * 0.3 + specular_fill);
     let lit_color = base_color * (ambient + diffuse) + specular + base_color * rim_factor;
 
-    // Apply dimming AFTER lighting — preserves visibility of dimmed objects
-    let dimmed_color = lit_color * in.v_dim_factor;
+    // Apply selection state AFTER lighting to preserve 3D shading
+    // selection: 0 = normal, 1 = selected instance, 2 = dimmed instance
+    var final_color = lit_color;
 
-    // Apply highlight as additive tint AFTER lighting — preserves 3D shading
-    // Yellow-gold highlight color added proportionally to highlight factor
-    let highlight_tint = vec3<f32>(0.35, 0.28, 0.05);
-    let final_color = dimmed_color + highlight_tint * in.v_highlight;
+    // Selected instance: add warm highlight tint to make it stand out
+    let is_selected = step(0.5, in.v_selection) * step(in.v_selection, 1.5);
+    let selected_tint = vec3<f32>(0.12, 0.10, 0.02);
+    final_color = final_color + selected_tint * is_selected;
+
+    // Dimmed instance: gentle dimming (70% brightness) — still clearly visible
+    let is_dimmed = step(1.5, in.v_selection);
+    final_color = final_color * (1.0 - 0.30 * is_dimmed);
+
+    // Face highlight: additive yellow-gold tint for selected face
+    let highlight_tint = vec3<f32>(0.40, 0.32, 0.06);
+    final_color = final_color + highlight_tint * in.v_highlight;
 
     return vec4<f32>(final_color, 1.0);
 }
@@ -665,7 +677,7 @@ fn create_vertex_buffer(device: &wgpu::Device, vertices: &[MeshVertex]) -> wgpu:
     if vertices.is_empty() {
         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("3Draper vertex buffer (empty)"),
-            contents: bytemuck::cast_slice(&[MeshVertex { position: [0.0; 3], normal: [0.0; 3], color: [0.48, 0.52, 0.58], dim_factor: 1.0, highlight: 0.0 }]),
+            contents: bytemuck::cast_slice(&[MeshVertex { position: [0.0; 3], normal: [0.0; 3], color: [0.48, 0.52, 0.58], selection: 0.0, highlight: 0.0 }]),
             usage: wgpu::BufferUsages::VERTEX,
         })
     } else {

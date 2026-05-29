@@ -18,8 +18,9 @@ use eframe::egui;
 
 /// Convert TriangleMesh to GPU vertex/index data.
 /// Uses flat shading with face normals to properly support per-triangle colors from STEP files.
-/// Selection state (dimming/highlighting) is encoded as per-vertex attributes and applied
-/// AFTER lighting in the shader, so 3D shading is always preserved.
+/// Selection state is encoded as per-vertex attributes and applied AFTER lighting in the shader:
+///   selection: 0 = normal, 1 = selected instance, 2 = dimmed instance
+///   highlight: 0 = normal face, 1 = highlighted face
 fn mesh_to_gpu_data(
     mesh: &TriangleMesh,
     highlighted_face_id: Option<u64>,
@@ -56,7 +57,7 @@ fn mesh_to_gpu_data(
                     position: [v.x as f32, v.y as f32, v.z as f32],
                     normal: n,
                     color: [0.48, 0.52, 0.58],
-                    dim_factor: 1.0,
+                    selection: 0.0,
                     highlight: 0.0,
                 });
             }
@@ -86,8 +87,23 @@ fn mesh_to_gpu_data(
             .unwrap_or([0.48, 0.52, 0.58]);
 
         // Compute per-triangle selection state (applied AFTER lighting in shader)
+        // selection: 0 = normal, 1 = selected instance, 2 = dimmed instance
+        let mut selection = 0.0_f32;
         let mut is_highlighted = false;
-        let mut is_dimmed = false;
+
+        // Determine instance selection state
+        if let Some(sel_idx) = selected_instance {
+            if let Some(&(start, end)) = instance_triangle_ranges.get(sel_idx) {
+                if i >= start && i < end {
+                    // This triangle belongs to the selected instance
+                    selection = 1.0;
+                } else {
+                    // This triangle belongs to a non-selected instance
+                    selection = 2.0;
+                }
+            }
+            // If instance_triangle_ranges doesn't have this index, selection stays 0.0 (normal)
+        }
 
         // Check face-level highlighting
         if let Some(hid) = highlighted_face_id {
@@ -98,16 +114,6 @@ fn mesh_to_gpu_data(
             }
         }
 
-        // Check instance-level dimming (dim triangles not in selected instance)
-        if let Some(sel_idx) = selected_instance {
-            if let Some(&(start, end)) = instance_triangle_ranges.get(sel_idx) {
-                if i < start || i >= end {
-                    is_dimmed = true;
-                }
-            }
-        }
-
-        let dim_factor = if is_dimmed { 0.45 } else { 1.0 };
         let highlight = if is_highlighted { 1.0 } else { 0.0 };
 
         let base_idx = gpu_vertices.len() as u32;
@@ -117,7 +123,7 @@ fn mesh_to_gpu_data(
                 position: [v.x as f32, v.y as f32, v.z as f32],
                 normal,
                 color,
-                dim_factor,
+                selection,
                 highlight,
             });
         }
