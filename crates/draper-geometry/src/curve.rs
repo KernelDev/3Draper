@@ -191,6 +191,105 @@ pub struct NurbsCurve {
     pub knots: Vec<f64>,
 }
 
+impl NurbsCurve {
+    /// Evaluate the first derivative of the NURBS curve at parameter t.
+    ///
+    /// Uses the quotient rule for rational B-splines:
+    ///   C(t) = A(t) / w(t)
+    ///   C'(t) = (A'(t) - C(t) * w'(t)) / w(t)
+    ///
+    /// where A(t) is the weighted numerator curve and w(t) is the weight function.
+    ///
+    /// Returns the tangent vector at t.
+    pub fn derivative_at(&self, t: f64) -> Vec3d {
+        let n = self.control_points.len();
+        if n == 0 {
+            return Vec3d::new(0.0, 0.0, 0.0);
+        }
+
+        let p = self.degree;
+        let t_min = if self.knots.len() > p { self.knots[p] } else { 0.0 };
+        let t_max = if self.knots.len() > p { self.knots[self.knots.len() - p - 1] } else { 1.0 };
+        let t_c = t.clamp(t_min, t_max);
+
+        let k = find_knot_span_curve(&self.knots, p, t_c, n);
+
+        // Collect p+1 weighted control points
+        let mut pts: Vec<(f64, f64, f64, f64)> = Vec::with_capacity(p + 1);
+        for i in 0..=p {
+            let idx = k - p + i;
+            let idx = if idx >= n { n - 1 } else { idx };
+            let w = self.weights.get(idx).copied().unwrap_or(1.0);
+            let cp = &self.control_points[idx];
+            pts.push((cp.x * w, cp.y * w, cp.z * w, w));
+        }
+
+        // Evaluate A(t) and w(t) using de Boor
+        let mut pts_eval = pts.clone();
+        de_boor_step_curve(&mut pts_eval, &self.knots, p, k, t_c);
+        let a_result = pts_eval.last().unwrap();
+        let w = a_result.3;
+        if w.abs() < 1e-15 {
+            return Vec3d::new(0.0, 0.0, 0.0);
+        }
+        let cx = a_result.0 / w;
+        let cy = a_result.1 / w;
+        let cz = a_result.2 / w;
+
+        // Compute derivative of the weighted numerator A'(t) and weight derivative w'(t)
+        // Using the derivative of the B-spline basis functions
+        let mut dpts: Vec<(f64, f64, f64, f64)> = Vec::with_capacity(p);
+        for i in 0..p {
+            let idx_curr = i;
+            let idx_next = i + 1;
+
+            let k_low = k - p + idx_curr;
+            let k_high = k - p + idx_next;
+
+            let denom1 = if k_low + p + 1 < self.knots.len() && k_low < self.knots.len() {
+                let d = self.knots[k_low + p + 1] - self.knots[k_low];
+                if d.abs() < 1e-15 { 0.0 } else { p as f64 / d }
+            } else {
+                0.0
+            };
+
+            let denom2 = if k_high + p + 1 < self.knots.len() && k_high < self.knots.len() {
+                let d = self.knots[k_high + p + 1] - self.knots[k_high];
+                if d.abs() < 1e-15 { 0.0 } else { p as f64 / d }
+            } else {
+                0.0
+            };
+
+            // d[i] = denom1 * pts[i+1] - denom2 * pts[i]
+            dpts.push((
+                denom1 * pts[idx_next].0 - denom2 * pts[idx_curr].0,
+                denom1 * pts[idx_next].1 - denom2 * pts[idx_curr].1,
+                denom1 * pts[idx_next].2 - denom2 * pts[idx_curr].2,
+                denom1 * pts[idx_next].3 - denom2 * pts[idx_curr].3,
+            ));
+        }
+
+        // Evaluate A'(t) using de Boor on the derivative control points (degree p-1)
+        if p > 1 {
+            de_boor_step_curve(&mut dpts, &self.knots, p - 1, k, t_c);
+        }
+
+        if dpts.is_empty() {
+            return Vec3d::new(0.0, 0.0, 0.0);
+        }
+
+        let da = dpts.last().unwrap();
+        let dw = da.3;
+
+        // C'(t) = (A'(t) - C(t) * w'(t)) / w(t)
+        let dx = (da.0 - cx * dw) / w;
+        let dy = (da.1 - cy * dw) / w;
+        let dz = (da.2 - cz * dw) / w;
+
+        Vec3d::new(dx, dy, dz)
+    }
+}
+
 impl Curve3d {
     /// Check if the curve is degenerate (zero length or zero radius).
     ///

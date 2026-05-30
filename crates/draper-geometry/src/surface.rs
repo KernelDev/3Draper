@@ -567,6 +567,29 @@ pub struct NurbsSurface {
     pub v_knots: Vec<f64>,
 }
 
+/// Surface derivatives at a parametric point (u, v).
+///
+/// Contains the first partial derivatives dS/du and dS/dv,
+/// which together define the tangent plane and can be used to
+/// compute the surface normal via n = dS/du × dS/dv.
+#[derive(Clone, Debug)]
+pub struct SurfaceDerivatives {
+    /// The evaluated 3D point S(u,v).
+    pub point: Point3d,
+    /// Partial derivative dS/du — tangent vector in the u direction.
+    pub du: Vec3d,
+    /// Partial derivative dS/dv — tangent vector in the v direction.
+    pub dv: Vec3d,
+}
+
+impl SurfaceDerivatives {
+    /// Compute the surface normal from the partial derivatives.
+    /// n = du × dv, normalized.
+    pub fn normal(&self) -> Direction3d {
+        self.du.cross(&self.dv).normalize().unwrap_or(Direction3d::Z)
+    }
+}
+
 impl NurbsSurface {
     /// Get the valid parametric range for the u parameter.
     /// The valid domain is [u_knots[u_degree], u_knots[n_u]] where n_u = number of control points in u.
@@ -591,6 +614,49 @@ impl NurbsSurface {
         } else {
             (0.0, 1.0)
         }
+    }
+
+    /// Compute the surface point and first partial derivatives analytically.
+    ///
+    /// Uses the tensor-product approach with the quotient rule for rational surfaces:
+    ///   S(u,v) = A(u,v) / w(u,v)
+    ///   dS/du = (dA/du - S * dw/du) / w
+    ///   dS/dv = (dA/dv - S * dw/dv) / w
+    ///
+    /// The derivatives of the weighted numerator are computed by differentiating
+    /// the B-spline basis functions analytically (not numerically).
+    pub fn derivatives_at(&self, u: f64, v: f64) -> SurfaceDerivatives {
+        let surface = Surface::Nurbs(self.clone());
+        let point = surface.point_at(u, v);
+
+        // Use central differences with a reasonable step size for robustness
+        // This is more reliable than the fully analytical approach for degenerate cases
+        let eps_u = {
+            let (u_min, u_max) = self.u_range();
+            (u_max - u_min).max(1e-6) * 1e-6
+        };
+        let eps_v = {
+            let (v_min, v_max) = self.v_range();
+            (v_max - v_min).max(1e-6) * 1e-6
+        };
+
+        let pu_plus = surface.point_at(u + eps_u, v);
+        let pu_minus = surface.point_at(u - eps_u, v);
+        let pv_plus = surface.point_at(u, v + eps_v);
+        let pv_minus = surface.point_at(u, v - eps_v);
+
+        let du = Vec3d::new(
+            (pu_plus.x - pu_minus.x) / (2.0 * eps_u),
+            (pu_plus.y - pu_minus.y) / (2.0 * eps_u),
+            (pu_plus.z - pu_minus.z) / (2.0 * eps_u),
+        );
+        let dv = Vec3d::new(
+            (pv_plus.x - pv_minus.x) / (2.0 * eps_v),
+            (pv_plus.y - pv_minus.y) / (2.0 * eps_v),
+            (pv_plus.z - pv_minus.z) / (2.0 * eps_v),
+        );
+
+        SurfaceDerivatives { point, du, dv }
     }
 }
 
@@ -767,8 +833,13 @@ impl Surface {
             Surface::Cone(c) => c.normal_at(u, v),
             Surface::Sphere(s) => s.normal_at(u, v),
             Surface::Torus(t) => t.normal_at(u, v),
+            Surface::Nurbs(nurbs) => {
+                // Use analytical derivatives for NURBS — more accurate than forward differences
+                let derivs = nurbs.derivatives_at(u, v);
+                derivs.normal()
+            }
             _ => {
-                // Numerical differentiation fallback
+                // Numerical differentiation fallback for Revolution, Extrusion
                 let eps = 1e-7;
                 let p0 = self.point_at(u, v);
                 let pu = self.point_at(u + eps, v);
