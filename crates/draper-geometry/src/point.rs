@@ -1,6 +1,6 @@
 //! 2D and 3D point types.
 
-use crate::tolerance::{is_coincident, TOLERANCE};
+use crate::tolerance::{ToleranceContext, TOLERANCE};
 use nalgebra::{Point3, Vector3};
 use std::fmt;
 
@@ -39,9 +39,17 @@ impl Point3d {
     }
 
     /// Check if two points are within geometric tolerance.
+    /// Uses the global TOLERANCE constant.
+    /// DEPRECATED: Use `is_coincident_with_tolerance()` with a ToleranceContext instead.
     #[inline]
     pub fn is_coincident_with(&self, other: &Point3d) -> bool {
         self.distance_sq_to(other) < TOLERANCE * TOLERANCE
+    }
+
+    /// Check if two points are coincident within the given tolerance context.
+    #[inline]
+    pub fn is_coincident_with_tolerance(&self, other: &Point3d, ctx: &ToleranceContext) -> bool {
+        self.distance_sq_to(other) < ctx.coincidence_tolerance_sq()
     }
 
     /// Midpoint between two points.
@@ -125,9 +133,18 @@ impl Point2d {
         du * du + dv * dv
     }
 
+    /// Check if two 2D points are within geometric tolerance.
+    /// Uses the global TOLERANCE constant.
+    /// DEPRECATED: Use `is_coincident_with_tolerance()` with a ToleranceContext instead.
     #[inline]
     pub fn is_coincident_with(&self, other: &Point2d) -> bool {
         self.distance_sq_to(other) < TOLERANCE * TOLERANCE
+    }
+
+    /// Check if two 2D points are coincident within the given tolerance context.
+    #[inline]
+    pub fn is_coincident_with_tolerance(&self, other: &Point2d, ctx: &ToleranceContext) -> bool {
+        self.distance_sq_to(other) < ctx.coincidence_tolerance_sq()
     }
 
     #[inline]

@@ -4051,7 +4051,10 @@ fn project_points_on_circle(circle: &Circle, p1: &Point3d, p2: &Point3d) -> (f64
 
     // Ensure t2 > t1 (positive direction arc from t1 to t2)
     let mut t2 = t2;
+    let mut guard = 0;
     while t2 <= t1 {
+        guard += 1;
+        if guard > 1000 { break; } // Safety: prevent infinite loop with NaN/Inf
         t2 += 2.0 * std::f64::consts::PI;
     }
 

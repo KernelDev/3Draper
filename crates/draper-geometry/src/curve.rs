@@ -308,7 +308,13 @@ fn find_knot_span_curve(knots: &[f64], degree: usize, t: f64, n_control_points: 
     let mut lo = degree;
     let mut hi = n_control_points;
     let mut mid = (lo + hi) / 2;
+    let mut iterations = 0;
+    let max_iterations = knots.len(); // Safety guard
     while t < knots[mid] || t >= knots[mid + 1] {
+        iterations += 1;
+        if iterations > max_iterations {
+            break; // Safety: prevent infinite loop with degenerate knot vectors
+        }
         if t < knots[mid] {
             hi = mid;
         } else {

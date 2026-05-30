@@ -7,7 +7,11 @@
 pub mod mesh;
 pub mod triangulate;
 pub mod stl;
+pub mod manifold;
+pub mod edge_cache;
 
 pub use mesh::*;
 pub use triangulate::*;
 pub use stl::*;
+pub use manifold::*;
+pub use edge_cache::*;
