@@ -236,3 +236,135 @@ fn point_on_segment(p: &Point3d, a: &Point3d, b: &Point3d, tol_sq: f64) -> bool 
     let cz = a.z + t * abz - p.z;
     (cx * cx + cy * cy + cz * cz) < tol_sq
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mesh::TriangleMesh;
+
+    /// Helper: create a simple cube mesh (6 faces, 12 triangles, 8 vertices)
+    fn make_cube_mesh() -> TriangleMesh {
+        let mut mesh = TriangleMesh::new();
+        // 8 vertices of a unit cube
+        let v = [
+            Point3d::new(0.0, 0.0, 0.0), // 0
+            Point3d::new(1.0, 0.0, 0.0), // 1
+            Point3d::new(1.0, 1.0, 0.0), // 2
+            Point3d::new(0.0, 1.0, 0.0), // 3
+            Point3d::new(0.0, 0.0, 1.0), // 4
+            Point3d::new(1.0, 0.0, 1.0), // 5
+            Point3d::new(1.0, 1.0, 1.0), // 6
+            Point3d::new(0.0, 1.0, 1.0), // 7
+        ];
+        for p in &v {
+            mesh.add_vertex(*p);
+        }
+        // 12 triangles (2 per face)
+        // Bottom (z=0)
+        mesh.add_triangle(0, 2, 1);
+        mesh.add_triangle(0, 3, 2);
+        // Top (z=1)
+        mesh.add_triangle(4, 5, 6);
+        mesh.add_triangle(4, 6, 7);
+        // Front (y=0)
+        mesh.add_triangle(0, 1, 5);
+        mesh.add_triangle(0, 5, 4);
+        // Back (y=1)
+        mesh.add_triangle(3, 7, 6);
+        mesh.add_triangle(3, 6, 2);
+        // Left (x=0)
+        mesh.add_triangle(0, 4, 7);
+        mesh.add_triangle(0, 7, 3);
+        // Right (x=1)
+        mesh.add_triangle(1, 2, 6);
+        mesh.add_triangle(1, 6, 5);
+        mesh
+    }
+
+    #[test]
+    fn test_cube_euler_characteristic() {
+        let mesh = make_cube_mesh();
+        let report = check_manifold(&mesh);
+        assert!(report.is_watertight(), "Cube should be watertight, but has {} boundary edges", report.boundary_edge_count);
+        // For a sphere (genus 0): χ = V - E + F = 2
+        assert_eq!(report.euler_characteristic, 2,
+            "Cube Euler characteristic should be 2, got {}", report.euler_characteristic);
+    }
+
+    #[test]
+    fn test_cube_is_manifold() {
+        let mesh = make_cube_mesh();
+        let report = check_manifold(&mesh);
+        assert!(report.is_manifold(), "Cube should be manifold");
+        assert_eq!(report.non_manifold_edge_count, 0, "Cube should have no non-manifold edges");
+    }
+
+    #[test]
+    fn test_open_mesh_has_boundary() {
+        let mut mesh = TriangleMesh::new();
+        // Single triangle — 3 boundary edges
+        mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0));
+        mesh.add_vertex(Point3d::new(1.0, 0.0, 0.0));
+        mesh.add_vertex(Point3d::new(0.5, 1.0, 0.0));
+        mesh.add_triangle(0, 1, 2);
+
+        let report = check_manifold(&mesh);
+        assert!(!report.is_watertight(), "Single triangle should not be watertight");
+        assert_eq!(report.boundary_edge_count, 3, "Single triangle should have 3 boundary edges");
+        // Euler characteristic: V=3, E=3, F=1 → χ = 1
+        assert_eq!(report.euler_characteristic, 1,
+            "Single triangle: χ = V-E+F = 3-3+1 = 1, got {}", report.euler_characteristic);
+    }
+
+    #[test]
+    fn test_sphere_mesh_euler() {
+        // Create a simple closed mesh (icosahedron-like)
+        let mut mesh = TriangleMesh::new();
+        // Create a simple tetrahedron (4 vertices, 4 faces)
+        mesh.add_vertex(Point3d::new(1.0, 1.0, 1.0));
+        mesh.add_vertex(Point3d::new(1.0, -1.0, -1.0));
+        mesh.add_vertex(Point3d::new(-1.0, 1.0, -1.0));
+        mesh.add_vertex(Point3d::new(-1.0, -1.0, 1.0));
+        mesh.add_triangle(0, 1, 2);
+        mesh.add_triangle(0, 1, 3);
+        mesh.add_triangle(0, 2, 3);
+        mesh.add_triangle(1, 2, 3);
+
+        let report = check_manifold(&mesh);
+        assert!(report.is_watertight(), "Tetrahedron should be watertight");
+        // For a sphere (genus 0): χ = 2
+        // V=4, E=6, F=4 → χ = 2 ✓
+        assert_eq!(report.euler_characteristic, 2,
+            "Tetrahedron Euler characteristic should be 2, got {}", report.euler_characteristic);
+    }
+
+    #[test]
+    fn test_torus_euler() {
+        // A torus has genus 1, so χ = 0
+        // We check the formula rather than constructing a full torus mesh
+        // (which would need many vertices to be manifold)
+        assert_eq!(ManifoldReport::expected_euler_for_genus(0), 2, "Genus 0 → χ = 2");
+        assert_eq!(ManifoldReport::expected_euler_for_genus(1), 0, "Genus 1 → χ = 0");
+        assert_eq!(ManifoldReport::expected_euler_for_genus(2), -2, "Genus 2 → χ = -2");
+    }
+
+    #[test]
+    fn test_degenerate_triangles_counted() {
+        let mut mesh = TriangleMesh::new();
+        mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0));
+        mesh.add_vertex(Point3d::new(1.0, 0.0, 0.0));
+        // Zero-area triangle (all 3 vertices at the same point)
+        mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0));
+        mesh.add_triangle(0, 1, 2);
+
+        let report = check_manifold(&mesh);
+        assert!(report.degenerate_triangle_count > 0, "Should detect degenerate triangles");
+    }
+
+    #[test]
+    fn test_expected_euler_for_genus() {
+        assert_eq!(ManifoldReport::expected_euler_for_genus(0), 2);
+        assert_eq!(ManifoldReport::expected_euler_for_genus(1), 0);
+        assert_eq!(ManifoldReport::expected_euler_for_genus(2), -2);
+    }
+}

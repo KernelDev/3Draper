@@ -186,3 +186,104 @@ pub fn is_zero(a: f64) -> bool {
 pub fn is_within(a: f64, b: f64, tol: f64) -> bool {
     (a - b).abs() < tol
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_micron_scale() {
+        // Micron-scale model (0.001 mm)
+        let ctx = ToleranceContext::from_model_scale(0.001);
+        assert_eq!(ctx.model_scale, 0.001);
+        // coincidence_tolerance = 1e-6 + 1e-8 * 0.001 ≈ 1e-6
+        let tol = ctx.coincidence_tolerance();
+        assert!(tol > 0.0);
+        assert!((tol - 1e-6).abs() < 1e-10, "Micron scale: tolerance should be ~1e-6, got {}", tol);
+
+        // Two points 1nm apart should be coincident
+        let p1 = crate::Point3d::new(0.0, 0.0, 0.0);
+        let p2 = crate::Point3d::new(1e-7, 0.0, 0.0); // 0.1 microns apart
+        assert!(ctx.is_coincident_3d(&p1, &p2), "Points 0.1 microns apart should be coincident at micron scale");
+
+        // Two points 1 micron apart should NOT be coincident
+        let p3 = crate::Point3d::new(0.0, 1e-3, 0.0); // 1mm apart at micron scale
+        assert!(!ctx.is_coincident_3d(&p1, &p3), "Points 1mm apart should NOT be coincident at micron scale");
+    }
+
+    #[test]
+    fn test_meter_scale() {
+        // Meter-scale model (1000 mm = 1m)
+        let ctx = ToleranceContext::from_model_scale(1000.0);
+        assert_eq!(ctx.model_scale, 1000.0);
+        // coincidence_tolerance = 1e-6 + 1e-8 * 1000 = 1e-6 + 1e-5 ≈ 1.1e-5
+        let tol = ctx.coincidence_tolerance();
+        assert!(tol > 1e-6, "Meter scale: tolerance should be larger than 1e-6, got {}", tol);
+        assert!(tol < 1e-4, "Meter scale: tolerance should be smaller than 1e-4, got {}", tol);
+
+        // Two points 1e-5 mm apart should be coincident at meter scale
+        let p1 = crate::Point3d::new(0.0, 0.0, 0.0);
+        let p2 = crate::Point3d::new(1e-5, 0.0, 0.0);
+        assert!(ctx.is_coincident_3d(&p1, &p2), "Points 1e-5 apart should be coincident at meter scale");
+    }
+
+    #[test]
+    fn test_kilometer_scale() {
+        // Kilometer-scale model (1e6 mm = 1km)
+        let ctx = ToleranceContext::from_model_scale(1e6);
+        // coincidence_tolerance = 1e-6 + 1e-8 * 1e6 = 1e-6 + 1e-2 ≈ 0.01
+        let tol = ctx.coincidence_tolerance();
+        assert!(tol > 1e-3, "Kilometer scale: tolerance should be ~0.01, got {}", tol);
+        assert!(tol < 0.1, "Kilometer scale: tolerance should be ~0.01, got {}", tol);
+
+        // Two points 0.005mm apart should be coincident at kilometer scale
+        // (0.005 < 0.01 = tolerance)
+        let p1 = crate::Point3d::new(0.0, 0.0, 0.0);
+        let p2 = crate::Point3d::new(0.005, 0.0, 0.0); // 0.005mm apart
+        assert!(ctx.is_coincident_3d(&p1, &p2), "Points 0.005mm apart should be coincident at kilometer scale");
+
+        // Two points 100mm apart should NOT be coincident even at kilometer scale
+        let p3 = crate::Point3d::new(100.0, 0.0, 0.0);
+        assert!(!ctx.is_coincident_3d(&p1, &p3), "Points 100mm apart should NOT be coincident at kilometer scale");
+    }
+
+    #[test]
+    fn test_from_bounding_box() {
+        let min = crate::Point3d::new(-50.0, -50.0, -50.0);
+        let max = crate::Point3d::new(50.0, 50.0, 50.0);
+        let ctx = ToleranceContext::from_bounding_box(&min, &max);
+        // Diagonal = sqrt(100² + 100² + 100²) = 100 * sqrt(3) ≈ 173.2
+        let expected_scale = (100.0_f64 * 100.0 + 100.0 * 100.0 + 100.0 * 100.0).sqrt();
+        assert!((ctx.model_scale - expected_scale).abs() < 1e-6,
+            "model_scale should be {}, got {}", expected_scale, ctx.model_scale);
+    }
+
+    #[test]
+    fn test_parametric_tolerance_for_plane() {
+        let ctx = ToleranceContext::new();
+        let plane = crate::Surface::Plane(crate::Plane::xy());
+        let ptol = ctx.parametric_tolerance_for_surface(&plane, 0.5, 0.5);
+        // For a plane with unit u/v directions, max_stretch ≈ eps (1e-8)
+        // because the numerical derivative is evaluated with step = parametric (1e-8)
+        // This is an approximation — the result should be positive
+        assert!(ptol > 0.0, "Parametric tolerance must be positive");
+        // The result should be at least DEFAULT_PARAMETRIC_TOLERANCE
+        assert!(ptol >= DEFAULT_PARAMETRIC_TOLERANCE,
+            "Parametric tolerance should be >= 1e-8, got {}", ptol);
+    }
+
+    #[test]
+    fn test_is_coincident_scalar() {
+        let ctx = ToleranceContext::new();
+        assert!(ctx.is_coincident(0.0, 5e-7), "Values within 1e-6 should be coincident");
+        assert!(!ctx.is_coincident(0.0, 2e-6), "Values beyond 1e-6 should NOT be coincident");
+    }
+
+    #[test]
+    fn test_is_zero() {
+        let ctx = ToleranceContext::new();
+        assert!(ctx.is_zero(0.0));
+        assert!(ctx.is_zero(5e-7));
+        assert!(!ctx.is_zero(2e-6));
+    }
+}

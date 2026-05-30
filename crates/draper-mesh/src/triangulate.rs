@@ -6,6 +6,7 @@
 //! 2. Planes use minimum number of triangles (ear-clipping, no interior subdivision).
 //! 3. Curved surfaces use edge samples as boundary ring vertices.
 //! 4. Post-hoc merge_coincident_vertices ensures watertight closed solids.
+//! 5. TriangulationGuard prevents runaway computation on pathological faces.
 
 use crate::mesh::TriangleMesh;
 use draper_geometry::{
@@ -14,6 +15,83 @@ use draper_geometry::{
     ConeSurface, Curve3d,
 };
 use draper_topology::{Face, Wire, CoEdge, Edge, Solid, Shell, Compound};
+use std::time::Instant;
+
+/// Guard that prevents individual face triangulation from running too long.
+///
+/// If a face takes longer than the configured time limit, its triangulation
+/// is aborted and an empty mesh is returned. This prevents the entire
+/// application from hanging on pathological geometry (e.g., 660 NURBS faces
+/// in drill_top.stp).
+///
+/// # Usage
+/// ```ignore
+/// let guard = TriangulationGuard::new(std::time::Duration::from_secs(5));
+/// if guard.should_abort() {
+///     return TriangleMesh::new();
+/// }
+/// ```
+#[derive(Clone, Debug)]
+pub struct TriangulationGuard {
+    /// Maximum time allowed for triangulation of a single face.
+    time_limit: std::time::Duration,
+    /// When the guard was created.
+    start: Instant,
+    /// Whether the guard has been triggered.
+    aborted: bool,
+}
+
+impl TriangulationGuard {
+    /// Create a new guard with a default time limit of 5 seconds per face.
+    pub fn new() -> Self {
+        Self::with_limit(std::time::Duration::from_secs(5))
+    }
+
+    /// Create a new guard with a custom time limit.
+    pub fn with_limit(time_limit: std::time::Duration) -> Self {
+        Self {
+            time_limit,
+            start: Instant::now(),
+            aborted: false,
+        }
+    }
+
+    /// Check if the time limit has been exceeded.
+    /// Returns `true` if the triangulation should be aborted.
+    pub fn should_abort(&mut self) -> bool {
+        if self.aborted {
+            return true;
+        }
+        if self.start.elapsed() > self.time_limit {
+            self.aborted = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check if the guard has been triggered (read-only).
+    pub fn is_aborted(&self) -> bool {
+        self.aborted
+    }
+
+    /// Reset the guard for a new face.
+    pub fn reset(&mut self) {
+        self.start = Instant::now();
+        self.aborted = false;
+    }
+
+    /// Get the elapsed time since the guard was created or last reset.
+    pub fn elapsed(&self) -> std::time::Duration {
+        self.start.elapsed()
+    }
+}
+
+impl Default for TriangulationGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 use std::f64::consts::PI;
 use std::collections::HashMap;
 
@@ -51,6 +129,11 @@ const EDGE_SAMPLES: usize = 64;
 /// Triangulate a solid into a triangle mesh.
 /// After merging all faces, merges coincident vertices to ensure
 /// that shared edges are watertight.
+///
+/// Post-processing steps:
+/// 1. Merge coincident boundary vertices
+/// 2. Remove degenerate (zero-area) triangles
+/// 3. Remove triangles with NaN/Inf vertices
 pub fn triangulate_solid(solid: &Solid, params: &TriangulationParams) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
     for face in solid.faces() {
@@ -59,6 +142,8 @@ pub fn triangulate_solid(solid: &Solid, params: &TriangulationParams) -> Triangl
     }
     // Merge coincident boundary vertices to make the solid watertight
     merge_coincident_vertices(&mut mesh, 1e-6);
+    // Remove degenerate and invalid triangles
+    filter_degenerate_triangles(&mut mesh, 1e-6);
     mesh
 }
 
@@ -70,6 +155,7 @@ pub fn triangulate_shell(shell: &Shell, params: &TriangulationParams) -> Triangl
         mesh.merge(&face_mesh);
     }
     merge_coincident_vertices(&mut mesh, 1e-6);
+    filter_degenerate_triangles(&mut mesh, 1e-6);
     mesh
 }
 
@@ -126,6 +212,10 @@ fn sample_edge_points(edge: &Edge, n_samples: usize) -> Vec<Point3d> {
 /// Collect boundary points from a face's outer wire by sampling edge curves.
 /// Each edge is sampled at consistent parameter values so that shared edges
 /// between adjacent faces produce identical 3D points.
+///
+/// Degenerate edges (flagged `edge.degenerate`) are skipped — they contribute
+/// no boundary points. This prevents zero-length edge samples from creating
+/// degenerate (zero-area) triangles in the mesh.
 fn collect_face_boundary_points(face: &Face) -> Vec<Point3d> {
     let mut points = Vec::new();
 
@@ -133,6 +223,10 @@ fn collect_face_boundary_points(face: &Face) -> Vec<Point3d> {
         for coedge in &wire.coedges {
             let edge = face.edges.iter().find(|e| e.id == coedge.edge);
             if let Some(edge) = edge {
+                // Skip degenerate edges — they have no meaningful geometry
+                if edge.degenerate {
+                    continue;
+                }
                 let mut edge_pts = sample_edge_points(edge, EDGE_SAMPLES);
                 // If coedge is reversed, reverse the sample order
                 if !coedge.forward {
@@ -3280,5 +3374,66 @@ pub fn merge_coincident_vertices(mesh: &mut TriangleMesh, tolerance: f64) {
     // Rebuild normals
     if mesh.normals.is_some() {
         mesh.normals = None;
+    }
+}
+
+/// Filter out degenerate and invalid triangles from the mesh.
+///
+/// A triangle is removed if:
+/// - Any of its vertices have NaN or Inf coordinates
+/// - Its area is below `tolerance²` (zero-area / degenerate triangle)
+/// - Two or more vertex indices are the same (collapsed triangle)
+///
+/// This is called after `merge_coincident_vertices` as a final cleanup step.
+pub fn filter_degenerate_triangles(mesh: &mut TriangleMesh, tolerance: f64) {
+    let min_area_sq = tolerance * tolerance;
+    let old_triangles = std::mem::take(&mut mesh.triangles);
+
+    for tri in &old_triangles {
+        let a_idx = tri[0] as usize;
+        let b_idx = tri[1] as usize;
+        let c_idx = tri[2] as usize;
+
+        // Check for collapsed triangles (duplicate vertex indices)
+        if a_idx == b_idx || b_idx == c_idx || a_idx == c_idx {
+            continue;
+        }
+
+        // Bounds check
+        if a_idx >= mesh.vertices.len() || b_idx >= mesh.vertices.len() || c_idx >= mesh.vertices.len() {
+            continue;
+        }
+
+        let a = &mesh.vertices[a_idx];
+        let b = &mesh.vertices[b_idx];
+        let c = &mesh.vertices[c_idx];
+
+        // Check for NaN/Inf vertices
+        if !a.x.is_finite() || !a.y.is_finite() || !a.z.is_finite() ||
+           !b.x.is_finite() || !b.y.is_finite() || !b.z.is_finite() ||
+           !c.x.is_finite() || !c.y.is_finite() || !c.z.is_finite() {
+            continue;
+        }
+
+        // Check for zero-area triangles using cross product magnitude
+        // |cross| / 2 = area, so |cross|² / 4 = area²
+        // We compare |cross|² < 4 * min_area² = (2 * tolerance)²
+        let e1x = b.x - a.x;
+        let e1y = b.y - a.y;
+        let e1z = b.z - a.z;
+        let e2x = c.x - a.x;
+        let e2y = c.y - a.y;
+        let e2z = c.z - a.z;
+        let cx = e1y * e2z - e1z * e2y;
+        let cy = e1z * e2x - e1x * e2z;
+        let cz = e1x * e2y - e1y * e2x;
+        let cross_mag_sq = cx * cx + cy * cy + cz * cz;
+
+        // Skip degenerate triangles (area < tolerance²)
+        if cross_mag_sq < 4.0 * min_area_sq * min_area_sq {
+            continue;
+        }
+
+        mesh.triangles.push(*tri);
     }
 }

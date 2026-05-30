@@ -3,6 +3,66 @@
 use crate::{Direction3d, Point3d, Point2d, Vec3d, Transform, curve::Curve3d};
 use std::fmt;
 
+/// Bitflags indicating the type of degeneracy at a surface point.
+///
+/// Multiple degeneracies can occur simultaneously (e.g., a cone apex
+/// is both a pole and a zero-area singularity).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct DegeneracyFlags(pub u32);
+
+impl DegeneracyFlags {
+    /// No degeneracy — the surface is well-behaved at this point.
+    pub const NONE: DegeneracyFlags = DegeneracyFlags(0);
+    /// The partial derivative dS/du is zero (u-pole / u-seam degeneracy).
+    pub const DU_ZERO: DegeneracyFlags = DegeneracyFlags(1);
+    /// The partial derivative dS/dv is zero (v-pole / v-seam degeneracy).
+    pub const DV_ZERO: DegeneracyFlags = DegeneracyFlags(2);
+    /// Both partial derivatives are zero (complete singularity, e.g., cone apex or sphere pole).
+    pub const SINGULAR: DegeneracyFlags = DegeneracyFlags(3); // DU_ZERO | DV_ZERO
+    /// The surface normal is NaN or Inf at this point.
+    pub const NORMAL_INVALID: DegeneracyFlags = DegeneracyFlags(4);
+    /// The 3D point is NaN or Inf.
+    pub const POINT_INVALID: DegeneracyFlags = DegeneracyFlags(8);
+
+    /// Check if any degeneracy is present.
+    pub fn is_degenerate(&self) -> bool {
+        self.0 != 0
+    }
+
+    /// Check if this is a complete singularity (both partials zero).
+    pub fn is_singular(&self) -> bool {
+        self.contains(DegeneracyFlags::DU_ZERO) && self.contains(DegeneracyFlags::DV_ZERO)
+    }
+
+    /// Check if only the u-direction is degenerate (v-ring collapses).
+    pub fn is_u_pole(&self) -> bool {
+        self.contains(DegeneracyFlags::DU_ZERO) && !self.contains(DegeneracyFlags::DV_ZERO)
+    }
+
+    /// Check if only the v-direction is degenerate (u-ring collapses).
+    pub fn is_v_pole(&self) -> bool {
+        !self.contains(DegeneracyFlags::DU_ZERO) && self.contains(DegeneracyFlags::DV_ZERO)
+    }
+
+    /// Check if the given flags are set.
+    pub fn contains(&self, other: DegeneracyFlags) -> bool {
+        (self.0 & other.0) == other.0
+    }
+}
+
+impl std::ops::BitOr for DegeneracyFlags {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        DegeneracyFlags(self.0 | rhs.0)
+    }
+}
+
+impl std::ops::BitOrAssign for DegeneracyFlags {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
 /// A parametric surface: S(u,v) -> Point3d.
 #[derive(Clone, Debug)]
 pub enum Surface {
@@ -535,6 +595,156 @@ impl NurbsSurface {
 }
 
 impl Surface {
+    /// Check if the surface is degenerate at the given parametric point (u, v).
+    ///
+    /// Returns `DegeneracyFlags` indicating which types of degeneracy are present.
+    /// A degenerate point is one where the surface parameterization breaks down:
+    /// - Poles where a parametric ring collapses to a single point (e.g., sphere poles, cone apex)
+    /// - Seam edges where the parameterization wraps around
+    /// - Points where the normal cannot be computed
+    ///
+    /// # Arguments
+    /// * `u`, `v` - Parametric coordinates on the surface
+    /// * `tolerance` - Geometric tolerance for zero-comparisons
+    pub fn is_degenerate_at(&self, u: f64, v: f64, tolerance: f64) -> DegeneracyFlags {
+        let mut flags = DegeneracyFlags::NONE;
+
+        // Evaluate the 3D point and check for NaN/Inf
+        let p = self.point_at(u, v);
+        if !p.x.is_finite() || !p.y.is_finite() || !p.z.is_finite() {
+            flags |= DegeneracyFlags::POINT_INVALID;
+        }
+
+        // Check the surface normal
+        let normal = self.normal_at(u, v);
+        if !normal.x.is_finite() || !normal.y.is_finite() || !normal.z.is_finite() {
+            flags |= DegeneracyFlags::NORMAL_INVALID;
+        }
+
+        // Compute partial derivatives numerically.
+        // Use a reasonable step size: 1e-6 is too small (numerical noise),
+        // 1e-3 is better for estimating the Jacobian.
+        // We only flag degeneracy if the partial is zero to within `tolerance`,
+        // which means the surface collapses at this parametric point.
+        let eps = 1e-4;
+        let pu = self.point_at(u + eps, v);
+        let pv = self.point_at(u, v + eps);
+        let du = Vec3d::new(pu.x - p.x, pu.y - p.y, pu.z - p.z);
+        let dv = Vec3d::new(pv.x - p.x, pv.y - p.y, pv.z - p.z);
+        let du_len = (du.x * du.x + du.y * du.y + du.z * du.z).sqrt();
+        let dv_len = (dv.x * dv.x + dv.y * dv.y + dv.z * dv.z).sqrt();
+
+        // A partial derivative is considered "zero" if the step in parameter space
+        // produces a 3D displacement smaller than tolerance.
+        // This detects degeneracies like cone apex (radius → 0) and sphere poles.
+        if du_len < tolerance {
+            flags |= DegeneracyFlags::DU_ZERO;
+        }
+        if dv_len < tolerance {
+            flags |= DegeneracyFlags::DV_ZERO;
+        }
+
+        // Also apply surface-specific degeneracy checks
+        match self {
+            Surface::Cone(cone) => {
+                // Cone apex: radius reaches zero, all u-values map to the same 3D point
+                let r = if cone.expanding {
+                    v * cone.half_angle.tan()
+                } else {
+                    (cone.radius - v * cone.half_angle.tan()).max(0.0)
+                };
+                if r < tolerance {
+                    flags |= DegeneracyFlags::DU_ZERO | DegeneracyFlags::DV_ZERO;
+                }
+            }
+            Surface::Sphere(sphere) => {
+                // Sphere poles: at v=0 (north) or v=pi (south), all u-values map to same point
+                // v is polar angle: v=0 → top, v=pi → bottom
+                if v.abs() < tolerance / sphere.radius.max(tolerance) {
+                    flags |= DegeneracyFlags::DU_ZERO;
+                }
+                if (v - std::f64::consts::PI).abs() < tolerance / sphere.radius.max(tolerance) {
+                    flags |= DegeneracyFlags::DU_ZERO;
+                }
+            }
+            Surface::Nurbs(nurbs) => {
+                // NURBS surface: check for collapsed control point rows/columns
+                // A row of coincident control points indicates a degenerate edge
+                let (u_min, u_max) = nurbs.u_range();
+                let (v_min, v_max) = nurbs.v_range();
+
+                // At the boundary of the knot domain, check if the boundary row/column
+                // is degenerate (all control points coincident)
+                let tol_sq = tolerance * tolerance;
+                let n_u = nurbs.control_points.len();
+                if n_u > 0 {
+                    // Check first row (u = u_min boundary)
+                    let first_row = &nurbs.control_points[0];
+                    if first_row.len() > 1 {
+                        let fp = &first_row[0];
+                        let first_row_degenerate = first_row.iter().skip(1).all(|p| {
+                            (p.x - fp.x).powi(2) + (p.y - fp.y).powi(2) + (p.z - fp.z).powi(2) < tol_sq
+                        });
+                        if first_row_degenerate && (u - u_min).abs() < (u_max - u_min) * 0.01 + tolerance {
+                            flags |= DegeneracyFlags::DU_ZERO;
+                        }
+                    }
+
+                    // Check last row (u = u_max boundary)
+                    let last_row = &nurbs.control_points[n_u - 1];
+                    if last_row.len() > 1 {
+                        let lp = &last_row[0];
+                        let last_row_degenerate = last_row.iter().skip(1).all(|p| {
+                            (p.x - lp.x).powi(2) + (p.y - lp.y).powi(2) + (p.z - lp.z).powi(2) < tol_sq
+                        });
+                        if last_row_degenerate && (u - u_max).abs() < (u_max - u_min) * 0.01 + tolerance {
+                            flags |= DegeneracyFlags::DU_ZERO;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        flags
+    }
+
+    /// Check if the surface as a whole is degenerate (e.g., zero area).
+    ///
+    /// This is a coarser check than `is_degenerate_at` — it checks whether
+    /// the surface has any meaningful geometric extent at all.
+    pub fn is_degenerate(&self, tolerance: f64) -> bool {
+        match self {
+            Surface::Plane(_) => false, // Planes are never degenerate
+            Surface::Cylinder(c) => c.radius < tolerance,
+            Surface::Cone(c) => {
+                // A cone is degenerate if its base radius is below tolerance
+                // AND it's not an expanding cone
+                !c.expanding && c.radius < tolerance
+            }
+            Surface::Sphere(s) => s.radius < tolerance,
+            Surface::Torus(t) => {
+                // A torus is degenerate if its major radius or minor radius is below tolerance
+                t.major_radius < tolerance || t.minor_radius < tolerance
+            }
+            Surface::Revolution(_) => false, // Can't easily tell without evaluating
+            Surface::Extrusion(_) => false,
+            Surface::Nurbs(n) => {
+                // Check if all control points are coincident
+                if n.control_points.is_empty() || n.control_points[0].is_empty() {
+                    return true;
+                }
+                let first = &n.control_points[0][0];
+                let tol_sq = tolerance * tolerance;
+                n.control_points.iter().all(|row| {
+                    row.iter().all(|p| {
+                        (p.x - first.x).powi(2) + (p.y - first.y).powi(2) + (p.z - first.z).powi(2) < tol_sq
+                    })
+                })
+            }
+        }
+    }
+
     /// Evaluate the surface at (u, v).
     pub fn point_at(&self, u: f64, v: f64) -> Point3d {
         match self {
@@ -944,5 +1154,110 @@ fn de_boor_step(pts: &mut [(f64, f64, f64, f64)], knots: &[f64], degree: usize, 
                 alpha * pts[j].3 + beta * pts[j - 1].3,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::f64::consts::PI;
+
+    #[test]
+    fn test_cone_apex_degenerate() {
+        let cone = ConeSurface::new_z(10.0, 0.5);
+        let surface = Surface::Cone(cone);
+        // At v = height (apex), the cone is degenerate
+        let apex_v = 10.0 / 0.5_f64.tan(); // height = radius / tan(half_angle)
+        let flags = surface.is_degenerate_at(0.0, apex_v, 1e-6);
+        assert!(flags.is_degenerate(), "Cone apex should be degenerate, got {:?}", flags);
+        assert!(flags.is_singular(), "Cone apex should be singular (both partials zero)");
+    }
+
+    #[test]
+    fn test_cone_base_not_degenerate() {
+        let cone = ConeSurface::new_z(10.0, 0.5);
+        let surface = Surface::Cone(cone);
+        // At v = 0 (base), the cone is not degenerate
+        let flags = surface.is_degenerate_at(0.0, 0.0, 1e-6);
+        assert!(!flags.is_degenerate(), "Cone base should not be degenerate, got {:?}", flags);
+    }
+
+    #[test]
+    fn test_sphere_north_pole_degenerate() {
+        let sphere = SphereSurface::new(Point3d::ORIGIN, 10.0);
+        let surface = Surface::Sphere(sphere);
+        // At v = 0 (north pole), the sphere is degenerate (u-ring collapses)
+        let flags = surface.is_degenerate_at(0.0, 0.0, 1e-6);
+        assert!(flags.contains(DegeneracyFlags::DU_ZERO),
+            "Sphere north pole should have DU_ZERO flag, got {:?}", flags);
+    }
+
+    #[test]
+    fn test_sphere_south_pole_degenerate() {
+        let sphere = SphereSurface::new(Point3d::ORIGIN, 10.0);
+        let surface = Surface::Sphere(sphere);
+        // At v = pi (south pole), the sphere is degenerate (u-ring collapses)
+        let flags = surface.is_degenerate_at(0.0, PI, 1e-6);
+        assert!(flags.contains(DegeneracyFlags::DU_ZERO),
+            "Sphere south pole should have DU_ZERO flag, got {:?}", flags);
+    }
+
+    #[test]
+    fn test_sphere_equator_not_degenerate() {
+        let sphere = SphereSurface::new(Point3d::ORIGIN, 10.0);
+        let surface = Surface::Sphere(sphere);
+        // At v = pi/2 (equator), the sphere is not degenerate
+        let flags = surface.is_degenerate_at(0.0, PI / 2.0, 1e-6);
+        assert!(!flags.is_degenerate(), "Sphere equator should not be degenerate, got {:?}", flags);
+    }
+
+    #[test]
+    fn test_cylinder_not_degenerate() {
+        let cyl = CylinderSurface::new_z(10.0);
+        let surface = Surface::Cylinder(cyl);
+        let flags = surface.is_degenerate_at(0.0, 5.0, 1e-6);
+        assert!(!flags.is_degenerate(), "Cylinder should not be degenerate at any point, got {:?}", flags);
+    }
+
+    #[test]
+    fn test_plane_not_degenerate() {
+        let plane = Surface::Plane(Plane::xy());
+        let flags = plane.is_degenerate_at(0.0, 0.0, 1e-6);
+        assert!(!flags.is_degenerate(), "Plane should never be degenerate, got {:?}", flags);
+    }
+
+    #[test]
+    fn test_surface_is_degenerate_zero_radius_sphere() {
+        let sphere = SphereSurface::new(Point3d::ORIGIN, 0.0);
+        let surface = Surface::Sphere(sphere);
+        assert!(surface.is_degenerate(1e-6), "Sphere with zero radius should be degenerate");
+    }
+
+    #[test]
+    fn test_surface_is_degenerate_zero_radius_cylinder() {
+        let cyl = CylinderSurface::new_z(0.0);
+        let surface = Surface::Cylinder(cyl);
+        assert!(surface.is_degenerate(1e-6), "Cylinder with zero radius should be degenerate");
+    }
+
+    #[test]
+    fn test_degeneracy_flags_bitor() {
+        let flags = DegeneracyFlags::DU_ZERO | DegeneracyFlags::DV_ZERO;
+        assert!(flags.contains(DegeneracyFlags::DU_ZERO));
+        assert!(flags.contains(DegeneracyFlags::DV_ZERO));
+        assert!(flags.is_singular());
+    }
+
+    #[test]
+    fn test_torus_inner_touch_degenerate() {
+        // Torus where minor_radius == major_radius (self-intersecting at center)
+        // This is not degenerate per se, but the surface point at the touch
+        // should still be computable without NaN
+        let torus = TorusSurface::new_z(Point3d::ORIGIN, 10.0, 10.0);
+        let surface = Surface::Torus(torus);
+        let flags = surface.is_degenerate_at(0.0, PI, 1e-6);
+        // The point itself should not be invalid
+        assert!(!flags.contains(DegeneracyFlags::POINT_INVALID),
+            "Torus inner touch point should not be NaN/Inf");
     }
 }

@@ -79,6 +79,9 @@ pub struct Edge {
     pub forward: bool,
     /// Tolerance.
     pub tolerance: f64,
+    /// Whether this edge is degenerate (zero-length or degenerate curve).
+    /// Set during validation when the edge's curve is found to be degenerate.
+    pub degenerate: bool,
 }
 
 impl Edge {
@@ -92,6 +95,7 @@ impl Edge {
             vertex_end: None,
             forward: true,
             tolerance: 1e-6,
+            degenerate: false,
         }
     }
 
@@ -140,6 +144,7 @@ impl Edge {
             vertex_end: self.vertex_start,
             forward: !self.forward,
             tolerance: self.tolerance,
+            degenerate: self.degenerate,
         }
     }
 }

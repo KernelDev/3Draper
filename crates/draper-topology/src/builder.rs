@@ -115,6 +115,7 @@ impl ShapeBuilder {
             vertex_end: None,
             forward: true,
             tolerance: 1e-6,
+            degenerate: false,
         };
         let bottom_coedge = CoEdge::new(bottom_edge.id, false); // Reversed for bottom (looking from -Z)
         let bottom_wire = Wire::new(vec![bottom_coedge]);
@@ -131,6 +132,7 @@ impl ShapeBuilder {
             vertex_end: None,
             forward: true,
             tolerance: 1e-6,
+            degenerate: false,
         };
         let top_coedge = CoEdge::new(top_edge.id, true); // Forward for top (looking from +Z)
         let top_wire = Wire::new(vec![top_coedge]);
@@ -196,6 +198,7 @@ impl ShapeBuilder {
             vertex_end: None,
             forward: true,
             tolerance: 1e-6,
+            degenerate: false,
         };
         let bottom_coedge = CoEdge::new(bottom_edge.id, false);
         let bottom_wire = Wire::new(vec![bottom_coedge]);
@@ -231,6 +234,7 @@ impl ShapeBuilder {
             vertex_end: None,
             forward: true,
             tolerance: 1e-6,
+            degenerate: false,
         };
 
         let coedges = vec![CoEdge::new(edge_v.id, true)];
@@ -322,6 +326,7 @@ impl ShapeBuilder {
             vertex_end: None,
             forward: true,
             tolerance: 1e-6,
+            degenerate: false,
         };
         let coedge = CoEdge::new(edge.id, true);
         let wire = Wire::new(vec![coedge]);

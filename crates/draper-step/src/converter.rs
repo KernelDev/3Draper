@@ -247,6 +247,67 @@ pub fn step_structure_detailed(step_file: &StepFile) -> String {
     converter.build_detailed_structure()
 }
 
+/// Extract tolerance values from STEP file entities.
+///
+/// STEP files can contain explicit tolerance information via:
+/// - `UNCERTAINTY_MEASURE_WITH_UNIT` — overall model uncertainty
+/// - `GEOMETRIC_TOLERANCE` / `GEOMETRIC_TOLERANCE_WITH_DATUM_REFERENCE` — GD&T tolerances
+/// - `SHAPE_TOLERANCE` / `SHAPE_TOLERANCE_WITH_DATUM_REFERENCE` — shape-level tolerances
+///
+/// Returns an `Option<f64>` with the best available tolerance value.
+/// If multiple tolerance values are found, the smallest (tightest) is returned.
+/// If no tolerance information is found, returns `None`.
+pub fn extract_step_tolerance(step_file: &StepFile) -> Option<f64> {
+    let mut best_tolerance: Option<f64> = None;
+
+    for entity in &step_file.entities {
+        let type_name = entity.type_name.to_uppercase();
+
+        if type_name == "UNCERTAINTY_MEASURE_WITH_UNIT" {
+            // Format: UNCERTAINTY_MEASURE_WITH_UNIT(name, measure_with_unit)
+            // The first parameter is typically the uncertainty value
+            if let Some(StepValue::List(params)) = entity.params.get(0) {
+                if let Some(StepValue::Float(val)) = params.first() {
+                    let tol = val.abs();
+                    best_tolerance = Some(match best_tolerance {
+                        Some(existing) => existing.min(tol),
+                        None => tol,
+                    });
+                }
+            }
+            // Also try the second parameter pattern
+            if let Some(StepValue::Float(val)) = entity.params.get(0) {
+                let tol = val.abs();
+                best_tolerance = Some(match best_tolerance {
+                    Some(existing) => existing.min(tol),
+                    None => tol,
+                });
+            }
+        }
+
+        if type_name.starts_with("GEOMETRIC_TOLERANCE") || type_name.starts_with("SHAPE_TOLERANCE") {
+            // Geometric tolerances have the tolerance value as one of the parameters
+            // The exact position depends on the specific subtype, but typically
+            // the first numeric parameter is the tolerance value
+            for param in &entity.params {
+                if let StepValue::Float(val) = param {
+                    let tol = val.abs();
+                    if tol > 1e-15 && tol < 1000.0 {
+                        // Sanity check: tolerance should be small positive number
+                        best_tolerance = Some(match best_tolerance {
+                            Some(existing) => existing.min(tol),
+                            None => tol,
+                        });
+                    }
+                    break; // Only use the first numeric parameter
+                }
+            }
+        }
+    }
+
+    best_tolerance
+}
+
 /// Get a text representation of the STEP file structure.
 pub fn step_structure_text(step_file: &StepFile) -> String {
     let converter = StepConverter::new(step_file);

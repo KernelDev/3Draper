@@ -56,6 +56,14 @@ impl Line {
     pub fn derivative_at(&self, _t: f64) -> Vec3d {
         Vec3d::new(self.direction.x, self.direction.y, self.direction.z)
     }
+
+    /// Check if this line is degenerate (zero direction vector).
+    pub fn is_degenerate(&self, tolerance: f64) -> bool {
+        let len_sq = self.direction.x * self.direction.x
+            + self.direction.y * self.direction.y
+            + self.direction.z * self.direction.z;
+        len_sq < tolerance * tolerance
+    }
 }
 
 /// A circle in 3D space.
@@ -184,6 +192,76 @@ pub struct NurbsCurve {
 }
 
 impl Curve3d {
+    /// Check if the curve is degenerate (zero length or zero radius).
+    ///
+    /// A degenerate curve has no meaningful geometric extent. This can happen
+    /// when an edge's start and end points are coincident (zero-length edge),
+    /// or when a circle/ellipse has zero radius.
+    ///
+    /// # Arguments
+    /// * `tolerance` - The geometric tolerance for coincidence checks. Use
+    ///   `ToleranceContext::coincidence_tolerance()` for model-scale-aware checks.
+    pub fn is_degenerate(&self, tolerance: f64) -> bool {
+        match self {
+            Curve3d::Line(line) => {
+                // A line is degenerate if its direction has zero length
+                // (this shouldn't happen with Direction3d, but check anyway)
+                let d = line.direction;
+                let len_sq = d.x * d.x + d.y * d.y + d.z * d.z;
+                len_sq < tolerance * tolerance
+            }
+            Curve3d::Circle(circle) => {
+                // A circle is degenerate if its radius is smaller than tolerance
+                circle.radius < tolerance
+            }
+            Curve3d::Ellipse(ellipse) => {
+                // An ellipse is degenerate if both semi-axes are smaller than tolerance
+                ellipse.semi_major < tolerance && ellipse.semi_minor < tolerance
+            }
+            Curve3d::Arc(arc) => {
+                // An arc is degenerate if its underlying circle is degenerate
+                // OR if the arc length is effectively zero (start and end are coincident)
+                if arc.circle.radius < tolerance {
+                    return true;
+                }
+                // Check if start and end points are coincident
+                let start = arc.start_point();
+                let end = arc.end_point();
+                let dx = start.x - end.x;
+                let dy = start.y - end.y;
+                let dz = start.z - end.z;
+                (dx * dx + dy * dy + dz * dz) < tolerance * tolerance
+            }
+            Curve3d::Nurbs(nurbs) => {
+                // A NURBS curve is degenerate if:
+                // 1. It has fewer than 2 control points
+                // 2. All control points are coincident within tolerance
+                // 3. The knot vector is degenerate (empty or zero-length domain)
+                if nurbs.control_points.len() < 2 {
+                    return true;
+                }
+
+                // Check knot vector domain
+                let n = nurbs.knots.len();
+                let t_min = if n > nurbs.degree { nurbs.knots[nurbs.degree] } else { 0.0 };
+                let t_max = if n > nurbs.degree { nurbs.knots[n - nurbs.degree - 1] } else { 1.0 };
+                if (t_max - t_min).abs() < tolerance * 1e-8 {
+                    return true;
+                }
+
+                // Check if all control points are coincident
+                let first = &nurbs.control_points[0];
+                let all_coincident = nurbs.control_points.iter().skip(1).all(|p| {
+                    let dx = p.x - first.x;
+                    let dy = p.y - first.y;
+                    let dz = p.z - first.z;
+                    (dx * dx + dy * dy + dz * dz) < tolerance * tolerance
+                });
+                all_coincident
+            }
+        }
+    }
+
     /// Evaluate the curve at parameter t.
     pub fn point_at(&self, t: f64) -> Point3d {
         match self {
@@ -350,5 +428,94 @@ fn de_boor_step_curve(pts: &mut [(f64, f64, f64, f64)], knots: &[f64], degree: u
                 alpha * pts[j].3 + beta * pts[j - 1].3,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_line_not_degenerate() {
+        let line = Line::through_points(
+            Point3d::new(0.0, 0.0, 0.0),
+            Point3d::new(1.0, 0.0, 0.0),
+        ).unwrap();
+        let curve = Curve3d::Line(line);
+        assert!(!curve.is_degenerate(1e-6), "A line between distinct points should not be degenerate");
+    }
+
+    #[test]
+    fn test_circle_degenerate_zero_radius() {
+        let circle = Circle::new_xy(Point3d::ORIGIN, 0.0);
+        let curve = Curve3d::Circle(circle);
+        assert!(curve.is_degenerate(1e-6), "A circle with zero radius should be degenerate");
+    }
+
+    #[test]
+    fn test_circle_not_degenerate() {
+        let circle = Circle::new_xy(Point3d::ORIGIN, 10.0);
+        let curve = Curve3d::Circle(circle);
+        assert!(!curve.is_degenerate(1e-6), "A circle with nonzero radius should not be degenerate");
+    }
+
+    #[test]
+    fn test_ellipse_degenerate() {
+        let ellipse = Ellipse::new_xy(Point3d::ORIGIN, 0.0, 0.0);
+        let curve = Curve3d::Ellipse(ellipse);
+        assert!(curve.is_degenerate(1e-6), "An ellipse with zero semi-axes should be degenerate");
+    }
+
+    #[test]
+    fn test_arc_degenerate_zero_angle() {
+        let circle = Circle::new_xy(Point3d::ORIGIN, 10.0);
+        // Arc from 0 to 0 — start and end at same point
+        let arc = Arc::new(circle, 0.0, 0.0);
+        let curve = Curve3d::Arc(arc);
+        assert!(curve.is_degenerate(1e-6), "An arc with zero angle should be degenerate");
+    }
+
+    #[test]
+    fn test_nurbs_degenerate_coincident_points() {
+        // All control points at the same location
+        let pts = vec![
+            Point3d::new(1.0, 2.0, 3.0),
+            Point3d::new(1.0, 2.0, 3.0),
+            Point3d::new(1.0, 2.0, 3.0),
+        ];
+        let nurbs = NurbsCurve {
+            degree: 2,
+            control_points: pts,
+            weights: vec![1.0, 1.0, 1.0],
+            knots: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        };
+        let curve = Curve3d::Nurbs(nurbs);
+        assert!(curve.is_degenerate(1e-6), "A NURBS curve with coincident control points should be degenerate");
+    }
+
+    #[test]
+    fn test_nurbs_not_degenerate() {
+        let pts = vec![
+            Point3d::new(0.0, 0.0, 0.0),
+            Point3d::new(5.0, 5.0, 0.0),
+            Point3d::new(10.0, 0.0, 0.0),
+        ];
+        let nurbs = NurbsCurve {
+            degree: 2,
+            control_points: pts,
+            weights: vec![1.0, 1.0, 1.0],
+            knots: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        };
+        let curve = Curve3d::Nurbs(nurbs);
+        assert!(!curve.is_degenerate(1e-6), "A NURBS curve with distinct control points should not be degenerate");
+    }
+
+    #[test]
+    fn test_edge_zero_length_degenerate() {
+        // Create an edge where start == end
+        let p = Point3d::new(1.0, 2.0, 3.0);
+        let line = Line::through_points(p, p);
+        // Line::through_points returns None for coincident points
+        assert!(line.is_none(), "Line through identical points should return None");
     }
 }
