@@ -9,9 +9,11 @@ pub mod shape;
 pub mod builder;
 pub mod traversal;
 pub mod validation;
+pub mod healing;
 
 pub use entity::*;
 pub use shape::*;
 pub use builder::*;
 pub use traversal::*;
-pub use validation::*;
+pub use validation::{ValidationError, validate_solid, validate_solid_readonly, validate_shell};
+pub use healing::*;

@@ -199,18 +199,18 @@
 
 ### 3.1 Модуль Healing (восстановление геометрии)
 
-- [ ] 3.1.1 Создать крейт `draper-healing` (или модуль в `draper-topology`)
-- [ ] 3.1.2 **Gap closing**: поиск пар граничных рёбер с расстоянием < tolerance * gap_factor
-- [ ] 3.1.3 **Hole filling**: триангуляция малых отверстий
-- [ ] 3.1.4 **Edge stitching**: объединение коллинеарных рёбер
+- [x] 3.1.1 Создать крейт `draper-healing` (или модуль в `draper-topology`) — модуль healing в draper-topology
+- [x] 3.1.2 **Gap closing**: поиск пар граничных рёбер с расстоянием < tolerance * gap_factor
+- [x] 3.1.3 **Hole filling**: триангуляция малых отверстий
+- [x] 3.1.4 **Edge stitching**: объединение коллинеарных рёбер
 - [ ] 3.1.5 **Face merging**: объединение копланарных/коцилиндрических граней
-- [ ] 3.1.6 **Normal orientation repair**: проверка и исправление ориентации нормалей
+- [x] 3.1.6 **Normal orientation repair**: проверка и исправление ориентации нормалей
 - [ ] 3.1.7 **Tolerance propagation**: распространение толерансов по топологическому графу
-- [ ] 3.1.8 **Small feature removal**: удаление граней с площадью < tolerance²
-- [ ] 3.1.9 **Sliver triangle removal**: обнаружение и удаление треугольников с отношением сторон > 100:1
-- [ ] 3.1.10 Конфигурируемость: `HealingParams`
+- [x] 3.1.8 **Small feature removal**: удаление граней с площадью < tolerance²
+- [x] 3.1.9 **Sliver triangle removal**: обнаружение и удаление треугольников с отношением сторон > 100:1
+- [x] 3.1.10 Конфигурируемость: `HealingParams`
 - [ ] 3.1.11 Интеграция: `StepConverter` → `heal()` → `triangulate()`
-- [ ] 3.1.12 Unit-тесты: искусственные модели с зазорами, дырками, несогласованными нормалями
+- [x] 3.1.12 Unit-тесты: искусственные модели с зазорами, дырками, несогласованными нормалями
 
 ### 3.2 Полная валидация STEP и семантический парсинг
 
@@ -260,11 +260,11 @@
 
 ### 3.6 Система ошибок вместо паник
 
-- [ ] 3.6.1 Определить иерархию ошибок в `draper-core/src/error.rs`
-- [ ] 3.6.2 Заменить `unwrap()` в `draper-mesh/src/triangulate.rs`
-- [ ] 3.6.3 Заменить `unwrap()` в `draper-geometry/src/surface.rs`
-- [ ] 3.6.4 Заменить `unwrap()` в `draper-step/src/converter.rs`
-- [ ] 3.6.5 Заменить `unwrap()` в `draper-topology/src/`
+- [x] 3.6.1 Определить иерархию ошибок в `draper-core/src/error.rs`
+- [x] 3.6.2 Заменить `unwrap()` в `draper-mesh/src/triangulate.rs`
+- [x] 3.6.3 Заменить `unwrap()` в `draper-geometry/src/surface.rs` и `curve.rs`
+- [x] 3.6.4 Заменить `unwrap()` в `draper-step/src/converter.rs`
+- [x] 3.6.5 Заменить `unwrap()` в `draper-topology/src/` и `draper-mesh/src/stl.rs`, `edge_cache.rs`
 - [ ] 3.6.6 FFI: конвертировать `KernelError` в коды возврата
 - [ ] 3.6.7 Viewer: отображать ошибки как уведомления
 - [ ] 3.6.8 CI: `deny(unwrap)` или `clippy::unwrap_used` lint
@@ -411,3 +411,4 @@
 | 2026-05-30 | Super Z | Обновление: выполнены Фазы 1.1, 1.2, 1.3, 1.5, 2.5 |
 | 2026-05-30 | Super Z | Обновление: выполнены 1.4.2–1.4.6, 1.1.9, 1.1.10, 1.5.6, 1.3.8 — Фаза 1 завершена |
 | 2026-05-30 | Super Z | Обновление: выполнены 1.2.6, 1.2.8, 1.3.9 — StepEdgeCache интегрирован в converter.rs |
+| 2026-05-30 | Super Z | Обновление: выполнены 3.6.1–3.6.5 — KernelError + замена unwrap; 3.1.1–3.1.4,3.1.6,3.1.8–3.1.10,3.1.12 — Healing модуль |
