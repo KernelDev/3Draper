@@ -588,6 +588,75 @@ impl SurfaceDerivatives {
     pub fn normal(&self) -> Direction3d {
         self.du.cross(&self.dv).normalize().unwrap_or(Direction3d::Z)
     }
+
+    /// Compute the first fundamental form coefficients.
+    ///
+    /// The first fundamental form describes the intrinsic metric of the surface:
+    ///   I = E*du² + 2*F*du*dv + G*dv²
+    ///
+    /// Where:
+    ///   E = dS/du · dS/du  (squared length of u-tangent)
+    ///   F = dS/du · dS/dv  (dot product of tangents)
+    ///   G = dS/dv · dS/dv  (squared length of v-tangent)
+    ///
+    /// This is essential for:
+    /// - Converting 3D tolerances to UV-space tolerances
+    /// - Computing surface areas via integration
+    /// - Measuring distances on the surface
+    pub fn first_fundamental_form(&self) -> FirstFundamentalForm {
+        FirstFundamentalForm {
+            e: self.du.dot(&self.du),
+            f: self.du.dot(&self.dv),
+            g: self.dv.dot(&self.dv),
+        }
+    }
+}
+
+/// Coefficients of the first fundamental form of a surface.
+///
+/// I = E*du² + 2*F*du*dv + G*dv²
+///
+/// These coefficients describe the metric tensor of the surface in
+/// parametric space and are used for:
+/// - Tolerance conversion between 3D and UV space
+/// - Surface area computation
+/// - Geodesic distance measurement
+#[derive(Clone, Debug)]
+pub struct FirstFundamentalForm {
+    /// E = dS/du · dS/du
+    pub e: f64,
+    /// F = dS/du · dS/dv
+    pub f: f64,
+    /// G = dS/dv · dS/dv
+    pub g: f64,
+}
+
+impl FirstFundamentalForm {
+    /// Convert a 3D distance tolerance to a UV parametric tolerance.
+    ///
+    /// Given a 3D tolerance δ, the corresponding parametric tolerance
+    /// is approximately δ / √(max(E, G)), which ensures that a step
+    /// in parameter space doesn't exceed the 3D tolerance.
+    pub fn tolerance_3d_to_uv(&self, tol_3d: f64) -> f64 {
+        let max_stretch = self.e.max(self.g).sqrt().max(1e-10);
+        tol_3d / max_stretch
+    }
+
+    /// Compute the area element dA at this point.
+    /// dA = √(EG - F²) du dv
+    pub fn area_element(&self) -> f64 {
+        (self.e * self.g - self.f * self.f).max(0.0).sqrt()
+    }
+
+    /// Check if the parameterization is orthogonal (F ≈ 0).
+    pub fn is_orthogonal(&self, tolerance: f64) -> bool {
+        self.f.abs() < tolerance
+    }
+
+    /// Check if the parameterization is conformal (E ≈ G and F ≈ 0).
+    pub fn is_conformal(&self, tolerance: f64) -> bool {
+        self.f.abs() < tolerance && (self.e - self.g).abs() < tolerance * self.e.max(self.g)
+    }
 }
 
 impl NurbsSurface {
