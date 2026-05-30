@@ -42,7 +42,7 @@ impl Default for TriangulationParams {
 }
 
 /// Number of samples per edge curve for boundary discretization.
-const EDGE_SAMPLES: usize = 32;
+const EDGE_SAMPLES: usize = 64;
 
 // ============================================================
 // Top-level entry points
@@ -601,46 +601,80 @@ fn triangulate_cone_face(face: &Face, cone: &ConeSurface, params: &Triangulation
 
     // Check if the top row reaches the apex (radius = 0)
     let apex_v = cone.height();
-    let top_row_at_apex = (v_max - apex_v).abs() < apex_v * 0.01 + 1e-6;
+    let top_row_at_apex = apex_v.is_finite() && (v_max - apex_v).abs() < apex_v * 0.01 + 1e-6;
+
+    // Clamp v_max to apex height
+    let v_max = v_max.min(apex_v);
 
     let mut mesh = TriangleMesh::new();
 
-    // Generate vertices: n_v+1 rows (from v_min to v_max inclusive)
+    // Generate vertex grid with apex degeneracy handling
+    let mut apex_vertex: Option<u32> = None;
+    let mut row_vertex_offset: Vec<u32> = Vec::with_capacity(n_v + 1);
+    let mut row_vertex_count: Vec<usize> = Vec::with_capacity(n_v + 1);
+    let mut total_vertices = 0u32;
+
     for j in 0..=n_v {
-        for i in 0..n_u {
-            let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
-            let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
-            let p = cone.point_at(u, v);
-            let n = cone.normal_at(u, v);
+        let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
+
+        if top_row_at_apex && j == n_v {
+            // Apex row — single vertex
+            let p = cone.point_at(0.0, apex_v);
+            let n = cone.normal_at(0.0, apex_v);
             let idx = mesh.add_vertex(p);
             mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+            apex_vertex = Some(idx);
+            row_vertex_offset.push(idx);
+            row_vertex_count.push(1);
+            total_vertices += 1;
+        } else {
+            // Normal ring row
+            let base = total_vertices;
+            row_vertex_offset.push(base);
+            row_vertex_count.push(n_u);
+            for i in 0..n_u {
+                let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
+                let p = cone.point_at(u, v);
+                let n = cone.normal_at(u, v);
+                let idx = mesh.add_vertex(p);
+                mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+            }
+            total_vertices += n_u as u32;
         }
     }
 
-    // Snap boundary rings to edge curves
-    if let Some(ref surface) = face.surface {
-        snap_boundary_rings(&mut mesh, &boundary_3d, surface, n_u, n_v + 1, u_start, u_end, v_min, v_max, full_circle);
-    }
-
-    // Generate triangles with apex degeneracy handling
+    // Generate triangles
     let n_u_loop = if full_circle { n_u } else { n_u - 1 };
     for j in 0..n_v {
-        for i in 0..n_u_loop {
-            let i_next = (i + 1) % n_u;
-            let v0 = (j * n_u + i) as u32;
-            let v1 = (j * n_u + i_next) as u32;
-            let v2 = ((j + 1) * n_u + i_next) as u32;
-            let v3 = ((j + 1) * n_u + i) as u32;
+        let j_next = j + 1;
+        let row_count = row_vertex_count[j];
+        let next_row_count = row_vertex_count[j_next];
+        let row_base = row_vertex_offset[j];
+        let next_row_base = row_vertex_offset[j_next];
 
-            if top_row_at_apex && j == n_v - 1 {
-                // Apex row — all vertices in row n_v are at the apex.
-                // Only one triangle per sector.
-                if face.forward {
-                    mesh.add_triangle(v0, v1, v2);
-                } else {
-                    mesh.add_triangle(v0, v2, v1);
+        if next_row_count == 1 {
+            // Next row is apex — fan from current row ring to apex
+            let apex = next_row_base;
+            for i in 0..n_u_loop {
+                let i_next = (i + 1) % row_count;
+                let v0 = row_base + i as u32;
+                let v1 = row_base + i_next as u32;
+                if v0 != v1 {
+                    if face.forward {
+                        mesh.add_triangle(v0, v1, apex);
+                    } else {
+                        mesh.add_triangle(v1, v0, apex);
+                    }
                 }
-            } else {
+            }
+        } else {
+            // Normal quad strip between two ring rows
+            for i in 0..n_u_loop {
+                let i_next = (i + 1) % row_count;
+                let v0 = row_base + i as u32;
+                let v1 = row_base + i_next as u32;
+                let v2 = next_row_base + i_next as u32;
+                let v3 = next_row_base + i as u32;
                 if face.forward {
                     mesh.add_triangle(v0, v1, v2);
                     mesh.add_triangle(v0, v2, v3);
@@ -658,9 +692,8 @@ fn triangulate_cone_face(face: &Face, cone: &ConeSurface, params: &Triangulation
 /// Full cone triangulation (no boundary edges).
 ///
 /// Handles apex degeneracy: when the top row of vertices reaches the apex,
-/// all vertices collapse to a single point. In that row, we generate only
-/// one triangle per sector (instead of two) to avoid degenerate zero-area
-/// triangles.
+/// all vertices collapse to a single point. We generate only 1 apex vertex
+/// instead of n_u to avoid degenerate (zero-area) triangles.
 fn triangulate_cone_full(face: &Face, cone: &ConeSurface, params: &TriangulationParams) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
     let n_u = params.angular_samples;
@@ -668,40 +701,79 @@ fn triangulate_cone_full(face: &Face, cone: &ConeSurface, params: &Triangulation
     let (v_min, v_max) = compute_axis_v_range(face, &cone.origin, &cone.axis);
     let (v_min, v_max) = if v_min < v_max { (v_min, v_max) } else { (0.0, cone.height().min(100.0)) };
 
-    // Check if the top row reaches the apex (radius = 0)
+    // Clamp v_max to apex height
     let apex_v = cone.height();
-    let top_row_at_apex = (v_max - apex_v).abs() < apex_v * 0.01 + 1e-6;
+    let v_max = v_max.min(apex_v);
 
-    // Generate vertices: n_v+1 rows (from v_min to v_max inclusive)
+    // Check if the top row reaches the apex (radius = 0)
+    let top_row_at_apex = apex_v.is_finite() && (v_max - apex_v).abs() < apex_v * 0.01 + 1e-6;
+
+    // Generate vertex grid with apex degeneracy handling
+    let mut apex_vertex: Option<u32> = None;
+    let mut row_vertex_offset: Vec<u32> = Vec::with_capacity(n_v + 1);
+    let mut row_vertex_count: Vec<usize> = Vec::with_capacity(n_v + 1);
+    let mut total_vertices = 0u32;
+
     for j in 0..=n_v {
-        for i in 0..n_u {
-            let u = 2.0 * PI * i as f64 / n_u as f64;
-            let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
-            let p = cone.point_at(u, v);
-            let n = cone.normal_at(u, v);
+        let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
+
+        if top_row_at_apex && j == n_v {
+            // Apex row — single vertex
+            let p = cone.point_at(0.0, apex_v);
+            let n = cone.normal_at(0.0, apex_v);
             let idx = mesh.add_vertex(p);
             mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+            apex_vertex = Some(idx);
+            row_vertex_offset.push(idx);
+            row_vertex_count.push(1);
+            total_vertices += 1;
+        } else {
+            // Normal ring row
+            let base = total_vertices;
+            row_vertex_offset.push(base);
+            row_vertex_count.push(n_u);
+            for i in 0..n_u {
+                let u = 2.0 * PI * i as f64 / n_u as f64;
+                let p = cone.point_at(u, v);
+                let n = cone.normal_at(u, v);
+                let idx = mesh.add_vertex(p);
+                mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+            }
+            total_vertices += n_u as u32;
         }
     }
 
-    // Generate triangles with apex degeneracy handling
+    // Generate triangles
     for j in 0..n_v {
-        for i in 0..n_u {
-            let i_next = (i + 1) % n_u;
-            let v0 = (j * n_u + i) as u32;
-            let v1 = (j * n_u + i_next) as u32;
-            let v2 = ((j + 1) * n_u + i_next) as u32;
-            let v3 = ((j + 1) * n_u + i) as u32;
+        let j_next = j + 1;
+        let row_count = row_vertex_count[j];
+        let next_row_count = row_vertex_count[j_next];
+        let row_base = row_vertex_offset[j];
+        let next_row_base = row_vertex_offset[j_next];
 
-            if top_row_at_apex && j == n_v - 1 {
-                // Apex row — all vertices in row n_v are at the apex (same point).
-                // Only one triangle per sector to avoid degenerate triangles.
-                if face.forward {
-                    mesh.add_triangle(v0, v1, v2);
-                } else {
-                    mesh.add_triangle(v0, v2, v1);
+        if next_row_count == 1 {
+            // Next row is apex — fan from current row ring to apex
+            let apex = next_row_base;
+            for i in 0..row_count {
+                let i_next = (i + 1) % row_count;
+                let v0 = row_base + i as u32;
+                let v1 = row_base + i_next as u32;
+                if v0 != v1 {
+                    if face.forward {
+                        mesh.add_triangle(v0, v1, apex);
+                    } else {
+                        mesh.add_triangle(v1, v0, apex);
+                    }
                 }
-            } else {
+            }
+        } else {
+            // Normal quad strip between two ring rows
+            for i in 0..row_count {
+                let i_next = (i + 1) % row_count;
+                let v0 = row_base + i as u32;
+                let v1 = row_base + i_next as u32;
+                let v2 = next_row_base + i_next as u32;
+                let v3 = next_row_base + i as u32;
                 if face.forward {
                     mesh.add_triangle(v0, v1, v2);
                     mesh.add_triangle(v0, v2, v3);
@@ -722,6 +794,10 @@ fn triangulate_cone_full(face: &Face, cone: &ConeSurface, params: &Triangulation
 /// When the boundary edges don't constrain a direction, we default to the
 /// full range for that direction. This handles both full spheres and partial
 /// spherical faces correctly.
+///
+/// Pole degeneracy handling: At v=0 (north pole) and v=π (south pole),
+/// all vertices in that row collapse to a single point. We merge them
+/// into a single vertex to avoid degenerate (zero-area) triangles.
 fn triangulate_sphere_face(face: &Face, sphere: &SphereSurface, params: &TriangulationParams) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
     let n_u = params.angular_samples;
@@ -768,50 +844,148 @@ fn triangulate_sphere_face(face: &Face, sphere: &SphereSurface, params: &Triangu
     }
 
     let full_u = (u_end - u_start) > 1.9 * PI;
+    let at_north_pole = v_start.abs() < 0.05;
+    let at_south_pole = (v_end - PI).abs() < 0.05;
 
     // Generate vertices (n_v+1 rows to include both poles)
+    // For pole rows, generate only 1 vertex instead of n_u to avoid degenerate triangles
+    let mut pole_vertex_north: Option<u32> = None;
+    let mut pole_vertex_south: Option<u32> = None;
+    let mut row_vertex_offset: Vec<u32> = Vec::with_capacity(n_v + 1);
+    let mut row_vertex_count: Vec<usize> = Vec::with_capacity(n_v + 1);
+    let mut total_vertices = 0u32;
+
     for j in 0..=n_v {
-        for i in 0..n_u {
-            let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
-            let v = v_start + (v_end - v_start) * j as f64 / n_v as f64;
-            let p = sphere.point_at(u, v);
-            let n = sphere.normal_at(u, v);
+        let v = v_start + (v_end - v_start) * j as f64 / n_v as f64;
+
+        if j == 0 && at_north_pole {
+            // North pole — single vertex
+            let p = sphere.point_at(0.0, 0.0);
+            let n = sphere.normal_at(0.0, 0.0);
             let idx = mesh.add_vertex(p);
             mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+            pole_vertex_north = Some(idx);
+            row_vertex_offset.push(idx);
+            row_vertex_count.push(1);
+            total_vertices += 1;
+        } else if j == n_v && at_south_pole {
+            // South pole — single vertex
+            let p = sphere.point_at(0.0, PI);
+            let n = sphere.normal_at(0.0, PI);
+            let idx = mesh.add_vertex(p);
+            mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+            pole_vertex_south = Some(idx);
+            row_vertex_offset.push(idx);
+            row_vertex_count.push(1);
+            total_vertices += 1;
+        } else {
+            // Normal ring row
+            let base = total_vertices;
+            row_vertex_offset.push(base);
+            row_vertex_count.push(n_u);
+            for i in 0..n_u {
+                let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
+                let p = sphere.point_at(u, v);
+                let n = sphere.normal_at(u, v);
+                let idx = mesh.add_vertex(p);
+                mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+            }
+            total_vertices += n_u as u32;
         }
     }
 
-    // Generate triangles with proper pole handling
+    // Generate triangles
     for j in 0..n_v {
-        for i in 0..n_u {
-            let i_next = if full_u { (i + 1) % n_u } else { (i + 1).min(n_u - 1) };
-            let v0 = (j * n_u + i) as u32;
-            let v1 = (j * n_u + i_next) as u32;
-            let v2 = ((j + 1) * n_u + i_next) as u32;
-            let v3 = ((j + 1) * n_u + i) as u32;
+        let j_next = j + 1;
 
-            if j == 0 {
-                // Top cap — all vertices in row 0 are at the north pole
-                // Use a single triangle: pole, next_on_ring, next_next_on_ring
-                if face.forward {
-                    mesh.add_triangle(v0, v2, v3);
-                } else {
-                    mesh.add_triangle(v0, v3, v2);
+        if at_north_pole && j == 0 {
+            // North pole fan: pole_vertex → ring[j+1][i] → ring[j+1][i_next]
+            let pole = pole_vertex_north.unwrap();
+            let next_row_count = row_vertex_count[j_next];
+            let next_row_base = row_vertex_offset[j_next];
+
+            for i in 0..next_row_count {
+                let i_next = if full_u { (i + 1) % next_row_count } else { (i + 1).min(next_row_count - 1) };
+                let v1 = next_row_base + i as u32;
+                let v2 = next_row_base + i_next as u32;
+                if v1 != v2 {
+                    if face.forward {
+                        mesh.add_triangle(pole, v1, v2);
+                    } else {
+                        mesh.add_triangle(pole, v2, v1);
+                    }
                 }
-            } else if j == n_v - 1 {
-                // Bottom cap
-                if face.forward {
-                    mesh.add_triangle(v0, v1, v2);
-                } else {
-                    mesh.add_triangle(v0, v2, v1);
+            }
+        } else if at_south_pole && j == n_v - 1 {
+            // South pole fan: ring[j][i] → ring[j][i_next] → pole_vertex
+            let pole = pole_vertex_south.unwrap();
+            let row_count = row_vertex_count[j];
+            let row_base = row_vertex_offset[j];
+
+            for i in 0..row_count {
+                let i_next = if full_u { (i + 1) % row_count } else { (i + 1).min(row_count - 1) };
+                let v1 = row_base + i as u32;
+                let v2 = row_base + i_next as u32;
+                if v1 != v2 {
+                    if face.forward {
+                        mesh.add_triangle(v1, v2, pole);
+                    } else {
+                        mesh.add_triangle(v2, v1, pole);
+                    }
                 }
-            } else {
-                if face.forward {
-                    mesh.add_triangle(v0, v1, v2);
-                    mesh.add_triangle(v0, v2, v3);
-                } else {
-                    mesh.add_triangle(v0, v2, v1);
-                    mesh.add_triangle(v0, v3, v2);
+            }
+        } else {
+            // Normal quad strip between row j and row j+1
+            let row_count = row_vertex_count[j];
+            let next_row_count = row_vertex_count[j_next];
+            let row_base = row_vertex_offset[j];
+            let next_row_base = row_vertex_offset[j_next];
+
+            // Handle case where one row is a pole (1 vertex) and the other is a ring
+            if row_count == 1 && next_row_count > 1 {
+                // row j is a single point (shouldn't happen here but handle gracefully)
+                let v0 = row_base;
+                for i in 0..next_row_count {
+                    let i_next = if full_u { (i + 1) % next_row_count } else { (i + 1).min(next_row_count - 1) };
+                    let v1 = next_row_base + i as u32;
+                    let v2 = next_row_base + i_next as u32;
+                    if v1 != v2 {
+                        if face.forward {
+                            mesh.add_triangle(v0, v1, v2);
+                        } else {
+                            mesh.add_triangle(v0, v2, v1);
+                        }
+                    }
+                }
+            } else if row_count > 1 && next_row_count == 1 {
+                let v_last = next_row_base;
+                for i in 0..row_count {
+                    let i_next = if full_u { (i + 1) % row_count } else { (i + 1).min(row_count - 1) };
+                    let v0 = row_base + i as u32;
+                    let v1 = row_base + i_next as u32;
+                    if v0 != v1 {
+                        if face.forward {
+                            mesh.add_triangle(v0, v1, v_last);
+                        } else {
+                            mesh.add_triangle(v1, v0, v_last);
+                        }
+                    }
+                }
+            } else if row_count > 1 && next_row_count > 1 {
+                // Both rows are rings of the same size
+                for i in 0..row_count {
+                    let i_next = if full_u { (i + 1) % row_count } else { (i + 1).min(row_count - 1) };
+                    let v0 = row_base + i as u32;
+                    let v1 = row_base + i_next as u32;
+                    let v2 = next_row_base + i_next as u32;
+                    let v3 = next_row_base + i as u32;
+                    if face.forward {
+                        mesh.add_triangle(v0, v1, v2);
+                        mesh.add_triangle(v0, v2, v3);
+                    } else {
+                        mesh.add_triangle(v0, v2, v1);
+                        mesh.add_triangle(v0, v3, v2);
+                    }
                 }
             }
         }
@@ -1978,9 +2152,10 @@ fn triangulate_sphere_with_boundary(
 
 /// Triangulate a cone face with boundary points and optional holes.
 /// Handles apex degeneracy: when v_max reaches the apex height, all
-/// vertices in the top row collapse to a single point, and we emit
-/// only one triangle per sector instead of two to avoid degenerate
-/// zero-area triangles.
+/// vertices in the top row collapse to a single point. We merge them
+/// into a single apex vertex to avoid degenerate (zero-area) triangles.
+/// Also handles cones with near-zero height (very small half_angle) by
+/// treating them as degenerate cylinders when appropriate.
 fn triangulate_cone_face_with_boundary(
     cone: &ConeSurface,
     boundary_points: &[Point3d],
@@ -1991,6 +2166,19 @@ fn triangulate_cone_face_with_boundary(
     let mut mesh = TriangleMesh::new();
     if boundary_points.len() < 3 {
         return mesh;
+    }
+
+    let apex_v = cone.height();
+
+    // Handle degenerate cone: infinite or zero height (non-expanding).
+    // Expanding cones always have infinite height — that's normal for them.
+    if !cone.expanding && (!apex_v.is_finite() || apex_v > 1e6) {
+        // Near-cylinder: half_angle is very small, cone is essentially a cylinder.
+        // Use the generic UV-trimmed path which handles cylinders.
+        return triangulate_surface_uv_trimmed(
+            &Surface::Cone(cone.clone()),
+            boundary_points, hole_polylines, forward, params,
+        );
     }
 
     // Project boundary to UV space
@@ -2026,6 +2214,12 @@ fn triangulate_cone_face_with_boundary(
         return mesh;
     }
 
+    // Handle degenerate v range — if v range is near-zero, the cone face
+    // is essentially a flat disc. Triangulate as a cap face.
+    if v_range < apex_v * 0.001 + 1e-6 && !cone.expanding {
+        return triangulate_cap_face(&Surface::Cone(cone.clone()), boundary_points, forward);
+    }
+
     // Handle degenerate u range (boundary doesn't constrain u → full circle)
     let full_circle = u_range < 0.5 * PI || u_range > 1.9 * PI;
     if full_circle {
@@ -2033,15 +2227,23 @@ fn triangulate_cone_face_with_boundary(
         u_max = 2.0 * PI;
     }
 
-    // Clamp v range: v < 0 is below base, v > height is past apex
-    let apex_v = cone.height();
-    let top_at_apex = apex_v.is_finite() && (v_max - apex_v).abs() < apex_v * 0.05 + 1e-6;
+    // Clamp v_max to apex height (only for non-expanding cones)
+    if !cone.expanding {
+        v_max = v_max.min(apex_v);
+    }
+    let top_at_apex = !cone.expanding && apex_v.is_finite() && (v_max - apex_v).abs() < apex_v * 0.05 + 1e-6;
 
     // Add small margin
     let margin_u = (u_max - u_min) * 0.001;
     let margin_v = (v_max - v_min) * 0.001;
     u_min -= margin_u; u_max += margin_u;
     v_min -= margin_v; v_max += margin_v;
+
+    // Clamp v range (only lower bound for expanding cones)
+    v_min = v_min.max(0.0);
+    if !cone.expanding {
+        v_max = v_max.min(apex_v);
+    }
 
     // Grid resolution
     let n_u = if full_circle { params.angular_samples } else {
@@ -2052,36 +2254,90 @@ fn triangulate_cone_face_with_boundary(
     let du = (u_max - u_min) / n_u as f64;
     let dv = (v_max - v_min) / n_v as f64;
 
-    // Generate vertex grid: (n_v+1) rows × n_u columns
+    // Generate vertex grid with apex degeneracy handling
+    // At the apex (row n_v), all vertices collapse to a single point.
+    // We generate only 1 apex vertex instead of n_u to avoid degenerate triangles.
+    let mut apex_vertex: Option<u32> = None;
+    let mut row_vertex_offset: Vec<u32> = Vec::with_capacity(n_v + 1);
+    let mut row_vertex_count: Vec<usize> = Vec::with_capacity(n_v + 1);
+    let mut total_vertices = 0u32;
+
     for j in 0..=n_v {
-        for i in 0..n_u {
-            let u = u_min + du * i as f64;
-            let v = v_min + dv * j as f64;
-            let p = cone.point_at(u, v);
-            let n = cone.normal_at(u, v);
+        let v = v_min + dv * j as f64;
+
+        if top_at_apex && j == n_v {
+            // Apex row — single vertex
+            let p = cone.point_at(0.0, apex_v);
+            let n = cone.normal_at(0.0, apex_v);
             let idx = mesh.add_vertex(p);
             mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+            apex_vertex = Some(idx);
+            row_vertex_offset.push(idx);
+            row_vertex_count.push(1);
+            total_vertices += 1;
+        } else {
+            // Normal ring row
+            let base = total_vertices;
+            row_vertex_offset.push(base);
+            row_vertex_count.push(n_u);
+            for i in 0..n_u {
+                let u = u_min + du * i as f64;
+                let p = cone.point_at(u, v);
+                let n = cone.normal_at(u, v);
+                let idx = mesh.add_vertex(p);
+                mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+            }
+            total_vertices += n_u as u32;
         }
     }
 
-    // Generate triangles with apex degeneracy handling
+    // Generate triangles
     for j in 0..n_v {
-        for i in 0..n_u {
-            let i_next = if full_circle { (i + 1) % n_u } else { (i + 1).min(n_u - 1) };
-            let v0 = (j * n_u + i) as u32;
-            let v1 = (j * n_u + i_next) as u32;
-            let v2 = ((j + 1) * n_u + i_next) as u32;
-            let v3 = ((j + 1) * n_u + i) as u32;
+        let j_next = j + 1;
+        let row_count = row_vertex_count[j];
+        let next_row_count = row_vertex_count[j_next];
+        let row_base = row_vertex_offset[j];
+        let next_row_base = row_vertex_offset[j_next];
 
-            if top_at_apex && j == n_v - 1 {
-                // Apex row: all vertices in row n_v are at the apex.
-                // Only one triangle per sector to avoid degenerate zero-area triangles.
-                if forward {
-                    mesh.add_triangle(v0, v1, v2);
-                } else {
-                    mesh.add_triangle(v0, v2, v1);
+        if row_count == 1 {
+            // Current row is apex — fan from apex to next row ring
+            // (shouldn't normally happen as apex is the last row)
+            let apex = row_base;
+            for i in 0..next_row_count {
+                let i_next = if full_circle { (i + 1) % next_row_count } else { (i + 1).min(next_row_count - 1) };
+                let v1 = next_row_base + i as u32;
+                let v2 = next_row_base + i_next as u32;
+                if v1 != v2 {
+                    if forward {
+                        mesh.add_triangle(apex, v1, v2);
+                    } else {
+                        mesh.add_triangle(apex, v2, v1);
+                    }
                 }
-            } else {
+            }
+        } else if next_row_count == 1 {
+            // Next row is apex — fan from current row ring to apex
+            let apex = next_row_base;
+            for i in 0..row_count {
+                let i_next = if full_circle { (i + 1) % row_count } else { (i + 1).min(row_count - 1) };
+                let v0 = row_base + i as u32;
+                let v1 = row_base + i_next as u32;
+                if v0 != v1 {
+                    if forward {
+                        mesh.add_triangle(v0, v1, apex);
+                    } else {
+                        mesh.add_triangle(v1, v0, apex);
+                    }
+                }
+            }
+        } else {
+            // Normal quad strip between two ring rows
+            for i in 0..row_count {
+                let i_next = if full_circle { (i + 1) % row_count } else { (i + 1).min(row_count - 1) };
+                let v0 = row_base + i as u32;
+                let v1 = row_base + i_next as u32;
+                let v2 = next_row_base + i_next as u32;
+                let v3 = next_row_base + i as u32;
                 if forward {
                     mesh.add_triangle(v0, v1, v2);
                     mesh.add_triangle(v0, v2, v3);
@@ -2098,8 +2354,8 @@ fn triangulate_cone_face_with_boundary(
 
 /// Triangulate a sphere face with boundary points and optional holes.
 /// Handles pole degeneracy: when v_start = 0 (north pole) or v_end = π (south pole),
-/// all vertices in that row collapse to a single point, and we emit
-/// only one triangle per sector instead of two.
+/// all vertices in that row collapse to a single point. We merge them
+/// into a single pole vertex to avoid degenerate (zero-area) triangles.
 fn triangulate_sphere_face_with_boundary(
     sphere: &SphereSurface,
     boundary_points: &[Point3d],
@@ -2160,8 +2416,8 @@ fn triangulate_sphere_face_with_boundary(
     }
 
     // Check for pole degeneracy
-    let north_pole = v_min.abs() < 0.05; // v ≈ 0 → north pole
-    let south_pole = (v_max - PI).abs() < 0.05; // v ≈ π → south pole
+    let at_north_pole = v_min.abs() < 0.05; // v ≈ 0 → north pole
+    let at_south_pole = (v_max - PI).abs() < 0.05; // v ≈ π → south pole
 
     // Add small margin
     let margin_u = (u_max - u_min) * 0.001;
@@ -2183,44 +2439,100 @@ fn triangulate_sphere_face_with_boundary(
     let du = (u_max - u_min) / n_u as f64;
     let dv = (v_max - v_min) / n_v as f64;
 
-    // Generate vertex grid: (n_v+1) rows × n_u columns
+    // Generate vertex grid with pole degeneracy handling
+    // At poles, all vertices collapse to a single point.
+    // We generate only 1 pole vertex instead of n_u to avoid degenerate triangles.
+    let mut pole_vertex_north: Option<u32> = None;
+    let mut pole_vertex_south: Option<u32> = None;
+    let mut row_vertex_offset: Vec<u32> = Vec::with_capacity(n_v + 1);
+    let mut row_vertex_count: Vec<usize> = Vec::with_capacity(n_v + 1);
+    let mut total_vertices = 0u32;
+
     for j in 0..=n_v {
-        for i in 0..n_u {
-            let u = u_min + du * i as f64;
-            let v = v_min + dv * j as f64;
-            let p = sphere.point_at(u, v);
-            let n = sphere.normal_at(u, v);
+        let v = v_min + dv * j as f64;
+
+        if j == 0 && at_north_pole {
+            // North pole — single vertex
+            let p = sphere.point_at(0.0, 0.0);
+            let n = sphere.normal_at(0.0, 0.0);
             let idx = mesh.add_vertex(p);
             mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+            pole_vertex_north = Some(idx);
+            row_vertex_offset.push(idx);
+            row_vertex_count.push(1);
+            total_vertices += 1;
+        } else if j == n_v && at_south_pole {
+            // South pole — single vertex
+            let p = sphere.point_at(0.0, PI);
+            let n = sphere.normal_at(0.0, PI);
+            let idx = mesh.add_vertex(p);
+            mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+            pole_vertex_south = Some(idx);
+            row_vertex_offset.push(idx);
+            row_vertex_count.push(1);
+            total_vertices += 1;
+        } else {
+            // Normal ring row
+            let base = total_vertices;
+            row_vertex_offset.push(base);
+            row_vertex_count.push(n_u);
+            for i in 0..n_u {
+                let u = u_min + du * i as f64;
+                let p = sphere.point_at(u, v);
+                let n = sphere.normal_at(u, v);
+                let idx = mesh.add_vertex(p);
+                mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+            }
+            total_vertices += n_u as u32;
         }
     }
 
-    // Generate triangles with pole degeneracy handling
+    // Generate triangles
     for j in 0..n_v {
-        for i in 0..n_u {
-            let i_next = if full_u { (i + 1) % n_u } else { (i + 1).min(n_u - 1) };
-            let v0 = (j * n_u + i) as u32;
-            let v1 = (j * n_u + i_next) as u32;
-            let v2 = ((j + 1) * n_u + i_next) as u32;
-            let v3 = ((j + 1) * n_u + i) as u32;
+        let j_next = j + 1;
+        let row_count = row_vertex_count[j];
+        let next_row_count = row_vertex_count[j_next];
+        let row_base = row_vertex_offset[j];
+        let next_row_base = row_vertex_offset[j_next];
 
-            if north_pole && j == 0 {
-                // North pole row: all vertices in row 0 are at the north pole.
-                // Only one triangle per sector.
-                if forward {
-                    mesh.add_triangle(v0, v2, v3);
-                } else {
-                    mesh.add_triangle(v0, v3, v2);
+        if row_count == 1 && next_row_count > 1 {
+            // North pole fan: pole → ring[i] → ring[i_next]
+            let pole = row_base;
+            for i in 0..next_row_count {
+                let i_next = if full_u { (i + 1) % next_row_count } else { (i + 1).min(next_row_count - 1) };
+                let v1 = next_row_base + i as u32;
+                let v2 = next_row_base + i_next as u32;
+                if v1 != v2 {
+                    if forward {
+                        mesh.add_triangle(pole, v1, v2);
+                    } else {
+                        mesh.add_triangle(pole, v2, v1);
+                    }
                 }
-            } else if south_pole && j == n_v - 1 {
-                // South pole row: all vertices in row n_v are at the south pole.
-                // Only one triangle per sector.
-                if forward {
-                    mesh.add_triangle(v0, v1, v2);
-                } else {
-                    mesh.add_triangle(v0, v2, v1);
+            }
+        } else if row_count > 1 && next_row_count == 1 {
+            // South pole fan: ring[i] → ring[i_next] → pole
+            let pole = next_row_base;
+            for i in 0..row_count {
+                let i_next = if full_u { (i + 1) % row_count } else { (i + 1).min(row_count - 1) };
+                let v0 = row_base + i as u32;
+                let v1 = row_base + i_next as u32;
+                if v0 != v1 {
+                    if forward {
+                        mesh.add_triangle(v0, v1, pole);
+                    } else {
+                        mesh.add_triangle(v1, v0, pole);
+                    }
                 }
-            } else {
+            }
+        } else if row_count > 1 && next_row_count > 1 {
+            // Normal quad strip between two ring rows
+            for i in 0..row_count {
+                let i_next = if full_u { (i + 1) % row_count } else { (i + 1).min(row_count - 1) };
+                let v0 = row_base + i as u32;
+                let v1 = row_base + i_next as u32;
+                let v2 = next_row_base + i_next as u32;
+                let v3 = next_row_base + i as u32;
                 if forward {
                     mesh.add_triangle(v0, v1, v2);
                     mesh.add_triangle(v0, v2, v3);
@@ -2517,7 +2829,7 @@ fn estimate_v_range(face: &Face) -> Option<(f64, f64)> {
             }
             Surface::Revolution(rev) => Some(rev.profile.param_range()),
             Surface::Extrusion(ext) => Some(ext.profile.param_range()),
-            _ => Some((0.0, 100.0)),
+            _ => Some((0.0, 1.0)),
         }
     } else {
         None
@@ -2572,28 +2884,17 @@ fn compute_axis_v_range(face: &Face, origin: &Point3d, axis: &Direction3d) -> (f
         if let Some(ref surface) = face.surface {
             match surface {
                 Surface::Cylinder(cyl) => {
-                    // Sample points around the cylinder at various heights
-                    // The origin is the center of the base, axis is the direction
-                    // Try to determine height from the surface's bounding box
-                    // by sampling a circle at v=0 and looking for the top
+                    // For a full cylinder with no edges, use a default height of 1.0
                     let base_pt = cyl.point_at(0.0, 0.0);
+                    let top_pt = cyl.point_at(0.0, 1.0);
                     let v_base = (base_pt.x - origin.x) * axis.x
                                + (base_pt.y - origin.y) * axis.y
                                + (base_pt.z - origin.z) * axis.z;
-                    // Sample up to a reasonable height
-                    let test_heights = [0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0];
-                    for &h in &test_heights {
-                        let pt = cyl.point_at(0.0, h);
-                        let v_test = (pt.x - origin.x) * axis.x
-                                   + (pt.y - origin.y) * axis.y
-                                   + (pt.z - origin.z) * axis.z;
-                        v_min = v_min.min(v_base).min(v_test);
-                        v_max = v_max.max(v_base).max(v_test);
-                    }
-                    // For a full cylinder with no edges, use a default height of 1.0
-                    if v_min >= v_max {
-                        return (0.0, 1.0);
-                    }
+                    let v_top = (top_pt.x - origin.x) * axis.x
+                              + (top_pt.y - origin.y) * axis.y
+                              + (top_pt.z - origin.z) * axis.z;
+                    v_min = v_base.min(v_top);
+                    v_max = v_base.max(v_top);
                 }
                 Surface::Cone(cone) => {
                     let h = cone.height().min(100.0);
@@ -2609,11 +2910,11 @@ fn compute_axis_v_range(face: &Face, origin: &Point3d, axis: &Direction3d) -> (f
                     v_max = v_base.max(v_apex);
                 }
                 _ => {
-                    return (0.0, 100.0);
+                    return (0.0, 1.0);
                 }
             }
         } else {
-            return (0.0, 100.0);
+            return (0.0, 1.0);
         }
     }
 

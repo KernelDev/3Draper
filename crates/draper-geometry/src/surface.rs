@@ -197,11 +197,12 @@ impl CylinderSurface {
 /// Height from base to apex = radius / tan(half_angle).
 #[derive(Clone, Debug)]
 pub struct ConeSurface {
-    pub origin: Point3d,    // Center of base circle
-    pub axis: Direction3d,   // Direction from base toward apex
+    pub origin: Point3d,    // Center of base circle (or apex for expanding cones)
+    pub axis: Direction3d,   // Direction from base toward apex (or away from apex for expanding cones)
     pub half_angle: f64,     // Half-angle in radians
     pub radius: f64,         // Base radius (at v=0)
     pub x_dir: Direction3d,  // reference direction for u=0
+    pub expanding: bool,     // If true, cone expands from apex (radius increases with v)
 }
 
 impl ConeSurface {
@@ -223,6 +224,7 @@ impl ConeSurface {
             half_angle,
             radius,
             x_dir: Direction3d::X,
+            expanding: false,
         }
     }
 
@@ -230,18 +232,27 @@ impl ConeSurface {
     /// The x_dir is computed automatically from the axis.
     pub fn new(origin: Point3d, axis: Direction3d, radius: f64, half_angle: f64) -> Self {
         let x_dir = Self::default_x_dir(&axis);
-        Self { origin, axis, half_angle, radius, x_dir }
+        Self { origin, axis, half_angle, radius, x_dir, expanding: false }
     }
 
     /// Create a cone with an explicit reference direction for u=0.
     /// Use this when the STEP file provides the x_dir (ref_direction).
     pub fn new_with_frame(origin: Point3d, axis: Direction3d, radius: f64, half_angle: f64, x_dir: Direction3d) -> Self {
-        Self { origin, axis, half_angle, radius, x_dir }
+        Self { origin, axis, half_angle, radius, x_dir, expanding: false }
+    }
+
+    /// Create an expanding cone (radius increases with v) — used for STEP
+    /// CONICAL_SURFACE with radius=0 where the apex is at the origin.
+    pub fn new_expanding(origin: Point3d, axis: Direction3d, half_angle: f64, x_dir: Direction3d) -> Self {
+        Self { origin, axis, half_angle, radius: 0.0, x_dir, expanding: true }
     }
 
     /// Height from base to apex.
+    /// For expanding cones, this is infinity (no natural apex in positive v direction).
     pub fn height(&self) -> f64 {
-        if self.half_angle.abs() < 1e-10 {
+        if self.expanding {
+            f64::INFINITY
+        } else if self.half_angle.abs() < 1e-10 {
             f64::INFINITY
         } else {
             self.radius / self.half_angle.tan()
@@ -249,10 +260,15 @@ impl ConeSurface {
     }
 
     /// Evaluate: u = angle in radians [0, 2pi], v = height from base along axis.
-    /// At v=0: radius = self.radius (base). At v=height(): radius = 0 (apex).
+    /// For standard cones: At v=0: radius = self.radius (base). At v=height(): radius = 0 (apex).
+    /// For expanding cones: At v=0: radius = 0 (apex). At v>0: radius = v * tan(half_angle).
     pub fn point_at(&self, u: f64, v: f64) -> Point3d {
-        // Radius decreases linearly from base to apex
-        let r = (self.radius - v * self.half_angle.tan()).max(0.0);
+        let r = if self.expanding {
+            v * self.half_angle.tan()
+        } else {
+            // Radius decreases linearly from base to apex
+            (self.radius - v * self.half_angle.tan()).max(0.0)
+        };
         let y_dir = self.axis.cross(&self.x_dir);
 
         Point3d::new(
@@ -272,13 +288,23 @@ impl ConeSurface {
             u.cos() * self.x_dir.y + u.sin() * y_dir.y,
             u.cos() * self.x_dir.z + u.sin() * y_dir.z,
         ).unwrap_or(Direction3d::X);
-        // Normal = radial * cos(half_angle) - axis * sin(half_angle)
+        // Normal = radial * cos(half_angle) ∓ axis * sin(half_angle)
+        // For standard (tapering) cones: outward normal points away from axis toward apex
+        // For expanding cones: outward normal points away from axis away from apex
         let ha = self.half_angle;
-        Direction3d::new(
-            radial.x * ha.cos() - self.axis.x * ha.sin(),
-            radial.y * ha.cos() - self.axis.y * ha.sin(),
-            radial.z * ha.cos() - self.axis.z * ha.sin(),
-        ).unwrap_or(radial)
+        if self.expanding {
+            Direction3d::new(
+                radial.x * ha.cos() + self.axis.x * ha.sin(),
+                radial.y * ha.cos() + self.axis.y * ha.sin(),
+                radial.z * ha.cos() + self.axis.z * ha.sin(),
+            ).unwrap_or(radial)
+        } else {
+            Direction3d::new(
+                radial.x * ha.cos() - self.axis.x * ha.sin(),
+                radial.y * ha.cos() - self.axis.y * ha.sin(),
+                radial.z * ha.cos() - self.axis.z * ha.sin(),
+            ).unwrap_or(radial)
+        }
     }
 
     /// Project a 3D point onto the cone's parametric space → (u, v).
@@ -723,6 +749,7 @@ impl Surface {
                 half_angle: c.half_angle,
                 radius: c.radius,
                 x_dir: t.transform_direction(&c.x_dir),
+                expanding: c.expanding,
             }),
             Surface::Sphere(s) => Surface::Sphere(SphereSurface {
                 center: t.transform_point(&s.center),

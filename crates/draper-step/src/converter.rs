@@ -2510,6 +2510,12 @@ impl<'a> StepConverter<'a> {
     /// STEP stores the semi-angle in DEGREES; our ConeSurface expects RADIANS.
     /// A negative semi-angle means the apex is in the OPPOSITE direction of the axis.
     /// We handle this by flipping the axis and using the absolute semi-angle.
+    ///
+    /// Special case: radius=0. In STEP, a CONICAL_SURFACE with radius=0 means
+    /// the apex is at the origin point. The cone expands outward from there.
+    /// For our ConeSurface, we need to compute the effective base radius and
+    /// height from the boundary edges, since the STEP definition gives us a
+    /// cone that starts at a point.
     fn extract_cone(&self, entity: &crate::schema::StepEntity) -> Option<Surface> {
         let axis2_id = self.find_axis2_ref(entity)?;
         let (origin, axis, u_dir) = self.resolve_axis2(axis2_id)?;
@@ -2524,7 +2530,16 @@ impl<'a> StepConverter<'a> {
         } else {
             (axis, u_dir)
         };
-        Some(Surface::Cone(ConeSurface::new_with_frame(origin, axis, radius, half_angle_rad, u_dir)))
+
+        if radius.abs() < 1e-10 && half_angle_rad > 1e-10 {
+            // Radius=0 cone: apex is at origin. The cone expands outward.
+            // Use the new_expanding constructor which models radius = v * tan(half_angle).
+            Some(Surface::Cone(ConeSurface::new_expanding(
+                origin, axis, half_angle_rad, u_dir,
+            )))
+        } else {
+            Some(Surface::Cone(ConeSurface::new_with_frame(origin, axis, radius, half_angle_rad, u_dir)))
+        }
     }
 
     /// Extract a TOROIDAL_SURFACE.
@@ -4355,6 +4370,450 @@ mod diag_tests {
     #[test]
     fn test_zentralstaender() { diagnose_file("/home/z/my-project/test/Zentralstaender.stp"); }
 
+    /// Comprehensive surface triangulation diagnostic across ALL test STEP files.
+    /// Checks each face for: surface type, boundary edges, triangulation success,
+    /// finite vertices, reasonable area, hole handling, and special surface issues.
+    #[test]
+    fn test_surface_diagnostic() {
+        let test_dir = "/home/z/my-project/3Draper_repo/test/";
+        let step_files = [
+            "SampleCube.step",
+            "3.05.078.stp",
+            "brick_thin_hole.stp",
+            "brick_thin_round.stp",
+            "brick_thin.stp",
+            "compressor-13920_top.stp",
+            "Zentralstaender.stp",
+            "as1-oc-214.stp",
+            "drill_top.stp",
+            "transmission_top.stp",
+        ];
+
+        let mut grand_total_faces = 0usize;
+        let mut grand_total_empty = 0usize;
+        let mut grand_total_nan = 0usize;
+        let mut grand_total_zero_area = 0usize;
+        let mut grand_total_inf_area = 0usize;
+        let mut grand_total_tris = 0usize;
+        let mut grand_total_verts = 0usize;
+        let mut grand_surface_counts: HashMap<String, usize> = HashMap::new();
+        let mut grand_fail_by_type: HashMap<String, usize> = HashMap::new();
+
+        for fname in &step_files {
+            let path = format!("{}{}", test_dir, fname);
+            eprintln!("\n{}", "=".repeat(70));
+            eprintln!("FILE: {}", fname);
+            eprintln!("{}", "=".repeat(70));
+
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(e) => { eprintln!("  ERROR reading: {}", e); continue; }
+            };
+
+            let step = match parse_step(&content) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("  PARSE ERROR: {:?}", e); continue; }
+            };
+
+            let converter = StepConverter::new(&step);
+            let params = TriangulationParams::default();
+            let bbox = converter.compute_bounding_box();
+
+            // ─── Per-face diagnostics using FaceData ────────────────────────
+            let breps = step.find_entities_by_type("MANIFOLD_SOLID_BREP");
+            let faceted_breps = step.find_entities_by_type("FACETED_BREP");
+
+            let mut file_total_faces = 0usize;
+            let mut file_surface_counts: HashMap<String, usize> = HashMap::new();
+            let mut file_faces_with_holes = 0usize;
+            let mut file_empty_meshes = 0usize;
+            let mut file_nan_vertices = 0usize;
+            let mut file_zero_area_tris = 0usize;
+            let mut file_inf_area = 0usize;
+            let mut file_fail_by_type: HashMap<String, usize> = HashMap::new();
+            let mut file_total_tris = 0usize;
+            let mut file_total_verts = 0usize;
+            let mut file_cone_issues = Vec::new();
+            let mut file_sphere_issues = Vec::new();
+            let mut file_cylinder_issues = Vec::new();
+            let mut file_hole_issues = Vec::new();
+
+            let all_brep_ids: Vec<i64> = breps.iter().chain(faceted_breps.iter())
+                .map(|e| e.id).collect();
+
+            for brep_id in &all_brep_ids {
+                let shell_id = match converter.find_shell_ref_by_brep_id(*brep_id) {
+                    Some(id) => id,
+                    None => continue,
+                };
+                let face_data_list = match converter.extract_shell_faces(shell_id) {
+                    Some(list) => list,
+                    None => continue,
+                };
+
+                for (fi, face_data) in face_data_list.iter().enumerate() {
+                    file_total_faces += 1;
+
+                    let surface_type = match &face_data.surface {
+                        Surface::Plane(_) => "Plane",
+                        Surface::Cylinder(_) => "Cylinder",
+                        Surface::Cone(_) => "Cone",
+                        Surface::Sphere(_) => "Sphere",
+                        Surface::Torus(_) => "Torus",
+                        Surface::Revolution(_) => "Revolution",
+                        Surface::Extrusion(_) => "Extrusion",
+                        Surface::Nurbs(_) => "Nurbs",
+                    }.to_string();
+                    *file_surface_counts.entry(surface_type.clone()).or_insert(0) += 1;
+
+                    // Count outer/inner edges and their curve types
+                    let n_outer = face_data.outer_edges.len();
+                    let n_inner_loops = face_data.inner_edges.len();
+                    let n_inner_edges: usize = face_data.inner_edges.iter().map(|l| l.len()).sum();
+
+                    let mut edge_type_counts: HashMap<String, usize> = HashMap::new();
+                    for edge in &face_data.outer_edges {
+                        if let Some(ref curve) = edge.curve {
+                            let tn = match curve {
+                                Curve3d::Line(_) => "Line",
+                                Curve3d::Circle(_) => "Circle",
+                                Curve3d::Ellipse(_) => "Ellipse",
+                                Curve3d::Arc(_) => "Arc",
+                                Curve3d::Nurbs(_) => "Nurbs",
+                            };
+                            *edge_type_counts.entry(tn.to_string()).or_insert(0) += 1;
+                        }
+                    }
+                    for inner_loop in &face_data.inner_edges {
+                        for edge in inner_loop {
+                            if let Some(ref curve) = edge.curve {
+                                let tn = match curve {
+                                    Curve3d::Line(_) => "Line",
+                                    Curve3d::Circle(_) => "Circle",
+                                    Curve3d::Ellipse(_) => "Ellipse",
+                                    Curve3d::Arc(_) => "Arc",
+                                    Curve3d::Nurbs(_) => "Nurbs",
+                                };
+                                *edge_type_counts.entry(tn.to_string()).or_insert(0) += 1;
+                            }
+                        }
+                    }
+
+                    if n_inner_loops > 0 {
+                        file_faces_with_holes += 1;
+                    }
+
+                    // ─── Triangulate ─────────────────────────────────────────
+                    let face_mesh = converter.surface_to_mesh(face_data, &params, &bbox);
+                    let tri_count = face_mesh.triangle_count();
+                    let vert_count = face_mesh.vertex_count();
+                    file_total_tris += tri_count;
+                    file_total_verts += vert_count;
+
+                    if tri_count == 0 {
+                        file_empty_meshes += 1;
+                        *file_fail_by_type.entry(surface_type.clone()).or_insert(0) += 1;
+                        eprintln!("  EMPTY MESH: BREP#{} face[{}] {} outer_edges={} inner_loops={} inner_edges={} edges={:?} forward={}",
+                            brep_id, fi, surface_type, n_outer, n_inner_loops, n_inner_edges,
+                            edge_type_counts, face_data.forward);
+
+                        // For cone/sphere/cylinder faces that failed, show UV diagnostics
+                        if matches!(face_data.surface, Surface::Cone(_) | Surface::Sphere(_) | Surface::Cylinder(_)) {
+                            let mut uv_samples = Vec::new();
+                            for edge in &face_data.outer_edges {
+                                for ti in 0..4 {
+                                    if let Some(p) = edge.point_at(ti as f64 / 3.0) {
+                                        let (u, v) = face_data.surface.project_point(&p);
+                                        uv_samples.push(format!("({:.3},{:.3})", u, v));
+                                    }
+                                }
+                            }
+                            eprintln!("    UV boundary samples: {}", uv_samples.iter().take(8).cloned().collect::<Vec<_>>().join(", "));
+                        }
+                        continue;
+                    }
+
+                    // ─── Check for NaN / Inf vertices ────────────────────────
+                    let mut has_nan = false;
+                    for v in &face_mesh.vertices {
+                        if v.x.is_nan() || v.y.is_nan() || v.z.is_nan() ||
+                           v.x.is_infinite() || v.y.is_infinite() || v.z.is_infinite() {
+                            has_nan = true;
+                            break;
+                        }
+                    }
+                    if has_nan {
+                        file_nan_vertices += 1;
+                        let nan_count = face_mesh.vertices.iter()
+                            .filter(|v| v.x.is_nan() || v.y.is_nan() || v.z.is_nan() ||
+                                        v.x.is_infinite() || v.y.is_infinite() || v.z.is_infinite())
+                            .count();
+                        eprintln!("  NaN/Inf VERTICES: BREP#{} face[{}] {} => {} of {} vertices are non-finite",
+                            brep_id, fi, surface_type, nan_count, vert_count);
+                    }
+
+                    // ─── Check triangle areas ─────────────────────────────────
+                    let mesh_area = face_mesh.surface_area();
+                    if mesh_area == 0.0 {
+                        file_zero_area_tris += 1;
+                        eprintln!("  ZERO AREA: BREP#{} face[{}] {} => {} tris but total area=0",
+                            brep_id, fi, surface_type, tri_count);
+                    } else if mesh_area.is_infinite() {
+                        file_inf_area += 1;
+                        eprintln!("  INF AREA: BREP#{} face[{}] {} => area is infinite",
+                            brep_id, fi, surface_type);
+                    }
+
+                    // Count individual zero-area triangles (cap at 10k tris to avoid O(n²) on huge meshes)
+                    if tri_count <= 10000 {
+                        let mut zero_tri_count = 0usize;
+                        for tri_idx in 0..face_mesh.triangles.len() {
+                            let tri = &face_mesh.triangles[tri_idx];
+                            let v0 = face_mesh.vertices[tri[0] as usize];
+                            let v1 = face_mesh.vertices[tri[1] as usize];
+                            let v2 = face_mesh.vertices[tri[2] as usize];
+                            let e1x = v1.x - v0.x; let e1y = v1.y - v0.y; let e1z = v1.z - v0.z;
+                            let e2x = v2.x - v0.x; let e2y = v2.y - v0.y; let e2z = v2.z - v0.z;
+                            let cx = e1y * e2z - e1z * e2y;
+                            let cy = e1z * e2x - e1x * e2z;
+                            let cz = e1x * e2y - e1y * e2x;
+                            let area2 = (cx*cx + cy*cy + cz*cz).sqrt();
+                            if area2 < 1e-20 {
+                                zero_tri_count += 1;
+                            }
+                        }
+                        if zero_tri_count > 0 {
+                            eprintln!("  ZERO-AREA TRIS: BREP#{} face[{}] {} => {}/{} degenerate tris",
+                                brep_id, fi, surface_type, zero_tri_count, tri_count);
+                        }
+                    }
+
+                    // ─── Special surface checks ───────────────────────────────
+
+                    // Cone: check v range and apex degeneracy
+                    if let Surface::Cone(cone) = &face_data.surface {
+                        let mut v_min = f64::MAX;
+                        let mut v_max = f64::MIN;
+                        for edge in &face_data.outer_edges {
+                            for ti in 0..4 {
+                                if let Some(p) = edge.point_at(ti as f64 / 3.0) {
+                                    let (_u, v) = cone.project_point(&p);
+                                    v_min = v_min.min(v);
+                                    v_max = v_max.max(v);
+                                }
+                            }
+                        }
+                        let apex_height = cone.height();
+                        let touches_apex = v_max >= apex_height * 0.99;
+                        if touches_apex {
+                            // Apex degeneracy: all u values should map to the same point at v=apex_height
+                            // Check if triangulation handles it correctly
+                            let apex_points: Vec<Point3d> = face_mesh.vertices.iter()
+                                .filter(|v| {
+                                    let (_u, vv) = cone.project_point(v);
+                                    vv >= apex_height * 0.95
+                                })
+                                .cloned()
+                                .collect();
+                            if apex_points.len() > 2 {
+                                // Check how spread they are (should be very close to each other)
+                                let first = apex_points[0];
+                                let max_spread = apex_points.iter()
+                                    .map(|p| (p.x-first.x).abs().max((p.y-first.y).abs()).max((p.z-first.z).abs()))
+                                    .fold(0.0f64, f64::max);
+                                if max_spread > apex_height * 0.1 {
+                                    file_cone_issues.push(format!(
+                                        "BREP#{} face[{}]: apex degeneracy spread={:.4} (height={:.4}) v_range=[{:.4},{:.4}]",
+                                        brep_id, fi, max_spread, apex_height, v_min, v_max));
+                                }
+                            }
+                        }
+                        if v_min == f64::MAX {
+                            file_cone_issues.push(format!(
+                                "BREP#{} face[{}]: could not compute v_range from boundary edges",
+                                brep_id, fi));
+                        }
+                    }
+
+                    // Sphere: check pole handling
+                    if let Surface::Sphere(sphere) = &face_data.surface {
+                        let mut v_values = Vec::new();
+                        for edge in &face_data.outer_edges {
+                            for ti in 0..4 {
+                                if let Some(p) = edge.point_at(ti as f64 / 3.0) {
+                                    let (_u, v) = sphere.project_point(&p);
+                                    v_values.push(v);
+                                }
+                            }
+                        }
+                        // v=0 is north pole, v=pi is south pole
+                        let touches_north = v_values.iter().any(|v| *v < 0.05);
+                        let touches_south = v_values.iter().any(|v| *v > std::f64::consts::PI - 0.05);
+                        if touches_north || touches_south {
+                            // Check if mesh has vertices near the poles
+                            let pole = if touches_north { "north" } else { "south" };
+                            let pole_v = if touches_north { 0.0 } else { std::f64::consts::PI };
+                            let near_pole: Vec<&Point3d> = face_mesh.vertices.iter()
+                                .filter(|v| {
+                                    let (_u, vv) = sphere.project_point(v);
+                                    (vv - pole_v).abs() < 0.1
+                                })
+                                .collect();
+                            if near_pole.is_empty() && tri_count > 0 {
+                                file_sphere_issues.push(format!(
+                                    "BREP#{} face[{}]: touches {} pole but no mesh vertices near pole",
+                                    brep_id, fi, pole));
+                            }
+                        }
+                    }
+
+                    // Cylinder: check v range from boundary edges
+                    if let Surface::Cylinder(cyl) = &face_data.surface {
+                        let mut v_min = f64::MAX;
+                        let mut v_max = f64::MIN;
+                        for edge in &face_data.outer_edges {
+                            for ti in 0..4 {
+                                if let Some(p) = edge.point_at(ti as f64 / 3.0) {
+                                    let (_u, v) = cyl.project_point(&p);
+                                    v_min = v_min.min(v);
+                                    v_max = v_max.max(v);
+                                }
+                            }
+                        }
+                        if v_max - v_min < 1e-10 {
+                            file_cylinder_issues.push(format!(
+                                "BREP#{} face[{}]: v_range degenerate [{:.6},{:.6}] delta={:.2e}",
+                                brep_id, fi, v_min, v_max, v_max - v_min));
+                        }
+                    }
+
+                    // Holes: check if inner boundaries produce valid triangulation
+                    if n_inner_loops > 0 {
+                        // Check that inner loop edges are properly oriented
+                        for (li, inner_loop) in face_data.inner_edges.iter().enumerate() {
+                            if inner_loop.is_empty() {
+                                file_hole_issues.push(format!(
+                                    "BREP#{} face[{}]: inner loop {} is EMPTY",
+                                    brep_id, fi, li));
+                            }
+                        }
+                        // Check that the triangulated mesh has fewer triangles than
+                        // a version without holes would (rough check)
+                    }
+                }
+            }
+
+            // ─── Skip step_to_mesh_instances cross-check (redundant with per-face analysis) ──
+            let n_instances = 0usize;
+            let n_detailed_tris = 0usize;
+
+            // ─── Print summary table ────────────────────────────────────────
+            eprintln!("\n  ┌─────────────────────────────────────────────────────┐");
+            eprintln!("  │  SUMMARY: {} ", fname);
+            eprintln!("  ├─────────────────────────────────────────────────────┤");
+            eprintln!("  │  Total faces (FaceData):  {:>6}", file_total_faces);
+            eprintln!("  │  Instances:               {:>6}", n_instances);
+            eprintln!("  │  Instance mesh tris:      {:>6}", n_detailed_tris);
+            eprintln!("  │  Faces with holes:        {:>6}", file_faces_with_holes);
+
+            eprintln!("  │  ─── Surface Types ───────────────────────────────");
+            let mut sorted_types: Vec<_> = file_surface_counts.iter().collect();
+            sorted_types.sort_by(|a, b| b.1.cmp(a.1));
+            for (st, count) in &sorted_types {
+                eprintln!("  │    {:<20} {:>6}", format!("{}:", st), count);
+            }
+
+            eprintln!("  │  ─── Triangulation Results ────────────────────────");
+            eprintln!("  │    Total triangles:       {:>6}", file_total_tris);
+            eprintln!("  │    Total vertices:        {:>6}", file_total_verts);
+            eprintln!("  │    Empty meshes (FAIL):   {:>6}", file_empty_meshes);
+            eprintln!("  │    NaN/Inf vertices:      {:>6}", file_nan_vertices);
+            eprintln!("  │    Zero-area mesh:        {:>6}", file_zero_area_tris);
+            eprintln!("  │    Infinite-area mesh:    {:>6}", file_inf_area);
+
+            if !file_fail_by_type.is_empty() {
+                eprintln!("  │  ─── Failures by Surface Type ─────────────────────");
+                for (st, count) in &file_fail_by_type {
+                    eprintln!("  │    {:<20} {:>6} EMPTY", format!("{}:", st), count);
+                }
+            }
+
+            if !file_cone_issues.is_empty() {
+                eprintln!("  │  ─── Cone Issues ─────────────────────────────────");
+                for issue in &file_cone_issues {
+                    eprintln!("  │    {}", issue);
+                }
+            }
+            if !file_sphere_issues.is_empty() {
+                eprintln!("  │  ─── Sphere Issues ───────────────────────────────");
+                for issue in &file_sphere_issues {
+                    eprintln!("  │    {}", issue);
+                }
+            }
+            if !file_cylinder_issues.is_empty() {
+                eprintln!("  │  ─── Cylinder Issues ─────────────────────────────");
+                for issue in &file_cylinder_issues {
+                    eprintln!("  │    {}", issue);
+                }
+            }
+            if !file_hole_issues.is_empty() {
+                eprintln!("  │  ─── Hole Issues ─────────────────────────────────");
+                for issue in &file_hole_issues {
+                    eprintln!("  │    {}", issue);
+                }
+            }
+            eprintln!("  └─────────────────────────────────────────────────────┘");
+
+            // Accumulate grand totals
+            grand_total_faces += file_total_faces;
+            grand_total_empty += file_empty_meshes;
+            grand_total_nan += file_nan_vertices;
+            grand_total_zero_area += file_zero_area_tris;
+            grand_total_inf_area += file_inf_area;
+            grand_total_tris += file_total_tris;
+            grand_total_verts += file_total_verts;
+            for (st, count) in &file_surface_counts {
+                *grand_surface_counts.entry(st.clone()).or_insert(0) += count;
+            }
+            for (st, count) in &file_fail_by_type {
+                *grand_fail_by_type.entry(st.clone()).or_insert(0) += count;
+            }
+        }
+
+        // ─── Grand summary ─────────────────────────────────────────────────
+        eprintln!("\n{}", "═".repeat(72));
+        eprintln!("GRAND SUMMARY — ALL TEST STEP FILES");
+        eprintln!("{}", "═".repeat(72));
+        eprintln!("  Total faces across all files:    {}", grand_total_faces);
+        eprintln!("  Total triangles:                 {}", grand_total_tris);
+        eprintln!("  Total vertices:                  {}", grand_total_verts);
+        eprintln!("  Empty mesh failures:             {}", grand_total_empty);
+        eprintln!("  NaN/Inf vertex failures:         {}", grand_total_nan);
+        eprintln!("  Zero-area mesh failures:         {}", grand_total_zero_area);
+        eprintln!("  Infinite-area mesh failures:     {}", grand_total_inf_area);
+        eprintln!();
+        eprintln!("  Surface type distribution:");
+        let mut sorted: Vec<_> = grand_surface_counts.iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(a.1));
+        for (st, count) in &sorted {
+            let fails = grand_fail_by_type.get(*st).copied().unwrap_or(0);
+            if fails > 0 {
+                eprintln!("    {:<20} {:>6}  ({} empty)", st, count, fails);
+            } else {
+                eprintln!("    {:<20} {:>6}  ✓", st, count);
+            }
+        }
+        eprintln!();
+
+        let total_issues = grand_total_empty + grand_total_nan + grand_total_zero_area + grand_total_inf_area;
+        if total_issues == 0 {
+            eprintln!("  ✓ ALL FACES TRIANGULATED SUCCESSFULLY — NO ISSUES FOUND");
+        } else {
+            eprintln!("  ✗ TOTAL ISSUES: {} (empty={}, NaN={}, zero_area={}, inf_area={})",
+                total_issues, grand_total_empty, grand_total_nan, grand_total_zero_area, grand_total_inf_area);
+        }
+    }
+
     #[test]
     fn test_zentralstaender_face_detail() {
         let path = "/home/z/my-project/test/Zentralstaender.stp";
@@ -4431,5 +4890,235 @@ mod diag_tests {
         eprintln!("\nTotal faces: {}, Empty faces: {}", total_faces, empty_faces);
         eprintln!("Surface types: {:?}", surface_type_counts);
         eprintln!("Empty by type: {:?}", empty_by_type);
+    }
+
+    /// Detailed diagnostic for cone faces in Zentralstaender.stp that produce
+    /// degenerate triangulation (720/720 degenerate triangles in BREP#1086 and BREP#1088).
+    /// Examines surface parameters, boundary edges, UV ranges, and apex detection.
+    #[test]
+    fn test_zentralstaender_cone_detail() {
+        let path = "/home/z/my-project/3Draper_repo/test/Zentralstaender.stp";
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => { eprintln!("ERROR reading {}: {}", path, e); return; }
+        };
+        let step = match parse_step(&content) {
+            Ok(s) => s,
+            Err(e) => { eprintln!("PARSE ERROR: {:?}", e); return; }
+        };
+        let converter = StepConverter::new(&step);
+        let params = TriangulationParams::default();
+        let bbox = converter.compute_bounding_box();
+
+        let target_brep_ids: Vec<i64> = vec![1086, 1088];
+
+        eprintln!("\n{}", "=".repeat(80));
+        eprintln!("ZENTRALSTAENDER CONE FACE DIAGNOSTIC — BREP#1086 & BREP#1088");
+        eprintln!("{}", "=".repeat(80));
+
+        let breps = step.find_entities_by_type("MANIFOLD_SOLID_BREP");
+        eprintln!("Total MANIFOLD_SOLID_BREP entities: {}", breps.len());
+        eprintln!("Target BREP IDs: {:?}", target_brep_ids);
+
+        for brep in &breps {
+            if !target_brep_ids.contains(&brep.id) {
+                continue;
+            }
+
+            let shell_id = match converter.find_shell_ref_by_brep_id(brep.id) {
+                Some(id) => id,
+                None => {
+                    eprintln!("\nBREP#{} — could not find shell ref, skipping", brep.id);
+                    continue;
+                }
+            };
+
+            let face_data_list = match converter.extract_shell_faces(shell_id) {
+                Some(list) => list,
+                None => {
+                    eprintln!("\nBREP#{} — could not extract shell faces, skipping", brep.id);
+                    continue;
+                }
+            };
+
+            eprintln!("\n{}", "-".repeat(80));
+            eprintln!("BREP#{} — {} faces total", brep.id, face_data_list.len());
+            eprintln!("{}", "-".repeat(80));
+
+            for (fi, face_data) in face_data_list.iter().enumerate() {
+                // Only examine cone faces
+                let cone = match &face_data.surface {
+                    Surface::Cone(c) => c,
+                    _ => continue,
+                };
+
+                eprintln!("\n  ┌─────────────────────────────────────────────────────────────");
+                eprintln!("  │ BREP#{} face[{}] (STEP face #{})", brep.id, fi, face_data.step_face_id);
+                eprintln!("  ├─────────────────────────────────────────────────────────────");
+
+                // (a) Surface parameters
+                let half_angle_deg = cone.half_angle.to_degrees();
+                let height = cone.height();
+                eprintln!("  │ Surface: CONE");
+                eprintln!("  │   half_angle = {:.6} rad = {:.4} deg", cone.half_angle, half_angle_deg);
+                eprintln!("  │   radius     = {:.6}", cone.radius);
+                eprintln!("  │   height     = {:.6}", height);
+                eprintln!("  │   origin     = ({:.6}, {:.6}, {:.6})", cone.origin.x, cone.origin.y, cone.origin.z);
+                eprintln!("  │   axis       = ({:.6}, {:.6}, {:.6})", cone.axis.x, cone.axis.y, cone.axis.z);
+                eprintln!("  │   x_dir      = ({:.6}, {:.6}, {:.6})", cone.x_dir.x, cone.x_dir.y, cone.x_dir.z);
+                eprintln!("  │   forward    = {}", face_data.forward);
+
+                // (b) Number of boundary edges and their curve types
+                let n_outer = face_data.outer_edges.len();
+                let n_inner_loops = face_data.inner_edges.len();
+                let n_inner_edges: usize = face_data.inner_edges.iter().map(|l| l.len()).sum();
+
+                let mut outer_edge_types: Vec<String> = Vec::new();
+                for edge in &face_data.outer_edges {
+                    let tn = match &edge.curve {
+                        Some(Curve3d::Line(_)) => "Line",
+                        Some(Curve3d::Circle(_)) => "Circle",
+                        Some(Curve3d::Ellipse(_)) => "Ellipse",
+                        Some(Curve3d::Arc(_)) => "Arc",
+                        Some(Curve3d::Nurbs(_)) => "Nurbs",
+                        None => "None",
+                    };
+                    outer_edge_types.push(tn.to_string());
+                }
+
+                let mut inner_edge_types: Vec<String> = Vec::new();
+                for inner_loop in &face_data.inner_edges {
+                    for edge in inner_loop {
+                        let tn = match &edge.curve {
+                            Some(Curve3d::Line(_)) => "Line",
+                            Some(Curve3d::Circle(_)) => "Circle",
+                            Some(Curve3d::Ellipse(_)) => "Ellipse",
+                            Some(Curve3d::Arc(_)) => "Arc",
+                            Some(Curve3d::Nurbs(_)) => "Nurbs",
+                            None => "None",
+                        };
+                        inner_edge_types.push(tn.to_string());
+                    }
+                }
+
+                eprintln!("  │ Boundary: {} outer edges {:?}", n_outer, outer_edge_types);
+                eprintln!("  │           {} inner loops, {} inner edges {:?}", n_inner_loops, n_inner_edges, inner_edge_types);
+
+                // (c) Projected UV range of boundary points
+                let mut u_min = f64::MAX; let mut u_max = f64::MIN;
+                let mut v_min = f64::MAX; let mut v_max = f64::MIN;
+                let mut boundary_pts_3d: Vec<Point3d> = Vec::new();
+
+                // Sample outer edges densely
+                for edge in &face_data.outer_edges {
+                    let n_samples = 20; // denser sampling for accurate UV range
+                    for i in 0..=n_samples {
+                        let t = i as f64 / n_samples as f64;
+                        if let Some(p) = edge.point_at(t) {
+                            let (u, v) = cone.project_point(&p);
+                            u_min = u_min.min(u);
+                            u_max = u_max.max(u);
+                            v_min = v_min.min(v);
+                            v_max = v_max.max(v);
+                            boundary_pts_3d.push(p);
+                        }
+                    }
+                }
+
+                // Also sample inner edges
+                for inner_loop in &face_data.inner_edges {
+                    for edge in inner_loop {
+                        let n_samples = 20;
+                        for i in 0..=n_samples {
+                            let t = i as f64 / n_samples as f64;
+                            if let Some(p) = edge.point_at(t) {
+                                let (u, v) = cone.project_point(&p);
+                                u_min = u_min.min(u);
+                                u_max = u_max.max(u);
+                                v_min = v_min.min(v);
+                                v_max = v_max.max(v);
+                                boundary_pts_3d.push(p);
+                            }
+                        }
+                    }
+                }
+
+                let u_range = u_max - u_min;
+                let v_range = v_max - v_min;
+                eprintln!("  │ UV range: u=[{:.6}, {:.6}] range={:.6}", u_min, u_max, u_range);
+                eprintln!("  │           v=[{:.6}, {:.6}] range={:.6}", v_min, v_max, v_range);
+
+                // (d) Whether top_at_apex detection triggers
+                // Replicate the logic from triangulate_cone_face:
+                //   let apex_v = cone.height();
+                //   let top_at_apex = (v_max - apex_v).abs() < apex_v * 0.05 + 1e-6;
+                let apex_v = height;
+                let v_max_clamped = v_max.min(apex_v);
+                let top_at_apex = (v_max_clamped - apex_v).abs() < apex_v * 0.05 + 1e-6;
+                eprintln!("  │ top_at_apex: {} (v_max_clamped={:.6}, apex_v={:.6}, threshold={:.6})",
+                    top_at_apex, v_max_clamped, apex_v, apex_v * 0.05 + 1e-6);
+
+                // Also check the other conditions from triangulate_cone_face:
+                let v_range_degenerate = v_range < apex_v * 0.001 + 1e-6;
+                let full_circle = u_range < 0.5 * std::f64::consts::PI || u_range > 1.9 * std::f64::consts::PI;
+                eprintln!("  │ v_range_degenerate (cap face): {}", v_range_degenerate);
+                eprintln!("  │ full_circle: {}", full_circle);
+
+                // (e) The v_min, v_max, apex_v values
+                eprintln!("  │ v_min={:.6}, v_max={:.6}, apex_v={:.6}", v_min, v_max, apex_v);
+                eprintln!("  │ v_max - v_min = {:.6}", v_max - v_min);
+                eprintln!("  │ apex_v - v_max = {:.6}", apex_v - v_max);
+
+                // (f) First 5 boundary points (3D coordinates)
+                eprintln!("  │ First 5 boundary points:");
+                for (i, p) in boundary_pts_3d.iter().take(5).enumerate() {
+                    let (u, v) = cone.project_point(p);
+                    eprintln!("  │   [{}] ({:.4}, {:.4}, {:.4}) → uv=({:.4}, {:.4})", i, p.x, p.y, p.z, u, v);
+                }
+
+                // (g) Whether the face has inner edges
+                eprintln!("  │ Has inner edges: {} ({} loops, {} total inner edges)",
+                    n_inner_loops > 0, n_inner_loops, n_inner_edges);
+
+                // Now triangulate and report results
+                let face_mesh = converter.surface_to_mesh(face_data, &params, &bbox);
+                let tri_count = face_mesh.triangle_count();
+                let vert_count = face_mesh.vertex_count();
+
+                // Count degenerate triangles
+                let mut degenerate_count = 0usize;
+                for tri_idx in 0..face_mesh.triangles.len() {
+                    let tri = &face_mesh.triangles[tri_idx];
+                    let v0 = face_mesh.vertices[tri[0] as usize];
+                    let v1 = face_mesh.vertices[tri[1] as usize];
+                    let v2 = face_mesh.vertices[tri[2] as usize];
+                    let e1x = v1.x - v0.x; let e1y = v1.y - v0.y; let e1z = v1.z - v0.z;
+                    let e2x = v2.x - v0.x; let e2y = v2.y - v0.y; let e2z = v2.z - v0.z;
+                    let cx = e1y * e2z - e1z * e2y;
+                    let cy = e1z * e2x - e1x * e2z;
+                    let cz = e1x * e2y - e1y * e2x;
+                    let area2 = (cx*cx + cy*cy + cz*cz).sqrt();
+                    if area2 < 1e-10 {
+                        degenerate_count += 1;
+                    }
+                }
+
+                let mesh_area = face_mesh.surface_area();
+                eprintln!("  │ Triangulation: {} tris, {} verts, {} degenerate, area={:.6}",
+                    tri_count, vert_count, degenerate_count, mesh_area);
+
+                if tri_count > 0 && degenerate_count == tri_count {
+                    eprintln!("  │ ★ ALL {} TRIANGLES ARE DEGENERATE ★", tri_count);
+                } else if degenerate_count > 0 {
+                    eprintln!("  │ ⚠ {}/{} triangles are degenerate", degenerate_count, tri_count);
+                }
+
+                eprintln!("  └─────────────────────────────────────────────────────────────");
+            }
+        }
+
+        eprintln!("\n{}", "=".repeat(80));
+        eprintln!("END ZENTRALSTAENDER CONE DIAGNOSTIC");
+        eprintln!("{}", "=".repeat(80));
     }
 }
