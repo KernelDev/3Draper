@@ -1120,8 +1120,16 @@ pub fn triangulate_face_with_boundary_and_holes(
             // Planes: ear-clipping is correct — don't change
             triangulate_plane_with_boundary(plane, boundary_points, forward)
         }
+        Surface::Cone(cone) => {
+            // Cone: must handle apex degeneracy (all top-row vertices collapse to a single point)
+            triangulate_cone_face_with_boundary(cone, boundary_points, hole_polylines, forward, params)
+        }
+        Surface::Sphere(sphere) => {
+            // Sphere: must handle pole degeneracy (all top/bottom-row vertices collapse to poles)
+            triangulate_sphere_face_with_boundary(sphere, boundary_points, hole_polylines, forward, params)
+        }
         _ => {
-            // All curved surfaces: use UV-space boundary trimming
+            // Other curved surfaces: use UV-space boundary trimming
             triangulate_surface_uv_trimmed(surface, boundary_points, hole_polylines, forward, params)
         }
     }
@@ -1961,6 +1969,265 @@ fn triangulate_sphere_with_boundary(
             } else {
                 mesh.add_triangle(v0, v2, v1);
                 mesh.add_triangle(v0, v3, v2);
+            }
+        }
+    }
+
+    mesh
+}
+
+/// Triangulate a cone face with boundary points and optional holes.
+/// Handles apex degeneracy: when v_max reaches the apex height, all
+/// vertices in the top row collapse to a single point, and we emit
+/// only one triangle per sector instead of two to avoid degenerate
+/// zero-area triangles.
+fn triangulate_cone_face_with_boundary(
+    cone: &ConeSurface,
+    boundary_points: &[Point3d],
+    hole_polylines: &[Vec<Point3d>],
+    forward: bool,
+    params: &TriangulationParams,
+) -> TriangleMesh {
+    let mut mesh = TriangleMesh::new();
+    if boundary_points.len() < 3 {
+        return mesh;
+    }
+
+    // Project boundary to UV space
+    let mut boundary_uv: Vec<Point2d> = boundary_points.iter()
+        .map(|p| {
+            let (u, v) = cone.project_point(p);
+            Point2d::new(u, v)
+        })
+        .collect();
+
+    // Normalize UV polygon for u-periodicity (2π)
+    normalize_uv_polygon(&mut boundary_uv, Some(2.0 * PI), None);
+
+    // Compute UV bounding box
+    let mut u_min = f64::MAX; let mut u_max = f64::MIN;
+    let mut v_min = f64::MAX; let mut v_max = f64::MIN;
+    for p in &boundary_uv {
+        u_min = u_min.min(p.u); u_max = u_max.max(p.u);
+        v_min = v_min.min(p.v); v_max = v_max.max(p.v);
+    }
+    for hole in hole_polylines {
+        for p in hole {
+            let (u, v) = cone.project_point(p);
+            u_min = u_min.min(u); u_max = u_max.max(u);
+            v_min = v_min.min(v); v_max = v_max.max(v);
+        }
+    }
+
+    let u_range = u_max - u_min;
+    let v_range = v_max - v_min;
+
+    if u_range < 1e-10 && v_range < 1e-10 {
+        return mesh;
+    }
+
+    // Handle degenerate u range (boundary doesn't constrain u → full circle)
+    let full_circle = u_range < 0.5 * PI || u_range > 1.9 * PI;
+    if full_circle {
+        u_min = 0.0;
+        u_max = 2.0 * PI;
+    }
+
+    // Clamp v range: v < 0 is below base, v > height is past apex
+    let apex_v = cone.height();
+    let top_at_apex = apex_v.is_finite() && (v_max - apex_v).abs() < apex_v * 0.05 + 1e-6;
+
+    // Add small margin
+    let margin_u = (u_max - u_min) * 0.001;
+    let margin_v = (v_max - v_min) * 0.001;
+    u_min -= margin_u; u_max += margin_u;
+    v_min -= margin_v; v_max += margin_v;
+
+    // Grid resolution
+    let n_u = if full_circle { params.angular_samples } else {
+        ((params.angular_samples as f64 * (u_max - u_min) / (2.0 * PI)).ceil() as usize).max(8).min(params.angular_samples)
+    };
+    let n_v = params.height_samples.max(2);
+
+    let du = (u_max - u_min) / n_u as f64;
+    let dv = (v_max - v_min) / n_v as f64;
+
+    // Generate vertex grid: (n_v+1) rows × n_u columns
+    for j in 0..=n_v {
+        for i in 0..n_u {
+            let u = u_min + du * i as f64;
+            let v = v_min + dv * j as f64;
+            let p = cone.point_at(u, v);
+            let n = cone.normal_at(u, v);
+            let idx = mesh.add_vertex(p);
+            mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+        }
+    }
+
+    // Generate triangles with apex degeneracy handling
+    for j in 0..n_v {
+        for i in 0..n_u {
+            let i_next = if full_circle { (i + 1) % n_u } else { (i + 1).min(n_u - 1) };
+            let v0 = (j * n_u + i) as u32;
+            let v1 = (j * n_u + i_next) as u32;
+            let v2 = ((j + 1) * n_u + i_next) as u32;
+            let v3 = ((j + 1) * n_u + i) as u32;
+
+            if top_at_apex && j == n_v - 1 {
+                // Apex row: all vertices in row n_v are at the apex.
+                // Only one triangle per sector to avoid degenerate zero-area triangles.
+                if forward {
+                    mesh.add_triangle(v0, v1, v2);
+                } else {
+                    mesh.add_triangle(v0, v2, v1);
+                }
+            } else {
+                if forward {
+                    mesh.add_triangle(v0, v1, v2);
+                    mesh.add_triangle(v0, v2, v3);
+                } else {
+                    mesh.add_triangle(v0, v2, v1);
+                    mesh.add_triangle(v0, v3, v2);
+                }
+            }
+        }
+    }
+
+    mesh
+}
+
+/// Triangulate a sphere face with boundary points and optional holes.
+/// Handles pole degeneracy: when v_start = 0 (north pole) or v_end = π (south pole),
+/// all vertices in that row collapse to a single point, and we emit
+/// only one triangle per sector instead of two.
+fn triangulate_sphere_face_with_boundary(
+    sphere: &SphereSurface,
+    boundary_points: &[Point3d],
+    hole_polylines: &[Vec<Point3d>],
+    forward: bool,
+    params: &TriangulationParams,
+) -> TriangleMesh {
+    let mut mesh = TriangleMesh::new();
+    if boundary_points.len() < 3 {
+        return mesh;
+    }
+
+    // Project boundary to UV space
+    let mut boundary_uv: Vec<Point2d> = boundary_points.iter()
+        .map(|p| {
+            let (u, v) = sphere.project_point(p);
+            Point2d::new(u, v)
+        })
+        .collect();
+
+    // Normalize UV polygon for u-periodicity (2π)
+    normalize_uv_polygon(&mut boundary_uv, Some(2.0 * PI), None);
+
+    // Compute UV bounding box
+    let mut u_min = f64::MAX; let mut u_max = f64::MIN;
+    let mut v_min = f64::MAX; let mut v_max = f64::MIN;
+    for p in &boundary_uv {
+        u_min = u_min.min(p.u); u_max = u_max.max(p.u);
+        v_min = v_min.min(p.v); v_max = v_max.max(p.v);
+    }
+    for hole in hole_polylines {
+        for p in hole {
+            let (u, v) = sphere.project_point(p);
+            u_min = u_min.min(u); u_max = u_max.max(u);
+            v_min = v_min.min(v); v_max = v_max.max(v);
+        }
+    }
+
+    let u_range = u_max - u_min;
+    let v_range = v_max - v_min;
+
+    if u_range < 1e-10 && v_range < 1e-10 {
+        return mesh;
+    }
+
+    // Handle degenerate u range (boundary doesn't constrain u → full circle)
+    let full_u = u_range < 0.5 * PI || u_range > 1.9 * PI;
+    if full_u {
+        u_min = 0.0;
+        u_max = 2.0 * PI;
+    }
+
+    // Handle v range: if boundary doesn't constrain v, use full [0, π]
+    let full_v = v_range < 0.2 || v_range > 0.9 * PI;
+    if full_v {
+        v_min = 0.0;
+        v_max = PI;
+    }
+
+    // Check for pole degeneracy
+    let north_pole = v_min.abs() < 0.05; // v ≈ 0 → north pole
+    let south_pole = (v_max - PI).abs() < 0.05; // v ≈ π → south pole
+
+    // Add small margin
+    let margin_u = (u_max - u_min) * 0.001;
+    let margin_v = (v_max - v_min) * 0.001;
+    u_min -= margin_u; u_max += margin_u;
+    v_min -= margin_v; v_max += margin_v;
+
+    // Clamp v to valid range
+    v_min = v_min.max(0.0);
+    v_max = v_max.min(PI);
+
+    // Grid resolution
+    let full_u = (u_max - u_min) > 1.9 * PI;
+    let n_u = if full_u { params.angular_samples } else {
+        ((params.angular_samples as f64 * (u_max - u_min) / (2.0 * PI)).ceil() as usize).max(8).min(params.angular_samples)
+    };
+    let n_v = (params.angular_samples / 2).max(4);
+
+    let du = (u_max - u_min) / n_u as f64;
+    let dv = (v_max - v_min) / n_v as f64;
+
+    // Generate vertex grid: (n_v+1) rows × n_u columns
+    for j in 0..=n_v {
+        for i in 0..n_u {
+            let u = u_min + du * i as f64;
+            let v = v_min + dv * j as f64;
+            let p = sphere.point_at(u, v);
+            let n = sphere.normal_at(u, v);
+            let idx = mesh.add_vertex(p);
+            mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+        }
+    }
+
+    // Generate triangles with pole degeneracy handling
+    for j in 0..n_v {
+        for i in 0..n_u {
+            let i_next = if full_u { (i + 1) % n_u } else { (i + 1).min(n_u - 1) };
+            let v0 = (j * n_u + i) as u32;
+            let v1 = (j * n_u + i_next) as u32;
+            let v2 = ((j + 1) * n_u + i_next) as u32;
+            let v3 = ((j + 1) * n_u + i) as u32;
+
+            if north_pole && j == 0 {
+                // North pole row: all vertices in row 0 are at the north pole.
+                // Only one triangle per sector.
+                if forward {
+                    mesh.add_triangle(v0, v2, v3);
+                } else {
+                    mesh.add_triangle(v0, v3, v2);
+                }
+            } else if south_pole && j == n_v - 1 {
+                // South pole row: all vertices in row n_v are at the south pole.
+                // Only one triangle per sector.
+                if forward {
+                    mesh.add_triangle(v0, v1, v2);
+                } else {
+                    mesh.add_triangle(v0, v2, v1);
+                }
+            } else {
+                if forward {
+                    mesh.add_triangle(v0, v1, v2);
+                    mesh.add_triangle(v0, v2, v3);
+                } else {
+                    mesh.add_triangle(v0, v2, v1);
+                    mesh.add_triangle(v0, v3, v2);
+                }
             }
         }
     }

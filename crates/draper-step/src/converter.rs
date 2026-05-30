@@ -2508,12 +2508,22 @@ impl<'a> StepConverter<'a> {
 
     /// Extract a CONICAL_SURFACE.
     /// STEP stores the semi-angle in DEGREES; our ConeSurface expects RADIANS.
+    /// A negative semi-angle means the apex is in the OPPOSITE direction of the axis.
+    /// We handle this by flipping the axis and using the absolute semi-angle.
     fn extract_cone(&self, entity: &crate::schema::StepEntity) -> Option<Surface> {
         let axis2_id = self.find_axis2_ref(entity)?;
         let (origin, axis, u_dir) = self.resolve_axis2(axis2_id)?;
         let radius = self.find_float_param(entity, 0)?;
         let half_angle_deg = self.find_float_param(entity, 1)?;
         let half_angle_rad = half_angle_deg.abs().to_radians();
+        // Negative semi-angle: apex is opposite to axis direction → flip axis
+        let (axis, u_dir) = if half_angle_deg < 0.0 {
+            let flipped_axis = Direction3d::new(-axis.x, -axis.y, -axis.z).unwrap_or(axis);
+            let flipped_u_dir = Direction3d::new(-u_dir.x, -u_dir.y, -u_dir.z).unwrap_or(u_dir);
+            (flipped_axis, flipped_u_dir)
+        } else {
+            (axis, u_dir)
+        };
         Some(Surface::Cone(ConeSurface::new_with_frame(origin, axis, radius, half_angle_rad, u_dir)))
     }
 
