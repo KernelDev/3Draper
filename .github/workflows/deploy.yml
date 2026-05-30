@@ -26,19 +26,6 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - name: Install WASI SDK for C deps on wasm32
-        run: |
-          # Install wasi-libc which provides stdlib.h and other C headers
-          # needed by native C dependencies (bzip2-sys, lzma-sys, zstd-sys)
-          # when cross-compiling to wasm32-unknown-unknown
-          sudo apt-get update
-          sudo apt-get install -y clang lld llvm wasi-libc
-
-          # Set environment variables so cc-rs can find the WASI sysroot
-          echo "WASI_SYSROOT=/usr/share/wasi-sysroot" >> $GITHUB_ENV
-          echo "CC_wasm32_unknown_unknown=clang --target=wasm32-wasi --sysroot=/usr/share/wasi-sysroot" >> $GITHUB_ENV
-          echo "AR_wasm32_unknown_unknown=llvm-ar" >> $GITHUB_ENV
-
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -55,6 +42,8 @@ jobs:
 
       - name: Build WASM
         working-directory: crates/draper-viewer
+        # Trunk.toml specifies --package draper-viewer to avoid building
+        # non-WASM crates. The web feature disables export-3mf (zip/bzip2/lzma C deps).
         run: trunk build --release --public-url /3Draper/
 
       - name: Add .nojekyll

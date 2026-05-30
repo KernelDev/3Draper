@@ -3,6 +3,12 @@ name = "draper-mesh"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = ["export-3mf"]
+# 3MF export requires the `zip` crate which has C dependencies (bzip2-sys, lzma-sys, zstd-sys)
+# that don't compile on wasm32-unknown-unknown. Disable this feature for WASM builds.
+export-3mf = ["zip"]
+
 [dependencies]
 draper-geometry = { workspace = true }
 draper-topology = { workspace = true }
@@ -10,7 +16,7 @@ spade = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 rayon = "1.10"
-zip = "2"
+zip = { version = "2", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

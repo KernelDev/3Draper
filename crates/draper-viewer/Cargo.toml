@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [features]
 default = ["native"]
-native = ["rfd", "env_logger"]
+native = ["rfd", "env_logger", "draper-mesh/export-3mf"]
 web = ["web-sys", "wasm-bindgen", "console_log", "wasm-bindgen-futures", "js-sys", "web-time", "wgpu/webgl", "wgpu/webgpu"]
 
 [dependencies]

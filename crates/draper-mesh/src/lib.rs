@@ -15,13 +15,16 @@ pub mod manifold;
 pub mod edge_cache;
 pub mod adaptive;
 pub mod parametric_domain;
-pub mod export;
 pub mod certification;
+
+#[cfg(feature = "export-3mf")]
+pub mod export;
 
 pub use mesh::*;
 pub use triangulate::*;
 pub use stl::*;
 pub use manifold::*;
 pub use edge_cache::*;
+#[cfg(feature = "export-3mf")]
 pub use export::*;
 pub use certification::*;
