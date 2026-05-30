@@ -14,6 +14,7 @@ pub mod builder;
 pub mod traversal;
 pub mod validation;
 pub mod healing;
+pub mod boolean;
 
 pub use entity::*;
 pub use shape::*;
@@ -25,3 +26,4 @@ pub use validation::{
     validate_topology,
 };
 pub use healing::*;
+pub use boolean::*;
