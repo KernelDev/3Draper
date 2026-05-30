@@ -867,6 +867,7 @@ dependencies = [
  "draper-geometry",
  "draper-mesh",
  "draper-topology",
+ "env_logger",
  "log",
  "thiserror 2.0.18",
 ]
