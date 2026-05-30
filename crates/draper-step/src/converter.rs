@@ -29,8 +29,175 @@ use draper_geometry::{
 };
 use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary, ear_clip};
 use draper_topology::{Face, Wire, CoEdge, Edge as TopoEdge};
+use draper_geometry::tolerance::ToleranceContext;
 use std::collections::HashMap;
 use log::{info, warn};
+
+// ============================================================
+// STEP Edge Discretization Cache
+// ============================================================
+
+/// Cache that ensures shared STEP edges between faces produce identical 3D points.
+///
+/// When two faces reference the same EDGE_CURVE entity in a STEP file, they
+/// must produce identical boundary 3D points. Without this cache, each face
+/// independently samples its boundary edges, producing *different* points on
+/// shared edges. This creates gaps (cracks) between adjacent faces in the mesh,
+/// which `merge_coincident_vertices` cannot always fix correctly.
+///
+/// With this cache:
+/// 1. The first face that references an EDGE_CURVE triggers its discretization.
+/// 2. The resulting 3D points are cached by STEP EDGE_CURVE entity ID.
+/// 3. Subsequent faces that share the same EDGE_CURVE receive the *identical*
+///    3D point sequence.
+///
+/// This guarantees watertight meshes at shared edges — no post-hoc merging needed.
+#[derive(Clone, Debug)]
+struct StepEdgeCache {
+    /// Maps STEP EDGE_CURVE entity ID → discretized 3D points.
+    entries: HashMap<i64, Vec<Point3d>>,
+    /// Tolerance context for adaptive sampling.
+    tol_ctx: ToleranceContext,
+    /// Default number of samples per edge.
+    default_samples: usize,
+}
+
+impl StepEdgeCache {
+    fn new(tol_ctx: ToleranceContext) -> Self {
+        Self {
+            entries: HashMap::new(),
+            tol_ctx,
+            default_samples: 64,
+        }
+    }
+
+    /// Get or compute discretized 3D points for an edge identified by its STEP entity ID.
+    /// If the edge is already cached, returns a clone of the cached points.
+    /// If not, discretizes the edge and caches the result.
+    fn discretize(&mut self, step_edge_id: i64, edge: &TopoEdge, n_samples: usize) -> Vec<Point3d> {
+        if let Some(pts) = self.entries.get(&step_edge_id) {
+            return pts.clone();
+        }
+
+        let pts = self.adaptive_discretize(edge, n_samples.max(2));
+        self.entries.insert(step_edge_id, pts.clone());
+        pts
+    }
+
+    /// Check if an edge is already in the cache.
+    fn contains(&self, step_edge_id: i64) -> bool {
+        self.entries.contains_key(&step_edge_id)
+    }
+
+    /// Get cached points for an edge (if it exists).
+    fn get(&self, step_edge_id: i64) -> Option<&Vec<Point3d>> {
+        self.entries.get(&step_edge_id)
+    }
+
+    /// Number of cached edges.
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Adaptively discretize an edge based on curve curvature.
+    /// Starts with uniformly-spaced points, then recursively subdivides
+    /// where chord deviation exceeds a threshold.
+    fn adaptive_discretize(&self, edge: &TopoEdge, n_samples: usize) -> Vec<Point3d> {
+        let curve = match &edge.curve {
+            Some(c) => c,
+            None => {
+                // No curve geometry — just use start/end points
+                let (p0, p1) = match (edge.start_point(), edge.end_point()) {
+                    (Some(a), Some(b)) => (a, b),
+                    _ => return vec![],
+                };
+                return vec![p0, p1];
+            }
+        };
+
+        let (t_min, t_max) = edge.param_range;
+
+        // For line edges, just return endpoints
+        if matches!(curve, Curve3d::Line(_)) {
+            return vec![curve.point_at(t_min), curve.point_at(t_max)];
+        }
+
+        // Adaptive subdivision threshold: 10× absolute tolerance as chord deviation
+        let max_deviation = self.tol_ctx.absolute * 10.0;
+
+        // Start with uniformly spaced points
+        let n_initial = n_samples.min(256).max(2);
+        let mut points: Vec<Point3d> = Vec::with_capacity(n_initial);
+
+        for i in 0..n_initial {
+            let t = t_min + (t_max - t_min) * i as f64 / (n_initial - 1) as f64;
+            points.push(curve.point_at(t));
+        }
+
+        // Refine: check chord deviation and subdivide where needed
+        let mut refined = true;
+        let mut refinement_passes = 0;
+        let max_refinement_passes = 5;
+        let max_points = 256;
+
+        while refined && refinement_passes < max_refinement_passes && points.len() < max_points {
+            refined = false;
+            refinement_passes += 1;
+
+            let mut i = 0;
+            while i < points.len() - 1 && points.len() < max_points {
+                let p0 = points[i];
+                let p2 = points[i + 1];
+                let t_mid = (t_min + t_max * 0.5); // simplified midpoint
+                let t0 = t_min + (t_max - t_min) * i as f64 / (points.len() - 1) as f64;
+                let t1 = t_min + (t_max - t_min) * (i + 1) as f64 / (points.len() - 1) as f64;
+                let t_mid_actual = (t0 + t1) * 0.5;
+                let p_mid = curve.point_at(t_mid_actual);
+
+                let deviation = point_to_chord_distance_3d(&p_mid, &p0, &p2);
+
+                if deviation > max_deviation {
+                    points.insert(i + 1, p_mid);
+                    refined = true;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
+        points
+    }
+}
+
+impl Default for StepEdgeCache {
+    fn default() -> Self {
+        Self::new(ToleranceContext::new())
+    }
+}
+
+/// Compute the distance from a point to a line segment (chord) in 3D.
+fn point_to_chord_distance_3d(point: &Point3d, a: &Point3d, b: &Point3d) -> f64 {
+    let abx = b.x - a.x;
+    let aby = b.y - a.y;
+    let abz = b.z - a.z;
+    let apx = point.x - a.x;
+    let apy = point.y - a.y;
+    let apz = point.z - a.z;
+
+    let ab_len_sq = abx * abx + aby * aby + abz * abz;
+    if ab_len_sq < 1e-30 {
+        return (apx * apx + apy * apy + apz * apz).sqrt();
+    }
+
+    let t = (apx * abx + apy * aby + apz * abz) / ab_len_sq;
+    let t = t.clamp(0.0, 1.0);
+
+    let cx = a.x + t * abx - point.x;
+    let cy = a.y + t * aby - point.y;
+    let cz = a.z + t * abz - point.z;
+    (cx * cx + cy * cy + cz * cz).sqrt()
+}
 
 /// Extracted face data with surface and boundary edges.
 struct FaceData {
@@ -49,6 +216,17 @@ struct FaceData {
     /// Analytical PCURVEs in UV space for each edge in `edges`.
     /// Same length as `edges`. When present, used instead of surface.project_point().
     edge_curves_2d: Vec<Option<Curve2d>>,
+    /// STEP entity IDs of EDGE_CURVE entities for each edge in `edges`.
+    /// Same length as `edges`. Used for edge discretization caching —
+    /// when two faces share the same STEP EDGE_CURVE, they must produce
+    /// identical 3D boundary points to ensure mesh watertightness.
+    edge_step_ids: Vec<i64>,
+    /// STEP entity IDs of EDGE_CURVE entities for outer edges.
+    /// Same length as `outer_edges`.
+    outer_edge_step_ids: Vec<i64>,
+    /// STEP entity IDs of EDGE_CURVE entities for inner edges.
+    /// Same structure as `inner_edges`.
+    inner_edge_step_ids: Vec<Vec<i64>>,
 }
 
 /// Information about a single face within a BREP, for structure display and UV visualization.
@@ -674,7 +852,7 @@ impl<'a> StepConverter<'a> {
         for type_name in &surface_types {
             for entity in self.step.find_entities_by_type(type_name) {
                 if let Some(surface) = self.extract_surface(entity.id, 0) {
-                    let face_data = FaceData { surface, outer_edges: vec![], inner_edges: vec![], edges: vec![], forward: true, step_face_id: entity.id, surface_step_id: None, edge_curves_2d: vec![] };
+                    let face_data = FaceData { surface, outer_edges: vec![], inner_edges: vec![], edges: vec![], forward: true, step_face_id: entity.id, surface_step_id: None, edge_curves_2d: vec![], edge_step_ids: vec![], outer_edge_step_ids: vec![], inner_edge_step_ids: vec![] };
                     let mesh = self.surface_to_mesh(&face_data, &params, &bbox);
                     results.push(MeshInstance {
                         name: entity.type_name.clone(),
@@ -1179,6 +1357,15 @@ impl<'a> StepConverter<'a> {
     ) -> Option<TriangleMesh> {
         let shell_id = self.find_shell_ref_by_brep_id(brep_id)?;
         let face_data_list = self.extract_shell_faces(shell_id)?;
+
+        // Create edge discretization cache for this BREP to ensure
+        // shared edges produce identical 3D points (watertightness).
+        let tol_ctx = match bbox {
+            Some((bmin, bmax)) => ToleranceContext::from_bounding_box(bmin, bmax),
+            None => ToleranceContext::new(),
+        };
+        let mut edge_cache = StepEdgeCache::new(tol_ctx);
+
         let mut mesh = TriangleMesh::new();
         for (fi, face_data) in face_data_list.iter().enumerate() {
             let surface_type = match &face_data.surface {
@@ -1224,7 +1411,7 @@ impl<'a> StepConverter<'a> {
                 log::debug!("BREP #{} face[{}]: {} outer={} inner={}", brep_id, fi, surface_type, n_outer, n_inner);
             }
 
-            let face_mesh = self.surface_to_mesh(face_data, params, bbox);
+            let face_mesh = self.surface_to_mesh_cached(face_data, params, bbox, &mut edge_cache);
             let (fbmin, fbmax) = face_mesh.bounding_box();
             log::debug!("  -> v={} t={} bbox=({:.2},{:.2},{:.2})..({:.2},{:.2},{:.2})",
                 face_mesh.vertex_count(), face_mesh.triangle_count(),
@@ -1232,7 +1419,11 @@ impl<'a> StepConverter<'a> {
             mesh.merge(&face_mesh);
         }
         // Merge coincident vertices to make the mesh watertight
+        // (still needed for non-shared edges, but the cache ensures shared edges
+        // already have identical vertices)
         draper_mesh::merge_coincident_vertices(&mut mesh, 1e-4);
+        log::info!("BREP #{}: edge_cache={} entries, mesh v={} t={}",
+            brep_id, edge_cache.len(), mesh.vertex_count(), mesh.triangle_count());
         Some(mesh)
     }
 
@@ -1245,6 +1436,14 @@ impl<'a> StepConverter<'a> {
     ) -> Option<(TriangleMesh, Vec<FaceInfo>)> {
         let shell_id = self.find_shell_ref_by_brep_id(brep_id)?;
         let face_data_list = self.extract_shell_faces(shell_id)?;
+
+        // Create edge discretization cache for this BREP
+        let tol_ctx = match bbox {
+            Some((bmin, bmax)) => ToleranceContext::from_bounding_box(bmin, bmax),
+            None => ToleranceContext::new(),
+        };
+        let mut edge_cache = StepEdgeCache::new(tol_ctx);
+
         let mut mesh = TriangleMesh::new();
         let mut face_infos = Vec::new();
         let mut next_face_id: u64 = 1;
@@ -1270,7 +1469,7 @@ impl<'a> StepConverter<'a> {
             };
 
             let tri_start = mesh.triangle_count();
-            let face_mesh = self.surface_to_mesh(face_data, params, bbox);
+            let face_mesh = self.surface_to_mesh_cached(face_data, params, bbox, &mut edge_cache);
             
             // Set face ID for all triangles in this face mesh
             let face_tri_count = face_mesh.triangle_count();
@@ -1311,6 +1510,8 @@ impl<'a> StepConverter<'a> {
         }
         // Merge coincident vertices to make the mesh watertight
         draper_mesh::merge_coincident_vertices(&mut mesh, 1e-4);
+        log::info!("BREP #{} detailed: edge_cache={} entries, mesh v={} t={}",
+            brep_id, edge_cache.len(), mesh.vertex_count(), mesh.triangle_count());
         Some((mesh, face_infos))
     }
 
@@ -2090,13 +2291,18 @@ impl<'a> StepConverter<'a> {
                 // Extract surface
                 let surface = self.extract_face_surface_from_entity(face_entity)?;
                 
-                // Extract boundary edges with inner/outer distinction
-                let (outer_edges, inner_edges) = self.extract_face_bounds_separated(face_entity);
+                // Extract boundary edges with inner/outer distinction AND STEP IDs
+                let (outer_edges, outer_step_ids, inner_edges, inner_step_ids) =
+                    self.extract_face_bounds_separated_with_step_ids(face_entity);
 
                 // All edges combined for backward compat
                 let mut all_edges = outer_edges.clone();
-                for inner in &inner_edges {
+                let mut all_step_ids = outer_step_ids.clone();
+                for (i, inner) in inner_edges.iter().enumerate() {
                     all_edges.extend(inner.clone());
+                    if let Some(ids) = inner_step_ids.get(i) {
+                        all_step_ids.extend(ids.clone());
+                    }
                 }
 
                 // Extract face orientation (last param, typically .T. or .F.)
@@ -2119,6 +2325,9 @@ impl<'a> StepConverter<'a> {
                     step_face_id: face_id,
                     surface_step_id,
                     edge_curves_2d,
+                    edge_step_ids: all_step_ids,
+                    outer_edge_step_ids: outer_step_ids,
+                    inner_edge_step_ids: inner_step_ids,
                 })
             }
             _ => {
@@ -2133,6 +2342,9 @@ impl<'a> StepConverter<'a> {
                         step_face_id: face_id,
                         surface_step_id: None,
                         edge_curves_2d: vec![],
+                        edge_step_ids: vec![],
+                        outer_edge_step_ids: vec![],
+                        inner_edge_step_ids: vec![],
                     })
                 } else {
                     None
@@ -2219,8 +2431,20 @@ impl<'a> StepConverter<'a> {
     /// FACE_BOUND → inner loop (a hole)
     /// Returns (outer_edges, inner_loops) where inner_loops is a Vec of edge loops.
     fn extract_face_bounds_separated(&self, face: &crate::schema::StepEntity) -> (Vec<TopoEdge>, Vec<Vec<TopoEdge>>) {
+        let (outer_edges, _, inner_loops, _) = self.extract_face_bounds_separated_with_step_ids(face);
+        (outer_edges, inner_loops)
+    }
+
+    /// Extract boundary edges with STEP EDGE_CURVE IDs for cache-key tracking.
+    /// Returns (outer_edges, outer_step_ids, inner_loops, inner_step_ids).
+    fn extract_face_bounds_separated_with_step_ids(
+        &self,
+        face: &crate::schema::StepEntity,
+    ) -> (Vec<TopoEdge>, Vec<i64>, Vec<Vec<TopoEdge>>, Vec<Vec<i64>>) {
         let mut outer_edges: Vec<TopoEdge> = Vec::new();
+        let mut outer_step_ids: Vec<i64> = Vec::new();
         let mut inner_loops: Vec<Vec<TopoEdge>> = Vec::new();
+        let mut inner_step_ids: Vec<Vec<i64>> = Vec::new();
 
         // ADVANCED_FACE params: [name, (bounds_list), surface_ref, orientation]
         // The bounds are in params[1], which is a List of references to FACE_BOUND/FACE_OUTER_BOUND
@@ -2233,13 +2457,15 @@ impl<'a> StepConverter<'a> {
                         if let Some(bound_entity) = self.step.find_entity(bound_id) {
                             if bound_entity.type_name == "FACE_OUTER_BOUND" {
                                 found_bound = true;
-                                if let Some(loop_edges) = self.resolve_face_bound(bound_entity) {
+                                if let Some((loop_edges, loop_step_ids)) = self.resolve_face_bound_with_step_ids(bound_entity) {
                                     outer_edges = loop_edges;
+                                    outer_step_ids = loop_step_ids;
                                 }
                             } else if bound_entity.type_name == "FACE_BOUND" {
                                 found_bound = true;
-                                if let Some(loop_edges) = self.resolve_face_bound(bound_entity) {
+                                if let Some((loop_edges, loop_step_ids)) = self.resolve_face_bound_with_step_ids(bound_entity) {
                                     inner_loops.push(loop_edges);
+                                    inner_step_ids.push(loop_step_ids);
                                 }
                             }
                         }
@@ -2252,8 +2478,9 @@ impl<'a> StepConverter<'a> {
                     // Many STEP files use only FACE_BOUND (no FACE_OUTER_BOUND at all).
                     if outer_edges.is_empty() && !inner_loops.is_empty() {
                         outer_edges = inner_loops.remove(0);
+                        outer_step_ids = inner_step_ids.remove(0);
                     }
-                    return (outer_edges, inner_loops);
+                    return (outer_edges, outer_step_ids, inner_loops, inner_step_ids);
                 }
             }
         }
@@ -2263,14 +2490,21 @@ impl<'a> StepConverter<'a> {
         // (some STEP files use FACE_BOUND for both outer and inner)
         if outer_edges.is_empty() && !inner_loops.is_empty() {
             outer_edges = inner_loops.remove(0);
+            outer_step_ids = inner_step_ids.remove(0);
         }
 
-        (outer_edges, inner_loops)
+        (outer_edges, outer_step_ids, inner_loops, inner_step_ids)
     }
 
-    /// Resolve a FACE_BOUND or FACE_OUTER_BOUND entity to a list of Edge objects.
+    /// Resolve a FACE_BOUND or FACE_OUTER_BOUND entity to a list of Edge objects with STEP IDs.
     /// FACE_BOUND params: [name, loop_ref, orientation]
     fn resolve_face_bound(&self, bound_entity: &crate::schema::StepEntity) -> Option<Vec<TopoEdge>> {
+        let (edges, _step_ids) = self.resolve_face_bound_with_step_ids(bound_entity)?;
+        Some(edges)
+    }
+
+    /// Resolve a FACE_BOUND or FACE_OUTER_BOUND entity, returning both edges and their STEP EDGE_CURVE IDs.
+    fn resolve_face_bound_with_step_ids(&self, bound_entity: &crate::schema::StepEntity) -> Option<(Vec<TopoEdge>, Vec<i64>)> {
         // FACE_BOUND('', #loop_ref, .T.)
         // The loop reference is typically the 2nd parameter (index 1)
         for (i, param) in bound_entity.params.iter().enumerate() {
@@ -2278,7 +2512,7 @@ impl<'a> StepConverter<'a> {
             if let Some(loop_id) = self.get_ref(param) {
                 if let Some(loop_entity) = self.step.find_entity(loop_id) {
                     if loop_entity.type_name == "EDGE_LOOP" {
-                        return Some(self.resolve_edge_loop(loop_id));
+                        return Some(self.resolve_edge_loop_with_step_ids(loop_id));
                     }
                 }
             }
@@ -2289,32 +2523,46 @@ impl<'a> StepConverter<'a> {
     /// Resolve an EDGE_LOOP entity to a list of Edge objects.
     /// EDGE_LOOP params: [name, (oriented_edge_refs)]
     fn resolve_edge_loop(&self, loop_id: i64) -> Vec<TopoEdge> {
+        let (edges, _) = self.resolve_edge_loop_with_step_ids(loop_id);
+        edges
+    }
+
+    /// Resolve an EDGE_LOOP entity, returning both edges and their STEP EDGE_CURVE IDs.
+    fn resolve_edge_loop_with_step_ids(&self, loop_id: i64) -> (Vec<TopoEdge>, Vec<i64>) {
         let loop_entity = match self.step.find_entity(loop_id) {
             Some(e) => e,
-            None => return vec![],
+            None => return (vec![], vec![]),
         };
 
         let mut edges = Vec::new();
+        let mut step_ids = Vec::new();
 
         // EDGE_LOOP('', (#oe1, #oe2, ...))
         for param in &loop_entity.params {
             if let StepValue::List(items) = param {
                 for item in items {
                     if let Some(oe_id) = self.get_ref(item) {
-                        if let Some(edge) = self.resolve_oriented_edge(oe_id) {
+                        if let Some((edge, step_id)) = self.resolve_oriented_edge_with_step_id(oe_id) {
                             edges.push(edge);
+                            step_ids.push(step_id);
                         }
                     }
                 }
             }
         }
 
-        edges
+        (edges, step_ids)
     }
 
     /// Resolve an ORIENTED_EDGE entity to an Edge object.
     /// ORIENTED_EDGE params: [name, *, *, edge_curve_ref, orientation]
     fn resolve_oriented_edge(&self, oe_id: i64) -> Option<TopoEdge> {
+        let (edge, _) = self.resolve_oriented_edge_with_step_id(oe_id)?;
+        Some(edge)
+    }
+
+    /// Resolve an ORIENTED_EDGE entity, returning both the edge and its STEP EDGE_CURVE ID.
+    fn resolve_oriented_edge_with_step_id(&self, oe_id: i64) -> Option<(TopoEdge, i64)> {
         let oe_entity = self.step.find_entity(oe_id)?;
 
         // ORIENTED_EDGE('', *, *, #edge_curve_ref, .T./.F.)
@@ -2339,15 +2587,15 @@ impl<'a> StepConverter<'a> {
             }
         }
 
-        let edge_curve_id = edge_curve_id?;
-        let mut edge = self.resolve_edge_curve(edge_curve_id)?;
+        let edge_curve_id_val = edge_curve_id?;
+        let mut edge = self.resolve_edge_curve(edge_curve_id_val)?;
 
         // If the oriented edge is reversed relative to the edge curve, reverse it
         if !orientation {
             edge = edge.reversed();
         }
 
-        Some(edge)
+        Some((edge, edge_curve_id_val))
     }
 
     /// Resolve an EDGE_CURVE entity to an Edge object.
@@ -4325,6 +4573,143 @@ impl<'a> StepConverter<'a> {
 
     /// Convert a FaceData (surface + boundary edges) to a mesh by creating a Face
     /// with proper wire/edges and triangulating.
+    /// Triangulate a face using the STEP edge discretization cache.
+    ///
+    /// This is the cache-aware version of `surface_to_mesh`. When multiple faces
+    /// share the same STEP EDGE_CURVE entity, the cache ensures they produce
+    /// identical 3D boundary points, guaranteeing watertight meshes.
+    fn surface_to_mesh_cached(
+        &self,
+        face_data: &FaceData,
+        params: &TriangulationParams,
+        bbox: &Option<(Point3d, Point3d)>,
+        edge_cache: &mut StepEdgeCache,
+    ) -> TriangleMesh {
+        if face_data.edges.is_empty() {
+            // No boundary edges — fall back to bounding-box-based triangulation for planes,
+            // or standard triangulation for curved surfaces
+            if let Surface::Plane(ref plane) = face_data.surface {
+                return self.triangulate_unbounded_plane(plane, params, bbox);
+            }
+            
+            let wire = Wire::new(vec![]);
+            let mut face = Face::new(face_data.surface.clone(), wire);
+            face.forward = face_data.forward;
+            face.edges = vec![];
+            return triangulate_face(&face, params);
+        }
+
+        // For planar faces with inner loops (holes), use the dedicated hole-aware path
+        if let Surface::Plane(ref plane) = face_data.surface {
+            if !face_data.inner_edges.is_empty() {
+                return self.triangulate_planar_face_with_holes_cached(
+                    plane, &face_data.outer_edges, &face_data.outer_edge_step_ids,
+                    &face_data.inner_edges, &face_data.inner_edge_step_ids,
+                    face_data.forward, edge_cache,
+                );
+            }
+        }
+
+        // Collect 3D boundary points from edge curves using the cache.
+        // When an edge is already in the cache (shared with another face),
+        // we reuse the identical 3D points to guarantee watertightness.
+        let mut boundary_points = Vec::new();
+        let mut inner_boundary_points: Vec<Vec<Point3d>> = Vec::new();
+
+        // Sample outer edges using the cache
+        for (edge_idx, edge) in face_data.outer_edges.iter().enumerate() {
+            let step_id = face_data.outer_edge_step_ids.get(edge_idx).copied().unwrap_or(0);
+            let n_samples = self.edge_sample_count(edge);
+            if step_id != 0 {
+                let pts = edge_cache.discretize(step_id, edge, n_samples);
+                boundary_points.extend(pts);
+            } else {
+                // No STEP ID (e.g., synthetic edge) — sample independently
+                for i in 0..n_samples {
+                    let t = i as f64 / (n_samples - 1).max(1) as f64;
+                    if let Some(p) = edge.point_at(t) {
+                        boundary_points.push(p);
+                    }
+                }
+            }
+        }
+
+        // For curved surfaces, also sample inner edges (holes) using the cache
+        match &face_data.surface {
+            Surface::Plane(_) => {}, // Planes use the dedicated hole-aware path above
+            _ => {
+                for (loop_idx, inner_edges) in face_data.inner_edges.iter().enumerate() {
+                    let mut hole_pts = Vec::new();
+                    let step_ids = face_data.inner_edge_step_ids.get(loop_idx);
+                    for (edge_idx, edge) in inner_edges.iter().enumerate() {
+                        let step_id = step_ids.and_then(|ids| ids.get(edge_idx).copied()).unwrap_or(0);
+                        let n_samples = self.edge_sample_count(edge);
+                        if step_id != 0 {
+                            let pts = edge_cache.discretize(step_id, edge, n_samples);
+                            hole_pts.extend(pts);
+                        } else {
+                            for i in 0..n_samples {
+                                let t = i as f64 / (n_samples - 1).max(1) as f64;
+                                if let Some(p) = edge.point_at(t) {
+                                    hole_pts.push(p);
+                                }
+                            }
+                        }
+                    }
+                    if !hole_pts.is_empty() {
+                        hole_pts = deduplicate_points_3d(&hole_pts, 1e-6);
+                        inner_boundary_points.push(hole_pts);
+                    }
+                }
+            }
+        }
+
+        // If outer boundary is empty, try all edges with cache
+        if boundary_points.is_empty() {
+            for (edge_idx, edge) in face_data.edges.iter().enumerate() {
+                let step_id = face_data.edge_step_ids.get(edge_idx).copied().unwrap_or(0);
+                let n_samples = self.edge_sample_count(edge);
+                if step_id != 0 {
+                    let pts = edge_cache.discretize(step_id, edge, n_samples);
+                    boundary_points.extend(pts);
+                } else {
+                    for i in 0..n_samples {
+                        let t = i as f64 / (n_samples - 1).max(1) as f64;
+                        if let Some(p) = edge.point_at(t) {
+                            boundary_points.push(p);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Deduplicate boundary points
+        boundary_points = deduplicate_points_3d(&boundary_points, 1e-6);
+
+        // If we have boundary points, use boundary-aware triangulation
+        if !boundary_points.is_empty() {
+            return draper_mesh::triangulate_face_with_boundary_and_holes(
+                &face_data.surface,
+                &boundary_points,
+                &inner_boundary_points,
+                face_data.forward,
+                params,
+            );
+        }
+
+        // Fallback: use the old Face-based path
+        let coedges: Vec<CoEdge> = face_data.edges.iter().map(|e| {
+            CoEdge::new(e.id, true)
+        }).collect();
+        let wire = Wire::new(coedges);
+
+        let mut face = Face::new(face_data.surface.clone(), wire);
+        face.forward = face_data.forward;
+        face.edges = face_data.edges.clone();
+
+        triangulate_face(&face, params)
+    }
+
     fn surface_to_mesh(
         &self,
         face_data: &FaceData,
@@ -4445,6 +4830,138 @@ impl<'a> StepConverter<'a> {
     /// Triangulate a planar face with holes using the bridge-edge technique.
     /// This connects each hole to the outer boundary with a pair of coincident edges,
     /// creating a single polygon that can be ear-clipped.
+    /// Triangulate a planar face with holes using the edge cache for consistent boundary points.
+    fn triangulate_planar_face_with_holes_cached(
+        &self,
+        plane: &Plane,
+        outer_edges: &[TopoEdge],
+        outer_step_ids: &[i64],
+        inner_loops: &[Vec<TopoEdge>],
+        inner_step_ids: &[Vec<i64>],
+        forward: bool,
+        edge_cache: &mut StepEdgeCache,
+    ) -> TriangleMesh {
+        let mut mesh = TriangleMesh::new();
+
+        // Sample outer boundary points using the cache
+        let mut outer_points_3d = Vec::new();
+        for (edge_idx, edge) in outer_edges.iter().enumerate() {
+            let step_id = outer_step_ids.get(edge_idx).copied().unwrap_or(0);
+            let n_samples = self.edge_sample_count(edge);
+            if step_id != 0 {
+                let pts = edge_cache.discretize(step_id, edge, n_samples);
+                outer_points_3d.extend(pts);
+            } else {
+                outer_points_3d.extend(self.sample_edge_points(edge));
+            }
+        }
+        outer_points_3d = deduplicate_points_3d(&outer_points_3d, 1e-6);
+        if outer_points_3d.is_empty() {
+            return mesh;
+        }
+
+        // Project all points onto the plane's 2D coordinate system
+        let project = |p: &Point3d| -> Point2d {
+            let dx = p.x - plane.origin.x;
+            let dy = p.y - plane.origin.y;
+            let dz = p.z - plane.origin.z;
+            Point2d::new(
+                dx * plane.u_dir.x + dy * plane.u_dir.y + dz * plane.u_dir.z,
+                dx * plane.v_dir.x + dy * plane.v_dir.y + dz * plane.v_dir.z,
+            )
+        };
+
+        let outer_2d: Vec<Point2d> = outer_points_3d.iter().map(|p| project(p)).collect();
+
+        // Sample inner loop (hole) points using the cache
+        let mut hole_points_3d: Vec<Vec<Point3d>> = Vec::new();
+        let mut hole_points_2d: Vec<Vec<Point2d>> = Vec::new();
+        for (loop_idx, inner_edges) in inner_loops.iter().enumerate() {
+            let mut hp3d = Vec::new();
+            let step_ids = inner_step_ids.get(loop_idx);
+            for (edge_idx, edge) in inner_edges.iter().enumerate() {
+                let step_id = step_ids.and_then(|ids| ids.get(edge_idx).copied()).unwrap_or(0);
+                let n_samples = self.edge_sample_count(edge);
+                if step_id != 0 {
+                    let pts = edge_cache.discretize(step_id, edge, n_samples);
+                    hp3d.extend(pts);
+                } else {
+                    hp3d.extend(self.sample_edge_points(edge));
+                }
+            }
+            if !hp3d.is_empty() {
+                hp3d = deduplicate_points_3d(&hp3d, 1e-6);
+                let hp2d: Vec<Point2d> = hp3d.iter().map(|p| project(p)).collect();
+                hole_points_3d.push(hp3d);
+                hole_points_2d.push(hp2d);
+            }
+        }
+
+        // Same triangulation logic as the non-cached version
+        if hole_points_2d.is_empty() {
+            let is_convex = is_convex_polygon_2d(&outer_2d);
+            if is_convex && outer_points_3d.len() >= 3 {
+                for p in &outer_points_3d { mesh.add_vertex(*p); }
+                let n = outer_points_3d.len() as u32;
+                for i in 1..n - 1 {
+                    if forward { mesh.add_triangle(0, i, i + 1); }
+                    else { mesh.add_triangle(0, i + 1, i); }
+                }
+            } else {
+                let triangles = ear_clip(&outer_2d);
+                for p in &outer_points_3d { mesh.add_vertex(*p); }
+                for tri in &triangles {
+                    if forward { mesh.add_triangle(tri[0], tri[1], tri[2]); }
+                    else { mesh.add_triangle(tri[0], tri[2], tri[1]); }
+                }
+            }
+        } else {
+            let mut all_points_3d = outer_points_3d.clone();
+            let mut all_points_2d = outer_2d.clone();
+            let mut polygon_indices: Vec<u32> = (0..all_points_3d.len() as u32).collect();
+
+            for hole_3d in &hole_points_3d {
+                let hole_2d: Vec<Point2d> = hole_3d.iter().map(|p| project(p)).collect();
+                let hole_start_idx = all_points_3d.len();
+                let bridge_result = find_bridge_edge_2d(&all_points_2d, &hole_2d);
+                for p in hole_3d { all_points_3d.push(*p); }
+                all_points_2d.extend(hole_2d);
+                let mut new_polygon = Vec::with_capacity(polygon_indices.len() + hole_3d.len() + 2);
+                let bridge_outer = bridge_result.0;
+                let bridge_hole = hole_start_idx + bridge_result.1;
+                for &idx in &polygon_indices[..=bridge_outer] { new_polygon.push(idx); }
+                new_polygon.push(bridge_hole as u32);
+                for i in 0..hole_3d.len() {
+                    let idx = (bridge_hole + i) % hole_3d.len() + hole_start_idx;
+                    new_polygon.push(idx as u32);
+                }
+                new_polygon.push(bridge_hole as u32);
+                new_polygon.push(polygon_indices[bridge_outer]);
+                for &idx in &polygon_indices[bridge_outer + 1..] { new_polygon.push(idx); }
+                polygon_indices = new_polygon;
+            }
+
+            let merged_2d: Vec<Point2d> = polygon_indices.iter()
+                .map(|&idx| all_points_2d[idx as usize])
+                .collect();
+            let triangles = ear_clip(&merged_2d);
+            for p in &all_points_3d { mesh.add_vertex(*p); }
+            for tri in &triangles {
+                let i0 = polygon_indices[tri[0] as usize];
+                let i1 = polygon_indices[tri[1] as usize];
+                let i2 = polygon_indices[tri[2] as usize];
+                if forward { mesh.add_triangle(i0, i1, i2); }
+                else { mesh.add_triangle(i0, i2, i1); }
+            }
+        }
+
+        let normal = if forward { plane.normal } else {
+            Direction3d::new(-plane.normal.x, -plane.normal.y, -plane.normal.z).unwrap_or(Direction3d::Z)
+        };
+        mesh.face_normals = Some(vec![[normal.x, normal.y, normal.z]; mesh.triangles.len()]);
+        mesh
+    }
+
     fn triangulate_planar_face_with_holes(
         &self,
         plane: &Plane,
@@ -4522,19 +5039,26 @@ impl<'a> StepConverter<'a> {
     fn sample_edges(&self, edges: &[TopoEdge]) -> Vec<Point3d> {
         let mut points = Vec::new();
         for edge in edges {
-            let n_samples = self.edge_sample_count(edge);
-            for i in 0..n_samples {
-                let t = i as f64 / (n_samples - 1).max(1) as f64;
-                if let Some(p) = edge.point_at(t) {
-                    points.push(p);
-                }
-            }
+            points.extend(self.sample_edge_points(edge));
         }
 
         // Remove near-duplicate consecutive points
         points = deduplicate_points_3d(&points, 1e-6);
 
         points
+    }
+
+    /// Sample points from a single edge curve.
+    fn sample_edge_points(&self, edge: &TopoEdge) -> Vec<Point3d> {
+        let n_samples = self.edge_sample_count(edge);
+        let mut pts = Vec::with_capacity(n_samples);
+        for i in 0..n_samples {
+            let t = i as f64 / (n_samples - 1).max(1) as f64;
+            if let Some(p) = edge.point_at(t) {
+                pts.push(p);
+            }
+        }
+        pts
     }
 
     /// Triangulate a PLANE surface with no boundary edges, using the bounding box
@@ -4698,6 +5222,50 @@ fn project_point_on_line(line: &Line, point: &Point3d) -> f64 {
 
 /// Deduplicate a list of 3D points by removing consecutive points that are within
 /// the given tolerance. Also removes the last point if it coincides with the first
+/// Find the best bridge edge between an outer polygon and a hole in 2D.
+/// Returns (outer_idx, hole_idx) — the indices to connect.
+fn find_bridge_edge_2d(outer_2d: &[Point2d], hole_2d: &[Point2d]) -> (usize, usize) {
+    let mut hole_idx = 0;
+    let mut max_u = hole_2d[0].u;
+    for (i, p) in hole_2d.iter().enumerate() {
+        if p.u > max_u {
+            max_u = p.u;
+            hole_idx = i;
+        }
+    }
+    let hole_pt = &hole_2d[hole_idx];
+    let mut outer_idx = 0;
+    let mut min_dist = f64::MAX;
+    for (i, p) in outer_2d.iter().enumerate() {
+        let dx = p.u - hole_pt.u;
+        let dy = p.v - hole_pt.v;
+        let dist = dx * dx + dy * dy;
+        if dist < min_dist {
+            min_dist = dist;
+            outer_idx = i;
+        }
+    }
+    (outer_idx, hole_idx)
+}
+
+/// Check if a 2D polygon is convex.
+fn is_convex_polygon_2d(points: &[Point2d]) -> bool {
+    let n = points.len();
+    if n < 3 { return false; }
+    let mut sign = 0i32;
+    for i in 0..n {
+        let a = &points[i];
+        let b = &points[(i + 1) % n];
+        let c = &points[(i + 2) % n];
+        let cross = (b.u - a.u) * (c.v - a.v) - (b.v - a.v) * (c.u - a.u);
+        if cross.abs() > 1e-10 {
+            let s = if cross > 0.0 { 1 } else { -1 };
+            if sign == 0 { sign = s; } else if sign != s { return false; }
+        }
+    }
+    sign != 0
+}
+
 /// (closing a loop). This is essential for ear clipping algorithms which produce
 /// degenerate triangles on duplicate vertices.
 fn deduplicate_points_3d(points: &[Point3d], tolerance: f64) -> Vec<Point3d> {
