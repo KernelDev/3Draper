@@ -21,7 +21,7 @@
 //! The cached UV coordinates per face will be used directly by UV-space CDT
 //! triangulation to produce boundary-conforming triangles.
 
-use draper_geometry::{Point3d, Point2d, Curve3d, Surface, tolerance::ToleranceContext};
+use draper_geometry::{Point3d, Point2d, Curve3d, Curve2d, Surface, tolerance::ToleranceContext};
 use draper_topology::{Edge, TopoId};
 use std::collections::HashMap;
 
@@ -79,12 +79,15 @@ impl EdgeDiscretizationCache {
     /// * `face_id` - The TopoId of the face that needs this edge
     /// * `surface` - The surface of the face (for UV computation)
     /// * `n_samples_hint` - Suggested number of samples (ignored if edge is already cached)
+    /// * `curve_2d` - Optional analytical PCURVE in UV space. When present, UV coordinates
+    ///   are computed analytically from the curve instead of using surface.project_point().
     pub fn discretize_edge(
         &mut self,
         edge: &Edge,
         face_id: TopoId,
         surface: &Surface,
         n_samples_hint: usize,
+        curve_2d: Option<&Curve2d>,
     ) -> &EdgeDiscretization {
         let edge_id = edge.id;
 
@@ -92,7 +95,7 @@ impl EdgeDiscretizationCache {
         if self.entries.contains_key(&edge_id) {
             let entry = self.entries.get_mut(&edge_id).unwrap();
             if !entry.uv_per_face.contains_key(&face_id) {
-                let uvs = Self::compute_uvs(&entry.points_3d, surface);
+                let uvs = Self::compute_uvs(&entry.points_3d, &entry.params, surface, curve_2d);
                 entry.uv_per_face.insert(face_id, uvs);
             }
             return self.entries.get(&edge_id).unwrap();
@@ -102,7 +105,7 @@ impl EdgeDiscretizationCache {
         let (points_3d, params) = self.adaptive_discretize(edge, n_samples_hint);
 
         // Compute UV for this face
-        let uvs = Self::compute_uvs(&points_3d, surface);
+        let uvs = Self::compute_uvs(&points_3d, &params, surface, curve_2d);
 
         let mut uv_per_face = HashMap::new();
         uv_per_face.insert(face_id, uvs);
@@ -222,14 +225,31 @@ impl EdgeDiscretizationCache {
     }
 
     /// Compute UV coordinates for a set of 3D points on a surface.
-    fn compute_uvs(points_3d: &[Point3d], surface: &Surface) -> Vec<Point2d> {
-        points_3d
-            .iter()
-            .map(|p| {
-                let (u, v) = surface.project_point(p);
-                Point2d::new(u, v)
-            })
-            .collect()
+    ///
+    /// If a Curve2d (analytical PCURVE) is provided, UV coordinates are computed
+    /// by evaluating the curve at the corresponding parameter values. This is more
+    /// accurate and faster than surface.project_point().
+    ///
+    /// If no Curve2d is available, falls back to surface.project_point().
+    fn compute_uvs(points_3d: &[Point3d], params: &[f64], surface: &Surface, curve_2d: Option<&Curve2d>) -> Vec<Point2d> {
+        if let Some(c2d) = curve_2d {
+            // Use analytical PCURVE — evaluate the 2D curve at each parameter value
+            let (t_min, t_max) = c2d.param_range();
+            params.iter().map(|&t| {
+                // Map normalized parameter t ∈ [0, 1] to curve's parameter range
+                let curve_t = t_min + t * (t_max - t_min);
+                c2d.point_at(curve_t)
+            }).collect()
+        } else {
+            // Fallback: project 3D points onto the surface
+            points_3d
+                .iter()
+                .map(|p| {
+                    let (u, v) = surface.project_point(p);
+                    Point2d::new(u, v)
+                })
+                .collect()
+        }
     }
 
     /// Clear the cache.
@@ -270,7 +290,7 @@ fn point_to_chord_distance(point: &Point3d, a: &Point3d, b: &Point3d) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use draper_geometry::{Point3d, Plane};
+    use draper_geometry::{Point3d, Plane, Direction3d, Line2d};
     use draper_topology::Edge;
 
     #[test]
@@ -284,7 +304,7 @@ mod tests {
         let face_id = TopoId::new();
 
         {
-            let disc = cache.discretize_edge(&edge, face_id, &surface, 32);
+            let disc = cache.discretize_edge(&edge, face_id, &surface, 32, None);
             // Line edges should have exactly 2 points (endpoints)
             assert_eq!(disc.points_3d.len(), 2);
         }
@@ -306,11 +326,11 @@ mod tests {
         let face2_id = TopoId::new();
 
         // Discretize for face1 — clone the points to release the borrow
-        let points_face1 = cache.discretize_edge(&edge, face1_id, &surface1, 32).points_3d.clone();
+        let points_face1 = cache.discretize_edge(&edge, face1_id, &surface1, 32, None).points_3d.clone();
 
         // Discretize for face2 — should return same 3D points
         let (points_face2, has_face1_uv, has_face2_uv) = {
-            let disc2 = cache.discretize_edge(&edge, face2_id, &surface2, 32);
+            let disc2 = cache.discretize_edge(&edge, face2_id, &surface2, 32, None);
             let pts = disc2.points_3d.clone();
             let h1 = disc2.uv_per_face.contains_key(&face1_id);
             let h2 = disc2.uv_per_face.contains_key(&face2_id);
@@ -323,6 +343,88 @@ mod tests {
 
         // Verify cache count after borrows are released
         assert_eq!(cache.len(), 1, "Edge should only be cached once");
+    }
+
+    #[test]
+    fn test_curve2d_analytical_uv() {
+        // Test that a Curve2d produces correct UV coordinates
+
+        let mut cache = EdgeDiscretizationCache::new();
+        let p1 = Point3d::new(0.0, 0.0, 0.0);
+        let p2 = Point3d::new(1.0, 0.0, 0.0);
+        let edge = Edge::new_line(p1, p2);
+
+        let surface = Surface::Plane(Plane::xy());
+        let face_id = TopoId::new();
+
+        // Create a Line2d from (0.5, 0.5) to (1.5, 0.5) in UV space
+        let curve_2d = Curve2d::Line(Line2d::new(
+            Point2d::new(0.5, 0.5),
+            Point2d::new(1.5, 0.5),
+        ));
+
+        let disc = cache.discretize_edge(&edge, face_id, &surface, 32, Some(&curve_2d));
+
+        // The UV coordinates should come from the Curve2d, not surface.project_point()
+        let uvs = disc.uv_per_face.get(&face_id).unwrap();
+        // For a line edge with 2 points (t=0 and t=1):
+        // t=0 → point_at(0) = (0.5, 0.5)
+        // t=1 → point_at(1) = (1.5, 0.5)
+        assert!((uvs[0].u - 0.5).abs() < 1e-10, "Expected u=0.5, got {}", uvs[0].u);
+        assert!((uvs[0].v - 0.5).abs() < 1e-10, "Expected v=0.5, got {}", uvs[0].v);
+        assert!((uvs[1].u - 1.5).abs() < 1e-10, "Expected u=1.5, got {}", uvs[1].u);
+        assert!((uvs[1].v - 0.5).abs() < 1e-10, "Expected v=0.5, got {}", uvs[1].v);
+    }
+
+    #[test]
+    fn test_curve2d_vs_project_point_cylinder() {
+        // Test that a cylinder edge with analytical PCURVE produces
+        // UV coordinates consistent with surface.project_point()
+        use draper_geometry::CylinderSurface;
+
+        // Create a cylinder with radius 5.0, axis along Z
+        let center = Point3d::new(0.0, 0.0, 0.0);
+        let axis = Direction3d::new(0.0, 0.0, 1.0).unwrap();
+        let cylinder = CylinderSurface::new(center, axis, 5.0);
+        let surface = Surface::Cylinder(cylinder);
+
+        // Create a line edge along the cylinder axis (constant theta, varying z)
+        let p1 = Point3d::new(5.0, 0.0, 0.0); // theta=0, z=0
+        let p2 = Point3d::new(5.0, 0.0, 10.0); // theta=0, z=10
+        let edge = Edge::new_line(p1, p2);
+
+        let face_id = TopoId::new();
+
+        // Create a Line2d in UV space: u=0 (theta=0), v goes from 0 to 10
+        let curve_2d = Curve2d::Line(Line2d::new(
+            Point2d::new(0.0, 0.0),
+            Point2d::new(0.0, 10.0),
+        ));
+
+        // Compute UV using analytical method
+        let mut cache_a = EdgeDiscretizationCache::new();
+        let uvs_a = cache_a.discretize_edge(&edge, face_id, &surface, 32, Some(&curve_2d))
+            .uv_per_face.get(&face_id).unwrap().clone();
+
+        // Compute UV using project_point method
+        let mut cache_p = EdgeDiscretizationCache::new();
+        let uvs_p = cache_p.discretize_edge(&edge, face_id, &surface, 32, None)
+            .uv_per_face.get(&face_id).unwrap().clone();
+
+        // Both should have the same number of UV points
+        assert_eq!(uvs_a.len(), uvs_p.len());
+
+        // For a line along the cylinder axis, both methods should produce
+        // similar UV coordinates (u≈0, v from 0 to 10)
+        for i in 0..uvs_a.len() {
+            // Allow some tolerance — project_point is approximate for cylinders
+            let du = (uvs_a[i].u - uvs_p[i].u).abs();
+            let dv = (uvs_a[i].v - uvs_p[i].v).abs();
+            // The analytical curve_2d should give exact UV; project_point is approximate
+            // We allow a generous tolerance since project_point can have errors
+            assert!(du < 0.5, "u mismatch at point {}: analytical={}, projected={}", i, uvs_a[i].u, uvs_p[i].u);
+            assert!(dv < 0.5, "v mismatch at point {}: analytical={}, projected={}", i, uvs_a[i].v, uvs_p[i].v);
+        }
     }
 
     #[test]

@@ -106,6 +106,12 @@ pub struct TriangulationParams {
     pub angular_samples: usize,
     /// Number of height samples for cylindrical surfaces.
     pub height_samples: usize,
+    /// Maximum angular deviation in radians between adjacent face normals.
+    pub max_angular_deviation: f64,
+    /// LOD detail level (1.0 = normal, 0.5 = coarser, 2.0 = finer).
+    pub detail_level: f64,
+    /// Whether to use adaptive sampling based on curvature.
+    pub adaptive: bool,
 }
 
 impl Default for TriangulationParams {
@@ -115,6 +121,9 @@ impl Default for TriangulationParams {
             max_deviation: 0.01,
             angular_samples: 48,
             height_samples: 8,
+            max_angular_deviation: 0.1,
+            detail_level: 1.0,
+            adaptive: true,
         }
     }
 }
@@ -467,6 +476,125 @@ fn find_bridge_edge(outer_2d: &[Point2d], hole_2d: &[Point2d]) -> BridgeResult {
 }
 
 // ============================================================
+// Unified ring-based surface triangulation
+// ============================================================
+
+/// Information about a single ring row in a ring-based surface.
+struct RingRow {
+    /// Base vertex index for this row.
+    base_index: u32,
+    /// Number of vertices in this row (1 for degenerate/pole rows, n_u for normal rows).
+    vertex_count: usize,
+}
+
+/// Triangulate a ring-based surface using a unified algorithm.
+///
+/// Ring-based surfaces (cylinder, cone, sphere, torus) share a common
+/// parameterization: u = angle around the axis, v = position along the axis.
+/// This function generates vertices in rings (one per v-step) and connects
+/// them with triangle strips, handling:
+/// - Periodic u (seam closing when full_circle)
+/// - Degenerate rows (cone apex, sphere poles with single vertex)
+/// - Partial u/v ranges
+fn triangulate_ring_surface(
+    n_u: usize,
+    n_v: usize,
+    full_circle: bool,
+    forward: bool,
+    point_at: impl Fn(usize, usize) -> Point3d,       // (i_u, j_v) -> Point3d
+    normal_at: impl Fn(usize, usize) -> Direction3d,   // (i_u, j_v) -> Direction3d
+    is_degenerate_row: impl Fn(usize) -> bool,          // j_v -> is this row degenerate (1 vertex)?
+) -> TriangleMesh {
+    let mut mesh = TriangleMesh::new();
+
+    // Generate vertices for each ring row
+    let mut rows: Vec<RingRow> = Vec::with_capacity(n_v + 1);
+    let mut total_vertices = 0u32;
+
+    for j in 0..=n_v {
+        if is_degenerate_row(j) {
+            // Degenerate row — single vertex (pole or apex)
+            let p = point_at(0, j);
+            let n = normal_at(0, j);
+            let idx = mesh.add_vertex(p);
+            mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+            rows.push(RingRow { base_index: idx, vertex_count: 1 });
+            total_vertices += 1;
+        } else {
+            // Normal ring row — n_u vertices
+            let base = total_vertices;
+            for i in 0..n_u {
+                let p = point_at(i, j);
+                let n = normal_at(i, j);
+                let idx = mesh.add_vertex(p);
+                mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+            }
+            rows.push(RingRow { base_index: base, vertex_count: n_u });
+            total_vertices += n_u as u32;
+        }
+    }
+
+    // Generate triangle strips between adjacent rows
+    for j in 0..n_v {
+        let row = &rows[j];
+        let next_row = &rows[j + 1];
+
+        if next_row.vertex_count == 1 {
+            // Next row is a single vertex (pole/apex) — fan triangulation
+            let apex = next_row.base_index;
+            let loop_count = if full_circle { row.vertex_count } else { row.vertex_count - 1 };
+            for i in 0..loop_count {
+                let i_next = (i + 1) % row.vertex_count;
+                let v0 = row.base_index + i as u32;
+                let v1 = row.base_index + i_next as u32;
+                if v0 != v1 {
+                    if forward {
+                        mesh.add_triangle(v0, v1, apex);
+                    } else {
+                        mesh.add_triangle(v1, v0, apex);
+                    }
+                }
+            }
+        } else if row.vertex_count == 1 {
+            // Current row is a single vertex (pole) — fan from pole
+            let pole = row.base_index;
+            let loop_count = if full_circle { next_row.vertex_count } else { next_row.vertex_count - 1 };
+            for i in 0..loop_count {
+                let i_next = (i + 1) % next_row.vertex_count;
+                let v1 = next_row.base_index + i as u32;
+                let v2 = next_row.base_index + i_next as u32;
+                if v1 != v2 {
+                    if forward {
+                        mesh.add_triangle(pole, v1, v2);
+                    } else {
+                        mesh.add_triangle(pole, v2, v1);
+                    }
+                }
+            }
+        } else {
+            // Both rows are normal rings — quad strip
+            let loop_count = if full_circle { row.vertex_count } else { row.vertex_count - 1 };
+            for i in 0..loop_count {
+                let i_next = (i + 1) % row.vertex_count;
+                let v0 = row.base_index + i as u32;
+                let v1 = row.base_index + i_next as u32;
+                let v2 = next_row.base_index + i_next as u32;
+                let v3 = next_row.base_index + i as u32;
+                if forward {
+                    mesh.add_triangle(v0, v1, v2);
+                    mesh.add_triangle(v0, v2, v3);
+                } else {
+                    mesh.add_triangle(v0, v2, v1);
+                    mesh.add_triangle(v0, v3, v2);
+                }
+            }
+        }
+    }
+
+    mesh
+}
+
+// ============================================================
 // Curved surface triangulation — boundary-consistent
 // ============================================================
 
@@ -500,12 +628,19 @@ fn triangulate_cylinder_face(face: &Face, cyl: &CylinderSurface, params: &Triang
         true
     };
 
-    // Sample the cylinder surface on a grid, but snap boundary rings to edge curves
-    let n_u = if full_circle { params.angular_samples } else { params.angular_samples.min(48) };
-    let n_v = params.height_samples.max(2);
-
     let u_start = if full_circle { 0.0 } else { u_min };
     let u_end = if full_circle { 2.0 * PI } else { u_max };
+
+    // Sample the cylinder surface on a grid, but snap boundary rings to edge curves
+    let (n_u, n_v) = if params.adaptive {
+        crate::adaptive::required_samples(
+            &Surface::Cylinder(cyl.clone()), u_start, u_end, v_min, v_max,
+            params.max_deviation, params.detail_level,
+        )
+    } else {
+        let n_u = if full_circle { params.angular_samples } else { params.angular_samples.min(48) };
+        (n_u, params.height_samples.max(2))
+    };
 
     let mut mesh = TriangleMesh::new();
 
@@ -563,10 +698,17 @@ fn triangulate_cylinder_face(face: &Face, cyl: &CylinderSurface, params: &Triang
 /// Full cylinder triangulation (no boundary edges).
 fn triangulate_cylinder_full(face: &Face, cyl: &CylinderSurface, params: &TriangulationParams) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
-    let n_u = params.angular_samples;
-    let n_v = params.height_samples.max(2);
     let (v_min, v_max) = compute_axis_v_range(face, &cyl.origin, &cyl.axis);
     let (v_min, v_max) = if v_min < v_max { (v_min, v_max) } else { (0.0, 1.0) };
+
+    let (n_u, n_v) = if params.adaptive {
+        crate::adaptive::required_samples(
+            &Surface::Cylinder(cyl.clone()), 0.0, 2.0 * PI, v_min, v_max,
+            params.max_deviation, params.detail_level,
+        )
+    } else {
+        (params.angular_samples, params.height_samples.max(2))
+    };
 
     // Generate vertices: n_v+1 rows (from v_min to v_max inclusive)
     for j in 0..=n_v {
@@ -687,11 +829,18 @@ fn triangulate_cone_face(face: &Face, cone: &ConeSurface, params: &Triangulation
         true
     };
 
-    let n_u = if full_circle { params.angular_samples } else { params.angular_samples.min(48) };
-    let n_v = params.height_samples.max(2);
-
     let u_start = if full_circle { 0.0 } else { u_min };
     let u_end = if full_circle { 2.0 * PI } else { u_max };
+
+    let (n_u, n_v) = if params.adaptive {
+        crate::adaptive::required_samples(
+            &Surface::Cone(cone.clone()), u_start, u_end, v_min, v_max,
+            params.max_deviation, params.detail_level,
+        )
+    } else {
+        let n_u = if full_circle { params.angular_samples } else { params.angular_samples.min(48) };
+        (n_u, params.height_samples.max(2))
+    };
 
     // Check if the top row reaches the apex (radius = 0)
     let apex_v = cone.height();
@@ -790,10 +939,17 @@ fn triangulate_cone_face(face: &Face, cone: &ConeSurface, params: &Triangulation
 /// instead of n_u to avoid degenerate (zero-area) triangles.
 fn triangulate_cone_full(face: &Face, cone: &ConeSurface, params: &TriangulationParams) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
-    let n_u = params.angular_samples;
-    let n_v = params.height_samples.max(2);
     let (v_min, v_max) = compute_axis_v_range(face, &cone.origin, &cone.axis);
     let (v_min, v_max) = if v_min < v_max { (v_min, v_max) } else { (0.0, cone.height().min(100.0)) };
+
+    let (n_u, n_v) = if params.adaptive {
+        crate::adaptive::required_samples(
+            &Surface::Cone(cone.clone()), 0.0, 2.0 * PI, v_min, v_max,
+            params.max_deviation, params.detail_level,
+        )
+    } else {
+        (params.angular_samples, params.height_samples.max(2))
+    };
 
     // Clamp v_max to apex height
     let apex_v = cone.height();
@@ -894,8 +1050,6 @@ fn triangulate_cone_full(face: &Face, cone: &ConeSurface, params: &Triangulation
 /// into a single vertex to avoid degenerate (zero-area) triangles.
 fn triangulate_sphere_face(face: &Face, sphere: &SphereSurface, params: &TriangulationParams) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
-    let n_u = params.angular_samples;
-    let n_v = (params.angular_samples / 2).max(4);
 
     // Default: full sphere [0, 2π] × [0, π]
     let mut u_start = 0.0_f64;
@@ -940,6 +1094,16 @@ fn triangulate_sphere_face(face: &Face, sphere: &SphereSurface, params: &Triangu
     let full_u = (u_end - u_start) > 1.9 * PI;
     let at_north_pole = v_start.abs() < 0.05;
     let at_south_pole = (v_end - PI).abs() < 0.05;
+
+    let (n_u, n_v) = if params.adaptive {
+        crate::adaptive::required_samples(
+            &Surface::Sphere(sphere.clone()), u_start, u_end, v_start, v_end,
+            params.max_deviation, params.detail_level,
+        )
+    } else {
+        (params.angular_samples, (params.angular_samples / 2).max(4))
+    };
+    let n_v = n_v.max(4);
 
     // Generate vertices (n_v+1 rows to include both poles)
     // For pole rows, generate only 1 vertex instead of n_u to avoid degenerate triangles
@@ -1098,10 +1262,6 @@ fn triangulate_sphere_face(face: &Face, sphere: &SphereSurface, params: &Triangu
 /// This handles the common case of a full torus with only a single
 /// v-circle boundary edge.
 fn triangulate_torus_face(face: &Face, torus: &TorusSurface, params: &TriangulationParams) -> TriangleMesh {
-    let mut mesh = TriangleMesh::new();
-    let n_u = params.angular_samples;
-    let n_v = params.angular_samples;
-
     let boundary_3d = collect_face_boundary_points(face);
 
     // Default: full torus [0, 2π] × [0, 2π]
@@ -1143,56 +1303,53 @@ fn triangulate_torus_face(face: &Face, torus: &TorusSurface, params: &Triangulat
         // else: boundary doesn't constrain v → keep full [0, 2π]
     }
 
-    // Generate vertices
-    for j in 0..n_v {
-        for i in 0..n_u {
-            let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
-            let v = v_start + (v_end - v_start) * j as f64 / n_v as f64;
-            let p = torus.point_at(u, v);
-            let n = torus.normal_at(u, v);
-            let idx = mesh.add_vertex(p);
-            mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
-        }
-    }
-
-    // Both u and v are periodic for a full torus
     let u_periodic = (u_end - u_start) > 1.9 * PI;
     let v_periodic = (v_end - v_start) > 1.9 * PI;
 
-    for j in 0..n_v {
-        for i in 0..n_u {
-            let i_next = if u_periodic { (i + 1) % n_u } else { (i + 1).min(n_u - 1) };
-            let j_next = if v_periodic { (j + 1) % n_v } else { (j + 1).min(n_v - 1) };
+    let (n_u, n_v) = if params.adaptive {
+        crate::adaptive::required_samples(
+            &Surface::Torus(torus.clone()), u_start, u_end, v_start, v_end,
+            params.max_deviation, params.detail_level,
+        )
+    } else {
+        (params.angular_samples, params.angular_samples)
+    };
 
-            if (!u_periodic && i == n_u - 1) || (!v_periodic && j == n_v - 1) {
-                continue;
-            }
+    // For v-periodic torus, generate one extra row so the last strip
+    // connects back to the v_start position. The duplicate vertices at
+    // the v-seam will be merged by merge_coincident_vertices.
+    let n_v_grid = if v_periodic { n_v } else { n_v };
 
-            let v0 = (j * n_u + i) as u32;
-            let v1 = (j * n_u + i_next) as u32;
-            let v2 = (j_next * n_u + i_next) as u32;
-            let v3 = (j_next * n_u + i) as u32;
-
-            if face.forward {
-                mesh.add_triangle(v0, v1, v2);
-                mesh.add_triangle(v0, v2, v3);
-            } else {
-                mesh.add_triangle(v0, v2, v1);
-                mesh.add_triangle(v0, v3, v2);
-            }
-        }
-    }
-
-    mesh
+    triangulate_ring_surface(
+        n_u, n_v_grid, u_periodic, face.forward,
+        |i, j| {
+            let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
+            let v = v_start + (v_end - v_start) * j as f64 / n_v_grid as f64;
+            torus.point_at(u, v)
+        },
+        |i, j| {
+            let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
+            let v = v_start + (v_end - v_start) * j as f64 / n_v_grid as f64;
+            torus.normal_at(u, v)
+        },
+        |_j| false, // Torus has no degenerate rows
+    )
 }
 
 /// Triangulate a revolution surface face.
 fn triangulate_revolution_face(face: &Face, rev: &draper_geometry::RevolutionSurface, params: &TriangulationParams) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
-    let n_u = params.angular_samples;
-    let n_v = params.angular_samples;
-
     let (v_min, v_max) = rev.profile.param_range();
+
+    let surface = face.surface.as_ref().cloned().unwrap_or(Surface::Revolution(rev.clone()));
+    let (n_u, n_v) = if params.adaptive {
+        crate::adaptive::required_samples(
+            &surface, 0.0, 2.0 * PI, v_min, v_max,
+            params.max_deviation, params.detail_level,
+        )
+    } else {
+        (params.angular_samples, params.angular_samples)
+    };
 
     for j in 0..n_v {
         for i in 0..n_u {
@@ -1228,11 +1385,19 @@ fn triangulate_revolution_face(face: &Face, rev: &draper_geometry::RevolutionSur
 /// Triangulate an extrusion surface face.
 fn triangulate_extrusion_face(face: &Face, ext: &draper_geometry::ExtrusionSurface, params: &TriangulationParams) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
-    let n_u = params.angular_samples;
-    let n_v = params.height_samples.max(2);
 
     let (v_min, v_max) = compute_extrusion_v_range(face, ext);
     let (u_min, u_max) = ext.profile.param_range();
+
+    let surface = face.surface.as_ref().cloned().unwrap_or(Surface::Extrusion(ext.clone()));
+    let (n_u, n_v) = if params.adaptive {
+        crate::adaptive::required_samples(
+            &surface, u_min, u_max, v_min, v_max,
+            params.max_deviation, params.detail_level,
+        )
+    } else {
+        (params.angular_samples, params.height_samples.max(2))
+    };
 
     for j in 0..n_v {
         for i in 0..n_u {
@@ -1312,15 +1477,23 @@ fn triangulate_generic_surface(face: &Face, surface: &Surface, params: &Triangul
         (base_u_min, base_u_max, base_v_min, base_v_max)
     };
 
-    let n_u = if let Surface::Nurbs(_) = surface {
-        params.angular_samples.max(24)
+    let (n_u, n_v) = if params.adaptive {
+        crate::adaptive::required_samples(
+            surface, u_min, u_max, v_min, v_max,
+            params.max_deviation, params.detail_level,
+        )
     } else {
-        params.angular_samples
-    };
-    let n_v = if let Surface::Nurbs(_) = surface {
-        params.angular_samples.max(24)
-    } else {
-        params.angular_samples
+        let n_u = if let Surface::Nurbs(_) = surface {
+            params.angular_samples.max(24)
+        } else {
+            params.angular_samples
+        };
+        let n_v = if let Surface::Nurbs(_) = surface {
+            params.angular_samples.max(24)
+        } else {
+            params.angular_samples
+        };
+        (n_u, n_v)
     };
 
     for j in 0..n_v {
@@ -1398,8 +1571,8 @@ pub fn triangulate_face_with_boundary_and_holes(
             triangulate_sphere_face_with_boundary(sphere, boundary_points, hole_polylines, forward, params)
         }
         _ => {
-            // Other curved surfaces: use UV-space boundary trimming
-            triangulate_surface_uv_trimmed(surface, boundary_points, hole_polylines, forward, params)
+            // Other curved surfaces: use UV-space CDT
+            crate::parametric_domain::triangulate_surface_uv_cdt(surface, boundary_points, hole_polylines, forward, params)
         }
     }
 }
@@ -1494,7 +1667,7 @@ fn point_in_polygon_2d(point: &Point2d, polygon: &[Point2d]) -> bool {
 
 /// Normalize UV polygon for periodic surfaces.
 /// Handles wrap-around when boundary points cross the ±π seam.
-fn normalize_uv_polygon(boundary_uv: &mut [Point2d], u_period: Option<f64>, v_period: Option<f64>) {
+pub(crate) fn normalize_uv_polygon(boundary_uv: &mut [Point2d], u_period: Option<f64>, v_period: Option<f64>) {
     // Handle u-periodicity
     if let Some(period) = u_period {
         // Find the largest gap and normalize
@@ -3435,5 +3608,168 @@ pub fn filter_degenerate_triangles(mesh: &mut TriangleMesh, tolerance: f64) {
         }
 
         mesh.triangles.push(*tri);
+    }
+}
+
+#[cfg(test)]
+mod ring_surface_tests {
+    use super::*;
+    use draper_geometry::{Point3d, Direction3d, Surface, Plane, CylinderSurface, SphereSurface, TorusSurface, ConeSurface};
+
+    /// Helper: create a face with a surface but no boundary edges (full surface).
+    fn make_full_face(surface: Surface) -> Face {
+        Face::new_surface_only(surface)
+    }
+
+    #[test]
+    fn test_full_cylinder_triangulation() {
+        let cyl = CylinderSurface::new_z(5.0);
+        let face = make_full_face(Surface::Cylinder(cyl));
+        let params = TriangulationParams::default();
+        let mesh = triangulate_face(&face, &params);
+        assert!(mesh.triangles.len() > 0, "Cylinder should produce triangles");
+        assert!(mesh.vertices.len() > 0, "Cylinder should produce vertices");
+        for v in &mesh.vertices {
+            assert!(v.x.is_finite() && v.y.is_finite() && v.z.is_finite(),
+                "Cylinder vertex should be finite: {:?}", v);
+        }
+    }
+
+    #[test]
+    fn test_full_sphere_triangulation() {
+        let sphere = SphereSurface::new(Point3d::ORIGIN, 5.0);
+        let face = make_full_face(Surface::Sphere(sphere));
+        let params = TriangulationParams::default();
+        let mesh = triangulate_face(&face, &params);
+        assert!(mesh.triangles.len() > 0, "Sphere should produce triangles");
+        assert!(mesh.vertices.len() > 0, "Sphere should produce vertices");
+        for v in &mesh.vertices {
+            assert!(v.x.is_finite() && v.y.is_finite() && v.z.is_finite(),
+                "Sphere vertex should be finite: {:?}", v);
+        }
+    }
+
+    #[test]
+    fn test_full_torus_triangulation() {
+        let torus = TorusSurface::new_z(Point3d::ORIGIN, 10.0, 3.0);
+        let face = make_full_face(Surface::Torus(torus));
+        let params = TriangulationParams::default();
+        let mesh = triangulate_face(&face, &params);
+        assert!(mesh.triangles.len() > 0, "Torus should produce triangles");
+        assert!(mesh.vertices.len() > 0, "Torus should produce vertices");
+        for v in &mesh.vertices {
+            assert!(v.x.is_finite() && v.y.is_finite() && v.z.is_finite(),
+                "Torus vertex should be finite: {:?}", v);
+        }
+    }
+
+    #[test]
+    fn test_cone_with_apex() {
+        let cone = ConeSurface::new_z(5.0, 0.3);
+        let face = make_full_face(Surface::Cone(cone));
+        let params = TriangulationParams::default();
+        let mesh = triangulate_face(&face, &params);
+        assert!(mesh.triangles.len() > 0, "Cone should produce triangles");
+        assert!(mesh.vertices.len() > 0, "Cone should produce vertices");
+        for v in &mesh.vertices {
+            assert!(v.x.is_finite() && v.y.is_finite() && v.z.is_finite(),
+                "Cone vertex should be finite: {:?}", v);
+        }
+    }
+
+    #[test]
+    fn test_plane_triangulation_minimal() {
+        let plane = Plane::xy();
+        // Face with no boundary edges produces empty mesh for planar faces
+        let face = make_full_face(Surface::Plane(plane));
+        let params = TriangulationParams::default();
+        let mesh = triangulate_face(&face, &params);
+        // Plane with no boundary points produces empty mesh — this is expected
+        assert_eq!(mesh.triangles.len(), 0, "Plane with no boundary should produce no triangles");
+    }
+
+    #[test]
+    fn test_ring_surface_no_degenerate_rows() {
+        // Test triangulate_ring_surface directly with no degenerate rows (like a cylinder)
+        let n_u = 8;
+        let n_v = 4;
+        let radius = 3.0;
+        let mesh = triangulate_ring_surface(
+            n_u, n_v, true, true,
+            |i, j| {
+                let u = 2.0 * std::f64::consts::PI * i as f64 / n_u as f64;
+                let v = j as f64 / n_v as f64;
+                Point3d::new(radius * u.cos(), radius * u.sin(), v)
+            },
+            |i, j| {
+                let u = 2.0 * std::f64::consts::PI * i as f64 / n_u as f64;
+                let _v = j as f64 / n_v as f64;
+                Direction3d::new(u.cos(), u.sin(), 0.0).unwrap_or(Direction3d::Z)
+            },
+            |_j| false,
+        );
+        // Should have (n_v+1)*n_u vertices and n_v*n_u*2 triangles
+        assert_eq!(mesh.vertices.len(), (n_v + 1) * n_u);
+        assert_eq!(mesh.triangles.len(), n_v * n_u * 2);
+    }
+
+    #[test]
+    fn test_ring_surface_with_apex() {
+        // Test triangulate_ring_surface with a degenerate last row (cone apex)
+        let n_u = 8;
+        let n_v = 4;
+        let mesh = triangulate_ring_surface(
+            n_u, n_v, true, true,
+            |i, j| {
+                let u = 2.0 * std::f64::consts::PI * i as f64 / n_u as f64;
+                let v = j as f64 / n_v as f64;
+                let r = 3.0 * (1.0 - v);
+                Point3d::new(r * u.cos(), r * u.sin(), v * 5.0)
+            },
+            |i, j| {
+                let u = 2.0 * std::f64::consts::PI * i as f64 / n_u as f64;
+                let v = j as f64 / n_v as f64;
+                let r = 3.0 * (1.0 - v);
+                if r.abs() < 1e-10 {
+                    Direction3d::Z
+                } else {
+                    Direction3d::new(u.cos(), u.sin(), 0.0).unwrap_or(Direction3d::Z)
+                }
+            },
+            |j| j == n_v, // Last row is degenerate (apex)
+        );
+        // Should have n_v*n_u + 1 vertices (n_v normal rows + 1 apex vertex)
+        assert_eq!(mesh.vertices.len(), n_v * n_u + 1);
+        // Triangles: (n_v-1) normal strips * n_u * 2 + 1 apex fan * n_u
+        assert_eq!(mesh.triangles.len(), (n_v - 1) * n_u * 2 + n_u);
+    }
+
+    #[test]
+    fn test_ring_surface_with_pole() {
+        // Test triangulate_ring_surface with a degenerate first row (north pole)
+        let n_u = 8;
+        let n_v = 4;
+        let mesh = triangulate_ring_surface(
+            n_u, n_v, true, true,
+            |i, j| {
+                let u = 2.0 * std::f64::consts::PI * i as f64 / n_u as f64;
+                let v = j as f64 / n_v as f64;
+                let r = 3.0 * v.sin();
+                Point3d::new(r * u.cos(), r * u.sin(), 3.0 * v.cos())
+            },
+            |i, j| {
+                let u = 2.0 * std::f64::consts::PI * i as f64 / n_u as f64;
+                let v = j as f64 / n_v as f64;
+                let r = 3.0 * v.sin();
+                if r.abs() < 1e-10 {
+                    Direction3d::new(0.0, 0.0, v.cos().signum()).unwrap_or(Direction3d::Z)
+                } else {
+                    Direction3d::new(u.cos() * v.sin(), u.sin() * v.sin(), v.cos()).unwrap_or(Direction3d::Z)
+                }
+            },
+            |j| j == 0, // First row is degenerate (north pole)
+        );
+        // Should have 1 + n_v*n_u vertices (1 pole + n_v normal rows)
+        assert_eq!(mesh.vertices.len(), 1 + n_v * n_u);
     }
 }

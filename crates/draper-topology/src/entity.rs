@@ -9,7 +9,7 @@
 //!           - Edge (curve segment between two vertices)
 //!             - Vertex (point in 3D space)
 
-use draper_geometry::{Point3d, Point2d, Curve3d, Surface};
+use draper_geometry::{Point3d, Point2d, Curve3d, Curve2d, Surface};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -164,6 +164,10 @@ pub struct CoEdge {
     pub forward: bool,
     /// 2D pcurve in the parametric space of the face's surface.
     pub pcurve: Option<Pcurve>,
+    /// Analytical PCURVE in UV space (if available from STEP).
+    /// When present, this is used instead of surface.project_point()
+    /// for computing UV coordinates during triangulation.
+    pub curve_2d: Option<Curve2d>,
 }
 
 impl CoEdge {
@@ -173,6 +177,7 @@ impl CoEdge {
             edge,
             forward,
             pcurve: None,
+            curve_2d: None,
         }
     }
 }

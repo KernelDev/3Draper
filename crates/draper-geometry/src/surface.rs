@@ -659,6 +659,76 @@ impl FirstFundamentalForm {
     }
 }
 
+/// Coefficients of the second fundamental form of a surface.
+///
+/// II = L*du² + 2*M*du*dv + N*dv²
+///
+/// These coefficients describe how the surface curves in 3D space:
+/// - L = d²S/du² · n  (normal curvature in u-direction)
+/// - M = d²S/du*dv · n (mixed normal curvature)
+/// - N = d²S/dv² · n  (normal curvature in v-direction)
+#[derive(Clone, Debug)]
+pub struct SecondFundamentalForm {
+    /// L = d²S/du² · n
+    pub l: f64,
+    /// M = d²S/du*dv · n
+    pub m: f64,
+    /// N = d²S/dv² · n
+    pub n: f64,
+}
+
+impl SecondFundamentalForm {
+    /// Compute Gaussian curvature from first and second fundamental forms.
+    /// K = (LN - M²) / (EG - F²)
+    pub fn gaussian_curvature(&self, first: &FirstFundamentalForm) -> f64 {
+        let denom = first.e * first.g - first.f * first.f;
+        if denom.abs() < 1e-20 { return 0.0; }
+        (self.l * self.n - self.m * self.m) / denom
+    }
+
+    /// Compute mean curvature from first and second fundamental forms.
+    /// H = (EN - 2FM + GL) / (2(EG - F²))
+    pub fn mean_curvature(&self, first: &FirstFundamentalForm) -> f64 {
+        let denom = 2.0 * (first.e * first.g - first.f * first.f);
+        if denom.abs() < 1e-20 { return 0.0; }
+        (first.e * self.n - 2.0 * first.f * self.m + first.g * self.l) / denom
+    }
+
+    /// Compute principal curvatures from Gaussian (K) and mean (H) curvatures.
+    /// k1,2 = H ± sqrt(H² - K)
+    pub fn principal_curvatures(&self, first: &FirstFundamentalForm) -> (f64, f64) {
+        let h = self.mean_curvature(first);
+        let k = self.gaussian_curvature(first);
+        let disc = (h * h - k).max(0.0);
+        let sqrt_disc = disc.sqrt();
+        (h + sqrt_disc, h - sqrt_disc)
+    }
+
+    /// Compute maximum absolute curvature (for adaptive sampling).
+    pub fn max_curvature(&self, first: &FirstFundamentalForm) -> f64 {
+        let (k1, k2) = self.principal_curvatures(first);
+        k1.abs().max(k2.abs())
+    }
+}
+
+/// Surface curvature information at a point.
+///
+/// Contains Gaussian curvature (K), mean curvature (H),
+/// and principal curvatures (k1, k2).
+#[derive(Clone, Debug)]
+pub struct SurfaceCurvature {
+    /// Gaussian curvature K = k1 * k2.
+    pub gaussian: f64,
+    /// Mean curvature H = (k1 + k2) / 2.
+    pub mean: f64,
+    /// Maximum principal curvature (largest absolute value).
+    pub k1: f64,
+    /// Minimum principal curvature (smallest absolute value).
+    pub k2: f64,
+    /// Maximum absolute curvature = max(|k1|, |k2|).
+    pub max_abs: f64,
+}
+
 impl NurbsSurface {
     /// Get the valid parametric range for the u parameter.
     /// The valid domain is [u_knots[u_degree], u_knots[n_u]] where n_u = number of control points in u.
@@ -930,6 +1000,245 @@ impl Surface {
         matches!(self, Surface::Sphere(_) | Surface::Torus(_))
     }
 
+    /// Compute the curvature at a point on the surface.
+    ///
+    /// For analytical surfaces (plane, cylinder, cone, sphere, torus),
+    /// the curvature is computed from known analytical formulas.
+    /// For NURBS, revolution, and extrusion surfaces, numerical
+    /// differentiation of the second fundamental form is used.
+    pub fn curvature_at(&self, u: f64, v: f64) -> SurfaceCurvature {
+        match self {
+            Surface::Plane(_) => SurfaceCurvature {
+                gaussian: 0.0, mean: 0.0, k1: 0.0, k2: 0.0, max_abs: 0.0,
+            },
+            Surface::Cylinder(cyl) => {
+                // Cylinder: k_meridional = 0 (along axis), k_circumferential = 1/radius
+                let k_circ = 1.0 / cyl.radius.max(1e-10);
+                SurfaceCurvature {
+                    gaussian: 0.0,
+                    mean: k_circ / 2.0,
+                    k1: k_circ,
+                    k2: 0.0,
+                    max_abs: k_circ,
+                }
+            },
+            Surface::Cone(cone) => {
+                // Cone: k_meridional = 0 (along generator), k_circumferential = cos(half_angle) / r(u,v)
+                let r = if cone.expanding {
+                    v * cone.half_angle.tan()
+                } else {
+                    (cone.radius - v * cone.half_angle.tan()).max(0.0)
+                };
+                let k_circ = if r > 1e-10 {
+                    cone.half_angle.cos() / r
+                } else {
+                    0.0 // At apex, curvature is undefined
+                };
+                SurfaceCurvature {
+                    gaussian: 0.0,
+                    mean: k_circ / 2.0,
+                    k1: k_circ,
+                    k2: 0.0,
+                    max_abs: k_circ,
+                }
+            },
+            Surface::Sphere(sphere) => {
+                // Sphere: k1 = k2 = 1/radius
+                let k = 1.0 / sphere.radius.max(1e-10);
+                SurfaceCurvature {
+                    gaussian: k * k,
+                    mean: k,
+                    k1: k,
+                    k2: k,
+                    max_abs: k,
+                }
+            },
+            Surface::Torus(torus) => {
+                // Torus: k1 = cos(v)/(R + r*cos(v)), k2 = 1/r
+                let r = torus.minor_radius.max(1e-10);
+                let R = torus.major_radius;
+                let k2 = 1.0 / r;
+                let k1 = {
+                    let denom = R + r * v.cos();
+                    if denom.abs() > 1e-10 { v.cos() / denom } else { 0.0 }
+                };
+                let max_abs = k1.abs().max(k2.abs());
+                SurfaceCurvature {
+                    gaussian: k1 * k2,
+                    mean: (k1 + k2) / 2.0,
+                    k1, k2, max_abs,
+                }
+            },
+            _ => {
+                // Numerical curvature computation for Revolution, Extrusion, NURBS
+                // using second fundamental form
+                let eps = 1e-5;
+                let p0 = self.point_at(u, v);
+                let n = self.normal_at(u, v);
+
+                // First derivatives (central differences)
+                let pu_p = self.point_at(u + eps, v);
+                let pu_m = self.point_at(u - eps, v);
+                let pv_p = self.point_at(u, v + eps);
+                let pv_m = self.point_at(u, v - eps);
+
+                let du = Vec3d::new(
+                    (pu_p.x - pu_m.x) / (2.0 * eps),
+                    (pu_p.y - pu_m.y) / (2.0 * eps),
+                    (pu_p.z - pu_m.z) / (2.0 * eps),
+                );
+                let dv = Vec3d::new(
+                    (pv_p.x - pv_m.x) / (2.0 * eps),
+                    (pv_p.y - pv_m.y) / (2.0 * eps),
+                    (pv_p.z - pv_m.z) / (2.0 * eps),
+                );
+
+                // Second derivatives
+                let duu = Vec3d::new(
+                    (pu_p.x - 2.0 * p0.x + pu_m.x) / (eps * eps),
+                    (pu_p.y - 2.0 * p0.y + pu_m.y) / (eps * eps),
+                    (pu_p.z - 2.0 * p0.z + pu_m.z) / (eps * eps),
+                );
+                let dvv = Vec3d::new(
+                    (pv_p.x - 2.0 * p0.x + pv_m.x) / (eps * eps),
+                    (pv_p.y - 2.0 * p0.y + pv_m.y) / (eps * eps),
+                    (pv_p.z - 2.0 * p0.z + pv_m.z) / (eps * eps),
+                );
+                let puv_pp = self.point_at(u + eps, v + eps);
+                let puv_mm = self.point_at(u - eps, v - eps);
+                let puv_pm = self.point_at(u + eps, v - eps);
+                let puv_mp = self.point_at(u - eps, v + eps);
+                let duv = Vec3d::new(
+                    (puv_pp.x - puv_pm.x - puv_mp.x + puv_mm.x) / (4.0 * eps * eps),
+                    (puv_pp.y - puv_pm.y - puv_mp.y + puv_mm.y) / (4.0 * eps * eps),
+                    (puv_pp.z - puv_pm.z - puv_mp.z + puv_mm.z) / (4.0 * eps * eps),
+                );
+
+                let n_vec = Vec3d::new(n.x, n.y, n.z);
+
+                // Second fundamental form
+                let l = duu.dot(&n_vec);
+                let m = duv.dot(&n_vec);
+                let n_val = dvv.dot(&n_vec);
+
+                // First fundamental form
+                let e = du.dot(&du);
+                let f = du.dot(&dv);
+                let g = dv.dot(&dv);
+
+                let denom = e * g - f * f;
+                if denom.abs() < 1e-20 {
+                    return SurfaceCurvature { gaussian: 0.0, mean: 0.0, k1: 0.0, k2: 0.0, max_abs: 0.0 };
+                }
+
+                let k_gauss = (l * n_val - m * m) / denom;
+                let k_mean = (e * n_val - 2.0 * f * m + g * l) / (2.0 * denom);
+                let disc = (k_mean * k_mean - k_gauss).max(0.0);
+                let sqrt_disc = disc.sqrt();
+                let k1 = k_mean + sqrt_disc;
+                let k2 = k_mean - sqrt_disc;
+                let max_abs = k1.abs().max(k2.abs());
+
+                SurfaceCurvature {
+                    gaussian: k_gauss,
+                    mean: k_mean,
+                    k1, k2, max_abs,
+                }
+            }
+        }
+    }
+
+    /// Compute the second fundamental form at a point on the surface using
+    /// numerical differentiation.
+    ///
+    /// Returns (FirstFundamentalForm, SecondFundamentalForm) so that
+    /// curvature quantities can be computed.
+    pub fn fundamental_forms_at(&self, u: f64, v: f64) -> (FirstFundamentalForm, SecondFundamentalForm) {
+        let eps = 1e-5;
+        let p0 = self.point_at(u, v);
+        let n = self.normal_at(u, v);
+
+        let pu_p = self.point_at(u + eps, v);
+        let pu_m = self.point_at(u - eps, v);
+        let pv_p = self.point_at(u, v + eps);
+        let pv_m = self.point_at(u, v - eps);
+
+        let du = Vec3d::new(
+            (pu_p.x - pu_m.x) / (2.0 * eps),
+            (pu_p.y - pu_m.y) / (2.0 * eps),
+            (pu_p.z - pu_m.z) / (2.0 * eps),
+        );
+        let dv = Vec3d::new(
+            (pv_p.x - pv_m.x) / (2.0 * eps),
+            (pv_p.y - pv_m.y) / (2.0 * eps),
+            (pv_p.z - pv_m.z) / (2.0 * eps),
+        );
+
+        let duu = Vec3d::new(
+            (pu_p.x - 2.0 * p0.x + pu_m.x) / (eps * eps),
+            (pu_p.y - 2.0 * p0.y + pu_m.y) / (eps * eps),
+            (pu_p.z - 2.0 * p0.z + pu_m.z) / (eps * eps),
+        );
+        let dvv = Vec3d::new(
+            (pv_p.x - 2.0 * p0.x + pv_m.x) / (eps * eps),
+            (pv_p.y - 2.0 * p0.y + pv_m.y) / (eps * eps),
+            (pv_p.z - 2.0 * p0.z + pv_m.z) / (eps * eps),
+        );
+        let puv_pp = self.point_at(u + eps, v + eps);
+        let puv_mm = self.point_at(u - eps, v - eps);
+        let puv_pm = self.point_at(u + eps, v - eps);
+        let puv_mp = self.point_at(u - eps, v + eps);
+        let duv = Vec3d::new(
+            (puv_pp.x - puv_pm.x - puv_mp.x + puv_mm.x) / (4.0 * eps * eps),
+            (puv_pp.y - puv_pm.y - puv_mp.y + puv_mm.y) / (4.0 * eps * eps),
+            (puv_pp.z - puv_pm.z - puv_mp.z + puv_mm.z) / (4.0 * eps * eps),
+        );
+
+        let n_vec = Vec3d::new(n.x, n.y, n.z);
+
+        let first = FirstFundamentalForm {
+            e: du.dot(&du),
+            f: du.dot(&dv),
+            g: dv.dot(&dv),
+        };
+        let second = SecondFundamentalForm {
+            l: duu.dot(&n_vec),
+            m: duv.dot(&n_vec),
+            n: dvv.dot(&n_vec),
+        };
+
+        (first, second)
+    }
+
+    /// Compute the surface point and first partial derivatives at (u, v).
+    ///
+    /// For NURBS surfaces, uses the NurbsSurface::derivatives_at method.
+    /// For all other surface types, uses central finite differences.
+    pub fn derivatives_at(&self, u: f64, v: f64) -> SurfaceDerivatives {
+        match self {
+            Surface::Nurbs(nurbs) => nurbs.derivatives_at(u, v),
+            _ => {
+                let point = self.point_at(u, v);
+                let eps = 1e-6;
+                let pu_plus = self.point_at(u + eps, v);
+                let pu_minus = self.point_at(u - eps, v);
+                let pv_plus = self.point_at(u, v + eps);
+                let pv_minus = self.point_at(u, v - eps);
+                let du = Vec3d::new(
+                    (pu_plus.x - pu_minus.x) / (2.0 * eps),
+                    (pu_plus.y - pu_minus.y) / (2.0 * eps),
+                    (pu_plus.z - pu_minus.z) / (2.0 * eps),
+                );
+                let dv = Vec3d::new(
+                    (pv_plus.x - pv_minus.x) / (2.0 * eps),
+                    (pv_plus.y - pv_minus.y) / (2.0 * eps),
+                    (pv_plus.z - pv_minus.z) / (2.0 * eps),
+                );
+                SurfaceDerivatives { point, du, dv }
+            }
+        }
+    }
+
     /// Project a 3D point onto the surface's parametric space → Some(u, v).
     /// Returns None if the point is too far from the surface for a meaningful projection.
     pub fn project_point_opt(&self, point: &Point3d) -> Option<(f64, f64)> {
@@ -1099,6 +1408,55 @@ impl Surface {
                             best_u = u;
                             best_v = v;
                         }
+                    }
+                }
+
+                // Newton-Raphson refinement using analytical derivatives
+                for _ in 0..5 {
+                    let derivs = n.derivatives_at(best_u, best_v);
+                    let sp = derivs.point;
+                    let dx = sp.x - point.x;
+                    let dy = sp.y - point.y;
+                    let dz = sp.z - point.z;
+
+                    // Gradient: g = [dS/du · (S-P), dS/dv · (S-P)]
+                    let gu = derivs.du.x * dx + derivs.du.y * dy + derivs.du.z * dz;
+                    let gv = derivs.dv.x * dx + derivs.dv.y * dy + derivs.dv.z * dz;
+
+                    // Hessian approximation (Gauss-Newton)
+                    let hu_u = derivs.du.x * derivs.du.x + derivs.du.y * derivs.du.y + derivs.du.z * derivs.du.z;
+                    let hu_v = derivs.du.x * derivs.dv.x + derivs.du.y * derivs.dv.y + derivs.du.z * derivs.dv.z;
+                    let hv_v = derivs.dv.x * derivs.dv.x + derivs.dv.y * derivs.dv.y + derivs.dv.z * derivs.dv.z;
+
+                    let det = hu_u * hv_v - hu_v * hu_v;
+                    if det.abs() < 1e-20 { break; }
+
+                    let du = -(hv_v * gu - hu_v * gv) / det;
+                    let dv = -(-hu_v * gu + hu_u * gv) / det;
+
+                    // Clamp step size
+                    let step_limit = 0.1; // Max 10% of parametric range per step
+                    let du = du.clamp(-step_limit, step_limit);
+                    let dv = dv.clamp(-step_limit, step_limit);
+
+                    let new_u = (best_u + du).clamp(u_min, u_max);
+                    let new_v = (best_v + dv).clamp(v_min, v_max);
+
+                    // Check improvement
+                    let new_p = self.point_at(new_u, new_v);
+                    let new_dist_sq = (new_p.x - point.x).powi(2) + (new_p.y - point.y).powi(2) + (new_p.z - point.z).powi(2);
+
+                    if new_dist_sq < best_dist {
+                        if (best_dist - new_dist_sq) < 1e-10 * best_dist.max(1e-20) {
+                            best_u = new_u;
+                            best_v = new_v;
+                            break; // Converged
+                        }
+                        best_u = new_u;
+                        best_v = new_v;
+                        best_dist = new_dist_sq;
+                    } else {
+                        break; // Not improving
                     }
                 }
 
@@ -1399,5 +1757,106 @@ mod tests {
         // The point itself should not be invalid
         assert!(!flags.contains(DegeneracyFlags::POINT_INVALID),
             "Torus inner touch point should not be NaN/Inf");
+    }
+}
+
+#[cfg(test)]
+mod curvature_tests {
+    use super::*;
+
+    #[test]
+    fn test_plane_curvature_is_zero() {
+        let plane = Surface::Plane(Plane::xy());
+        let curv = plane.curvature_at(0.5, 0.5);
+        assert!(curv.gaussian.abs() < 1e-10, "Plane Gaussian curvature should be 0");
+        assert!(curv.mean.abs() < 1e-10, "Plane mean curvature should be 0");
+        assert!(curv.max_abs.abs() < 1e-10, "Plane max curvature should be 0");
+    }
+
+    #[test]
+    fn test_sphere_curvature() {
+        let r = 10.0;
+        let sphere = Surface::Sphere(SphereSurface::new(Point3d::ORIGIN, r));
+        let curv = sphere.curvature_at(1.0, 1.0);
+        let expected_k = 1.0 / r;
+        assert!((curv.k1 - expected_k).abs() < 1e-6, "Sphere k1 should be 1/r, got {}", curv.k1);
+        assert!((curv.k2 - expected_k).abs() < 1e-6, "Sphere k2 should be 1/r, got {}", curv.k2);
+        assert!((curv.gaussian - expected_k * expected_k).abs() < 1e-8, "Sphere K should be 1/r²");
+    }
+
+    #[test]
+    fn test_cylinder_curvature() {
+        let r = 5.0;
+        let cyl = Surface::Cylinder(CylinderSurface::new_z(r));
+        let curv = cyl.curvature_at(0.0, 0.0);
+        let expected_k = 1.0 / r;
+        assert!((curv.k1 - expected_k).abs() < 1e-6, "Cylinder circumferential curvature should be 1/r");
+        assert!(curv.k2.abs() < 1e-6, "Cylinder meridional curvature should be 0");
+        assert!(curv.gaussian.abs() < 1e-8, "Cylinder Gaussian curvature should be 0");
+    }
+
+    #[test]
+    fn test_numerical_vs_analytical_curvature() {
+        // Test that numerical curvature computation (used for NURBS/Revolution/Extrusion)
+        // matches analytical curvature for surfaces where we have both
+        let sphere = Surface::Sphere(SphereSurface::new(Point3d::ORIGIN, 10.0));
+        let (first, second) = sphere.fundamental_forms_at(1.0, 1.5);
+        let k_gauss = second.gaussian_curvature(&first);
+        let k_mean = second.mean_curvature(&first);
+
+        let expected_k = 1.0 / 10.0;
+        let expected_K = expected_k * expected_k;
+        // Note: mean curvature sign depends on normal orientation;
+        // the numerical fundamental-form computation may give -1/r
+        // for outward normals on a convex surface, so we compare absolute values.
+        let expected_H = expected_k;
+
+        assert!((k_gauss - expected_K).abs() < 0.01, "Numerical Gaussian curvature {} should be close to {}", k_gauss, expected_K);
+        assert!((k_mean.abs() - expected_H).abs() < 0.01, "Numerical |mean curvature| {} should be close to {}", k_mean.abs(), expected_H);
+    }
+
+    #[test]
+    fn test_nurbs_derivatives_vs_numerical() {
+        // Create a simple bilinear NURBS patch and compare derivatives
+        let nurbs = NurbsSurface {
+            u_degree: 1,
+            v_degree: 1,
+            control_points: vec![
+                vec![Point3d::new(0.0, 0.0, 0.0), Point3d::new(0.0, 10.0, 0.0)],
+                vec![Point3d::new(10.0, 0.0, 0.0), Point3d::new(10.0, 10.0, 5.0)],
+            ],
+            weights: vec![
+                vec![1.0, 1.0],
+                vec![1.0, 1.0],
+            ],
+            u_knots: vec![0.0, 0.0, 1.0, 1.0],
+            v_knots: vec![0.0, 0.0, 1.0, 1.0],
+        };
+
+        let surface = Surface::Nurbs(nurbs);
+        let derivs = surface.derivatives_at(0.5, 0.5);
+
+        // Compare with finite differences
+        let eps = 1e-5;
+        let p0 = surface.point_at(0.5, 0.5);
+        let pu = surface.point_at(0.5 + eps, 0.5);
+        let pv = surface.point_at(0.5, 0.5 + eps);
+
+        let du_fd = Vec3d::new(
+            (pu.x - p0.x) / eps,
+            (pu.y - p0.y) / eps,
+            (pu.z - p0.z) / eps,
+        );
+        let dv_fd = Vec3d::new(
+            (pv.x - p0.x) / eps,
+            (pv.y - p0.y) / eps,
+            (pv.z - p0.z) / eps,
+        );
+
+        let du_err = ((derivs.du.x - du_fd.x).powi(2) + (derivs.du.y - du_fd.y).powi(2) + (derivs.du.z - du_fd.z).powi(2)).sqrt();
+        let dv_err = ((derivs.dv.x - dv_fd.x).powi(2) + (derivs.dv.y - dv_fd.y).powi(2) + (derivs.dv.z - dv_fd.z).powi(2)).sqrt();
+
+        assert!(du_err < 1.0, "dS/du error should be small, got {}", du_err);
+        assert!(dv_err < 1.0, "dS/dv error should be small, got {}", dv_err);
     }
 }

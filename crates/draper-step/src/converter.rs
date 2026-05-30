@@ -24,7 +24,8 @@ use crate::schema::{StepFile, StepValue};
 use draper_geometry::{
     Point3d, Point2d, Direction3d, Surface, Plane, CylinderSurface, SphereSurface,
     ConeSurface, TorusSurface, RevolutionSurface, ExtrusionSurface,
-    NurbsSurface, Curve3d, Line, Circle, Ellipse, Arc, NurbsCurve,
+    NurbsSurface, Curve3d, Curve2d, Line, Circle, Ellipse, Arc, NurbsCurve,
+    Line2d, Circle2d, Ellipse2d, Nurbs2d,
 };
 use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary, ear_clip};
 use draper_topology::{Face, Wire, CoEdge, Edge as TopoEdge};
@@ -43,6 +44,11 @@ struct FaceData {
     forward: bool,
     /// STEP entity ID of the ADVANCED_FACE this data was extracted from.
     step_face_id: i64,
+    /// STEP entity ID of the face's surface (for PCURVE matching).
+    surface_step_id: Option<i64>,
+    /// Analytical PCURVEs in UV space for each edge in `edges`.
+    /// Same length as `edges`. When present, used instead of surface.project_point().
+    edge_curves_2d: Vec<Option<Curve2d>>,
 }
 
 /// Information about a single face within a BREP, for structure display and UV visualization.
@@ -668,7 +674,7 @@ impl<'a> StepConverter<'a> {
         for type_name in &surface_types {
             for entity in self.step.find_entities_by_type(type_name) {
                 if let Some(surface) = self.extract_surface(entity.id, 0) {
-                    let face_data = FaceData { surface, outer_edges: vec![], inner_edges: vec![], edges: vec![], forward: true, step_face_id: entity.id };
+                    let face_data = FaceData { surface, outer_edges: vec![], inner_edges: vec![], edges: vec![], forward: true, step_face_id: entity.id, surface_step_id: None, edge_curves_2d: vec![] };
                     let mesh = self.surface_to_mesh(&face_data, &params, &bbox);
                     results.push(MeshInstance {
                         name: entity.type_name.clone(),
@@ -2096,6 +2102,14 @@ impl<'a> StepConverter<'a> {
                 // Extract face orientation (last param, typically .T. or .F.)
                 let forward = self.extract_face_orientation(face_entity);
 
+                // Extract the STEP surface entity ID for PCURVE matching
+                let surface_step_id = self.extract_face_surface_step_id(face_entity);
+
+                // Extract analytical PCURVEs (Curve2d) for each edge
+                let edge_curves_2d = self.extract_edge_curves_2d(
+                    face_entity, &all_edges, surface_step_id,
+                );
+
                 Some(FaceData {
                     surface,
                     outer_edges,
@@ -2103,6 +2117,8 @@ impl<'a> StepConverter<'a> {
                     edges: all_edges,
                     forward,
                     step_face_id: face_id,
+                    surface_step_id,
+                    edge_curves_2d,
                 })
             }
             _ => {
@@ -2115,6 +2131,8 @@ impl<'a> StepConverter<'a> {
                         edges: vec![],
                         forward: true,
                         step_face_id: face_id,
+                        surface_step_id: None,
+                        edge_curves_2d: vec![],
                     })
                 } else {
                     None
@@ -2487,6 +2505,636 @@ impl<'a> StepConverter<'a> {
         }
 
         None
+    }
+
+    /// Extract the STEP surface entity ID from an ADVANCED_FACE entity.
+    /// This is used for PCURVE matching — the PCURVE that references the same
+    /// surface as the face is the one we want.
+    fn extract_face_surface_step_id(&self, face: &crate::schema::StepEntity) -> Option<i64> {
+        // Format: #N = ADVANCED_FACE('', (bounds), #surface_ref, .T.);
+        // The surface reference is typically the 3rd parameter (index 2).
+        if let Some(param) = face.params.get(2) {
+            if let Some(surface_id) = self.get_ref(param) {
+                if let Some(entity) = self.step.find_entity(surface_id) {
+                    let tn = entity.type_name.as_str();
+                    if tn.contains("SURFACE") || tn == "PLANE" || tn == "CYLINDRICAL_SURFACE"
+                        || tn == "SPHERICAL_SURFACE" || tn == "CONICAL_SURFACE"
+                        || tn == "TOROIDAL_SURFACE"
+                    {
+                        return Some(surface_id);
+                    }
+                }
+            }
+        }
+        // Fallback: scan all params for a surface ref
+        for param in &face.params {
+            if let Some(surface_id) = self.get_ref(param) {
+                if let Some(entity) = self.step.find_entity(surface_id) {
+                    let tn = entity.type_name.as_str();
+                    if tn.contains("SURFACE") || tn == "PLANE" || tn == "CYLINDRICAL_SURFACE"
+                        || tn == "SPHERICAL_SURFACE" || tn == "CONICAL_SURFACE"
+                        || tn == "TOROIDAL_SURFACE"
+                    {
+                        return Some(surface_id);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Extract analytical PCURVEs (Curve2d) for edges in a face.
+    /// Traverses: ADVANCED_FACE → FACE_BOUND → EDGE_LOOP → ORIENTED_EDGE →
+    ///            EDGE_CURVE → SURFACE_CURVE → PCURVE → DEFINITIONAL_REPRESENTATION → 2D curve
+    fn extract_edge_curves_2d(
+        &self,
+        face_entity: &crate::schema::StepEntity,
+        edges: &[TopoEdge],
+        surface_step_id: Option<i64>,
+    ) -> Vec<Option<Curve2d>> {
+        let surface_id = match surface_step_id {
+            Some(id) => id,
+            None => return vec![None; edges.len()],
+        };
+
+        // Collect all ORIENTED_EDGE entity IDs from the face bounds
+        let mut oriented_edge_ids: Vec<i64> = Vec::new();
+        for param in &face_entity.params {
+            if let StepValue::List(items) = param {
+                for item in items {
+                    if let Some(bound_id) = self.get_ref(item) {
+                        if let Some(bound_entity) = self.step.find_entity(bound_id) {
+                            if bound_entity.type_name == "FACE_OUTER_BOUND"
+                                || bound_entity.type_name == "FACE_BOUND"
+                            {
+                                // FACE_BOUND('', #loop_ref, .T.)
+                                for bp in &bound_entity.params {
+                                    if let Some(loop_id) = self.get_ref(bp) {
+                                        if let Some(loop_entity) = self.step.find_entity(loop_id) {
+                                            if loop_entity.type_name == "EDGE_LOOP" {
+                                                self.collect_oriented_edge_ids(loop_entity, &mut oriented_edge_ids);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // For each ORIENTED_EDGE, trace to SURFACE_CURVE and extract PCURVE
+        let mut edge_curve_2d_map: HashMap<draper_topology::TopoId, Curve2d> = HashMap::new();
+
+        for oe_id in oriented_edge_ids {
+            if let Some(oe_entity) = self.step.find_entity(oe_id) {
+                let mut edge_curve_id: Option<i64> = None;
+                let mut orientation = true;
+
+                for param in &oe_entity.params {
+                    if let Some(ref_id) = self.get_ref(param) {
+                        if let Some(entity) = self.step.find_entity(ref_id) {
+                            if entity.type_name == "EDGE_CURVE" {
+                                edge_curve_id = Some(ref_id);
+                            }
+                        }
+                    }
+                    if let StepValue::Enum(e) = param {
+                        orientation = e == "T";
+                    }
+                }
+
+                if let Some(ec_id) = edge_curve_id {
+                    // Get the SURFACE_CURVE ID from the EDGE_CURVE
+                    if let Some(sc_id) = self.find_surface_curve_from_edge_curve(ec_id) {
+                        // Find the PCURVE matching our surface
+                        if let Some(curve_2d) = self.extract_pcurve_for_surface(sc_id, surface_id) {
+                            // Find the edge TopoId that this oriented edge resolves to
+                            if let Some(edge) = self.resolve_edge_curve(ec_id) {
+                                let mut final_edge = edge;
+                                if !orientation {
+                                    final_edge = final_edge.reversed();
+                                }
+                                // Store by edge ID
+                                edge_curve_2d_map.insert(final_edge.id, curve_2d);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Map edges to their Curve2d
+        edges.iter().map(|e| edge_curve_2d_map.get(&e.id).cloned()).collect()
+    }
+
+    /// Collect ORIENTED_EDGE entity IDs from an EDGE_LOOP entity.
+    fn collect_oriented_edge_ids(&self, loop_entity: &crate::schema::StepEntity, ids: &mut Vec<i64>) {
+        for param in &loop_entity.params {
+            if let StepValue::List(items) = param {
+                for item in items {
+                    if let Some(oe_id) = self.get_ref(item) {
+                        ids.push(oe_id);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Find the SURFACE_CURVE entity ID from an EDGE_CURVE.
+    /// The EDGE_CURVE's curve parameter might point directly to a SURFACE_CURVE
+    /// or to a regular curve.
+    fn find_surface_curve_from_edge_curve(&self, edge_curve_id: i64) -> Option<i64> {
+        let ec_entity = self.step.find_entity(edge_curve_id)?;
+        for param in &ec_entity.params {
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(entity) = self.step.find_entity(ref_id) {
+                    if entity.type_name == "SURFACE_CURVE" {
+                        return Some(ref_id);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Extract the PCURVE Curve2d from a SURFACE_CURVE that matches a given surface.
+    /// SURFACE_CURVE('', #3d_curve, (#pcurve1, #pcurve2), .PCURVE_S1.)
+    fn extract_pcurve_for_surface(&self, surface_curve_id: i64, target_surface_id: i64) -> Option<Curve2d> {
+        let sc_entity = self.step.find_entity(surface_curve_id)?;
+        if sc_entity.type_name != "SURFACE_CURVE" {
+            return None;
+        }
+
+        // The PCURVE references are in the 3rd parameter (index 2), as a list
+        // SURFACE_CURVE('', #curve3d_ref, (#pcurve1, #pcurve2), .PCURVE_S1.)
+        for param in &sc_entity.params {
+            if let StepValue::List(items) = param {
+                for item in items {
+                    if let Some(pcurve_id) = self.get_ref(item) {
+                        if let Some(pcurve_entity) = self.step.find_entity(pcurve_id) {
+                            if pcurve_entity.type_name == "PCURVE" {
+                                // PCURVE('', #surface_ref, #definitional_rep)
+                                // Check if this PCURVE references our target surface
+                                if self.pcurve_references_surface(pcurve_entity, target_surface_id) {
+                                    if let Some(curve_2d) = self.resolve_pcurve_to_curve2d(pcurve_entity) {
+                                        return Some(curve_2d);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Check if a PCURVE entity references a given surface.
+    /// PCURVE('', #surface_ref, #definitional_rep)
+    fn pcurve_references_surface(&self, pcurve_entity: &crate::schema::StepEntity, target_surface_id: i64) -> bool {
+        // The surface reference is typically the 2nd parameter (index 1)
+        for param in &pcurve_entity.params {
+            if let Some(ref_id) = self.get_ref(param) {
+                if ref_id == target_surface_id {
+                    return true;
+                }
+                // Also check if the referenced entity is the same surface
+                // (some STEP files reference through intermediate entities)
+                if let Some(entity) = self.step.find_entity(ref_id) {
+                    if entity.type_name.contains("SURFACE") || entity.type_name == "PLANE" {
+                        // Direct match
+                        if ref_id == target_surface_id {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Resolve a PCURVE entity to a Curve2d.
+    /// PCURVE('', #surface_ref, #definitional_rep)
+    /// The DEFINITIONAL_REPRESENTATION contains the 2D curve in UV space.
+    fn resolve_pcurve_to_curve2d(&self, pcurve_entity: &crate::schema::StepEntity) -> Option<Curve2d> {
+        // Find the DEFINITIONAL_REPRESENTATION reference
+        // PCURVE('', #surface, #definitional_rep)
+        // The definitional_rep is typically the last reference param
+        let mut def_rep_id: Option<i64> = None;
+
+        for param in &pcurve_entity.params {
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(entity) = self.step.find_entity(ref_id) {
+                    if entity.type_name == "DEFINITIONAL_REPRESENTATION" {
+                        def_rep_id = Some(ref_id);
+                    }
+                }
+            }
+        }
+
+        let def_rep_id = def_rep_id?;
+
+        // DEFINITIONAL_REPRESENTATION('', (#2d_curve), #context)
+        // The 2D curve is the first reference in the list parameter
+        let def_rep_entity = self.step.find_entity(def_rep_id)?;
+        for param in &def_rep_entity.params {
+            if let StepValue::List(items) = param {
+                for item in items {
+                    if let Some(curve_2d_id) = self.get_ref(item) {
+                        if let Some(curve_2d) = self.resolve_curve_2d(curve_2d_id) {
+                            return Some(curve_2d);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Resolve a 2D curve entity (in UV space) to a Curve2d.
+    fn resolve_curve_2d(&self, curve_id: i64) -> Option<Curve2d> {
+        let entity = self.step.find_entity(curve_id)?;
+        let type_name = entity.type_name.as_str();
+
+        // Handle complex entity types containing B_SPLINE_CURVE
+        if type_name.contains("B_SPLINE_CURVE") {
+            return self.resolve_bspline_curve_2d(entity);
+        }
+
+        match type_name {
+            "LINE" => self.resolve_line_curve_2d(entity),
+            "CIRCLE" => self.resolve_circle_curve_2d(entity),
+            "ELLIPSE" => self.resolve_ellipse_curve_2d(entity),
+            "B_SPLINE_CURVE_WITH_KNOTS" | "B_SPLINE_CURVE" | "BEZIER_CURVE" |
+            "RATIONAL_B_SPLINE_CURVE" => self.resolve_bspline_curve_2d(entity),
+            "TRIMMED_CURVE" => self.resolve_trimmed_curve_2d(entity),
+            "POLYLINE" => self.resolve_polyline_curve_2d(entity),
+            _ => {
+                log::debug!("resolve_curve_2d #{}: unsupported 2D curve type '{}'", curve_id, type_name);
+                None
+            }
+        }
+    }
+
+    /// Resolve a 2D LINE curve to a Line2d.
+    /// STEP format: LINE('', #point, #vector) in 2D
+    fn resolve_line_curve_2d(&self, entity: &crate::schema::StepEntity) -> Option<Curve2d> {
+        // LINE('', #cartesian_point_2d, #vector_2d)
+        let mut point_ref: Option<i64> = None;
+        let mut dir_ref: Option<i64> = None;
+        let mut magnitude: f64 = 1.0;
+
+        for param in &entity.params {
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(referenced) = self.step.find_entity(ref_id) {
+                    if referenced.type_name == "CARTESIAN_POINT" && point_ref.is_none() {
+                        point_ref = Some(ref_id);
+                    } else if referenced.type_name == "DIRECTION" && dir_ref.is_none() {
+                        dir_ref = Some(ref_id);
+                    } else if referenced.type_name == "VECTOR" && dir_ref.is_none() {
+                        // VECTOR('', #direction, magnitude)
+                        dir_ref = self.find_direction_from_vector_2d(referenced);
+                        magnitude = self.find_float_param(referenced, 0).unwrap_or(1.0);
+                    }
+                }
+            }
+        }
+
+        let start = point_ref.and_then(|id| self.resolve_cartesian_point_2d(id))?;
+        let direction = dir_ref.and_then(|id| self.resolve_direction_2d(id))?;
+
+        // End point = start + direction * magnitude
+        let end = Point2d::new(
+            start.u + direction.0 * magnitude,
+            start.v + direction.1 * magnitude,
+        );
+
+        Some(Curve2d::Line(Line2d::new(start, end)))
+    }
+
+    /// Resolve a 2D CIRCLE curve to a Circle2d.
+    fn resolve_circle_curve_2d(&self, entity: &crate::schema::StepEntity) -> Option<Curve2d> {
+        // CIRCLE('', #axis2_2d, radius)
+        let axis2_id = self.find_axis2_2d_ref(entity)?;
+        let center = self.resolve_axis2_2d(axis2_id)?;
+        let radius = self.find_float_param(entity, 0)?;
+
+        Some(Curve2d::Circle(Circle2d::new_full(center, radius)))
+    }
+
+    /// Resolve a 2D ELLIPSE curve to an Ellipse2d.
+    fn resolve_ellipse_curve_2d(&self, entity: &crate::schema::StepEntity) -> Option<Curve2d> {
+        let axis2_id = self.find_axis2_2d_ref(entity)?;
+        let (center, rotation) = self.resolve_axis2_2d_with_rotation(axis2_id)?;
+        let semi_major = self.find_float_param(entity, 0)?;
+        let semi_minor = self.find_float_param(entity, 1)?;
+
+        Some(Curve2d::Ellipse(Ellipse2d::new_full(center, semi_major, semi_minor, rotation)))
+    }
+
+    /// Resolve a 2D B_SPLINE_CURVE to a Nurbs2d.
+    fn resolve_bspline_curve_2d(&self, entity: &crate::schema::StepEntity) -> Option<Curve2d> {
+        let bspline_sub = entity.find_sub_entity("B_SPLINE_CURVE");
+        let knots_sub = entity.find_sub_entity("B_SPLINE_CURVE_WITH_KNOTS");
+        let rational_sub = entity.find_sub_entity("RATIONAL_B_SPLINE_CURVE");
+
+        let cp_entity = bspline_sub.unwrap_or(entity);
+        let knot_entity = knots_sub.unwrap_or(entity);
+
+        // Find degree
+        let mut degree = None;
+        let mut cp_param_idx = None;
+        for (i, param) in cp_entity.params.iter().enumerate() {
+            if degree.is_none() {
+                if let Some(d) = self.get_float(param) {
+                    degree = Some(d as usize);
+                }
+            } else if cp_param_idx.is_none() {
+                if let StepValue::List(_) = param {
+                    cp_param_idx = Some(i);
+                }
+            }
+        }
+
+        let degree = degree?;
+
+        // Extract 2D control points
+        let mut control_points = Vec::new();
+        if let Some(cp_idx) = cp_param_idx {
+            if let Some(StepValue::List(items)) = cp_entity.params.get(cp_idx) {
+                for item in items {
+                    if let Some(ref_id) = self.get_ref(item) {
+                        if let Some(pt) = self.resolve_cartesian_point_2d(ref_id) {
+                            control_points.push(pt);
+                        }
+                    } else if let StepValue::List(coords) = item {
+                        let u = coords.get(0).and_then(|v| self.get_float(v)).unwrap_or(0.0);
+                        let v = coords.get(1).and_then(|v| self.get_float(v)).unwrap_or(0.0);
+                        control_points.push(Point2d::new(u, v));
+                    }
+                }
+            }
+        }
+
+        if control_points.is_empty() {
+            return None;
+        }
+
+        // Extract weights
+        let weights = if let Some(rational_ent) = rational_sub {
+            self.extract_curve_weights(rational_ent, control_points.len())
+        } else {
+            vec![1.0; control_points.len()]
+        };
+
+        // Extract knots
+        let n = control_points.len();
+        let knots = self.extract_curve_knots(knot_entity, n, degree);
+
+        Some(Curve2d::Nurbs(Nurbs2d {
+            degree,
+            control_points,
+            weights,
+            knots,
+        }))
+    }
+
+    /// Resolve a 2D TRIMMED_CURVE.
+    fn resolve_trimmed_curve_2d(&self, entity: &crate::schema::StepEntity) -> Option<Curve2d> {
+        // TRIMMED_CURVE(#basis_curve, #trim1, #trim2, .T., .T., .CARTESIAN., .CARTESIAN.)
+        let basis_id = self.get_ref(entity.params.first()?)?;
+        let mut basis = self.resolve_curve_2d(basis_id)?;
+
+        // Extract trim values
+        let mut trim1: Option<f64> = None;
+        let mut trim2: Option<f64> = None;
+
+        if entity.params.len() >= 3 {
+            if let Some(param) = entity.params.get(1) {
+                trim1 = self.get_float(param);
+                if trim1.is_none() {
+                    if let Some(ref_id) = self.get_ref(param) {
+                        if let Some(pt) = self.resolve_cartesian_point_2d(ref_id) {
+                            // Could use the point, but for now just note we have it
+                            let _ = pt;
+                        }
+                    }
+                }
+            }
+            if let Some(param) = entity.params.get(2) {
+                trim2 = self.get_float(param);
+            }
+        }
+
+        // For LINE in UV, trims define start/end points directly
+        if let Curve2d::Line(ref line) = basis {
+            if let (Some(t1), Some(t2)) = (trim1, trim2) {
+                let start = Point2d::new(
+                    line.start.u + t1 * (line.end.u - line.start.u),
+                    line.start.v + t1 * (line.end.v - line.start.v),
+                );
+                let end = Point2d::new(
+                    line.start.u + t2 * (line.end.u - line.start.u),
+                    line.start.v + t2 * (line.end.v - line.start.v),
+                );
+                return Some(Curve2d::Line(Line2d::new(start, end)));
+            }
+        }
+
+        // For CIRCLE in UV, trims define angle range
+        if let Curve2d::Circle(ref circle) = basis {
+            if let (Some(t1), Some(t2)) = (trim1, trim2) {
+                return Some(Curve2d::Circle(Circle2d::new_arc(
+                    circle.center, circle.radius, t1, t2,
+                )));
+            }
+        }
+
+        Some(basis)
+    }
+
+    /// Resolve a 2D POLYLINE as a series of Line2d segments (returning the first as representative).
+    /// For a polyline in UV, we approximate by sampling and returning a Nurbs2d.
+    fn resolve_polyline_curve_2d(&self, entity: &crate::schema::StepEntity) -> Option<Curve2d> {
+        let mut points = Vec::new();
+        for param in &entity.params {
+            if let StepValue::List(items) = param {
+                for item in items {
+                    if let Some(ref_id) = self.get_ref(item) {
+                        if let Some(pt) = self.resolve_cartesian_point_2d(ref_id) {
+                            points.push(pt);
+                        }
+                    }
+                }
+            }
+        }
+
+        if points.len() >= 2 {
+            // Create a degree-1 NURBS through the polyline points
+            let n = points.len();
+            let degree = 1;
+            let weights = vec![1.0; n];
+            let mut knots = Vec::with_capacity(n + degree + 1);
+            for _ in 0..=degree {
+                knots.push(0.0);
+            }
+            for i in 1..n-1 {
+                knots.push(i as f64);
+            }
+            for _ in 0..=degree {
+                knots.push((n - 1) as f64);
+            }
+
+            Some(Curve2d::Nurbs(Nurbs2d {
+                degree,
+                control_points: points,
+                weights,
+                knots,
+            }))
+        } else {
+            None
+        }
+    }
+
+    /// Resolve a 2D CARTESIAN_POINT entity.
+    /// CARTESIAN_POINT('', (u, v)) — 2 coordinates for UV space
+    fn resolve_cartesian_point_2d(&self, point_id: i64) -> Option<Point2d> {
+        let point_entity = self.step.find_entity(point_id)?;
+
+        if point_entity.type_name != "CARTESIAN_POINT" {
+            return None;
+        }
+
+        // Look for a list of coordinates (2 or 3 values — if 3, take first 2)
+        for param in &point_entity.params {
+            if let StepValue::List(coords) = param {
+                let values: Vec<f64> = coords.iter()
+                    .filter_map(|v| self.get_float(v))
+                    .collect();
+                if values.len() >= 2 {
+                    return Some(Point2d::new(values[0], values[1]));
+                }
+            }
+        }
+        None
+    }
+
+    /// Resolve a 2D DIRECTION entity.
+    /// DIRECTION('', (du, dv)) — 2 components for UV space
+    fn resolve_direction_2d(&self, dir_id: i64) -> Option<(f64, f64)> {
+        let dir_entity = self.step.find_entity(dir_id)?;
+
+        if dir_entity.type_name != "DIRECTION" {
+            return None;
+        }
+
+        for param in &dir_entity.params {
+            if let StepValue::List(coords) = param {
+                let values: Vec<f64> = coords.iter()
+                    .filter_map(|v| self.get_float(v))
+                    .collect();
+                if values.len() >= 2 {
+                    let len = (values[0] * values[0] + values[1] * values[1]).sqrt();
+                    if len > 1e-15 {
+                        return Some((values[0] / len, values[1] / len));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Find a DIRECTION reference from a 2D VECTOR entity.
+    fn find_direction_from_vector_2d(&self, vector_entity: &crate::schema::StepEntity) -> Option<i64> {
+        for param in &vector_entity.params {
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(referenced) = self.step.find_entity(ref_id) {
+                    if referenced.type_name == "DIRECTION" {
+                        return Some(ref_id);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Find a reference to AXIS2_PLACEMENT_2D in an entity's parameters.
+    fn find_axis2_2d_ref(&self, entity: &crate::schema::StepEntity) -> Option<i64> {
+        for param in &entity.params {
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(referenced) = self.step.find_entity(ref_id) {
+                    if referenced.type_name == "AXIS2_PLACEMENT_2D" {
+                        return Some(ref_id);
+                    }
+                }
+            }
+        }
+        // Fallback: AXIS2_PLACEMENT_3D can also be used in 2D context
+        for param in &entity.params {
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(referenced) = self.step.find_entity(ref_id) {
+                    if referenced.type_name == "AXIS2_PLACEMENT_3D" {
+                        return Some(ref_id);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Resolve an AXIS2_PLACEMENT_2D to a 2D center point.
+    fn resolve_axis2_2d(&self, axis2_id: i64) -> Option<Point2d> {
+        let axis2_entity = self.step.find_entity(axis2_id)?;
+
+        if axis2_entity.type_name == "AXIS2_PLACEMENT_2D" {
+            // AXIS2_PLACEMENT_2D('', #point_ref)
+            for param in &axis2_entity.params {
+                if let Some(ref_id) = self.get_ref(param) {
+                    if let Some(pt) = self.resolve_cartesian_point_2d(ref_id) {
+                        return Some(pt);
+                    }
+                }
+            }
+        } else if axis2_entity.type_name == "AXIS2_PLACEMENT_3D" {
+            // AXIS2_PLACEMENT_3D('', #point_ref, #axis_ref, #ref_dir_ref)
+            // Extract the 2D projection of the 3D point
+            for param in &axis2_entity.params {
+                if let Some(ref_id) = self.get_ref(param) {
+                    if let Some(pt) = self.resolve_cartesian_point(ref_id) {
+                        return Some(Point2d::new(pt.x, pt.y));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Resolve an AXIS2_PLACEMENT_2D to a center point and rotation angle.
+    fn resolve_axis2_2d_with_rotation(&self, axis2_id: i64) -> Option<(Point2d, f64)> {
+        let axis2_entity = self.step.find_entity(axis2_id)?;
+        let center = self.resolve_axis2_2d(axis2_id)?;
+
+        // Try to extract the ref direction for rotation
+        let mut rotation = 0.0;
+        if axis2_entity.type_name == "AXIS2_PLACEMENT_2D" {
+            // AXIS2_PLACEMENT_2D('', #point_ref, #direction_ref)
+            let mut refs: Vec<i64> = Vec::new();
+            for param in &axis2_entity.params {
+                if let Some(ref_id) = self.get_ref(param) {
+                    refs.push(ref_id);
+                }
+            }
+            // The second reference (if present) is the direction
+            if refs.len() >= 2 {
+                if let Some((du, dv)) = self.resolve_direction_2d(refs[1]) {
+                    rotation = dv.atan2(du);
+                }
+            }
+        }
+
+        Some((center, rotation))
     }
 
     /// Resolve a VERTEX_POINT entity to a 3D point.

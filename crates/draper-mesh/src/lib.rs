@@ -9,6 +9,8 @@ pub mod triangulate;
 pub mod stl;
 pub mod manifold;
 pub mod edge_cache;
+pub mod adaptive;
+pub mod parametric_domain;
 
 pub use mesh::*;
 pub use triangulate::*;
