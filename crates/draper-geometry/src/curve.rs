@@ -227,7 +227,10 @@ impl NurbsCurve {
         // Evaluate A(t) and w(t) using de Boor
         let mut pts_eval = pts.clone();
         de_boor_step_curve(&mut pts_eval, &self.knots, p, k, t_c);
-        let a_result = pts_eval.last().unwrap();
+        let a_result = match pts_eval.last() {
+            Some(&r) => r,
+            None => return Vec3d::new(0.0, 0.0, 0.0),
+        };
         let w = a_result.3;
         if w.abs() < 1e-15 {
             return Vec3d::new(0.0, 0.0, 0.0);
@@ -278,7 +281,10 @@ impl NurbsCurve {
             return Vec3d::new(0.0, 0.0, 0.0);
         }
 
-        let da = dpts.last().unwrap();
+        let da = match dpts.last() {
+            Some(&r) => r,
+            None => return Vec3d::new(0.0, 0.0, 0.0),
+        };
         let dw = da.3;
 
         // C'(t) = (A'(t) - C(t) * w'(t)) / w(t)
@@ -468,12 +474,15 @@ fn nurbs_eval(nurbs: &NurbsCurve, t: f64) -> Point3d {
     // De Boor's algorithm (standard)
     de_boor_step_curve(&mut pts, &nurbs.knots, p, k, t_c);
 
-    let result = pts.last().unwrap();
-    let w = result.3;
-    if w.abs() < 1e-15 {
-        Point3d::ORIGIN
+    if let Some(&result) = pts.last() {
+        let w = result.3;
+        if w.abs() < 1e-15 {
+            Point3d::ORIGIN
+        } else {
+            Point3d::new(result.0 / w, result.1 / w, result.2 / w)
+        }
     } else {
-        Point3d::new(result.0 / w, result.1 / w, result.2 / w)
+        Point3d::ORIGIN
     }
 }
 

@@ -1583,16 +1583,15 @@ fn nurbs_surface_eval(nurbs: &NurbsSurface, u: f64, v: f64) -> Point3d {
     // Step 2: De Boor in u direction on the intermediate points
     de_boor_step(&mut intermediate, &nurbs.u_knots, p, k_u, u_c);
 
-    if intermediate.is_empty() {
-        return Point3d::ORIGIN;
-    }
-
-    let result = intermediate.last().unwrap();
-    let w = result.3;
-    if w.abs() < 1e-15 {
-        Point3d::ORIGIN
+    if let Some(&result) = intermediate.last() {
+        let w = result.3;
+        if w.abs() < 1e-15 {
+            Point3d::ORIGIN
+        } else {
+            Point3d::new(result.0 / w, result.1 / w, result.2 / w)
+        }
     } else {
-        Point3d::new(result.0 / w, result.1 / w, result.2 / w)
+        Point3d::ORIGIN
     }
 }
 

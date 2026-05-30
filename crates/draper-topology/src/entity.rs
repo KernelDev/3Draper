@@ -108,7 +108,14 @@ impl Edge {
     /// `Line::point_at(t)` moves `t` units along that direction.
     pub fn new_line(p1: Point3d, p2: Point3d) -> Self {
         let distance = p1.distance_to(&p2);
-        let curve = Curve3d::Line(draper_geometry::Line::through_points(p1, p2).unwrap());
+        let line = draper_geometry::Line::through_points(p1, p2)
+            .unwrap_or_else(|| {
+                // Fallback for coincident points: use an arbitrary direction
+                // This creates a degenerate edge (zero-length), which will be
+                // detected by edge validation later.
+                draper_geometry::Line::new(p1, draper_geometry::Direction3d::X)
+            });
+        let curve = Curve3d::Line(line);
         let mut edge = Self::new(curve, (0.0, distance));
         edge.vertex_start = Some(TopoId::new());
         edge.vertex_end = Some(TopoId::new());

@@ -118,9 +118,18 @@ pub fn import_stl_from_bytes(data: &[u8]) -> io::Result<TriangleMesh> {
         // Read 3 vertices
         let mut tri_indices = [0u32; 3];
         for v in 0..3 {
-            let vx = f32::from_le_bytes(data[offset..offset+4].try_into().unwrap()) as f64;
-            let vy = f32::from_le_bytes(data[offset+4..offset+8].try_into().unwrap()) as f64;
-            let vz = f32::from_le_bytes(data[offset+8..offset+12].try_into().unwrap()) as f64;
+            let vx_bytes: [u8; 4] = data[offset..offset+4].try_into()
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData,
+                    format!("Truncated vertex data at offset {}", offset)))?;
+            let vy_bytes: [u8; 4] = data[offset+4..offset+8].try_into()
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData,
+                    format!("Truncated vertex data at offset {}", offset+4)))?;
+            let vz_bytes: [u8; 4] = data[offset+8..offset+12].try_into()
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData,
+                    format!("Truncated vertex data at offset {}", offset+8)))?;
+            let vx = f32::from_le_bytes(vx_bytes) as f64;
+            let vy = f32::from_le_bytes(vy_bytes) as f64;
+            let vz = f32::from_le_bytes(vz_bytes) as f64;
             tri_indices[v] = mesh.add_vertex(Point3d::new(vx, vy, vz));
             offset += 12;
         }
@@ -149,7 +158,10 @@ fn is_likely_binary(data: &[u8]) -> bool {
     if data.len() < 84 {
         return false;
     }
-    let num_triangles = u32::from_le_bytes(data[80..84].try_into().unwrap());
+    let num_triangles: u32 = match data[80..84].try_into() {
+        Ok(bytes) => u32::from_le_bytes(bytes),
+        Err(_) => return false,
+    };
     let expected_size = 84 + num_triangles as usize * 50;
     // If the size matches binary format exactly, it's binary
     data.len() == expected_size || (num_triangles > 0 && num_triangles < 10_000_000)

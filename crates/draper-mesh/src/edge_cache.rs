@@ -91,33 +91,31 @@ impl EdgeDiscretizationCache {
     ) -> &EdgeDiscretization {
         let edge_id = edge.id;
 
-        // If edge already in cache, just add UV if needed
-        if self.entries.contains_key(&edge_id) {
-            let entry = self.entries.get_mut(&edge_id).unwrap();
+        // If not yet cached, compute and insert the discretization first
+        if !self.entries.contains_key(&edge_id) {
+            let (points_3d, params) = self.adaptive_discretize(edge, n_samples_hint);
+            let uvs = Self::compute_uvs(&points_3d, &params, surface, curve_2d);
+
+            let mut uv_per_face = HashMap::new();
+            uv_per_face.insert(face_id, uvs);
+
+            self.entries.insert(edge_id, EdgeDiscretization {
+                points_3d,
+                uv_per_face,
+                params,
+            });
+        }
+
+        // Entry is guaranteed to exist now — add UV for this face if missing
+        if let Some(entry) = self.entries.get_mut(&edge_id) {
             if !entry.uv_per_face.contains_key(&face_id) {
                 let uvs = Self::compute_uvs(&entry.points_3d, &entry.params, surface, curve_2d);
                 entry.uv_per_face.insert(face_id, uvs);
             }
-            return self.entries.get(&edge_id).unwrap();
         }
 
-        // Discretize the edge adaptively
-        let (points_3d, params) = self.adaptive_discretize(edge, n_samples_hint);
-
-        // Compute UV for this face
-        let uvs = Self::compute_uvs(&points_3d, &params, surface, curve_2d);
-
-        let mut uv_per_face = HashMap::new();
-        uv_per_face.insert(face_id, uvs);
-
-        let disc = EdgeDiscretization {
-            points_3d,
-            uv_per_face,
-            params,
-        };
-
-        self.entries.insert(edge_id, disc);
-        self.entries.get(&edge_id).unwrap()
+        // Return the entry — guaranteed to exist at this point
+        &self.entries[&edge_id]
     }
 
     /// Get the cached discretization for an edge (if it exists).

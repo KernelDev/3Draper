@@ -8,9 +8,11 @@ pub mod operations;
 pub mod boolean;
 pub mod assembly;
 pub mod engine;
+pub mod error;
 
 pub use document::*;
 pub use operations::*;
 pub use boolean::*;
 pub use assembly::*;
 pub use engine::*;
+pub use error::*;

@@ -250,13 +250,19 @@ fn collect_face_boundary_points(face: &Face) -> Vec<Point3d> {
     if !points.is_empty() {
         let mut unique = vec![points[0]];
         for p in &points[1..] {
-            if !unique.last().unwrap().is_coincident_with(p) {
-                unique.push(*p);
+            if let Some(last) = unique.last() {
+                if !last.is_coincident_with(p) {
+                    unique.push(*p);
+                }
             }
         }
         // Also check last vs first (closed loop)
-        if unique.len() > 1 && unique.last().unwrap().is_coincident_with(&unique[0]) {
-            unique.pop();
+        if unique.len() > 1 {
+            if let Some(last) = unique.last() {
+                if last.is_coincident_with(&unique[0]) {
+                    unique.pop();
+                }
+            }
         }
         points = unique;
     }
@@ -283,12 +289,18 @@ fn collect_face_hole_points(face: &Face) -> Vec<Vec<Point3d>> {
         if !points.is_empty() {
             let mut unique = vec![points[0]];
             for p in &points[1..] {
-                if !unique.last().unwrap().is_coincident_with(p) {
-                    unique.push(*p);
+                if let Some(last) = unique.last() {
+                    if !last.is_coincident_with(p) {
+                        unique.push(*p);
+                    }
                 }
             }
-            if unique.len() > 1 && unique.last().unwrap().is_coincident_with(&unique[0]) {
-                unique.pop();
+            if unique.len() > 1 {
+                if let Some(last) = unique.last() {
+                    if last.is_coincident_with(&unique[0]) {
+                        unique.pop();
+                    }
+                }
             }
             holes.push(unique);
         }
@@ -1158,39 +1170,45 @@ fn triangulate_sphere_face(face: &Face, sphere: &SphereSurface, params: &Triangu
 
         if at_north_pole && j == 0 {
             // North pole fan: pole_vertex → ring[j+1][i] → ring[j+1][i_next]
-            let pole = pole_vertex_north.unwrap();
-            let next_row_count = row_vertex_count[j_next];
-            let next_row_base = row_vertex_offset[j_next];
+            if let Some(pole) = pole_vertex_north {
+                let next_row_count = row_vertex_count[j_next];
+                let next_row_base = row_vertex_offset[j_next];
 
-            for i in 0..next_row_count {
-                let i_next = if full_u { (i + 1) % next_row_count } else { (i + 1).min(next_row_count - 1) };
-                let v1 = next_row_base + i as u32;
-                let v2 = next_row_base + i_next as u32;
-                if v1 != v2 {
-                    if face.forward {
-                        mesh.add_triangle(pole, v1, v2);
-                    } else {
-                        mesh.add_triangle(pole, v2, v1);
+                for i in 0..next_row_count {
+                    let i_next = if full_u { (i + 1) % next_row_count } else { (i + 1).min(next_row_count - 1) };
+                    let v1 = next_row_base + i as u32;
+                    let v2 = next_row_base + i_next as u32;
+                    if v1 != v2 {
+                        if face.forward {
+                            mesh.add_triangle(pole, v1, v2);
+                        } else {
+                            mesh.add_triangle(pole, v2, v1);
+                        }
                     }
                 }
+            } else {
+                continue;
             }
         } else if at_south_pole && j == n_v - 1 {
             // South pole fan: ring[j][i] → ring[j][i_next] → pole_vertex
-            let pole = pole_vertex_south.unwrap();
-            let row_count = row_vertex_count[j];
-            let row_base = row_vertex_offset[j];
+            if let Some(pole) = pole_vertex_south {
+                let row_count = row_vertex_count[j];
+                let row_base = row_vertex_offset[j];
 
-            for i in 0..row_count {
-                let i_next = if full_u { (i + 1) % row_count } else { (i + 1).min(row_count - 1) };
-                let v1 = row_base + i as u32;
-                let v2 = row_base + i_next as u32;
-                if v1 != v2 {
-                    if face.forward {
-                        mesh.add_triangle(v1, v2, pole);
-                    } else {
-                        mesh.add_triangle(v2, v1, pole);
+                for i in 0..row_count {
+                    let i_next = if full_u { (i + 1) % row_count } else { (i + 1).min(row_count - 1) };
+                    let v1 = row_base + i as u32;
+                    let v2 = row_base + i_next as u32;
+                    if v1 != v2 {
+                        if face.forward {
+                            mesh.add_triangle(v1, v2, pole);
+                        } else {
+                            mesh.add_triangle(v2, v1, pole);
+                        }
                     }
                 }
+            } else {
+                continue;
             }
         } else {
             // Normal quad strip between row j and row j+1
@@ -1676,7 +1694,7 @@ pub(crate) fn normalize_uv_polygon(boundary_uv: &mut [Point2d], u_period: Option
 
         // Check for wrap-around: if the range is close to the period,
         // shift values that are far from the cluster
-        let u_range = us.last().unwrap() - us.first().unwrap();
+        let u_range = us.last().copied().unwrap_or(0.0) - us.first().copied().unwrap_or(0.0);
         if u_range > period * 0.5 {
             // Find the largest gap — points on the other side of the gap
             // should be shifted by ±period
@@ -1705,7 +1723,7 @@ pub(crate) fn normalize_uv_polygon(boundary_uv: &mut [Point2d], u_period: Option
         let mut vs: Vec<f64> = boundary_uv.iter().map(|p| p.v).collect();
         vs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-        let v_range = vs.last().unwrap() - vs.first().unwrap();
+        let v_range = vs.last().copied().unwrap_or(0.0) - vs.first().copied().unwrap_or(0.0);
         if v_range > period * 0.5 {
             let mut max_gap = 0.0f64;
             let mut gap_idx = 0;
@@ -3325,23 +3343,25 @@ fn deduplicate_points_3d(points: &[Point3d], tolerance: f64) -> Vec<Point3d> {
     let tol_sq = tolerance * tolerance;
     let mut unique = vec![points[0]];
     for p in &points[1..] {
-        let last = unique.last().unwrap();
-        let dx = p.x - last.x;
-        let dy = p.y - last.y;
-        let dz = p.z - last.z;
-        if dx * dx + dy * dy + dz * dz > tol_sq {
-            unique.push(*p);
+        if let Some(last) = unique.last() {
+            let dx = p.x - last.x;
+            let dy = p.y - last.y;
+            let dz = p.z - last.z;
+            if dx * dx + dy * dy + dz * dz > tol_sq {
+                unique.push(*p);
+            }
         }
     }
     // Also check last vs first (closed loop)
     if unique.len() > 1 {
         let first = unique[0];
-        let last = unique.last().unwrap();
-        let dx = first.x - last.x;
-        let dy = first.y - last.y;
-        let dz = first.z - last.z;
-        if dx * dx + dy * dy + dz * dz <= tol_sq {
-            unique.pop();
+        if let Some(last) = unique.last() {
+            let dx = first.x - last.x;
+            let dy = first.y - last.y;
+            let dz = first.z - last.z;
+            if dx * dx + dy * dy + dz * dz <= tol_sq {
+                unique.pop();
+            }
         }
     }
     unique

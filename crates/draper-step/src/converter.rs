@@ -2629,14 +2629,15 @@ impl<'a> StepConverter<'a> {
         let p2 = vertex_ids.get(1).and_then(|id| self.resolve_vertex_point(*id));
 
         // If we have both vertex points but no curve ref, create a line edge
-        if curve_ref_id.is_none() {
-            if let (Some(p1), Some(p2)) = (&p1, &p2) {
-                return Some(TopoEdge::new_line(*p1, *p2));
+        let curve_ref_id = match curve_ref_id {
+            Some(id) => id,
+            None => {
+                if let (Some(p1), Some(p2)) = (&p1, &p2) {
+                    return Some(TopoEdge::new_line(*p1, *p2));
+                }
+                return None;
             }
-            return None;
-        }
-
-        let curve_ref_id = curve_ref_id.unwrap();
+        };
 
         // Resolve the 3D curve (possibly through SURFACE_CURVE)
         let resolved_curve_id = self.resolve_3d_curve_ref(curve_ref_id);
@@ -5276,23 +5277,25 @@ fn deduplicate_points_3d(points: &[Point3d], tolerance: f64) -> Vec<Point3d> {
     let tol_sq = tolerance * tolerance;
     let mut unique = vec![points[0]];
     for p in &points[1..] {
-        let last = unique.last().unwrap();
-        let dx = p.x - last.x;
-        let dy = p.y - last.y;
-        let dz = p.z - last.z;
-        if dx * dx + dy * dy + dz * dz > tol_sq {
-            unique.push(*p);
+        if let Some(last) = unique.last() {
+            let dx = p.x - last.x;
+            let dy = p.y - last.y;
+            let dz = p.z - last.z;
+            if dx * dx + dy * dy + dz * dz > tol_sq {
+                unique.push(*p);
+            }
         }
     }
     // Also check last vs first (closed loop)
     if unique.len() > 1 {
         let first = unique[0];
-        let last = unique.last().unwrap();
-        let dx = first.x - last.x;
-        let dy = first.y - last.y;
-        let dz = first.z - last.z;
-        if dx * dx + dy * dy + dz * dz <= tol_sq {
-            unique.pop();
+        if let Some(last) = unique.last() {
+            let dx = first.x - last.x;
+            let dy = first.y - last.y;
+            let dz = first.z - last.z;
+            if dx * dx + dy * dy + dz * dz <= tol_sq {
+                unique.pop();
+            }
         }
     }
     unique
