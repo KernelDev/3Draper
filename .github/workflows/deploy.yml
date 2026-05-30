@@ -26,6 +26,15 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      - name: Install wasm32 sysroot headers
+        run: |
+          # Install a C compiler toolchain for wasm32 target
+          # This is needed by native C dependencies (bzip2-sys, zstd-sys, etc.)
+          # that are pulled in transitively even when building only draper-viewer
+          rustup target add wasm32-unknown-unknown
+          # Install wasi-sysroot so clang can find stdlib.h for wasm32
+          sudo apt-get update && sudo apt-get install -y clang lld llvm
+
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -43,6 +52,11 @@ jobs:
       - name: Build WASM
         working-directory: crates/draper-viewer
         run: trunk build --release --public-url /3Draper/
+        env:
+          # Only build draper-viewer and its deps, not the whole workspace
+          # This avoids pulling in draper-cloud (tokio) and draper-testing
+          # which don't compile on wasm32
+          TRUNK_CARGO_FLAGS: "--package draper-viewer"
 
       - name: Add .nojekyll
         working-directory: crates/draper-viewer/dist

@@ -14,6 +14,21 @@ members = [
     "tools",
 ]
 
+# Only these crates are built by default (cargo build without -p).
+# Crates that don't compile on wasm32 (draper-cloud with tokio, draper-testing)
+# are excluded from default-members so that `trunk build` only resolves
+# the WASM-compatible dependency graph.
+default-members = [
+    "crates/draper-geometry",
+    "crates/draper-topology",
+    "crates/draper-step",
+    "crates/draper-mesh",
+    "crates/draper-core",
+    "crates/draper-ffi",
+    "crates/draper-viewer",
+    "tools",
+]
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
