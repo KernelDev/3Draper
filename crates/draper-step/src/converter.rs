@@ -3555,15 +3555,47 @@ impl<'a> StepConverter<'a> {
             }
         }
 
-        // Collect 3D boundary points from outer edge curves by sampling each edge.
+        // Collect 3D boundary points from edge curves by sampling each edge.
         // Use adaptive sampling: fewer samples for line edges, more for curved edges.
+        //
+        // IMPORTANT: For curved surfaces (cylinder, cone, torus, etc.), we must include
+        // BOTH outer and inner edge samples. If we only include outer edges, projecting
+        // a single circular boundary onto a cylinder gives v_range ≈ 0, which causes
+        // the UV trimming algorithm to produce zero triangles. Including inner edges
+        // (holes) provides the missing v-range information.
         let mut boundary_points = Vec::new();
+        let mut inner_boundary_points: Vec<Vec<Point3d>> = Vec::new();
+
         for edge in &face_data.outer_edges {
             let n_samples = self.edge_sample_count(edge);
             for i in 0..n_samples {
                 let t = i as f64 / (n_samples - 1).max(1) as f64;
                 if let Some(p) = edge.point_at(t) {
                     boundary_points.push(p);
+                }
+            }
+        }
+
+        // For curved surfaces, also sample inner edges (holes)
+        // These are passed as separate hole polylines for proper trimming
+        match &face_data.surface {
+            Surface::Plane(_) => {}, // Planes use the dedicated hole-aware path above
+            _ => {
+                for inner_edges in &face_data.inner_edges {
+                    let mut hole_pts = Vec::new();
+                    for edge in inner_edges {
+                        let n_samples = self.edge_sample_count(edge);
+                        for i in 0..n_samples {
+                            let t = i as f64 / (n_samples - 1).max(1) as f64;
+                            if let Some(p) = edge.point_at(t) {
+                                hole_pts.push(p);
+                            }
+                        }
+                    }
+                    if !hole_pts.is_empty() {
+                        hole_pts = deduplicate_points_3d(&hole_pts, 1e-6);
+                        inner_boundary_points.push(hole_pts);
+                    }
                 }
             }
         }
@@ -3588,9 +3620,11 @@ impl<'a> StepConverter<'a> {
 
         // If we have boundary points, use boundary-aware triangulation
         if !boundary_points.is_empty() {
-            return triangulate_face_with_boundary(
+            // For curved surfaces with inner edges, pass them as hole polylines
+            return draper_mesh::triangulate_face_with_boundary_and_holes(
                 &face_data.surface,
                 &boundary_points,
+                &inner_boundary_points,
                 face_data.forward,
                 params,
             );
@@ -4243,4 +4277,84 @@ mod diag_tests {
     fn test_transmission() { diagnose_file("/home/z/my-project/3Draper/test/transmission_top.stp"); }
     #[test]
     fn test_3_05_078() { diagnose_file("/home/z/my-project/3Draper/test/3.05.078.stp"); }
+    #[test]
+    fn test_zentralstaender() { diagnose_file("/home/z/my-project/test/Zentralstaender.stp"); }
+
+    #[test]
+    fn test_zentralstaender_face_detail() {
+        let path = "/home/z/my-project/test/Zentralstaender.stp";
+        let content = std::fs::read_to_string(path).unwrap();
+        let step = parse_step(&content).unwrap();
+        let converter = StepConverter::new(&step);
+        let params = TriangulationParams::default();
+        let bbox = converter.compute_bounding_box();
+
+        let breps = step.find_entities_by_type("MANIFOLD_SOLID_BREP");
+        eprintln!("\n=== Zentralstaender Face Detail ===");
+        eprintln!("BREPs: {}", breps.len());
+
+        let mut total_faces = 0usize;
+        let mut empty_faces = 0usize;
+        let mut surface_type_counts: HashMap<String, usize> = HashMap::new();
+        let mut empty_by_type: HashMap<String, usize> = HashMap::new();
+
+        for brep in &breps {
+            if let Some(shell_id) = converter.find_shell_ref_by_brep_id(brep.id) {
+                if let Some(face_data_list) = converter.extract_shell_faces(shell_id) {
+                    for (fi, face_data) in face_data_list.iter().enumerate() {
+                        total_faces += 1;
+                        let surface_type = match &face_data.surface {
+                            Surface::Plane(_) => "Plane",
+                            Surface::Cylinder(_) => "Cylinder",
+                            Surface::Cone(_) => "Cone",
+                            Surface::Sphere(_) => "Sphere",
+                            Surface::Torus(_) => "Torus",
+                            Surface::Revolution(_) => "Revolution",
+                            Surface::Extrusion(_) => "Extrusion",
+                            Surface::Nurbs(_) => "Nurbs",
+                        }.to_string();
+                        *surface_type_counts.entry(surface_type.clone()).or_insert(0) += 1;
+
+                        let face_mesh = converter.surface_to_mesh(face_data, &params, &bbox);
+                        let tri_count = face_mesh.triangle_count();
+                        if tri_count == 0 {
+                            empty_faces += 1;
+                            *empty_by_type.entry(surface_type.clone()).or_insert(0) += 1;
+                            // Sample boundary points to understand what we have
+                            let mut bp_count = 0;
+                            let mut bp_sample_pts = Vec::new();
+                            for edge in &face_data.outer_edges {
+                                for i in 0..4 {
+                                    let t = i as f64 / 3.0;
+                                    if let Some(p) = edge.point_at(t) {
+                                        bp_count += 1;
+                                        bp_sample_pts.push(p);
+                                    }
+                                }
+                            }
+                            // Project boundary points to UV
+                            let uv_samples: Vec<_> = bp_sample_pts.iter().map(|p| face_data.surface.project_point(p)).collect();
+                            eprintln!("  BREP #{} face[{}]: {} edges={}/{} forward={} => 0 TRIANGLES! bp_sample={}",
+                                brep.id, fi, surface_type, face_data.outer_edges.len(), face_data.inner_edges.len(),
+                                face_data.forward, bp_count);
+                            eprintln!("    UV samples: {:?}", uv_samples.iter().take(6).collect::<Vec<_>>());
+                            // Also show inner edge UV samples
+                            for (li, inner_loop) in face_data.inner_edges.iter().enumerate() {
+                                for edge in inner_loop {
+                                    if let Some(p0) = edge.point_at(0.0) {
+                                        let (u, v) = face_data.surface.project_point(&p0);
+                                        eprintln!("    inner[{}] uv=({:.4},{:.4}) 3d=({:.2},{:.2},{:.2})", li, u, v, p0.x, p0.y, p0.z);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        eprintln!("\nTotal faces: {}, Empty faces: {}", total_faces, empty_faces);
+        eprintln!("Surface types: {:?}", surface_type_counts);
+        eprintln!("Empty by type: {:?}", empty_by_type);
+    }
 }

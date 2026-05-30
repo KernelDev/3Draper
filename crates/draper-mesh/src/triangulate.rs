@@ -971,6 +971,18 @@ pub fn triangulate_face_with_boundary(
     forward: bool,
     params: &TriangulationParams,
 ) -> TriangleMesh {
+    triangulate_face_with_boundary_and_holes(surface, boundary_points, &[], forward, params)
+}
+
+/// Triangulate a face with boundary points and optional hole polygons.
+/// For curved surfaces, uses UV-space boundary trimming with proper hole exclusion.
+pub fn triangulate_face_with_boundary_and_holes(
+    surface: &Surface,
+    boundary_points: &[Point3d],
+    hole_polylines: &[Vec<Point3d>],
+    forward: bool,
+    params: &TriangulationParams,
+) -> TriangleMesh {
     if boundary_points.is_empty() {
         let wire = Wire::new(vec![]);
         let mut face = Face::new(surface.clone(), wire);
@@ -986,7 +998,7 @@ pub fn triangulate_face_with_boundary(
         }
         _ => {
             // All curved surfaces: use UV-space boundary trimming
-            triangulate_surface_uv_trimmed(surface, boundary_points, forward, params)
+            triangulate_surface_uv_trimmed(surface, boundary_points, hole_polylines, forward, params)
         }
     }
 }
@@ -1095,6 +1107,63 @@ fn surface_v_period(surface: &Surface) -> Option<f64> {
     }
 }
 
+/// Triangulate a "cap" face on a curved surface — a disc-like face where the boundary
+/// projects to a degenerate UV range (e.g., a circular disc on the end of a cylinder,
+/// cone, or torus). The boundary points form a closed loop on the surface, and we
+/// triangulate using a fan from the centroid of the boundary points, with each triangle's
+/// third vertex evaluated on the surface.
+fn triangulate_cap_face(
+    surface: &Surface,
+    boundary_points_3d: &[Point3d],
+    forward: bool,
+) -> TriangleMesh {
+    let mut mesh = TriangleMesh::new();
+
+    if boundary_points_3d.len() < 3 {
+        return mesh;
+    }
+
+    // Compute centroid of boundary points
+    let n_pts = boundary_points_3d.len() as f64;
+    let centroid = Point3d::new(
+        boundary_points_3d.iter().map(|p| p.x).sum::<f64>() / n_pts,
+        boundary_points_3d.iter().map(|p| p.y).sum::<f64>() / n_pts,
+        boundary_points_3d.iter().map(|p| p.z).sum::<f64>() / n_pts,
+    );
+
+    // Project centroid onto the surface to get a more accurate center
+    let (cu, cv) = surface.project_point(&centroid);
+    let center_3d = surface.point_at(cu, cv);
+    let center_normal = surface.normal_at(cu, cv);
+
+    // Add centroid as first vertex
+    let center_idx = mesh.add_vertex(center_3d);
+    mesh.add_vertex_normal(center_idx, [center_normal.x, center_normal.y, center_normal.z]);
+
+    // Add boundary vertices
+    for p in boundary_points_3d {
+        let (u, v) = surface.project_point(p);
+        let n = surface.normal_at(u, v);
+        let idx = mesh.add_vertex(*p);
+        mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+    }
+
+    // Fan triangulation: center → boundary[i] → boundary[(i+1) % n]
+    let n = boundary_points_3d.len() as u32;
+    for i in 0..n {
+        let i_next = (i + 1) % n;
+        let v1 = center_idx + 1 + i;
+        let v2 = center_idx + 1 + i_next;
+        if forward {
+            mesh.add_triangle(center_idx, v1, v2);
+        } else {
+            mesh.add_triangle(center_idx, v2, v1);
+        }
+    }
+
+    mesh
+}
+
 /// Triangulate a curved surface with boundary trimming in UV space.
 ///
 /// Algorithm:
@@ -1108,6 +1177,7 @@ fn surface_v_period(surface: &Surface) -> Option<f64> {
 fn triangulate_surface_uv_trimmed(
     surface: &Surface,
     boundary_points_3d: &[Point3d],
+    hole_polylines_3d: &[Vec<Point3d>],
     forward: bool,
     params: &TriangulationParams,
 ) -> TriangleMesh {
@@ -1125,23 +1195,80 @@ fn triangulate_surface_uv_trimmed(
         return mesh;
     }
 
+    // Also project hole polylines to UV
+    let mut hole_uv_polylines: Vec<Vec<Point2d>> = hole_polylines_3d.iter().map(|hole| {
+        hole.iter().map(|p| {
+            let (u, v) = surface.project_point(p);
+            Point2d::new(u, v)
+        }).collect()
+    }).collect();
+
     // 2. Normalize UV polygon for periodic surfaces
     let u_period = surface_u_period(surface);
     let v_period = surface_v_period(surface);
     normalize_uv_polygon(&mut boundary_uv, u_period, v_period);
+    // Also normalize hole polygons
+    for hole_uv in hole_uv_polylines.iter_mut() {
+        normalize_uv_polygon(hole_uv, u_period, v_period);
+    }
 
-    // 3. Compute UV bounding box
+    // 3. Compute UV bounding box from BOTH outer and inner boundary points
     let mut u_min = f64::MAX; let mut u_max = f64::MIN;
     let mut v_min = f64::MAX; let mut v_max = f64::MIN;
     for p in &boundary_uv {
         u_min = u_min.min(p.u); u_max = u_max.max(p.u);
         v_min = v_min.min(p.v); v_max = v_max.max(p.v);
     }
+    for hole_uv in &hole_uv_polylines {
+        for p in hole_uv {
+            u_min = u_min.min(p.u); u_max = u_max.max(p.u);
+            v_min = v_min.min(p.v); v_max = v_max.max(p.v);
+        }
+    }
 
     let u_range = u_max - u_min;
     let v_range = v_max - v_min;
-    if u_range < 1e-12 || v_range < 1e-12 {
+
+    // Handle degenerate UV range — this occurs when the boundary is a "cap" face
+    // (a disc on a cylinder/cone/torus where all boundary points project to the
+    // same v value). In this case, triangulate as a disc (fan from centroid).
+    if u_range < 1e-12 && v_range < 1e-12 {
+        // Both ranges degenerate — shouldn't happen
         return mesh;
+    }
+
+    // Check for cap faces: if the outer boundary projects to a degenerate UV range
+    // (constant v for cylinders/cones, or constant u/v for torus), but holes provide
+    // the missing range, we still need to treat this as a cap + annular ring.
+    //
+    // The key insight: if the outer boundary alone has a degenerate v_range (or u_range),
+    // but with holes the full range becomes non-degenerate, the face is an annular band
+    // (like the side of a tube between two concentric circles). We should handle this
+    // with the UV grid approach.
+    //
+    // But if the outer boundary has a degenerate range AND holes don't help either
+    // (holes are at the same v value), it's truly a flat cap disc.
+    {
+        let mut outer_u_min = f64::MAX; let mut outer_u_max = f64::MIN;
+        let mut outer_v_min = f64::MAX; let mut outer_v_max = f64::MIN;
+        for p in &boundary_uv {
+            outer_u_min = outer_u_min.min(p.u); outer_u_max = outer_u_max.max(p.u);
+            outer_v_min = outer_v_min.min(p.v); outer_v_max = outer_v_max.max(p.v);
+        }
+        let outer_u_range = outer_u_max - outer_u_min;
+        let outer_v_range = outer_v_max - outer_v_min;
+
+        if outer_u_range < 1e-8 && outer_v_range < 1e-8 {
+            // Both ranges degenerate — completely degenerate face
+            return mesh;
+        }
+
+        if outer_u_range < 1e-8 || outer_v_range < 1e-8 {
+            // Outer boundary is degenerate in one direction.
+            // This is a cap face (disc on cylinder/cone/torus).
+            // Even if holes exist, the outer boundary is a flat circle on the surface.
+            return triangulate_cap_face(surface, boundary_points_3d, forward);
+        }
     }
 
     // Add small margin
@@ -1156,14 +1283,36 @@ fn triangulate_surface_uv_trimmed(
     let du = (u_max - u_min) / n_u as f64;
     let dv = (v_max - v_min) / n_v as f64;
 
-    // 5. For each grid cell, check if center is inside polygon
+    // 5. For each grid cell, check if center is inside outer polygon AND NOT inside any hole
     let mut inside = vec![vec![false; n_u]; n_v];
+    let mut inside_count = 0usize;
     for j in 0..n_v {
         for i in 0..n_u {
             let cu = u_min + du * (i as f64 + 0.5);
             let cv = v_min + dv * (j as f64 + 0.5);
-            inside[j][i] = point_in_polygon_2d(&Point2d::new(cu, cv), &boundary_uv);
+            let pt = Point2d::new(cu, cv);
+            let in_outer = point_in_polygon_2d(&pt, &boundary_uv);
+            if !in_outer {
+                inside[j][i] = false;
+                continue;
+            }
+            // Check if inside any hole — if so, exclude
+            let mut in_hole = false;
+            for hole_uv in &hole_uv_polylines {
+                if hole_uv.len() >= 3 && point_in_polygon_2d(&pt, hole_uv) {
+                    in_hole = true;
+                    break;
+                }
+            }
+            inside[j][i] = !in_hole;
+            if inside[j][i] { inside_count += 1; }
         }
+    }
+
+    if inside_count == 0 {
+        // No cells inside the polygon — this likely means the boundary projects
+        // to a degenerate shape (a line) in UV space. Fall back to cap face triangulation.
+        return triangulate_cap_face(surface, boundary_points_3d, forward);
     }
 
     // 6. Generate grid vertices (only for cells that are inside or adjacent to inside)
