@@ -1,0 +1,223 @@
+ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('NIST STEP Test Suite - Block with Through-Hole'),'2;1');
+FILE_NAME('nist_block_with_hole.stp','2024-01-01T00:00:00',('NIST'),(''),
+  '3Draper NIST Test Suite','','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));
+ENDSEC;
+DATA;
+
+/* Block 20x20x10 with a cylindrical through-hole of radius 3 at center */
+/* Top and bottom faces have inner boundary (hole) */
+
+/* ---- Cartesian points ---- */
+#1 = CARTESIAN_POINT('',(0.0,0.0,0.0));
+#2 = CARTESIAN_POINT('',(20.0,0.0,0.0));
+#3 = CARTESIAN_POINT('',(20.0,20.0,0.0));
+#4 = CARTESIAN_POINT('',(0.0,20.0,0.0));
+#5 = CARTESIAN_POINT('',(0.0,0.0,10.0));
+#6 = CARTESIAN_POINT('',(20.0,0.0,10.0));
+#7 = CARTESIAN_POINT('',(20.0,20.0,10.0));
+#8 = CARTESIAN_POINT('',(0.0,20.0,10.0));
+/* Hole center points */
+#9 = CARTESIAN_POINT('',(10.0,10.0,0.0));
+#10 = CARTESIAN_POINT('',(10.0,10.0,10.0));
+/* Hole seam point */
+#11 = CARTESIAN_POINT('',(13.0,10.0,0.0));
+#12 = CARTESIAN_POINT('',(13.0,10.0,10.0));
+
+/* ---- Directions ---- */
+#20 = DIRECTION('',(1.0,0.0,0.0));
+#21 = DIRECTION('',(0.0,1.0,0.0));
+#22 = DIRECTION('',(0.0,0.0,1.0));
+#23 = DIRECTION('',(-1.0,0.0,0.0));
+#24 = DIRECTION('',(0.0,-1.0,0.0));
+#25 = DIRECTION('',(0.0,0.0,-1.0));
+
+/* ---- Vectors ---- */
+#50 = VECTOR('',#20,20.0);
+#51 = VECTOR('',#21,20.0);
+#52 = VECTOR('',#22,10.0);
+#53 = VECTOR('',#23,20.0);
+#54 = VECTOR('',#24,20.0);
+#55 = VECTOR('',#25,10.0);
+#56 = VECTOR('',#22,10.0);
+
+/* ---- Axis placements ---- */
+/* Face planes */
+#30 = AXIS2_PLACEMENT_3D('',#1,#25,#20);
+#31 = AXIS2_PLACEMENT_3D('',#5,#22,#20);
+#32 = AXIS2_PLACEMENT_3D('',#1,#24,#20);
+#33 = AXIS2_PLACEMENT_3D('',#4,#21,#20);
+#34 = AXIS2_PLACEMENT_3D('',#1,#23,#22);
+#35 = AXIS2_PLACEMENT_3D('',#2,#20,#22);
+/* Hole cylinder axis */
+#36 = AXIS2_PLACEMENT_3D('',#9,#22,#20);
+/* Hole circle axes */
+#37 = AXIS2_PLACEMENT_3D('',#9,#22,#20);
+#38 = AXIS2_PLACEMENT_3D('',#10,#22,#20);
+
+/* ---- Surfaces ---- */
+#40 = PLANE('',#30);
+#41 = PLANE('',#31);
+#42 = PLANE('',#32);
+#43 = PLANE('',#33);
+#44 = PLANE('',#34);
+#45 = PLANE('',#35);
+#46 = CYLINDRICAL_SURFACE('',#36,3.0);
+
+/* ---- Vertex points ---- */
+#60 = VERTEX_POINT('',#1);
+#61 = VERTEX_POINT('',#2);
+#62 = VERTEX_POINT('',#3);
+#63 = VERTEX_POINT('',#4);
+#64 = VERTEX_POINT('',#5);
+#65 = VERTEX_POINT('',#6);
+#66 = VERTEX_POINT('',#7);
+#67 = VERTEX_POINT('',#8);
+/* Hole vertices */
+#68 = VERTEX_POINT('',#11);
+#69 = VERTEX_POINT('',#12);
+
+/* ---- Edge curves ---- */
+/* Box edges (12) */
+#70 = LINE('',#1,#50);
+#71 = LINE('',#2,#51);
+#72 = LINE('',#3,#53);
+#73 = LINE('',#4,#54);
+#74 = LINE('',#5,#50);
+#75 = LINE('',#6,#51);
+#76 = LINE('',#7,#53);
+#77 = LINE('',#8,#54);
+#78 = LINE('',#1,#52);
+#79 = LINE('',#2,#52);
+#80 = LINE('',#3,#52);
+#81 = LINE('',#4,#52);
+
+#82 = EDGE_CURVE('',#60,#61,#70,.T.);
+#83 = EDGE_CURVE('',#61,#62,#71,.T.);
+#84 = EDGE_CURVE('',#62,#63,#72,.T.);
+#85 = EDGE_CURVE('',#63,#60,#73,.T.);
+#86 = EDGE_CURVE('',#64,#65,#74,.T.);
+#87 = EDGE_CURVE('',#65,#66,#75,.T.);
+#88 = EDGE_CURVE('',#66,#67,#76,.T.);
+#89 = EDGE_CURVE('',#67,#64,#77,.T.);
+#90 = EDGE_CURVE('',#60,#64,#78,.T.);
+#91 = EDGE_CURVE('',#61,#65,#79,.T.);
+#92 = EDGE_CURVE('',#62,#66,#80,.T.);
+#93 = EDGE_CURVE('',#63,#67,#81,.T.);
+
+/* Hole edges */
+/* Bottom hole circle: center (10,10,0), r=3 */
+#94 = CIRCLE('',#37,3.0);
+#95 = EDGE_CURVE('',#68,#68,#94,.T.);
+/* Top hole circle: center (10,10,10), r=3 */
+#96 = CIRCLE('',#38,3.0);
+#97 = EDGE_CURVE('',#69,#69,#96,.T.);
+/* Hole seam line */
+#98 = LINE('',#11,#56);
+#99 = EDGE_CURVE('',#68,#69,#98,.T.);
+
+/* ---- Oriented edges ---- */
+/* Bottom face: outer boundary + hole inner boundary */
+#100 = ORIENTED_EDGE('',*,*,#82,.F.);
+#101 = ORIENTED_EDGE('',*,*,#83,.F.);
+#102 = ORIENTED_EDGE('',*,*,#84,.F.);
+#103 = ORIENTED_EDGE('',*,*,#85,.F.);
+/* Bottom hole */
+#104 = ORIENTED_EDGE('',*,*,#95,.T.);
+
+/* Top face: outer boundary + hole inner boundary */
+#105 = ORIENTED_EDGE('',*,*,#86,.T.);
+#106 = ORIENTED_EDGE('',*,*,#87,.T.);
+#107 = ORIENTED_EDGE('',*,*,#88,.T.);
+#108 = ORIENTED_EDGE('',*,*,#89,.T.);
+/* Top hole */
+#109 = ORIENTED_EDGE('',*,*,#97,.F.);
+
+/* Front face (y=0) */
+#110 = ORIENTED_EDGE('',*,*,#82,.T.);
+#111 = ORIENTED_EDGE('',*,*,#91,.T.);
+#112 = ORIENTED_EDGE('',*,*,#86,.F.);
+#113 = ORIENTED_EDGE('',*,*,#90,.F.);
+
+/* Back face (y=20) */
+#114 = ORIENTED_EDGE('',*,*,#84,.F.);
+#115 = ORIENTED_EDGE('',*,*,#92,.T.);
+#116 = ORIENTED_EDGE('',*,*,#88,.F.);
+#117 = ORIENTED_EDGE('',*,*,#93,.F.);
+
+/* Left face (x=0) */
+#118 = ORIENTED_EDGE('',*,*,#85,.T.);
+#119 = ORIENTED_EDGE('',*,*,#93,.T.);
+#120 = ORIENTED_EDGE('',*,*,#89,.F.);
+#121 = ORIENTED_EDGE('',*,*,#90,.T.);
+
+/* Right face (x=20) */
+#122 = ORIENTED_EDGE('',*,*,#83,.F.);
+#123 = ORIENTED_EDGE('',*,*,#92,.F.);
+#124 = ORIENTED_EDGE('',*,*,#87,.F.);
+#125 = ORIENTED_EDGE('',*,*,#91,.F.);
+
+/* Hole cylinder face */
+#126 = ORIENTED_EDGE('',*,*,#95,.T.);
+#127 = ORIENTED_EDGE('',*,*,#99,.T.);
+#128 = ORIENTED_EDGE('',*,*,#97,.F.);
+#129 = ORIENTED_EDGE('',*,*,#99,.F.);
+
+/* ---- Edge loops ---- */
+#130 = EDGE_LOOP('',(#100,#101,#102,#103));
+#131 = EDGE_LOOP('',(#104));
+#132 = EDGE_LOOP('',(#105,#106,#107,#108));
+#133 = EDGE_LOOP('',(#109));
+#134 = EDGE_LOOP('',(#110,#111,#112,#113));
+#135 = EDGE_LOOP('',(#114,#115,#116,#117));
+#136 = EDGE_LOOP('',(#118,#119,#120,#121));
+#137 = EDGE_LOOP('',(#122,#123,#124,#125));
+#138 = EDGE_LOOP('',(#126,#127,#128,#129));
+
+/* ---- Face bounds ---- */
+#140 = FACE_OUTER_BOUND('',#130,.T.);
+#141 = FACE_BOUND('',#131,.T.);
+#142 = FACE_OUTER_BOUND('',#132,.T.);
+#143 = FACE_BOUND('',#133,.T.);
+#144 = FACE_OUTER_BOUND('',#134,.T.);
+#145 = FACE_OUTER_BOUND('',#135,.T.);
+#146 = FACE_OUTER_BOUND('',#136,.T.);
+#147 = FACE_OUTER_BOUND('',#137,.T.);
+#148 = FACE_OUTER_BOUND('',#138,.T.);
+
+/* ---- Advanced faces ---- */
+#150 = ADVANCED_FACE('',(#140,#141),#40,.F.);
+#151 = ADVANCED_FACE('',(#142,#143),#41,.T.);
+#152 = ADVANCED_FACE('',(#144),#42,.F.);
+#153 = ADVANCED_FACE('',(#145),#43,.T.);
+#154 = ADVANCED_FACE('',(#146),#44,.F.);
+#155 = ADVANCED_FACE('',(#147),#45,.T.);
+#156 = ADVANCED_FACE('',(#148),#46,.T.);
+
+/* ---- Shell and BREP ---- */
+#160 = CLOSED_SHELL('',(#150,#151,#152,#153,#154,#155,#156));
+#161 = MANIFOLD_SOLID_BREP('nist_block_with_hole',#160);
+
+/* ---- Shape representation ---- */
+#300 = ( GEOMETRIC_REPRESENTATION_CONTEXT(3)
+         GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#301))
+         GLOBAL_UNIT_ASSIGNED_CONTEXT((#302,#303,#304))
+         REPRESENTATION_CONTEXT('model','3D') );
+#301 = UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.0E-06),#302,'','');
+#302 = ( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) );
+#303 = ( NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.) );
+#304 = ( NAMED_UNIT(*) SI_UNIT($,.STERADIAN.) SOLID_ANGLE_UNIT() );
+#400 = SHAPE_DEFINITION_REPRESENTATION(#401,#402);
+#401 = PRODUCT_DEFINITION_SHAPE('','',#403);
+#402 = ADVANCED_BREP_SHAPE_REPRESENTATION('',(#161),#300);
+#403 = PRODUCT_DEFINITION('','',#404,#405);
+#404 = PRODUCT_DEFINITION_FORMATION('','',#406);
+#405 = PRODUCT_DEFINITION_CONTEXT('part definition',#407,'design');
+#406 = PRODUCT('NIST_Block_Hole','NIST_Block_Hole','Block with hole',(#408));
+#407 = APPLICATION_CONTEXT('automotive_design');
+#408 = PRODUCT_CONTEXT('',#407,'mechanical');
+
+ENDSEC;
+END-ISO-10303-21;

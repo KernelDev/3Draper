@@ -1,0 +1,18 @@
+[package]
+name = "draper-cloud"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+draper-geometry = { workspace = true }
+draper-topology = { workspace = true }
+draper-mesh = { workspace = true }
+draper-core = { workspace = true }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = { workspace = true }
+thiserror = { workspace = true }
+uuid = { version = "1", features = ["v4"] }

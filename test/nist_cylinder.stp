@@ -1,0 +1,113 @@
+ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('NIST STEP Test Suite - Simple Cylinder'),'2;1');
+FILE_NAME('nist_cylinder.stp','2024-01-01T00:00:00',('NIST'),(''),
+  '3Draper NIST Test Suite','','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));
+ENDSEC;
+DATA;
+
+/* ---- Cartesian points ---- */
+#1 = CARTESIAN_POINT('',(0.0,0.0,0.0));
+#2 = CARTESIAN_POINT('',(5.0,0.0,0.0));
+#3 = CARTESIAN_POINT('',(0.0,0.0,10.0));
+
+/* ---- Directions ---- */
+#10 = DIRECTION('',(0.0,0.0,1.0));
+#11 = DIRECTION('',(0.0,0.0,-1.0));
+#12 = DIRECTION('',(1.0,0.0,0.0));
+#13 = DIRECTION('',(-1.0,0.0,0.0));
+
+/* ---- Vectors ---- */
+#50 = VECTOR('',#10,10.0);
+
+/* ---- Axis placements ---- */
+/* Bottom plane: origin at (0,0,0), normal -Z, ref X */
+#20 = AXIS2_PLACEMENT_3D('',#1,#11,#12);
+/* Top plane: origin at (0,0,10), normal +Z, ref X */
+#21 = AXIS2_PLACEMENT_3D('',#3,#10,#12);
+/* Cylinder axis: origin at (0,0,0), axis Z, ref X */
+#22 = AXIS2_PLACEMENT_3D('',#1,#10,#12);
+/* Bottom circle axis: origin at (0,0,0), normal +Z, ref X */
+#23 = AXIS2_PLACEMENT_3D('',#1,#10,#12);
+/* Top circle axis: origin at (0,0,10), normal +Z, ref X */
+#24 = AXIS2_PLACEMENT_3D('',#3,#10,#12);
+
+/* ---- Surfaces ---- */
+#30 = PLANE('',#20);
+#31 = PLANE('',#21);
+#32 = CYLINDRICAL_SURFACE('',#22,5.0);
+
+/* ---- Vertex points ---- */
+#40 = VERTEX_POINT('',#2);
+#41 = VERTEX_POINT('',#3);
+
+/* ---- Curves ---- */
+/* Bottom circle: center (0,0,0), radius 5 */
+#60 = CIRCLE('',#23,5.0);
+/* Top circle: center (0,0,10), radius 5 */
+#61 = CIRCLE('',#24,5.0);
+/* Seam line: from (5,0,0) to (5,0,10) */
+#62 = LINE('',#2,#50);
+
+/* ---- Edge curves ---- */
+/* Bottom circle edge: V40 -> V40 (closed circle at seam point) */
+#70 = EDGE_CURVE('',#40,#40,#60,.T.);
+/* Top circle edge: V41 -> V41 (closed circle at seam point) */
+#71 = EDGE_CURVE('',#41,#41,#61,.T.);
+/* Seam line edge: V40 -> V41 */
+#72 = EDGE_CURVE('',#40,#41,#62,.T.);
+
+/* ---- Oriented edges ---- */
+/* Bottom face: circle reversed (outward normal -Z, boundary CW from top) */
+#80 = ORIENTED_EDGE('',*,*,#70,.F.);
+
+/* Top face: circle forward (outward normal +Z, boundary CCW from top) */
+#81 = ORIENTED_EDGE('',*,*,#71,.T.);
+
+/* Lateral face: bottom circle fwd + seam up + top circle rev + seam down */
+#82 = ORIENTED_EDGE('',*,*,#70,.T.);
+#83 = ORIENTED_EDGE('',*,*,#72,.T.);
+#84 = ORIENTED_EDGE('',*,*,#71,.F.);
+#85 = ORIENTED_EDGE('',*,*,#72,.F.);
+
+/* ---- Edge loops ---- */
+#90 = EDGE_LOOP('',(#80));
+#91 = EDGE_LOOP('',(#81));
+#92 = EDGE_LOOP('',(#82,#83,#84,#85));
+
+/* ---- Face bounds ---- */
+#100 = FACE_OUTER_BOUND('',#90,.T.);
+#101 = FACE_OUTER_BOUND('',#91,.T.);
+#102 = FACE_OUTER_BOUND('',#92,.T.);
+
+/* ---- Advanced faces ---- */
+#110 = ADVANCED_FACE('',(#100),#30,.F.);
+#111 = ADVANCED_FACE('',(#101),#31,.T.);
+#112 = ADVANCED_FACE('',(#102),#32,.T.);
+
+/* ---- Shell and BREP ---- */
+#200 = CLOSED_SHELL('',(#110,#111,#112));
+#201 = MANIFOLD_SOLID_BREP('nist_cylinder',#200);
+
+/* ---- Shape representation ---- */
+#300 = ( GEOMETRIC_REPRESENTATION_CONTEXT(3)
+         GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#301))
+         GLOBAL_UNIT_ASSIGNED_CONTEXT((#302,#303,#304))
+         REPRESENTATION_CONTEXT('model','3D') );
+#301 = UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.0E-06),#302,'','');
+#302 = ( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) );
+#303 = ( NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.) );
+#304 = ( NAMED_UNIT(*) SI_UNIT($,.STERADIAN.) SOLID_ANGLE_UNIT() );
+#400 = SHAPE_DEFINITION_REPRESENTATION(#401,#402);
+#401 = PRODUCT_DEFINITION_SHAPE('','',#403);
+#402 = ADVANCED_BREP_SHAPE_REPRESENTATION('',(#201),#300);
+#403 = PRODUCT_DEFINITION('','',#404,#405);
+#404 = PRODUCT_DEFINITION_FORMATION('','',#406);
+#405 = PRODUCT_DEFINITION_CONTEXT('part definition',#407,'design');
+#406 = PRODUCT('NIST_Cylinder','NIST_Cylinder','Simple cylinder',(#408));
+#407 = APPLICATION_CONTEXT('automotive_design');
+#408 = PRODUCT_CONTEXT('',#407,'mechanical');
+
+ENDSEC;
+END-ISO-10303-21;

@@ -1,0 +1,210 @@
+ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('NIST STEP Test Suite - Chamfered Block'),'2;1');
+FILE_NAME('nist_chamfer_block.stp','2024-01-01T00:00:00',('NIST'),(''),
+  '3Draper NIST Test Suite','','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));
+ENDSEC;
+DATA;
+
+/* Block 10x10x10 with chamfer on the top-front edge */
+/* Chamfer distance = 2mm, creating 7 planar faces */
+
+/* ---- Cartesian points ---- */
+/* Bottom face */
+#1 = CARTESIAN_POINT('',(0.0,0.0,0.0));
+#2 = CARTESIAN_POINT('',(10.0,0.0,0.0));
+#3 = CARTESIAN_POINT('',(10.0,10.0,0.0));
+#4 = CARTESIAN_POINT('',(0.0,10.0,0.0));
+/* Top face (shifted front edge by chamfer) */
+#5 = CARTESIAN_POINT('',(0.0,2.0,10.0));
+#6 = CARTESIAN_POINT('',(10.0,2.0,10.0));
+#7 = CARTESIAN_POINT('',(10.0,10.0,10.0));
+#8 = CARTESIAN_POINT('',(0.0,10.0,10.0));
+/* Chamfer edge on front face */
+#9 = CARTESIAN_POINT('',(0.0,0.0,8.0));
+#10 = CARTESIAN_POINT('',(10.0,0.0,8.0));
+
+/* ---- Directions ---- */
+#20 = DIRECTION('',(1.0,0.0,0.0));
+#21 = DIRECTION('',(0.0,1.0,0.0));
+#22 = DIRECTION('',(0.0,0.0,1.0));
+#23 = DIRECTION('',(-1.0,0.0,0.0));
+#24 = DIRECTION('',(0.0,-1.0,0.0));
+#25 = DIRECTION('',(0.0,0.0,-1.0));
+#26 = DIRECTION('',(0.0,0.7071,0.7071));
+
+/* ---- Vectors ---- */
+#50 = VECTOR('',#20,10.0);
+#51 = VECTOR('',#21,10.0);
+#52 = VECTOR('',#22,10.0);
+#53 = VECTOR('',#23,10.0);
+#54 = VECTOR('',#24,2.0);
+#55 = VECTOR('',#25,2.0);
+
+/* ---- Axis placements ---- */
+#30 = AXIS2_PLACEMENT_3D('',#1,#25,#20);
+#31 = AXIS2_PLACEMENT_3D('',#5,#22,#20);
+#32 = AXIS2_PLACEMENT_3D('',#1,#24,#20);
+#33 = AXIS2_PLACEMENT_3D('',#4,#21,#20);
+#34 = AXIS2_PLACEMENT_3D('',#1,#23,#22);
+#35 = AXIS2_PLACEMENT_3D('',#2,#20,#22);
+#36 = AXIS2_PLACEMENT_3D('',#9,#26,#20);
+
+/* ---- Surfaces ---- */
+#40 = PLANE('',#30);
+#41 = PLANE('',#31);
+#42 = PLANE('',#32);
+#43 = PLANE('',#33);
+#44 = PLANE('',#34);
+#45 = PLANE('',#35);
+#46 = PLANE('',#36);
+
+/* ---- Vertex points ---- */
+#60 = VERTEX_POINT('',#1);
+#61 = VERTEX_POINT('',#2);
+#62 = VERTEX_POINT('',#3);
+#63 = VERTEX_POINT('',#4);
+#64 = VERTEX_POINT('',#5);
+#65 = VERTEX_POINT('',#6);
+#66 = VERTEX_POINT('',#7);
+#67 = VERTEX_POINT('',#8);
+#68 = VERTEX_POINT('',#9);
+#69 = VERTEX_POINT('',#10);
+
+/* ---- Lines ---- */
+#70 = LINE('',#1,#50);
+#71 = LINE('',#2,#51);
+#72 = LINE('',#3,#53);
+#73 = LINE('',#4,#54);
+#74 = LINE('',#5,#50);
+#75 = LINE('',#6,#51);
+#76 = LINE('',#7,#53);
+#77 = LINE('',#8,#54);
+#78 = LINE('',#9,#50);
+#79 = LINE('',#9,#55);
+#80 = LINE('',#10,#55);
+#81 = LINE('',#1,#52);
+#82 = LINE('',#2,#52);
+#83 = LINE('',#3,#52);
+#84 = LINE('',#4,#52);
+
+/* ---- Edge curves ---- */
+/* Bottom edges */
+#90 = EDGE_CURVE('',#60,#61,#70,.T.);
+#91 = EDGE_CURVE('',#61,#62,#71,.T.);
+#92 = EDGE_CURVE('',#62,#63,#72,.T.);
+#93 = EDGE_CURVE('',#63,#60,#73,.T.);
+/* Top edges (P5->P6->P7->P8) */
+#94 = EDGE_CURVE('',#64,#65,#74,.T.);
+#95 = EDGE_CURVE('',#65,#66,#75,.T.);
+#96 = EDGE_CURVE('',#66,#67,#76,.T.);
+#97 = EDGE_CURVE('',#67,#64,#77,.T.);
+/* Chamfer horizontal edge P9->P10 */
+#98 = EDGE_CURVE('',#68,#69,#78,.T.);
+/* Chamfer-to-front vertical edges P9->P5 (via front), P10->P6 */
+#99 = EDGE_CURVE('',#64,#68,#79,.T.);
+#100 = EDGE_CURVE('',#65,#69,#80,.T.);
+/* Original vertical edges (some now go to different points) */
+#101 = EDGE_CURVE('',#60,#68,#81,.T.);
+#102 = EDGE_CURVE('',#61,#69,#82,.T.);
+#103 = EDGE_CURVE('',#62,#66,#83,.T.);
+#104 = EDGE_CURVE('',#63,#67,#84,.T.);
+
+/* ---- Oriented edges ---- */
+/* Bottom face: V0->V1->V2->V3 reversed */
+#110 = ORIENTED_EDGE('',*,*,#90,.F.);
+#111 = ORIENTED_EDGE('',*,*,#91,.F.);
+#112 = ORIENTED_EDGE('',*,*,#92,.F.);
+#113 = ORIENTED_EDGE('',*,*,#93,.F.);
+
+/* Top face: V5->V6->V7->V8 */
+#114 = ORIENTED_EDGE('',*,*,#94,.T.);
+#115 = ORIENTED_EDGE('',*,*,#95,.T.);
+#116 = ORIENTED_EDGE('',*,*,#96,.T.);
+#117 = ORIENTED_EDGE('',*,*,#97,.T.);
+
+/* Front face: V0->V1->V10->V9 (below chamfer) */
+#118 = ORIENTED_EDGE('',*,*,#90,.T.);
+#119 = ORIENTED_EDGE('',*,*,#102,.T.);
+#120 = ORIENTED_EDGE('',*,*,#98,.F.);
+#121 = ORIENTED_EDGE('',*,*,#101,.F.);
+
+/* Back face: V3->V2->V7->V8 */
+#122 = ORIENTED_EDGE('',*,*,#92,.F.);
+#123 = ORIENTED_EDGE('',*,*,#103,.T.);
+#124 = ORIENTED_EDGE('',*,*,#96,.F.);
+#125 = ORIENTED_EDGE('',*,*,#104,.F.);
+
+/* Left face: V0->V3->V8->V5->V9 */
+#126 = ORIENTED_EDGE('',*,*,#93,.T.);
+#127 = ORIENTED_EDGE('',*,*,#104,.T.);
+#128 = ORIENTED_EDGE('',*,*,#97,.F.);
+#129 = ORIENTED_EDGE('',*,*,#99,.F.);
+#130 = ORIENTED_EDGE('',*,*,#101,.T.);
+
+/* Right face: V1->V2->V7->V6->V10 */
+#131 = ORIENTED_EDGE('',*,*,#91,.F.);
+#132 = ORIENTED_EDGE('',*,*,#103,.F.);
+#133 = ORIENTED_EDGE('',*,*,#95,.F.);
+#134 = ORIENTED_EDGE('',*,*,#100,.F.);
+#135 = ORIENTED_EDGE('',*,*,#102,.F.);
+
+/* Chamfer face: V9->V10->V6->V5 */
+#136 = ORIENTED_EDGE('',*,*,#98,.T.);
+#137 = ORIENTED_EDGE('',*,*,#100,.T.);
+#138 = ORIENTED_EDGE('',*,*,#94,.F.);
+#139 = ORIENTED_EDGE('',*,*,#99,.T.);
+
+/* ---- Edge loops ---- */
+#140 = EDGE_LOOP('',(#110,#111,#112,#113));
+#141 = EDGE_LOOP('',(#114,#115,#116,#117));
+#142 = EDGE_LOOP('',(#118,#119,#120,#121));
+#143 = EDGE_LOOP('',(#122,#123,#124,#125));
+#144 = EDGE_LOOP('',(#126,#127,#128,#129,#130));
+#145 = EDGE_LOOP('',(#131,#132,#133,#134,#135));
+#146 = EDGE_LOOP('',(#136,#137,#138,#139));
+
+/* ---- Face bounds ---- */
+#150 = FACE_OUTER_BOUND('',#140,.T.);
+#151 = FACE_OUTER_BOUND('',#141,.T.);
+#152 = FACE_OUTER_BOUND('',#142,.T.);
+#153 = FACE_OUTER_BOUND('',#143,.T.);
+#154 = FACE_OUTER_BOUND('',#144,.T.);
+#155 = FACE_OUTER_BOUND('',#145,.T.);
+#156 = FACE_OUTER_BOUND('',#146,.T.);
+
+/* ---- Advanced faces ---- */
+#157 = ADVANCED_FACE('',(#150),#40,.F.);
+#158 = ADVANCED_FACE('',(#151),#41,.T.);
+#159 = ADVANCED_FACE('',(#152),#42,.F.);
+#160 = ADVANCED_FACE('',(#153),#43,.T.);
+#161 = ADVANCED_FACE('',(#154),#44,.F.);
+#162 = ADVANCED_FACE('',(#155),#45,.T.);
+#163 = ADVANCED_FACE('',(#156),#46,.T.);
+
+/* ---- Shell and BREP ---- */
+#170 = CLOSED_SHELL('',(#157,#158,#159,#160,#161,#162,#163));
+#171 = MANIFOLD_SOLID_BREP('nist_chamfer_block',#170);
+
+/* ---- Shape representation ---- */
+#300 = ( GEOMETRIC_REPRESENTATION_CONTEXT(3)
+         GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#301))
+         GLOBAL_UNIT_ASSIGNED_CONTEXT((#302,#303,#304))
+         REPRESENTATION_CONTEXT('model','3D') );
+#301 = UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.0E-06),#302,'','');
+#302 = ( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) );
+#303 = ( NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.) );
+#304 = ( NAMED_UNIT(*) SI_UNIT($,.STERADIAN.) SOLID_ANGLE_UNIT() );
+#400 = SHAPE_DEFINITION_REPRESENTATION(#401,#402);
+#401 = PRODUCT_DEFINITION_SHAPE('','',#403);
+#402 = ADVANCED_BREP_SHAPE_REPRESENTATION('',(#171),#300);
+#403 = PRODUCT_DEFINITION('','',#404,#405);
+#404 = PRODUCT_DEFINITION_FORMATION('','',#406);
+#405 = PRODUCT_DEFINITION_CONTEXT('part definition',#407,'design');
+#406 = PRODUCT('NIST_Chamfer','NIST_Chamfer','Chamfered block',(#408));
+#407 = APPLICATION_CONTEXT('automotive_design');
+#408 = PRODUCT_CONTEXT('',#407,'mechanical');
+
+ENDSEC;
+END-ISO-10303-21;

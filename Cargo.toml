@@ -8,6 +8,9 @@ members = [
     "crates/draper-core",
     "crates/draper-ffi",
     "crates/draper-viewer",
+    "crates/draper-cloud",
+    "crates/draper-ai",
+    "crates/draper-testing",
     "tools",
 ]
 
@@ -24,6 +27,9 @@ draper-topology = { path = "crates/draper-topology" }
 draper-step = { path = "crates/draper-step" }
 draper-mesh = { path = "crates/draper-mesh" }
 draper-core = { path = "crates/draper-core" }
+draper-cloud = { path = "crates/draper-cloud" }
+draper-ai = { path = "crates/draper-ai" }
+draper-testing = { path = "crates/draper-testing" }
 
 # Math & numerics
 nalgebra = "0.33"

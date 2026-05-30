@@ -1,0 +1,95 @@
+ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('NIST STEP Test Suite - Simple Sphere'),'2;1');
+FILE_NAME('nist_sphere.stp','2024-01-01T00:00:00',('NIST'),(''),
+  '3Draper NIST Test Suite','','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));
+ENDSEC;
+DATA;
+
+/* ---- Cartesian points ---- */
+#1 = CARTESIAN_POINT('',(0.0,0.0,0.0));
+#2 = CARTESIAN_POINT('',(5.0,0.0,0.0));
+#3 = CARTESIAN_POINT('',(0.0,0.0,5.0));
+#4 = CARTESIAN_POINT('',(-5.0,0.0,0.0));
+#5 = CARTESIAN_POINT('',(0.0,0.0,-5.0));
+
+/* ---- Directions ---- */
+#10 = DIRECTION('',(0.0,0.0,1.0));
+#11 = DIRECTION('',(1.0,0.0,0.0));
+#12 = DIRECTION('',(-1.0,0.0,0.0));
+#13 = DIRECTION('',(0.0,0.0,-1.0));
+
+/* ---- Axis placements ---- */
+/* Sphere center: origin, axis Z, ref X */
+#20 = AXIS2_PLACEMENT_3D('',#1,#10,#11);
+/* Equator circle axis: origin, normal +Z, ref X */
+#21 = AXIS2_PLACEMENT_3D('',#1,#10,#11);
+/* Meridian circle axis: origin, normal +Y (via -X as ref), ref X */
+#22 = AXIS2_PLACEMENT_3D('',#1,#11,#13);
+
+/* ---- Surfaces ---- */
+#30 = SPHERICAL_SURFACE('',#20,5.0);
+
+/* ---- Vertex points ---- */
+#40 = VERTEX_POINT('',#2);
+#41 = VERTEX_POINT('',#3);
+#42 = VERTEX_POINT('',#4);
+#43 = VERTEX_POINT('',#5);
+
+/* ---- Curves ---- */
+/* Equator circle: in XY plane, radius 5 */
+#60 = CIRCLE('',#21,5.0);
+/* Meridian circle: in XZ plane, radius 5 */
+#61 = CIRCLE('',#22,5.0);
+
+/* ---- Edge curves ---- */
+/* Equator: from (5,0,0) around back to (5,0,0) */
+#70 = EDGE_CURVE('',#40,#40,#60,.T.);
+/* Meridian top half: from (5,0,0) up to (-5,0,0) via (0,0,5) */
+#71 = EDGE_CURVE('',#40,#42,#61,.T.);
+/* Meridian bottom half: from (-5,0,0) down to (5,0,0) via (0,0,-5) */
+/* This uses the same circle but reversed */
+#72 = EDGE_CURVE('',#42,#40,#61,.T.);
+
+/* ---- Oriented edges ---- */
+/* Sphere face: equator + upper meridian + equator reversed + lower meridian */
+#80 = ORIENTED_EDGE('',*,*,#70,.T.);
+#81 = ORIENTED_EDGE('',*,*,#71,.T.);
+#82 = ORIENTED_EDGE('',*,*,#70,.F.);
+#83 = ORIENTED_EDGE('',*,*,#72,.T.);
+
+/* ---- Edge loops ---- */
+#90 = EDGE_LOOP('',(#80,#81,#82,#83));
+
+/* ---- Face bounds ---- */
+#100 = FACE_OUTER_BOUND('',#90,.T.);
+
+/* ---- Advanced faces ---- */
+#110 = ADVANCED_FACE('',(#100),#30,.T.);
+
+/* ---- Shell and BREP ---- */
+#200 = CLOSED_SHELL('',(#110));
+#201 = MANIFOLD_SOLID_BREP('nist_sphere',#200);
+
+/* ---- Shape representation ---- */
+#300 = ( GEOMETRIC_REPRESENTATION_CONTEXT(3)
+         GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#301))
+         GLOBAL_UNIT_ASSIGNED_CONTEXT((#302,#303,#304))
+         REPRESENTATION_CONTEXT('model','3D') );
+#301 = UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.0E-06),#302,'','');
+#302 = ( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) );
+#303 = ( NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.) );
+#304 = ( NAMED_UNIT(*) SI_UNIT($,.STERADIAN.) SOLID_ANGLE_UNIT() );
+#400 = SHAPE_DEFINITION_REPRESENTATION(#401,#402);
+#401 = PRODUCT_DEFINITION_SHAPE('','',#403);
+#402 = ADVANCED_BREP_SHAPE_REPRESENTATION('',(#201),#300);
+#403 = PRODUCT_DEFINITION('','',#404,#405);
+#404 = PRODUCT_DEFINITION_FORMATION('','',#406);
+#405 = PRODUCT_DEFINITION_CONTEXT('part definition',#407,'design');
+#406 = PRODUCT('NIST_Sphere','NIST_Sphere','Simple sphere',(#408));
+#407 = APPLICATION_CONTEXT('automotive_design');
+#408 = PRODUCT_CONTEXT('',#407,'mechanical');
+
+ENDSEC;
+END-ISO-10303-21;
