@@ -150,6 +150,19 @@ impl TriangleMesh {
                 colors.push(color);
             }
         }
+        // Merge normals
+        match (&mut self.normals, &other.normals) {
+            (Some(ref mut self_normals), Some(ref other_normals)) => {
+                self_normals.extend(other_normals.iter().cloned());
+            }
+            (None, Some(ref other_normals)) => {
+                // Fill in default normals for existing vertices
+                let mut combined = vec![[0.0, 0.0, 1.0]; self.vertices.len() - other.vertices.len()];
+                combined.extend(other_normals.iter().cloned());
+                self.normals = Some(combined);
+            }
+            _ => {}
+        }
         // Merge face IDs
         if self.triangle_face_ids.is_none() && other.triangle_face_ids.is_some() {
             let existing_count = self.triangles.len() - other.triangles.len();

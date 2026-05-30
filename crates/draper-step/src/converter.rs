@@ -173,24 +173,65 @@ pub fn step_structure_with_instances(step_file: &StepFile) -> (AssemblyNode, Vec
     (tree, instances)
 }
 
-/// Assign instance_index to leaf AssemblyNodes by matching them
-/// with instances in DFS order. The walk_assembly_tree_detailed function
-/// creates instances in the same DFS order as build_assembly_tree, so we
-/// can assign indices sequentially.
-/// Uses an explicit stack to avoid stack overflow on deeply nested trees.
-fn assign_instance_indices(root: &mut AssemblyNode, instances: &[DetailedMeshInstance], next_index: &mut usize) {
-    let mut stack: Vec<&mut AssemblyNode> = vec![root];
-    while let Some(node) = stack.pop() {
-        if node.children.is_empty() {
-            // Leaf node — assign instance_index if it has a brep_id
-            if node.brep_id.is_some() && *next_index < instances.len() {
-                node.instance_index = Some(*next_index);
-                *next_index += 1;
+/// Assign instance_index to leaf AssemblyNodes by finding the matching instance
+/// from the instances list. Matching is based on brep_id and the NAUO traversal order.
+///
+/// The key insight: `walk_assembly_tree_detailed` creates instances in the order it
+/// encounters leaf NAUO nodes. `build_assembly_tree` creates tree leaves in the same
+/// NAUO order. However, the instances list may contain MORE entries than tree leaves
+/// because some BREPs appear at multiple positions (multiple NAUO references to the
+/// same PD). The tree has one leaf per NAUO reference, but instances may also include
+/// sub-assembly BREP expansion.
+///
+/// We match by walking tree leaves and instances in parallel, using brep_id to
+/// synchronize when they diverge.
+fn assign_instance_indices(root: &mut AssemblyNode, instances: &[DetailedMeshInstance], _next_index: &mut usize) {
+    // Collect tree leaves in DFS order (leftmost child first)
+    let mut leaves: Vec<*mut AssemblyNode> = Vec::new();
+    {
+        let mut stack: Vec<*mut AssemblyNode> = vec![root as *mut AssemblyNode];
+        while let Some(node_ptr) = stack.pop() {
+            let node = unsafe { &mut *node_ptr };
+            if node.children.is_empty() {
+                leaves.push(node_ptr);
+            } else {
+                // Push children in reverse order so leftmost is processed first
+                for child in node.children.iter_mut().rev() {
+                    stack.push(child as *mut AssemblyNode);
+                }
             }
-        } else {
-            // Push children in reverse order so leftmost is processed first
-            for child in node.children.iter_mut().rev() {
-                stack.push(child);
+        }
+    }
+
+    // For each tree leaf, find the matching instance by brep_id
+    // Walk through instances sequentially, advancing for each tree leaf match
+    let mut inst_idx: usize = 0;
+    for leaf_ptr in leaves {
+        let leaf = unsafe { &mut *leaf_ptr };
+        let leaf_brep = match leaf.brep_id {
+            Some(id) => id,
+            None => continue,
+        };
+
+        // Search forward from inst_idx for a matching instance
+        let mut found = false;
+        for i in inst_idx..instances.len() {
+            if instances[i].brep_id == leaf_brep {
+                leaf.instance_index = Some(i);
+                inst_idx = i + 1;
+                found = true;
+                break;
+            }
+        }
+
+        if !found {
+            // Fallback: search from the beginning (might be a repeat occurrence)
+            for i in 0..instances.len() {
+                if instances[i].brep_id == leaf_brep {
+                    leaf.instance_index = Some(i);
+                    found = true;
+                    break;
+                }
             }
         }
     }
@@ -2436,6 +2477,7 @@ impl<'a> StepConverter<'a> {
             }
             "RECTANGULAR_TRIMMED_SURFACE" => self.extract_trimmed_surface(entity, depth + 1),
             "SWEPT_SURFACE" => self.extract_swept_surface(entity),
+            "OFFSET_SURFACE" => self.extract_offset_surface(entity, depth + 1),
             _ => None,
         }
     }
@@ -2465,12 +2507,14 @@ impl<'a> StepConverter<'a> {
     }
 
     /// Extract a CONICAL_SURFACE.
+    /// STEP stores the semi-angle in DEGREES; our ConeSurface expects RADIANS.
     fn extract_cone(&self, entity: &crate::schema::StepEntity) -> Option<Surface> {
         let axis2_id = self.find_axis2_ref(entity)?;
         let (origin, axis, u_dir) = self.resolve_axis2(axis2_id)?;
         let radius = self.find_float_param(entity, 0)?;
-        let half_angle = self.find_float_param(entity, 1)?;
-        Some(Surface::Cone(ConeSurface::new_with_frame(origin, axis, radius, half_angle.abs(), u_dir)))
+        let half_angle_deg = self.find_float_param(entity, 1)?;
+        let half_angle_rad = half_angle_deg.abs().to_radians();
+        Some(Surface::Cone(ConeSurface::new_with_frame(origin, axis, radius, half_angle_rad, u_dir)))
     }
 
     /// Extract a TOROIDAL_SURFACE.
@@ -2902,6 +2946,27 @@ impl<'a> StepConverter<'a> {
             }
         }
         None
+    }
+
+    /// Extract an OFFSET_SURFACE.
+    /// OFFSET_SURFACE('', #basis_surface, offset_distance, .T./.F.)
+    /// For now, we extract the basis surface and ignore the offset.
+    /// This produces the correct topology (faces, boundaries) even though
+    /// the surface geometry is slightly inaccurate (offset by the offset distance).
+    /// A proper implementation would offset every point along the surface normal
+    /// by the given distance, but that requires a new Surface variant.
+    fn extract_offset_surface(&self, entity: &crate::schema::StepEntity, depth: usize) -> Option<Surface> {
+        // Find the basis surface reference (2nd param, index 1)
+        let basis_id = self.find_param_ref(entity, 1)?;
+        let surface = self.extract_surface(basis_id, depth)?;
+
+        // Log the offset for debugging
+        let offset_dist = self.find_float_param(entity, 0).unwrap_or(0.0);
+        if offset_dist.abs() > 1e-10 {
+            warn!("OFFSET_SURFACE #{}: offset={} — using basis surface without offset (approximation)", entity.id, offset_dist);
+        }
+
+        Some(surface)
     }
 
     /// Find a curve reference from an entity's parameters.

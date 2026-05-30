@@ -1007,6 +1007,69 @@ pub fn triangulate_face_with_boundary_and_holes(
 // UV-space boundary trimming for curved surfaces
 // ============================================================
 
+/// Check if a set of 3D points are approximately coplanar within a given tolerance.
+/// Uses the best-fit plane and checks the maximum deviation from it.
+fn is_nearly_coplanar(points: &[Point3d], tolerance: f64) -> bool {
+    if points.len() < 4 {
+        return true; // 3 or fewer points are always coplanar
+    }
+
+    // Compute centroid
+    let n = points.len() as f64;
+    let cx = points.iter().map(|p| p.x).sum::<f64>() / n;
+    let cy = points.iter().map(|p| p.y).sum::<f64>() / n;
+    let cz = points.iter().map(|p| p.z).sum::<f64>() / n;
+
+    // Compute covariance matrix (3x3, symmetric)
+    let mut xx = 0.0_f64; let mut xy = 0.0_f64; let mut xz = 0.0_f64;
+    let mut yy = 0.0_f64; let mut yz = 0.0_f64; let mut zz = 0.0_f64;
+    for p in points {
+        let dx = p.x - cx;
+        let dy = p.y - cy;
+        let dz = p.z - cz;
+        xx += dx * dx; xy += dx * dy; xz += dx * dz;
+        yy += dy * dy; yz += dy * dz; zz += dz * dz;
+    }
+
+    // Find the normal of the best-fit plane by finding the eigenvector
+    // of the covariance matrix corresponding to the smallest eigenvalue.
+    // Use the cross product of the two rows of the covariance matrix
+    // as an approximation. The normal direction is the direction of
+    // minimum variance.
+    let candidates = [
+        [xy * yz - xz * yy, xz * yz - xy * xz, xx * yy - xy * xy], // row0 × row1
+        [xy * xz - xz * yz, yy * xz - yz * xz, xy * xz - xx * yz], // row1 × row2  
+        [xx * yz - xz * xy, xy * yz - yz * xz, xz * yz - xz * zz], // row0 × row2
+    ];
+
+    // Find the candidate with the largest magnitude (= best normal estimate)
+    let mut best_normal = [0.0_f64, 0.0, 1.0];
+    let mut max_mag = 0.0_f64;
+    for c in &candidates {
+        let mag = (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt();
+        if mag > max_mag {
+            max_mag = mag;
+            best_normal = [c[0] / mag, c[1] / mag, c[2] / mag];
+        }
+    }
+
+    if max_mag < 1e-20 {
+        // All points are coincident — trivially coplanar
+        return true;
+    }
+
+    // Check max distance from the plane through centroid with the best normal
+    let mut max_dist = 0.0_f64;
+    for p in points {
+        let dist = ((p.x - cx) * best_normal[0] + (p.y - cy) * best_normal[1] + (p.z - cz) * best_normal[2]).abs();
+        if dist > max_dist {
+            max_dist = dist;
+        }
+    }
+
+    max_dist < tolerance
+}
+
 /// Test if a 2D point is inside a closed polygon using ray casting.
 fn point_in_polygon_2d(point: &Point2d, polygon: &[Point2d]) -> bool {
     let n = polygon.len();
@@ -1263,23 +1326,81 @@ fn triangulate_surface_uv_trimmed(
             return mesh;
         }
 
+        // If only one UV direction is degenerate, check if this is a truly flat
+        // cap face (disc on a plane) or a curved band (cylinder/cone side face).
+        // A single closed curve on a cylinder/cone that projects to constant v is
+        // NOT a flat cap — it's a circular band that wraps around the surface.
+        // Only treat it as a cap face if the surface is flat (a plane) or if
+        // the boundary 3D points are nearly coplanar.
         if outer_u_range < 1e-8 || outer_v_range < 1e-8 {
-            // Outer boundary is degenerate in one direction.
-            // This is a cap face (disc on cylinder/cone/torus).
-            // Even if holes exist, the outer boundary is a flat circle on the surface.
-            return triangulate_cap_face(surface, boundary_points_3d, forward);
+            // Check if the 3D boundary points are approximately coplanar
+            // (meaning this is a genuine flat cap disc, not a curved band)
+            let is_coplanar = is_nearly_coplanar(boundary_points_3d, 1e-4);
+            if is_coplanar {
+                return triangulate_cap_face(surface, boundary_points_3d, forward);
+            }
+            // Otherwise, it's a curved band (e.g., cylinder/cone side face
+            // where the outer boundary is a single circle projecting to constant v).
+            // Fall through to the UV grid approach — we need to expand the UV range
+            // to cover the surface region properly.
+            //
+            // For a cylinder/cone band: if v_range is degenerate, expand it slightly
+            // using the 3D bounding box and the surface geometry.
+            if outer_v_range < 1e-8 {
+                // Compute a reasonable v range from the 3D bounding box
+                let mut z_min = f64::MAX; let mut z_max = f64::MIN;
+                for p in boundary_points_3d {
+                    // Project onto the surface's v direction
+                    let (_, v) = surface.project_point(p);
+                    z_min = z_min.min(v);
+                    z_max = z_max.max(v);
+                }
+                if z_max - z_min > 1e-8 {
+                    v_min = z_min; v_max = z_max;
+                } else {
+                    // Truly degenerate — give it a small range
+                    v_min -= 0.5; v_max += 0.5;
+                }
+            }
+            if outer_u_range < 1e-8 {
+                let mut u_min_tmp = f64::MAX; let mut u_max_tmp = f64::MIN;
+                for p in boundary_points_3d {
+                    let (u, _) = surface.project_point(p);
+                    u_min_tmp = u_min_tmp.min(u);
+                    u_max_tmp = u_max_tmp.max(u);
+                }
+                if u_max_tmp - u_min_tmp > 1e-8 {
+                    u_min = u_min_tmp; u_max = u_max_tmp;
+                } else {
+                    u_min -= 0.5; u_max += 0.5;
+                }
+            }
         }
     }
 
     // Add small margin
+    // Recompute ranges (may have been modified by cap face detection)
+    let u_range = u_max - u_min;
+    let v_range = v_max - v_min;
     let margin_u = u_range * 0.001;
     let margin_v = v_range * 0.001;
     u_min -= margin_u; u_max += margin_u;
     v_min -= margin_v; v_max += margin_v;
 
     // 4. Determine grid resolution
-    let n_u = params.angular_samples.max(16);
-    let n_v = params.height_samples.max(4);
+    // For partial angular ranges, scale down n_u proportionally
+    let full_circle = u_range > 1.9 * PI;
+    let n_u = if full_circle {
+        params.angular_samples.max(16)
+    } else {
+        ((params.angular_samples as f64 * u_range / (2.0 * PI)).ceil() as usize).max(8).min(params.angular_samples)
+    };
+    // For small v ranges, use fewer height samples
+    let n_v = if v_range < 1.0 {
+        ((params.height_samples as f64 * v_range).ceil() as usize).max(2)
+    } else {
+        params.height_samples.max(4)
+    };
     let du = (u_max - u_min) / n_u as f64;
     let dv = (v_max - v_min) / n_v as f64;
 

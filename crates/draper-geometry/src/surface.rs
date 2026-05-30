@@ -570,29 +570,87 @@ impl Surface {
             Surface::Sphere(s) => s.project_point(point),
             Surface::Torus(t) => t.project_point(point),
             Surface::Revolution(r) => {
+                // u = revolution angle
                 let dx = point.x - r.origin.x;
                 let dy = point.y - r.origin.y;
                 let u = dy.atan2(dx);
-                (u, 0.5) // Approximate v
+                // v = profile curve parameter: find the closest point on the profile curve
+                // The profile curve is in the XZ plane, and the surface point at (u, v)
+                // is: origin + (profile(v).x * cos(u), profile(v).x * sin(u), profile(v).z)
+                // We need to find v such that profile(v) matches the radial distance and z.
+                // Strategy: search the profile curve for the closest point in (radius, z) space.
+                let dz = point.z - r.origin.z;
+                let radial = (dx * dx + dy * dy).sqrt();
+                let (v_min, v_max) = r.profile.param_range();
+                let mut best_v = (v_min + v_max) * 0.5;
+                let mut best_dist = f64::MAX;
+                let steps = 64;
+                for i in 0..=steps {
+                    let v = v_min + (v_max - v_min) * i as f64 / steps as f64;
+                    let p = r.profile.point_at(v);
+                    let dr = p.x - radial;
+                    let ddz = p.z - dz;
+                    let dist = dr * dr + ddz * ddz;
+                    if dist < best_dist {
+                        best_dist = dist;
+                        best_v = v;
+                    }
+                }
+                // Refine with a finer search around the best point
+                let v_step = (v_max - v_min) / steps as f64;
+                let refine_steps = 20;
+                for i in 0..=refine_steps {
+                    let v = (best_v - v_step + 2.0 * v_step * i as f64 / refine_steps as f64)
+                        .clamp(v_min, v_max);
+                    let p = r.profile.point_at(v);
+                    let dr = p.x - radial;
+                    let ddz = p.z - dz;
+                    let dist = dr * dr + ddz * ddz;
+                    if dist < best_dist {
+                        best_dist = dist;
+                        best_v = v;
+                    }
+                }
+                (u, best_v)
             }
             Surface::Extrusion(e) => {
-                // u: project point onto profile curve (find closest parameter)
-                // v: distance along extrusion direction
-                let dx = point.x - e.profile.point_at(0.0).x;
-                let dy = point.y - e.profile.point_at(0.0).y;
-                let dz = point.z - e.profile.point_at(0.0).z;
+                // u: profile curve parameter, v: distance along extrusion direction
+                // First compute v by projecting the point onto the extrusion direction
+                let p0 = e.profile.point_at(0.0);
+                let dx = point.x - p0.x;
+                let dy = point.y - p0.y;
+                let dz = point.z - p0.z;
                 let v = dx * e.direction.x + dy * e.direction.y + dz * e.direction.z;
-                // For u, use a grid search on the profile curve
+
+                // For u: find the profile curve parameter where the profile point
+                // is closest to the 3D point projected onto the profile plane
+                // (subtract the extrusion component)
+                let px = point.x - v * e.direction.x;
+                let py = point.y - v * e.direction.y;
+                let pz = point.z - v * e.direction.z;
+
                 let (u_min, u_max) = e.profile.param_range();
                 let mut best_u = (u_min + u_max) * 0.5;
                 let mut best_dist = f64::MAX;
-                let steps = 20;
+                // Coarse search
+                let steps = 64;
                 for i in 0..=steps {
                     let u = u_min + (u_max - u_min) * i as f64 / steps as f64;
                     let p = e.profile.point_at(u);
-                    let dist = (p.x - point.x + v * e.direction.x).powi(2)
-                             + (p.y - point.y + v * e.direction.y).powi(2)
-                             + (p.z - point.z + v * e.direction.z).powi(2);
+                    let dist = (p.x - px).powi(2) + (p.y - py).powi(2) + (p.z - pz).powi(2);
+                    if dist < best_dist {
+                        best_dist = dist;
+                        best_u = u;
+                    }
+                }
+                // Refine
+                let u_step = (u_max - u_min) / steps as f64;
+                let refine_steps = 20;
+                for i in 0..=refine_steps {
+                    let u = (best_u - u_step + 2.0 * u_step * i as f64 / refine_steps as f64)
+                        .clamp(u_min, u_max);
+                    let p = e.profile.point_at(u);
+                    let dist = (p.x - px).powi(2) + (p.y - py).powi(2) + (p.z - pz).powi(2);
                     if dist < best_dist {
                         best_dist = dist;
                         best_u = u;
