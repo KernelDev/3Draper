@@ -5,6 +5,8 @@
 //!
 //! Supports STEP AP203/AP214 (geometric and topological entities).
 
+#![warn(clippy::unwrap_used)]
+
 pub mod parser;
 pub mod exporter;
 pub mod schema;

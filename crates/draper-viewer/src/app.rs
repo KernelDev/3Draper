@@ -258,11 +258,20 @@ pub struct ModelEntry {
     pub triangle_count: usize,
 }
 
-/// Log entry with timestamp.
+/// Severity level for log entries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LogSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
+/// Log entry with timestamp and severity.
 #[derive(Clone, Debug)]
 struct LogEntry {
     time: String,
     message: String,
+    severity: LogSeverity,
 }
 
 /// Result of an async file load (used on wasm).
@@ -373,10 +382,21 @@ pub struct ViewerApp {
     uv_grid_open: bool,
     /// Whether the face info section is expanded.
     face_info_open: bool,
+
+    // ─── Error tracking ──────────────────────────────────────────────────
+    /// Last error message (for dedicated "Errors" UI section).
+    last_error: Option<String>,
+    /// Number of warnings encountered during the current session.
+    warning_count: usize,
+    /// Number of errors encountered during the current session.
+    error_count: usize,
+    /// Number of faces that failed triangulation (for graceful degradation).
+    failed_face_count: usize,
 }
 
 impl ViewerApp {
-    fn log(&mut self, msg: &str) {
+    /// Get the current timestamp as a formatted string.
+    fn timestamp() -> String {
         #[cfg(not(target_arch = "wasm32"))]
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -391,12 +411,49 @@ impl ViewerApp {
 
         let secs = (now % 3600) / 60;
         let mins = (now % 86400) / 3600;
-        let time = format!("{:02}:{:02}:{:02}", (now / 3600) % 24, mins, secs);
+        format!("{:02}:{:02}:{:02}", (now / 3600) % 24, mins, secs)
+    }
+
+    /// Log an informational message.
+    fn log(&mut self, msg: &str) {
+        let time = Self::timestamp();
         self.log.push(LogEntry {
             time,
             message: msg.to_string(),
+            severity: LogSeverity::Info,
         });
         // Keep last 500 entries
+        if self.log.len() > 500 {
+            self.log.drain(0..self.log.len() - 500);
+        }
+        self.log_auto_scroll = true;
+    }
+
+    /// Log a warning message (yellow in log panel).
+    fn log_warning(&mut self, msg: &str) {
+        let time = Self::timestamp();
+        self.log.push(LogEntry {
+            time,
+            message: msg.to_string(),
+            severity: LogSeverity::Warning,
+        });
+        self.warning_count += 1;
+        if self.log.len() > 500 {
+            self.log.drain(0..self.log.len() - 500);
+        }
+        self.log_auto_scroll = true;
+    }
+
+    /// Log an error message (red in log panel) and update the error section.
+    fn log_error(&mut self, msg: &str) {
+        let time = Self::timestamp();
+        self.log.push(LogEntry {
+            time,
+            message: msg.to_string(),
+            severity: LogSeverity::Error,
+        });
+        self.last_error = Some(msg.to_string());
+        self.error_count += 1;
         if self.log.len() > 500 {
             self.log.drain(0..self.log.len() - 500);
         }
@@ -480,6 +537,10 @@ impl ViewerApp {
             face_list_open: true,
             uv_grid_open: false,
             face_info_open: false,
+            last_error: None,
+            warning_count: 0,
+            error_count: 0,
+            failed_face_count: 0,
         };
         app.log("3Draper Viewer started");
         app.log(&format!("Default model: Box 100x100x100 ({} vertices, {} triangles)",
@@ -594,7 +655,7 @@ impl ViewerApp {
                 self.load_mesh(mesh, &format!("STL: {}", name));
             }
             Err(e) => {
-                self.log(&format!("STL import error: {}", e));
+                self.log_error(&format!("STL import error: {}", e));
             }
         }
     }
@@ -610,7 +671,7 @@ impl ViewerApp {
                 self.process_step_file(&step_file, &name);
             }
             Err(e) => {
-                self.log(&format!("STEP import error: {}", e));
+                self.log_error(&format!("STEP import error: {}", e));
             }
         }
     }
@@ -619,7 +680,7 @@ impl ViewerApp {
     fn export_stl_binary(&mut self, path: &str) {
         match draper_mesh::stl::write_stl_file(&self.mesh, path, true) {
             Ok(()) => self.log(&format!("Exported STL (binary): {}", path)),
-            Err(e) => self.log(&format!("STL export error: {}", e)),
+            Err(e) => self.log_error(&format!("STL export error: {}", e)),
         }
     }
 
@@ -627,7 +688,7 @@ impl ViewerApp {
     fn export_stl_ascii(&mut self, path: &str) {
         match draper_mesh::stl::write_stl_file(&self.mesh, path, false) {
             Ok(()) => self.log(&format!("Exported STL (ASCII): {}", path)),
-            Err(e) => self.log(&format!("STL export error: {}", e)),
+            Err(e) => self.log_error(&format!("STL export error: {}", e)),
         }
     }
 
@@ -641,7 +702,7 @@ impl ViewerApp {
         let content = draper_step::export_step(&solid, &name);
         match draper_step::write_step_file(&content, path) {
             Ok(()) => self.log(&format!("Exported STEP: {}", path)),
-            Err(e) => self.log(&format!("STEP export error: {}", e)),
+            Err(e) => self.log_error(&format!("STEP export error: {}", e)),
         }
     }
 
@@ -754,7 +815,7 @@ impl ViewerApp {
                     self.load_mesh(mesh, &format!("STEP: {}", name));
                 }
                 Err(e) => {
-                    self.log(&format!("STEP detailed conversion error: {}, trying simple conversion", e));
+                    self.log_warning(&format!("STEP detailed conversion error: {}, trying simple conversion", e));
                     match draper_step::step_to_mesh_instances(step_file) {
                         Ok(instances) => {
                             self.log(&format!("Simple Mesh Instances: {}", instances.len()));
@@ -771,7 +832,7 @@ impl ViewerApp {
                             self.load_mesh(mesh, &format!("STEP: {}", name));
                         }
                         Err(e2) => {
-                            self.log(&format!("STEP conversion error: {}", e2));
+                            self.log_error(&format!("STEP conversion error: {}", e2));
                         }
                     }
                 }
@@ -789,6 +850,8 @@ impl ViewerApp {
 
     /// Process one batch of pending instances (called each frame from update()).
     /// Returns true if there are still more instances to process.
+    /// Gracefully handles triangulation failures: logs a warning and skips
+    /// instances with empty meshes instead of crashing.
     fn process_pending_instances(&mut self) -> bool {
         if !self.is_loading || self.pending_instances.is_empty() {
             return false;
@@ -797,6 +860,17 @@ impl ViewerApp {
         let batch_size = self.instances_per_frame.min(self.pending_instances.len());
         for _ in 0..batch_size {
             if let Some(inst) = self.pending_instances.pop() {
+                // Check if this instance has a valid mesh (non-empty triangulation)
+                if inst.mesh.triangle_count() == 0 && inst.mesh.vertex_count() == 0 {
+                    self.log_warning(&format!(
+                        "Instance '{}' (BREP #{}) produced empty mesh — skipping",
+                        inst.name, inst.brep_id
+                    ));
+                    self.failed_face_count += 1;
+                    self.triangulated_count += 1;
+                    continue;
+                }
+
                 let tri_start = self.mesh.triangle_count();
                 if let Some(color) = inst.color {
                     self.mesh.merge_with_color(&inst.mesh, color);
@@ -850,7 +924,7 @@ impl ViewerApp {
                 self.load_mesh(mesh, &format!("STL: {}", name));
             }
             Err(e) => {
-                self.log(&format!("STL import error: {}", e));
+                self.log_error(&format!("STL import error: {}", e));
             }
         }
     }
@@ -862,7 +936,7 @@ impl ViewerApp {
                 self.process_step_file(&step_file, name);
             }
             Err(e) => {
-                self.log(&format!("STEP import error: {}", e));
+                self.log_error(&format!("STEP import error: {}", e));
             }
         }
     }
@@ -1150,13 +1224,31 @@ impl eframe::App for ViewerApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.heading(egui::RichText::new("Log").size(12.0));
+                    // Show warning/error counts as badges
+                    if self.warning_count > 0 {
+                        ui.label(egui::RichText::new(format!("⚠ {}", self.warning_count))
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(255, 200, 50)));
+                    }
+                    if self.error_count > 0 {
+                        ui.label(egui::RichText::new(format!("✖ {}", self.error_count))
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(255, 80, 80)));
+                    }
                     ui.separator();
                     if ui.button("Clear").clicked() {
                         self.log.clear();
                     }
                     if ui.button("Copy All").clicked() {
                         let all_text: String = self.log.iter()
-                            .map(|e| format!("[{}] {}", e.time, e.message))
+                            .map(|e| {
+                                let prefix = match e.severity {
+                                    LogSeverity::Info => "INFO",
+                                    LogSeverity::Warning => "WARN",
+                                    LogSeverity::Error => "ERR",
+                                };
+                                format!("[{}] [{}] {}", e.time, prefix, e.message)
+                            })
                             .collect::<Vec<_>>()
                             .join("\n");
                         ui.ctx().copy_text(all_text);
@@ -1168,12 +1260,21 @@ impl eframe::App for ViewerApp {
                     .stick_to_bottom(self.log_auto_scroll)
                     .show(ui, |ui| {
                         for entry in &self.log {
+                            // Color coding based on severity
+                            let (icon, msg_color) = match entry.severity {
+                                LogSeverity::Info => ("ℹ", egui::Color32::from_rgb(200, 200, 210)),
+                                LogSeverity::Warning => ("⚠", egui::Color32::from_rgb(255, 200, 50)),
+                                LogSeverity::Error => ("✖", egui::Color32::from_rgb(255, 80, 80)),
+                            };
                             ui.horizontal(|ui| {
                                 ui.label(egui::RichText::new(format!("[{}]", entry.time))
                                     .size(10.0)
                                     .color(egui::Color32::from_rgb(120, 120, 140)));
+                                ui.label(egui::RichText::new(icon)
+                                    .size(10.0)
+                                    .color(msg_color));
                                 ui.add(egui::Label::new(
-                                    egui::RichText::new(&entry.message).size(10.0)
+                                    egui::RichText::new(&entry.message).size(10.0).color(msg_color)
                                 ).wrap());
                             });
                         }
@@ -1798,6 +1899,38 @@ impl eframe::App for ViewerApp {
                     ui.label(egui::RichText::new(format!("T-junctions: {}", report.t_junction_count)).size(12.0));
                 } else {
                     ui.label(egui::RichText::new("No mesh loaded").size(11.0).color(egui::Color32::GRAY));
+                }
+
+                // --- Errors section ---
+                if self.last_error.is_some() || self.failed_face_count > 0 {
+                    ui.separator();
+                    ui.heading(egui::RichText::new("Errors").size(12.0));
+                    if let Some(ref err) = self.last_error {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("✖")
+                                .size(12.0)
+                                .color(egui::Color32::from_rgb(255, 80, 80)));
+                            ui.add(egui::Label::new(
+                                egui::RichText::new(err)
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(255, 120, 120))
+                            ).wrap());
+                        });
+                        if ui.button("Dismiss").clicked() {
+                            self.last_error = None;
+                        }
+                    }
+                    if self.failed_face_count > 0 {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("⚠")
+                                .size(12.0)
+                                .color(egui::Color32::from_rgb(255, 200, 50)));
+                            ui.label(egui::RichText::new(format!(
+                                "{} face(s) failed triangulation (skipped)",
+                                self.failed_face_count
+                            )).size(11.0).color(egui::Color32::from_rgb(255, 220, 100)));
+                        });
+                    }
                 }
 
                 let cam_pos = self.camera.position();

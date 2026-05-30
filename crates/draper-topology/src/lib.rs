@@ -6,6 +6,8 @@
 //! Topology hierarchy: Solid → Shell → Face → Wire → CoEdge → Edge → Vertex
 //! Each topological entity has a reference to its underlying geometry.
 
+#![warn(clippy::unwrap_used)]
+
 pub mod entity;
 pub mod shape;
 pub mod builder;

@@ -5,6 +5,8 @@
 //!
 //! Provides points, vectors, transformations, parametric curves and surfaces.
 
+#![warn(clippy::unwrap_used)]
+
 pub mod point;
 pub mod direction;
 pub mod vector;

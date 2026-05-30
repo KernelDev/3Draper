@@ -6,6 +6,8 @@
 //! Provides constrained Delaunay triangulation of B-Rep faces
 //! and mesh output in various formats.
 
+#![warn(clippy::unwrap_used)]
+
 pub mod mesh;
 pub mod triangulate;
 pub mod stl;

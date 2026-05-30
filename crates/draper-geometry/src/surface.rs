@@ -506,11 +506,12 @@ impl TorusSurface {
 /// Surface of revolution.
 #[derive(Clone, Debug)]
 pub struct RevolutionSurface {
-    /// The profile curve in the XZ plane (revolved around Z axis).
+    /// The profile curve (generatrix) defined in global coordinates.
+    /// The curve is revolved around `axis` passing through `origin`.
     pub profile: Curve3d,
-    /// Axis of revolution.
+    /// Axis of revolution (unit direction vector).
     pub axis: Direction3d,
-    /// Origin point on the axis.
+    /// Origin point on the axis of revolution.
     pub origin: Point3d,
 }
 
@@ -520,15 +521,55 @@ impl RevolutionSurface {
     }
 
     /// Evaluate: u = revolution angle [0, 2pi], v = parameter on profile curve.
+    ///
+    /// The general revolution formula for an arbitrary axis:
+    /// Given profile point P(v), axis direction A, and origin O:
+    ///   V = P(v) - O
+    ///   V_parallel = (V · A) * A
+    ///   V_perp = V - V_parallel
+    ///   S(u, v) = O + V_parallel + cos(u) * V_perp + sin(u) * (A × V_perp)
+    ///
+    /// This works for any axis orientation. When the axis is Z and the
+    /// profile lies in the XZ plane (P.y = 0), this reduces to the simpler
+    /// formula used previously.
     pub fn point_at(&self, u: f64, v: f64) -> Point3d {
         let p = self.profile.point_at(v);
-        // Profile is in XZ plane, revolve around Z
+
+        // Vector from origin to profile point
+        let vx = p.x - self.origin.x;
+        let vy = p.y - self.origin.y;
+        let vz = p.z - self.origin.z;
+
+        // Parallel component (along axis)
+        let dot = vx * self.axis.x + vy * self.axis.y + vz * self.axis.z;
+        let par_x = dot * self.axis.x;
+        let par_y = dot * self.axis.y;
+        let par_z = dot * self.axis.z;
+
+        // Perpendicular component (to revolve)
+        let perp_x = vx - par_x;
+        let perp_y = vy - par_y;
+        let perp_z = vz - par_z;
+        let perp_len_sq = perp_x * perp_x + perp_y * perp_y + perp_z * perp_z;
+
+        if perp_len_sq < 1e-30 {
+            // Point is on the axis — no revolution needed
+            return p;
+        }
+
+        // Second perpendicular direction: axis × perp
+        // Since axis ⊥ perp, |axis × perp| = |perp|
+        let cross_x = self.axis.y * perp_z - self.axis.z * perp_y;
+        let cross_y = self.axis.z * perp_x - self.axis.x * perp_z;
+        let cross_z = self.axis.x * perp_y - self.axis.y * perp_x;
+
         let cos_u = u.cos();
         let sin_u = u.sin();
+
         Point3d::new(
-            self.origin.x + p.x * cos_u,
-            self.origin.y + p.x * sin_u,
-            self.origin.z + p.z,
+            self.origin.x + par_x + cos_u * perp_x + sin_u * cross_x,
+            self.origin.y + par_y + cos_u * perp_y + sin_u * cross_y,
+            self.origin.z + par_z + cos_u * perp_z + sin_u * cross_z,
         )
     }
 }

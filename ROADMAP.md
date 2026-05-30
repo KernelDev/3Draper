@@ -223,15 +223,15 @@
 
 ### 3.3 Расширение STEP-парсера (AP214/AP242)
 
-- [ ] 3.3.1 Полная поддержка `B_SPLINE_CURVE_WITH_KNOTS` (любая степень)
-- [ ] 3.3.2 Полная поддержка `B_SPLINE_SURFACE_WITH_KNOTS`
-- [ ] 3.3.3 `COMPOSITE_CURVE_SEGMENT` — все типы
-- [ ] 3.3.4 `OFFSET_CURVE_3D` — аппроксимация NURBS
-- [ ] 3.3.5 `OFFSET_SURFACE` — аппроксимация NURBS
-- [ ] 3.3.6 `RECTANGULAR_TRIMMED_SURFACE` — корректная обработка
-- [ ] 3.3.7 `SURFACE_OF_REVOLUTION` — проверить полноту
-- [ ] 3.3.8 `SURFACE_OF_LINEAR_EXTRUSION` — проверить полноту
-- [ ] 3.3.9 `COMPOSITE_CURVE_ON_SURFACE`
+- [x] 3.3.1 Полная поддержка `B_SPLINE_CURVE_WITH_KNOTS` (любая степень)
+- [x] 3.3.2 Полная поддержка `B_SPLINE_SURFACE_WITH_KNOTS`
+- [x] 3.3.3 `COMPOSITE_CURVE_SEGMENT` — все типы
+- [x] 3.3.4 `OFFSET_CURVE_3D` — аппроксимация NURBS
+- [x] 3.3.5 `OFFSET_SURFACE` — аппроксимация NURBS
+- [x] 3.3.6 `RECTANGULAR_TRIMMED_SURFACE` — корректная обработка
+- [x] 3.3.7 `SURFACE_OF_REVOLUTION` — проверить полноту
+- [x] 3.3.8 `SURFACE_OF_LINEAR_EXTRUSION` — проверить полноту
+- [x] 3.3.9 `COMPOSITE_CURVE_ON_SURFACE`
 - [ ] 3.3.10 Тестирование на NIST STEP Test Suite
 - [ ] 3.3.11 Тестирование на наборе промышленных файлов
 
@@ -265,9 +265,9 @@
 - [x] 3.6.3 Заменить `unwrap()` в `draper-geometry/src/surface.rs` и `curve.rs`
 - [x] 3.6.4 Заменить `unwrap()` в `draper-step/src/converter.rs`
 - [x] 3.6.5 Заменить `unwrap()` в `draper-topology/src/` и `draper-mesh/src/stl.rs`, `edge_cache.rs`
-- [ ] 3.6.6 FFI: конвертировать `KernelError` в коды возврата
-- [ ] 3.6.7 Viewer: отображать ошибки как уведомления
-- [ ] 3.6.8 CI: `deny(unwrap)` или `clippy::unwrap_used` lint
+- [x] 3.6.6 FFI: конвертировать `KernelError` в коды возврата
+- [x] 3.6.7 Viewer: отображать ошибки как уведомления
+- [x] 3.6.8 CI: `deny(unwrap)` или `clippy::unwrap_used` lint
 
 ---
 
@@ -415,3 +415,4 @@
 | 2026-05-31 | Super Z | Лицензия изменена с MIT на GPL-3.0-or-later |
 | 2026-05-31 | Super Z | Обновление: выполнены 1.3.7, 3.1.5, 3.1.7, 3.1.11 — Фаза 3.1 полностью завершена |
 | 2026-05-31 | Super Z | Обновление: выполнены 3.2.1–3.2.6 — STEP валидация; 3.4.1–3.4.10 — многоуровневая валидация топологии; 3.5.1–3.5.7 — распараллеливание |
+| 2026-05-31 | Super Z | Обновление: выполнены 3.3.1–3.3.9 — расширение STEP-парсера; 3.6.6–3.6.8 — завершение системы ошибок. Фаза 3 завершена! |

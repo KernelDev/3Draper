@@ -5,6 +5,8 @@
 //!
 //! Provides document management, modeling operations, and pipeline orchestration.
 
+#![warn(clippy::unwrap_used)]
+
 pub mod document;
 pub mod operations;
 pub mod boolean;

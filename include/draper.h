@@ -9,6 +9,48 @@
 #include <stdlib.h>
 
 /**
+ * C-compatible result codes returned by every FFI function.
+ */
+typedef enum DraperResult {
+  /**
+   * Operation succeeded.
+   */
+  Success = 0,
+  /**
+   * An invalid argument was passed (null pointer, out-of-range value, etc.).
+   */
+  InvalidArgument = -1,
+  /**
+   * The requested file was not found.
+   */
+  FileNotFound = -2,
+  /**
+   * Parsing of a file or data structure failed.
+   */
+  ParseError = -3,
+  /**
+   * A geometry evaluation failed (degenerate surface, NaN, etc.).
+   */
+  GeometryError = -4,
+  /**
+   * A topology error occurred (broken B-Rep, non-manifold, etc.).
+   */
+  TopologyError = -5,
+  /**
+   * Triangulation / mesh generation failed.
+   */
+  TriangulationError = -6,
+  /**
+   * Out of memory or resource limit exceeded.
+   */
+  OutOfMemory = -7,
+  /**
+   * An unclassified error occurred.
+   */
+  UnknownError = -99,
+} DraperResult;
+
+/**
  * Opaque document handle.
  */
 typedef struct DraperDocument DraperDocument;
@@ -19,7 +61,18 @@ typedef struct DraperDocument DraperDocument;
 typedef struct DraperMesh DraperMesh;
 
 /**
+ * Retrieve the last error message.
+ *
+ * Returns a pointer to a C string describing the last error that occurred on
+ * the current thread. The pointer is valid until the next FFI call on the
+ * same thread. Returns NULL if no error has occurred.
+ */
+const char *draper_get_last_error(void);
+
+/**
  * Create a new empty document.
+ *
+ * Returns a pointer to the new document, or NULL on error.
  */
 struct DraperDocument *draper_document_new(const char *name);
 
@@ -30,38 +83,60 @@ void draper_document_free(struct DraperDocument *doc);
 
 /**
  * Add a box to the document.
+ *
+ * Returns `DraperResult::Success` on success, or an error code on failure.
  */
-int32_t draper_document_add_box(struct DraperDocument *doc, double dx, double dy, double dz);
+enum DraperResult draper_document_add_box(struct DraperDocument *doc,
+                                          double dx,
+                                          double dy,
+                                          double dz);
 
 /**
  * Add a cylinder to the document.
+ *
+ * Returns `DraperResult::Success` on success, or an error code on failure.
  */
-int32_t draper_document_add_cylinder(struct DraperDocument *doc, double radius, double height);
+enum DraperResult draper_document_add_cylinder(struct DraperDocument *doc,
+                                               double radius,
+                                               double height);
 
 /**
  * Add a sphere to the document.
+ *
+ * Returns `DraperResult::Success` on success, or an error code on failure.
  */
-int32_t draper_document_add_sphere(struct DraperDocument *doc, double radius);
+enum DraperResult draper_document_add_sphere(struct DraperDocument *doc, double radius);
 
 /**
  * Add a cone to the document.
+ *
+ * Returns `DraperResult::Success` on success, or an error code on failure.
  */
-int32_t draper_document_add_cone(struct DraperDocument *doc, double radius, double height);
+enum DraperResult draper_document_add_cone(struct DraperDocument *doc,
+                                           double radius,
+                                           double height);
 
 /**
  * Add a torus to the document.
+ *
+ * Returns `DraperResult::Success` on success, or an error code on failure.
  */
-int32_t draper_document_add_torus(struct DraperDocument *doc,
-                                  double major_radius,
-                                  double minor_radius);
+enum DraperResult draper_document_add_torus(struct DraperDocument *doc,
+                                            double major_radius,
+                                            double minor_radius);
 
 /**
  * Build an ICE engine model.
+ *
+ * Returns `DraperResult::Success` on success, or an error code on failure.
  */
-int32_t draper_document_add_engine(struct DraperDocument *doc);
+enum DraperResult draper_document_add_engine(struct DraperDocument *doc);
 
 /**
  * Triangulate the document and return a mesh.
+ *
+ * Returns a pointer to the new mesh on success, or NULL on error.
+ * Use `draper_get_last_error()` for details on failure.
  */
 struct DraperMesh *draper_document_triangulate(struct DraperDocument *doc);
 
@@ -72,23 +147,31 @@ void draper_mesh_free(struct DraperMesh *mesh);
 
 /**
  * Get mesh vertex count.
+ *
+ * Returns 0 if mesh is null.
  */
 uint32_t draper_mesh_vertex_count(const struct DraperMesh *mesh);
 
 /**
  * Get mesh triangle count.
+ *
+ * Returns 0 if mesh is null.
  */
 uint32_t draper_mesh_triangle_count(const struct DraperMesh *mesh);
 
 /**
  * Get mesh vertex data (x, y, z triplets).
  * Caller must allocate buffer of size vertex_count * 3.
+ *
+ * Returns the number of vertices written, or 0 on error.
  */
 uint32_t draper_mesh_get_vertices(const struct DraperMesh *mesh, double *out, uint32_t max_count);
 
 /**
  * Get mesh triangle indices (i, j, k triplets).
  * Caller must allocate buffer of size triangle_count * 3.
+ *
+ * Returns the number of triangles written, or 0 on error.
  */
 uint32_t draper_mesh_get_triangles(const struct DraperMesh *mesh,
                                    uint32_t *out,
@@ -96,16 +179,24 @@ uint32_t draper_mesh_get_triangles(const struct DraperMesh *mesh,
 
 /**
  * Export mesh to STL file.
+ *
+ * Returns `DraperResult::Success` on success, or an error code on failure.
  */
-int32_t draper_mesh_export_stl(const struct DraperMesh *mesh, const char *path, int32_t binary);
+enum DraperResult draper_mesh_export_stl(const struct DraperMesh *mesh,
+                                         const char *path,
+                                         int32_t binary);
 
 /**
  * Export document to STEP file.
+ *
+ * Returns `DraperResult::Success` on success, or an error code on failure.
  */
-int32_t draper_document_export_step(struct DraperDocument *doc, const char *path);
+enum DraperResult draper_document_export_step(struct DraperDocument *doc, const char *path);
 
 /**
  * Get the number of solids in the document.
+ *
+ * Returns 0 if doc is null.
  */
 uint32_t draper_document_solid_count(const struct DraperDocument *doc);
 

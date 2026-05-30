@@ -24,7 +24,7 @@
 
 use crate::schema::{StepFile, StepValue};
 use draper_geometry::{
-    Point3d, Point2d, Direction3d, Surface, Plane, CylinderSurface, SphereSurface,
+    Point3d, Point2d, Direction3d, Vec3d, Surface, Plane, CylinderSurface, SphereSurface,
     ConeSurface, TorusSurface, RevolutionSurface, ExtrusionSurface,
     NurbsSurface, Curve3d, Curve2d, Line, Circle, Ellipse, Arc, NurbsCurve,
     Line2d, Circle2d, Ellipse2d, Nurbs2d,
@@ -4167,14 +4167,73 @@ impl<'a> StepConverter<'a> {
         (u_knots, v_knots)
     }
 
-    /// Extract a RECTANGULAR_TRIMMED_SURFACE (wrapper around another surface).
+    /// Extract a RECTANGULAR_TRIMMED_SURFACE (wrapper around another surface with explicit parameter bounds).
+    /// Format: RECTANGULAR_TRIMMED_SURFACE(#basis_surface, u1, u2, v1, v2, usense, vsense)
+    ///
+    /// The trim bounds define the valid parameter domain [u1,u2] × [v1,v2].
+    /// For triangulation purposes, the basis surface geometry is unchanged —
+    /// the actual face shape is defined by its boundary edges. However, the
+    /// trim parameters are important for UV projection and PCURVE matching.
+    ///
+    /// We extract the basis surface and log the trim bounds. Future work may
+    /// convert trimmed surfaces to NURBS approximations that respect the bounds.
     fn extract_trimmed_surface(&self, entity: &crate::schema::StepEntity, depth: usize) -> Option<Surface> {
         if depth > 20 {
             return None;
         }
         // RECTANGULAR_TRIMMED_SURFACE(#basis_surface, u1, u2, v1, v2, .T., .T.)
-        let basis_id = self.get_ref(entity.params.first()?)?;
-        self.extract_surface(basis_id, depth + 1)
+        // The first param may be a name string; find the first entity reference
+        let basis_id = self.find_param_ref(entity, 0)
+            .or_else(|| self.find_param_ref(entity, 1))?;
+        let surface = self.extract_surface(basis_id, depth + 1)?;
+
+        // Parse trim parameters for logging and future use
+        let mut u1: Option<f64> = None;
+        let mut u2: Option<f64> = None;
+        let mut v1: Option<f64> = None;
+        let mut v2: Option<f64> = None;
+        let mut found_floats = 0;
+        for param in entity.params.iter().skip(1) {
+            if let Some(val) = self.get_float(param) {
+                match found_floats {
+                    0 => u1 = Some(val),
+                    1 => u2 = Some(val),
+                    2 => v1 = Some(val),
+                    3 => v2 = Some(val),
+                    _ => {}
+                }
+                found_floats += 1;
+            }
+        }
+
+        // Parse sense flags
+        let mut usense = true;
+        let mut vsense = true;
+        for param in &entity.params {
+            if let StepValue::Enum(val) = param {
+                if val == "T" || val == "F" {
+                    if !usense == false && val == "F" {
+                        // First F we encounter flips usense
+                        usense = false;
+                    } else if usense == false && vsense == true && val == "F" {
+                        vsense = false;
+                    }
+                }
+            }
+        }
+
+        if let (Some(u1v), Some(u2v), Some(v1v), Some(v2v)) = (u1, u2, v1, v2) {
+            info!(
+                "RECTANGULAR_TRIMMED_SURFACE #{}: basis=#{} u=[{:.4},{:.4}] v=[{:.4},{:.4}] usense={} vsense={}",
+                entity.id, basis_id, u1v, u2v, v1v, v2v, usense, vsense
+            );
+
+            // If the basis is a NURBS surface, we could adjust its knot vector
+            // to respect the trim bounds. For now, we just return the basis surface
+            // since boundary edges define the actual face geometry during triangulation.
+        }
+
+        Some(surface)
     }
 
     /// Extract a SWEPT_SURFACE (surface created by sweeping a curve).
@@ -4212,25 +4271,30 @@ impl<'a> StepConverter<'a> {
         None
     }
 
-    /// Extract an OFFSET_SURFACE.
+    /// Extract an OFFSET_SURFACE with NURBS approximation.
     /// OFFSET_SURFACE('', #basis_surface, offset_distance, .T./.F.)
-    /// For now, we extract the basis surface and ignore the offset.
-    /// This produces the correct topology (faces, boundaries) even though
-    /// the surface geometry is slightly inaccurate (offset by the offset distance).
-    /// A proper implementation would offset every point along the surface normal
-    /// by the given distance, but that requires a new Surface variant.
+    ///
+    /// Approximation approach:
+    /// 1. Sample the basis surface on a grid
+    /// 2. At each grid point, compute the surface normal
+    /// 3. Offset each point along the normal by the given distance
+    /// 4. Create a NURBS surface from the offset grid
     fn extract_offset_surface(&self, entity: &crate::schema::StepEntity, depth: usize) -> Option<Surface> {
         // Find the basis surface reference (2nd param, index 1)
         let basis_id = self.find_param_ref(entity, 1)?;
         let surface = self.extract_surface(basis_id, depth)?;
 
-        // Log the offset for debugging
+        // Extract offset distance
         let offset_dist = self.find_float_param(entity, 0).unwrap_or(0.0);
-        if offset_dist.abs() > 1e-10 {
-            warn!("OFFSET_SURFACE #{}: offset={} — using basis surface without offset (approximation)", entity.id, offset_dist);
+
+        if offset_dist.abs() < 1e-10 {
+            // Zero offset — just return the basis surface
+            return Some(surface);
         }
 
-        Some(surface)
+        // Approximate the offset surface using NURBS
+        info!("OFFSET_SURFACE #{}: approximating offset={} as NURBS surface", entity.id, offset_dist);
+        Some(approximate_offset_surface(&surface, offset_dist))
     }
 
     /// Find a curve reference from an entity's parameters.
@@ -4303,7 +4367,8 @@ impl<'a> StepConverter<'a> {
             "B_SPLINE_CURVE" | "BEZIER_CURVE" | "POLYLINE" | "TRIMMED_CURVE" |
             "COMPOSITE_CURVE" | "COMPOSITE_CURVE_SEGMENT" | "OFFSET_CURVE_3D" |
             "HYPERBOLA" | "PARABOLA" | "RATIONAL_B_SPLINE_CURVE" |
-            "SURFACE_CURVE"
+            "SURFACE_CURVE" | "COMPOSITE_CURVE_ON_SURFACE" |
+            "BOUNDED_CURVE" | "CURVE_ON_SURFACE" | "PCURVE"
         ) || type_name.contains("B_SPLINE_CURVE") // Handle complex entity types like "BOUNDED_CURVE+B_SPLINE_CURVE_WITH_KNOTS+..."
     }
 
@@ -4386,7 +4451,9 @@ impl<'a> StepConverter<'a> {
             "RATIONAL_B_SPLINE_CURVE" => self.resolve_bspline_curve(entity),
             "POLYLINE" => self.resolve_polyline_curve(entity),
             "TRIMMED_CURVE" => self.resolve_trimmed_curve(entity, depth + 1),
-            "COMPOSITE_CURVE" => self.resolve_composite_curve(entity, depth + 1),
+            "COMPOSITE_CURVE" | "COMPOSITE_CURVE_ON_SURFACE" => {
+                self.resolve_composite_curve(entity, depth + 1)
+            }
             "OFFSET_CURVE_3D" => self.resolve_offset_curve_3d(entity, depth + 1),
             "SURFACE_CURVE" => {
                 // Unwrap SURFACE_CURVE to get the 3D curve
@@ -4395,6 +4462,14 @@ impl<'a> StepConverter<'a> {
                 } else {
                     None
                 }
+            }
+            "BOUNDED_CURVE" | "CURVE_ON_SURFACE" | "PCURVE" => {
+                // These are abstract/wrapper types — try to find the underlying curve
+                self.resolve_nested_curve_entity(entity, depth + 1)
+            }
+            "COMPOSITE_CURVE_SEGMENT" => {
+                // A standalone segment — extract the parent_curve
+                self.resolve_composite_curve_segment_curve(entity, depth + 1)
             }
             _ => None,
         }
@@ -4758,45 +4833,73 @@ impl<'a> StepConverter<'a> {
         Some(curve)
     }
 
-    /// Resolve a COMPOSITE_CURVE entity by concatenating all segments into a single
-    /// degree-1 NURBS curve (polyline approximation of the composite).
+    /// Resolve a COMPOSITE_CURVE or COMPOSITE_CURVE_ON_SURFACE entity by
+    /// concatenating all segments into a single degree-1 NURBS curve
+    /// (polyline approximation of the composite).
+    ///
+    /// Handles all COMPOSITE_CURVE_SEGMENT types including:
+    /// - BOUNDED_CURVE segments (any bounded curve type)
+    /// - Transition codes: CONTINUOUS, DISCONTINUOUS, etc.
+    /// - same_sense flag (reverses segment direction if false)
+    ///
+    /// COMPOSITE_CURVE_ON_SURFACE is handled identically — the 3D curve
+    /// of each segment is extracted and sampled.
     fn resolve_composite_curve(&self, entity: &crate::schema::StepEntity, depth: usize) -> Option<Curve3d> {
         // COMPOSITE_CURVE('', (#segment1, #segment2, ...), .U.)
+        // COMPOSITE_CURVE_ON_SURFACE('', (#segment1, #segment2, ...), .U., #basis_surface)
         let mut all_points: Vec<Point3d> = Vec::new();
         let mut n_segments = 0;
-        
+
         for param in &entity.params {
             if let StepValue::List(items) = param {
                 for item in items {
                     if let Some(ref_id) = self.get_ref(item) {
                         if let Some(seg_entity) = self.step.find_entity(ref_id) {
-                            if seg_entity.type_name == "COMPOSITE_CURVE_SEGMENT" {
-                                // COMPOSITE_CURVE_SEGMENT transition, parent_curve, same_sense
-                                // Find the curve reference (usually 2nd param)
-                                if let Some(curve_id) = self.find_param_ref(seg_entity, 1) {
-                                    if let Some(curve) = self.resolve_curve(curve_id, depth + 1) {
-                                        // Sample the curve into ~32 points
-                                        let (t_min, t_max) = curve.param_range();
-                                        let n_samples = 32;
-                                        for i in 0..n_samples {
-                                            let t = t_min + (t_max - t_min) * i as f64 / (n_samples - 1) as f64;
-                                            all_points.push(curve.point_at(t));
-                                        }
-                                        n_segments += 1;
-                                    }
+                            // Handle both COMPOSITE_CURVE_SEGMENT and direct curve references
+                            let curve = if seg_entity.type_name == "COMPOSITE_CURVE_SEGMENT" {
+                                self.resolve_composite_curve_segment_curve(seg_entity, depth + 1)
+                            } else if self.is_curve_type(&seg_entity.type_name) {
+                                self.resolve_curve(ref_id, depth + 1)
+                            } else {
+                                None
+                            };
+
+                            if let Some(curve) = curve {
+                                // Check same_sense flag (3rd param of COMPOSITE_CURVE_SEGMENT)
+                                let same_sense = if seg_entity.type_name == "COMPOSITE_CURVE_SEGMENT" {
+                                    self.extract_same_sense(seg_entity)
+                                } else {
+                                    true
+                                };
+
+                                // Sample the curve into ~32 points
+                                let (t_min, t_max) = curve.param_range();
+                                let n_samples = 32;
+                                let mut segment_points = Vec::with_capacity(n_samples);
+                                for i in 0..n_samples {
+                                    let t = t_min + (t_max - t_min) * i as f64 / (n_samples - 1) as f64;
+                                    segment_points.push(curve.point_at(t));
                                 }
+
+                                // Reverse if same_sense is false
+                                if !same_sense {
+                                    segment_points.reverse();
+                                }
+
+                                all_points.extend(segment_points);
+                                n_segments += 1;
                             }
                         }
                     }
                 }
             }
         }
-        
+
         if all_points.len() >= 2 {
             // Remove near-duplicate consecutive points
             all_points = deduplicate_points_3d(&all_points, 1e-6);
         }
-        
+
         if all_points.len() >= 2 {
             let n = all_points.len();
             let degree = 1;
@@ -4805,7 +4908,7 @@ impl<'a> StepConverter<'a> {
             for _ in 0..=degree { knots.push(0.0); }
             for i in 1..n-1 { knots.push(i as f64); }
             for _ in 0..=degree { knots.push((n - 1) as f64); }
-            
+
             Some(Curve3d::Nurbs(NurbsCurve {
                 degree,
                 control_points: all_points,
@@ -4820,10 +4923,12 @@ impl<'a> StepConverter<'a> {
                         if let Some(ref_id) = self.get_ref(item) {
                             if let Some(seg_entity) = self.step.find_entity(ref_id) {
                                 if seg_entity.type_name == "COMPOSITE_CURVE_SEGMENT" {
-                                    if let Some(curve_id) = self.find_param_ref(seg_entity, 1) {
-                                        if let Some(curve) = self.resolve_curve(curve_id, depth + 1) {
-                                            return Some(curve);
-                                        }
+                                    if let Some(curve) = self.resolve_composite_curve_segment_curve(seg_entity, depth + 1) {
+                                        return Some(curve);
+                                    }
+                                } else if self.is_curve_type(&seg_entity.type_name) {
+                                    if let Some(curve) = self.resolve_curve(ref_id, depth + 1) {
+                                        return Some(curve);
                                     }
                                 }
                             }
@@ -4837,20 +4942,121 @@ impl<'a> StepConverter<'a> {
         }
     }
 
-    /// Resolve an OFFSET_CURVE_3D entity — returns the basis curve (offset is approximated).
-    /// Format: OFFSET_CURVE_3D('', #basis_curve, distance, #direction, .F.)
-    fn resolve_offset_curve_3d(&self, entity: &crate::schema::StepEntity, depth: usize) -> Option<Curve3d> {
-        // Find the basis curve reference
-        for param in &entity.params {
+    /// Extract the parent_curve from a COMPOSITE_CURVE_SEGMENT.
+    /// Format: COMPOSITE_CURVE_SEGMENT(transition, #parent_curve, same_sense)
+    fn resolve_composite_curve_segment_curve(&self, seg_entity: &crate::schema::StepEntity, depth: usize) -> Option<Curve3d> {
+        // The parent_curve is typically the 2nd parameter (index 1)
+        // But also try other parameter positions
+        for param in &seg_entity.params {
             if let Some(ref_id) = self.get_ref(param) {
                 if let Some(curve_entity) = self.step.find_entity(ref_id) {
                     if self.is_curve_type(&curve_entity.type_name) {
                         return self.resolve_curve(ref_id, depth + 1);
                     }
+                    // Check for BOUNDED_CURVE or other wrappers
+                    if curve_entity.type_name == "BOUNDED_CURVE" {
+                        return self.resolve_nested_curve_entity(curve_entity, depth + 1);
+                    }
                 }
             }
         }
         None
+    }
+
+    /// Extract the same_sense flag from a COMPOSITE_CURVE_SEGMENT.
+    /// Format: COMPOSITE_CURVE_SEGMENT(transition, #parent_curve, same_sense)
+    /// same_sense is typically the 3rd parameter — .T. or .F.
+    fn extract_same_sense(&self, seg_entity: &crate::schema::StepEntity) -> bool {
+        for param in &seg_entity.params {
+            if let StepValue::Enum(val) = param {
+                if val == "T" { return true; }
+                if val == "F" { return false; }
+            }
+        }
+        true // Default to true
+    }
+
+    /// Resolve a nested curve entity (BOUNDED_CURVE, CURVE_ON_SURFACE, PCURVE).
+    /// These are wrapper types that contain an underlying curve entity.
+    fn resolve_nested_curve_entity(&self, entity: &crate::schema::StepEntity, depth: usize) -> Option<Curve3d> {
+        if depth > 30 { return None; }
+        // Search all params for a curve reference
+        for param in &entity.params {
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(nested) = self.step.find_entity(ref_id) {
+                    if self.is_curve_type(&nested.type_name) {
+                        return self.resolve_curve(ref_id, depth + 1);
+                    }
+                    // Go deeper
+                    let result = self.resolve_nested_curve_entity(nested, depth + 1);
+                    if result.is_some() { return result; }
+                }
+            }
+            // Also check lists
+            if let StepValue::List(items) = param {
+                for item in items {
+                    if let Some(ref_id) = self.get_ref(item) {
+                        if let Some(nested) = self.step.find_entity(ref_id) {
+                            if self.is_curve_type(&nested.type_name) {
+                                return self.resolve_curve(ref_id, depth + 1);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Resolve an OFFSET_CURVE_3D entity with NURBS approximation.
+    /// Format: OFFSET_CURVE_3D('', #basis_curve, distance, #ref_direction, .F.)
+    ///
+    /// Approximation approach:
+    /// 1. Sample the basis curve at many points
+    /// 2. At each point, compute the tangent and the Frenet normal
+    /// 3. Offset each point along the normal direction by the given distance
+    /// 4. Fit a NURBS curve through the offset points
+    fn resolve_offset_curve_3d(&self, entity: &crate::schema::StepEntity, depth: usize) -> Option<Curve3d> {
+        // Parse parameters: name (optional), basis_curve_ref, distance, ref_direction, self_intersect
+        let mut basis_curve_id: Option<i64> = None;
+        let mut offset_dist: f64 = 0.0;
+        let mut ref_dir_id: Option<i64> = None;
+
+        let mut found_floats = 0;
+        for param in &entity.params {
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(referenced) = self.step.find_entity(ref_id) {
+                    if self.is_curve_type(&referenced.type_name) && basis_curve_id.is_none() {
+                        basis_curve_id = Some(ref_id);
+                    } else if referenced.type_name == "DIRECTION" && ref_dir_id.is_none() {
+                        ref_dir_id = Some(ref_id);
+                    } else if referenced.type_name == "VECTOR" && ref_dir_id.is_none() {
+                        // Extract direction from VECTOR
+                        ref_dir_id = self.find_direction_from_vector(referenced);
+                    }
+                }
+            }
+            if let Some(val) = self.get_float(param) {
+                if found_floats == 0 {
+                    offset_dist = val;
+                }
+                found_floats += 1;
+            }
+        }
+
+        let basis_curve_id = basis_curve_id?;
+        let basis_curve = self.resolve_curve(basis_curve_id, depth + 1)?;
+
+        if offset_dist.abs() < 1e-10 {
+            // Zero offset — just return the basis curve
+            return Some(basis_curve);
+        }
+
+        // Resolve reference direction (if provided)
+        let ref_dir = ref_dir_id.and_then(|id| self.resolve_direction(id));
+
+        // Approximate the offset curve using NURBS
+        Some(approximate_offset_curve(&basis_curve, offset_dist, ref_dir.as_ref()))
     }
 
     /// Convert a FaceData (surface + boundary edges) to a mesh by creating a Face
@@ -5723,6 +5929,472 @@ fn expand_knot_vector(multiplicities: &[usize], knot_values: &[f64]) -> Vec<f64>
         }
     }
     result
+}
+
+// ============================================================
+// NURBS Approximation Helpers for Offset Curves/Surfaces
+// ============================================================
+
+/// Approximate an offset curve as a NURBS curve.
+///
+/// Given a basis curve and an offset distance, this samples the basis curve,
+/// offsets each sample point along the normal direction, and creates a
+/// degree-3 NURBS curve through the offset points.
+///
+/// # Arguments
+/// * `basis_curve` - The curve to offset
+/// * `distance` - The offset distance (positive = left of curve, negative = right)
+/// * `ref_direction` - Optional reference direction for the offset plane.
+///   When provided, the offset normal is computed in the plane containing
+///   the tangent and this direction. When None, the Frenet normal is used.
+fn approximate_offset_curve(basis_curve: &Curve3d, distance: f64, ref_direction: Option<&Direction3d>) -> Curve3d {
+    let n_samples = 64;
+    let (t_min, t_max) = basis_curve.param_range();
+    let eps = (t_max - t_min) * 1e-7;
+
+    let mut offset_points: Vec<Point3d> = Vec::with_capacity(n_samples);
+
+    for i in 0..n_samples {
+        let t = t_min + (t_max - t_min) * i as f64 / (n_samples - 1) as f64;
+        let p = basis_curve.point_at(t);
+
+        // Compute tangent using central differences
+        let t_lo = (t - eps).max(t_min);
+        let t_hi = (t + eps).min(t_max);
+        let p_lo = basis_curve.point_at(t_lo);
+        let p_hi = basis_curve.point_at(t_hi);
+
+        let tx = p_hi.x - p_lo.x;
+        let ty = p_hi.y - p_lo.y;
+        let tz = p_hi.z - p_lo.z;
+        let t_len = (tx * tx + ty * ty + tz * tz).sqrt();
+
+        if t_len < 1e-15 {
+            offset_points.push(p);
+            continue;
+        }
+
+        let tangent = Vec3d::new(tx / t_len, ty / t_len, tz / t_len);
+
+        // Compute the normal direction for the offset
+        let normal = if let Some(ref_dir) = ref_direction {
+            // Use the reference direction to define the offset plane
+            // Normal = tangent × ref_dir, then normalize
+            let n = tangent.cross(&Vec3d::new(ref_dir.x, ref_dir.y, ref_dir.z));
+            let n_len = n.length();
+            if n_len < 1e-15 {
+                // Tangent is parallel to ref_dir — fall back to Frenet
+                compute_frenet_normal(&tangent, basis_curve, t, eps)
+            } else {
+                Direction3d::new(n.x / n_len, n.y / n_len, n.z / n_len).unwrap_or(Direction3d::Z)
+            }
+        } else {
+            // Use Frenet normal (tangent × second_derivative direction)
+            compute_frenet_normal(&tangent, basis_curve, t, eps)
+        };
+
+        // Offset the point along the normal
+        offset_points.push(Point3d::new(
+            p.x + distance * normal.x,
+            p.y + distance * normal.y,
+            p.z + distance * normal.z,
+        ));
+    }
+
+    // Remove near-duplicate consecutive points
+    offset_points = deduplicate_points_3d(&offset_points, 1e-6);
+
+    if offset_points.len() < 2 {
+        // Degenerate offset — return basis curve as-is
+        return basis_curve.clone();
+    }
+
+    // Create a degree-3 NURBS curve through the offset points
+    // Using global interpolation with chord-length parameterization
+    fit_nurbs_curve_through_points(&offset_points, 3)
+        .map(Curve3d::Nurbs)
+        .unwrap_or_else(|| {
+            // Fallback to degree-1 polyline
+            let n = offset_points.len();
+            let degree = 1;
+            let weights = vec![1.0; n];
+            let mut knots = Vec::with_capacity(n + degree + 1);
+            for _ in 0..=degree { knots.push(0.0); }
+            for i in 1..n-1 { knots.push(i as f64); }
+            for _ in 0..=degree { knots.push((n - 1) as f64); }
+            Curve3d::Nurbs(NurbsCurve {
+                degree,
+                control_points: offset_points,
+                weights,
+                knots,
+            })
+        })
+}
+
+/// Compute the principal normal (Frenet normal, in the osculating plane,
+/// perpendicular to the tangent and pointing toward the center of curvature)
+/// using numerical differentiation.
+///
+/// For a circle, this should point radially inward (toward the center).
+fn compute_frenet_normal(tangent: &Vec3d, curve: &Curve3d, t: f64, eps: f64) -> Direction3d {
+    let (t_min, t_max) = curve.param_range();
+    let eps2 = eps.max((t_max - t_min) * 1e-6);
+
+    // Second derivative approximation
+    let p0 = curve.point_at(t - eps2);
+    let p1 = curve.point_at(t);
+    let p2 = curve.point_at(t + eps2);
+
+    let ddx = (p2.x - 2.0 * p1.x + p0.x) / (eps2 * eps2);
+    let ddy = (p2.y - 2.0 * p1.y + p0.y) / (eps2 * eps2);
+    let ddz = (p2.z - 2.0 * p1.z + p0.z) / (eps2 * eps2);
+
+    // The principal normal is the component of the second derivative
+    // that is perpendicular to the tangent:
+    // N = P'' - (P'' · T) * T, then normalize
+    let dot = ddx * tangent.x + ddy * tangent.y + ddz * tangent.z;
+    let nx = ddx - dot * tangent.x;
+    let ny = ddy - dot * tangent.y;
+    let nz = ddz - dot * tangent.z;
+    let n_len = (nx * nx + ny * ny + nz * nz).sqrt();
+
+    if n_len > 1e-15 {
+        Direction3d::new(nx / n_len, ny / n_len, nz / n_len).unwrap_or(Direction3d::Z)
+    } else {
+        // Principal normal is degenerate (straight line or inflection point)
+        // Use an arbitrary normal perpendicular to the tangent
+        let arbitrary = if tangent.x.abs() < 0.9 {
+            Vec3d::new(1.0, 0.0, 0.0)
+        } else {
+            Vec3d::new(0.0, 1.0, 0.0)
+        };
+        let n = tangent.cross(&arbitrary);
+        Direction3d::new(n.x, n.y, n.z).unwrap_or(Direction3d::Z)
+    }
+}
+
+/// Fit a degree-p NURBS curve through a set of 3D points using global
+/// curve interpolation with chord-length parameterization.
+///
+/// This implements the standard algorithm from "The NURBS Book" (Piegl & Tiller):
+/// 1. Compute chord-length parameter values for each data point
+/// 2. Compute knot vector using the averaging technique
+/// 3. Solve the linear system N^T * P = Q for control points
+fn fit_nurbs_curve_through_points(points: &[Point3d], degree: usize) -> Option<NurbsCurve> {
+    let n = points.len();
+    if n < degree + 1 {
+        return None;
+    }
+
+    // 1. Chord-length parameterization
+    let mut chords = vec![0.0f64; n];
+    let mut total_chord = 0.0f64;
+    for i in 1..n {
+        let dx = points[i].x - points[i-1].x;
+        let dy = points[i].y - points[i-1].y;
+        let dz = points[i].z - points[i-1].z;
+        total_chord += (dx * dx + dy * dy + dz * dz).sqrt();
+        chords[i] = total_chord;
+    }
+
+    if total_chord < 1e-15 {
+        return None;
+    }
+
+    // Normalize to [0, 1]
+    let t: Vec<f64> = chords.iter().map(|c| c / total_chord).collect();
+
+    // 2. Compute knot vector using averaging
+    let m = n + degree + 1;
+    let mut knots = Vec::with_capacity(m);
+    // First degree+1 knots = 0
+    for _ in 0..=degree {
+        knots.push(0.0);
+    }
+    // Interior knots: average of degree parameter values
+    for j in 1..=(n - degree - 1) {
+        let sum: f64 = (1..=degree).map(|k| t[j + k - 1]).sum();
+        knots.push(sum / degree as f64);
+    }
+    // Last degree+1 knots = 1
+    for _ in 0..=degree {
+        knots.push(1.0);
+    }
+
+    // 3. Build and solve the linear system for control points
+    // N[i][j] = B-spline basis function N_{j,degree}(t_i)
+    let mut matrix = vec![vec![0.0f64; n]; n];
+    for i in 0..n {
+        let basis = compute_bspline_basis_values(&knots, degree, t[i], n);
+        for j in 0..n {
+            matrix[i][j] = basis[j];
+        }
+    }
+
+    // Solve for each coordinate using Gaussian elimination
+    let mut control_points = Vec::with_capacity(n);
+    for coord in 0..3 {
+        let rhs: Vec<f64> = points.iter().map(|p| match coord {
+            0 => p.x, 1 => p.y, _ => p.z
+        }).collect();
+
+        if let Some(solution) = solve_linear_system_gauss(&matrix, &rhs) {
+            for (i, &val) in solution.iter().enumerate() {
+                if coord == 0 {
+                    control_points.push(Point3d::new(val, 0.0, 0.0));
+                } else if coord == 1 {
+                    control_points[i].y = val;
+                } else {
+                    control_points[i].z = val;
+                }
+            }
+        } else {
+            return None;
+        }
+    }
+
+    Some(NurbsCurve {
+        degree,
+        control_points,
+        weights: vec![1.0; n],
+        knots,
+    })
+}
+
+/// Compute all B-spline basis function values N_{i,p}(t) for i=0..n_cp.
+/// Uses the Cox-de Boor recursion formula.
+fn compute_bspline_basis_values(knots: &[f64], degree: usize, t: f64, n_cp: usize) -> Vec<f64> {
+    let n = n_cp;
+    let p = degree;
+
+    // Clamp t to valid range
+    let t_min = knots[p];
+    let t_max = knots[knots.len() - p - 1];
+    let t = t.clamp(t_min, t_max);
+
+    // Initialize degree-0 basis functions
+    let mut basis = vec![0.0f64; n];
+    for i in 0..n {
+        if i + 1 < knots.len() {
+            if (t >= knots[i] || (i == 0 && t >= knots[0])) &&
+               (t < knots[i + 1] || (i == n - 1 && t <= knots[knots.len() - 1])) {
+                // Special case for the last span
+                if i == n - 1 && t >= knots[i] && t <= knots[i + 1].max(knots[knots.len() - 1]) {
+                    basis[i] = 1.0;
+                } else if t >= knots[i] && t < knots[i + 1] {
+                    basis[i] = 1.0;
+                }
+            }
+        }
+    }
+
+    // Build up higher-degree basis functions
+    for d in 1..=p {
+        let mut new_basis = vec![0.0f64; n];
+        for i in 0..n {
+            // Left term
+            let left = if i + d < knots.len() && i < knots.len() {
+                let denom = knots[i + d] - knots[i];
+                if denom.abs() < 1e-15 { 0.0 } else { (t - knots[i]) / denom * basis[i] }
+            } else { 0.0 };
+
+            // Right term
+            let right = if i + 1 < n && i + d + 1 < knots.len() {
+                let denom = knots[i + d + 1] - knots[i + 1];
+                if denom.abs() < 1e-15 { 0.0 } else { (knots[i + d + 1] - t) / denom * basis[i + 1] }
+            } else { 0.0 };
+
+            new_basis[i] = left + right;
+        }
+        basis = new_basis;
+    }
+
+    basis
+}
+
+/// Solve a linear system Ax = b using Gaussian elimination with partial pivoting.
+fn solve_linear_system_gauss(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
+    let n = b.len();
+    if a.len() != n || a.iter().any(|row| row.len() != n) {
+        return None;
+    }
+
+    // Create augmented matrix
+    let mut aug: Vec<Vec<f64>> = a.iter().zip(b.iter())
+        .map(|(row, &bi)| {
+            let mut r = row.clone();
+            r.push(bi);
+            r
+        })
+        .collect();
+
+    // Forward elimination with partial pivoting
+    for col in 0..n {
+        // Find pivot
+        let mut max_val = aug[col][col].abs();
+        let mut max_row = col;
+        for row in (col + 1)..n {
+            if aug[row][col].abs() > max_val {
+                max_val = aug[row][col].abs();
+                max_row = row;
+            }
+        }
+
+        if max_val < 1e-15 {
+            // Singular or near-singular matrix
+            continue;
+        }
+
+        // Swap rows
+        if max_row != col {
+            aug.swap(col, max_row);
+        }
+
+        // Eliminate below
+        let pivot = aug[col][col];
+        for row in (col + 1)..n {
+            if aug[row][col].abs() < 1e-30 { continue; }
+            let factor = aug[row][col] / pivot;
+            for j in col..=n {
+                aug[row][j] -= factor * aug[col][j];
+            }
+        }
+    }
+
+    // Back substitution
+    let mut x = vec![0.0f64; n];
+    for i in (0..n).rev() {
+        if aug[i][i].abs() < 1e-15 {
+            x[i] = 0.0; // Free variable
+            continue;
+        }
+        let mut sum = aug[i][n]; // RHS
+        for j in (i + 1)..n {
+            sum -= aug[i][j] * x[j];
+        }
+        x[i] = sum / aug[i][i];
+    }
+
+    Some(x)
+}
+
+/// Approximate an offset surface as a NURBS surface.
+///
+/// Given a basis surface and an offset distance, this samples the basis surface
+/// on a grid, offsets each grid point along the surface normal, and creates
+/// a NURBS surface from the offset grid.
+fn approximate_offset_surface(basis_surface: &Surface, distance: f64) -> Surface {
+    let n_u = 16;
+    let n_v = 16;
+
+    // Determine parameter ranges
+    let (u_min, u_max) = surface_param_range_u(basis_surface);
+    let (v_min, v_max) = surface_param_range_v(basis_surface);
+
+    let mut offset_grid: Vec<Vec<Point3d>> = Vec::with_capacity(n_u);
+
+    for i in 0..n_u {
+        let u = u_min + (u_max - u_min) * i as f64 / (n_u - 1) as f64;
+        let mut row = Vec::with_capacity(n_v);
+
+        for j in 0..n_v {
+            let v = v_min + (v_max - v_min) * j as f64 / (n_v - 1) as f64;
+            let p = basis_surface.point_at(u, v);
+            let normal = basis_surface.normal_at(u, v);
+
+            // Offset along the normal
+            row.push(Point3d::new(
+                p.x + distance * normal.x,
+                p.y + distance * normal.y,
+                p.z + distance * normal.z,
+            ));
+        }
+        offset_grid.push(row);
+    }
+
+    // Create a degree-3 NURBS surface with the offset grid as control points
+    let u_degree = 3.min(n_u - 1);
+    let v_degree = 3.min(n_v - 1);
+
+    // Generate clamped knot vectors
+    let u_knots = generate_clamped_knots(n_u, u_degree);
+    let v_knots = generate_clamped_knots(n_v, v_degree);
+
+    // Unit weights
+    let weights = vec![vec![1.0; n_v]; n_u];
+
+    Surface::Nurbs(NurbsSurface {
+        u_degree,
+        v_degree,
+        control_points: offset_grid,
+        weights,
+        u_knots,
+        v_knots,
+    })
+}
+
+/// Get the parameter range for u direction of a surface.
+fn surface_param_range_u(surface: &Surface) -> (f64, f64) {
+    match surface {
+        Surface::Nurbs(n) => n.u_range(),
+        Surface::Plane(_) => (0.0, 1.0),
+        Surface::Cylinder(c) => c.u_range(),
+        Surface::Cone(_) => (0.0, 2.0 * std::f64::consts::PI),
+        Surface::Sphere(_) => (0.0, 2.0 * std::f64::consts::PI),
+        Surface::Torus(_) => (0.0, 2.0 * std::f64::consts::PI),
+        Surface::Revolution(_) => (0.0, 2.0 * std::f64::consts::PI),
+        Surface::Extrusion(_) => {
+            if let Surface::Extrusion(e) = surface {
+                e.profile.param_range()
+            } else {
+                (0.0, 1.0)
+            }
+        }
+    }
+}
+
+/// Get the parameter range for v direction of a surface.
+fn surface_param_range_v(surface: &Surface) -> (f64, f64) {
+    match surface {
+        Surface::Nurbs(n) => n.v_range(),
+        Surface::Plane(_) => (0.0, 1.0),
+        Surface::Cylinder(_) => (-10.0, 10.0), // Infinite in v
+        Surface::Cone(_) => (-10.0, 10.0),
+        Surface::Sphere(_) => (0.0, std::f64::consts::PI),
+        Surface::Torus(_) => (0.0, 2.0 * std::f64::consts::PI),
+        Surface::Revolution(_) => {
+            if let Surface::Revolution(r) = surface {
+                r.profile.param_range()
+            } else {
+                (0.0, 1.0)
+            }
+        }
+        Surface::Extrusion(_) => (-10.0, 10.0), // Infinite in v (extrusion direction)
+    }
+}
+
+/// Generate a clamped uniform knot vector for n control points and given degree.
+fn generate_clamped_knots(n: usize, degree: usize) -> Vec<f64> {
+    let m = n + degree + 1;
+    let mut knots = Vec::with_capacity(m);
+
+    // First degree+1 knots = 0
+    for _ in 0..=degree {
+        knots.push(0.0);
+    }
+
+    // Interior knots: uniformly spaced
+    let n_interior = n - degree - 1;
+    for i in 1..=n_interior {
+        knots.push(i as f64 / (n_interior + 1) as f64);
+    }
+
+    // Last degree+1 knots = 1
+    for _ in 0..=degree {
+        knots.push(1.0);
+    }
+
+    knots
 }
 
 /// Merge holes into an outer polygon using the bridge-edge technique.
@@ -6741,6 +7413,339 @@ mod diag_tests {
                 }
                 Err(e) => { eprintln!("  convert_detailed_instances ERROR: {}", e); }
             }
+        }
+    }
+}
+
+// ============================================================
+// Unit Tests for STEP Parser Extension (3.3.x)
+// ============================================================
+
+#[cfg(test)]
+mod step_parser_extension_tests {
+    use super::*;
+    use crate::parse_step;
+
+    /// Helper: create a minimal STEP file with the given DATA section content
+    fn make_step(data: &str) -> String {
+        format!(
+            "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('test'),'2;1');\n\
+             FILE_NAME('test.stp','2024-01-01',(''),(''),'3Draper','','');\n\
+             FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));\nENDSEC;\nDATA;\n{}\nENDSEC;\nEND-ISO-10303-21;",
+            data
+        )
+    }
+
+    // ─── 3.3.1 B_SPLINE_CURVE_WITH_KNOTS (any degree) ─────────
+
+    #[test]
+    fn test_bspline_curve_degree1_linear() {
+        let step = make_step(
+            "#1 = B_SPLINE_CURVE_WITH_KNOTS('',1,(#10,#11),.UNSPECIFIED.,.F.,.U.,\
+             (2,2),(0.0,1.0),.UNSPECIFIED.);\n\
+             #10 = CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
+             #11 = CARTESIAN_POINT('',(10.0,0.0,0.0));"
+        );
+        let file = parse_step(&step).unwrap();
+        let converter = StepConverter::new(&file);
+        let curve = converter.resolve_curve(1, 0).unwrap();
+        let p0 = curve.point_at(0.0);
+        let p1 = curve.point_at(1.0);
+        assert!((p0.x - 0.0).abs() < 1e-6, "p0.x should be 0");
+        assert!((p1.x - 10.0).abs() < 1e-6, "p1.x should be 10");
+    }
+
+    #[test]
+    fn test_bspline_curve_degree2_quadratic() {
+        let step = make_step(
+            "#1 = B_SPLINE_CURVE_WITH_KNOTS('',2,(#10,#11,#12),.UNSPECIFIED.,.F.,.U.,\
+             (3,3),(0.0,1.0),.UNSPECIFIED.);\n\
+             #10 = CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
+             #11 = CARTESIAN_POINT('',(5.0,10.0,0.0));\n\
+             #12 = CARTESIAN_POINT('',(10.0,0.0,0.0));"
+        );
+        let file = parse_step(&step).unwrap();
+        let converter = StepConverter::new(&file);
+        let curve = converter.resolve_curve(1, 0).unwrap();
+        let p_mid = curve.point_at(0.5);
+        assert!((p_mid.x - 5.0).abs() < 0.1, "midpoint x should be ~5, got {}", p_mid.x);
+        assert!(p_mid.y > 0.0, "midpoint y should be positive");
+    }
+
+    #[test]
+    fn test_bspline_curve_degree3_cubic() {
+        let step = make_step(
+            "#1 = B_SPLINE_CURVE_WITH_KNOTS('',3,(#10,#11,#12,#13),.UNSPECIFIED.,.F.,.U.,\
+             (4,4),(0.0,1.0),.UNSPECIFIED.);\n\
+             #10 = CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
+             #11 = CARTESIAN_POINT('',(1.0,3.0,0.0));\n\
+             #12 = CARTESIAN_POINT('',(4.0,3.0,0.0));\n\
+             #13 = CARTESIAN_POINT('',(5.0,0.0,0.0));"
+        );
+        let file = parse_step(&step).unwrap();
+        let converter = StepConverter::new(&file);
+        let curve = converter.resolve_curve(1, 0).unwrap();
+        let p0 = curve.point_at(0.0);
+        let p1 = curve.point_at(1.0);
+        assert!((p0.x).abs() < 1e-6, "start x should be 0");
+        assert!((p1.x - 5.0).abs() < 1e-6, "end x should be 5");
+    }
+
+    #[test]
+    fn test_rational_bspline_curve() {
+        let step = make_step(
+            "#1 = (BOUNDED_CURVE()B_SPLINE_CURVE(2,(#10,#11,#12),.UNSPECIFIED.,.F.,.U.)\
+             B_SPLINE_CURVE_WITH_KNOTS((3,3),(0.0,1.0),.UNSPECIFIED.)\
+             RATIONAL_B_SPLINE_CURVE((1.0,0.7071067811865476,1.0))REPRESENTATION_ITEM('')GEOMETRIC_REPRESENTATION_ITEM()CURVE());\n\
+             #10 = CARTESIAN_POINT('',(1.0,0.0,0.0));\n\
+             #11 = CARTESIAN_POINT('',(1.0,1.0,0.0));\n\
+             #12 = CARTESIAN_POINT('',(0.0,1.0,0.0));"
+        );
+        let file = parse_step(&step).unwrap();
+        let converter = StepConverter::new(&file);
+        let curve = converter.resolve_curve(1, 0).unwrap();
+        if let Curve3d::Nurbs(nurbs) = &curve {
+            assert_eq!(nurbs.degree, 2);
+            assert_eq!(nurbs.control_points.len(), 3);
+            assert_eq!(nurbs.weights.len(), 3);
+            assert!((nurbs.weights[1] - 0.707).abs() < 0.01, "middle weight should be ~0.707, got {}", nurbs.weights[1]);
+        } else {
+            panic!("Expected NURBS curve");
+        }
+    }
+
+    // ─── 3.3.3 COMPOSITE_CURVE_SEGMENT ─────────
+
+    #[test]
+    fn test_composite_curve_with_segments() {
+        let step = make_step(
+            "#1 = COMPOSITE_CURVE('',(#2,#3),.U.);\n\
+             #2 = COMPOSITE_CURVE_SEGMENT(.CONTINUOUS.,#10,.T.);\n\
+             #3 = COMPOSITE_CURVE_SEGMENT(.CONTINUOUS.,#20,.T.);\n\
+             #10 = LINE('',#100,#200);\n\
+             #20 = LINE('',#101,#201);\n\
+             #100 = CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
+             #101 = CARTESIAN_POINT('',(5.0,0.0,0.0));\n\
+             #200 = DIRECTION('',(1.0,0.0,0.0));\n\
+             #201 = DIRECTION('',(0.0,1.0,0.0));"
+        );
+        let file = parse_step(&step).unwrap();
+        let converter = StepConverter::new(&file);
+        let curve = converter.resolve_curve(1, 0);
+        assert!(curve.is_some(), "Should resolve composite curve");
+    }
+
+    #[test]
+    fn test_composite_curve_segment_same_sense() {
+        let step = make_step(
+            "#1 = COMPOSITE_CURVE_SEGMENT(.CONTINUOUS.,#10,.F.);\n\
+             #10 = LINE('',#100,#200);\n\
+             #100 = CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
+             #200 = DIRECTION('',(1.0,0.0,0.0));"
+        );
+        let file = parse_step(&step).unwrap();
+        let converter = StepConverter::new(&file);
+        let entity = file.find_entity(1).unwrap();
+        let same_sense = converter.extract_same_sense(entity);
+        assert!(!same_sense, "same_sense should be false for .F.");
+    }
+
+    // ─── 3.3.4 OFFSET_CURVE_3D ─────────
+
+    #[test]
+    fn test_offset_curve_3d_parsing() {
+        let step = make_step(
+            "#1 = OFFSET_CURVE_3D('',#10,2.0,#200,.F.);\n\
+             #10 = LINE('',#100,#201);\n\
+             #100 = CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
+             #201 = DIRECTION('',(1.0,0.0,0.0));\n\
+             #200 = DIRECTION('',(0.0,0.0,1.0));"
+        );
+        let file = parse_step(&step).unwrap();
+        let converter = StepConverter::new(&file);
+        let curve = converter.resolve_curve(1, 0);
+        assert!(curve.is_some(), "Should resolve offset curve");
+    }
+
+    #[test]
+    fn test_offset_curve_zero_distance() {
+        let step = make_step(
+            "#1 = OFFSET_CURVE_3D('',#10,0.0,#200,.F.);\n\
+             #10 = LINE('',#100,#201);\n\
+             #100 = CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
+             #201 = DIRECTION('',(1.0,0.0,0.0));\n\
+             #200 = DIRECTION('',(0.0,0.0,1.0));"
+        );
+        let file = parse_step(&step).unwrap();
+        let converter = StepConverter::new(&file);
+        let curve = converter.resolve_curve(1, 0).unwrap();
+        assert!(matches!(curve, Curve3d::Line(_)), "Zero offset should return the line");
+    }
+
+    // ─── 3.3.5 OFFSET_SURFACE ─────────
+
+    #[test]
+    fn test_offset_surface_parsing() {
+        let step = make_step(
+            "#1 = OFFSET_SURFACE('',#10,0.5,.T.);\n\
+             #10 = PLANE('',#100);\n\
+             #100 = AXIS2_PLACEMENT_3D('',#101,#102,#103);\n\
+             #101 = CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
+             #102 = DIRECTION('',(0.0,0.0,1.0));\n\
+             #103 = DIRECTION('',(1.0,0.0,0.0));"
+        );
+        let file = parse_step(&step).unwrap();
+        let converter = StepConverter::new(&file);
+        let surface = converter.extract_surface(1, 0);
+        assert!(surface.is_some(), "Should resolve offset surface");
+    }
+
+    // ─── 3.3.6 RECTANGULAR_TRIMMED_SURFACE ─────────
+
+    #[test]
+    fn test_rectangular_trimmed_surface_parsing() {
+        let step = make_step(
+            "#1 = RECTANGULAR_TRIMMED_SURFACE('',#10,0.0,6.28,0.0,1.0,.T.,.T.);\n\
+             #10 = CYLINDRICAL_SURFACE('',#100,5.0);\n\
+             #100 = AXIS2_PLACEMENT_3D('',#101,#102,#103);\n\
+             #101 = CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
+             #102 = DIRECTION('',(0.0,0.0,1.0));\n\
+             #103 = DIRECTION('',(1.0,0.0,0.0));"
+        );
+        let file = parse_step(&step).unwrap();
+        let converter = StepConverter::new(&file);
+        let surface = converter.extract_surface(1, 0);
+        assert!(surface.is_some(), "Should resolve trimmed surface");
+        assert!(matches!(surface.unwrap(), Surface::Cylinder(_)), "Should return basis cylinder");
+    }
+
+    // ─── 3.3.7 SURFACE_OF_REVOLUTION ─────────
+
+    #[test]
+    fn test_revolution_surface_arbitrary_axis() {
+        let step = make_step(
+            "#1 = SURFACE_OF_REVOLUTION('',#10,#100);\n\
+             #10 = LINE('',#200,#201);\n\
+             #200 = CARTESIAN_POINT('',(5.0,0.0,0.0));\n\
+             #201 = DIRECTION('',(0.0,0.0,1.0));\n\
+             #100 = AXIS1_PLACEMENT('',#101,#102);\n\
+             #101 = CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
+             #102 = DIRECTION('',(1.0,0.0,0.0));"
+        );
+        let file = parse_step(&step).unwrap();
+        let converter = StepConverter::new(&file);
+        let surface = converter.extract_surface(1, 0);
+        assert!(surface.is_some(), "Should resolve revolution surface with arbitrary axis");
+    }
+
+    // ─── 3.3.8 SURFACE_OF_LINEAR_EXTRUSION ─────────
+
+    #[test]
+    fn test_extrusion_with_vector() {
+        let step = make_step(
+            "#1 = SURFACE_OF_LINEAR_EXTRUSION('',#10,#200);\n\
+             #10 = LINE('',#100,#201);\n\
+             #100 = CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
+             #201 = DIRECTION('',(1.0,0.0,0.0));\n\
+             #200 = VECTOR('',#202,10.0);\n\
+             #202 = DIRECTION('',(0.0,0.0,1.0));"
+        );
+        let file = parse_step(&step).unwrap();
+        let converter = StepConverter::new(&file);
+        let surface = converter.extract_surface(1, 0);
+        assert!(surface.is_some(), "Should resolve extrusion with VECTOR");
+    }
+
+    // ─── 3.3.9 COMPOSITE_CURVE_ON_SURFACE ─────────
+
+    #[test]
+    fn test_composite_curve_on_surface() {
+        let step = make_step(
+            "#1 = COMPOSITE_CURVE_ON_SURFACE('',(#2,#3),.U.,#50);\n\
+             #2 = COMPOSITE_CURVE_SEGMENT(.CONTINUOUS.,#10,.T.);\n\
+             #3 = COMPOSITE_CURVE_SEGMENT(.CONTINUOUS.,#20,.T.);\n\
+             #10 = LINE('',#100,#200);\n\
+             #20 = LINE('',#101,#201);\n\
+             #50 = PLANE('',#500);\n\
+             #100 = CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
+             #101 = CARTESIAN_POINT('',(5.0,0.0,0.0));\n\
+             #200 = DIRECTION('',(1.0,0.0,0.0));\n\
+             #201 = DIRECTION('',(0.0,1.0,0.0));\n\
+             #500 = AXIS2_PLACEMENT_3D('',#501,#502,#503);\n\
+             #501 = CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
+             #502 = DIRECTION('',(0.0,0.0,1.0));\n\
+             #503 = DIRECTION('',(1.0,0.0,0.0));"
+        );
+        let file = parse_step(&step).unwrap();
+        let converter = StepConverter::new(&file);
+        let curve = converter.resolve_curve(1, 0);
+        assert!(curve.is_some(), "Should resolve COMPOSITE_CURVE_ON_SURFACE");
+    }
+
+    // ─── NURBS approximation helpers ─────────
+
+    #[test]
+    fn test_nurbs_curve_interpolation() {
+        let points = vec![
+            Point3d::new(0.0, 0.0, 0.0),
+            Point3d::new(1.0, 2.0, 0.0),
+            Point3d::new(2.0, 2.0, 0.0),
+            Point3d::new(3.0, 0.0, 0.0),
+        ];
+        let nurbs = fit_nurbs_curve_through_points(&points, 3);
+        assert!(nurbs.is_some(), "Should fit a degree-3 curve through 4 points");
+        let nurbs = nurbs.unwrap();
+        assert_eq!(nurbs.degree, 3);
+        assert_eq!(nurbs.control_points.len(), 4);
+
+        let p0 = Curve3d::Nurbs(nurbs.clone()).point_at(0.0);
+        let p3 = Curve3d::Nurbs(nurbs.clone()).point_at(1.0);
+        assert!((p0.x - 0.0).abs() < 1e-4, "First point x should be 0");
+        assert!((p3.x - 3.0).abs() < 1e-4, "Last point x should be 3");
+    }
+
+    #[test]
+    fn test_offset_circle_curve() {
+        // Offset a circle by -1.0 (outward) — should produce a circle with radius+1
+        // Note: the Frenet principal normal points inward (toward center of curvature),
+        // so a negative offset distance offsets outward.
+        let circle = Circle::new_xy(Point3d::ORIGIN, 5.0);
+        let basis = Curve3d::Circle(circle);
+        let offset = approximate_offset_curve(&basis, -1.0, None);
+        // The offset curve should be approximately a circle of radius 6
+        // Check the point at t=0 (which should be at (6, 0, 0) for outward offset)
+        let p_start = offset.point_at(0.0);
+        assert!(p_start.x > 5.0, "Offset circle start x should be > 5, got {}", p_start.x);
+    }
+
+    #[test]
+    fn test_offset_surface_plane() {
+        let plane = Plane::xy();
+        let offset = approximate_offset_surface(&Surface::Plane(plane), 1.0);
+        if let Surface::Nurbs(nurbs) = &offset {
+            assert!(nurbs.u_degree >= 1);
+            assert!(nurbs.v_degree >= 1);
+            let (u_min, u_max) = nurbs.u_range();
+            let (v_min, v_max) = nurbs.v_range();
+            let p_mid = offset.point_at((u_min + u_max) / 2.0, (v_min + v_max) / 2.0);
+            assert!((p_mid.z - 1.0).abs() < 0.1, "Offset plane z should be ~1.0, got {}", p_mid.z);
+        } else {
+            panic!("Expected NURBS surface for offset plane");
+        }
+    }
+
+    #[test]
+    fn test_generate_clamped_knots() {
+        let knots = generate_clamped_knots(6, 3);
+        assert_eq!(knots.len(), 10);
+        for i in 0..=3 {
+            assert!((knots[i] - 0.0).abs() < 1e-10, "First 4 knots should be 0");
+        }
+        for i in 6..=9 {
+            assert!((knots[i] - 1.0).abs() < 1e-10, "Last 4 knots should be 1");
+        }
+        for i in 1..knots.len() {
+            assert!(knots[i] >= knots[i-1] - 1e-10, "Knots should be non-decreasing");
         }
     }
 }

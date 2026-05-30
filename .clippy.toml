@@ -1,0 +1,7 @@
+# Clippy configuration for the 3Draper project.
+# Deny unwrap() and expect() in non-test code — use KernelError instead.
+
+disallowed-methods = [
+    { path = "std::option::Option::unwrap", reason = "use KernelError instead of unwrap" },
+    { path = "std::result::Result::unwrap", reason = "use KernelError instead of unwrap" },
+]
