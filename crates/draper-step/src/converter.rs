@@ -24,7 +24,7 @@ use crate::schema::{StepFile, StepValue};
 use draper_geometry::{
     Point3d, Point2d, Direction3d, Surface, Plane, CylinderSurface, SphereSurface,
     ConeSurface, TorusSurface, RevolutionSurface, ExtrusionSurface,
-    NurbsSurface, Curve3d, Line, Circle, NurbsCurve,
+    NurbsSurface, Curve3d, Line, Circle, Ellipse, Arc, NurbsCurve,
 };
 use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary, ear_clip};
 use draper_topology::{Face, Wire, CoEdge, Edge as TopoEdge};
@@ -173,20 +173,25 @@ pub fn step_structure_with_instances(step_file: &StepFile) -> (AssemblyNode, Vec
     (tree, instances)
 }
 
-/// Recursively assign instance_index to leaf AssemblyNodes by matching them
+/// Assign instance_index to leaf AssemblyNodes by matching them
 /// with instances in DFS order. The walk_assembly_tree_detailed function
 /// creates instances in the same DFS order as build_assembly_tree, so we
 /// can assign indices sequentially.
-fn assign_instance_indices(node: &mut AssemblyNode, instances: &[DetailedMeshInstance], next_index: &mut usize) {
-    if node.children.is_empty() {
-        // Leaf node — assign instance_index if it has a brep_id
-        if node.brep_id.is_some() && *next_index < instances.len() {
-            node.instance_index = Some(*next_index);
-            *next_index += 1;
-        }
-    } else {
-        for child in &mut node.children {
-            assign_instance_indices(child, instances, next_index);
+/// Uses an explicit stack to avoid stack overflow on deeply nested trees.
+fn assign_instance_indices(root: &mut AssemblyNode, instances: &[DetailedMeshInstance], next_index: &mut usize) {
+    let mut stack: Vec<&mut AssemblyNode> = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.children.is_empty() {
+            // Leaf node — assign instance_index if it has a brep_id
+            if node.brep_id.is_some() && *next_index < instances.len() {
+                node.instance_index = Some(*next_index);
+                *next_index += 1;
+            }
+        } else {
+            // Push children in reverse order so leftmost is processed first
+            for child in node.children.iter_mut().rev() {
+                stack.push(child);
+            }
         }
     }
 }
@@ -560,7 +565,7 @@ impl<'a> StepConverter<'a> {
         ];
         for type_name in &surface_types {
             for entity in self.step.find_entities_by_type(type_name) {
-                if let Some(surface) = self.extract_surface(entity.id) {
+                if let Some(surface) = self.extract_surface(entity.id, 0) {
                     let face_data = FaceData { surface, outer_edges: vec![], inner_edges: vec![], edges: vec![], forward: true, step_face_id: entity.id };
                     let mesh = self.surface_to_mesh(&face_data, &params, &bbox);
                     results.push(MeshInstance {
@@ -710,157 +715,141 @@ impl<'a> StepConverter<'a> {
     }
 
     /// Walk assembly tree producing DetailedMeshInstance results.
+    /// Uses an explicit stack to avoid stack overflow on deeply nested assemblies.
     fn walk_assembly_tree_detailed(
         &self,
-        parent_pd_id: i64,
-        _parent_name: &str,
-        parent_transform: &Option<[[f64; 4]; 4]>,
+        root_pd_id: i64,
+        _root_name: &str,
+        root_transform: &Option<[[f64; 4]; 4]>,
         color_map: &HashMap<i64, [f32; 4]>,
         brep_detail_cache: &mut HashMap<i64, (TriangleMesh, Vec<FaceInfo>)>,
         params: &TriangulationParams,
         bbox: &Option<(Point3d, Point3d)>,
         parent_pd_to_children: &HashMap<i64, Vec<(i64, i64, String)>>,
         results: &mut Vec<DetailedMeshInstance>,
-        visited: &mut std::collections::HashSet<(i64, i64)>,
+        _visited: &mut std::collections::HashSet<(i64, i64)>,
     ) {
-        let children = match parent_pd_to_children.get(&parent_pd_id) {
-            Some(c) => c,
-            None => return,
-        };
+        // Explicit stack: (pd_id, composed_transform)
+        let mut stack: Vec<(i64, Option<[[f64; 4]; 4]>)> = vec![(root_pd_id, *root_transform)];
 
-        for &(nauo_id, child_pd_id, ref nauo_name) in children {
-            if visited.contains(&(child_pd_id, nauo_id)) {
-                continue;
-            }
-            visited.insert((child_pd_id, nauo_id));
-
-            let nauo_transform = self.find_nauo_transform(nauo_id, child_pd_id);
-            let composed = match (parent_transform, nauo_transform) {
-                (Some(pt), Some(nt)) => Some(mat4_mul(pt, &nt)),
-                (Some(pt), None) => Some(*pt),
-                (None, Some(nt)) => Some(nt),
-                (None, None) => None,
+        while let Some((parent_pd_id, parent_transform)) = stack.pop() {
+            let children = match parent_pd_to_children.get(&parent_pd_id) {
+                Some(c) => c,
+                None => continue,
             };
 
-            let has_nauo_children = parent_pd_to_children.contains_key(&child_pd_id);
+            for &(nauo_id, child_pd_id, ref nauo_name) in children {
+                // Get this NAUO's transform
+                let nauo_transform = self.find_nauo_transform(nauo_id, child_pd_id);
 
-            if has_nauo_children {
-                let child_name = self.get_product_name(child_pd_id);
-                self.walk_assembly_tree_detailed(
-                    child_pd_id, &child_name, &composed, color_map,
-                    brep_detail_cache, params, bbox, parent_pd_to_children,
-                    results, visited,
-                );
-            } else if let Some(brep_id) = self.find_pd_brep(child_pd_id) {
-                if let Some((mesh, faces)) = self.triangulate_brep_detailed_cached(brep_id, brep_detail_cache, params, bbox) {
-                    let mut instance_mesh = mesh.clone();
-                    if let Some(ref tf) = composed {
-                        instance_mesh.transform(tf);
+                // Compose: parent_transform * nauo_transform
+                let composed = match (&parent_transform, &nauo_transform) {
+                    (Some(pt), Some(nt)) => Some(mat4_mul(pt, nt)),
+                    (Some(pt), None) => Some(*pt),
+                    (None, Some(nt)) => Some(*nt),
+                    (None, None) => None,
+                };
+
+                let has_nauo_children = parent_pd_to_children.contains_key(&child_pd_id);
+
+                if has_nauo_children {
+                    // Sub-assembly — push to stack instead of recursing
+                    stack.push((child_pd_id, composed));
+                } else if let Some(brep_id) = self.find_pd_brep(child_pd_id) {
+                    if let Some((mesh, faces)) = self.triangulate_brep_detailed_cached(brep_id, brep_detail_cache, params, bbox) {
+                        let mut instance_mesh = mesh.clone();
+                        if let Some(ref tf) = composed {
+                            instance_mesh.transform(tf);
+                        }
+                        let color = color_map.get(&brep_id).copied();
+                        let name = format!("{} (BREP#{})", nauo_name, brep_id);
+                        results.push(DetailedMeshInstance {
+                            name,
+                            mesh: instance_mesh,
+                            color,
+                            transform: composed,
+                            brep_id,
+                            faces,
+                        });
                     }
-                    let color = color_map.get(&brep_id).copied();
-                    let name = format!("{} (BREP#{})", nauo_name, brep_id);
-                    results.push(DetailedMeshInstance {
-                        name,
-                        mesh: instance_mesh,
-                        color,
-                        transform: composed,
-                        brep_id,
-                        faces,
-                    });
                 }
             }
-
-            visited.remove(&(child_pd_id, nauo_id));
         }
     }
 
-    /// Recursively walk the assembly tree from a parent PD, creating mesh instances
+    /// Walk the assembly tree from a root PD, creating mesh instances
     /// for each leaf BREP occurrence with the correct composed transform.
+    /// Uses an explicit stack to avoid stack overflow on deeply nested assemblies.
     fn walk_assembly_tree(
         &self,
-        parent_pd_id: i64,
-        _parent_name: &str,
-        parent_transform: &Option<[[f64; 4]; 4]>,
+        root_pd_id: i64,
+        _root_name: &str,
+        root_transform: &Option<[[f64; 4]; 4]>,
         color_map: &HashMap<i64, [f32; 4]>,
         brep_mesh_cache: &mut HashMap<i64, TriangleMesh>,
         params: &TriangulationParams,
         bbox: &Option<(Point3d, Point3d)>,
         parent_pd_to_children: &HashMap<i64, Vec<(i64, i64, String)>>,
         results: &mut Vec<MeshInstance>,
-        // Track (pd_id, nauo_id) pairs to detect cycles
-        visited: &mut std::collections::HashSet<(i64, i64)>,
+        // Track (pd_id, nauo_id) pairs to detect cycles (kept for API compat, not used in iterative version)
+        _visited: &mut std::collections::HashSet<(i64, i64)>,
     ) {
-        let children = match parent_pd_to_children.get(&parent_pd_id) {
-            Some(c) => c,
-            None => return, // Leaf with no children in the NAUO tree
-        };
+        // Explicit stack: (pd_id, composed_transform)
+        let mut stack: Vec<(i64, Option<[[f64; 4]; 4]>)> = vec![(root_pd_id, *root_transform)];
 
-        for &(nauo_id, child_pd_id, ref nauo_name) in children {
-            // Cycle detection: same PD via same NAUO = infinite loop
-            if visited.contains(&(child_pd_id, nauo_id)) {
-                warn!("Cycle detected: PD=#{} via NAUO=#{}", child_pd_id, nauo_id);
-                continue;
-            }
-            visited.insert((child_pd_id, nauo_id));
-
-            // Get this NAUO's transform (CDSR → SRR → ITEM_DEFINED_TRANSFORMATION)
-            let nauo_transform = self.find_nauo_transform(nauo_id, child_pd_id);
-
-            // Compose: parent_transform * nauo_transform
-            let composed = match (parent_transform, nauo_transform) {
-                (Some(pt), Some(nt)) => Some(mat4_mul(pt, &nt)),
-                (Some(pt), None) => Some(*pt),
-                (None, Some(nt)) => Some(nt),
-                (None, None) => None,
+        while let Some((parent_pd_id, parent_transform)) = stack.pop() {
+            let children = match parent_pd_to_children.get(&parent_pd_id) {
+                Some(c) => c,
+                None => continue, // Leaf with no children in the NAUO tree
             };
 
-            // Check if this child PD has NAUO children (sub-assembly) FIRST.
-            // A sub-assembly can have BOTH a BREP and children. In that case,
-            // the BREP represents the assembly's own geometry (which duplicates
-            // the children), so we should recurse into children, not add the BREP.
-            let has_nauo_children = parent_pd_to_children.contains_key(&child_pd_id);
+            for &(nauo_id, child_pd_id, ref nauo_name) in children {
+                // Get this NAUO's transform (CDSR → SRR → ITEM_DEFINED_TRANSFORMATION)
+                let nauo_transform = self.find_nauo_transform(nauo_id, child_pd_id);
 
-            if has_nauo_children {
-                // Sub-assembly — recurse into it (even if it has a BREP)
-                let child_name = self.get_product_name(child_pd_id);
-                self.walk_assembly_tree(
-                    child_pd_id,
-                    &child_name,
-                    &composed,
-                    color_map,
-                    brep_mesh_cache,
-                    params,
-                    bbox,
-                    parent_pd_to_children,
-                    results,
-                    visited,
-                );
-            } else if let Some(brep_id) = self.find_pd_brep(child_pd_id) {
-                // Leaf node — triangulate BREP and create instance
-                if let Some(mesh) = self.triangulate_brep_cached(brep_id, brep_mesh_cache, params, bbox) {
-                    let mut instance_mesh = mesh.clone();
-                    if let Some(ref tf) = composed {
-                        instance_mesh.transform(tf);
+                // Compose: parent_transform * nauo_transform
+                let composed = match (&parent_transform, &nauo_transform) {
+                    (Some(pt), Some(nt)) => Some(mat4_mul(pt, nt)),
+                    (Some(pt), None) => Some(*pt),
+                    (None, Some(nt)) => Some(*nt),
+                    (None, None) => None,
+                };
+
+                // Check if this child PD has NAUO children (sub-assembly) FIRST.
+                // A sub-assembly can have BOTH a BREP and children. In that case,
+                // the BREP represents the assembly's own geometry (which duplicates
+                // the children), so we should push to stack instead of adding the BREP.
+                let has_nauo_children = parent_pd_to_children.contains_key(&child_pd_id);
+
+                if has_nauo_children {
+                    // Sub-assembly — push to stack instead of recursing
+                    stack.push((child_pd_id, composed));
+                } else if let Some(brep_id) = self.find_pd_brep(child_pd_id) {
+                    // Leaf node — triangulate BREP and create instance
+                    if let Some(mesh) = self.triangulate_brep_cached(brep_id, brep_mesh_cache, params, bbox) {
+                        let mut instance_mesh = mesh.clone();
+                        if let Some(ref tf) = composed {
+                            instance_mesh.transform(tf);
+                        }
+                        let color = color_map.get(&brep_id).copied();
+                        let name = format!("{} (BREP#{})", nauo_name, brep_id);
+                        results.push(MeshInstance {
+                            name,
+                            mesh: instance_mesh,
+                            color,
+                            transform: composed,
+                            brep_id,
+                        });
+                        info!("Instance: {} PD=#{} BREP=#{} color={:?} transform={}",
+                            nauo_name, child_pd_id, brep_id, color, composed.is_some());
                     }
-                    let color = color_map.get(&brep_id).copied();
-                    let name = format!("{} (BREP=#{})", nauo_name, brep_id);
-                    results.push(MeshInstance {
-                        name,
-                        mesh: instance_mesh,
-                        color,
-                        transform: composed,
-                        brep_id,
-                    });
-                    info!("Instance: {} PD=#{} BREP=#{} color={:?} transform={}",
-                        nauo_name, child_pd_id, brep_id, color, composed.is_some());
+                } else {
+                    warn!("PD=#{} has no NAUO children and no BREP — skipped", child_pd_id);
                 }
-            } else {
-                warn!("PD=#{} has no NAUO children and no BREP — skipped", child_pd_id);
             }
-
-            visited.remove(&(child_pd_id, nauo_id));
         }
     }
+
 
     /// Build the assembly tree for display/debugging purposes.
     fn build_assembly_tree(&self) -> AssemblyNode {
@@ -886,9 +875,8 @@ impl<'a> StepConverter<'a> {
 
         if let Some(&root_pd) = roots.first() {
             let root_name = self.get_product_name(root_pd);
-            self.build_assembly_node_recursive(
+            self.build_assembly_node_iterative(
                 root_pd, &root_name, &color_map, &parent_pd_to_children,
-                &mut std::collections::HashSet::new(),
             )
         } else {
             // No assembly — build flat tree from BREPs
@@ -918,56 +906,86 @@ impl<'a> StepConverter<'a> {
         }
     }
 
-    fn build_assembly_node_recursive(
+    /// Build the assembly node tree using an explicit stack to avoid stack overflow.
+    fn build_assembly_node_iterative(
         &self,
-        pd_id: i64,
-        name: &str,
+        root_pd_id: i64,
+        root_name: &str,
         color_map: &HashMap<i64, [f32; 4]>,
         parent_pd_to_children: &HashMap<i64, Vec<(i64, i64, String)>>,
-        visited: &mut std::collections::HashSet<i64>,
     ) -> AssemblyNode {
-        let has_nauo_children = parent_pd_to_children.contains_key(&pd_id);
-        // Only set brep_id for leaf nodes (no NAUO children)
-        let brep_id = if has_nauo_children { None } else { self.find_pd_brep(pd_id) };
-        let color = brep_id.and_then(|id| color_map.get(&id).copied());
+        // Stack entries: (pd_id, name, transform, color_override)
+        // We'll build the tree bottom-up by creating leaf nodes first,
+        // then attaching them to their parents.
+        let mut visited: std::collections::HashSet<i64> = std::collections::HashSet::new();
 
-        let mut node = AssemblyNode {
-            name: name.to_string(),
-            pd_id,
-            brep_id,
-            instance_index: None,
-            transform: None, // Transforms are per-NAUO, set in children
-            color,
-            children: Vec::new(),
-        };
+        // First pass: DFS to determine processing order
+        let mut order: Vec<(i64, String, Option<[[f64; 4]; 4]>, Option<[f32; 4]>)> = Vec::new();
+        let mut dfs_stack: Vec<(i64, String, Option<[[f64; 4]; 4]>, Option<[f32; 4]>)> = vec![(root_pd_id, root_name.to_string(), None, None)];
 
-        if visited.contains(&pd_id) {
-            return node; // Cycle protection
-        }
-        visited.insert(pd_id);
+        while let Some((pd_id, name, transform, color_override)) = dfs_stack.pop() {
+            if visited.contains(&pd_id) { continue; }
+            visited.insert(pd_id);
 
-        if let Some(children) = parent_pd_to_children.get(&pd_id) {
-            for &(nauo_id, child_pd_id, ref nauo_name) in children {
-                let nauo_transform = self.find_nauo_transform(nauo_id, child_pd_id);
-                let child_has_nauo_children = parent_pd_to_children.contains_key(&child_pd_id);
-                let child_brep_id = if child_has_nauo_children { None } else { self.find_pd_brep(child_pd_id) };
-                let child_color = child_brep_id.and_then(|id| color_map.get(&id).copied());
-                let child_name = self.get_product_name(child_pd_id);
+            let has_nauo_children = parent_pd_to_children.contains_key(&pd_id);
+            let brep_id = if has_nauo_children { None } else { self.find_pd_brep(pd_id) };
+            let color = color_override.or_else(|| brep_id.and_then(|id| color_map.get(&id).copied()));
 
-                let mut child_node = self.build_assembly_node_recursive(
-                    child_pd_id, &child_name, color_map, parent_pd_to_children, visited,
-                );
-                child_node.name = format!("{} ({})", nauo_name, child_name);
-                child_node.transform = nauo_transform;
-                if child_color.is_some() {
-                    child_node.color = child_color;
+            order.push((pd_id, name, transform, color));
+
+            if let Some(children) = parent_pd_to_children.get(&pd_id) {
+                for &(nauo_id, child_pd_id, ref nauo_name) in children.iter().rev() {
+                    let nauo_transform = self.find_nauo_transform(nauo_id, child_pd_id);
+                    let child_has_nauo_children = parent_pd_to_children.contains_key(&child_pd_id);
+                    let child_brep_id = if child_has_nauo_children { None } else { self.find_pd_brep(child_pd_id) };
+                    let child_color = child_brep_id.and_then(|id| color_map.get(&id).copied());
+                    let child_name = self.get_product_name(child_pd_id);
+                    let display_name = format!("{} ({})", nauo_name, child_name);
+                    dfs_stack.push((child_pd_id, display_name, nauo_transform, child_color));
                 }
-                node.children.push(child_node);
             }
         }
 
-        visited.remove(&pd_id);
-        node
+        // Build nodes: since we processed DFS, order is parent-first.
+        // We need to build parent nodes and attach children.
+        // Use a map from pd_id to built node.
+        let mut node_map: HashMap<i64, AssemblyNode> = HashMap::new();
+
+        for (pd_id, name, transform, color) in order.into_iter().rev() {
+            let has_nauo_children = parent_pd_to_children.contains_key(&pd_id);
+            let brep_id = if has_nauo_children { None } else { self.find_pd_brep(pd_id) };
+
+            let mut node = AssemblyNode {
+                name,
+                pd_id,
+                brep_id,
+                instance_index: None,
+                transform,
+                color,
+                children: Vec::new(),
+            };
+
+            // Attach already-built children
+            if let Some(children) = parent_pd_to_children.get(&pd_id) {
+                for &(_, child_pd_id, _) in children {
+                    if let Some(child_node) = node_map.remove(&child_pd_id) {
+                        node.children.push(child_node);
+                    }
+                }
+            }
+
+            node_map.insert(pd_id, node);
+        }
+
+        node_map.remove(&root_pd_id).unwrap_or_else(|| AssemblyNode {
+            name: root_name.to_string(),
+            pd_id: root_pd_id,
+            brep_id: None,
+            instance_index: None,
+            transform: None,
+            color: None,
+            children: Vec::new(),
+        })
     }
 
     /// Build a detailed text representation of the STEP file structure.
@@ -1082,29 +1100,31 @@ impl<'a> StepConverter<'a> {
                 let p00 = face_data.surface.point_at(u0, v0);
                 let p_mid = face_data.surface.point_at((u0+u1)/2.0, (v0+v1)/2.0);
                 let p11 = face_data.surface.point_at(u1, v1);
-                eprintln!("BREP #{} face[{}]: {} outer={} inner={} ur={:.4}..{:.4} vr={:.4}..{:.4}", 
+                log::debug!("BREP #{} face[{}]: {} outer={} inner={} ur={:.4}..{:.4} vr={:.4}..{:.4}", 
                     brep_id, fi, surface_type, n_outer, n_inner, u0, u1, v0, v1);
-                eprintln!("  sample(0,0)=({:.4},{:.4},{:.4}) mid=({:.4},{:.4},{:.4}) end=({:.4},{:.4},{:.4})",
+                log::debug!("  sample(0,0)=({:.4},{:.4},{:.4}) mid=({:.4},{:.4},{:.4}) end=({:.4},{:.4},{:.4})",
                     p00.x, p00.y, p00.z, p_mid.x, p_mid.y, p_mid.z, p11.x, p11.y, p11.z);
                 // Print first 3 control points
                 for (ri, row) in n.control_points.iter().enumerate().take(3) {
                     for (ci, cp) in row.iter().enumerate().take(3) {
-                        eprintln!("  cp[{}][{}]=({:.4},{:.4},{:.4})", ri, ci, cp.x, cp.y, cp.z);
+                        log::debug!("  cp[{}][{}]=({:.4},{:.4},{:.4})", ri, ci, cp.x, cp.y, cp.z);
                     }
                 }
-                eprintln!("  u_knots={:?}", &n.u_knots);
-                eprintln!("  v_knots={:?}", &n.v_knots);
+                log::debug!("  u_knots={:?}", &n.u_knots);
+                log::debug!("  v_knots={:?}", &n.v_knots);
             } else {
-                eprintln!("BREP #{} face[{}]: {} outer={} inner={}", brep_id, fi, surface_type, n_outer, n_inner);
+                log::debug!("BREP #{} face[{}]: {} outer={} inner={}", brep_id, fi, surface_type, n_outer, n_inner);
             }
 
             let face_mesh = self.surface_to_mesh(face_data, params, bbox);
             let (fbmin, fbmax) = face_mesh.bounding_box();
-            eprintln!("  -> v={} t={} bbox=({:.2},{:.2},{:.2})..({:.2},{:.2},{:.2})",
+            log::debug!("  -> v={} t={} bbox=({:.2},{:.2},{:.2})..({:.2},{:.2},{:.2})",
                 face_mesh.vertex_count(), face_mesh.triangle_count(),
                 fbmin.x, fbmin.y, fbmin.z, fbmax.x, fbmax.y, fbmax.z);
             mesh.merge(&face_mesh);
         }
+        // Merge coincident vertices to make the mesh watertight
+        draper_mesh::merge_coincident_vertices(&mut mesh, 1e-4);
         Some(mesh)
     }
 
@@ -1181,6 +1201,8 @@ impl<'a> StepConverter<'a> {
                 forward: face_data.forward,
             });
         }
+        // Merge coincident vertices to make the mesh watertight
+        draper_mesh::merge_coincident_vertices(&mut mesh, 1e-4);
         Some((mesh, face_infos))
     }
 
@@ -1504,7 +1526,7 @@ impl<'a> StepConverter<'a> {
                             return Some(brep_id);
                         }
                         // Indirect: SR is a SHAPE_REPRESENTATION linked to ABSR via SRR
-                        if let Some(brep_id) = self.find_brep_via_srr(sr_id) {
+                        if let Some(brep_id) = self.find_brep_via_srr(sr_id, 0) {
                             return Some(brep_id);
                         }
                     }
@@ -1567,22 +1589,34 @@ impl<'a> StepConverter<'a> {
 
     /// Find a BREP by following SHAPE_REPRESENTATION_RELATIONSHIP links from a SHAPE_REPRESENTATION.
     /// Many STEP files use: SR → SRR → ABSR → BREP
-    fn find_brep_via_srr(&self, sr_id: i64) -> Option<i64> {
+    ///
+    /// Strategy: collect ALL SRRs that reference this SR, then try them in priority order:
+    /// 1. SRRs whose other end is an ADVANCED_BREP_SHAPE_REPRESENTATION (direct link to BREP)
+    /// 2. SRRs whose other end is a plain SHAPE_REPRESENTATION (indirect, recurse)
+    ///
+    /// This avoids the bug where assembly-placement SRRs (complex entities with transforms)
+    /// are followed instead of the direct SR→ABSR link, causing all parts to map to the same BREP.
+    fn find_brep_via_srr(&self, sr_id: i64, depth: usize) -> Option<i64> {
+        if depth > 20 {
+            return None;
+        }
         let sr = self.step.find_entity(sr_id)?;
         if !sr.type_name.contains("SHAPE_REPRESENTATION") { return None; }
 
-        // Find all SRR entities that reference this SR
-        for srr in self.step.find_entities_by_type("SHAPE_REPRESENTATION_RELATIONSHIP") {
+        // Collect all SRR relationships that reference this SR
+        // Priority: direct ABSR links first, then plain SR links
+        let mut direct_absr_links: Vec<i64> = Vec::new();  // other SR is an ABSR
+        let mut indirect_sr_links: Vec<i64> = Vec::new();   // other SR is a plain SR
+
+        // Helper: extract the two SR references from an SRR's params
+        let extract_sr_refs = |srr: &crate::schema::StepEntity| -> (bool, Option<i64>) {
             let mut refs_our_sr = false;
             let mut other_sr_id: Option<i64> = None;
-
             for (i, param) in srr.params.iter().enumerate() {
                 if let Some(ref_id) = self.get_ref(param) {
                     if ref_id == sr_id {
                         refs_our_sr = true;
                     } else if i >= 2 {
-                        // The first two params are typically strings (name, description)
-                        // The 3rd and 4th are the two SR references
                         if let Some(entity) = self.step.find_entity(ref_id) {
                             if entity.type_name.contains("SHAPE_REPRESENTATION") {
                                 other_sr_id = Some(ref_id);
@@ -1591,46 +1625,54 @@ impl<'a> StepConverter<'a> {
                     }
                 }
             }
+            (refs_our_sr, other_sr_id)
+        };
 
-            if refs_our_sr {
-                if let Some(other_id) = other_sr_id {
-                    // Try to find a BREP in the other representation
-                    if let Some(brep_id) = self.find_brep_in_representation(other_id) {
-                        return Some(brep_id);
-                    }
-                    // Recurse one level
-                    if let Some(brep_id) = self.find_brep_via_srr(other_id) {
-                        return Some(brep_id);
+        // Check simple SHAPE_REPRESENTATION_RELATIONSHIP entities (these are typically SR→ABSR links)
+        for srr in self.step.find_entities_by_type("SHAPE_REPRESENTATION_RELATIONSHIP") {
+            let (refs_our_sr, other_sr_id) = extract_sr_refs(srr);
+            if !refs_our_sr { continue; }
+            if let Some(other_id) = other_sr_id {
+                if let Some(other_entity) = self.step.find_entity(other_id) {
+                    if other_entity.type_name.contains("ADVANCED_BREP_SHAPE_REPRESENTATION")
+                        || other_entity.type_name.contains("FACETED_BREP_SHAPE_REPRESENTATION") {
+                        direct_absr_links.push(other_id);
+                    } else {
+                        indirect_sr_links.push(other_id);
                     }
                 }
             }
         }
 
-        // Also check complex SRR entities
+        // Also check REPRESENTATION_RELATIONSHIP entities (may catch additional complex entities)
         for srr in self.step.find_entities_by_type("REPRESENTATION_RELATIONSHIP") {
-            let mut refs_our_sr = false;
-            let mut other_sr_id: Option<i64> = None;
-
-            for (i, param) in srr.params.iter().enumerate() {
-                if let Some(ref_id) = self.get_ref(param) {
-                    if ref_id == sr_id {
-                        refs_our_sr = true;
-                    } else if i >= 2 {
-                        if let Some(entity) = self.step.find_entity(ref_id) {
-                            if entity.type_name.contains("SHAPE_REPRESENTATION") {
-                                other_sr_id = Some(ref_id);
-                            }
-                        }
+            // Skip if this is already caught as SHAPE_REPRESENTATION_RELATIONSHIP
+            if srr.type_name.contains("SHAPE_REPRESENTATION_RELATIONSHIP") { continue; }
+            let (refs_our_sr, other_sr_id) = extract_sr_refs(srr);
+            if !refs_our_sr { continue; }
+            if let Some(other_id) = other_sr_id {
+                if let Some(other_entity) = self.step.find_entity(other_id) {
+                    if other_entity.type_name.contains("ADVANCED_BREP_SHAPE_REPRESENTATION")
+                        || other_entity.type_name.contains("FACETED_BREP_SHAPE_REPRESENTATION") {
+                        direct_absr_links.push(other_id);
+                    } else {
+                        indirect_sr_links.push(other_id);
                     }
                 }
             }
+        }
 
-            if refs_our_sr {
-                if let Some(other_id) = other_sr_id {
-                    if let Some(brep_id) = self.find_brep_in_representation(other_id) {
-                        return Some(brep_id);
-                    }
-                }
+        // Priority 1: try direct ABSR links
+        for absr_id in &direct_absr_links {
+            if let Some(brep_id) = self.find_brep_in_representation(*absr_id) {
+                return Some(brep_id);
+            }
+        }
+
+        // Priority 2: try indirect SR links (recurse)
+        for other_id in &indirect_sr_links {
+            if let Some(brep_id) = self.find_brep_via_srr(*other_id, depth + 1) {
+                return Some(brep_id);
             }
         }
 
@@ -1740,6 +1782,7 @@ impl<'a> StepConverter<'a> {
 
     /// Resolve color from PRESENTATION_STYLE_ASSIGNMENT chain.
     fn resolve_color_from_styles(&self, style_ids: &[i64]) -> Option<[f32; 4]> {
+        let mut visited = std::collections::HashSet::new();
         for style_id in style_ids {
             if let Some(psa) = self.step.find_entity(*style_id) {
                 if psa.type_name != "PRESENTATION_STYLE_ASSIGNMENT" { continue; }
@@ -1747,14 +1790,14 @@ impl<'a> StepConverter<'a> {
                     if let StepValue::List(items) = param {
                         for item in items {
                             if let Some(ref_id) = self.get_ref(item) {
-                                if let Some(color) = self.walk_style_chain(ref_id) {
+                                if let Some(color) = self.walk_style_chain(ref_id, &mut visited) {
                                     return Some(color);
                                 }
                             }
                         }
                     }
                     if let Some(ref_id) = self.get_ref(param) {
-                        if let Some(color) = self.walk_style_chain(ref_id) {
+                        if let Some(color) = self.walk_style_chain(ref_id, &mut visited) {
                             return Some(color);
                         }
                     }
@@ -1765,21 +1808,32 @@ impl<'a> StepConverter<'a> {
     }
 
     /// Walk the style chain from SURFACE_STYLE_USAGE down to COLOUR_RGB.
-    fn walk_style_chain(&self, entity_id: i64) -> Option<[f32; 4]> {
+    fn walk_style_chain(&self, entity_id: i64, visited: &mut std::collections::HashSet<i64>) -> Option<[f32; 4]> {
+        if visited.contains(&entity_id) {
+            return None;
+        }
+        visited.insert(entity_id);
+        let result = self.walk_style_chain_inner(entity_id, visited);
+        visited.remove(&entity_id);
+        result
+    }
+
+    /// Inner implementation of walk_style_chain (called after visited guard).
+    fn walk_style_chain_inner(&self, entity_id: i64, visited: &mut std::collections::HashSet<i64>) -> Option<[f32; 4]> {
         let entity = self.step.find_entity(entity_id)?;
 
         match entity.type_name.as_str() {
             "SURFACE_STYLE_USAGE" | "SURFACE_SIDE_STYLE" | "SURFACE_STYLE_FILL_AREA" | "FILL_AREA_STYLE" | "FILL_AREA_STYLE_COLOUR" => {
                 for param in &entity.params {
                     if let Some(ref_id) = self.get_ref(param) {
-                        if let Some(color) = self.walk_style_chain(ref_id) {
+                        if let Some(color) = self.walk_style_chain(ref_id, visited) {
                             return Some(color);
                         }
                     }
                     if let StepValue::List(items) = param {
                         for item in items {
                             if let Some(ref_id) = self.get_ref(item) {
-                                if let Some(color) = self.walk_style_chain(ref_id) {
+                                if let Some(color) = self.walk_style_chain(ref_id, visited) {
                                     return Some(color);
                                 }
                             }
@@ -1817,14 +1871,14 @@ impl<'a> StepConverter<'a> {
                 // For unknown types, try to walk deeper
                 for param in &entity.params {
                     if let Some(ref_id) = self.get_ref(param) {
-                        if let Some(color) = self.walk_style_chain(ref_id) {
+                        if let Some(color) = self.walk_style_chain(ref_id, visited) {
                             return Some(color);
                         }
                     }
                     if let StepValue::List(items) = param {
                         for item in items {
                             if let Some(ref_id) = self.get_ref(item) {
-                                if let Some(color) = self.walk_style_chain(ref_id) {
+                                if let Some(color) = self.walk_style_chain(ref_id, visited) {
                                     return Some(color);
                                 }
                             }
@@ -1836,7 +1890,6 @@ impl<'a> StepConverter<'a> {
         }
     }
 
-    /// Find the shell reference from a BREP entity.
     fn find_shell_ref(&self, brep: &crate::schema::StepEntity) -> Option<i64> {
         // MANIFOLD_SOLID_BREP('name', #shell_ref) — shell ref is usually 2nd param
         // But some files have it as the first Ref parameter
@@ -1952,7 +2005,7 @@ impl<'a> StepConverter<'a> {
             }
             _ => {
                 // Try to extract directly as a surface (no boundary info)
-                if let Some(surface) = self.extract_surface(face_id) {
+                if let Some(surface) = self.extract_surface(face_id, 0) {
                     Some(FaceData {
                         surface,
                         outer_edges: vec![],
@@ -1978,7 +2031,7 @@ impl<'a> StepConverter<'a> {
         // Try parameter index 2 first (the typical position for surface ref)
         if let Some(param) = face.params.get(2) {
             if let Some(surface_id) = self.get_ref(param) {
-                if let Some(surface) = self.extract_surface(surface_id) {
+                if let Some(surface) = self.extract_surface(surface_id, 0) {
                     return Some(surface);
                 }
             }
@@ -2003,7 +2056,7 @@ impl<'a> StepConverter<'a> {
                     ) || tn.contains("B_SPLINE_SURFACE") // Handle complex entities like "BOUNDED_SURFACE+B_SPLINE_SURFACE+..."
                     || tn.contains("SURFACE") && !tn.contains("CURVE"); // Handle other complex surface entities
                     if is_surface {
-                        if let Some(surface) = self.extract_surface(surface_id) {
+                        if let Some(surface) = self.extract_surface(surface_id, 0) {
                             return Some(surface);
                         }
                     }
@@ -2220,8 +2273,8 @@ impl<'a> StepConverter<'a> {
         // Resolve the 3D curve (possibly through SURFACE_CURVE)
         let resolved_curve_id = self.resolve_3d_curve_ref(curve_ref_id);
         let curve = match resolved_curve_id {
-            Some(id) => self.resolve_curve(id),
-            None => self.resolve_curve(curve_ref_id),
+            Some(id) => self.resolve_curve(id, 0),
+            None => self.resolve_curve(curve_ref_id, 0),
         };
 
         match (curve, &p1, &p2) {
@@ -2239,7 +2292,7 @@ impl<'a> StepConverter<'a> {
                     // For lines, compute param range from vertex projections
                     let t1 = project_point_on_line(line, p1);
                     let t2 = project_point_on_line(line, p2);
-                    eprintln!("    EDGE_CURVE #{}: {} p1=({:.4},{:.4},{:.4}) p2=({:.4},{:.4},{:.4}) param=({:.6},{:.6})",
+                    log::debug!("    EDGE_CURVE #{}: {} p1=({:.4},{:.4},{:.4}) p2=({:.4},{:.4},{:.4}) param=({:.6},{:.6})",
                         edge_curve_id, curve_type_name, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, t1, t2);
                     let mut edge = TopoEdge::new(curve, (t1, t2));
                     edge.vertex_start = Some(draper_topology::TopoId::new());
@@ -2248,7 +2301,7 @@ impl<'a> StepConverter<'a> {
                 } else if let Curve3d::Circle(ref circle) = curve {
                     // For circles, compute angular range from vertex projections
                     let (t1, t2) = project_points_on_circle(circle, p1, p2);
-                    eprintln!("    EDGE_CURVE #{}: {} p1=({:.4},{:.4},{:.4}) p2=({:.4},{:.4},{:.4}) param=({:.6},{:.6}) center=({:.4},{:.4},{:.4}) r={:.4} normal=({:.4},{:.4},{:.4}) x_axis=({:.4},{:.4},{:.4})",
+                    log::debug!("    EDGE_CURVE #{}: {} p1=({:.4},{:.4},{:.4}) p2=({:.4},{:.4},{:.4}) param=({:.6},{:.6}) center=({:.4},{:.4},{:.4}) r={:.4} normal=({:.4},{:.4},{:.4}) x_axis=({:.4},{:.4},{:.4})",
                         edge_curve_id, curve_type_name, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, t1, t2,
                         circle.center.x, circle.center.y, circle.center.z, circle.radius,
                         circle.normal.x, circle.normal.y, circle.normal.z,
@@ -2260,7 +2313,7 @@ impl<'a> StepConverter<'a> {
                 } else {
                     // For other curves, use the default param range
                     let param_range = curve.param_range();
-                    eprintln!("    EDGE_CURVE #{}: {} p1=({:.4},{:.4},{:.4}) p2=({:.4},{:.4},{:.4}) param=({:.6},{:.6})",
+                    log::debug!("    EDGE_CURVE #{}: {} p1=({:.4},{:.4},{:.4}) p2=({:.4},{:.4},{:.4}) param=({:.6},{:.6})",
                         edge_curve_id, curve_type_name, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, param_range.0, param_range.1);
                     let mut edge = TopoEdge::new(curve, param_range);
                     edge.vertex_start = Some(draper_topology::TopoId::new());
@@ -2276,12 +2329,12 @@ impl<'a> StepConverter<'a> {
             }
             (None, Some(p1), Some(p2)) => {
                 // No curve but have vertex points — create a line edge
-                eprintln!("    EDGE_CURVE #{}: NO CURVE, falling back to LINE p1=({:.4},{:.4},{:.4}) p2=({:.4},{:.4},{:.4})",
+                log::debug!("    EDGE_CURVE #{}: NO CURVE, falling back to LINE p1=({:.4},{:.4},{:.4}) p2=({:.4},{:.4},{:.4})",
                     edge_curve_id, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z);
                 Some(TopoEdge::new_line(*p1, *p2))
             }
             _ => {
-                eprintln!("    EDGE_CURVE #{}: RESOLUTION FAILED", edge_curve_id);
+                log::debug!("    EDGE_CURVE #{}: RESOLUTION FAILED", edge_curve_id);
                 None
             }
         }
@@ -2356,7 +2409,11 @@ impl<'a> StepConverter<'a> {
     }
 
     /// Extract a Surface from a STEP surface entity.
-    fn extract_surface(&self, surface_id: i64) -> Option<Surface> {
+    fn extract_surface(&self, surface_id: i64, depth: usize) -> Option<Surface> {
+        if depth > 20 {
+            warn!("extract_surface depth limit reached at surface_id=#{} — returning None", surface_id);
+            return None;
+        }
         let entity = self.step.find_entity(surface_id)?;
         let type_name = entity.type_name.as_str();
 
@@ -2377,7 +2434,7 @@ impl<'a> StepConverter<'a> {
             "B_SPLINE_SURFACE_WITH_KNOTS" | "B_SPLINE_SURFACE" | "BEZIER_SURFACE" => {
                 self.extract_bspline_surface(entity)
             }
-            "RECTANGULAR_TRIMMED_SURFACE" => self.extract_trimmed_surface(entity),
+            "RECTANGULAR_TRIMMED_SURFACE" => self.extract_trimmed_surface(entity, depth + 1),
             "SWEPT_SURFACE" => self.extract_swept_surface(entity),
             _ => None,
         }
@@ -2430,7 +2487,7 @@ impl<'a> StepConverter<'a> {
     fn extract_revolution(&self, entity: &crate::schema::StepEntity) -> Option<Surface> {
         // Find the profile curve (2nd param, index 1)
         let profile_id = self.find_curve_ref(entity, 1)?;
-        let profile = self.resolve_curve(profile_id)?;
+        let profile = self.resolve_curve(profile_id, 0)?;
 
         // Find the axis placement (3rd param, index 2)
         let axis2_id = self.find_param_ref(entity, 2)?;
@@ -2449,7 +2506,7 @@ impl<'a> StepConverter<'a> {
     fn extract_extrusion(&self, entity: &crate::schema::StepEntity) -> Option<Surface> {
         // Find the profile curve
         let profile_id = self.find_curve_ref(entity, 1)?;
-        let profile = self.resolve_curve(profile_id)?;
+        let profile = self.resolve_curve(profile_id, 0)?;
 
         // Find the extrusion direction (3rd param, index 2)
         // Can be a DIRECTION or a VECTOR(#direction, magnitude)
@@ -2803,10 +2860,13 @@ impl<'a> StepConverter<'a> {
     }
 
     /// Extract a RECTANGULAR_TRIMMED_SURFACE (wrapper around another surface).
-    fn extract_trimmed_surface(&self, entity: &crate::schema::StepEntity) -> Option<Surface> {
+    fn extract_trimmed_surface(&self, entity: &crate::schema::StepEntity, depth: usize) -> Option<Surface> {
+        if depth > 20 {
+            return None;
+        }
         // RECTANGULAR_TRIMMED_SURFACE(#basis_surface, u1, u2, v1, v2, .T., .T.)
         let basis_id = self.get_ref(entity.params.first()?)?;
-        self.extract_surface(basis_id)
+        self.extract_surface(basis_id, depth + 1)
     }
 
     /// Extract a SWEPT_SURFACE (surface created by sweeping a curve).
@@ -2822,7 +2882,7 @@ impl<'a> StepConverter<'a> {
                 if let Some(dir_entity) = self.step.find_entity(ref_id) {
                     if dir_entity.type_name == "DIRECTION" {
                         // It's a linear extrusion
-                        let profile = self.resolve_curve(profile_id)?;
+                        let profile = self.resolve_curve(profile_id, 0)?;
                         let direction = self.resolve_direction(ref_id)?;
                         return Some(Surface::Extrusion(ExtrusionSurface {
                             profile,
@@ -2830,7 +2890,7 @@ impl<'a> StepConverter<'a> {
                         }));
                     } else if dir_entity.type_name.contains("AXIS2_PLACEMENT") {
                         // It's a revolution
-                        let profile = self.resolve_curve(profile_id)?;
+                        let profile = self.resolve_curve(profile_id, 0)?;
                         let (origin, axis, _u_dir) = self.resolve_axis2(ref_id)?;
                         return Some(Surface::Revolution(RevolutionSurface {
                             profile,
@@ -2860,7 +2920,7 @@ impl<'a> StepConverter<'a> {
                         return self.resolve_3d_curve_ref(ref_id);
                     }
                     // Indirect reference — try to find a curve within this entity
-                    return self.find_nested_curve(curve_entity);
+                    return self.find_nested_curve(curve_entity, 0);
                 }
             }
         }
@@ -2869,7 +2929,10 @@ impl<'a> StepConverter<'a> {
 
     /// Find a curve reference nested inside an entity (e.g., through
     /// DEFINITIONAL_REPRESENTATION, GEOMETRIC_REPRESENTATION_ITEM, etc.)
-    fn find_nested_curve(&self, entity: &crate::schema::StepEntity) -> Option<i64> {
+    fn find_nested_curve(&self, entity: &crate::schema::StepEntity, depth: usize) -> Option<i64> {
+        if depth > 20 {
+            return None;
+        }
         for param in &entity.params {
             if let Some(ref_id) = self.get_ref(param) {
                 if let Some(nested) = self.step.find_entity(ref_id) {
@@ -2881,7 +2944,7 @@ impl<'a> StepConverter<'a> {
                         return self.resolve_3d_curve_ref(ref_id);
                     }
                     // Go one level deeper
-                    let deeper = self.find_nested_curve(nested);
+                    let deeper = self.find_nested_curve(nested, depth + 1);
                     if deeper.is_some() {
                         return deeper;
                     }
@@ -2973,7 +3036,11 @@ impl<'a> StepConverter<'a> {
     }
 
     /// Resolve a STEP curve entity to a Curve3d.
-    fn resolve_curve(&self, curve_id: i64) -> Option<Curve3d> {
+    fn resolve_curve(&self, curve_id: i64, depth: usize) -> Option<Curve3d> {
+        if depth > 30 {
+            warn!("resolve_curve depth limit reached at curve_id=#{} — returning None", curve_id);
+            return None;
+        }
         let entity = self.step.find_entity(curve_id)?;
         let type_name = entity.type_name.as_str();
 
@@ -2989,13 +3056,13 @@ impl<'a> StepConverter<'a> {
             "B_SPLINE_CURVE_WITH_KNOTS" | "B_SPLINE_CURVE" | "BEZIER_CURVE" |
             "RATIONAL_B_SPLINE_CURVE" => self.resolve_bspline_curve(entity),
             "POLYLINE" => self.resolve_polyline_curve(entity),
-            "TRIMMED_CURVE" => self.resolve_trimmed_curve(entity),
-            "COMPOSITE_CURVE" => self.resolve_composite_curve(entity),
-            "OFFSET_CURVE_3D" => self.resolve_offset_curve_3d(entity),
+            "TRIMMED_CURVE" => self.resolve_trimmed_curve(entity, depth + 1),
+            "COMPOSITE_CURVE" => self.resolve_composite_curve(entity, depth + 1),
+            "OFFSET_CURVE_3D" => self.resolve_offset_curve_3d(entity, depth + 1),
             "SURFACE_CURVE" => {
                 // Unwrap SURFACE_CURVE to get the 3D curve
                 if let Some(curve3d_id) = self.resolve_3d_curve_ref(curve_id) {
-                    self.resolve_curve(curve3d_id)
+                    self.resolve_curve(curve3d_id, depth + 1)
                 } else {
                     None
                 }
@@ -3049,10 +3116,16 @@ impl<'a> StepConverter<'a> {
     /// STEP format: `#N = ELLIPSE('', #axis2, semi_major, semi_minor);`
     fn resolve_ellipse_curve(&self, entity: &crate::schema::StepEntity) -> Option<Curve3d> {
         let axis2_id = self.find_axis2_ref(entity)?;
-        let (center, _normal, _x_axis) = self.resolve_axis2(axis2_id)?;
+        let (center, normal, x_axis) = self.resolve_axis2(axis2_id)?;
         let semi_major = self.find_float_param(entity, 0)?;
         let semi_minor = self.find_float_param(entity, 1)?;
-        Some(Curve3d::Ellipse(draper_geometry::Ellipse::new_xy(center, semi_major, semi_minor)))
+        Some(Curve3d::Ellipse(draper_geometry::Ellipse {
+            center,
+            normal,
+            semi_major,
+            semi_minor,
+            x_axis,
+        }))
     }
 
     /// Resolve a B_SPLINE_CURVE_WITH_KNOTS entity (or complex entity containing B_SPLINE_CURVE).
@@ -3091,7 +3164,7 @@ impl<'a> StepConverter<'a> {
         let degree = match degree {
             Some(d) => d,
             None => {
-                eprintln!("    resolve_bspline_curve #{}: no degree param found in {} params", entity.id, cp_entity.params.len());
+                log::debug!("    resolve_bspline_curve #{}: no degree param found in {} params", entity.id, cp_entity.params.len());
                 return None;
             }
         };
@@ -3116,7 +3189,7 @@ impl<'a> StepConverter<'a> {
         }
 
         if control_points.is_empty() {
-            eprintln!("    resolve_bspline_curve #{}: no control points (degree={}, cp_param_idx={:?}, params count={})",
+            log::debug!("    resolve_bspline_curve #{}: no control points (degree={}, cp_param_idx={:?}, params count={})",
                 entity.id, degree, cp_param_idx, cp_entity.params.len());
             return None;
         }
@@ -3253,10 +3326,10 @@ impl<'a> StepConverter<'a> {
         knots
     }
 
-    /// Resolve a POLYLINE entity — return as a line segment approximation.
+    /// Resolve a POLYLINE entity — return as a degree-1 NURBS curve
+    /// that interpolates all the polyline vertices in order.
     fn resolve_polyline_curve(&self, entity: &crate::schema::StepEntity) -> Option<Curve3d> {
         // POLYLINE('', (#pt1, #pt2, ...))
-        // Use the first and last points to create a line
         let mut points = Vec::new();
         for param in &entity.params {
             if let StepValue::List(items) = param {
@@ -3271,35 +3344,116 @@ impl<'a> StepConverter<'a> {
         }
 
         if points.len() >= 2 {
-            let line = Line::through_points(points[0], *points.last().unwrap())?;
-            Some(Curve3d::Line(line))
+            // Create a degree-1 (piecewise linear) NURBS curve through all points.
+            // For N points, we need N control points, N weights (=1), and N+2 knots.
+            // Knot vector: clamped — first 2 knots = 0.0, last 2 = (N-1), interior knots = 1,2,...,N-2
+            let n = points.len();
+            let degree = 1;
+            let weights = vec![1.0; n];
+            let mut knots = Vec::with_capacity(n + degree + 1);
+            // Clamped knot vector for degree 1
+            for _ in 0..=degree {
+                knots.push(0.0);
+            }
+            for i in 1..n-1 {
+                knots.push(i as f64);
+            }
+            for _ in 0..=degree {
+                knots.push((n - 1) as f64);
+            }
+
+            Some(Curve3d::Nurbs(NurbsCurve {
+                degree,
+                control_points: points,
+                weights,
+                knots,
+            }))
         } else {
             None
         }
     }
 
-    /// Resolve a TRIMMED_CURVE entity.
-    fn resolve_trimmed_curve(&self, entity: &crate::schema::StepEntity) -> Option<Curve3d> {
+    /// Resolve a TRIMMED_CURVE entity by extracting the basis curve and
+    /// applying trim parameters to set the correct param_range.
+    fn resolve_trimmed_curve(&self, entity: &crate::schema::StepEntity, depth: usize) -> Option<Curve3d> {
         // TRIMMED_CURVE(#basis_curve, #trim1, #trim2, .T., .T., .CARTESIAN., .CARTESIAN.)
+        // trim1/trim2 can be either parameter values or point references
+        
         let basis_id = self.get_ref(entity.params.first()?)?;
-        self.resolve_curve(basis_id)
+        let curve = self.resolve_curve(basis_id, depth + 1)?;
+        
+        // Try to extract trim parameter values or points
+        // The 2nd and 3rd params are the trim specifications
+        let mut trim1: Option<f64> = None;
+        let mut trim2: Option<f64> = None;
+        let mut _trim_point1: Option<Point3d> = None;
+        let mut _trim_point2: Option<Point3d> = None;
+        
+        if entity.params.len() >= 3 {
+            // Trim 1
+            if let Some(param) = entity.params.get(1) {
+                if let Some(val) = self.get_float(param) {
+                    trim1 = Some(val);
+                } else if let Some(ref_id) = self.get_ref(param) {
+                    _trim_point1 = self.resolve_cartesian_point(ref_id);
+                }
+            }
+            // Trim 2
+            if let Some(param) = entity.params.get(2) {
+                if let Some(val) = self.get_float(param) {
+                    trim2 = Some(val);
+                } else if let Some(ref_id) = self.get_ref(param) {
+                    _trim_point2 = self.resolve_cartesian_point(ref_id);
+                }
+            }
+        }
+        
+        // If we have parameter values, create a new curve with adjusted param_range
+        // For circles/ellipses with angle trims, convert to Arc
+        match (&trim1, &trim2, &curve) {
+            (Some(t1), Some(t2), Curve3d::Circle(circle)) => {
+                // Trim a circle by angles — create an Arc
+                return Some(Curve3d::Arc(Arc::new(circle.clone(), *t1, *t2)));
+            }
+            (Some(_t1), Some(_t2), _) => {
+                // For other curves, we can't easily adjust param_range at the Curve3d level.
+                // The Edge struct handles param_range, so this is handled at edge creation time.
+                // Just return the untrimmed curve — the resolve_edge_curve will handle vertex-based trimming.
+            }
+            _ => {}
+        }
+        
+        // If we have trim points but no param values, project them onto the curve
+        // This is handled at the Edge level by resolve_edge_curve which uses vertex points.
+        
+        Some(curve)
     }
 
-    /// Resolve a COMPOSITE_CURVE entity.
-    fn resolve_composite_curve(&self, entity: &crate::schema::StepEntity) -> Option<Curve3d> {
+    /// Resolve a COMPOSITE_CURVE entity by concatenating all segments into a single
+    /// degree-1 NURBS curve (polyline approximation of the composite).
+    fn resolve_composite_curve(&self, entity: &crate::schema::StepEntity, depth: usize) -> Option<Curve3d> {
         // COMPOSITE_CURVE('', (#segment1, #segment2, ...), .U.)
-        // Use the first segment as a representative curve
+        let mut all_points: Vec<Point3d> = Vec::new();
+        let mut n_segments = 0;
+        
         for param in &entity.params {
             if let StepValue::List(items) = param {
                 for item in items {
                     if let Some(ref_id) = self.get_ref(item) {
-                        // Each segment is a COMPOSITE_CURVE_SEGMENT
                         if let Some(seg_entity) = self.step.find_entity(ref_id) {
                             if seg_entity.type_name == "COMPOSITE_CURVE_SEGMENT" {
-                                // The 2nd param is the parent curve
+                                // COMPOSITE_CURVE_SEGMENT transition, parent_curve, same_sense
+                                // Find the curve reference (usually 2nd param)
                                 if let Some(curve_id) = self.find_param_ref(seg_entity, 1) {
-                                    if let Some(curve) = self.resolve_curve(curve_id) {
-                                        return Some(curve);
+                                    if let Some(curve) = self.resolve_curve(curve_id, depth + 1) {
+                                        // Sample the curve into ~32 points
+                                        let (t_min, t_max) = curve.param_range();
+                                        let n_samples = 32;
+                                        for i in 0..n_samples {
+                                            let t = t_min + (t_max - t_min) * i as f64 / (n_samples - 1) as f64;
+                                            all_points.push(curve.point_at(t));
+                                        }
+                                        n_segments += 1;
                                     }
                                 }
                             }
@@ -3308,18 +3462,61 @@ impl<'a> StepConverter<'a> {
                 }
             }
         }
-        None
+        
+        if all_points.len() >= 2 {
+            // Remove near-duplicate consecutive points
+            all_points = deduplicate_points_3d(&all_points, 1e-6);
+        }
+        
+        if all_points.len() >= 2 {
+            let n = all_points.len();
+            let degree = 1;
+            let weights = vec![1.0; n];
+            let mut knots = Vec::with_capacity(n + degree + 1);
+            for _ in 0..=degree { knots.push(0.0); }
+            for i in 1..n-1 { knots.push(i as f64); }
+            for _ in 0..=degree { knots.push((n - 1) as f64); }
+            
+            Some(Curve3d::Nurbs(NurbsCurve {
+                degree,
+                control_points: all_points,
+                weights,
+                knots,
+            }))
+        } else if n_segments > 0 {
+            // Fallback: try just the first segment
+            for param in &entity.params {
+                if let StepValue::List(items) = param {
+                    for item in items {
+                        if let Some(ref_id) = self.get_ref(item) {
+                            if let Some(seg_entity) = self.step.find_entity(ref_id) {
+                                if seg_entity.type_name == "COMPOSITE_CURVE_SEGMENT" {
+                                    if let Some(curve_id) = self.find_param_ref(seg_entity, 1) {
+                                        if let Some(curve) = self.resolve_curve(curve_id, depth + 1) {
+                                            return Some(curve);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        } else {
+            None
+        }
     }
 
     /// Resolve an OFFSET_CURVE_3D entity — returns the basis curve (offset is approximated).
     /// Format: OFFSET_CURVE_3D('', #basis_curve, distance, #direction, .F.)
-    fn resolve_offset_curve_3d(&self, entity: &crate::schema::StepEntity) -> Option<Curve3d> {
+    fn resolve_offset_curve_3d(&self, entity: &crate::schema::StepEntity, depth: usize) -> Option<Curve3d> {
         // Find the basis curve reference
         for param in &entity.params {
             if let Some(ref_id) = self.get_ref(param) {
                 if let Some(curve_entity) = self.step.find_entity(ref_id) {
                     if self.is_curve_type(&curve_entity.type_name) {
-                        return self.resolve_curve(ref_id);
+                        return self.resolve_curve(ref_id, depth + 1);
                     }
                 }
             }

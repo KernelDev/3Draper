@@ -23,7 +23,7 @@ use eframe::egui;
 ///   highlight: 0 = normal face, 1 = highlighted face
 fn mesh_to_gpu_data(
     mesh: &TriangleMesh,
-    highlighted_face_id: Option<u64>,
+    highlighted_face: Option<(usize, u64)>,
     selected_instance: Option<usize>,
     instance_triangle_ranges: &[(usize, usize)],
 ) -> (Vec<MeshVertex>, Vec<u32>) {
@@ -43,7 +43,7 @@ fn mesh_to_gpu_data(
     });
 
     // Determine if we need per-triangle processing (face highlight, instance selection, or colors)
-    let needs_per_tri = highlighted_face_id.is_some() || selected_instance.is_some() || has_real_colors;
+    let needs_per_tri = highlighted_face.is_some() || selected_instance.is_some() || has_real_colors;
 
     // If we have vertex normals and no special per-triangle processing, use smooth shading
     if let Some(ref vertex_normals) = mesh.normals {
@@ -105,11 +105,16 @@ fn mesh_to_gpu_data(
             // If instance_triangle_ranges doesn't have this index, selection stays 0.0 (normal)
         }
 
-        // Check face-level highlighting
-        if let Some(hid) = highlighted_face_id {
-            if let Some(ids) = face_ids {
-                if ids.get(i).map_or(false, |id| *id == hid) {
-                    is_highlighted = true;
+        // Check face-level highlighting (instance-aware)
+        // highlighted_face = (instance_index, face_id) — only highlight within the correct instance
+        if let Some((hl_inst, hl_fid)) = highlighted_face {
+            if let Some(&(start, end)) = instance_triangle_ranges.get(hl_inst) {
+                if i >= start && i < end {
+                    if let Some(ids) = face_ids {
+                        if ids.get(i).map_or(false, |id| *id == hl_fid) {
+                            is_highlighted = true;
+                        }
+                    }
                 }
             }
         }
@@ -304,8 +309,8 @@ pub struct ViewerApp {
     assembly_tree: Option<AssemblyNode>,
     /// Currently selected instance index.
     selected_instance: Option<usize>,
-    /// Currently selected face ID (within the instance).
-    selected_face_id: Option<u64>,
+    /// Currently selected face: (instance_index, face_id_within_instance).
+    selected_face: Option<(usize, u64)>,
     /// Whether to show the structure panel.
     show_structure: bool,
 
@@ -317,11 +322,11 @@ pub struct ViewerApp {
     /// UV grid V subdivisions.
     uv_grid_v: usize,
     /// Cached UV grid SVG string for the selected face.
-    uv_svg_cache: Option<(u64, String)>, // (face_id, svg_content)
+    uv_svg_cache: Option<((usize, u64), String)>, // ((instance_idx, face_id), svg_content)
 
     // ─── Face highlight state ──────────────────────────────────────
-    /// Currently highlighted face ID (for 3D view highlighting).
-    highlighted_face_id: Option<u64>,
+    /// Currently highlighted face: (instance_index, face_id_within_instance).
+    highlighted_face: Option<(usize, u64)>,
     /// Whether the GPU data needs update due to highlight change.
     highlight_dirty: bool,
 
@@ -329,6 +334,39 @@ pub struct ViewerApp {
     /// Per-instance triangle ranges in the merged mesh: Vec<(start_tri, end_tri)>
     /// When an instance is selected, triangles outside its range are dimmed.
     instance_triangle_ranges: Vec<(usize, usize)>,
+    // ─── Tree navigation state ────────────────────────────────────────
+    /// Node keys ("name_pd_id") that should be forced open in the assembly tree.
+    open_tree_nodes: std::collections::HashSet<String>,
+    /// Node key to scroll to in the assembly tree (set when selecting from 3D view).
+    scroll_to_tree_node: Option<String>,
+    /// Face ID to scroll to in the face list (set when selecting a face from 3D view).
+    scroll_to_face_id: Option<u64>,
+
+    // ─── Progressive loading state ────────────────────────────────────
+    /// Pending instances to triangulate (populated during parse phase, consumed during render phase).
+    pending_instances: Vec<DetailedMeshInstance>,
+    /// Total number of instances being loaded (for progress display).
+    total_instance_count: usize,
+    /// Number of instances already triangulated.
+    triangulated_count: usize,
+    /// Whether we are currently in the progressive triangulation phase.
+    is_loading: bool,
+    /// Name of the file being loaded.
+    loading_name: String,
+    /// How many instances to triangulate per frame (adaptive).
+    instances_per_frame: usize,
+
+    // ─── Panel collapse state (for mobile optimization) ──────────────
+    /// Whether the left controls panel is open.
+    controls_panel_open: bool,
+    /// Whether the structure tree section is expanded.
+    structure_tree_open: bool,
+    /// Whether the face list section is expanded.
+    face_list_open: bool,
+    /// Whether the UV grid section is expanded.
+    uv_grid_open: bool,
+    /// Whether the face info section is expanded.
+    face_info_open: bool,
 }
 
 impl ViewerApp {
@@ -409,15 +447,29 @@ impl ViewerApp {
             detailed_instances: Vec::new(),
             assembly_tree: None,
             selected_instance: None,
-            selected_face_id: None,
+            selected_face: None,
             show_structure: true,
             show_uv_grid: false,
             uv_grid_u: 10,
             uv_grid_v: 10,
             uv_svg_cache: None,
-            highlighted_face_id: None,
+            highlighted_face: None,
             highlight_dirty: false,
             instance_triangle_ranges: Vec::new(),
+            open_tree_nodes: std::collections::HashSet::new(),
+            scroll_to_tree_node: None,
+            scroll_to_face_id: None,
+            pending_instances: Vec::new(),
+            total_instance_count: 0,
+            triangulated_count: 0,
+            is_loading: false,
+            loading_name: String::new(),
+            instances_per_frame: 1,
+            controls_panel_open: true,
+            structure_tree_open: true,
+            face_list_open: true,
+            uv_grid_open: false,
+            face_info_open: false,
         };
         app.log("3Draper Viewer started");
         app.log(&format!("Default model: Box 100x100x100 ({} vertices, {} triangles)",
@@ -442,10 +494,13 @@ impl ViewerApp {
         self.mesh_dirty = true;
         // Reset selection when loading new model
         self.selected_instance = None;
-        self.selected_face_id = None;
-        self.highlighted_face_id = None;
+        self.selected_face = None;
+        self.highlighted_face = None;
         self.highlight_dirty = true;
         self.uv_svg_cache = None;
+        self.open_tree_nodes.clear();
+        self.scroll_to_tree_node = None;
+        self.scroll_to_face_id = None;
         self.log(&format!("Loaded: {} ({} vertices, {} triangles)",
             name, self.current_model.vertex_count, self.current_model.triangle_count));
     }
@@ -576,8 +631,12 @@ impl ViewerApp {
 
     // ─── Shared file processing (used by both native and web) ─────────────
 
-    /// Process a parsed STEP file (common logic for native and web).
+    /// Process a parsed STEP file — Phase 1: Parse + Build tree (fast).
+    /// The tree is shown immediately. Triangulation happens progressively in update().
     fn process_step_file(&mut self, step_file: &draper_step::StepFile, name: &str) {
+        // Cancel any previous loading
+        self.cancel_loading();
+
         // Count relevant geometry entities
         let mut point_count = 0;
         let mut face_count = 0;
@@ -627,43 +686,38 @@ impl ViewerApp {
         // instance_index is properly populated in the assembly tree
         let (tree, instances) = draper_step::step_structure_with_instances(step_file);
         self.assembly_tree = Some(tree);
+        self.show_structure = true;
 
-        // ── Convert STEP to detailed mesh instances ──
+        // ── Set up progressive triangulation ──
         if !instances.is_empty() {
-            self.log(&format!("── Mesh Rendering Tree ({} instances) ──", instances.len()));
+            self.log(&format!("Triangulating {} instances...", instances.len()));
+            self.total_instance_count = instances.len();
+            self.triangulated_count = 0;
+            self.pending_instances = instances;
+            self.is_loading = true;
+            self.loading_name = name.to_string();
+            self.instances_per_frame = 1;
 
-            // Store detailed instances for structure/selection
-            self.detailed_instances = instances.clone();
+            // Clear existing rendering data
+            self.detailed_instances.clear();
+            self.instance_triangle_ranges.clear();
+            self.selected_instance = None;
+            self.selected_face = None;
+            self.highlighted_face = None;
 
-            // Merge all instances into a single mesh for rendering,
-            // tracking per-instance triangle ranges
-            let mut mesh = TriangleMesh::new();
-            let mut instance_ranges = Vec::new();
-            for inst in &instances {
-                let tri_start = mesh.triangle_count();
-                if let Some(color) = inst.color {
-                    mesh.merge_with_color(&inst.mesh, color);
-                } else {
-                    mesh.merge_with_color(&inst.mesh, [0.48, 0.52, 0.58, 1.0]);
-                }
-                let tri_end = mesh.triangle_count();
-                instance_ranges.push((tri_start, tri_end));
-            }
-            self.instance_triangle_ranges = instance_ranges;
+            // Start with empty mesh — will be built progressively
+            self.mesh = TriangleMesh::new();
+            self.mesh_dirty = true;
 
-            let vcount = mesh.vertex_count();
-            let tcount = mesh.triangle_count();
-            self.log(&format!(
-                "Total merged: {} vertices, {} triangles", vcount, tcount
-            ));
-            self.load_mesh(mesh, &format!("STEP: {}", name));
+            // Auto-fit camera once tree is ready (even before mesh)
+            self.log("Structure tree ready — triangulation in progress...");
         } else {
-            // Fallback to separate calls
+            // Fallback: try separate conversion (no progressive loading for fallback)
             self.log("step_structure_with_instances returned no instances, trying separate conversion");
             self.assembly_tree = Some(draper_step::step_structure(step_file));
             match draper_step::step_to_detailed_instances(step_file) {
                 Ok(instances) => {
-                    self.log(&format!("── Mesh Rendering Tree ({} instances) ──", instances.len()));
+                    self.log(&format!("Mesh Rendering Tree ({} instances)", instances.len()));
                     self.detailed_instances = instances.clone();
                     let mut mesh = TriangleMesh::new();
                     let mut instance_ranges = Vec::new();
@@ -687,7 +741,7 @@ impl ViewerApp {
                     self.log(&format!("STEP detailed conversion error: {}, trying simple conversion", e));
                     match draper_step::step_to_mesh_instances(step_file) {
                         Ok(instances) => {
-                            self.log(&format!("── Simple Mesh Instances: {} ──", instances.len()));
+                            self.log(&format!("Simple Mesh Instances: {}", instances.len()));
                             let mut mesh = TriangleMesh::new();
                             for inst in &instances {
                                 if let Some(color) = inst.color {
@@ -707,6 +761,70 @@ impl ViewerApp {
                 }
             }
         }
+    }
+
+    /// Cancel any in-progress loading.
+    fn cancel_loading(&mut self) {
+        self.is_loading = false;
+        self.pending_instances.clear();
+        self.triangulated_count = 0;
+        self.total_instance_count = 0;
+    }
+
+    /// Process one batch of pending instances (called each frame from update()).
+    /// Returns true if there are still more instances to process.
+    fn process_pending_instances(&mut self) -> bool {
+        if !self.is_loading || self.pending_instances.is_empty() {
+            return false;
+        }
+
+        let batch_size = self.instances_per_frame.min(self.pending_instances.len());
+        for _ in 0..batch_size {
+            if let Some(inst) = self.pending_instances.pop() {
+                let tri_start = self.mesh.triangle_count();
+                if let Some(color) = inst.color {
+                    self.mesh.merge_with_color(&inst.mesh, color);
+                } else {
+                    self.mesh.merge_with_color(&inst.mesh, [0.48, 0.52, 0.58, 1.0]);
+                }
+                let tri_end = self.mesh.triangle_count();
+                self.instance_triangle_ranges.push((tri_start, tri_end));
+
+                let inst_idx = self.triangulated_count;
+                self.detailed_instances.push(inst);
+                self.triangulated_count += 1;
+
+                // Update the assembly tree: link this instance to its tree node
+                if let Some(ref mut tree) = self.assembly_tree {
+                    assign_instance_to_tree(tree, inst_idx);
+                }
+            }
+        }
+
+        self.mesh_dirty = true;
+
+        // Adaptive: process more per frame if instances are small
+        if self.triangulated_count > 0 && self.triangulated_count % 5 == 0 {
+            let avg_triangles = self.mesh.triangle_count() / self.triangulated_count;
+            if avg_triangles < 1000 {
+                self.instances_per_frame = (self.instances_per_frame + 1).min(10);
+            }
+        }
+
+        if self.pending_instances.is_empty() {
+            // Loading complete
+            self.is_loading = false;
+            let vcount = self.mesh.vertex_count();
+            let tcount = self.mesh.triangle_count();
+            self.log(&format!(
+                "Triangulation complete: {} instances, {} vertices, {} triangles",
+                self.triangulated_count, vcount, tcount
+            ));
+            self.load_mesh(self.mesh.clone(), &format!("STEP: {}", self.loading_name));
+            self.loading_name.clear();
+            return false;
+        }
+        true
     }
 
     /// Import STL from bytes (used by web file loading).
@@ -883,14 +1001,6 @@ impl ViewerApp {
             }
         }
     }
-
-    /// Handle picking: find which face is at the given screen position.
-    fn pick_face_at(&self, _screen_x: f32, _screen_y: f32) -> Option<(usize, u64)> {
-        // Simplified picking: iterate all instances and faces, check if any triangle 
-        // is under the cursor. For now, return None since true raycasting is complex.
-        // The primary selection mechanism is through the structure panel.
-        None
-    }
 }
 
 impl eframe::App for ViewerApp {
@@ -901,6 +1011,12 @@ impl eframe::App for ViewerApp {
         // Process any pending web file loads
         #[cfg(target_arch = "wasm32")]
         self.process_web_file_loads();
+
+        // Process progressive triangulation (one batch per frame)
+        if self.is_loading {
+            self.process_pending_instances();
+            ctx.request_repaint(); // Keep repainting during loading
+        }
 
         // === Top menu bar ===
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
@@ -1051,7 +1167,7 @@ impl eframe::App for ViewerApp {
         // === Right panel: Structure / Faces / UV ===
         // Collect pending UI actions to avoid borrow checker conflicts
         let mut pending_instance_select: Option<usize> = None;
-        let mut pending_face_select: Option<u64> = None;
+        let mut pending_face_select: Option<(usize, u64)> = None;
         let mut pending_svg_export = false;
         let mut pending_copy_face_id: Option<u64> = None;
 
@@ -1060,102 +1176,147 @@ impl eframe::App for ViewerApp {
             let assembly_tree_clone = self.assembly_tree.clone();
             let detailed_instances_clone = self.detailed_instances.clone();
             let selected_instance = self.selected_instance;
-            let selected_face_id = self.selected_face_id;
+            let selected_face = self.selected_face;
             let uv_grid_u = self.uv_grid_u;
             let uv_grid_v = self.uv_grid_v;
             let show_uv_grid = self.show_uv_grid;
-            let uv_svg_cache_face_id = self.uv_svg_cache.as_ref().map(|(id, _)| *id);
+            let uv_svg_cache_key = self.uv_svg_cache.as_ref().map(|(key, _)| *key);
+            let open_tree_nodes = self.open_tree_nodes.clone();
+            let scroll_to_tree_node = self.scroll_to_tree_node.clone();
+            let scroll_to_face_id = self.scroll_to_face_id;
 
             egui::SidePanel::right("structure_panel")
-                .min_width(280.0)
-                .default_width(320.0)
+                .min_width(220.0)
+                .default_width(280.0)
                 .resizable(true)
                 .show(ctx, |ui| {
-                    ui.add_space(4.0);
-                    ui.heading(egui::RichText::new("Structure").size(14.0));
+                    ui.add_space(2.0);
+
+                    // ─── Loading progress in panel header ───
+                    if self.is_loading && self.total_instance_count > 0 {
+                        let progress = self.triangulated_count as f32 / self.total_instance_count as f32;
+                        ui.horizontal(|ui| {
+                            ui.heading(egui::RichText::new("Structure").size(14.0));
+                            ui.label(egui::RichText::new(format!("({:.0}%)", progress * 100.0))
+                                .size(11.0).color(egui::Color32::from_rgb(80, 180, 80)));
+                        });
+                        let avail = ui.available_width();
+                        ui.add(egui::ProgressBar::new(progress)
+                            .desired_width(avail)
+                            .show_percentage());
+                    } else {
+                        ui.heading(egui::RichText::new("Structure").size(14.0));
+                    }
                     ui.separator();
 
-                    // ─── Assembly Tree ──────────────────────────────────
-                    egui::ScrollArea::vertical()
-                        .max_height(250.0)
-                        .show(ui, |ui| {
-                            if let Some(ref tree) = assembly_tree_clone {
-                                draw_assembly_node_static(ui, tree, selected_instance, &mut pending_instance_select);
-                            } else if !detailed_instances_clone.is_empty() {
-                                for (i, inst) in detailed_instances_clone.iter().enumerate() {
-                                    let is_selected = selected_instance == Some(i);
-                                    let label = format!("{} (BREP#{})", inst.name, inst.brep_id);
-                                    if ui.selectable_label(is_selected, &label).clicked() {
-                                        pending_instance_select = Some(i);
+                    // ─── Assembly Tree (collapsible) ──────────────────────────────────
+                    let tree_id = ui.make_persistent_id("structure_tree_section");
+                    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), tree_id, self.structure_tree_open)
+                        .show_header(ui, |ui| {
+                            ui.heading(egui::RichText::new("▼ Tree").size(12.0));
+                        }).body(|ui| {
+                            egui::ScrollArea::vertical()
+                                .max_height(300.0)
+                                .show(ui, |ui| {
+                                    if let Some(ref tree) = assembly_tree_clone {
+                                        draw_assembly_node_static(ui, tree, selected_instance, &mut pending_instance_select, &open_tree_nodes, &scroll_to_tree_node);
+                                    } else if !detailed_instances_clone.is_empty() {
+                                        for (i, inst) in detailed_instances_clone.iter().enumerate() {
+                                            let is_selected = selected_instance == Some(i);
+                                            let label = format!("{} (BREP#{})", inst.name, inst.brep_id);
+                                            if ui.selectable_label(is_selected, &label).clicked() {
+                                                pending_instance_select = Some(i);
+                                            }
+                                        }
+                                    } else {
+                                        ui.label(egui::RichText::new("No STEP file loaded").size(11.0).color(egui::Color32::GRAY));
                                     }
+                                });
+                        });
+
+                    ui.separator();
+
+                    // ─── Face List (collapsible) ─────────────────────────────────────
+                    let face_id = ui.make_persistent_id("face_list_section");
+                    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), face_id, self.face_list_open)
+                        .show_header(ui, |ui| {
+                            let label = if let Some(inst_idx) = selected_instance {
+                                if let Some(inst) = detailed_instances_clone.get(inst_idx) {
+                                    format!("▼ Faces: {} (BREP #{})", inst.name, inst.brep_id)
+                                } else {
+                                    "▼ Faces".to_string()
                                 }
                             } else {
-                                ui.label(egui::RichText::new("No STEP file loaded").size(11.0).color(egui::Color32::GRAY));
+                                "▼ Faces (select instance)".to_string()
+                            };
+                            ui.heading(egui::RichText::new(label).size(12.0));
+                        }).body(|ui| {
+                            if let Some(inst_idx) = selected_instance {
+                                if let Some(inst) = detailed_instances_clone.get(inst_idx) {
+                                    ui.label(egui::RichText::new(format!("BREP #{} — {} faces", inst.brep_id, inst.faces.len()))
+                                        .size(11.0).color(egui::Color32::GRAY));
+
+                                    egui::ScrollArea::vertical()
+                                        .id_salt("face_list_scroll")
+                                        .max_height(250.0)
+                                        .show(ui, |ui| {
+                                            for face in &inst.faces {
+                                                let is_selected = selected_face == Some((inst_idx, face.face_id));
+                                                let label = format!("F#{} STEP#{} {} [{}..{}]",
+                                                    face.face_id, face.step_face_id, face.surface_type,
+                                                    face.triangle_range.0, face.triangle_range.1);
+                                                let response = ui.selectable_label(is_selected, &label);
+                                                if scroll_to_face_id == Some(face.face_id) {
+                                                    response.scroll_to_me(Some(egui::Align::Center));
+                                                }
+                                                if response.clicked() {
+                                                    pending_face_select = Some((inst_idx, face.face_id));
+                                                }
+                                                response.on_hover_text(format!(
+                                                    "Face ID: {}\nSTEP ID: {}\nSurface: {}\nTriangles: [{}, {})\nOuter edges: {}\nInner edges: {}\nForward: {}",
+                                                    face.face_id, face.step_face_id, face.surface_type,
+                                                    face.triangle_range.0, face.triangle_range.1,
+                                                    face.outer_boundary.len(), face.inner_boundaries.len(),
+                                                    face.forward
+                                                ));
+                                            }
+                                        });
+                                }
+                            } else {
+                                ui.label(egui::RichText::new("Select an instance to see faces").size(11.0).color(egui::Color32::GRAY));
                             }
                         });
 
                     ui.separator();
 
-                    // ─── Face List for Selected Instance ─────────────────
-                    if let Some(inst_idx) = selected_instance {
-                        if let Some(inst) = detailed_instances_clone.get(inst_idx) {
-                            ui.heading(egui::RichText::new(format!("Faces: {}", inst.name)).size(12.0));
-                            ui.label(egui::RichText::new(format!("BREP #{} — {} faces", inst.brep_id, inst.faces.len()))
-                                .size(11.0).color(egui::Color32::GRAY));
-
-                            egui::ScrollArea::vertical()
-                                .id_salt("face_list_scroll")
-                                .max_height(300.0)
-                                .show(ui, |ui| {
-                                    for face in &inst.faces {
-                                        let is_selected = selected_face_id == Some(face.face_id);
-                                        let label = format!("F#{} STEP#{} {} [{}..{}]",
-                                            face.face_id, face.step_face_id, face.surface_type,
-                                            face.triangle_range.0, face.triangle_range.1);
-                                        let response = ui.selectable_label(is_selected, &label);
-                                        if response.clicked() {
-                                            pending_face_select = Some(face.face_id);
-                                        }
-                                        // Show tooltip on hover
-                                        response.on_hover_text(format!(
-                                            "Face ID: {}\nSTEP ID: {}\nSurface: {}\nTriangles: [{}, {})\nOuter edges: {}\nInner edges: {}\nForward: {}",
-                                            face.face_id, face.step_face_id, face.surface_type,
-                                            face.triangle_range.0, face.triangle_range.1,
-                                            face.outer_boundary.len(), face.inner_boundaries.len(),
-                                            face.forward
-                                        ));
-                                    }
-                                });
-                        }
-                    } else {
-                        ui.label(egui::RichText::new("Select an instance to see faces").size(11.0).color(egui::Color32::GRAY));
-                    }
-
-                    ui.separator();
-
-                    // ─── UV Grid Controls ────────────────────────────────
-                    ui.heading(egui::RichText::new("UV Grid").size(14.0));
-                    ui.checkbox(&mut self.show_uv_grid, "Show UV grid");
-                    ui.horizontal(|ui| {
-                        ui.label("U divs:");
-                        ui.add(egui::DragValue::new(&mut self.uv_grid_u).range(2..=50));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("V divs:");
-                        ui.add(egui::DragValue::new(&mut self.uv_grid_v).range(2..=50));
-                    });
+                    // ─── UV Grid Controls (collapsible) ────────────────────────────────
+                    let uv_id = ui.make_persistent_id("uv_grid_section");
+                    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), uv_id, self.uv_grid_open)
+                        .show_header(ui, |ui| {
+                            ui.heading(egui::RichText::new("▼ UV Grid").size(12.0));
+                        }).body(|ui| {
+                            ui.checkbox(&mut self.show_uv_grid, "Show UV grid");
+                            ui.horizontal(|ui| {
+                                ui.label("U divs:");
+                                ui.add(egui::DragValue::new(&mut self.uv_grid_u).range(2..=50));
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("V divs:");
+                                ui.add(egui::DragValue::new(&mut self.uv_grid_v).range(2..=50));
+                            });
 
                     // ─── UV Grid Display ─────────────────────────────────
                     if show_uv_grid {
                         if let Some(inst_idx) = selected_instance {
-                            if let Some(face_id) = selected_face_id {
+                            if let Some((_, face_id)) = selected_face {
                                 if let Some(inst) = detailed_instances_clone.get(inst_idx) {
                                     if let Some(face) = inst.faces.iter().find(|f| f.face_id == face_id) {
                                         // Check cache
-                                        let needs_regen = uv_svg_cache_face_id != Some(face_id);
+                                        let cache_key = (inst_idx, face_id);
+                                        let needs_regen = uv_svg_cache_key != Some(cache_key);
                                         if needs_regen {
                                             let svg = generate_uv_svg(face, uv_grid_u, uv_grid_v);
-                                            self.uv_svg_cache = Some((face_id, svg));
+                                            self.uv_svg_cache = Some((cache_key, svg));
                                         }
 
                                         // Draw UV grid in the panel using custom painting
@@ -1307,48 +1468,77 @@ impl eframe::App for ViewerApp {
                             ui.label(egui::RichText::new("Select an instance first").size(11.0).color(egui::Color32::GRAY));
                         }
                     }
+                        }); // close UV Grid .body()
 
                     ui.separator();
 
-                    // ─── Selected Face Info ───────────────────────────────
-                    if let Some(inst_idx) = selected_instance {
-                        if let Some(fid) = selected_face_id {
-                            if let Some(inst) = detailed_instances_clone.get(inst_idx) {
-                                if let Some(face) = inst.faces.iter().find(|f| f.face_id == fid) {
-                                    ui.heading(egui::RichText::new("Face Info").size(13.0));
-                                    ui.label(egui::RichText::new(format!("ID: {}", face.face_id)).size(11.0));
-                                    ui.label(egui::RichText::new(format!("STEP ID: #{}", face.step_face_id)).size(11.0));
-                                    ui.label(egui::RichText::new(format!("Surface: {}", face.surface_type)).size(11.0));
-                                    ui.label(egui::RichText::new(format!("Triangles: [{}, {})", face.triangle_range.0, face.triangle_range.1)).size(11.0));
-                                    ui.label(egui::RichText::new(format!("Boundary pts: {}", face.outer_boundary.len())).size(11.0));
-                                    ui.label(egui::RichText::new(format!("Holes: {}", face.inner_boundaries.len())).size(11.0));
-                                    ui.label(egui::RichText::new(format!("Forward: {}", face.forward)).size(11.0));
+                    // ─── Selected Face Info (collapsible) ───────────────────────────────
+                    let info_id = ui.make_persistent_id("face_info_section");
+                    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), info_id, self.face_info_open)
+                        .show_header(ui, |ui| {
+                            ui.heading(egui::RichText::new("▼ Face Info").size(12.0));
+                        }).body(|ui| {
+                            if let Some(inst_idx) = selected_instance {
+                                if let Some((_, fid)) = selected_face {
+                                    if let Some(inst) = detailed_instances_clone.get(inst_idx) {
+                                        if let Some(face) = inst.faces.iter().find(|f| f.face_id == fid) {
+                                            ui.label(egui::RichText::new(format!("ID: {}", face.face_id)).size(11.0));
+                                            ui.label(egui::RichText::new(format!("STEP ID: #{}", face.step_face_id)).size(11.0));
+                                            ui.label(egui::RichText::new(format!("Surface: {}", face.surface_type)).size(11.0));
+                                            ui.label(egui::RichText::new(format!("Triangles: [{}, {})", face.triangle_range.0, face.triangle_range.1)).size(11.0));
+                                            ui.label(egui::RichText::new(format!("Boundary pts: {}", face.outer_boundary.len())).size(11.0));
+                                            ui.label(egui::RichText::new(format!("Holes: {}", face.inner_boundaries.len())).size(11.0));
+                                            ui.label(egui::RichText::new(format!("Forward: {}", face.forward)).size(11.0));
 
-                                    // Copy face ID to clipboard
-                                    if ui.button("Copy Face ID").clicked() {
-                                        pending_copy_face_id = Some(face.face_id);
+                                            if ui.button("Copy Face ID").clicked() {
+                                                pending_copy_face_id = Some(face.face_id);
+                                            }
+                                        }
                                     }
+                                } else {
+                                    ui.label(egui::RichText::new("Select a face").size(11.0).color(egui::Color32::GRAY));
                                 }
+                            } else {
+                                ui.label(egui::RichText::new("Select an instance").size(11.0).color(egui::Color32::GRAY));
                             }
-                        }
-                    }
+                        });
                 });
+            // Clear scroll/open targets after the tree has been rendered.
+            // The CollapsingState::set_open calls above already persisted the open state
+            // in egui's memory, so users can freely toggle nodes afterwards.
+            self.scroll_to_tree_node = None;
+            self.scroll_to_face_id = None;
+            self.open_tree_nodes.clear();
         }
 
         // Apply pending UI actions (after all borrows are released)
         if let Some(idx) = pending_instance_select {
             self.selected_instance = Some(idx);
-            self.selected_face_id = None;
-            self.highlighted_face_id = None;
+            self.selected_face = None;
+            self.highlighted_face = None;
             self.highlight_dirty = true;
             self.uv_svg_cache = None;
+            // Find the path to this instance in the assembly tree and open it
+            if let Some(ref tree) = self.assembly_tree {
+                let (path, target) = find_instance_path(tree, idx);
+                self.open_tree_nodes = path.into_iter().collect();
+                self.scroll_to_tree_node = target;
+            }
         }
-        if let Some(fid) = pending_face_select {
-            self.selected_face_id = Some(fid);
-            self.highlighted_face_id = Some(fid);
+        if let Some((inst_idx, fid)) = pending_face_select {
+            self.selected_instance = Some(inst_idx);
+            self.selected_face = Some((inst_idx, fid));
+            self.highlighted_face = Some((inst_idx, fid));
             self.highlight_dirty = true;
             self.uv_svg_cache = None;
-            self.log(&format!("Selected face #{}", fid));
+            self.scroll_to_face_id = Some(fid);
+            self.log(&format!("Selected face #{} in instance #{}", fid, inst_idx));
+            // Find the path to this instance in the assembly tree and open it
+            if let Some(ref tree) = self.assembly_tree {
+                let (path, target) = find_instance_path(tree, inst_idx);
+                self.open_tree_nodes = path.into_iter().collect();
+                self.scroll_to_tree_node = target;
+            }
         }
         if pending_svg_export {
             if let Some((_, ref svg_content)) = self.uv_svg_cache {
@@ -1403,21 +1593,20 @@ impl eframe::App for ViewerApp {
 
         // === Left side panel (controls) ===
         egui::SidePanel::left("controls")
-            .min_width(180.0)
-            .default_width(200.0)
+            .min_width(150.0)
+            .default_width(180.0)
             .show(ctx, |ui| {
-                ui.add_space(8.0);
-                ui.heading("3Draper Viewer");
+                ui.add_space(4.0);
+                ui.heading(egui::RichText::new("3Draper").size(14.0));
                 ui.label(
                     egui::RichText::new("3D Geometric Kernel")
-                        .size(11.0)
+                        .size(10.0)
                         .color(egui::Color32::GRAY)
                 );
                 ui.separator();
-                ui.add_space(4.0);
 
                 // --- Primitives ---
-                ui.heading(egui::RichText::new("Primitives").size(14.0));
+                ui.heading(egui::RichText::new("Primitives").size(12.0));
                 ui.horizontal(|ui| {
                     if ui.button("Box").clicked() { self.load_box(); }
                     if ui.button("Cylinder").clicked() { self.load_cylinder(); }
@@ -1427,19 +1616,15 @@ impl eframe::App for ViewerApp {
                     if ui.button("Cone").clicked() { self.load_cone(); }
                     if ui.button("Torus").clicked() { self.load_torus(); }
                 });
-                ui.add_space(4.0);
-
                 // --- Models ---
                 ui.separator();
-                ui.heading(egui::RichText::new("Models").size(14.0));
+                ui.heading(egui::RichText::new("Models").size(12.0));
                 if ui.button("ICE Engine (Inline-4)").clicked() {
                     self.load_engine();
                 }
-                ui.add_space(4.0);
-
                 // --- Import ---
                 ui.separator();
-                ui.heading(egui::RichText::new("Import").size(14.0));
+                ui.heading(egui::RichText::new("Import").size(12.0));
 
                 #[cfg(not(target_arch = "wasm32"))]
                 {
@@ -1483,11 +1668,9 @@ impl eframe::App for ViewerApp {
                     });
                 }
 
-                ui.add_space(4.0);
-
                 // --- Export ---
                 ui.separator();
-                ui.heading(egui::RichText::new("Export").size(14.0));
+                ui.heading(egui::RichText::new("Export").size(12.0));
 
                 #[cfg(not(target_arch = "wasm32"))]
                 {
@@ -1528,11 +1711,9 @@ impl eframe::App for ViewerApp {
                         .color(egui::Color32::GRAY));
                 }
 
-                ui.add_space(4.0);
-
                 // --- Display ---
                 ui.separator();
-                ui.heading(egui::RichText::new("Display").size(14.0));
+                ui.heading(egui::RichText::new("Display").size(12.0));
                 ui.checkbox(&mut self.wireframe, "Wireframe");
                 ui.checkbox(&mut self.show_axes, "Show axes");
                 ui.checkbox(&mut self.show_grid, "Show grid");
@@ -1549,24 +1730,32 @@ impl eframe::App for ViewerApp {
                 // Clear selection button
                 if ui.button("Clear Selection").clicked() {
                     self.selected_instance = None;
-                    self.selected_face_id = None;
-                    self.highlighted_face_id = None;
+                    self.selected_face = None;
+                    self.highlighted_face = None;
                     self.highlight_dirty = true;
                     self.uv_svg_cache = None;
+                    self.open_tree_nodes.clear();
+                    self.scroll_to_tree_node = None;
+                    self.scroll_to_face_id = None;
                 }
-
-                ui.add_space(4.0);
 
                 // --- Info ---
                 ui.separator();
-                ui.heading(egui::RichText::new("Info").size(14.0));
+                ui.heading(egui::RichText::new("Info").size(12.0));
                 ui.label(egui::RichText::new(format!("Model: {}", self.current_model.name)).size(12.0));
                 ui.label(egui::RichText::new(format!("Vertices: {}", self.current_model.vertex_count)).size(12.0));
                 ui.label(egui::RichText::new(format!("Triangles: {}", self.current_model.triangle_count)).size(12.0));
                 ui.label(egui::RichText::new(format!("Instances: {}", self.detailed_instances.len())).size(12.0));
 
-                if let Some(fid) = self.highlighted_face_id {
-                    ui.label(egui::RichText::new(format!("Selected face: #{}", fid))
+                // Loading progress in info section
+                if self.is_loading && self.total_instance_count > 0 {
+                    let progress = self.triangulated_count as f32 / self.total_instance_count as f32;
+                    ui.label(egui::RichText::new(format!("Loading: {}/{} ({:.0}%)", self.triangulated_count, self.total_instance_count, progress * 100.0))
+                        .size(11.0).color(egui::Color32::from_rgb(80, 180, 80)));
+                }
+
+                if let Some((inst_idx, fid)) = self.highlighted_face {
+                    ui.label(egui::RichText::new(format!("Selected face: #{} (inst #{})", fid, inst_idx))
                         .size(12.0)
                         .color(egui::Color32::from_rgb(255, 220, 50)));
                 }
@@ -1575,11 +1764,11 @@ impl eframe::App for ViewerApp {
                 ui.label(egui::RichText::new(format!("Camera: ({:.0}, {:.0}, {:.0})", cam_pos[0], cam_pos[1], cam_pos[2]))
                     .size(11.0).color(egui::Color32::GRAY));
 
-                ui.add_space(8.0);
+                ui.add_space(4.0);
                 ui.separator();
                 ui.label(
-                    egui::RichText::new("LMB Select | Ctrl+LMB Face | Drag Rotate | Scroll Zoom | MMB Pan")
-                        .size(10.0)
+                    egui::RichText::new("Click: Select | Ctrl+Click: Face | Drag: Rotate | Scroll: Zoom")
+                        .size(9.0)
                         .color(egui::Color32::from_rgb(160, 160, 160))
                 );
             });
@@ -1635,28 +1824,44 @@ impl eframe::App for ViewerApp {
                                     // Ctrl+click: select face
                                     if let Some(fid) = pick.face_id {
                                         self.selected_instance = Some(pick.instance_idx);
-                                        self.selected_face_id = Some(fid);
-                                        self.highlighted_face_id = Some(fid);
+                                        self.selected_face = Some((pick.instance_idx, fid));
+                                        self.highlighted_face = Some((pick.instance_idx, fid));
                                         self.highlight_dirty = true;
                                         self.uv_svg_cache = None;
+                                        self.scroll_to_face_id = Some(fid);
                                         self.log(&format!("Picked face #{} (instance #{})", fid, pick.instance_idx));
+                                        // Navigate structure tree
+                                        if let Some(ref tree) = self.assembly_tree {
+                                            let (path, target) = find_instance_path(tree, pick.instance_idx);
+                                            self.open_tree_nodes = path.into_iter().collect();
+                                            self.scroll_to_tree_node = target;
+                                        }
                                     }
                                 } else {
                                     // Simple click: select solid/instance
                                     self.selected_instance = Some(pick.instance_idx);
-                                    self.selected_face_id = None;
-                                    self.highlighted_face_id = None;
+                                    self.selected_face = None;
+                                    self.highlighted_face = None;
                                     self.highlight_dirty = true;
                                     self.uv_svg_cache = None;
                                     self.log(&format!("Picked instance #{}", pick.instance_idx));
+                                    // Navigate structure tree
+                                    if let Some(ref tree) = self.assembly_tree {
+                                        let (path, target) = find_instance_path(tree, pick.instance_idx);
+                                        self.open_tree_nodes = path.into_iter().collect();
+                                        self.scroll_to_tree_node = target;
+                                    }
                                 }
                             } else {
                                 // Clicked on empty space — deselect
                                 self.selected_instance = None;
-                                self.selected_face_id = None;
-                                self.highlighted_face_id = None;
+                                self.selected_face = None;
+                                self.highlighted_face = None;
                                 self.highlight_dirty = true;
                                 self.uv_svg_cache = None;
+                                self.open_tree_nodes.clear();
+                                self.scroll_to_tree_node = None;
+                                self.scroll_to_face_id = None;
                             }
                         }
                     }
@@ -1696,7 +1901,7 @@ impl eframe::App for ViewerApp {
                 // Upload mesh data if dirty or highlight changed
                 if self.mesh_dirty || self.highlight_dirty {
                     if let Some(ref rs) = self.render_state {
-                        let (vertices, indices) = mesh_to_gpu_data(&self.mesh, self.highlighted_face_id, self.selected_instance, &self.instance_triangle_ranges);
+                        let (vertices, indices) = mesh_to_gpu_data(&self.mesh, self.highlighted_face, self.selected_instance, &self.instance_triangle_ranges);
                         let mut guard = self.gpu_resources.lock().unwrap();
                         if let Some(ref mut resources) = *guard {
                             update_mesh_buffers(resources, &rs.device, &vertices, &indices);
@@ -1750,6 +1955,58 @@ impl eframe::App for ViewerApp {
 
                 if self.show_axes {
                     self.draw_axes_overlay(ui, rect);
+                }
+
+                // ─── Loading progress overlay ───
+                if self.is_loading && self.total_instance_count > 0 {
+                    let progress = self.triangulated_count as f32 / self.total_instance_count as f32;
+                    let bar_w = rect.width() * 0.6;
+                    let bar_h = 20.0;
+                    let bar_x = rect.center().x - bar_w / 2.0;
+                    let bar_y = rect.bottom() - 60.0;
+                    let bar_rect = egui::Rect::from_min_max(
+                        egui::pos2(bar_x, bar_y),
+                        egui::pos2(bar_x + bar_w, bar_y + bar_h),
+                    );
+
+                    // Background
+                    ui.painter().rect_filled(
+                        egui::Rect::from_min_max(
+                            egui::pos2(bar_x - 10.0, bar_y - 25.0),
+                            egui::pos2(bar_x + bar_w + 10.0, bar_y + bar_h + 10.0),
+                        ),
+                        4.0,
+                        egui::Color32::from_rgba_premultiplied(0, 0, 0, 160),
+                    );
+
+                    // Label
+                    ui.painter().text(
+                        egui::pos2(bar_x + bar_w / 2.0, bar_y - 8.0),
+                        egui::Align2::CENTER_CENTER,
+                        format!("Triangulating: {}/{} ({:.0}%)", self.triangulated_count, self.total_instance_count, progress * 100.0),
+                        egui::FontId::proportional(12.0),
+                        egui::Color32::WHITE,
+                    );
+
+                    // Progress bar background
+                    ui.painter().rect_filled(
+                        bar_rect,
+                        3.0,
+                        egui::Color32::from_rgb(60, 60, 60),
+                    );
+
+                    // Progress bar fill
+                    let fill_w = bar_w * progress;
+                    if fill_w > 0.0 {
+                        ui.painter().rect_filled(
+                            egui::Rect::from_min_max(
+                                egui::pos2(bar_x, bar_y),
+                                egui::pos2(bar_x + fill_w, bar_y + bar_h),
+                            ),
+                            3.0,
+                            egui::Color32::from_rgb(80, 180, 80),
+                        );
+                    }
                 }
             });
     }
@@ -1912,7 +2169,10 @@ fn draw_assembly_node_static(
     node: &AssemblyNode,
     selected_instance: Option<usize>,
     pending_instance_select: &mut Option<usize>,
+    open_tree_nodes: &std::collections::HashSet<String>,
+    scroll_to_tree_node: &Option<String>,
 ) {
+    let key = node_key(node);
     let has_children = !node.children.is_empty();
     let brep_str = match node.brep_id {
         Some(id) => format!(" BREP#{}", id),
@@ -1928,15 +2188,37 @@ fn draw_assembly_node_static(
     let is_selected = node.instance_index.map_or(false, |idx| selected_instance == Some(idx));
 
     if has_children {
-        egui::CollapsingHeader::new(egui::RichText::new(&label).size(11.0))
-            .default_open(false)
-            .show(ui, |ui| {
-                for child in &node.children {
-                    draw_assembly_node_static(ui, child, selected_instance, pending_instance_select);
+        let should_be_open = open_tree_nodes.contains(&key);
+        // Use CollapsingState to programmatically force open/close
+        let id = egui::Id::new(format!("tree_{}_{}", node.name, node.pd_id));
+        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+            ui.ctx(), id, false,
+        );
+        if should_be_open {
+            state.set_open(true);
+        }
+        // If the scroll target is this node's child, also ensure this node is open
+        if let Some(ref scroll_key) = scroll_to_tree_node {
+            if !state.is_open() {
+                // Check if any descendant matches the scroll target
+                if has_descendant_with_key(node, scroll_key) {
+                    state.set_open(true);
                 }
-            });
+            }
+        }
+        state.show_header(ui, |ui| {
+            ui.label(egui::RichText::new(&label).size(11.0));
+        }).body(|ui| {
+            for child in &node.children {
+                draw_assembly_node_static(ui, child, selected_instance, pending_instance_select, open_tree_nodes, scroll_to_tree_node);
+            }
+        });
     } else {
         let response = ui.selectable_label(is_selected, egui::RichText::new(&label).size(11.0));
+        // Scroll to this node if it's the scroll target
+        if scroll_to_tree_node.as_ref() == Some(&key) {
+            response.scroll_to_me(Some(egui::Align::Center));
+        }
         if response.clicked() {
             // Use instance_index for precise selection
             if let Some(idx) = node.instance_index {
@@ -1944,6 +2226,19 @@ fn draw_assembly_node_static(
             }
         }
     }
+}
+
+/// Check if any descendant of the given node has the specified key.
+fn has_descendant_with_key(node: &AssemblyNode, target_key: &str) -> bool {
+    for child in &node.children {
+        if node_key(child) == target_key {
+            return true;
+        }
+        if has_descendant_with_key(child, target_key) {
+            return true;
+        }
+    }
+    false
 }
 
 impl ViewerApp {
@@ -2021,4 +2316,48 @@ fn point_in_polygon(x: f64, y: f64, polygon: &[(f64, f64)]) -> bool {
         j = i;
     }
     inside
+}
+
+// ─── Assembly tree path finder ─────────────────────────────────────────────
+
+/// Generate a unique key for an assembly node (used for open/scroll tracking).
+/// Uses name + pd_id to avoid collisions when multiple nodes share the same name.
+fn node_key(node: &AssemblyNode) -> String {
+    format!("{}_{}", node.name, node.pd_id)
+}
+
+/// Find the path of node keys from root to the leaf node with the given instance_index.
+/// Returns (path_keys, target_leaf_key) — path_keys for opening ancestors,
+/// target_leaf_key for scrolling to the selected item.
+fn find_instance_path(node: &AssemblyNode, target_instance: usize) -> (Vec<String>, Option<String>) {
+    let key = node_key(node);
+    if node.instance_index == Some(target_instance) {
+        return (vec![key.clone()], Some(key));
+    }
+    for child in &node.children {
+        let (mut path, target) = find_instance_path(child, target_instance);
+        if !path.is_empty() {
+            path.insert(0, key.clone());
+            return (path, target);
+        }
+    }
+    (Vec::new(), None)
+}
+
+/// Assign instance_index to the next unassigned leaf node in the assembly tree (DFS order).
+/// Called during progressive loading to link tree nodes to their graphical instances
+/// as each instance gets triangulated.
+fn assign_instance_to_tree(node: &mut AssemblyNode, instance_idx: usize) {
+    // Use an explicit stack to avoid stack overflow on deeply nested trees
+    let mut stack: Vec<&mut AssemblyNode> = vec![node];
+    while let Some(n) = stack.pop() {
+        if n.children.is_empty() && n.brep_id.is_some() && n.instance_index.is_none() {
+            n.instance_index = Some(instance_idx);
+            return;
+        }
+        // Push children in reverse order so leftmost is processed first
+        for child in n.children.iter_mut().rev() {
+            stack.push(child);
+        }
+    }
 }
