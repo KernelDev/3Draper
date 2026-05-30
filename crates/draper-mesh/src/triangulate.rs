@@ -380,6 +380,11 @@ fn find_bridge_edge(outer_2d: &[Point2d], hole_2d: &[Point2d]) -> BridgeResult {
 /// The boundary ring vertices are sampled from edge curves (ensuring consistency
 /// with adjacent faces). Interior vertices are sampled from the parametric grid.
 /// Top/bottom cap rings are snapped to edge curves when available.
+///
+/// A cylinder is periodic in u with period 2π. When the boundary doesn't
+/// constrain the u direction (u_range < ~half period), we use the full
+/// u range [0, 2π] — this handles the common case of a full cylinder
+/// where the boundary edges are only the top/bottom circles and seam.
 fn triangulate_cylinder_face(face: &Face, cyl: &CylinderSurface, params: &TriangulationParams) -> TriangleMesh {
     let boundary_3d = collect_face_boundary_points(face);
 
@@ -391,7 +396,15 @@ fn triangulate_cylinder_face(face: &Face, cyl: &CylinderSurface, params: &Triang
     // Determine UV range from boundary
     let (u_min, u_max, v_min, v_max) = cylinder_uv_range(cyl, &boundary_3d);
     let u_range = u_max - u_min;
-    let full_circle = u_range > 1.9 * PI;
+
+    // Cylinder is periodic in u. If boundary doesn't cover more than ~half
+    // the period, assume the face needs the full period.
+    let full_circle = if u_range > 1.5 * PI {
+        u_range > 1.9 * PI
+    } else {
+        // Boundary doesn't constrain u — use full circle
+        true
+    };
 
     // Sample the cylinder surface on a grid, but snap boundary rings to edge curves
     let n_u = if full_circle { params.angular_samples } else { params.angular_samples.min(48) };
@@ -402,11 +415,6 @@ fn triangulate_cylinder_face(face: &Face, cyl: &CylinderSurface, params: &Triang
 
     // Generate interior grid points (not boundary rings)
     let mut mesh = TriangleMesh::new();
-
-    // Sample rows from j=0 to j=n_v-1
-    // For each row, generate points along u
-    // j=0 and j=n_v-1 are boundary rows — we'll try to snap them to edge curves
-    // Interior rows are purely from surface.point_at
 
     // Collect edge-projected boundary rings at v_min and v_max
     let bottom_ring = extract_boundary_ring_at_v(&boundary_3d, cyl, v_min, n_u, full_circle, u_start, u_end);
@@ -562,6 +570,9 @@ fn extract_boundary_ring_at_v(
 }
 
 /// Triangulate a cone face.
+///
+/// A cone is periodic in u with period 2π. When the boundary doesn't
+/// constrain the u direction, we use the full u range [0, 2π].
 fn triangulate_cone_face(face: &Face, cone: &ConeSurface, params: &TriangulationParams) -> TriangleMesh {
     let boundary_3d = collect_face_boundary_points(face);
 
@@ -571,7 +582,14 @@ fn triangulate_cone_face(face: &Face, cone: &ConeSurface, params: &Triangulation
 
     let (u_min, u_max, v_min, v_max) = cone_uv_range(cone, &boundary_3d);
     let u_range = u_max - u_min;
-    let full_circle = u_range > 1.9 * PI;
+
+    // Cone is periodic in u. If boundary doesn't cover more than ~half
+    // the period, assume the face needs the full period.
+    let full_circle = if u_range > 1.5 * PI {
+        u_range > 1.9 * PI
+    } else {
+        true
+    };
 
     let n_u = if full_circle { params.angular_samples } else { params.angular_samples.min(48) };
     let n_v = params.height_samples.max(2);
@@ -658,30 +676,59 @@ fn triangulate_cone_full(face: &Face, cone: &ConeSurface, params: &Triangulation
 }
 
 /// Triangulate a sphere face.
+///
+/// A sphere is periodic in u (period 2π) and semi-periodic in v (range [0, π]).
+/// When the boundary edges don't constrain a direction, we default to the
+/// full range for that direction. This handles both full spheres and partial
+/// spherical faces correctly.
 fn triangulate_sphere_face(face: &Face, sphere: &SphereSurface, params: &TriangulationParams) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
     let n_u = params.angular_samples;
     let n_v = (params.angular_samples / 2).max(4);
 
-    // Determine range from boundary if available
-    let boundary_3d = collect_face_boundary_points(face);
-    let (u_start, u_end, v_start, v_end) = if !boundary_3d.is_empty() {
-        let (u_min, u_max, v_min, v_max) = sphere_uv_range(sphere, &boundary_3d);
-        let u_range = u_max - u_min;
-        let v_range = v_max - v_min;
-        let full_u = u_range > 1.9 * PI;
-        let full_v = v_range > 0.9 * PI;
-        (
-            if full_u { 0.0 } else { u_min },
-            if full_u { 2.0 * PI } else { u_max },
-            if full_v { 0.0 } else { v_min },
-            if full_v { PI } else { v_max },
-        )
-    } else {
-        (0.0, 2.0 * PI, 0.0, PI)
-    };
+    // Default: full sphere [0, 2π] × [0, π]
+    let mut u_start = 0.0_f64;
+    let mut u_end = 2.0 * PI;
+    let mut v_start = 0.0_f64;
+    let mut v_end = PI;
 
-    // Generate vertices including poles
+    let boundary_3d = collect_face_boundary_points(face);
+    if !boundary_3d.is_empty() {
+        let (bu_min, bu_max, bv_min, bv_max) = sphere_uv_range(sphere, &boundary_3d);
+        let u_range = bu_max - bu_min;
+        let v_range = bv_max - bv_min;
+
+        // Sphere is periodic in u with period 2π.
+        // If boundary doesn't cover more than ~half the u period,
+        // the face likely needs the full u range.
+        if u_range > 1.5 * PI {
+            if u_range > 1.9 * PI {
+                u_start = 0.0;
+                u_end = 2.0 * PI;
+            } else {
+                u_start = bu_min;
+                u_end = bu_max;
+            }
+        }
+        // else: boundary doesn't constrain u → keep full [0, 2π]
+
+        // Sphere v range is [0, π]. If boundary doesn't cover most of v,
+        // the face likely needs the full v range.
+        if v_range > 0.5 * PI {
+            if v_range > 0.9 * PI {
+                v_start = 0.0;
+                v_end = PI;
+            } else {
+                v_start = bv_min;
+                v_end = bv_max;
+            }
+        }
+        // else: boundary doesn't constrain v → keep full [0, π]
+    }
+
+    let full_u = (u_end - u_start) > 1.9 * PI;
+
+    // Generate vertices (n_v+1 rows to include both poles)
     for j in 0..=n_v {
         for i in 0..n_u {
             let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
@@ -696,14 +743,15 @@ fn triangulate_sphere_face(face: &Face, sphere: &SphereSurface, params: &Triangu
     // Generate triangles with proper pole handling
     for j in 0..n_v {
         for i in 0..n_u {
-            let i_next = (i + 1) % n_u;
+            let i_next = if full_u { (i + 1) % n_u } else { (i + 1).min(n_u - 1) };
             let v0 = (j * n_u + i) as u32;
             let v1 = (j * n_u + i_next) as u32;
             let v2 = ((j + 1) * n_u + i_next) as u32;
             let v3 = ((j + 1) * n_u + i) as u32;
 
             if j == 0 {
-                // Top cap — degenerate triangles (all v0/v1 share top pole position)
+                // Top cap — all vertices in row 0 are at the north pole
+                // Use a single triangle: pole, next_on_ring, next_next_on_ring
                 if face.forward {
                     mesh.add_triangle(v0, v2, v3);
                 } else {
@@ -732,26 +780,60 @@ fn triangulate_sphere_face(face: &Face, sphere: &SphereSurface, params: &Triangu
 }
 
 /// Triangulate a torus face.
+///
+/// A torus is periodic in both u and v (both have period 2π).
+/// When the boundary edges don't constrain a periodic direction
+/// (i.e. the projected boundary points span less than ~half the period),
+/// we assume the face needs the full period in that direction.
+/// This handles the common case of a full torus with only a single
+/// v-circle boundary edge.
 fn triangulate_torus_face(face: &Face, torus: &TorusSurface, params: &TriangulationParams) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
     let n_u = params.angular_samples;
     let n_v = params.angular_samples;
 
     let boundary_3d = collect_face_boundary_points(face);
-    let (u_start, u_end, v_start, v_end) = if !boundary_3d.is_empty() {
-        let (u_min, u_max, v_min, v_max) = torus_uv_range(torus, &boundary_3d);
-        let u_range = u_max - u_min;
-        let v_range = v_max - v_min;
-        (
-            if u_range > 1.9 * PI { 0.0 } else { u_min },
-            if u_range > 1.9 * PI { 2.0 * PI } else { u_max },
-            if v_range > 1.9 * PI { 0.0 } else { v_min },
-            if v_range > 1.9 * PI { 2.0 * PI } else { v_max },
-        )
-    } else {
-        (0.0, 2.0 * PI, 0.0, 2.0 * PI)
-    };
 
+    // Default: full torus [0, 2π] × [0, 2π]
+    let mut u_start = 0.0_f64;
+    let mut u_end = 2.0 * PI;
+    let mut v_start = 0.0_f64;
+    let mut v_end = 2.0 * PI;
+
+    if !boundary_3d.is_empty() {
+        let (bu_min, bu_max, bv_min, bv_max) = torus_uv_range(torus, &boundary_3d);
+        let u_range = bu_max - bu_min;
+        let v_range = bv_max - bv_min;
+
+        // Torus is periodic in both u and v with period 2π.
+        // If the boundary spans more than ~half the period, it's close to full.
+        // If it spans less, the face likely needs the full period
+        // (the boundary only constrains one parametric direction).
+        if u_range > 1.5 * PI {
+            // Boundary covers most of u — use the computed range
+            if u_range > 1.9 * PI {
+                u_start = 0.0;
+                u_end = 2.0 * PI;
+            } else {
+                u_start = bu_min;
+                u_end = bu_max;
+            }
+        }
+        // else: boundary doesn't constrain u → keep full [0, 2π]
+
+        if v_range > 1.5 * PI {
+            if v_range > 1.9 * PI {
+                v_start = 0.0;
+                v_end = 2.0 * PI;
+            } else {
+                v_start = bv_min;
+                v_end = bv_max;
+            }
+        }
+        // else: boundary doesn't constrain v → keep full [0, 2π]
+    }
+
+    // Generate vertices
     for j in 0..n_v {
         for i in 0..n_u {
             let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
@@ -763,6 +845,7 @@ fn triangulate_torus_face(face: &Face, torus: &TorusSurface, params: &Triangulat
         }
     }
 
+    // Both u and v are periodic for a full torus
     let u_periodic = (u_end - u_start) > 1.9 * PI;
     let v_periodic = (v_end - v_start) > 1.9 * PI;
 
@@ -1347,32 +1430,46 @@ fn triangulate_surface_uv_trimmed(
             // For a cylinder/cone band: if v_range is degenerate, expand it slightly
             // using the 3D bounding box and the surface geometry.
             if outer_v_range < 1e-8 {
-                // Compute a reasonable v range from the 3D bounding box
-                let mut z_min = f64::MAX; let mut z_max = f64::MIN;
-                for p in boundary_points_3d {
-                    // Project onto the surface's v direction
-                    let (_, v) = surface.project_point(p);
-                    z_min = z_min.min(v);
-                    z_max = z_max.max(v);
-                }
-                if z_max - z_min > 1e-8 {
-                    v_min = z_min; v_max = z_max;
+                // For v-periodic surfaces, a degenerate v range means the boundary
+                // doesn't constrain v — use the full v period
+                if let Some(period) = v_period {
+                    v_min = 0.0;
+                    v_max = period;
                 } else {
-                    // Truly degenerate — give it a small range
-                    v_min -= 0.5; v_max += 0.5;
+                    // Compute a reasonable v range from the 3D bounding box
+                    let mut z_min = f64::MAX; let mut z_max = f64::MIN;
+                    for p in boundary_points_3d {
+                        // Project onto the surface's v direction
+                        let (_, v) = surface.project_point(p);
+                        z_min = z_min.min(v);
+                        z_max = z_max.max(v);
+                    }
+                    if z_max - z_min > 1e-8 {
+                        v_min = z_min; v_max = z_max;
+                    } else {
+                        // Truly degenerate — give it a small range
+                        v_min -= 0.5; v_max += 0.5;
+                    }
                 }
             }
             if outer_u_range < 1e-8 {
-                let mut u_min_tmp = f64::MAX; let mut u_max_tmp = f64::MIN;
-                for p in boundary_points_3d {
-                    let (u, _) = surface.project_point(p);
-                    u_min_tmp = u_min_tmp.min(u);
-                    u_max_tmp = u_max_tmp.max(u);
-                }
-                if u_max_tmp - u_min_tmp > 1e-8 {
-                    u_min = u_min_tmp; u_max = u_max_tmp;
+                // For periodic surfaces, a degenerate u range means the boundary
+                // doesn't constrain u — use the full u period
+                if let Some(period) = u_period {
+                    u_min = 0.0;
+                    u_max = period;
                 } else {
-                    u_min -= 0.5; u_max += 0.5;
+                    let mut u_min_tmp = f64::MAX; let mut u_max_tmp = f64::MIN;
+                    for p in boundary_points_3d {
+                        let (u, _) = surface.project_point(p);
+                        u_min_tmp = u_min_tmp.min(u);
+                        u_max_tmp = u_max_tmp.max(u);
+                    }
+                    if u_max_tmp - u_min_tmp > 1e-8 {
+                        u_min = u_min_tmp; u_max = u_max_tmp;
+                    } else {
+                        u_min -= 0.5; u_max += 0.5;
+                    }
                 }
             }
         }
@@ -1432,7 +1529,20 @@ fn triangulate_surface_uv_trimmed(
 
     if inside_count == 0 {
         // No cells inside the polygon — this likely means the boundary projects
-        // to a degenerate shape (a line) in UV space. Fall back to cap face triangulation.
+        // to a degenerate shape (a line) in UV space, or the UV polygon
+        // representation doesn't match the grid (e.g., wrap-around issues).
+        //
+        // For periodic surfaces, the UV polygon might not correctly represent
+        // the face when it wraps around. In this case, fall back to the
+        // surface-type-specific triangulation which handles periodicity better.
+        if u_period.is_some() || v_period.is_some() {
+            // Use the Face-based triangulation path which handles periodicity
+            let wire = Wire::new(vec![]);
+            let mut face = Face::new(surface.clone(), wire);
+            face.forward = forward;
+            face.edges = vec![];
+            return triangulate_face(&face, params);
+        }
         return triangulate_cap_face(surface, boundary_points_3d, forward);
     }
 
