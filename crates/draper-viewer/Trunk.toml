@@ -1,0 +1,18 @@
+# Trunk configuration for 3Draper WASM viewer build
+# https://trunkrs.dev/configuration/
+
+[build]
+# Only build the viewer crate, not the whole workspace.
+# This avoids pulling in draper-cloud (tokio) and draper-testing
+# which have C dependencies that don't compile on wasm32.
+target = "index.html"
+dist = "dist"
+cargo_flags = ["--package", "draper-viewer"]
+
+[watch]
+ignore = ["../../target"]
+
+[serve]
+# Local development server (not used in CI)
+address = "127.0.0.1"
+port = 8080
