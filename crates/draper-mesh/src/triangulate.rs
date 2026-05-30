@@ -973,8 +973,9 @@ fn triangulate_sphere_face(face: &Face, sphere: &SphereSurface, params: &Triangu
                 }
             } else if row_count > 1 && next_row_count > 1 {
                 // Both rows are rings of the same size
-                for i in 0..row_count {
-                    let i_next = if full_u { (i + 1) % row_count } else { (i + 1).min(row_count - 1) };
+                let loop_count = if full_u { row_count } else { row_count - 1 };
+                for i in 0..loop_count {
+                    let i_next = if full_u { (i + 1) % row_count } else { i + 1 };
                     let v0 = row_base + i as u32;
                     let v1 = row_base + i_next as u32;
                     let v2 = next_row_base + i_next as u32;
@@ -1857,36 +1858,40 @@ fn triangulate_surface_uv_trimmed(
     }
 
     // 8. Add boundary vertices and create boundary strip triangles
-    // For each boundary vertex, add it to the mesh and then create
-    // triangles connecting it to its neighbors and the nearest grid vertex
+    // For NURBS surfaces, skip the expensive boundary strip — the UV grid
+    // already provides adequate coverage, and project_point is very slow for NURBS.
+    // Boundary strip is mainly needed for cylinder/cone/torus where the boundary
+    // constrains the face tightly.
+    let is_nurbs = matches!(surface, Surface::Nurbs(_));
+    if is_nurbs {
+        return mesh;
+    }
+
     let n_boundary = boundary_points_3d.len();
     if n_boundary < 3 {
         return mesh;
     }
 
+    // Reuse the already-computed boundary_uv from step 1 instead of re-projecting.
+    // This avoids the expensive project_point call (especially for NURBS/Revolution/Extrusion).
+    let boundary_uv_ref = &boundary_uv;
+
     let boundary_start = mesh.vertices.len() as u32;
     for (idx_3d, p) in boundary_points_3d.iter().enumerate() {
-        let (u, v) = surface.project_point(p);
-        // Use normalized UV for finding nearest grid vertex
-        let mut nu = u;
-        let mut nv = v;
-        // Apply the same normalization as the boundary_uv
-        if let Some(period) = u_period {
-            let threshold_u = (u_min + u_max) * 0.5;
-            if nu > threshold_u + (u_max - u_min) * 0.5 {
-                nu -= period;
-            } else if nu < threshold_u - (u_max - u_min) * 0.5 {
-                nu += period;
-            }
-        }
-        if let Some(period) = v_period {
-            let threshold_v = (v_min + v_max) * 0.5;
-            if nv > threshold_v + (v_max - v_min) * 0.5 {
-                nv -= period;
-            } else if nv < threshold_v - (v_max - v_min) * 0.5 {
-                nv += period;
-            }
-        }
+        // Use the pre-computed boundary UV (already normalized)
+        let (nu, nv) = if idx_3d < boundary_uv_ref.len() {
+            (boundary_uv_ref[idx_3d].u, boundary_uv_ref[idx_3d].v)
+        } else {
+            // Fallback: project the point (shouldn't normally happen)
+            let (u, v) = surface.project_point(p);
+            (u, v)
+        };
+
+        let (u, v) = if idx_3d < boundary_uv_ref.len() {
+            (boundary_uv_ref[idx_3d].u, boundary_uv_ref[idx_3d].v)
+        } else {
+            surface.project_point(p)
+        };
 
         let normal = surface.normal_at(u, v);
         let vidx = mesh.add_vertex(*p);
@@ -1948,7 +1953,13 @@ fn triangulate_plane_with_boundary(
         return mesh;
     }
 
-    let points_2d: Vec<Point2d> = boundary_points.iter().map(|p| {
+    // Deduplicate boundary points — close points create degenerate triangles
+    let deduped_points = deduplicate_points_3d(boundary_points, 1e-6);
+    if deduped_points.len() < 3 {
+        return mesh;
+    }
+
+    let points_2d: Vec<Point2d> = deduped_points.iter().map(|p| {
         let dx = p.x - plane.origin.x;
         let dy = p.y - plane.origin.y;
         let dz = p.z - plane.origin.z;
@@ -1960,12 +1971,12 @@ fn triangulate_plane_with_boundary(
 
     let is_convex = is_convex_polygon(&points_2d);
 
-    if is_convex && boundary_points.len() >= 3 {
+    if is_convex && deduped_points.len() >= 3 {
         // Fan triangulation — N-2 triangles (minimum for convex polygon)
-        for p in boundary_points {
+        for p in &deduped_points {
             mesh.add_vertex(*p);
         }
-        let n = boundary_points.len() as u32;
+        let n = deduped_points.len() as u32;
         for i in 1..n - 1 {
             if forward {
                 mesh.add_triangle(0, i, i + 1);
@@ -1975,7 +1986,7 @@ fn triangulate_plane_with_boundary(
         }
     } else {
         let triangles = ear_clip(&points_2d);
-        for p in boundary_points {
+        for p in &deduped_points {
             mesh.add_vertex(*p);
         }
         for tri in &triangles {
@@ -2332,8 +2343,9 @@ fn triangulate_cone_face_with_boundary(
             }
         } else {
             // Normal quad strip between two ring rows
-            for i in 0..row_count {
-                let i_next = if full_circle { (i + 1) % row_count } else { (i + 1).min(row_count - 1) };
+            let loop_count = if full_circle { row_count } else { row_count - 1 };
+            for i in 0..loop_count {
+                let i_next = if full_circle { (i + 1) % row_count } else { i + 1 };
                 let v0 = row_base + i as u32;
                 let v1 = row_base + i_next as u32;
                 let v2 = next_row_base + i_next as u32;
@@ -2527,8 +2539,9 @@ fn triangulate_sphere_face_with_boundary(
             }
         } else if row_count > 1 && next_row_count > 1 {
             // Normal quad strip between two ring rows
-            for i in 0..row_count {
-                let i_next = if full_u { (i + 1) % row_count } else { (i + 1).min(row_count - 1) };
+            let loop_count = if full_u { row_count } else { row_count - 1 };
+            for i in 0..loop_count {
+                let i_next = if full_u { (i + 1) % row_count } else { i + 1 };
                 let v0 = row_base + i as u32;
                 let v1 = row_base + i_next as u32;
                 let v2 = next_row_base + i_next as u32;
@@ -3033,6 +3046,38 @@ fn snap_boundary_rings(
             }
         }
     }
+}
+
+/// Remove consecutive duplicate points within a tolerance, and also check
+/// that the last point is not coincident with the first (for closed loops).
+fn deduplicate_points_3d(points: &[Point3d], tolerance: f64) -> Vec<Point3d> {
+    if points.is_empty() {
+        return Vec::new();
+    }
+
+    let tol_sq = tolerance * tolerance;
+    let mut unique = vec![points[0]];
+    for p in &points[1..] {
+        let last = unique.last().unwrap();
+        let dx = p.x - last.x;
+        let dy = p.y - last.y;
+        let dz = p.z - last.z;
+        if dx * dx + dy * dy + dz * dz > tol_sq {
+            unique.push(*p);
+        }
+    }
+    // Also check last vs first (closed loop)
+    if unique.len() > 1 {
+        let first = unique[0];
+        let last = unique.last().unwrap();
+        let dx = first.x - last.x;
+        let dy = first.y - last.y;
+        let dz = first.z - last.z;
+        if dx * dx + dy * dy + dz * dz <= tol_sq {
+            unique.pop();
+        }
+    }
+    unique
 }
 
 // ============================================================

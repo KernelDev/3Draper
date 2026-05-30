@@ -5121,4 +5121,62 @@ mod diag_tests {
         eprintln!("END ZENTRALSTAENDER CONE DIAGNOSTIC");
         eprintln!("{}", "=".repeat(80));
     }
+
+    /// Test that convert_instances and convert_detailed_instances produce
+    /// non-empty results for all test STEP files.
+    #[test]
+    fn test_all_files_instance_conversion() {
+        let test_dir = "/home/z/my-project/3Draper_repo/test/";
+        let step_files = [
+            "brick_thin.stp",
+            "brick_thin_hole.stp",
+            "brick_thin_round.stp",
+            "3.05.078.stp",
+            "compressor-13920_top.stp",
+            "drill_top.stp",
+            "transmission_top.stp",
+            "Zentralstaender.stp",
+        ];
+
+        for fname in &step_files {
+            let path = format!("{}{}", test_dir, fname);
+            eprintln!("\n=== Testing instance conversion: {} ===", fname);
+
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(e) => { eprintln!("  ERROR reading: {}", e); continue; }
+            };
+
+            let step = match parse_step(&content) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("  PARSE ERROR: {:?}", e); continue; }
+            };
+
+            // Test convert_instances
+            let converter = StepConverter::new(&step);
+            match converter.convert_instances() {
+                Ok(instances) => {
+                    let total_tris: usize = instances.iter().map(|i| i.mesh.triangle_count()).sum();
+                    eprintln!("  convert_instances: {} instances, {} total tris", instances.len(), total_tris);
+                    if total_tris == 0 {
+                        eprintln!("  ⚠ NO TRIANGLES GENERATED — file may not convert properly!");
+                    }
+                }
+                Err(e) => { eprintln!("  convert_instances ERROR: {}", e); }
+            }
+
+            // Test convert_detailed_instances
+            let converter2 = StepConverter::new(&step);
+            match converter2.convert_detailed_instances() {
+                Ok(instances) => {
+                    let total_tris: usize = instances.iter().map(|i| i.mesh.triangle_count()).sum();
+                    eprintln!("  convert_detailed_instances: {} instances, {} total tris", instances.len(), total_tris);
+                    if total_tris == 0 {
+                        eprintln!("  ⚠ NO TRIANGLES GENERATED — file may not convert properly!");
+                    }
+                }
+                Err(e) => { eprintln!("  convert_detailed_instances ERROR: {}", e); }
+            }
+        }
+    }
 }

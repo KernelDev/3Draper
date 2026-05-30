@@ -685,18 +685,21 @@ impl Surface {
                 (best_u, v)
             }
             Surface::Nurbs(n) => {
-                // Grid-based closest point search using actual knot range
+                // Grid-based closest point search using actual knot range.
+                // Uses progressively finer searches (coarse → medium → fine) for
+                // good accuracy with fewer total evaluations than a single fine grid.
                 let (u_min, u_max) = n.u_range();
                 let (v_min, v_max) = n.v_range();
                 let mut best_u = (u_min + u_max) * 0.5;
                 let mut best_v = (v_min + v_max) * 0.5;
                 let mut best_dist = f64::MAX;
-                // Coarse grid search
-                let steps = 20;
-                for i in 0..=steps {
-                    for j in 0..=steps {
-                        let u = u_min + (u_max - u_min) * i as f64 / steps as f64;
-                        let v = v_min + (v_max - v_min) * j as f64 / steps as f64;
+
+                // Phase 1: Coarse grid (10×10 = 121 evaluations)
+                let coarse = 10;
+                for i in 0..=coarse {
+                    for j in 0..=coarse {
+                        let u = u_min + (u_max - u_min) * i as f64 / coarse as f64;
+                        let v = v_min + (v_max - v_min) * j as f64 / coarse as f64;
                         let p = self.point_at(u, v);
                         let dist = (p.x - point.x).powi(2) + (p.y - point.y).powi(2) + (p.z - point.z).powi(2);
                         if dist < best_dist {
@@ -706,14 +709,39 @@ impl Surface {
                         }
                     }
                 }
-                // Refine with a finer search around the best point
-                let refine_steps = 10;
-                let u_range = (u_max - u_min) / steps as f64;
-                let v_range = (v_max - v_min) / steps as f64;
-                for i in 0..=refine_steps {
-                    for j in 0..=refine_steps {
-                        let u = (best_u - u_range * 0.5 + u_range * i as f64 / refine_steps as f64).clamp(u_min, u_max);
-                        let v = (best_v - v_range * 0.5 + v_range * j as f64 / refine_steps as f64).clamp(v_min, v_max);
+
+                // Phase 2: Medium refinement (8×8 = 81 evaluations around best)
+                let medium = 8;
+                let u_range = (u_max - u_min) / coarse as f64;
+                let v_range = (v_max - v_min) / coarse as f64;
+                let mut med_best_u = best_u;
+                let mut med_best_v = best_v;
+                let mut med_best_dist = best_dist;
+                for i in 0..=medium {
+                    for j in 0..=medium {
+                        let u = (best_u - u_range * 0.5 + u_range * i as f64 / medium as f64).clamp(u_min, u_max);
+                        let v = (best_v - v_range * 0.5 + v_range * j as f64 / medium as f64).clamp(v_min, v_max);
+                        let p = self.point_at(u, v);
+                        let dist = (p.x - point.x).powi(2) + (p.y - point.y).powi(2) + (p.z - point.z).powi(2);
+                        if dist < med_best_dist {
+                            med_best_dist = dist;
+                            med_best_u = u;
+                            med_best_v = v;
+                        }
+                    }
+                }
+                best_u = med_best_u;
+                best_v = med_best_v;
+                best_dist = med_best_dist;
+
+                // Phase 3: Fine refinement (6×6 = 49 evaluations around best)
+                let fine = 6;
+                let u_range2 = u_range / medium as f64;
+                let v_range2 = v_range / medium as f64;
+                for i in 0..=fine {
+                    for j in 0..=fine {
+                        let u = (best_u - u_range2 * 0.5 + u_range2 * i as f64 / fine as f64).clamp(u_min, u_max);
+                        let v = (best_v - v_range2 * 0.5 + v_range2 * j as f64 / fine as f64).clamp(v_min, v_max);
                         let p = self.point_at(u, v);
                         let dist = (p.x - point.x).powi(2) + (p.y - point.y).powi(2) + (p.z - point.z).powi(2);
                         if dist < best_dist {
@@ -723,6 +751,7 @@ impl Surface {
                         }
                     }
                 }
+
                 (best_u, best_v)
             }
         }
