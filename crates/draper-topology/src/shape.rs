@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 KernelDev
 //! Shape storage — efficient storage and indexing of topological entities.
 
 use crate::entity::*;

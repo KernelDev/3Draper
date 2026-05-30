@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 KernelDev
 //! Manifold (watertight) mesh validation.
 //!
 //! Checks that a triangulated mesh forms a proper manifold:

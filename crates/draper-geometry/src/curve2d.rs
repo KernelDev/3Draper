@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 KernelDev
 //! 2D parametric curves in UV parameter space.
 //!
 //! Curve2d represents a curve in the 2D parametric domain of a surface.

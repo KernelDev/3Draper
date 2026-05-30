@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 KernelDev
 //! Edge discretization cache for consistent triangulation.
 //!
 //! Ensures that shared edges between faces produce identical 3D point sequences.

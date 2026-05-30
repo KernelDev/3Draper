@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 KernelDev
 //! Face triangulation — converts B-Rep faces to triangle meshes.
 //!
 //! Design principles:

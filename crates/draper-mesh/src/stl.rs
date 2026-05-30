@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 KernelDev
 //! STL file import and export.
 
 use crate::mesh::TriangleMesh;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 KernelDev
 //! Internal Combustion Engine model using the 3Draper kernel.
 //!
 //! Creates a simplified inline-4 cylinder engine built entirely from

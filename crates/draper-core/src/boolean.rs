@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 KernelDev
 //! Boolean operations — union, subtract, intersection.
 //!
 //! These are simplified implementations. Full boolean operations require:

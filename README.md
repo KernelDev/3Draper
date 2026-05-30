@@ -89,4 +89,12 @@ ISO 10303-21 exchange structure format. The parser handles:
 
 ## License
 
-MIT OR Apache-2.0
+GNU General Public License v3.0 or later (GPL-3.0-or-later)
+
+This project is free software: you can use, study, modify and redistribute it
+under the terms of the **GNU GPLv3+**. Any derivative work — including use in
+commercial products — **must also be released as open source under the same
+license**. This ensures that no one can incorporate this kernel into proprietary
+software without giving back to the community.
+
+See [LICENSE](LICENSE) for the full license text.

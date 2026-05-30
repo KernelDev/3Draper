@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 KernelDev
 //! Topology healing — repair common B-Rep defects.
 //!
 //! Phase 3.1 of the 3Draper roadmap. This module provides configurable

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 KernelDev
 //! STEP-to-mesh converter.
 //!
 //! Converts parsed STEP entities into a triangle mesh by:

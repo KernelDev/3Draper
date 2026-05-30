@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 KernelDev
 //! STEP file exporter (AP203/AP214).
 //!
 //! Exports a B-Rep Solid to a valid STEP file with proper topology:

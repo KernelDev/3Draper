@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 KernelDev
 //! Example: Generate an ICE engine model and export to STL/STEP.
 //!
 //! Run: cargo run --example engine_export

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 KernelDev
 //! 4x4 homogeneous transformation matrix.
 
 use crate::{Direction3d, Point3d, Vec3d};

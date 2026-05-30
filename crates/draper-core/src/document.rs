@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 KernelDev
 //! Document — top-level container for a CAD model.
 
 use draper_topology::{Solid, Compound};

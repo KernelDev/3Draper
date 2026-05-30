@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 KernelDev
 //! Parametric surfaces in 3D space.
 
 use crate::{Direction3d, Point3d, Point2d, Vec3d, Transform, curve::Curve3d};

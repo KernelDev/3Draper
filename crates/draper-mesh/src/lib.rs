@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 KernelDev
 //! # draper-mesh
 //! Mesh generation from B-Rep topology.
 //!

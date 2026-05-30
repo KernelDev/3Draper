@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 KernelDev
 //! Adaptive triangulation — compute required samples from surface curvature and max_deviation.
 //!
 //! Instead of using fixed `angular_samples` and `height_samples` for all surfaces,

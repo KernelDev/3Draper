@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 KernelDev
 //! Tolerance context for geometric computations.
 //! 
 //! Replaces global tolerance constants with a configurable, model-scale-aware context.

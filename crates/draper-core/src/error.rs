@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 KernelDev
 //! Error types for the 3Draper geometric kernel.
 //!
 //! Defines a comprehensive error hierarchy that replaces `unwrap()`/`expect()`

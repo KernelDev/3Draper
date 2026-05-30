@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 KernelDev
 //! # draper-topology
 //! B-Rep (Boundary Representation) topology for the 3Draper kernel.
 //!

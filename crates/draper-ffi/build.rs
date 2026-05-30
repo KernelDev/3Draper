@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 KernelDev
 //! Build script for generating C header file from FFI definitions.
 //! Only generates headers on native targets (not wasm).
 

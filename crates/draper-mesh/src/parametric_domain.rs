@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 KernelDev
 //! Parametric domain representation for trimmed surface triangulation.
 //!
 //! A ParametricDomain represents the 2D region in UV-parameter space

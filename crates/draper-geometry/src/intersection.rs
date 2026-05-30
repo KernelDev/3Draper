@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 KernelDev
 //! Geometric intersection algorithms.
 
 use crate::{Point3d, Direction3d, Vec3d, curve::*, surface::*, tolerance::TOLERANCE};

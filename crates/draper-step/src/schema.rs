@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 KernelDev
 //! STEP schema definitions — entity types and data structures.
 
 use std::collections::HashMap;

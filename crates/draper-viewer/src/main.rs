@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 KernelDev
 //! 3Draper Viewer — high-performance 3D model viewer using egui/wgpu.
 //!
 //! Supports both native and web (wasm32) targets.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 KernelDev
 //! Assembly support — positioning and mating parts.
 
 use draper_geometry::{Point3d, Direction3d, Transform};
