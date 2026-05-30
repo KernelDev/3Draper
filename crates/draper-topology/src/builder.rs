@@ -96,6 +96,10 @@ impl ShapeBuilder {
     /// Create a cylinder along the Z axis.
     /// height: total height along Z
     /// radius: cylinder radius
+    ///
+    /// Uses three faces: bottom disk, top disk, and lateral surface.
+    /// The lateral surface stores bottom and top circle edges so that
+    /// the triangulation can determine the height range.
     pub fn make_cylinder(radius: f64, height: f64) -> Solid {
         let cyl_surface = CylinderSurface::new_z(radius);
         let bottom_center = Point3d::new(0.0, 0.0, 0.0);
@@ -108,14 +112,14 @@ impl ShapeBuilder {
             curve: Some(Curve3d::Circle(bottom_circle)),
             param_range: (0.0, 2.0 * PI),
             vertex_start: None,
-            vertex_end: None, // Closed edge — start == end
+            vertex_end: None,
             forward: true,
             tolerance: 1e-6,
         };
         let bottom_coedge = CoEdge::new(bottom_edge.id, false); // Reversed for bottom (looking from -Z)
         let bottom_wire = Wire::new(vec![bottom_coedge]);
         let mut bottom_face = Face::new(Surface::Plane(Plane::xy()), bottom_wire);
-        bottom_face.edges = vec![bottom_edge];
+        bottom_face.edges = vec![bottom_edge.clone()];
 
         // === Top face (disk) ===
         let top_circle = Circle::new_xy(top_center, radius);
@@ -134,67 +138,15 @@ impl ShapeBuilder {
             Surface::Plane(Plane::from_origin_and_normal(top_center, Direction3d::Z)),
             top_wire,
         );
-        top_face.edges = vec![top_edge];
+        top_face.edges = vec![top_edge.clone()];
 
         // === Lateral face (cylinder surface) ===
-        // Seam edge at u=0 (from bottom to top)
-        let seam_p1 = Point3d::new(radius, 0.0, 0.0);
-        let seam_p2 = Point3d::new(radius, 0.0, height);
-        let seam_distance = seam_p1.distance_to(&seam_p2);
-        let seam_line = Line::through_points(seam_p1, seam_p2).unwrap();
-        let seam_edge = Edge {
-            id: TopoId::new(),
-            curve: Some(Curve3d::Line(seam_line)),
-            param_range: (0.0, seam_distance), // Use actual distance so point_at(1) = p2
-            vertex_start: None,
-            vertex_end: None,
-            forward: true,
-            tolerance: 1e-6,
-        };
-
-        // Bottom arc edge — param_range is angle in radians for Circle::point_at
-        let bottom_arc_edge = Edge {
-            id: TopoId::new(),
-            curve: Some(Curve3d::Circle(Circle::new_xy(bottom_center, radius))),
-            param_range: (0.0, 2.0 * PI),
-            vertex_start: None,
-            vertex_end: None,
-            forward: true,
-            tolerance: 1e-6,
-        };
-
-        // Top arc edge — param_range is angle in radians for Circle::point_at
-        let top_arc_edge = Edge {
-            id: TopoId::new(),
-            curve: Some(Curve3d::Circle(Circle::new_xy(top_center, radius))),
-            param_range: (0.0, 2.0 * PI),
-            vertex_start: None,
-            vertex_end: None,
-            forward: true,
-            tolerance: 1e-6,
-        };
-
-        // Seam edge reversed (from top to bottom)
-        let seam_rev_edge = Edge {
-            id: seam_edge.id, // Same edge, opposite direction
-            curve: seam_edge.curve.clone(),
-            param_range: (seam_distance, 0.0), // Reversed param range
-            vertex_start: seam_edge.vertex_end,
-            vertex_end: seam_edge.vertex_start,
-            forward: false,
-            tolerance: 1e-6,
-        };
-
-        let lateral_coedges = vec![
-            CoEdge::new(seam_edge.id, true),
-            CoEdge::new(top_arc_edge.id, true),
-            CoEdge::new(seam_rev_edge.id, false),
-            CoEdge::new(bottom_arc_edge.id, false),
-        ];
-
-        let lateral_wire = Wire::new(lateral_coedges);
+        // Store bottom and top circle edges so compute_axis_v_range can
+        // determine the height range. Wire is empty — the triangulation
+        // uses the full cylinder path.
+        let lateral_wire = Wire::new(vec![]);
         let mut lateral_face = Face::new(Surface::Cylinder(cyl_surface), lateral_wire);
-        lateral_face.edges = vec![seam_edge, top_arc_edge, seam_rev_edge, bottom_arc_edge];
+        lateral_face.edges = vec![bottom_edge, top_edge];
 
         let shell = Shell::new_closed(vec![bottom_face, top_face, lateral_face]);
         Solid::new(shell)
@@ -208,71 +160,30 @@ impl ShapeBuilder {
     }
 
     /// Create a sphere.
+    ///
+    /// Uses a single face with no boundary edges. The triangulation
+    /// code handles the full sphere via the UV parameterization
+    /// u ∈ [0, 2π], v ∈ [0, π] with proper pole handling.
     pub fn make_sphere(radius: f64) -> Solid {
         let sphere_surface = SphereSurface::new(Point3d::ORIGIN, radius);
 
-        // Sphere has two degenerate vertices at poles
-        let north_pole = Vertex::new(Point3d::new(0.0, 0.0, radius));
-        let south_pole = Vertex::new(Point3d::new(0.0, 0.0, -radius));
+        // Single face — no boundary edges; triangulation uses the full
+        // sphere path which correctly handles pole degeneracy.
+        let wire = Wire::new(vec![]);
+        let face = Face::new(Surface::Sphere(sphere_surface), wire);
 
-        // Simplified: create a single face with two seam edges and two arcs
-        let seam_meridian = Circle {
-            center: Point3d::ORIGIN,
-            normal: Direction3d::Y,
-            radius,
-            x_axis: Direction3d::X,
-        };
-
-        let seam_edge = Edge {
-            id: TopoId::new(),
-            curve: Some(Curve3d::Circle(seam_meridian)),
-            param_range: (0.0, PI),
-            vertex_start: Some(north_pole.id),
-            vertex_end: Some(south_pole.id),
-            forward: true,
-            tolerance: 1e-6,
-        };
-
-        let seam_rev_edge_id = seam_edge.id;
-
-        // Equator
-        let equator = Circle::new_xy(Point3d::ORIGIN, radius);
-        let equator_edge = Edge {
-            id: TopoId::new(),
-            curve: Some(Curve3d::Circle(equator)),
-            param_range: (0.0, 2.0 * PI),
-            vertex_start: None,
-            vertex_end: None,
-            forward: true,
-            tolerance: 1e-6,
-        };
-
-        // Front face (0 <= u <= pi)
-        let front_coedges = vec![
-            CoEdge::new(seam_edge.id, true),
-            CoEdge::new(equator_edge.id, true),
-            CoEdge::new(seam_rev_edge_id, false),
-        ];
-        let front_wire = Wire::new(front_coedges);
-        let mut front_face = Face::new(Surface::Sphere(sphere_surface.clone()), front_wire);
-        front_face.edges = vec![seam_edge.clone(), equator_edge.clone()];
-
-        // Back face (pi <= u <= 2pi) — simplified as another face
-        let back_coedges = vec![
-            CoEdge::new(seam_edge.id, false),
-            CoEdge::new(equator_edge.id, false),
-            CoEdge::new(seam_rev_edge_id, true),
-        ];
-        let back_wire = Wire::new(back_coedges);
-        let mut back_face = Face::new(Surface::Sphere(sphere_surface), back_wire);
-        back_face.edges = vec![seam_edge, equator_edge];
-
-        let shell = Shell::new_closed(vec![front_face, back_face]);
+        let shell = Shell::new_closed(vec![face]);
         Solid::new(shell)
     }
 
     /// Create a cone.
-    pub fn make_cone(radius: f64, height: f64, half_angle: f64) -> Solid {
+    ///
+    /// Uses two faces: bottom disk and lateral cone surface.
+    /// The lateral face stores the bottom circle edge so that
+    /// the triangulation can determine the height range.
+    /// Handles apex degeneracy (all vertices collapse to a single
+    /// point at the apex) via the cone surface parameterization.
+    pub fn make_cone(radius: f64, _height: f64, half_angle: f64) -> Solid {
         let cone_surface = ConeSurface::new_z(radius, half_angle);
 
         // Bottom disk face
@@ -291,21 +202,12 @@ impl ShapeBuilder {
         let mut bottom_face = Face::new(Surface::Plane(Plane::xy()), bottom_wire);
         bottom_face.edges = vec![bottom_edge.clone()];
 
-        // Lateral cone face — seam from base edge to apex
-        let apex = Point3d::new(0.0, 0.0, height);
-        let seam_p1 = Point3d::new(radius, 0.0, 0.0);
-        let seam_distance = seam_p1.distance_to(&apex);
-        let seam_line = Line::through_points(seam_p1, apex).unwrap();
-        let seam_edge = Edge::new(Curve3d::Line(seam_line), (0.0, seam_distance));
-
-        let lateral_coedges = vec![
-            CoEdge::new(seam_edge.id, true),
-            CoEdge::new(bottom_edge.id, true),
-            CoEdge::new(seam_edge.id, false),
-        ];
-        let lateral_wire = Wire::new(lateral_coedges);
+        // Lateral cone face — store bottom circle edge so compute_axis_v_range
+        // can determine the height range. Wire is empty — triangulation uses
+        // the full cone path with apex degeneracy handling.
+        let lateral_wire = Wire::new(vec![]);
         let mut lateral_face = Face::new(Surface::Cone(cone_surface), lateral_wire);
-        lateral_face.edges = vec![seam_edge, bottom_edge];
+        lateral_face.edges = vec![bottom_edge];
 
         let shell = Shell::new_closed(vec![bottom_face, lateral_face]);
         Solid::new(shell)

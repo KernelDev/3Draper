@@ -413,17 +413,13 @@ fn triangulate_cylinder_face(face: &Face, cyl: &CylinderSurface, params: &Triang
     let u_start = if full_circle { 0.0 } else { u_min };
     let u_end = if full_circle { 2.0 * PI } else { u_max };
 
-    // Generate interior grid points (not boundary rings)
     let mut mesh = TriangleMesh::new();
 
-    // Collect edge-projected boundary rings at v_min and v_max
-    let bottom_ring = extract_boundary_ring_at_v(&boundary_3d, cyl, v_min, n_u, full_circle, u_start, u_end);
-    let top_ring = extract_boundary_ring_at_v(&boundary_3d, cyl, v_max, n_u, full_circle, u_start, u_end);
-
-    for j in 0..n_v {
+    // Generate vertices: n_v+1 rows (from v_min to v_max inclusive)
+    for j in 0..=n_v {
         for i in 0..n_u {
             let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
-            let v = v_min + (v_max - v_min) * j as f64 / (n_v - 1).max(1) as f64;
+            let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
             let p = cyl.point_at(u, v);
             let n = cyl.normal_at(u, v);
             let idx = mesh.add_vertex(p);
@@ -432,13 +428,16 @@ fn triangulate_cylinder_face(face: &Face, cyl: &CylinderSurface, params: &Triang
     }
 
     // Snap boundary row vertices to edge curve samples
+    let bottom_ring = extract_boundary_ring_at_v(&boundary_3d, cyl, v_min, n_u, full_circle, u_start, u_end);
+    let top_ring = extract_boundary_ring_at_v(&boundary_3d, cyl, v_max, n_u, full_circle, u_start, u_end);
+
     if !bottom_ring.is_empty() && n_u == bottom_ring.len() {
         for i in 0..n_u {
             mesh.vertices[i] = bottom_ring[i];
         }
     }
     if !top_ring.is_empty() && n_u == top_ring.len() {
-        let offset = (n_v - 1) * n_u;
+        let offset = n_v * n_u;
         for i in 0..n_u {
             mesh.vertices[offset + i] = top_ring[i];
         }
@@ -446,7 +445,7 @@ fn triangulate_cylinder_face(face: &Face, cyl: &CylinderSurface, params: &Triang
 
     // Generate triangles
     let n_u_loop = if full_circle { n_u } else { n_u - 1 };
-    for j in 0..n_v - 1 {
+    for j in 0..n_v {
         for i in 0..n_u_loop {
             let i_next = (i + 1) % n_u;
             let v0 = (j * n_u + i) as u32;
@@ -475,10 +474,11 @@ fn triangulate_cylinder_full(face: &Face, cyl: &CylinderSurface, params: &Triang
     let (v_min, v_max) = compute_axis_v_range(face, &cyl.origin, &cyl.axis);
     let (v_min, v_max) = if v_min < v_max { (v_min, v_max) } else { (0.0, 1.0) };
 
-    for j in 0..n_v {
+    // Generate vertices: n_v+1 rows (from v_min to v_max inclusive)
+    for j in 0..=n_v {
         for i in 0..n_u {
             let u = 2.0 * PI * i as f64 / n_u as f64;
-            let v = v_min + (v_max - v_min) * j as f64 / (n_v - 1).max(1) as f64;
+            let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
             let p = cyl.point_at(u, v);
             let n = cyl.normal_at(u, v);
             let idx = mesh.add_vertex(p);
@@ -486,7 +486,7 @@ fn triangulate_cylinder_full(face: &Face, cyl: &CylinderSurface, params: &Triang
         }
     }
 
-    for j in 0..n_v - 1 {
+    for j in 0..n_v {
         for i in 0..n_u {
             let i_next = (i + 1) % n_u;
             let v0 = (j * n_u + i) as u32;
@@ -573,6 +573,8 @@ fn extract_boundary_ring_at_v(
 ///
 /// A cone is periodic in u with period 2π. When the boundary doesn't
 /// constrain the u direction, we use the full u range [0, 2π].
+/// Handles apex degeneracy: when v_max reaches the apex height, all
+/// vertices in the top row collapse to a single point.
 fn triangulate_cone_face(face: &Face, cone: &ConeSurface, params: &TriangulationParams) -> TriangleMesh {
     let boundary_3d = collect_face_boundary_points(face);
 
@@ -597,12 +599,17 @@ fn triangulate_cone_face(face: &Face, cone: &ConeSurface, params: &Triangulation
     let u_start = if full_circle { 0.0 } else { u_min };
     let u_end = if full_circle { 2.0 * PI } else { u_max };
 
+    // Check if the top row reaches the apex (radius = 0)
+    let apex_v = cone.height();
+    let top_row_at_apex = (v_max - apex_v).abs() < apex_v * 0.01 + 1e-6;
+
     let mut mesh = TriangleMesh::new();
 
-    for j in 0..n_v {
+    // Generate vertices: n_v+1 rows (from v_min to v_max inclusive)
+    for j in 0..=n_v {
         for i in 0..n_u {
             let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
-            let v = v_min + (v_max - v_min) * j as f64 / (n_v - 1).max(1) as f64;
+            let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
             let p = cone.point_at(u, v);
             let n = cone.normal_at(u, v);
             let idx = mesh.add_vertex(p);
@@ -612,23 +619,35 @@ fn triangulate_cone_face(face: &Face, cone: &ConeSurface, params: &Triangulation
 
     // Snap boundary rings to edge curves
     if let Some(ref surface) = face.surface {
-        snap_boundary_rings(&mut mesh, &boundary_3d, surface, n_u, n_v, u_start, u_end, v_min, v_max, full_circle);
+        snap_boundary_rings(&mut mesh, &boundary_3d, surface, n_u, n_v + 1, u_start, u_end, v_min, v_max, full_circle);
     }
 
+    // Generate triangles with apex degeneracy handling
     let n_u_loop = if full_circle { n_u } else { n_u - 1 };
-    for j in 0..n_v - 1 {
+    for j in 0..n_v {
         for i in 0..n_u_loop {
             let i_next = (i + 1) % n_u;
             let v0 = (j * n_u + i) as u32;
             let v1 = (j * n_u + i_next) as u32;
             let v2 = ((j + 1) * n_u + i_next) as u32;
             let v3 = ((j + 1) * n_u + i) as u32;
-            if face.forward {
-                mesh.add_triangle(v0, v1, v2);
-                mesh.add_triangle(v0, v2, v3);
+
+            if top_row_at_apex && j == n_v - 1 {
+                // Apex row — all vertices in row n_v are at the apex.
+                // Only one triangle per sector.
+                if face.forward {
+                    mesh.add_triangle(v0, v1, v2);
+                } else {
+                    mesh.add_triangle(v0, v2, v1);
+                }
             } else {
-                mesh.add_triangle(v0, v2, v1);
-                mesh.add_triangle(v0, v3, v2);
+                if face.forward {
+                    mesh.add_triangle(v0, v1, v2);
+                    mesh.add_triangle(v0, v2, v3);
+                } else {
+                    mesh.add_triangle(v0, v2, v1);
+                    mesh.add_triangle(v0, v3, v2);
+                }
             }
         }
     }
@@ -637,6 +656,11 @@ fn triangulate_cone_face(face: &Face, cone: &ConeSurface, params: &Triangulation
 }
 
 /// Full cone triangulation (no boundary edges).
+///
+/// Handles apex degeneracy: when the top row of vertices reaches the apex,
+/// all vertices collapse to a single point. In that row, we generate only
+/// one triangle per sector (instead of two) to avoid degenerate zero-area
+/// triangles.
 fn triangulate_cone_full(face: &Face, cone: &ConeSurface, params: &TriangulationParams) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
     let n_u = params.angular_samples;
@@ -644,10 +668,15 @@ fn triangulate_cone_full(face: &Face, cone: &ConeSurface, params: &Triangulation
     let (v_min, v_max) = compute_axis_v_range(face, &cone.origin, &cone.axis);
     let (v_min, v_max) = if v_min < v_max { (v_min, v_max) } else { (0.0, cone.height().min(100.0)) };
 
-    for j in 0..n_v {
+    // Check if the top row reaches the apex (radius = 0)
+    let apex_v = cone.height();
+    let top_row_at_apex = (v_max - apex_v).abs() < apex_v * 0.01 + 1e-6;
+
+    // Generate vertices: n_v+1 rows (from v_min to v_max inclusive)
+    for j in 0..=n_v {
         for i in 0..n_u {
             let u = 2.0 * PI * i as f64 / n_u as f64;
-            let v = v_min + (v_max - v_min) * j as f64 / (n_v - 1).max(1) as f64;
+            let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
             let p = cone.point_at(u, v);
             let n = cone.normal_at(u, v);
             let idx = mesh.add_vertex(p);
@@ -655,19 +684,31 @@ fn triangulate_cone_full(face: &Face, cone: &ConeSurface, params: &Triangulation
         }
     }
 
-    for j in 0..n_v - 1 {
+    // Generate triangles with apex degeneracy handling
+    for j in 0..n_v {
         for i in 0..n_u {
             let i_next = (i + 1) % n_u;
             let v0 = (j * n_u + i) as u32;
             let v1 = (j * n_u + i_next) as u32;
             let v2 = ((j + 1) * n_u + i_next) as u32;
             let v3 = ((j + 1) * n_u + i) as u32;
-            if face.forward {
-                mesh.add_triangle(v0, v1, v2);
-                mesh.add_triangle(v0, v2, v3);
+
+            if top_row_at_apex && j == n_v - 1 {
+                // Apex row — all vertices in row n_v are at the apex (same point).
+                // Only one triangle per sector to avoid degenerate triangles.
+                if face.forward {
+                    mesh.add_triangle(v0, v1, v2);
+                } else {
+                    mesh.add_triangle(v0, v2, v1);
+                }
             } else {
-                mesh.add_triangle(v0, v2, v1);
-                mesh.add_triangle(v0, v3, v2);
+                if face.forward {
+                    mesh.add_triangle(v0, v1, v2);
+                    mesh.add_triangle(v0, v2, v3);
+                } else {
+                    mesh.add_triangle(v0, v2, v1);
+                    mesh.add_triangle(v0, v3, v2);
+                }
             }
         }
     }
@@ -2217,6 +2258,8 @@ fn estimate_v_range(face: &Face) -> Option<(f64, f64)> {
 }
 
 /// Compute the v parameter range for axis-based surfaces (Cylinder, Cone).
+/// When the face has no edges (e.g., simplified primitives), falls back
+/// to surface geometry to estimate the v range.
 fn compute_axis_v_range(face: &Face, origin: &Point3d, axis: &Direction3d) -> (f64, f64) {
     let mut v_min = f64::MAX;
     let mut v_max = f64::MIN;
@@ -2256,11 +2299,59 @@ fn compute_axis_v_range(face: &Face, origin: &Point3d, axis: &Direction3d) -> (f
     }
 
     if v_min >= v_max {
-        (0.0, 100.0)
-    } else {
-        let margin = (v_max - v_min) * 0.001;
-        (v_min - margin, v_max + margin)
+        // No edges or wire — use surface geometry to estimate v range
+        // For a cylinder/cone centered at origin along Z axis, v range
+        // corresponds to the height. Use the bounding box of the surface.
+        if let Some(ref surface) = face.surface {
+            match surface {
+                Surface::Cylinder(cyl) => {
+                    // Sample points around the cylinder at various heights
+                    // The origin is the center of the base, axis is the direction
+                    // Try to determine height from the surface's bounding box
+                    // by sampling a circle at v=0 and looking for the top
+                    let base_pt = cyl.point_at(0.0, 0.0);
+                    let v_base = (base_pt.x - origin.x) * axis.x
+                               + (base_pt.y - origin.y) * axis.y
+                               + (base_pt.z - origin.z) * axis.z;
+                    // Sample up to a reasonable height
+                    let test_heights = [0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0];
+                    for &h in &test_heights {
+                        let pt = cyl.point_at(0.0, h);
+                        let v_test = (pt.x - origin.x) * axis.x
+                                   + (pt.y - origin.y) * axis.y
+                                   + (pt.z - origin.z) * axis.z;
+                        v_min = v_min.min(v_base).min(v_test);
+                        v_max = v_max.max(v_base).max(v_test);
+                    }
+                    // For a full cylinder with no edges, use a default height of 1.0
+                    if v_min >= v_max {
+                        return (0.0, 1.0);
+                    }
+                }
+                Surface::Cone(cone) => {
+                    let h = cone.height().min(100.0);
+                    let base_pt = cone.point_at(0.0, 0.0);
+                    let apex_pt = cone.point_at(0.0, h);
+                    let v_base = (base_pt.x - origin.x) * axis.x
+                               + (base_pt.y - origin.y) * axis.y
+                               + (base_pt.z - origin.z) * axis.z;
+                    let v_apex = (apex_pt.x - origin.x) * axis.x
+                               + (apex_pt.y - origin.y) * axis.y
+                               + (apex_pt.z - origin.z) * axis.z;
+                    v_min = v_base.min(v_apex);
+                    v_max = v_base.max(v_apex);
+                }
+                _ => {
+                    return (0.0, 100.0);
+                }
+            }
+        } else {
+            return (0.0, 100.0);
+        }
     }
+
+    let margin = (v_max - v_min) * 0.001;
+    (v_min - margin, v_max + margin)
 }
 
 /// Compute the v (extrusion) parameter range for an extrusion surface.
