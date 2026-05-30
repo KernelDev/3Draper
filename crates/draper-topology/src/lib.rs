@@ -16,6 +16,7 @@ pub mod validation;
 pub mod healing;
 pub mod boolean;
 pub mod queries;
+pub mod operations;
 
 pub use entity::*;
 pub use shape::*;
@@ -33,3 +34,4 @@ pub use queries::{
     solid_moments_of_inertia, InertiaTensor,
     Bvh, BvhNode,
 };
+pub use operations::*;

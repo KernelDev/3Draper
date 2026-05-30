@@ -70,6 +70,56 @@ typedef struct DraperMesh DraperMesh;
 const char *draper_get_last_error(void);
 
 /**
+ * Major version number of the 3Draper library.
+ *
+ * Incremented on incompatible API changes.
+ */
+uint32_t draper_version_major(void);
+
+/**
+ * Minor version number of the 3Draper library.
+ *
+ * Incremented on backwards-compatible additions.
+ */
+uint32_t draper_version_minor(void);
+
+/**
+ * Patch version number of the 3Draper library.
+ *
+ * Incremented on backwards-compatible bug fixes.
+ */
+uint32_t draper_version_patch(void);
+
+/**
+ * Version string in "major.minor.patch" format.
+ *
+ * The returned pointer is valid for the lifetime of the library and must NOT be freed.
+ */
+const char *draper_version_string(void);
+
+/**
+ * Check whether the library supports a named feature.
+ *
+ * Feature names are case-sensitive ASCII strings.  Currently recognised:
+ *
+ * | Feature name        | Meaning                                      |
+ * |---------------------|----------------------------------------------|
+ * | `step_import`       | STEP AP242 file import                       |
+ * | `step_export`       | STEP AP242 file export                       |
+ * | `stl_export`        | STL (ASCII & binary) export                  |
+ * | `gltf_export`       | glTF 2.0 / GLB export                        |
+ * | `obj_export`        | Wavefront OBJ export                         |
+ * | `3mf_export`        | 3MF (3D Manufacturing Format) export         |
+ * | `boolean_ops`       | Boolean union / subtract / intersect         |
+ * | `healing`           | Geometry healing pipeline                    |
+ * | `validation`        | Topology & STEP validation                   |
+ * | `analytical_queries`| Volume, surface area, center of mass, inertia|
+ * | `bvh`               | BVH acceleration for ray / proximity queries |
+ * | `wasm`              | WebAssembly target support                   |
+ */
+bool draper_has_feature(const char *feature);
+
+/**
  * Create a new empty document.
  *
  * Returns a pointer to the new document, or NULL on error.
@@ -199,5 +249,60 @@ enum DraperResult draper_document_export_step(struct DraperDocument *doc, const 
  * Returns 0 if doc is null.
  */
 uint32_t draper_document_solid_count(const struct DraperDocument *doc);
+
+/**
+ * Compute the total volume of all solids in the document.
+ *
+ * Uses the divergence theorem on a triangulated approximation of each solid.
+ * Returns 0.0 if `doc` is null or the document has no solids.
+ */
+double draper_solid_volume(const struct DraperDocument *doc);
+
+/**
+ * Compute the total surface area of all solids in the document.
+ *
+ * Returns 0.0 if `doc` is null or the document has no solids.
+ */
+double draper_solid_surface_area(const struct DraperDocument *doc);
+
+/**
+ * Run topology validation on all solids in the document.
+ *
+ * Returns `DraperResult::Success` if no errors were found,
+ * `DraperResult::TopologyError` if any error-level issues exist.
+ * Detailed issues are stored in the thread-local error message
+ * (accessible via `draper_get_last_error()`).
+ */
+enum DraperResult draper_validate_step(const struct DraperDocument *doc);
+
+/**
+ * Triangulate the document and export to glTF 2.0 (GLB binary).
+ *
+ * Convenience function that triangulates the document and writes
+ * the result to a glTF file in a single call.
+ *
+ * Returns `DraperResult::Success` on success, or an error code on failure.
+ */
+enum DraperResult draper_export_gltf(const struct DraperDocument *doc, const char *path);
+
+/**
+ * Triangulate the document and export to Wavefront OBJ.
+ *
+ * Convenience function that triangulates the document and writes
+ * the result to an OBJ file in a single call.
+ *
+ * Returns `DraperResult::Success` on success, or an error code on failure.
+ */
+enum DraperResult draper_export_obj(const struct DraperDocument *doc, const char *path);
+
+/**
+ * Triangulate the document and export to 3MF (3D Manufacturing Format).
+ *
+ * Convenience function that triangulates the document and writes
+ * the result to a 3MF file in a single call.
+ *
+ * Returns `DraperResult::Success` on success, or an error code on failure.
+ */
+enum DraperResult draper_export_3mf(const struct DraperDocument *doc, const char *path);
 
 #endif  /* DRAPER_H */
