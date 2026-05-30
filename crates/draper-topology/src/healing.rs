@@ -27,7 +27,7 @@
 
 use crate::entity::*;
 use draper_geometry::{
-    Direction3d, Plane, Point3d, Surface, Vec3d,
+    CylinderSurface, Direction3d, Plane, Point3d, Surface, Vec3d,
     ToleranceContext,
 };
 
@@ -61,6 +61,20 @@ pub struct HealingParams {
     /// Whether to stitch collinear edges that share a vertex.
     pub stitch_edges: bool,
 
+    /// Whether to merge coplanar and co-cylindrical faces that share edges.
+    pub merge_faces: bool,
+
+    /// Whether to propagate tolerances through the topological graph.
+    /// When true, tolerance propagation runs as the first step in the
+    /// healing pipeline, ensuring all entities have consistent tolerances
+    /// before subsequent operations.
+    pub propagate_tolerances: bool,
+
+    /// Optional tolerance context from the STEP file or model scale.
+    /// When present, the coincidence tolerance from this context is used
+    /// as a floor for all entity tolerances during propagation.
+    pub tolerance_context: Option<ToleranceContext>,
+
     /// Base geometric tolerance.
     pub tolerance: f64,
 }
@@ -74,6 +88,9 @@ impl Default for HealingParams {
             max_aspect_ratio: 100.0,
             fix_normals: true,
             stitch_edges: true,
+            merge_faces: true,
+            propagate_tolerances: true,
+            tolerance_context: None,
             tolerance: 1e-6,
         }
     }
@@ -85,6 +102,7 @@ impl HealingParams {
         Self {
             tolerance: ctx.coincidence_tolerance(),
             min_face_area: ctx.coincidence_tolerance().powi(2),
+            tolerance_context: Some(ctx.clone()),
             ..Self::default()
         }
     }
@@ -116,6 +134,10 @@ pub struct HealingReport {
     pub degenerate_edges_marked: u32,
     /// Number of sliver triangles detected (mesh-level).
     pub sliver_triangles_detected: u32,
+    /// Number of face pairs merged (coplanar or co-cylindrical).
+    pub faces_merged: u32,
+    /// Number of entities whose tolerance was increased during propagation.
+    pub tolerances_propagated: u32,
     /// Human-readable messages describing each operation.
     pub messages: Vec<String>,
 }
@@ -129,6 +151,8 @@ impl HealingReport {
             + self.normals_fixed
             + self.small_faces_removed
             + self.degenerate_edges_marked
+            + self.faces_merged
+            + self.tolerances_propagated
     }
 
     fn add_msg(&mut self, msg: impl Into<String>) {
@@ -179,15 +203,23 @@ pub fn heal_solid(solid: &Solid, params: &HealingParams) -> (Solid, HealingRepor
 /// Heal a shell using the given parameters.
 ///
 /// Applies the healing pipeline in a specific order:
+/// 0. Propagate tolerances (3.1.7)
 /// 1. Mark degenerate edges
 /// 2. Close gaps between boundary edges
 /// 3. Fill small holes
 /// 4. Stitch collinear edges
-/// 5. Remove small-feature faces
-/// 6. Fix normal orientation (for closed shells)
+/// 5. Merge coplanar/co-cylindrical faces (3.1.5)
+/// 6. Remove small-feature faces
+/// 7. Fix normal orientation (for closed shells)
 pub fn heal_shell(shell: &Shell, params: &HealingParams) -> (Shell, HealingReport) {
     let mut report = HealingReport::default();
     let mut shell = shell.clone();
+
+    // 0. Propagate tolerances (must run first — correct tolerances are
+    //    needed for all subsequent operations)
+    if params.propagate_tolerances {
+        propagate_tolerances(&mut shell, params, &mut report);
+    }
 
     // 1. Mark degenerate edges
     mark_degenerate_edges(&mut shell, params, &mut report);
@@ -203,10 +235,15 @@ pub fn heal_shell(shell: &Shell, params: &HealingParams) -> (Shell, HealingRepor
         stitch_collinear_edges(&mut shell, params, &mut report);
     }
 
-    // 5. Remove small-feature faces
+    // 5. Merge coplanar and co-cylindrical faces
+    if params.merge_faces {
+        merge_faces(&mut shell, params, &mut report);
+    }
+
+    // 6. Remove small-feature faces
     remove_small_features(&mut shell, params, &mut report);
 
-    // 6. Fix normal orientation for closed shells
+    // 7. Fix normal orientation for closed shells
     if params.fix_normals && shell.closed {
         fix_normal_orientation(&mut shell, params, &mut report);
     }
@@ -217,6 +254,152 @@ pub fn heal_shell(shell: &Shell, params: &HealingParams) -> (Shell, HealingRepor
 // ============================================================
 // Internal healing operations
 // ============================================================
+
+/// Propagate tolerances through the topological graph (3.1.7).
+///
+/// Ensures tolerance consistency across the B-Rep hierarchy:
+///
+/// 1. **Downward propagation**: If a `ToleranceContext` is provided, all
+///    entities are guaranteed to have at least the `coincidence_tolerance()`
+///    from the context. This is important when STEP files specify global
+///    tolerances that should override individual entity tolerances.
+///
+/// 2. **Vertex → Edge**: An edge's tolerance must be at least the maximum
+///    of its vertex tolerances. If either vertex has a larger tolerance,
+///    the edge's tolerance is increased to match.
+///
+/// 3. **Edge → Face**: A face's tolerance must be at least the maximum
+///    of its edge tolerances. If any edge has a larger tolerance, the
+///    face's tolerance is increased to match.
+///
+/// 4. **Face → Shell**: The shell's effective tolerance is the maximum
+///    of all its face tolerances. (This is informational; shells don't
+///    have a tolerance field, so we report it.)
+fn propagate_tolerances(shell: &mut Shell, params: &HealingParams, report: &mut HealingReport) {
+    let mut count = 0u32;
+
+    // Determine the floor tolerance from ToleranceContext (downward propagation)
+    let floor_tol = params
+        .tolerance_context
+        .as_ref()
+        .map(|ctx| ctx.coincidence_tolerance())
+        .unwrap_or(0.0);
+
+    // Build a map of vertex ID → tolerance so we can look up vertex
+    // tolerances when processing edges.
+    // Vertices are stored as TopoId references in edges (vertex_start, vertex_end),
+    // but the actual Vertex objects live inside the face.edges[].vertex_start/vertex_end
+    // which are just IDs. We need to find the vertex point to reconstruct tolerances.
+    //
+    // Since vertices are not stored as standalone objects in our entity model
+    // (they're implicit in edges), we track vertex tolerances via a HashMap.
+    // The vertex tolerance is initialized from the floor or from the edge's
+    // starting tolerance — but since we don't have explicit Vertex objects in
+    // the shell, we use a simpler approach:
+    // - For downward propagation: apply floor tolerance to edges and faces
+    // - For upward propagation: edges inherit max of their vertex-related
+    //   tolerances (estimated from the edge's own geometry), faces inherit
+    //   from edges.
+
+    // Phase 1: Apply floor tolerance to all edges and faces (downward propagation)
+    if floor_tol > 0.0 {
+        for face in &mut shell.faces {
+            // Apply floor to edges
+            for edge in &mut face.edges {
+                if edge.tolerance < floor_tol {
+                    edge.tolerance = floor_tol;
+                    count += 1;
+                }
+            }
+            // Apply floor to face
+            if face.tolerance < floor_tol {
+                face.tolerance = floor_tol;
+                count += 1;
+            }
+        }
+    }
+
+    // Phase 2: Vertex → Edge propagation
+    // Since vertices are stored as TopoId references (not inline objects),
+    // we collect vertex tolerances by building a map from vertex ID to
+    // the maximum tolerance seen at that vertex across all edges.
+    //
+    // In our entity model, Edge has vertex_start: Option<TopoId> and
+    // vertex_end: Option<TopoId>, but Vertex objects with their own
+    // tolerance are not directly stored in the Shell. Instead, the
+    // vertex tolerance is implicitly derived from the edge's tolerance.
+    //
+    // For a complete implementation, we collect the max edge tolerance
+    // associated with each vertex, then propagate that back to edges
+    // that share the vertex.
+    let mut vertex_max_tol: std::collections::HashMap<TopoId, f64> =
+        std::collections::HashMap::new();
+
+    // First pass: collect the maximum tolerance for each vertex
+    for face in &shell.faces {
+        for edge in &face.edges {
+            if let Some(vid) = edge.vertex_start {
+                let entry = vertex_max_tol.entry(vid).or_insert(0.0);
+                *entry = (*entry).max(edge.tolerance);
+            }
+            if let Some(vid) = edge.vertex_end {
+                let entry = vertex_max_tol.entry(vid).or_insert(0.0);
+                *entry = (*entry).max(edge.tolerance);
+            }
+        }
+    }
+
+    // Second pass: propagate vertex tolerances upward to edges
+    for face in &mut shell.faces {
+        for edge in &mut face.edges {
+            let mut max_vertex_tol = 0.0f64;
+            if let Some(vid) = edge.vertex_start {
+                if let Some(&tol) = vertex_max_tol.get(&vid) {
+                    max_vertex_tol = max_vertex_tol.max(tol);
+                }
+            }
+            if let Some(vid) = edge.vertex_end {
+                if let Some(&tol) = vertex_max_tol.get(&vid) {
+                    max_vertex_tol = max_vertex_tol.max(tol);
+                }
+            }
+            if max_vertex_tol > edge.tolerance {
+                edge.tolerance = max_vertex_tol;
+                count += 1;
+            }
+        }
+    }
+
+    // Phase 3: Edge → Face propagation
+    for face in &mut shell.faces {
+        let max_edge_tol = face
+            .edges
+            .iter()
+            .map(|e| e.tolerance)
+            .fold(0.0f64, f64::max);
+        if max_edge_tol > face.tolerance {
+            face.tolerance = max_edge_tol;
+            count += 1;
+        }
+    }
+
+    // Phase 4: Face → Shell (informational)
+    // Shell doesn't have a tolerance field, but we report the max face
+    // tolerance in the report messages for debugging.
+    let max_face_tol = shell
+        .faces
+        .iter()
+        .map(|f| f.tolerance)
+        .fold(0.0f64, f64::max);
+
+    if count > 0 {
+        report.tolerances_propagated = count;
+        report.add_msg(format!(
+            "Propagated tolerances: {} entities updated, shell max tolerance = {:.2e}",
+            count, max_face_tol
+        ));
+    }
+}
 
 /// Mark degenerate edges (zero-length or degenerate curves).
 fn mark_degenerate_edges(shell: &mut Shell, params: &HealingParams, report: &mut HealingReport) {
@@ -488,6 +671,437 @@ fn stitch_collinear_edges(shell: &mut Shell, params: &HealingParams, report: &mu
         report.edges_stitched = stitch_count;
         report.add_msg(format!("Stitched {} collinear edge pairs", stitch_count));
     }
+}
+
+/// Merge coplanar and co-cylindrical faces that share edges.
+///
+/// When two faces share one or more edges and lie on geometrically
+/// compatible surfaces (same plane or same cylinder within tolerance),
+/// they are merged into a single face with a combined wire.
+///
+/// # Algorithm
+///
+/// 1. Build a map from edge ID → face indices to find face pairs sharing edges.
+/// 2. For each pair of adjacent faces, check surface compatibility.
+/// 3. For compatible pairs, reconstruct the merged boundary by removing
+///    shared edges and re-connecting the remaining edges.
+/// 4. Replace both original faces with the merged face.
+fn merge_faces(shell: &mut Shell, params: &HealingParams, report: &mut HealingReport) {
+    let tol = params.tolerance;
+    let angular_tol = 1e-6; // radians (~0.00006°)
+
+    // Iteratively merge face pairs until no more merges are possible.
+    // Each iteration may enable new merges (transitive merging).
+    let mut total_merged = 0u32;
+    loop {
+        let merged_this_pass = merge_one_pass(shell, tol, angular_tol);
+        if merged_this_pass == 0 {
+            break;
+        }
+        total_merged += merged_this_pass;
+    }
+
+    if total_merged > 0 {
+        report.faces_merged = total_merged;
+        report.add_msg(format!("Merged {} face pairs", total_merged));
+    }
+}
+
+/// Perform one pass of face merging. Returns the number of merges performed.
+fn merge_one_pass(shell: &mut Shell, tol: f64, angular_tol: f64) -> u32 {
+    let n = shell.faces.len();
+    if n < 2 {
+        return 0;
+    }
+
+    // Build a map: edge_id → set of face indices that use this edge in their coedges
+    let mut edge_to_faces: std::collections::HashMap<TopoId, std::collections::HashSet<usize>> =
+        std::collections::HashMap::new();
+    for (fi, face) in shell.faces.iter().enumerate() {
+        let coedge_edge_ids = face_coedge_edge_ids(face);
+        for eid in coedge_edge_ids {
+            edge_to_faces.entry(eid).or_default().insert(fi);
+        }
+    }
+
+    // Build face adjacency: find pairs of faces sharing at least one edge
+    let mut adjacent_pairs: std::collections::HashSet<(usize, usize)> =
+        std::collections::HashSet::new();
+    for face_set in edge_to_faces.values() {
+        let face_vec: Vec<usize> = face_set.iter().copied().collect();
+        for i in 0..face_vec.len() {
+            for j in (i + 1)..face_vec.len() {
+                let a = face_vec[i].min(face_vec[j]);
+                let b = face_vec[i].max(face_vec[j]);
+                adjacent_pairs.insert((a, b));
+            }
+        }
+    }
+
+    // Check each adjacent pair for surface compatibility and merge
+    let mut faces_to_remove: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut new_faces: Vec<Face> = Vec::new();
+    let mut merge_count = 0u32;
+
+    for (fi, fj) in &adjacent_pairs {
+        if faces_to_remove.contains(fi) || faces_to_remove.contains(fj) {
+            continue;
+        }
+
+        let face_a = &shell.faces[*fi];
+        let face_b = &shell.faces[*fj];
+
+        // Check surface compatibility
+        if !are_surfaces_compatible(&face_a.surface, &face_b.surface, tol, angular_tol) {
+            continue;
+        }
+
+        // Find shared edge IDs
+        let edges_a = face_coedge_edge_ids(face_a);
+        let edges_b = face_coedge_edge_ids(face_b);
+        let set_a: std::collections::HashSet<TopoId> = edges_a.iter().copied().collect();
+        let set_b: std::collections::HashSet<TopoId> = edges_b.iter().copied().collect();
+        let shared: std::collections::HashSet<TopoId> =
+            set_a.intersection(&set_b).copied().collect();
+
+        if shared.is_empty() {
+            continue;
+        }
+
+        // Merge the two faces
+        if let Some(merged_face) = merge_two_faces(face_a, face_b, &shared, tol) {
+            faces_to_remove.insert(*fi);
+            faces_to_remove.insert(*fj);
+            new_faces.push(merged_face);
+            merge_count += 1;
+        }
+    }
+
+    // Apply: remove merged faces and add new ones
+    if merge_count > 0 {
+        let mut sorted_remove: Vec<usize> = faces_to_remove.iter().copied().collect();
+        sorted_remove.sort_unstable();
+        for &idx in sorted_remove.iter().rev() {
+            shell.faces.remove(idx);
+        }
+        shell.faces.extend(new_faces);
+    }
+
+    merge_count
+}
+
+/// Collect all edge IDs referenced by coedges in a face (outer + inner wires).
+fn face_coedge_edge_ids(face: &Face) -> Vec<TopoId> {
+    let mut ids = Vec::new();
+    if let Some(ref wire) = face.outer_wire {
+        for coedge in &wire.coedges {
+            ids.push(coedge.edge);
+        }
+    }
+    for wire in &face.inner_wires {
+        for coedge in &wire.coedges {
+            ids.push(coedge.edge);
+        }
+    }
+    ids
+}
+
+/// Check whether two surfaces are compatible for merging.
+///
+/// Two surfaces are compatible if:
+/// - Both are Planes with the same normal (within angular tolerance) and
+///   same origin distance from the plane (within tolerance).
+/// - Both are Cylinders with the same axis, radius, and origin (within tolerance).
+fn are_surfaces_compatible(
+    surf_a: &Option<Surface>,
+    surf_b: &Option<Surface>,
+    tol: f64,
+    angular_tol: f64,
+) -> bool {
+    let (sa, sb) = match (surf_a, surf_b) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return false,
+    };
+
+    match (sa, sb) {
+        (Surface::Plane(pa), Surface::Plane(pb)) => are_planes_compatible(pa, pb, tol, angular_tol),
+        (Surface::Cylinder(ca), Surface::Cylinder(cb)) => {
+            are_cylinders_compatible(ca, cb, tol, angular_tol)
+        }
+        _ => false,
+    }
+}
+
+/// Check whether two planes are compatible for merging.
+///
+/// Two planes are compatible if their normals are parallel (within angular
+/// tolerance) and their origin distances from the common plane are the same
+/// (within tolerance). This handles both same-side and opposite-side normals
+/// (a face with `forward = false` has its effective normal flipped).
+fn are_planes_compatible(a: &Plane, b: &Plane, tol: f64, angular_tol: f64) -> bool {
+    // Check if normals are parallel (same or opposite direction)
+    let dot = a.normal.dot(&b.normal);
+    let angle = dot.acos().abs();
+    if angle > angular_tol && (std::f64::consts::PI - angle).abs() > angular_tol {
+        return false;
+    }
+
+    // Check if planes are coplanar: distance from b.origin to plane a
+    let dx = b.origin.x - a.origin.x;
+    let dy = b.origin.y - a.origin.y;
+    let dz = b.origin.z - a.origin.z;
+    let dist = dx * a.normal.x + dy * a.normal.y + dz * a.normal.z;
+    dist.abs() < tol
+}
+
+/// Check whether two cylinders are compatible for merging.
+///
+/// Two cylinders are compatible if their axes are parallel, radii match,
+/// and their origins project to the same point on the shared axis
+/// (within tolerance).
+fn are_cylinders_compatible(
+    a: &CylinderSurface,
+    b: &CylinderSurface,
+    tol: f64,
+    angular_tol: f64,
+) -> bool {
+    // Check radii match
+    if (a.radius - b.radius).abs() > tol {
+        return false;
+    }
+
+    // Check axes are parallel
+    let dot = a.axis.dot(&b.axis);
+    let angle = dot.acos().abs();
+    if angle > angular_tol && (std::f64::consts::PI - angle).abs() > angular_tol {
+        return false;
+    }
+
+    // Check that origins project to the same point on the shared axis.
+    // Project b.origin onto a's axis and check distance.
+    let dx = b.origin.x - a.origin.x;
+    let dy = b.origin.y - a.origin.y;
+    let dz = b.origin.z - a.origin.z;
+    let along_axis = dx * a.axis.x + dy * a.axis.y + dz * a.axis.z;
+    let perp_x = dx - along_axis * a.axis.x;
+    let perp_y = dy - along_axis * a.axis.y;
+    let perp_z = dz - along_axis * a.axis.z;
+    let perp_dist_sq = perp_x * perp_x + perp_y * perp_y + perp_z * perp_z;
+    perp_dist_sq < tol * tol
+}
+
+/// Merge two faces that share edges and have compatible surfaces.
+///
+/// The merged face:
+/// - Uses the surface from `face_a`
+/// - Has a combined outer wire formed by removing shared edges and
+///   reconnecting the remaining edges
+/// - Preserves all inner wires (holes) from both faces
+fn merge_two_faces(
+    face_a: &Face,
+    face_b: &Face,
+    shared_edge_ids: &std::collections::HashSet<TopoId>,
+    tol: f64,
+) -> Option<Face> {
+    // Collect coedges from both faces, marking which are shared
+    // We need to walk the boundary and skip shared edges
+    let coedges_a = face_coedges_with_forward(face_a);
+    let coedges_b = face_coedges_with_forward(face_b);
+
+    // Collect edge geometry from both faces
+    let mut all_edges: std::collections::HashMap<TopoId, Edge> = std::collections::HashMap::new();
+    for edge in &face_a.edges {
+        all_edges.entry(edge.id).or_insert_with(|| edge.clone());
+    }
+    for edge in &face_b.edges {
+        all_edges.entry(edge.id).or_insert_with(|| edge.clone());
+    }
+
+    // Build the combined outer wire:
+    // Non-shared coedges from both faces form the new boundary.
+    // We need to order them correctly by connecting end-to-start.
+    let mut non_shared_coedges: Vec<(TopoId, bool)> = Vec::new(); // (edge_id, forward)
+
+    for (edge_id, forward) in &coedges_a {
+        if !shared_edge_ids.contains(edge_id) {
+            non_shared_coedges.push((*edge_id, *forward));
+        }
+    }
+    for (edge_id, forward) in &coedges_b {
+        if !shared_edge_ids.contains(edge_id) {
+            // If face_b has opposite orientation from face_a, we may need to
+            // flip the coedge direction for the merged face.
+            // The merged face uses face_a's surface orientation.
+            // If face_b.forward != face_a.forward, we need to flip face_b's coedges.
+            let effective_forward = if face_a.forward != face_b.forward {
+                !*forward
+            } else {
+                *forward
+            };
+            non_shared_coedges.push((*edge_id, effective_forward));
+        }
+    }
+
+    // Now we need to order these coedges to form a proper wire.
+    // Build a graph of edge connectivity and walk the boundary.
+    let ordered_coedges = order_coedges_into_wire(&non_shared_coedges, &all_edges, tol)?;
+
+    // Collect all edges needed by the merged face
+    let mut merged_edge_list: Vec<Edge> = Vec::new();
+    for (edge_id, _forward) in &ordered_coedges {
+        if let Some(edge) = all_edges.remove(edge_id) {
+            merged_edge_list.push(edge);
+        }
+    }
+
+    // Build the wire
+    let wire_coedges: Vec<CoEdge> = ordered_coedges
+        .iter()
+        .map(|(edge_id, forward)| CoEdge::new(*edge_id, *forward))
+        .collect();
+    let mut outer_wire = Wire::new(wire_coedges);
+    outer_wire.closed = true;
+
+    // Build inner wires from both faces (preserve holes)
+    let mut inner_wires: Vec<Wire> = Vec::new();
+    inner_wires.extend(face_a.inner_wires.clone());
+    inner_wires.extend(face_b.inner_wires.clone());
+
+    // Create merged face
+    let mut merged_face = Face::new(
+        face_a.surface.clone().unwrap_or(Surface::Plane(Plane::xy())),
+        outer_wire,
+    );
+    merged_face.forward = face_a.forward;
+    merged_face.edges = merged_edge_list;
+    merged_face.inner_wires = inner_wires;
+
+    Some(merged_face)
+}
+
+/// Get the list of (edge_id, forward) for coedges in the outer wire of a face.
+fn face_coedges_with_forward(face: &Face) -> Vec<(TopoId, bool)> {
+    let mut result = Vec::new();
+    if let Some(ref wire) = face.outer_wire {
+        for coedge in &wire.coedges {
+            result.push((coedge.edge, coedge.forward));
+        }
+    }
+    result
+}
+
+/// Order a set of coedges into a proper wire by connecting end-to-start.
+///
+/// Each coedge represents an edge with an orientation. When `forward` is true,
+/// the edge goes from start_point to end_point. When false, it's reversed.
+///
+/// We walk from one coedge to the next by matching the end point of the
+/// current coedge with the start point of the next.
+fn order_coedges_into_wire(
+    coedges: &[(TopoId, bool)],
+    edge_map: &std::collections::HashMap<TopoId, Edge>,
+    tol: f64,
+) -> Option<Vec<(TopoId, bool)>> {
+    if coedges.is_empty() {
+        return Some(Vec::new());
+    }
+    if coedges.len() == 1 {
+        return Some(coedges.to_vec());
+    }
+
+    let tol_sq = tol * tol;
+
+    // For each coedge, compute its start and end points considering orientation
+    let mut start_pts: Vec<Point3d> = Vec::with_capacity(coedges.len());
+    let mut end_pts: Vec<Point3d> = Vec::with_capacity(coedges.len());
+
+    for (edge_id, forward) in coedges {
+        let edge = edge_map.get(edge_id)?;
+        let (sp, ep) = if let (Some(s), Some(e)) = (edge.start_point(), edge.end_point()) {
+            (s, e)
+        } else {
+            return None;
+        };
+        if *forward {
+            start_pts.push(sp);
+            end_pts.push(ep);
+        } else {
+            start_pts.push(ep);
+            end_pts.push(sp);
+        }
+    }
+
+    // Build adjacency: for each coedge end, find which coedge starts there
+    // Use grid snapping for robustness
+    let snap = |p: &Point3d| -> (i64, i64, i64) {
+        let scale = 1.0 / tol;
+        (
+            (p.x * scale).round() as i64,
+            (p.y * scale).round() as i64,
+            (p.z * scale).round() as i64,
+        )
+    };
+
+    let mut end_to_next: std::collections::HashMap<(i64, i64, i64), Vec<usize>> =
+        std::collections::HashMap::new();
+    for i in 0..coedges.len() {
+        let key = snap(&start_pts[i]);
+        end_to_next.entry(key).or_default().push(i);
+    }
+
+    // Walk the wire starting from coedge 0
+    let mut ordered = Vec::with_capacity(coedges.len());
+    let mut visited = vec![false; coedges.len()];
+    let mut current = 0;
+
+    for _ in 0..coedges.len() {
+        if visited[current] {
+            // Cycle detected before visiting all coedges — disconnected graph
+            break;
+        }
+        visited[current] = true;
+        ordered.push((coedges[current].0, coedges[current].1));
+
+        // Find next coedge whose start matches our end
+        let end_key = snap(&end_pts[current]);
+        let candidates = end_to_next.get(&end_key).cloned().unwrap_or_default();
+
+        let mut found = false;
+        for next_idx in &candidates {
+            if !visited[*next_idx] {
+                // Verify proximity
+                if end_pts[current].distance_sq_to(&start_pts[*next_idx]) < tol_sq {
+                    current = *next_idx;
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        if !found {
+            // Try to find any unvisited coedge whose start is close to our end
+            for i in 0..coedges.len() {
+                if !visited[i] && end_pts[current].distance_sq_to(&start_pts[i]) < tol_sq {
+                    current = i;
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        if !found {
+            // Can't connect — just add remaining unvisited coedges
+            for i in 0..coedges.len() {
+                if !visited[i] {
+                    ordered.push((coedges[i].0, coedges[i].1));
+                    visited[i] = true;
+                }
+            }
+            break;
+        }
+    }
+
+    Some(ordered)
 }
 
 /// Remove faces with area below `min_face_area`.
@@ -997,6 +1611,8 @@ fn merge_report(target: &mut HealingReport, source: &HealingReport) {
     target.small_faces_removed += source.small_faces_removed;
     target.degenerate_edges_marked += source.degenerate_edges_marked;
     target.sliver_triangles_detected += source.sliver_triangles_detected;
+    target.faces_merged += source.faces_merged;
+    target.tolerances_propagated += source.tolerances_propagated;
     target.messages.extend(source.messages.iter().cloned());
 }
 
@@ -1127,9 +1743,11 @@ mod tests {
             small_faces_removed: 1,
             degenerate_edges_marked: 4,
             sliver_triangles_detected: 0,
+            faces_merged: 0,
+            tolerances_propagated: 2,
             messages: Vec::new(),
         };
-        assert_eq!(report.total_fixes(), 11);
+        assert_eq!(report.total_fixes(), 13);
     }
 
     /// Test triangle_aspect_ratio for an equilateral triangle.
@@ -1398,5 +2016,451 @@ mod tests {
         if let Some(ref shell) = healed.outer_shell {
             assert_eq!(shell.faces.len(), 6);
         }
+    }
+
+    /// Test that two coplanar faces sharing an edge are merged into one.
+    ///
+    /// Creates two rectangles on the XY plane that share an edge,
+    /// then verifies that face merging combines them.
+    #[test]
+    fn test_merge_coplanar_faces() {
+        // Face A: rectangle (0,0)-(2,1) on XY plane
+        //   vertices: (0,0,0), (2,0,0), (2,1,0), (0,1,0)
+        let e_a0 = Edge::new_line(Point3d::new(0.0, 0.0, 0.0), Point3d::new(2.0, 0.0, 0.0));
+        let e_a1 = Edge::new_line(Point3d::new(2.0, 0.0, 0.0), Point3d::new(2.0, 1.0, 0.0));
+        // Shared edge: from (2,0,0) to (2,1,0) — but face A uses it forward
+        let e_shared = Edge::new_line(Point3d::new(2.0, 0.0, 0.0), Point3d::new(2.0, 1.0, 0.0));
+        let e_a3 = Edge::new_line(Point3d::new(2.0, 1.0, 0.0), Point3d::new(0.0, 1.0, 0.0));
+        let e_a4 = Edge::new_line(Point3d::new(0.0, 1.0, 0.0), Point3d::new(0.0, 0.0, 0.0));
+
+        let coedges_a = vec![
+            CoEdge::new(e_a0.id, true),
+            CoEdge::new(e_shared.id, true),
+            CoEdge::new(e_a3.id, true),
+            CoEdge::new(e_a4.id, true),
+        ];
+        let wire_a = Wire::new(coedges_a);
+        let plane = Plane::from_origin_and_normal(Point3d::new(0.0, 0.0, 0.0), Direction3d::Z);
+        let mut face_a = Face::new(Surface::Plane(plane), wire_a);
+        face_a.edges = vec![e_a0, e_a1.clone(), e_shared.clone(), e_a3, e_a4];
+
+        // Face B: rectangle (2,0)-(4,1) on XY plane
+        //   vertices: (2,0,0), (4,0,0), (4,1,0), (2,1,0)
+        let e_b0 = Edge::new_line(Point3d::new(2.0, 0.0, 0.0), Point3d::new(4.0, 0.0, 0.0));
+        let e_b1 = Edge::new_line(Point3d::new(4.0, 0.0, 0.0), Point3d::new(4.0, 1.0, 0.0));
+        let e_b2 = Edge::new_line(Point3d::new(4.0, 1.0, 0.0), Point3d::new(2.0, 1.0, 0.0));
+        // Face B uses the shared edge in reverse direction (from (2,1,0) to (2,0,0))
+        let coedges_b = vec![
+            CoEdge::new(e_shared.id, false),
+            CoEdge::new(e_b0.id, true),
+            CoEdge::new(e_b1.id, true),
+            CoEdge::new(e_b2.id, true),
+        ];
+        let wire_b = Wire::new(coedges_b);
+        let plane_b = Plane::from_origin_and_normal(Point3d::new(2.0, 0.0, 0.0), Direction3d::Z);
+        let mut face_b = Face::new(Surface::Plane(plane_b), wire_b);
+        face_b.edges = vec![e_shared, e_b0, e_b1, e_b2];
+
+        let shell = Shell::new(vec![face_a, face_b]);
+
+        let params = HealingParams {
+            fix_normals: false,
+            stitch_edges: false,
+            merge_faces: true,
+            ..HealingParams::default()
+        };
+
+        let (healed, report) = heal_shell(&shell, &params);
+
+        assert!(report.faces_merged >= 1, "Expected at least 1 face pair merged, got {}", report.faces_merged);
+        assert_eq!(healed.faces.len(), 1, "Expected 1 face after merging, got {}", healed.faces.len());
+
+        // The merged face should have 6 edges (4 outer boundary + 2 from the L-shape)
+        // Actually: the merged L-shape has 6 boundary edges after removing the shared one
+        let merged_face = &healed.faces[0];
+        if let Some(ref wire) = merged_face.outer_wire {
+            // The L-shaped boundary has 6 edges
+            assert_eq!(wire.coedges.len(), 6, "Expected 6 coedges in merged wire, got {}", wire.coedges.len());
+        }
+    }
+
+    /// Test that two co-cylindrical faces sharing an edge are merged into one.
+    ///
+    /// Creates two rectangular faces on the same cylinder surface that
+    /// share an edge, then verifies that face merging combines them.
+    #[test]
+    fn test_merge_cocylindrical_faces() {
+        let cyl = CylinderSurface::new_z(5.0);
+
+        // Face A: a strip on the cylinder from u=0 to u=π/2, v=0 to v=10
+        // We approximate with line edges connecting sampled points
+        let p0 = cyl.point_at(0.0, 0.0);
+        let p1 = cyl.point_at(std::f64::consts::FRAC_PI_2, 0.0);
+        let p2 = cyl.point_at(std::f64::consts::FRAC_PI_2, 10.0);
+        let p3 = cyl.point_at(0.0, 10.0);
+
+        let e_a0 = Edge::new_line(p0, p1);
+        let e_a1 = Edge::new_line(p1, p2);
+        let e_shared = Edge::new_line(p1, p2); // shared along u=π/2
+        let e_a3 = Edge::new_line(p2, p3);
+        let e_a4 = Edge::new_line(p3, p0);
+
+        // Actually, let's simplify: the shared edge is e_a1 (from p1 to p2)
+        let coedges_a = vec![
+            CoEdge::new(e_a0.id, true),
+            CoEdge::new(e_a1.id, true),
+            CoEdge::new(e_a3.id, true),
+            CoEdge::new(e_a4.id, true),
+        ];
+        let wire_a = Wire::new(coedges_a);
+        let mut face_a = Face::new(Surface::Cylinder(cyl.clone()), wire_a);
+        face_a.edges = vec![e_a0.clone(), e_a1.clone(), e_a3.clone(), e_a4.clone()];
+
+        // Face B: adjacent strip from u=π/2 to u=π, v=0 to v=10
+        let p4 = cyl.point_at(std::f64::consts::PI, 0.0);
+        let p5 = cyl.point_at(std::f64::consts::PI, 10.0);
+
+        let e_b0 = Edge::new_line(p1, p4);
+        let e_b1 = Edge::new_line(p4, p5);
+        let e_b2 = Edge::new_line(p5, p2);
+        // Face B uses the shared edge (e_a1) in reverse direction
+        let coedges_b = vec![
+            CoEdge::new(e_a1.id, false), // shared edge reversed
+            CoEdge::new(e_b0.id, true),
+            CoEdge::new(e_b1.id, true),
+            CoEdge::new(e_b2.id, true),
+        ];
+        let wire_b = Wire::new(coedges_b);
+        let mut face_b = Face::new(Surface::Cylinder(cyl.clone()), wire_b);
+        face_b.edges = vec![e_a1, e_b0.clone(), e_b1.clone(), e_b2.clone()];
+
+        let shell = Shell::new(vec![face_a, face_b]);
+
+        let params = HealingParams {
+            fix_normals: false,
+            stitch_edges: false,
+            merge_faces: true,
+            ..HealingParams::default()
+        };
+
+        let (healed, report) = heal_shell(&shell, &params);
+
+        assert!(report.faces_merged >= 1, "Expected at least 1 face pair merged, got {}", report.faces_merged);
+        assert_eq!(healed.faces.len(), 1, "Expected 1 face after merging, got {}", healed.faces.len());
+
+        // The merged face should be on a cylinder surface
+        let merged_face = &healed.faces[0];
+        assert!(matches!(merged_face.surface, Some(Surface::Cylinder(_))),
+            "Merged face should have a Cylinder surface");
+    }
+
+    /// Test that faces on different planes are NOT merged.
+    #[test]
+    fn test_no_merge_non_coplanar_faces() {
+        // Two faces that share an edge but are NOT coplanar
+        let e_shared = Edge::new_line(Point3d::new(0.0, 0.0, 0.0), Point3d::new(1.0, 0.0, 0.0));
+
+        // Face A on XY plane
+        let e_a0 = Edge::new_line(Point3d::new(0.0, 0.0, 0.0), Point3d::new(0.0, 1.0, 0.0));
+        let e_a1 = Edge::new_line(Point3d::new(0.0, 1.0, 0.0), Point3d::new(1.0, 1.0, 0.0));
+        let e_a2 = Edge::new_line(Point3d::new(1.0, 1.0, 0.0), Point3d::new(1.0, 0.0, 0.0));
+
+        let coedges_a = vec![
+            CoEdge::new(e_shared.id, true),
+            CoEdge::new(e_a2.id, false),
+            CoEdge::new(e_a1.id, false),
+            CoEdge::new(e_a0.id, false),
+        ];
+        let wire_a = Wire::new(coedges_a);
+        let plane_a = Plane::from_origin_and_normal(Point3d::new(0.0, 0.0, 0.0), Direction3d::Z);
+        let mut face_a = Face::new(Surface::Plane(plane_a), wire_a);
+        face_a.edges = vec![e_shared.clone(), e_a0, e_a1, e_a2];
+
+        // Face B on XZ plane (different normal!)
+        let e_b0 = Edge::new_line(Point3d::new(1.0, 0.0, 0.0), Point3d::new(1.0, 0.0, 1.0));
+        let e_b1 = Edge::new_line(Point3d::new(1.0, 0.0, 1.0), Point3d::new(0.0, 0.0, 1.0));
+        let e_b2 = Edge::new_line(Point3d::new(0.0, 0.0, 1.0), Point3d::new(0.0, 0.0, 0.0));
+
+        let coedges_b = vec![
+            CoEdge::new(e_shared.id, false),
+            CoEdge::new(e_b0.id, true),
+            CoEdge::new(e_b1.id, true),
+            CoEdge::new(e_b2.id, true),
+        ];
+        let wire_b = Wire::new(coedges_b);
+        let plane_b = Plane::from_origin_and_normal(Point3d::new(0.0, 0.0, 0.0), Direction3d::Y);
+        let mut face_b = Face::new(Surface::Plane(plane_b), wire_b);
+        face_b.edges = vec![e_shared, e_b0, e_b1, e_b2];
+
+        let shell = Shell::new(vec![face_a, face_b]);
+
+        let params = HealingParams {
+            fix_normals: false,
+            stitch_edges: false,
+            merge_faces: true,
+            ..HealingParams::default()
+        };
+
+        let (healed, report) = heal_shell(&shell, &params);
+
+        assert_eq!(report.faces_merged, 0, "Non-coplanar faces should not be merged");
+        assert_eq!(healed.faces.len(), 2, "Should still have 2 faces");
+    }
+
+    /// Test that `are_planes_compatible` works correctly.
+    #[test]
+    fn test_planes_compatible() {
+        let p1 = Plane::from_origin_and_normal(Point3d::new(0.0, 0.0, 0.0), Direction3d::Z);
+        let p2 = Plane::from_origin_and_normal(Point3d::new(5.0, 3.0, 0.0), Direction3d::Z);
+        let p3 = Plane::from_origin_and_normal(Point3d::new(0.0, 0.0, 5.0), Direction3d::Z);
+        let p4 = Plane::from_origin_and_normal(Point3d::new(0.0, 0.0, 0.0), Direction3d::NEG_Z);
+        let p5 = Plane::from_origin_and_normal(Point3d::new(0.0, 0.0, 0.0), Direction3d::X);
+
+        // Same plane, different origin in-plane → compatible
+        assert!(are_planes_compatible(&p1, &p2, 1e-6, 1e-6));
+
+        // Same normal, different offset → NOT compatible
+        assert!(!are_planes_compatible(&p1, &p3, 1e-6, 1e-6));
+
+        // Opposite normals, same plane → compatible (coplanar)
+        assert!(are_planes_compatible(&p1, &p4, 1e-6, 1e-6));
+
+        // Different normals → NOT compatible
+        assert!(!are_planes_compatible(&p1, &p5, 1e-6, 1e-6));
+    }
+
+    /// Test that `are_cylinders_compatible` works correctly.
+    #[test]
+    fn test_cylinders_compatible() {
+        let c1 = CylinderSurface::new_z(5.0);
+        let c2 = CylinderSurface::new(Point3d::new(0.0, 0.0, 10.0), Direction3d::Z, 5.0);
+        let c3 = CylinderSurface::new_z(3.0);
+        let c4 = CylinderSurface::new(Point3d::new(1.0, 0.0, 0.0), Direction3d::Z, 5.0);
+
+        // Same cylinder, different origin along axis → compatible
+        assert!(are_cylinders_compatible(&c1, &c2, 1e-6, 1e-6));
+
+        // Different radii → NOT compatible
+        assert!(!are_cylinders_compatible(&c1, &c3, 1e-6, 1e-6));
+
+        // Same radius but offset from axis → NOT compatible
+        assert!(!are_cylinders_compatible(&c1, &c4, 1e-6, 1e-6));
+    }
+
+    /// Test tolerance propagation: edge tolerances should increase to match
+    /// vertex tolerances, and face tolerances should increase to match edges.
+    #[test]
+    fn test_propagate_tolerances_upward() {
+        // Create a simple box where we manually set some vertices/edges
+        // with small tolerances, then verify propagation increases them.
+        let mut box_solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+
+        // Set one edge's tolerance very high (simulating a vertex with large tolerance)
+        // and all others to small values
+        if let Some(ref mut shell) = box_solid.outer_shell {
+            let first_face = &mut shell.faces[0];
+            // Set the first edge to a large tolerance
+            if !first_face.edges.is_empty() {
+                first_face.edges[0].tolerance = 1e-3;
+            }
+            // Set the face tolerance to a small value
+            first_face.tolerance = 1e-8;
+        }
+
+        let params = HealingParams {
+            propagate_tolerances: true,
+            fix_normals: false,
+            stitch_edges: false,
+            merge_faces: false,
+            ..HealingParams::default()
+        };
+
+        let (healed, report) = heal_solid(&box_solid, &params);
+
+        // The face containing the high-tolerance edge should have its
+        // tolerance increased to match
+        if let Some(ref shell) = healed.outer_shell {
+            let first_face = &shell.faces[0];
+            assert!(
+                first_face.tolerance >= 1e-3,
+                "Face tolerance should be >= 1e-3 after propagation, got {:.2e}",
+                first_face.tolerance
+            );
+        }
+
+        // Report should show that tolerances were propagated
+        assert!(
+            report.tolerances_propagated > 0,
+            "Expected some tolerance propagations, got {}",
+            report.tolerances_propagated
+        );
+    }
+
+    /// Test tolerance propagation with a ToleranceContext that overrides
+    /// small tolerances (downward propagation).
+    #[test]
+    fn test_propagate_tolerances_with_context() {
+        // Create a box with default small tolerances
+        let box_solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+
+        // Use a ToleranceContext with a large model scale that produces
+        // a coincidence tolerance larger than the default 1e-6
+        let ctx = ToleranceContext::from_model_scale(1000.0);
+        let coincidence = ctx.coincidence_tolerance();
+
+        let params = HealingParams {
+            propagate_tolerances: true,
+            tolerance_context: Some(ctx),
+            fix_normals: false,
+            stitch_edges: false,
+            merge_faces: false,
+            ..HealingParams::default()
+        };
+
+        let (healed, report) = heal_solid(&box_solid, &params);
+
+        // All entities should have tolerance >= the context's coincidence tolerance
+        if let Some(ref shell) = healed.outer_shell {
+            for face in &shell.faces {
+                assert!(
+                    face.tolerance >= coincidence,
+                    "Face tolerance {:.2e} should be >= context coincidence {:.2e}",
+                    face.tolerance,
+                    coincidence
+                );
+                for edge in &face.edges {
+                    assert!(
+                        edge.tolerance >= coincidence,
+                        "Edge tolerance {:.2e} should be >= context coincidence {:.2e}",
+                        edge.tolerance,
+                        coincidence
+                    );
+                }
+            }
+        }
+
+        // Report should show many propagations (all edges and faces in the box)
+        assert!(
+            report.tolerances_propagated > 0,
+            "Expected tolerance propagations from context, got {}",
+            report.tolerances_propagated
+        );
+    }
+
+    /// Test that tolerance propagation can be disabled.
+    #[test]
+    fn test_propagate_tolerances_disabled() {
+        let box_solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+
+        let params = HealingParams {
+            propagate_tolerances: false,
+            fix_normals: false,
+            stitch_edges: false,
+            merge_faces: false,
+            ..HealingParams::default()
+        };
+
+        let (_healed, report) = heal_solid(&box_solid, &params);
+
+        // No tolerances should be propagated
+        assert_eq!(
+            report.tolerances_propagated, 0,
+            "No tolerance propagation expected when disabled"
+        );
+    }
+
+    /// Test edge → face propagation specifically.
+    #[test]
+    fn test_edge_to_face_tolerance_propagation() {
+        // Create a triangle face with edges having different tolerances
+        let mut face = ShapeBuilder::make_polygon_face(&[
+            Point3d::new(0.0, 0.0, 0.0),
+            Point3d::new(1.0, 0.0, 0.0),
+            Point3d::new(0.0, 1.0, 0.0),
+        ])
+        .unwrap();
+
+        // Set edge tolerances to different values
+        face.edges[0].tolerance = 1e-6;
+        face.edges[1].tolerance = 1e-4;
+        face.edges[2].tolerance = 1e-5;
+        face.tolerance = 1e-8; // Very small face tolerance
+
+        let mut shell = Shell::new(vec![face]);
+        let mut report = HealingReport::default();
+        let params = HealingParams {
+            propagate_tolerances: true,
+            ..HealingParams::default()
+        };
+
+        propagate_tolerances(&mut shell, &params, &mut report);
+
+        // Face tolerance should be at least max edge tolerance (1e-4)
+        assert!(
+            shell.faces[0].tolerance >= 1e-4,
+            "Face tolerance {:.2e} should be >= 1e-4 after propagation",
+            shell.faces[0].tolerance
+        );
+        assert!(report.tolerances_propagated > 0);
+    }
+
+    /// Test that downward propagation from ToleranceContext applies to
+    /// all entity types (edges and faces).
+    #[test]
+    fn test_downward_propagation_from_context() {
+        // Create a face with very small tolerances
+        let mut face = ShapeBuilder::make_polygon_face(&[
+            Point3d::new(0.0, 0.0, 0.0),
+            Point3d::new(1.0, 0.0, 0.0),
+            Point3d::new(0.0, 1.0, 0.0),
+        ])
+        .unwrap();
+
+        // Set everything to a very small tolerance
+        for edge in &mut face.edges {
+            edge.tolerance = 1e-10;
+        }
+        face.tolerance = 1e-10;
+
+        let mut shell = Shell::new(vec![face]);
+
+        // Use a context with a much larger coincidence tolerance
+        let ctx = ToleranceContext {
+            absolute: 1e-3,
+            relative: 1e-6,
+            angular: 1e-5,
+            parametric: 1e-8,
+            model_scale: 100.0,
+        };
+        let floor = ctx.coincidence_tolerance(); // 1e-3 + 1e-6 * 100 = 1.001e-3
+
+        let params = HealingParams {
+            propagate_tolerances: true,
+            tolerance_context: Some(ctx),
+            ..HealingParams::default()
+        };
+
+        let mut report = HealingReport::default();
+        propagate_tolerances(&mut shell, &params, &mut report);
+
+        // All edges should have tolerance >= floor
+        for edge in &shell.faces[0].edges {
+            assert!(
+                edge.tolerance >= floor,
+                "Edge tolerance {:.2e} should be >= floor {:.2e}",
+                edge.tolerance,
+                floor
+            );
+        }
+
+        // Face should have tolerance >= floor
+        assert!(
+            shell.faces[0].tolerance >= floor,
+            "Face tolerance {:.2e} should be >= floor {:.2e}",
+            shell.faces[0].tolerance,
+            floor
+        );
+
+        assert!(report.tolerances_propagated > 0);
     }
 }

@@ -30,10 +30,41 @@ use draper_geometry::{
     Line2d, Circle2d, Ellipse2d, Nurbs2d,
 };
 use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary, ear_clip};
-use draper_topology::{Face, Wire, CoEdge, Edge as TopoEdge};
+use draper_topology::{Face, Wire, CoEdge, Edge as TopoEdge, Shell, Solid};
+use draper_topology::healing::{heal_solid, HealingParams, HealingReport};
 use draper_geometry::tolerance::ToleranceContext;
 use std::collections::HashMap;
 use log::{info, warn};
+
+// ============================================================
+// STEP Conversion Configuration
+// ============================================================
+
+/// Configuration for STEP-to-mesh conversion.
+///
+/// Controls optional pipeline stages like healing.
+#[derive(Clone, Debug)]
+pub struct StepConversionConfig {
+    /// Whether to apply the healing pipeline between BRep extraction and
+    /// triangulation. Healing fixes common B-Rep defects such as gaps,
+    /// holes, flipped normals, degenerate edges, and small features.
+    ///
+    /// Default: `true` — healing is applied automatically.
+    pub heal: bool,
+}
+
+impl Default for StepConversionConfig {
+    fn default() -> Self {
+        Self { heal: true }
+    }
+}
+
+impl StepConversionConfig {
+    /// Create a config with healing disabled.
+    pub fn no_healing() -> Self {
+        Self { heal: false }
+    }
+}
 
 // ============================================================
 // STEP Edge Discretization Cache
@@ -202,6 +233,7 @@ fn point_to_chord_distance_3d(point: &Point3d, a: &Point3d, b: &Point3d) -> f64 
 }
 
 /// Extracted face data with surface and boundary edges.
+#[derive(Clone)]
 struct FaceData {
     surface: Surface,
     /// Edges from the outer boundary loop (FACE_OUTER_BOUND)
@@ -229,6 +261,185 @@ struct FaceData {
     /// STEP entity IDs of EDGE_CURVE entities for inner edges.
     /// Same structure as `inner_edges`.
     inner_edge_step_ids: Vec<Vec<i64>>,
+}
+
+// ============================================================
+// FaceData ↔ Solid conversion (for healing pipeline)
+// ============================================================
+
+/// Build a `Solid` from a list of `FaceData` so that the healing
+/// pipeline can operate on the topology.
+///
+/// Returns the Solid and a mapping from each Face's `TopoId` to its
+/// index in the original `face_data_list`. This mapping allows us to
+/// recover STEP-specific metadata after healing.
+fn face_data_list_to_solid(face_data_list: &[FaceData]) -> (Solid, HashMap<draper_topology::TopoId, usize>) {
+    let mut topo_faces = Vec::with_capacity(face_data_list.len());
+    let mut face_id_to_index = HashMap::new();
+
+    for (fd_idx, fd) in face_data_list.iter().enumerate() {
+        // Build outer wire from outer edges
+        let outer_wire = if fd.outer_edges.is_empty() {
+            None
+        } else {
+            let coedges: Vec<CoEdge> = fd.outer_edges.iter()
+                .map(|edge| CoEdge::new(edge.id, true))
+                .collect();
+            Some(Wire::new(coedges))
+        };
+
+        // Build inner wires from inner edges (holes)
+        let inner_wires: Vec<Wire> = fd.inner_edges.iter()
+            .map(|inner_edge_list| {
+                let coedges: Vec<CoEdge> = inner_edge_list.iter()
+                    .map(|edge| CoEdge::new(edge.id, true))
+                    .collect();
+                Wire::new(coedges)
+            })
+            .collect();
+
+        let mut face = Face::new(fd.surface.clone(), outer_wire.unwrap_or_else(|| Wire::new(vec![])));
+        face.forward = fd.forward;
+        face.edges = fd.edges.clone();
+
+        // Record the mapping before we add holes (which doesn't change the ID)
+        face_id_to_index.insert(face.id, fd_idx);
+
+        // Add inner wires as holes
+        for wire in inner_wires {
+            face.add_hole(wire);
+        }
+
+        topo_faces.push(face);
+    }
+
+    let shell = Shell::new_closed(topo_faces);
+    (Solid::new(shell), face_id_to_index)
+}
+
+/// Apply healing results back to the original `FaceData` list.
+///
+/// This function takes the original `FaceData` list, the healed `Solid`,
+/// and a mapping from face TopoId → original FaceData index. It produces
+/// a new `FaceData` list that:
+///
+/// - **Preserves** STEP-specific metadata (step_face_id, edge_step_ids,
+///   edge_curves_2d, etc.) for faces that originated from the STEP file.
+///   The original edge data and STEP IDs are kept intact because the
+///   StepEdgeCache already handles watertightness at the mesh level.
+/// - **Updates** the `forward` flag if the healing pipeline flipped a face
+///   normal.
+/// - **Removes** faces that were removed by the healing pipeline (small
+///   feature removal).
+/// - **Adds** new faces that were created by the healing pipeline (hole
+///   filling), with default (0) STEP IDs.
+fn apply_healing_to_face_data(
+    original_face_data: &[FaceData],
+    healed_solid: &Solid,
+    face_id_to_index: &HashMap<draper_topology::TopoId, usize>,
+) -> Vec<FaceData> {
+    let mut result = Vec::new();
+    let mut used_original_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
+    let faces = healed_solid.faces();
+    for face in faces {
+        if let Some(&orig_idx) = face_id_to_index.get(&face.id) {
+            // This face existed in the original FaceData — reuse it with updates.
+            // We preserve the original FaceData's STEP-specific metadata (step IDs,
+            // 2D curves, etc.) and only apply structural changes from healing.
+            used_original_indices.insert(orig_idx);
+            let mut fd = original_face_data[orig_idx].clone();
+
+            // Apply forward flag change (normal repair)
+            fd.forward = face.forward;
+
+            result.push(fd);
+        } else {
+            // This is a new face added by the healing pipeline (e.g., hole fill).
+            // Create a FaceData with default STEP IDs.
+            let outer_edges: Vec<TopoEdge> = if let Some(ref wire) = face.outer_wire {
+                wire.coedges.iter()
+                    .filter_map(|coedge| {
+                        face.edges.iter().find(|e| e.id == coedge.edge).cloned()
+                    })
+                    .collect()
+            } else {
+                vec![]
+            };
+
+            let inner_edges: Vec<Vec<TopoEdge>> = face.inner_wires.iter()
+                .map(|wire| {
+                    wire.coedges.iter()
+                        .filter_map(|coedge| {
+                            face.edges.iter().find(|e| e.id == coedge.edge).cloned()
+                        })
+                        .collect()
+                })
+                .collect();
+
+            let n_outer = outer_edges.len();
+            let n_inner: Vec<usize> = inner_edges.iter().map(|ie| ie.len()).collect();
+
+            let mut all_edges = outer_edges.clone();
+            for inner in &inner_edges {
+                all_edges.extend(inner.clone());
+            }
+
+            let n_edges = all_edges.len();
+
+            result.push(FaceData {
+                surface: face.surface.clone().unwrap_or(Surface::Plane(Plane::from_origin_and_normal(
+                    Point3d::ORIGIN, Direction3d::Z))),
+                outer_edges,
+                inner_edges,
+                edges: all_edges,
+                forward: face.forward,
+                step_face_id: 0, // Synthetic face — no STEP ID
+                surface_step_id: None,
+                edge_curves_2d: vec![None; n_edges],
+                edge_step_ids: vec![0; n_edges],
+                outer_edge_step_ids: vec![0; n_outer],
+                inner_edge_step_ids: n_inner.iter().map(|&n| vec![0; n]).collect(),
+            });
+        }
+    }
+
+    result
+}
+
+/// Log a summary of the healing report.
+fn log_healing_report(brep_id: i64, report: &HealingReport) {
+    if report.total_fixes() == 0 {
+        info!("BREP #{}: healing complete — no fixes needed", brep_id);
+        return;
+    }
+
+    info!("BREP #{}: healing report — {} total fixes applied:", brep_id, report.total_fixes());
+    if report.degenerate_edges_marked > 0 {
+        info!("  • {} degenerate edges marked", report.degenerate_edges_marked);
+    }
+    if report.gaps_closed > 0 {
+        info!("  • {} gaps closed", report.gaps_closed);
+    }
+    if report.holes_filled > 0 {
+        info!("  • {} holes filled", report.holes_filled);
+    }
+    if report.edges_stitched > 0 {
+        info!("  • {} edge pairs stitched", report.edges_stitched);
+    }
+    if report.normals_fixed > 0 {
+        info!("  • {} face normals fixed", report.normals_fixed);
+    }
+    if report.small_faces_removed > 0 {
+        info!("  • {} small-feature faces removed", report.small_faces_removed);
+    }
+    if report.sliver_triangles_detected > 0 {
+        info!("  • {} sliver triangles detected", report.sliver_triangles_detected);
+    }
+    // Log individual messages at debug level
+    for msg in &report.messages {
+        log::debug!("  → {}", msg);
+    }
 }
 
 /// Information about a single face within a BREP, for structure display and UV visualization.
@@ -314,7 +525,12 @@ pub struct AssemblyNode {
 
 /// Convert a parsed STEP file to a single merged triangle mesh.
 pub fn step_to_mesh(step_file: &StepFile) -> Result<TriangleMesh, String> {
-    let converter = StepConverter::new(step_file);
+    step_to_mesh_with_config(step_file, &StepConversionConfig::default())
+}
+
+/// Convert a parsed STEP file to a single merged triangle mesh with custom configuration.
+pub fn step_to_mesh_with_config(step_file: &StepFile, config: &StepConversionConfig) -> Result<TriangleMesh, String> {
+    let converter = StepConverter::with_config(step_file, config.clone());
     converter.convert()
 }
 
@@ -322,7 +538,12 @@ pub fn step_to_mesh(step_file: &StepFile) -> Result<TriangleMesh, String> {
 /// Each instance has its own transform and color — the same BREP can appear
 /// multiple times with different transforms (e.g., bolt inserted 6 times).
 pub fn step_to_mesh_instances(step_file: &StepFile) -> Result<Vec<MeshInstance>, String> {
-    let converter = StepConverter::new(step_file);
+    step_to_mesh_instances_with_config(step_file, &StepConversionConfig::default())
+}
+
+/// Convert a parsed STEP file to mesh instances with custom configuration.
+pub fn step_to_mesh_instances_with_config(step_file: &StepFile, config: &StepConversionConfig) -> Result<Vec<MeshInstance>, String> {
+    let converter = StepConverter::with_config(step_file, config.clone());
     converter.convert_instances()
 }
 
@@ -330,7 +551,12 @@ pub fn step_to_mesh_instances(step_file: &StepFile) -> Result<Vec<MeshInstance>,
 /// Includes face IDs, surface types, boundary polylines, and UV-space data
 /// for structure display, selection, UV grid visualization, and debugging.
 pub fn step_to_detailed_instances(step_file: &StepFile) -> Result<Vec<DetailedMeshInstance>, String> {
-    let converter = StepConverter::new(step_file);
+    step_to_detailed_instances_with_config(step_file, &StepConversionConfig::default())
+}
+
+/// Convert a parsed STEP file to detailed mesh instances with custom configuration.
+pub fn step_to_detailed_instances_with_config(step_file: &StepFile, config: &StepConversionConfig) -> Result<Vec<DetailedMeshInstance>, String> {
+    let converter = StepConverter::with_config(step_file, config.clone());
     converter.convert_detailed_instances()
 }
 
@@ -558,6 +784,7 @@ fn format_assembly_node_detailed(node: &AssemblyNode, depth: usize, out: &mut St
 struct StepConverter<'a> {
     step: &'a StepFile,
     _entity_map: HashMap<i64, usize>,
+    config: StepConversionConfig,
 }
 
 impl<'a> StepConverter<'a> {
@@ -566,7 +793,15 @@ impl<'a> StepConverter<'a> {
             .enumerate()
             .map(|(i, e)| (e.id, i))
             .collect();
-        Self { step, _entity_map: entity_map }
+        Self { step, _entity_map: entity_map, config: StepConversionConfig::default() }
+    }
+
+    fn with_config(step: &'a StepFile, config: StepConversionConfig) -> Self {
+        let entity_map: HashMap<i64, usize> = step.entities.iter()
+            .enumerate()
+            .map(|(i, e)| (e.id, i))
+            .collect();
+        Self { step, _entity_map: entity_map, config }
     }
 
     fn convert(&self) -> Result<TriangleMesh, String> {
@@ -1360,12 +1595,25 @@ impl<'a> StepConverter<'a> {
         let shell_id = self.find_shell_ref_by_brep_id(brep_id)?;
         let face_data_list = self.extract_shell_faces(shell_id)?;
 
-        // Create edge discretization cache for this BREP to ensure
-        // shared edges produce identical 3D points (watertightness).
+        // Create tolerance context for this BREP
         let tol_ctx = match bbox {
             Some((bmin, bmax)) => ToleranceContext::from_bounding_box(bmin, bmax),
             None => ToleranceContext::new(),
         };
+
+        // ─── Healing pipeline: heal the solid before triangulation ────────
+        let face_data_list = if self.config.heal {
+            let (solid, face_id_map) = face_data_list_to_solid(&face_data_list);
+            let healing_params = HealingParams::from_tolerance_context(&tol_ctx);
+            let (healed, report) = heal_solid(&solid, &healing_params);
+            log_healing_report(brep_id, &report);
+            apply_healing_to_face_data(&face_data_list, &healed, &face_id_map)
+        } else {
+            face_data_list
+        };
+
+        // Create edge discretization cache for this BREP to ensure
+        // shared edges produce identical 3D points (watertightness).
         let mut edge_cache = StepEdgeCache::new(tol_ctx);
 
         let mut mesh = TriangleMesh::new();
@@ -1439,11 +1687,24 @@ impl<'a> StepConverter<'a> {
         let shell_id = self.find_shell_ref_by_brep_id(brep_id)?;
         let face_data_list = self.extract_shell_faces(shell_id)?;
 
-        // Create edge discretization cache for this BREP
+        // Create tolerance context for this BREP
         let tol_ctx = match bbox {
             Some((bmin, bmax)) => ToleranceContext::from_bounding_box(bmin, bmax),
             None => ToleranceContext::new(),
         };
+
+        // ─── Healing pipeline: heal the solid before triangulation ────────
+        let face_data_list = if self.config.heal {
+            let (solid, face_id_map) = face_data_list_to_solid(&face_data_list);
+            let healing_params = HealingParams::from_tolerance_context(&tol_ctx);
+            let (healed, report) = heal_solid(&solid, &healing_params);
+            log_healing_report(brep_id, &report);
+            apply_healing_to_face_data(&face_data_list, &healed, &face_id_map)
+        } else {
+            face_data_list
+        };
+
+        // Create edge discretization cache for this BREP
         let mut edge_cache = StepEdgeCache::new(tol_ctx);
 
         let mut mesh = TriangleMesh::new();
@@ -1571,6 +1832,24 @@ impl<'a> StepConverter<'a> {
         bbox: &Option<(Point3d, Point3d)>,
     ) -> Option<TriangleMesh> {
         let face_data_list = self.extract_shell_faces(shell_id)?;
+
+        // Create tolerance context for healing
+        let tol_ctx = match bbox {
+            Some((bmin, bmax)) => ToleranceContext::from_bounding_box(bmin, bmax),
+            None => ToleranceContext::new(),
+        };
+
+        // ─── Healing pipeline ────────
+        let face_data_list = if self.config.heal {
+            let (solid, face_id_map) = face_data_list_to_solid(&face_data_list);
+            let healing_params = HealingParams::from_tolerance_context(&tol_ctx);
+            let (healed, report) = heal_solid(&solid, &healing_params);
+            log_healing_report(shell_id, &report);
+            apply_healing_to_face_data(&face_data_list, &healed, &face_id_map)
+        } else {
+            face_data_list
+        };
+
         let mut mesh = TriangleMesh::new();
         for face_data in &face_data_list {
             let face_mesh = self.surface_to_mesh(face_data, params, bbox);

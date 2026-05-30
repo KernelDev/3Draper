@@ -17,5 +17,9 @@ pub use entity::*;
 pub use shape::*;
 pub use builder::*;
 pub use traversal::*;
-pub use validation::{ValidationError, validate_solid, validate_solid_readonly, validate_shell};
+pub use validation::{
+    ValidationError, validate_solid, validate_solid_readonly, validate_shell,
+    Severity, ValidationIssue, TopologyValidationConfig, TopologyValidationReport,
+    validate_topology,
+};
 pub use healing::*;

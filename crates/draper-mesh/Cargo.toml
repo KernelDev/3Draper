@@ -9,3 +9,4 @@ draper-topology = { workspace = true }
 spade = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
+rayon = "1.10"

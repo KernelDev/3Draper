@@ -9,8 +9,10 @@ pub mod parser;
 pub mod exporter;
 pub mod schema;
 pub mod converter;
+pub mod validation;
 
 pub use parser::*;
 pub use exporter::*;
 pub use schema::*;
 pub use converter::*;
+pub use validation::*;
