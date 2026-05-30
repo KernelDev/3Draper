@@ -10,7 +10,7 @@ use crate::renderer::{
 };
 use draper_core::engine::{EngineConfig, build_engine};
 use draper_topology::ShapeBuilder;
-use draper_mesh::{triangulate_solid, TriangleMesh, TriangulationParams};
+use draper_mesh::{triangulate_solid, TriangleMesh, TriangulationParams, check_manifold, ManifoldReport};
 use draper_step::{AssemblyNode, DetailedMeshInstance, FaceInfo};
 use draper_geometry::{Surface, Point2d};
 use egui_wgpu::RenderState;
@@ -356,6 +356,10 @@ pub struct ViewerApp {
     /// How many instances to triangulate per frame (adaptive).
     instances_per_frame: usize,
 
+    // ─── Manifold statistics ──────────────────────────────────────────
+    /// Manifold report for the current mesh (computed on load).
+    manifold_report: Option<ManifoldReport>,
+
     // ─── Panel collapse state (for mobile optimization) ──────────────
     /// Whether the left controls panel is open.
     controls_panel_open: bool,
@@ -430,6 +434,9 @@ impl ViewerApp {
         #[cfg(target_arch = "wasm32")]
         let file_result = Arc::new(Mutex::new(None));
 
+        // Compute manifold report for initial mesh before moving it
+        let manifold_report = Some(check_manifold(&mesh));
+
         let mut app = Self {
             mesh,
             gpu_resources,
@@ -465,6 +472,7 @@ impl ViewerApp {
             is_loading: false,
             loading_name: String::new(),
             instances_per_frame: 1,
+            manifold_report,
             controls_panel_open: true,
             structure_tree_open: true,
             face_list_open: true,
@@ -490,6 +498,11 @@ impl ViewerApp {
             vertex_count: mesh.vertex_count(),
             triangle_count: mesh.triangle_count(),
         };
+        // Compute manifold statistics for the new mesh
+        let report = check_manifold(&mesh);
+        let is_watertight = report.is_watertight();
+        self.manifold_report = Some(report);
+
         self.mesh = mesh;
         self.mesh_dirty = true;
         // Reset selection when loading new model
@@ -501,8 +514,9 @@ impl ViewerApp {
         self.open_tree_nodes.clear();
         self.scroll_to_tree_node = None;
         self.scroll_to_face_id = None;
-        self.log(&format!("Loaded: {} ({} vertices, {} triangles)",
-            name, self.current_model.vertex_count, self.current_model.triangle_count));
+        self.log(&format!("Loaded: {} ({} vertices, {} triangles) — {}",
+            name, self.current_model.vertex_count, self.current_model.triangle_count,
+            if is_watertight { "watertight" } else { "not watertight" }));
     }
 
     fn load_box(&mut self) {
@@ -1758,6 +1772,30 @@ impl eframe::App for ViewerApp {
                     ui.label(egui::RichText::new(format!("Selected face: #{} (inst #{})", fid, inst_idx))
                         .size(12.0)
                         .color(egui::Color32::from_rgb(255, 220, 50)));
+                }
+
+                // --- Manifold Statistics ---
+                ui.separator();
+                ui.heading(egui::RichText::new("Manifold").size(12.0));
+                if let Some(ref report) = self.manifold_report {
+                    let watertight = report.is_watertight();
+                    let wt_color = if watertight {
+                        egui::Color32::from_rgb(80, 200, 80)
+                    } else {
+                        egui::Color32::from_rgb(255, 100, 80)
+                    };
+                    let wt_label = if watertight { "Yes" } else { "No" };
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Watertight:").size(12.0));
+                        ui.label(egui::RichText::new(wt_label).size(12.0).color(wt_color));
+                    });
+                    ui.label(egui::RichText::new(format!("Euler characteristic: {}", report.euler_characteristic)).size(12.0));
+                    ui.label(egui::RichText::new(format!("Boundary edges: {}", report.boundary_edge_count)).size(12.0));
+                    ui.label(egui::RichText::new(format!("Non-manifold edges: {}", report.non_manifold_edge_count)).size(12.0));
+                    ui.label(egui::RichText::new(format!("Degenerate triangles: {}", report.degenerate_triangle_count)).size(12.0));
+                    ui.label(egui::RichText::new(format!("T-junctions: {}", report.t_junction_count)).size(12.0));
+                } else {
+                    ui.label(egui::RichText::new("No mesh loaded").size(11.0).color(egui::Color32::GRAY));
                 }
 
                 let cam_pos = self.camera.position();
