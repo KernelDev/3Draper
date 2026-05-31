@@ -13,7 +13,7 @@ use crate::renderer::{
 use draper_core::engine::{EngineConfig, build_engine};
 use draper_topology::ShapeBuilder;
 use draper_mesh::{triangulate_solid, TriangleMesh, TriangulationParams, check_manifold, ManifoldReport};
-use draper_step::{AssemblyNode, DetailedMeshInstance, FaceInfo};
+use draper_step::{AssemblyNode, DetailedMeshInstance, FaceInfo, PendingBrepInstance, step_structure_lazy, triangulate_pending_instance};
 use draper_geometry::{Surface, Point2d};
 use egui_wgpu::RenderState;
 use eframe::egui;
@@ -354,8 +354,14 @@ pub struct ViewerApp {
     scroll_to_face_id: Option<u64>,
 
     // ─── Progressive loading state ────────────────────────────────────
-    /// Pending instances to triangulate (populated during parse phase, consumed during render phase).
-    pending_instances: Vec<DetailedMeshInstance>,
+    /// Pending BREP instances to triangulate (populated during parse phase, consumed during render phase).
+    /// Unlike the old approach which stored already-triangulated DetailedMeshInstance,
+    /// this stores PendingBrepInstance descriptors that are triangulated ONE AT A TIME
+    /// in the frame loop, keeping the browser responsive.
+    pending_breps: Vec<PendingBrepInstance>,
+    /// The parsed STEP file — kept alive so that `triangulate_pending_instance()`
+    /// can resolve entity references during progressive triangulation.
+    step_file_cache: Option<draper_step::StepFile>,
     /// Total number of instances being loaded (for progress display).
     total_instance_count: usize,
     /// Number of instances already triangulated.
@@ -364,8 +370,6 @@ pub struct ViewerApp {
     is_loading: bool,
     /// Name of the file being loaded.
     loading_name: String,
-    /// How many instances to triangulate per frame (adaptive).
-    instances_per_frame: usize,
 
     // ─── Manifold statistics ──────────────────────────────────────────
     /// Manifold report for the current mesh (computed on load).
@@ -525,12 +529,12 @@ impl ViewerApp {
             open_tree_nodes: std::collections::HashSet::new(),
             scroll_to_tree_node: None,
             scroll_to_face_id: None,
-            pending_instances: Vec::new(),
+            pending_breps: Vec::new(),
+            step_file_cache: None,
             total_instance_count: 0,
             triangulated_count: 0,
             is_loading: false,
             loading_name: String::new(),
-            instances_per_frame: 1,
             manifold_report,
             controls_panel_open: true,
             structure_tree_open: true,
@@ -709,12 +713,13 @@ impl ViewerApp {
     // ─── Shared file processing (used by both native and web) ─────────────
 
     /// Process a parsed STEP file — Phase 1: Parse + Build tree (fast).
-    /// The tree is shown immediately. Triangulation happens progressively in update().
+    /// The tree is shown immediately. Triangulation happens progressively in update(),
+    /// one BREP per frame, so the browser stays responsive.
     fn process_step_file(&mut self, step_file: &draper_step::StepFile, name: &str) {
         // Cancel any previous loading
         self.cancel_loading();
 
-        // Count relevant geometry entities
+        // Count relevant geometry entities (fast O(n) pass)
         let mut point_count = 0;
         let mut face_count = 0;
         let mut shell_count = 0;
@@ -759,21 +764,20 @@ impl ViewerApp {
             self.log(&format!("  Surfaces: {}", surface_summary.join(", ")));
         }
 
-        // Build assembly tree AND detailed instances together so that
-        // instance_index is properly populated in the assembly tree
-        let (tree, instances) = draper_step::step_structure_with_instances(step_file);
+        // ── Use LAZY conversion: build tree + collect pending BREP descriptors (FAST) ──
+        // No triangulation happens here — that's done one-BREP-per-frame in process_pending_breps()
+        let (tree, pending) = step_structure_lazy(step_file);
         self.assembly_tree = Some(tree);
         self.show_structure = true;
 
-        // ── Set up progressive triangulation ──
-        if !instances.is_empty() {
-            self.log(&format!("Triangulating {} instances...", instances.len()));
-            self.total_instance_count = instances.len();
+        if !pending.is_empty() {
+            self.log(&format!("Queued {} BREP instances for progressive triangulation...", pending.len()));
+            self.total_instance_count = pending.len();
             self.triangulated_count = 0;
-            self.pending_instances = instances;
+            self.pending_breps = pending;
+            self.step_file_cache = Some(step_file.clone());
             self.is_loading = true;
             self.loading_name = name.to_string();
-            self.instances_per_frame = 1;
 
             // Clear existing rendering data
             self.detailed_instances.clear();
@@ -787,129 +791,98 @@ impl ViewerApp {
             self.mesh_dirty = true;
 
             // Auto-fit camera once tree is ready (even before mesh)
-            self.log("Structure tree ready — triangulation in progress...");
+            self.log("Structure tree ready — triangulation will begin...");
         } else {
-            // Fallback: try separate conversion (no progressive loading for fallback)
-            self.log("step_structure_with_instances returned no instances, trying separate conversion");
-            self.assembly_tree = Some(draper_step::step_structure(step_file));
-            match draper_step::step_to_detailed_instances(step_file) {
-                Ok(instances) => {
-                    self.log(&format!("Mesh Rendering Tree ({} instances)", instances.len()));
-                    self.detailed_instances = instances.clone();
-                    let mut mesh = TriangleMesh::new();
-                    let mut instance_ranges = Vec::new();
-                    for inst in &instances {
-                        let tri_start = mesh.triangle_count();
-                        if let Some(color) = inst.color {
-                            mesh.merge_with_color(&inst.mesh, color);
-                        } else {
-                            mesh.merge_with_color(&inst.mesh, [0.48, 0.52, 0.58, 1.0]);
-                        }
-                        let tri_end = mesh.triangle_count();
-                        instance_ranges.push((tri_start, tri_end));
-                    }
-                    self.instance_triangle_ranges = instance_ranges;
-                    let vcount = mesh.vertex_count();
-                    let tcount = mesh.triangle_count();
-                    self.log(&format!("Total merged: {} vertices, {} triangles", vcount, tcount));
-                    self.load_mesh(mesh, &format!("STEP: {}", name));
-                }
-                Err(e) => {
-                    self.log_warning(&format!("STEP detailed conversion error: {}, trying simple conversion", e));
-                    match draper_step::step_to_mesh_instances(step_file) {
-                        Ok(instances) => {
-                            self.log(&format!("Simple Mesh Instances: {}", instances.len()));
-                            let mut mesh = TriangleMesh::new();
-                            for inst in &instances {
-                                if let Some(color) = inst.color {
-                                    mesh.merge_with_color(&inst.mesh, color);
-                                } else {
-                                    mesh.merge_with_color(&inst.mesh, [0.48, 0.52, 0.58, 1.0]);
-                                }
-                            }
-                            self.detailed_instances.clear();
-                            self.instance_triangle_ranges.clear();
-                            self.load_mesh(mesh, &format!("STEP: {}", name));
-                        }
-                        Err(e2) => {
-                            self.log_error(&format!("STEP conversion error: {}", e2));
-                        }
-                    }
-                }
-            }
+            // No BREPs found in the file
+            self.log_warning("No BREP instances found in STEP file");
         }
     }
 
     /// Cancel any in-progress loading.
     fn cancel_loading(&mut self) {
         self.is_loading = false;
-        self.pending_instances.clear();
+        self.pending_breps.clear();
+        self.step_file_cache = None;
         self.triangulated_count = 0;
         self.total_instance_count = 0;
     }
 
-    /// Process one batch of pending instances (called each frame from update()).
+    /// Process one pending BREP per frame (called from update()).
+    /// Triangulates a single BREP instance and merges it into the scene mesh.
     /// Returns true if there are still more instances to process.
-    /// Gracefully handles triangulation failures: logs a warning and skips
-    /// instances with empty meshes instead of crashing.
-    fn process_pending_instances(&mut self) -> bool {
-        if !self.is_loading || self.pending_instances.is_empty() {
+    ///
+    /// This is the key to keeping the browser responsive: instead of triangulating
+    /// all BREPs in one blocking call, we do ONE BREP per animation frame.
+    /// Each BREP's triangulation is still synchronous, but it's bounded by the
+    /// number of faces in that single BREP (typically 6-50 faces for most parts).
+    fn process_pending_breps(&mut self) -> bool {
+        if !self.is_loading || self.pending_breps.is_empty() {
             return false;
         }
 
-        let batch_size = self.instances_per_frame.min(self.pending_instances.len());
-        for _ in 0..batch_size {
-            if let Some(inst) = self.pending_instances.pop() {
-                // Check if this instance has a valid mesh (non-empty triangulation)
+        // Take the next pending BREP from the front
+        let pending = self.pending_breps.remove(0);
+
+        // Triangulate this single BREP using the cached StepFile
+        let instance = if let Some(ref step_file) = self.step_file_cache {
+            triangulate_pending_instance(step_file, &pending)
+        } else {
+            None
+        };
+
+        match instance {
+            Some(inst) => {
+                // Check if this instance has a valid mesh
                 if inst.mesh.triangle_count() == 0 && inst.mesh.vertex_count() == 0 {
                     self.log_warning(&format!(
                         "Instance '{}' (BREP #{}) produced empty mesh — skipping",
                         inst.name, inst.brep_id
                     ));
                     self.failed_face_count += 1;
-                    self.triangulated_count += 1;
-                    continue;
-                }
-
-                let tri_start = self.mesh.triangle_count();
-                if let Some(color) = inst.color {
-                    self.mesh.merge_with_color(&inst.mesh, color);
                 } else {
-                    self.mesh.merge_with_color(&inst.mesh, [0.48, 0.52, 0.58, 1.0]);
-                }
-                let tri_end = self.mesh.triangle_count();
-                self.instance_triangle_ranges.push((tri_start, tri_end));
+                    let tri_start = self.mesh.triangle_count();
+                    if let Some(color) = inst.color {
+                        self.mesh.merge_with_color(&inst.mesh, color);
+                    } else {
+                        self.mesh.merge_with_color(&inst.mesh, [0.48, 0.52, 0.58, 1.0]);
+                    }
+                    let tri_end = self.mesh.triangle_count();
+                    self.instance_triangle_ranges.push((tri_start, tri_end));
 
-                let inst_idx = self.triangulated_count;
-                self.detailed_instances.push(inst);
-                self.triangulated_count += 1;
+                    // Update the assembly tree: link this instance to its tree node
+                    let inst_idx = self.triangulated_count;
+                    if let Some(ref mut tree) = self.assembly_tree {
+                        assign_instance_to_tree(tree, inst_idx);
+                    }
 
-                // Update the assembly tree: link this instance to its tree node
-                if let Some(ref mut tree) = self.assembly_tree {
-                    assign_instance_to_tree(tree, inst_idx);
+                    self.detailed_instances.push(inst);
                 }
+            }
+            None => {
+                self.log_warning(&format!(
+                    "Instance '{}' (BREP #{}) failed triangulation — skipping",
+                    pending.name, pending.brep_id
+                ));
+                self.failed_face_count += 1;
             }
         }
 
+        self.triangulated_count += 1;
         self.mesh_dirty = true;
 
-        // Adaptive: process more per frame if instances are small
-        if self.triangulated_count > 0 && self.triangulated_count % 5 == 0 {
-            let avg_triangles = self.mesh.triangle_count() / self.triangulated_count;
-            if avg_triangles < 1000 {
-                self.instances_per_frame = (self.instances_per_frame + 1).min(10);
-            }
-        }
-
-        if self.pending_instances.is_empty() {
+        if self.pending_breps.is_empty() {
             // Loading complete
             self.is_loading = false;
+            self.step_file_cache = None; // Free the STEP file data
             let vcount = self.mesh.vertex_count();
             let tcount = self.mesh.triangle_count();
             self.log(&format!(
                 "Triangulation complete: {} instances, {} vertices, {} triangles",
                 self.triangulated_count, vcount, tcount
             ));
+            if self.failed_face_count > 0 {
+                self.log_warning(&format!("{} instances failed triangulation", self.failed_face_count));
+            }
             self.load_mesh(self.mesh.clone(), &format!("STEP: {}", self.loading_name));
             self.loading_name.clear();
             return false;
@@ -1102,9 +1075,9 @@ impl eframe::App for ViewerApp {
         #[cfg(target_arch = "wasm32")]
         self.process_web_file_loads();
 
-        // Process progressive triangulation (one batch per frame)
+        // Process progressive triangulation (one BREP per frame)
         if self.is_loading {
-            self.process_pending_instances();
+            self.process_pending_breps();
             ctx.request_repaint(); // Keep repainting during loading
         }
 

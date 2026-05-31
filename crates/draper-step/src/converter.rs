@@ -585,6 +585,140 @@ pub fn step_structure_with_instances(step_file: &StepFile) -> (AssemblyNode, Vec
     (tree, instances)
 }
 
+// ============================================================
+// Lazy (progressive) conversion — no triangulation in the initial call
+// ============================================================
+
+/// A pending BREP instance that has NOT been triangulated yet.
+///
+/// Contains all the metadata needed to produce a `DetailedMeshInstance`
+/// (name, transform, color, brep_id), but the expensive triangulation
+/// is deferred to a separate call to `triangulate_pending_instance()`.
+///
+/// This is used by `step_structure_lazy()` to return the assembly tree
+/// and instance descriptors quickly, then triangulate them one-by-one
+/// in a progressive frame loop (e.g., the wasm web viewer).
+#[derive(Clone, Debug)]
+pub struct PendingBrepInstance {
+    /// Human-readable name (from STEP PRODUCT or NAUO).
+    pub name: String,
+    /// The STEP entity ID of the source MANIFOLD_SOLID_BREP.
+    pub brep_id: i64,
+    /// The 4×4 transform to apply to get this instance into world space.
+    pub transform: Option<[[f64; 4]; 4]>,
+    /// Optional RGBA color (0..1 range).
+    pub color: Option<[f32; 4]>,
+}
+
+/// Build the assembly tree and collect BREP instance descriptors — **without**
+/// triangulating any geometry.
+///
+/// Returns the assembly tree (for immediate structure display) and a list of
+/// `PendingBrepInstance` descriptors. Each descriptor can later be triangulated
+/// individually via `triangulate_pending_instance()`.
+///
+/// This function is fast (O(n) in STEP entity count) because it only resolves
+/// references and collects metadata — no mesh computation is performed.
+pub fn step_structure_lazy(step_file: &StepFile) -> (AssemblyNode, Vec<PendingBrepInstance>) {
+    let converter = StepConverter::new(step_file);
+    let mut tree = converter.build_assembly_tree();
+    let pending = converter.collect_pending_instances();
+
+    // Assign instance_index to tree leaves based on pending list
+    let mut next_index: usize = 0;
+    assign_instance_indices_pending(&mut tree, &pending, &mut next_index);
+
+    (tree, pending)
+}
+
+/// Triangulate a single pending BREP instance on demand.
+///
+/// This is the progressive counterpart to `step_structure_lazy()`: instead of
+/// triangulating all BREPs at once (which blocks the main thread on wasm),
+/// call this function once per frame for each pending instance.
+///
+/// Returns `None` if the BREP cannot be triangulated (missing geometry,
+/// unsupported surface types, etc.).
+///
+/// # Timeout
+/// On wasm32, a per-BREP time limit of 3 seconds is enforced via
+/// `TriangulationGuard`. Faces that exceed the limit are skipped,
+/// producing a partial mesh instead of hanging the browser.
+pub fn triangulate_pending_instance(
+    step_file: &StepFile,
+    pending: &PendingBrepInstance,
+) -> Option<DetailedMeshInstance> {
+    let config = StepConversionConfig::default();
+    let converter = StepConverter::with_config(step_file, config.clone());
+    let params = TriangulationParams::default();
+    let bbox = converter.compute_bounding_box();
+
+    let (mesh, faces) = converter.triangulate_brep_detailed(pending.brep_id, &params, &bbox)?;
+
+    // Apply the instance transform
+    let mut instance_mesh = mesh;
+    if let Some(ref tf) = pending.transform {
+        instance_mesh.transform(tf);
+    }
+
+    Some(DetailedMeshInstance {
+        name: pending.name.clone(),
+        mesh: instance_mesh,
+        color: pending.color,
+        transform: pending.transform,
+        brep_id: pending.brep_id,
+        faces,
+    })
+}
+
+/// Assign instance_index to leaf AssemblyNodes for pending instances.
+fn assign_instance_indices_pending(root: &mut AssemblyNode, instances: &[PendingBrepInstance], _next_index: &mut usize) {
+    // Same logic as assign_instance_indices but for PendingBrepInstance
+    let mut leaves: Vec<*mut AssemblyNode> = Vec::new();
+    {
+        let mut stack: Vec<*mut AssemblyNode> = vec![root as *mut AssemblyNode];
+        while let Some(node_ptr) = stack.pop() {
+            let node = unsafe { &mut *node_ptr };
+            if node.children.is_empty() {
+                leaves.push(node_ptr);
+            } else {
+                for child in node.children.iter_mut().rev() {
+                    stack.push(child as *mut AssemblyNode);
+                }
+            }
+        }
+    }
+
+    let mut inst_idx: usize = 0;
+    for leaf_ptr in leaves {
+        let leaf = unsafe { &mut *leaf_ptr };
+        let leaf_brep = match leaf.brep_id {
+            Some(id) => id,
+            None => continue,
+        };
+
+        let mut found = false;
+        for i in inst_idx..instances.len() {
+            if instances[i].brep_id == leaf_brep {
+                leaf.instance_index = Some(i);
+                inst_idx = i + 1;
+                found = true;
+                break;
+            }
+        }
+
+        if !found {
+            for i in 0..instances.len() {
+                if instances[i].brep_id == leaf_brep {
+                    leaf.instance_index = Some(i);
+                    found = true;
+                    break;
+                }
+            }
+        }
+    }
+}
+
 /// Assign instance_index to leaf AssemblyNodes by finding the matching instance
 /// from the instances list. Matching is based on brep_id and the NAUO traversal order.
 ///
@@ -2499,6 +2633,135 @@ impl<'a> StepConverter<'a> {
             }
         }
         None
+    }
+
+    /// Collect pending BREP instances without triangulating them.
+    ///
+    /// This mirrors `convert_detailed_instances()` but skips the expensive
+    /// `triangulate_brep_detailed_cached()` call. Instead, it returns
+    /// `PendingBrepInstance` descriptors that can be triangulated later
+    /// via `triangulate_pending_instance()`.
+    fn collect_pending_instances(&self) -> Vec<PendingBrepInstance> {
+        let color_map = self.extract_color_map();
+        let mut results: Vec<PendingBrepInstance> = Vec::new();
+
+        // ─── Phase 1: Assembly-based collection via NAUO tree walk ────────
+        let nauos = self.step.find_entities_by_type("NEXT_ASSEMBLY_USAGE_OCCURRENCE");
+        if !nauos.is_empty() {
+            let mut parent_pd_to_children: HashMap<i64, Vec<(i64, i64, String)>> = HashMap::new();
+            for nauo in &nauos {
+                let (relating_pd, related_pd) = self.extract_nauo_pd_refs(nauo);
+                if let (Some(parent_pd), Some(child_pd)) = (relating_pd, related_pd) {
+                    let name = self.extract_nauo_name(nauo);
+                    parent_pd_to_children.entry(parent_pd).or_default().push((nauo.id, child_pd, name));
+                }
+            }
+
+            let parent_pds: std::collections::HashSet<i64> = parent_pd_to_children.keys().copied().collect();
+            let child_pds: std::collections::HashSet<i64> = nauos.iter()
+                .filter_map(|n| self.extract_nauo_pd_refs(n).1)
+                .collect();
+            let roots: Vec<i64> = parent_pds.difference(&child_pds).copied().collect();
+
+            if !roots.is_empty() {
+                // Track which BREPs we've already added (to avoid duplicates)
+                let mut seen_breps: std::collections::HashSet<i64> = std::collections::HashSet::new();
+
+                for root_pd in &roots {
+                    self.collect_pending_from_assembly_tree(
+                        *root_pd,
+                        &None,
+                        &color_map,
+                        &parent_pd_to_children,
+                        &mut results,
+                        &mut seen_breps,
+                    );
+                }
+            }
+
+            if !results.is_empty() {
+                return results;
+            }
+        }
+
+        // ─── Phase 2: No assembly — direct BREP descriptors ───
+        let breps = self.step.find_entities_by_type("MANIFOLD_SOLID_BREP");
+        for brep in &breps {
+            let name = self.get_brep_name(brep.id);
+            let color = color_map.get(&brep.id).copied();
+            results.push(PendingBrepInstance {
+                name,
+                brep_id: brep.id,
+                transform: None,
+                color,
+            });
+        }
+
+        if !results.is_empty() {
+            return results;
+        }
+
+        // FACETED_BREP
+        let faceted = self.step.find_entities_by_type("FACETED_BREP");
+        for fb in &faceted {
+            let name = self.get_brep_name(fb.id);
+            let color = color_map.get(&fb.id).copied();
+            results.push(PendingBrepInstance {
+                name,
+                brep_id: fb.id,
+                transform: None,
+                color,
+            });
+        }
+
+        results
+    }
+
+    /// Walk the assembly tree collecting PendingBrepInstance descriptors
+    /// without triangulating any geometry.
+    fn collect_pending_from_assembly_tree(
+        &self,
+        root_pd_id: i64,
+        root_transform: &Option<[[f64; 4]; 4]>,
+        color_map: &HashMap<i64, [f32; 4]>,
+        parent_pd_to_children: &HashMap<i64, Vec<(i64, i64, String)>>,
+        results: &mut Vec<PendingBrepInstance>,
+        _seen_breps: &mut std::collections::HashSet<i64>,
+    ) {
+        let mut stack: Vec<(i64, Option<[[f64; 4]; 4]>)> = vec![(root_pd_id, *root_transform)];
+
+        while let Some((parent_pd_id, parent_transform)) = stack.pop() {
+            let children = match parent_pd_to_children.get(&parent_pd_id) {
+                Some(c) => c,
+                None => continue,
+            };
+
+            for &(nauo_id, child_pd_id, ref nauo_name) in children {
+                let nauo_transform = self.find_nauo_transform(nauo_id, child_pd_id);
+
+                let composed = match (&parent_transform, &nauo_transform) {
+                    (Some(pt), Some(nt)) => Some(mat4_mul(pt, nt)),
+                    (Some(pt), None) => Some(*pt),
+                    (None, Some(nt)) => Some(nt.clone()),
+                    (None, None) => None,
+                };
+
+                let has_nauo_children = parent_pd_to_children.contains_key(&child_pd_id);
+
+                if has_nauo_children {
+                    stack.push((child_pd_id, composed));
+                } else if let Some(brep_id) = self.find_pd_brep(child_pd_id) {
+                    let color = color_map.get(&brep_id).copied();
+                    let name = format!("{} (BREP#{})", nauo_name, brep_id);
+                    results.push(PendingBrepInstance {
+                        name,
+                        brep_id,
+                        transform: composed,
+                        color,
+                    });
+                }
+            }
+        }
     }
 
     /// Compute a bounding box from all CARTESIAN_POINT entities.
