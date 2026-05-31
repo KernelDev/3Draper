@@ -367,6 +367,8 @@ pub struct ViewerApp {
     is_loading: bool,
     /// Name of the file being loaded.
     loading_name: String,
+    /// Start time of loading (for timeout detection).
+    loading_start: Option<std::time::Instant>,
 
     // ─── Manifold statistics ──────────────────────────────────────────
     /// Manifold report for the current mesh (computed on load).
@@ -537,6 +539,7 @@ impl ViewerApp {
             triangulated_count: 0,
             is_loading: false,
             loading_name: String::new(),
+            loading_start: None,
             manifold_report,
             controls_panel_open: true,
             structure_tree_open: true,
@@ -1076,6 +1079,7 @@ impl ViewerApp {
             self.conversion_ctx = Some(OwnedStepConversionContext::new(step_file.clone()));
             self.is_loading = true;
             self.loading_name = name.to_string();
+            self.loading_start = Some(std::time::Instant::now());
 
             // Clear existing rendering data
             self.detailed_instances.clear();
@@ -1099,6 +1103,7 @@ impl ViewerApp {
     /// Cancel any in-progress loading.
     fn cancel_loading(&mut self) {
         self.is_loading = false;
+        self.loading_start = None;
         self.pending_breps.clear();
         self.conversion_ctx = None;
         self.triangulated_count = 0;
@@ -1116,6 +1121,31 @@ impl ViewerApp {
     fn process_pending_breps(&mut self) -> bool {
         if !self.is_loading || self.pending_breps.is_empty() {
             return false;
+        }
+
+        // Check for global loading timeout (30 seconds on WASM, 120 seconds native)
+        if let Some(start) = self.loading_start {
+            let timeout = if cfg!(target_arch = "wasm32") {
+                std::time::Duration::from_secs(30)
+            } else {
+                std::time::Duration::from_secs(120)
+            };
+            if start.elapsed() > timeout {
+                let elapsed = start.elapsed().as_secs();
+                let remaining = self.pending_breps.len();
+                self.log_warning(&format!(
+                    "Loading timed out after {}s — {} instances remaining, showing partial result",
+                    elapsed, remaining
+                ));
+                self.is_loading = false;
+                self.conversion_ctx = None;
+                self.loading_start = None;
+                if self.mesh.vertex_count() > 0 {
+                    self.load_mesh(self.mesh.clone(), &format!("STEP (partial): {}", self.loading_name));
+                }
+                self.loading_name.clear();
+                return false;
+            }
         }
 
         // Take the next pending BREP from the front
@@ -1175,6 +1205,7 @@ impl ViewerApp {
             // Loading complete — free the conversion context (and its StepFile)
             self.is_loading = false;
             self.conversion_ctx = None;
+            self.loading_start = None;
             let vcount = self.mesh.vertex_count();
             let tcount = self.mesh.triangle_count();
             self.log(&format!(
