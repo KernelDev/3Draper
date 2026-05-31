@@ -778,13 +778,13 @@ impl ViewerApp {
         self.load_mesh(mesh, "NURBS (Wavy Sheet)");
     }
 
-    /// Load Box with "3Draper" text CUT OUT (holes) on the front face.
+    /// Load Box with "3" hole CUT OUT on the front face.
     fn load_box_text(&mut self) {
         let solid = ShapeBuilder::make_box(100.0, 80.0, 60.0);
         let base_mesh = triangulate_solid(&solid, &wasm_tri_params());
         let mesh = cut_text_holes_in_mesh(
             &base_mesh,
-            "3Draper",
+            "3",
             &TextSurface::Plane { z: 30.0 },
             0.5,   // text scale
             5.0,   // hole depth
@@ -793,16 +793,16 @@ impl ViewerApp {
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
-        self.load_mesh(mesh, "Box + 3Draper (holes)");
+        self.load_mesh(mesh, "Box + hole(3)");
     }
 
-    /// Load Cylinder with "3Draper" text CUT OUT on the lateral surface.
+    /// Load Cylinder with "3" hole CUT OUT on the lateral surface.
     fn load_cylinder_text(&mut self) {
         let solid = ShapeBuilder::make_cylinder(40.0, 100.0);
         let base_mesh = triangulate_solid(&solid, &wasm_tri_params());
         let mesh = cut_text_holes_in_mesh(
             &base_mesh,
-            "3Draper",
+            "3",
             &TextSurface::Cylinder { radius: 40.0, height: 100.0 },
             0.4,   // text scale
             5.0,   // hole depth
@@ -811,16 +811,16 @@ impl ViewerApp {
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
-        self.load_mesh(mesh, "Cylinder + 3Draper (holes)");
+        self.load_mesh(mesh, "Cylinder + hole(3)");
     }
 
-    /// Load Sphere with "3Draper" text CUT OUT on the surface.
+    /// Load Sphere with "3" hole CUT OUT on the surface.
     fn load_sphere_text(&mut self) {
         let solid = ShapeBuilder::make_sphere(50.0);
         let base_mesh = triangulate_solid(&solid, &wasm_tri_params());
         let mesh = cut_text_holes_in_mesh(
             &base_mesh,
-            "3Draper",
+            "3",
             &TextSurface::Sphere { center: [0.0, 0.0, 0.0], radius: 50.0 },
             0.5,   // text scale
             5.0,   // hole depth
@@ -829,10 +829,10 @@ impl ViewerApp {
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
-        self.load_mesh(mesh, "Sphere + 3Draper (holes)");
+        self.load_mesh(mesh, "Sphere + hole(3)");
     }
 
-    /// Load Cone with "3Draper" text CUT OUT on the lateral surface.
+    /// Load Cone with "3" hole CUT OUT on the lateral surface.
     fn load_cone_text(&mut self) {
         let radius: f64 = 40.0;
         let height: f64 = 80.0;
@@ -841,7 +841,7 @@ impl ViewerApp {
         let base_mesh = triangulate_solid(&solid, &wasm_tri_params());
         let mesh = cut_text_holes_in_mesh(
             &base_mesh,
-            "3Draper",
+            "3",
             &TextSurface::Cone { radius: 40.0, height: 80.0 },
             0.4,   // text scale
             5.0,   // hole depth
@@ -850,16 +850,16 @@ impl ViewerApp {
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
-        self.load_mesh(mesh, "Cone + 3Draper (holes)");
+        self.load_mesh(mesh, "Cone + hole(3)");
     }
 
-    /// Load Torus with "3Draper" text CUT OUT on the outer surface.
+    /// Load Torus with "3" hole CUT OUT on the outer surface.
     fn load_torus_text(&mut self) {
         let solid = ShapeBuilder::make_torus(40.0, 12.0);
         let base_mesh = triangulate_solid(&solid, &wasm_tri_params());
         let mesh = cut_text_holes_in_mesh(
             &base_mesh,
-            "3Draper",
+            "3",
             &TextSurface::Torus { major_radius: 40.0, minor_radius: 12.0 },
             0.3,   // text scale (smaller for torus)
             3.0,   // hole depth
@@ -868,10 +868,10 @@ impl ViewerApp {
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
-        self.load_mesh(mesh, "Torus + 3Draper (holes)");
+        self.load_mesh(mesh, "Torus + hole(3)");
     }
 
-    /// Load Revolution with "3Draper" text CUT OUT (approximated as cylinder for projection).
+    /// Load Revolution with "3" hole CUT OUT (approximated as cylinder for projection).
     fn load_revolution_text(&mut self) {
         use draper_geometry::{Curve3d, NurbsCurve, Point3d as P3};
         let profile = Curve3d::Nurbs(NurbsCurve {
@@ -891,7 +891,7 @@ impl ViewerApp {
         // Approximate revolution as cylinder for text projection
         let mesh = cut_text_holes_in_mesh(
             &base_mesh,
-            "3Draper",
+            "3",
             &TextSurface::Cylinder { radius: 30.0, height: 100.0 },
             0.4,   // text scale
             5.0,   // hole depth
@@ -900,10 +900,10 @@ impl ViewerApp {
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
-        self.load_mesh(mesh, "Revolution + 3Draper (holes)");
+        self.load_mesh(mesh, "Revolution + hole(3)");
     }
 
-    /// Load NURBS with "3Draper" text CUT OUT (projected as flat plane).
+    /// Load NURBS with "3" hole CUT OUT (projected as flat plane).
     fn load_nurbs_text(&mut self) {
         use draper_geometry::{NurbsSurface, Point3d as P3};
         let control_points = vec![
@@ -934,7 +934,7 @@ impl ViewerApp {
         // NURBS sheet is roughly flat at z~0 to z~30, use plane projection at average z
         let mesh = cut_text_holes_in_mesh(
             &base_mesh,
-            "3Draper",
+            "3",
             &TextSurface::Plane { z: 10.0 },
             0.5,   // text scale
             5.0,   // hole depth
@@ -943,10 +943,10 @@ impl ViewerApp {
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
-        self.load_mesh(mesh, "NURBS + 3Draper (holes)");
+        self.load_mesh(mesh, "NURBS + hole(3)");
     }
 
-    /// Load Extrusion with "3Draper" text CUT OUT (approximated as cylinder).
+    /// Load Extrusion with "3" hole CUT OUT (approximated as cylinder).
     fn load_extrusion_text(&mut self) {
         use draper_geometry::{Curve3d, Circle, Point3d as P3};
         let profile = Curve3d::Circle(Circle::new_xy(
@@ -961,7 +961,7 @@ impl ViewerApp {
         let base_mesh = triangulate_solid(&solid, &wasm_tri_params());
         let mesh = cut_text_holes_in_mesh(
             &base_mesh,
-            "3Draper",
+            "3",
             &TextSurface::Cylinder { radius: 30.0, height: 80.0 },
             0.4,   // text scale
             5.0,   // hole depth
@@ -970,7 +970,7 @@ impl ViewerApp {
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
-        self.load_mesh(mesh, "Extrusion + 3Draper (holes)");
+        self.load_mesh(mesh, "Extrusion + hole(3)");
     }
 
     // ─── Native file I/O (uses rfd + filesystem) ─────────────────────────
@@ -1301,12 +1301,15 @@ impl ViewerApp {
 
     /// Import STEP from string (used by web file loading).
     fn import_step_from_str(&mut self, content: &str, name: &str) {
+        self.log(&format!("Parsing STEP file: '{}' ({} chars)...", name, content.len()));
         match draper_step::parse_step(content) {
             Ok(step_file) => {
+                let entity_count = step_file.entities.len();
+                self.log(&format!("STEP parsed: {} entities found in '{}'", entity_count, name));
                 self.process_step_file(&step_file, name);
             }
             Err(e) => {
-                self.log_error(&format!("STEP import error: {}", e));
+                self.log_error(&format!("STEP import error for '{}': {}", name, e));
             }
         }
     }
@@ -1330,11 +1333,14 @@ impl ViewerApp {
         let shared_result = self.file_result.clone();
 
         let input_elem_for_closure = input_elem.clone();
+        let input_for_cleanup: web_sys::HtmlElement = input.clone().unchecked_into();
 
         let onchange = Closure::wrap(Box::new(move |_: web_sys::Event| {
             if let Some(files) = input_elem_for_closure.files() {
                 if let Some(file) = files.get(0) {
                     let file_name = file.name();
+                    log::info!("STL file selected: '{}'", file_name);
+
                     let reader = web_sys::FileReader::new().unwrap();
                     let reader_clone = reader.clone();
                     let shared = shared_result.clone();
@@ -1344,17 +1350,30 @@ impl ViewerApp {
                             let array_buffer: js_sys::ArrayBuffer = result.into();
                             let uint8_array = js_sys::Uint8Array::new(&array_buffer);
                             let data = uint8_array.to_vec();
+                            log::info!("STL file loaded: {} bytes", data.len());
                             *shared.lock().unwrap() = Some(FileLoadResult::Stl {
                                 name: file_name.clone(),
                                 data,
                             });
+                        } else {
+                            log::error!("STL file read_as_array_buffer() returned error");
                         }
+                    }) as Box<dyn FnMut(_)>);
+
+                    let onerror = Closure::wrap(Box::new(move |_evt: web_sys::Event| {
+                        log::error!("FileReader error while reading STL file");
                     }) as Box<dyn FnMut(_)>);
 
                     reader.set_onload(Some(onload.as_ref().unchecked_ref()));
                     onload.forget();
+                    reader.set_onerror(Some(onerror.as_ref().unchecked_ref()));
+                    onerror.forget();
                     let _ = reader.read_as_array_buffer(&file);
                 }
+            }
+            // Remove the file input element from DOM after use
+            if let Some(parent) = input_for_cleanup.parent_node() {
+                let _ = parent.remove_child(&input_for_cleanup);
             }
         }) as Box<dyn FnMut(_)>);
 
@@ -1383,30 +1402,68 @@ impl ViewerApp {
         let shared_result = self.file_result.clone();
 
         let input_elem_for_closure = input_elem.clone();
+        // Clone the input element for cleanup after file selection
+        let input_for_cleanup: web_sys::HtmlElement = input.clone().unchecked_into();
 
         let onchange = Closure::wrap(Box::new(move |_: web_sys::Event| {
             if let Some(files) = input_elem_for_closure.files() {
                 if let Some(file) = files.get(0) {
                     let file_name = file.name();
+                    let file_size = file.size();
+                    log::info!("STEP file selected: '{}' ({} bytes)", file_name, file_size);
+
+                    // Check file size limit (50MB max for WASM)
+                    if file_size > 50 * 1024 * 1024 {
+                        log::error!("STEP file too large: {} bytes (max 50MB)", file_size);
+                        *shared_result.lock().unwrap() = None;
+                        return;
+                    }
+
                     let reader = web_sys::FileReader::new().unwrap();
                     let reader_clone = reader.clone();
                     let shared = shared_result.clone();
+                    let name_for_log = file_name.clone();
 
                     let onload = Closure::wrap(Box::new(move |_: web_sys::Event| {
+                        log::info!("STEP file loaded into memory: '{}'", name_for_log);
                         if let Ok(result) = reader_clone.result() {
                             if let Some(text) = result.as_string() {
+                                log::info!("STEP file text extracted: {} chars", text.len());
                                 *shared.lock().unwrap() = Some(FileLoadResult::Step {
-                                    name: file_name.clone(),
+                                    name: name_for_log.clone(),
                                     content: text,
                                 });
+                            } else {
+                                log::error!("STEP file read result is not a string — file may be binary or have encoding issues");
                             }
+                        } else {
+                            log::error!("STEP file read_as_text() returned error");
                         }
+                    }) as Box<dyn FnMut(_)>);
+
+                    // Add onerror handler
+                    let onerror = Closure::wrap(Box::new(move |_evt: web_sys::Event| {
+                        log::error!("FileReader error while reading STEP file");
                     }) as Box<dyn FnMut(_)>);
 
                     reader.set_onload(Some(onload.as_ref().unchecked_ref()));
                     onload.forget();
-                    let _ = reader.read_as_text(&file);
+                    reader.set_onerror(Some(onerror.as_ref().unchecked_ref()));
+                    onerror.forget();
+
+                    match reader.read_as_text(&file) {
+                        Ok(()) => {
+                            log::info!("Started reading STEP file: '{}'", file_name);
+                        }
+                        Err(_) => {
+                            log::error!("Failed to start reading STEP file: '{}'", file_name);
+                        }
+                    }
                 }
+            }
+            // Remove the file input element from DOM after use
+            if let Some(parent) = input_for_cleanup.parent_node() {
+                let _ = parent.remove_child(&input_for_cleanup);
             }
         }) as Box<dyn FnMut(_)>);
 
@@ -1425,9 +1482,11 @@ impl ViewerApp {
         if let Some(file_result) = result {
             match file_result {
                 FileLoadResult::Step { name, content } => {
+                    log::info!("Processing loaded STEP file: '{}' ({} chars)", name, content.len());
                     self.import_step_from_str(&content, &name);
                 }
                 FileLoadResult::Stl { name, data } => {
+                    log::info!("Processing loaded STL file: '{}' ({} bytes)", name, data.len());
                     self.import_stl_from_bytes(&data, &name);
                 }
             }
@@ -2108,10 +2167,10 @@ impl eframe::App for ViewerApp {
                     if ui.button("Extrusion").clicked() { self.load_extrusion(); }
                     if ui.button("NURBS").clicked() { self.load_nurbs(); }
                 });
-                // --- 3Draper Text ---
+                // --- Hole: 3 ---
                 ui.separator();
-                ui.heading(egui::RichText::new("3Draper Holes").size(12.0));
-                ui.label(egui::RichText::new("Cut-out text on surfaces").size(9.0).color(egui::Color32::GRAY));
+                ui.heading(egui::RichText::new("Hole: 3").size(12.0));
+                ui.label(egui::RichText::new("Cut-out \"3\" on surfaces").size(9.0).color(egui::Color32::GRAY));
                 ui.horizontal(|ui| {
                     if ui.button("Box~").clicked() { self.load_box_text(); }
                     if ui.button("Cyl~").clicked() { self.load_cylinder_text(); }
