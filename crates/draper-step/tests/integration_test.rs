@@ -8,7 +8,7 @@
 //! 3. StepEdgeCache produces consistent boundary points on shared edges
 
 use std::path::Path;
-use draper_step::{parse_step, step_to_detailed_instances, step_to_mesh};
+use draper_step::{parse_step, step_to_detailed_instances, step_to_mesh, step_structure_lazy, StepConversionContext};
 use draper_mesh::{check_manifold, TriangulationParams};
 
 /// Helper: read a STEP file from the test directory.
@@ -143,4 +143,50 @@ fn test_sample_cube_manifold() {
     assert!(report.is_watertight() || report.boundary_edge_count < 10,
         "SampleCube should be approximately watertight, got {} boundary edges",
         report.boundary_edge_count);
+}
+
+// ============================================================
+// Test as1-oc-214.stp (assembly file that previously hung)
+// ============================================================
+
+#[test]
+fn test_as1_oc_214_loads() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    
+    let step = parse_test_step("as1-oc-214.stp");
+    
+    // Test lazy loading (the path used by the web viewer)
+    let start = std::time::Instant::now();
+    let (_tree, pending) = step_structure_lazy(&step);
+    let lazy_time = start.elapsed();
+    println!("as1-oc-214.stp: {} pending instances (lazy: {:?})", pending.len(), lazy_time);
+    
+    assert!(!pending.is_empty(), "as1-oc-214.stp should have at least one BREP instance");
+    
+    // Test progressive triangulation
+    let ctx = StepConversionContext::new(&step);
+    let mut total_vertices = 0;
+    let mut total_triangles = 0;
+    let mut ok_count = 0;
+    let mut fail_count = 0;
+    
+    for (i, p) in pending.iter().enumerate() {
+        match ctx.triangulate_pending(p) {
+            Some(inst) => {
+                total_vertices += inst.mesh.vertex_count();
+                total_triangles += inst.mesh.triangle_count();
+                ok_count += 1;
+                if i < 3 || i == pending.len() - 1 {
+                    println!("  [{}] {}: v={} t={}", i, inst.name, inst.mesh.vertex_count(), inst.mesh.triangle_count());
+                }
+            }
+            None => {
+                fail_count += 1;
+            }
+        }
+    }
+    
+    println!("as1-oc-214.stp: {} ok, {} fail, total v={}, t={}", ok_count, fail_count, total_vertices, total_triangles);
+    assert!(ok_count > 0, "as1-oc-214.stp should produce at least one mesh");
+    assert!(total_triangles > 0, "as1-oc-214.stp should produce triangles");
 }
