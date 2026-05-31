@@ -137,6 +137,12 @@ impl StepFile {
             .map(|&idx| &self.entities[idx])
     }
 
+    /// Get a reference to the entity index (id → array position).
+    /// This allows callers to clone the index instead of rebuilding it.
+    pub fn entity_index_ref(&self) -> &HashMap<i64, usize> {
+        &self.entity_index
+    }
+
     /// Find all entities whose type_name contains the given string.
     /// This handles both simple types like "MANIFOLD_SOLID_BREP" and
     /// complex types like "REPRESENTATION_RELATIONSHIP+REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION+SHAPE_REPRESENTATION_RELATIONSHIP".

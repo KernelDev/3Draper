@@ -798,10 +798,8 @@ impl OwnedStepConversionContext {
         // is nearly free (just clones of already-built maps).
         let pd_brep_map = step_file.pd_brep_index().clone();
         let nauo_transform_map = step_file.nauo_transform_index().clone();
-        let entity_map: HashMap<i64, usize> = step_file.entities.iter()
-            .enumerate()
-            .map(|(i, e)| (e.id, i))
-            .collect();
+        // Reuse the StepFile's entity_index instead of rebuilding it from scratch
+        let entity_map = step_file.entity_index_ref().clone();
 
         Self { step_file, bbox, params, pd_brep_map, nauo_transform_map, entity_map, config }
     }
@@ -1114,10 +1112,8 @@ impl<'a> StepConverter<'a> {
     }
 
     fn with_config(step: &'a StepFile, config: StepConversionConfig) -> Self {
-        let entity_map: HashMap<i64, usize> = step.entities.iter()
-            .enumerate()
-            .map(|(i, e)| (e.id, i))
-            .collect();
+        // Reuse the StepFile's entity_index instead of rebuilding from scratch
+        let entity_map = step.entity_index_ref().clone();
 
         // ─── Use or build reverse-index maps ───
         // These are cached on the StepFile so that multiple StepConverter instances
@@ -3459,24 +3455,33 @@ impl<'a> StepConverter<'a> {
 
     /// Actual bounding box computation (uncached).
     fn compute_bounding_box_uncached(&self) -> Option<(Point3d, Point3d)> {
-        let points: Vec<Point3d> = self.step.find_entities_by_type("CARTESIAN_POINT")
-            .iter()
-            .filter_map(|e| self.resolve_cartesian_point(e.id))
-            .collect();
+        // Stream min/max without allocating a Vec — for large STEP files with
+        // 100K+ CARTESIAN_POINT entities, the Vec allocation was a significant
+        // blocking cost on the WASM main thread.
+        let point_entities = self.step.find_entities_by_type("CARTESIAN_POINT");
+        let mut first = true;
+        let mut min = Point3d::ORIGIN;
+        let mut max = Point3d::ORIGIN;
 
-        if points.is_empty() {
-            return None;
+        for e in point_entities.iter() {
+            if let Some(p) = self.resolve_cartesian_point(e.id) {
+                if first {
+                    min = p;
+                    max = p;
+                    first = false;
+                } else {
+                    min.x = min.x.min(p.x);
+                    min.y = min.y.min(p.y);
+                    min.z = min.z.min(p.z);
+                    max.x = max.x.max(p.x);
+                    max.y = max.y.max(p.y);
+                    max.z = max.z.max(p.z);
+                }
+            }
         }
 
-        let mut min = points[0];
-        let mut max = points[0];
-        for p in &points[1..] {
-            min.x = min.x.min(p.x);
-            min.y = min.y.min(p.y);
-            min.z = min.z.min(p.z);
-            max.x = max.x.max(p.x);
-            max.y = max.y.max(p.y);
-            max.z = max.z.max(p.z);
+        if first {
+            return None;
         }
 
         // Expand the box slightly
@@ -6376,7 +6381,7 @@ impl<'a> StepConverter<'a> {
                 for &idx in &polygon_indices[..=bridge_outer] { new_polygon.push(idx); }
                 new_polygon.push(bridge_hole as u32);
                 for i in 0..hole_3d.len() {
-                    let idx = (bridge_hole + i) % hole_3d.len() + hole_start_idx;
+                    let idx = hole_start_idx + (bridge_result.1 + i) % hole_3d.len();
                     new_polygon.push(idx as u32);
                 }
                 new_polygon.push(bridge_hole as u32);

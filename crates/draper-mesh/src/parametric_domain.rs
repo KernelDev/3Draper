@@ -186,13 +186,50 @@ pub fn triangulate_cdt(
         all_uv_points.push(*p);
     }
 
+    // Deduplicate near-coincident points before CDT.
+    // When two points are extremely close in UV space, spade's CDT can fail
+    // to insert the second one. Previously we used a "last handle" fallback
+    // which created invalid constraint edges. Instead, merge near-duplicate
+    // points into a single index.
+    let dedup_eps = 1e-8;
+    let mut point_remap: Vec<usize> = (0..all_uv_points.len()).collect();
+    for i in 1..all_uv_points.len() {
+        for j in 0..i {
+            let du = all_uv_points[i].u - all_uv_points[j].u;
+            let dv = all_uv_points[i].v - all_uv_points[j].v;
+            if du * du + dv * dv < dedup_eps * dedup_eps {
+                point_remap[i] = point_remap[j];
+                break;
+            }
+        }
+    }
+    // Build a list of unique points and remap constraint edges
+    let mut unique_points: Vec<Point2d> = Vec::new();
+    let mut unique_remap: Vec<usize> = vec![0; all_uv_points.len()];
+    for i in 0..all_uv_points.len() {
+        if point_remap[i] == i {
+            unique_remap[i] = unique_points.len();
+            unique_points.push(all_uv_points[i]);
+        }
+    }
+    for i in 0..all_uv_points.len() {
+        if point_remap[i] != i {
+            unique_remap[i] = unique_remap[point_remap[i]];
+        }
+    }
+    let remapped_edges: Vec<(usize, usize)> = constraint_edges.iter()
+        .map(|&(i, j)| (unique_remap[i], unique_remap[j]))
+        .filter(|&(i, j)| i != j)  // Remove degenerate zero-length edges
+        .collect();
+
     // Build the constrained Delaunay triangulation
     let mut cdt: ConstrainedDelaunayTriangulation<SpadePoint> =
         ConstrainedDelaunayTriangulation::new();
 
-    // Insert all points
-    let mut vertex_handles: Vec<FixedVertexHandle> = Vec::with_capacity(all_uv_points.len());
-    for (idx, p) in all_uv_points.iter().enumerate() {
+    // Insert all unique points
+    let mut vertex_handles: Vec<FixedVertexHandle> = Vec::with_capacity(unique_points.len());
+    let mut insert_failed = false;
+    for (idx, p) in unique_points.iter().enumerate() {
         let spade_pt = SpadePoint {
             x: p.u,
             y: p.v,
@@ -201,20 +238,27 @@ pub fn triangulate_cdt(
         match cdt.insert(spade_pt) {
             Ok(handle) => vertex_handles.push(handle),
             Err(_) => {
-                // Duplicate or degenerate point — skip but push a placeholder
-                // Use the last inserted vertex handle as fallback
+                // Insertion failed — this is rare after deduplication.
+                // Push the nearest existing handle to keep indices aligned.
+                insert_failed = true;
                 if let Some(last) = vertex_handles.last().copied() {
                     vertex_handles.push(last);
+                } else {
+                    // Cannot create any triangulation — return empty mesh
+                    return TriangleMesh::new();
                 }
-                continue;
             }
         }
+    }
+
+    if insert_failed {
+        log::warn!("CDT: some points failed to insert even after deduplication");
     }
 
     // Add constraint edges — catch panics from intersecting constraints
     // and fall back to unconstrained Delaunay if CDT fails
     let mut cdt_ok = true;
-    for (i, j) in &constraint_edges {
+    for (i, j) in &remapped_edges {
         if *i < vertex_handles.len() && *j < vertex_handles.len() {
             let h_i = vertex_handles[*i];
             let h_j = vertex_handles[*j];
@@ -235,7 +279,7 @@ pub fn triangulate_cdt(
         log::warn!("CDT constraint edges intersect — falling back to unconstrained Delaunay");
         let mut fallback: spade::DelaunayTriangulation<SpadePoint> = spade::DelaunayTriangulation::new();
         vertex_handles.clear();
-        for (idx, p) in all_uv_points.iter().enumerate() {
+        for (idx, p) in unique_points.iter().enumerate() {
             let spade_pt = SpadePoint {
                 x: p.u,
                 y: p.v,

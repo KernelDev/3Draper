@@ -807,7 +807,7 @@ fn triangulate_planar_face(face: &Face, plane: &Plane, _params: &TriangulationPa
             // Bridge: outer → hole → ... hole loop ... → hole → outer
             new_polygon.push(bridge_hole as u32);
             for i in 0..hole_3d.len() {
-                let idx = (bridge_hole + i) % hole_3d.len() + hole_start_idx;
+                let idx = hole_start_idx + (bridge_result.hole_idx + i) % hole_3d.len();
                 new_polygon.push(idx as u32);
             }
             new_polygon.push(bridge_hole as u32);

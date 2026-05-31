@@ -13,7 +13,7 @@ use crate::renderer::{
 use draper_core::engine::{EngineConfig, build_engine};
 use draper_topology::ShapeBuilder;
 use draper_mesh::{triangulate_solid, TriangleMesh, TriangulationParams, check_manifold, ManifoldReport, generate_3draper_text, cut_text_holes_in_mesh, TextSurface};
-use draper_step::{AssemblyNode, DetailedMeshInstance, FaceInfo, PendingBrepInstance, OwnedStepConversionContext, step_structure_lazy};
+use draper_step::{AssemblyNode, DetailedMeshInstance, FaceInfo, PendingBrepInstance, OwnedStepConversionContext, StepFile, step_structure_lazy};
 use draper_geometry::{Surface, Point2d};
 use egui_wgpu::RenderState;
 use eframe::egui;
@@ -358,7 +358,13 @@ pub struct ViewerApp {
     /// Cached conversion context — owns the StepFile and is reused across frames.
     /// This avoids rebuilding entity maps, cloning HashMaps, and recomputing bounding boxes
     /// on every animation frame (which was the main cause of performance degradation).
+    /// Created LAZILY on the first `process_pending_breps()` call to avoid blocking
+    /// the main thread during `process_step_file()`.
     conversion_ctx: Option<OwnedStepConversionContext>,
+    /// Stored StepFile for lazy context creation. When a STEP file is loaded, we store it
+    /// here instead of immediately creating OwnedStepConversionContext (which is expensive).
+    /// The context is built on the first frame of progressive triangulation.
+    pending_step_file: Option<StepFile>,
     /// Total number of instances being loaded (for progress display).
     total_instance_count: usize,
     /// Number of instances already triangulated.
@@ -535,6 +541,7 @@ impl ViewerApp {
             scroll_to_face_id: None,
             pending_breps: Vec::new(),
             conversion_ctx: None,
+            pending_step_file: None,
             total_instance_count: 0,
             triangulated_count: 0,
             is_loading: false,
@@ -1076,7 +1083,14 @@ impl ViewerApp {
             self.total_instance_count = pending.len();
             self.triangulated_count = 0;
             self.pending_breps = pending;
-            self.conversion_ctx = Some(OwnedStepConversionContext::new(step_file.clone()));
+            // LAZY: Store the StepFile for later context creation.
+            // OwnedStepConversionContext::new() is expensive (builds entity maps,
+            // computes bounding box, clones HashMaps). Doing it synchronously here
+            // blocks the WASM main thread and prevents the browser from ever
+            // reaching process_pending_breps(). Instead, we create the context
+            // lazily on the first frame of progressive triangulation.
+            self.pending_step_file = Some(step_file.clone());
+            self.conversion_ctx = None;
             self.is_loading = true;
             self.loading_name = name.to_string();
             self.loading_start = Some(std::time::Instant::now());
@@ -1106,6 +1120,7 @@ impl ViewerApp {
         self.loading_start = None;
         self.pending_breps.clear();
         self.conversion_ctx = None;
+        self.pending_step_file = None;
         self.triangulated_count = 0;
         self.total_instance_count = 0;
     }
@@ -1123,12 +1138,29 @@ impl ViewerApp {
             return false;
         }
 
+        // LAZY: Create the conversion context on the first frame.
+        // This is expensive (builds entity maps, computes bounding box) but
+        // doing it here instead of in process_step_file() means the browser
+        // can render the tree structure before this heavy computation starts.
+        if self.conversion_ctx.is_none() {
+            if let Some(step_file) = self.pending_step_file.take() {
+                self.log("Building conversion context (entity maps, bounding box)...");
+                let ctx = OwnedStepConversionContext::new(step_file);
+                self.conversion_ctx = Some(ctx);
+                self.log("Conversion context ready — starting triangulation...");
+            } else {
+                // No step file and no context — can't proceed
+                self.is_loading = false;
+                return false;
+            }
+        }
+
         // Check for global loading timeout (30 seconds on WASM, 120 seconds native)
         if let Some(start) = self.loading_start {
             let timeout = if cfg!(target_arch = "wasm32") {
-                std::time::Duration::from_secs(30)
+                std::time::Duration::from_secs(60)
             } else {
-                std::time::Duration::from_secs(120)
+                std::time::Duration::from_secs(300)
             };
             if start.elapsed() > timeout {
                 let elapsed = start.elapsed().as_secs();
@@ -1139,6 +1171,7 @@ impl ViewerApp {
                 ));
                 self.is_loading = false;
                 self.conversion_ctx = None;
+                self.pending_step_file = None;
                 self.loading_start = None;
                 if self.mesh.vertex_count() > 0 {
                     self.load_mesh(self.mesh.clone(), &format!("STEP (partial): {}", self.loading_name));
