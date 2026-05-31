@@ -29,12 +29,8 @@ fn mesh_to_gpu_data(
     selected_instance: Option<usize>,
     instance_triangle_ranges: &[(usize, usize)],
 ) -> (Vec<MeshVertex>, Vec<u32>) {
-    let mut mesh = mesh.clone();
-    if mesh.face_normals.is_none() {
-        mesh.compute_face_normals();
-    }
-    mesh.ensure_colors([0.48, 0.52, 0.58, 1.0]);
-
+    // NOTE: compute_face_normals() and ensure_colors() must be called on the mesh
+    // BEFORE calling this function, to avoid cloning the entire mesh here.
     let normals = mesh.face_normals.as_ref();
     let colors = mesh.triangle_colors.as_ref();
     let face_ids = mesh.triangle_face_ids.as_ref();
@@ -470,7 +466,7 @@ impl ViewerApp {
         // Start with a default box
         let solid = ShapeBuilder::make_box(100.0, 100.0, 100.0);
         let params = TriangulationParams::default();
-        let mesh = triangulate_solid(&solid, &params);
+        let mut mesh = triangulate_solid(&solid, &params);
 
         let current_model = ModelEntry {
             name: "Box 100x100x100".to_string(),
@@ -489,6 +485,11 @@ impl ViewerApp {
 
         // Initialize GPU resources if wgpu is available
         if let Some(ref rs) = render_state {
+            // Ensure mesh has face normals and colors before GPU upload
+            if mesh.face_normals.is_none() {
+                mesh.compute_face_normals();
+            }
+            mesh.ensure_colors([0.48, 0.52, 0.58, 1.0]);
             let (vertices, indices) = mesh_to_gpu_data(&mesh, None, None, &[]);
             let resources = create_scene_resources(rs, &vertices, &indices);
             *gpu_resources.lock().unwrap() = Some(resources);
@@ -2049,6 +2050,13 @@ impl eframe::App for ViewerApp {
 
                 // Upload mesh data if dirty or highlight changed
                 if self.mesh_dirty || self.highlight_dirty {
+                    // Ensure mesh has face normals and colors before GPU upload
+                    // (moved from mesh_to_gpu_data to avoid cloning the entire mesh)
+                    if self.mesh.face_normals.is_none() {
+                        self.mesh.compute_face_normals();
+                    }
+                    self.mesh.ensure_colors([0.48, 0.52, 0.58, 1.0]);
+
                     if let Some(ref rs) = self.render_state {
                         let (vertices, indices) = mesh_to_gpu_data(&self.mesh, self.highlighted_face, self.selected_instance, &self.instance_triangle_ranges);
                         let mut guard = self.gpu_resources.lock().unwrap();

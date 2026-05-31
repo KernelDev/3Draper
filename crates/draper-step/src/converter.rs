@@ -670,7 +670,13 @@ impl<'a> StepConversionContext<'a> {
     /// Computes bounding box once and prepares adaptive triangulation parameters.
     /// The StepFile's internal type index (lazy) will be reused across calls.
     pub fn new(step_file: &'a StepFile) -> Self {
+        // On WASM, disable healing — it's O(n²) and freezes the browser.
+        // On native, keep healing enabled for better mesh quality.
+        #[cfg(target_arch = "wasm32")]
+        let config = StepConversionConfig::no_healing();
+        #[cfg(not(target_arch = "wasm32"))]
         let config = StepConversionConfig::default();
+
         let converter = StepConverter::with_config(step_file, config);
         let bbox = converter.compute_bounding_box();
 
@@ -973,28 +979,17 @@ struct StepConverter<'a> {
     step: &'a StepFile,
     _entity_map: HashMap<i64, usize>,
     config: StepConversionConfig,
-    /// Cache: pd_id → brep_id (avoids repeated O(n²) lookups in find_pd_brep)
-    pd_brep_cache: std::cell::RefCell<HashMap<i64, Option<i64>>>,
-    /// Cache: nauo_id → transform (avoids repeated O(n²) lookups in find_nauo_transform)
-    nauo_transform_cache: std::cell::RefCell<HashMap<i64, Option<[[f64; 4]; 4]>>>,
+    /// Pre-built index: pd_id → brep_id (resolved eagerly in new() — O(n) instead of O(n³) per-call)
+    pd_brep_map: HashMap<i64, Option<i64>>,
+    /// Pre-built index: nauo_id → transform (resolved eagerly in new() — O(n) instead of O(n²) per-call)
+    nauo_transform_map: HashMap<i64, Option<[[f64; 4]; 4]>>,
     /// Cache: bounding box (computed once, reused across all BREP triangulations)
     bbox_cache: std::cell::RefCell<Option<Option<(Point3d, Point3d)>>>,
 }
 
 impl<'a> StepConverter<'a> {
     fn new(step: &'a StepFile) -> Self {
-        let entity_map: HashMap<i64, usize> = step.entities.iter()
-            .enumerate()
-            .map(|(i, e)| (e.id, i))
-            .collect();
-        Self {
-            step,
-            _entity_map: entity_map,
-            config: StepConversionConfig::default(),
-            pd_brep_cache: std::cell::RefCell::new(HashMap::new()),
-            nauo_transform_cache: std::cell::RefCell::new(HashMap::new()),
-            bbox_cache: std::cell::RefCell::new(None),
-        }
+        Self::with_config(step, StepConversionConfig::default())
     }
 
     fn with_config(step: &'a StepFile, config: StepConversionConfig) -> Self {
@@ -1002,14 +997,373 @@ impl<'a> StepConverter<'a> {
             .enumerate()
             .map(|(i, e)| (e.id, i))
             .collect();
+
+        // ─── Use or build reverse-index maps ───
+        // These are cached on the StepFile so that multiple StepConverter instances
+        // (created per-BREP in progressive triangulation) don't rebuild them.
+        // First call builds and caches; subsequent calls reuse the cache.
+
+        // Build pd_brep_map if not cached
+        if step.pd_brep_index().is_empty() || (!step.pd_brep_index().is_empty() && step.pd_brep_index().values().all(|v| v.is_none())) {
+            let pd_brep_map = Self::build_pd_brep_index(step);
+            step.set_pd_brep_index(pd_brep_map);
+        }
+        let pd_brep_map = step.pd_brep_index().clone();
+
+        // Build nauo_transform_map if not cached
+        if step.nauo_transform_index().is_empty() {
+            let nauo_transform_map = Self::build_nauo_transform_index(step);
+            step.set_nauo_transform_index(nauo_transform_map);
+        }
+        let nauo_transform_map = step.nauo_transform_index().clone();
+
         Self {
             step,
             _entity_map: entity_map,
             config,
-            pd_brep_cache: std::cell::RefCell::new(HashMap::new()),
-            nauo_transform_cache: std::cell::RefCell::new(HashMap::new()),
+            pd_brep_map,
+            nauo_transform_map,
             bbox_cache: std::cell::RefCell::new(None),
         }
+    }
+
+    /// Build a complete pd_id → brep_id index in a single O(n) pass.
+    ///
+    /// This replaces the per-call `find_pd_brep_uncached()` which was O(n³)
+    /// (triple-nested loop: PDS × SDR × params). By pre-building the
+    /// reverse indices (pds_id → pd_id, pds_id → sdr_ids, sdr_id → sr_ids)
+    /// and resolving all BREP lookups upfront, we turn O(n³ × m) into O(n).
+    fn build_pd_brep_index(step: &StepFile) -> HashMap<i64, Option<i64>> {
+        // Phase 1: Build reverse index: pd_id → pds_ids
+        let mut pd_to_pds: HashMap<i64, Vec<i64>> = HashMap::new();
+        for pds in step.find_entities_by_type("PRODUCT_DEFINITION_SHAPE") {
+            for param in &pds.params {
+                if let Some(pd_id) = get_ref_standalone(param) {
+                    pd_to_pds.entry(pd_id).or_default().push(pds.id);
+                }
+            }
+        }
+
+        // Phase 2: Build reverse index: pds_id → sdr_ids
+        let mut pds_to_sdrs: HashMap<i64, Vec<i64>> = HashMap::new();
+        for sdr in step.find_entities_by_type("SHAPE_DEFINITION_REPRESENTATION") {
+            if let Some(pds_id) = sdr.params.first().and_then(|p| get_ref_standalone(p)) {
+                pds_to_sdrs.entry(pds_id).or_default().push(sdr.id);
+            }
+        }
+
+        // Phase 3: For each SDR, extract SR IDs and resolve BREP
+        let mut sdr_to_brep: HashMap<i64, Option<i64>> = HashMap::new();
+        for sdr in step.find_entities_by_type("SHAPE_DEFINITION_REPRESENTATION") {
+            let mut brep_id: Option<i64> = None;
+            for param in &sdr.params {
+                if let Some(sr_id) = get_ref_standalone(param) {
+                    // Direct: check if SR contains a BREP
+                    if let Some(bid) = Self::find_brep_in_representation_static(step, sr_id) {
+                        brep_id = Some(bid);
+                        break;
+                    }
+                    // Indirect: follow SRR chain
+                    if let Some(bid) = Self::find_brep_via_srr_static(step, sr_id, 0) {
+                        brep_id = Some(bid);
+                        break;
+                    }
+                }
+            }
+            sdr_to_brep.insert(sdr.id, brep_id);
+        }
+
+        // Phase 4: Combine: for each PD, find its PDS → SDR → BREP chain
+        let mut result: HashMap<i64, Option<i64>> = HashMap::new();
+        for (pd_id, pds_ids) in &pd_to_pds {
+            let mut found_brep: Option<i64> = None;
+            for pds_id in pds_ids {
+                if let Some(sdr_ids) = pds_to_sdrs.get(pds_id) {
+                    for sdr_id in sdr_ids {
+                        if let Some(bid) = sdr_to_brep.get(sdr_id).copied().flatten() {
+                            found_brep = Some(bid);
+                            break;
+                        }
+                    }
+                }
+                if found_brep.is_some() { break; }
+            }
+            result.insert(*pd_id, found_brep);
+        }
+
+        result
+    }
+
+    /// Static version of find_brep_in_representation (doesn't need &self).
+    fn find_brep_in_representation_static(step: &StepFile, sr_id: i64) -> Option<i64> {
+        let sr = step.find_entity(sr_id)?;
+        if sr.type_name.contains("ADVANCED_BREP_SHAPE_REPRESENTATION") {
+            for sp in &sr.params {
+                if let Some(brep_id) = get_ref_standalone(sp) {
+                    if let Some(brep) = step.find_entity(brep_id) {
+                        if brep.type_name == "MANIFOLD_SOLID_BREP" {
+                            return Some(brep_id);
+                        }
+                    }
+                }
+                if let StepValue::List(items) = sp {
+                    for item in items {
+                        if let Some(brep_id) = get_ref_standalone(item) {
+                            if let Some(brep) = step.find_entity(brep_id) {
+                                if brep.type_name == "MANIFOLD_SOLID_BREP" {
+                                    return Some(brep_id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Also check FACETED_BREP
+        if sr.type_name.contains("FACETED_BREP_SHAPE_REPRESENTATION") {
+            for sp in &sr.params {
+                if let Some(brep_id) = get_ref_standalone(sp) {
+                    if let Some(brep) = step.find_entity(brep_id) {
+                        if brep.type_name == "FACETED_BREP" {
+                            return Some(brep_id);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Static version of find_brep_via_srr (doesn't need &self).
+    /// Iterative implementation with cycle detection.
+    fn find_brep_via_srr_static(step: &StepFile, sr_id: i64, _depth: usize) -> Option<i64> {
+        let mut visited: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        let mut stack = vec![sr_id];
+        let mut depth = 0;
+
+        while let Some(current_sr_id) = stack.pop() {
+            if depth > 20 { break; }
+            if !visited.insert(current_sr_id) { continue; }
+            depth += 1;
+
+            let sr = match step.find_entity(current_sr_id) {
+                Some(s) => s,
+                None => continue,
+            };
+            if !sr.type_name.contains("SHAPE_REPRESENTATION") { continue; }
+
+            // Check SRR relationships that reference this SR
+            for srr in step.find_entities_by_type("SHAPE_REPRESENTATION_RELATIONSHIP") {
+                let mut refs_our_sr = false;
+                let mut other_sr_id: Option<i64> = None;
+                for (i, param) in srr.params.iter().enumerate() {
+                    if let Some(ref_id) = get_ref_standalone(param) {
+                        if ref_id == current_sr_id {
+                            refs_our_sr = true;
+                        } else if i >= 2 {
+                            if let Some(entity) = step.find_entity(ref_id) {
+                                if entity.type_name.contains("SHAPE_REPRESENTATION") {
+                                    other_sr_id = Some(ref_id);
+                                }
+                            }
+                        }
+                    }
+                }
+                if !refs_our_sr { continue; }
+                if let Some(other_id) = other_sr_id {
+                    // Direct BREP in the other SR?
+                    if let Some(bid) = Self::find_brep_in_representation_static(step, other_id) {
+                        return Some(bid);
+                    }
+                    // Otherwise add to stack for indirect lookup
+                    stack.push(other_id);
+                }
+            }
+
+            // Also check REPRESENTATION_RELATIONSHIP entities
+            for srr in step.find_entities_by_type("REPRESENTATION_RELATIONSHIP") {
+                if srr.type_name.contains("SHAPE_REPRESENTATION_RELATIONSHIP") { continue; }
+                let mut refs_our_sr = false;
+                let mut other_sr_id: Option<i64> = None;
+                for (i, param) in srr.params.iter().enumerate() {
+                    if let Some(ref_id) = get_ref_standalone(param) {
+                        if ref_id == current_sr_id {
+                            refs_our_sr = true;
+                        } else if i >= 2 {
+                            if let Some(entity) = step.find_entity(ref_id) {
+                                if entity.type_name.contains("SHAPE_REPRESENTATION") {
+                                    other_sr_id = Some(ref_id);
+                                }
+                            }
+                        }
+                    }
+                }
+                if !refs_our_sr { continue; }
+                if let Some(other_id) = other_sr_id {
+                    if let Some(bid) = Self::find_brep_in_representation_static(step, other_id) {
+                        return Some(bid);
+                    }
+                    stack.push(other_id);
+                }
+            }
+        }
+        None
+    }
+
+    /// Build a complete nauo_id → transform index in a single pass.
+    ///
+    /// This replaces `find_nauo_transform_uncached()` which was O(n²) per NAUO.
+    fn build_nauo_transform_index(step: &StepFile) -> HashMap<i64, Option<[[f64; 4]; 4]>> {
+        let mut result: HashMap<i64, Option<[[f64; 4]; 4]>> = HashMap::new();
+
+        // Build a reverse index: pds_id → nauo_id (which PDS belongs to which NAUO)
+        let nauos = step.find_entities_by_type("NEXT_ASSEMBLY_USAGE_OCCURRENCE");
+        if nauos.is_empty() { return result; }
+
+        // Build: nauo_id → the NAUO entity itself is already accessible via find_entity
+        // Build: pds_id → set of nauo_ids that reference this PDS
+        let mut pds_to_nauos: HashMap<i64, Vec<i64>> = HashMap::new();
+        for nauo in &nauos {
+            // NAUO params: id, name, description, #relating_pd, #related_pd, #pds_or_$
+            for param in nauo.params.iter().skip(5) {
+                if let Some(pds_id) = get_ref_standalone(param) {
+                    pds_to_nauos.entry(pds_id).or_default().push(nauo.id);
+                }
+            }
+        }
+
+        // Now walk CDSR entities and match them to NAUOs
+        for cdsr in step.find_entities_by_type("CONTEXT_DEPENDENT_SHAPE_REPRESENTATION") {
+            // CDSR params: #srr_or_repr_rel, #pds
+            // The PDS param links to the NAUO
+            let mut srr_id: Option<i64> = None;
+            let mut pds_id: Option<i64> = None;
+
+            for (i, param) in cdsr.params.iter().enumerate() {
+                if let Some(ref_id) = get_ref_standalone(param) {
+                    if i == 0 {
+                        srr_id = Some(ref_id);
+                    } else {
+                        pds_id = Some(ref_id);
+                    }
+                }
+            }
+
+            let srr_id = match srr_id {
+                Some(id) => id,
+                None => continue,
+            };
+            let pds_id = match pds_id {
+                Some(id) => id,
+                None => continue,
+            };
+
+            // Which NAUO(s) does this CDSR's PDS belong to?
+            let nauo_ids = match pds_to_nauos.get(&pds_id) {
+                Some(ids) => ids,
+                None => continue,
+            };
+
+            // Extract transform from SRR
+            let transform = if let Some(srr_entity) = step.find_entity(srr_id) {
+                Self::extract_transform_from_srr_static(step, &srr_entity)
+            } else {
+                None
+            };
+
+            // Assign to all NAUOs that reference this PDS
+            for nauo_id in nauo_ids {
+                result.insert(*nauo_id, transform);
+            }
+        }
+
+        // Ensure all NAUOs have an entry (even if no CDSR found → None transform)
+        for nauo in &nauos {
+            result.entry(nauo.id).or_insert(None);
+        }
+
+        result
+    }
+
+    /// Static version of extract_transform_from_srr.
+    fn extract_transform_from_srr_static(step: &StepFile, srr: &crate::schema::StepEntity) -> Option<[[f64; 4]; 4]> {
+        // Check complex entity with RRWT sub-entity
+        if srr.is_complex() {
+            if let Some(rrwt_sub) = srr.find_sub_entity("REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION") {
+                for param in &rrwt_sub.params {
+                    if let Some(ref_id) = get_ref_standalone(param) {
+                        if let Some(entity) = step.find_entity(ref_id) {
+                            if entity.type_name == "ITEM_DEFINED_TRANSFORMATION" {
+                                return Self::compute_item_defined_transform_static(step, &entity);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback: search params for IDT reference
+        for param in &srr.params {
+            if let Some(ref_id) = get_ref_standalone(param) {
+                if let Some(entity) = step.find_entity(ref_id) {
+                    if entity.type_name == "ITEM_DEFINED_TRANSFORMATION" {
+                        return Self::compute_item_defined_transform_static(step, &entity);
+                    }
+                    for inner_param in &entity.params {
+                        if let Some(inner_id) = get_ref_standalone(inner_param) {
+                            if let Some(inner_entity) = step.find_entity(inner_id) {
+                                if inner_entity.type_name == "ITEM_DEFINED_TRANSFORMATION" {
+                                    return Self::compute_item_defined_transform_static(step, &inner_entity);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Static version of compute_item_defined_transform.
+    fn compute_item_defined_transform_static(step: &StepFile, idt: &crate::schema::StepEntity) -> Option<[[f64; 4]; 4]> {
+        let mut axis2_ids: Vec<i64> = Vec::new();
+        for (i, param) in idt.params.iter().enumerate() {
+            if i < 2 { continue; }
+            if let Some(ref_id) = get_ref_standalone(param) {
+                if let Some(entity) = step.find_entity(ref_id) {
+                    if entity.type_name == "AXIS2_PLACEMENT_3D" {
+                        axis2_ids.push(ref_id);
+                    }
+                }
+            }
+        }
+
+        if axis2_ids.len() < 2 {
+            return None;
+        }
+
+        let (origin_pt, origin_z, origin_x) = resolve_axis2_standalone(step, axis2_ids[0])?;
+        let (target_pt, target_z, target_x) = resolve_axis2_standalone(step, axis2_ids[1])?;
+
+        let origin_y = origin_z.cross(&origin_x);
+        let target_y = target_z.cross(&target_x);
+
+        let o = [
+            [origin_x.x, origin_y.x, origin_z.x, origin_pt.x],
+            [origin_x.y, origin_y.y, origin_z.y, origin_pt.y],
+            [origin_x.z, origin_y.z, origin_z.z, origin_pt.z],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+
+        let t = [
+            [target_x.x, target_y.x, target_z.x, target_pt.x],
+            [target_x.y, target_y.y, target_z.y, target_pt.y],
+            [target_x.z, target_y.z, target_z.z, target_pt.z],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+
+        let o_inv = mat4_inverse(&o)?;
+        Some(mat4_mul(&t, &o_inv))
     }
 
     fn convert(&self) -> Result<TriangleMesh, String> {
@@ -1954,7 +2308,7 @@ impl<'a> StepConverter<'a> {
         // Time guard: on wasm, limit per-BREP triangulation time to avoid freezing the browser.
         // On native, there's no limit (Duration::MAX).
         #[cfg(target_arch = "wasm32")]
-        let brep_time_limit = std::time::Duration::from_secs(10);
+        let brep_time_limit = std::time::Duration::from_secs(3);
         #[cfg(not(target_arch = "wasm32"))]
         let brep_time_limit = std::time::Duration::from_secs(300); // 5 min on native
         let brep_start = std::time::Instant::now();
@@ -2015,11 +2369,17 @@ impl<'a> StepConverter<'a> {
                 .map(|edges| self.sample_edges_to_polylines(edges))
                 .collect();
 
-            // Project boundary to UV space
+            // Project boundary to UV space — skip on WASM (expensive NURBS projection)
+            #[cfg(not(target_arch = "wasm32"))]
             let outer_uv_boundary = self.sample_edges_to_uv_polylines(&face_data.outer_edges, &face_data.surface);
+            #[cfg(not(target_arch = "wasm32"))]
             let inner_uv_boundaries: Vec<Vec<Vec<Point2d>>> = face_data.inner_edges.iter()
                 .map(|edges| self.sample_edges_to_uv_polylines(edges, &face_data.surface))
                 .collect();
+            #[cfg(target_arch = "wasm32")]
+            let outer_uv_boundary: Vec<Vec<Point2d>> = vec![];
+            #[cfg(target_arch = "wasm32")]
+            let inner_uv_boundaries: Vec<Vec<Vec<Point2d>>> = vec![];
 
             face_infos.push(FaceInfo {
                 face_id,
@@ -2221,13 +2581,8 @@ impl<'a> StepConverter<'a> {
 
     /// Find the transform for a NAUO instance by walking CDSR → SRR → ITEM_DEFINED_TRANSFORMATION.
     fn find_nauo_transform(&self, nauo_id: i64, _related_pd_id: i64) -> Option<[[f64; 4]; 4]> {
-        // Check cache first
-        if let Some(cached) = self.nauo_transform_cache.borrow().get(&nauo_id) {
-            return *cached;
-        }
-        let result = self.find_nauo_transform_uncached(nauo_id, _related_pd_id);
-        self.nauo_transform_cache.borrow_mut().insert(nauo_id, result);
-        result
+        // Use pre-built index for O(1) lookup
+        self.nauo_transform_map.get(&nauo_id).copied().flatten()
     }
 
     /// Actual find_nauo_transform computation (uncached).
@@ -2365,14 +2720,9 @@ impl<'a> StepConverter<'a> {
     }
 
     /// Find the MANIFOLD_SOLID_BREP associated with a PRODUCT_DEFINITION.
+    /// Uses the pre-built pd_brep_map for O(1) lookup.
     fn find_pd_brep(&self, pd_id: i64) -> Option<i64> {
-        // Check cache first
-        if let Some(cached) = self.pd_brep_cache.borrow().get(&pd_id) {
-            return *cached;
-        }
-        let result = self.find_pd_brep_uncached(pd_id);
-        self.pd_brep_cache.borrow_mut().insert(pd_id, result);
-        result
+        self.pd_brep_map.get(&pd_id).copied().flatten()
     }
 
     /// Actual find_pd_brep computation (uncached).
@@ -6133,6 +6483,94 @@ impl<'a> StepConverter<'a> {
             _ => None,
         }
     }
+}
+
+// ============================================================
+// Standalone helper functions (used by pre-built index construction)
+// ============================================================
+
+/// Standalone version of get_ref for StepValue.
+fn get_ref_standalone(value: &StepValue) -> Option<i64> {
+    match value {
+        StepValue::Ref(id) => Some(*id),
+        _ => None,
+    }
+}
+
+/// Standalone version of get_float for StepValue.
+fn get_float_standalone(value: &StepValue) -> Option<f64> {
+    match value {
+        StepValue::Float(f) => Some(*f),
+        StepValue::Integer(i) => Some(*i as f64),
+        _ => None,
+    }
+}
+
+/// Standalone version of resolve_cartesian_point.
+fn resolve_cartesian_point_standalone(step: &StepFile, point_id: i64) -> Option<Point3d> {
+    let entity = step.find_entity(point_id)?;
+    for param in &entity.params {
+        if let StepValue::List(coords) = param {
+            let x = get_float_standalone(coords.get(0)?)?;
+            let y = get_float_standalone(coords.get(1)?)?;
+            let z = coords.get(2).and_then(|v| get_float_standalone(v)).unwrap_or(0.0);
+            return Some(Point3d::new(x, y, z));
+        }
+    }
+    None
+}
+
+/// Standalone version of resolve_direction.
+fn resolve_direction_standalone(step: &StepFile, dir_id: i64) -> Option<Direction3d> {
+    let entity = step.find_entity(dir_id)?;
+    for param in &entity.params {
+        if let StepValue::List(coords) = param {
+            let x = get_float_standalone(coords.get(0)?)?;
+            let y = get_float_standalone(coords.get(1)?)?;
+            let z = coords.get(2).and_then(|v| get_float_standalone(v)).unwrap_or(0.0);
+            return Direction3d::new(x, y, z);
+        }
+    }
+    None
+}
+
+/// Default x direction given a z direction.
+fn default_x_dir_standalone(z_dir: &Direction3d) -> Direction3d {
+    if z_dir.is_parallel_to(&Direction3d::Y) {
+        Direction3d::X
+    } else {
+        z_dir.cross(&Direction3d::Y)
+    }
+}
+
+/// Standalone version of resolve_axis2 (used by pre-built index construction).
+fn resolve_axis2_standalone(step: &StepFile, axis2_id: i64) -> Option<(Point3d, Direction3d, Direction3d)> {
+    let entity = step.find_entity(axis2_id)?;
+
+    let mut origin: Option<Point3d> = None;
+    let mut directions: Vec<Direction3d> = Vec::new();
+
+    for param in &entity.params {
+        if let Some(ref_id) = get_ref_standalone(param) {
+            if let Some(referenced) = step.find_entity(ref_id) {
+                if referenced.type_name == "CARTESIAN_POINT" {
+                    if origin.is_none() {
+                        origin = resolve_cartesian_point_standalone(step, ref_id);
+                    }
+                } else if referenced.type_name == "DIRECTION" {
+                    if let Some(dir) = resolve_direction_standalone(step, ref_id) {
+                        directions.push(dir);
+                    }
+                }
+            }
+        }
+    }
+
+    let origin = origin?;
+    let z_dir = directions.get(0).copied().unwrap_or(Direction3d::Z);
+    let x_dir = directions.get(1).copied().unwrap_or_else(|| default_x_dir_standalone(&z_dir));
+
+    Some((origin, z_dir, x_dir))
 }
 
 /// Project a 3D point onto a line and return the parameter t.

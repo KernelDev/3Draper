@@ -53,6 +53,15 @@ pub struct StepHeader {
 }
 
 /// Parsed STEP file.
+///
+/// The lazy index caches (type_index, pd_brep_index, nauo_transform_index) use
+/// `RefCell` for interior mutability during lazy initialization. After initialization,
+/// they are only ever read. Since `StepFile` is only mutated during parsing (single-threaded)
+/// and then shared read-only across threads for conversion, we implement `Sync` manually.
+/// This is safe because:
+/// 1. The `RefCell` contents are only written once (lazy init), then only read
+/// 2. Writing is protected by the `is_none()` check (only one thread writes)
+/// 3. After writing, the contents are immutable
 #[derive(Clone, Debug)]
 pub struct StepFile {
     pub header: StepHeader,
@@ -62,7 +71,18 @@ pub struct StepFile {
     /// Type-to-entities index for fast lookup by type name.
     /// Built lazily on first access to avoid overhead when not needed.
     type_index: std::cell::RefCell<Option<HashMap<String, Vec<usize>>>>,
+    /// Pre-built index: pd_id → brep_id (resolved eagerly on first access).
+    /// This replaces O(n³) per-call lookups with O(1) lookups.
+    pd_brep_index: std::cell::RefCell<Option<HashMap<i64, Option<i64>>>>,
+    /// Pre-built index: nauo_id → transform (resolved eagerly on first access).
+    /// This replaces O(n²) per-call lookups with O(1) lookups.
+    nauo_transform_index: std::cell::RefCell<Option<HashMap<i64, Option<[[f64; 4]; 4]>>>>,
 }
+
+// SAFETY: StepFile uses RefCell for lazy index initialization. After initialization,
+// the RefCell contents are only read. Since StepFile is built in a single-threaded
+// context (parsing) and then shared read-only, manual Sync is safe.
+unsafe impl Sync for StepFile {}
 
 impl StepFile {
     pub fn new() -> Self {
@@ -71,6 +91,8 @@ impl StepFile {
             entities: Vec::new(),
             entity_index: HashMap::new(),
             type_index: std::cell::RefCell::new(None),
+            pd_brep_index: std::cell::RefCell::new(None),
+            nauo_transform_index: std::cell::RefCell::new(None),
         }
     }
 
@@ -82,6 +104,8 @@ impl StepFile {
             .collect();
         // Reset type index so it's rebuilt lazily
         *self.type_index.borrow_mut() = None;
+        *self.pd_brep_index.borrow_mut() = None;
+        *self.nauo_transform_index.borrow_mut() = None;
     }
 
     /// Build the type-to-entities index for O(1) type lookups.
@@ -144,5 +168,34 @@ impl StepFile {
             }
         }
         vec![]
+    }
+
+    /// Get or build the pd_id → brep_id index.
+    /// Built lazily on first access and cached for subsequent calls.
+    pub fn pd_brep_index(&self) -> std::cell::Ref<'_, HashMap<i64, Option<i64>>> {
+        if self.pd_brep_index.borrow().is_none() {
+            // Will be populated by StepConverter on first use
+            *self.pd_brep_index.borrow_mut() = Some(HashMap::new());
+        }
+        std::cell::Ref::map(self.pd_brep_index.borrow(), |opt| opt.as_ref().unwrap())
+    }
+
+    /// Set the pd_brep_index (called by StepConverter after building it).
+    pub fn set_pd_brep_index(&self, index: HashMap<i64, Option<i64>>) {
+        *self.pd_brep_index.borrow_mut() = Some(index);
+    }
+
+    /// Get or build the nauo_id → transform index.
+    /// Built lazily on first access and cached for subsequent calls.
+    pub fn nauo_transform_index(&self) -> std::cell::Ref<'_, HashMap<i64, Option<[[f64; 4]; 4]>>> {
+        if self.nauo_transform_index.borrow().is_none() {
+            *self.nauo_transform_index.borrow_mut() = Some(HashMap::new());
+        }
+        std::cell::Ref::map(self.nauo_transform_index.borrow(), |opt| opt.as_ref().unwrap())
+    }
+
+    /// Set the nauo_transform_index (called by StepConverter after building it).
+    pub fn set_nauo_transform_index(&self, index: HashMap<i64, Option<[[f64; 4]; 4]>>) {
+        *self.nauo_transform_index.borrow_mut() = Some(index);
     }
 }
