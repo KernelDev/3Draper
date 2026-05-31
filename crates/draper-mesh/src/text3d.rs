@@ -383,48 +383,48 @@ fn project_3d_to_2d(point: Point3d, surface: &TextSurface) -> (f64, f64) {
         TextSurface::Plane { z: _ } => {
             (point.x, point.y)
         }
-        TextSurface::Sphere { center, radius: _ } => {
+        TextSurface::Sphere { center, radius } => {
             let dx = point.x - center[0];
             let dy = point.y - center[1];
             let dz = point.z - center[2];
-            let r = (dx * dx + dy * dy + dz * dz).sqrt();
-            if r < 1e-10 {
-                return (0.0, 0.0);
-            }
-            let scale_angle = 1.0; // inverse of 1/r → r
-            let theta = dz.asin(); // polar angle
-            let phi = dy.atan2(dx); // azimuthal
-
-            (phi * r, theta * r) // scale back to text space
-        }
-        TextSurface::Cylinder { radius, height: _ } => {
             let r = *radius;
+            // Inverse of: theta = y/r, phi = x/r
+            // theta (polar from equator) = asin(dz/r)
+            // phi (azimuthal) = atan2(dy, dx)
+            let theta = (dz / r).asin();
+            let phi = dy.atan2(dx);
+            (phi * r, theta * r)
+        }
+        TextSurface::Cylinder { radius, height } => {
+            let r = *radius;
+            let h = *height;
+            // Inverse of: angle = x/r, pz = y + h/2
             let angle = point.y.atan2(point.x);
-            let z = point.z;
-            (angle * r, z - 0.0) // approximate inverse
+            let pz = point.z;
+            (angle * r, pz - h / 2.0)
         }
         TextSurface::Cone { radius, height } => {
             let r = *radius;
             let h = *height;
-            let local_r = (point.x * point.x + point.y * point.y).sqrt();
+            let scale_angle = 1.2 / r;
             let angle = point.y.atan2(point.x);
             let z = point.z;
-            let scale_angle = 1.2 / r;
             (angle / scale_angle, z - h / 2.0)
         }
         TextSurface::Torus { major_radius, minor_radius } => {
-            let R = *major_radius;
-            let r = *minor_radius;
+            let major_r = *major_radius;
+            let minor_r = *minor_radius;
+            // Inverse of: u = x * scale_major, v = y * scale_minor
             let u = point.y.atan2(point.x); // major angle
             let cos_u = u.cos();
             let sin_u = u.sin();
-            // Minor angle from distance to ring center
-            let ring_x = point.x - R * cos_u;
-            let ring_y = point.y - R * sin_u;
+            // Project point onto ring center to find minor angle
+            let ring_x = point.x - major_r * cos_u;
+            let ring_y = point.y - major_r * sin_u;
             let ring_z = point.z;
-            let v = ring_z.atan2((ring_x * cos_u + ring_y * sin_u).max(0.0));
-
-            (u * R, v * r)
+            let radial_dist = ring_x * cos_u + ring_y * sin_u;
+            let v = ring_z.atan2(radial_dist.max(0.0));
+            (u * major_r, v * minor_r)
         }
     }
 }
@@ -459,22 +459,10 @@ pub fn cut_text_holes_in_mesh(
         return result;
     }
 
-    // Compute winding for each contour (outer = clockwise with negative area for our glyph defs,
-    // inner holes = counter-clockwise). We need to know which contours are "solid" vs "holes".
-    let contours_with_winding: Vec<(Vec<(f64, f64)>, f64)> = contours_2d
-        .iter()
-        .map(|c| (c.clone(), signed_area_2d(c)))
-        .collect();
-
     // Identify triangles to remove: those whose centroid projects inside text contours.
-    // For each glyph, the outer contour defines the region to cut, and inner contours
-    // (holes like in 'D', 'a', 'p', 'e') are regions that should NOT be cut.
-    //
-    // Strategy: A point is "inside text" if it's inside an odd number of contours
-    // (treating all contours the same with ray-casting parity).
-    // This naturally handles holes because a point in a hole is inside 2 contours (outer + hole),
-    // which is even → not cut.
-
+    // A point is "inside text" if it's inside an odd number of contours
+    // (ray-casting parity test). This naturally handles letter holes (D, a, p, e)
+    // because a point in a hole is inside 2 contours (outer + hole) → even → not cut.
     let mut triangles_to_remove = vec![false; base_mesh.triangles.len()];
 
     for (i, tri) in base_mesh.triangles.iter().enumerate() {
@@ -492,7 +480,7 @@ pub fn cut_text_holes_in_mesh(
 
         // Count how many contours the point is inside (parity test)
         let mut inside_count = 0;
-        for (contour, _winding) in &contours_with_winding {
+        for contour in &contours_2d {
             if point_in_polygon_2d(px, py, contour) {
                 inside_count += 1;
             }
@@ -504,11 +492,12 @@ pub fn cut_text_holes_in_mesh(
         }
     }
 
-    // Build result mesh: keep non-removed triangles, add contour boundary geometry
+    // Build result mesh
     let mut result = TriangleMesh::new();
     let base_color = [0.48, 0.52, 0.58, 1.0];
 
     // Keep triangles that are NOT inside the text
+    let mut num_base_tris = 0usize;
     for (i, tri) in base_mesh.triangles.iter().enumerate() {
         if !triangles_to_remove[i] {
             let base = result.vertices.len() as u32;
@@ -516,17 +505,16 @@ pub fn cut_text_holes_in_mesh(
                 result.vertices.push(base_mesh.vertices[idx as usize].clone());
             }
             result.triangles.push([base, base + 1, base + 2]);
+            num_base_tris += 1;
         }
     }
 
-    // Now add contour boundary geometry on the surface + inset surfaces for depth
     // For each contour, project its 2D points onto the 3D surface and create:
-    // 1. A surface ring of vertices on the surface at the contour boundary
-    // 2. An inset ring of vertices pushed inward along the surface normal by `depth`
+    // 1. Surface ring vertices on the surface at the contour boundary
+    // 2. Inset ring vertices pushed inward along surface normal by `depth`
     // 3. Side walls connecting surface ring to inset ring
     // 4. Inset face (fan triangulation) for the bottom of the hole
-
-    for (contour_2d, _winding) in &contours_with_winding {
+    for contour_2d in &contours_2d {
         if contour_2d.len() < 3 {
             continue;
         }
@@ -560,26 +548,8 @@ pub fn cut_text_holes_in_mesh(
             let ii = inset_ring_start + i;
             let ij = inset_ring_start + j;
 
-            // Two triangles per side quad (winding for outward-facing normals)
-            result.triangles.push([si, ij, sj]);
-            result.triangles.push([sj, ij, ij + 1]); // Note: ij+1 is only valid if not wrapping; use ij = inset_ring_start + j instead
-        }
-
-        // Fix side wall triangles with correct indices
-        // Actually let me redo the side walls properly
-        let last_wall_tri = result.triangles.len();
-        // Remove the incorrect wall triangles we just added
-        result.triangles.truncate(last_wall_tri - 2 * n as usize);
-
-        for i in 0..n as u32 {
-            let j = (i + 1) % n as u32;
-            let si = surface_ring_start + i;
-            let sj = surface_ring_start + j;
-            let ii = inset_ring_start + i;
-            let ij = inset_ring_start + j;
-
             // Quad: si → sj → ij → ii
-            // Triangle 1: si, ii, sj (normal facing outward from hole)
+            // Triangle 1: si, ii, sj
             result.triangles.push([si, ii, sj]);
             // Triangle 2: sj, ii, ij
             result.triangles.push([sj, ii, ij]);
@@ -587,8 +557,6 @@ pub fn cut_text_holes_in_mesh(
 
         // Inset face (bottom of hole) — fan triangulation from first vertex
         for i in 1..n as u32 - 1 {
-            // Winding: looking from inside the hole toward the normal direction,
-            // the inset face should face inward (opposite normal)
             result.triangles.push([
                 inset_ring_start,
                 inset_ring_start + i + 1,
@@ -597,25 +565,18 @@ pub fn cut_text_holes_in_mesh(
         }
     }
 
-    // Set up colors
-    let num_base_tris = result.triangles.len() - contours_with_winding.iter().map(|(c, _)| {
-        // Side walls: 2 * contour.len() triangles
-        // Inset face: contour.len() - 2 triangles
-        if c.len() >= 3 {
-            2 * c.len() + c.len() - 2
-        } else {
-            0
-        }
-    }).sum::<usize>();
-    let num_hole_tris = result.triangles.len() - num_base_tris;
-
-    result.ensure_colors(base_color);
-    if let Some(ref mut colors) = result.triangle_colors {
-        // Color the hole triangles (side walls + inset) with the hole color
-        for i in num_base_tris..result.triangles.len() {
-            colors.push(hole_color);
-        }
+    // Set up per-triangle colors
+    // Base triangles get the default color, hole triangles get the hole color
+    let total_tris = result.triangles.len();
+    let hole_tris = total_tris - num_base_tris;
+    let mut colors = Vec::with_capacity(total_tris);
+    for _ in 0..num_base_tris {
+        colors.push(base_color);
     }
+    for _ in 0..hole_tris {
+        colors.push(hole_color);
+    }
+    result.triangle_colors = Some(colors);
 
     if result.vertex_count() > 0 {
         result.compute_face_normals();
