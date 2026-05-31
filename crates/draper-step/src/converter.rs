@@ -100,7 +100,7 @@ impl StepEdgeCache {
         Self {
             entries: HashMap::new(),
             tol_ctx,
-            default_samples: 64,
+            default_samples: 32,
         }
     }
 
@@ -171,7 +171,7 @@ impl StepEdgeCache {
         let mut refined = true;
         let mut refinement_passes = 0;
         let max_refinement_passes = 5;
-        let max_points = 256;
+        let max_points = 64;
 
         while refined && refinement_passes < max_refinement_passes && points.len() < max_points {
             refined = false;
@@ -650,8 +650,22 @@ pub fn triangulate_pending_instance(
 ) -> Option<DetailedMeshInstance> {
     let config = StepConversionConfig::default();
     let converter = StepConverter::with_config(step_file, config.clone());
-    let params = TriangulationParams::default();
     let bbox = converter.compute_bounding_box();
+
+    // Compute adaptive max_deviation based on bounding box size.
+    // The default 0.01 is too tight for large models (500mm+), causing
+    // massive over-tessellation. Scale deviation as 0.01% of bounding box diagonal.
+    let mut params = TriangulationParams::default();
+    if let Some((bmin, bmax)) = &bbox {
+        let dx = bmax.x - bmin.x;
+        let dy = bmax.y - bmin.y;
+        let dz = bmax.z - bmin.z;
+        let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
+        if diagonal > 1.0 {
+            // Use 0.02% of diagonal as max_deviation, but never less than 0.01
+            params.max_deviation = params.max_deviation.max(diagonal * 0.0002);
+        }
+    }
 
     let (mesh, faces) = converter.triangulate_brep_detailed(pending.brep_id, &params, &bbox)?;
 
@@ -955,8 +969,18 @@ impl<'a> StepConverter<'a> {
     /// Each leaf BREP produces one mesh instance per assembly occurrence,
     /// with the composed transform from root → leaf applied.
     fn convert_instances(&self) -> Result<Vec<MeshInstance>, String> {
-        let params = TriangulationParams::default();
         let bbox = self.compute_bounding_box();
+        let mut params = TriangulationParams::default();
+        // Scale max_deviation based on bounding box
+        if let Some((bmin, bmax)) = &bbox {
+            let dx = bmax.x - bmin.x;
+            let dy = bmax.y - bmin.y;
+            let dz = bmax.z - bmin.z;
+            let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
+            if diagonal > 1.0 {
+                params.max_deviation = params.max_deviation.max(diagonal * 0.0002);
+            }
+        }
         let color_map = self.extract_color_map();
         let mut brep_mesh_cache: HashMap<i64, TriangleMesh> = HashMap::new();
         let mut results: Vec<MeshInstance> = Vec::new();
@@ -1268,8 +1292,18 @@ impl<'a> StepConverter<'a> {
 
     /// Convert STEP to detailed mesh instances with per-face information.
     fn convert_detailed_instances(&self) -> Result<Vec<DetailedMeshInstance>, String> {
-        let params = TriangulationParams::default();
         let bbox = self.compute_bounding_box();
+        let mut params = TriangulationParams::default();
+        // Scale max_deviation based on bounding box
+        if let Some((bmin, bmax)) = &bbox {
+            let dx = bmax.x - bmin.x;
+            let dy = bmax.y - bmin.y;
+            let dz = bmax.z - bmin.z;
+            let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
+            if diagonal > 1.0 {
+                params.max_deviation = params.max_deviation.max(diagonal * 0.0002);
+            }
+        }
         let color_map = self.extract_color_map();
         let mut brep_detail_cache: HashMap<i64, (TriangleMesh, Vec<FaceInfo>)> = HashMap::new();
         let mut results: Vec<DetailedMeshInstance> = Vec::new();
@@ -1841,11 +1875,30 @@ impl<'a> StepConverter<'a> {
         // Create edge discretization cache for this BREP
         let mut edge_cache = StepEdgeCache::new(tol_ctx);
 
+        // Time guard: on wasm, limit per-BREP triangulation time to avoid freezing the browser.
+        // On native, there's no limit (Duration::MAX).
+        #[cfg(target_arch = "wasm32")]
+        let brep_time_limit = std::time::Duration::from_secs(10);
+        #[cfg(not(target_arch = "wasm32"))]
+        let brep_time_limit = std::time::Duration::from_secs(300); // 5 min on native
+        let brep_start = std::time::Instant::now();
+
         let mut mesh = TriangleMesh::new();
         let mut face_infos = Vec::new();
         let mut next_face_id: u64 = 1;
+        let mut skipped_faces = 0;
 
         for (fi, face_data) in face_data_list.iter().enumerate() {
+            // Check time budget — skip remaining faces if we're over limit
+            if brep_start.elapsed() > brep_time_limit {
+                skipped_faces += face_data_list.len() - fi;
+                log::warn!(
+                    "BREP #{}: time limit reached after {} faces, skipping {} remaining",
+                    brep_id, fi, skipped_faces
+                );
+                break;
+            }
+
             let face_id = next_face_id;
             next_face_id += 1;
             let step_face_id = face_data.step_face_id;
@@ -1907,8 +1960,11 @@ impl<'a> StepConverter<'a> {
         }
         // Merge coincident vertices to make the mesh watertight
         draper_mesh::merge_coincident_vertices(&mut mesh, 1e-4);
-        log::info!("BREP #{} detailed: edge_cache={} entries, mesh v={} t={}",
-            brep_id, edge_cache.len(), mesh.vertex_count(), mesh.triangle_count());
+        if skipped_faces > 0 {
+            log::warn!("BREP #{} detailed: {} faces skipped due to time limit", brep_id, skipped_faces);
+        }
+        log::info!("BREP #{} detailed: edge_cache={} entries, mesh v={} t={} skipped={}",
+            brep_id, edge_cache.len(), mesh.vertex_count(), mesh.triangle_count(), skipped_faces);
         Some((mesh, face_infos))
     }
 

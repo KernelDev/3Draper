@@ -21,13 +21,15 @@ use draper_geometry::Surface;
 const MIN_ANGULAR_SAMPLES: usize = 6;
 
 /// Maximum number of angular samples (to prevent excessive tessellation).
-const MAX_ANGULAR_SAMPLES: usize = 256;
+/// Kept at 64 to avoid generating millions of triangles for a single face.
+/// A face with 64×64 grid produces ~8K triangles, which is reasonable.
+const MAX_ANGULAR_SAMPLES: usize = 64;
 
 /// Minimum number of height/v samples for any curved surface.
 const MIN_HEIGHT_SAMPLES: usize = 2;
 
 /// Maximum number of height/v samples.
-const MAX_HEIGHT_SAMPLES: usize = 256;
+const MAX_HEIGHT_SAMPLES: usize = 64;
 
 /// Compute the required number of angular (u-direction) samples for a surface
 /// given a maximum deviation tolerance.
@@ -229,6 +231,44 @@ pub fn required_samples(
     let n_u = required_angular_samples(surface, u_start, u_end, v_start, v_end, max_deviation, detail_level);
     let n_v = required_height_samples(surface, u_start, u_end, v_start, v_end, max_deviation, detail_level);
     (n_u, n_v)
+}
+
+/// Default maximum number of triangles per face.
+/// This prevents a single face from generating millions of triangles
+/// that freeze the browser on WASM.
+/// 2000 triangles per face is sufficient for visual quality while keeping
+/// the mesh count manageable.
+pub const DEFAULT_MAX_FACE_TRIANGLES: usize = 2000;
+
+/// Compute adaptive samples for both u and v directions simultaneously,
+/// capped so that the resulting grid does not exceed `max_face_triangles`.
+///
+/// A grid of n_u × n_v produces roughly 2 × n_u × n_v triangles.
+/// If the uncapped result would exceed the budget, both dimensions are
+/// scaled down proportionally.
+pub fn required_samples_capped(
+    surface: &Surface,
+    u_start: f64,
+    u_end: f64,
+    v_start: f64,
+    v_end: f64,
+    max_deviation: f64,
+    detail_level: f64,
+    max_face_triangles: usize,
+) -> (usize, usize) {
+    let (n_u, n_v) = required_samples(surface, u_start, u_end, v_start, v_end, max_deviation, detail_level);
+
+    // Approximate triangle count: 2 triangles per grid cell
+    let approx_tris = 2 * n_u * n_v;
+    if approx_tris <= max_face_triangles {
+        return (n_u, n_v);
+    }
+
+    // Scale down both dimensions proportionally
+    let scale = (max_face_triangles as f64 / approx_tris as f64).sqrt();
+    let n_u_capped = ((n_u as f64 * scale).ceil() as usize).max(MIN_ANGULAR_SAMPLES);
+    let n_v_capped = ((n_v as f64 * scale).ceil() as usize).max(MIN_HEIGHT_SAMPLES);
+    (n_u_capped, n_v_capped)
 }
 
 #[cfg(test)]

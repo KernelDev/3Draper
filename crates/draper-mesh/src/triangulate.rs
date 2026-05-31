@@ -124,6 +124,11 @@ pub struct TriangulationParams {
     /// Called with `(faces_completed, total_faces)`.
     /// Only used when `parallel` is `true`.
     pub progress_callback: Option<Arc<dyn Fn(usize, usize) + Send + Sync>>,
+    /// Maximum number of triangles per face. If a face's grid would produce
+    /// more triangles than this budget, the resolution is reduced.
+    /// This prevents a single face from generating millions of triangles
+    /// that freeze the browser on WASM. Default: 2000.
+    pub max_face_triangles: usize,
 }
 
 impl std::fmt::Debug for TriangulationParams {
@@ -137,6 +142,7 @@ impl std::fmt::Debug for TriangulationParams {
             .field("detail_level", &self.detail_level)
             .field("adaptive", &self.adaptive)
             .field("parallel", &self.parallel)
+            .field("max_face_triangles", &self.max_face_triangles)
             .field("progress_callback", &self.progress_callback.as_ref().map(|_| "Some(...)"))
             .finish()
     }
@@ -147,19 +153,33 @@ impl Default for TriangulationParams {
         Self {
             max_edge_length: 1.0,
             max_deviation: 0.01,
-            angular_samples: 48,
-            height_samples: 8,
+            angular_samples: 24,
+            height_samples: 4,
             max_angular_deviation: 0.1,
             detail_level: 1.0,
             adaptive: true,
             parallel: false,
             progress_callback: None,
+            max_face_triangles: crate::adaptive::DEFAULT_MAX_FACE_TRIANGLES,
         }
     }
 }
 
 /// Number of samples per edge curve for boundary discretization.
-const EDGE_SAMPLES: usize = 64;
+const EDGE_SAMPLES: usize = 32;
+
+/// Cap grid resolution (n_u, n_v) so that the resulting mesh does not exceed
+/// `max_face_triangles`. A grid of n_u × n_v produces ~2 × n_u × n_v triangles.
+fn cap_grid_resolution(n_u: usize, n_v: usize, max_face_triangles: usize) -> (usize, usize) {
+    let approx_tris = 2 * n_u * n_v;
+    if approx_tris <= max_face_triangles {
+        return (n_u, n_v);
+    }
+    let scale = (max_face_triangles as f64 / approx_tris as f64).sqrt();
+    let n_u_capped = ((n_u as f64 * scale).ceil() as usize).max(4);
+    let n_v_capped = ((n_v as f64 * scale).ceil() as usize).max(2);
+    (n_u_capped, n_v_capped)
+}
 
 // ============================================================
 // Top-level entry points

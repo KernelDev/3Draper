@@ -564,15 +564,25 @@ pub fn triangulate_surface_uv_cdt(
         domain = domain.with_hole(hole.clone());
     }
 
-    // Generate interior points using adaptive sampling
+    // Generate interior points using adaptive sampling (capped by max_face_triangles)
     let (n_u, n_v) = if params.adaptive {
-        crate::adaptive::required_samples(
+        crate::adaptive::required_samples_capped(
             surface,
             u_min, u_max, v_min, v_max,
             params.max_deviation, params.detail_level,
+            params.max_face_triangles,
         )
     } else {
-        (params.angular_samples, params.height_samples)
+        // For non-adaptive, also cap by max_face_triangles
+        let mut n_u = params.angular_samples;
+        let mut n_v = params.height_samples;
+        let approx_tris = 2 * n_u * n_v;
+        if approx_tris > params.max_face_triangles {
+            let scale = (params.max_face_triangles as f64 / approx_tris as f64).sqrt();
+            n_u = ((n_u as f64 * scale).ceil() as usize).max(4);
+            n_v = ((n_v as f64 * scale).ceil() as usize).max(2);
+        }
+        (n_u, n_v)
     };
 
     // Compute margin for interior points (avoid placing too close to boundary)
