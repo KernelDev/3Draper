@@ -59,6 +59,9 @@ pub struct StepFile {
     pub entities: Vec<StepEntity>,
     /// Index for fast entity lookup by ID.
     entity_index: HashMap<i64, usize>,
+    /// Type-to-entities index for fast lookup by type name.
+    /// Built lazily on first access to avoid overhead when not needed.
+    type_index: std::cell::RefCell<Option<HashMap<String, Vec<usize>>>>,
 }
 
 impl StepFile {
@@ -67,6 +70,7 @@ impl StepFile {
             header: StepHeader::default(),
             entities: Vec::new(),
             entity_index: HashMap::new(),
+            type_index: std::cell::RefCell::new(None),
         }
     }
 
@@ -76,6 +80,31 @@ impl StepFile {
             .enumerate()
             .map(|(i, e)| (e.id, i))
             .collect();
+        // Reset type index so it's rebuilt lazily
+        *self.type_index.borrow_mut() = None;
+    }
+
+    /// Build the type-to-entities index for O(1) type lookups.
+    /// Called lazily on first `find_entities_by_type` call.
+    fn ensure_type_index(&self) {
+        if self.type_index.borrow().is_some() {
+            return;
+        }
+        let mut index: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, entity) in self.entities.iter().enumerate() {
+            // Index by full type name
+            index.entry(entity.type_name.clone()).or_default().push(i);
+            // For complex entities with "+" separated types, also index each sub-type
+            if entity.type_name.contains('+') {
+                for part in entity.type_name.split('+') {
+                    let part = part.trim().to_string();
+                    if !part.is_empty() {
+                        index.entry(part).or_default().push(i);
+                    }
+                }
+            }
+        }
+        *self.type_index.borrow_mut() = Some(index);
     }
 
     /// Find entity by ID.
@@ -87,7 +116,19 @@ impl StepFile {
     /// Find all entities whose type_name contains the given string.
     /// This handles both simple types like "MANIFOLD_SOLID_BREP" and
     /// complex types like "REPRESENTATION_RELATIONSHIP+REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION+SHAPE_REPRESENTATION_RELATIONSHIP".
+    ///
+    /// Uses a type index for O(1) exact match lookups, falling back to linear scan
+    /// only for partial matches.
     pub fn find_entities_by_type(&self, type_name: &str) -> Vec<&StepEntity> {
+        self.ensure_type_index();
+        let type_idx = self.type_index.borrow();
+        if let Some(ref idx) = *type_idx {
+            // Fast path: exact match via index
+            if let Some(indices) = idx.get(type_name) {
+                return indices.iter().map(|&i| &self.entities[i]).collect();
+            }
+        }
+        // Slow path: linear scan for partial matches (rare)
         self.entities.iter().filter(|e| {
             e.type_name == type_name || e.type_name.contains(type_name)
         }).collect()
@@ -95,6 +136,13 @@ impl StepFile {
 
     /// Find all entities with exact type name match.
     pub fn find_entities_by_exact_type(&self, type_name: &str) -> Vec<&StepEntity> {
-        self.entities.iter().filter(|e| e.type_name == type_name).collect()
+        self.ensure_type_index();
+        let type_idx = self.type_index.borrow();
+        if let Some(ref idx) = *type_idx {
+            if let Some(indices) = idx.get(type_name) {
+                return indices.iter().map(|&i| &self.entities[i]).collect();
+            }
+        }
+        vec![]
     }
 }

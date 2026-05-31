@@ -13,7 +13,7 @@ use crate::renderer::{
 use draper_core::engine::{EngineConfig, build_engine};
 use draper_topology::ShapeBuilder;
 use draper_mesh::{triangulate_solid, TriangleMesh, TriangulationParams, check_manifold, ManifoldReport};
-use draper_step::{AssemblyNode, DetailedMeshInstance, FaceInfo, PendingBrepInstance, step_structure_lazy, triangulate_pending_instance};
+use draper_step::{AssemblyNode, DetailedMeshInstance, FaceInfo, PendingBrepInstance, StepConversionContext, step_structure_lazy};
 use draper_geometry::{Surface, Point2d};
 use egui_wgpu::RenderState;
 use eframe::egui;
@@ -359,7 +359,7 @@ pub struct ViewerApp {
     /// this stores PendingBrepInstance descriptors that are triangulated ONE AT A TIME
     /// in the frame loop, keeping the browser responsive.
     pending_breps: Vec<PendingBrepInstance>,
-    /// The parsed STEP file — kept alive so that `triangulate_pending_instance()`
+    /// The parsed STEP file — kept alive so that `StepConversionContext`
     /// can resolve entity references during progressive triangulation.
     step_file_cache: Option<draper_step::StepFile>,
     /// Total number of instances being loaded (for progress display).
@@ -823,9 +823,12 @@ impl ViewerApp {
         // Take the next pending BREP from the front
         let pending = self.pending_breps.remove(0);
 
-        // Triangulate this single BREP using the cached StepFile
+        // Triangulate this single BREP using the cached StepFile with a reusable context.
+        // The StepConversionContext computes bounding box once and caches pd_brep/nauo_transform
+        // lookups. The StepFile's type index (biggest optimization) persists across contexts.
         let instance = if let Some(ref step_file) = self.step_file_cache {
-            triangulate_pending_instance(step_file, &pending)
+            let ctx = StepConversionContext::new(step_file);
+            ctx.triangulate_pending(&pending)
         } else {
             None
         };

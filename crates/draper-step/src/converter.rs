@@ -644,45 +644,85 @@ pub fn step_structure_lazy(step_file: &StepFile) -> (AssemblyNode, Vec<PendingBr
 /// On wasm32, a per-BREP time limit of 3 seconds is enforced via
 /// `TriangulationGuard`. Faces that exceed the limit are skipped,
 /// producing a partial mesh instead of hanging the browser.
+/// A reusable conversion context for progressive BREP triangulation.
+///
+/// Instead of creating a new `StepConverter` for every BREP instance (which
+/// rebuilds entity maps and recomputes bounding boxes), this context keeps
+/// a single converter alive across all triangulation calls.
+///
+/// Usage:
+/// ```ignore
+/// let ctx = StepConversionContext::new(&step_file);
+/// for pending in &pending_instances {
+///     if let Some(instance) = ctx.triangulate_pending(pending) {
+///         // use instance
+///     }
+/// }
+/// ```
+pub struct StepConversionContext<'a> {
+    converter: StepConverter<'a>,
+    bbox: Option<(Point3d, Point3d)>,
+    params: TriangulationParams,
+}
+
+impl<'a> StepConversionContext<'a> {
+    /// Create a new conversion context for the given STEP file reference.
+    /// Computes bounding box once and prepares adaptive triangulation parameters.
+    /// The StepFile's internal type index (lazy) will be reused across calls.
+    pub fn new(step_file: &'a StepFile) -> Self {
+        let config = StepConversionConfig::default();
+        let converter = StepConverter::with_config(step_file, config);
+        let bbox = converter.compute_bounding_box();
+
+        let mut params = TriangulationParams::default();
+        if let Some((bmin, bmax)) = &bbox {
+            let dx = bmax.x - bmin.x;
+            let dy = bmax.y - bmin.y;
+            let dz = bmax.z - bmin.z;
+            let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
+            if diagonal > 1.0 {
+                params.max_deviation = params.max_deviation.max(diagonal * 0.0002);
+            }
+        }
+
+        Self { converter, bbox, params }
+    }
+
+    /// Triangulate a single pending BREP instance.
+    ///
+    /// Returns `None` if the BREP cannot be triangulated (missing geometry,
+    /// unsupported surface types, etc.).
+    ///
+    /// # Timeout
+    /// On wasm32, a per-BREP time limit of 10 seconds is enforced.
+    /// Faces that exceed the limit are skipped, producing a partial mesh
+    /// instead of hanging the browser.
+    pub fn triangulate_pending(&self, pending: &PendingBrepInstance) -> Option<DetailedMeshInstance> {
+        let (mesh, faces) = self.converter.triangulate_brep_detailed(pending.brep_id, &self.params, &self.bbox)?;
+
+        // Apply the instance transform
+        let mut instance_mesh = mesh;
+        if let Some(ref tf) = pending.transform {
+            instance_mesh.transform(tf);
+        }
+
+        Some(DetailedMeshInstance {
+            name: pending.name.clone(),
+            mesh: instance_mesh,
+            color: pending.color,
+            transform: pending.transform,
+            brep_id: pending.brep_id,
+            faces,
+        })
+    }
+}
+
 pub fn triangulate_pending_instance(
     step_file: &StepFile,
     pending: &PendingBrepInstance,
 ) -> Option<DetailedMeshInstance> {
-    let config = StepConversionConfig::default();
-    let converter = StepConverter::with_config(step_file, config.clone());
-    let bbox = converter.compute_bounding_box();
-
-    // Compute adaptive max_deviation based on bounding box size.
-    // The default 0.01 is too tight for large models (500mm+), causing
-    // massive over-tessellation. Scale deviation as 0.01% of bounding box diagonal.
-    let mut params = TriangulationParams::default();
-    if let Some((bmin, bmax)) = &bbox {
-        let dx = bmax.x - bmin.x;
-        let dy = bmax.y - bmin.y;
-        let dz = bmax.z - bmin.z;
-        let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
-        if diagonal > 1.0 {
-            // Use 0.02% of diagonal as max_deviation, but never less than 0.01
-            params.max_deviation = params.max_deviation.max(diagonal * 0.0002);
-        }
-    }
-
-    let (mesh, faces) = converter.triangulate_brep_detailed(pending.brep_id, &params, &bbox)?;
-
-    // Apply the instance transform
-    let mut instance_mesh = mesh;
-    if let Some(ref tf) = pending.transform {
-        instance_mesh.transform(tf);
-    }
-
-    Some(DetailedMeshInstance {
-        name: pending.name.clone(),
-        mesh: instance_mesh,
-        color: pending.color,
-        transform: pending.transform,
-        brep_id: pending.brep_id,
-        faces,
-    })
+    let ctx = StepConversionContext::new(step_file);
+    ctx.triangulate_pending(pending)
 }
 
 /// Assign instance_index to leaf AssemblyNodes for pending instances.
@@ -933,6 +973,12 @@ struct StepConverter<'a> {
     step: &'a StepFile,
     _entity_map: HashMap<i64, usize>,
     config: StepConversionConfig,
+    /// Cache: pd_id → brep_id (avoids repeated O(n²) lookups in find_pd_brep)
+    pd_brep_cache: std::cell::RefCell<HashMap<i64, Option<i64>>>,
+    /// Cache: nauo_id → transform (avoids repeated O(n²) lookups in find_nauo_transform)
+    nauo_transform_cache: std::cell::RefCell<HashMap<i64, Option<[[f64; 4]; 4]>>>,
+    /// Cache: bounding box (computed once, reused across all BREP triangulations)
+    bbox_cache: std::cell::RefCell<Option<Option<(Point3d, Point3d)>>>,
 }
 
 impl<'a> StepConverter<'a> {
@@ -941,7 +987,14 @@ impl<'a> StepConverter<'a> {
             .enumerate()
             .map(|(i, e)| (e.id, i))
             .collect();
-        Self { step, _entity_map: entity_map, config: StepConversionConfig::default() }
+        Self {
+            step,
+            _entity_map: entity_map,
+            config: StepConversionConfig::default(),
+            pd_brep_cache: std::cell::RefCell::new(HashMap::new()),
+            nauo_transform_cache: std::cell::RefCell::new(HashMap::new()),
+            bbox_cache: std::cell::RefCell::new(None),
+        }
     }
 
     fn with_config(step: &'a StepFile, config: StepConversionConfig) -> Self {
@@ -949,7 +1002,14 @@ impl<'a> StepConverter<'a> {
             .enumerate()
             .map(|(i, e)| (e.id, i))
             .collect();
-        Self { step, _entity_map: entity_map, config }
+        Self {
+            step,
+            _entity_map: entity_map,
+            config,
+            pd_brep_cache: std::cell::RefCell::new(HashMap::new()),
+            nauo_transform_cache: std::cell::RefCell::new(HashMap::new()),
+            bbox_cache: std::cell::RefCell::new(None),
+        }
     }
 
     fn convert(&self) -> Result<TriangleMesh, String> {
@@ -1422,8 +1482,16 @@ impl<'a> StepConverter<'a> {
     ) {
         // Explicit stack: (pd_id, composed_transform)
         let mut stack: Vec<(i64, Option<[[f64; 4]; 4]>)> = vec![(root_pd_id, *root_transform)];
+        // Track visited pd_ids to detect cycles in the NAUO graph
+        let mut visited: std::collections::HashSet<i64> = std::collections::HashSet::new();
 
         while let Some((parent_pd_id, parent_transform)) = stack.pop() {
+            // Cycle detection: skip if we've already visited this pd_id
+            if !visited.insert(parent_pd_id) {
+                log::warn!("Cycle detected in NAUO tree at PD #{}, skipping", parent_pd_id);
+                continue;
+            }
+
             let children = match parent_pd_to_children.get(&parent_pd_id) {
                 Some(c) => c,
                 None => continue,
@@ -1487,8 +1555,16 @@ impl<'a> StepConverter<'a> {
     ) {
         // Explicit stack: (pd_id, composed_transform)
         let mut stack: Vec<(i64, Option<[[f64; 4]; 4]>)> = vec![(root_pd_id, *root_transform)];
+        // Track visited pd_ids to detect cycles in the NAUO graph
+        let mut visited: std::collections::HashSet<i64> = std::collections::HashSet::new();
 
         while let Some((parent_pd_id, parent_transform)) = stack.pop() {
+            // Cycle detection: skip if we've already visited this pd_id
+            if !visited.insert(parent_pd_id) {
+                log::warn!("Cycle detected in NAUO tree at PD #{}, skipping", parent_pd_id);
+                continue;
+            }
+
             let children = match parent_pd_to_children.get(&parent_pd_id) {
                 Some(c) => c,
                 None => continue, // Leaf with no children in the NAUO tree
@@ -2145,6 +2221,17 @@ impl<'a> StepConverter<'a> {
 
     /// Find the transform for a NAUO instance by walking CDSR → SRR → ITEM_DEFINED_TRANSFORMATION.
     fn find_nauo_transform(&self, nauo_id: i64, _related_pd_id: i64) -> Option<[[f64; 4]; 4]> {
+        // Check cache first
+        if let Some(cached) = self.nauo_transform_cache.borrow().get(&nauo_id) {
+            return *cached;
+        }
+        let result = self.find_nauo_transform_uncached(nauo_id, _related_pd_id);
+        self.nauo_transform_cache.borrow_mut().insert(nauo_id, result);
+        result
+    }
+
+    /// Actual find_nauo_transform computation (uncached).
+    fn find_nauo_transform_uncached(&self, nauo_id: i64, _related_pd_id: i64) -> Option<[[f64; 4]; 4]> {
         let cdsrs = self.step.find_entities_by_type("CONTEXT_DEPENDENT_SHAPE_REPRESENTATION");
         for cdsr in &cdsrs {
             let linked = self.cdsr_links_to_nauo(cdsr, nauo_id);
@@ -2279,6 +2366,17 @@ impl<'a> StepConverter<'a> {
 
     /// Find the MANIFOLD_SOLID_BREP associated with a PRODUCT_DEFINITION.
     fn find_pd_brep(&self, pd_id: i64) -> Option<i64> {
+        // Check cache first
+        if let Some(cached) = self.pd_brep_cache.borrow().get(&pd_id) {
+            return *cached;
+        }
+        let result = self.find_pd_brep_uncached(pd_id);
+        self.pd_brep_cache.borrow_mut().insert(pd_id, result);
+        result
+    }
+
+    /// Actual find_pd_brep computation (uncached).
+    fn find_pd_brep_uncached(&self, pd_id: i64) -> Option<i64> {
         let _pd = self.step.find_entity(pd_id)?;
 
         for pds in self.step.find_entities_by_type("PRODUCT_DEFINITION_SHAPE") {
@@ -2785,8 +2883,16 @@ impl<'a> StepConverter<'a> {
         _seen_breps: &mut std::collections::HashSet<i64>,
     ) {
         let mut stack: Vec<(i64, Option<[[f64; 4]; 4]>)> = vec![(root_pd_id, *root_transform)];
+        // Track visited pd_ids to detect cycles in the NAUO graph
+        let mut visited: std::collections::HashSet<i64> = std::collections::HashSet::new();
 
         while let Some((parent_pd_id, parent_transform)) = stack.pop() {
+            // Cycle detection: skip if we've already visited this pd_id
+            if !visited.insert(parent_pd_id) {
+                log::warn!("Cycle detected in NAUO tree at PD #{}, skipping", parent_pd_id);
+                continue;
+            }
+
             let children = match parent_pd_to_children.get(&parent_pd_id) {
                 Some(c) => c,
                 None => continue,
@@ -2821,7 +2927,19 @@ impl<'a> StepConverter<'a> {
     }
 
     /// Compute a bounding box from all CARTESIAN_POINT entities.
+    /// Result is cached so repeated calls don't recompute.
     fn compute_bounding_box(&self) -> Option<(Point3d, Point3d)> {
+        // Check cache first
+        if let Some(ref cached) = *self.bbox_cache.borrow() {
+            return cached.clone();
+        }
+        let result = self.compute_bounding_box_uncached();
+        *self.bbox_cache.borrow_mut() = Some(result.clone());
+        result
+    }
+
+    /// Actual bounding box computation (uncached).
+    fn compute_bounding_box_uncached(&self) -> Option<(Point3d, Point3d)> {
         let points: Vec<Point3d> = self.step.find_entities_by_type("CARTESIAN_POINT")
             .iter()
             .filter_map(|e| self.resolve_cartesian_point(e.id))
