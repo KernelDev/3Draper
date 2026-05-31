@@ -12,7 +12,7 @@ use crate::renderer::{
 };
 use draper_core::engine::{EngineConfig, build_engine};
 use draper_topology::ShapeBuilder;
-use draper_mesh::{triangulate_solid, TriangleMesh, TriangulationParams, check_manifold, ManifoldReport, generate_3draper_text};
+use draper_mesh::{triangulate_solid, TriangleMesh, TriangulationParams, check_manifold, ManifoldReport, generate_3draper_text, cut_text_holes_in_mesh, TextSurface};
 use draper_step::{AssemblyNode, DetailedMeshInstance, FaceInfo, PendingBrepInstance, OwnedStepConversionContext, step_structure_lazy};
 use draper_geometry::{Surface, Point2d};
 use egui_wgpu::RenderState;
@@ -746,91 +746,100 @@ impl ViewerApp {
         self.load_mesh(mesh, "NURBS (Wavy Sheet)");
     }
 
-    /// Helper: add "3Draper" text to a mesh as a colored overlay.
-    /// The text is placed on the front face of the primitive.
-    fn add_text_to_mesh(&self, base_mesh: &TriangleMesh, text_color: [f32; 4]) -> TriangleMesh {
-        let mut result = base_mesh.clone();
-
-        // Generate text mesh
-        let text_depth = 2.0;
-        let text_scale = 0.5;
-        let mut text_mesh = generate_3draper_text(text_depth, text_scale);
-
-        // Position the text on the front face of the primitive
-        let (bmin, bmax) = base_mesh.bounding_box();
-        let cx = (bmin.x + bmax.x) / 2.0;
-        let cy = (bmin.y + bmax.y) / 2.0;
-        let front_z = bmax.z + 0.5; // Slightly in front of the surface
-
-        for v in &mut text_mesh.vertices {
-            v.x += cx;
-            v.y += cy;
-            v.z += front_z;
-        }
-
-        result.merge_with_color(&text_mesh, text_color);
-        result
-    }
-
-    /// Load Box with "3Draper" text on the front face.
+    /// Load Box with "3Draper" text CUT OUT (holes) on the front face.
     fn load_box_text(&mut self) {
         let solid = ShapeBuilder::make_box(100.0, 80.0, 60.0);
         let base_mesh = triangulate_solid(&solid, &TriangulationParams::default());
-        let mesh = self.add_text_to_mesh(&base_mesh, [0.9, 0.3, 0.1, 1.0]); // Orange text
+        let mesh = cut_text_holes_in_mesh(
+            &base_mesh,
+            "3Draper",
+            &TextSurface::Plane { z: 30.0 },
+            0.5,   // text scale
+            5.0,   // hole depth
+            [0.15, 0.15, 0.2, 1.0], // dark hole color
+        );
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
-        self.load_mesh(mesh, "Box + 3Draper");
+        self.load_mesh(mesh, "Box + 3Draper (holes)");
     }
 
-    /// Load Cylinder with "3Draper" text.
+    /// Load Cylinder with "3Draper" text CUT OUT on the lateral surface.
     fn load_cylinder_text(&mut self) {
         let solid = ShapeBuilder::make_cylinder(40.0, 100.0);
         let base_mesh = triangulate_solid(&solid, &TriangulationParams::default());
-        let mesh = self.add_text_to_mesh(&base_mesh, [0.1, 0.8, 0.3, 1.0]); // Green text
+        let mesh = cut_text_holes_in_mesh(
+            &base_mesh,
+            "3Draper",
+            &TextSurface::Cylinder { radius: 40.0, height: 100.0 },
+            0.4,   // text scale
+            5.0,   // hole depth
+            [0.1, 0.15, 0.1, 1.0], // dark green hole
+        );
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
-        self.load_mesh(mesh, "Cylinder + 3Draper");
+        self.load_mesh(mesh, "Cylinder + 3Draper (holes)");
     }
 
-    /// Load Sphere with "3Draper" text.
+    /// Load Sphere with "3Draper" text CUT OUT on the surface.
     fn load_sphere_text(&mut self) {
         let solid = ShapeBuilder::make_sphere(50.0);
         let base_mesh = triangulate_solid(&solid, &TriangulationParams::default());
-        let mesh = self.add_text_to_mesh(&base_mesh, [0.3, 0.5, 0.9, 1.0]); // Blue text
+        let mesh = cut_text_holes_in_mesh(
+            &base_mesh,
+            "3Draper",
+            &TextSurface::Sphere { center: [0.0, 0.0, 0.0], radius: 50.0 },
+            0.5,   // text scale
+            5.0,   // hole depth
+            [0.1, 0.1, 0.2, 1.0], // dark blue hole
+        );
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
-        self.load_mesh(mesh, "Sphere + 3Draper");
+        self.load_mesh(mesh, "Sphere + 3Draper (holes)");
     }
 
-    /// Load Cone with "3Draper" text.
+    /// Load Cone with "3Draper" text CUT OUT on the lateral surface.
     fn load_cone_text(&mut self) {
         let radius: f64 = 40.0;
         let height: f64 = 80.0;
         let half_angle = (radius / height).atan();
         let solid = ShapeBuilder::make_cone(radius, height, half_angle);
         let base_mesh = triangulate_solid(&solid, &TriangulationParams::default());
-        let mesh = self.add_text_to_mesh(&base_mesh, [0.9, 0.7, 0.1, 1.0]); // Yellow text
+        let mesh = cut_text_holes_in_mesh(
+            &base_mesh,
+            "3Draper",
+            &TextSurface::Cone { radius: 40.0, height: 80.0 },
+            0.4,   // text scale
+            5.0,   // hole depth
+            [0.2, 0.15, 0.05, 1.0], // dark amber hole
+        );
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
-        self.load_mesh(mesh, "Cone + 3Draper");
+        self.load_mesh(mesh, "Cone + 3Draper (holes)");
     }
 
-    /// Load Torus with "3Draper" text.
+    /// Load Torus with "3Draper" text CUT OUT on the outer surface.
     fn load_torus_text(&mut self) {
         let solid = ShapeBuilder::make_torus(40.0, 12.0);
         let base_mesh = triangulate_solid(&solid, &TriangulationParams::default());
-        let mesh = self.add_text_to_mesh(&base_mesh, [0.8, 0.2, 0.8, 1.0]); // Purple text
+        let mesh = cut_text_holes_in_mesh(
+            &base_mesh,
+            "3Draper",
+            &TextSurface::Torus { major_radius: 40.0, minor_radius: 12.0 },
+            0.3,   // text scale (smaller for torus)
+            3.0,   // hole depth
+            [0.15, 0.05, 0.2, 1.0], // dark purple hole
+        );
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
-        self.load_mesh(mesh, "Torus + 3Draper");
+        self.load_mesh(mesh, "Torus + 3Draper (holes)");
     }
 
-    /// Load Revolution with "3Draper" text.
+    /// Load Revolution with "3Draper" text CUT OUT (approximated as cylinder for projection).
     fn load_revolution_text(&mut self) {
         use draper_geometry::{Curve3d, NurbsCurve, Point3d as P3};
         let profile = Curve3d::Nurbs(NurbsCurve {
@@ -847,14 +856,22 @@ impl ViewerApp {
         });
         let solid = ShapeBuilder::make_revolution(profile, std::f64::consts::PI * 2.0);
         let base_mesh = triangulate_solid(&solid, &TriangulationParams::default());
-        let mesh = self.add_text_to_mesh(&base_mesh, [0.1, 0.7, 0.7, 1.0]); // Cyan text
+        // Approximate revolution as cylinder for text projection
+        let mesh = cut_text_holes_in_mesh(
+            &base_mesh,
+            "3Draper",
+            &TextSurface::Cylinder { radius: 30.0, height: 100.0 },
+            0.4,   // text scale
+            5.0,   // hole depth
+            [0.05, 0.15, 0.15, 1.0], // dark cyan hole
+        );
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
-        self.load_mesh(mesh, "Revolution + 3Draper");
+        self.load_mesh(mesh, "Revolution + 3Draper (holes)");
     }
 
-    /// Load NURBS with "3Draper" text.
+    /// Load NURBS with "3Draper" text CUT OUT (projected as flat plane).
     fn load_nurbs_text(&mut self) {
         use draper_geometry::{NurbsSurface, Point3d as P3};
         let control_points = vec![
@@ -882,14 +899,22 @@ impl ViewerApp {
         for i in (1..steps).rev() { boundary.push(surface.point_at(u_min, v_min + (v_max-v_min)*i as f64/steps as f64)); }
         let params = TriangulationParams::default();
         let base_mesh = draper_mesh::triangulate_face_with_boundary(&surface, &boundary, true, &params);
-        let mesh = self.add_text_to_mesh(&base_mesh, [0.9, 0.4, 0.6, 1.0]); // Pink text
+        // NURBS sheet is roughly flat at z~0 to z~30, use plane projection at average z
+        let mesh = cut_text_holes_in_mesh(
+            &base_mesh,
+            "3Draper",
+            &TextSurface::Plane { z: 10.0 },
+            0.5,   // text scale
+            5.0,   // hole depth
+            [0.2, 0.1, 0.15, 1.0], // dark pink hole
+        );
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
-        self.load_mesh(mesh, "NURBS + 3Draper");
+        self.load_mesh(mesh, "NURBS + 3Draper (holes)");
     }
 
-    /// Load Extrusion with "3Draper" text.
+    /// Load Extrusion with "3Draper" text CUT OUT (approximated as cylinder).
     fn load_extrusion_text(&mut self) {
         use draper_geometry::{Curve3d, Circle, Point3d as P3};
         let profile = Curve3d::Circle(Circle::new_xy(
@@ -902,11 +927,18 @@ impl ViewerApp {
             80.0,
         );
         let base_mesh = triangulate_solid(&solid, &TriangulationParams::default());
-        let mesh = self.add_text_to_mesh(&base_mesh, [0.6, 0.4, 0.2, 1.0]); // Brown text
+        let mesh = cut_text_holes_in_mesh(
+            &base_mesh,
+            "3Draper",
+            &TextSurface::Cylinder { radius: 30.0, height: 80.0 },
+            0.4,   // text scale
+            5.0,   // hole depth
+            [0.1, 0.08, 0.05, 1.0], // dark brown hole
+        );
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
-        self.load_mesh(mesh, "Extrusion + 3Draper");
+        self.load_mesh(mesh, "Extrusion + 3Draper (holes)");
     }
 
     // ─── Native file I/O (uses rfd + filesystem) ─────────────────────────
@@ -1982,20 +2014,21 @@ impl eframe::App for ViewerApp {
                 });
                 // --- 3Draper Text ---
                 ui.separator();
-                ui.heading(egui::RichText::new("+ 3Draper").size(12.0));
+                ui.heading(egui::RichText::new("3Draper Holes").size(12.0));
+                ui.label(egui::RichText::new("Cut-out text on surfaces").size(9.0).color(egui::Color32::GRAY));
                 ui.horizontal(|ui| {
-                    if ui.button("Box+").clicked() { self.load_box_text(); }
-                    if ui.button("Cyl+").clicked() { self.load_cylinder_text(); }
-                    if ui.button("Sph+").clicked() { self.load_sphere_text(); }
+                    if ui.button("Box~").clicked() { self.load_box_text(); }
+                    if ui.button("Cyl~").clicked() { self.load_cylinder_text(); }
+                    if ui.button("Sph~").clicked() { self.load_sphere_text(); }
                 });
                 ui.horizontal(|ui| {
-                    if ui.button("Cone+").clicked() { self.load_cone_text(); }
-                    if ui.button("Torus+").clicked() { self.load_torus_text(); }
-                    if ui.button("Rev+").clicked() { self.load_revolution_text(); }
+                    if ui.button("Cone~").clicked() { self.load_cone_text(); }
+                    if ui.button("Torus~").clicked() { self.load_torus_text(); }
+                    if ui.button("Rev~").clicked() { self.load_revolution_text(); }
                 });
                 ui.horizontal(|ui| {
-                    if ui.button("Ext+").clicked() { self.load_extrusion_text(); }
-                    if ui.button("NURBS+").clicked() { self.load_nurbs_text(); }
+                    if ui.button("Ext~").clicked() { self.load_extrusion_text(); }
+                    if ui.button("NURBS~").clicked() { self.load_nurbs_text(); }
                 });
                 // --- Models ---
                 ui.separator();
