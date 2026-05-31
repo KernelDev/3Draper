@@ -12,7 +12,7 @@ use crate::renderer::{
 };
 use draper_core::engine::{EngineConfig, build_engine};
 use draper_topology::ShapeBuilder;
-use draper_mesh::{triangulate_solid, TriangleMesh, TriangulationParams, check_manifold, ManifoldReport};
+use draper_mesh::{triangulate_solid, TriangleMesh, TriangulationParams, check_manifold, ManifoldReport, generate_3draper_text};
 use draper_step::{AssemblyNode, DetailedMeshInstance, FaceInfo, PendingBrepInstance, OwnedStepConversionContext, step_structure_lazy};
 use draper_geometry::{Surface, Point2d};
 use egui_wgpu::RenderState;
@@ -643,6 +643,270 @@ impl ViewerApp {
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
         self.load_mesh(mesh, "ICE Engine (I4)");
+    }
+
+    /// Load a revolution solid (vase-like shape) — demonstrates RevolutionSurface.
+    fn load_revolution(&mut self) {
+        use draper_geometry::{Curve3d, NurbsCurve, Point3d as P3};
+        // Profile: a wavy curve that creates an interesting vase shape when revolved around Z
+        // Using a NURBS curve for smooth profile
+        let profile = Curve3d::Nurbs(NurbsCurve {
+            degree: 2,
+            control_points: vec![
+                P3::new(20.0, 0.0, 0.0),
+                P3::new(40.0, 0.0, 30.0),
+                P3::new(30.0, 0.0, 60.0),
+                P3::new(15.0, 0.0, 80.0),
+                P3::new(35.0, 0.0, 100.0),
+            ],
+            weights: vec![1.0, 1.0, 1.0, 1.0, 1.0],
+            knots: vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0],
+        });
+        let solid = ShapeBuilder::make_revolution(profile, std::f64::consts::PI * 2.0);
+        let mesh = triangulate_solid(&solid, &TriangulationParams::default());
+        self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
+        self.assembly_tree = None;
+        self.load_mesh(mesh, "Revolution (Vase)");
+    }
+
+    /// Load an extrusion solid — demonstrates ExtrusionSurface.
+    fn load_extrusion(&mut self) {
+        use draper_geometry::{Curve3d, Circle, Point3d as P3};
+        // Profile: a circle extruded along Y axis → creates a tube
+        let profile = Curve3d::Circle(Circle::new_xy(
+            P3::new(0.0, 0.0, 50.0),
+            30.0,
+        ));
+        let solid = ShapeBuilder::make_extrusion(
+            profile,
+            draper_geometry::Direction3d::Y,
+            80.0,
+        );
+        let mesh = triangulate_solid(&solid, &TriangulationParams::default());
+        self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
+        self.assembly_tree = None;
+        self.load_mesh(mesh, "Extrusion (Circle→Y)");
+    }
+
+    /// Load a NURBS surface — demonstrates NurbsSurface.
+    fn load_nurbs(&mut self) {
+        use draper_geometry::{NurbsSurface, Point3d as P3};
+        // Create a bicubic NURBS surface (a wavy sheet)
+        let control_points = vec![
+            vec![P3::new(-50.0, -50.0,  0.0), P3::new(-50.0, -15.0, 10.0), P3::new(-50.0,  15.0, 10.0), P3::new(-50.0,  50.0,  0.0)],
+            vec![P3::new(-15.0, -50.0, 10.0), P3::new(-15.0, -15.0, 30.0), P3::new(-15.0,  15.0, 25.0), P3::new(-15.0,  50.0,  5.0)],
+            vec![P3::new( 15.0, -50.0, 10.0), P3::new( 15.0, -15.0, 25.0), P3::new( 15.0,  15.0, 30.0), P3::new( 15.0,  50.0, 10.0)],
+            vec![P3::new( 50.0, -50.0,  0.0), P3::new( 50.0, -15.0,  5.0), P3::new( 50.0,  15.0, 10.0), P3::new( 50.0,  50.0,  0.0)],
+        ];
+        let weights = vec![vec![1.0; 4]; 4];
+        let u_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+        let v_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+
+        let nurbs_surface = NurbsSurface {
+            u_degree: 3, v_degree: 3,
+            control_points, weights,
+            u_knots, v_knots,
+        };
+
+        // Sample boundary points from the NURBS surface for triangulation
+        let (u_min, u_max) = nurbs_surface.u_range();
+        let (v_min, v_max) = nurbs_surface.v_range();
+        let surface = Surface::Nurbs(nurbs_surface);
+        let mut boundary = Vec::new();
+        let steps = 20;
+        // Bottom edge (v = v_min)
+        for i in 0..=steps {
+            let u = u_min + (u_max - u_min) * i as f64 / steps as f64;
+            boundary.push(surface.point_at(u, v_min));
+        }
+        // Right edge (u = u_max)
+        for i in 1..=steps {
+            let v = v_min + (v_max - v_min) * i as f64 / steps as f64;
+            boundary.push(surface.point_at(u_max, v));
+        }
+        // Top edge (v = v_max), reversed
+        for i in (0..steps).rev() {
+            let u = u_min + (u_max - u_min) * i as f64 / steps as f64;
+            boundary.push(surface.point_at(u, v_max));
+        }
+        // Left edge (u = u_min), reversed
+        for i in (1..steps).rev() {
+            let v = v_min + (v_max - v_min) * i as f64 / steps as f64;
+            boundary.push(surface.point_at(u_min, v));
+        }
+
+        let params = TriangulationParams::default();
+        let mesh = draper_mesh::triangulate_face_with_boundary(&surface, &boundary, true, &params);
+
+        self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
+        self.assembly_tree = None;
+        self.load_mesh(mesh, "NURBS (Wavy Sheet)");
+    }
+
+    /// Helper: add "3Draper" text to a mesh as a colored overlay.
+    /// The text is placed on the front face of the primitive.
+    fn add_text_to_mesh(&self, base_mesh: &TriangleMesh, text_color: [f32; 4]) -> TriangleMesh {
+        let mut result = base_mesh.clone();
+
+        // Generate text mesh
+        let text_depth = 2.0;
+        let text_scale = 0.5;
+        let mut text_mesh = generate_3draper_text(text_depth, text_scale);
+
+        // Position the text on the front face of the primitive
+        let (bmin, bmax) = base_mesh.bounding_box();
+        let cx = (bmin.x + bmax.x) / 2.0;
+        let cy = (bmin.y + bmax.y) / 2.0;
+        let front_z = bmax.z + 0.5; // Slightly in front of the surface
+
+        for v in &mut text_mesh.vertices {
+            v.x += cx;
+            v.y += cy;
+            v.z += front_z;
+        }
+
+        result.merge_with_color(&text_mesh, text_color);
+        result
+    }
+
+    /// Load Box with "3Draper" text on the front face.
+    fn load_box_text(&mut self) {
+        let solid = ShapeBuilder::make_box(100.0, 80.0, 60.0);
+        let base_mesh = triangulate_solid(&solid, &TriangulationParams::default());
+        let mesh = self.add_text_to_mesh(&base_mesh, [0.9, 0.3, 0.1, 1.0]); // Orange text
+        self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
+        self.assembly_tree = None;
+        self.load_mesh(mesh, "Box + 3Draper");
+    }
+
+    /// Load Cylinder with "3Draper" text.
+    fn load_cylinder_text(&mut self) {
+        let solid = ShapeBuilder::make_cylinder(40.0, 100.0);
+        let base_mesh = triangulate_solid(&solid, &TriangulationParams::default());
+        let mesh = self.add_text_to_mesh(&base_mesh, [0.1, 0.8, 0.3, 1.0]); // Green text
+        self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
+        self.assembly_tree = None;
+        self.load_mesh(mesh, "Cylinder + 3Draper");
+    }
+
+    /// Load Sphere with "3Draper" text.
+    fn load_sphere_text(&mut self) {
+        let solid = ShapeBuilder::make_sphere(50.0);
+        let base_mesh = triangulate_solid(&solid, &TriangulationParams::default());
+        let mesh = self.add_text_to_mesh(&base_mesh, [0.3, 0.5, 0.9, 1.0]); // Blue text
+        self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
+        self.assembly_tree = None;
+        self.load_mesh(mesh, "Sphere + 3Draper");
+    }
+
+    /// Load Cone with "3Draper" text.
+    fn load_cone_text(&mut self) {
+        let radius: f64 = 40.0;
+        let height: f64 = 80.0;
+        let half_angle = (radius / height).atan();
+        let solid = ShapeBuilder::make_cone(radius, height, half_angle);
+        let base_mesh = triangulate_solid(&solid, &TriangulationParams::default());
+        let mesh = self.add_text_to_mesh(&base_mesh, [0.9, 0.7, 0.1, 1.0]); // Yellow text
+        self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
+        self.assembly_tree = None;
+        self.load_mesh(mesh, "Cone + 3Draper");
+    }
+
+    /// Load Torus with "3Draper" text.
+    fn load_torus_text(&mut self) {
+        let solid = ShapeBuilder::make_torus(40.0, 12.0);
+        let base_mesh = triangulate_solid(&solid, &TriangulationParams::default());
+        let mesh = self.add_text_to_mesh(&base_mesh, [0.8, 0.2, 0.8, 1.0]); // Purple text
+        self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
+        self.assembly_tree = None;
+        self.load_mesh(mesh, "Torus + 3Draper");
+    }
+
+    /// Load Revolution with "3Draper" text.
+    fn load_revolution_text(&mut self) {
+        use draper_geometry::{Curve3d, NurbsCurve, Point3d as P3};
+        let profile = Curve3d::Nurbs(NurbsCurve {
+            degree: 2,
+            control_points: vec![
+                P3::new(20.0, 0.0, 0.0),
+                P3::new(40.0, 0.0, 30.0),
+                P3::new(30.0, 0.0, 60.0),
+                P3::new(15.0, 0.0, 80.0),
+                P3::new(35.0, 0.0, 100.0),
+            ],
+            weights: vec![1.0, 1.0, 1.0, 1.0, 1.0],
+            knots: vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0],
+        });
+        let solid = ShapeBuilder::make_revolution(profile, std::f64::consts::PI * 2.0);
+        let base_mesh = triangulate_solid(&solid, &TriangulationParams::default());
+        let mesh = self.add_text_to_mesh(&base_mesh, [0.1, 0.7, 0.7, 1.0]); // Cyan text
+        self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
+        self.assembly_tree = None;
+        self.load_mesh(mesh, "Revolution + 3Draper");
+    }
+
+    /// Load NURBS with "3Draper" text.
+    fn load_nurbs_text(&mut self) {
+        use draper_geometry::{NurbsSurface, Point3d as P3};
+        let control_points = vec![
+            vec![P3::new(-50.0, -50.0,  0.0), P3::new(-50.0, -15.0, 10.0), P3::new(-50.0,  15.0, 10.0), P3::new(-50.0,  50.0,  0.0)],
+            vec![P3::new(-15.0, -50.0, 10.0), P3::new(-15.0, -15.0, 30.0), P3::new(-15.0,  15.0, 25.0), P3::new(-15.0,  50.0,  5.0)],
+            vec![P3::new( 15.0, -50.0, 10.0), P3::new( 15.0, -15.0, 25.0), P3::new( 15.0,  15.0, 30.0), P3::new( 15.0,  50.0, 10.0)],
+            vec![P3::new( 50.0, -50.0,  0.0), P3::new( 50.0, -15.0,  5.0), P3::new( 50.0,  15.0, 10.0), P3::new( 50.0,  50.0,  0.0)],
+        ];
+        let weights = vec![vec![1.0; 4]; 4];
+        let u_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+        let v_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+        let nurbs_surface = NurbsSurface {
+            u_degree: 3, v_degree: 3,
+            control_points, weights,
+            u_knots, v_knots,
+        };
+        let (u_min, u_max) = nurbs_surface.u_range();
+        let (v_min, v_max) = nurbs_surface.v_range();
+        let surface = Surface::Nurbs(nurbs_surface);
+        let mut boundary = Vec::new();
+        let steps = 20;
+        for i in 0..=steps { boundary.push(surface.point_at(u_min + (u_max-u_min)*i as f64/steps as f64, v_min)); }
+        for i in 1..=steps { boundary.push(surface.point_at(u_max, v_min + (v_max-v_min)*i as f64/steps as f64)); }
+        for i in (0..steps).rev() { boundary.push(surface.point_at(u_min + (u_max-u_min)*i as f64/steps as f64, v_max)); }
+        for i in (1..steps).rev() { boundary.push(surface.point_at(u_min, v_min + (v_max-v_min)*i as f64/steps as f64)); }
+        let params = TriangulationParams::default();
+        let base_mesh = draper_mesh::triangulate_face_with_boundary(&surface, &boundary, true, &params);
+        let mesh = self.add_text_to_mesh(&base_mesh, [0.9, 0.4, 0.6, 1.0]); // Pink text
+        self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
+        self.assembly_tree = None;
+        self.load_mesh(mesh, "NURBS + 3Draper");
+    }
+
+    /// Load Extrusion with "3Draper" text.
+    fn load_extrusion_text(&mut self) {
+        use draper_geometry::{Curve3d, Circle, Point3d as P3};
+        let profile = Curve3d::Circle(Circle::new_xy(
+            P3::new(0.0, 0.0, 50.0),
+            30.0,
+        ));
+        let solid = ShapeBuilder::make_extrusion(
+            profile,
+            draper_geometry::Direction3d::Y,
+            80.0,
+        );
+        let base_mesh = triangulate_solid(&solid, &TriangulationParams::default());
+        let mesh = self.add_text_to_mesh(&base_mesh, [0.6, 0.4, 0.2, 1.0]); // Brown text
+        self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
+        self.assembly_tree = None;
+        self.load_mesh(mesh, "Extrusion + 3Draper");
     }
 
     // ─── Native file I/O (uses rfd + filesystem) ─────────────────────────
@@ -1710,6 +1974,28 @@ impl eframe::App for ViewerApp {
                 ui.horizontal(|ui| {
                     if ui.button("Cone").clicked() { self.load_cone(); }
                     if ui.button("Torus").clicked() { self.load_torus(); }
+                    if ui.button("Revolution").clicked() { self.load_revolution(); }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Extrusion").clicked() { self.load_extrusion(); }
+                    if ui.button("NURBS").clicked() { self.load_nurbs(); }
+                });
+                // --- 3Draper Text ---
+                ui.separator();
+                ui.heading(egui::RichText::new("+ 3Draper").size(12.0));
+                ui.horizontal(|ui| {
+                    if ui.button("Box+").clicked() { self.load_box_text(); }
+                    if ui.button("Cyl+").clicked() { self.load_cylinder_text(); }
+                    if ui.button("Sph+").clicked() { self.load_sphere_text(); }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Cone+").clicked() { self.load_cone_text(); }
+                    if ui.button("Torus+").clicked() { self.load_torus_text(); }
+                    if ui.button("Rev+").clicked() { self.load_revolution_text(); }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Ext+").clicked() { self.load_extrusion_text(); }
+                    if ui.button("NURBS+").clicked() { self.load_nurbs_text(); }
                 });
                 // --- Models ---
                 ui.separator();

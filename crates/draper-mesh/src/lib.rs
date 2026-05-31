@@ -16,6 +16,7 @@ pub mod edge_cache;
 pub mod adaptive;
 pub mod parametric_domain;
 pub mod certification;
+pub mod text3d;
 
 #[cfg(feature = "export-3mf")]
 pub mod export;
@@ -25,6 +26,7 @@ pub use triangulate::*;
 pub use stl::*;
 pub use manifold::*;
 pub use edge_cache::*;
+pub use text3d::*;
 #[cfg(feature = "export-3mf")]
 pub use export::*;
 pub use certification::*;
