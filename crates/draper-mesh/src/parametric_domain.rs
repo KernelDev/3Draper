@@ -154,6 +154,14 @@ pub fn triangulate_cdt(
     use spade::handles::FixedVertexHandle;
     use spade::Triangulation as _;
 
+    // Time limit for CDT construction — prevents browser hangs on WASM.
+    // On WASM, use a shorter limit since the main thread is blocked.
+    #[cfg(target_arch = "wasm32")]
+    let cdt_timeout = std::time::Duration::from_millis(500);
+    #[cfg(not(target_arch = "wasm32"))]
+    let cdt_timeout = std::time::Duration::from_secs(5);
+    let cdt_start = std::time::Instant::now();
+
     // Collect all constraint edges (outer boundary + holes)
     let mut all_uv_points: Vec<Point2d> = Vec::new();
     let mut constraint_edges: Vec<(usize, usize)> = Vec::new();
@@ -187,11 +195,12 @@ pub fn triangulate_cdt(
     }
 
     // Deduplicate near-coincident points before CDT.
-    // When two points are extremely close in UV space, spade's CDT can fail
-    // to insert the second one. Previously we used a "last handle" fallback
-    // which created invalid constraint edges. Instead, merge near-duplicate
-    // points into a single index.
-    let dedup_eps = 1e-8;
+    // Use a LARGER epsilon than before — spade's CDT can hang when points
+    // are extremely close but not exactly coincident. A relative epsilon
+    // based on the domain size avoids false merges while catching problematic cases.
+    let (u_min_bb, u_max_bb, v_min_bb, v_max_bb) = domain.bounding_box();
+    let domain_size = ((u_max_bb - u_min_bb).max(v_max_bb - v_min_bb)).max(1e-10);
+    let dedup_eps = domain_size * 1e-6; // relative epsilon
     let mut point_remap: Vec<usize> = (0..all_uv_points.len()).collect();
     for i in 1..all_uv_points.len() {
         for j in 0..i {
@@ -222,130 +231,82 @@ pub fn triangulate_cdt(
         .filter(|&(i, j)| i != j)  // Remove degenerate zero-length edges
         .collect();
 
-    // Build the constrained Delaunay triangulation
+    // Track which vertex handles correspond to failed insertions.
+    // We store Option<FixedVertexHandle> instead of using the "last handle" hack,
+    // because using the wrong handle creates invalid constraint edges that cause
+    // spade's CDT to hang in infinite loops.
     let mut cdt: ConstrainedDelaunayTriangulation<SpadePoint> =
         ConstrainedDelaunayTriangulation::new();
-
-    // Insert all unique points
-    let mut vertex_handles: Vec<FixedVertexHandle> = Vec::with_capacity(unique_points.len());
-    let mut insert_failed = false;
+    let mut vertex_handles: Vec<Option<FixedVertexHandle>> = Vec::with_capacity(unique_points.len());
     for (idx, p) in unique_points.iter().enumerate() {
+        // Check timeout
+        if cdt_start.elapsed() > cdt_timeout {
+            log::warn!("CDT: timeout during point insertion — falling back to Delaunay");
+            return fallback_delaunay(domain, surface, forward, &unique_points);
+        }
+
         let spade_pt = SpadePoint {
             x: p.u,
             y: p.v,
             index: idx,
         };
         match cdt.insert(spade_pt) {
-            Ok(handle) => vertex_handles.push(handle),
+            Ok(handle) => vertex_handles.push(Some(handle)),
             Err(_) => {
-                // Insertion failed — this is rare after deduplication.
-                // Push the nearest existing handle to keep indices aligned.
-                insert_failed = true;
-                if let Some(last) = vertex_handles.last().copied() {
-                    vertex_handles.push(last);
-                } else {
-                    // Cannot create any triangulation — return empty mesh
-                    return TriangleMesh::new();
-                }
+                // Mark this vertex as failed — None means we skip constraint edges
+                // that reference it, rather than using the wrong handle.
+                vertex_handles.push(None);
             }
         }
     }
 
-    if insert_failed {
-        log::warn!("CDT: some points failed to insert even after deduplication");
+    let failed_count = vertex_handles.iter().filter(|h| h.is_none()).count();
+    if failed_count > 0 {
+        log::warn!("CDT: {} out of {} points failed to insert", failed_count, unique_points.len());
     }
 
     // Add constraint edges — catch panics from intersecting constraints
-    // and fall back to unconstrained Delaunay if CDT fails
+    // and fall back to unconstrained Delaunay if CDT fails.
+    // SKIP edges that reference failed vertex handles — they would create
+    // invalid constraints that cause spade to hang.
     let mut cdt_ok = true;
+    let mut edges_added = 0usize;
     for (i, j) in &remapped_edges {
-        if *i < vertex_handles.len() && *j < vertex_handles.len() {
-            let h_i = vertex_handles[*i];
-            let h_j = vertex_handles[*j];
-            // add_constraint can panic if edges intersect — use catch_unwind
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                cdt.add_constraint(h_i, h_j);
-            }));
-            if result.is_err() {
-                cdt_ok = false;
-                break;
-            }
+        // Check timeout periodically (every 10 edges)
+        if edges_added % 10 == 0 && cdt_start.elapsed() > cdt_timeout {
+            log::warn!("CDT: timeout during constraint edge insertion — using partial CDT");
+            cdt_ok = false;
+            break;
         }
+
+        if *i >= vertex_handles.len() || *j >= vertex_handles.len() {
+            continue; // Out of bounds — skip
+        }
+        let h_i = match vertex_handles[*i] {
+            Some(h) => h,
+            None => continue, // Failed insertion — skip this edge
+        };
+        let h_j = match vertex_handles[*j] {
+            Some(h) => h,
+            None => continue, // Failed insertion — skip this edge
+        };
+
+        // add_constraint can panic if edges intersect — use catch_unwind
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cdt.add_constraint(h_i, h_j);
+        }));
+        if result.is_err() {
+            cdt_ok = false;
+            break;
+        }
+        edges_added += 1;
     }
 
     // If CDT failed due to intersecting constraints, rebuild as plain Delaunay
-    // (without constraints) — this is less accurate but won't panic
+    // (without constraints) — this is less accurate but won't panic/hang
     if !cdt_ok {
-        log::warn!("CDT constraint edges intersect — falling back to unconstrained Delaunay");
-        let mut fallback: spade::DelaunayTriangulation<SpadePoint> = spade::DelaunayTriangulation::new();
-        vertex_handles.clear();
-        for (idx, p) in unique_points.iter().enumerate() {
-            let spade_pt = SpadePoint {
-                x: p.u,
-                y: p.v,
-                index: idx,
-            };
-            match fallback.insert(spade_pt) {
-                Ok(handle) => vertex_handles.push(handle),
-                Err(_) => {
-                    if let Some(last) = vertex_handles.last().copied() {
-                        vertex_handles.push(last);
-                    }
-                }
-            }
-        }
-        // Extract triangles from fallback Delaunay
-        let mut mesh = TriangleMesh::new();
-        let mut vertex_map: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
-
-        for face in fallback.inner_faces() {
-            let positions = face.positions();
-            let verts: Vec<_> = face
-                .vertices()
-                .iter()
-                .map(|v| {
-                    let sp = v.position();
-                    let data = v.data();
-                    (sp.x, sp.y, data.index)
-                })
-                .collect();
-
-            if verts.len() != 3 { continue; }
-
-            let centroid_u = (verts[0].0 + verts[1].0 + verts[2].0) / 3.0;
-            let centroid_v = (verts[0].1 + verts[1].1 + verts[2].1) / 3.0;
-            let centroid = Point2d::new(centroid_u, centroid_v);
-
-            if !domain.contains(&centroid) { continue; }
-
-            let area = triangle_area_2d(
-                positions[0].x, positions[0].y,
-                positions[1].x, positions[1].y,
-                positions[2].x, positions[2].y,
-            );
-            if area < 1e-20 { continue; }
-
-            let mut tri_indices = [0u32; 3];
-            for (k, vert) in verts.iter().enumerate() {
-                let idx = vert.2;
-                let entry = vertex_map.entry(idx).or_insert_with(|| {
-                    let uv = Point2d::new(vert.0, vert.1);
-                    let p3d = surface.point_at(uv.u, uv.v);
-                    let n = surface.normal_at(uv.u, uv.v);
-                    let vi = mesh.add_vertex(p3d);
-                    mesh.add_vertex_normal(vi, [n.x, n.y, n.z]);
-                    vi
-                });
-                tri_indices[k] = *entry;
-            }
-
-            if forward {
-                mesh.add_triangle(tri_indices[0], tri_indices[1], tri_indices[2]);
-            } else {
-                mesh.add_triangle(tri_indices[0], tri_indices[2], tri_indices[1]);
-            }
-        }
-        return mesh;
+        log::warn!("CDT constraint edges failed — falling back to unconstrained Delaunay");
+        return fallback_delaunay(domain, surface, forward, &unique_points);
     }
 
     // Extract triangles, keeping only those inside the domain
@@ -410,6 +371,97 @@ pub fn triangulate_cdt(
         }
     }
 
+    mesh
+}
+
+/// Fallback: build an unconstrained Delaunay triangulation and filter by domain.
+///
+/// Used when the constrained Delaunay triangulation fails or times out.
+/// This approach doesn't respect boundary edges exactly, but it always
+/// terminates and produces a reasonable mesh.
+fn fallback_delaunay(
+    domain: &ParametricDomain,
+    surface: &Surface,
+    forward: bool,
+    unique_points: &[Point2d],
+) -> TriangleMesh {
+    use spade::ConstrainedDelaunayTriangulation;
+    use spade::Triangulation as _;
+
+    // Use ConstrainedDelaunayTriangulation without constraints as fallback.
+    // This is equivalent to a regular Delaunay triangulation but uses the
+    // same API as the main CDT path, avoiding spade v2 API incompatibilities.
+    let mut fallback: ConstrainedDelaunayTriangulation<SpadePoint> =
+        ConstrainedDelaunayTriangulation::new();
+    let mut vertex_handles: Vec<spade::handles::FixedVertexHandle> = Vec::with_capacity(unique_points.len());
+
+    for (idx, p) in unique_points.iter().enumerate() {
+        let spade_pt = SpadePoint {
+            x: p.u,
+            y: p.v,
+            index: idx,
+        };
+        match fallback.insert(spade_pt) {
+            Ok(handle) => vertex_handles.push(handle),
+            Err(_) => {
+                if let Some(last) = vertex_handles.last().copied() {
+                    vertex_handles.push(last);
+                }
+            }
+        }
+    }
+
+    // Extract triangles from fallback Delaunay (no constraints = pure Delaunay)
+    let mut mesh = TriangleMesh::new();
+    let mut vertex_map: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
+
+    for face in fallback.inner_faces() {
+        let positions = face.positions();
+        let verts: Vec<_> = face
+            .vertices()
+            .iter()
+            .map(|v| {
+                let sp = v.position();
+                let data = v.data();
+                (sp.x, sp.y, data.index)
+            })
+            .collect();
+
+        if verts.len() != 3 { continue; }
+
+        let centroid_u = (verts[0].0 + verts[1].0 + verts[2].0) / 3.0;
+        let centroid_v = (verts[0].1 + verts[1].1 + verts[2].1) / 3.0;
+        let centroid = Point2d::new(centroid_u, centroid_v);
+
+        if !domain.contains(&centroid) { continue; }
+
+        let area = triangle_area_2d(
+            positions[0].x, positions[0].y,
+            positions[1].x, positions[1].y,
+            positions[2].x, positions[2].y,
+        );
+        if area < 1e-20 { continue; }
+
+        let mut tri_indices = [0u32; 3];
+        for (k, vert) in verts.iter().enumerate() {
+            let idx = vert.2;
+            let entry = vertex_map.entry(idx).or_insert_with(|| {
+                let uv = Point2d::new(vert.0, vert.1);
+                let p3d = surface.point_at(uv.u, uv.v);
+                let n = surface.normal_at(uv.u, uv.v);
+                let vi = mesh.add_vertex(p3d);
+                mesh.add_vertex_normal(vi, [n.x, n.y, n.z]);
+                vi
+            });
+            tri_indices[k] = *entry;
+        }
+
+        if forward {
+            mesh.add_triangle(tri_indices[0], tri_indices[1], tri_indices[2]);
+        } else {
+            mesh.add_triangle(tri_indices[0], tri_indices[2], tri_indices[1]);
+        }
+    }
     mesh
 }
 

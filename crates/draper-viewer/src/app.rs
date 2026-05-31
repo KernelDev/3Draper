@@ -1188,7 +1188,7 @@ impl ViewerApp {
         // The context (OwnedStepConversionContext) is created ONCE when loading starts
         // and reused across all frames — this avoids rebuilding entity maps, cloning
         // HashMaps, and recomputing bounding boxes on every frame (major perf win).
-        let instance = if let Some(ref ctx) = self.conversion_ctx {
+        let instance = if let Some(ref mut ctx) = self.conversion_ctx {
             ctx.triangulate_pending(&pending)
         } else {
             None

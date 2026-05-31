@@ -135,12 +135,78 @@ fn get_glyph(ch: char) -> Option<GlyphDef> {
     }
 }
 
+/// Simplify a polygon contour by removing points that are nearly collinear.
+///
+/// Uses the Ramer-Douglas-Peucker algorithm to reduce the number of points
+/// while preserving the overall shape. This is essential for CDT performance —
+/// fewer constraint edges means faster triangulation and fewer opportunities
+/// for spade's CDT to encounter degenerate configurations.
+///
+/// # Arguments
+/// * `points` - Input polygon points
+/// * `epsilon` - Maximum allowed deviation from the original contour
+fn simplify_contour(points: &[(f64, f64)], epsilon: f64) -> Vec<(f64, f64)> {
+    if points.len() <= 3 {
+        return points.to_vec();
+    }
+
+    // Find the point with the maximum distance from the line between first and last
+    let first = points[0];
+    let last = points[points.len() - 1];
+    let mut max_dist = 0.0_f64;
+    let mut max_idx = 0;
+
+    for (i, p) in points.iter().enumerate().skip(1).take(points.len() - 2) {
+        let dist = point_to_line_dist(*p, first, last);
+        if dist > max_dist {
+            max_dist = dist;
+            max_idx = i;
+        }
+    }
+
+    if max_dist > epsilon {
+        // Recursive simplification
+        let left = simplify_contour(&points[..=max_idx], epsilon);
+        let right = simplify_contour(&points[max_idx..], epsilon);
+        // Merge, avoiding duplicate at junction
+        let mut result = left;
+        result.extend_from_slice(&right[1..]);
+        result
+    } else {
+        // All intermediate points are close to the line
+        vec![first, last]
+    }
+}
+
+/// Compute the perpendicular distance from a point to a line segment.
+fn point_to_line_dist(point: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
+    let dx = b.0 - a.0;
+    let dy = b.1 - a.1;
+    let len_sq = dx * dx + dy * dy;
+    if len_sq < 1e-20 {
+        let px = point.0 - a.0;
+        let py = point.1 - a.1;
+        return (px * px + py * py).sqrt();
+    }
+    let t = ((point.0 - a.0) * dx + (point.1 - a.1) * dy) / len_sq;
+    let t = t.clamp(0.0, 1.0);
+    let proj_x = a.0 + t * dx;
+    let proj_y = a.1 + t * dy;
+    let px = point.0 - proj_x;
+    let py = point.1 - proj_y;
+    (px * px + py * py).sqrt()
+}
+
 /// Generate 2D text contour polygons for the given text string.
 ///
 /// Returns a list of closed polygons, each being a Vec of (x, y) points.
 /// The first polygon of each glyph is the outer contour; subsequent polygons
 /// are holes (counter-clockwise). For hole cutting, we treat all contours
 /// as regions to cut away.
+///
+/// The contours are simplified using Ramer-Douglas-Peucker to reduce
+/// the number of constraint edges in the CDT, which prevents spade's
+/// constrained Delaunay triangulation from hanging on complex inputs.
 ///
 /// # Arguments
 /// * `text` - Text string (typically "3Draper")
@@ -159,7 +225,17 @@ pub fn generate_text_contours(text: &str, scale: f64, spacing: f64) -> Vec<Vec<(
                     .map(|&(x, y)| (offset_x + x * scale, y * scale))
                     .collect();
                 if scaled.len() >= 3 {
-                    contours.push(scaled);
+                    // Simplify the contour to reduce CDT constraint edge count.
+                    // Epsilon is relative to scale — larger text = more simplification tolerance.
+                    // Target: reduce each contour to ~6-10 points max.
+                    let epsilon = scale * 1.5;
+                    let simplified = simplify_contour(&scaled, epsilon);
+                    // Ensure we still have at least 3 points after simplification
+                    if simplified.len() >= 3 {
+                        contours.push(simplified);
+                    } else {
+                        contours.push(scaled);
+                    }
                 }
             }
             cursor_x += glyph.width * scale + spacing;
@@ -553,14 +629,26 @@ pub fn cut_text_holes_in_mesh(
         domain = domain.with_hole(hole.clone());
     }
 
-    // Generate interior points for CDT
-    let n_u = 16;
-    let n_v = 8;
+    // Generate interior points for CDT — use fewer points to keep CDT fast.
+    // On WASM, even fewer points to avoid blocking the browser thread.
+    #[cfg(target_arch = "wasm32")]
+    let (n_u, n_v) = (8, 4);
+    #[cfg(not(target_arch = "wasm32"))]
+    let (n_u, n_v) = (12, 6);
     let boundary_margin = (outer_u_max - outer_u_min) / n_u as f64 * 0.2;
     let interior_points = generate_interior_points(&domain, n_u, n_v, boundary_margin);
 
-    // Triangulate using CDT
+    // Triangulate using CDT (with built-in timeout protection)
     let text_face_mesh = triangulate_cdt(&domain, &geo_surface, true, &interior_points);
+
+    // If CDT produced no triangles, fall back to simple centroid-based removal.
+    // This creates jagged edges but at least shows something instead of hanging.
+    let text_face_mesh = if text_face_mesh.triangle_count() == 0 {
+        log::warn!("CDT produced empty mesh — falling back to simple triangle removal");
+        cut_text_holes_simple(base_mesh, surface, &contours_2d, &hole_indices)
+    } else {
+        text_face_mesh
+    };
 
     // Now build the complete mesh: base mesh faces + text-cut face + hole insets
     let mut result = TriangleMesh::new();
@@ -916,6 +1004,54 @@ pub fn carve_text_on_surface(
         v.x += surface_center.x + surface_normal[0] * offset;
         v.y += surface_center.y + surface_normal[1] * offset;
         v.z += surface_center.z + surface_normal[2] * offset;
+    }
+
+    result
+}
+
+/// Simple fallback for text hole cutting when CDT fails.
+///
+/// Removes triangles whose centroids fall inside text contours and
+/// replaces them with inset hole surfaces. Less accurate than CDT
+/// (jagged edges), but always terminates and never hangs.
+fn cut_text_holes_simple(
+    base_mesh: &TriangleMesh,
+    surface: &TextSurface,
+    contours_2d: &[Vec<(f64, f64)>],
+    hole_indices: &[usize],
+) -> TriangleMesh {
+    let mut result = TriangleMesh::new();
+
+    for tri in &base_mesh.triangles {
+        let v0 = base_mesh.vertices[tri[0] as usize];
+        let v1 = base_mesh.vertices[tri[1] as usize];
+        let v2 = base_mesh.vertices[tri[2] as usize];
+
+        // Centroid
+        let cx = (v0.x + v1.x + v2.x) / 3.0;
+        let cy = (v0.y + v1.y + v2.y) / 3.0;
+
+        // Project centroid onto surface to get 2D position
+        let sp = project_2d_to_surface(cx, cy, surface);
+
+        // Check if the projected centroid is inside any hole contour
+        let mut inside_hole = false;
+        for &idx in hole_indices {
+            if idx < contours_2d.len() {
+                if point_in_polygon_2d(sp.pos.x, sp.pos.y, &contours_2d[idx]) {
+                    inside_hole = true;
+                    break;
+                }
+            }
+        }
+
+        if !inside_hole {
+            let base = result.vertices.len() as u32;
+            result.vertices.push(v0);
+            result.vertices.push(v1);
+            result.vertices.push(v2);
+            result.triangles.push([base, base + 1, base + 2]);
+        }
     }
 
     result

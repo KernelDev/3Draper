@@ -761,12 +761,18 @@ pub struct OwnedStepConversionContext {
     entity_map: HashMap<i64, usize>,
     /// Conversion configuration (healing on/off).
     config: StepConversionConfig,
+    /// Whether the bounding box has been computed (for lazy init on WASM).
+    bbox_computed: bool,
 }
 
 impl OwnedStepConversionContext {
     /// Create a new owning conversion context.
-    /// Computes bounding box once and prepares adaptive triangulation parameters.
     /// Pre-builds and caches all index maps to avoid per-BREP recomputation.
+    ///
+    /// On WASM, the bounding box computation is deferred to the first
+    /// `triangulate_pending()` call to avoid blocking the main thread
+    /// during construction. This makes `new()` return quickly, keeping
+    /// the browser responsive.
     pub fn new(step_file: StepFile) -> Self {
         // On WASM, disable healing — it's O(n²) and freezes the browser.
         #[cfg(target_arch = "wasm32")]
@@ -774,8 +780,22 @@ impl OwnedStepConversionContext {
         #[cfg(not(target_arch = "wasm32"))]
         let config = StepConversionConfig::default();
 
-        let converter = StepConverter::with_config(&step_file, config.clone());
-        let bbox = converter.compute_bounding_box();
+        // Cache the index maps — after this, creating a lightweight StepConverter
+        // is nearly free (just clones of already-built maps).
+        let pd_brep_map = step_file.pd_brep_index().clone();
+        let nauo_transform_map = step_file.nauo_transform_index().clone();
+        // Reuse the StepFile's entity_index instead of rebuilding it from scratch
+        let entity_map = step_file.entity_index_ref().clone();
+
+        // On WASM, defer bounding box computation to avoid blocking the main thread.
+        // The bounding box will be computed lazily on the first triangulate_pending() call.
+        #[cfg(target_arch = "wasm32")]
+        let bbox: Option<(Point3d, Point3d)> = None;
+        #[cfg(not(target_arch = "wasm32"))]
+        let bbox = {
+            let converter = StepConverter::with_config(&step_file, config.clone());
+            converter.compute_bounding_box()
+        };
 
         let mut params = TriangulationParams::default();
         if let Some((bmin, bmax)) = &bbox {
@@ -794,20 +814,34 @@ impl OwnedStepConversionContext {
             params.max_face_triangles = 1000;
         }
 
-        // Cache the index maps — after this, creating a lightweight StepConverter
-        // is nearly free (just clones of already-built maps).
-        let pd_brep_map = step_file.pd_brep_index().clone();
-        let nauo_transform_map = step_file.nauo_transform_index().clone();
-        // Reuse the StepFile's entity_index instead of rebuilding it from scratch
-        let entity_map = step_file.entity_index_ref().clone();
-
-        Self { step_file, bbox, params, pd_brep_map, nauo_transform_map, entity_map, config }
+        Self { step_file, bbox, params, pd_brep_map, nauo_transform_map, entity_map, config, bbox_computed: false }
     }
 
     /// Triangulate a single pending BREP instance.
     ///
     /// Returns `None` if the BREP cannot be triangulated.
-    pub fn triangulate_pending(&self, pending: &PendingBrepInstance) -> Option<DetailedMeshInstance> {
+    ///
+    /// On WASM, the bounding box is computed lazily on the first call
+    /// to avoid blocking the main thread during `new()`.
+    pub fn triangulate_pending(&mut self, pending: &PendingBrepInstance) -> Option<DetailedMeshInstance> {
+        // Lazy bounding box computation on WASM (deferred from new())
+        if !self.bbox_computed && self.bbox.is_none() {
+            let converter = StepConverter::with_config(&self.step_file, self.config.clone());
+            self.bbox = converter.compute_bounding_box();
+            self.bbox_computed = true;
+
+            // Update params based on actual bounding box
+            if let Some((bmin, bmax)) = &self.bbox {
+                let dx = bmax.x - bmin.x;
+                let dy = bmax.y - bmin.y;
+                let dz = bmax.z - bmin.z;
+                let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
+                if diagonal > 1.0 {
+                    self.params.max_deviation = self.params.max_deviation.max(diagonal * 0.0002);
+                }
+            }
+        }
+
         // Build a lightweight StepConverter using cached maps.
         // This avoids the O(n) entity_map rebuild and O(n) pd_brep/nauo
         // re-cloning that was happening on every call.
