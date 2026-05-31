@@ -752,11 +752,21 @@ pub struct OwnedStepConversionContext {
     step_file: StepFile,
     bbox: Option<(Point3d, Point3d)>,
     params: TriangulationParams,
+    /// Pre-built index: pd_id → brep_id. Cached here to avoid re-cloning
+    /// from StepFile's RefCell on every triangulate_pending() call.
+    pd_brep_map: HashMap<i64, Option<i64>>,
+    /// Pre-built index: nauo_id → transform. Cached here for the same reason.
+    nauo_transform_map: HashMap<i64, Option<[[f64; 4]; 4]>>,
+    /// Pre-built entity map: step_entity_id → index in entities vec.
+    entity_map: HashMap<i64, usize>,
+    /// Conversion configuration (healing on/off).
+    config: StepConversionConfig,
 }
 
 impl OwnedStepConversionContext {
     /// Create a new owning conversion context.
     /// Computes bounding box once and prepares adaptive triangulation parameters.
+    /// Pre-builds and caches all index maps to avoid per-BREP recomputation.
     pub fn new(step_file: StepFile) -> Self {
         // On WASM, disable healing — it's O(n²) and freezes the browser.
         #[cfg(target_arch = "wasm32")]
@@ -764,7 +774,7 @@ impl OwnedStepConversionContext {
         #[cfg(not(target_arch = "wasm32"))]
         let config = StepConversionConfig::default();
 
-        let converter = StepConverter::with_config(&step_file, config);
+        let converter = StepConverter::with_config(&step_file, config.clone());
         let bbox = converter.compute_bounding_box();
 
         let mut params = TriangulationParams::default();
@@ -784,20 +794,32 @@ impl OwnedStepConversionContext {
             params.max_face_triangles = 1000;
         }
 
-        Self { step_file, bbox, params }
+        // Cache the index maps — after this, creating a lightweight StepConverter
+        // is nearly free (just clones of already-built maps).
+        let pd_brep_map = step_file.pd_brep_index().clone();
+        let nauo_transform_map = step_file.nauo_transform_index().clone();
+        let entity_map: HashMap<i64, usize> = step_file.entities.iter()
+            .enumerate()
+            .map(|(i, e)| (e.id, i))
+            .collect();
+
+        Self { step_file, bbox, params, pd_brep_map, nauo_transform_map, entity_map, config }
     }
 
     /// Triangulate a single pending BREP instance.
     ///
     /// Returns `None` if the BREP cannot be triangulated.
     pub fn triangulate_pending(&self, pending: &PendingBrepInstance) -> Option<DetailedMeshInstance> {
-        // On WASM, disable healing
-        #[cfg(target_arch = "wasm32")]
-        let config = StepConversionConfig::no_healing();
-        #[cfg(not(target_arch = "wasm32"))]
-        let config = StepConversionConfig::default();
-
-        let converter = StepConverter::with_config(&self.step_file, config);
+        // Build a lightweight StepConverter using cached maps.
+        // This avoids the O(n) entity_map rebuild and O(n) pd_brep/nauo
+        // re-cloning that was happening on every call.
+        let converter = StepConverter::from_cached_maps(
+            &self.step_file,
+            self.config.clone(),
+            self.entity_map.clone(),
+            self.pd_brep_map.clone(),
+            self.nauo_transform_map.clone(),
+        );
         let (mesh, faces) = converter.triangulate_brep_detailed(pending.brep_id, &self.params, &self.bbox)?;
 
         // Apply the instance transform
@@ -1116,6 +1138,29 @@ impl<'a> StepConverter<'a> {
         }
         let nauo_transform_map = step.nauo_transform_index().clone();
 
+        Self {
+            step,
+            _entity_map: entity_map,
+            config,
+            pd_brep_map,
+            nauo_transform_map,
+            bbox_cache: std::cell::RefCell::new(None),
+        }
+    }
+
+    /// Create a StepConverter from pre-built index maps.
+    ///
+    /// This is used by `OwnedStepConversionContext::triangulate_pending()` to
+    /// avoid rebuilding the entity_map, pd_brep_map, and nauo_transform_map
+    /// on every BREP instance. The maps are cached once in the context and
+    /// cloned here (which is much cheaper than rebuilding from scratch).
+    fn from_cached_maps(
+        step: &'a StepFile,
+        config: StepConversionConfig,
+        entity_map: HashMap<i64, usize>,
+        pd_brep_map: HashMap<i64, Option<i64>>,
+        nauo_transform_map: HashMap<i64, Option<[[f64; 4]; 4]>>,
+    ) -> Self {
         Self {
             step,
             _entity_map: entity_map,

@@ -6,11 +6,14 @@
 //! Each glyph is defined as a set of closed polygon contours (stroke paths).
 //! The resulting mesh has front faces, back faces, and side walls.
 //!
-//! Also provides mesh-level text hole cutting: actual holes in the shape of
-//! "3Draper" text are cut through primitive surfaces.
+//! Also provides CDT-based text hole cutting: actual holes in the shape of
+//! "3Draper" text are cut through primitive surfaces using Constrained Delaunay
+//! Triangulation for clean, accurate boundaries.
 
 use crate::mesh::TriangleMesh;
-use draper_geometry::Point3d;
+use crate::parametric_domain::{ParametricDomain, triangulate_cdt, generate_interior_points};
+use draper_geometry::{Point3d, Point2d, Surface, Plane, SphereSurface, CylinderSurface, ConeSurface, TorusSurface};
+use std::f64::consts::PI;
 
 /// A single glyph defined by its closed polygon contours.
 struct GlyphDef {
@@ -213,18 +216,9 @@ fn point_in_polygon_2d(px: f64, py: f64, vertices: &[(f64, f64)]) -> bool {
     inside
 }
 
-/// Check if a 2D point is inside any of the text contour polygons.
-fn point_in_any_contour(px: f64, py: f64, contours: &[(Vec<(f64, f64)>, f64)]) -> bool {
-    for (contour, _winding) in contours {
-        if point_in_polygon_2d(px, py, contour) {
-            return true;
-        }
-    }
-    false
-}
-
 /// Compute signed area (shoelace formula) to determine winding order.
 /// Positive = counter-clockwise, negative = clockwise.
+#[allow(dead_code)]
 fn signed_area_2d(polygon: &[(f64, f64)]) -> f64 {
     let n = polygon.len();
     let mut area = 0.0;
@@ -271,13 +265,10 @@ fn project_2d_to_surface(x: f64, y: f64, surface: &TextSurface) -> SurfacePoint 
             normal: [0.0, 0.0, 1.0],
         },
         TextSurface::Sphere { center, radius } => {
-            // Map text (x, y) to spherical coordinates
-            // x maps to azimuthal angle (longitude), y maps to polar angle (latitude)
             let r = *radius;
-            // Scale text to cover a reasonable portion of the sphere
-            let scale_angle = 1.0 / r; // radians per unit
-            let theta = y * scale_angle; // polar angle from equator
-            let phi = x * scale_angle;   // azimuthal angle
+            let scale_angle = 1.0 / r;
+            let theta = y * scale_angle;
+            let phi = x * scale_angle;
 
             let cos_t = theta.cos();
             let sin_t = theta.sin();
@@ -288,7 +279,6 @@ fn project_2d_to_surface(x: f64, y: f64, surface: &TextSurface) -> SurfacePoint 
             let py = center[1] + r * cos_t * sin_p;
             let pz = center[2] + r * sin_t;
 
-            // Normal points outward from center
             let nx = cos_t * cos_p;
             let ny = cos_t * sin_p;
             let nz = sin_t;
@@ -299,7 +289,6 @@ fn project_2d_to_surface(x: f64, y: f64, surface: &TextSurface) -> SurfacePoint 
             }
         }
         TextSurface::Cylinder { radius, height } => {
-            // Map text x to angle around cylinder, y to height
             let r = *radius;
             let h = *height;
             let scale_angle = 1.0 / r;
@@ -307,9 +296,8 @@ fn project_2d_to_surface(x: f64, y: f64, surface: &TextSurface) -> SurfacePoint 
 
             let px = r * angle.cos();
             let py = r * angle.sin();
-            let pz = y + h / 2.0; // center vertically
+            let pz = y + h / 2.0;
 
-            // Normal points radially outward
             let nx = angle.cos();
             let ny = angle.sin();
             let nz = 0.0;
@@ -320,19 +308,17 @@ fn project_2d_to_surface(x: f64, y: f64, surface: &TextSurface) -> SurfacePoint 
             }
         }
         TextSurface::Cone { radius, height } => {
-            // Map text x to angle around cone, y to height
             let r = *radius;
             let h = *height;
-            let scale_angle = 1.2 / r; // slightly wider for cone
+            let scale_angle = 1.2 / r;
             let angle = x * scale_angle;
             let z = y + h / 2.0;
-            let local_r = r * (1.0 - z / h); // radius decreases with height
+            let local_r = r * (1.0 - z / h);
 
             let px = local_r * angle.cos();
             let py = local_r * angle.sin();
             let pz = z;
 
-            // Cone normal (slightly tilted outward)
             let half_angle = (r / h).atan();
             let sin_ha = half_angle.sin();
             let cos_ha = half_angle.cos();
@@ -346,13 +332,12 @@ fn project_2d_to_surface(x: f64, y: f64, surface: &TextSurface) -> SurfacePoint 
             }
         }
         TextSurface::Torus { major_radius, minor_radius } => {
-            // Map text x to major angle (around the ring), y to minor angle (around the tube)
             let R = *major_radius;
             let r = *minor_radius;
             let scale_major = 1.0 / R;
             let scale_minor = 1.0 / r;
-            let u = x * scale_major; // major angle
-            let v = y * scale_minor; // minor angle
+            let u = x * scale_major;
+            let v = y * scale_minor;
 
             let cos_u = u.cos();
             let sin_u = u.sin();
@@ -363,7 +348,6 @@ fn project_2d_to_surface(x: f64, y: f64, surface: &TextSurface) -> SurfacePoint 
             let py = (R + r * cos_v) * sin_u;
             let pz = r * sin_v;
 
-            // Normal points outward from the tube center
             let nx = cos_v * cos_u;
             let ny = cos_v * sin_u;
             let nz = sin_v;
@@ -376,67 +360,102 @@ fn project_2d_to_surface(x: f64, y: f64, surface: &TextSurface) -> SurfacePoint 
     }
 }
 
-/// Project a 3D point back to 2D text space (inverse of project_2d_to_surface).
-/// Used to test if a mesh vertex is inside a text contour.
-fn project_3d_to_2d(point: Point3d, surface: &TextSurface) -> (f64, f64) {
+/// Get the Surface geometry object and UV domain for a TextSurface.
+fn get_surface_and_uv_domain(surface: &TextSurface, text_scale: f64) -> (Surface, (f64, f64), (f64, f64)) {
     match surface {
         TextSurface::Plane { z: _ } => {
-            (point.x, point.y)
+            // We'll handle plane specially — just use XY extents
+            let half_w = 50.0 * text_scale;
+            let half_h = 20.0 * text_scale;
+            (Surface::Plane(Plane::xy()), (-half_w, half_w), (-half_h, half_h))
         }
         TextSurface::Sphere { center, radius } => {
-            let dx = point.x - center[0];
-            let dy = point.y - center[1];
-            let dz = point.z - center[2];
             let r = *radius;
-            // Inverse of: theta = y/r, phi = x/r
-            // theta (polar from equator) = asin(dz/r)
-            // phi (azimuthal) = atan2(dy, dx)
-            let theta = (dz / r).asin();
-            let phi = dy.atan2(dx);
-            (phi * r, theta * r)
+            let scale_angle = 1.0 / r;
+            let half_w = 30.0 * text_scale * scale_angle;
+            let half_h = 10.0 * text_scale * scale_angle;
+            (Surface::Sphere(SphereSurface::new(Point3d::new(center[0], center[1], center[2]), r)),
+             (-half_w, half_w), (-half_h, half_h))
         }
         TextSurface::Cylinder { radius, height } => {
             let r = *radius;
             let h = *height;
-            // Inverse of: angle = x/r, pz = y + h/2
-            let angle = point.y.atan2(point.x);
-            let pz = point.z;
-            (angle * r, pz - h / 2.0)
+            let scale_angle = 1.0 / r;
+            let half_u = 30.0 * text_scale * scale_angle;
+            let half_v = 10.0 * text_scale;
+            (Surface::Cylinder(CylinderSurface::new_z(r)),
+             (-half_u, half_u), (-half_v + h / 2.0, half_v + h / 2.0))
         }
         TextSurface::Cone { radius, height } => {
             let r = *radius;
             let h = *height;
             let scale_angle = 1.2 / r;
-            let angle = point.y.atan2(point.x);
-            let z = point.z;
-            (angle / scale_angle, z - h / 2.0)
+            let half_u = 30.0 * text_scale * scale_angle;
+            let half_v = 10.0 * text_scale;
+            let half_angle = (r / h).atan();
+            (Surface::Cone(ConeSurface::new_z(r, half_angle)),
+             (-half_u, half_u), (-half_v + h / 2.0, half_v + h / 2.0))
         }
         TextSurface::Torus { major_radius, minor_radius } => {
-            let major_r = *major_radius;
-            let minor_r = *minor_radius;
-            // Inverse of: u = x * scale_major, v = y * scale_minor
-            let u = point.y.atan2(point.x); // major angle
-            let cos_u = u.cos();
-            let sin_u = u.sin();
-            // Project point onto ring center to find minor angle
-            let ring_x = point.x - major_r * cos_u;
-            let ring_y = point.y - major_r * sin_u;
-            let ring_z = point.z;
-            let radial_dist = ring_x * cos_u + ring_y * sin_u;
-            let v = ring_z.atan2(radial_dist.max(0.0));
-            (u * major_r, v * minor_r)
+            let R = *major_radius;
+            let r = *minor_radius;
+            let scale_major = 1.0 / R;
+            let scale_minor = 1.0 / r;
+            let half_u = 20.0 * text_scale * scale_major;
+            let half_v = 10.0 * text_scale * scale_minor;
+            (Surface::Torus(TorusSurface::new_z(Point3d::ORIGIN, R, r)),
+             (-half_u, half_u), (-half_v, half_v))
         }
     }
 }
 
-/// Cut "3Draper" text-shaped holes in a mesh, projected onto a surface.
+/// Convert 2D text contour points to UV coordinates on the surface.
+fn text_2d_to_uv(pts: &[(f64, f64)], surface: &TextSurface) -> Vec<Point2d> {
+    match surface {
+        TextSurface::Plane { z: _ } => {
+            // UV = (x, y) directly
+            pts.iter().map(|&(x, y)| Point2d::new(x, y)).collect()
+        }
+        TextSurface::Sphere { radius, .. } => {
+            // x → azimuthal angle (phi), y → polar angle (theta)
+            let r = *radius;
+            let scale = 1.0 / r;
+            pts.iter().map(|&(x, y)| Point2d::new(x * scale, y * scale + PI / 2.0)).collect()
+        }
+        TextSurface::Cylinder { radius, height } => {
+            // x → angle, y → height
+            let r = *radius;
+            let h = *height;
+            let scale = 1.0 / r;
+            pts.iter().map(|&(x, y)| Point2d::new(x * scale, y + h / 2.0)).collect()
+        }
+        TextSurface::Cone { radius, height } => {
+            // x → angle, y → z position
+            let r = *radius;
+            let h = *height;
+            let scale = 1.2 / r;
+            pts.iter().map(|&(x, y)| Point2d::new(x * scale, y + h / 2.0)).collect()
+        }
+        TextSurface::Torus { major_radius, minor_radius } => {
+            // x → major angle (u), y → minor angle (v)
+            let R = *major_radius;
+            let r = *minor_radius;
+            pts.iter().map(|&(x, y)| Point2d::new(x / R, y / r)).collect()
+        }
+    }
+}
+
+/// Cut "3Draper" text-shaped holes in a mesh using CDT-based approach.
 ///
-/// This removes triangles whose centroids fall inside the text contour polygons,
-/// and adds new geometry along the contour boundaries to create clean holes
-/// with depth (inset surfaces).
+/// Instead of removing whole triangles whose centroids fall inside text contours
+/// (which creates jagged edges), this function:
+/// 1. Generates a new surface mesh using Constrained Delaunay Triangulation
+///    with the text contours as holes in UV space
+/// 2. Creates clean inset surfaces for the holes with proper depth
+/// 3. Creates side walls connecting the surface boundary to the inset
 ///
 /// # Arguments
-/// * `base_mesh` - The base primitive mesh to cut holes into
+/// * `base_mesh` - The base primitive mesh to cut holes into (used for non-text faces)
 /// * `text` - Text string to cut (typically "3Draper")
 /// * `surface` - Surface type for projection
 /// * `scale` - Scale factor for text size
@@ -459,11 +478,84 @@ pub fn cut_text_holes_in_mesh(
         return result;
     }
 
-    // Identify triangles to remove: those whose centroid projects inside text contours.
-    // A point is "inside text" if it's inside an odd number of contours
-    // (ray-casting parity test). This naturally handles letter holes (D, a, p, e)
-    // because a point in a hole is inside 2 contours (outer + hole) → even → not cut.
-    let mut triangles_to_remove = vec![false; base_mesh.triangles.len()];
+    // Get the analytical surface and UV domain
+    let (geo_surface, u_range, v_range) = get_surface_and_uv_domain(surface, scale);
+
+    // Convert text contours from 2D text space to UV space
+    let contours_uv: Vec<Vec<Point2d>> = contours_2d.iter()
+        .map(|c| text_2d_to_uv(c, surface))
+        .collect();
+
+    // Build the outer boundary in UV space (rectangle covering the text area)
+    let (u_min, u_max) = u_range;
+    let (v_min, v_max) = v_range;
+
+    // Expand the UV domain a bit to ensure text fits well
+    let margin_u = (u_max - u_min) * 0.3;
+    let margin_v = (v_max - v_min) * 0.3;
+    let outer_u_min = u_min - margin_u;
+    let outer_u_max = u_max + margin_u;
+    let outer_v_min = v_min - margin_v;
+    let outer_v_max = v_max + margin_v;
+
+    // Outer boundary rectangle in UV space
+    let outer_boundary = vec![
+        Point2d::new(outer_u_min, outer_v_min),
+        Point2d::new(outer_u_max, outer_v_min),
+        Point2d::new(outer_u_max, outer_v_max),
+        Point2d::new(outer_u_min, outer_v_max),
+    ];
+
+    // Determine which contours are outer contours and which are inner holes
+    // A contour is a "hole" (text cut-out) if it's inside an odd number of contours
+    // (parity test). In practice, we simplify: all contours become holes.
+    // The D/a/p/e letters have their own internal holes which should NOT be
+    // cut — we need parity-based classification.
+    let hole_contours: Vec<Vec<Point2d>> = contours_uv.iter()
+        .filter(|c| {
+            // Test midpoint of the contour — if it's inside an odd number of
+            // OTHER contours, it's a hole; otherwise it's an outer boundary.
+            let mid_x: f64 = c.iter().map(|p| p.u).sum::<f64>() / c.len() as f64;
+            let mid_y: f64 = c.iter().map(|p| p.v).sum::<f64>() / c.len() as f64;
+
+            let mut inside_count = 0;
+            for other in &contours_2d {
+                if point_in_polygon_2d(mid_x, mid_y, other) {
+                    inside_count += 1;
+                }
+            }
+            // Odd count = this is a solid text region (outer contour) → becomes a hole
+            inside_count % 2 == 1
+        })
+        .cloned()
+        .collect();
+
+    // Build parametric domain with holes
+    let mut domain = ParametricDomain::new(
+        outer_boundary,
+        (outer_u_min, outer_u_max),
+        (outer_v_min, outer_v_max),
+    );
+    for hole in &hole_contours {
+        domain = domain.with_hole(hole.clone());
+    }
+
+    // Generate interior points for CDT
+    let n_u = 16;
+    let n_v = 8;
+    let boundary_margin = (outer_u_max - outer_u_min) / n_u as f64 * 0.2;
+    let interior_points = generate_interior_points(&domain, n_u, n_v, boundary_margin);
+
+    // Triangulate using CDT
+    let mut text_face_mesh = triangulate_cdt(&domain, &geo_surface, true, &interior_points);
+
+    // Now build the complete mesh: base mesh faces + text-cut face + hole insets
+    let mut result = TriangleMesh::new();
+    let base_color = [0.48, 0.52, 0.58, 1.0];
+
+    // Add base mesh triangles that are NOT on the text face
+    // (i.e., keep all faces from the primitive that don't overlap with the text region)
+    let mut num_base_tris = 0usize;
 
     for (i, tri) in base_mesh.triangles.iter().enumerate() {
         let v0 = base_mesh.vertices[tri[0] as usize];
@@ -475,47 +567,50 @@ pub fn cut_text_holes_in_mesh(
         let cy = (v0.y + v1.y + v2.y) / 3.0;
         let cz = (v0.z + v1.z + v2.z) / 3.0;
 
-        // Project centroid to 2D text space
-        let (px, py) = project_3d_to_2d(Point3d::new(cx, cy, cz), surface);
+        // Check if centroid is inside the outer UV domain of the text face
+        let sp = project_2d_to_surface(cx, cy, surface); // approximate
+        // Project centroid to UV to check if it's in the text region
+        let in_text_region = is_in_text_uv_region(cx, cy, cz, surface, outer_u_min, outer_u_max, outer_v_min, outer_v_max);
 
-        // Count how many contours the point is inside (parity test)
-        let mut inside_count = 0;
-        for contour in &contours_2d {
-            if point_in_polygon_2d(px, py, contour) {
-                inside_count += 1;
-            }
-        }
-
-        // Odd count → inside the text region → remove this triangle
-        if inside_count % 2 == 1 {
-            triangles_to_remove[i] = true;
-        }
-    }
-
-    // Build result mesh
-    let mut result = TriangleMesh::new();
-    let base_color = [0.48, 0.52, 0.58, 1.0];
-
-    // Keep triangles that are NOT inside the text
-    let mut num_base_tris = 0usize;
-    for (i, tri) in base_mesh.triangles.iter().enumerate() {
-        if !triangles_to_remove[i] {
+        if !in_text_region {
+            // Keep this triangle — it's outside the text region
             let base = result.vertices.len() as u32;
-            for &idx in tri {
-                result.vertices.push(base_mesh.vertices[idx as usize].clone());
-            }
+            result.vertices.push(v0);
+            result.vertices.push(v1);
+            result.vertices.push(v2);
             result.triangles.push([base, base + 1, base + 2]);
             num_base_tris += 1;
         }
     }
 
-    // For each contour, project its 2D points onto the 3D surface and create:
-    // 1. Surface ring vertices on the surface at the contour boundary
-    // 2. Inset ring vertices pushed inward along surface normal by `depth`
-    // 3. Side walls connecting surface ring to inset ring
-    // 4. Inset face (fan triangulation) for the bottom of the hole
+    // Add the CDT-triangulated text face (with holes)
+    let text_face_offset = result.vertices.len() as u32;
+    let text_face_tri_count = text_face_mesh.triangles.len();
+    for v in &text_face_mesh.vertices {
+        result.vertices.push(*v);
+    }
+    for tri in &text_face_mesh.triangles {
+        result.triangles.push([tri[0] + text_face_offset, tri[1] + text_face_offset, tri[2] + text_face_offset]);
+    }
+
+    // Add inset surfaces for each hole contour
     for contour_2d in &contours_2d {
-        if contour_2d.len() < 3 {
+        let contour_uv = text_2d_to_uv(contour_2d, surface);
+        if contour_uv.len() < 3 {
+            continue;
+        }
+
+        // Check if this is an outer contour (odd parity) — only create insets for those
+        let mid_x: f64 = contour_2d.iter().map(|p| p.0).sum::<f64>() / contour_2d.len() as f64;
+        let mid_y: f64 = contour_2d.iter().map(|p| p.1).sum::<f64>() / contour_2d.len() as f64;
+        let mut inside_count = 0;
+        for other in &contours_2d {
+            if point_in_polygon_2d(mid_x, mid_y, other) {
+                inside_count += 1;
+            }
+        }
+        if inside_count % 2 != 1 {
+            // This is an inner hole (like the hole in 'D' or 'a') — skip inset
             continue;
         }
 
@@ -548,10 +643,8 @@ pub fn cut_text_holes_in_mesh(
             let ii = inset_ring_start + i;
             let ij = inset_ring_start + j;
 
-            // Quad: si → sj → ij → ii
-            // Triangle 1: si, ii, sj
+            // Two triangles per quad
             result.triangles.push([si, ii, sj]);
-            // Triangle 2: sj, ii, ij
             result.triangles.push([sj, ii, ij]);
         }
 
@@ -566,11 +659,13 @@ pub fn cut_text_holes_in_mesh(
     }
 
     // Set up per-triangle colors
-    // Base triangles get the default color, hole triangles get the hole color
     let total_tris = result.triangles.len();
-    let hole_tris = total_tris - num_base_tris;
+    let hole_tris = total_tris - num_base_tris - text_face_tri_count;
     let mut colors = Vec::with_capacity(total_tris);
     for _ in 0..num_base_tris {
+        colors.push(base_color);
+    }
+    for _ in 0..text_face_tri_count {
         colors.push(base_color);
     }
     for _ in 0..hole_tris {
@@ -583,6 +678,63 @@ pub fn cut_text_holes_in_mesh(
     }
 
     result
+}
+
+/// Check if a 3D point is within the UV region where text is being cut.
+fn is_in_text_uv_region(
+    px: f64, py: f64, pz: f64,
+    surface: &TextSurface,
+    u_min: f64, u_max: f64,
+    v_min: f64, v_max: f64,
+) -> bool {
+    match surface {
+        TextSurface::Plane { z } => {
+            // For plane, UV = (x, y), check if point is at the right z level
+            let z_val = *z;
+            if (pz - z_val).abs() > 5.0 {
+                return false; // Not on this face
+            }
+            px >= u_min && px <= u_max && py >= v_min && py <= v_max
+        }
+        TextSurface::Sphere { center, radius: _ } => {
+            // Check if point is on the sphere and within the UV region
+            let dx = px - center[0];
+            let dy = py - center[1];
+            let dz = pz - center[2];
+            let phi = dy.atan2(dx);
+            let theta = dz.asin().max(-1.0).min(1.0);
+            let r = (dx * dx + dy * dy + dz * dz).sqrt();
+            if r < 1.0 {
+                return false; // Too close to center, not on surface
+            }
+            // Normalize angles to compare
+            let phi_norm = if phi < 0.0 { phi + 2.0 * PI } else { phi };
+            let theta_norm = theta + PI / 2.0;
+            phi_norm >= u_min && phi_norm <= u_max && theta_norm >= v_min && theta_norm <= v_max
+        }
+        TextSurface::Cylinder { radius: _, height: _ } => {
+            // For cylinder, UV = (angle, z)
+            let angle = py.atan2(px);
+            let angle_norm = if angle < 0.0 { angle + 2.0 * PI } else { angle };
+            angle_norm >= u_min && angle_norm <= u_max && pz >= v_min && pz <= v_max
+        }
+        TextSurface::Cone { radius: _, height: _ } => {
+            // For cone, UV = (angle, z)
+            let angle = py.atan2(px);
+            let angle_norm = if angle < 0.0 { angle + 2.0 * PI } else { angle };
+            angle_norm >= u_min && angle_norm <= u_max && pz >= v_min && pz <= v_max
+        }
+        TextSurface::Torus { major_radius, minor_radius: _ } => {
+            // For torus, UV = (major angle, minor angle)
+            let R = *major_radius;
+            let u = py.atan2(px);
+            let u_norm = if u < 0.0 { u + 2.0 * PI } else { u };
+            // Approximate: check if near the outer equator of the torus
+            let dist_from_axis = (px * px + py * py).sqrt();
+            let v_approx = (pz / (dist_from_axis - R).max(0.01)).atan();
+            u_norm >= u_min && u_norm <= u_max && v_approx >= v_min && v_approx <= v_max
+        }
+    }
 }
 
 /// Generate a 3D extruded text mesh for the string "3Draper".
@@ -657,8 +809,6 @@ fn extrude_contour(
     let n = contour.len() as u32;
 
     // Triangulate front face using fan triangulation
-    // For convex contours, this works perfectly.
-    // For concave contours, this is approximate but visually acceptable.
     for i in 1..n - 1 {
         mesh.triangles.push([front_start, front_start + i, front_start + i + 1]);
     }
@@ -676,7 +826,6 @@ fn extrude_contour(
         let bi = back_start + i;
         let bj = back_start + j;
 
-        // Two triangles per side quad
         mesh.triangles.push([fi, bi, fj]);
         mesh.triangles.push([fj, bi, bj]);
     }
@@ -726,7 +875,7 @@ pub fn carve_text_on_surface(
     }
 
     // Simple placement: offset text to surface position along normal
-    let offset = 0.1; // Small offset above surface
+    let offset = 0.1;
     for v in &mut result.vertices {
         v.x += surface_center.x + surface_normal[0] * offset;
         v.y += surface_center.y + surface_normal[1] * offset;
