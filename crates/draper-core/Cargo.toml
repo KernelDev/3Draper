@@ -6,7 +6,7 @@ edition.workspace = true
 [dependencies]
 draper-geometry = { workspace = true }
 draper-topology = { workspace = true }
-draper-mesh = { workspace = true }
+draper-mesh = { workspace = true, default-features = false }
 draper-step = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }

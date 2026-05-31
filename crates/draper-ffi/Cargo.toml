@@ -11,7 +11,7 @@ crate-type = ["cdylib", "staticlib", "lib"]
 [dependencies]
 draper-geometry = { workspace = true }
 draper-topology = { workspace = true }
-draper-mesh = { workspace = true }
+draper-mesh = { workspace = true, default-features = false, features = ["export-3mf"] }
 draper-core = { workspace = true }
 draper-step = { workspace = true }
 
