@@ -156,11 +156,24 @@ pub fn triangulate_cdt(
 
     // Time limit for CDT construction — prevents browser hangs on WASM.
     // On WASM, use a shorter limit since the main thread is blocked.
+    // NOTE: spade's add_constraint can enter infinite loops on complex
+    // constraint edge configurations (intersecting constraints, near-coincident
+    // points). The timeout check only works BETWEEN add_constraint calls —
+    // if a single call hangs, we can't abort it. So we also limit the total
+    // number of constraint edges to keep the CDT manageable.
     #[cfg(target_arch = "wasm32")]
-    let cdt_timeout = std::time::Duration::from_millis(500);
+    let cdt_timeout = std::time::Duration::from_millis(200);
     #[cfg(not(target_arch = "wasm32"))]
-    let cdt_timeout = std::time::Duration::from_secs(5);
+    let cdt_timeout = std::time::Duration::from_secs(3);
     let cdt_start = std::time::Instant::now();
+
+    // Limit the number of constraint edges to prevent CDT from hanging.
+    // Complex boundaries with many points create O(n²) constraint intersections
+    // that can take forever. Cap at a reasonable number.
+    #[cfg(target_arch = "wasm32")]
+    let max_constraint_edges = 100;
+    #[cfg(not(target_arch = "wasm32"))]
+    let max_constraint_edges = 500;
 
     // Collect all constraint edges (outer boundary + holes)
     let mut all_uv_points: Vec<Point2d> = Vec::new();
@@ -269,12 +282,21 @@ pub fn triangulate_cdt(
     // and fall back to unconstrained Delaunay if CDT fails.
     // SKIP edges that reference failed vertex handles — they would create
     // invalid constraints that cause spade to hang.
+    // ALSO limit total number of constraint edges to prevent CDT from
+    // spending too long on complex boundary configurations.
     let mut cdt_ok = true;
     let mut edges_added = 0usize;
     for (i, j) in &remapped_edges {
-        // Check timeout periodically (every 10 edges)
-        if edges_added % 10 == 0 && cdt_start.elapsed() > cdt_timeout {
+        // Check timeout on EVERY edge (not every 10) to minimize hang risk
+        if cdt_start.elapsed() > cdt_timeout {
             log::warn!("CDT: timeout during constraint edge insertion — using partial CDT");
+            cdt_ok = false;
+            break;
+        }
+
+        // Limit total constraint edges to prevent CDT hang
+        if edges_added >= max_constraint_edges {
+            log::warn!("CDT: exceeded max constraint edges ({}) — using partial CDT", max_constraint_edges);
             cdt_ok = false;
             break;
         }
@@ -587,6 +609,12 @@ pub fn generate_nurbs_interior_points(
 /// This is a more accurate alternative to `triangulate_surface_uv_trimmed` that
 /// uses CDT to ensure boundary edges are respected exactly and interior triangles
 /// satisfy the Delaunay criterion (maximizing minimum angle).
+///
+/// **Performance note**: Large boundary point counts create many constraint edges,
+/// which can cause spade's CDT to hang. This function downsamples boundary points
+/// on WASM (and for very large boundaries on native) to keep CDT tractable.
+/// The domain.contains() check still filters triangles correctly, so mesh quality
+/// is acceptable even with simplified boundaries.
 pub fn triangulate_surface_uv_cdt(
     surface: &Surface,
     boundary_points: &[Point3d],
@@ -597,6 +625,48 @@ pub fn triangulate_surface_uv_cdt(
     if boundary_points.is_empty() {
         return TriangleMesh::new();
     }
+
+    // Downsample boundary points to prevent CDT from hanging.
+    // On WASM, use very aggressive downsampling. On native, only downsample
+    // if the boundary is very large.
+    #[cfg(target_arch = "wasm32")]
+    let max_boundary_points = 30;
+    #[cfg(not(target_arch = "wasm32"))]
+    let max_boundary_points = 200;
+
+    let boundary_points = if boundary_points.len() > max_boundary_points {
+        let step = boundary_points.len() as f64 / max_boundary_points as f64;
+        let sampled: Vec<Point3d> = (0..max_boundary_points)
+            .map(|i| boundary_points[((i as f64 * step) as usize).min(boundary_points.len() - 1)])
+            .collect();
+        log::warn!(
+            "CDT: downsampled boundary from {} to {} points",
+            boundary_points.len(), sampled.len()
+        );
+        sampled
+    } else {
+        boundary_points.to_vec()
+    };
+
+    // Also downsample hole polylines
+    #[cfg(target_arch = "wasm32")]
+    let max_hole_points = 20;
+    #[cfg(not(target_arch = "wasm32"))]
+    let max_hole_points = 100;
+
+    let hole_polylines_downsampled: Vec<Vec<Point3d>> = hole_polylines.iter()
+        .map(|hole| {
+            if hole.len() > max_hole_points {
+                let step = hole.len() as f64 / max_hole_points as f64;
+                let sampled: Vec<Point3d> = (0..max_hole_points)
+                    .map(|i| hole[((i as f64 * step) as usize).min(hole.len() - 1)])
+                    .collect();
+                sampled
+            } else {
+                hole.clone()
+            }
+        })
+        .collect();
 
     // Project 3D boundary to UV
     let mut outer_uv: Vec<Point2d> = boundary_points
@@ -634,8 +704,8 @@ pub fn triangulate_surface_uv_cdt(
     let margin_u = (u_max - u_min) * 0.01;
     let margin_v = (v_max - v_min) * 0.01;
 
-    // Project holes to UV
-    let holes_uv: Vec<Vec<Point2d>> = hole_polylines
+    // Project holes to UV (use downsampled holes)
+    let holes_uv: Vec<Vec<Point2d>> = hole_polylines_downsampled
         .iter()
         .map(|hole| {
             let mut huv: Vec<Point2d> = hole

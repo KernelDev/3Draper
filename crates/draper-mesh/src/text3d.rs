@@ -6,12 +6,13 @@
 //! Each glyph is defined as a set of closed polygon contours (stroke paths).
 //! The resulting mesh has front faces, back faces, and side walls.
 //!
-//! Also provides CDT-based text hole cutting: actual holes in the shape of
-//! "3Draper" text are cut through primitive surfaces using Constrained Delaunay
-//! Triangulation for clean, accurate boundaries.
+//! Also provides text hole cutting: actual holes in the shape of
+//! "3Draper" text are cut through primitive surfaces using ear-clipping
+//! with bridge-edge hole insertion (guaranteed to terminate, unlike CDT).
 
 use crate::mesh::TriangleMesh;
-use crate::parametric_domain::{ParametricDomain, triangulate_cdt, generate_interior_points};
+// Note: ParametricDomain/CDT imports removed — we use ear-clipping instead
+// which is guaranteed to terminate (unlike spade CDT which can hang).
 use draper_geometry::{Point3d, Point2d, Surface, Plane, SphereSurface, CylinderSurface, ConeSurface, TorusSurface};
 use std::f64::consts::PI;
 
@@ -525,17 +526,18 @@ fn text_2d_to_uv(pts: &[(f64, f64)], surface: &TextSurface) -> Vec<Point2d> {
     }
 }
 
-/// Cut "3Draper" text-shaped holes in a mesh using CDT-based approach.
+/// Cut "3Draper" text-shaped holes in a mesh.
 ///
-/// Instead of removing whole triangles whose centroids fall inside text contours
-/// (which creates jagged edges), this function:
-/// 1. Generates a new surface mesh using Constrained Delaunay Triangulation
-///    with the text contours as holes in UV space
-/// 2. Creates clean inset surfaces for the holes with proper depth
-/// 3. Creates side walls connecting the surface boundary to the inset
+/// This function creates holes in the shape of text characters through a surface:
+/// 1. Removes triangles whose centroids fall inside text contours (simple, always terminates)
+/// 2. Replaces the text region with a new surface mesh that has proper holes
+///    using ear-clipping with bridge-edge hole insertion (guaranteed to terminate,
+///    unlike CDT which can hang on complex constraint edge configurations)
+/// 3. Creates inset surfaces for the holes with proper depth
+/// 4. Creates side walls connecting the surface boundary to the inset
 ///
 /// # Arguments
-/// * `base_mesh` - The base primitive mesh to cut holes into (used for non-text faces)
+/// * `base_mesh` - The base primitive mesh to cut holes into
 /// * `text` - Text string to cut (typically "3Draper")
 /// * `surface` - Surface type for projection
 /// * `scale` - Scale factor for text size
@@ -558,48 +560,13 @@ pub fn cut_text_holes_in_mesh(
         return result;
     }
 
-    // Get the analytical surface and UV domain
-    let (geo_surface, u_range, v_range) = get_surface_and_uv_domain(surface, scale);
-
-    // Convert text contours from 2D text space to UV space
-    let contours_uv: Vec<Vec<Point2d>> = contours_2d.iter()
-        .map(|c| text_2d_to_uv(c, surface))
-        .collect();
-
-    // Build the outer boundary in UV space (rectangle covering the text area)
-    let (u_min, u_max) = u_range;
-    let (v_min, v_max) = v_range;
-
-    // Expand the UV domain a bit to ensure text fits well
-    let margin_u = (u_max - u_min) * 0.3;
-    let margin_v = (v_max - v_min) * 0.3;
-    let outer_u_min = u_min - margin_u;
-    let outer_u_max = u_max + margin_u;
-    let outer_v_min = v_min - margin_v;
-    let outer_v_max = v_max + margin_v;
-
-    // Outer boundary rectangle in UV space
-    let outer_boundary = vec![
-        Point2d::new(outer_u_min, outer_v_min),
-        Point2d::new(outer_u_max, outer_v_min),
-        Point2d::new(outer_u_max, outer_v_max),
-        Point2d::new(outer_u_min, outer_v_max),
-    ];
-
     // Determine which contours are outer contours and which are inner holes
     // A contour is a "hole" (text cut-out) if it's inside an odd number of contours
     // (parity test). The D/a/p/e letters have their own internal holes which should
     // NOT be cut — we need parity-based classification.
-    //
-    // IMPORTANT: The parity test must be done in 2D text space (contours_2d),
-    // NOT in UV space (contours_uv). For non-plane surfaces, UV coordinates are
-    // in a different coordinate system (angles) while the 2D contours are in the
-    // same space as the polygon test expects. We compute the midpoint in 2D text
-    // space and test against 2D text-space contours, then map the result to UV.
     let hole_indices: Vec<usize> = contours_2d.iter()
         .enumerate()
         .filter(|(_, c)| {
-            // Test midpoint of the contour in 2D text space
             let mid_x: f64 = c.iter().map(|p| p.0).sum::<f64>() / c.len() as f64;
             let mid_y: f64 = c.iter().map(|p| p.1).sum::<f64>() / c.len() as f64;
 
@@ -615,47 +582,43 @@ pub fn cut_text_holes_in_mesh(
         .map(|(i, _)| i)
         .collect();
 
-    let hole_contours: Vec<Vec<Point2d>> = hole_indices.iter()
-        .map(|&i| contours_uv[i].clone())
-        .collect();
+    // Get the analytical surface and UV domain
+    let (geo_surface, u_range, v_range) = get_surface_and_uv_domain(surface, scale);
+    let (u_min, u_max) = u_range;
+    let (v_min, v_max) = v_range;
 
-    // Build parametric domain with holes
-    let mut domain = ParametricDomain::new(
-        outer_boundary,
-        (outer_u_min, outer_u_max),
-        (outer_v_min, outer_v_max),
+    // Expand the UV domain a bit to ensure text fits well
+    let margin_u = (u_max - u_min) * 0.3;
+    let margin_v = (v_max - v_min) * 0.3;
+    let outer_u_min = u_min - margin_u;
+    let outer_u_max = u_max + margin_u;
+    let outer_v_min = v_min - margin_v;
+    let outer_v_max = v_max + margin_v;
+
+    // Build the text face mesh with holes using ear-clipping with bridge edges.
+    // This approach is guaranteed to terminate (unlike CDT which can hang
+    // when constraint edges intersect or are nearly coincident).
+    //
+    // Algorithm:
+    // 1. Create a 2D rectangle in UV space for the text region
+    // 2. Map text hole contours into the rectangle
+    // 3. Use bridge-edge technique to merge holes into the outer polygon
+    // 4. Ear-clip the merged polygon (always terminates in O(n²))
+    // 5. Map UV vertices back to 3D using the analytical surface
+    let text_face_mesh = build_text_face_earclip(
+        &geo_surface,
+        surface,
+        &contours_2d,
+        &hole_indices,
+        outer_u_min, outer_u_max,
+        outer_v_min, outer_v_max,
     );
-    for hole in &hole_contours {
-        domain = domain.with_hole(hole.clone());
-    }
-
-    // Generate interior points for CDT — use fewer points to keep CDT fast.
-    // On WASM, even fewer points to avoid blocking the browser thread.
-    #[cfg(target_arch = "wasm32")]
-    let (n_u, n_v) = (8, 4);
-    #[cfg(not(target_arch = "wasm32"))]
-    let (n_u, n_v) = (12, 6);
-    let boundary_margin = (outer_u_max - outer_u_min) / n_u as f64 * 0.2;
-    let interior_points = generate_interior_points(&domain, n_u, n_v, boundary_margin);
-
-    // Triangulate using CDT (with built-in timeout protection)
-    let text_face_mesh = triangulate_cdt(&domain, &geo_surface, true, &interior_points);
-
-    // If CDT produced no triangles, fall back to simple centroid-based removal.
-    // This creates jagged edges but at least shows something instead of hanging.
-    let text_face_mesh = if text_face_mesh.triangle_count() == 0 {
-        log::warn!("CDT produced empty mesh — falling back to simple triangle removal");
-        cut_text_holes_simple(base_mesh, surface, &contours_2d, &hole_indices)
-    } else {
-        text_face_mesh
-    };
 
     // Now build the complete mesh: base mesh faces + text-cut face + hole insets
     let mut result = TriangleMesh::new();
     let base_color = [0.48, 0.52, 0.58, 1.0];
 
     // Add base mesh triangles that are NOT on the text face
-    // (i.e., keep all faces from the primitive that don't overlap with the text region)
     let mut num_base_tris = 0usize;
 
     for (_i, tri) in base_mesh.triangles.iter().enumerate() {
@@ -663,18 +626,16 @@ pub fn cut_text_holes_in_mesh(
         let v1 = base_mesh.vertices[tri[1] as usize];
         let v2 = base_mesh.vertices[tri[2] as usize];
 
-        // Centroid
         let cx = (v0.x + v1.x + v2.x) / 3.0;
         let cy = (v0.y + v1.y + v2.y) / 3.0;
         let cz = (v0.z + v1.z + v2.z) / 3.0;
 
-        // Check if centroid is inside the outer UV domain of the text face
-        let _sp = project_2d_to_surface(cx, cy, surface); // approximate (unused, kept for reference)
-        // Project centroid to UV to check if it's in the text region
-        let in_text_region = is_in_text_uv_region(cx, cy, cz, surface, outer_u_min, outer_u_max, outer_v_min, outer_v_max);
+        let in_text_region = is_in_text_uv_region(
+            cx, cy, cz, surface,
+            outer_u_min, outer_u_max, outer_v_min, outer_v_max,
+        );
 
         if !in_text_region {
-            // Keep this triangle — it's outside the text region
             let base = result.vertices.len() as u32;
             result.vertices.push(v0);
             result.vertices.push(v1);
@@ -684,7 +645,7 @@ pub fn cut_text_holes_in_mesh(
         }
     }
 
-    // Add the CDT-triangulated text face (with holes)
+    // Add the ear-clipped text face (with holes)
     let text_face_offset = result.vertices.len() as u32;
     let text_face_tri_count = text_face_mesh.triangles.len();
     for v in &text_face_mesh.vertices {
@@ -695,7 +656,6 @@ pub fn cut_text_holes_in_mesh(
     }
 
     // Add inset surfaces for each hole contour
-    // Reuse the hole_indices computed above — only create insets for outer contours (odd parity)
     for &idx in &hole_indices {
         let contour_2d = &contours_2d[idx];
         if contour_2d.len() < 3 {
@@ -731,7 +691,6 @@ pub fn cut_text_holes_in_mesh(
             let ii = inset_ring_start + i;
             let ij = inset_ring_start + j;
 
-            // Two triangles per quad
             result.triangles.push([si, ii, sj]);
             result.triangles.push([sj, ii, ij]);
         }
@@ -766,6 +725,268 @@ pub fn cut_text_holes_in_mesh(
     }
 
     result
+}
+
+/// Build the text face mesh with holes using ear-clipping with bridge edges.
+///
+/// This is a guaranteed-to-terminate alternative to CDT that:
+/// 1. Creates a UV-space rectangle for the text region
+/// 2. Maps text hole contours into the rectangle
+/// 3. Uses bridge-edge technique to merge each hole into the outer polygon
+/// 4. Ear-clips the merged polygon (O(n²) worst case, always terminates)
+/// 5. Maps UV vertices to 3D using the analytical surface
+///
+/// For curved surfaces, we add interior grid points to capture curvature,
+/// but these are added as simple vertex insertions (not CDT constraints).
+fn build_text_face_earclip(
+    geo_surface: &Surface,
+    surface: &TextSurface,
+    contours_2d: &[Vec<(f64, f64)>],
+    hole_indices: &[usize],
+    u_min: f64, u_max: f64,
+    v_min: f64, v_max: f64,
+) -> TriangleMesh {
+    // Convert hole contours from 2D text space to UV space
+    let hole_contours_uv: Vec<Vec<Point2d>> = hole_indices.iter()
+        .map(|&i| text_2d_to_uv(&contours_2d[i], surface))
+        .collect();
+
+    // Build the outer boundary in UV space (rectangle covering the text area)
+    let outer_uv = vec![
+        Point2d::new(u_min, v_min),
+        Point2d::new(u_max, v_min),
+        Point2d::new(u_max, v_max),
+        Point2d::new(u_min, v_max),
+    ];
+
+    // Collect all 2D points: outer boundary first, then holes
+    let mut all_uv_points: Vec<Point2d> = outer_uv.clone();
+
+    // Insert each hole into the polygon using bridge-edge technique
+    // This is the same approach used in triangulate_planar_face for holes
+    let mut polygon_indices: Vec<u32> = (0..outer_uv.len() as u32).collect();
+
+    for hole_uv in &hole_contours_uv {
+        let hole_start_idx = all_uv_points.len();
+
+        // Find the bridge: rightmost point of the hole, closest point on outer polygon
+        let bridge_result = find_bridge_edge_text(&all_uv_points, &polygon_indices, hole_uv);
+
+        // Add hole points to the combined point list
+        for p in hole_uv {
+            all_uv_points.push(*p);
+        }
+
+        // Insert hole into polygon via bridge edge
+        let mut new_polygon = Vec::with_capacity(polygon_indices.len() + hole_uv.len() + 2);
+        let bridge_outer = bridge_result.outer_idx;
+        let bridge_hole = hole_start_idx + bridge_result.hole_idx;
+
+        for &idx in &polygon_indices[..=bridge_outer] {
+            new_polygon.push(idx);
+        }
+        // Bridge: outer → hole → ... hole loop ... → hole → outer
+        new_polygon.push(bridge_hole as u32);
+        for i in 0..hole_uv.len() {
+            let idx = hole_start_idx + (bridge_result.hole_idx + i) % hole_uv.len();
+            new_polygon.push(idx as u32);
+        }
+        new_polygon.push(bridge_hole as u32);
+        new_polygon.push(polygon_indices[bridge_outer]);
+        for &idx in &polygon_indices[bridge_outer + 1..] {
+            new_polygon.push(idx);
+        }
+
+        polygon_indices = new_polygon;
+    }
+
+    // Add interior grid points for curved surfaces to capture curvature
+    let n_interior_u = match surface {
+        TextSurface::Plane { .. } => 0, // No interior points needed for flat plane
+        _ => {
+            #[cfg(target_arch = "wasm32")]
+            { 4 }
+            #[cfg(not(target_arch = "wasm32"))]
+            { 8 }
+        }
+    };
+    let n_interior_v = match surface {
+        TextSurface::Plane { .. } => 0,
+        _ => {
+            #[cfg(target_arch = "wasm32")]
+            { 3 }
+            #[cfg(not(target_arch = "wasm32"))]
+            { 5 }
+        }
+    };
+
+    let mut interior_point_indices: Vec<u32> = Vec::new();
+    if n_interior_u > 0 && n_interior_v > 0 {
+        for j in 1..n_interior_v {
+            for i in 1..n_interior_u {
+                let u = u_min + (u_max - u_min) * i as f64 / n_interior_u as f64;
+                let v = v_min + (v_max - v_min) * j as f64 / n_interior_v as f64;
+
+                // Check if this interior point is NOT inside any hole
+                let pt = Point2d::new(u, v);
+                let mut inside_hole = false;
+                for hole_uv in &hole_contours_uv {
+                    if point_in_polygon_2d_uv(&pt, hole_uv) {
+                        inside_hole = true;
+                        break;
+                    }
+                }
+                if !inside_hole {
+                    let idx = all_uv_points.len() as u32;
+                    all_uv_points.push(pt);
+                    interior_point_indices.push(idx);
+                }
+            }
+        }
+    }
+
+    // Now ear-clip the merged polygon (with holes inserted via bridge edges)
+    let merged_2d: Vec<Point2d> = polygon_indices.iter()
+        .map(|&idx| all_uv_points[idx as usize])
+        .collect();
+
+    let triangles = crate::ear_clip(&merged_2d);
+
+    // Build 3D mesh: map UV vertices to 3D using the analytical surface
+    let mut mesh = TriangleMesh::new();
+
+    // Add all polygon vertices as 3D points
+    for &idx in &polygon_indices {
+        let uv = all_uv_points[idx as usize];
+        let p3d = geo_surface.point_at(uv.u, uv.v);
+        mesh.add_vertex(p3d);
+    }
+
+    // Add interior vertices
+    let interior_offset = polygon_indices.len() as u32;
+    for &idx in &interior_point_indices {
+        let uv = all_uv_points[idx as usize];
+        let p3d = geo_surface.point_at(uv.u, uv.v);
+        mesh.add_vertex(p3d);
+    }
+
+    // Map ear-clip triangle indices back to vertex indices
+    for tri in &triangles {
+        let i0 = polygon_indices[tri[0] as usize];
+        let i1 = polygon_indices[tri[1] as usize];
+        let i2 = polygon_indices[tri[2] as usize];
+        // These are indices into the polygon_indices array, which are direct
+        // vertex indices in our mesh (we added polygon vertices first)
+        mesh.add_triangle(i0, i1, i2);
+    }
+
+    // For interior points, we need to insert them into the mesh.
+    // Simple approach: for each interior point, find the triangle that contains it
+    // and subdivide that triangle into 3 sub-triangles.
+    for (k, &_uv_idx) in interior_point_indices.iter().enumerate() {
+        let new_vert_idx = interior_offset + k as u32;
+        let uv = all_uv_points[interior_point_indices[k] as usize];
+
+        // Find a triangle whose 2D bounding contains this point
+        let mut best_tri: Option<usize> = None;
+        for (ti, tri) in mesh.triangles.iter().enumerate() {
+            let v0 = mesh.vertices[tri[0] as usize];
+            let v1 = mesh.vertices[tri[1] as usize];
+            let v2 = mesh.vertices[tri[2] as usize];
+
+            // Project to UV for containment test
+            let (u0, v0v) = geo_surface.project_point(&v0);
+            let (u1, v1v) = geo_surface.project_point(&v1);
+            let (u2, v2v) = geo_surface.project_point(&v2);
+
+            // Simple bounding box test
+            let min_u = u0.min(u1).min(u2);
+            let max_u = u0.max(u1).max(u2);
+            let min_v = v0v.min(v1v).min(v2v);
+            let max_v = v0v.max(v1v).max(v2v);
+
+            if uv.u >= min_u && uv.u <= max_u && uv.v >= min_v && uv.v <= max_v {
+                best_tri = Some(ti);
+                break;
+            }
+        }
+
+        if let Some(ti) = best_tri {
+            let [a, b, c] = mesh.triangles[ti];
+            // Replace triangle with 3 sub-triangles
+            mesh.triangles[ti] = [a, b, new_vert_idx];
+            mesh.triangles.push([b, c, new_vert_idx]);
+            mesh.triangles.push([c, a, new_vert_idx]);
+        }
+    }
+
+    // Compute normals for the text face
+    mesh.compute_face_normals();
+
+    mesh
+}
+
+/// Find bridge edge between outer polygon and a hole for ear-clipping.
+/// Returns indices into the outer polygon indices and hole points.
+struct BridgeResultText {
+    outer_idx: usize,
+    hole_idx: usize,
+}
+
+fn find_bridge_edge_text(
+    all_points: &[Point2d],
+    polygon_indices: &[u32],
+    hole_2d: &[Point2d],
+) -> BridgeResultText {
+    // Find rightmost point of the hole
+    let mut hole_idx = 0;
+    let mut max_u = hole_2d[0].u;
+    for (i, p) in hole_2d.iter().enumerate() {
+        if p.u > max_u {
+            max_u = p.u;
+            hole_idx = i;
+        }
+    }
+
+    // Find closest point on outer polygon to the rightmost hole point
+    let hole_pt = &hole_2d[hole_idx];
+    let mut outer_idx = 0;
+    let mut min_dist = f64::MAX;
+    for (i, &idx) in polygon_indices.iter().enumerate() {
+        let p = &all_points[idx as usize];
+        let dx = p.u - hole_pt.u;
+        let dy = p.v - hole_pt.v;
+        let dist = dx * dx + dy * dy;
+        if dist < min_dist {
+            min_dist = dist;
+            outer_idx = i;
+        }
+    }
+
+    BridgeResultText { outer_idx, hole_idx }
+}
+
+/// Point-in-polygon test for UV-space Point2d.
+fn point_in_polygon_2d_uv(point: &Point2d, polygon: &[Point2d]) -> bool {
+    let n = polygon.len();
+    if n < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let px = point.u;
+    let py = point.v;
+    let mut j = n - 1;
+    for i in 0..n {
+        let xi = polygon[i].u;
+        let yi = polygon[i].v;
+        let xj = polygon[j].u;
+        let yj = polygon[j].v;
+        if ((yi > py) != (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi) {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
 }
 
 /// Check if a 3D point is within the UV region where text is being cut.
