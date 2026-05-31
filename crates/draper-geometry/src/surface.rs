@@ -1303,16 +1303,18 @@ impl Surface {
                 let dy = point.y - r.origin.y;
                 let u = dy.atan2(dx);
                 // v = profile curve parameter: find the closest point on the profile curve
-                // The profile curve is in the XZ plane, and the surface point at (u, v)
-                // is: origin + (profile(v).x * cos(u), profile(v).x * sin(u), profile(v).z)
-                // We need to find v such that profile(v) matches the radial distance and z.
-                // Strategy: search the profile curve for the closest point in (radius, z) space.
                 let dz = point.z - r.origin.z;
                 let radial = (dx * dx + dy * dy).sqrt();
                 let (v_min, v_max) = r.profile.param_range();
                 let mut best_v = (v_min + v_max) * 0.5;
                 let mut best_dist = f64::MAX;
-                let steps = 64;
+
+                // Use fewer steps on WASM to reduce computation
+                #[cfg(target_arch = "wasm32")]
+                let (steps, refine_steps) = (32, 10);
+                #[cfg(not(target_arch = "wasm32"))]
+                let (steps, refine_steps) = (64, 20);
+
                 for i in 0..=steps {
                     let v = v_min + (v_max - v_min) * i as f64 / steps as f64;
                     let p = r.profile.point_at(v);
@@ -1326,7 +1328,6 @@ impl Surface {
                 }
                 // Refine with a finer search around the best point
                 let v_step = (v_max - v_min) / steps as f64;
-                let refine_steps = 20;
                 for i in 0..=refine_steps {
                     let v = (best_v - v_step + 2.0 * v_step * i as f64 / refine_steps as f64)
                         .clamp(v_min, v_max);
@@ -1343,16 +1344,12 @@ impl Surface {
             }
             Surface::Extrusion(e) => {
                 // u: profile curve parameter, v: distance along extrusion direction
-                // First compute v by projecting the point onto the extrusion direction
                 let p0 = e.profile.point_at(0.0);
                 let dx = point.x - p0.x;
                 let dy = point.y - p0.y;
                 let dz = point.z - p0.z;
                 let v = dx * e.direction.x + dy * e.direction.y + dz * e.direction.z;
 
-                // For u: find the profile curve parameter where the profile point
-                // is closest to the 3D point projected onto the profile plane
-                // (subtract the extrusion component)
                 let px = point.x - v * e.direction.x;
                 let py = point.y - v * e.direction.y;
                 let pz = point.z - v * e.direction.z;
@@ -1360,8 +1357,13 @@ impl Surface {
                 let (u_min, u_max) = e.profile.param_range();
                 let mut best_u = (u_min + u_max) * 0.5;
                 let mut best_dist = f64::MAX;
+
+                #[cfg(target_arch = "wasm32")]
+                let (steps, refine_steps) = (32, 10);
+                #[cfg(not(target_arch = "wasm32"))]
+                let (steps, refine_steps) = (64, 20);
+
                 // Coarse search
-                let steps = 64;
                 for i in 0..=steps {
                     let u = u_min + (u_max - u_min) * i as f64 / steps as f64;
                     let p = e.profile.point_at(u);
@@ -1373,7 +1375,6 @@ impl Surface {
                 }
                 // Refine
                 let u_step = (u_max - u_min) / steps as f64;
-                let refine_steps = 20;
                 for i in 0..=refine_steps {
                     let u = (best_u - u_step + 2.0 * u_step * i as f64 / refine_steps as f64)
                         .clamp(u_min, u_max);
@@ -1390,14 +1391,23 @@ impl Surface {
                 // Grid-based closest point search using actual knot range.
                 // Uses progressively finer searches (coarse → medium → fine) for
                 // good accuracy with fewer total evaluations than a single fine grid.
+                //
+                // On WASM, we use smaller grids to avoid blocking the browser thread.
+                // The total evaluations are:
+                //   Native: (11*11) + (9*9) + (7*7) + 5 Newton = 121+81+49+5 = 256
+                //   WASM:   (7*7) + (5*5) + (4*4) + 3 Newton = 49+25+16+3 = 93
                 let (u_min, u_max) = n.u_range();
                 let (v_min, v_max) = n.v_range();
                 let mut best_u = (u_min + u_max) * 0.5;
                 let mut best_v = (v_min + v_max) * 0.5;
                 let mut best_dist = f64::MAX;
 
-                // Phase 1: Coarse grid (10×10 = 121 evaluations)
-                let coarse = 10;
+                #[cfg(target_arch = "wasm32")]
+                let (coarse, medium, fine, newton_iters) = (6, 5, 4, 3);
+                #[cfg(not(target_arch = "wasm32"))]
+                let (coarse, medium, fine, newton_iters) = (10, 8, 6, 5);
+
+                // Phase 1: Coarse grid
                 for i in 0..=coarse {
                     for j in 0..=coarse {
                         let u = u_min + (u_max - u_min) * i as f64 / coarse as f64;
@@ -1412,8 +1422,7 @@ impl Surface {
                     }
                 }
 
-                // Phase 2: Medium refinement (8×8 = 81 evaluations around best)
-                let medium = 8;
+                // Phase 2: Medium refinement around best
                 let u_range = (u_max - u_min) / coarse as f64;
                 let v_range = (v_max - v_min) / coarse as f64;
                 let mut med_best_u = best_u;
@@ -1436,8 +1445,7 @@ impl Surface {
                 best_v = med_best_v;
                 best_dist = med_best_dist;
 
-                // Phase 3: Fine refinement (6×6 = 49 evaluations around best)
-                let fine = 6;
+                // Phase 3: Fine refinement around best
                 let u_range2 = u_range / medium as f64;
                 let v_range2 = v_range / medium as f64;
                 for i in 0..=fine {
@@ -1455,7 +1463,7 @@ impl Surface {
                 }
 
                 // Newton-Raphson refinement using analytical derivatives
-                for _ in 0..5 {
+                for _ in 0..newton_iters {
                     let derivs = n.derivatives_at(best_u, best_v);
                     let sp = derivs.point;
                     let dx = sp.x - point.x;

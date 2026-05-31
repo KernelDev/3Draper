@@ -13,7 +13,7 @@ use crate::renderer::{
 use draper_core::engine::{EngineConfig, build_engine};
 use draper_topology::ShapeBuilder;
 use draper_mesh::{triangulate_solid, TriangleMesh, TriangulationParams, check_manifold, ManifoldReport};
-use draper_step::{AssemblyNode, DetailedMeshInstance, FaceInfo, PendingBrepInstance, StepConversionContext, step_structure_lazy};
+use draper_step::{AssemblyNode, DetailedMeshInstance, FaceInfo, PendingBrepInstance, OwnedStepConversionContext, step_structure_lazy};
 use draper_geometry::{Surface, Point2d};
 use egui_wgpu::RenderState;
 use eframe::egui;
@@ -355,9 +355,10 @@ pub struct ViewerApp {
     /// this stores PendingBrepInstance descriptors that are triangulated ONE AT A TIME
     /// in the frame loop, keeping the browser responsive.
     pending_breps: Vec<PendingBrepInstance>,
-    /// The parsed STEP file — kept alive so that `StepConversionContext`
-    /// can resolve entity references during progressive triangulation.
-    step_file_cache: Option<draper_step::StepFile>,
+    /// Cached conversion context — owns the StepFile and is reused across frames.
+    /// This avoids rebuilding entity maps, cloning HashMaps, and recomputing bounding boxes
+    /// on every animation frame (which was the main cause of performance degradation).
+    conversion_ctx: Option<OwnedStepConversionContext>,
     /// Total number of instances being loaded (for progress display).
     total_instance_count: usize,
     /// Number of instances already triangulated.
@@ -531,7 +532,7 @@ impl ViewerApp {
             scroll_to_tree_node: None,
             scroll_to_face_id: None,
             pending_breps: Vec::new(),
-            step_file_cache: None,
+            conversion_ctx: None,
             total_instance_count: 0,
             triangulated_count: 0,
             is_loading: false,
@@ -776,7 +777,7 @@ impl ViewerApp {
             self.total_instance_count = pending.len();
             self.triangulated_count = 0;
             self.pending_breps = pending;
-            self.step_file_cache = Some(step_file.clone());
+            self.conversion_ctx = Some(OwnedStepConversionContext::new(step_file.clone()));
             self.is_loading = true;
             self.loading_name = name.to_string();
 
@@ -803,7 +804,7 @@ impl ViewerApp {
     fn cancel_loading(&mut self) {
         self.is_loading = false;
         self.pending_breps.clear();
-        self.step_file_cache = None;
+        self.conversion_ctx = None;
         self.triangulated_count = 0;
         self.total_instance_count = 0;
     }
@@ -824,11 +825,11 @@ impl ViewerApp {
         // Take the next pending BREP from the front
         let pending = self.pending_breps.remove(0);
 
-        // Triangulate this single BREP using the cached StepFile with a reusable context.
-        // The StepConversionContext computes bounding box once and caches pd_brep/nauo_transform
-        // lookups. The StepFile's type index (biggest optimization) persists across contexts.
-        let instance = if let Some(ref step_file) = self.step_file_cache {
-            let ctx = StepConversionContext::new(step_file);
+        // Triangulate this single BREP using the CACHED conversion context.
+        // The context (OwnedStepConversionContext) is created ONCE when loading starts
+        // and reused across all frames — this avoids rebuilding entity maps, cloning
+        // HashMaps, and recomputing bounding boxes on every frame (major perf win).
+        let instance = if let Some(ref ctx) = self.conversion_ctx {
             ctx.triangulate_pending(&pending)
         } else {
             None
@@ -875,9 +876,9 @@ impl ViewerApp {
         self.mesh_dirty = true;
 
         if self.pending_breps.is_empty() {
-            // Loading complete
+            // Loading complete — free the conversion context (and its StepFile)
             self.is_loading = false;
-            self.step_file_cache = None; // Free the STEP file data
+            self.conversion_ctx = None;
             let vcount = self.mesh.vertex_count();
             let tcount = self.mesh.triangle_count();
             self.log(&format!(

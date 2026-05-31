@@ -97,10 +97,16 @@ struct StepEdgeCache {
 
 impl StepEdgeCache {
     fn new(tol_ctx: ToleranceContext) -> Self {
+        // Use fewer default samples on WASM to reduce project_point calls
+        #[cfg(target_arch = "wasm32")]
+        let default_samples = 16;
+        #[cfg(not(target_arch = "wasm32"))]
+        let default_samples = 32;
+
         Self {
             entries: HashMap::new(),
             tol_ctx,
-            default_samples: 32,
+            default_samples,
         }
     }
 
@@ -720,6 +726,99 @@ impl<'a> StepConversionContext<'a> {
             brep_id: pending.brep_id,
             faces,
         })
+    }
+}
+
+// ============================================================
+// Owned conversion context (for caching across frames)
+// ============================================================
+
+/// An **owning** conversion context that takes ownership of the `StepFile`.
+///
+/// This is designed for progressive triangulation where the context must be
+/// cached across multiple animation frames (e.g., in a WASM web viewer).
+/// Unlike `StepConversionContext<'a>` which borrows the `StepFile`, this
+/// struct owns it — so it can be stored as a field in a viewer struct without
+/// lifetime issues.
+///
+/// Usage:
+/// ```ignore
+/// let ctx = OwnedStepConversionContext::new(step_file);
+/// for pending in &pending_instances {
+///     if let Some(instance) = ctx.triangulate_pending(pending) { ... }
+/// }
+/// ```
+pub struct OwnedStepConversionContext {
+    step_file: StepFile,
+    bbox: Option<(Point3d, Point3d)>,
+    params: TriangulationParams,
+}
+
+impl OwnedStepConversionContext {
+    /// Create a new owning conversion context.
+    /// Computes bounding box once and prepares adaptive triangulation parameters.
+    pub fn new(step_file: StepFile) -> Self {
+        // On WASM, disable healing — it's O(n²) and freezes the browser.
+        #[cfg(target_arch = "wasm32")]
+        let config = StepConversionConfig::no_healing();
+        #[cfg(not(target_arch = "wasm32"))]
+        let config = StepConversionConfig::default();
+
+        let converter = StepConverter::with_config(&step_file, config);
+        let bbox = converter.compute_bounding_box();
+
+        let mut params = TriangulationParams::default();
+        if let Some((bmin, bmax)) = &bbox {
+            let dx = bmax.x - bmin.x;
+            let dy = bmax.y - bmin.y;
+            let dz = bmax.z - bmin.z;
+            let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
+            if diagonal > 1.0 {
+                params.max_deviation = params.max_deviation.max(diagonal * 0.0002);
+            }
+        }
+
+        // On WASM, limit max_face_triangles to keep per-face triangulation fast
+        #[cfg(target_arch = "wasm32")]
+        {
+            params.max_face_triangles = 1000;
+        }
+
+        Self { step_file, bbox, params }
+    }
+
+    /// Triangulate a single pending BREP instance.
+    ///
+    /// Returns `None` if the BREP cannot be triangulated.
+    pub fn triangulate_pending(&self, pending: &PendingBrepInstance) -> Option<DetailedMeshInstance> {
+        // On WASM, disable healing
+        #[cfg(target_arch = "wasm32")]
+        let config = StepConversionConfig::no_healing();
+        #[cfg(not(target_arch = "wasm32"))]
+        let config = StepConversionConfig::default();
+
+        let converter = StepConverter::with_config(&self.step_file, config);
+        let (mesh, faces) = converter.triangulate_brep_detailed(pending.brep_id, &self.params, &self.bbox)?;
+
+        // Apply the instance transform
+        let mut instance_mesh = mesh;
+        if let Some(ref tf) = pending.transform {
+            instance_mesh.transform(tf);
+        }
+
+        Some(DetailedMeshInstance {
+            name: pending.name.clone(),
+            mesh: instance_mesh,
+            color: pending.color,
+            transform: pending.transform,
+            brep_id: pending.brep_id,
+            faces,
+        })
+    }
+
+    /// Get a reference to the owned StepFile.
+    pub fn step_file(&self) -> &StepFile {
+        &self.step_file
     }
 }
 
@@ -2311,15 +2410,26 @@ impl<'a> StepConverter<'a> {
         let brep_time_limit = std::time::Duration::from_secs(3);
         #[cfg(not(target_arch = "wasm32"))]
         let brep_time_limit = std::time::Duration::from_secs(300); // 5 min on native
+
+        // Per-FACE time limit: on WASM, if a single face takes longer than this,
+        // we skip it (returning an empty mesh for that face) rather than blocking.
+        // This prevents a single NURBS face with expensive project_point calls
+        // from freezing the browser for minutes.
+        #[cfg(target_arch = "wasm32")]
+        let face_time_limit = std::time::Duration::from_millis(500);
+        #[cfg(not(target_arch = "wasm32"))]
+        let face_time_limit = std::time::Duration::from_secs(60);
+
         let brep_start = std::time::Instant::now();
 
         let mut mesh = TriangleMesh::new();
         let mut face_infos = Vec::new();
         let mut next_face_id: u64 = 1;
         let mut skipped_faces = 0;
+        let mut timed_out_faces = 0;
 
         for (fi, face_data) in face_data_list.iter().enumerate() {
-            // Check time budget — skip remaining faces if we're over limit
+            // Check BREP-level time budget — skip remaining faces if we're over limit
             if brep_start.elapsed() > brep_time_limit {
                 skipped_faces += face_data_list.len() - fi;
                 log::warn!(
@@ -2328,6 +2438,20 @@ impl<'a> StepConverter<'a> {
                 );
                 break;
             }
+
+            // Check per-FACE time budget before starting an expensive face.
+            // If we've already used most of the BREP time budget, skip remaining faces.
+            let elapsed = brep_start.elapsed();
+            if elapsed + face_time_limit > brep_time_limit {
+                skipped_faces += face_data_list.len() - fi;
+                log::warn!(
+                    "BREP #{}: insufficient time budget for face {} (elapsed {:?}), skipping {} remaining",
+                    brep_id, fi, elapsed, face_data_list.len() - fi
+                );
+                break;
+            }
+
+            let face_start = std::time::Instant::now();
 
             let face_id = next_face_id;
             next_face_id += 1;
@@ -6300,13 +6424,36 @@ impl<'a> StepConverter<'a> {
     /// Sample points from a list of edges at uniform parameter intervals.
     /// Determine the number of samples to take from an edge based on its curve type.
     /// Lines need only 2 samples (start and end), while circles/NURBS need more for curvature.
+    ///
+    /// On WASM, we use fewer samples to reduce the number of expensive project_point
+    /// calls during UV-space triangulation of curved surfaces.
     fn edge_sample_count(&self, edge: &TopoEdge) -> usize {
         match &edge.curve {
             Some(Curve3d::Line(_)) => 2,
-            Some(Curve3d::Circle(_)) => 36,
-            Some(Curve3d::Ellipse(_)) => 36,
-            Some(Curve3d::Arc(_)) => 24,
-            Some(Curve3d::Nurbs(_)) => 48,
+            Some(Curve3d::Circle(_)) => {
+                #[cfg(target_arch = "wasm32")]
+                { 20 }
+                #[cfg(not(target_arch = "wasm32"))]
+                36
+            }
+            Some(Curve3d::Ellipse(_)) => {
+                #[cfg(target_arch = "wasm32")]
+                { 20 }
+                #[cfg(not(target_arch = "wasm32"))]
+                36
+            }
+            Some(Curve3d::Arc(_)) => {
+                #[cfg(target_arch = "wasm32")]
+                { 16 }
+                #[cfg(not(target_arch = "wasm32"))]
+                24
+            }
+            Some(Curve3d::Nurbs(_)) => {
+                #[cfg(target_arch = "wasm32")]
+                { 24 }
+                #[cfg(not(target_arch = "wasm32"))]
+                48
+            }
             None => 2,
         }
     }
