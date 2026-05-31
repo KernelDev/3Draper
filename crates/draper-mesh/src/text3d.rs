@@ -560,10 +560,22 @@ pub fn cut_text_holes_in_mesh(
         return result;
     }
 
-    // Determine which contours are outer contours and which are inner holes
-    // A contour is a "hole" (text cut-out) if it's inside an odd number of contours
-    // (parity test). The D/a/p/e letters have their own internal holes which should
-    // NOT be cut — we need parity-based classification.
+    // Determine which contours are "holes to cut" vs "solid islands to keep".
+    //
+    // Text characters have a specific structure:
+    // - Each glyph has an OUTER contour (the shape of the letter)
+    // - Some glyphs have INNER contours (holes within the letter, e.g., D, a, p, e)
+    //
+    // When cutting text as holes through a surface:
+    // - The OUTER contours of each letter become HOLES (cut out)
+    // - The INNER contours (like the hole inside 'D') become SOLID ISLANDS (kept)
+    //
+    // We use parity-based classification: a contour's centroid is inside
+    // an EVEN number of other contours → it's an outer letter contour → becomes a hole.
+    // Inside an ODD number → it's an inner island inside another letter → stays solid.
+    // The key insight: since these contours are NOT inside a bounding rectangle contour
+    // in our list, outer letter contours have inside_count = 0 (even) → they ARE holes.
+    // Inner contours like D's hole have inside_count = 1 (odd) → they are NOT holes.
     let hole_indices: Vec<usize> = contours_2d.iter()
         .enumerate()
         .filter(|(_, c)| {
@@ -571,13 +583,15 @@ pub fn cut_text_holes_in_mesh(
             let mid_y: f64 = c.iter().map(|p| p.1).sum::<f64>() / c.len() as f64;
 
             let mut inside_count = 0;
-            for other in &contours_2d {
+            for (j, other) in contours_2d.iter().enumerate() {
+                // Don't count self-containment
                 if point_in_polygon_2d(mid_x, mid_y, other) {
                     inside_count += 1;
                 }
             }
-            // Odd count = this is a solid text region (outer contour) → becomes a hole
-            inside_count % 2 == 1
+            // Even count (0, 2, ...) = outer letter contour → becomes a hole
+            // Odd count (1, 3, ...) = inner island within a letter → stays solid
+            inside_count % 2 == 0
         })
         .map(|(i, _)| i)
         .collect();

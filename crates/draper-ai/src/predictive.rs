@@ -200,6 +200,7 @@ impl TriangulationParams {
             adaptive: self.adaptive,
             parallel: false,
             progress_callback: None,
+            max_face_triangles: draper_mesh::adaptive::DEFAULT_MAX_FACE_TRIANGLES,
         }
     }
 }

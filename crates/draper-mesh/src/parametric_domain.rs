@@ -7,8 +7,10 @@
 //! - An outer boundary (the trimming loop)
 //! - Optional inner boundaries (holes)
 //!
-//! The domain is used to construct a constrained Delaunay triangulation
-//! that respects the trimming boundaries exactly.
+//! The domain is triangulated using ear-clipping with bridge-edge hole
+//! insertion, which is GUARANTEED to terminate in O(n²) — unlike
+//! Constrained Delaunay Triangulation (spade CDT) which can hang
+//! inside a single `add_constraint` call on degenerate inputs.
 
 use draper_geometry::{Point2d, Point3d, Surface};
 use crate::mesh::TriangleMesh;
@@ -114,269 +116,288 @@ fn point_in_polygon(point: &Point2d, polygon: &[Point2d]) -> bool {
 }
 
 // ============================================================
-// CDT triangulation using spade
+// Ear-clipping triangulation (GUARANTEED to terminate)
 // ============================================================
 
-/// Wrapper point type for spade's Delaunay triangulation.
-#[derive(Clone, Debug)]
-struct SpadePoint {
-    x: f64,
-    y: f64,
-    index: usize,
-}
-
-impl spade::HasPosition for SpadePoint {
-    type Scalar = f64;
-
-    fn position(&self) -> spade::Point2<Self::Scalar> {
-        spade::Point2::new(self.x, self.y)
-    }
-}
-
-/// Triangulate a parametric domain using Constrained Delaunay Triangulation.
+/// Triangulate a parametric domain using ear-clipping with bridge-edge
+/// hole insertion.
 ///
-/// This creates a mesh in UV space that respects the boundary and holes,
-/// then maps the vertices to 3D using the surface evaluation.
+/// This approach is GUARANTEED to terminate in O(n²) worst case,
+/// unlike spade's Constrained Delaunay Triangulation which can hang
+/// inside a single `add_constraint` call when constraint edges intersect
+/// or when near-coincident points create degenerate configurations.
 ///
 /// The algorithm:
-/// 1. Collect all boundary edges as constraints
-/// 2. Add interior vertices (from adaptive sampling grid)
-/// 3. Build a constrained Delaunay triangulation using `spade`
-/// 4. Remove triangles outside the domain or inside holes
-/// 5. Map UV vertices to 3D
+/// 1. Collect all boundary and hole points
+/// 2. Insert each hole into the outer polygon using bridge edges
+/// 3. Ear-clip the merged polygon (always terminates)
+/// 4. Add interior grid points by subdividing containing triangles
+/// 5. Filter triangles by domain containment
+/// 6. Map UV vertices to 3D
 pub fn triangulate_cdt(
     domain: &ParametricDomain,
     surface: &Surface,
     forward: bool,
     interior_uv_points: &[Point2d],
 ) -> TriangleMesh {
-    use spade::ConstrainedDelaunayTriangulation;
-    use spade::handles::FixedVertexHandle;
-    use spade::Triangulation as _;
-
-    // Time limit for CDT construction — prevents browser hangs on WASM.
-    // On WASM, use a shorter limit since the main thread is blocked.
-    // NOTE: spade's add_constraint can enter infinite loops on complex
-    // constraint edge configurations (intersecting constraints, near-coincident
-    // points). The timeout check only works BETWEEN add_constraint calls —
-    // if a single call hangs, we can't abort it. So we also limit the total
-    // number of constraint edges to keep the CDT manageable.
-    #[cfg(target_arch = "wasm32")]
-    let cdt_timeout = std::time::Duration::from_millis(200);
-    #[cfg(not(target_arch = "wasm32"))]
-    let cdt_timeout = std::time::Duration::from_secs(3);
-    let cdt_start = std::time::Instant::now();
-
-    // Limit the number of constraint edges to prevent CDT from hanging.
-    // Complex boundaries with many points create O(n²) constraint intersections
-    // that can take forever. Cap at a reasonable number.
-    #[cfg(target_arch = "wasm32")]
-    let max_constraint_edges = 100;
-    #[cfg(not(target_arch = "wasm32"))]
-    let max_constraint_edges = 500;
-
-    // Collect all constraint edges (outer boundary + holes)
-    let mut all_uv_points: Vec<Point2d> = Vec::new();
-    let mut constraint_edges: Vec<(usize, usize)> = Vec::new();
-
-    // Outer boundary
-    let outer_start = all_uv_points.len();
-    for p in &domain.outer_boundary {
-        all_uv_points.push(*p);
-    }
-    for i in 0..domain.outer_boundary.len() {
-        let next = (i + 1) % domain.outer_boundary.len();
-        constraint_edges.push((outer_start + i, outer_start + next));
+    // If no holes and no interior points, use simple ear-clip of outer boundary
+    if domain.holes.is_empty() && interior_uv_points.is_empty() {
+        return triangulate_simple_domain(domain, surface, forward);
     }
 
-    // Holes
-    for hole in &domain.holes {
-        let hole_start = all_uv_points.len();
-        for p in hole {
-            all_uv_points.push(*p);
+    // If no holes but has interior points, still use ear-clip + point insertion
+    if domain.holes.is_empty() {
+        return triangulate_simple_domain_with_interior(domain, surface, forward, interior_uv_points);
+    }
+
+    // Has holes: use bridge-edge + ear-clipping
+    triangulate_domain_with_holes(domain, surface, forward, interior_uv_points)
+}
+
+/// Triangulate a simple domain (no holes) using ear-clipping.
+fn triangulate_simple_domain(
+    domain: &ParametricDomain,
+    surface: &Surface,
+    forward: bool,
+) -> TriangleMesh {
+    let outer = &domain.outer_boundary;
+    if outer.len() < 3 {
+        return TriangleMesh::new();
+    }
+
+    // Ear-clip the outer boundary directly
+    let triangles_2d = crate::ear_clip(outer);
+
+    // Map UV to 3D
+    uv_triangles_to_3d(&triangles_2d, outer, surface, forward)
+}
+
+/// Triangulate a simple domain with interior points using ear-clip + subdivision.
+fn triangulate_simple_domain_with_interior(
+    domain: &ParametricDomain,
+    surface: &Surface,
+    forward: bool,
+    interior_uv_points: &[Point2d],
+) -> TriangleMesh {
+    let outer = &domain.outer_boundary;
+    if outer.len() < 3 {
+        return TriangleMesh::new();
+    }
+
+    let triangles_2d = crate::ear_clip(outer);
+    let mut all_points: Vec<Point2d> = outer.clone();
+    let mut result_triangles = triangles_2d;
+
+    // Insert interior points by subdividing containing triangles
+    for &pt in interior_uv_points {
+        if !domain.contains(&pt) {
+            continue;
         }
-        for i in 0..hole.len() {
-            let next = (i + 1) % hole.len();
-            constraint_edges.push((hole_start + i, hole_start + next));
-        }
-    }
+        let new_idx = all_points.len() as u32;
+        all_points.push(pt);
 
-    // Interior points
-    let _interior_start = all_uv_points.len();
-    for p in interior_uv_points {
-        all_uv_points.push(*p);
-    }
-
-    // Deduplicate near-coincident points before CDT.
-    // Use a LARGER epsilon than before — spade's CDT can hang when points
-    // are extremely close but not exactly coincident. A relative epsilon
-    // based on the domain size avoids false merges while catching problematic cases.
-    let (u_min_bb, u_max_bb, v_min_bb, v_max_bb) = domain.bounding_box();
-    let domain_size = ((u_max_bb - u_min_bb).max(v_max_bb - v_min_bb)).max(1e-10);
-    let dedup_eps = domain_size * 1e-6; // relative epsilon
-    let mut point_remap: Vec<usize> = (0..all_uv_points.len()).collect();
-    for i in 1..all_uv_points.len() {
-        for j in 0..i {
-            let du = all_uv_points[i].u - all_uv_points[j].u;
-            let dv = all_uv_points[i].v - all_uv_points[j].v;
-            if du * du + dv * dv < dedup_eps * dedup_eps {
-                point_remap[i] = point_remap[j];
+        // Find a triangle that contains this point and subdivide it
+        let mut found = false;
+        for tri in &mut result_triangles {
+            let a = all_points[tri[0] as usize];
+            let b = all_points[tri[1] as usize];
+            let c = all_points[tri[2] as usize];
+            if point_in_triangle_2d(&pt, &a, &b, &c) {
+                let old = *tri;
+                *tri = [old[0], old[1], new_idx];
+                result_triangles.push([old[1], old[2], new_idx]);
+                result_triangles.push([old[2], old[0], new_idx]);
+                found = true;
                 break;
             }
         }
-    }
-    // Build a list of unique points and remap constraint edges
-    let mut unique_points: Vec<Point2d> = Vec::new();
-    let mut unique_remap: Vec<usize> = vec![0; all_uv_points.len()];
-    for i in 0..all_uv_points.len() {
-        if point_remap[i] == i {
-            unique_remap[i] = unique_points.len();
-            unique_points.push(all_uv_points[i]);
+
+        if !found {
+            // Point not in any triangle — skip it (shouldn't happen if domain is valid)
+            all_points.pop();
         }
     }
-    for i in 0..all_uv_points.len() {
-        if point_remap[i] != i {
-            unique_remap[i] = unique_remap[point_remap[i]];
-        }
+
+    uv_triangles_to_3d(&result_triangles, &all_points, surface, forward)
+}
+
+/// Triangulate a domain with holes using bridge-edge + ear-clipping.
+///
+/// This is the key algorithm that replaces CDT. It works by:
+/// 1. Finding a "bridge edge" from each hole to the outer polygon
+/// 2. Merging the hole into the outer polygon via the bridge
+/// 3. Ear-clipping the resulting single polygon (guaranteed O(n²))
+/// 4. Adding interior points via triangle subdivision
+/// 5. Filtering triangles by domain containment
+fn triangulate_domain_with_holes(
+    domain: &ParametricDomain,
+    surface: &Surface,
+    forward: bool,
+    interior_uv_points: &[Point2d],
+) -> TriangleMesh {
+    let outer = &domain.outer_boundary;
+    if outer.len() < 3 {
+        return TriangleMesh::new();
     }
-    let remapped_edges: Vec<(usize, usize)> = constraint_edges.iter()
-        .map(|&(i, j)| (unique_remap[i], unique_remap[j]))
-        .filter(|&(i, j)| i != j)  // Remove degenerate zero-length edges
+
+    // Downsample holes if too many points (prevents O(n²) blowup in ear-clip)
+    #[cfg(target_arch = "wasm32")]
+    let max_hole_points = 20;
+    #[cfg(not(target_arch = "wasm32"))]
+    let max_hole_points = 100;
+
+    let downsampled_holes: Vec<Vec<Point2d>> = domain.holes.iter()
+        .map(|hole| {
+            if hole.len() > max_hole_points {
+                let step = hole.len() as f64 / max_hole_points as f64;
+                (0..max_hole_points)
+                    .map(|i| hole[((i as f64 * step) as usize).min(hole.len() - 1)])
+                    .collect()
+            } else {
+                hole.clone()
+            }
+        })
         .collect();
 
-    // Track which vertex handles correspond to failed insertions.
-    // We store Option<FixedVertexHandle> instead of using the "last handle" hack,
-    // because using the wrong handle creates invalid constraint edges that cause
-    // spade's CDT to hang in infinite loops.
-    let mut cdt: ConstrainedDelaunayTriangulation<SpadePoint> =
-        ConstrainedDelaunayTriangulation::new();
-    let mut vertex_handles: Vec<Option<FixedVertexHandle>> = Vec::with_capacity(unique_points.len());
-    for (idx, p) in unique_points.iter().enumerate() {
-        // Check timeout
-        if cdt_start.elapsed() > cdt_timeout {
-            log::warn!("CDT: timeout during point insertion — falling back to Delaunay");
-            return fallback_delaunay(domain, surface, forward, &unique_points);
-        }
+    // Also downsample outer boundary if too large
+    #[cfg(target_arch = "wasm32")]
+    let max_outer_points = 60;
+    #[cfg(not(target_arch = "wasm32"))]
+    let max_outer_points = 500;
 
-        let spade_pt = SpadePoint {
-            x: p.u,
-            y: p.v,
-            index: idx,
-        };
-        match cdt.insert(spade_pt) {
-            Ok(handle) => vertex_handles.push(Some(handle)),
-            Err(_) => {
-                // Mark this vertex as failed — None means we skip constraint edges
-                // that reference it, rather than using the wrong handle.
-                vertex_handles.push(None);
-            }
-        }
-    }
+    let outer_downsampled: Vec<Point2d> = if outer.len() > max_outer_points {
+        let step = outer.len() as f64 / max_outer_points as f64;
+        (0..max_outer_points)
+            .map(|i| outer[((i as f64 * step) as usize).min(outer.len() - 1)])
+            .collect()
+    } else {
+        outer.clone()
+    };
 
-    let failed_count = vertex_handles.iter().filter(|h| h.is_none()).count();
-    if failed_count > 0 {
-        log::warn!("CDT: {} out of {} points failed to insert", failed_count, unique_points.len());
-    }
+    // Collect all points: outer boundary first, then holes
+    let mut all_points: Vec<Point2d> = outer_downsampled.clone();
 
-    // Add constraint edges — catch panics from intersecting constraints
-    // and fall back to unconstrained Delaunay if CDT fails.
-    // SKIP edges that reference failed vertex handles — they would create
-    // invalid constraints that cause spade to hang.
-    // ALSO limit total number of constraint edges to prevent CDT from
-    // spending too long on complex boundary configurations.
-    let mut cdt_ok = true;
-    let mut edges_added = 0usize;
-    for (i, j) in &remapped_edges {
-        // Check timeout on EVERY edge (not every 10) to minimize hang risk
-        if cdt_start.elapsed() > cdt_timeout {
-            log::warn!("CDT: timeout during constraint edge insertion — using partial CDT");
-            cdt_ok = false;
-            break;
-        }
+    // Build polygon indices starting with outer boundary
+    let mut polygon_indices: Vec<u32> = (0..outer_downsampled.len() as u32).collect();
 
-        // Limit total constraint edges to prevent CDT hang
-        if edges_added >= max_constraint_edges {
-            log::warn!("CDT: exceeded max constraint edges ({}) — using partial CDT", max_constraint_edges);
-            cdt_ok = false;
-            break;
-        }
-
-        if *i >= vertex_handles.len() || *j >= vertex_handles.len() {
-            continue; // Out of bounds — skip
-        }
-        let h_i = match vertex_handles[*i] {
-            Some(h) => h,
-            None => continue, // Failed insertion — skip this edge
-        };
-        let h_j = match vertex_handles[*j] {
-            Some(h) => h,
-            None => continue, // Failed insertion — skip this edge
-        };
-
-        // add_constraint can panic if edges intersect — use catch_unwind
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            cdt.add_constraint(h_i, h_j);
-        }));
-        if result.is_err() {
-            cdt_ok = false;
-            break;
-        }
-        edges_added += 1;
-    }
-
-    // If CDT failed due to intersecting constraints, rebuild as plain Delaunay
-    // (without constraints) — this is less accurate but won't panic/hang
-    if !cdt_ok {
-        log::warn!("CDT constraint edges failed — falling back to unconstrained Delaunay");
-        return fallback_delaunay(domain, surface, forward, &unique_points);
-    }
-
-    // Extract triangles, keeping only those inside the domain
-    let mut mesh = TriangleMesh::new();
-    let mut vertex_map: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
-
-    for face in cdt.inner_faces() {
-        // Get the three vertex positions and indices
-        let positions = face.positions();
-        let verts: Vec<_> = face
-            .vertices()
-            .iter()
-            .map(|v| {
-                let sp = v.position();
-                let data = v.data();
-                (sp.x, sp.y, data.index)
-            })
-            .collect();
-
-        if verts.len() != 3 {
+    // Insert each hole into the polygon using bridge-edge technique
+    for hole in &downsampled_holes {
+        if hole.len() < 3 {
             continue;
         }
 
-        // Check if triangle centroid is inside the domain
-        let centroid_u = (verts[0].0 + verts[1].0 + verts[2].0) / 3.0;
-        let centroid_v = (verts[0].1 + verts[1].1 + verts[2].1) / 3.0;
-        let centroid = Point2d::new(centroid_u, centroid_v);
+        let hole_start_idx = all_points.len();
+        let bridge_result = find_bridge_edge(&all_points, &polygon_indices, hole);
 
+        // Add hole points to the combined point list
+        for p in hole {
+            all_points.push(*p);
+        }
+
+        // Insert hole into polygon via bridge edge:
+        // outer[bridge_outer] → hole[bridge_hole] → ... hole loop ... → hole[bridge_hole] → outer[bridge_outer]
+        let mut new_polygon = Vec::with_capacity(polygon_indices.len() + hole.len() + 2);
+        let bridge_outer = bridge_result.outer_idx;
+        let bridge_hole = hole_start_idx + bridge_result.hole_idx;
+
+        for &idx in &polygon_indices[..=bridge_outer] {
+            new_polygon.push(idx);
+        }
+        // Bridge: outer → hole → loop → hole → outer
+        new_polygon.push(bridge_hole as u32);
+        for i in 0..hole.len() {
+            let idx = hole_start_idx + (bridge_result.hole_idx + i) % hole.len();
+            new_polygon.push(idx as u32);
+        }
+        new_polygon.push(bridge_hole as u32);
+        new_polygon.push(polygon_indices[bridge_outer]);
+        for &idx in &polygon_indices[bridge_outer + 1..] {
+            new_polygon.push(idx);
+        }
+
+        polygon_indices = new_polygon;
+    }
+
+    // Add interior grid points (not part of the polygon, inserted via subdivision)
+    let mut interior_point_indices: Vec<u32> = Vec::new();
+    for &pt in interior_uv_points {
+        if !domain.contains(&pt) {
+            continue;
+        }
+        let idx = all_points.len() as u32;
+        all_points.push(pt);
+        interior_point_indices.push(idx);
+    }
+
+    // Ear-clip the merged polygon (with holes inserted via bridge edges)
+    let merged_2d: Vec<Point2d> = polygon_indices.iter()
+        .map(|&idx| all_points[idx as usize])
+        .collect();
+
+    let mut result_triangles = crate::ear_clip(&merged_2d);
+
+    // Map ear-clip triangle indices back to polygon vertex indices
+    // ear_clip returns indices into merged_2d, which correspond to polygon_indices
+    let mapped_triangles: Vec<[u32; 3]> = result_triangles.iter()
+        .map(|tri| [
+            polygon_indices[tri[0] as usize],
+            polygon_indices[tri[1] as usize],
+            polygon_indices[tri[2] as usize],
+        ])
+        .collect();
+    result_triangles = mapped_triangles;
+
+    // Insert interior points by subdividing containing triangles
+    for &uv_idx in &interior_point_indices {
+        let pt = all_points[uv_idx as usize];
+
+        let mut found = false;
+        for tri in &mut result_triangles {
+            let a = all_points[tri[0] as usize];
+            let b = all_points[tri[1] as usize];
+            let c = all_points[tri[2] as usize];
+            if point_in_triangle_2d(&pt, &a, &b, &c) {
+                let old = *tri;
+                *tri = [old[0], old[1], uv_idx];
+                result_triangles.push([old[1], old[2], uv_idx]);
+                result_triangles.push([old[2], old[0], uv_idx]);
+                found = true;
+                break;
+            }
+        }
+        // If not found in any triangle, skip (harmless)
+    }
+
+    // Filter triangles by domain containment and map to 3D
+    let mut mesh = TriangleMesh::new();
+    let mut vertex_map: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+
+    for tri in &result_triangles {
+        // Get UV positions for the three vertices
+        let a_uv = all_points[tri[0] as usize];
+        let b_uv = all_points[tri[1] as usize];
+        let c_uv = all_points[tri[2] as usize];
+
+        // Check if triangle centroid is inside the domain
+        let centroid = Point2d::new(
+            (a_uv.u + b_uv.u + c_uv.u) / 3.0,
+            (a_uv.v + b_uv.v + c_uv.v) / 3.0,
+        );
         if !domain.contains(&centroid) {
             continue;
         }
 
         // Check for degenerate triangle (near-zero area)
-        let area = triangle_area_2d(
-            positions[0].x, positions[0].y,
-            positions[1].x, positions[1].y,
-            positions[2].x, positions[2].y,
-        );
+        let area = triangle_area_2d(a_uv.u, a_uv.v, b_uv.u, b_uv.v, c_uv.u, c_uv.v);
         if area < 1e-20 {
             continue;
         }
 
         // Add vertices and triangle
         let mut tri_indices = [0u32; 3];
-        for (k, vert) in verts.iter().enumerate() {
-            let idx = vert.2;
+        for (k, &idx) in tri.iter().enumerate() {
             let entry = vertex_map.entry(idx).or_insert_with(|| {
-                let uv = Point2d::new(vert.0, vert.1);
+                let uv = all_points[idx as usize];
                 let p3d = surface.point_at(uv.u, uv.v);
                 let n = surface.normal_at(uv.u, uv.v);
                 let vi = mesh.add_vertex(p3d);
@@ -396,79 +417,79 @@ pub fn triangulate_cdt(
     mesh
 }
 
-/// Fallback: build an unconstrained Delaunay triangulation and filter by domain.
+/// Find bridge edge between outer polygon and a hole for ear-clipping.
 ///
-/// Used when the constrained Delaunay triangulation fails or times out.
-/// This approach doesn't respect boundary edges exactly, but it always
-/// terminates and produces a reasonable mesh.
-fn fallback_delaunay(
-    domain: &ParametricDomain,
+/// The bridge connects the rightmost point of the hole to the closest
+/// point on the outer polygon. This is a standard technique for
+/// converting a polygon-with-holes into a single simple polygon.
+struct BridgeResult {
+    outer_idx: usize,
+    hole_idx: usize,
+}
+
+fn find_bridge_edge(
+    all_points: &[Point2d],
+    polygon_indices: &[u32],
+    hole: &[Point2d],
+) -> BridgeResult {
+    // Find rightmost point of the hole (most positive u)
+    let mut hole_idx = 0;
+    let mut max_u = hole[0].u;
+    for (i, p) in hole.iter().enumerate() {
+        if p.u > max_u {
+            max_u = p.u;
+            hole_idx = i;
+        }
+    }
+
+    // Find closest point on outer polygon to the rightmost hole point
+    let hole_pt = &hole[hole_idx];
+    let mut outer_idx = 0;
+    let mut min_dist = f64::MAX;
+    for (i, &idx) in polygon_indices.iter().enumerate() {
+        let p = &all_points[idx as usize];
+        let du = p.u - hole_pt.u;
+        let dv = p.v - hole_pt.v;
+        let dist = du * du + dv * dv;
+        if dist < min_dist {
+            min_dist = dist;
+            outer_idx = i;
+        }
+    }
+
+    BridgeResult { outer_idx, hole_idx }
+}
+
+/// Check if a 2D point is inside a triangle (barycentric coordinates).
+fn point_in_triangle_2d(p: &Point2d, a: &Point2d, b: &Point2d, c: &Point2d) -> bool {
+    let d1 = sign_2d(p, a, b);
+    let d2 = sign_2d(p, b, c);
+    let d3 = sign_2d(p, c, a);
+    let has_neg = (d1 < 0.0) || (d2 < 0.0) || (d3 < 0.0);
+    let has_pos = (d1 > 0.0) || (d2 > 0.0) || (d3 > 0.0);
+    !(has_neg && has_pos)
+}
+
+/// Compute signed area for point-in-triangle test.
+fn sign_2d(p1: &Point2d, p2: &Point2d, p3: &Point2d) -> f64 {
+    (p1.u - p3.u) * (p2.v - p3.v) - (p2.u - p3.u) * (p1.v - p3.v)
+}
+
+/// Map 2D UV triangles to 3D using the surface evaluation.
+fn uv_triangles_to_3d(
+    triangles: &[[u32; 3]],
+    points: &[Point2d],
     surface: &Surface,
     forward: bool,
-    unique_points: &[Point2d],
 ) -> TriangleMesh {
-    use spade::ConstrainedDelaunayTriangulation;
-    use spade::Triangulation as _;
-
-    // Use ConstrainedDelaunayTriangulation without constraints as fallback.
-    // This is equivalent to a regular Delaunay triangulation but uses the
-    // same API as the main CDT path, avoiding spade v2 API incompatibilities.
-    let mut fallback: ConstrainedDelaunayTriangulation<SpadePoint> =
-        ConstrainedDelaunayTriangulation::new();
-    let mut vertex_handles: Vec<spade::handles::FixedVertexHandle> = Vec::with_capacity(unique_points.len());
-
-    for (idx, p) in unique_points.iter().enumerate() {
-        let spade_pt = SpadePoint {
-            x: p.u,
-            y: p.v,
-            index: idx,
-        };
-        match fallback.insert(spade_pt) {
-            Ok(handle) => vertex_handles.push(handle),
-            Err(_) => {
-                if let Some(last) = vertex_handles.last().copied() {
-                    vertex_handles.push(last);
-                }
-            }
-        }
-    }
-
-    // Extract triangles from fallback Delaunay (no constraints = pure Delaunay)
     let mut mesh = TriangleMesh::new();
-    let mut vertex_map: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
+    let mut vertex_map: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
 
-    for face in fallback.inner_faces() {
-        let positions = face.positions();
-        let verts: Vec<_> = face
-            .vertices()
-            .iter()
-            .map(|v| {
-                let sp = v.position();
-                let data = v.data();
-                (sp.x, sp.y, data.index)
-            })
-            .collect();
-
-        if verts.len() != 3 { continue; }
-
-        let centroid_u = (verts[0].0 + verts[1].0 + verts[2].0) / 3.0;
-        let centroid_v = (verts[0].1 + verts[1].1 + verts[2].1) / 3.0;
-        let centroid = Point2d::new(centroid_u, centroid_v);
-
-        if !domain.contains(&centroid) { continue; }
-
-        let area = triangle_area_2d(
-            positions[0].x, positions[0].y,
-            positions[1].x, positions[1].y,
-            positions[2].x, positions[2].y,
-        );
-        if area < 1e-20 { continue; }
-
+    for tri in triangles {
         let mut tri_indices = [0u32; 3];
-        for (k, vert) in verts.iter().enumerate() {
-            let idx = vert.2;
+        for (k, &idx) in tri.iter().enumerate() {
             let entry = vertex_map.entry(idx).or_insert_with(|| {
-                let uv = Point2d::new(vert.0, vert.1);
+                let uv = points[idx as usize];
                 let p3d = surface.point_at(uv.u, uv.v);
                 let n = surface.normal_at(uv.u, uv.v);
                 let vi = mesh.add_vertex(p3d);
@@ -484,10 +505,11 @@ fn fallback_delaunay(
             mesh.add_triangle(tri_indices[0], tri_indices[2], tri_indices[1]);
         }
     }
+
     mesh
 }
 
-/// Compute the signed area of a 2D triangle.
+/// Compute the area of a 2D triangle.
 fn triangle_area_2d(x0: f64, y0: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64 {
     ((x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)).abs() * 0.5
 }
@@ -601,20 +623,21 @@ pub fn generate_nurbs_interior_points(
 }
 
 // ============================================================
-// Integration: CDT-based surface triangulation
+// Integration: ear-clipping based surface triangulation
 // ============================================================
 
-/// Triangulate a curved surface using UV-space Constrained Delaunay Triangulation.
+/// Triangulate a curved surface using UV-space ear-clipping with bridge edges.
 ///
-/// This is a more accurate alternative to `triangulate_surface_uv_trimmed` that
-/// uses CDT to ensure boundary edges are respected exactly and interior triangles
-/// satisfy the Delaunay criterion (maximizing minimum angle).
+/// This replaces the previous CDT-based approach (spade) which could hang
+/// indefinitely inside `add_constraint` on degenerate inputs. The ear-clipping
+/// approach is GUARANTEED to terminate in O(n²) worst case.
 ///
-/// **Performance note**: Large boundary point counts create many constraint edges,
-/// which can cause spade's CDT to hang. This function downsamples boundary points
-/// on WASM (and for very large boundaries on native) to keep CDT tractable.
-/// The domain.contains() check still filters triangles correctly, so mesh quality
-/// is acceptable even with simplified boundaries.
+/// For surfaces without holes, this uses simple ear-clipping of the outer boundary.
+/// For surfaces with holes, each hole is connected to the outer boundary via a
+/// bridge edge, forming a single polygon that is then ear-clipped.
+///
+/// Interior grid points are inserted by subdividing containing triangles,
+/// which is O(interior_points × triangles) but always terminates.
 pub fn triangulate_surface_uv_cdt(
     surface: &Surface,
     boundary_points: &[Point3d],
@@ -626,11 +649,9 @@ pub fn triangulate_surface_uv_cdt(
         return TriangleMesh::new();
     }
 
-    // Downsample boundary points to prevent CDT from hanging.
-    // On WASM, use very aggressive downsampling. On native, only downsample
-    // if the boundary is very large.
+    // Downsample boundary points to prevent O(n²) blowup in ear-clipping.
     #[cfg(target_arch = "wasm32")]
-    let max_boundary_points = 30;
+    let max_boundary_points = 60;
     #[cfg(not(target_arch = "wasm32"))]
     let max_boundary_points = 200;
 
@@ -639,8 +660,8 @@ pub fn triangulate_surface_uv_cdt(
         let sampled: Vec<Point3d> = (0..max_boundary_points)
             .map(|i| boundary_points[((i as f64 * step) as usize).min(boundary_points.len() - 1)])
             .collect();
-        log::warn!(
-            "CDT: downsampled boundary from {} to {} points",
+        log::info!(
+            "Ear-clip: downsampled boundary from {} to {} points",
             boundary_points.len(), sampled.len()
         );
         sampled
@@ -739,7 +760,6 @@ pub fn triangulate_surface_uv_cdt(
             params.max_face_triangles,
         )
     } else {
-        // For non-adaptive, also cap by max_face_triangles
         let mut n_u = params.angular_samples;
         let mut n_v = params.height_samples;
         let approx_tris = 2 * n_u * n_v;
@@ -751,14 +771,14 @@ pub fn triangulate_surface_uv_cdt(
         (n_u, n_v)
     };
 
-    // Compute margin for interior points (avoid placing too close to boundary)
+    // Compute margin for interior points
     let u_step = (u_max - u_min) / n_u.max(1) as f64;
     let v_step = (v_max - v_min) / n_v.max(1) as f64;
     let boundary_margin = u_step.min(v_step) * 0.3;
 
     let interior_points = generate_interior_points(&domain, n_u, n_v, boundary_margin);
 
-    // Triangulate using CDT
+    // Triangulate using ear-clipping (replaces CDT — guaranteed to terminate)
     triangulate_cdt(&domain, surface, forward, &interior_points)
 }
 
@@ -806,11 +826,9 @@ mod tests {
     fn test_cylinder_with_hole() {
         use draper_geometry::{CylinderSurface, Point3d, Surface};
 
-        // Create a cylinder surface
         let cyl = CylinderSurface::new_z(5.0);
         let surface = Surface::Cylinder(cyl);
 
-        // Create a domain representing a half-cylinder with a rectangular hole
         let outer = vec![
             Point2d::new(0.0, 0.0),
             Point2d::new(PI, 0.0),
@@ -825,24 +843,13 @@ mod tests {
         ];
         let domain = ParametricDomain::new(outer, (0.0, PI), (0.0, 10.0)).with_hole(hole);
 
-        // Generate interior points
         let interior = generate_interior_points(&domain, 10, 10, 0.1);
-
-        // All interior points should be inside domain
         for p in &interior {
-            assert!(
-                domain.contains(p),
-                "Interior point {:?} should be inside domain",
-                p
-            );
+            assert!(domain.contains(p), "Interior point {:?} should be inside domain", p);
         }
 
-        // Triangulate
         let mesh = triangulate_cdt(&domain, &surface, true, &interior);
-        assert!(
-            !mesh.triangles.is_empty(),
-            "Should generate triangles"
-        );
+        assert!(!mesh.triangles.is_empty(), "Should generate triangles with holes");
     }
 
     #[test]
@@ -852,37 +859,27 @@ mod tests {
         let sphere = SphereSurface::new(Point3d::ORIGIN, 10.0);
         let surface = Surface::Sphere(sphere);
 
-        // Create a domain for a spherical band (v from PI/4 to PI/2)
-        // This forms a proper closed polygon in UV space
         let n_pts = 20;
         let mut outer: Vec<Point2d> = Vec::new();
-        // Bottom edge: v = PI/4, u from 0 to 2*PI
         for i in 0..n_pts {
             let u = 2.0 * PI * i as f64 / n_pts as f64;
             outer.push(Point2d::new(u, PI / 4.0));
         }
-        // Right edge: u = 2*PI, v from PI/4 to PI/2
         outer.push(Point2d::new(2.0 * PI, PI / 2.0));
-        // Top edge: v = PI/2, u from 2*PI back to 0
         for i in (0..n_pts).rev() {
             let u = 2.0 * PI * i as f64 / n_pts as f64;
             outer.push(Point2d::new(u, PI / 2.0));
         }
-        // Left edge: u = 0, v from PI/2 to PI/4
         outer.push(Point2d::new(0.0, PI / 4.0));
 
         let domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (PI / 4.0, PI / 2.0));
         let interior = generate_interior_points(&domain, 10, 5, 0.01);
         let mesh = triangulate_cdt(&domain, &surface, true, &interior);
-        assert!(
-            !mesh.triangles.is_empty(),
-            "Sphere band should generate triangles"
-        );
+        assert!(!mesh.triangles.is_empty(), "Sphere band should generate triangles");
     }
 
     #[test]
     fn test_nurbs_interior_points() {
-        // Test NURBS interior point generation with mock knot vectors
         let outer = vec![
             Point2d::new(0.0, 0.0),
             Point2d::new(4.0, 0.0),
@@ -895,16 +892,59 @@ mod tests {
         let v_knots = vec![0.0, 2.0, 4.0];
 
         let points = generate_nurbs_interior_points(&domain, &u_knots, &v_knots, 2);
-
-        // All generated points should be inside the domain
         for p in &points {
-            assert!(
-                domain.contains(p),
-                "NURBS interior point {:?} should be inside domain",
-                p
-            );
+            assert!(domain.contains(p), "NURBS interior point {:?} should be inside domain", p);
         }
-        // Should generate some points
         assert!(!points.is_empty(), "Should generate NURBS interior points");
+    }
+
+    #[test]
+    fn test_earclip_with_holes_no_hang() {
+        // Test that ear-clipping with multiple holes completes quickly
+        // (previously CDT could hang on this)
+        use draper_geometry::{SphereSurface, Point3d, Surface};
+
+        let sphere = SphereSurface::new(Point3d::ORIGIN, 10.0);
+        let surface = Surface::Sphere(sphere);
+
+        // Outer boundary: a rectangle in UV space
+        let outer = vec![
+            Point2d::new(0.0, 0.5),
+            Point2d::new(3.0, 0.5),
+            Point2d::new(3.0, 2.5),
+            Point2d::new(0.0, 2.5),
+        ];
+
+        // Multiple holes (simulating text cutouts)
+        let hole1 = vec![
+            Point2d::new(0.5, 1.0),
+            Point2d::new(1.0, 1.0),
+            Point2d::new(1.0, 2.0),
+            Point2d::new(0.5, 2.0),
+        ];
+        let hole2 = vec![
+            Point2d::new(1.5, 1.0),
+            Point2d::new(2.0, 1.0),
+            Point2d::new(2.0, 2.0),
+            Point2d::new(1.5, 2.0),
+        ];
+        let hole3 = vec![
+            Point2d::new(2.2, 0.8),
+            Point2d::new(2.8, 0.8),
+            Point2d::new(2.8, 1.5),
+            Point2d::new(2.2, 1.5),
+        ];
+
+        let domain = ParametricDomain::new(outer, (0.0, 3.0), (0.5, 2.5))
+            .with_hole(hole1)
+            .with_hole(hole2)
+            .with_hole(hole3);
+
+        let start = std::time::Instant::now();
+        let mesh = triangulate_cdt(&domain, &surface, true, &[]);
+        let elapsed = start.elapsed();
+
+        assert!(!mesh.triangles.is_empty(), "Should generate triangles with 3 holes");
+        assert!(elapsed.as_millis() < 100, "Ear-clip should be fast, took {}ms", elapsed.as_millis());
     }
 }

@@ -18,6 +18,28 @@ use draper_geometry::{Surface, Point2d};
 use egui_wgpu::RenderState;
 use eframe::egui;
 
+/// WASM-optimized triangulation parameters.
+///
+/// On WASM, the main thread is blocked during triangulation. We need
+/// to keep total computation time under ~3 seconds to prevent the
+/// browser from showing an "unresponsive" dialog. This means:
+/// - Lower angular samples (16 instead of 24)
+/// - Lower height samples (3 instead of 4)
+/// - Lower max_face_triangles (500 instead of 2000)
+/// - Coarser max_deviation (0.05 instead of 0.01)
+fn wasm_tri_params() -> TriangulationParams {
+    let mut params = TriangulationParams::default();
+    #[cfg(target_arch = "wasm32")]
+    {
+        params.angular_samples = 16;
+        params.height_samples = 3;
+        params.max_face_triangles = 500;
+        params.max_deviation = 0.05;
+        params.detail_level = 0.5;
+    }
+    params
+}
+
 /// Convert TriangleMesh to GPU vertex/index data.
 /// Uses flat shading with face normals to properly support per-triangle colors from STEP files.
 /// Selection state is encoded as per-vertex attributes and applied AFTER lighting in the shader:
@@ -600,7 +622,7 @@ impl ViewerApp {
 
     fn load_box(&mut self) {
         let solid = ShapeBuilder::make_box(100.0, 80.0, 60.0);
-        let mesh = triangulate_solid(&solid, &TriangulationParams::default());
+        let mesh = triangulate_solid(&solid, &wasm_tri_params());
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -609,7 +631,7 @@ impl ViewerApp {
 
     fn load_cylinder(&mut self) {
         let solid = ShapeBuilder::make_cylinder(40.0, 100.0);
-        let mesh = triangulate_solid(&solid, &TriangulationParams::default());
+        let mesh = triangulate_solid(&solid, &wasm_tri_params());
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -618,7 +640,7 @@ impl ViewerApp {
 
     fn load_sphere(&mut self) {
         let solid = ShapeBuilder::make_sphere(50.0);
-        let mesh = triangulate_solid(&solid, &TriangulationParams::default());
+        let mesh = triangulate_solid(&solid, &wasm_tri_params());
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -630,7 +652,7 @@ impl ViewerApp {
         let height: f64 = 80.0;
         let half_angle = (radius / height).atan();
         let solid = ShapeBuilder::make_cone(radius, height, half_angle);
-        let mesh = triangulate_solid(&solid, &TriangulationParams::default());
+        let mesh = triangulate_solid(&solid, &wasm_tri_params());
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -639,7 +661,7 @@ impl ViewerApp {
 
     fn load_torus(&mut self) {
         let solid = ShapeBuilder::make_torus(40.0, 12.0);
-        let mesh = triangulate_solid(&solid, &TriangulationParams::default());
+        let mesh = triangulate_solid(&solid, &wasm_tri_params());
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -673,7 +695,7 @@ impl ViewerApp {
             knots: vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0],
         });
         let solid = ShapeBuilder::make_revolution(profile, std::f64::consts::PI * 2.0);
-        let mesh = triangulate_solid(&solid, &TriangulationParams::default());
+        let mesh = triangulate_solid(&solid, &wasm_tri_params());
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -693,7 +715,7 @@ impl ViewerApp {
             draper_geometry::Direction3d::Y,
             80.0,
         );
-        let mesh = triangulate_solid(&solid, &TriangulationParams::default());
+        let mesh = triangulate_solid(&solid, &wasm_tri_params());
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -759,7 +781,7 @@ impl ViewerApp {
     /// Load Box with "3Draper" text CUT OUT (holes) on the front face.
     fn load_box_text(&mut self) {
         let solid = ShapeBuilder::make_box(100.0, 80.0, 60.0);
-        let base_mesh = triangulate_solid(&solid, &TriangulationParams::default());
+        let base_mesh = triangulate_solid(&solid, &wasm_tri_params());
         let mesh = cut_text_holes_in_mesh(
             &base_mesh,
             "3Draper",
@@ -777,7 +799,7 @@ impl ViewerApp {
     /// Load Cylinder with "3Draper" text CUT OUT on the lateral surface.
     fn load_cylinder_text(&mut self) {
         let solid = ShapeBuilder::make_cylinder(40.0, 100.0);
-        let base_mesh = triangulate_solid(&solid, &TriangulationParams::default());
+        let base_mesh = triangulate_solid(&solid, &wasm_tri_params());
         let mesh = cut_text_holes_in_mesh(
             &base_mesh,
             "3Draper",
@@ -795,7 +817,7 @@ impl ViewerApp {
     /// Load Sphere with "3Draper" text CUT OUT on the surface.
     fn load_sphere_text(&mut self) {
         let solid = ShapeBuilder::make_sphere(50.0);
-        let base_mesh = triangulate_solid(&solid, &TriangulationParams::default());
+        let base_mesh = triangulate_solid(&solid, &wasm_tri_params());
         let mesh = cut_text_holes_in_mesh(
             &base_mesh,
             "3Draper",
@@ -816,7 +838,7 @@ impl ViewerApp {
         let height: f64 = 80.0;
         let half_angle = (radius / height).atan();
         let solid = ShapeBuilder::make_cone(radius, height, half_angle);
-        let base_mesh = triangulate_solid(&solid, &TriangulationParams::default());
+        let base_mesh = triangulate_solid(&solid, &wasm_tri_params());
         let mesh = cut_text_holes_in_mesh(
             &base_mesh,
             "3Draper",
@@ -834,7 +856,7 @@ impl ViewerApp {
     /// Load Torus with "3Draper" text CUT OUT on the outer surface.
     fn load_torus_text(&mut self) {
         let solid = ShapeBuilder::make_torus(40.0, 12.0);
-        let base_mesh = triangulate_solid(&solid, &TriangulationParams::default());
+        let base_mesh = triangulate_solid(&solid, &wasm_tri_params());
         let mesh = cut_text_holes_in_mesh(
             &base_mesh,
             "3Draper",
@@ -865,7 +887,7 @@ impl ViewerApp {
             knots: vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0],
         });
         let solid = ShapeBuilder::make_revolution(profile, std::f64::consts::PI * 2.0);
-        let base_mesh = triangulate_solid(&solid, &TriangulationParams::default());
+        let base_mesh = triangulate_solid(&solid, &wasm_tri_params());
         // Approximate revolution as cylinder for text projection
         let mesh = cut_text_holes_in_mesh(
             &base_mesh,
@@ -936,7 +958,7 @@ impl ViewerApp {
             draper_geometry::Direction3d::Y,
             80.0,
         );
-        let base_mesh = triangulate_solid(&solid, &TriangulationParams::default());
+        let base_mesh = triangulate_solid(&solid, &wasm_tri_params());
         let mesh = cut_text_holes_in_mesh(
             &base_mesh,
             "3Draper",
@@ -1095,15 +1117,22 @@ impl ViewerApp {
             self.loading_name = name.to_string();
             self.loading_start = Some(std::time::Instant::now());
 
-            // Clear existing rendering data
+            // Clear existing rendering data — free WASM memory from previous load.
+            // Without this, repeated file loads accumulate data in the WASM heap
+            // (which has a 4GB limit in Chrome) and eventually crash the tab.
             self.detailed_instances.clear();
             self.instance_triangle_ranges.clear();
             self.selected_instance = None;
             self.selected_face = None;
             self.highlighted_face = None;
+            self.failed_face_count = 0;
 
-            // Start with empty mesh — will be built progressively
+            // Drop old mesh and GPU resources explicitly to free WASM memory
             self.mesh = TriangleMesh::new();
+            {
+                let mut gpu = self.gpu_resources.lock().unwrap();
+                *gpu = None; // Drop GPU buffers — frees GPU memory
+            }
             self.mesh_dirty = true;
 
             // Auto-fit camera once tree is ready (even before mesh)
@@ -1119,6 +1148,9 @@ impl ViewerApp {
         self.is_loading = false;
         self.loading_start = None;
         self.pending_breps.clear();
+        // Drop the conversion context and step file to free WASM memory.
+        // Without this, repeated file loads accumulate data in the WASM heap
+        // (which has a 4GB limit in Chrome) and eventually crash the tab.
         self.conversion_ctx = None;
         self.pending_step_file = None;
         self.triangulated_count = 0;
