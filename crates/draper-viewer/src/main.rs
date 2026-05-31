@@ -108,40 +108,37 @@ mod web_entry {
             .expect("failed to find the_canvas_id")
             .unchecked_into::<web_sys::HtmlCanvasElement>();
 
-        // ── Feature detection: check if WebGL2/WebGPU is available BEFORE
-        // attempting wgpu initialization. This prevents silent failures where
-        // the canvas context is already taken or WebGL2 is not supported.
+        // ── Feature detection: check if WebGL2 is available WITHOUT
+        // actually creating a context on the canvas.
         //
-        // NOTE: We probe using a temporary context check. If canvas.getContext
-        // returns null for "webgl2", the browser doesn't support it or the
-        // canvas is already in use by another context. We do NOT actually
-        // take the context here — just check availability.
-        // However, canvas.getContext("webgl2") will CREATE a context if one
-        // doesn't exist yet. This is fine because wgpu will use it.
-        let webgl2_available = canvas.get_context("webgl2")
-            .map(|ctx| ctx.is_some())
-            .unwrap_or(false);
-
-        if !webgl2_available {
-            // Try WebGL1 as a last resort (very limited but better than nothing)
-            let webgl1_available = canvas.get_context("webgl")
+        // CRITICAL: We must NOT call canvas.getContext("webgl2") here because
+        // it CREATES a WebGL2 context on the canvas. Browsers only allow ONE
+        // WebGL context per canvas — if we create one here, wgpu will fail to
+        // initialize because the context is already taken. Instead, we probe
+        // for support using the WebGLRenderingContext prototype on a TEMPORARY
+        // offscreen canvas that we discard immediately.
+        let webgl2_available = {
+            let offscreen = document
+                .create_element("canvas")
+                .ok()
+                .and_then(|el| el.unchecked_into::<web_sys::HtmlCanvasElement>().get_context("webgl2").ok())
                 .map(|ctx| ctx.is_some())
                 .unwrap_or(false);
+            offscreen
+        };
 
-            if !webgl1_available {
-                let msg = "Neither WebGPU nor WebGL is available in this browser. \
-                           The 3D viewer requires at least WebGL2 support.";
-                log::error!("{}", msg);
-                show_error_page(&document, &format!(
-                    "<h2>3Draper — Graphics Not Available</h2>\
-                     <p>{}</p>\
-                     <p style='color:#888;font-size:14px;'>\
-                     Try using Chrome 113+, Edge 113+, or Firefox with WebGL2 enabled.\
-                     </p>", msg
-                ));
-                return;
-            }
-            log::warn!("WebGL2 not available, falling back to WebGL1 — rendering may be limited");
+        if !webgl2_available {
+            let msg = "WebGL2 is not available in this browser. \
+                       The 3D viewer requires WebGL2 support.";
+            log::error!("{}", msg);
+            show_error_page(&document, &format!(
+                "<h2>3Draper — Graphics Not Available</h2>\
+                 <p>{}</p>\
+                 <p style='color:#888;font-size:14px;'>\
+                 Try using Chrome 113+, Edge 113+, or Firefox with WebGL2 enabled.\
+                 </p>", msg
+            ));
+            return;
         }
 
         // Configure wgpu to use WebGL2 as fallback when WebGPU is not available

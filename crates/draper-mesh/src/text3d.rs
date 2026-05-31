@@ -736,9 +736,49 @@ pub fn cut_text_holes_in_mesh(
 
     if result.vertex_count() > 0 {
         result.compute_face_normals();
+        // Remove degenerate triangles (zero-area) that can arise from
+        // bridge-edge duplication or near-collinear polygon vertices.
+        filter_degenerate_tris(&mut result, 1e-8);
     }
 
     result
+}
+
+/// Filter out degenerate triangles from a mesh.
+fn filter_degenerate_tris(mesh: &mut TriangleMesh, min_area_sq: f64) {
+    let old_tris = std::mem::take(&mut mesh.triangles);
+    let old_colors = mesh.triangle_colors.take();
+    let old_face_normals = mesh.face_normals.take();
+    
+    for (i, tri) in old_tris.iter().enumerate() {
+        let v0 = mesh.vertices[tri[0] as usize];
+        let v1 = mesh.vertices[tri[1] as usize];
+        let v2 = mesh.vertices[tri[2] as usize];
+        
+        // Skip degenerate triangles (zero or near-zero area)
+        let e1 = [v1.x - v0.x, v1.y - v0.y, v1.z - v0.z];
+        let e2 = [v2.x - v0.x, v2.y - v0.y, v2.z - v0.z];
+        let cross = [
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        ];
+        let area_sq = cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2];
+        
+        if area_sq >= min_area_sq && tri[0] != tri[1] && tri[1] != tri[2] && tri[0] != tri[2] {
+            mesh.triangles.push(*tri);
+            if let Some(ref colors) = old_colors {
+                if let Some(c) = colors.get(i) {
+                    mesh.triangle_colors.get_or_insert_with(Vec::new).push(*c);
+                }
+            }
+            if let Some(ref normals) = old_face_normals {
+                if let Some(n) = normals.get(i) {
+                    mesh.face_normals.get_or_insert_with(Vec::new).push(*n);
+                }
+            }
+        }
+    }
 }
 
 /// Build the text face mesh with holes using ear-clipping with bridge edges.

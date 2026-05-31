@@ -692,8 +692,12 @@ fn merge_faces(shell: &mut Shell, params: &HealingParams, report: &mut HealingRe
 
     // Iteratively merge face pairs until no more merges are possible.
     // Each iteration may enable new merges (transitive merging).
+    // Hard limit: at most 50 iterations to prevent infinite loops on
+    // pathological shells where merging creates new mergeable pairs
+    // (e.g., floating-point snap mismatches that grow the face count).
     let mut total_merged = 0u32;
-    loop {
+    let max_passes = 50;
+    for _ in 0..max_passes {
         let merged_this_pass = merge_one_pass(shell, tol, angular_tol);
         if merged_this_pass == 0 {
             break;
@@ -1329,6 +1333,10 @@ fn find_boundary_loops(
 
         loop {
             if visited.contains(&current_edge) {
+                break;
+            }
+            // Safety limit: prevent infinite loop on pathological topology
+            if current_loop.len() >= 10000 {
                 break;
             }
             visited.insert(current_edge);
