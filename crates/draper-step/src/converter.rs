@@ -110,12 +110,32 @@ impl StepEdgeCache {
     /// Get or compute discretized 3D points for an edge identified by its STEP entity ID.
     /// If the edge is already cached, returns a clone of the cached points.
     /// If not, discretizes the edge and caches the result.
+    ///
+    /// IMPORTANT: When the edge is reversed (param_range.0 > param_range.1, i.e.,
+    /// the ORIENTED_EDGE had orientation=.F.), the cached forward-order points are
+    /// reversed before returning. This ensures that shared EDGE_CURVE entities
+    /// produce correctly oriented boundary points for each face.
     fn discretize(&mut self, step_edge_id: i64, edge: &TopoEdge, n_samples: usize) -> Vec<Point3d> {
         if let Some(pts) = self.entries.get(&step_edge_id) {
-            return pts.clone();
+            let mut result = pts.clone();
+            // If the edge is reversed (ORIENTED_EDGE orientation=.F.),
+            // reverse the point sequence to match the traversal direction.
+            if edge.param_range.0 > edge.param_range.1 {
+                result.reverse();
+            }
+            return result;
         }
 
-        let pts = self.adaptive_discretize(edge, n_samples.max(2));
+        // Cache miss: always discretize in forward direction (param_range.0 < param_range.1).
+        // If the edge is reversed, we still discretize in forward direction and cache that,
+        // then reverse for the caller.
+        let forward_edge = if edge.param_range.0 > edge.param_range.1 {
+            edge.reversed()
+        } else {
+            edge.clone()
+        };
+
+        let pts = self.adaptive_discretize(&forward_edge, n_samples.max(2));
         if pts.is_empty() {
             let curve_type = match &edge.curve {
                 Some(Curve3d::Line(_)) => "Line",
@@ -128,8 +148,15 @@ impl StepEdgeCache {
             log::warn!("edge_cache: discretize(step_id={}, n_samples={}) returned empty — curve type: {}",
                 step_edge_id, n_samples, curve_type);
         }
+        // Cache the forward-direction points
         self.entries.insert(step_edge_id, pts.clone());
-        pts
+
+        // If the original edge was reversed, reverse the result
+        if edge.param_range.0 > edge.param_range.1 {
+            pts.into_iter().rev().collect()
+        } else {
+            pts
+        }
     }
 
     /// Check if an edge is already in the cache.
@@ -4136,15 +4163,33 @@ impl<'a> StepConverter<'a> {
     }
 
     /// Resolve a FACE_BOUND or FACE_OUTER_BOUND entity, returning both edges and their STEP EDGE_CURVE IDs.
+    /// FACE_BOUND params: [name, loop_ref, orientation]
+    /// When orientation is .F., the entire loop should be reversed (winding order flipped).
     fn resolve_face_bound_with_step_ids(&self, bound_entity: &crate::schema::StepEntity) -> Option<(Vec<TopoEdge>, Vec<i64>)> {
         // FACE_BOUND('', #loop_ref, .T.)
         // The loop reference is typically the 2nd parameter (index 1)
+        // The orientation is typically the 3rd parameter (index 2)
+        let mut orientation = true;
         for (i, param) in bound_entity.params.iter().enumerate() {
             if i == 0 { continue; } // Skip name
+            // Check for orientation enum (.T. or .F.)
+            if let StepValue::Enum(e) = param {
+                orientation = e == "T";
+                continue;
+            }
             if let Some(loop_id) = self.get_ref(param) {
                 if let Some(loop_entity) = self.step.find_entity(loop_id) {
                     if loop_entity.type_name == "EDGE_LOOP" {
-                        return Some(self.resolve_edge_loop_with_step_ids(loop_id));
+                        let (mut edges, step_ids) = self.resolve_edge_loop_with_step_ids(loop_id);
+                        if !orientation {
+                            // FACE_BOUND orientation=.F. means the entire loop is reversed.
+                            // Reverse the edge order AND flip each individual edge.
+                            edges.reverse();
+                            for edge in &mut edges {
+                                *edge = edge.reversed();
+                            }
+                        }
+                        return Some((edges, step_ids));
                     }
                 }
             }
@@ -7365,6 +7410,24 @@ fn deduplicate_points_3d(points: &[Point3d], tolerance: f64) -> Vec<Point3d> {
             let dz = first.z - last.z;
             if dx * dx + dy * dy + dz * dz <= tol_sq {
                 unique.pop();
+            }
+        }
+    }
+    // Also check for non-adjacent duplicates that could create self-intersecting
+    // polygons (e.g., when reversed edge cache produces bowtie patterns).
+    // Scan from the end: if the last point is near any earlier point (except
+    // its immediate predecessor), trim the loop.
+    if unique.len() > 3 {
+        let n = unique.len();
+        let last = unique[n - 1];
+        for i in 0..n - 2 {
+            let dx = last.x - unique[i].x;
+            let dy = last.y - unique[i].y;
+            let dz = last.z - unique[i].z;
+            if dx * dx + dy * dy + dz * dz <= tol_sq {
+                // The last point duplicates an earlier point — trim from there
+                unique.truncate(i + 1);
+                break;
             }
         }
     }

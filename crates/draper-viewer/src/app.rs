@@ -1802,10 +1802,11 @@ impl eframe::App for ViewerApp {
                                                     pending_face_select = Some((inst_idx, face.face_id));
                                                 }
                                                 response.on_hover_text(format!(
-                                                    "Face ID: {}\nSTEP ID: {}\nSurface: {}\nTriangles: [{}, {})\nOuter edges: {}\nInner edges: {}\nForward: {}",
+                                                    "Face ID: {}\nSTEP ID: {}\nSurface: {}\nTriangles: [{}, {})\nBoundary loops: {} ({} pts)\nHoles: {} ({} pts)\nForward: {}",
                                                     face.face_id, face.step_face_id, face.surface_type,
                                                     face.triangle_range.0, face.triangle_range.1,
-                                                    face.outer_boundary.len(), face.inner_boundaries.len(),
+                                                    face.outer_boundary.len(), face.outer_boundary.iter().map(|p| p.len()).sum::<usize>(),
+                                                    face.inner_boundaries.len(), face.inner_boundaries.iter().map(|p| p.len()).sum::<usize>(),
                                                     face.forward
                                                 ));
                                             }
@@ -2015,8 +2016,10 @@ impl eframe::App for ViewerApp {
                                             ui.label(egui::RichText::new(format!("STEP ID: #{}", face.step_face_id)).size(11.0));
                                             ui.label(egui::RichText::new(format!("Surface: {}", face.surface_type)).size(11.0));
                                             ui.label(egui::RichText::new(format!("Triangles: [{}, {})", face.triangle_range.0, face.triangle_range.1)).size(11.0));
-                                            ui.label(egui::RichText::new(format!("Boundary pts: {}", face.outer_boundary.len())).size(11.0));
-                                            ui.label(egui::RichText::new(format!("Holes: {}", face.inner_boundaries.len())).size(11.0));
+                                            let outer_pt_count: usize = face.outer_boundary.iter().map(|p| p.len()).sum();
+                                            ui.label(egui::RichText::new(format!("Boundary loops: {} ({} pts)", face.outer_boundary.len(), outer_pt_count)).size(11.0));
+                                            let inner_pt_count: usize = face.inner_boundaries.iter().map(|p| p.len()).sum();
+                                            ui.label(egui::RichText::new(format!("Holes: {} ({} pts)", face.inner_boundaries.len(), inner_pt_count)).size(11.0));
                                             ui.label(egui::RichText::new(format!("Forward: {}", face.forward)).size(11.0));
 
                                             if ui.button("Copy Face ID").clicked() {

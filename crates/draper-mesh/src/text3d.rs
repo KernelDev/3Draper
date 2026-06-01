@@ -469,6 +469,9 @@ pub fn cut_text_holes_in_mesh(
     let spacing = 1.5 * scale;
     let contours_2d = generate_text_contours(text, scale, spacing);
 
+    log::info!("cut_text_holes: text='{}', scale={}, {} contours, base_mesh has {} tris",
+        text, scale, contours_2d.len(), base_mesh.triangle_count());
+
     if contours_2d.is_empty() || base_mesh.triangle_count() == 0 {
         let mut result = base_mesh.clone();
         result.ensure_colors([0.48, 0.52, 0.58, 1.0]);
@@ -495,7 +498,10 @@ pub fn cut_text_holes_in_mesh(
         .map(|(i, _)| i)
         .collect();
 
+    log::info!("cut_text_holes: {} hole contours out of {} total", hole_indices.len(), contours_2d.len());
+
     if hole_indices.is_empty() {
+        log::warn!("cut_text_holes: no holes classified — returning base mesh unchanged");
         // No holes to cut — return the base mesh unchanged
         let mut result = base_mesh.clone();
         result.ensure_colors([0.48, 0.52, 0.58, 1.0]);
@@ -691,6 +697,9 @@ pub fn cut_text_holes_in_mesh(
         filter_degenerate_tris(&mut result, 1e-8);
     }
 
+    log::info!("cut_text_holes: result {} base tris + {} hole tris = {} total (from {} input tris)",
+        num_base_tris, hole_tri_count, result.triangle_count(), base_mesh.triangle_count());
+
     result
 }
 
@@ -870,8 +879,13 @@ fn filter_degenerate_tris(mesh: &mut TriangleMesh, min_area_sq: f64) {
 fn project_3d_to_text_2d(px: f64, py: f64, pz: f64, surface: &TextSurface) -> (f64, f64) {
     match surface {
         TextSurface::Plane { z } => {
-            // Inverse of: pos = (x, y, z), UV = (x, y)
-            // For a plane, text x = 3D x, text y = 3D y
+            // Only map points that are actually ON the plane (within tolerance).
+            // Points on other faces (different z) should return (MAX, MAX) so they
+            // don't interfere with the hole cutting.
+            let z_tolerance = 1.0; // Allow 1mm tolerance from the plane
+            if (pz - z).abs() > z_tolerance {
+                return (f64::MAX, f64::MAX);
+            }
             (px, py)
         }
         TextSurface::Sphere { center, radius } => {
