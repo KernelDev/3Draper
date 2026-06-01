@@ -97,10 +97,7 @@ struct StepEdgeCache {
 
 impl StepEdgeCache {
     fn new(tol_ctx: ToleranceContext) -> Self {
-        // Use fewer default samples on WASM to reduce project_point calls
-        #[cfg(target_arch = "wasm32")]
-        let default_samples = 16;
-        #[cfg(not(target_arch = "wasm32"))]
+        // Use same default samples on all platforms for consistent results
         let default_samples = 32;
 
         Self {
@@ -119,6 +116,18 @@ impl StepEdgeCache {
         }
 
         let pts = self.adaptive_discretize(edge, n_samples.max(2));
+        if pts.is_empty() {
+            let curve_type = match &edge.curve {
+                Some(Curve3d::Line(_)) => "Line",
+                Some(Curve3d::Circle(_)) => "Circle",
+                Some(Curve3d::Ellipse(_)) => "Ellipse",
+                Some(Curve3d::Arc(_)) => "Arc",
+                Some(Curve3d::Nurbs(_)) => "Nurbs",
+                None => "None",
+            };
+            log::warn!("edge_cache: discretize(step_id={}, n_samples={}) returned empty — curve type: {}",
+                step_edge_id, n_samples, curve_type);
+        }
         self.entries.insert(step_edge_id, pts.clone());
         pts
     }
@@ -772,11 +781,9 @@ impl OwnedStepConversionContext {
     /// during construction. This makes `new()` return quickly, keeping
     /// the browser responsive.
     pub fn new(step_file: StepFile) -> Self {
-        // On WASM, disable healing — it's O(n²) and freezes the browser.
-        #[cfg(target_arch = "wasm32")]
+        // Disable healing on all platforms — it can silently remove valid small faces,
+        // causing missing geometry in complex assemblies.
         let config = StepConversionConfig::no_healing();
-        #[cfg(not(target_arch = "wasm32"))]
-        let config = StepConversionConfig::default();
 
         // Cache the index maps — after this, creating a lightweight StepConverter
         // is nearly free (just clones of already-built maps).
@@ -785,11 +792,8 @@ impl OwnedStepConversionContext {
         // Reuse the StepFile's entity_index instead of rebuilding it from scratch
         let entity_map = step_file.entity_index_ref().clone();
 
-        // On WASM, defer bounding box computation to avoid blocking the main thread.
-        // The bounding box will be computed lazily on the first triangulate_pending() call.
-        #[cfg(target_arch = "wasm32")]
-        let bbox: Option<(Point3d, Point3d)> = None;
-        #[cfg(not(target_arch = "wasm32"))]
+        // Compute bounding box eagerly on all platforms for consistent results.
+        // The cost is negligible compared to the triangulation that follows.
         let bbox = {
             let converter = StepConverter::with_config(&step_file, config.clone());
             converter.compute_bounding_box()
@@ -806,11 +810,8 @@ impl OwnedStepConversionContext {
             }
         }
 
-        // On WASM, limit max_face_triangles to keep per-face triangulation fast
-        #[cfg(target_arch = "wasm32")]
-        {
-            params.max_face_triangles = 1000;
-        }
+        // Use consistent max_face_triangles on all platforms
+        // (no WASM-specific cap — quality should match native)
 
         Self { step_file, bbox, params, pd_brep_map, nauo_transform_map, entity_map, config, bbox_computed: false }
     }
@@ -2668,19 +2669,20 @@ impl<'a> StepConverter<'a> {
         // Create edge discretization cache for this BREP
         let mut edge_cache = StepEdgeCache::new(tol_ctx);
 
-        // Time guard: on wasm, limit per-BREP triangulation time to avoid freezing the browser.
-        // On native, there's no limit (Duration::MAX).
+        // Time guard: limit per-BREP triangulation time.
+        // WASM uses a moderate limit to avoid browser freezes;
+        // native uses a generous limit for complex assemblies.
         #[cfg(target_arch = "wasm32")]
-        let brep_time_limit = std::time::Duration::from_secs(3);
+        let brep_time_limit = std::time::Duration::from_secs(60);
         #[cfg(not(target_arch = "wasm32"))]
         let brep_time_limit = std::time::Duration::from_secs(600); // 10 min on native
 
-        // Per-FACE time limit: on WASM, if a single face takes longer than this,
+        // Per-FACE time limit: if a single face takes longer than this,
         // we skip it (returning an empty mesh for that face) rather than blocking.
-        // This prevents a single NURBS face with expensive project_point calls
-        // from freezing the browser for minutes.
+        // WASM uses 10s (increased from 500ms for better quality);
+        // native uses 120s for complex NURBS faces.
         #[cfg(target_arch = "wasm32")]
-        let face_time_limit = std::time::Duration::from_millis(500);
+        let face_time_limit = std::time::Duration::from_secs(10);
         #[cfg(not(target_arch = "wasm32"))]
         let face_time_limit = std::time::Duration::from_secs(120);
 
@@ -2757,17 +2759,11 @@ impl<'a> StepConverter<'a> {
                 .map(|edges| self.sample_edges_to_polylines(edges))
                 .collect();
 
-            // Project boundary to UV space — skip on WASM (expensive NURBS projection)
-            #[cfg(not(target_arch = "wasm32"))]
+            // Project boundary to UV space on all platforms
             let outer_uv_boundary = self.sample_edges_to_uv_polylines(&face_data.outer_edges, &face_data.surface);
-            #[cfg(not(target_arch = "wasm32"))]
             let inner_uv_boundaries: Vec<Vec<Vec<Point2d>>> = face_data.inner_edges.iter()
                 .map(|edges| self.sample_edges_to_uv_polylines(edges, &face_data.surface))
                 .collect();
-            #[cfg(target_arch = "wasm32")]
-            let outer_uv_boundary: Vec<Vec<Point2d>> = vec![];
-            #[cfg(target_arch = "wasm32")]
-            let inner_uv_boundaries: Vec<Vec<Vec<Point2d>>> = vec![];
 
             face_infos.push(FaceInfo {
                 face_id,
@@ -6700,7 +6696,14 @@ impl<'a> StepConverter<'a> {
         }
         outer_points_3d = deduplicate_points_3d(&outer_points_3d, 1e-6);
         if outer_points_3d.is_empty() {
+            log::warn!("planar_face_with_holes: outer boundary is empty after dedup — {} outer edges", outer_edges.len());
             return mesh;
+        }
+
+        // Log diagnostic info for complex planar faces
+        if !inner_loops.is_empty() {
+            log::info!("planar_face_with_holes: {} outer pts, {} holes, {} outer edges",
+                outer_points_3d.len(), inner_loops.len(), outer_edges.len());
         }
 
         // Project all points onto the plane's 2D coordinate system
@@ -6872,32 +6875,13 @@ impl<'a> StepConverter<'a> {
     /// On WASM, we use fewer samples to reduce the number of expensive project_point
     /// calls during UV-space triangulation of curved surfaces.
     fn edge_sample_count(&self, edge: &TopoEdge) -> usize {
+        // Use same sample counts on all platforms for consistent results
         match &edge.curve {
             Some(Curve3d::Line(_)) => 2,
-            Some(Curve3d::Circle(_)) => {
-                #[cfg(target_arch = "wasm32")]
-                { 20 }
-                #[cfg(not(target_arch = "wasm32"))]
-                36
-            }
-            Some(Curve3d::Ellipse(_)) => {
-                #[cfg(target_arch = "wasm32")]
-                { 20 }
-                #[cfg(not(target_arch = "wasm32"))]
-                36
-            }
-            Some(Curve3d::Arc(_)) => {
-                #[cfg(target_arch = "wasm32")]
-                { 16 }
-                #[cfg(not(target_arch = "wasm32"))]
-                24
-            }
-            Some(Curve3d::Nurbs(_)) => {
-                #[cfg(target_arch = "wasm32")]
-                { 24 }
-                #[cfg(not(target_arch = "wasm32"))]
-                48
-            }
+            Some(Curve3d::Circle(_)) => 36,
+            Some(Curve3d::Ellipse(_)) => 36,
+            Some(Curve3d::Arc(_)) => 24,
+            Some(Curve3d::Nurbs(_)) => 48,
             None => 2,
         }
     }

@@ -18,26 +18,13 @@ use draper_geometry::{Surface, Point2d};
 use egui_wgpu::RenderState;
 use eframe::egui;
 
-/// WASM-optimized triangulation parameters.
+/// Unified triangulation parameters for all platforms.
 ///
-/// On WASM, the main thread is blocked during triangulation. We need
-/// to keep total computation time under ~3 seconds to prevent the
-/// browser from showing an "unresponsive" dialog. This means:
-/// - Moderate angular samples (32 instead of 48)
-/// - Moderate height samples (6 instead of 8)
-/// - Moderate max_face_triangles (4000 instead of 8000)
-/// - Slightly coarser max_deviation (0.02 instead of 0.01)
+/// Use same quality parameters on all platforms for consistent results.
+/// Previously WASM used reduced quality to avoid browser freezes,
+/// but this caused significant visual differences from the native version.
 fn wasm_tri_params() -> TriangulationParams {
-    let mut params = TriangulationParams::default();
-    #[cfg(target_arch = "wasm32")]
-    {
-        params.angular_samples = 32;
-        params.height_samples = 6;
-        params.max_face_triangles = 4000;
-        params.max_deviation = 0.02;
-        params.detail_level = 0.8;
-    }
-    params
+    TriangulationParams::default()
 }
 
 /// Convert TriangleMesh to GPU vertex/index data.
@@ -1187,13 +1174,9 @@ impl ViewerApp {
             }
         }
 
-        // Check for global loading timeout (30 seconds on WASM, 120 seconds native)
+        // Check for global loading timeout (5 minutes on all platforms)
         if let Some(start) = self.loading_start {
-            let timeout = if cfg!(target_arch = "wasm32") {
-                std::time::Duration::from_secs(60)
-            } else {
-                std::time::Duration::from_secs(300)
-            };
+            let timeout = std::time::Duration::from_secs(300);
             if start.elapsed() > timeout {
                 let elapsed = start.elapsed().as_secs();
                 let remaining = self.pending_breps.len();

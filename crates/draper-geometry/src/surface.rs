@@ -1309,10 +1309,7 @@ impl Surface {
                 let mut best_v = (v_min + v_max) * 0.5;
                 let mut best_dist = f64::MAX;
 
-                // Use fewer steps on WASM to reduce computation
-                #[cfg(target_arch = "wasm32")]
-                let (steps, refine_steps) = (32, 10);
-                #[cfg(not(target_arch = "wasm32"))]
+                // Use same search resolution on all platforms for consistent results
                 let (steps, refine_steps) = (64, 20);
 
                 for i in 0..=steps {
@@ -1358,9 +1355,7 @@ impl Surface {
                 let mut best_u = (u_min + u_max) * 0.5;
                 let mut best_dist = f64::MAX;
 
-                #[cfg(target_arch = "wasm32")]
-                let (steps, refine_steps) = (32, 10);
-                #[cfg(not(target_arch = "wasm32"))]
+                // Use same search resolution on all platforms for consistent results
                 let (steps, refine_steps) = (64, 20);
 
                 // Coarse search
@@ -1392,19 +1387,14 @@ impl Surface {
                 // Uses progressively finer searches (coarse → medium → fine) for
                 // good accuracy with fewer total evaluations than a single fine grid.
                 //
-                // On WASM, we use smaller grids to avoid blocking the browser thread.
-                // The total evaluations are:
-                //   Native: (11*11) + (9*9) + (7*7) + 5 Newton = 121+81+49+5 = 256
-                //   WASM:   (7*7) + (5*5) + (4*4) + 3 Newton = 49+25+16+3 = 93
+                // Use same grid sizes on all platforms for consistent results.
+                // Total evaluations: (11*11) + (9*9) + (7*7) + 5 Newton = 121+81+49+5 = 256
                 let (u_min, u_max) = n.u_range();
                 let (v_min, v_max) = n.v_range();
                 let mut best_u = (u_min + u_max) * 0.5;
                 let mut best_v = (v_min + v_max) * 0.5;
                 let mut best_dist = f64::MAX;
 
-                #[cfg(target_arch = "wasm32")]
-                let (coarse, medium, fine, newton_iters) = (6, 5, 4, 3);
-                #[cfg(not(target_arch = "wasm32"))]
                 let (coarse, medium, fine, newton_iters) = (10, 8, 6, 5);
 
                 // Phase 1: Coarse grid

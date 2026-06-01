@@ -241,9 +241,7 @@ fn triangulate_domain_with_holes(
     }
 
     // Downsample holes if too many points (prevents O(n²) blowup in ear-clip)
-    #[cfg(target_arch = "wasm32")]
-    let max_hole_points = 40;
-    #[cfg(not(target_arch = "wasm32"))]
+    // Use same limits on all platforms for consistent results
     let max_hole_points = 200;
 
     let downsampled_holes: Vec<Vec<Point2d>> = domain.holes.iter()
@@ -260,9 +258,7 @@ fn triangulate_domain_with_holes(
         .collect();
 
     // Also downsample outer boundary if too large
-    #[cfg(target_arch = "wasm32")]
-    let max_outer_points = 120;
-    #[cfg(not(target_arch = "wasm32"))]
+    // Use same limits on all platforms for consistent results
     let max_outer_points = 500;
 
     let outer_downsampled: Vec<Point2d> = if outer.len() > max_outer_points {
@@ -650,9 +646,7 @@ pub fn triangulate_surface_uv_cdt(
     }
 
     // Downsample boundary points to prevent O(n²) blowup in ear-clipping.
-    #[cfg(target_arch = "wasm32")]
-    let max_boundary_points = 120;
-    #[cfg(not(target_arch = "wasm32"))]
+    // Use same limits on all platforms for consistent results
     let max_boundary_points = 500;
 
     let boundary_points = if boundary_points.len() > max_boundary_points {
@@ -670,9 +664,7 @@ pub fn triangulate_surface_uv_cdt(
     };
 
     // Also downsample hole polylines
-    #[cfg(target_arch = "wasm32")]
-    let max_hole_points = 40;
-    #[cfg(not(target_arch = "wasm32"))]
+    // Use same limits on all platforms for consistent results
     let max_hole_points = 200;
 
     let hole_polylines_downsampled: Vec<Vec<Point3d>> = hole_polylines.iter()
