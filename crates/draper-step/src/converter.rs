@@ -1393,13 +1393,35 @@ impl<'a> StepConverter<'a> {
         if nauos.is_empty() { return result; }
 
         // Build: nauo_id → the NAUO entity itself is already accessible via find_entity
-        // Build: pds_id → set of nauo_ids that reference this PDS
+        // Build: pds_id → set of nauo_ids that this PDS references
+        //
+        // Two strategies:
+        //   1) Some NAUOs explicitly reference a PDS in their 6th parameter
+        //      (NAUO params: id, name, description, #relating_pd, #related_pd, #pds_or_$).
+        //   2) More commonly, the PDS's definition (3rd param) references the NAUO.
+        //      E.g. PRODUCT_DEFINITION_SHAPE('Placement','Placement of an item',#751)
+        //      where #751 is a NEXT_ASSEMBLY_USAGE_OCCURRENCE.
+        // We must use strategy 2 because many STEP files (including the CAx-IF
+        // as1-oc-214 reference file) use $ for the NAUO's 6th param.
+        let nauo_ids: std::collections::HashSet<i64> = nauos.iter().map(|n| n.id).collect();
         let mut pds_to_nauos: HashMap<i64, Vec<i64>> = HashMap::new();
+
+        // Strategy 1: NAUO → PDS (works when NAUO's 6th param is not $)
         for nauo in &nauos {
-            // NAUO params: id, name, description, #relating_pd, #related_pd, #pds_or_$
             for param in nauo.params.iter().skip(5) {
                 if let Some(pds_id) = get_ref_standalone(param) {
                     pds_to_nauos.entry(pds_id).or_default().push(nauo.id);
+                }
+            }
+        }
+
+        // Strategy 2: PDS → NAUO (works when PDS's definition references a NAUO)
+        for pds in step.find_entities_by_type("PRODUCT_DEFINITION_SHAPE") {
+            for param in &pds.params {
+                if let Some(ref_id) = get_ref_standalone(param) {
+                    if nauo_ids.contains(&ref_id) {
+                        pds_to_nauos.entry(pds.id).or_default().push(ref_id);
+                    }
                 }
             }
         }
@@ -1453,6 +1475,12 @@ impl<'a> StepConverter<'a> {
         for nauo in &nauos {
             result.entry(nauo.id).or_insert(None);
         }
+
+        // Debug logging
+        let with_transform = result.values().filter(|v| v.is_some()).count();
+        let total = result.len();
+        log::info!("NAUO transform index: {}/{} NAUOs have transforms, pds_to_nauos has {} entries",
+            with_transform, total, pds_to_nauos.len());
 
         result
     }
@@ -2035,6 +2063,11 @@ impl<'a> StepConverter<'a> {
                 // Get this NAUO's transform
                 let nauo_transform = self.find_nauo_transform(nauo_id, child_pd_id);
 
+                // Debug: log transform status for each NAUO
+                log::info!("NAUO #{} '{}' (PD #{}): nauo_transform={}, parent_transform={}",
+                    nauo_id, nauo_name, child_pd_id,
+                    nauo_transform.is_some(), parent_transform.is_some());
+
                 // Compose: parent_transform * nauo_transform
                 let composed = match (&parent_transform, &nauo_transform) {
                     (Some(pt), Some(nt)) => Some(mat4_mul(pt, nt)),
@@ -2227,24 +2260,32 @@ impl<'a> StepConverter<'a> {
         color_map: &HashMap<i64, [f32; 4]>,
         parent_pd_to_children: &HashMap<i64, Vec<(i64, i64, String)>>,
     ) -> AssemblyNode {
-        // Stack entries: (pd_id, name, transform, color_override)
-        // We'll build the tree bottom-up by creating leaf nodes first,
-        // then attaching them to their parents.
-        let mut visited: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        // Stack entries: (pd_id, name, transform, color_override, ancestor_pd_set)
+        // We build the tree bottom-up. Each occurrence is keyed by NAUO ID
+        // (unique per usage), not PD ID, so the same part can appear at
+        // multiple positions in the tree (e.g., 3 identical nuts at different
+        // positions). The root node is keyed by its PD ID (negated to avoid
+        // collision with NAUO IDs, which are always positive).
+        const ROOT_KEY: i64 = -1; // sentinel key for the root node
 
         // First pass: DFS to determine processing order
-        let mut order: Vec<(i64, String, Option<[[f64; 4]; 4]>, Option<[f32; 4]>)> = Vec::new();
-        let mut dfs_stack: Vec<(i64, String, Option<[[f64; 4]; 4]>, Option<[f32; 4]>)> = vec![(root_pd_id, root_name.to_string(), None, None)];
+        // Each entry: (node_key, pd_id, name, transform, color, ancestors)
+        let mut order: Vec<(i64, i64, String, Option<[[f64; 4]; 4]>, Option<[f32; 4]>)> = Vec::new();
+        let mut dfs_stack: Vec<(i64, i64, String, Option<[[f64; 4]; 4]>, Option<[f32; 4]>, std::collections::HashSet<i64>)> =
+            vec![(ROOT_KEY, root_pd_id, root_name.to_string(), None, None, std::collections::HashSet::new())];
 
-        while let Some((pd_id, name, transform, color_override)) = dfs_stack.pop() {
-            if visited.contains(&pd_id) { continue; }
-            visited.insert(pd_id);
+        while let Some((node_key, pd_id, name, transform, color_override, ancestors)) = dfs_stack.pop() {
+            // Cycle detection: only skip if this PD is already in our ancestor chain
+            if ancestors.contains(&pd_id) {
+                log::warn!("Cycle detected in assembly tree at PD #{}, skipping", pd_id);
+                continue;
+            }
 
             let has_nauo_children = parent_pd_to_children.contains_key(&pd_id);
             let brep_id = if has_nauo_children { None } else { self.find_pd_brep(pd_id) };
             let color = color_override.or_else(|| brep_id.and_then(|id| color_map.get(&id).copied()));
 
-            order.push((pd_id, name, transform, color));
+            order.push((node_key, pd_id, name, transform, color));
 
             if let Some(children) = parent_pd_to_children.get(&pd_id) {
                 for &(nauo_id, child_pd_id, ref nauo_name) in children.iter().rev() {
@@ -2254,17 +2295,19 @@ impl<'a> StepConverter<'a> {
                     let child_color = child_brep_id.and_then(|id| color_map.get(&id).copied());
                     let child_name = self.get_product_name(child_pd_id);
                     let display_name = format!("{} ({})", nauo_name, child_name);
-                    dfs_stack.push((child_pd_id, display_name, nauo_transform, child_color));
+                    // Key each child by its NAUO ID (unique per occurrence)
+                    let mut new_ancestors = ancestors.clone();
+                    new_ancestors.insert(pd_id);
+                    dfs_stack.push((nauo_id, child_pd_id, display_name, nauo_transform, child_color, new_ancestors));
                 }
             }
         }
 
-        // Build nodes: since we processed DFS, order is parent-first.
-        // We need to build parent nodes and attach children.
-        // Use a map from pd_id to built node.
+        // Build nodes bottom-up (children are processed before parents).
+        // Key by node_key (NAUO ID for children, ROOT_KEY for root).
         let mut node_map: HashMap<i64, AssemblyNode> = HashMap::new();
 
-        for (pd_id, name, transform, color) in order.into_iter().rev() {
+        for (node_key, pd_id, name, transform, color) in order.into_iter().rev() {
             let has_nauo_children = parent_pd_to_children.contains_key(&pd_id);
             let brep_id = if has_nauo_children { None } else { self.find_pd_brep(pd_id) };
 
@@ -2278,19 +2321,19 @@ impl<'a> StepConverter<'a> {
                 children: Vec::new(),
             };
 
-            // Attach already-built children
+            // Attach already-built children (keyed by NAUO ID)
             if let Some(children) = parent_pd_to_children.get(&pd_id) {
-                for &(_, child_pd_id, _) in children {
-                    if let Some(child_node) = node_map.remove(&child_pd_id) {
+                for &(nauo_id, child_pd_id, _) in children {
+                    if let Some(child_node) = node_map.remove(&nauo_id) {
                         node.children.push(child_node);
                     }
                 }
             }
 
-            node_map.insert(pd_id, node);
+            node_map.insert(node_key, node);
         }
 
-        node_map.remove(&root_pd_id).unwrap_or_else(|| AssemblyNode {
+        node_map.remove(&ROOT_KEY).unwrap_or_else(|| AssemblyNode {
             name: root_name.to_string(),
             pd_id: root_pd_id,
             brep_id: None,
