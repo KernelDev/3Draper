@@ -1993,8 +1993,8 @@ pub fn triangulate_face_with_boundary_and_holes(
             triangulate_sphere_face_with_boundary(sphere, boundary_points, hole_polylines, forward, params)
         }
         _ => {
-            // Other curved surfaces: use UV-space CDT
-            crate::parametric_domain::triangulate_surface_uv_cdt(surface, boundary_points, hole_polylines, forward, params)
+            // Other curved surfaces: use UV grid trimming (more reliable than CDT)
+            triangulate_surface_uv_trimmed(surface, boundary_points, hole_polylines, forward, params)
         }
     }
 }
