@@ -1396,7 +1396,7 @@ impl ViewerApp {
                     log::info!("STEP file selected: '{}' ({} bytes)", file_name, file_size);
 
                     // Check file size limit (50MB max for WASM)
-                    if file_size > 50 * 1024 * 1024 {
+                    if file_size > 50.0 * 1024.0 * 1024.0 {
                         log::error!("STEP file too large: {} bytes (max 50MB)", file_size);
                         *shared_result.lock().unwrap() = None;
                         return;
