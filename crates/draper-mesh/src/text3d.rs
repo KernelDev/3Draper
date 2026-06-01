@@ -844,11 +844,11 @@ fn extrude_contour(
     }
 }
 
-/// Create a "3Draper" text mesh centered at origin, placed on the XY plane.
+/// Create a "3" text mesh centered at origin, placed on the XY plane.
 ///
 /// The text is scaled and positioned so that it can be easily placed on surfaces.
 pub fn generate_3draper_text(depth: f64, scale: f64) -> TriangleMesh {
-    let text = "3Draper";
+    let text = "3";
     let spacing = 1.5 * scale;
     let mut mesh = generate_text_mesh(text, depth, scale, spacing);
 
