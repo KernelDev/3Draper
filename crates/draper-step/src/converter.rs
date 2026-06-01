@@ -677,11 +677,9 @@ impl<'a> StepConversionContext<'a> {
     /// The StepFile's internal type index (lazy) will be reused across calls.
     pub fn new(step_file: &'a StepFile) -> Self {
         // On WASM, disable healing — it's O(n²) and freezes the browser.
-        // On native, keep healing enabled for better mesh quality.
-        #[cfg(target_arch = "wasm32")]
+        // On native, also disable healing — it can silently remove valid small faces,
+        // causing missing geometry in complex assemblies.
         let config = StepConversionConfig::no_healing();
-        #[cfg(not(target_arch = "wasm32"))]
-        let config = StepConversionConfig::default();
 
         let converter = StepConverter::with_config(step_file, config);
         let bbox = converter.compute_bounding_box();
@@ -2008,14 +2006,22 @@ impl<'a> StepConverter<'a> {
         results: &mut Vec<DetailedMeshInstance>,
         _visited: &mut std::collections::HashSet<(i64, i64)>,
     ) {
-        // Explicit stack: (pd_id, composed_transform)
-        let mut stack: Vec<(i64, Option<[[f64; 4]; 4]>)> = vec![(root_pd_id, *root_transform)];
-        // Track visited pd_ids to detect cycles in the NAUO graph
-        let mut visited: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        // Explicit stack: (pd_id, composed_transform, depth, ancestor_set)
+        // ancestor_set tracks the chain of PDs from root to current node,
+        // so we detect actual cycles (A→B→C→A) without preventing legitimate
+        // reuse of the same sub-assembly at different positions.
+        let mut stack: Vec<(i64, Option<[[f64; 4]; 4]>, usize, std::collections::HashSet<i64>)> =
+            vec![(root_pd_id, *root_transform, 0, std::collections::HashSet::new())];
+        const MAX_DEPTH: usize = 50;
 
-        while let Some((parent_pd_id, parent_transform)) = stack.pop() {
-            // Cycle detection: skip if we've already visited this pd_id
-            if !visited.insert(parent_pd_id) {
+        while let Some((parent_pd_id, parent_transform, depth, ancestors)) = stack.pop() {
+            // Depth limit to prevent infinite loops
+            if depth > MAX_DEPTH {
+                log::warn!("Max depth {} reached at PD #{}, skipping", MAX_DEPTH, parent_pd_id);
+                continue;
+            }
+            // Cycle detection: only skip if this PD is already in our ancestor chain
+            if ancestors.contains(&parent_pd_id) {
                 log::warn!("Cycle detected in NAUO tree at PD #{}, skipping", parent_pd_id);
                 continue;
             }
@@ -2041,7 +2047,10 @@ impl<'a> StepConverter<'a> {
 
                 if has_nauo_children {
                     // Sub-assembly — push to stack instead of recursing
-                    stack.push((child_pd_id, composed));
+                    // Build new ancestor set: current ancestors + current parent
+                    let mut new_ancestors = ancestors.clone();
+                    new_ancestors.insert(parent_pd_id);
+                    stack.push((child_pd_id, composed, depth + 1, new_ancestors));
                 } else if let Some(brep_id) = self.find_pd_brep(child_pd_id) {
                     if let Some((mesh, faces)) = self.triangulate_brep_detailed_cached(brep_id, brep_detail_cache, params, bbox) {
                         let mut instance_mesh = mesh.clone();
@@ -2078,17 +2087,24 @@ impl<'a> StepConverter<'a> {
         bbox: &Option<(Point3d, Point3d)>,
         parent_pd_to_children: &HashMap<i64, Vec<(i64, i64, String)>>,
         results: &mut Vec<MeshInstance>,
-        // Track (pd_id, nauo_id) pairs to detect cycles (kept for API compat, not used in iterative version)
         _visited: &mut std::collections::HashSet<(i64, i64)>,
     ) {
-        // Explicit stack: (pd_id, composed_transform)
-        let mut stack: Vec<(i64, Option<[[f64; 4]; 4]>)> = vec![(root_pd_id, *root_transform)];
-        // Track visited pd_ids to detect cycles in the NAUO graph
-        let mut visited: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        // Explicit stack: (pd_id, composed_transform, depth, ancestor_set)
+        // ancestor_set tracks the chain of PDs from root to current node,
+        // so we detect actual cycles (A→B→C→A) without preventing legitimate
+        // reuse of the same sub-assembly at different positions.
+        let mut stack: Vec<(i64, Option<[[f64; 4]; 4]>, usize, std::collections::HashSet<i64>)> =
+            vec![(root_pd_id, *root_transform, 0, std::collections::HashSet::new())];
+        const MAX_DEPTH: usize = 50;
 
-        while let Some((parent_pd_id, parent_transform)) = stack.pop() {
-            // Cycle detection: skip if we've already visited this pd_id
-            if !visited.insert(parent_pd_id) {
+        while let Some((parent_pd_id, parent_transform, depth, ancestors)) = stack.pop() {
+            // Depth limit to prevent infinite loops
+            if depth > MAX_DEPTH {
+                log::warn!("Max depth {} reached at PD #{}, skipping", MAX_DEPTH, parent_pd_id);
+                continue;
+            }
+            // Cycle detection: only skip if this PD is already in our ancestor chain
+            if ancestors.contains(&parent_pd_id) {
                 log::warn!("Cycle detected in NAUO tree at PD #{}, skipping", parent_pd_id);
                 continue;
             }
@@ -2118,7 +2134,9 @@ impl<'a> StepConverter<'a> {
 
                 if has_nauo_children {
                     // Sub-assembly — push to stack instead of recursing
-                    stack.push((child_pd_id, composed));
+                    let mut new_ancestors = ancestors.clone();
+                    new_ancestors.insert(parent_pd_id);
+                    stack.push((child_pd_id, composed, depth + 1, new_ancestors));
                 } else if let Some(brep_id) = self.find_pd_brep(child_pd_id) {
                     // Leaf node — triangulate BREP and create instance
                     if let Some(mesh) = self.triangulate_brep_cached(brep_id, brep_mesh_cache, params, bbox) {
@@ -2484,7 +2502,7 @@ impl<'a> StepConverter<'a> {
         #[cfg(target_arch = "wasm32")]
         let brep_time_limit = std::time::Duration::from_secs(3);
         #[cfg(not(target_arch = "wasm32"))]
-        let brep_time_limit = std::time::Duration::from_secs(300); // 5 min on native
+        let brep_time_limit = std::time::Duration::from_secs(600); // 10 min on native
 
         // Per-FACE time limit: on WASM, if a single face takes longer than this,
         // we skip it (returning an empty mesh for that face) rather than blocking.
@@ -2493,7 +2511,7 @@ impl<'a> StepConverter<'a> {
         #[cfg(target_arch = "wasm32")]
         let face_time_limit = std::time::Duration::from_millis(500);
         #[cfg(not(target_arch = "wasm32"))]
-        let face_time_limit = std::time::Duration::from_secs(60);
+        let face_time_limit = std::time::Duration::from_secs(120);
 
         let brep_start = std::time::Instant::now();
 
@@ -3431,13 +3449,17 @@ impl<'a> StepConverter<'a> {
         results: &mut Vec<PendingBrepInstance>,
         _seen_breps: &mut std::collections::HashSet<i64>,
     ) {
-        let mut stack: Vec<(i64, Option<[[f64; 4]; 4]>)> = vec![(root_pd_id, *root_transform)];
-        // Track visited pd_ids to detect cycles in the NAUO graph
-        let mut visited: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        // Explicit stack with ancestor tracking — same pattern as walk_assembly_tree
+        let mut stack: Vec<(i64, Option<[[f64; 4]; 4]>, usize, std::collections::HashSet<i64>)> =
+            vec![(root_pd_id, *root_transform, 0, std::collections::HashSet::new())];
+        const MAX_DEPTH: usize = 50;
 
-        while let Some((parent_pd_id, parent_transform)) = stack.pop() {
-            // Cycle detection: skip if we've already visited this pd_id
-            if !visited.insert(parent_pd_id) {
+        while let Some((parent_pd_id, parent_transform, depth, ancestors)) = stack.pop() {
+            if depth > MAX_DEPTH {
+                log::warn!("Max depth {} reached at PD #{}, skipping", MAX_DEPTH, parent_pd_id);
+                continue;
+            }
+            if ancestors.contains(&parent_pd_id) {
                 log::warn!("Cycle detected in NAUO tree at PD #{}, skipping", parent_pd_id);
                 continue;
             }
@@ -3460,7 +3482,9 @@ impl<'a> StepConverter<'a> {
                 let has_nauo_children = parent_pd_to_children.contains_key(&child_pd_id);
 
                 if has_nauo_children {
-                    stack.push((child_pd_id, composed));
+                    let mut new_ancestors = ancestors.clone();
+                    new_ancestors.insert(parent_pd_id);
+                    stack.push((child_pd_id, composed, depth + 1, new_ancestors));
                 } else if let Some(brep_id) = self.find_pd_brep(child_pd_id) {
                     let color = color_map.get(&brep_id).copied();
                     let name = format!("{} (BREP#{})", nauo_name, brep_id);

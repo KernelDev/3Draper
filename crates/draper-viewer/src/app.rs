@@ -23,19 +23,19 @@ use eframe::egui;
 /// On WASM, the main thread is blocked during triangulation. We need
 /// to keep total computation time under ~3 seconds to prevent the
 /// browser from showing an "unresponsive" dialog. This means:
-/// - Lower angular samples (16 instead of 24)
-/// - Lower height samples (3 instead of 4)
-/// - Lower max_face_triangles (500 instead of 2000)
-/// - Coarser max_deviation (0.05 instead of 0.01)
+/// - Moderate angular samples (32 instead of 48)
+/// - Moderate height samples (6 instead of 8)
+/// - Moderate max_face_triangles (4000 instead of 8000)
+/// - Slightly coarser max_deviation (0.02 instead of 0.01)
 fn wasm_tri_params() -> TriangulationParams {
     let mut params = TriangulationParams::default();
     #[cfg(target_arch = "wasm32")]
     {
-        params.angular_samples = 16;
-        params.height_samples = 3;
-        params.max_face_triangles = 500;
-        params.max_deviation = 0.05;
-        params.detail_level = 0.5;
+        params.angular_samples = 32;
+        params.height_samples = 6;
+        params.max_face_triangles = 4000;
+        params.max_deviation = 0.02;
+        params.detail_level = 0.8;
     }
     params
 }

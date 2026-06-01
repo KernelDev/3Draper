@@ -153,14 +153,14 @@ impl Default for TriangulationParams {
         Self {
             max_edge_length: 1.0,
             max_deviation: 0.01,
-            angular_samples: 24,
-            height_samples: 4,
+            angular_samples: 48,
+            height_samples: 8,
             max_angular_deviation: 0.1,
             detail_level: 1.0,
             adaptive: true,
             parallel: false,
             progress_callback: None,
-            max_face_triangles: crate::adaptive::DEFAULT_MAX_FACE_TRIANGLES,
+            max_face_triangles: 8000,
         }
     }
 }
@@ -213,8 +213,9 @@ fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams) -> 
     }
     // Merge coincident boundary vertices to make the solid watertight
     merge_coincident_vertices(&mut mesh, 1e-6);
-    // Remove degenerate and invalid triangles
-    filter_degenerate_triangles(&mut mesh, 1e-6);
+    // Use a very small tolerance for degenerate filtering — only remove truly degenerate triangles
+    // (zero area or NaN/Inf), not small valid triangles
+    filter_degenerate_triangles(&mut mesh, 1e-10);
     mesh
 }
 
@@ -447,7 +448,7 @@ fn triangulate_solid_parallel(solid: &Solid, params: &TriangulationParams) -> Tr
     // Step 4: Post-processing
     let mut mesh = merged;
     merge_coincident_vertices(&mut mesh, 1e-6);
-    filter_degenerate_triangles(&mut mesh, 1e-6);
+    filter_degenerate_triangles(&mut mesh, 1e-10);
     mesh
 }
 
@@ -568,7 +569,7 @@ pub fn triangulate_shell(shell: &Shell, params: &TriangulationParams) -> Triangl
         mesh.merge(&face_mesh);
     }
     merge_coincident_vertices(&mut mesh, 1e-6);
-    filter_degenerate_triangles(&mut mesh, 1e-6);
+    filter_degenerate_triangles(&mut mesh, 1e-10);
     mesh
 }
 
