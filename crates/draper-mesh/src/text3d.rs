@@ -438,18 +438,18 @@ fn project_2d_to_surface(x: f64, y: f64, surface: &TextSurface) -> SurfacePoint 
     }
 }
 
-/// Cut text-shaped holes in a mesh using a simple, reliable approach.
+/// Cut text-shaped holes in a mesh using adaptive refinement and subtraction.
 ///
 /// This function creates holes in the shape of text characters through a surface:
-/// 1. Projects each triangle centroid from 3D back to 2D text coordinates
-/// 2. Removes triangles whose centroids fall inside any hole contour
-/// 3. Creates inset surfaces for each hole with proper depth
-/// 4. Creates side walls connecting the surface boundary to the inset
+/// 1. Computes 2D text contours and determines which are holes vs solid islands
+/// 2. Adaptively refines the base mesh near hole boundaries (subdivides large triangles)
+/// 3. Removes triangles whose centroids fall inside any hole contour
+/// 4. Creates inset surfaces for each hole with proper depth
+/// 5. Creates side walls connecting the surface boundary to the inset
 ///
-/// This approach is simple and always terminates — it doesn't use CDT or
-/// bridge-edge triangulation, avoiding all the failure modes of those algorithms.
-/// The hole boundaries follow the mesh triangulation (slightly jagged), but
-/// for simple shapes like the digit "3" this looks perfectly acceptable.
+/// The adaptive refinement ensures that the mesh has sufficient resolution
+/// around the hole contours for clean subtraction, regardless of the input
+/// mesh resolution. Triangles far from any hole are left unchanged.
 ///
 /// # Arguments
 /// * `base_mesh` - The base primitive mesh to cut holes into
@@ -476,36 +476,68 @@ pub fn cut_text_holes_in_mesh(
     }
 
     // Determine which contours are "holes to cut" vs "solid islands to keep".
-    // For the digit "3" there is only one contour (the outer shape), so it
-    // becomes a hole. For characters with inner holes (D, a, p, e), the
-    // inner contours become solid islands.
-    //
-    // Parity-based classification: a contour whose centroid is inside an
-    // EVEN number of other contours → outer letter shape → becomes a hole.
-    // Inside an ODD number → inner island (like D's hole) → stays solid.
+    // Parity-based classification: a contour whose first vertex is inside an
+    // EVEN number of OTHER contours → outer letter shape → becomes a hole.
+    // Inside an ODD number → inner island (like D's counter) → stays solid.
     let hole_indices: Vec<usize> = contours_2d.iter()
         .enumerate()
-        .filter(|(_, c)| {
-            let mid_x: f64 = c.iter().map(|p| p.0).sum::<f64>() / c.len() as f64;
-            let mid_y: f64 = c.iter().map(|p| p.1).sum::<f64>() / c.len() as f64;
-
+        .filter(|(i, c)| {
+            let test_x = c[0].0;
+            let test_y = c[0].1;
             let mut inside_count = 0;
-            for other in contours_2d.iter() {
-                if point_in_polygon_2d(mid_x, mid_y, other) {
+            for (j, other) in contours_2d.iter().enumerate() {
+                if j != *i && point_in_polygon_2d(test_x, test_y, other) {
                     inside_count += 1;
                 }
             }
-            // Even = outer letter contour → hole; Odd = inner island → keep
             inside_count % 2 == 0
         })
         .map(|(i, _)| i)
         .collect();
 
-    // === Simple subtractive approach: remove triangles inside hole contours ===
+    if hole_indices.is_empty() {
+        // No holes to cut — return the base mesh unchanged
+        let mut result = base_mesh.clone();
+        result.ensure_colors([0.48, 0.52, 0.58, 1.0]);
+        return result;
+    }
+
+    // Compute the 2D bounding box of all hole contours (in text coordinates)
+    let mut hole_min_x = f64::MAX;
+    let mut hole_min_y = f64::MAX;
+    let mut hole_max_x = f64::MIN;
+    let mut hole_max_y = f64::MIN;
+    for &idx in &hole_indices {
+        for &(x, y) in &contours_2d[idx] {
+            hole_min_x = hole_min_x.min(x);
+            hole_min_y = hole_min_y.min(y);
+            hole_max_x = hole_max_x.max(x);
+            hole_max_y = hole_max_y.max(y);
+        }
+    }
+    // Add margin to ensure triangles near the boundary are also refined
+    let margin_x = (hole_max_x - hole_min_x) * 0.3;
+    let margin_y = (hole_max_y - hole_min_y) * 0.3;
+    hole_min_x -= margin_x;
+    hole_min_y -= margin_y;
+    hole_max_x += margin_x;
+    hole_max_y += margin_y;
+
+    // Target triangle edge length for refined regions.
+    // We want enough triangles to resolve the hole shape — roughly
+    // 4-6 triangles across the smallest feature of the text contour.
+    let hole_size = ((hole_max_x - hole_min_x).min(hole_max_y - hole_min_y)).max(1.0);
+    let target_edge_len = hole_size / 8.0;
+
+    // === Adaptive refinement + hole subtraction ===
     //
-    // For each triangle in the base mesh, project its centroid to 2D text
-    // coordinates using the inverse of project_2d_to_surface, then check if
-    // the 2D point is inside any hole contour.
+    // For each triangle in the base mesh:
+    // 1. Project its vertices to 2D text coordinates
+    // 2. If the triangle's 2D bounding box doesn't overlap the hole region,
+    //    keep the triangle as-is (fast path)
+    // 3. If it overlaps and is too large, recursively subdivide it
+    // 4. For leaf triangles, check if centroid is inside a hole contour
+    //    and remove/keep accordingly
     let mut result = TriangleMesh::new();
     let base_color = [0.48, 0.52, 0.58, 1.0];
     let mut num_base_tris = 0usize;
@@ -515,29 +547,78 @@ pub fn cut_text_holes_in_mesh(
         let v1 = base_mesh.vertices[tri[1] as usize];
         let v2 = base_mesh.vertices[tri[2] as usize];
 
-        let cx = (v0.x + v1.x + v2.x) / 3.0;
-        let cy = (v0.y + v1.y + v2.y) / 3.0;
-        let cz = (v0.z + v1.z + v2.z) / 3.0;
+        // Project all 3 vertices to 2D text space
+        let p0_2d = project_3d_to_text_2d(v0.x, v0.y, v0.z, surface);
+        let p1_2d = project_3d_to_text_2d(v1.x, v1.y, v1.z, surface);
+        let p2_2d = project_3d_to_text_2d(v2.x, v2.y, v2.z, surface);
 
-        // Project 3D centroid to 2D text coordinates
-        let (tx, ty) = project_3d_to_text_2d(cx, cy, cz, surface);
+        // Compute 2D bounding box of this triangle
+        let tri_min_x = p0_2d.0.min(p1_2d.0).min(p2_2d.0);
+        let tri_min_y = p0_2d.1.min(p1_2d.1).min(p2_2d.1);
+        let tri_max_x = p0_2d.0.max(p1_2d.0).max(p2_2d.0);
+        let tri_max_y = p0_2d.1.max(p1_2d.1).max(p2_2d.1);
 
-        // Check if the centroid is inside any hole contour
-        let mut inside_hole = false;
-        for &idx in &hole_indices {
-            if point_in_polygon_2d(tx, ty, &contours_2d[idx]) {
-                inside_hole = true;
-                break;
-            }
-        }
-
-        if !inside_hole {
+        // Fast path: triangle is far from any hole → keep as-is
+        if tri_max_x < hole_min_x || tri_min_x > hole_max_x ||
+           tri_max_y < hole_min_y || tri_min_y > hole_max_y {
             let base = result.vertices.len() as u32;
             result.vertices.push(v0);
             result.vertices.push(v1);
             result.vertices.push(v2);
             result.triangles.push([base, base + 1, base + 2]);
             num_base_tris += 1;
+            continue;
+        }
+
+        // Triangle overlaps the hole region — check if it needs subdivision
+        let longest_edge = {
+            let dx01 = v1.x - v0.x; let dy01 = v1.y - v0.y; let dz01 = v1.z - v0.z;
+            let dx12 = v2.x - v1.x; let dy12 = v2.y - v1.y; let dz12 = v2.z - v1.z;
+            let dx20 = v0.x - v2.x; let dy20 = v0.y - v2.y; let dz20 = v0.z - v2.z;
+            let l01 = (dx01*dx01 + dy01*dy01 + dz01*dz01).sqrt();
+            let l12 = (dx12*dx12 + dy12*dy12 + dz12*dz12).sqrt();
+            let l20 = (dx20*dx20 + dy20*dy20 + dz20*dz20).sqrt();
+            l01.max(l12).max(l20)
+        };
+
+        if longest_edge > target_edge_len * 2.0 {
+            // Subdivide this triangle into 4 sub-triangles (midpoint subdivision)
+            // and recursively process each one
+            subdivide_and_classify(
+                v0, v1, v2,
+                surface,
+                &contours_2d,
+                &hole_indices,
+                &hole_min_x, &hole_min_y, &hole_max_x, &hole_max_y,
+                target_edge_len,
+                0,      // depth
+                5,      // max subdivision depth
+                &mut result,
+                &mut num_base_tris,
+            );
+        } else {
+            // Triangle is small enough — classify by centroid
+            let cx = (v0.x + v1.x + v2.x) / 3.0;
+            let cy = (v0.y + v1.y + v2.y) / 3.0;
+            let cz = (v0.z + v1.z + v2.z) / 3.0;
+            let (tx, ty) = project_3d_to_text_2d(cx, cy, cz, surface);
+
+            let mut inside_hole = false;
+            for &idx in &hole_indices {
+                if point_in_polygon_2d(tx, ty, &contours_2d[idx]) {
+                    inside_hole = true;
+                    break;
+                }
+            }
+
+            if !inside_hole {
+                let base = result.vertices.len() as u32;
+                result.vertices.push(v0);
+                result.vertices.push(v1);
+                result.vertices.push(v2);
+                result.triangles.push([base, base + 1, base + 2]);
+                num_base_tris += 1;
+            }
         }
     }
 
@@ -611,6 +692,133 @@ pub fn cut_text_holes_in_mesh(
     }
 
     result
+}
+
+/// Recursively subdivide a triangle and classify each sub-triangle
+/// as inside/outside hole contours.
+///
+/// Subdivision: split each edge at its midpoint, creating 4 sub-triangles.
+/// This continues until triangles are small enough to classify by centroid,
+/// or until max depth is reached.
+fn subdivide_and_classify(
+    v0: Point3d,
+    v1: Point3d,
+    v2: Point3d,
+    surface: &TextSurface,
+    contours_2d: &[Vec<(f64, f64)>],
+    hole_indices: &[usize],
+    hole_min_x: &f64,
+    hole_min_y: &f64,
+    hole_max_x: &f64,
+    hole_max_y: &f64,
+    target_edge_len: f64,
+    depth: usize,
+    max_depth: usize,
+    result: &mut TriangleMesh,
+    num_base_tris: &mut usize,
+) {
+    // Compute midpoints of each edge
+    let m01 = Point3d::new(
+        (v0.x + v1.x) / 2.0,
+        (v0.y + v1.y) / 2.0,
+        (v0.z + v1.z) / 2.0,
+    );
+    let m12 = Point3d::new(
+        (v1.x + v2.x) / 2.0,
+        (v1.y + v2.y) / 2.0,
+        (v1.z + v2.z) / 2.0,
+    );
+    let m20 = Point3d::new(
+        (v2.x + v0.x) / 2.0,
+        (v2.y + v0.y) / 2.0,
+        (v2.z + v0.z) / 2.0,
+    );
+
+    // 4 sub-triangles from midpoint subdivision
+    let sub_tris = [
+        (v0, m01, m20),
+        (m01, v1, m12),
+        (m20, m12, v2),
+        (m01, m12, m20),
+    ];
+
+    for (sv0, sv1, sv2) in &sub_tris {
+        let sv0 = *sv0;
+        let sv1 = *sv1;
+        let sv2 = *sv2;
+
+        // Project to 2D
+        let p0_2d = project_3d_to_text_2d(sv0.x, sv0.y, sv0.z, surface);
+        let p1_2d = project_3d_to_text_2d(sv1.x, sv1.y, sv1.z, surface);
+        let p2_2d = project_3d_to_text_2d(sv2.x, sv2.y, sv2.z, surface);
+
+        let tri_min_x = p0_2d.0.min(p1_2d.0).min(p2_2d.0);
+        let tri_min_y = p0_2d.1.min(p1_2d.1).min(p2_2d.1);
+        let tri_max_x = p0_2d.0.max(p1_2d.0).max(p2_2d.0);
+        let tri_max_y = p0_2d.1.max(p1_2d.1).max(p2_2d.1);
+
+        // Fast path: sub-triangle is far from hole → keep
+        if tri_max_x < *hole_min_x || tri_min_x > *hole_max_x ||
+           tri_max_y < *hole_min_y || tri_min_y > *hole_max_y {
+            let base = result.vertices.len() as u32;
+            result.vertices.push(sv0);
+            result.vertices.push(sv1);
+            result.vertices.push(sv2);
+            result.triangles.push([base, base + 1, base + 2]);
+            *num_base_tris += 1;
+            continue;
+        }
+
+        // Check if further subdivision is needed
+        let longest_edge = {
+            let dx01 = sv1.x - sv0.x; let dy01 = sv1.y - sv0.y; let dz01 = sv1.z - sv0.z;
+            let dx12 = sv2.x - sv1.x; let dy12 = sv2.y - sv1.y; let dz12 = sv2.z - sv1.z;
+            let dx20 = sv0.x - sv2.x; let dy20 = sv0.y - sv2.y; let dz20 = sv0.z - sv2.z;
+            let l01 = (dx01*dx01 + dy01*dy01 + dz01*dz01).sqrt();
+            let l12 = (dx12*dx12 + dy12*dy12 + dz12*dz12).sqrt();
+            let l20 = (dx20*dx20 + dy20*dy20 + dz20*dz20).sqrt();
+            l01.max(l12).max(l20)
+        };
+
+        if longest_edge > target_edge_len * 2.0 && depth < max_depth {
+            // Recurse
+            subdivide_and_classify(
+                sv0, sv1, sv2,
+                surface,
+                contours_2d,
+                hole_indices,
+                hole_min_x, hole_min_y, hole_max_x, hole_max_y,
+                target_edge_len,
+                depth + 1,
+                max_depth,
+                result,
+                num_base_tris,
+            );
+        } else {
+            // Small enough or max depth reached — classify by centroid
+            let cx = (sv0.x + sv1.x + sv2.x) / 3.0;
+            let cy = (sv0.y + sv1.y + sv2.y) / 3.0;
+            let cz = (sv0.z + sv1.z + sv2.z) / 3.0;
+            let (tx, ty) = project_3d_to_text_2d(cx, cy, cz, surface);
+
+            let mut inside_hole = false;
+            for &idx in hole_indices {
+                if idx < contours_2d.len() && point_in_polygon_2d(tx, ty, &contours_2d[idx]) {
+                    inside_hole = true;
+                    break;
+                }
+            }
+
+            if !inside_hole {
+                let base = result.vertices.len() as u32;
+                result.vertices.push(sv0);
+                result.vertices.push(sv1);
+                result.vertices.push(sv2);
+                result.triangles.push([base, base + 1, base + 2]);
+                *num_base_tris += 1;
+            }
+        }
+    }
 }
 
 /// Filter out degenerate triangles from a mesh.

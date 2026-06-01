@@ -229,10 +229,41 @@ impl TriangleMesh {
         area
     }
 
-    /// Transform all vertices.
+    /// Transform all vertices and normals.
+    ///
+    /// Vertices are transformed by the full 4×4 matrix (including translation).
+    /// Normals are transformed by the inverse-transpose of the upper-left 3×3
+    /// submatrix — this preserves correct lighting/backface-culling for
+    /// non-uniform scaling and reflection transforms.
     pub fn transform(&mut self, m: &[[f64; 4]; 4]) {
         for v in &mut self.vertices {
             *v = v.transform(m);
+        }
+        // Transform normals by inverse-transpose of 3×3 rotation
+        if let Some(ref mut normals) = self.normals {
+            let inv_transpose = compute_normal_transform(m);
+            for n in normals.iter_mut() {
+                let nx = inv_transpose[0][0] * n[0] + inv_transpose[0][1] * n[1] + inv_transpose[0][2] * n[2];
+                let ny = inv_transpose[1][0] * n[0] + inv_transpose[1][1] * n[1] + inv_transpose[1][2] * n[2];
+                let nz = inv_transpose[2][0] * n[0] + inv_transpose[2][1] * n[1] + inv_transpose[2][2] * n[2];
+                let len = (nx * nx + ny * ny + nz * nz).sqrt();
+                if len > 1e-15 {
+                    *n = [nx / len, ny / len, nz / len];
+                }
+            }
+        }
+        // Face normals also need to be transformed
+        if let Some(ref mut face_normals) = self.face_normals {
+            let inv_transpose = compute_normal_transform(m);
+            for n in face_normals.iter_mut() {
+                let nx = inv_transpose[0][0] * n[0] + inv_transpose[0][1] * n[1] + inv_transpose[0][2] * n[2];
+                let ny = inv_transpose[1][0] * n[0] + inv_transpose[1][1] * n[1] + inv_transpose[1][2] * n[2];
+                let nz = inv_transpose[2][0] * n[0] + inv_transpose[2][1] * n[1] + inv_transpose[2][2] * n[2];
+                let len = (nx * nx + ny * ny + nz * nz).sqrt();
+                if len > 1e-15 {
+                    *n = [nx / len, ny / len, nz / len];
+                }
+            }
         }
     }
 }
@@ -250,4 +281,40 @@ pub struct Point2dForTriangulation {
 pub struct ConstraintEdge {
     pub start: usize,
     pub end: usize,
+}
+
+/// Compute the inverse-transpose of the upper-left 3×3 submatrix of a 4×4 matrix.
+///
+/// This is used for transforming normals: if vertices are transformed by M,
+/// then normals must be transformed by (M⁻¹)ᵀ to remain correct under
+/// non-uniform scaling and reflection transforms.
+fn compute_normal_transform(m: &[[f64; 4]; 4]) -> [[f64; 3]; 3] {
+    // Extract 3×3 submatrix
+    let a = m[0][0]; let b = m[0][1]; let c = m[0][2];
+    let d = m[1][0]; let e = m[1][1]; let f = m[1][2];
+    let g = m[2][0]; let h = m[2][1]; let i = m[2][2];
+
+    // Compute determinant of 3×3
+    let det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+
+    if det.abs() < 1e-15 {
+        // Degenerate matrix — return identity
+        return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    }
+
+    let inv_det = 1.0 / det;
+
+    // Compute inverse of 3×3 (cofactor matrix transposed, divided by det)
+    let inv = [
+        [(e * i - f * h) * inv_det, (c * h - b * i) * inv_det, (b * f - c * e) * inv_det],
+        [(f * g - d * i) * inv_det, (a * i - c * g) * inv_det, (c * d - a * f) * inv_det],
+        [(d * h - e * g) * inv_det, (b * g - a * h) * inv_det, (a * e - b * d) * inv_det],
+    ];
+
+    // Transpose the inverse to get (M⁻¹)ᵀ
+    [
+        [inv[0][0], inv[1][0], inv[2][0]],
+        [inv[0][1], inv[1][1], inv[2][1]],
+        [inv[0][2], inv[1][2], inv[2][2]],
+    ]
 }

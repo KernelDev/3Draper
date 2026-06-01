@@ -778,7 +778,7 @@ impl ViewerApp {
         self.load_mesh(mesh, "NURBS (Wavy Sheet)");
     }
 
-    /// Load Box with "3" hole CUT OUT on the front face.
+    /// Load Box with "3" hole CUT OUT on the top face.
     fn load_box_text(&mut self) {
         let solid = ShapeBuilder::make_box(100.0, 80.0, 60.0);
         let base_mesh = triangulate_solid(&solid, &wasm_tri_params());
@@ -786,7 +786,7 @@ impl ViewerApp {
             &base_mesh,
             "3",
             &TextSurface::Plane { z: 30.0 },
-            0.5,   // text scale
+            3.0,   // text scale — large enough to be visible on 100×80 face
             5.0,   // hole depth
             [0.15, 0.15, 0.2, 1.0], // dark hole color
         );
@@ -804,7 +804,7 @@ impl ViewerApp {
             &base_mesh,
             "3",
             &TextSurface::Cylinder { radius: 40.0, height: 100.0 },
-            0.4,   // text scale
+            2.5,   // text scale — visible on r=40 cylinder
             5.0,   // hole depth
             [0.1, 0.15, 0.1, 1.0], // dark green hole
         );
@@ -822,7 +822,7 @@ impl ViewerApp {
             &base_mesh,
             "3",
             &TextSurface::Sphere { center: [0.0, 0.0, 0.0], radius: 50.0 },
-            0.5,   // text scale
+            3.0,   // text scale — visible on r=50 sphere
             5.0,   // hole depth
             [0.1, 0.1, 0.2, 1.0], // dark blue hole
         );
@@ -843,7 +843,7 @@ impl ViewerApp {
             &base_mesh,
             "3",
             &TextSurface::Cone { radius: 40.0, height: 80.0 },
-            0.4,   // text scale
+            2.5,   // text scale — visible on r=40 cone
             5.0,   // hole depth
             [0.2, 0.15, 0.05, 1.0], // dark amber hole
         );
@@ -861,7 +861,7 @@ impl ViewerApp {
             &base_mesh,
             "3",
             &TextSurface::Torus { major_radius: 40.0, minor_radius: 12.0 },
-            0.3,   // text scale (smaller for torus)
+            2.0,   // text scale — visible on torus
             3.0,   // hole depth
             [0.15, 0.05, 0.2, 1.0], // dark purple hole
         );
@@ -893,7 +893,7 @@ impl ViewerApp {
             &base_mesh,
             "3",
             &TextSurface::Cylinder { radius: 30.0, height: 100.0 },
-            0.4,   // text scale
+            2.0,   // text scale — visible on revolution
             5.0,   // hole depth
             [0.05, 0.15, 0.15, 1.0], // dark cyan hole
         );
@@ -936,7 +936,7 @@ impl ViewerApp {
             &base_mesh,
             "3",
             &TextSurface::Plane { z: 10.0 },
-            0.5,   // text scale
+            2.5,   // text scale — visible on NURBS sheet
             5.0,   // hole depth
             [0.2, 0.1, 0.15, 1.0], // dark pink hole
         );
@@ -963,7 +963,7 @@ impl ViewerApp {
             &base_mesh,
             "3",
             &TextSurface::Cylinder { radius: 30.0, height: 80.0 },
-            0.4,   // text scale
+            2.0,   // text scale — visible on extrusion
             5.0,   // hole depth
             [0.1, 0.08, 0.05, 1.0], // dark brown hole
         );

@@ -1496,24 +1496,34 @@ impl<'a> StepConverter<'a> {
                             if entity.type_name == "ITEM_DEFINED_TRANSFORMATION" {
                                 return Self::compute_item_defined_transform_static(step, &entity);
                             }
+                            // Support CARTESIAN_TRANSFORMATION_OPERATOR_3D
+                            if entity.type_name == "CARTESIAN_TRANSFORMATION_OPERATOR_3D" {
+                                return Self::compute_cartesian_transform_static(step, &entity);
+                            }
                         }
                     }
                 }
             }
         }
 
-        // Fallback: search params for IDT reference
+        // Fallback: search params for IDT or CTO3D reference
         for param in &srr.params {
             if let Some(ref_id) = get_ref_standalone(param) {
                 if let Some(entity) = step.find_entity(ref_id) {
                     if entity.type_name == "ITEM_DEFINED_TRANSFORMATION" {
                         return Self::compute_item_defined_transform_static(step, &entity);
                     }
+                    if entity.type_name == "CARTESIAN_TRANSFORMATION_OPERATOR_3D" {
+                        return Self::compute_cartesian_transform_static(step, &entity);
+                    }
                     for inner_param in &entity.params {
                         if let Some(inner_id) = get_ref_standalone(inner_param) {
                             if let Some(inner_entity) = step.find_entity(inner_id) {
                                 if inner_entity.type_name == "ITEM_DEFINED_TRANSFORMATION" {
                                     return Self::compute_item_defined_transform_static(step, &inner_entity);
+                                }
+                                if inner_entity.type_name == "CARTESIAN_TRANSFORMATION_OPERATOR_3D" {
+                                    return Self::compute_cartesian_transform_static(step, &inner_entity);
                                 }
                             }
                         }
@@ -1564,6 +1574,100 @@ impl<'a> StepConverter<'a> {
 
         let o_inv = mat4_inverse(&o)?;
         Some(mat4_mul(&t, &o_inv))
+    }
+
+    /// Static version: compute a 4×4 transform from CARTESIAN_TRANSFORMATION_OPERATOR_3D.
+    ///
+    /// CTO3D directly specifies a coordinate system (origin + local axes) with an
+    /// optional scale factor. This is an alternative to ITEM_DEFINED_TRANSFORMATION
+    /// used by some STEP exporters.
+    ///
+    /// STEP definition:
+    ///   CARTESIAN_TRANSFORMATION_OPERATOR_3D(
+    ///     name,                           -- optional
+    ///     origin,                         -- CARTESIAN_POINT
+    ///     axis1 : OPTIONAL DIRECTION,     -- local X (u axis)
+    ///     axis2 : OPTIONAL DIRECTION,     -- local Y (v axis, in 3D variant)
+    ///     scale,                          -- scale factor (default 1.0)
+    ///     axis3 : OPTIONAL DIRECTION      -- local Z
+    ///   )
+    fn compute_cartesian_transform_static(step: &StepFile, cto: &crate::schema::StepEntity) -> Option<[[f64; 4]; 4]> {
+        let mut origin = [0.0_f64; 3];
+        let mut axis1: Option<[f64; 3]> = None;
+        let mut axis2: Option<[f64; 3]> = None;
+        let mut axis3: Option<[f64; 3]> = None;
+        let mut scale = 1.0_f64;
+
+        for (i, param) in cto.params.iter().enumerate() {
+            match i {
+                0 => { /* name — skip */ }
+                1 => {
+                    // origin — CARTESIAN_POINT reference
+                    if let Some(ref_id) = get_ref_standalone(param) {
+                        if let Some(cp) = step.find_entity(ref_id) {
+                            if let Some(pt) = get_cartesian_point_coords_standalone(&cp) {
+                                origin = pt;
+                            }
+                        }
+                    }
+                }
+                2 => { /* axis1 (u direction) */ axis1 = get_direction_from_param_standalone(step, param); }
+                3 => { /* axis2 (v direction) */ axis2 = get_direction_from_param_standalone(step, param); }
+                4 => {
+                    // scale
+                    if let Some(s) = get_float_standalone(param) {
+                        scale = s;
+                    }
+                }
+                5 => { /* axis3 (w direction / Z) */ axis3 = get_direction_from_param_standalone(step, param); }
+                _ => {}
+            }
+        }
+
+        // Build orthogonal coordinate frame
+        // Z = axis3 (if provided), else [0,0,1]
+        let z = axis3.unwrap_or([0.0, 0.0, 1.0]);
+        // X = axis1 (if provided), else default perpendicular to Z
+        let x_raw = axis1.unwrap_or_else(|| {
+            if z[2].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] }
+        });
+        // Y = axis2 (if provided), else Z × X
+        let y_raw = axis2.unwrap_or_else(|| {
+            let y = [
+                z[1] * x_raw[2] - z[2] * x_raw[1],
+                z[2] * x_raw[0] - z[0] * x_raw[2],
+                z[0] * x_raw[1] - z[1] * x_raw[0],
+            ];
+            let len = (y[0]*y[0] + y[1]*y[1] + y[2]*y[2]).sqrt();
+            if len > 1e-10 { [y[0]/len, y[1]/len, y[2]/len] } else { [0.0, 1.0, 0.0] }
+        });
+
+        // Project X onto plane perpendicular to Z (STEP spec requirement)
+        let dot_xz = x_raw[0]*z[0] + x_raw[1]*z[1] + x_raw[2]*z[2];
+        let x_proj = [x_raw[0] - dot_xz*z[0], x_raw[1] - dot_xz*z[1], x_raw[2] - dot_xz*z[2]];
+        let x_len = (x_proj[0]*x_proj[0] + x_proj[1]*x_proj[1] + x_proj[2]*x_proj[2]).sqrt();
+        let x = if x_len > 1e-10 { [x_proj[0]/x_len, x_proj[1]/x_len, x_proj[2]/x_len] } else { x_raw };
+
+        // Recompute Y = Z × X to ensure orthogonality
+        let y = [
+            z[1]*x[2] - z[2]*x[1],
+            z[2]*x[0] - z[0]*x[2],
+            z[0]*x[1] - z[1]*x[0],
+        ];
+        let y_len = (y[0]*y[0] + y[1]*y[1] + y[2]*y[2]).sqrt();
+        let y = if y_len > 1e-10 { [y[0]/y_len, y[1]/y_len, y[2]/y_len] } else { y_raw };
+
+        // Normalize Z
+        let z_len = (z[0]*z[0] + z[1]*z[1] + z[2]*z[2]).sqrt();
+        let z = if z_len > 1e-10 { [z[0]/z_len, z[1]/z_len, z[2]/z_len] } else { z };
+
+        // Build 4×4 matrix with scale
+        Some([
+            [x[0] * scale, y[0] * scale, z[0] * scale, origin[0]],
+            [x[1] * scale, y[1] * scale, z[1] * scale, origin[1]],
+            [x[2] * scale, y[2] * scale, z[2] * scale, origin[2]],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
     }
 
     fn convert(&self) -> Result<TriangleMesh, String> {
@@ -2906,18 +3010,25 @@ impl<'a> StepConverter<'a> {
                             if entity.type_name == "ITEM_DEFINED_TRANSFORMATION" {
                                 return self.compute_item_defined_transform(&entity);
                             }
+                            // Support CARTESIAN_TRANSFORMATION_OPERATOR_3D
+                            if entity.type_name == "CARTESIAN_TRANSFORMATION_OPERATOR_3D" {
+                                return self.compute_cartesian_transform(&entity);
+                            }
                         }
                     }
                 }
             }
         }
 
-        // Fallback: search all params for direct reference to ITEM_DEFINED_TRANSFORMATION
+        // Fallback: search all params for direct reference to ITEM_DEFINED_TRANSFORMATION or CTO3D
         for param in &srr.params {
             if let Some(ref_id) = self.get_ref(param) {
                 if let Some(entity) = self.step.find_entity(ref_id) {
                     if entity.type_name == "ITEM_DEFINED_TRANSFORMATION" {
                         return self.compute_item_defined_transform(&entity);
+                    }
+                    if entity.type_name == "CARTESIAN_TRANSFORMATION_OPERATOR_3D" {
+                        return self.compute_cartesian_transform(&entity);
                     }
                     // Also search inside nested entities
                     for inner_param in &entity.params {
@@ -2925,6 +3036,9 @@ impl<'a> StepConverter<'a> {
                             if let Some(inner_entity) = self.step.find_entity(inner_id) {
                                 if inner_entity.type_name == "ITEM_DEFINED_TRANSFORMATION" {
                                     return self.compute_item_defined_transform(&inner_entity);
+                                }
+                                if inner_entity.type_name == "CARTESIAN_TRANSFORMATION_OPERATOR_3D" {
+                                    return self.compute_cartesian_transform(&inner_entity);
                                 }
                             }
                         }
@@ -2977,6 +3091,115 @@ impl<'a> StepConverter<'a> {
         let o_inv = mat4_inverse(&o)?;
         let result = mat4_mul(&t, &o_inv);
         Some(result)
+    }
+
+    /// Compute a 4×4 transform from CARTESIAN_TRANSFORMATION_OPERATOR_3D.
+    ///
+    /// CTO3D directly specifies a coordinate system (origin + local axes) with an
+    /// optional scale factor. This is an alternative to ITEM_DEFINED_TRANSFORMATION
+    /// used by some STEP exporters.
+    fn compute_cartesian_transform(&self, cto: &crate::schema::StepEntity) -> Option<[[f64; 4]; 4]> {
+        let mut origin = [0.0_f64; 3];
+        let mut axis1: Option<[f64; 3]> = None;
+        let mut axis2: Option<[f64; 3]> = None;
+        let mut axis3: Option<[f64; 3]> = None;
+        let mut scale = 1.0_f64;
+
+        for (i, param) in cto.params.iter().enumerate() {
+            match i {
+                0 => { /* name — skip */ }
+                1 => {
+                    // origin — CARTESIAN_POINT reference
+                    if let Some(ref_id) = self.get_ref(param) {
+                        if let Some(cp) = self.step.find_entity(ref_id) {
+                            for cp_param in &cp.params {
+                                if let StepValue::List(coords) = cp_param {
+                                    let x = coords.get(0).and_then(|v| self.get_float(v))?;
+                                    let y = coords.get(1).and_then(|v| self.get_float(v))?;
+                                    let z = coords.get(2).and_then(|v| self.get_float(v)).unwrap_or(0.0);
+                                    origin = [x, y, z];
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                2 => { /* axis1 (u direction) */ axis1 = self.get_direction_from_param(param); }
+                3 => { /* axis2 (v direction) */ axis2 = self.get_direction_from_param(param); }
+                4 => {
+                    // scale
+                    if let Some(s) = self.get_float(param) {
+                        scale = s;
+                    }
+                }
+                5 => { /* axis3 (w direction / Z) */ axis3 = self.get_direction_from_param(param); }
+                _ => {}
+            }
+        }
+
+        // Build orthogonal coordinate frame
+        let z = axis3.unwrap_or([0.0, 0.0, 1.0]);
+        let x_raw = axis1.unwrap_or_else(|| {
+            if z[2].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] }
+        });
+        let y_raw = axis2.unwrap_or_else(|| {
+            let y = [
+                z[1] * x_raw[2] - z[2] * x_raw[1],
+                z[2] * x_raw[0] - z[0] * x_raw[2],
+                z[0] * x_raw[1] - z[1] * x_raw[0],
+            ];
+            let len = (y[0]*y[0] + y[1]*y[1] + y[2]*y[2]).sqrt();
+            if len > 1e-10 { [y[0]/len, y[1]/len, y[2]/len] } else { [0.0, 1.0, 0.0] }
+        });
+
+        // Project X onto plane perpendicular to Z (STEP spec requirement)
+        let dot_xz = x_raw[0]*z[0] + x_raw[1]*z[1] + x_raw[2]*z[2];
+        let x_proj = [x_raw[0] - dot_xz*z[0], x_raw[1] - dot_xz*z[1], x_raw[2] - dot_xz*z[2]];
+        let x_len = (x_proj[0]*x_proj[0] + x_proj[1]*x_proj[1] + x_proj[2]*x_proj[2]).sqrt();
+        let x = if x_len > 1e-10 { [x_proj[0]/x_len, x_proj[1]/x_len, x_proj[2]/x_len] } else { x_raw };
+
+        // Recompute Y = Z × X to ensure orthogonality
+        let y = [
+            z[1]*x[2] - z[2]*x[1],
+            z[2]*x[0] - z[0]*x[2],
+            z[0]*x[1] - z[1]*x[0],
+        ];
+        let y_len = (y[0]*y[0] + y[1]*y[1] + y[2]*y[2]).sqrt();
+        let y = if y_len > 1e-10 { [y[0]/y_len, y[1]/y_len, y[2]/y_len] } else { y_raw };
+
+        // Normalize Z
+        let z_len = (z[0]*z[0] + z[1]*z[1] + z[2]*z[2]).sqrt();
+        let z = if z_len > 1e-10 { [z[0]/z_len, z[1]/z_len, z[2]/z_len] } else { z };
+
+        // Build 4×4 matrix with scale
+        Some([
+            [x[0] * scale, y[0] * scale, z[0] * scale, origin[0]],
+            [x[1] * scale, y[1] * scale, z[1] * scale, origin[1]],
+            [x[2] * scale, y[2] * scale, z[2] * scale, origin[2]],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+    }
+
+    /// Helper: extract a [f64;3] direction from a DIRECTION entity referenced by a StepValue param.
+    fn get_direction_from_param(&self, param: &StepValue) -> Option<[f64; 3]> {
+        if let Some(ref_id) = self.get_ref(param) {
+            if let Some(dir_entity) = self.step.find_entity(ref_id) {
+                if dir_entity.type_name == "DIRECTION" {
+                    for dir_param in &dir_entity.params {
+                        if let StepValue::List(coords) = dir_param {
+                            let x = coords.get(0).and_then(|v| self.get_float(v))?;
+                            let y = coords.get(1).and_then(|v| self.get_float(v))?;
+                            let z = coords.get(2).and_then(|v| self.get_float(v)).unwrap_or(0.0);
+                            let len = (x*x + y*y + z*z).sqrt();
+                            if len > 1e-10 {
+                                return Some([x/len, y/len, z/len]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Find the MANIFOLD_SOLID_BREP associated with a PRODUCT_DEFINITION.
@@ -6723,7 +6946,18 @@ impl<'a> StepConverter<'a> {
 
         let origin = origin?;
         let z_dir = directions.get(0).copied().unwrap_or(Direction3d::Z);
-        let x_dir = directions.get(1).copied().unwrap_or_else(|| Self::default_x_dir(&z_dir));
+        let x_dir_raw = directions.get(1).copied().unwrap_or_else(|| Self::default_x_dir(&z_dir));
+
+        // STEP spec: ref_direction is approximate — must be projected onto the plane
+        // perpendicular to axis (z_dir) before use. This ensures the resulting
+        // coordinate frame is orthogonal.
+        let dot_xz = x_dir_raw.x * z_dir.x + x_dir_raw.y * z_dir.y + x_dir_raw.z * z_dir.z;
+        let x_proj = Direction3d::new(
+            x_dir_raw.x - dot_xz * z_dir.x,
+            x_dir_raw.y - dot_xz * z_dir.y,
+            x_dir_raw.z - dot_xz * z_dir.z,
+        );
+        let x_dir = x_proj.unwrap_or(x_dir_raw);
 
         Some((origin, z_dir, x_dir))
     }
@@ -6804,6 +7038,47 @@ fn get_float_standalone(value: &StepValue) -> Option<f64> {
     }
 }
 
+/// Standalone: extract a [f64;3] direction from a DIRECTION entity referenced by a StepValue param.
+fn get_direction_from_param_standalone(step: &StepFile, param: &StepValue) -> Option<[f64; 3]> {
+    if let Some(ref_id) = get_ref_standalone(param) {
+        if let Some(entity) = step.find_entity(ref_id) {
+            if entity.type_name == "DIRECTION" {
+                return resolve_direction_coords_standalone(&entity);
+            }
+        }
+    }
+    None
+}
+
+/// Standalone: extract [x,y,z] coordinates from a DIRECTION entity's param list.
+fn resolve_direction_coords_standalone(entity: &crate::schema::StepEntity) -> Option<[f64; 3]> {
+    for param in &entity.params {
+        if let StepValue::List(coords) = param {
+            let x = get_float_standalone(coords.get(0)?)?;
+            let y = get_float_standalone(coords.get(1)?)?;
+            let z = coords.get(2).and_then(|v| get_float_standalone(v)).unwrap_or(0.0);
+            let len = (x*x + y*y + z*z).sqrt();
+            if len > 1e-10 {
+                return Some([x/len, y/len, z/len]);
+            }
+        }
+    }
+    None
+}
+
+/// Standalone: extract [x,y,z] coordinates from a CARTESIAN_POINT entity.
+fn get_cartesian_point_coords_standalone(entity: &crate::schema::StepEntity) -> Option<[f64; 3]> {
+    for param in &entity.params {
+        if let StepValue::List(coords) = param {
+            let x = get_float_standalone(coords.get(0)?)?;
+            let y = get_float_standalone(coords.get(1)?)?;
+            let z = coords.get(2).and_then(|v| get_float_standalone(v)).unwrap_or(0.0);
+            return Some([x, y, z]);
+        }
+    }
+    None
+}
+
 /// Standalone version of resolve_cartesian_point.
 fn resolve_cartesian_point_standalone(step: &StepFile, point_id: i64) -> Option<Point3d> {
     let entity = step.find_entity(point_id)?;
@@ -6866,7 +7141,19 @@ fn resolve_axis2_standalone(step: &StepFile, axis2_id: i64) -> Option<(Point3d, 
 
     let origin = origin?;
     let z_dir = directions.get(0).copied().unwrap_or(Direction3d::Z);
-    let x_dir = directions.get(1).copied().unwrap_or_else(|| default_x_dir_standalone(&z_dir));
+    let x_dir_raw = directions.get(1).copied().unwrap_or_else(|| default_x_dir_standalone(&z_dir));
+
+    // STEP spec: ref_direction is approximate — must be projected onto the plane
+    // perpendicular to axis (z_dir) before use. This ensures the resulting
+    // coordinate frame is orthogonal.
+    // x_proj = x_raw - dot(x_raw, z) * z
+    let dot_xz = x_dir_raw.x * z_dir.x + x_dir_raw.y * z_dir.y + x_dir_raw.z * z_dir.z;
+    let x_proj = Direction3d::new(
+        x_dir_raw.x - dot_xz * z_dir.x,
+        x_dir_raw.y - dot_xz * z_dir.y,
+        x_dir_raw.z - dot_xz * z_dir.z,
+    );
+    let x_dir = x_proj.unwrap_or(x_dir_raw);
 
     Some((origin, z_dir, x_dir))
 }
