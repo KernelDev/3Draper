@@ -863,7 +863,12 @@ struct BridgeResult {
 }
 
 /// Find the best bridge edge between an outer polygon and a hole.
-/// Uses the rightmost-hole-point / closest-outer-point technique.
+/// Uses the rightmost-hole-point / closest-visible-outer-point technique.
+///
+/// For non-convex polygons (like L-shapes), the simple "closest point" approach
+/// can produce bridge edges that cross through the concave part of the polygon,
+/// creating self-intersecting merged polygons. This function verifies that the
+/// bridge edge doesn't cross any polygon edges before accepting it.
 fn find_bridge_edge(outer_2d: &[Point2d], hole_2d: &[Point2d]) -> BridgeResult {
     // Find rightmost point of the hole
     let mut hole_idx = 0;
@@ -875,21 +880,115 @@ fn find_bridge_edge(outer_2d: &[Point2d], hole_2d: &[Point2d]) -> BridgeResult {
         }
     }
 
-    // Find closest point on outer polygon to the rightmost hole point
-    let hole_pt = &hole_2d[hole_idx];
-    let mut outer_idx = 0;
-    let mut min_dist = f64::MAX;
-    for (i, p) in outer_2d.iter().enumerate() {
-        let dx = p.u - hole_pt.u;
-        let dy = p.v - hole_pt.v;
-        let dist = dx * dx + dy * dy;
-        if dist < min_dist {
-            min_dist = dist;
-            outer_idx = i;
+    let hole_pt = hole_2d[hole_idx];
+
+    // Sort outer polygon vertices by distance to the rightmost hole point (closest first)
+    let mut candidates: Vec<(usize, f64)> = outer_2d.iter().enumerate()
+        .map(|(i, p)| {
+            let dx = p.u - hole_pt.u;
+            let dy = p.v - hole_pt.v;
+            (i, dx * dx + dy * dy)
+        })
+        .collect();
+    candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Try each candidate in order of distance — accept the first visible one
+    let fallback_idx = candidates[0].0;
+    let bridge = candidates.into_iter().find(|(outer_idx, _)| {
+        let outer_pt = outer_2d[*outer_idx];
+        is_bridge_visible(outer_2d, hole_pt, outer_pt, *outer_idx)
+    });
+
+    let outer_idx = bridge.map(|(idx, _)| idx).unwrap_or(fallback_idx);
+
+    BridgeResult { outer_idx, hole_idx }
+}
+
+/// Check if a bridge edge from `hole_pt` to `outer_pt` (at `outer_idx`) is visible,
+/// meaning it doesn't cross any edge of the outer polygon.
+fn is_bridge_visible(
+    outer_2d: &[Point2d],
+    hole_pt: Point2d,
+    outer_pt: Point2d,
+    outer_idx: usize,
+) -> bool {
+    let n = outer_2d.len();
+
+    // Check if the bridge edge intersects any edge of the outer polygon.
+    // We skip the two edges adjacent to outer_idx since they share the endpoint.
+    for i in 0..n {
+        let j = (i + 1) % n;
+
+        // Skip edges adjacent to the bridge endpoint
+        if i == outer_idx || j == outer_idx {
+            continue;
+        }
+
+        let a = outer_2d[i];
+        let b = outer_2d[j];
+
+        if segments_intersect(hole_pt, outer_pt, a, b) {
+            return false;
         }
     }
 
-    BridgeResult { outer_idx, hole_idx }
+    // Also check that the bridge edge doesn't go outside the polygon
+    // by verifying the midpoint is inside the outer polygon
+    let mid_u = (hole_pt.u + outer_pt.u) / 2.0;
+    let mid_v = (hole_pt.v + outer_pt.v) / 2.0;
+    let mid = Point2d::new(mid_u, mid_v);
+    if !point_in_polygon_check(&mid, outer_2d) {
+        return false;
+    }
+
+    true
+}
+
+/// Check if two line segments (p1→p2 and p3→p4) properly intersect.
+/// Uses the orientation test approach.
+fn segments_intersect(p1: Point2d, p2: Point2d, p3: Point2d, p4: Point2d) -> bool {
+    let d1 = cross_2d(p3, p4, p1);
+    let d2 = cross_2d(p3, p4, p2);
+    let d3 = cross_2d(p1, p2, p3);
+    let d4 = cross_2d(p1, p2, p4);
+
+    if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
+        && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
+    {
+        return true;
+    }
+
+    // Check collinear cases (degenerate — treat as non-intersecting for robustness)
+    false
+}
+
+/// Cross product of vectors (p2-p1) and (p3-p1) in 2D.
+fn cross_2d(p1: Point2d, p2: Point2d, p3: Point2d) -> f64 {
+    (p2.u - p1.u) * (p3.v - p1.v) - (p2.v - p1.v) * (p3.u - p1.u)
+}
+
+/// Point-in-polygon test using ray casting for 2D points.
+/// (Used by bridge edge visibility checking for hole merging)
+fn point_in_polygon_check(point: &Point2d, polygon: &[Point2d]) -> bool {
+    let n = polygon.len();
+    if n < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let yi = polygon[i].v;
+        let yj = polygon[j].v;
+        let xi = polygon[i].u;
+        let xj = polygon[j].u;
+        if ((yi > point.v) != (yj > point.v))
+            && (point.u < (xj - xi) * (point.v - yi) / (yj - yi) + xi)
+        {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
 }
 
 // ============================================================

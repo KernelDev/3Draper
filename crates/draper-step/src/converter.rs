@@ -883,8 +883,9 @@ pub fn triangulate_pending_instance(
 }
 
 /// Assign instance_index to leaf AssemblyNodes for pending instances.
+/// Uses simple sequential matching since both tree leaves and instances
+/// are produced in the same DFS order.
 fn assign_instance_indices_pending(root: &mut AssemblyNode, instances: &[PendingBrepInstance], _next_index: &mut usize) {
-    // Same logic as assign_instance_indices but for PendingBrepInstance
     let mut leaves: Vec<*mut AssemblyNode> = Vec::new();
     {
         let mut stack: Vec<*mut AssemblyNode> = vec![root as *mut AssemblyNode];
@@ -900,48 +901,20 @@ fn assign_instance_indices_pending(root: &mut AssemblyNode, instances: &[Pending
         }
     }
 
-    let mut inst_idx: usize = 0;
-    for leaf_ptr in leaves {
-        let leaf = unsafe { &mut *leaf_ptr };
-        let leaf_brep = match leaf.brep_id {
-            Some(id) => id,
-            None => continue,
-        };
-
-        let mut found = false;
-        for i in inst_idx..instances.len() {
-            if instances[i].brep_id == leaf_brep {
-                leaf.instance_index = Some(i);
-                inst_idx = i + 1;
-                found = true;
-                break;
-            }
-        }
-
-        if !found {
-            for i in 0..instances.len() {
-                if instances[i].brep_id == leaf_brep {
-                    leaf.instance_index = Some(i);
-                    found = true;
-                    break;
-                }
-            }
+    // Simple 1:1 sequential assignment — both leaves and instances are in DFS order
+    for (i, leaf_ptr) in leaves.iter().enumerate() {
+        let leaf = unsafe { &mut **leaf_ptr };
+        if leaf.brep_id.is_some() && i < instances.len() {
+            leaf.instance_index = Some(i);
         }
     }
 }
 
-/// Assign instance_index to leaf AssemblyNodes by finding the matching instance
-/// from the instances list. Matching is based on brep_id and the NAUO traversal order.
+/// Assign instance_index to leaf AssemblyNodes by sequential DFS position.
 ///
-/// The key insight: `walk_assembly_tree_detailed` creates instances in the order it
-/// encounters leaf NAUO nodes. `build_assembly_tree` creates tree leaves in the same
-/// NAUO order. However, the instances list may contain MORE entries than tree leaves
-/// because some BREPs appear at multiple positions (multiple NAUO references to the
-/// same PD). The tree has one leaf per NAUO reference, but instances may also include
-/// sub-assembly BREP expansion.
-///
-/// We match by walking tree leaves and instances in parallel, using brep_id to
-/// synchronize when they diverge.
+/// Both tree leaves (from `build_assembly_node_iterative`) and instances
+/// (from `walk_assembly_tree_detailed`) are produced in the same DFS order,
+/// so we can use simple 1:1 sequential matching instead of brep_id matching.
 fn assign_instance_indices(root: &mut AssemblyNode, instances: &[DetailedMeshInstance], _next_index: &mut usize) {
     // Collect tree leaves in DFS order (leftmost child first)
     let mut leaves: Vec<*mut AssemblyNode> = Vec::new();
@@ -960,36 +933,11 @@ fn assign_instance_indices(root: &mut AssemblyNode, instances: &[DetailedMeshIns
         }
     }
 
-    // For each tree leaf, find the matching instance by brep_id
-    // Walk through instances sequentially, advancing for each tree leaf match
-    let mut inst_idx: usize = 0;
-    for leaf_ptr in leaves {
-        let leaf = unsafe { &mut *leaf_ptr };
-        let leaf_brep = match leaf.brep_id {
-            Some(id) => id,
-            None => continue,
-        };
-
-        // Search forward from inst_idx for a matching instance
-        let mut found = false;
-        for i in inst_idx..instances.len() {
-            if instances[i].brep_id == leaf_brep {
-                leaf.instance_index = Some(i);
-                inst_idx = i + 1;
-                found = true;
-                break;
-            }
-        }
-
-        if !found {
-            // Fallback: search from the beginning (might be a repeat occurrence)
-            for i in 0..instances.len() {
-                if instances[i].brep_id == leaf_brep {
-                    leaf.instance_index = Some(i);
-                    found = true;
-                    break;
-                }
-            }
+    // Simple 1:1 sequential assignment — both leaves and instances are in DFS order
+    for (i, leaf_ptr) in leaves.iter().enumerate() {
+        let leaf = unsafe { &mut **leaf_ptr };
+        if leaf.brep_id.is_some() && i < instances.len() {
+            leaf.instance_index = Some(i);
         }
     }
 }
@@ -2125,6 +2073,10 @@ impl<'a> StepConverter<'a> {
 
     /// Walk assembly tree producing DetailedMeshInstance results.
     /// Uses an explicit stack to avoid stack overflow on deeply nested assemblies.
+    ///
+    /// IMPORTANT: Instances are produced in DFS order (first child first) to match
+    /// the order of tree leaves in `build_assembly_node_iterative`. This ensures
+    /// that `assign_instance_indices` can correctly map tree leaves to instances.
     fn walk_assembly_tree_detailed(
         &self,
         root_pd_id: i64,
@@ -2138,71 +2090,110 @@ impl<'a> StepConverter<'a> {
         results: &mut Vec<DetailedMeshInstance>,
         _visited: &mut std::collections::HashSet<(i64, i64)>,
     ) {
-        // Explicit stack: (pd_id, composed_transform, depth, ancestor_set)
-        // ancestor_set tracks the chain of PDs from root to current node,
-        // so we detect actual cycles (A→B→C→A) without preventing legitimate
-        // reuse of the same sub-assembly at different positions.
-        let mut stack: Vec<(i64, Option<[[f64; 4]; 4]>, usize, std::collections::HashSet<i64>)> =
-            vec![(root_pd_id, *root_transform, 0, std::collections::HashSet::new())];
-        const MAX_DEPTH: usize = 50;
+        // Work stack: (pd_id, composed_transform, depth, ancestor_set, is_leaf, nauo_name, brep_id)
+        // We push ALL nodes (both sub-assemblies and leaves) onto the stack.
+        // Children are pushed in REVERSE order so the first child is on top (LIFO → DFS).
+        //
+        // For leaf nodes (is_leaf=true), we create the instance immediately when popped.
+        // For sub-assembly nodes (is_leaf=false), we push their children when popped.
+        struct WorkItem {
+            pd_id: i64,
+            composed: Option<[[f64; 4]; 4]>,
+            depth: usize,
+            ancestors: std::collections::HashSet<i64>,
+            is_leaf: bool,
+            nauo_name: String,
+            brep_id: Option<i64>,
+        }
 
-        while let Some((parent_pd_id, parent_transform, depth, ancestors)) = stack.pop() {
-            // Depth limit to prevent infinite loops
-            if depth > MAX_DEPTH {
-                log::warn!("Max depth {} reached at PD #{}, skipping", MAX_DEPTH, parent_pd_id);
-                continue;
-            }
-            // Cycle detection: only skip if this PD is already in our ancestor chain
-            if ancestors.contains(&parent_pd_id) {
-                log::warn!("Cycle detected in NAUO tree at PD #{}, skipping", parent_pd_id);
-                continue;
-            }
+        let mut stack: Vec<WorkItem> = Vec::new();
 
-            let children = match parent_pd_to_children.get(&parent_pd_id) {
-                Some(c) => c,
-                None => continue,
-            };
-
-            for &(nauo_id, child_pd_id, ref nauo_name) in children {
-                // Get this NAUO's transform
-                let nauo_transform = self.find_nauo_transform(nauo_id, child_pd_id);
-
-                // Debug: log transform status for each NAUO
-                log::info!("NAUO #{} '{}' (PD #{}): nauo_transform={}, parent_transform={}",
-                    nauo_id, nauo_name, child_pd_id,
-                    nauo_transform.is_some(), parent_transform.is_some());
-
-                // Compose: parent_transform * nauo_transform
-                let composed = match (&parent_transform, &nauo_transform) {
+        // Push root's children as initial work items (root itself is never a leaf)
+        if let Some(children) = parent_pd_to_children.get(&root_pd_id) {
+            let root_ancestors = std::collections::HashSet::new();
+            // Push in reverse order so first child is processed first
+            for (nauo_id, child_pd_id, nauo_name) in children.iter().rev() {
+                let nauo_transform = self.find_nauo_transform(*nauo_id, *child_pd_id);
+                let composed = match (&root_transform, &nauo_transform) {
                     (Some(pt), Some(nt)) => Some(mat4_mul(pt, nt)),
                     (Some(pt), None) => Some(*pt),
                     (None, Some(nt)) => Some(*nt),
                     (None, None) => None,
                 };
+                let has_nauo_children = parent_pd_to_children.contains_key(child_pd_id);
+                let brep_id = if has_nauo_children { None } else { self.find_pd_brep(*child_pd_id) };
 
-                let has_nauo_children = parent_pd_to_children.contains_key(&child_pd_id);
+                stack.push(WorkItem {
+                    pd_id: *child_pd_id,
+                    composed,
+                    depth: 1,
+                    ancestors: root_ancestors.clone(),
+                    is_leaf: !has_nauo_children,
+                    nauo_name: nauo_name.clone(),
+                    brep_id,
+                });
+            }
+        }
 
-                if has_nauo_children {
-                    // Sub-assembly — push to stack instead of recursing
-                    // Build new ancestor set: current ancestors + current parent
-                    let mut new_ancestors = ancestors.clone();
-                    new_ancestors.insert(parent_pd_id);
-                    stack.push((child_pd_id, composed, depth + 1, new_ancestors));
-                } else if let Some(brep_id) = self.find_pd_brep(child_pd_id) {
+        const MAX_DEPTH: usize = 50;
+
+        while let Some(item) = stack.pop() {
+            // Depth limit to prevent infinite loops
+            if item.depth > MAX_DEPTH {
+                log::warn!("Max depth {} reached at PD #{}, skipping", MAX_DEPTH, item.pd_id);
+                continue;
+            }
+            // Cycle detection: only skip if this PD is already in our ancestor chain
+            if item.ancestors.contains(&item.pd_id) {
+                log::warn!("Cycle detected in NAUO tree at PD #{}, skipping", item.pd_id);
+                continue;
+            }
+
+            if item.is_leaf {
+                // Leaf node — create instance
+                if let Some(brep_id) = item.brep_id {
                     if let Some((mesh, faces)) = self.triangulate_brep_detailed_cached(brep_id, brep_detail_cache, params, bbox) {
                         let mut instance_mesh = mesh.clone();
-                        if let Some(ref tf) = composed {
+                        if let Some(ref tf) = item.composed {
                             instance_mesh.transform(tf);
                         }
                         let color = color_map.get(&brep_id).copied();
-                        let name = format!("{} (BREP#{})", nauo_name, brep_id);
+                        let name = format!("{} (BREP#{})", item.nauo_name, brep_id);
                         results.push(DetailedMeshInstance {
                             name,
                             mesh: instance_mesh,
                             color,
-                            transform: composed,
+                            transform: item.composed,
                             brep_id,
                             faces,
+                        });
+                    }
+                }
+            } else {
+                // Sub-assembly — push children in reverse order (first child on top)
+                if let Some(children) = parent_pd_to_children.get(&item.pd_id) {
+                    for (nauo_id, child_pd_id, nauo_name) in children.iter().rev() {
+                        let nauo_transform = self.find_nauo_transform(*nauo_id, *child_pd_id);
+                        let composed = match (&item.composed, &nauo_transform) {
+                            (Some(pt), Some(nt)) => Some(mat4_mul(pt, nt)),
+                            (Some(pt), None) => Some(*pt),
+                            (None, Some(nt)) => Some(*nt),
+                            (None, None) => None,
+                        };
+                        let has_nauo_children = parent_pd_to_children.contains_key(child_pd_id);
+                        let brep_id = if has_nauo_children { None } else { self.find_pd_brep(*child_pd_id) };
+
+                        let mut new_ancestors = item.ancestors.clone();
+                        new_ancestors.insert(item.pd_id);
+
+                        stack.push(WorkItem {
+                            pd_id: *child_pd_id,
+                            composed,
+                            depth: item.depth + 1,
+                            ancestors: new_ancestors,
+                            is_leaf: !has_nauo_children,
+                            nauo_name: nauo_name.clone(),
+                            brep_id,
                         });
                     }
                 }
@@ -2213,6 +2204,9 @@ impl<'a> StepConverter<'a> {
     /// Walk the assembly tree from a root PD, creating mesh instances
     /// for each leaf BREP occurrence with the correct composed transform.
     /// Uses an explicit stack to avoid stack overflow on deeply nested assemblies.
+    ///
+    /// IMPORTANT: Instances are produced in DFS order (first child first) to match
+    /// the order of tree leaves in `build_assembly_node_iterative`.
     fn walk_assembly_tree(
         &self,
         root_pd_id: i64,
@@ -2226,75 +2220,105 @@ impl<'a> StepConverter<'a> {
         results: &mut Vec<MeshInstance>,
         _visited: &mut std::collections::HashSet<(i64, i64)>,
     ) {
-        // Explicit stack: (pd_id, composed_transform, depth, ancestor_set)
-        // ancestor_set tracks the chain of PDs from root to current node,
-        // so we detect actual cycles (A→B→C→A) without preventing legitimate
-        // reuse of the same sub-assembly at different positions.
-        let mut stack: Vec<(i64, Option<[[f64; 4]; 4]>, usize, std::collections::HashSet<i64>)> =
-            vec![(root_pd_id, *root_transform, 0, std::collections::HashSet::new())];
-        const MAX_DEPTH: usize = 50;
+        // Work stack: ALL nodes (both sub-assemblies and leaves) are pushed.
+        // Children pushed in REVERSE order so first child is on top (LIFO → DFS).
+        struct WorkItem {
+            pd_id: i64,
+            composed: Option<[[f64; 4]; 4]>,
+            depth: usize,
+            ancestors: std::collections::HashSet<i64>,
+            is_leaf: bool,
+            nauo_name: String,
+            brep_id: Option<i64>,
+        }
 
-        while let Some((parent_pd_id, parent_transform, depth, ancestors)) = stack.pop() {
-            // Depth limit to prevent infinite loops
-            if depth > MAX_DEPTH {
-                log::warn!("Max depth {} reached at PD #{}, skipping", MAX_DEPTH, parent_pd_id);
-                continue;
-            }
-            // Cycle detection: only skip if this PD is already in our ancestor chain
-            if ancestors.contains(&parent_pd_id) {
-                log::warn!("Cycle detected in NAUO tree at PD #{}, skipping", parent_pd_id);
-                continue;
-            }
+        let mut stack: Vec<WorkItem> = Vec::new();
 
-            let children = match parent_pd_to_children.get(&parent_pd_id) {
-                Some(c) => c,
-                None => continue, // Leaf with no children in the NAUO tree
-            };
-
-            for &(nauo_id, child_pd_id, ref nauo_name) in children {
-                // Get this NAUO's transform (CDSR → SRR → ITEM_DEFINED_TRANSFORMATION)
-                let nauo_transform = self.find_nauo_transform(nauo_id, child_pd_id);
-
-                // Compose: parent_transform * nauo_transform
-                let composed = match (&parent_transform, &nauo_transform) {
+        if let Some(children) = parent_pd_to_children.get(&root_pd_id) {
+            let root_ancestors = std::collections::HashSet::new();
+            for (nauo_id, child_pd_id, nauo_name) in children.iter().rev() {
+                let nauo_transform = self.find_nauo_transform(*nauo_id, *child_pd_id);
+                let composed = match (&root_transform, &nauo_transform) {
                     (Some(pt), Some(nt)) => Some(mat4_mul(pt, nt)),
                     (Some(pt), None) => Some(*pt),
                     (None, Some(nt)) => Some(*nt),
                     (None, None) => None,
                 };
+                let has_nauo_children = parent_pd_to_children.contains_key(child_pd_id);
+                let brep_id = if has_nauo_children { None } else { self.find_pd_brep(*child_pd_id) };
 
-                // Check if this child PD has NAUO children (sub-assembly) FIRST.
-                // A sub-assembly can have BOTH a BREP and children. In that case,
-                // the BREP represents the assembly's own geometry (which duplicates
-                // the children), so we should push to stack instead of adding the BREP.
-                let has_nauo_children = parent_pd_to_children.contains_key(&child_pd_id);
+                stack.push(WorkItem {
+                    pd_id: *child_pd_id,
+                    composed,
+                    depth: 1,
+                    ancestors: root_ancestors.clone(),
+                    is_leaf: !has_nauo_children,
+                    nauo_name: nauo_name.clone(),
+                    brep_id,
+                });
+            }
+        }
 
-                if has_nauo_children {
-                    // Sub-assembly — push to stack instead of recursing
-                    let mut new_ancestors = ancestors.clone();
-                    new_ancestors.insert(parent_pd_id);
-                    stack.push((child_pd_id, composed, depth + 1, new_ancestors));
-                } else if let Some(brep_id) = self.find_pd_brep(child_pd_id) {
-                    // Leaf node — triangulate BREP and create instance
+        const MAX_DEPTH: usize = 50;
+
+        while let Some(item) = stack.pop() {
+            if item.depth > MAX_DEPTH {
+                log::warn!("Max depth {} reached at PD #{}, skipping", MAX_DEPTH, item.pd_id);
+                continue;
+            }
+            if item.ancestors.contains(&item.pd_id) {
+                log::warn!("Cycle detected in NAUO tree at PD #{}, skipping", item.pd_id);
+                continue;
+            }
+
+            if item.is_leaf {
+                if let Some(brep_id) = item.brep_id {
                     if let Some(mesh) = self.triangulate_brep_cached(brep_id, brep_mesh_cache, params, bbox) {
                         let mut instance_mesh = mesh.clone();
-                        if let Some(ref tf) = composed {
+                        if let Some(ref tf) = item.composed {
                             instance_mesh.transform(tf);
                         }
                         let color = color_map.get(&brep_id).copied();
-                        let name = format!("{} (BREP#{})", nauo_name, brep_id);
+                        let name = format!("{} (BREP#{})", item.nauo_name, brep_id);
                         results.push(MeshInstance {
                             name,
                             mesh: instance_mesh,
                             color,
-                            transform: composed,
+                            transform: item.composed,
                             brep_id,
                         });
                         info!("Instance: {} PD=#{} BREP=#{} color={:?} transform={}",
-                            nauo_name, child_pd_id, brep_id, color, composed.is_some());
+                            item.nauo_name, item.pd_id, brep_id, color, item.composed.is_some());
                     }
                 } else {
-                    warn!("PD=#{} has no NAUO children and no BREP — skipped", child_pd_id);
+                    warn!("PD=#{} has no NAUO children and no BREP — skipped", item.pd_id);
+                }
+            } else {
+                if let Some(children) = parent_pd_to_children.get(&item.pd_id) {
+                    for (nauo_id, child_pd_id, nauo_name) in children.iter().rev() {
+                        let nauo_transform = self.find_nauo_transform(*nauo_id, *child_pd_id);
+                        let composed = match (&item.composed, &nauo_transform) {
+                            (Some(pt), Some(nt)) => Some(mat4_mul(pt, nt)),
+                            (Some(pt), None) => Some(*pt),
+                            (None, Some(nt)) => Some(*nt),
+                            (None, None) => None,
+                        };
+                        let has_nauo_children = parent_pd_to_children.contains_key(child_pd_id);
+                        let brep_id = if has_nauo_children { None } else { self.find_pd_brep(*child_pd_id) };
+
+                        let mut new_ancestors = item.ancestors.clone();
+                        new_ancestors.insert(item.pd_id);
+
+                        stack.push(WorkItem {
+                            pd_id: *child_pd_id,
+                            composed,
+                            depth: item.depth + 1,
+                            ancestors: new_ancestors,
+                            is_leaf: !has_nauo_children,
+                            nauo_name: nauo_name.clone(),
+                            brep_id,
+                        });
+                    }
                 }
             }
         }
@@ -3706,6 +3730,9 @@ impl<'a> StepConverter<'a> {
 
     /// Walk the assembly tree collecting PendingBrepInstance descriptors
     /// without triangulating any geometry.
+    ///
+    /// IMPORTANT: Instances are produced in DFS order (first child first) to match
+    /// the order of tree leaves in `build_assembly_node_iterative`.
     fn collect_pending_from_assembly_tree(
         &self,
         root_pd_id: i64,
@@ -3715,51 +3742,94 @@ impl<'a> StepConverter<'a> {
         results: &mut Vec<PendingBrepInstance>,
         _seen_breps: &mut std::collections::HashSet<i64>,
     ) {
-        // Explicit stack with ancestor tracking — same pattern as walk_assembly_tree
-        let mut stack: Vec<(i64, Option<[[f64; 4]; 4]>, usize, std::collections::HashSet<i64>)> =
-            vec![(root_pd_id, *root_transform, 0, std::collections::HashSet::new())];
-        const MAX_DEPTH: usize = 50;
+        // Work stack: ALL nodes (both sub-assemblies and leaves) are pushed.
+        // Children pushed in REVERSE order so first child is on top (LIFO → DFS).
+        struct WorkItem {
+            pd_id: i64,
+            composed: Option<[[f64; 4]; 4]>,
+            depth: usize,
+            ancestors: std::collections::HashSet<i64>,
+            is_leaf: bool,
+            nauo_name: String,
+            brep_id: Option<i64>,
+        }
 
-        while let Some((parent_pd_id, parent_transform, depth, ancestors)) = stack.pop() {
-            if depth > MAX_DEPTH {
-                log::warn!("Max depth {} reached at PD #{}, skipping", MAX_DEPTH, parent_pd_id);
-                continue;
-            }
-            if ancestors.contains(&parent_pd_id) {
-                log::warn!("Cycle detected in NAUO tree at PD #{}, skipping", parent_pd_id);
-                continue;
-            }
+        let mut stack: Vec<WorkItem> = Vec::new();
 
-            let children = match parent_pd_to_children.get(&parent_pd_id) {
-                Some(c) => c,
-                None => continue,
-            };
-
-            for &(nauo_id, child_pd_id, ref nauo_name) in children {
-                let nauo_transform = self.find_nauo_transform(nauo_id, child_pd_id);
-
-                let composed = match (&parent_transform, &nauo_transform) {
+        if let Some(children) = parent_pd_to_children.get(&root_pd_id) {
+            let root_ancestors = std::collections::HashSet::new();
+            for (nauo_id, child_pd_id, nauo_name) in children.iter().rev() {
+                let nauo_transform = self.find_nauo_transform(*nauo_id, *child_pd_id);
+                let composed = match (&root_transform, &nauo_transform) {
                     (Some(pt), Some(nt)) => Some(mat4_mul(pt, nt)),
                     (Some(pt), None) => Some(*pt),
                     (None, Some(nt)) => Some(nt.clone()),
                     (None, None) => None,
                 };
+                let has_nauo_children = parent_pd_to_children.contains_key(child_pd_id);
+                let brep_id = if has_nauo_children { None } else { self.find_pd_brep(*child_pd_id) };
 
-                let has_nauo_children = parent_pd_to_children.contains_key(&child_pd_id);
+                stack.push(WorkItem {
+                    pd_id: *child_pd_id,
+                    composed,
+                    depth: 1,
+                    ancestors: root_ancestors.clone(),
+                    is_leaf: !has_nauo_children,
+                    nauo_name: nauo_name.clone(),
+                    brep_id,
+                });
+            }
+        }
 
-                if has_nauo_children {
-                    let mut new_ancestors = ancestors.clone();
-                    new_ancestors.insert(parent_pd_id);
-                    stack.push((child_pd_id, composed, depth + 1, new_ancestors));
-                } else if let Some(brep_id) = self.find_pd_brep(child_pd_id) {
+        const MAX_DEPTH: usize = 50;
+
+        while let Some(item) = stack.pop() {
+            if item.depth > MAX_DEPTH {
+                log::warn!("Max depth {} reached at PD #{}, skipping", MAX_DEPTH, item.pd_id);
+                continue;
+            }
+            if item.ancestors.contains(&item.pd_id) {
+                log::warn!("Cycle detected in NAUO tree at PD #{}, skipping", item.pd_id);
+                continue;
+            }
+
+            if item.is_leaf {
+                if let Some(brep_id) = item.brep_id {
                     let color = color_map.get(&brep_id).copied();
-                    let name = format!("{} (BREP#{})", nauo_name, brep_id);
+                    let name = format!("{} (BREP#{})", item.nauo_name, brep_id);
                     results.push(PendingBrepInstance {
                         name,
                         brep_id,
-                        transform: composed,
+                        transform: item.composed,
                         color,
                     });
+                }
+            } else {
+                if let Some(children) = parent_pd_to_children.get(&item.pd_id) {
+                    for (nauo_id, child_pd_id, nauo_name) in children.iter().rev() {
+                        let nauo_transform = self.find_nauo_transform(*nauo_id, *child_pd_id);
+                        let composed = match (&item.composed, &nauo_transform) {
+                            (Some(pt), Some(nt)) => Some(mat4_mul(pt, nt)),
+                            (Some(pt), None) => Some(*pt),
+                            (None, Some(nt)) => Some(nt.clone()),
+                            (None, None) => None,
+                        };
+                        let has_nauo_children = parent_pd_to_children.contains_key(child_pd_id);
+                        let brep_id = if has_nauo_children { None } else { self.find_pd_brep(*child_pd_id) };
+
+                        let mut new_ancestors = item.ancestors.clone();
+                        new_ancestors.insert(item.pd_id);
+
+                        stack.push(WorkItem {
+                            pd_id: *child_pd_id,
+                            composed,
+                            depth: item.depth + 1,
+                            ancestors: new_ancestors,
+                            is_leaf: !has_nauo_children,
+                            nauo_name: nauo_name.clone(),
+                            brep_id,
+                        });
+                    }
                 }
             }
         }
@@ -7170,8 +7240,13 @@ fn project_point_on_line(line: &Line, point: &Point3d) -> f64 {
 
 /// Deduplicate a list of 3D points by removing consecutive points that are within
 /// the given tolerance. Also removes the last point if it coincides with the first
+/// (closing a loop).
+
 /// Find the best bridge edge between an outer polygon and a hole in 2D.
-/// Returns (outer_idx, hole_idx) — the indices to connect.
+/// Uses the rightmost-hole-point / closest-visible-outer-point technique.
+///
+/// For non-convex polygons (like L-shapes), verifies that the bridge edge
+/// doesn't cross any polygon edges before accepting it.
 fn find_bridge_edge_2d(outer_2d: &[Point2d], hole_2d: &[Point2d]) -> (usize, usize) {
     let mut hole_idx = 0;
     let mut max_u = hole_2d[0].u;
@@ -7181,19 +7256,83 @@ fn find_bridge_edge_2d(outer_2d: &[Point2d], hole_2d: &[Point2d]) -> (usize, usi
             hole_idx = i;
         }
     }
-    let hole_pt = &hole_2d[hole_idx];
-    let mut outer_idx = 0;
-    let mut min_dist = f64::MAX;
-    for (i, p) in outer_2d.iter().enumerate() {
-        let dx = p.u - hole_pt.u;
-        let dy = p.v - hole_pt.v;
-        let dist = dx * dx + dy * dy;
-        if dist < min_dist {
-            min_dist = dist;
-            outer_idx = i;
+    let hole_pt = hole_2d[hole_idx];
+
+    // Sort outer polygon vertices by distance to the rightmost hole point (closest first)
+    let mut candidates: Vec<(usize, f64)> = outer_2d.iter().enumerate()
+        .map(|(i, p)| {
+            let dx = p.u - hole_pt.u;
+            let dy = p.v - hole_pt.v;
+            (i, dx * dx + dy * dy)
+        })
+        .collect();
+    candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Try each candidate — accept the first visible one
+    let fallback_idx = candidates[0].0;
+    let bridge = candidates.into_iter().find(|(outer_idx, _)| {
+        let outer_pt = outer_2d[*outer_idx];
+        is_bridge_visible_converter(outer_2d, hole_pt, outer_pt, *outer_idx)
+    });
+
+    let outer_idx = bridge.map(|(idx, _)| idx).unwrap_or(fallback_idx);
+    (outer_idx, hole_idx)
+}
+
+/// Check if a bridge edge from `hole_pt` to `outer_pt` is visible (doesn't cross polygon edges).
+fn is_bridge_visible_converter(outer_2d: &[Point2d], hole_pt: Point2d, outer_pt: Point2d, outer_idx: usize) -> bool {
+    let n = outer_2d.len();
+    for i in 0..n {
+        let j = (i + 1) % n;
+        if i == outer_idx || j == outer_idx {
+            continue;
+        }
+        if segments_intersect_converter(hole_pt, outer_pt, outer_2d[i], outer_2d[j]) {
+            return false;
         }
     }
-    (outer_idx, hole_idx)
+    // Verify midpoint is inside the polygon
+    let mid = Point2d::new((hole_pt.u + outer_pt.u) / 2.0, (hole_pt.v + outer_pt.v) / 2.0);
+    if !point_in_polygon_2d_converter(&mid, outer_2d) {
+        return false;
+    }
+    true
+}
+
+/// Check if two line segments properly intersect.
+fn segments_intersect_converter(p1: Point2d, p2: Point2d, p3: Point2d, p4: Point2d) -> bool {
+    let d1 = cross_2d_converter(p3, p4, p1);
+    let d2 = cross_2d_converter(p3, p4, p2);
+    let d3 = cross_2d_converter(p1, p2, p3);
+    let d4 = cross_2d_converter(p1, p2, p4);
+    if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
+        && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
+    {
+        return true;
+    }
+    false
+}
+
+/// Cross product for 2D segment intersection test.
+fn cross_2d_converter(p1: Point2d, p2: Point2d, p3: Point2d) -> f64 {
+    (p2.u - p1.u) * (p3.v - p1.v) - (p2.v - p1.v) * (p3.u - p1.u)
+}
+
+/// Point-in-polygon test for 2D (ray casting).
+fn point_in_polygon_2d_converter(point: &Point2d, polygon: &[Point2d]) -> bool {
+    let n = polygon.len();
+    if n < 3 { return false; }
+    let mut inside = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        if ((polygon[i].v > point.v) != (polygon[j].v > point.v))
+            && (point.u < (polygon[j].u - polygon[i].u) * (point.v - polygon[i].v) / (polygon[j].v - polygon[i].v) + polygon[i].u)
+        {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
 }
 
 /// Check if a 2D polygon is convex.
@@ -7899,22 +8038,28 @@ fn merge_holes_into_polygon(
             .max_by(|(_, a), (_, b)| a.u.partial_cmp(&b.u).unwrap_or(std::cmp::Ordering::Equal))
             .unwrap_or((0, &hole_2d[0]));
 
-        // Find the closest point on the outer polygon to the rightmost hole point.
-        // For simplicity, find the polygon vertex that is visible from the hole's
-        // rightmost point and is closest in the u direction.
+        // Find the closest VISIBLE point on the polygon to the rightmost hole point.
+        // For non-convex polygons, we must verify the bridge edge doesn't cross
+        // any polygon edge or go outside the polygon.
         let hole_pt = hole_2d[rightmost_idx];
 
-        let mut best_poly_idx = 0;
-        let mut best_dist = f64::MAX;
-        for (i, pt) in poly_2d.iter().enumerate() {
-            let dx = pt.u - hole_pt.u;
-            let dy = pt.v - hole_pt.v;
-            let dist = dx * dx + dy * dy;
-            if dist < best_dist {
-                best_dist = dist;
-                best_poly_idx = i;
-            }
-        }
+        // Sort polygon vertices by distance to the hole point (closest first)
+        let mut candidates: Vec<(usize, f64)> = poly_2d.iter().enumerate()
+            .map(|(i, pt)| {
+                let dx = pt.u - hole_pt.u;
+                let dy = pt.v - hole_pt.v;
+                (i, dx * dx + dy * dy)
+            })
+            .collect();
+        candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        let best_poly_idx = candidates.iter()
+            .find(|(idx, _)| {
+                let outer_pt = poly_2d[*idx];
+                is_bridge_visible_converter(&poly_2d, hole_pt, outer_pt, *idx)
+            })
+            .map(|(idx, _)| *idx)
+            .unwrap_or(candidates[0].0);
 
         // Insert the hole into the polygon at the bridge point
         // The bridge creates: ...poly[best] -> hole[rightmost] -> ...hole -> hole[rightmost] -> poly[best]...
