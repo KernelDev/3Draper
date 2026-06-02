@@ -46,7 +46,7 @@ fn mesh_to_gpu_data(
 
     // Check if we have meaningful per-triangle colors (not all default grey)
     let has_real_colors = colors.map_or(false, |c| {
-        c.iter().any(|col| (col[0] - 0.70).abs() > 0.01 || (col[1] - 0.72).abs() > 0.01 || (col[2] - 0.76).abs() > 0.01)
+        c.iter().any(|col| (col[0] - 0.62).abs() > 0.01 || (col[1] - 0.65).abs() > 0.01 || (col[2] - 0.70).abs() > 0.01)
     });
 
     // Determine if we need per-triangle processing (face highlight, instance selection, or colors)
@@ -63,7 +63,7 @@ fn mesh_to_gpu_data(
                 gpu_vertices.push(MeshVertex {
                     position: [v.x as f32, v.y as f32, v.z as f32],
                     normal: n,
-                    color: [0.70, 0.72, 0.76],
+                    color: [0.62, 0.65, 0.70],
                     selection: 0.0,
                     highlight: 0.0,
                 });
@@ -91,7 +91,7 @@ fn mesh_to_gpu_data(
         let color = colors
             .and_then(|c| c.get(i))
             .map(|c| [c[0], c[1], c[2]])
-            .unwrap_or([0.70, 0.72, 0.76]);
+            .unwrap_or([0.62, 0.65, 0.70]);
 
         // Compute per-triangle selection state (applied AFTER lighting in shader)
         // selection: 0 = normal, 1 = selected instance, 2 = dimmed instance
@@ -417,22 +417,23 @@ pub struct ViewerApp {
 }
 
 impl ViewerApp {
-    /// Muted CAD-style color palette for instances without STEP-defined colors.
-    /// Designed for a dark background — lighter, more saturated colors.
+    /// CAD-style color palette for instances without STEP-defined colors.
+    /// Designed for a light background — richer, more saturated colors that
+    /// stand out well against a light gray viewport.
     fn instance_color(index: usize) -> [f32; 4] {
         const PALETTE: [[f32; 4]; 12] = [
-            [0.70, 0.72, 0.76, 1.0], // Silver (default)
-            [0.76, 0.68, 0.52, 1.0], // Gold
-            [0.52, 0.72, 0.62, 1.0], // Emerald
-            [0.72, 0.58, 0.64, 1.0], // Rose
-            [0.66, 0.70, 0.52, 1.0], // Olive
-            [0.54, 0.66, 0.76, 1.0], // Sky blue
-            [0.78, 0.64, 0.48, 1.0], // Copper
-            [0.48, 0.66, 0.68, 1.0], // Teal
-            [0.68, 0.56, 0.66, 1.0], // Lavender
-            [0.60, 0.72, 0.58, 1.0], // Mint
-            [0.74, 0.64, 0.56, 1.0], // Bronze
-            [0.56, 0.60, 0.74, 1.0], // Periwinkle
+            [0.62, 0.65, 0.70, 1.0], // Steel (default)
+            [0.72, 0.58, 0.38, 1.0], // Gold
+            [0.35, 0.62, 0.48, 1.0], // Emerald
+            [0.65, 0.42, 0.50, 1.0], // Rose
+            [0.55, 0.58, 0.35, 1.0], // Olive
+            [0.38, 0.55, 0.72, 1.0], // Sky blue
+            [0.72, 0.50, 0.35, 1.0], // Copper
+            [0.32, 0.58, 0.60, 1.0], // Teal
+            [0.55, 0.40, 0.60, 1.0], // Lavender
+            [0.42, 0.62, 0.40, 1.0], // Mint
+            [0.65, 0.52, 0.40, 1.0], // Bronze
+            [0.42, 0.45, 0.68, 1.0], // Periwinkle
         ];
         PALETTE[index % PALETTE.len()]
     }
@@ -531,7 +532,7 @@ impl ViewerApp {
             if mesh.face_normals.is_none() {
                 mesh.compute_face_normals();
             }
-            mesh.ensure_colors([0.48, 0.52, 0.58, 1.0]);
+            mesh.ensure_colors([0.62, 0.65, 0.70, 1.0]);
             let (vertices, indices) = mesh_to_gpu_data(&mesh, None, None, &[]);
             let resources = create_scene_resources(rs, &vertices, &indices);
             *gpu_resources.lock().unwrap() = Some(resources);
@@ -1163,56 +1164,84 @@ impl ViewerApp {
     /// For each face, outer_boundary and inner_boundaries provide 3D polylines
     /// that represent the B-Rep edges. We convert these into LineVertex pairs
     /// (two vertices per line segment) with a dark edge color.
+    ///
+    /// IMPORTANT: Face boundary points are stored in LOCAL BREP coordinates,
+    /// but the mesh vertices are already transformed to world space. So we must
+    /// apply the instance transform to boundary points to match the rendered mesh.
     fn build_edge_line_vertices(&self) -> Vec<LineVertex> {
         let mut edge_vertices: Vec<LineVertex> = Vec::new();
 
-        // Edge color: dark charcoal, slightly visible on both light and dark surfaces
-        let edge_color: [f32; 3] = [0.15, 0.15, 0.18];
+        // Edge color: dark charcoal visible on light background
+        let edge_color: [f32; 3] = [0.20, 0.20, 0.25];
+
+        /// Transform a Point3d by a 4×4 matrix (homogeneous coordinates).
+        fn transform_point(p: &draper_geometry::Point3d, m: &[[f64; 4]; 4]) -> [f32; 3] {
+            let x = m[0][0] * p.x + m[0][1] * p.y + m[0][2] * p.z + m[0][3];
+            let y = m[1][0] * p.x + m[1][1] * p.y + m[1][2] * p.z + m[1][3];
+            let z = m[2][0] * p.x + m[2][1] * p.y + m[2][2] * p.z + m[2][3];
+            [x as f32, y as f32, z as f32]
+        }
 
         for inst in &self.detailed_instances {
+            // Apply instance transform to boundary points to match the mesh
+            // (mesh vertices are already in world space, but boundary points are local)
+            let tf = inst.transform.as_ref();
+
             for face in &inst.faces {
                 // Outer boundary polylines
                 for polyline in &face.outer_boundary {
                     if polyline.len() < 2 {
                         continue;
                     }
-                    // Downsample: limit to ~200 points per polyline to avoid
+                    // Downsample: limit to ~500 points per polyline to avoid
                     // excessive edge vertex count on highly tessellated boundaries
-                    let step = if polyline.len() > 200 {
-                        (polyline.len() as f64 / 200.0).ceil() as usize
+                    let step = if polyline.len() > 500 {
+                        (polyline.len() as f64 / 500.0).ceil() as usize
                     } else {
                         1
                     };
-                    let mut prev: Option<&draper_geometry::Point3d> = None;
+                    let mut prev_pos: Option<[f32; 3]> = None;
                     for i in (0..polyline.len()).step_by(step) {
                         let p = &polyline[i];
-                        if let Some(pp) = prev {
+                        let pos = if let Some(m) = tf {
+                            transform_point(p, m)
+                        } else {
+                            [p.x as f32, p.y as f32, p.z as f32]
+                        };
+                        if let Some(pp) = prev_pos {
                             edge_vertices.push(LineVertex {
-                                position: [pp.x as f32, pp.y as f32, pp.z as f32],
+                                position: pp,
                                 color: edge_color,
                             });
                             edge_vertices.push(LineVertex {
-                                position: [p.x as f32, p.y as f32, p.z as f32],
+                                position: pos,
                                 color: edge_color,
                             });
                         }
-                        prev = Some(p);
+                        prev_pos = Some(pos);
                     }
                     // Close the loop: connect last drawn point back to first
-                    if let (Some(first), Some(last_drawn)) = (polyline.first(), prev) {
-                        let dx = first.x - last_drawn.x;
-                        let dy = first.y - last_drawn.y;
-                        let dz = first.z - last_drawn.z;
-                        let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-                        if dist > 1e-6 {
-                            edge_vertices.push(LineVertex {
-                                position: [last_drawn.x as f32, last_drawn.y as f32, last_drawn.z as f32],
-                                color: edge_color,
-                            });
-                            edge_vertices.push(LineVertex {
-                                position: [first.x as f32, first.y as f32, first.z as f32],
-                                color: edge_color,
-                            });
+                    if let Some(first) = polyline.first() {
+                        if let Some(last_pos) = prev_pos {
+                            let first_pos = if let Some(m) = tf {
+                                transform_point(first, m)
+                            } else {
+                                [first.x as f32, first.y as f32, first.z as f32]
+                            };
+                            let dx = first_pos[0] - last_pos[0];
+                            let dy = first_pos[1] - last_pos[1];
+                            let dz = first_pos[2] - last_pos[2];
+                            let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                            if dist > 1e-6 {
+                                edge_vertices.push(LineVertex {
+                                    position: last_pos,
+                                    color: edge_color,
+                                });
+                                edge_vertices.push(LineVertex {
+                                    position: first_pos,
+                                    color: edge_color,
+                                });
+                            }
                         }
                     }
                 }
@@ -1222,40 +1251,52 @@ impl ViewerApp {
                     if polyline.len() < 2 {
                         continue;
                     }
-                    let step = if polyline.len() > 200 {
-                        (polyline.len() as f64 / 200.0).ceil() as usize
+                    let step = if polyline.len() > 500 {
+                        (polyline.len() as f64 / 500.0).ceil() as usize
                     } else {
                         1
                     };
-                    let mut prev: Option<&draper_geometry::Point3d> = None;
+                    let mut prev_pos: Option<[f32; 3]> = None;
                     for i in (0..polyline.len()).step_by(step) {
                         let p = &polyline[i];
-                        if let Some(pp) = prev {
+                        let pos = if let Some(m) = tf {
+                            transform_point(p, m)
+                        } else {
+                            [p.x as f32, p.y as f32, p.z as f32]
+                        };
+                        if let Some(pp) = prev_pos {
                             edge_vertices.push(LineVertex {
-                                position: [pp.x as f32, pp.y as f32, pp.z as f32],
+                                position: pp,
                                 color: edge_color,
                             });
                             edge_vertices.push(LineVertex {
-                                position: [p.x as f32, p.y as f32, p.z as f32],
+                                position: pos,
                                 color: edge_color,
                             });
                         }
-                        prev = Some(p);
+                        prev_pos = Some(pos);
                     }
-                    if let (Some(first), Some(last_drawn)) = (polyline.first(), prev) {
-                        let dx = first.x - last_drawn.x;
-                        let dy = first.y - last_drawn.y;
-                        let dz = first.z - last_drawn.z;
-                        let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-                        if dist > 1e-6 {
-                            edge_vertices.push(LineVertex {
-                                position: [last_drawn.x as f32, last_drawn.y as f32, last_drawn.z as f32],
-                                color: edge_color,
-                            });
-                            edge_vertices.push(LineVertex {
-                                position: [first.x as f32, first.y as f32, first.z as f32],
-                                color: edge_color,
-                            });
+                    if let Some(first) = polyline.first() {
+                        if let Some(last_pos) = prev_pos {
+                            let first_pos = if let Some(m) = tf {
+                                transform_point(first, m)
+                            } else {
+                                [first.x as f32, first.y as f32, first.z as f32]
+                            };
+                            let dx = first_pos[0] - last_pos[0];
+                            let dy = first_pos[1] - last_pos[1];
+                            let dz = first_pos[2] - last_pos[2];
+                            let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                            if dist > 1e-6 {
+                                edge_vertices.push(LineVertex {
+                                    position: last_pos,
+                                    color: edge_color,
+                                });
+                                edge_vertices.push(LineVertex {
+                                    position: first_pos,
+                                    color: edge_color,
+                                });
+                            }
                         }
                     }
                 }
@@ -2686,7 +2727,7 @@ impl eframe::App for ViewerApp {
                     if self.mesh.face_normals.is_none() {
                         self.mesh.compute_face_normals();
                     }
-                    self.mesh.ensure_colors([0.70, 0.72, 0.76, 1.0]);
+                    self.mesh.ensure_colors([0.62, 0.65, 0.70, 1.0]);
 
                     if let Some(ref rs) = self.render_state {
                         let (vertices, indices) = mesh_to_gpu_data(&self.mesh, self.highlighted_face, self.selected_instance, &self.instance_triangle_ranges);
@@ -2729,7 +2770,7 @@ impl eframe::App for ViewerApp {
                     let uniforms = SceneUniforms {
                         mvp,
                         model,
-                        light_dir: [cam_fwd[0], cam_fwd[1], cam_fwd[2], 0.30],
+                        light_dir: [cam_fwd[0], cam_fwd[1], cam_fwd[2], 0.35],
                         camera_pos: [cam_pos[0], cam_pos[1], cam_pos[2], 0.0],
                     };
                     let guard = self.gpu_resources.lock().unwrap();

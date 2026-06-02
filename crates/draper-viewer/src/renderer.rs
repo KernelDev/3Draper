@@ -161,7 +161,7 @@ impl CallbackTrait for SceneCallback {
                 view: &resources.offscreen_color,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.15, g: 0.15, b: 0.17, a: 1.0 }),
+                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.90, g: 0.91, b: 0.94, a: 1.0 }),
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -529,9 +529,10 @@ fn create_edge_pipeline(
             depth_compare: wgpu::CompareFunction::LessEqual,
             stencil: wgpu::StencilState::default(),
             // Depth bias to push edges slightly in front of the surface
+            // Larger values prevent z-fighting on surfaces viewed at grazing angles
             bias: wgpu::DepthBiasState {
-                constant: 1,
-                slope_scale: 1.0,
+                constant: 2,
+                slope_scale: 2.0,
                 clamp: 0.0,
             },
         }),
@@ -725,7 +726,7 @@ pub fn create_scene_resources(
         contents: bytemuck::cast_slice(&[SceneUniforms {
             mvp: [[0.0; 4]; 4],
             model: [[0.0; 4]; 4],
-            light_dir: [0.0, 0.0, 1.0, 0.30],
+            light_dir: [0.0, 0.0, 1.0, 0.35],
             camera_pos: [0.0, 0.0, 0.0, 0.0],
         }]),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
@@ -838,7 +839,7 @@ fn create_vertex_buffer(device: &wgpu::Device, vertices: &[MeshVertex]) -> wgpu:
     if vertices.is_empty() {
         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("3Draper vertex buffer (empty)"),
-            contents: bytemuck::cast_slice(&[MeshVertex { position: [0.0; 3], normal: [0.0; 3], color: [0.70, 0.72, 0.76], selection: 0.0, highlight: 0.0 }]),
+            contents: bytemuck::cast_slice(&[MeshVertex { position: [0.0; 3], normal: [0.0; 3], color: [0.62, 0.65, 0.70], selection: 0.0, highlight: 0.0 }]),
             usage: wgpu::BufferUsages::VERTEX,
         })
     } else {

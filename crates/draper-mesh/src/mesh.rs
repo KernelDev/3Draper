@@ -145,7 +145,7 @@ impl TriangleMesh {
         }
         if self.triangle_colors.is_none() {
             let existing_count = self.triangles.len() - other.triangles.len();
-            self.triangle_colors = Some(vec![[0.48, 0.52, 0.58, 1.0]; existing_count]);
+            self.triangle_colors = Some(vec![[0.62, 0.65, 0.70, 1.0]; existing_count]);
         }
         if let Some(ref mut colors) = self.triangle_colors {
             for _ in 0..other.triangles.len() {
