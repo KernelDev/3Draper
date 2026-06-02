@@ -1283,16 +1283,19 @@ impl<'a> StepConverter<'a> {
     }
 
     /// Static version of find_brep_via_srr (doesn't need &self).
-    /// Iterative implementation with cycle detection.
+    /// Uses the same priority-based strategy as the instance method:
+    /// 1. SRRs whose other end is an ADVANCED_BREP_SHAPE_REPRESENTATION (direct link to BREP)
+    /// 2. SRRs whose other end is a plain SHAPE_REPRESENTATION (indirect, recurse)
+    ///
+    /// This avoids the bug where assembly-placement SRRs (complex entities with transforms)
+    /// are followed instead of the direct SR→ABSR link, causing all parts to map to the same BREP.
     fn find_brep_via_srr_static(step: &StepFile, sr_id: i64, _depth: usize) -> Option<i64> {
         let mut visited: std::collections::HashSet<i64> = std::collections::HashSet::new();
-        let mut stack = vec![sr_id];
-        let mut depth = 0;
+        let mut stack = vec![(sr_id, 0usize)]; // (sr_id, depth)
 
-        while let Some(current_sr_id) = stack.pop() {
-            if depth > 20 { break; }
+        while let Some((current_sr_id, depth)) = stack.pop() {
+            if depth > 20 { continue; }
             if !visited.insert(current_sr_id) { continue; }
-            depth += 1;
 
             let sr = match step.find_entity(current_sr_id) {
                 Some(s) => s,
@@ -1300,8 +1303,12 @@ impl<'a> StepConverter<'a> {
             };
             if !sr.type_name.contains("SHAPE_REPRESENTATION") { continue; }
 
-            // Check SRR relationships that reference this SR
-            for srr in step.find_entities_by_type("SHAPE_REPRESENTATION_RELATIONSHIP") {
+            // Collect SRR relationships into priority buckets
+            let mut direct_absr_links: Vec<i64> = Vec::new();  // other SR is an ABSR/FBSR
+            let mut indirect_sr_links: Vec<i64> = Vec::new();   // other SR is a plain SR
+
+            // Helper closure to classify SRRs
+            let mut classify_srr = |srr: &crate::schema::StepEntity| {
                 let mut refs_our_sr = false;
                 let mut other_sr_id: Option<i64> = None;
                 for (i, param) in srr.params.iter().enumerate() {
@@ -1317,42 +1324,40 @@ impl<'a> StepConverter<'a> {
                         }
                     }
                 }
-                if !refs_our_sr { continue; }
+                if !refs_our_sr { return; }
                 if let Some(other_id) = other_sr_id {
-                    // Direct BREP in the other SR?
-                    if let Some(bid) = Self::find_brep_in_representation_static(step, other_id) {
-                        return Some(bid);
+                    if let Some(other_entity) = step.find_entity(other_id) {
+                        if other_entity.type_name.contains("ADVANCED_BREP_SHAPE_REPRESENTATION")
+                            || other_entity.type_name.contains("FACETED_BREP_SHAPE_REPRESENTATION") {
+                            direct_absr_links.push(other_id);
+                        } else {
+                            indirect_sr_links.push(other_id);
+                        }
                     }
-                    // Otherwise add to stack for indirect lookup
-                    stack.push(other_id);
+                }
+            };
+
+            // Check SHAPE_REPRESENTATION_RELATIONSHIP entities
+            for srr in step.find_entities_by_type("SHAPE_REPRESENTATION_RELATIONSHIP") {
+                classify_srr(srr);
+            }
+
+            // Also check REPRESENTATION_RELATIONSHIP entities (may catch additional complex entities)
+            for srr in step.find_entities_by_type("REPRESENTATION_RELATIONSHIP") {
+                if srr.type_name.contains("SHAPE_REPRESENTATION_RELATIONSHIP") { continue; }
+                classify_srr(srr);
+            }
+
+            // Priority 1: try direct ABSR links
+            for absr_id in &direct_absr_links {
+                if let Some(brep_id) = Self::find_brep_in_representation_static(step, *absr_id) {
+                    return Some(brep_id);
                 }
             }
 
-            // Also check REPRESENTATION_RELATIONSHIP entities
-            for srr in step.find_entities_by_type("REPRESENTATION_RELATIONSHIP") {
-                if srr.type_name.contains("SHAPE_REPRESENTATION_RELATIONSHIP") { continue; }
-                let mut refs_our_sr = false;
-                let mut other_sr_id: Option<i64> = None;
-                for (i, param) in srr.params.iter().enumerate() {
-                    if let Some(ref_id) = get_ref_standalone(param) {
-                        if ref_id == current_sr_id {
-                            refs_our_sr = true;
-                        } else if i >= 2 {
-                            if let Some(entity) = step.find_entity(ref_id) {
-                                if entity.type_name.contains("SHAPE_REPRESENTATION") {
-                                    other_sr_id = Some(ref_id);
-                                }
-                            }
-                        }
-                    }
-                }
-                if !refs_our_sr { continue; }
-                if let Some(other_id) = other_sr_id {
-                    if let Some(bid) = Self::find_brep_in_representation_static(step, other_id) {
-                        return Some(bid);
-                    }
-                    stack.push(other_id);
-                }
+            // Priority 2: add indirect SR links to stack (process in next iterations)
+            for other_id in indirect_sr_links {
+                stack.push((other_id, depth + 1));
             }
         }
         None

@@ -92,6 +92,9 @@ pub struct SceneResources {
     pub edge_vertex_buffer: wgpu::Buffer,
     pub edge_vertex_count: u32,
 
+    // Wireframe overlay (triangle edges drawn on top of filled mesh)
+    pub wireframe_overlay_pipeline: Option<wgpu::RenderPipeline>,
+
     // Bind group layouts (needed for resize recreation)
     pub mesh_bind_group_layout: wgpu::BindGroupLayout,
     pub blit_bind_group_layout: wgpu::BindGroupLayout,
@@ -120,6 +123,7 @@ pub struct SceneCallback {
     pub resources: Arc<std::sync::Mutex<Option<SceneResources>>>,
     pub wireframe: bool,
     pub show_edges: bool,
+    pub show_wireframe_overlay: bool,
     pub viewport_width: u32,
     pub viewport_height: u32,
 }
@@ -188,6 +192,17 @@ impl CallbackTrait for SceneCallback {
         mesh_pass.set_vertex_buffer(0, resources.vertex_buffer.slice(..));
         mesh_pass.set_index_buffer(resources.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         mesh_pass.draw_indexed(0..resources.index_count, 0, 0..1);
+
+        // Draw wireframe overlay on top of the filled mesh (triangle edges)
+        if self.show_wireframe_overlay {
+            if let Some(ref wf_pipeline) = resources.wireframe_overlay_pipeline {
+                mesh_pass.set_pipeline(wf_pipeline);
+                mesh_pass.set_bind_group(0, &resources.mesh_bind_group, &[]);
+                mesh_pass.set_vertex_buffer(0, resources.vertex_buffer.slice(..));
+                mesh_pass.set_index_buffer(resources.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                mesh_pass.draw_indexed(0..resources.index_count, 0, 0..1);
+            }
+        }
 
         // Draw B-Rep boundary edges on top of the mesh
         if self.show_edges && resources.edge_vertex_count > 0 {
@@ -331,6 +346,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     final_color = final_color + highlight_tint * in.v_highlight;
 
     return vec4<f32>(final_color, 1.0);
+}
+
+// Wireframe overlay fragment shader: renders semi-transparent dark lines
+// over the filled mesh to show triangle mesh structure with depth testing.
+@fragment
+fn fs_wireframe_overlay(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Semi-transparent dark gray for wireframe overlay
+    let overlay_color = vec3<f32>(0.15, 0.15, 0.20);
+    let overlay_alpha = 0.35;
+    return vec4<f32>(overlay_color, overlay_alpha);
 }
 "#;
 
@@ -528,10 +553,83 @@ fn create_edge_pipeline(
             // Use LessEqual so edges on the surface are visible
             depth_compare: wgpu::CompareFunction::LessEqual,
             stencil: wgpu::StencilState::default(),
-            // Depth bias to push edges slightly in front of the surface
-            // Larger values prevent z-fighting on surfaces viewed at grazing angles
+            // Depth bias to push edges in front of the surface
+            // Strong bias ensures edges never sink under the surface (no stepping artifacts)
             bias: wgpu::DepthBiasState {
-                constant: 2,
+                constant: 10,
+                slope_scale: 4.0,
+                clamp: 0.0,
+            },
+        }),
+        multisample: wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        multiview: None,
+        cache: None,
+    })
+}
+
+fn create_wireframe_overlay_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("3Draper wireframe overlay pipeline layout"),
+        bind_group_layouts: &[layout],
+        push_constant_ranges: &[],
+    });
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("3Draper wireframe overlay pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            buffers: &[MeshVertex::LAYOUT],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_wireframe_overlay"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::SrcAlpha,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::Zero,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                }),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            polygon_mode: wgpu::PolygonMode::Line,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: false,
+            depth_compare: wgpu::CompareFunction::LessEqual,
+            stencil: wgpu::StencilState::default(),
+            // Depth bias to push wireframe lines in front of the filled surface
+            bias: wgpu::DepthBiasState {
+                constant: 5,
                 slope_scale: 2.0,
                 clamp: 0.0,
             },
@@ -715,6 +813,16 @@ pub fn create_scene_resources(
         None
     };
 
+    // ── Wireframe overlay pipeline (draws triangle edges ON TOP of filled mesh) ──
+    // Uses same mesh shader but in Line polygon mode with depth bias to avoid z-fighting
+    let wireframe_overlay_pipeline = if device.features().contains(wgpu::Features::POLYGON_MODE_LINE) {
+        Some(create_wireframe_overlay_pipeline(
+            device, offscreen_color_format, &mesh_shader, &mesh_bind_group_layout,
+        ))
+    } else {
+        None
+    };
+
     // ── Vertex / index buffers ──
     let vertex_buffer = create_vertex_buffer(device, vertices);
     let index_buffer = create_index_buffer(device, indices);
@@ -815,6 +923,7 @@ pub fn create_scene_resources(
     SceneResources {
         mesh_pipeline,
         wireframe_pipeline,
+        wireframe_overlay_pipeline,
         vertex_buffer,
         index_buffer,
         index_count,

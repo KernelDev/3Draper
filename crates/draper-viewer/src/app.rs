@@ -304,6 +304,8 @@ pub struct ViewerApp {
     wireframe: bool,
     /// Show B-Rep boundary edges.
     show_edges: bool,
+    /// Show wireframe overlay (triangle mesh edges on top of filled surfaces).
+    show_wireframe_overlay: bool,
     /// Edge line vertices need GPU upload.
     edge_dirty: bool,
     /// Model info.
@@ -551,6 +553,7 @@ impl ViewerApp {
             camera,
             wireframe: false,
             show_edges: true,
+            show_wireframe_overlay: false,
             edge_dirty: false,
             current_model,
             mesh_dirty: false,
@@ -1821,6 +1824,7 @@ impl eframe::App for ViewerApp {
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut self.wireframe, "Wireframe");
                     ui.checkbox(&mut self.show_edges, "Show Edges");
+                    ui.checkbox(&mut self.show_wireframe_overlay, "Mesh Overlay");
                     ui.checkbox(&mut self.show_axes, "Show axes");
                     ui.checkbox(&mut self.show_grid, "Show grid");
                     ui.checkbox(&mut self.show_structure, "Structure Panel");
@@ -2497,6 +2501,7 @@ impl eframe::App for ViewerApp {
                 ui.heading(egui::RichText::new("Display").size(12.0));
                 ui.checkbox(&mut self.wireframe, "Wireframe");
                 ui.checkbox(&mut self.show_edges, "Show Edges");
+                ui.checkbox(&mut self.show_wireframe_overlay, "Mesh Overlay");
                 ui.checkbox(&mut self.show_axes, "Show axes");
                 ui.checkbox(&mut self.show_grid, "Show grid");
                 ui.checkbox(&mut self.show_structure, "Structure Panel");
@@ -2799,6 +2804,7 @@ impl eframe::App for ViewerApp {
                     resources: self.gpu_resources.clone(),
                     wireframe: self.wireframe,
                     show_edges: self.show_edges,
+                    show_wireframe_overlay: self.show_wireframe_overlay,
                     viewport_width: width,
                     viewport_height: height,
                 };
