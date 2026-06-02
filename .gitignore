@@ -33,3 +33,4 @@ Thumbs.db
 pkg/
 gh-pages/
 target/
+.gh-pages/
