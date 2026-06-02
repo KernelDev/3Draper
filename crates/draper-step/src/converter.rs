@@ -2784,6 +2784,15 @@ impl<'a> StepConverter<'a> {
             
             // Set face ID for all triangles in this face mesh
             let face_tri_count = face_mesh.triangle_count();
+            
+            // Log faces that produced zero triangles (likely triangulation failures)
+            if face_tri_count == 0 {
+                log::warn!(
+                    "BREP #{} face #{} (STEP #{}, type={}): produced 0 triangles — triangulation may have failed",
+                    brep_id, face_id, step_face_id, surface_type
+                );
+            }
+            
             let mut face_mesh_with_ids = face_mesh.clone();
             face_mesh_with_ids.triangle_face_ids = Some(vec![face_id; face_tri_count]);
             
@@ -5136,7 +5145,10 @@ impl<'a> StepConverter<'a> {
             "RECTANGULAR_TRIMMED_SURFACE" => self.extract_trimmed_surface(entity, depth + 1),
             "SWEPT_SURFACE" => self.extract_swept_surface(entity),
             "OFFSET_SURFACE" => self.extract_offset_surface(entity, depth + 1),
-            _ => None,
+            _ => {
+                log::warn!("extract_surface: unknown surface type '{}' (id=#{}), skipping", type_name, surface_id);
+                None
+            }
         }
     }
 
