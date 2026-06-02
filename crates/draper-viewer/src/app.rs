@@ -7,8 +7,8 @@ use std::sync::Mutex;
 
 use crate::camera::OrbitCamera;
 use crate::renderer::{
-    MeshVertex, SceneCallback, SceneResources, SceneUniforms,
-    create_scene_resources, update_mesh_buffers, update_uniforms,
+    MeshVertex, LineVertex, SceneCallback, SceneResources, SceneUniforms,
+    create_scene_resources, update_mesh_buffers, update_uniforms, update_edge_buffers,
 };
 use draper_core::engine::{EngineConfig, build_engine};
 use draper_topology::ShapeBuilder;
@@ -46,7 +46,7 @@ fn mesh_to_gpu_data(
 
     // Check if we have meaningful per-triangle colors (not all default grey)
     let has_real_colors = colors.map_or(false, |c| {
-        c.iter().any(|col| (col[0] - 0.48).abs() > 0.01 || (col[1] - 0.52).abs() > 0.01 || (col[2] - 0.58).abs() > 0.01)
+        c.iter().any(|col| (col[0] - 0.70).abs() > 0.01 || (col[1] - 0.72).abs() > 0.01 || (col[2] - 0.76).abs() > 0.01)
     });
 
     // Determine if we need per-triangle processing (face highlight, instance selection, or colors)
@@ -63,7 +63,7 @@ fn mesh_to_gpu_data(
                 gpu_vertices.push(MeshVertex {
                     position: [v.x as f32, v.y as f32, v.z as f32],
                     normal: n,
-                    color: [0.48, 0.52, 0.58],
+                    color: [0.70, 0.72, 0.76],
                     selection: 0.0,
                     highlight: 0.0,
                 });
@@ -91,7 +91,7 @@ fn mesh_to_gpu_data(
         let color = colors
             .and_then(|c| c.get(i))
             .map(|c| [c[0], c[1], c[2]])
-            .unwrap_or([0.48, 0.52, 0.58]);
+            .unwrap_or([0.70, 0.72, 0.76]);
 
         // Compute per-triangle selection state (applied AFTER lighting in shader)
         // selection: 0 = normal, 1 = selected instance, 2 = dimmed instance
@@ -302,6 +302,10 @@ pub struct ViewerApp {
     camera: OrbitCamera,
     /// Show wireframe.
     wireframe: bool,
+    /// Show B-Rep boundary edges.
+    show_edges: bool,
+    /// Edge line vertices need GPU upload.
+    edge_dirty: bool,
     /// Model info.
     current_model: ModelEntry,
     /// Whether mesh needs GPU upload.
@@ -413,6 +417,26 @@ pub struct ViewerApp {
 }
 
 impl ViewerApp {
+    /// Muted CAD-style color palette for instances without STEP-defined colors.
+    /// Designed for a dark background — lighter, more saturated colors.
+    fn instance_color(index: usize) -> [f32; 4] {
+        const PALETTE: [[f32; 4]; 12] = [
+            [0.70, 0.72, 0.76, 1.0], // Silver (default)
+            [0.76, 0.68, 0.52, 1.0], // Gold
+            [0.52, 0.72, 0.62, 1.0], // Emerald
+            [0.72, 0.58, 0.64, 1.0], // Rose
+            [0.66, 0.70, 0.52, 1.0], // Olive
+            [0.54, 0.66, 0.76, 1.0], // Sky blue
+            [0.78, 0.64, 0.48, 1.0], // Copper
+            [0.48, 0.66, 0.68, 1.0], // Teal
+            [0.68, 0.56, 0.66, 1.0], // Lavender
+            [0.60, 0.72, 0.58, 1.0], // Mint
+            [0.74, 0.64, 0.56, 1.0], // Bronze
+            [0.56, 0.60, 0.74, 1.0], // Periwinkle
+        ];
+        PALETTE[index % PALETTE.len()]
+    }
+
     /// Get the current timestamp as a formatted string.
     fn timestamp() -> String {
         #[cfg(not(target_arch = "wasm32"))]
@@ -525,6 +549,8 @@ impl ViewerApp {
             render_state,
             camera,
             wireframe: false,
+            show_edges: true,
+            edge_dirty: false,
             current_model,
             mesh_dirty: false,
             show_grid: true,
@@ -593,6 +619,7 @@ impl ViewerApp {
 
         self.mesh = mesh;
         self.mesh_dirty = true;
+        self.edge_dirty = true;
         // Reset selection when loading new model
         self.selected_instance = None;
         self.selected_face = None;
@@ -1121,6 +1148,7 @@ impl ViewerApp {
                 *gpu = None; // Drop GPU buffers — frees GPU memory
             }
             self.mesh_dirty = true;
+            self.edge_dirty = true;
 
             // Auto-fit camera once tree is ready (even before mesh)
             self.log("Structure tree ready — triangulation will begin...");
@@ -1128,6 +1156,113 @@ impl ViewerApp {
             // No BREPs found in the file
             self.log_warning("No BREP instances found in STEP file");
         }
+    }
+
+    /// Build GPU edge line vertices from B-Rep boundary data in detailed_instances.
+    ///
+    /// For each face, outer_boundary and inner_boundaries provide 3D polylines
+    /// that represent the B-Rep edges. We convert these into LineVertex pairs
+    /// (two vertices per line segment) with a dark edge color.
+    fn build_edge_line_vertices(&self) -> Vec<LineVertex> {
+        let mut edge_vertices: Vec<LineVertex> = Vec::new();
+
+        // Edge color: dark charcoal, slightly visible on both light and dark surfaces
+        let edge_color: [f32; 3] = [0.15, 0.15, 0.18];
+
+        for inst in &self.detailed_instances {
+            for face in &inst.faces {
+                // Outer boundary polylines
+                for polyline in &face.outer_boundary {
+                    if polyline.len() < 2 {
+                        continue;
+                    }
+                    // Downsample: limit to ~200 points per polyline to avoid
+                    // excessive edge vertex count on highly tessellated boundaries
+                    let step = if polyline.len() > 200 {
+                        (polyline.len() as f64 / 200.0).ceil() as usize
+                    } else {
+                        1
+                    };
+                    let mut prev: Option<&draper_geometry::Point3d> = None;
+                    for i in (0..polyline.len()).step_by(step) {
+                        let p = &polyline[i];
+                        if let Some(pp) = prev {
+                            edge_vertices.push(LineVertex {
+                                position: [pp.x as f32, pp.y as f32, pp.z as f32],
+                                color: edge_color,
+                            });
+                            edge_vertices.push(LineVertex {
+                                position: [p.x as f32, p.y as f32, p.z as f32],
+                                color: edge_color,
+                            });
+                        }
+                        prev = Some(p);
+                    }
+                    // Close the loop: connect last drawn point back to first
+                    if let (Some(first), Some(last_drawn)) = (polyline.first(), prev) {
+                        let dx = first.x - last_drawn.x;
+                        let dy = first.y - last_drawn.y;
+                        let dz = first.z - last_drawn.z;
+                        let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                        if dist > 1e-6 {
+                            edge_vertices.push(LineVertex {
+                                position: [last_drawn.x as f32, last_drawn.y as f32, last_drawn.z as f32],
+                                color: edge_color,
+                            });
+                            edge_vertices.push(LineVertex {
+                                position: [first.x as f32, first.y as f32, first.z as f32],
+                                color: edge_color,
+                            });
+                        }
+                    }
+                }
+
+                // Inner boundary polylines (holes)
+                for polyline in &face.inner_boundaries {
+                    if polyline.len() < 2 {
+                        continue;
+                    }
+                    let step = if polyline.len() > 200 {
+                        (polyline.len() as f64 / 200.0).ceil() as usize
+                    } else {
+                        1
+                    };
+                    let mut prev: Option<&draper_geometry::Point3d> = None;
+                    for i in (0..polyline.len()).step_by(step) {
+                        let p = &polyline[i];
+                        if let Some(pp) = prev {
+                            edge_vertices.push(LineVertex {
+                                position: [pp.x as f32, pp.y as f32, pp.z as f32],
+                                color: edge_color,
+                            });
+                            edge_vertices.push(LineVertex {
+                                position: [p.x as f32, p.y as f32, p.z as f32],
+                                color: edge_color,
+                            });
+                        }
+                        prev = Some(p);
+                    }
+                    if let (Some(first), Some(last_drawn)) = (polyline.first(), prev) {
+                        let dx = first.x - last_drawn.x;
+                        let dy = first.y - last_drawn.y;
+                        let dz = first.z - last_drawn.z;
+                        let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                        if dist > 1e-6 {
+                            edge_vertices.push(LineVertex {
+                                position: [last_drawn.x as f32, last_drawn.y as f32, last_drawn.z as f32],
+                                color: edge_color,
+                            });
+                            edge_vertices.push(LineVertex {
+                                position: [first.x as f32, first.y as f32, first.z as f32],
+                                color: edge_color,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        edge_vertices
     }
 
     /// Cancel any in-progress loading.
@@ -1213,6 +1348,17 @@ impl ViewerApp {
         // Take the next pending BREP from the front
         let pending = self.pending_breps.remove(0);
 
+        // Log transform info for debugging positioning issues
+        if let Some(ref tf) = pending.transform {
+            let is_identity = (tf[0][0] - 1.0).abs() < 1e-10 && (tf[1][1] - 1.0).abs() < 1e-10 && (tf[2][2] - 1.0).abs() < 1e-10 && tf[0][3].abs() < 1e-10 && tf[1][3].abs() < 1e-10 && tf[2][3].abs() < 1e-10;
+            if !is_identity {
+                self.log(&format!(
+                    "Instance '{}' (BREP #{}): non-identity transform — translation=({:.3}, {:.3}, {:.3})",
+                    pending.name, pending.brep_id, tf[0][3], tf[1][3], tf[2][3]
+                ));
+            }
+        }
+
         // Triangulate this single BREP using the CACHED conversion context.
         // The context (OwnedStepConversionContext) is created ONCE when loading starts
         // and reused across all frames — this avoids rebuilding entity maps, cloning
@@ -1240,11 +1386,12 @@ impl ViewerApp {
                     self.failed_face_count += 1;
                 } else {
                     let tri_start = self.mesh.triangle_count();
-                    if let Some(color) = inst.color {
-                        self.mesh.merge_with_color(&inst.mesh, color);
-                    } else {
-                        self.mesh.merge_with_color(&inst.mesh, [0.48, 0.52, 0.58, 1.0]);
-                    }
+                    // Use STEP color if available, otherwise assign a per-instance color
+                    // from a muted CAD-style palette so different parts are visually distinct
+                    let color = inst.color.unwrap_or_else(|| {
+                        Self::instance_color(self.triangulated_count)
+                    });
+                    self.mesh.merge_with_color(&inst.mesh, color);
                     let tri_end = self.mesh.triangle_count();
                     self.instance_triangle_ranges.push((tri_start, tri_end));
 
@@ -1268,6 +1415,7 @@ impl ViewerApp {
 
         self.triangulated_count += 1;
         self.mesh_dirty = true;
+        self.edge_dirty = true;
 
         if self.pending_breps.is_empty() {
             // Loading complete — free the conversion context (and its StepFile)
@@ -1615,6 +1763,7 @@ impl eframe::App for ViewerApp {
                 });
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut self.wireframe, "Wireframe");
+                    ui.checkbox(&mut self.show_edges, "Show Edges");
                     ui.checkbox(&mut self.show_axes, "Show axes");
                     ui.checkbox(&mut self.show_grid, "Show grid");
                     ui.checkbox(&mut self.show_structure, "Structure Panel");
@@ -2290,6 +2439,7 @@ impl eframe::App for ViewerApp {
                 ui.separator();
                 ui.heading(egui::RichText::new("Display").size(12.0));
                 ui.checkbox(&mut self.wireframe, "Wireframe");
+                ui.checkbox(&mut self.show_edges, "Show Edges");
                 ui.checkbox(&mut self.show_axes, "Show axes");
                 ui.checkbox(&mut self.show_grid, "Show grid");
                 ui.checkbox(&mut self.show_structure, "Structure Panel");
@@ -2530,26 +2680,36 @@ impl eframe::App for ViewerApp {
                 }
 
                 // Upload mesh data if dirty or highlight changed
-                if self.mesh_dirty || self.highlight_dirty {
+                if self.mesh_dirty || self.highlight_dirty || self.edge_dirty {
                     // Ensure mesh has face normals and colors before GPU upload
                     // (moved from mesh_to_gpu_data to avoid cloning the entire mesh)
                     if self.mesh.face_normals.is_none() {
                         self.mesh.compute_face_normals();
                     }
-                    self.mesh.ensure_colors([0.48, 0.52, 0.58, 1.0]);
+                    self.mesh.ensure_colors([0.70, 0.72, 0.76, 1.0]);
 
                     if let Some(ref rs) = self.render_state {
                         let (vertices, indices) = mesh_to_gpu_data(&self.mesh, self.highlighted_face, self.selected_instance, &self.instance_triangle_ranges);
+
+                        // Build edge line vertices from B-Rep boundary data
+                        let edge_vertices = self.build_edge_line_vertices();
+
                         let mut guard = self.gpu_resources.lock().unwrap();
                         if let Some(ref mut resources) = *guard {
                             update_mesh_buffers(resources, &rs.device, &vertices, &indices);
+                            update_edge_buffers(resources, &rs.device, &edge_vertices);
                         } else {
                             let resources = create_scene_resources(rs, &vertices, &indices);
                             *guard = Some(resources);
+                            // After creating new resources, we need to upload edges too
+                            if let Some(ref mut resources) = *guard {
+                                update_edge_buffers(resources, &rs.device, &edge_vertices);
+                            }
                         }
                     }
                     self.mesh_dirty = false;
                     self.highlight_dirty = false;
+                    self.edge_dirty = false;
                 }
 
                 // Update uniforms
@@ -2569,7 +2729,7 @@ impl eframe::App for ViewerApp {
                     let uniforms = SceneUniforms {
                         mvp,
                         model,
-                        light_dir: [cam_fwd[0], cam_fwd[1], cam_fwd[2], 0.45],
+                        light_dir: [cam_fwd[0], cam_fwd[1], cam_fwd[2], 0.30],
                         camera_pos: [cam_pos[0], cam_pos[1], cam_pos[2], 0.0],
                     };
                     let guard = self.gpu_resources.lock().unwrap();
@@ -2581,6 +2741,7 @@ impl eframe::App for ViewerApp {
                 let callback = SceneCallback {
                     resources: self.gpu_resources.clone(),
                     wireframe: self.wireframe,
+                    show_edges: self.show_edges,
                     viewport_width: width,
                     viewport_height: height,
                 };

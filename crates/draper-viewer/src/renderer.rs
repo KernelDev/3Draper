@@ -30,6 +30,26 @@ pub struct MeshVertex {
     pub highlight: f32,
 }
 
+/// Vertex format for edge lines: position + color.
+/// Simple line vertex for rendering B-Rep boundary edges.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct LineVertex {
+    pub position: [f32; 3],
+    pub color: [f32; 3],
+}
+
+impl LineVertex {
+    pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<LineVertex>() as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &wgpu::vertex_attr_array![
+            0 => Float32x3,  // position
+            1 => Float32x3,  // color
+        ],
+    };
+}
+
 impl MeshVertex {
     const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<MeshVertex>() as wgpu::BufferAddress,
@@ -67,6 +87,11 @@ pub struct SceneResources {
     pub uniform_buffer: wgpu::Buffer,
     pub mesh_bind_group: wgpu::BindGroup,
 
+    // Edge line rendering
+    pub edge_pipeline: wgpu::RenderPipeline,
+    pub edge_vertex_buffer: wgpu::Buffer,
+    pub edge_vertex_count: u32,
+
     // Bind group layouts (needed for resize recreation)
     pub mesh_bind_group_layout: wgpu::BindGroupLayout,
     pub blit_bind_group_layout: wgpu::BindGroupLayout,
@@ -94,6 +119,7 @@ pub struct OffscreenResult {
 pub struct SceneCallback {
     pub resources: Arc<std::sync::Mutex<Option<SceneResources>>>,
     pub wireframe: bool,
+    pub show_edges: bool,
     pub viewport_width: u32,
     pub viewport_height: u32,
 }
@@ -135,7 +161,7 @@ impl CallbackTrait for SceneCallback {
                 view: &resources.offscreen_color,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.90, g: 0.90, b: 0.90, a: 1.0 }),
+                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.15, g: 0.15, b: 0.17, a: 1.0 }),
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -162,6 +188,14 @@ impl CallbackTrait for SceneCallback {
         mesh_pass.set_vertex_buffer(0, resources.vertex_buffer.slice(..));
         mesh_pass.set_index_buffer(resources.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         mesh_pass.draw_indexed(0..resources.index_count, 0, 0..1);
+
+        // Draw B-Rep boundary edges on top of the mesh
+        if self.show_edges && resources.edge_vertex_count > 0 {
+            mesh_pass.set_pipeline(&resources.edge_pipeline);
+            mesh_pass.set_bind_group(0, &resources.mesh_bind_group, &[]);
+            mesh_pass.set_vertex_buffer(0, resources.edge_vertex_buffer.slice(..));
+            mesh_pass.draw(0..resources.edge_vertex_count, 0..1);
+        }
 
         drop(mesh_pass);
 
@@ -268,14 +302,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let ndotl_back = max(dot(effective_normal, back_dir), 0.0);
 
     // Rim light for edge definition
-    let rim_factor = pow(1.0 - max(dot(effective_normal, view_dir), 0.0), 3.0) * 0.10;
+    let rim_factor = pow(1.0 - max(dot(effective_normal, view_dir), 0.0), 3.0) * 0.15;
 
     // Base color — use per-vertex color from mesh (never modified for selection)
     let base_color = in.vertex_color;
 
     // Combine lighting — strong ambient + multi-directional diffuse
-    let diffuse = ndotl_primary * 0.55 + ndotl_fill * 0.30 + ndotl_back * 0.15;
-    let specular = vec3<f32>(0.95, 0.95, 0.97) * (specular_primary * 0.3 + specular_fill);
+    let diffuse = ndotl_primary * 0.50 + ndotl_fill * 0.30 + ndotl_back * 0.15;
+    let specular = vec3<f32>(0.90, 0.90, 0.93) * (specular_primary * 0.3 + specular_fill);
     let lit_color = base_color * (ambient + diffuse) + specular + base_color * rim_factor;
 
     // Apply selection state AFTER lighting to preserve 3D shading
@@ -331,6 +365,40 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VertexOutput {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return textureSample(offscreen_tex, offscreen_sampler, in.uv);
+}
+"#;
+
+const EDGE_SHADER_SRC: &str = r#"
+struct Uniforms {
+    mvp: mat4x4<f32>,
+    model: mat4x4<f32>,
+    light_dir: vec4<f32>,
+    camera_pos: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) color: vec3<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) line_color: vec3<f32>,
+};
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.clip_position = uniforms.mvp * vec4<f32>(in.position, 1.0);
+    out.line_color = in.color;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    return vec4<f32>(in.line_color, 1.0);
 }
 "#;
 
@@ -392,6 +460,80 @@ fn create_mesh_pipeline(
             depth_compare: wgpu::CompareFunction::LessEqual,
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        multiview: None,
+        cache: None,
+    })
+}
+
+fn create_edge_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("3Draper edge pipeline layout"),
+        bind_group_layouts: &[layout],
+        push_constant_ranges: &[],
+    });
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("3Draper edge pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            buffers: &[LineVertex::LAYOUT],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::SrcAlpha,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::Zero,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                }),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::LineList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: false,
+            // Use LessEqual so edges on the surface are visible
+            depth_compare: wgpu::CompareFunction::LessEqual,
+            stencil: wgpu::StencilState::default(),
+            // Depth bias to push edges slightly in front of the surface
+            bias: wgpu::DepthBiasState {
+                constant: 1,
+                slope_scale: 1.0,
+                clamp: 0.0,
+            },
         }),
         multisample: wgpu::MultisampleState {
             count: 1,
@@ -583,7 +725,7 @@ pub fn create_scene_resources(
         contents: bytemuck::cast_slice(&[SceneUniforms {
             mvp: [[0.0; 4]; 4],
             model: [[0.0; 4]; 4],
-            light_dir: [0.0, 0.0, 1.0, 0.45],
+            light_dir: [0.0, 0.0, 1.0, 0.30],
             camera_pos: [0.0, 0.0, 0.0, 0.0],
         }]),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
@@ -656,6 +798,19 @@ pub fn create_scene_resources(
         ],
     });
 
+    // ── Edge line pipeline ──
+    let edge_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("3Draper edge shader"),
+        source: wgpu::ShaderSource::Wgsl(EDGE_SHADER_SRC.into()),
+    });
+    let edge_pipeline = create_edge_pipeline(
+        device, offscreen_color_format, &edge_shader, &mesh_bind_group_layout,
+    );
+
+    // ── Edge vertex buffer (empty initially) ──
+    let edge_vertex_buffer = create_edge_vertex_buffer(device, &[]);
+    let edge_vertex_count = 0u32;
+
     SceneResources {
         mesh_pipeline,
         wireframe_pipeline,
@@ -664,6 +819,9 @@ pub fn create_scene_resources(
         index_count,
         uniform_buffer,
         mesh_bind_group,
+        edge_pipeline,
+        edge_vertex_buffer,
+        edge_vertex_count,
         mesh_bind_group_layout,
         blit_bind_group_layout,
         offscreen_color,
@@ -680,7 +838,7 @@ fn create_vertex_buffer(device: &wgpu::Device, vertices: &[MeshVertex]) -> wgpu:
     if vertices.is_empty() {
         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("3Draper vertex buffer (empty)"),
-            contents: bytemuck::cast_slice(&[MeshVertex { position: [0.0; 3], normal: [0.0; 3], color: [0.48, 0.52, 0.58], selection: 0.0, highlight: 0.0 }]),
+            contents: bytemuck::cast_slice(&[MeshVertex { position: [0.0; 3], normal: [0.0; 3], color: [0.70, 0.72, 0.76], selection: 0.0, highlight: 0.0 }]),
             usage: wgpu::BufferUsages::VERTEX,
         })
     } else {
@@ -718,6 +876,32 @@ pub fn update_mesh_buffers(
     resources.vertex_buffer = create_vertex_buffer(device, vertices);
     resources.index_buffer = create_index_buffer(device, indices);
     resources.index_count = indices.len() as u32;
+}
+
+fn create_edge_vertex_buffer(device: &wgpu::Device, vertices: &[LineVertex]) -> wgpu::Buffer {
+    if vertices.is_empty() {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("3Draper edge vertex buffer (empty)"),
+            contents: bytemuck::cast_slice(&[LineVertex { position: [0.0; 3], color: [0.0; 3] }]),
+            usage: wgpu::BufferUsages::VERTEX,
+        })
+    } else {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("3Draper edge vertex buffer"),
+            contents: bytemuck::cast_slice(vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        })
+    }
+}
+
+/// Update edge line data in GPU buffers.
+pub fn update_edge_buffers(
+    resources: &mut SceneResources,
+    device: &wgpu::Device,
+    vertices: &[LineVertex],
+) {
+    resources.edge_vertex_buffer = create_edge_vertex_buffer(device, vertices);
+    resources.edge_vertex_count = vertices.len() as u32;
 }
 
 /// Update the uniform buffer.
