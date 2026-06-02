@@ -1548,10 +1548,10 @@ impl<'a> StepConverter<'a> {
             [0.0, 0.0, 0.0, 1.0],
         ];
 
-        // Same fix as compute_item_defined_transform: M = t⁻¹ * o
+        // Same formula as compute_item_defined_transform: M = t * o⁻¹
         // (see the detailed comment in compute_item_defined_transform for rationale)
-        let t_inv = mat4_inverse(&t)?;
-        Some(mat4_mul(&t_inv, &o))
+        let o_inv = mat4_inverse(&o)?;
+        Some(mat4_mul(&t, &o_inv))
     }
 
     /// Static version: compute a 4×4 transform from CARTESIAN_TRANSFORMATION_OPERATOR_3D.
@@ -3137,18 +3137,20 @@ impl<'a> StepConverter<'a> {
             [0.0, 0.0, 0.0, 1.0],
         ];
 
-        // The IDT maps from transform_item_1 ("origin"/source, the child's frame)
-        // to transform_item_2 ("target"/destination, the parent's frame).
-        // Both `o` and `t` are "local-to-world" matrices for their respective frames.
-        // To map from child-local to parent-local, we go:
-        //   child-local → world (via `o`) → parent-local (via `t`⁻¹)
-        // So: M = t⁻¹ * o
-        // Previously this was `t * o⁻¹`, which is mathematically incorrect — it
-        // only coincidentally gives the right answer for pure-translation transforms
-        // but produces wrong positions/rotations whenever the child or parent frame
-        // involves rotation.
-        let t_inv = mat4_inverse(&t)?;
-        let result = mat4_mul(&t_inv, &o);
+        // The IDT defines a mapping: "geometry at source position should be placed
+        // at target position". Both `o` and `t` are local-to-world matrices.
+        //
+        // To place child geometry (defined in child's world frame) into the parent's
+        // world frame, we need to:
+        //   1. Remove the source placement: o⁻¹ (go from child-world to source-local)
+        //   2. Apply the target placement: t (go from target-local to parent-world)
+        // Result: M = t * o⁻¹
+        //
+        // The formula M = t⁻¹ * o maps source-local → target-local, which is the
+        // STEP-internal representation of the transformation but is NOT what we need
+        // when applying the transform to BREP vertex coordinates.
+        let o_inv = mat4_inverse(&o)?;
+        let result = mat4_mul(&t, &o_inv);
         Some(result)
     }
 
