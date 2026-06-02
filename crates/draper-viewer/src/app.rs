@@ -1393,10 +1393,26 @@ impl ViewerApp {
         if let Some(ref tf) = pending.transform {
             let is_identity = (tf[0][0] - 1.0).abs() < 1e-10 && (tf[1][1] - 1.0).abs() < 1e-10 && (tf[2][2] - 1.0).abs() < 1e-10 && tf[0][3].abs() < 1e-10 && tf[1][3].abs() < 1e-10 && tf[2][3].abs() < 1e-10;
             if !is_identity {
-                self.log(&format!(
-                    "Instance '{}' (BREP #{}): non-identity transform — translation=({:.3}, {:.3}, {:.3})",
-                    pending.name, pending.brep_id, tf[0][3], tf[1][3], tf[2][3]
-                ));
+                // Check if there's any rotation (diagonal != 1 or off-diagonal != 0)
+                let has_rotation = (tf[0][0] - 1.0).abs() > 1e-6 || (tf[1][1] - 1.0).abs() > 1e-6 || (tf[2][2] - 1.0).abs() > 1e-6
+                    || tf[0][1].abs() > 1e-6 || tf[0][2].abs() > 1e-6
+                    || tf[1][0].abs() > 1e-6 || tf[1][2].abs() > 1e-6
+                    || tf[2][0].abs() > 1e-6 || tf[2][1].abs() > 1e-6;
+                if has_rotation {
+                    self.log(&format!(
+                        "Instance '{}' (BREP #{}): non-identity transform with ROTATION — translation=({:.3}, {:.3}, {:.3}), matrix=[[{:.4},{:.4},{:.4}],[{:.4},{:.4},{:.4}],[{:.4},{:.4},{:.4}]]",
+                        pending.name, pending.brep_id,
+                        tf[0][3], tf[1][3], tf[2][3],
+                        tf[0][0], tf[0][1], tf[0][2],
+                        tf[1][0], tf[1][1], tf[1][2],
+                        tf[2][0], tf[2][1], tf[2][2]
+                    ));
+                } else {
+                    self.log(&format!(
+                        "Instance '{}' (BREP #{}): non-identity transform — translation=({:.3}, {:.3}, {:.3})",
+                        pending.name, pending.brep_id, tf[0][3], tf[1][3], tf[2][3]
+                    ));
+                }
             }
         }
 
