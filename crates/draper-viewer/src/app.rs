@@ -416,6 +416,16 @@ pub struct ViewerApp {
     error_count: usize,
     /// Number of faces that failed triangulation (for graceful degradation).
     failed_face_count: usize,
+
+    // ─── JSON API state ────────────────────────────────────────────────────
+    /// JSON API engine.
+    json_api: draper_json::JsonApi,
+    /// JSON API command input text.
+    json_api_input: String,
+    /// JSON API response text.
+    json_api_output: String,
+    /// Whether to show the JSON API panel.
+    show_json_api: bool,
 }
 
 impl ViewerApp {
@@ -596,6 +606,10 @@ impl ViewerApp {
             warning_count: 0,
             error_count: 0,
             failed_face_count: 0,
+            json_api: draper_json::JsonApi::new(),
+            json_api_input: String::new(),
+            json_api_output: String::new(),
+            show_json_api: false,
         };
         app.log("3Draper Viewer started");
         app.log(&format!("Default model: Box 100x100x100 ({} vertices, {} triangles)",
@@ -1055,6 +1069,93 @@ impl ViewerApp {
         match draper_step::write_step_file(&content, path) {
             Ok(()) => self.log(&format!("Exported STEP: {}", path)),
             Err(e) => self.log_error(&format!("STEP export error: {}", e)),
+        }
+    }
+
+    /// Export the current model to JSON file.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn export_json(&mut self, path: &str) {
+        use draper_json::JsonModel;
+        let model = if !self.detailed_instances.is_empty() {
+            let assembly = self.assembly_tree.clone().unwrap_or_else(|| AssemblyNode {
+                name: self.current_model.name.clone(),
+                pd_id: 0,
+                brep_id: None,
+                instance_index: None,
+                transform: None,
+                color: None,
+                children: Vec::new(),
+            });
+            JsonModel::from_instances(self.detailed_instances.clone(), assembly, &self.current_model.name)
+        } else {
+            // Create a minimal JsonModel from the current mesh
+            let mut instances = Vec::new();
+            if !self.mesh.vertices.is_empty() {
+                let vertices: Vec<f64> = self.mesh.vertices.iter()
+                    .flat_map(|p| [p.x, p.y, p.z]).collect();
+                let triangles: Vec<u32> = self.mesh.triangles.iter()
+                    .flat_map(|t| [t[0], t[1], t[2]]).collect();
+                let normals = self.mesh.normals.as_ref().map(|n| {
+                    n.iter().flat_map(|v| [v[0], v[1], v[2]]).collect()
+                });
+                let triangle_colors = self.mesh.triangle_colors.as_ref().map(|c| {
+                    c.iter().flat_map(|v| [v[0], v[1], v[2], v[3]]).collect()
+                });
+                use draper_json::JsonMeshInstance;
+                instances.push(JsonMeshInstance {
+                    name: self.current_model.name.clone(),
+                    brep_id: 0,
+                    vertices,
+                    triangles,
+                    normals,
+                    triangle_colors,
+                    triangle_face_ids: self.mesh.triangle_face_ids.clone(),
+                    transform: None,
+                    color: None,
+                    faces: Vec::new(),
+                });
+            }
+            let assembly = AssemblyNode {
+                name: self.current_model.name.clone(),
+                pd_id: 0,
+                brep_id: None,
+                instance_index: Some(0),
+                transform: None,
+                color: None,
+                children: Vec::new(),
+            };
+            JsonModel::from_instances(self.detailed_instances.clone(), assembly, &self.current_model.name)
+        };
+        match model.to_json_pretty() {
+            Ok(json) => {
+                match std::fs::write(path, &json) {
+                    Ok(()) => self.log(&format!("Exported JSON: {} ({} bytes)", path, json.len())),
+                    Err(e) => self.log_error(&format!("JSON write error: {}", e)),
+                }
+            }
+            Err(e) => self.log_error(&format!("JSON export error: {}", e)),
+        }
+    }
+
+    /// Import a model from JSON file.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn import_json(&mut self, path: &str) {
+        use draper_json::JsonModel;
+        match std::fs::read_to_string(path) {
+            Ok(json) => {
+                match JsonModel::from_json(&json) {
+                    Ok(model) => {
+                        let mesh = model.to_triangle_mesh();
+                        let name = model.metadata.name.clone();
+                        self.detailed_instances = model.to_detailed_instances();
+                        self.assembly_tree = Some(model.assembly);
+                        self.load_mesh(mesh, &name);
+                        self.log(&format!("Imported JSON: {} ({} instances)", path, model.metadata.instance_count));
+                    }
+                    Err(e) => self.log_error(&format!("JSON parse error: {}", e)),
+                }
+            }
+            Err(e) => self.log_error(&format!("JSON read error: {}", e)),
         }
     }
 
@@ -1801,6 +1902,25 @@ impl eframe::App for ViewerApp {
                             }
                             ui.close_menu();
                         }
+                        if ui.button("Export JSON...").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("JSON", &["json"])
+                                .save_file()
+                            {
+                                self.export_json(&path.to_string_lossy());
+                            }
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("Import JSON...").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("JSON", &["json"])
+                                .pick_file()
+                            {
+                                self.import_json(&path.to_string_lossy());
+                            }
+                            ui.close_menu();
+                        }
                         ui.separator();
                     }
 
@@ -2486,6 +2606,24 @@ impl eframe::App for ViewerApp {
                                 self.export_step(&path.to_string_lossy());
                             }
                         }
+                        if ui.button("Export JSON").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("JSON", &["json"])
+                                .save_file()
+                            {
+                                self.export_json(&path.to_string_lossy());
+                            }
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Import JSON").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("JSON", &["json"])
+                                .pick_file()
+                            {
+                                self.import_json(&path.to_string_lossy());
+                            }
+                        }
                     });
                 }
 
@@ -2505,6 +2643,7 @@ impl eframe::App for ViewerApp {
                 ui.checkbox(&mut self.show_axes, "Show axes");
                 ui.checkbox(&mut self.show_grid, "Show grid");
                 ui.checkbox(&mut self.show_structure, "Structure Panel");
+                ui.checkbox(&mut self.show_json_api, "JSON API");
 
                 if ui.button("Reset Camera").clicked() {
                     let (bbox_min, bbox_max) = self.mesh.bounding_box();
@@ -2606,6 +2745,67 @@ impl eframe::App for ViewerApp {
                 let cam_pos = self.camera.position();
                 ui.label(egui::RichText::new(format!("Camera: ({:.0}, {:.0}, {:.0})", cam_pos[0], cam_pos[1], cam_pos[2]))
                     .size(11.0).color(egui::Color32::GRAY));
+
+                // --- JSON API Panel ---
+                if self.show_json_api {
+                    ui.separator();
+                    ui.heading(egui::RichText::new("JSON API").size(12.0));
+                    ui.label(egui::RichText::new("Enter command (JSON):").size(10.0));
+                    let response = ui.add(
+                        egui::TextEdit::multiline(&mut self.json_api_input)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(3)
+                            .font(egui::TextStyle::Monospace)
+                    );
+                    let mut execute = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    ui.horizontal(|ui| {
+                        if ui.button("Execute").clicked() {
+                            execute = true;
+                        }
+                        if ui.button("Help").clicked() {
+                            let help_response = self.json_api.execute(draper_json::ApiRequest::Help);
+                            self.json_api_output = serde_json::to_string_pretty(&help_response)
+                                .unwrap_or_else(|_| "Error formatting response".to_string());
+                        }
+                        if ui.button("Stats").clicked() {
+                            let resp = self.json_api.execute(draper_json::ApiRequest::GetStats);
+                            self.json_api_output = serde_json::to_string_pretty(&resp)
+                                .unwrap_or_else(|_| "Error".to_string());
+                        }
+                        if ui.button("Clear").clicked() {
+                            self.json_api_input.clear();
+                            self.json_api_output.clear();
+                        }
+                    });
+                    if execute && !self.json_api_input.is_empty() {
+                        let result = self.json_api.execute_json(&self.json_api_input);
+                        self.json_api_output = result;
+                        // If the command loaded a model, sync the viewer
+                        let should_sync = self.json_api.model().map_or(false, |m| {
+                            let vc = m.metadata.total_vertices;
+                            vc > 0 && vc != self.current_model.vertex_count
+                        });
+                        if should_sync {
+                            let (mesh, name, instances, assembly) = {
+                                let model = self.json_api.model().unwrap();
+                                (model.to_triangle_mesh(), model.metadata.name.clone(), model.to_detailed_instances(), model.assembly.clone())
+                            };
+                            self.detailed_instances = instances;
+                            self.assembly_tree = Some(assembly);
+                            self.load_mesh(mesh, &name);
+                        }
+                    }
+                    if !self.json_api_output.is_empty() {
+                        ui.label(egui::RichText::new("Response:").size(10.0));
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.json_api_output)
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(6)
+                                .font(egui::TextStyle::Monospace)
+                                .interactive(false)
+                        );
+                    }
+                }
 
                 ui.add_space(4.0);
                 ui.separator();

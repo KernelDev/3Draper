@@ -3,12 +3,18 @@ name = "draper-step"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+serde = ["dep:serde", "dep:serde_json", "draper-geometry/serde", "draper-topology/serde", "draper-mesh/serde"]
+
 [dependencies]
 draper-geometry = { workspace = true }
 draper-topology = { workspace = true }
 draper-mesh = { workspace = true, default-features = false }
 thiserror = { workspace = true }
 log = { workspace = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
 env_logger = "0.11"

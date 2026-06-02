@@ -6,6 +6,7 @@ use std::fmt;
 
 /// A vector in 3D space (not necessarily unit length).
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Vec3d {
     pub x: f64,
     pub y: f64,
@@ -81,6 +82,7 @@ impl fmt::Display for Vec3d {
 
 /// 2D vector for parametric space computations.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Vec2d {
     pub u: f64,
     pub v: f64,

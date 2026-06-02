@@ -24,6 +24,7 @@ fn next_id() -> u64 {
 
 /// Unique identifier for a topological entity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TopoId(u64);
 
 impl TopoId {
@@ -44,6 +45,7 @@ impl fmt::Display for TopoId {
 
 /// A vertex — a point in 3D space.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Vertex {
     pub id: TopoId,
     pub point: Point3d,
@@ -67,6 +69,7 @@ impl Vertex {
 
 /// An edge — a curve segment between two vertices.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Edge {
     pub id: TopoId,
     /// The 3D curve geometry.
@@ -165,6 +168,7 @@ impl Edge {
 /// A co-edge — an oriented use of an edge within a wire.
 /// Stores the 2D pcurve (parametric curve on the face's surface).
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CoEdge {
     pub id: TopoId,
     /// Reference to the parent edge.
@@ -193,6 +197,7 @@ impl CoEdge {
 
 /// A 2D parametric curve on a surface (pcurve).
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Pcurve {
     /// 2D polyline approximation in (u, v) space.
     pub polyline_2d: Vec<Point2d>,
@@ -215,6 +220,7 @@ impl Pcurve {
 
 /// A wire — an ordered sequence of coedges forming a closed or open loop.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Wire {
     pub id: TopoId,
     /// Ordered coedges.
@@ -249,6 +255,7 @@ impl Wire {
 
 /// A face — a region of a surface bounded by wires.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Face {
     pub id: TopoId,
     /// The surface geometry.
@@ -318,6 +325,7 @@ impl Face {
 
 /// A shell — a connected set of faces forming a closed or open surface.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Shell {
     pub id: TopoId,
     /// Faces in the shell.
@@ -359,6 +367,7 @@ impl Shell {
 
 /// A solid — a closed 3D region bounded by shells.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Solid {
     pub id: TopoId,
     /// Outer shell.
@@ -412,6 +421,7 @@ impl Solid {
 
 /// A compound — a collection of solids (assembly).
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Compound {
     pub id: TopoId,
     pub solids: Vec<Solid>,
@@ -438,6 +448,7 @@ impl Compound {
 
 /// Top-level shape that can contain any topological entity.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Shape {
     Vertex(Vertex),
     Edge(Edge),

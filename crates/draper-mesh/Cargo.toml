@@ -4,14 +4,12 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-# No default features — all optional features must be explicitly enabled.
-# This prevents C dependencies (bzip2-sys, lzma-sys, zstd-sys) from being
-# compiled when building for wasm32-unknown-unknown.
 default = []
 # 3MF export requires the `zip` crate which has C dependencies
 # (bzip2-sys, lzma-sys, zstd-sys) that don't compile on wasm32.
 # Only enable this for native builds.
 export-3mf = ["zip"]
+serde = ["dep:serde", "dep:serde_json", "draper-geometry/serde"]
 
 [dependencies]
 draper-geometry = { workspace = true }
@@ -21,6 +19,8 @@ thiserror = { workspace = true }
 log = { workspace = true }
 rayon = "1.10"
 zip = { version = "2", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

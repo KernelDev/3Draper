@@ -7,6 +7,7 @@ use std::fmt;
 
 /// A unit direction vector in 3D space. Always normalized.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Direction3d {
     pub x: f64,
     pub y: f64,

@@ -17,6 +17,7 @@ use std::f64::consts::PI;
 
 /// A 2D parametric curve in UV parameter space.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Curve2d {
     /// A straight line segment in UV space.
     Line(Line2d),
@@ -30,6 +31,7 @@ pub enum Curve2d {
 
 /// A straight line in UV space.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Line2d {
     /// Start point in UV space.
     pub start: Point2d,
@@ -71,6 +73,7 @@ impl Line2d {
 
 /// A circular arc in UV space.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Circle2d {
     /// Center of the circle in UV space.
     pub center: Point2d,
@@ -130,6 +133,7 @@ impl Circle2d {
 
 /// An elliptical arc in UV space.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Ellipse2d {
     /// Center of the ellipse in UV space.
     pub center: Point2d,
@@ -211,6 +215,7 @@ impl Ellipse2d {
 
 /// A NURBS curve in UV space.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Nurbs2d {
     /// Degree of the NURBS curve.
     pub degree: usize,

@@ -10,6 +10,7 @@ pub type ParamRange = (f64, f64);
 
 /// A parametric curve in 3D space.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Curve3d {
     /// Line: P(t) = origin + t * direction
     Line(Line),
@@ -25,6 +26,7 @@ pub enum Curve3d {
 
 /// A line in 3D.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Line {
     pub origin: Point3d,
     pub direction: Direction3d,
@@ -70,6 +72,7 @@ impl Line {
 
 /// A circle in 3D space.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Circle {
     pub center: Point3d,
     pub normal: Direction3d,
@@ -127,6 +130,7 @@ impl Circle {
 
 /// An ellipse in 3D space.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Ellipse {
     pub center: Point3d,
     pub normal: Direction3d,
@@ -158,6 +162,7 @@ impl Ellipse {
 
 /// An arc (trimmed circle segment).
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Arc {
     pub circle: Circle,
     pub start_angle: f64,
@@ -186,6 +191,7 @@ impl Arc {
 
 /// NURBS curve representation.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct NurbsCurve {
     pub degree: usize,
     pub control_points: Vec<Point3d>,

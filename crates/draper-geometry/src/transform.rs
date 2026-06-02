@@ -6,6 +6,7 @@ use crate::{Direction3d, Point3d, Vec3d};
 
 /// 4x4 homogeneous transformation matrix stored in row-major order.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Transform {
     /// Row-major 4x4 matrix.
     pub m: [[f64; 4]; 4],

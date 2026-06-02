@@ -1,0 +1,22 @@
+[package]
+name = "draper-json"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+# HTTP server feature (native only — uses tiny_http which doesn't compile on wasm32)
+http-server = ["tiny_http"]
+
+[dependencies]
+draper-geometry = { workspace = true, features = ["serde"] }
+draper-topology = { workspace = true, features = ["serde"] }
+draper-mesh = { workspace = true, default-features = false, features = ["serde"] }
+draper-step = { workspace = true, features = ["serde"] }
+draper-core = { workspace = true, features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = { workspace = true }
+
+# Native-only HTTP server
+tiny_http = { version = "0.12", optional = true }

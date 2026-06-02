@@ -486,6 +486,7 @@ fn log_healing_report(brep_id: i64, report: &HealingReport) {
 
 /// Information about a single face within a BREP, for structure display and UV visualization.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FaceInfo {
     /// Unique face identifier (for selection and tracking).
     pub face_id: u64,
@@ -508,11 +509,11 @@ pub struct FaceInfo {
     /// Whether the face normal matches the surface normal.
     pub forward: bool,
 }
-
 /// A mesh instance to be rendered — the mesh geometry is transformed by the given matrix
 /// and painted with the given color. Multiple instances can reference the same BREP geometry
 /// but with different transforms (e.g., a bolt inserted 6 times at different positions).
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MeshInstance {
     /// Human-readable name (from STEP PRODUCT or NAUO).
     pub name: String,
@@ -529,6 +530,7 @@ pub struct MeshInstance {
 /// A detailed mesh instance with per-face information for structure display,
 /// selection, UV grid visualization, and debugging.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DetailedMeshInstance {
     /// Human-readable name (from STEP PRODUCT or NAUO).
     pub name: String,
@@ -546,6 +548,7 @@ pub struct DetailedMeshInstance {
 
 /// A node in the STEP assembly tree (for structure display).
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AssemblyNode {
     /// Name of this assembly node.
     pub name: String,
@@ -641,6 +644,7 @@ pub fn step_structure_with_instances(step_file: &StepFile) -> (AssemblyNode, Vec
 /// and instance descriptors quickly, then triangulate them one-by-one
 /// in a progressive frame loop (e.g., the wasm web viewer).
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PendingBrepInstance {
     /// Human-readable name (from STEP PRODUCT or NAUO).
     pub name: String,
