@@ -67,6 +67,7 @@ impl std::ops::BitOrAssign for DegeneracyFlags {
 
 /// A parametric surface: S(u,v) -> Point3d.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Surface {
     /// Plane: S(u,v) = origin + u*u_dir + v*v_dir
     Plane(Plane),
@@ -88,6 +89,7 @@ pub enum Surface {
 
 /// A plane in 3D space.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Plane {
     pub origin: Point3d,
     pub u_dir: Direction3d,
@@ -172,6 +174,7 @@ impl Plane {
 
 /// A cylindrical surface.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CylinderSurface {
     pub origin: Point3d,
     pub axis: Direction3d,
@@ -258,6 +261,7 @@ impl CylinderSurface {
 /// v increases toward the apex where radius reaches 0.
 /// Height from base to apex = radius / tan(half_angle).
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ConeSurface {
     pub origin: Point3d,    // Center of base circle (or apex for expanding cones)
     pub axis: Direction3d,   // Direction from base toward apex (or away from apex for expanding cones)
@@ -385,6 +389,7 @@ impl ConeSurface {
 
 /// A spherical surface.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SphereSurface {
     pub center: Point3d,
     pub radius: f64,
@@ -427,6 +432,7 @@ impl SphereSurface {
 
 /// A toroidal surface.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TorusSurface {
     pub center: Point3d,
     pub axis: Direction3d,
@@ -505,6 +511,7 @@ impl TorusSurface {
 
 /// Surface of revolution.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RevolutionSurface {
     /// The profile curve (generatrix) defined in global coordinates.
     /// The curve is revolved around `axis` passing through `origin`.
@@ -576,6 +583,7 @@ impl RevolutionSurface {
 
 /// Extruded surface — a curve swept along a direction.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExtrusionSurface {
     /// The profile curve.
     pub profile: Curve3d,
@@ -601,6 +609,7 @@ impl ExtrusionSurface {
 
 /// NURBS surface.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct NurbsSurface {
     pub u_degree: usize,
     pub v_degree: usize,

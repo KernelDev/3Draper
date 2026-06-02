@@ -7,6 +7,7 @@ use std::fmt;
 
 /// A 3D triangle mesh.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TriangleMesh {
     /// Vertex positions.
     pub vertices: Vec<Point3d>,

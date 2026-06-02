@@ -8,6 +8,7 @@ use std::fmt;
 
 /// A point in 3D space.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Point3d {
     pub x: f64,
     pub y: f64,
@@ -108,6 +109,7 @@ impl fmt::Display for Point3d {
 
 /// A point in 2D parametric space (u, v).
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Point2d {
     pub u: f64,
     pub v: f64,
