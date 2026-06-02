@@ -1548,10 +1548,17 @@ impl<'a> StepConverter<'a> {
             [0.0, 0.0, 0.0, 1.0],
         ];
 
-        // Same formula as compute_item_defined_transform: M = t * o⁻¹
-        // (see the detailed comment in compute_item_defined_transform for rationale)
-        let o_inv = mat4_inverse(&o)?;
-        Some(mat4_mul(&t, &o_inv))
+        // The IDT defines: the coordinate system described by transform_item_1 (o)
+        // in the parent representation is IDENTICAL to the coordinate system described
+        // by transform_item_2 (t) in the child representation.
+        //
+        // BREP geometry is expressed in the child representation's coordinate space.
+        // To place it in the parent's coordinate space, we need:
+        //   1. Express the child point in the shared (local) frame: t⁻¹ (child-world → local)
+        //   2. Re-express in parent-world: o (local → parent-world)
+        // Result: M = o * t⁻¹
+        let t_inv = mat4_inverse(&t)?;
+        Some(mat4_mul(&o, &t_inv))
     }
 
     /// Static version: compute a 4×4 transform from CARTESIAN_TRANSFORMATION_OPERATOR_3D.
@@ -3137,20 +3144,17 @@ impl<'a> StepConverter<'a> {
             [0.0, 0.0, 0.0, 1.0],
         ];
 
-        // The IDT defines a mapping: "geometry at source position should be placed
-        // at target position". Both `o` and `t` are local-to-world matrices.
+        // The IDT defines: the coordinate system described by transform_item_1 (o)
+        // in the parent representation is IDENTICAL to the coordinate system described
+        // by transform_item_2 (t) in the child representation (CAx-IF convention).
         //
-        // To place child geometry (defined in child's world frame) into the parent's
-        // world frame, we need to:
-        //   1. Remove the source placement: o⁻¹ (go from child-world to source-local)
-        //   2. Apply the target placement: t (go from target-local to parent-world)
-        // Result: M = t * o⁻¹
-        //
-        // The formula M = t⁻¹ * o maps source-local → target-local, which is the
-        // STEP-internal representation of the transformation but is NOT what we need
-        // when applying the transform to BREP vertex coordinates.
-        let o_inv = mat4_inverse(&o)?;
-        let result = mat4_mul(&t, &o_inv);
+        // BREP geometry is expressed in the child representation's coordinate space.
+        // To place it in the parent's coordinate space, we need:
+        //   1. Express the child point in the shared (local) frame: t⁻¹ (child-world → local)
+        //   2. Re-express in parent-world: o (local → parent-world)
+        // Result: M = o * t⁻¹
+        let t_inv = mat4_inverse(&t)?;
+        let result = mat4_mul(&o, &t_inv);
         Some(result)
     }
 
