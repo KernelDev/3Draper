@@ -870,6 +870,10 @@ struct BridgeResult {
 /// creating self-intersecting merged polygons. This function verifies that the
 /// bridge edge doesn't cross any polygon edges before accepting it.
 fn find_bridge_edge(outer_2d: &[Point2d], hole_2d: &[Point2d]) -> BridgeResult {
+    // Guard against empty inputs
+    if hole_2d.is_empty() || outer_2d.is_empty() {
+        return BridgeResult { outer_idx: 0, hole_idx: 0 };
+    }
     // Find rightmost point of the hole
     let mut hole_idx = 0;
     let mut max_u = hole_2d[0].u;
@@ -891,6 +895,10 @@ fn find_bridge_edge(outer_2d: &[Point2d], hole_2d: &[Point2d]) -> BridgeResult {
         })
         .collect();
     candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    if candidates.is_empty() {
+        return BridgeResult { outer_idx: 0, hole_idx };
+    }
 
     // Try each candidate in order of distance — accept the first visible one
     let fallback_idx = candidates[0].0;

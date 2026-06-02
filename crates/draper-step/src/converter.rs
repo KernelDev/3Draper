@@ -7291,6 +7291,9 @@ fn project_point_on_line(line: &Line, point: &Point3d) -> f64 {
 /// For non-convex polygons (like L-shapes), verifies that the bridge edge
 /// doesn't cross any polygon edges before accepting it.
 fn find_bridge_edge_2d(outer_2d: &[Point2d], hole_2d: &[Point2d]) -> (usize, usize) {
+    if hole_2d.is_empty() || outer_2d.is_empty() {
+        return (0, 0);
+    }
     let mut hole_idx = 0;
     let mut max_u = hole_2d[0].u;
     for (i, p) in hole_2d.iter().enumerate() {
@@ -7310,6 +7313,10 @@ fn find_bridge_edge_2d(outer_2d: &[Point2d], hole_2d: &[Point2d]) -> (usize, usi
         })
         .collect();
     candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    if candidates.is_empty() {
+        return (0, hole_idx);
+    }
 
     // Try each candidate — accept the first visible one
     let fallback_idx = candidates[0].0;
@@ -8097,7 +8104,7 @@ fn merge_holes_into_polygon(
         // Find the rightmost point of the hole
         let (rightmost_idx, _) = hole_2d.iter().enumerate()
             .max_by(|(_, a), (_, b)| a.u.partial_cmp(&b.u).unwrap_or(std::cmp::Ordering::Equal))
-            .unwrap_or((0, &hole_2d[0]));
+            .unwrap_or_else(|| (0, &hole_2d[0]));
 
         // Find the closest VISIBLE point on the polygon to the rightmost hole point.
         // For non-convex polygons, we must verify the bridge edge doesn't cross
@@ -8120,7 +8127,7 @@ fn merge_holes_into_polygon(
                 is_bridge_visible_converter(&poly_2d, hole_pt, outer_pt, *idx)
             })
             .map(|(idx, _)| *idx)
-            .unwrap_or(candidates[0].0);
+            .unwrap_or_else(|| candidates.first().map(|c| c.0).unwrap_or(0));
 
         // Insert the hole into the polygon at the bridge point
         // The bridge creates: ...poly[best] -> hole[rightmost] -> ...hole -> hole[rightmost] -> poly[best]...

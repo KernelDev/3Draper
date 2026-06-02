@@ -1164,9 +1164,23 @@ impl ViewerApp {
         if self.conversion_ctx.is_none() {
             if let Some(step_file) = self.pending_step_file.take() {
                 self.log("Building conversion context (entity maps, bounding box)...");
-                let ctx = OwnedStepConversionContext::new(step_file);
-                self.conversion_ctx = Some(ctx);
-                self.log("Conversion context ready — starting triangulation...");
+                // Wrap in catch_unwind to prevent WASM panics from crashing the entire app.
+                let ctx_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    OwnedStepConversionContext::new(step_file)
+                }));
+                match ctx_result {
+                    Ok(ctx) => {
+                        self.conversion_ctx = Some(ctx);
+                        self.log("Conversion context ready — starting triangulation...");
+                    }
+                    Err(_) => {
+                        self.log_error("Panic during conversion context creation — STEP loading aborted");
+                        self.is_loading = false;
+                        self.conversion_ctx = None;
+                        self.pending_step_file = None;
+                        return false;
+                    }
+                }
             } else {
                 // No step file and no context — can't proceed
                 self.is_loading = false;
@@ -1203,8 +1217,14 @@ impl ViewerApp {
         // The context (OwnedStepConversionContext) is created ONCE when loading starts
         // and reused across all frames — this avoids rebuilding entity maps, cloning
         // HashMaps, and recomputing bounding boxes on every frame (major perf win).
+        // Wrap in catch_unwind to prevent WASM panics from crashing the entire app.
         let instance = if let Some(ref mut ctx) = self.conversion_ctx {
-            ctx.triangulate_pending(&pending)
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ctx.triangulate_pending(&pending)
+            })).unwrap_or_else(|_| {
+                log::error!("Panic during triangulation of '{}' (BREP #{}), skipping", pending.name, pending.brep_id);
+                None
+            })
         } else {
             None
         };
@@ -1461,7 +1481,7 @@ impl ViewerApp {
     /// Check for loaded web files and process them.
     #[cfg(target_arch = "wasm32")]
     fn process_web_file_loads(&mut self) {
-        let result = self.file_result.lock().unwrap().take();
+        let result = self.file_result.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(file_result) = result {
             match file_result {
                 FileLoadResult::Step { name, content } => {
