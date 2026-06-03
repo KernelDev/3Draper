@@ -288,6 +288,24 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
+// Wireframe vertex shader: same as vs_main but pushes vertices slightly towards
+// the camera to avoid z-fighting with the filled surface. This replaces depth
+// bias which is not allowed for PolygonMode::Line in WebGPU/WebGL2.
+@vertex
+fn vs_wireframe(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    let world_pos = uniforms.model * vec4<f32>(in.position, 1.0);
+    let clip_pos = uniforms.mvp * vec4<f32>(in.position, 1.0);
+    // Offset clip-space Z slightly towards the camera (multiply by <1)
+    out.clip_position = vec4<f32>(clip_pos.x, clip_pos.y, clip_pos.z * 0.999, clip_pos.w);
+    out.world_normal = (uniforms.model * vec4<f32>(in.normal, 0.0)).xyz;
+    out.world_pos = world_pos.xyz;
+    out.vertex_color = in.color;
+    out.v_selection = in.selection;
+    out.v_highlight = in.highlight;
+    return out;
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let normal = normalize(in.world_normal);
@@ -416,7 +434,11 @@ struct VertexOutput {
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    out.clip_position = uniforms.mvp * vec4<f32>(in.position, 1.0);
+    // Push edges slightly towards the camera to avoid z-fighting with the surface.
+    // We offset the clip-space Z by a small epsilon. This replaces depth bias
+    // which is not allowed for LineList topology in WebGPU/WebGL2.
+    let clip_pos = uniforms.mvp * vec4<f32>(in.position, 1.0);
+    out.clip_position = vec4<f32>(clip_pos.x, clip_pos.y, clip_pos.z * 0.999, clip_pos.w);
     out.line_color = in.color;
     return out;
 }
@@ -553,11 +575,13 @@ fn create_edge_pipeline(
             // Use LessEqual so edges on the surface are visible
             depth_compare: wgpu::CompareFunction::LessEqual,
             stencil: wgpu::StencilState::default(),
-            // Depth bias to push edges in front of the surface
-            // Strong bias ensures edges never sink under the surface (no stepping artifacts)
+            // NOTE: Depth bias MUST be 0 for LineList topology —
+            // WebGPU and WebGL2 reject non-zero depthBias for line primitives.
+            // Instead, edges are pushed slightly towards the camera in the
+            // vertex shader (see vs_main offset along the view-space Z axis).
             bias: wgpu::DepthBiasState {
-                constant: 10,
-                slope_scale: 4.0,
+                constant: 0,
+                slope_scale: 0.0,
                 clamp: 0.0,
             },
         }),
@@ -588,7 +612,7 @@ fn create_wireframe_overlay_pipeline(
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState {
             module: shader,
-            entry_point: Some("vs_main"),
+            entry_point: Some("vs_wireframe"),
             buffers: &[MeshVertex::LAYOUT],
             compilation_options: Default::default(),
         },
@@ -627,10 +651,13 @@ fn create_wireframe_overlay_pipeline(
             depth_write_enabled: false,
             depth_compare: wgpu::CompareFunction::LessEqual,
             stencil: wgpu::StencilState::default(),
-            // Depth bias to push wireframe lines in front of the filled surface
+            // NOTE: Depth bias MUST be 0 for PolygonMode::Line —
+            // WebGPU and WebGL2 reject non-zero depthBias for line primitives.
+            // Instead, wireframe lines are pushed slightly towards the camera
+            // in the vertex shader (see vs_main offset along view-space Z).
             bias: wgpu::DepthBiasState {
-                constant: 5,
-                slope_scale: 2.0,
+                constant: 0,
+                slope_scale: 0.0,
                 clamp: 0.0,
             },
         }),
