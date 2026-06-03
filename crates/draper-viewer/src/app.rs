@@ -35,8 +35,11 @@ fn wasm_tri_params() -> TriangulationParams {
 ///   highlight: 0 = normal face, 1 = highlighted face
 ///
 /// Hidden instances are skipped entirely — their triangles are not included in the output.
-/// The returned Vec<(usize, usize)> contains the updated per-instance triangle ranges
-/// for visible instances only (indices in the output mesh, not the source mesh).
+/// The returned Vec<(usize, usize)> contains per-instance triangle ranges in the GPU OUTPUT
+/// buffer (visible triangles only, indices shift when instances are hidden). These ranges
+/// must NOT be stored back into instance_triangle_ranges because that field must always map
+/// to the ORIGINAL mesh's triangle indices (self.mesh.triangles), which are used by
+/// build_wireframe_overlay_vertices(), pick_at(), and subsequent mesh_to_gpu_data() calls.
 fn mesh_to_gpu_data(
     mesh: &TriangleMesh,
     highlighted_face: Option<(usize, u64)>,
@@ -3136,9 +3139,15 @@ impl eframe::App for ViewerApp {
                     self.mesh.ensure_colors([0.62, 0.65, 0.70, 1.0]);
 
                     if let Some(ref rs) = self.render_state {
-                        let (vertices, indices, new_ranges) = mesh_to_gpu_data(&self.mesh, self.highlighted_face, self.selected_instance, &self.instance_triangle_ranges, &self.hidden_instances);
-                        // Update instance triangle ranges to reflect hidden instances
-                        self.instance_triangle_ranges = new_ranges;
+                        let (vertices, indices, _new_ranges) = mesh_to_gpu_data(&self.mesh, self.highlighted_face, self.selected_instance, &self.instance_triangle_ranges, &self.hidden_instances);
+                        // NOTE: We intentionally do NOT overwrite instance_triangle_ranges with new_ranges.
+                        // The new_ranges map instance indices to triangle ranges in the GPU output buffer
+                        // (with hidden instances removed, so indices shift). But self.mesh.triangles still
+                        // contains ALL triangles including hidden ones. All subsequent operations —
+                        // build_wireframe_overlay_vertices(), pick_at(), and future mesh_to_gpu_data() calls —
+                        // iterate over self.mesh.triangles and need the ORIGINAL ranges to correctly determine
+                        // which instance each triangle belongs to. Overwriting with GPU output ranges corrupted
+                        // the mapping after the first visibility toggle, causing mesh/edges to hide incorrectly.
 
                         // Build edge line vertices from B-Rep boundary data
                         let edge_vertices = self.build_edge_line_vertices();
