@@ -1395,7 +1395,7 @@ impl<'a> StepConverter<'a> {
         //      where #751 is a NEXT_ASSEMBLY_USAGE_OCCURRENCE.
         // We must use strategy 2 because many STEP files (including the CAx-IF
         // as1-oc-214 reference file) use $ for the NAUO's 6th param.
-        let nauo_ids: std::collections::HashSet<i64> = nauos.iter().map(|n| n.id).collect();
+        let nauo_id_set: std::collections::HashSet<i64> = nauos.iter().map(|n| n.id).collect();
         let mut pds_to_nauos: HashMap<i64, Vec<i64>> = HashMap::new();
 
         // Strategy 1: NAUO → PDS (works when NAUO's 6th param is not $)
@@ -1411,10 +1411,24 @@ impl<'a> StepConverter<'a> {
         for pds in step.find_entities_by_type("PRODUCT_DEFINITION_SHAPE") {
             for param in &pds.params {
                 if let Some(ref_id) = get_ref_standalone(param) {
-                    if nauo_ids.contains(&ref_id) {
+                    if nauo_id_set.contains(&ref_id) {
                         pds_to_nauos.entry(pds.id).or_default().push(ref_id);
                     }
                 }
+            }
+        }
+
+        // Build index: PD → representation_id via SHAPE_DEFINITION_REPRESENTATION
+        // This is needed to determine which representation in the SRR belongs to
+        // the parent (relating) PD vs the child (related) PD.
+        let pd_to_repr = Self::build_pd_to_representation_index(step);
+
+        // Build index: nauo_id → (relating_pd, related_pd)
+        let mut nauo_to_pd_refs: HashMap<i64, (i64, i64)> = HashMap::new();
+        for nauo in &nauos {
+            let (relating_pd, related_pd) = extract_nauo_pd_refs_static(step, nauo);
+            if let (Some(rp), Some(rd)) = (relating_pd, related_pd) {
+                nauo_to_pd_refs.insert(nauo.id, (rp, rd));
             }
         }
 
@@ -1445,20 +1459,54 @@ impl<'a> StepConverter<'a> {
             };
 
             // Which NAUO(s) does this CDSR's PDS belong to?
-            let nauo_ids = match pds_to_nauos.get(&pds_id) {
+            let matched_nauo_ids = match pds_to_nauos.get(&pds_id) {
                 Some(ids) => ids,
                 None => continue,
             };
 
             // Extract transform from SRR
-            let transform = if let Some(srr_entity) = step.find_entity(srr_id) {
-                Self::extract_transform_from_srr_static(step, &srr_entity)
-            } else {
-                None
+            let srr_entity = match step.find_entity(srr_id) {
+                Some(e) => e,
+                None => continue,
+            };
+
+            // Determine the transform direction by checking which SRR representation
+            // belongs to the parent (relating) PD.
+            //
+            // The ITEM_DEFINED_TRANSFORMATION defines:
+            //   transform_item_1 (o) is in rep_1's coordinate space
+            //   transform_item_2 (t) is in rep_2's coordinate space
+            //
+            // The formula M = o * t⁻¹ maps from rep_2 → rep_1.
+            //
+            // For assembly placement, we need the transform that maps from
+            // the CHILD's coordinate space to the PARENT's coordinate space.
+            //
+            // CAx-IF convention (most STEP files):
+            //   rep_1 = child component, rep_2 = parent assembly
+            //   M = o * t⁻¹ maps parent → child (WRONG direction)
+            //   We need M⁻¹ = t * o⁻¹ (child → parent)
+            //
+            // Opposite convention (some STEP exporters):
+            //   rep_1 = parent assembly, rep_2 = child component
+            //   M = o * t⁻¹ maps child → parent (CORRECT direction)
+            //
+            // We detect which convention is used by checking which representation
+            // in the SRR belongs to the parent PD.
+            let needs_inversion = Self::srr_needs_transform_inversion(
+                step, &srr_entity, matched_nauo_ids, &nauo_to_pd_refs, &pd_to_repr,
+            );
+
+            let raw_transform = Self::extract_transform_from_srr_static(step, &srr_entity);
+
+            let transform = match (raw_transform, needs_inversion) {
+                (Some(tf), true) => mat4_inverse(&tf),
+                (Some(tf), false) => Some(tf),
+                (None, _) => None,
             };
 
             // Assign to all NAUOs that reference this PDS
-            for nauo_id in nauo_ids {
+            for nauo_id in matched_nauo_ids {
                 result.insert(*nauo_id, transform);
             }
         }
@@ -1475,6 +1523,126 @@ impl<'a> StepConverter<'a> {
             with_transform, total, pds_to_nauos.len());
 
         result
+    }
+
+    /// Build an index: PD_id → representation_id via SHAPE_DEFINITION_REPRESENTATION.
+    ///
+    /// Each PRODUCT_DEFINITION links to a PRODUCT_DEFINITION_SHAPE, which links to
+    /// a SHAPE_DEFINITION_REPRESENTATION, which references a SHAPE_REPRESENTATION.
+    /// This index allows us to determine which representation belongs to which PD.
+    fn build_pd_to_representation_index(step: &StepFile) -> HashMap<i64, i64> {
+        let mut pd_to_pds: HashMap<i64, Vec<i64>> = HashMap::new();
+        for pds in step.find_entities_by_type("PRODUCT_DEFINITION_SHAPE") {
+            for param in &pds.params {
+                if let Some(pd_id) = get_ref_standalone(param) {
+                    if let Some(entity) = step.find_entity(pd_id) {
+                        if entity.type_name == "PRODUCT_DEFINITION" {
+                            pd_to_pds.entry(pd_id).or_default().push(pds.id);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut pds_to_repr: HashMap<i64, i64> = HashMap::new();
+        for sdr in step.find_entities_by_type("SHAPE_DEFINITION_REPRESENTATION") {
+            if let Some(pds_id) = sdr.params.first().and_then(|p| get_ref_standalone(p)) {
+                // The second parameter of SDR is the representation
+                if let Some(repr_id) = sdr.params.get(1).and_then(|p| get_ref_standalone(p)) {
+                    pds_to_repr.insert(pds_id, repr_id);
+                }
+            }
+        }
+
+        let mut result: HashMap<i64, i64> = HashMap::new();
+        for (pd_id, pds_ids) in &pd_to_pds {
+            for pds_id in pds_ids {
+                if let Some(repr_id) = pds_to_repr.get(pds_id) {
+                    result.insert(*pd_id, *repr_id);
+                    break;
+                }
+            }
+        }
+        result
+    }
+
+    /// Determine whether the computed transform from the SRR needs to be inverted.
+    ///
+    /// Returns `true` if rep_2 of the SRR belongs to the parent PD (CAx-IF convention),
+    /// meaning M = o * t⁻¹ maps in the wrong direction and must be inverted.
+    /// Returns `false` if rep_1 belongs to the parent PD, meaning M = o * t⁻¹
+    /// already maps child → parent.
+    ///
+    /// If the direction cannot be determined, defaults to `true` (CAx-IF convention),
+    /// which is the most common case.
+    fn srr_needs_transform_inversion(
+        step: &StepFile,
+        srr: &crate::schema::StepEntity,
+        nauo_ids: &[i64],
+        nauo_to_pd_refs: &HashMap<i64, (i64, i64)>,
+        pd_to_repr: &HashMap<i64, i64>,
+    ) -> bool {
+        // Extract rep_1 and rep_2 from the SRR
+        // For a complex entity, the REPRESENTATION_RELATIONSHIP sub-entity has the rep refs.
+        // For a simple entity, params are: name, description, rep_1, rep_2
+        let rr_sub = if srr.is_complex() {
+            srr.find_sub_entity("REPRESENTATION_RELATIONSHIP")
+        } else {
+            Some(srr)
+        };
+
+        let rr = match rr_sub {
+            Some(s) => s,
+            None => return true, // Default: assume CAx-IF convention
+        };
+
+        // Extract representation references (params 2 and 3 of RR: name, desc, rep_1, rep_2)
+        let mut repr_refs: Vec<i64> = Vec::new();
+        for (i, param) in rr.params.iter().enumerate() {
+            if i >= 2 { // Skip name (0) and description (1)
+                if let Some(ref_id) = get_ref_standalone(param) {
+                    if step.find_entity(ref_id).is_some() {
+                        repr_refs.push(ref_id);
+                    }
+                }
+            }
+        }
+
+        let rep1_id = match repr_refs.get(0) {
+            Some(&id) => id,
+            None => return true, // Can't determine direction, assume CAx-IF
+        };
+        let rep2_id = match repr_refs.get(1) {
+            Some(&id) => id,
+            None => return true,
+        };
+
+        // Get the parent (relating) PD from any of the NAUOs
+        let relating_pd = nauo_ids.iter()
+            .filter_map(|nid| nauo_to_pd_refs.get(nid).map(|(rp, _)| *rp))
+            .next();
+
+        let relating_pd = match relating_pd {
+            Some(pd) => pd,
+            None => return true, // Can't determine, assume CAx-IF
+        };
+
+        // Check which representation belongs to the relating (parent) PD
+        if let Some(&parent_repr_id) = pd_to_repr.get(&relating_pd) {
+            if parent_repr_id == rep1_id {
+                // rep_1 = parent → M = o * t⁻¹ maps child → parent (correct)
+                log::debug!("SRR #{}: rep_1 is parent → no inversion needed", srr.id);
+                return false;
+            } else if parent_repr_id == rep2_id {
+                // rep_2 = parent → M = o * t⁻¹ maps parent → child (wrong, needs inversion)
+                log::debug!("SRR #{}: rep_2 is parent → inversion needed (CAx-IF convention)", srr.id);
+                return true;
+            }
+        }
+
+        // Default: assume CAx-IF convention (rep_1 = child, rep_2 = parent)
+        log::debug!("SRR #{}: cannot determine parent repr, assuming CAx-IF (inversion needed)", srr.id);
+        true
     }
 
     /// Static version of extract_transform_from_srr.
@@ -1527,6 +1695,16 @@ impl<'a> StepConverter<'a> {
     }
 
     /// Static version of compute_item_defined_transform.
+    ///
+    /// Computes the "raw" transform from an ITEM_DEFINED_TRANSFORMATION entity.
+    /// Returns M = o * t⁻¹, which maps from rep_2 → rep_1 (i.e., from the
+    /// "related" representation to the "relating" representation).
+    ///
+    /// IMPORTANT: The caller must determine whether this raw transform maps
+    /// from child → parent or from parent → child, depending on which
+    /// representation in the SRR corresponds to the parent PD. The
+    /// `build_nauo_transform_index` function handles this by inverting
+    /// the result when rep_2 is the parent (CAx-IF convention).
     fn compute_item_defined_transform_static(step: &StepFile, idt: &crate::schema::StepEntity) -> Option<[[f64; 4]; 4]> {
         let mut axis2_ids: Vec<i64> = Vec::new();
         for (i, param) in idt.params.iter().enumerate() {
@@ -1565,14 +1743,13 @@ impl<'a> StepConverter<'a> {
         ];
 
         // The IDT defines: the coordinate system described by transform_item_1 (o)
-        // in the parent representation is IDENTICAL to the coordinate system described
-        // by transform_item_2 (t) in the child representation.
+        // in rep_1's space is IDENTICAL to the coordinate system described by
+        // transform_item_2 (t) in rep_2's space.
         //
-        // BREP geometry is expressed in the child representation's coordinate space.
-        // To place it in the parent's coordinate space, we need:
-        //   1. Express the child point in the shared (local) frame: t⁻¹ (child-world → local)
-        //   2. Re-express in parent-world: o (local → parent-world)
-        // Result: M = o * t⁻¹
+        // This formula computes M = o * t⁻¹, which maps from rep_2 → rep_1.
+        // The caller (build_nauo_transform_index) determines whether this is
+        // child → parent or parent → child based on the SRR/NAUO relationship,
+        // and inverts if necessary.
         let t_inv = mat4_inverse(&t)?;
         Some(mat4_mul(&o, &t_inv))
     }
@@ -3080,6 +3257,12 @@ impl<'a> StepConverter<'a> {
     /// Extract the 4x4 transform from a SHAPE_REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION.
     /// Handles both simple SRR entities and complex/composite entities
     /// (e.g., REPRESENTATION_RELATIONSHIP+REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION+SHAPE_REPRESENTATION_RELATIONSHIP).
+    ///
+    /// NOTE: Returns the "raw" transform M = o * t⁻¹ which maps from rep_2 → rep_1.
+    /// The caller must determine the direction (child → parent or parent → child)
+    /// based on the SRR/NAUO relationship. For the cached path used by the viewer,
+    /// `build_nauo_transform_index` handles this automatically by detecting the
+    /// convention and inverting when needed.
     fn extract_transform_from_srr(&self, srr: &crate::schema::StepEntity) -> Option<[[f64; 4]; 4]> {
         // First: check if this is a complex entity with a REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION sub-entity
         if srr.is_complex() {
@@ -3131,6 +3314,11 @@ impl<'a> StepConverter<'a> {
     }
 
     /// Compute a 4x4 transform from ITEM_DEFINED_TRANSFORMATION(origin_axis2, target_axis2).
+    ///
+    /// NOTE: This returns the "raw" transform M = o * t⁻¹ which maps from rep_2 → rep_1.
+    /// The caller must determine the direction (child → parent or parent → child)
+    /// based on which representation in the SRR is the parent. For the cached path
+    /// used by the viewer, `build_nauo_transform_index` handles this automatically.
     fn compute_item_defined_transform(&self, idt: &crate::schema::StepEntity) -> Option<[[f64; 4]; 4]> {
         let mut axis2_ids: Vec<i64> = Vec::new();
         for (i, param) in idt.params.iter().enumerate() {
@@ -3170,14 +3358,11 @@ impl<'a> StepConverter<'a> {
         ];
 
         // The IDT defines: the coordinate system described by transform_item_1 (o)
-        // in the parent representation is IDENTICAL to the coordinate system described
-        // by transform_item_2 (t) in the child representation (CAx-IF convention).
+        // in rep_1's space is IDENTICAL to the coordinate system described by
+        // transform_item_2 (t) in rep_2's space.
         //
-        // BREP geometry is expressed in the child representation's coordinate space.
-        // To place it in the parent's coordinate space, we need:
-        //   1. Express the child point in the shared (local) frame: t⁻¹ (child-world → local)
-        //   2. Re-express in parent-world: o (local → parent-world)
-        // Result: M = o * t⁻¹
+        // M = o * t⁻¹ maps from rep_2 → rep_1.
+        // The caller must determine whether this maps child → parent or vice versa.
         let t_inv = mat4_inverse(&t)?;
         let result = mat4_mul(&o, &t_inv);
         Some(result)
@@ -7181,6 +7366,22 @@ fn get_float_standalone(value: &StepValue) -> Option<f64> {
         StepValue::Integer(i) => Some(*i as f64),
         _ => None,
     }
+}
+
+/// Static version of extract_nauo_pd_refs: extract relating and related PD IDs from a NAUO entity.
+/// Returns (relating_pd_id, related_pd_id).
+fn extract_nauo_pd_refs_static(step: &StepFile, nauo: &crate::schema::StepEntity) -> (Option<i64>, Option<i64>) {
+    let mut pd_refs: Vec<i64> = Vec::new();
+    for param in &nauo.params {
+        if let Some(ref_id) = get_ref_standalone(param) {
+            if let Some(entity) = step.find_entity(ref_id) {
+                if entity.type_name == "PRODUCT_DEFINITION" {
+                    pd_refs.push(ref_id);
+                }
+            }
+        }
+    }
+    (pd_refs.get(0).copied(), pd_refs.get(1).copied())
 }
 
 /// Standalone: extract a [f64;3] direction from a DIRECTION entity referenced by a StepValue param.
