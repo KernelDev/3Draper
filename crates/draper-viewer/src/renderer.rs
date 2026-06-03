@@ -93,7 +93,10 @@ pub struct SceneResources {
     pub edge_vertex_count: u32,
 
     // Wireframe overlay (triangle edges drawn on top of filled mesh)
-    pub wireframe_overlay_pipeline: Option<wgpu::RenderPipeline>,
+    // Uses LineList topology — works on ALL platforms including WebGPU/WASM.
+    pub wireframe_overlay_line_pipeline: wgpu::RenderPipeline,
+    pub wireframe_overlay_vertex_buffer: wgpu::Buffer,
+    pub wireframe_overlay_vertex_count: u32,
 
     // Bind group layouts (needed for resize recreation)
     pub mesh_bind_group_layout: wgpu::BindGroupLayout,
@@ -194,14 +197,14 @@ impl CallbackTrait for SceneCallback {
         mesh_pass.draw_indexed(0..resources.index_count, 0, 0..1);
 
         // Draw wireframe overlay on top of the filled mesh (triangle edges)
-        if self.show_wireframe_overlay {
-            if let Some(ref wf_pipeline) = resources.wireframe_overlay_pipeline {
-                mesh_pass.set_pipeline(wf_pipeline);
-                mesh_pass.set_bind_group(0, &resources.mesh_bind_group, &[]);
-                mesh_pass.set_vertex_buffer(0, resources.vertex_buffer.slice(..));
-                mesh_pass.set_index_buffer(resources.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                mesh_pass.draw_indexed(0..resources.index_count, 0, 0..1);
-            }
+        // Uses LineList topology — works on ALL platforms including WebGPU/WASM.
+        // Depth test (LessEqual) ensures only VISIBLE edges are drawn;
+        // edges behind the solid surface are properly occluded.
+        if self.show_wireframe_overlay && resources.wireframe_overlay_vertex_count > 0 {
+            mesh_pass.set_pipeline(&resources.wireframe_overlay_line_pipeline);
+            mesh_pass.set_bind_group(0, &resources.mesh_bind_group, &[]);
+            mesh_pass.set_vertex_buffer(0, resources.wireframe_overlay_vertex_buffer.slice(..));
+            mesh_pass.draw(0..resources.wireframe_overlay_vertex_count, 0..1);
         }
 
         // Draw B-Rep boundary edges on top of the mesh
@@ -447,6 +450,28 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(in.line_color, 1.0);
 }
+
+// Wireframe overlay line shader: renders semi-transparent mesh triangle edges
+// on top of the filled surface with depth testing for proper occlusion.
+// Uses LineList topology which works on ALL platforms including WebGPU/WASM.
+@vertex
+fn vs_wireframe_line(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    let clip_pos = uniforms.mvp * vec4<f32>(in.position, 1.0);
+    // Push slightly towards camera to avoid z-fighting with the filled surface
+    out.clip_position = vec4<f32>(clip_pos.x, clip_pos.y, clip_pos.z * 0.999, clip_pos.w);
+    out.line_color = in.color;
+    return out;
+}
+
+@fragment
+fn fs_wireframe_line(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Semi-transparent dark gray for wireframe overlay
+    // The alpha value controls visibility: 0.35 gives a subtle mesh structure overlay
+    let overlay_color = vec3<f32>(0.15, 0.15, 0.20);
+    let overlay_alpha = 0.35;
+    return vec4<f32>(overlay_color, overlay_alpha);
+}
 "#;
 
 // ─── Pipeline creation helpers ────────────────────────────────────────────
@@ -595,30 +620,34 @@ fn create_edge_pipeline(
     })
 }
 
-fn create_wireframe_overlay_pipeline(
+/// Create the wireframe overlay pipeline using LineList topology.
+/// This works on ALL platforms including WebGPU/WASM where PolygonMode::Line
+/// is not available. Wireframe overlay vertices are generated from the mesh's
+/// triangle data on the CPU side (see build_wireframe_overlay_vertices in app.rs).
+fn create_wireframe_overlay_line_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
     shader: &wgpu::ShaderModule,
     layout: &wgpu::BindGroupLayout,
 ) -> wgpu::RenderPipeline {
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("3Draper wireframe overlay pipeline layout"),
+        label: Some("3Draper wireframe overlay line pipeline layout"),
         bind_group_layouts: &[layout],
         push_constant_ranges: &[],
     });
 
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("3Draper wireframe overlay pipeline"),
+        label: Some("3Draper wireframe overlay line pipeline"),
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState {
             module: shader,
-            entry_point: Some("vs_wireframe"),
-            buffers: &[MeshVertex::LAYOUT],
+            entry_point: Some("vs_wireframe_line"),
+            buffers: &[LineVertex::LAYOUT],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some("fs_wireframe_overlay"),
+            entry_point: Some("fs_wireframe_line"),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
                 blend: Some(wgpu::BlendState {
@@ -638,11 +667,11 @@ fn create_wireframe_overlay_pipeline(
             compilation_options: Default::default(),
         }),
         primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
+            topology: wgpu::PrimitiveTopology::LineList,
             strip_index_format: None,
             front_face: wgpu::FrontFace::Ccw,
             cull_mode: None,
-            polygon_mode: wgpu::PolygonMode::Line,
+            polygon_mode: wgpu::PolygonMode::Fill,
             unclipped_depth: false,
             conservative: false,
         },
@@ -651,10 +680,9 @@ fn create_wireframe_overlay_pipeline(
             depth_write_enabled: false,
             depth_compare: wgpu::CompareFunction::LessEqual,
             stencil: wgpu::StencilState::default(),
-            // NOTE: Depth bias MUST be 0 for PolygonMode::Line —
-            // WebGPU and WebGL2 reject non-zero depthBias for line primitives.
-            // Instead, wireframe lines are pushed slightly towards the camera
-            // in the vertex shader (see vs_main offset along view-space Z).
+            // NOTE: Depth bias MUST be 0 for LineList —
+            // WebGPU/WebGL2 reject non-zero depthBias for line primitives.
+            // Instead, Z-offset is applied in the vertex shader.
             bias: wgpu::DepthBiasState {
                 constant: 0,
                 slope_scale: 0.0,
@@ -840,15 +868,18 @@ pub fn create_scene_resources(
         None
     };
 
-    // ── Wireframe overlay pipeline (draws triangle edges ON TOP of filled mesh) ──
-    // Uses same mesh shader but in Line polygon mode with depth bias to avoid z-fighting
-    let wireframe_overlay_pipeline = if device.features().contains(wgpu::Features::POLYGON_MODE_LINE) {
-        Some(create_wireframe_overlay_pipeline(
-            device, offscreen_color_format, &mesh_shader, &mesh_bind_group_layout,
-        ))
-    } else {
-        None
-    };
+    // ── Wireframe overlay line pipeline (draws triangle edges ON TOP of filled mesh) ──
+    // Uses LineList topology — works on ALL platforms including WebGPU/WASM.
+    // The old PolygonMode::Line approach only worked on desktop GPUs.
+    let edge_shader_for_overlay = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("3Draper wireframe overlay edge shader"),
+        source: wgpu::ShaderSource::Wgsl(EDGE_SHADER_SRC.into()),
+    });
+    let wireframe_overlay_line_pipeline = create_wireframe_overlay_line_pipeline(
+        device, offscreen_color_format, &edge_shader_for_overlay, &mesh_bind_group_layout,
+    );
+    let wireframe_overlay_vertex_buffer = create_wireframe_overlay_vertex_buffer(device, &[]);
+    let wireframe_overlay_vertex_count = 0u32;
 
     // ── Vertex / index buffers ──
     let vertex_buffer = create_vertex_buffer(device, vertices);
@@ -950,7 +981,9 @@ pub fn create_scene_resources(
     SceneResources {
         mesh_pipeline,
         wireframe_pipeline,
-        wireframe_overlay_pipeline,
+        wireframe_overlay_line_pipeline,
+        wireframe_overlay_vertex_buffer,
+        wireframe_overlay_vertex_count,
         vertex_buffer,
         index_buffer,
         index_count,
@@ -1039,6 +1072,32 @@ pub fn update_edge_buffers(
 ) {
     resources.edge_vertex_buffer = create_edge_vertex_buffer(device, vertices);
     resources.edge_vertex_count = vertices.len() as u32;
+}
+
+fn create_wireframe_overlay_vertex_buffer(device: &wgpu::Device, vertices: &[LineVertex]) -> wgpu::Buffer {
+    if vertices.is_empty() {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("3Draper wireframe overlay vertex buffer (empty)"),
+            contents: bytemuck::cast_slice(&[LineVertex { position: [0.0; 3], color: [0.0; 3] }]),
+            usage: wgpu::BufferUsages::VERTEX,
+        })
+    } else {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("3Draper wireframe overlay vertex buffer"),
+            contents: bytemuck::cast_slice(vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        })
+    }
+}
+
+/// Update wireframe overlay line data in GPU buffers.
+pub fn update_wireframe_overlay_buffers(
+    resources: &mut SceneResources,
+    device: &wgpu::Device,
+    vertices: &[LineVertex],
+) {
+    resources.wireframe_overlay_vertex_buffer = create_wireframe_overlay_vertex_buffer(device, vertices);
+    resources.wireframe_overlay_vertex_count = vertices.len() as u32;
 }
 
 /// Update the uniform buffer.

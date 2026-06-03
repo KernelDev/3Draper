@@ -9,6 +9,7 @@ use crate::camera::OrbitCamera;
 use crate::renderer::{
     MeshVertex, LineVertex, SceneCallback, SceneResources, SceneUniforms,
     create_scene_resources, update_mesh_buffers, update_uniforms, update_edge_buffers,
+    update_wireframe_overlay_buffers,
 };
 use draper_core::engine::{EngineConfig, build_engine};
 use draper_topology::ShapeBuilder;
@@ -306,6 +307,8 @@ pub struct ViewerApp {
     show_edges: bool,
     /// Show wireframe overlay (triangle mesh edges on top of filled surfaces).
     show_wireframe_overlay: bool,
+    /// Wireframe overlay line vertices need GPU upload.
+    wireframe_overlay_dirty: bool,
     /// Edge line vertices need GPU upload.
     edge_dirty: bool,
     /// Model info.
@@ -568,6 +571,7 @@ impl ViewerApp {
             wireframe: false,
             show_edges: true,
             show_wireframe_overlay: false,
+            wireframe_overlay_dirty: false,
             edge_dirty: false,
             current_model,
             mesh_dirty: false,
@@ -642,6 +646,7 @@ impl ViewerApp {
         self.mesh = mesh;
         self.mesh_dirty = true;
         self.edge_dirty = true;
+        self.wireframe_overlay_dirty = true;
         // Reset selection when loading new model
         self.selected_instance = None;
         self.selected_face = None;
@@ -1263,6 +1268,7 @@ impl ViewerApp {
             }
             self.mesh_dirty = true;
             self.edge_dirty = true;
+            self.wireframe_overlay_dirty = true;
 
             // Auto-fit camera once tree is ready (even before mesh)
             self.log("Structure tree ready — triangulation will begin...");
@@ -1417,6 +1423,64 @@ impl ViewerApp {
         }
 
         edge_vertices
+    }
+
+    /// Build wireframe overlay line vertices from the mesh's triangle data.
+    ///
+    /// This generates LineVertex pairs for each triangle edge, creating a wireframe
+    /// overlay that shows the mesh triangulation structure. Uses LineList topology
+    /// which works on ALL platforms including WebGPU/WASM (unlike PolygonMode::Line).
+    ///
+    /// The vertices are in the same coordinate space as the mesh (world space),
+    /// so depth testing against the solid mesh will properly occlude hidden edges.
+    fn build_wireframe_overlay_vertices(&self) -> Vec<LineVertex> {
+        let mut vertices: Vec<LineVertex> = Vec::new();
+
+        // Wireframe overlay color: subtle dark gray
+        let overlay_color: [f32; 3] = [0.15, 0.15, 0.20];
+
+        let mesh = &self.mesh;
+
+        // For each triangle, generate 3 line segments (6 vertices)
+        // Adjacent triangles will share edges — each shared edge is drawn twice,
+        // which is acceptable for a wireframe overlay.
+        for tri in &mesh.triangles {
+            let v0 = &mesh.vertices[tri[0] as usize];
+            let v1 = &mesh.vertices[tri[1] as usize];
+            let v2 = &mesh.vertices[tri[2] as usize];
+
+            // Edge 0→1
+            vertices.push(LineVertex {
+                position: [v0.x as f32, v0.y as f32, v0.z as f32],
+                color: overlay_color,
+            });
+            vertices.push(LineVertex {
+                position: [v1.x as f32, v1.y as f32, v1.z as f32],
+                color: overlay_color,
+            });
+
+            // Edge 1→2
+            vertices.push(LineVertex {
+                position: [v1.x as f32, v1.y as f32, v1.z as f32],
+                color: overlay_color,
+            });
+            vertices.push(LineVertex {
+                position: [v2.x as f32, v2.y as f32, v2.z as f32],
+                color: overlay_color,
+            });
+
+            // Edge 2→0
+            vertices.push(LineVertex {
+                position: [v2.x as f32, v2.y as f32, v2.z as f32],
+                color: overlay_color,
+            });
+            vertices.push(LineVertex {
+                position: [v0.x as f32, v0.y as f32, v0.z as f32],
+                color: overlay_color,
+            });
+        }
+
+        vertices
     }
 
     /// Cancel any in-progress loading.
@@ -1586,6 +1650,7 @@ impl ViewerApp {
         self.triangulated_count += 1;
         self.mesh_dirty = true;
         self.edge_dirty = true;
+        self.wireframe_overlay_dirty = true;
 
         if self.pending_breps.is_empty() {
             // Loading complete — free the conversion context (and its StepFile)
@@ -2959,7 +3024,7 @@ impl eframe::App for ViewerApp {
                 }
 
                 // Upload mesh data if dirty or highlight changed
-                if self.mesh_dirty || self.highlight_dirty || self.edge_dirty {
+                if self.mesh_dirty || self.highlight_dirty || self.edge_dirty || self.wireframe_overlay_dirty {
                     // Ensure mesh has face normals and colors before GPU upload
                     // (moved from mesh_to_gpu_data to avoid cloning the entire mesh)
                     if self.mesh.face_normals.is_none() {
@@ -2973,22 +3038,28 @@ impl eframe::App for ViewerApp {
                         // Build edge line vertices from B-Rep boundary data
                         let edge_vertices = self.build_edge_line_vertices();
 
+                        // Build wireframe overlay line vertices from mesh triangles
+                        let wf_overlay_vertices = self.build_wireframe_overlay_vertices();
+
                         let mut guard = self.gpu_resources.lock().unwrap();
                         if let Some(ref mut resources) = *guard {
                             update_mesh_buffers(resources, &rs.device, &vertices, &indices);
                             update_edge_buffers(resources, &rs.device, &edge_vertices);
+                            update_wireframe_overlay_buffers(resources, &rs.device, &wf_overlay_vertices);
                         } else {
                             let resources = create_scene_resources(rs, &vertices, &indices);
                             *guard = Some(resources);
-                            // After creating new resources, we need to upload edges too
+                            // After creating new resources, we need to upload edges and overlay too
                             if let Some(ref mut resources) = *guard {
                                 update_edge_buffers(resources, &rs.device, &edge_vertices);
+                                update_wireframe_overlay_buffers(resources, &rs.device, &wf_overlay_vertices);
                             }
                         }
                     }
                     self.mesh_dirty = false;
                     self.highlight_dirty = false;
                     self.edge_dirty = false;
+                    self.wireframe_overlay_dirty = false;
                 }
 
                 // Update uniforms
