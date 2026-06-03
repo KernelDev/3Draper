@@ -7038,42 +7038,20 @@ impl<'a> StepConverter<'a> {
                 }
             }
         } else {
-            let mut all_points_3d = outer_points_3d.clone();
-            let mut all_points_2d = outer_2d.clone();
-            let mut polygon_indices: Vec<u32> = (0..all_points_3d.len() as u32).collect();
-
-            for hole_3d in &hole_points_3d {
-                let hole_2d: Vec<Point2d> = hole_3d.iter().map(|p| project(p)).collect();
-                let hole_start_idx = all_points_3d.len();
-                let bridge_result = find_bridge_edge_2d(&all_points_2d, &hole_2d);
-                for p in hole_3d { all_points_3d.push(*p); }
-                all_points_2d.extend(hole_2d);
-                let mut new_polygon = Vec::with_capacity(polygon_indices.len() + hole_3d.len() + 2);
-                let bridge_outer = bridge_result.0;
-                let bridge_hole = hole_start_idx + bridge_result.1;
-                for &idx in &polygon_indices[..=bridge_outer] { new_polygon.push(idx); }
-                new_polygon.push(bridge_hole as u32);
-                for i in 0..hole_3d.len() {
-                    let idx = hole_start_idx + (bridge_result.1 + i) % hole_3d.len();
-                    new_polygon.push(idx as u32);
-                }
-                new_polygon.push(bridge_hole as u32);
-                new_polygon.push(polygon_indices[bridge_outer]);
-                for &idx in &polygon_indices[bridge_outer + 1..] { new_polygon.push(idx); }
-                polygon_indices = new_polygon;
-            }
-
-            let merged_2d: Vec<Point2d> = polygon_indices.iter()
-                .map(|&idx| all_points_2d[idx as usize])
-                .collect();
+            // Use the same bridge-edge merging as the non-cached version.
+            // The previous implementation had a bug: find_bridge_edge_2d returned an index
+            // into all_points_2d, but after the first hole was merged, polygon_indices
+            // was rearranged and the index no longer corresponded to the correct position.
+            // Using merge_holes_into_polygon avoids this by rebuilding the polygon as a
+            // flat array each time.
+            let (merged_2d, merged_3d) = merge_holes_into_polygon(
+                &outer_2d, &outer_points_3d, &hole_points_2d, &hole_points_3d,
+            );
             let triangles = ear_clip(&merged_2d);
-            for p in &all_points_3d { mesh.add_vertex(*p); }
+            for p in &merged_3d { mesh.add_vertex(*p); }
             for tri in &triangles {
-                let i0 = polygon_indices[tri[0] as usize];
-                let i1 = polygon_indices[tri[1] as usize];
-                let i2 = polygon_indices[tri[2] as usize];
-                if forward { mesh.add_triangle(i0, i1, i2); }
-                else { mesh.add_triangle(i0, i2, i1); }
+                if forward { mesh.add_triangle(tri[0], tri[1], tri[2]); }
+                else { mesh.add_triangle(tri[0], tri[2], tri[1]); }
             }
         }
 

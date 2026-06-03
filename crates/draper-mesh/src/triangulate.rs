@@ -782,70 +782,37 @@ fn triangulate_planar_face(face: &Face, plane: &Plane, _params: &TriangulationPa
             }
         }
     } else {
-        // Has holes — merge holes into outer polygon via bridge edges, then ear-clip
-        let mut all_points_3d = boundary_3d.clone();
-        let mut all_points_2d = points_2d.clone();
+        // Has holes — merge holes into outer polygon via bridge edges, then ear-clip.
+        //
+        // We rebuild the polygon as a flat array after each hole insertion,
+        // so that bridge-edge search always operates on the current polygon
+        // and indices remain consistent. (Previous version used separate
+        // all_points_2d + polygon_indices arrays, which caused index mismatches
+        // when multiple holes were inserted because find_bridge_edge returned
+        // an index into all_points_2d but the code used it as a position in
+        // polygon_indices — these diverge after the first hole is merged.)
 
-        // Compute the polygon index ranges after each hole insertion
-        let mut polygon_indices: Vec<u32> = (0..boundary_3d.len() as u32).collect();
-
-        for hole_3d in &holes_3d {
-            let hole_2d: Vec<Point2d> = hole_3d.iter().map(|p| project(p)).collect();
-            let hole_start_idx = all_points_3d.len();
-
-            // Find the bridge: rightmost point of the hole, closest point on outer polygon
-            let bridge_result = find_bridge_edge(&all_points_2d, &hole_2d);
-
-            // Add hole points to the combined point list
-            for p in hole_3d {
-                all_points_3d.push(*p);
-            }
-            all_points_2d.extend(hole_2d);
-
-            // Insert hole into polygon via bridge edge
-            let mut new_polygon = Vec::with_capacity(polygon_indices.len() + hole_3d.len() + 2);
-            let bridge_outer = bridge_result.outer_idx;
-            let bridge_hole = hole_start_idx + bridge_result.hole_idx;
-
-            for &idx in &polygon_indices[..=bridge_outer as usize] {
-                new_polygon.push(idx);
-            }
-            // Bridge: outer → hole → ... hole loop ... → hole → outer
-            new_polygon.push(bridge_hole as u32);
-            for i in 0..hole_3d.len() {
-                let idx = hole_start_idx + (bridge_result.hole_idx + i) % hole_3d.len();
-                new_polygon.push(idx as u32);
-            }
-            new_polygon.push(bridge_hole as u32);
-            new_polygon.push(polygon_indices[bridge_outer as usize]);
-            for &idx in &polygon_indices[bridge_outer as usize + 1..] {
-                new_polygon.push(idx);
-            }
-
-            polygon_indices = new_polygon;
-        }
-
-        // Now ear-clip the merged polygon
-        let merged_2d: Vec<Point2d> = polygon_indices.iter()
-            .map(|&idx| all_points_2d[idx as usize])
+        let holes_2d: Vec<Vec<Point2d>> = holes_3d.iter()
+            .map(|h| h.iter().map(|p| project(p)).collect())
             .collect();
+
+        let (merged_2d, merged_3d) = merge_holes_into_polygon_planar(
+            &points_2d, &boundary_3d, &holes_2d, &holes_3d,
+        );
 
         let triangles = ear_clip(&merged_2d);
 
         // Add all vertices
-        for p in &all_points_3d {
+        for p in &merged_3d {
             mesh.add_vertex(*p);
         }
 
-        // Map ear-clip indices back to original vertex indices
+        // Ear-clip indices directly map to merged arrays
         for tri in &triangles {
-            let i0 = polygon_indices[tri[0] as usize];
-            let i1 = polygon_indices[tri[1] as usize];
-            let i2 = polygon_indices[tri[2] as usize];
             if forward {
-                mesh.add_triangle(i0, i1, i2);
+                mesh.add_triangle(tri[0], tri[1], tri[2]);
             } else {
-                mesh.add_triangle(i0, i2, i1);
+                mesh.add_triangle(tri[0], tri[2], tri[1]);
             }
         }
     }
@@ -865,6 +832,90 @@ fn triangulate_planar_face(face: &Face, plane: &Plane, _params: &TriangulationPa
 struct BridgeResult {
     outer_idx: usize,
     hole_idx: usize,
+}
+
+/// Merge holes into the outer polygon using the bridge-edge technique.
+/// Returns the merged polygon as flat (2D, 3D) arrays suitable for ear-clipping.
+///
+/// This function rebuilds the polygon as a flat array after each hole insertion,
+/// ensuring that bridge-edge search always operates on the current polygon and
+/// indices remain consistent across multiple holes.
+fn merge_holes_into_polygon_planar(
+    outer_2d: &[Point2d],
+    outer_3d: &[Point3d],
+    holes_2d: &[Vec<Point2d>],
+    holes_3d: &[Vec<Point3d>],
+) -> (Vec<Point2d>, Vec<Point3d>) {
+    if outer_2d.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    if holes_2d.is_empty() {
+        return (outer_2d.to_vec(), outer_3d.to_vec());
+    }
+
+    let mut poly_2d: Vec<Point2d> = outer_2d.to_vec();
+    let mut poly_3d: Vec<Point3d> = outer_3d.to_vec();
+
+    // Sort holes by rightmost point (u-coordinate) descending
+    let mut hole_indices: Vec<usize> = (0..holes_2d.len()).collect();
+    hole_indices.sort_by(|&a, &b| {
+        let max_u_a = holes_2d[a].iter().map(|p| p.u).fold(f64::NEG_INFINITY, f64::max);
+        let max_u_b = holes_2d[b].iter().map(|p| p.u).fold(f64::NEG_INFINITY, f64::max);
+        max_u_b.partial_cmp(&max_u_a).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    for hole_idx in hole_indices {
+        let hole_2d = &holes_2d[hole_idx];
+        let hole_3d = &holes_3d[hole_idx];
+        if hole_2d.is_empty() { continue; }
+
+        let bridge_result = find_bridge_edge(&poly_2d, hole_2d);
+
+        // Rotate hole to start at bridge point
+        let n_hole = hole_2d.len();
+        let mut rotated_hole_2d = Vec::with_capacity(n_hole + 1);
+        let mut rotated_hole_3d = Vec::with_capacity(n_hole + 1);
+        for i in 0..=n_hole {
+            let idx = (bridge_result.hole_idx + i) % n_hole;
+            rotated_hole_2d.push(hole_2d[idx]);
+            rotated_hole_3d.push(hole_3d[idx]);
+        }
+
+        // Insert hole into polygon at the bridge point
+        let mut new_poly_2d = Vec::new();
+        let mut new_poly_3d = Vec::new();
+
+        // Part 1: outer polygon up to and including the bridge point
+        for i in 0..=bridge_result.outer_idx {
+            new_poly_2d.push(poly_2d[i]);
+            new_poly_3d.push(poly_3d[i]);
+        }
+
+        // Part 2: bridge to hole (rightmost point)
+        new_poly_2d.push(hole_2d[bridge_result.hole_idx]);
+        new_poly_3d.push(hole_3d[bridge_result.hole_idx]);
+
+        // Part 3: hole vertices starting from rightmost+1 going around back to rightmost
+        for i in 1..rotated_hole_2d.len() {
+            new_poly_2d.push(rotated_hole_2d[i]);
+            new_poly_3d.push(rotated_hole_3d[i]);
+        }
+
+        // Part 4: bridge back to the same outer polygon point
+        new_poly_2d.push(poly_2d[bridge_result.outer_idx]);
+        new_poly_3d.push(poly_3d[bridge_result.outer_idx]);
+
+        // Part 5: rest of outer polygon after bridge point
+        for i in (bridge_result.outer_idx + 1)..poly_2d.len() {
+            new_poly_2d.push(poly_2d[i]);
+            new_poly_3d.push(poly_3d[i]);
+        }
+
+        poly_2d = new_poly_2d;
+        poly_3d = new_poly_3d;
+    }
+
+    (poly_2d, poly_3d)
 }
 
 /// Find the best bridge edge between an outer polygon and a hole.
