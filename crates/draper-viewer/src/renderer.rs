@@ -15,10 +15,10 @@ use wgpu::util::DeviceExt;
 // ─── Vertex / Uniform types ──────────────────────────────────────────────
 
 /// Vertex format for the 3D mesh: position + normal + color + selection state.
-/// selection: encodes three states:
+/// selection: encodes states:
 ///   0.0 = normal (no selection active)
-///   1.0 = selected instance (gets warm highlight tint)
-///   2.0 = dimmed instance (non-selected, slightly dimmed)
+///   1.0 = selected instance (gets subtle highlight tint)
+///   2.0 = unused (was dimmed — now non-selected instances stay at original color)
 /// highlight: 0.0 = normal face, 1.0 = highlighted face (additive tint)
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -351,18 +351,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let lit_color = base_color * (ambient + diffuse) + specular + base_color * rim_factor;
 
     // Apply selection state AFTER lighting to preserve 3D shading
-    // selection: 0 = normal, 1 = selected instance, 2 = non-selected instance
+    // selection: 0 = normal, 1 = selected instance (highlighted), 2 = unused (was dimmed)
     var final_color = lit_color;
 
-    // Selected instance: add warm highlight tint to make it stand out
+    // Selected instance: add bright cyan-white outline tint to make it stand out
+    // without darkening the rest of the model
     let is_selected = step(0.5, in.v_selection) * step(in.v_selection, 1.5);
-    let selected_tint = vec3<f32>(0.15, 0.12, 0.03);
+    let selected_tint = vec3<f32>(0.18, 0.22, 0.28);
     final_color = final_color + selected_tint * is_selected;
 
-    // Non-selected instances: dim slightly so the selected instance stands out
-    let is_dimmed = step(1.5, in.v_selection) * step(in.v_selection, 2.5);
-    let dim_factor = 0.6;
-    final_color = final_color * (1.0 - is_dimmed * (1.0 - dim_factor));
+    // NOTE: Non-selected instances are NO LONGER dimmed — the entire model
+    // keeps its original colors. Only the selected instance gets a subtle
+    // additive highlight so it stands out without affecting other parts.
 
     // Face highlight: additive yellow-gold tint for selected face
     let highlight_tint = vec3<f32>(0.40, 0.32, 0.06);

@@ -31,14 +31,19 @@ fn wasm_tri_params() -> TriangulationParams {
 /// Convert TriangleMesh to GPU vertex/index data.
 /// Uses flat shading with face normals to properly support per-triangle colors from STEP files.
 /// Selection state is encoded as per-vertex attributes and applied AFTER lighting in the shader:
-///   selection: 0 = normal, 1 = selected instance, 2 = dimmed instance
+///   selection: 0 = normal, 1 = selected instance, 2 = unused (was dimmed)
 ///   highlight: 0 = normal face, 1 = highlighted face
+///
+/// Hidden instances are skipped entirely — their triangles are not included in the output.
+/// The returned Vec<(usize, usize)> contains the updated per-instance triangle ranges
+/// for visible instances only (indices in the output mesh, not the source mesh).
 fn mesh_to_gpu_data(
     mesh: &TriangleMesh,
     highlighted_face: Option<(usize, u64)>,
     selected_instance: Option<usize>,
     instance_triangle_ranges: &[(usize, usize)],
-) -> (Vec<MeshVertex>, Vec<u32>) {
+    hidden_instances: &std::collections::HashSet<usize>,
+) -> (Vec<MeshVertex>, Vec<u32>, Vec<(usize, usize)>) {
     // NOTE: compute_face_normals() and ensure_colors() must be called on the mesh
     // BEFORE calling this function, to avoid cloning the entire mesh here.
     let normals = mesh.face_normals.as_ref();
@@ -74,7 +79,9 @@ fn mesh_to_gpu_data(
                 gpu_indices.push(tri[1]);
                 gpu_indices.push(tri[2]);
             }
-            return (gpu_vertices, gpu_indices);
+            // No instance tracking for smooth shading path (single-instance primitives)
+            let new_ranges: Vec<(usize, usize)> = instance_triangle_ranges.to_vec();
+            return (gpu_vertices, gpu_indices, new_ranges);
         }
     }
 
@@ -82,7 +89,28 @@ fn mesh_to_gpu_data(
     let mut gpu_vertices = Vec::with_capacity(mesh.triangles.len() * 3);
     let mut gpu_indices = Vec::with_capacity(mesh.triangles.len() * 3);
 
+    // Build updated instance triangle ranges for visible instances.
+    // When an instance is hidden, its triangles are skipped, so ranges shift.
+    let mut new_instance_ranges: Vec<(usize, usize)> = vec![(0, 0); instance_triangle_ranges.len()];
+    let mut visible_tri_count: usize = 0;
+
     for (i, tri) in mesh.triangles.iter().enumerate() {
+        // Determine which instance this triangle belongs to
+        let mut inst_idx: Option<usize> = None;
+        for (idx, &(start, end)) in instance_triangle_ranges.iter().enumerate() {
+            if i >= start && i < end {
+                inst_idx = Some(idx);
+                break;
+            }
+        }
+
+        // Skip triangles belonging to hidden instances
+        if let Some(idx) = inst_idx {
+            if hidden_instances.contains(&idx) {
+                continue;
+            }
+        }
+
         let normal = normals
             .and_then(|n| n.get(i))
             .map(|n| [n[0] as f32, n[1] as f32, n[2] as f32])
@@ -95,39 +123,47 @@ fn mesh_to_gpu_data(
             .unwrap_or([0.62, 0.65, 0.70]);
 
         // Compute per-triangle selection state (applied AFTER lighting in shader)
-        // selection: 0 = normal, 1 = selected instance, 2 = dimmed instance
+        // selection: 0 = normal, 1 = selected instance, 2 = unused
         let mut selection = 0.0_f32;
         let mut is_highlighted = false;
 
         // Determine instance selection state
         if let Some(sel_idx) = selected_instance {
-            if let Some(&(start, end)) = instance_triangle_ranges.get(sel_idx) {
-                if i >= start && i < end {
-                    // This triangle belongs to the selected instance
-                    selection = 1.0;
-                } else {
-                    // This triangle belongs to a non-selected instance
-                    selection = 2.0;
-                }
+            if Some(sel_idx) == inst_idx {
+                // This triangle belongs to the selected instance
+                selection = 1.0;
             }
-            // If instance_triangle_ranges doesn't have this index, selection stays 0.0 (normal)
+            // Non-selected instances keep selection = 0.0 (normal, no dimming)
         }
 
         // Check face-level highlighting (instance-aware)
         // highlighted_face = (instance_index, face_id) — only highlight within the correct instance
         if let Some((hl_inst, hl_fid)) = highlighted_face {
-            if let Some(&(start, end)) = instance_triangle_ranges.get(hl_inst) {
-                if i >= start && i < end {
-                    if let Some(ids) = face_ids {
-                        if ids.get(i).map_or(false, |id| *id == hl_fid) {
-                            is_highlighted = true;
-                        }
+            if Some(hl_inst) == inst_idx {
+                if let Some(ids) = face_ids {
+                    if ids.get(i).map_or(false, |id| *id == hl_fid) {
+                        is_highlighted = true;
                     }
                 }
             }
         }
 
         let highlight = if is_highlighted { 1.0 } else { 0.0 };
+
+        // Track instance ranges in the output mesh (visible triangles only)
+        if let Some(idx) = inst_idx {
+            if new_instance_ranges[idx].0 == 0 && new_instance_ranges[idx].1 == 0 && visible_tri_count == 0 {
+                // First triangle of this instance
+                new_instance_ranges[idx] = (visible_tri_count, visible_tri_count + 1);
+            } else if new_instance_ranges[idx].1 == visible_tri_count {
+                // Extending existing range
+                new_instance_ranges[idx].1 = visible_tri_count + 1;
+            } else {
+                // Gap (shouldn't happen with sequential instances) — extend anyway
+                new_instance_ranges[idx].1 = visible_tri_count + 1;
+            }
+        }
+        visible_tri_count += 1;
 
         let base_idx = gpu_vertices.len() as u32;
         for &idx in tri {
@@ -145,7 +181,7 @@ fn mesh_to_gpu_data(
         gpu_indices.push(base_idx + 2);
     }
 
-    (gpu_vertices, gpu_indices)
+    (gpu_vertices, gpu_indices, new_instance_ranges)
 }
 
 /// Result of a mouse pick operation.
@@ -206,9 +242,11 @@ fn ray_triangle_intersect(
 
 /// Pick the closest triangle under the given screen position.
 /// Returns the instance index and face ID of the hit triangle, or None if nothing was hit.
+/// Hidden instances are excluded from picking.
 fn pick_at(
     mesh: &TriangleMesh,
     instance_triangle_ranges: &[(usize, usize)],
+    hidden_instances: &std::collections::HashSet<usize>,
     camera: &OrbitCamera,
     screen_pos: [f32; 2],
     viewport: (f32, f32, f32, f32),
@@ -219,6 +257,17 @@ fn pick_at(
     let mut best: Option<PickResult> = None;
 
     for (i, tri) in mesh.triangles.iter().enumerate() {
+        // Determine which instance this triangle belongs to
+        let instance_idx = instance_triangle_ranges
+            .iter()
+            .position(|&(start, end)| i >= start && i < end)
+            .unwrap_or(0);
+
+        // Skip hidden instances — they can't be picked
+        if hidden_instances.contains(&instance_idx) {
+            continue;
+        }
+
         let v0 = mesh.vertices.get(tri[0] as usize);
         let v1 = mesh.vertices.get(tri[1] as usize);
         let v2 = mesh.vertices.get(tri[2] as usize);
@@ -236,12 +285,6 @@ fn pick_at(
         ) {
             let dist = best.as_ref().map_or(f32::MAX, |b| b.distance);
             if t < dist {
-                // Determine which instance this triangle belongs to
-                let instance_idx = instance_triangle_ranges
-                    .iter()
-                    .position(|&(start, end)| i >= start && i < end)
-                    .unwrap_or(0);
-
                 let face_id = face_ids.and_then(|ids| ids.get(i)).copied();
 
                 best = Some(PickResult {
@@ -359,6 +402,9 @@ pub struct ViewerApp {
     /// Per-instance triangle ranges in the merged mesh: Vec<(start_tri, end_tri)>
     /// When an instance is selected, triangles outside its range are dimmed.
     instance_triangle_ranges: Vec<(usize, usize)>,
+    /// Set of instance indices that are currently hidden (not rendered).
+    /// Users toggle visibility via checkboxes in the assembly tree.
+    hidden_instances: std::collections::HashSet<usize>,
     // ─── Tree navigation state ────────────────────────────────────────
     /// Node keys ("name_pd_id") that should be forced open in the assembly tree.
     open_tree_nodes: std::collections::HashSet<String>,
@@ -552,7 +598,7 @@ impl ViewerApp {
                 mesh.compute_face_normals();
             }
             mesh.ensure_colors([0.62, 0.65, 0.70, 1.0]);
-            let (vertices, indices) = mesh_to_gpu_data(&mesh, None, None, &[]);
+            let (vertices, indices, _new_ranges) = mesh_to_gpu_data(&mesh, None, None, &[], &std::collections::HashSet::new());
             let resources = create_scene_resources(rs, &vertices, &indices);
             *gpu_resources.lock().unwrap() = Some(resources);
         }
@@ -593,6 +639,7 @@ impl ViewerApp {
             highlighted_face: None,
             highlight_dirty: false,
             instance_triangle_ranges: Vec::new(),
+            hidden_instances: std::collections::HashSet::new(),
             open_tree_nodes: std::collections::HashSet::new(),
             scroll_to_tree_node: None,
             scroll_to_face_id: None,
@@ -656,6 +703,7 @@ impl ViewerApp {
         self.open_tree_nodes.clear();
         self.scroll_to_tree_node = None;
         self.scroll_to_face_id = None;
+        self.hidden_instances.clear();
         self.log(&format!("Loaded: {} ({} vertices, {} triangles) — {}",
             name, self.current_model.vertex_count, self.current_model.triangle_count,
             if is_watertight { "watertight" } else { "not watertight" }));
@@ -1301,7 +1349,12 @@ impl ViewerApp {
             [x as f32, y as f32, z as f32]
         }
 
-        for inst in &self.detailed_instances {
+        for (inst_idx, inst) in self.detailed_instances.iter().enumerate() {
+            // Skip hidden instances — don't draw their edges
+            if self.hidden_instances.contains(&inst_idx) {
+                continue;
+            }
+
             // Apply instance transform to boundary points to match the mesh
             // (mesh vertices are already in world space, but boundary points are local)
             let tf = inst.transform.as_ref();
@@ -1440,11 +1493,26 @@ impl ViewerApp {
         let overlay_color: [f32; 3] = [0.15, 0.15, 0.20];
 
         let mesh = &self.mesh;
+        let hidden = &self.hidden_instances;
+        let ranges = &self.instance_triangle_ranges;
 
         // For each triangle, generate 3 line segments (6 vertices)
         // Adjacent triangles will share edges — each shared edge is drawn twice,
         // which is acceptable for a wireframe overlay.
-        for tri in &mesh.triangles {
+        // Skip triangles belonging to hidden instances.
+        for (i, tri) in mesh.triangles.iter().enumerate() {
+            // Check if this triangle belongs to a hidden instance
+            let mut is_hidden = false;
+            for (idx, &(start, end)) in ranges.iter().enumerate() {
+                if i >= start && i < end && hidden.contains(&idx) {
+                    is_hidden = true;
+                    break;
+                }
+            }
+            if is_hidden {
+                continue;
+            }
+
             let v0 = &mesh.vertices[tri[0] as usize];
             let v1 = &mesh.vertices[tri[1] as usize];
             let v2 = &mesh.vertices[tri[2] as usize];
@@ -2131,6 +2199,7 @@ impl eframe::App for ViewerApp {
         let mut pending_face_select: Option<(usize, u64)> = None;
         let mut pending_svg_export = false;
         let mut pending_copy_face_id: Option<u64> = None;
+        let mut pending_visibility_toggle: Option<usize> = None;
 
         if self.show_structure {
             // Clone data needed for drawing to avoid borrow conflicts
@@ -2145,6 +2214,7 @@ impl eframe::App for ViewerApp {
             let open_tree_nodes = self.open_tree_nodes.clone();
             let scroll_to_tree_node = self.scroll_to_tree_node.clone();
             let scroll_to_face_id = self.scroll_to_face_id;
+            let hidden_instances = self.hidden_instances.clone();
 
             egui::SidePanel::right("structure_panel")
                 .min_width(220.0)
@@ -2180,14 +2250,28 @@ impl eframe::App for ViewerApp {
                                 .max_height(300.0)
                                 .show(ui, |ui| {
                                     if let Some(ref tree) = assembly_tree_clone {
-                                        draw_assembly_node_static(ui, tree, selected_instance, &mut pending_instance_select, &open_tree_nodes, &scroll_to_tree_node);
+                                        draw_assembly_node_static(ui, tree, selected_instance, &hidden_instances, &mut pending_instance_select, &mut pending_visibility_toggle, &open_tree_nodes, &scroll_to_tree_node);
                                     } else if !detailed_instances_clone.is_empty() {
                                         for (i, inst) in detailed_instances_clone.iter().enumerate() {
                                             let is_selected = selected_instance == Some(i);
-                                            let label = format!("{} (BREP#{})", inst.name, inst.brep_id);
-                                            if ui.selectable_label(is_selected, &label).clicked() {
-                                                pending_instance_select = Some(i);
-                                            }
+                                            let is_visible = !hidden_instances.contains(&i);
+                                            ui.horizontal(|ui| {
+                                                // Visibility eye icon
+                                                let eye_color = if is_visible {
+                                                    egui::Color32::from_rgb(80, 180, 80)
+                                                } else {
+                                                    egui::Color32::from_rgb(180, 80, 80)
+                                                };
+                                                let eye_text = if is_visible { "👁" } else { "  " };
+                                                if ui.add(egui::Label::new(egui::RichText::new(eye_text).size(11.0).color(eye_color)).sense(egui::Sense::click())).clicked() {
+                                                    pending_visibility_toggle = Some(i);
+                                                }
+                                                // Selectable label
+                                                let label = format!("{} (BREP#{})", inst.name, inst.brep_id);
+                                                if ui.selectable_label(is_selected, &label).clicked() {
+                                                    pending_instance_select = Some(i);
+                                                }
+                                            });
                                         }
                                     } else {
                                         ui.label(egui::RichText::new("No STEP file loaded").size(11.0).color(egui::Color32::GRAY));
@@ -2476,6 +2560,24 @@ impl eframe::App for ViewerApp {
         }
 
         // Apply pending UI actions (after all borrows are released)
+        if let Some(idx) = pending_visibility_toggle {
+            if self.hidden_instances.contains(&idx) {
+                self.hidden_instances.remove(&idx);
+                self.log(&format!("Instance #{} shown", idx));
+            } else {
+                self.hidden_instances.insert(idx);
+                self.log(&format!("Instance #{} hidden", idx));
+                // If the hidden instance was selected, deselect it
+                if self.selected_instance == Some(idx) {
+                    self.selected_instance = None;
+                    self.selected_face = None;
+                    self.highlighted_face = None;
+                }
+            }
+            self.highlight_dirty = true;
+            self.edge_dirty = true;
+            self.wireframe_overlay_dirty = true;
+        }
         if let Some(idx) = pending_instance_select {
             self.selected_instance = Some(idx);
             self.selected_face = None;
@@ -2941,6 +3043,7 @@ impl eframe::App for ViewerApp {
                             if let Some(pick) = pick_at(
                                 &self.mesh,
                                 &self.instance_triangle_ranges,
+                                &self.hidden_instances,
                                 &self.camera,
                                 [local_x, local_y],
                                 viewport,
@@ -3033,7 +3136,9 @@ impl eframe::App for ViewerApp {
                     self.mesh.ensure_colors([0.62, 0.65, 0.70, 1.0]);
 
                     if let Some(ref rs) = self.render_state {
-                        let (vertices, indices) = mesh_to_gpu_data(&self.mesh, self.highlighted_face, self.selected_instance, &self.instance_triangle_ranges);
+                        let (vertices, indices, new_ranges) = mesh_to_gpu_data(&self.mesh, self.highlighted_face, self.selected_instance, &self.instance_triangle_ranges, &self.hidden_instances);
+                        // Update instance triangle ranges to reflect hidden instances
+                        self.instance_triangle_ranges = new_ranges;
 
                         // Build edge line vertices from B-Rep boundary data
                         let edge_vertices = self.build_edge_line_vertices();
@@ -3318,7 +3423,9 @@ fn draw_assembly_node_static(
     ui: &mut egui::Ui,
     node: &AssemblyNode,
     selected_instance: Option<usize>,
+    hidden_instances: &std::collections::HashSet<usize>,
     pending_instance_select: &mut Option<usize>,
+    pending_visibility_toggle: &mut Option<usize>,
     open_tree_nodes: &std::collections::HashSet<String>,
     scroll_to_tree_node: &Option<String>,
 ) {
@@ -3360,21 +3467,38 @@ fn draw_assembly_node_static(
             ui.label(egui::RichText::new(&label).size(11.0));
         }).body(|ui| {
             for child in &node.children {
-                draw_assembly_node_static(ui, child, selected_instance, pending_instance_select, open_tree_nodes, scroll_to_tree_node);
+                draw_assembly_node_static(ui, child, selected_instance, hidden_instances, pending_instance_select, pending_visibility_toggle, open_tree_nodes, scroll_to_tree_node);
             }
         });
     } else {
-        let response = ui.selectable_label(is_selected, egui::RichText::new(&label).size(11.0));
-        // Scroll to this node if it's the scroll target
-        if scroll_to_tree_node.as_ref() == Some(&key) {
-            response.scroll_to_me(Some(egui::Align::Center));
-        }
-        if response.clicked() {
-            // Use instance_index for precise selection
+        // Leaf node: draw visibility checkbox + selectable label
+        ui.horizontal(|ui| {
+            // Visibility checkbox (eye icon equivalent)
             if let Some(idx) = node.instance_index {
-                *pending_instance_select = Some(idx);
+                let is_visible = !hidden_instances.contains(&idx);
+                let checkbox_color = if is_visible {
+                    egui::Color32::from_rgb(80, 180, 80)
+                } else {
+                    egui::Color32::from_rgb(180, 80, 80)
+                };
+                let eye_text = if is_visible { "👁" } else { "  " };
+                if ui.add(egui::Label::new(egui::RichText::new(eye_text).size(11.0).color(checkbox_color)).sense(egui::Sense::click())).clicked() {
+                    *pending_visibility_toggle = Some(idx);
+                }
             }
-        }
+            // Selectable label for the instance
+            let response = ui.selectable_label(is_selected, egui::RichText::new(&label).size(11.0));
+            // Scroll to this node if it's the scroll target
+            if scroll_to_tree_node.as_ref() == Some(&key) {
+                response.scroll_to_me(Some(egui::Align::Center));
+            }
+            if response.clicked() {
+                // Use instance_index for precise selection
+                if let Some(idx) = node.instance_index {
+                    *pending_instance_select = Some(idx);
+                }
+            }
+        });
     }
 }
 
