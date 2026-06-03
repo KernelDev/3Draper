@@ -389,7 +389,11 @@ pub struct ViewerApp {
     /// Name of the file being loaded.
     loading_name: String,
     /// Start time of loading (for timeout detection).
+    /// Uses web_time::Instant on WASM (std::time::Instant panics on wasm32).
+    #[cfg(not(target_arch = "wasm32"))]
     loading_start: Option<std::time::Instant>,
+    #[cfg(target_arch = "wasm32")]
+    loading_start: Option<web_time::Instant>,
 
     // ─── Manifold statistics ──────────────────────────────────────────
     /// Manifold report for the current mesh (computed on load).
@@ -1234,7 +1238,12 @@ impl ViewerApp {
             self.conversion_ctx = None;
             self.is_loading = true;
             self.loading_name = name.to_string();
-            self.loading_start = Some(std::time::Instant::now());
+            self.loading_start = Some({
+                #[cfg(not(target_arch = "wasm32"))]
+                { std::time::Instant::now() }
+                #[cfg(target_arch = "wasm32")]
+                { web_time::Instant::now() }
+            });
 
             // Clear existing rendering data — free WASM memory from previous load.
             // Without this, repeated file loads accumulate data in the WASM heap
@@ -1614,14 +1623,22 @@ impl ViewerApp {
     /// Import STEP from string (used by web file loading).
     fn import_step_from_str(&mut self, content: &str, name: &str) {
         self.log(&format!("Parsing STEP file: '{}' ({} chars)...", name, content.len()));
-        match draper_step::parse_step(content) {
-            Ok(step_file) => {
+        // Wrap parse_step in catch_unwind to prevent WASM panics from crashing the app.
+        // If STEP parsing panics (e.g., malformed input), we log the error and keep running.
+        let parse_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            draper_step::parse_step(content)
+        }));
+        match parse_result {
+            Ok(Ok(step_file)) => {
                 let entity_count = step_file.entities.len();
                 self.log(&format!("STEP parsed: {} entities found in '{}'", entity_count, name));
                 self.process_step_file(&step_file, name);
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 self.log_error(&format!("STEP import error for '{}': {}", name, e));
+            }
+            Err(_) => {
+                self.log_error(&format!("STEP parser panicked on '{}' — file may be malformed", name));
             }
         }
     }

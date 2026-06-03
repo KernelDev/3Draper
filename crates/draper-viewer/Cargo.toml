@@ -10,7 +10,7 @@ path = "src/main.rs"
 [features]
 default = ["native"]
 native = ["rfd", "env_logger", "draper-mesh/export-3mf"]
-web = ["web-sys", "wasm-bindgen", "console_log", "wasm-bindgen-futures", "js-sys", "web-time", "wgpu/webgl", "wgpu/webgpu"]
+web = ["web-sys", "wasm-bindgen", "console_log", "wasm-bindgen-futures", "js-sys", "web-time", "wgpu/webgl", "wgpu/webgpu", "console_error_panic_hook"]
 
 [dependencies]
 draper-geometry = { workspace = true }
@@ -54,3 +54,4 @@ wasm-bindgen-futures = { version = "0.4", optional = true }
 console_log = { version = "1", optional = true }
 js-sys = { version = "0.3", optional = true }
 web-time = { version = "1", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }

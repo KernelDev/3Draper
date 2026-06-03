@@ -407,12 +407,43 @@ impl JsonFaceInfo {
     }
 }
 
-/// Get current time as ISO 8601 string (no dependency on chrono).
+/// Get current time as ISO 8601 string (WASM-compatible).
+/// On WASM, `SystemTime::now()` panics, so we use `web_time::SystemTime` instead.
+#[cfg(not(target_arch = "wasm32"))]
 fn chrono_now() -> String {
-    // Simple ISO 8601 timestamp without external dependency
-    // In production, you'd use chrono or time crate
-    format!("{:?}", std::time::SystemTime::now())
-        .replace("SystemTime { tv_sec: ", "")
-        .replace(", tv_nsec: ", ".")
-        .replace(" }", "Z")
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = now / 86400;
+    let year = 1970 + days / 365;
+    let month = ((days % 365) / 30).min(11) + 1;
+    let day = (days % 30).min(27) + 1;
+    let hour = (now % 86400) / 3600;
+    let minute = (now % 3600) / 60;
+    let second = now % 60;
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        year, month, day, hour, minute, second
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+fn chrono_now() -> String {
+    use web_time::SystemTime;
+    let now = SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = now / 86400;
+    let year = 1970 + days / 365;
+    let month = ((days % 365) / 30).min(11) + 1;
+    let day = (days % 30).min(27) + 1;
+    let hour = (now % 86400) / 3600;
+    let minute = (now % 3600) / 60;
+    let second = now % 60;
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        year, month, day, hour, minute, second
+    )
 }

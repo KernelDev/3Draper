@@ -20,3 +20,6 @@ log = { workspace = true }
 
 # Native-only HTTP server
 tiny_http = { version = "0.12", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"

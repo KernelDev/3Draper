@@ -17,7 +17,12 @@ use draper_geometry::{
     ConeSurface, Curve3d,
 };
 use draper_topology::{Face, Wire, CoEdge, Edge, Solid, Shell, Compound, TopoId};
+// WASM-compatible Instant: on native uses std::time::Instant,
+// on wasm32 uses web_time::Instant (backed by performance.now()).
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Guard that prevents individual face triangulation from running too long.

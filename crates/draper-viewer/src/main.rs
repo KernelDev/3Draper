@@ -99,6 +99,10 @@ mod web_entry {
     /// It is called automatically when the wasm module is loaded.
     #[wasm_bindgen(start)]
     pub async fn start() {
+        // Install panic hook so WASM panics show readable stack traces
+        // in the browser console instead of cryptic "RuntimeError: unreachable".
+        console_error_panic_hook::set_once();
+
         console_log::init_with_level(log::Level::Info).ok();
 
         let window = web_sys::window().expect("no window");

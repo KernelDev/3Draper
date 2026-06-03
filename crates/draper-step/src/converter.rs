@@ -34,6 +34,13 @@ use draper_topology::{Face, Wire, CoEdge, Edge as TopoEdge, Shell, Solid};
 use draper_topology::healing::{heal_solid, HealingParams, HealingReport};
 use draper_geometry::tolerance::ToleranceContext;
 use std::collections::HashMap;
+
+// WASM-compatible Instant: on native uses std::time::Instant,
+// on wasm32 uses web_time::Instant (backed by performance.now()).
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant as StdInstant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant as StdInstant;
 use log::{info, warn};
 
 // ============================================================
@@ -2731,7 +2738,7 @@ impl<'a> StepConverter<'a> {
         #[cfg(not(target_arch = "wasm32"))]
         let face_time_limit = std::time::Duration::from_secs(120);
 
-        let brep_start = std::time::Instant::now();
+        let brep_start = StdInstant::now();
 
         let mut mesh = TriangleMesh::new();
         let mut face_infos = Vec::new();
@@ -2762,7 +2769,7 @@ impl<'a> StepConverter<'a> {
                 break;
             }
 
-            let face_start = std::time::Instant::now();
+            let face_start = StdInstant::now();
 
             let face_id = next_face_id;
             next_face_id += 1;
