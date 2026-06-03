@@ -292,15 +292,17 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 }
 
 // Wireframe vertex shader: same as vs_main but pushes vertices slightly towards
-// the camera to avoid z-fighting with the filled surface. This replaces depth
-// bias which is not allowed for PolygonMode::Line in WebGPU/WebGL2.
+// the camera to avoid z-fighting with the filled surface. Uses a tiny additive
+// offset (clip_z - epsilon * clip_w) instead of the old multiplicative * 0.999
+// which was too aggressive and broke back-face edge occlusion.
 @vertex
 fn vs_wireframe(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     let world_pos = uniforms.model * vec4<f32>(in.position, 1.0);
     let clip_pos = uniforms.mvp * vec4<f32>(in.position, 1.0);
-    // Offset clip-space Z slightly towards the camera (multiply by <1)
-    out.clip_position = vec4<f32>(clip_pos.x, clip_pos.y, clip_pos.z * 0.999, clip_pos.w);
+    // Tiny additive offset — see vs_main in EDGE_SHADER_SRC for detailed explanation
+    let depth_bias = 2e-6;
+    out.clip_position = vec4<f32>(clip_pos.x, clip_pos.y, clip_pos.z - depth_bias * clip_pos.w, clip_pos.w);
     out.world_normal = (uniforms.model * vec4<f32>(in.normal, 0.0)).xyz;
     out.world_pos = world_pos.xyz;
     out.vertex_color = in.color;
@@ -438,10 +440,23 @@ struct VertexOutput {
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     // Push edges slightly towards the camera to avoid z-fighting with the surface.
-    // We offset the clip-space Z by a small epsilon. This replaces depth bias
-    // which is not allowed for LineList topology in WebGPU/WebGL2.
+    // We use a TINY additive offset in clip space: clip_z - epsilon * clip_w
+    // This gives a constant NDC Z offset of epsilon regardless of depth.
+    //
+    // IMPORTANT: The old multiplicative offset (clip_z * 0.999) was too aggressive.
+    // For perspective projection with far=100000, objects at distance ~100 have
+    // NDC Z ≈ 0.999. Multiplying by 0.999 shifts NDC Z by ~0.001, which is
+    // 100x larger than the front-back face NDC Z difference (~0.00001).
+    // This caused ALL back-face edges to pass the depth test, making hidden
+    // edges visible through solid surfaces.
+    //
+    // The additive offset of 2e-6 is ~16 ULPs at NDC Z ≈ 1.0 (enough to win
+    // the depth test against the same surface) but small enough that back-face
+    // edges (which have NDC Z > front-face NDC Z by >0.00001 for typical
+    // CAD models) still fail the depth test and are properly occluded.
     let clip_pos = uniforms.mvp * vec4<f32>(in.position, 1.0);
-    out.clip_position = vec4<f32>(clip_pos.x, clip_pos.y, clip_pos.z * 0.999, clip_pos.w);
+    let depth_bias = 2e-6;
+    out.clip_position = vec4<f32>(clip_pos.x, clip_pos.y, clip_pos.z - depth_bias * clip_pos.w, clip_pos.w);
     out.line_color = in.color;
     return out;
 }
@@ -458,8 +473,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 fn vs_wireframe_line(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     let clip_pos = uniforms.mvp * vec4<f32>(in.position, 1.0);
-    // Push slightly towards camera to avoid z-fighting with the filled surface
-    out.clip_position = vec4<f32>(clip_pos.x, clip_pos.y, clip_pos.z * 0.999, clip_pos.w);
+    // Same tiny additive offset as vs_main for B-Rep edges.
+    // See vs_main comments for why 2e-6 is used instead of * 0.999.
+    let depth_bias = 2e-6;
+    out.clip_position = vec4<f32>(clip_pos.x, clip_pos.y, clip_pos.z - depth_bias * clip_pos.w, clip_pos.w);
     out.line_color = in.color;
     return out;
 }
