@@ -261,10 +261,13 @@ fn pick_at(
 
     for (i, tri) in mesh.triangles.iter().enumerate() {
         // Determine which instance this triangle belongs to
-        let instance_idx = instance_triangle_ranges
+        let instance_idx = match instance_triangle_ranges
             .iter()
             .position(|&(start, end)| i >= start && i < end)
-            .unwrap_or(0);
+        {
+            Some(idx) => idx,
+            None => continue, // Triangle not in any instance range — skip
+        };
 
         // Skip hidden instances — they can't be picked
         if hidden_instances.contains(&instance_idx) {
@@ -1701,7 +1704,7 @@ impl ViewerApp {
                     self.instance_triangle_ranges.push((tri_start, tri_end));
 
                     // Update the assembly tree: link this instance to its tree node
-                    let inst_idx = self.triangulated_count;
+                    let inst_idx = self.instance_triangle_ranges.len() - 1;
                     if let Some(ref mut tree) = self.assembly_tree {
                         assign_instance_to_tree(tree, inst_idx);
                     }

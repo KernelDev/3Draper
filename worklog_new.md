@@ -26,3 +26,26 @@ Stage Summary:
 - STEP CTO3D entities now supported for assembly transforms
 - AXIS2_PLACEMENT_3D now correctly projects ref_direction
 - Mesh normals now correctly transformed with vertices
+
+---
+Task ID: fix-visibility-toggle
+Agent: Main
+Task: Fix visibility toggle for assembly instances - mesh not hiding, edges inconsistent
+
+Work Log:
+- Diagnosed root cause: line 3141 in app.rs was overwriting `instance_triangle_ranges` with GPU output ranges from `mesh_to_gpu_data()`
+- The GPU output ranges map instance indices to triangle ranges in the GPU buffer (with hidden instances removed, indices shift)
+- But `self.mesh.triangles` still contains ALL triangles including hidden ones
+- All subsequent operations (`build_wireframe_overlay_vertices()`, `pick_at()`, future `mesh_to_gpu_data()`) iterate over `self.mesh.triangles` and need the ORIGINAL ranges
+- After first visibility toggle, the ranges were corrupted → mesh surfaces didn't hide, edges hid inconsistently
+- Fix: removed `self.instance_triangle_ranges = new_ranges;` line, added detailed comment explaining why
+- Built native binary successfully
+- Built WASM with wasi-sdk-24.0 and Trunk
+- Deployed to GitHub Pages (gh-pages branch)
+- Pushed commit 27a06c6 to main branch
+
+Stage Summary:
+- Root cause: `instance_triangle_ranges` corruption after GPU output range overwrite
+- Fix: preserve original mesh triangle ranges, don't overwrite with GPU output ranges
+- Both mesh surfaces and edges should now correctly hide/show per instance
+- Deployed to https://kerneldev.github.io/3Draper/
