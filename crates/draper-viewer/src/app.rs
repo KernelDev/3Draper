@@ -3532,9 +3532,11 @@ impl ViewerApp {
             });
 
         // ─── Floating buttons: bottom-left (Controls) + bottom-right (Structure) ─
-        let controls_btn_pos = egui::Pos2::new(screen.min.x + margin, screen.bottom() - margin - btn_size - 50.0);
-        let structure_btn_pos = egui::Pos2::new(screen.right() - margin - btn_size, screen.bottom() - margin - btn_size - 50.0);
-        let log_btn_pos = egui::Pos2::new(screen.center().x - btn_size * 0.5, screen.bottom() - margin - btn_size - 50.0);
+        // When mobile log is open, push floating buttons up so they aren't covered by the log window.
+        let log_window_height = if self.mobile_log_open { (screen.height() * 0.4).min(250.0) + 55.0 } else { 0.0 };
+        let controls_btn_pos = egui::Pos2::new(screen.min.x + margin, screen.bottom() - margin - btn_size - 50.0 - log_window_height);
+        let structure_btn_pos = egui::Pos2::new(screen.right() - margin - btn_size, screen.bottom() - margin - btn_size - 50.0 - log_window_height);
+        let log_btn_pos = egui::Pos2::new(screen.center().x - btn_size * 0.5, screen.bottom() - margin - btn_size - 50.0 - log_window_height);
 
         // Controls panel button (bottom-left)
         let controls_active = self.mobile_panel == Some(MobilePanel::Controls);
@@ -4165,6 +4167,10 @@ impl ViewerApp {
                 .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
+                        // Close button — large and easy to tap on mobile
+                        if ui.button("✕").clicked() {
+                            self.mobile_log_open = false;
+                        }
                         ui.heading(egui::RichText::new("Log").size(12.0));
                         if self.warning_count > 0 {
                             ui.label(egui::RichText::new(format!("W:{}", self.warning_count)).size(10.0).color(egui::Color32::from_rgb(255, 200, 50)));
