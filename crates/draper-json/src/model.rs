@@ -403,6 +403,7 @@ impl JsonFaceInfo {
             inner_uv_boundaries: Vec::new(),
             triangle_range: (self.triangle_range[0], self.triangle_range[1]),
             forward: self.forward,
+            uv_triangles: Vec::new(),
         }
     }
 }
