@@ -1678,7 +1678,11 @@ impl ViewerApp {
         let batch_size = 1;
 
         let mut processed = 0;
+        // Use web_time::Instant on WASM (std::time::Instant panics on wasm32).
+        #[cfg(not(target_arch = "wasm32"))]
         let frame_start = std::time::Instant::now();
+        #[cfg(target_arch = "wasm32")]
+        let frame_start = web_time::Instant::now();
         // On native, allow up to 200ms per frame for batch processing.
         // On WASM, process just 1 BREP per frame (no time budget needed).
         #[cfg(not(target_arch = "wasm32"))]
