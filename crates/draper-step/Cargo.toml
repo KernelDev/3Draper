@@ -11,6 +11,7 @@ serde = ["dep:serde", "dep:serde_json", "draper-geometry/serde", "draper-topolog
 draper-geometry = { workspace = true }
 draper-topology = { workspace = true }
 draper-mesh = { workspace = true, default-features = false }
+earcutr = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 serde = { version = "1", features = ["derive"], optional = true }

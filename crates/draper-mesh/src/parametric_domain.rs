@@ -270,51 +270,19 @@ fn triangulate_domain_with_holes(
         outer.clone()
     };
 
-    // Collect all points: outer boundary first, then holes
+    // Collect all UV points: outer boundary first, then holes, then interior
     let mut all_points: Vec<Point2d> = outer_downsampled.clone();
+    let mut hole_start_indices: Vec<usize> = Vec::new();
 
-    // Build polygon indices starting with outer boundary
-    let mut polygon_indices: Vec<u32> = (0..outer_downsampled.len() as u32).collect();
-
-    // Insert each hole into the polygon using bridge-edge technique
     for hole in &downsampled_holes {
         if hole.len() < 3 {
             continue;
         }
-
-        let hole_start_idx = all_points.len();
-        let bridge_result = find_bridge_edge(&all_points, &polygon_indices, hole);
-
-        // Add hole points to the combined point list
-        for p in hole {
-            all_points.push(*p);
-        }
-
-        // Insert hole into polygon via bridge edge:
-        // outer[bridge_outer] → hole[bridge_hole] → ... hole loop ... → hole[bridge_hole] → outer[bridge_outer]
-        let mut new_polygon = Vec::with_capacity(polygon_indices.len() + hole.len() + 2);
-        let bridge_outer = bridge_result.outer_idx;
-        let bridge_hole = hole_start_idx + bridge_result.hole_idx;
-
-        for &idx in &polygon_indices[..=bridge_outer] {
-            new_polygon.push(idx);
-        }
-        // Bridge: outer → hole → loop → hole → outer
-        new_polygon.push(bridge_hole as u32);
-        for i in 0..hole.len() {
-            let idx = hole_start_idx + (bridge_result.hole_idx + i) % hole.len();
-            new_polygon.push(idx as u32);
-        }
-        new_polygon.push(bridge_hole as u32);
-        new_polygon.push(polygon_indices[bridge_outer]);
-        for &idx in &polygon_indices[bridge_outer + 1..] {
-            new_polygon.push(idx);
-        }
-
-        polygon_indices = new_polygon;
+        hole_start_indices.push(all_points.len());
+        all_points.extend_from_slice(hole);
     }
 
-    // Add interior grid points (not part of the polygon, inserted via subdivision)
+    // Add interior grid points
     let mut interior_point_indices: Vec<u32> = Vec::new();
     for &pt in interior_uv_points {
         if !domain.contains(&pt) {
@@ -325,23 +293,28 @@ fn triangulate_domain_with_holes(
         interior_point_indices.push(idx);
     }
 
-    // Ear-clip the merged polygon (with holes inserted via bridge edges)
-    let merged_2d: Vec<Point2d> = polygon_indices.iter()
-        .map(|&idx| all_points[idx as usize])
+    // Use earcutr for triangulation — it natively handles holes without bridge-edge tricks
+    let mut coords: Vec<f64> = Vec::with_capacity(all_points.len() * 2);
+    for p in &all_points {
+        coords.push(p.u);
+        coords.push(p.v);
+    }
+
+    let earcutr_hole_indices: Vec<usize> = hole_start_indices.iter()
+        .map(|&idx| idx) // hole indices already point into all_points
         .collect();
 
-    let mut result_triangles = crate::ear_clip(&merged_2d);
+    let triangle_indices = earcutr::earcut(&coords, &earcutr_hole_indices, 2);
 
-    // Map ear-clip triangle indices back to polygon vertex indices
-    // ear_clip returns indices into merged_2d, which correspond to polygon_indices
-    let mapped_triangles: Vec<[u32; 3]> = result_triangles.iter()
-        .map(|tri| [
-            polygon_indices[tri[0] as usize],
-            polygon_indices[tri[1] as usize],
-            polygon_indices[tri[2] as usize],
-        ])
-        .collect();
-    result_triangles = mapped_triangles;
+    let mut result_triangles: Vec<[u32; 3]> = Vec::new();
+    for chunk in triangle_indices.chunks(3) {
+        if chunk.len() < 3 { break; }
+        let a = chunk[0];
+        let b = chunk[1];
+        let c = chunk[2];
+        if a == b || b == c || a == c { continue; }
+        result_triangles.push([a, b, c]);
+    }
 
     // Insert interior points by subdividing containing triangles
     for &uv_idx in &interior_point_indices {

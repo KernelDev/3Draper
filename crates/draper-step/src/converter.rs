@@ -7060,21 +7060,24 @@ impl<'a> StepConverter<'a> {
                 }
             }
         } else {
-            // Use the same bridge-edge merging as the non-cached version.
-            // The previous implementation had a bug: find_bridge_edge_2d returned an index
-            // into all_points_2d, but after the first hole was merged, polygon_indices
-            // was rearranged and the index no longer corresponded to the correct position.
-            // Using merge_holes_into_polygon avoids this by rebuilding the polygon as a
-            // flat array each time.
+            // Use earcutr (mapbox/earcut algorithm) which natively handles holes.
+            // The previous bridge-edge + ear-clip approach failed for circular bolt holes
+            // because ear-clipping could produce triangles that span across the thin
+            // bridge-edge passage. earcutr uses a different strategy that connects
+            // holes to the outer boundary using optimal Z-order curves.
+            if let Some(m) = earcutr_triangulate_planar_converter(
+                &outer_2d, &outer_points_3d, &hole_points_2d, &hole_points_3d, forward, plane,
+            ) {
+                return m;
+            }
+
+            // Fallback to bridge-edge + ear-clip if earcutr fails
+            log::warn!("earcutr failed for planar face with holes (cached), falling back to bridge-edge ear-clip");
             let (merged_2d, merged_3d) = merge_holes_into_polygon(
                 &outer_2d, &outer_points_3d, &hole_points_2d, &hole_points_3d,
             );
             let triangles = ear_clip(&merged_2d);
 
-            // Post-filter: remove triangles whose centroid falls inside any hole.
-            // This is essential for correctness — bridge-edge + ear-clip can produce
-            // triangles that span across holes, especially for circular holes where
-            // the bridge edges may not fully separate the hole from the polygon.
             let filtered_triangles: Vec<[u32; 3]> = triangles.iter()
                 .filter(|tri| {
                     let a = merged_2d[tri[0] as usize];
@@ -7083,13 +7086,11 @@ impl<'a> StepConverter<'a> {
                     let centroid_u = (a.u + b.u + c.u) / 3.0;
                     let centroid_v = (a.v + b.v + c.v) / 3.0;
                     let centroid = Point2d::new(centroid_u, centroid_v);
-                    // Check that centroid is NOT inside any hole
                     for hole in &hole_points_2d {
                         if point_in_polygon_2d_converter(&centroid, hole) {
-                            return false; // Triangle centroid is inside a hole — skip it
+                            return false;
                         }
                     }
-                    // Also verify centroid is inside the outer boundary
                     point_in_polygon_2d_converter(&centroid, &outer_2d)
                 })
                 .cloned()
@@ -7148,15 +7149,18 @@ impl<'a> StepConverter<'a> {
             hole_points_2d.push(pts_2d);
         }
 
-        // Use bridge-edge technique to merge holes into the outer polygon
+        // Use earcutr (mapbox/earcut algorithm) which natively handles holes.
+        // The bridge-edge + ear-clip approach fails for circular bolt holes.
+        if let Some(m) = earcutr_triangulate_planar_converter(
+            &outer_2d, &outer_points_3d, &hole_points_2d, &hole_points_3d, forward, plane,
+        ) {
+            return m;
+        }
+
+        // Fallback to bridge-edge + ear-clip if earcutr fails
+        log::warn!("earcutr failed for planar face with holes (non-cached), falling back to bridge-edge ear-clip");
         let (merged_2d, merged_3d) = merge_holes_into_polygon(&outer_2d, &outer_points_3d, &hole_points_2d, &hole_points_3d);
-
-        // Ear clipping triangulation of the merged polygon
         let triangles = ear_clip(&merged_2d);
-
-        // Post-filter: remove triangles whose centroid falls inside any hole.
-        // Bridge-edge + ear-clip can produce triangles spanning across holes,
-        // especially for circular bolt holes. Filter by centroid containment.
         let filtered_triangles: Vec<[u32; 3]> = triangles.iter()
             .filter(|tri| {
                 let a = merged_2d[tri[0] as usize];
@@ -7165,19 +7169,15 @@ impl<'a> StepConverter<'a> {
                 let centroid_u = (a.u + b.u + c.u) / 3.0;
                 let centroid_v = (a.v + b.v + c.v) / 3.0;
                 let centroid = Point2d::new(centroid_u, centroid_v);
-                // Check that centroid is NOT inside any hole
                 for hole in &hole_points_2d {
                     if point_in_polygon_2d_converter(&centroid, hole) {
                         return false;
                     }
                 }
-                // Also verify centroid is inside the outer boundary
                 point_in_polygon_2d_converter(&centroid, &outer_2d)
             })
             .cloned()
             .collect();
-
-        // Add vertices and triangles
         for p in &merged_3d {
             mesh.add_vertex(*p);
         }
@@ -7565,6 +7565,116 @@ fn project_point_on_line(line: &Line, point: &Point3d) -> f64 {
 /// Deduplicate a list of 3D points by removing consecutive points that are within
 /// the given tolerance. Also removes the last point if it coincides with the first
 /// (closing a loop).
+
+/// Triangulate a planar face with holes using the earcutr (mapbox/earcut) algorithm.
+///
+/// Unlike the bridge-edge + ear-clip approach, earcutr natively handles holes
+/// by connecting them to the outer boundary using an optimal Z-order curve strategy.
+/// This produces correct triangulations for circular bolt holes and other complex
+/// hole shapes where bridge edges fail.
+///
+/// Returns None if the input is degenerate, in which case the caller should
+/// fall back to bridge-edge ear-clip.
+fn earcutr_triangulate_planar_converter(
+    outer_2d: &[Point2d],
+    outer_3d: &[Point3d],
+    holes_2d: &[Vec<Point2d>],
+    holes_3d: &[Vec<Point3d>],
+    forward: bool,
+    plane: &Plane,
+) -> Option<TriangleMesh> {
+    if outer_2d.len() < 3 {
+        return None;
+    }
+
+    let mut mesh = TriangleMesh::new();
+
+    // Build the flat coordinate array for earcutr.
+    // Layout: [outer_pts...][hole0_pts...][hole1_pts...]
+    // earcutr expects coordinates as [x0,y0, x1,y1, ...] (2D flat)
+    let mut coords: Vec<f64> = Vec::with_capacity((outer_2d.len() + holes_2d.iter().map(|h| h.len()).sum::<usize>()) * 2);
+    let mut hole_indices: Vec<usize> = Vec::with_capacity(holes_2d.len());
+
+    // Outer boundary points
+    for p in outer_2d {
+        coords.push(p.u);
+        coords.push(p.v);
+    }
+
+    // Hole points — each hole starts at the current vertex count
+    for hole in holes_2d {
+        if hole.len() < 3 {
+            continue;
+        }
+        hole_indices.push(coords.len() / 2);
+        for p in hole {
+            coords.push(p.u);
+            coords.push(p.v);
+        }
+    }
+
+    // Run earcutr triangulation
+    let triangle_indices = earcutr::earcut(&coords, &hole_indices, 2);
+
+    if triangle_indices.is_empty() {
+        return None;
+    }
+
+    // Build combined 3D vertex array: outer vertices first, then hole vertices
+    let mut all_3d: Vec<Point3d> = outer_3d.to_vec();
+    for hole in holes_3d {
+        all_3d.extend_from_slice(hole);
+    }
+
+    // Verify that all triangle indices are within bounds
+    let n_verts = coords.len() / 2;
+    for &idx in &triangle_indices {
+        if idx as usize >= n_verts {
+            log::warn!("earcutr produced out-of-bounds index {} (max {})", idx, n_verts - 1);
+            return None;
+        }
+    }
+
+    // Add vertices and triangles to the mesh
+    for p in &all_3d {
+        mesh.add_vertex(*p);
+    }
+
+    // earcutr produces triangles as [i0, i1, i2, i0, i1, i2, ...]
+    for chunk in triangle_indices.chunks(3) {
+        if chunk.len() < 3 {
+            break;
+        }
+        let a = chunk[0];
+        let b = chunk[1];
+        let c = chunk[2];
+
+        // Skip degenerate triangles
+        if a == b || b == c || a == c {
+            continue;
+        }
+
+        // Verify vertices are valid
+        if (a as usize) < all_3d.len() && (b as usize) < all_3d.len() && (c as usize) < all_3d.len() {
+            if forward {
+                mesh.add_triangle(a, b, c);
+            } else {
+                mesh.add_triangle(a, c, b);
+            }
+        }
+    }
+
+    if mesh.triangles.is_empty() {
+        return None;
+    }
+
+    let normal = if forward { plane.normal } else {
+        Direction3d::new(-plane.normal.x, -plane.normal.y, -plane.normal.z).unwrap_or(Direction3d::Z)
+    };
+    mesh.face_normals = Some(vec![[normal.x, normal.y, normal.z]; mesh.triangles.len()]);
+
+    Some(mesh)
+}
 
 /// Find the best bridge edge between an outer polygon and a hole in 2D.
 /// Uses the rightmost-hole-point / closest-visible-outer-point technique.

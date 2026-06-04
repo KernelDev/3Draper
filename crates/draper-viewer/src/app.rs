@@ -2470,6 +2470,7 @@ impl eframe::App for ViewerApp {
                                                     }))
                                                     .collect();
 
+                                                let tri_limit = 2000.min(face.uv_triangles.len());
                                                 for (ti, tri) in face.uv_triangles.iter().enumerate() {
                                                     let cu = (tri[0].u + tri[1].u + tri[2].u) / 3.0;
                                                     let cv = (tri[0].v + tri[1].v + tri[2].v) / 3.0;
@@ -2481,17 +2482,29 @@ impl eframe::App for ViewerApp {
                                                     let p2 = egui::pos2(map_u(tri[2].u), map_v(tri[2].v));
 
                                                     if in_hole || !in_outer {
-                                                        // Triangle inside hole — red
-                                                        ui.painter().line_segment([p0, p1], egui::Stroke::new(0.5, egui::Color32::from_rgba_premultiplied(255, 68, 68, 100)));
-                                                        ui.painter().line_segment([p1, p2], egui::Stroke::new(0.5, egui::Color32::from_rgba_premultiplied(255, 68, 68, 100)));
-                                                        ui.painter().line_segment([p2, p0], egui::Stroke::new(0.5, egui::Color32::from_rgba_premultiplied(255, 68, 68, 100)));
+                                                        // Triangle inside hole — red fill + outline
+                                                        let points = vec![p0, p1, p2];
+                                                        ui.painter().add(egui::Shape::convex_polygon(
+                                                            points,
+                                                            egui::Color32::from_rgba_premultiplied(255, 34, 34, 50),
+                                                            egui::Stroke::new(0.5, egui::Color32::from_rgba_premultiplied(255, 68, 68, 120)),
+                                                        ));
                                                     } else {
-                                                        // Valid triangle — blue outline
-                                                        ui.painter().line_segment([p0, p1], egui::Stroke::new(0.3, egui::Color32::from_rgba_premultiplied(68, 136, 255, 150)));
-                                                        ui.painter().line_segment([p1, p2], egui::Stroke::new(0.3, egui::Color32::from_rgba_premultiplied(68, 136, 255, 150)));
-                                                        ui.painter().line_segment([p2, p0], egui::Stroke::new(0.3, egui::Color32::from_rgba_premultiplied(68, 136, 255, 150)));
+                                                        // Valid triangle — blue fill + outline
+                                                        let points = vec![p0, p1, p2];
+                                                        let fill = if ti % 2 == 0 {
+                                                            egui::Color32::from_rgba_premultiplied(68, 136, 255, 20)
+                                                        } else {
+                                                            egui::Color32::from_rgba_premultiplied(85, 170, 255, 20)
+                                                        };
+                                                        let stroke = if ti % 2 == 0 {
+                                                            egui::Stroke::new(0.4, egui::Color32::from_rgba_premultiplied(68, 136, 255, 160))
+                                                        } else {
+                                                            egui::Stroke::new(0.4, egui::Color32::from_rgba_premultiplied(85, 170, 255, 160))
+                                                        };
+                                                        ui.painter().add(egui::Shape::convex_polygon(points, fill, stroke));
                                                     }
-                                                    if ti >= 1500 { break; }
+                                                    if ti >= tri_limit { break; }
                                                 }
                                             }
 
@@ -3437,6 +3450,9 @@ fn generate_uv_svg(face: &FaceInfo, u_divs: usize, v_divs: usize) -> String {
             }))
             .collect();
 
+        let n_triangles = face.uv_triangles.len();
+        let svg_limit = 3000.min(n_triangles);
+
         for (ti, tri) in face.uv_triangles.iter().enumerate() {
             let x0 = map_u(tri[0].u);
             let y0 = map_v(tri[0].v);
@@ -3452,21 +3468,36 @@ fn generate_uv_svg(face: &FaceInfo, u_divs: usize, v_divs: usize) -> String {
             let in_outer = !outer_uv_poly.is_empty() && point_in_polygon(cu, cv, &outer_uv_poly);
 
             if in_hole || !in_outer {
-                // Triangle inside a hole or outside boundary — red outline
+                // Triangle inside a hole or outside boundary — red fill
                 svg.push_str(&format!(
-                    "  <polygon points=\"{:.2},{:.2} {:.2},{:.2} {:.2},{:.2}\" fill=\"#ff222233\" stroke=\"#ff4444\" stroke-width=\"0.5\" opacity=\"0.4\"/>\n",
+                    "  <polygon points=\"{:.2},{:.2} {:.2},{:.2} {:.2},{:.2}\" fill=\"#ff222244\" stroke=\"#ff4444\" stroke-width=\"0.5\"/>\n",
                     x0, y0, x1, y1, x2, y2
                 ));
             } else {
-                // Valid triangle — semi-transparent blue fill, thin outline
+                // Valid triangle — use alternating colors for visibility
+                let fill_color = if ti % 2 == 0 { "#4488ff22" } else { "#55aaff22" };
+                let stroke_color = if ti % 2 == 0 { "#4488ff" } else { "#55aaff" };
                 svg.push_str(&format!(
-                    "  <polygon points=\"{:.2},{:.2} {:.2},{:.2} {:.2},{:.2}\" fill=\"#4488ff11\" stroke=\"#4488ff\" stroke-width=\"0.5\" opacity=\"0.6\"/>\n",
-                    x0, y0, x1, y1, x2, y2
+                    "  <polygon points=\"{:.2},{:.2} {:.2},{:.2} {:.2},{:.2}\" fill=\"{}\" stroke=\"{}\" stroke-width=\"0.5\"/>\n",
+                    x0, y0, x1, y1, x2, y2, fill_color, stroke_color
                 ));
             }
-            // Limit to 2000 triangles in SVG for performance
-            if ti >= 2000 { break; }
+            if ti >= svg_limit { break; }
         }
+
+        // Add triangle count info
+        svg.push_str(&format!(
+            "  <text x=\"{}\" y=\"{}\" fill=\"#888\" font-size=\"11\" text-anchor=\"end\">Triangles: {}/{} (valid/in UV)</text>\n",
+            margin + draw_w, svg_height - 20.0,
+            face.uv_triangles.iter().take(svg_limit).filter(|tri| {
+                let cu = (tri[0].u + tri[1].u + tri[2].u) / 3.0;
+                let cv = (tri[0].v + tri[1].v + tri[2].v) / 3.0;
+                let in_hole = hole_polys.iter().any(|h| point_in_polygon(cu, cv, h));
+                let in_outer = !outer_uv_poly.is_empty() && point_in_polygon(cu, cv, &outer_uv_poly);
+                !in_hole && in_outer
+            }).count(),
+            n_triangles
+        ));
     }
 
     for i in 0..=u_divs {
