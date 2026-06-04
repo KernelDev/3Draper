@@ -851,6 +851,13 @@ impl OwnedStepConversionContext {
             }
         }
 
+        // Enable parallel face triangulation on native (uses rayon internally).
+        // On WASM, threads are not available, so keep sequential.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            params.parallel = true;
+        }
+
         // Use consistent max_face_triangles on all platforms
         // (no WASM-specific cap — quality should match native)
 

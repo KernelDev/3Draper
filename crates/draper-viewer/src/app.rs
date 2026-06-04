@@ -457,6 +457,8 @@ pub struct ViewerApp {
     // ─── Panel collapse state (for mobile optimization) ──────────────
     /// Whether the left controls panel is open.
     controls_panel_open: bool,
+    /// Whether the log panel is expanded (collapsed = thin bar with toggle).
+    log_panel_open: bool,
     /// Whether the structure tree section is expanded.
     structure_tree_open: bool,
     /// Whether the face list section is expanded.
@@ -676,6 +678,7 @@ impl ViewerApp {
             loading_start: None,
             manifold_report,
             controls_panel_open: true,
+            log_panel_open: true,
             structure_tree_open: true,
             face_list_open: true,
             uv_grid_open: false,
@@ -1599,6 +1602,11 @@ impl ViewerApp {
     /// all BREPs in one blocking call, we do ONE BREP per animation frame.
     /// Each BREP's triangulation is still synchronous, but it's bounded by the
     /// number of faces in that single BREP (typically 6-50 faces for most parts).
+    ///
+    /// On native, we process MULTIPLE BREPs per frame (batch) and use
+    /// parallel face triangulation (rayon) for each BREP. This significantly
+    /// speeds up loading of large assemblies without breaking selection/visibility,
+    /// because `instance_triangle_ranges` is still built in sequential order.
     fn process_pending_breps(&mut self) -> bool {
         if !self.is_loading || self.pending_breps.is_empty() {
             return false;
@@ -1618,6 +1626,10 @@ impl ViewerApp {
                 match ctx_result {
                     Ok(ctx) => {
                         self.conversion_ctx = Some(ctx);
+                        // Log parallel mode status
+                        #[cfg(not(target_arch = "wasm32"))]
+                        self.log("Conversion context ready — starting triangulation (parallel mode)...");
+                        #[cfg(target_arch = "wasm32")]
                         self.log("Conversion context ready — starting triangulation...");
                     }
                     Err(_) => {
@@ -1657,91 +1669,121 @@ impl ViewerApp {
             }
         }
 
-        // Take the next pending BREP from the front
-        let pending = self.pending_breps.remove(0);
+        // Determine batch size: on native process multiple BREPs per frame
+        // to take advantage of parallel face triangulation (rayon).
+        // On WASM, keep 1-per-frame to avoid blocking the browser.
+        #[cfg(not(target_arch = "wasm32"))]
+        let batch_size = std::cmp::min(self.pending_breps.len(), 8);
+        #[cfg(target_arch = "wasm32")]
+        let batch_size = 1;
 
-        // Log transform info for debugging positioning issues
-        if let Some(ref tf) = pending.transform {
-            let is_identity = (tf[0][0] - 1.0).abs() < 1e-10 && (tf[1][1] - 1.0).abs() < 1e-10 && (tf[2][2] - 1.0).abs() < 1e-10 && tf[0][3].abs() < 1e-10 && tf[1][3].abs() < 1e-10 && tf[2][3].abs() < 1e-10;
-            if !is_identity {
-                // Check if there's any rotation (diagonal != 1 or off-diagonal != 0)
-                let has_rotation = (tf[0][0] - 1.0).abs() > 1e-6 || (tf[1][1] - 1.0).abs() > 1e-6 || (tf[2][2] - 1.0).abs() > 1e-6
-                    || tf[0][1].abs() > 1e-6 || tf[0][2].abs() > 1e-6
-                    || tf[1][0].abs() > 1e-6 || tf[1][2].abs() > 1e-6
-                    || tf[2][0].abs() > 1e-6 || tf[2][1].abs() > 1e-6;
-                if has_rotation {
-                    self.log(&format!(
-                        "Instance '{}' (BREP #{}): non-identity transform with ROTATION — translation=({:.3}, {:.3}, {:.3}), matrix=[[{:.4},{:.4},{:.4}],[{:.4},{:.4},{:.4}],[{:.4},{:.4},{:.4}]]",
-                        pending.name, pending.brep_id,
-                        tf[0][3], tf[1][3], tf[2][3],
-                        tf[0][0], tf[0][1], tf[0][2],
-                        tf[1][0], tf[1][1], tf[1][2],
-                        tf[2][0], tf[2][1], tf[2][2]
-                    ));
-                } else {
-                    self.log(&format!(
-                        "Instance '{}' (BREP #{}): non-identity transform — translation=({:.3}, {:.3}, {:.3})",
-                        pending.name, pending.brep_id, tf[0][3], tf[1][3], tf[2][3]
-                    ));
+        let mut processed = 0;
+        let frame_start = std::time::Instant::now();
+        // On native, allow up to 200ms per frame for batch processing.
+        // On WASM, process just 1 BREP per frame (no time budget needed).
+        #[cfg(not(target_arch = "wasm32"))]
+        let frame_budget = std::time::Duration::from_millis(200);
+        #[cfg(target_arch = "wasm32")]
+        let frame_budget = std::time::Duration::from_secs(10); // effectively no budget on WASM
+
+        while processed < batch_size && !self.pending_breps.is_empty() {
+            // Check frame time budget on native
+            if processed > 0 && frame_start.elapsed() > frame_budget {
+                break;
+            }
+
+            // Take the next pending BREP from the front
+            let pending = self.pending_breps.remove(0);
+
+            // Log transform info for debugging positioning issues
+            if let Some(ref tf) = pending.transform {
+                let is_identity = (tf[0][0] - 1.0).abs() < 1e-10 && (tf[1][1] - 1.0).abs() < 1e-10 && (tf[2][2] - 1.0).abs() < 1e-10 && tf[0][3].abs() < 1e-10 && tf[1][3].abs() < 1e-10 && tf[2][3].abs() < 1e-10;
+                if !is_identity {
+                    // Check if there's any rotation (diagonal != 1 or off-diagonal != 0)
+                    let has_rotation = (tf[0][0] - 1.0).abs() > 1e-6 || (tf[1][1] - 1.0).abs() > 1e-6 || (tf[2][2] - 1.0).abs() > 1e-6
+                        || tf[0][1].abs() > 1e-6 || tf[0][2].abs() > 1e-6
+                        || tf[1][0].abs() > 1e-6 || tf[1][2].abs() > 1e-6
+                        || tf[2][0].abs() > 1e-6 || tf[2][1].abs() > 1e-6;
+                    if has_rotation {
+                        self.log(&format!(
+                            "Instance '{}' (BREP #{}): non-identity transform with ROTATION — translation=({:.3}, {:.3}, {:.3}), matrix=[[{:.4},{:.4},{:.4}],[{:.4},{:.4},{:.4}],[{:.4},{:.4},{:.4}]]",
+                            pending.name, pending.brep_id,
+                            tf[0][3], tf[1][3], tf[2][3],
+                            tf[0][0], tf[0][1], tf[0][2],
+                            tf[1][0], tf[1][1], tf[1][2],
+                            tf[2][0], tf[2][1], tf[2][2]
+                        ));
+                    } else {
+                        self.log(&format!(
+                            "Instance '{}' (BREP #{}): non-identity transform — translation=({:.3}, {:.3}, {:.3})",
+                            pending.name, pending.brep_id, tf[0][3], tf[1][3], tf[2][3]
+                        ));
+                    }
                 }
             }
-        }
 
-        // Triangulate this single BREP using the CACHED conversion context.
-        // The context (OwnedStepConversionContext) is created ONCE when loading starts
-        // and reused across all frames — this avoids rebuilding entity maps, cloning
-        // HashMaps, and recomputing bounding boxes on every frame (major perf win).
-        // Wrap in catch_unwind to prevent WASM panics from crashing the entire app.
-        let instance = if let Some(ref mut ctx) = self.conversion_ctx {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                ctx.triangulate_pending(&pending)
-            })).unwrap_or_else(|_| {
-                log::error!("Panic during triangulation of '{}' (BREP #{}), skipping", pending.name, pending.brep_id);
+            // Triangulate this single BREP using the CACHED conversion context.
+            // The context (OwnedStepConversionContext) is created ONCE when loading starts
+            // and reused across all frames — this avoids rebuilding entity maps, cloning
+            // HashMaps, and recomputing bounding boxes on every frame (major perf win).
+            // Wrap in catch_unwind to prevent WASM panics from crashing the entire app.
+            let instance = if let Some(ref mut ctx) = self.conversion_ctx {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    ctx.triangulate_pending(&pending)
+                })).unwrap_or_else(|_| {
+                    log::error!("Panic during triangulation of '{}' (BREP #{}), skipping", pending.name, pending.brep_id);
+                    None
+                })
+            } else {
                 None
-            })
-        } else {
-            None
-        };
+            };
 
-        match instance {
-            Some(inst) => {
-                // Check if this instance has a valid mesh
-                if inst.mesh.triangle_count() == 0 && inst.mesh.vertex_count() == 0 {
+            match instance {
+                Some(inst) => {
+                    // Check if this instance has a valid mesh
+                    if inst.mesh.triangle_count() == 0 && inst.mesh.vertex_count() == 0 {
+                        self.log_warning(&format!(
+                            "Instance '{}' (BREP #{}) produced empty mesh — skipping",
+                            inst.name, inst.brep_id
+                        ));
+                        self.failed_face_count += 1;
+                    } else {
+                        let tri_start = self.mesh.triangle_count();
+                        // Use STEP color if available, otherwise assign a per-instance color
+                        // from a muted CAD-style palette so different parts are visually distinct
+                        let color = inst.color.unwrap_or_else(|| {
+                            Self::instance_color(self.triangulated_count)
+                        });
+                        self.mesh.merge_with_color(&inst.mesh, color);
+                        let tri_end = self.mesh.triangle_count();
+                        // IMPORTANT: instance_triangle_ranges is built sequentially in order.
+                        // This preserves the invariant that selection and visibility use
+                        // original mesh indices — parallel triangulation within each BREP
+                        // does not affect this because we merge one BREP at a time.
+                        self.instance_triangle_ranges.push((tri_start, tri_end));
+
+                        // Update the assembly tree: link this instance to its tree node
+                        let inst_idx = self.instance_triangle_ranges.len() - 1;
+                        if let Some(ref mut tree) = self.assembly_tree {
+                            assign_instance_to_tree(tree, inst_idx);
+                        }
+
+                        self.detailed_instances.push(inst);
+                    }
+                }
+                None => {
                     self.log_warning(&format!(
-                        "Instance '{}' (BREP #{}) produced empty mesh — skipping",
-                        inst.name, inst.brep_id
+                        "Instance '{}' (BREP #{}) failed triangulation — skipping",
+                        pending.name, pending.brep_id
                     ));
                     self.failed_face_count += 1;
-                } else {
-                    let tri_start = self.mesh.triangle_count();
-                    // Use STEP color if available, otherwise assign a per-instance color
-                    // from a muted CAD-style palette so different parts are visually distinct
-                    let color = inst.color.unwrap_or_else(|| {
-                        Self::instance_color(self.triangulated_count)
-                    });
-                    self.mesh.merge_with_color(&inst.mesh, color);
-                    let tri_end = self.mesh.triangle_count();
-                    self.instance_triangle_ranges.push((tri_start, tri_end));
-
-                    // Update the assembly tree: link this instance to its tree node
-                    let inst_idx = self.instance_triangle_ranges.len() - 1;
-                    if let Some(ref mut tree) = self.assembly_tree {
-                        assign_instance_to_tree(tree, inst_idx);
-                    }
-
-                    self.detailed_instances.push(inst);
                 }
             }
-            None => {
-                self.log_warning(&format!(
-                    "Instance '{}' (BREP #{}) failed triangulation — skipping",
-                    pending.name, pending.brep_id
-                ));
-                self.failed_face_count += 1;
-            }
+
+            self.triangulated_count += 1;
+            processed += 1;
         }
 
-        self.triangulated_count += 1;
         self.mesh_dirty = true;
         self.edge_dirty = true;
         self.wireframe_overlay_dirty = true;
@@ -2160,72 +2202,115 @@ impl eframe::App for ViewerApp {
         });
         } // end desktop top menu bar
 
-        // === Bottom panel: log (desktop only) ===
-        if !self.is_mobile {
-        egui::TopBottomPanel::bottom("log_panel")
-            .min_height(60.0)
-            .default_height(100.0)
-            .resizable(true)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.heading(egui::RichText::new("Log").size(12.0));
-                    // Show warning/error counts as badges
-                    if self.warning_count > 0 {
-                        ui.label(egui::RichText::new(format!("⚠ {}", self.warning_count))
-                            .size(11.0)
-                            .color(egui::Color32::from_rgb(255, 200, 50)));
-                    }
-                    if self.error_count > 0 {
-                        ui.label(egui::RichText::new(format!("✖ {}", self.error_count))
-                            .size(11.0)
-                            .color(egui::Color32::from_rgb(255, 80, 80)));
-                    }
-                    ui.separator();
-                    if ui.button("Clear").clicked() {
-                        self.log.clear();
-                    }
-                    if ui.button("Copy All").clicked() {
-                        let all_text: String = self.log.iter()
-                            .map(|e| {
-                                let prefix = match e.severity {
-                                    LogSeverity::Info => "INFO",
-                                    LogSeverity::Warning => "WARN",
-                                    LogSeverity::Error => "ERR",
+        // === Bottom panel: log (collapsible — especially important on mobile) ===
+        // On mobile, the log panel can cover the entire viewport when expanded,
+        // so it MUST have a collapse/expand toggle. On desktop the toggle is also
+        // useful for users who want more 3D viewport space.
+        if self.log_panel_open {
+            egui::TopBottomPanel::bottom("log_panel")
+                .min_height(60.0)
+                .default_height(100.0)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        // Collapse button — always visible, easy to tap on mobile
+                        if ui.button("▼").clicked() {
+                            self.log_panel_open = false;
+                        }
+                        ui.heading(egui::RichText::new("Log").size(12.0));
+                        // Show warning/error counts as badges
+                        if self.warning_count > 0 {
+                            ui.label(egui::RichText::new(format!("⚠ {}", self.warning_count))
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(255, 200, 50)));
+                        }
+                        if self.error_count > 0 {
+                            ui.label(egui::RichText::new(format!("✖ {}", self.error_count))
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(255, 80, 80)));
+                        }
+                        ui.separator();
+                        if ui.button("Clear").clicked() {
+                            self.log.clear();
+                        }
+                        if ui.button("Copy All").clicked() {
+                            let all_text: String = self.log.iter()
+                                .map(|e| {
+                                    let prefix = match e.severity {
+                                        LogSeverity::Info => "INFO",
+                                        LogSeverity::Warning => "WARN",
+                                        LogSeverity::Error => "ERR",
+                                    };
+                                    format!("[{}] [{}] {}", e.time, prefix, e.message)
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            ui.ctx().copy_text(all_text);
+                        }
+                        ui.separator();
+                        ui.checkbox(&mut self.log_auto_scroll, "Auto-scroll");
+                    });
+                    egui::ScrollArea::vertical()
+                        .stick_to_bottom(self.log_auto_scroll)
+                        .show(ui, |ui| {
+                            for entry in &self.log {
+                                // Color coding based on severity
+                                let (icon, msg_color) = match entry.severity {
+                                    LogSeverity::Info => ("ℹ", egui::Color32::from_rgb(200, 200, 210)),
+                                    LogSeverity::Warning => ("⚠", egui::Color32::from_rgb(255, 200, 50)),
+                                    LogSeverity::Error => ("✖", egui::Color32::from_rgb(255, 80, 80)),
                                 };
-                                format!("[{}] [{}] {}", e.time, prefix, e.message)
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        ui.ctx().copy_text(all_text);
-                    }
-                    ui.separator();
-                    ui.checkbox(&mut self.log_auto_scroll, "Auto-scroll");
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(format!("[{}]", entry.time))
+                                        .size(10.0)
+                                        .color(egui::Color32::from_rgb(120, 120, 140)));
+                                    ui.label(egui::RichText::new(icon)
+                                        .size(10.0)
+                                        .color(msg_color));
+                                    ui.add(egui::Label::new(
+                                        egui::RichText::new(&entry.message).size(10.0).color(msg_color)
+                                    ).wrap());
+                                });
+                            }
+                        });
                 });
-                egui::ScrollArea::vertical()
-                    .stick_to_bottom(self.log_auto_scroll)
-                    .show(ui, |ui| {
-                        for entry in &self.log {
-                            // Color coding based on severity
-                            let (icon, msg_color) = match entry.severity {
-                                LogSeverity::Info => ("ℹ", egui::Color32::from_rgb(200, 200, 210)),
-                                LogSeverity::Warning => ("⚠", egui::Color32::from_rgb(255, 200, 50)),
-                                LogSeverity::Error => ("✖", egui::Color32::from_rgb(255, 80, 80)),
+        } else {
+            // Collapsed: thin bar with only expand button and last log line
+            egui::TopBottomPanel::bottom("log_panel_collapsed")
+                .exact_height(24.0)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        // Expand button — easy to tap on mobile
+                        if ui.button("▲").clicked() {
+                            self.log_panel_open = true;
+                        }
+                        ui.heading(egui::RichText::new("Log").size(11.0));
+                        // Show warning/error counts as badges
+                        if self.warning_count > 0 {
+                            ui.label(egui::RichText::new(format!("⚠ {}", self.warning_count))
+                                .size(10.0)
+                                .color(egui::Color32::from_rgb(255, 200, 50)));
+                        }
+                        if self.error_count > 0 {
+                            ui.label(egui::RichText::new(format!("✖ {}", self.error_count))
+                                .size(10.0)
+                                .color(egui::Color32::from_rgb(255, 80, 80)));
+                        }
+                        ui.separator();
+                        // Show last log entry as preview
+                        if let Some(last) = self.log.last() {
+                            let color = match last.severity {
+                                LogSeverity::Info => egui::Color32::from_rgb(200, 200, 210),
+                                LogSeverity::Warning => egui::Color32::from_rgb(255, 200, 50),
+                                LogSeverity::Error => egui::Color32::from_rgb(255, 80, 80),
                             };
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(format!("[{}]", entry.time))
-                                    .size(10.0)
-                                    .color(egui::Color32::from_rgb(120, 120, 140)));
-                                ui.label(egui::RichText::new(icon)
-                                    .size(10.0)
-                                    .color(msg_color));
-                                ui.add(egui::Label::new(
-                                    egui::RichText::new(&entry.message).size(10.0).color(msg_color)
-                                ).wrap());
-                            });
+                            ui.add(egui::Label::new(
+                                egui::RichText::new(&last.message).size(9.0).color(color)
+                            ).truncate());
                         }
                     });
-            });
-        } // end desktop bottom log panel
+                });
+        }
 
         // === Right panel: Structure / Faces / UV (desktop only) ===
         // Collect pending UI actions to avoid borrow checker conflicts
