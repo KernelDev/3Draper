@@ -309,9 +309,9 @@ fn triangulate_domain_with_holes(
     let mut result_triangles: Vec<[u32; 3]> = Vec::new();
     for chunk in triangle_indices.chunks(3) {
         if chunk.len() < 3 { break; }
-        let a = chunk[0];
-        let b = chunk[1];
-        let c = chunk[2];
+        let a = chunk[0] as u32;
+        let b = chunk[1] as u32;
+        let c = chunk[2] as u32;
         if a == b || b == c || a == c { continue; }
         result_triangles.push([a, b, c]);
     }

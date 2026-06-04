@@ -485,6 +485,23 @@ pub struct ViewerApp {
     json_api_output: String,
     /// Whether to show the JSON API panel.
     show_json_api: bool,
+
+    // ─── Mobile UI state ────────────────────────────────────────────────────
+    /// Whether we are in mobile (narrow screen) mode — updated each frame.
+    is_mobile: bool,
+    /// Which mobile overlay panel is currently shown (None = none).
+    mobile_panel: Option<MobilePanel>,
+    /// Whether the mobile log panel is visible.
+    mobile_log_open: bool,
+}
+
+/// Mobile overlay panel type.
+#[derive(Clone, Debug, PartialEq)]
+enum MobilePanel {
+    /// Left controls panel (primitives, import, display, info)
+    Controls,
+    /// Right structure panel (tree, faces, UV, face info)
+    Structure,
 }
 
 impl ViewerApp {
@@ -671,6 +688,9 @@ impl ViewerApp {
             json_api_input: String::new(),
             json_api_output: String::new(),
             show_json_api: false,
+            is_mobile: false,
+            mobile_panel: None,
+            mobile_log_open: false,
         };
         app.log("3Draper Viewer started");
         app.log(&format!("Default model: Box 100x100x100 ({} vertices, {} triangles)",
@@ -2005,7 +2025,12 @@ impl eframe::App for ViewerApp {
             ctx.request_repaint(); // Keep repainting during loading
         }
 
-        // === Top menu bar ===
+        // === Detect mobile mode (narrow screen) ===
+        let screen_width = ctx.screen_rect().width();
+        self.is_mobile = screen_width < 768.0;
+
+        // === Top menu bar (desktop only — mobile uses overlay buttons) ===
+        if !self.is_mobile {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -2133,8 +2158,10 @@ impl eframe::App for ViewerApp {
                 });
             });
         });
+        } // end desktop top menu bar
 
-        // === Bottom panel: log ===
+        // === Bottom panel: log (desktop only) ===
+        if !self.is_mobile {
         egui::TopBottomPanel::bottom("log_panel")
             .min_height(60.0)
             .default_height(100.0)
@@ -2198,8 +2225,9 @@ impl eframe::App for ViewerApp {
                         }
                     });
             });
+        } // end desktop bottom log panel
 
-        // === Right panel: Structure / Faces / UV ===
+        // === Right panel: Structure / Faces / UV (desktop only) ===
         // Collect pending UI actions to avoid borrow checker conflicts
         let mut pending_instance_select: Option<usize> = None;
         let mut pending_face_select: Option<(usize, u64)> = None;
@@ -2207,7 +2235,7 @@ impl eframe::App for ViewerApp {
         let mut pending_copy_face_id: Option<u64> = None;
         let mut pending_visibility_toggle: Option<usize> = None;
 
-        if self.show_structure {
+        if self.show_structure && !self.is_mobile {
             // Clone data needed for drawing to avoid borrow conflicts
             let assembly_tree_clone = self.assembly_tree.clone();
             let detailed_instances_clone = self.detailed_instances.clone();
@@ -2710,7 +2738,8 @@ impl eframe::App for ViewerApp {
             self.log(&format!("Copied face ID: {}", fid));
         }
 
-        // === Left side panel (controls) ===
+        // === Left side panel (controls) — desktop only ===
+        if !self.is_mobile {
         egui::SidePanel::left("controls")
             .min_width(150.0)
             .default_width(180.0)
@@ -3052,6 +3081,7 @@ impl eframe::App for ViewerApp {
                         .color(egui::Color32::from_rgb(160, 160, 160))
                 );
             });
+        } // end desktop left controls panel
 
         // === Central 3D viewport ===
         egui::CentralPanel::default()
@@ -3083,9 +3113,10 @@ impl eframe::App for ViewerApp {
                 } else {
                     let is_hovering = response.hovered();
 
-                    // ─── Mouse picking: click = select solid, Ctrl+click = select face ───
+                    // ─── Mouse/touch picking: click = select solid, Ctrl+click = select face ───
+                    // On mobile, tap always selects face (since there's no Ctrl key)
                     if response.clicked_by(egui::PointerButton::Primary) {
-                        let ctrl_held = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
+                        let ctrl_held = ui.input(|i| i.modifiers.ctrl || i.modifiers.command) || self.is_mobile;
                         let mouse_pos = ui.input(|i| i.pointer.latest_pos());
                         if let Some(pos) = mouse_pos {
                             // Convert screen position to viewport-local coordinates
@@ -3323,6 +3354,757 @@ impl eframe::App for ViewerApp {
                     }
                 }
             });
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // === MOBILE UI — floating buttons + overlay panels ===
+        // ═══════════════════════════════════════════════════════════════════════
+        if self.is_mobile {
+            self.draw_mobile_ui(ctx);
+        }
+    }
+}
+
+impl ViewerApp {
+    /// Draw mobile-specific UI: floating action buttons and overlay panels.
+    fn draw_mobile_ui(&mut self, ctx: &egui::Context) {
+        let screen = ctx.screen_rect();
+        let btn_size = 44.0;
+        let margin = 8.0;
+
+        // ─── Top bar: compact menu ─────────────────────────────────────
+        egui::TopBottomPanel::top("mobile_top_bar")
+            .exact_height(40.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.heading(egui::RichText::new("3Draper").size(14.0));
+                    ui.separator();
+                    // File menu
+                    ui.menu_button("File", |ui| {
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            if ui.button("Import STL...").clicked() {
+                                self.trigger_stl_file_input();
+                                ui.close_menu();
+                            }
+                            if ui.button("Import STEP...").clicked() {
+                                self.trigger_step_file_input();
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                    // View presets
+                    ui.menu_button("View", |ui| {
+                        if ui.button("Reset Camera").clicked() {
+                            let (bbox_min, bbox_max) = self.mesh.bounding_box();
+                            self.camera.fit_to_bounding_box(
+                                [bbox_min.x as f32, bbox_min.y as f32, bbox_min.z as f32],
+                                [bbox_max.x as f32, bbox_max.y as f32, bbox_max.z as f32],
+                            );
+                            ui.close_menu();
+                        }
+                        if ui.button("Top").clicked() {
+                            self.camera.look_from_direction([0.0, -1.0, 0.0]);
+                            ui.close_menu();
+                        }
+                        if ui.button("Front").clicked() {
+                            self.camera.look_from_direction([0.0, 0.0, 1.0]);
+                            ui.close_menu();
+                        }
+                        if ui.button("Isometric").clicked() {
+                            let d = 45.0_f32.to_radians();
+                            let e = 30.0_f32.to_radians();
+                            self.camera.look_from_direction([
+                                -e.cos() * d.sin(), -e.sin(), e.cos() * d.cos(),
+                            ]);
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        ui.checkbox(&mut self.wireframe, "Wireframe");
+                        ui.checkbox(&mut self.show_edges, "Edges");
+                        ui.checkbox(&mut self.show_wireframe_overlay, "Mesh Overlay");
+                        ui.checkbox(&mut self.show_axes, "Axes");
+                    });
+                    // Quick primitives
+                    ui.menu_button("Models", |ui| {
+                        if ui.button("Box").clicked() { self.load_box(); ui.close_menu(); }
+                        if ui.button("Cylinder").clicked() { self.load_cylinder(); ui.close_menu(); }
+                        if ui.button("Sphere").clicked() { self.load_sphere(); ui.close_menu(); }
+                        if ui.button("Cone").clicked() { self.load_cone(); ui.close_menu(); }
+                        if ui.button("Torus").clicked() { self.load_torus(); ui.close_menu(); }
+                        if ui.button("Engine").clicked() { self.load_engine(); ui.close_menu(); }
+                    });
+                    // Spacer
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Info summary
+                        let info_text = format!("V:{} T:{}", self.current_model.vertex_count, self.current_model.triangle_count);
+                        ui.label(egui::RichText::new(info_text).size(10.0).color(egui::Color32::GRAY));
+                    });
+                });
+            });
+
+        // ─── Floating buttons: bottom-left (Controls) + bottom-right (Structure) ─
+        let controls_btn_pos = egui::Pos2::new(screen.min.x + margin, screen.bottom() - margin - btn_size - 50.0);
+        let structure_btn_pos = egui::Pos2::new(screen.right() - margin - btn_size, screen.bottom() - margin - btn_size - 50.0);
+        let log_btn_pos = egui::Pos2::new(screen.center().x - btn_size * 0.5, screen.bottom() - margin - btn_size - 50.0);
+
+        // Controls panel button (bottom-left)
+        let controls_active = self.mobile_panel == Some(MobilePanel::Controls);
+        egui::Area::new(egui::Id::new("mobile_controls_btn"))
+            .fixed_pos(controls_btn_pos)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(btn_size, btn_size),
+                    egui::Sense::click(),
+                );
+                let fill = if controls_active {
+                    egui::Color32::from_rgba_premultiplied(60, 120, 200, 220)
+                } else {
+                    egui::Color32::from_rgba_premultiplied(40, 40, 50, 200)
+                };
+                ui.painter().rect_filled(rect, 8.0, fill);
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "⚙",
+                    egui::FontId::proportional(22.0),
+                    egui::Color32::WHITE,
+                );
+                if ui.interact(rect, egui::Id::new("mobile_controls_click"), egui::Sense::click()).clicked() {
+                    self.mobile_panel = if controls_active { None } else { Some(MobilePanel::Controls) };
+                }
+            });
+
+        // Structure panel button (bottom-right)
+        let structure_active = self.mobile_panel == Some(MobilePanel::Structure);
+        egui::Area::new(egui::Id::new("mobile_structure_btn"))
+            .fixed_pos(structure_btn_pos)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(btn_size, btn_size),
+                    egui::Sense::click(),
+                );
+                let fill = if structure_active {
+                    egui::Color32::from_rgba_premultiplied(60, 120, 200, 220)
+                } else {
+                    egui::Color32::from_rgba_premultiplied(40, 40, 50, 200)
+                };
+                ui.painter().rect_filled(rect, 8.0, fill);
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "📋",
+                    egui::FontId::proportional(20.0),
+                    egui::Color32::WHITE,
+                );
+                if ui.interact(rect, egui::Id::new("mobile_structure_click"), egui::Sense::click()).clicked() {
+                    self.mobile_panel = if structure_active { None } else { Some(MobilePanel::Structure) };
+                }
+            });
+
+        // Log button (bottom-center)
+        let log_active = self.mobile_log_open;
+        egui::Area::new(egui::Id::new("mobile_log_btn"))
+            .fixed_pos(log_btn_pos)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(btn_size, btn_size),
+                    egui::Sense::click(),
+                );
+                let fill = if log_active {
+                    egui::Color32::from_rgba_premultiplied(60, 120, 200, 220)
+                } else if self.error_count > 0 {
+                    egui::Color32::from_rgba_premultiplied(200, 60, 60, 200)
+                } else if self.warning_count > 0 {
+                    egui::Color32::from_rgba_premultiplied(200, 160, 40, 200)
+                } else {
+                    egui::Color32::from_rgba_premultiplied(40, 40, 50, 200)
+                };
+                ui.painter().rect_filled(rect, 8.0, fill);
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "📝",
+                    egui::FontId::proportional(20.0),
+                    egui::Color32::WHITE,
+                );
+                if ui.interact(rect, egui::Id::new("mobile_log_click"), egui::Sense::click()).clicked() {
+                    self.mobile_log_open = !self.mobile_log_open;
+                }
+            });
+
+        // ─── Touch gesture help (bottom center, small) ─────────────────
+        egui::Area::new(egui::Id::new("mobile_touch_help"))
+            .fixed_pos(egui::Pos2::new(screen.center().x - 100.0, screen.bottom() - margin - 44.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new("1drag:Rotate  2drag:Pan  Pinch:Zoom  Tap:Select")
+                        .size(9.0)
+                        .color(egui::Color32::from_rgba_premultiplied(180, 180, 190, 180))
+                );
+            });
+
+        // ─── Mobile overlay: Controls panel ─────────────────────────────
+        if self.mobile_panel == Some(MobilePanel::Controls) {
+            let panel_width = (screen.width() * 0.85).min(320.0);
+            egui::Window::new("Controls")
+                .id(egui::Id::new("mobile_controls_window"))
+                .fixed_pos(egui::Pos2::new(screen.min.x, screen.min.y + 42.0))
+                .fixed_size(egui::vec2(panel_width, screen.height() - 50.0))
+                .resizable(false)
+                .collapsible(false)
+                .default_open(true)
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        // Primitives
+                        ui.heading(egui::RichText::new("Primitives").size(13.0));
+                        ui.horizontal(|ui| {
+                            if ui.button("Box").clicked() { self.load_box(); }
+                            if ui.button("Cylinder").clicked() { self.load_cylinder(); }
+                            if ui.button("Sphere").clicked() { self.load_sphere(); }
+                        });
+                        ui.horizontal(|ui| {
+                            if ui.button("Cone").clicked() { self.load_cone(); }
+                            if ui.button("Torus").clicked() { self.load_torus(); }
+                            if ui.button("Revolution").clicked() { self.load_revolution(); }
+                        });
+                        ui.horizontal(|ui| {
+                            if ui.button("Extrusion").clicked() { self.load_extrusion(); }
+                            if ui.button("NURBS").clicked() { self.load_nurbs(); }
+                        });
+                        ui.separator();
+
+                        // Display
+                        ui.heading(egui::RichText::new("Display").size(13.0));
+                        ui.checkbox(&mut self.wireframe, "Wireframe");
+                        ui.checkbox(&mut self.show_edges, "Show Edges");
+                        ui.checkbox(&mut self.show_wireframe_overlay, "Mesh Overlay");
+                        ui.checkbox(&mut self.show_axes, "Show axes");
+                        ui.separator();
+
+                        // Camera
+                        ui.heading(egui::RichText::new("Camera").size(13.0));
+                        if ui.button("Reset Camera").clicked() {
+                            let (bbox_min, bbox_max) = self.mesh.bounding_box();
+                            self.camera.fit_to_bounding_box(
+                                [bbox_min.x as f32, bbox_min.y as f32, bbox_min.z as f32],
+                                [bbox_max.x as f32, bbox_max.y as f32, bbox_max.z as f32],
+                            );
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.button("Top").clicked() { self.camera.look_from_direction([0.0, -1.0, 0.0]); }
+                            if ui.button("Front").clicked() { self.camera.look_from_direction([0.0, 0.0, 1.0]); }
+                            if ui.button("Right").clicked() { self.camera.look_from_direction([-1.0, 0.0, 0.0]); }
+                            if ui.button("Iso").clicked() {
+                                let d = 45.0_f32.to_radians();
+                                let e = 30.0_f32.to_radians();
+                                self.camera.look_from_direction([
+                                    -e.cos() * d.sin(), -e.sin(), e.cos() * d.cos(),
+                                ]);
+                            }
+                        });
+                        ui.separator();
+
+                        // Selection
+                        if ui.button("Clear Selection").clicked() {
+                            self.selected_instance = None;
+                            self.selected_face = None;
+                            self.highlighted_face = None;
+                            self.highlight_dirty = true;
+                            self.uv_svg_cache = None;
+                        }
+                        ui.separator();
+
+                        // Info
+                        ui.heading(egui::RichText::new("Info").size(13.0));
+                        ui.label(egui::RichText::new(format!("Model: {}", self.current_model.name)).size(12.0));
+                        ui.label(egui::RichText::new(format!("Vertices: {}", self.current_model.vertex_count)).size(12.0));
+                        ui.label(egui::RichText::new(format!("Triangles: {}", self.current_model.triangle_count)).size(12.0));
+                        ui.label(egui::RichText::new(format!("Instances: {}", self.detailed_instances.len())).size(12.0));
+                        if self.is_loading && self.total_instance_count > 0 {
+                            let progress = self.triangulated_count as f32 / self.total_instance_count as f32;
+                            ui.label(egui::RichText::new(format!("Loading: {}/{} ({:.0}%)", self.triangulated_count, self.total_instance_count, progress * 100.0))
+                                .size(11.0).color(egui::Color32::from_rgb(80, 180, 80)));
+                        }
+                        if let Some((inst_idx, fid)) = self.highlighted_face {
+                            ui.label(egui::RichText::new(format!("Face: #{} (inst #{})", fid, inst_idx))
+                                .size(12.0).color(egui::Color32::from_rgb(255, 220, 50)));
+                        }
+
+                        // Manifold
+                        ui.separator();
+                        ui.heading(egui::RichText::new("Manifold").size(13.0));
+                        if let Some(ref report) = self.manifold_report {
+                            let watertight = report.is_watertight();
+                            let wt_color = if watertight { egui::Color32::from_rgb(80, 200, 80) } else { egui::Color32::from_rgb(255, 100, 80) };
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("Watertight:").size(12.0));
+                                ui.label(egui::RichText::new(if watertight { "Yes" } else { "No" }).size(12.0).color(wt_color));
+                            });
+                            ui.label(egui::RichText::new(format!("Boundary edges: {}", report.boundary_edge_count)).size(11.0));
+                            ui.label(egui::RichText::new(format!("Degenerate tris: {}", report.degenerate_triangle_count)).size(11.0));
+                        }
+
+                        // Errors
+                        if self.last_error.is_some() || self.failed_face_count > 0 {
+                            ui.separator();
+                            ui.heading(egui::RichText::new("Errors").size(13.0));
+                            if let Some(ref err) = self.last_error {
+                                ui.label(egui::RichText::new(err).size(11.0).color(egui::Color32::from_rgb(255, 120, 120)));
+                                if ui.button("Dismiss").clicked() { self.last_error = None; }
+                            }
+                            if self.failed_face_count > 0 {
+                                ui.label(egui::RichText::new(format!("{} face(s) failed triangulation", self.failed_face_count))
+                                    .size(11.0).color(egui::Color32::from_rgb(255, 220, 100)));
+                            }
+                        }
+
+                        // JSON API
+                        if self.show_json_api {
+                            ui.separator();
+                            ui.heading(egui::RichText::new("JSON API").size(13.0));
+                            ui.add(egui::TextEdit::multiline(&mut self.json_api_input)
+                                .desired_width(f32::INFINITY).desired_rows(2).font(egui::TextStyle::Monospace));
+                            ui.horizontal(|ui| {
+                                if ui.button("Execute").clicked() && !self.json_api_input.is_empty() {
+                                    self.json_api_output = self.json_api.execute_json(&self.json_api_input);
+                                }
+                                if ui.button("Help").clicked() {
+                                    let r = self.json_api.execute(draper_json::ApiRequest::Help);
+                                    self.json_api_output = serde_json::to_string_pretty(&r).unwrap_or_default();
+                                }
+                                if ui.button("Clear").clicked() { self.json_api_input.clear(); self.json_api_output.clear(); }
+                            });
+                            if !self.json_api_output.is_empty() {
+                                ui.add(egui::TextEdit::multiline(&mut self.json_api_output)
+                                    .desired_width(f32::INFINITY).desired_rows(4).font(egui::TextStyle::Monospace).interactive(false));
+                            }
+                        }
+                    });
+                });
+        }
+
+        // ─── Mobile overlay: Structure panel ────────────────────────────
+        if self.mobile_panel == Some(MobilePanel::Structure) {
+            let panel_width = (screen.width() * 0.85).min(360.0);
+            let panel_x = screen.right() - panel_width;
+
+            // Collect pending UI actions
+            let mut pending_instance_select: Option<usize> = None;
+            let mut pending_face_select: Option<(usize, u64)> = None;
+            let mut pending_svg_export = false;
+            let mut pending_copy_face_id: Option<u64> = None;
+            let mut pending_visibility_toggle: Option<usize> = None;
+
+            let assembly_tree_clone = self.assembly_tree.clone();
+            let detailed_instances_clone = self.detailed_instances.clone();
+            let selected_instance = self.selected_instance;
+            let selected_face = self.selected_face;
+            let uv_grid_u = self.uv_grid_u;
+            let uv_grid_v = self.uv_grid_v;
+            let show_uv_grid = self.show_uv_grid;
+            let uv_svg_cache_key = self.uv_svg_cache.as_ref().map(|(key, _)| *key);
+            let open_tree_nodes = self.open_tree_nodes.clone();
+            let scroll_to_tree_node = self.scroll_to_tree_node.clone();
+            let scroll_to_face_id = self.scroll_to_face_id;
+            let hidden_instances = self.hidden_instances.clone();
+
+            egui::Window::new("Structure")
+                .id(egui::Id::new("mobile_structure_window"))
+                .fixed_pos(egui::Pos2::new(panel_x, screen.min.y + 44.0))
+                .fixed_size(egui::vec2(panel_width, screen.height() - 50.0))
+                .resizable(false)
+                .collapsible(false)
+                .default_open(true)
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        // Loading progress
+                        if self.is_loading && self.total_instance_count > 0 {
+                            let progress = self.triangulated_count as f32 / self.total_instance_count as f32;
+                            ui.add(egui::ProgressBar::new(progress).show_percentage());
+                        }
+
+                        // Tree
+                        ui.heading(egui::RichText::new("Tree").size(13.0));
+                        egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                            if let Some(ref tree) = assembly_tree_clone {
+                                draw_assembly_node_static(ui, tree, selected_instance, &hidden_instances, &mut pending_instance_select, &mut pending_visibility_toggle, &open_tree_nodes, &scroll_to_tree_node);
+                            } else if !detailed_instances_clone.is_empty() {
+                                for (i, inst) in detailed_instances_clone.iter().enumerate() {
+                                    let is_selected = selected_instance == Some(i);
+                                    let is_visible = !hidden_instances.contains(&i);
+                                    ui.horizontal(|ui| {
+                                        let eye_text = if is_visible { "👁" } else { "  " };
+                                        let eye_color = if is_visible { egui::Color32::from_rgb(80, 180, 80) } else { egui::Color32::from_rgb(180, 80, 80) };
+                                        if ui.add(egui::Label::new(egui::RichText::new(eye_text).size(12.0).color(eye_color)).sense(egui::Sense::click())).clicked() {
+                                            pending_visibility_toggle = Some(i);
+                                        }
+                                        let label = format!("{} (BREP#{})", inst.name, inst.brep_id);
+                                        if ui.selectable_label(is_selected, &label).clicked() {
+                                            pending_instance_select = Some(i);
+                                        }
+                                    });
+                                }
+                            } else {
+                                ui.label(egui::RichText::new("No STEP file loaded").size(11.0).color(egui::Color32::GRAY));
+                            }
+                        });
+                        ui.separator();
+
+                        // Faces
+                        ui.heading(egui::RichText::new("Faces").size(13.0));
+                        if let Some(inst_idx) = selected_instance {
+                            if let Some(inst) = detailed_instances_clone.get(inst_idx) {
+                                ui.label(egui::RichText::new(format!("BREP #{} — {} faces", inst.brep_id, inst.faces.len()))
+                                    .size(11.0).color(egui::Color32::GRAY));
+                                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                                    for face in &inst.faces {
+                                        let is_selected = selected_face == Some((inst_idx, face.face_id));
+                                        let label = format!("F#{} STEP#{} {}", face.face_id, face.step_face_id, face.surface_type);
+                                        let response = ui.selectable_label(is_selected, &label);
+                                        if scroll_to_face_id == Some(face.face_id) {
+                                            response.scroll_to_me(Some(egui::Align::Center));
+                                        }
+                                        if response.clicked() {
+                                            pending_face_select = Some((inst_idx, face.face_id));
+                                        }
+                                    }
+                                });
+                            }
+                        } else {
+                            ui.label(egui::RichText::new("Select an instance").size(11.0).color(egui::Color32::GRAY));
+                        }
+                        ui.separator();
+
+                        // UV Grid
+                        ui.heading(egui::RichText::new("UV Grid").size(13.0));
+                        ui.checkbox(&mut self.show_uv_grid, "Show UV grid");
+                        ui.horizontal(|ui| {
+                            ui.label("U:");
+                            ui.add(egui::DragValue::new(&mut self.uv_grid_u).range(2..=50));
+                            ui.label("V:");
+                            ui.add(egui::DragValue::new(&mut self.uv_grid_v).range(2..=50));
+                        });
+
+                        if show_uv_grid {
+                            if let Some(inst_idx) = selected_instance {
+                                if let Some((_, face_id)) = selected_face {
+                                    if let Some(inst) = detailed_instances_clone.get(inst_idx) {
+                                        if let Some(face) = inst.faces.iter().find(|f| f.face_id == face_id) {
+                                            let cache_key = (inst_idx, face_id);
+                                            let needs_regen = uv_svg_cache_key != Some(cache_key);
+                                            if needs_regen {
+                                                let svg = generate_uv_svg(face, uv_grid_u, uv_grid_v);
+                                                self.uv_svg_cache = Some((cache_key, svg));
+                                            }
+                                            let available = ui.available_size();
+                                            let size = available.x.min(available.y - 20.0).min(350.0);
+                                            if size > 50.0 {
+                                                let (rect, _response) = ui.allocate_exact_size(
+                                                    egui::vec2(size, size),
+                                                    egui::Sense::hover(),
+                                                );
+                                                ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgb(26, 26, 46));
+
+                                                let margin_f = size * 0.067;
+                                                let draw_size = size - 2.0 * margin_f;
+
+                                                // Compute UV bounds
+                                                let mut u_min = f64::MAX; let mut u_max = f64::MIN;
+                                                let mut v_min = f64::MAX; let mut v_max = f64::MIN;
+                                                for polyline in &face.outer_uv_boundary {
+                                                    for pt in polyline {
+                                                        u_min = u_min.min(pt.u); u_max = u_max.max(pt.u);
+                                                        v_min = v_min.min(pt.v); v_max = v_max.max(pt.v);
+                                                    }
+                                                }
+                                                if u_min >= u_max || v_min >= v_max {
+                                                    match &face.surface {
+                                                        Surface::Nurbs(n) => {
+                                                            let (ur0, ur1) = n.u_range();
+                                                            let (vr0, vr1) = n.v_range();
+                                                            u_min = ur0; u_max = ur1; v_min = vr0; v_max = vr1;
+                                                        }
+                                                        _ => { u_min = 0.0; u_max = 1.0; v_min = 0.0; v_max = 1.0; }
+                                                    }
+                                                }
+                                                let u_range = (u_max - u_min).max(1e-6);
+                                                let v_range = (v_max - v_min).max(1e-6);
+                                                u_min -= u_range * 0.05; u_max += u_range * 0.05;
+                                                v_min -= v_range * 0.05; v_max += v_range * 0.05;
+
+                                                let mf = margin_f as f64;
+                                                let ds = draw_size as f64;
+                                                let map_u = |u: f64| -> f32 { (mf + (u - u_min) / (u_max - u_min) * ds) as f32 };
+                                                let map_v = |v: f64| -> f32 { (mf + (1.0 - (v - v_min) / (v_max - v_min)) * ds) as f32 };
+
+                                                // Grid lines
+                                                for i in 0..=uv_grid_u.min(50) {
+                                                    let u = u_min + (u_max - u_min) * i as f64 / uv_grid_u.min(50) as f64;
+                                                    let x = map_u(u);
+                                                    ui.painter().line_segment(
+                                                        [egui::pos2(x, rect.top() + margin_f), egui::pos2(x, rect.bottom() - margin_f)],
+                                                        egui::Stroke::new(0.5, egui::Color32::from_rgb(51, 51, 68)),
+                                                    );
+                                                }
+                                                for j in 0..=uv_grid_v.min(50) {
+                                                    let v = v_min + (v_max - v_min) * j as f64 / uv_grid_v.min(50) as f64;
+                                                    let y = map_v(v);
+                                                    ui.painter().line_segment(
+                                                        [egui::pos2(rect.left() + margin_f, y), egui::pos2(rect.right() - margin_f, y)],
+                                                        egui::Stroke::new(0.5, egui::Color32::from_rgb(51, 51, 68)),
+                                                    );
+                                                }
+
+                                                // Outer boundary
+                                                for polyline in &face.outer_uv_boundary {
+                                                    if polyline.len() < 2 { continue; }
+                                                    let points: Vec<egui::Pos2> = polyline.iter()
+                                                        .map(|pt| egui::pos2(map_u(pt.u), map_v(pt.v)))
+                                                        .collect();
+                                                    ui.painter().line(points, egui::Stroke::new(1.5, egui::Color32::from_rgb(0, 255, 136)));
+                                                }
+                                                // Inner boundaries (holes)
+                                                for boundary in &face.inner_uv_boundaries {
+                                                    for polyline in boundary {
+                                                        if polyline.len() < 2 { continue; }
+                                                        let points: Vec<egui::Pos2> = polyline.iter()
+                                                            .map(|pt| egui::pos2(map_u(pt.u), map_v(pt.v)))
+                                                            .collect();
+                                                        ui.painter().line(points, egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 68, 68)));
+                                                    }
+                                                }
+
+                                                // UV triangles
+                                                let outer_uv_poly: Vec<(f64, f64)> = face.outer_uv_boundary.iter()
+                                                    .flat_map(|pl| pl.iter().map(|pt| (pt.u, pt.v))).collect();
+                                                if !face.uv_triangles.is_empty() {
+                                                    let hole_polys: Vec<Vec<(f64, f64)>> = face.inner_uv_boundaries.iter()
+                                                        .flat_map(|boundaries| boundaries.iter().map(|poly| {
+                                                            poly.iter().map(|pt| (pt.u, pt.v)).collect()
+                                                        })).collect();
+                                                    let tri_limit = 1500.min(face.uv_triangles.len());
+                                                    for (ti, tri) in face.uv_triangles.iter().enumerate() {
+                                                        let cu = (tri[0].u + tri[1].u + tri[2].u) / 3.0;
+                                                        let cv = (tri[0].v + tri[1].v + tri[2].v) / 3.0;
+                                                        let in_hole = hole_polys.iter().any(|h| point_in_polygon(cu, cv, h));
+                                                        let in_outer = !outer_uv_poly.is_empty() && point_in_polygon(cu, cv, &outer_uv_poly);
+                                                        let p0 = egui::pos2(map_u(tri[0].u), map_v(tri[0].v));
+                                                        let p1 = egui::pos2(map_u(tri[1].u), map_v(tri[1].v));
+                                                        let p2 = egui::pos2(map_u(tri[2].u), map_v(tri[2].v));
+                                                        if in_hole || !in_outer {
+                                                            let points = vec![p0, p1, p2];
+                                                            ui.painter().add(egui::Shape::convex_polygon(points,
+                                                                egui::Color32::from_rgba_premultiplied(255, 34, 34, 50),
+                                                                egui::Stroke::new(0.5, egui::Color32::from_rgba_premultiplied(255, 68, 68, 120)),
+                                                            ));
+                                                        } else {
+                                                            let points = vec![p0, p1, p2];
+                                                            let fill = if ti % 2 == 0 {
+                                                                egui::Color32::from_rgba_premultiplied(68, 136, 255, 20)
+                                                            } else {
+                                                                egui::Color32::from_rgba_premultiplied(85, 170, 255, 20)
+                                                            };
+                                                            let stroke = if ti % 2 == 0 {
+                                                                egui::Stroke::new(0.4, egui::Color32::from_rgba_premultiplied(68, 136, 255, 160))
+                                                            } else {
+                                                                egui::Stroke::new(0.4, egui::Color32::from_rgba_premultiplied(85, 170, 255, 160))
+                                                            };
+                                                            ui.painter().add(egui::Shape::convex_polygon(points, fill, stroke));
+                                                        }
+                                                        if ti >= tri_limit { break; }
+                                                    }
+                                                }
+                                            }
+
+                                            // SVG export
+                                            #[cfg(target_arch = "wasm32")]
+                                            {
+                                                if ui.button("Download UV as SVG").clicked() {
+                                                    pending_svg_export = true;
+                                                }
+                                            }
+                                            #[cfg(not(target_arch = "wasm32"))]
+                                            {
+                                                if ui.button("Save UV as SVG...").clicked() {
+                                                    pending_svg_export = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    ui.label(egui::RichText::new("Select a face").size(11.0).color(egui::Color32::GRAY));
+                                }
+                            } else {
+                                ui.label(egui::RichText::new("Select an instance first").size(11.0).color(egui::Color32::GRAY));
+                            }
+                        }
+                        ui.separator();
+
+                        // Face Info
+                        ui.heading(egui::RichText::new("Face Info").size(13.0));
+                        if let Some(inst_idx) = selected_instance {
+                            if let Some((_, fid)) = selected_face {
+                                if let Some(inst) = detailed_instances_clone.get(inst_idx) {
+                                    if let Some(face) = inst.faces.iter().find(|f| f.face_id == fid) {
+                                        ui.label(egui::RichText::new(format!("ID: {} | STEP: #{}", face.face_id, face.step_face_id)).size(11.0));
+                                        ui.label(egui::RichText::new(format!("Surface: {}", face.surface_type)).size(11.0));
+                                        ui.label(egui::RichText::new(format!("Triangles: [{}, {})", face.triangle_range.0, face.triangle_range.1)).size(11.0));
+                                        ui.label(egui::RichText::new(format!("Boundary: {} loops, Holes: {}", face.outer_boundary.len(), face.inner_boundaries.len())).size(11.0));
+                                        if ui.button("Copy Face ID").clicked() {
+                                            pending_copy_face_id = Some(face.face_id);
+                                        }
+                                    }
+                                }
+                            } else {
+                                ui.label(egui::RichText::new("Select a face").size(11.0).color(egui::Color32::GRAY));
+                            }
+                        } else {
+                            ui.label(egui::RichText::new("Select an instance").size(11.0).color(egui::Color32::GRAY));
+                        }
+                    });
+                });
+
+            // Apply pending actions from mobile structure panel
+            if let Some(idx) = pending_visibility_toggle {
+                if self.hidden_instances.contains(&idx) {
+                    self.hidden_instances.remove(&idx);
+                } else {
+                    self.hidden_instances.insert(idx);
+                    if self.selected_instance == Some(idx) {
+                        self.selected_instance = None;
+                        self.selected_face = None;
+                        self.highlighted_face = None;
+                    }
+                }
+                self.highlight_dirty = true;
+                self.edge_dirty = true;
+                self.wireframe_overlay_dirty = true;
+            }
+            if let Some(idx) = pending_instance_select {
+                self.selected_instance = Some(idx);
+                self.selected_face = None;
+                self.highlighted_face = None;
+                self.highlight_dirty = true;
+                self.uv_svg_cache = None;
+                if let Some(ref tree) = self.assembly_tree {
+                    let (path, target) = find_instance_path(tree, idx);
+                    self.open_tree_nodes = path.into_iter().collect();
+                    self.scroll_to_tree_node = target;
+                }
+            }
+            if let Some((inst_idx, fid)) = pending_face_select {
+                self.selected_instance = Some(inst_idx);
+                self.selected_face = Some((inst_idx, fid));
+                self.highlighted_face = Some((inst_idx, fid));
+                self.highlight_dirty = true;
+                self.uv_svg_cache = None;
+                self.scroll_to_face_id = Some(fid);
+                if let Some(ref tree) = self.assembly_tree {
+                    let (path, target) = find_instance_path(tree, inst_idx);
+                    self.open_tree_nodes = path.into_iter().collect();
+                    self.scroll_to_tree_node = target;
+                }
+            }
+            if pending_svg_export {
+                if let Some((_, ref svg_content)) = self.uv_svg_cache {
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        use wasm_bindgen::prelude::*;
+                        if let Some(window) = web_sys::window() {
+                            if let Some(document) = window.document() {
+                                let blob = web_sys::Blob::new_with_str_sequence(
+                                    &js_sys::Array::of1(&JsValue::from_str(svg_content)),
+                                ).ok();
+                                if let Some(blob) = blob {
+                                    let url = web_sys::Url::create_object_url_with_blob(&blob).ok();
+                                    if let Some(url) = url {
+                                        let a = document.create_element("a").ok();
+                                        if let Some(a) = a {
+                                            let _ = a.set_attribute("href", &url);
+                                            let _ = a.set_attribute("download", "uv_grid.svg");
+                                            let _ = a.set_attribute("style", "display:none");
+                                            if let Some(body) = document.body() {
+                                                let _ = body.append_child(&a);
+                                                let html_elem: web_sys::HtmlElement = a.unchecked_into();
+                                                html_elem.click();
+                                            }
+                                        }
+                                        web_sys::Url::revoke_object_url(&url).ok();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("SVG", &["svg"])
+                            .save_file()
+                        {
+                            match std::fs::write(&path, svg_content) {
+                                Ok(()) => self.log(&format!("Exported UV SVG: {}", path.to_string_lossy())),
+                                Err(e) => self.log(&format!("SVG export error: {}", e)),
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(fid) = pending_copy_face_id {
+                ctx.copy_text(format!("{}", fid));
+            }
+            self.scroll_to_tree_node = None;
+            self.scroll_to_face_id = None;
+            self.open_tree_nodes.clear();
+        }
+
+        // ─── Mobile overlay: Log panel ─────────────────────────────────
+        if self.mobile_log_open {
+            let panel_height = (screen.height() * 0.4).min(250.0);
+            egui::Window::new("Log")
+                .id(egui::Id::new("mobile_log_window"))
+                .fixed_pos(egui::Pos2::new(screen.min.x, screen.bottom() - panel_height - 50.0))
+                .fixed_size(egui::vec2(screen.width(), panel_height))
+                .resizable(false)
+                .collapsible(false)
+                .default_open(true)
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.heading(egui::RichText::new("Log").size(12.0));
+                        if self.warning_count > 0 {
+                            ui.label(egui::RichText::new(format!("W:{}", self.warning_count)).size(10.0).color(egui::Color32::from_rgb(255, 200, 50)));
+                        }
+                        if self.error_count > 0 {
+                            ui.label(egui::RichText::new(format!("E:{}", self.error_count)).size(10.0).color(egui::Color32::from_rgb(255, 80, 80)));
+                        }
+                        if ui.button("Clear").clicked() { self.log.clear(); }
+                        ui.checkbox(&mut self.log_auto_scroll, "Auto");
+                    });
+                    egui::ScrollArea::vertical()
+                        .stick_to_bottom(self.log_auto_scroll)
+                        .show(ui, |ui| {
+                            for entry in &self.log {
+                                let msg_color = match entry.severity {
+                                    LogSeverity::Info => egui::Color32::from_rgb(200, 200, 210),
+                                    LogSeverity::Warning => egui::Color32::from_rgb(255, 200, 50),
+                                    LogSeverity::Error => egui::Color32::from_rgb(255, 80, 80),
+                                };
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(format!("[{}]", entry.time)).size(9.0).color(egui::Color32::from_rgb(120, 120, 140)));
+                                    ui.add(egui::Label::new(
+                                        egui::RichText::new(&entry.message).size(9.0).color(msg_color)
+                                    ).wrap());
+                                });
+                            }
+                        });
+                });
+        }
     }
 }
 

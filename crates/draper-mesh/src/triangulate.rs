@@ -918,9 +918,9 @@ fn earcutr_triangulate_planar(
         if chunk.len() < 3 {
             break;
         }
-        let a = chunk[0];
-        let b = chunk[1];
-        let c = chunk[2];
+        let a = chunk[0] as u32;
+        let b = chunk[1] as u32;
+        let c = chunk[2] as u32;
 
         // Skip degenerate triangles
         if a == b || b == c || a == c {
