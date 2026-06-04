@@ -221,6 +221,8 @@ fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams) -> 
     // Use a very small tolerance for degenerate filtering — only remove truly degenerate triangles
     // (zero area or NaN/Inf), not small valid triangles
     filter_degenerate_triangles(&mut mesh, 1e-10);
+    // Safety check: ensure all per-triangle arrays have the same length
+    debug_assert_mesh_consistency(&mesh);
     mesh
 }
 
@@ -290,8 +292,10 @@ fn collect_face_boundary_points_cached(face: &Face, cache: &EdgeSampleCache) -> 
                 } else {
                     sample_edge_points(edge, EDGE_SAMPLES)
                 };
-                // If coedge is reversed, reverse the sample order
-                if !coedge.forward {
+                // Canonical-direction reversal logic (same as collect_face_boundary_points)
+                let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+                let should_reverse = !coedge.forward != edge_is_reversed;
+                if should_reverse {
                     edge_pts.reverse();
                 }
                 points.extend(edge_pts);
@@ -340,7 +344,10 @@ fn collect_face_hole_points_cached(face: &Face, cache: &EdgeSampleCache) -> Vec<
                 } else {
                     sample_edge_points(edge, EDGE_SAMPLES)
                 };
-                if !coedge.forward {
+                // Canonical-direction reversal logic (same as collect_face_boundary_points)
+                let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+                let should_reverse = !coedge.forward != edge_is_reversed;
+                if should_reverse {
                     edge_pts.reverse();
                 }
                 points.extend(edge_pts);
@@ -454,6 +461,8 @@ fn triangulate_solid_parallel(solid: &Solid, params: &TriangulationParams) -> Tr
     let mut mesh = merged;
     merge_coincident_vertices(&mut mesh, 1e-6);
     filter_degenerate_triangles(&mut mesh, 1e-10);
+    // Safety check: ensure all per-triangle arrays have the same length
+    debug_assert_mesh_consistency(&mesh);
     mesh
 }
 
@@ -617,12 +626,25 @@ pub fn triangulate_face(face: &Face, params: &TriangulationParams) -> TriangleMe
 /// Sample points along a single edge curve.
 /// Returns the sampled 3D points (not including the endpoint to avoid duplicates
 /// when chaining edges into a wire).
+///
+/// Samples in the CANONICAL direction (from param_min to param_max) regardless
+/// of the edge's stored param_range orientation. This ensures that the same
+/// STEP edge_curve always produces identical 3D points when sampled, even when
+/// adjacent faces have reversed Edge copies with swapped param_ranges.
+/// The coedge.forward flag controls whether the result is reversed to match
+/// the wire traversal direction.
 fn sample_edge_points(edge: &Edge, n_samples: usize) -> Vec<Point3d> {
     let mut pts = Vec::with_capacity(n_samples);
-    for i in 0..n_samples {
-        let t = i as f64 / n_samples as f64;
-        if let Some(p) = edge.point_at(t) {
-            pts.push(p);
+    if let Some(ref curve) = edge.curve {
+        let (tmin, tmax) = edge.param_range;
+        // Always sample from the smaller parameter to the larger one
+        // (canonical direction). This guarantees that two Edge objects
+        // referencing the same STEP EDGE_CURVE produce identical point
+        // sequences, even if one has a reversed param_range.
+        let (pmin, pmax) = if tmin <= tmax { (tmin, tmax) } else { (tmax, tmin) };
+        for i in 0..n_samples {
+            let t = pmin + (i as f64 / n_samples as f64) * (pmax - pmin);
+            pts.push(curve.point_at(t));
         }
     }
     pts
@@ -647,8 +669,14 @@ fn collect_face_boundary_points(face: &Face) -> Vec<Point3d> {
                     continue;
                 }
                 let mut edge_pts = sample_edge_points(edge, EDGE_SAMPLES);
-                // If coedge is reversed, reverse the sample order
-                if !coedge.forward {
+                // sample_edge_points now always samples in the canonical direction
+                // (from min param to max param). We need to reverse when the
+                // coedge traversal direction doesn't match the canonical direction.
+                // Old rule was: reverse if !coedge.forward (relative to edge's param_range).
+                // New rule: reverse if !coedge.forward XOR (param_range is reversed).
+                let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+                let should_reverse = !coedge.forward != edge_is_reversed;
+                if should_reverse {
                     edge_pts.reverse();
                 }
                 points.extend(edge_pts);
@@ -689,7 +717,10 @@ fn collect_face_hole_points(face: &Face) -> Vec<Vec<Point3d>> {
             let edge = face.edges.iter().find(|e| e.id == coedge.edge);
             if let Some(edge) = edge {
                 let mut edge_pts = sample_edge_points(edge, EDGE_SAMPLES);
-                if !coedge.forward {
+                // Same canonical-direction logic as collect_face_boundary_points
+                let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+                let should_reverse = !coedge.forward != edge_is_reversed;
+                if should_reverse {
                     edge_pts.reverse();
                 }
                 points.extend(edge_pts);
@@ -736,6 +767,26 @@ fn triangulate_planar_face(face: &Face, plane: &Plane, _params: &TriangulationPa
 
     let holes_3d = collect_face_hole_points(face);
     let forward = face.forward;
+
+    // Snap boundary points onto the plane to eliminate any numerical drift
+    // from edge curve sampling. Without this, vertices can be slightly off-plane,
+    // causing visible "wavy" artifacts on what should be a perfectly flat surface.
+    let snap_to_plane = |p: &Point3d| -> Point3d {
+        let dx = p.x - plane.origin.x;
+        let dy = p.y - plane.origin.y;
+        let dz = p.z - plane.origin.z;
+        let dist = dx * plane.normal.x + dy * plane.normal.y + dz * plane.normal.z;
+        Point3d::new(
+            p.x - dist * plane.normal.x,
+            p.y - dist * plane.normal.y,
+            p.z - dist * plane.normal.z,
+        )
+    };
+
+    let boundary_3d: Vec<Point3d> = boundary_3d.iter().map(|p| snap_to_plane(p)).collect();
+    let holes_3d: Vec<Vec<Point3d>> = holes_3d.iter()
+        .map(|hole| hole.iter().map(|p| snap_to_plane(p)).collect())
+        .collect();
 
     // Project 3D boundary points onto the plane's 2D coordinate system
     let project = |p: &Point3d| -> Point2d {
@@ -790,7 +841,7 @@ fn triangulate_planar_face(face: &Face, plane: &Plane, _params: &TriangulationPa
             .map(|h| h.iter().map(|p| project(p)).collect())
             .collect();
 
-        match earcutr_triangulate_planar(&points_2d, &boundary_3d, &holes_2d, &holes_3d, forward) {
+        match earcutr_triangulate_planar(&points_2d, &boundary_3d, &holes_2d, &holes_3d, forward, plane.normal) {
             Some(m) => return m,
             None => {
                 // Fallback to bridge-edge + ear-clip if earcutr fails
@@ -855,6 +906,7 @@ fn earcutr_triangulate_planar(
     holes_2d: &[Vec<Point2d>],
     holes_3d: &[Vec<Point3d>],
     forward: bool,
+    plane_normal: Direction3d,
 ) -> Option<TriangleMesh> {
     if outer_2d.len() < 3 {
         return None;
@@ -937,37 +989,15 @@ fn earcutr_triangulate_planar(
         }
     }
 
-    // Compute face normals for the planar face
-    // Get the plane normal from the cross product of two boundary edges
+    // Compute face normals for the planar face using the analytical plane normal
     if mesh.triangles.is_empty() {
         return None;
     }
 
-    // Use the plane normal from the cross product of the first two 3D boundary edges
-    let normal = if outer_3d.len() >= 3 {
-        let v0x = outer_3d[1].x - outer_3d[0].x;
-        let v0y = outer_3d[1].y - outer_3d[0].y;
-        let v0z = outer_3d[1].z - outer_3d[0].z;
-        let v1x = outer_3d[2].x - outer_3d[0].x;
-        let v1y = outer_3d[2].y - outer_3d[0].y;
-        let v1z = outer_3d[2].z - outer_3d[0].z;
-        let nx = v0y * v1z - v0z * v1y;
-        let ny = v0z * v1x - v0x * v1z;
-        let nz = v0x * v1y - v0y * v1x;
-        let len = (nx * nx + ny * ny + nz * nz).sqrt();
-        if len > 1e-20 {
-            if forward {
-                Direction3d::new(nx / len, ny / len, nz / len).unwrap_or(Direction3d::Z)
-            } else {
-                Direction3d::new(-nx / len, -ny / len, -nz / len).unwrap_or(Direction3d::Z)
-            }
-        } else {
-            Direction3d::Z
-        }
-    } else if forward {
-        Direction3d::Z
+    let normal = if forward {
+        plane_normal
     } else {
-        Direction3d::new(0.0, 0.0, -1.0).unwrap_or(Direction3d::Z)
+        Direction3d::new(-plane_normal.x, -plane_normal.y, -plane_normal.z).unwrap_or(Direction3d::Z)
     };
 
     mesh.face_normals = Some(vec![[normal.x, normal.y, normal.z]; mesh.triangles.len()]);
@@ -3059,7 +3089,7 @@ fn triangulate_plane_with_boundary_and_holes(
     }
 
     // Try earcutr first
-    if let Some(m) = earcutr_triangulate_planar(&outer_2d, &deduped_outer, &holes_2d, &holes_3d, forward) {
+    if let Some(m) = earcutr_triangulate_planar(&outer_2d, &deduped_outer, &holes_2d, &holes_3d, forward, plane.normal) {
         return m;
     }
 
@@ -4270,6 +4300,34 @@ pub fn ear_clip(points: &[Point2d]) -> Vec<[u32; 3]> {
     triangles
 }
 
+/// Debug assertion to verify that all per-triangle arrays in a mesh have consistent lengths.
+/// This catches bugs where post-processing removes triangles but forgets to update
+/// the corresponding entries in face_normals, triangle_colors, or triangle_face_ids.
+fn debug_assert_mesh_consistency(mesh: &TriangleMesh) {
+    let n = mesh.triangles.len();
+    if let Some(ref face_normals) = mesh.face_normals {
+        debug_assert_eq!(
+            face_normals.len(), n,
+            "face_normals length ({}) != triangles length ({})",
+            face_normals.len(), n
+        );
+    }
+    if let Some(ref colors) = mesh.triangle_colors {
+        debug_assert_eq!(
+            colors.len(), n,
+            "triangle_colors length ({}) != triangles length ({})",
+            colors.len(), n
+        );
+    }
+    if let Some(ref ids) = mesh.triangle_face_ids {
+        debug_assert_eq!(
+            ids.len(), n,
+            "triangle_face_ids length ({}) != triangles length ({})",
+            ids.len(), n
+        );
+    }
+}
+
 /// Check if a 2D point is inside a triangle.
 fn point_in_triangle(a: &Point2d, b: &Point2d, c: &Point2d, p: &Point2d) -> bool {
     let d1 = sign_area_2d(p, a, b);
@@ -4365,9 +4423,11 @@ pub fn merge_coincident_vertices(mesh: &mut TriangleMesh, tolerance: f64) {
     }
 
     // Apply remap to triangles and filter degenerate ones
-    // Also preserve triangle_face_ids in sync with the filtered triangles
+    // Also preserve ALL per-triangle arrays in sync with the filtered triangles
     let old_triangles = std::mem::take(&mut mesh.triangles);
     let old_face_ids = mesh.triangle_face_ids.take();
+    let old_face_normals = mesh.face_normals.take();
+    let old_triangle_colors = mesh.triangle_colors.take();
     for (i, tri) in old_triangles.iter().enumerate() {
         let a = remap[tri[0] as usize];
         let b = remap[tri[1] as usize];
@@ -4379,12 +4439,22 @@ pub fn merge_coincident_vertices(mesh: &mut TriangleMesh, tolerance: f64) {
                     mesh.triangle_face_ids.get_or_insert_with(Vec::new).push(fid);
                 }
             }
+            if let Some(ref normals) = old_face_normals {
+                if let Some(&n) = normals.get(i) {
+                    mesh.face_normals.get_or_insert_with(Vec::new).push(n);
+                }
+            }
+            if let Some(ref colors) = old_triangle_colors {
+                if let Some(&col) = colors.get(i) {
+                    mesh.triangle_colors.get_or_insert_with(Vec::new).push(col);
+                }
+            }
         }
     }
 
     mesh.vertices = new_vertices;
 
-    // Rebuild normals
+    // Rebuild vertex normals (they are invalidated by vertex merging)
     if mesh.normals.is_some() {
         mesh.normals = None;
     }
@@ -4402,6 +4472,8 @@ pub fn filter_degenerate_triangles(mesh: &mut TriangleMesh, tolerance: f64) {
     let min_area_sq = tolerance * tolerance;
     let old_triangles = std::mem::take(&mut mesh.triangles);
     let old_face_ids = mesh.triangle_face_ids.take();
+    let old_face_normals = mesh.face_normals.take();
+    let old_triangle_colors = mesh.triangle_colors.take();
 
     for (i, tri) in old_triangles.iter().enumerate() {
         let a_idx = tri[0] as usize;
@@ -4452,6 +4524,16 @@ pub fn filter_degenerate_triangles(mesh: &mut TriangleMesh, tolerance: f64) {
         if let Some(ref ids) = old_face_ids {
             if let Some(&fid) = ids.get(i) {
                 mesh.triangle_face_ids.get_or_insert_with(Vec::new).push(fid);
+            }
+        }
+        if let Some(ref normals) = old_face_normals {
+            if let Some(&n) = normals.get(i) {
+                mesh.face_normals.get_or_insert_with(Vec::new).push(n);
+            }
+        }
+        if let Some(ref colors) = old_triangle_colors {
+            if let Some(&col) = colors.get(i) {
+                mesh.triangle_colors.get_or_insert_with(Vec::new).push(col);
             }
         }
     }

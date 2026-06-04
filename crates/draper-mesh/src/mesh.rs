@@ -111,7 +111,7 @@ impl TriangleMesh {
         for tri in &other.triangles {
             self.triangles.push([tri[0] + offset, tri[1] + offset, tri[2] + offset]);
         }
-        // Merge normals
+        // Merge vertex normals
         match (&mut self.normals, &other.normals) {
             (Some(ref mut self_normals), Some(ref other_normals)) => {
                 self_normals.extend(other_normals.iter().cloned());
@@ -121,6 +121,28 @@ impl TriangleMesh {
                 let mut combined = vec![[0.0, 0.0, 1.0]; self.vertices.len() - other.vertices.len()];
                 combined.extend(other_normals.iter().cloned());
                 self.normals = Some(combined);
+            }
+            _ => {}
+        }
+        // Merge face normals (per-triangle)
+        if self.face_normals.is_none() && other.face_normals.is_some() {
+            let existing_count = self.triangles.len() - other.triangles.len();
+            self.face_normals = Some(vec![[0.0, 0.0, 1.0]; existing_count]);
+        }
+        match (&mut self.face_normals, &other.face_normals) {
+            (Some(ref mut dest), Some(ref src)) => {
+                dest.extend(src.iter().cloned());
+            }
+            _ => {}
+        }
+        // Merge triangle colors (per-triangle)
+        if self.triangle_colors.is_none() && other.triangle_colors.is_some() {
+            let existing_count = self.triangles.len() - other.triangles.len();
+            self.triangle_colors = Some(vec![[0.62, 0.65, 0.70, 1.0]; existing_count]);
+        }
+        match (&mut self.triangle_colors, &other.triangle_colors) {
+            (Some(ref mut dest), Some(ref src)) => {
+                dest.extend(src.iter().cloned());
             }
             _ => {}
         }
@@ -153,7 +175,7 @@ impl TriangleMesh {
                 colors.push(color);
             }
         }
-        // Merge normals
+        // Merge vertex normals
         match (&mut self.normals, &other.normals) {
             (Some(ref mut self_normals), Some(ref other_normals)) => {
                 self_normals.extend(other_normals.iter().cloned());
@@ -163,6 +185,17 @@ impl TriangleMesh {
                 let mut combined = vec![[0.0, 0.0, 1.0]; self.vertices.len() - other.vertices.len()];
                 combined.extend(other_normals.iter().cloned());
                 self.normals = Some(combined);
+            }
+            _ => {}
+        }
+        // Merge face normals (per-triangle)
+        if self.face_normals.is_none() && other.face_normals.is_some() {
+            let existing_count = self.triangles.len() - other.triangles.len();
+            self.face_normals = Some(vec![[0.0, 0.0, 1.0]; existing_count]);
+        }
+        match (&mut self.face_normals, &other.face_normals) {
+            (Some(ref mut dest), Some(ref src)) => {
+                dest.extend(src.iter().cloned());
             }
             _ => {}
         }
