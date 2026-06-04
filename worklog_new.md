@@ -49,3 +49,30 @@ Stage Summary:
 - Fix: preserve original mesh triangle ranges, don't overwrite with GPU output ranges
 - Both mesh surfaces and edges should now correctly hide/show per instance
 - Deployed to https://kerneldev.github.io/3Draper/
+
+---
+Task ID: fix-planar-holes-3
+Agent: Main
+Task: Fix planar face triangulation with holes + UV triangle visualization + face picking bug
+
+Work Log:
+- Diagnosed issue: plate_1 F#1 (STEP#3815) Plane has 6 bolt holes but they were not cut from surface
+- Root cause 1: bridge-edge + ear-clip triangulation produces triangles spanning across holes, especially for circular bolt holes where bridge edges don't fully separate the hole
+- Root cause 2: `merge_coincident_vertices()` and `filter_degenerate_triangles()` were removing triangles without updating `triangle_face_ids`, causing face picking to always select face #1
+- Added post-filter in `triangulate_planar_face_with_holes_cached()` and `triangulate_planar_face_with_holes()` to remove triangles whose centroids fall inside any hole
+- Added same post-filter in `triangulate_planar_face()` in draper-mesh
+- Fixed `merge_coincident_vertices()` to preserve `triangle_face_ids` in sync with filtered triangles
+- Fixed `filter_degenerate_triangles()` to preserve `triangle_face_ids` in sync with filtered triangles
+- Added `uv_triangles: Vec<[Point2d; 3]>` field to `FaceInfo` struct
+- Added UV triangle projection in converter.rs (project each triangle's vertices to UV space)
+- Added UV triangle rendering in SVG export: valid triangles in blue, triangles inside holes in red
+- Added UV triangle rendering in egui UV grid panel with same color coding
+- Fixed `JsonFaceInfo::to_face_info()` to include new `uv_triangles` field
+- Pushed commits 8e26df1 and 681cfbb to main
+- GitHub Actions build succeeded, deployed to GitHub Pages
+
+Stage Summary:
+- Bolt holes in plate_1 now properly cut from surface via centroid-based triangle filtering
+- Face picking (Ctrl+click) now correctly identifies which face was clicked (no longer always F#1)
+- UV triangle visualization added to both SVG export and egui panel for debugging triangulation
+- triangle_face_ids now correctly maintained through vertex merging and degenerate filtering
