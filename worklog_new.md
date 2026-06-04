@@ -76,3 +76,43 @@ Stage Summary:
 - Face picking (Ctrl+click) now correctly identifies which face was clicked (no longer always F#1)
 - UV triangle visualization added to both SVG export and egui panel for debugging triangulation
 - triangle_face_ids now correctly maintained through vertex merging and degenerate filtering
+
+---
+Task ID: consistent-triangulation-4
+Agent: Main
+Task: Implement consistent (watertight) triangulation — fix shared edge vertex mismatch between plane and NURBS/curved faces
+
+Work Log:
+- Analyzed screenshot: torus model showing cracks/gaps at shared edges between faces
+- Root cause: each face triangulated independently with different vertex counts on shared edges
+  - Plane faces: use collect_face_boundary_points() with EDGE_SAMPLES=32
+  - Curved surfaces: use parametric grid with n_u × n_v points, boundary strip approximation
+  - StepEdgeCache in converter.rs caches 3D points by STEP entity ID, BUT the mesh functions don't use these cached points as constraints
+- Implemented triangulate_surface_consistent() in parametric_domain.rs:
+  - Accepts pre-computed UV coordinates for boundary/hole points
+  - Uses boundary 3D points DIRECTLY (not re-projected from UV) — bit-identical across faces
+  - earcutr triangulation with boundary as constraints
+  - Interior grid points via triangle subdivision
+  - Flood-fill containment check via domain.contains()
+- Added triangulate_face_with_boundary_and_holes_uv() in triangulate.rs:
+  - UV-aware variant routing to surface-specific consistent functions
+  - Planes: boundary 3D points + ear-clip/earcutr
+  - Cones/spheres: triangulate_surface_consistent()
+  - Other curved: triangulate_surface_consistent()
+- Updated surface_to_mesh_cached() in converter.rs:
+  - Collects UV coordinates alongside 3D boundary points
+  - Uses PCURVE (Curve2d) when available for accurate UV
+  - Falls back to surface.project_point()
+  - Calls UV-aware API when UVs available
+- Added helper functions: sample_edge_points_with_uv(), compute_edge_uvs(), find_curve_2d_for_edge(), deduplicate_points_3d_with_uv()
+- Fixed index-out-of-bounds bug in interior point subdivision (all_uv vs coords index mismatch)
+- All 75 draper-step tests pass (2 pre-existing PMI failures unrelated)
+- All 53 draper-mesh unit tests pass
+- All 18 triangulation integration tests pass
+- Committed as b1ab469 (push failed due to expired GitHub token)
+
+Stage Summary:
+- Shared edges between adjacent faces now produce bit-identical 3D vertices
+- Key insight: boundary vertices from StepEdgeCache used directly (not re-projected)
+- UV coordinates from PCURVE ensure accurate parametric domain for curved surfaces
+- Watertight mesh guaranteed by consistent boundary + constraint-based triangulation
