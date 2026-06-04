@@ -53,6 +53,12 @@ impl ParametricDomain {
         self
     }
 
+    /// Add multiple holes (inner boundaries) to the domain.
+    pub fn with_holes_from<I: IntoIterator<Item = UVPolygon>>(mut self, holes: I) -> Self {
+        self.holes.extend(holes);
+        self
+    }
+
     /// Compute the bounding box of the domain.
     pub fn bounding_box(&self) -> (f64, f64, f64, f64) {
         let mut u_min = f64::MAX;
@@ -745,6 +751,307 @@ pub fn triangulate_surface_uv_cdt(
 
     // Triangulate using ear-clipping (replaces CDT — guaranteed to terminate)
     triangulate_cdt(&domain, surface, forward, &interior_points)
+}
+
+// ============================================================
+// Consistent (watertight) triangulation — Phase 2.2
+// ============================================================
+
+/// Triangulate a curved surface with **consistent** boundary vertices.
+///
+/// This function is the key to producing watertight meshes where shared edges
+/// between adjacent faces have **bit-identical** 3D vertex positions. It works by:
+///
+/// 1. Accepting pre-computed UV coordinates for boundary and hole points
+///    (from PCURVE or EdgeDiscretizationCache), avoiding the inaccurate
+///    and slow `surface.project_point()` re-projection.
+/// 2. Using boundary 3D points **directly** (not re-projected from UV) as
+///    the 3D positions for boundary vertices. This ensures that two faces
+///    sharing an edge receive the exact same 3D points from StepEdgeCache.
+/// 3. Including boundary UV points as vertices in the earcutr triangulation,
+///    so boundary edges become triangle edges (constraints in the mesh).
+/// 4. Adding interior grid points to earcutr's input as additional vertices,
+///    then mapping interior vertices to 3D via `surface.point_at(u,v)`.
+///
+/// # Arguments
+/// * `surface` — The parametric surface to triangulate.
+/// * `boundary_points_3d` — 3D points along the outer boundary (from cache).
+/// * `boundary_uvs` — Pre-computed UV coordinates for boundary points.
+/// * `hole_polylines_3d` — 3D points along each hole boundary.
+/// * `hole_uvs` — Pre-computed UV coordinates for hole points (same structure as hole_polylines_3d).
+/// * `forward` — Whether face normal matches surface normal.
+/// * `params` — Triangulation parameters (for grid resolution).
+///
+/// # Returns
+/// A `TriangleMesh` where boundary vertices use the cached 3D positions directly.
+pub fn triangulate_surface_consistent(
+    surface: &Surface,
+    boundary_points_3d: &[Point3d],
+    boundary_uvs: &[Point2d],
+    hole_polylines_3d: &[Vec<Point3d>],
+    hole_uvs: &[Vec<Point2d>],
+    forward: bool,
+    params: &crate::triangulate::TriangulationParams,
+) -> TriangleMesh {
+    if boundary_points_3d.is_empty() || boundary_uvs.len() < 3 {
+        return TriangleMesh::new();
+    }
+
+    // Downsample boundary if too many points (prevents O(n²) blowup in earcutr)
+    let max_boundary_points = 500;
+    let max_hole_points = 200;
+
+    let (boundary_3d, boundary_uv) = if boundary_points_3d.len() > max_boundary_points {
+        let step = boundary_points_3d.len() as f64 / max_boundary_points as f64;
+        let sampled_3d: Vec<Point3d> = (0..max_boundary_points)
+            .map(|i| boundary_points_3d[((i as f64 * step) as usize).min(boundary_points_3d.len() - 1)])
+            .collect();
+        let sampled_uv: Vec<Point2d> = (0..max_boundary_points)
+            .map(|i| boundary_uvs[((i as f64 * step) as usize).min(boundary_uvs.len() - 1)])
+            .collect();
+        (sampled_3d, sampled_uv)
+    } else {
+        (boundary_points_3d.to_vec(), boundary_uvs.to_vec())
+    };
+
+    // Downsample holes
+    let (holes_3d, holes_uv): (Vec<Vec<Point3d>>, Vec<Vec<Point2d>>) = hole_polylines_3d.iter()
+        .zip(hole_uvs.iter())
+        .map(|(h3d, huv)| {
+            if h3d.len() > max_hole_points {
+                let step = h3d.len() as f64 / max_hole_points as f64;
+                let s3d: Vec<Point3d> = (0..max_hole_points)
+                    .map(|i| h3d[((i as f64 * step) as usize).min(h3d.len() - 1)])
+                    .collect();
+                let suv: Vec<Point2d> = (0..max_hole_points)
+                    .map(|i| huv[((i as f64 * step) as usize).min(huv.len() - 1)])
+                    .collect();
+                (s3d, suv)
+            } else {
+                (h3d.clone(), huv.clone())
+            }
+        })
+        .unzip();
+
+    // Normalize UV for periodic surfaces
+    let u_period = if surface.is_u_periodic() { Some(2.0 * PI) } else { None };
+    let v_period = if surface.is_v_periodic() { Some(2.0 * PI) } else { None };
+
+    let mut outer_uv = boundary_uv.clone();
+    crate::triangulate::normalize_uv_polygon(&mut outer_uv, u_period, v_period);
+
+    let mut normalized_holes_uv: Vec<Vec<Point2d>> = Vec::new();
+    for huv in &holes_uv {
+        let mut nhuv = huv.clone();
+        crate::triangulate::normalize_uv_polygon(&mut nhuv, u_period, v_period);
+        normalized_holes_uv.push(nhuv);
+    }
+
+    // Compute UV range
+    let mut u_min = f64::MAX;
+    let mut u_max = f64::MIN;
+    let mut v_min = f64::MAX;
+    let mut v_max = f64::MIN;
+    for p in &outer_uv {
+        u_min = u_min.min(p.u);
+        u_max = u_max.max(p.u);
+        v_min = v_min.min(p.v);
+        v_max = v_max.max(p.v);
+    }
+    for huv in &normalized_holes_uv {
+        for p in huv {
+            u_min = u_min.min(p.u);
+            u_max = u_max.max(p.u);
+            v_min = v_min.min(p.v);
+            v_max = v_max.max(p.v);
+        }
+    }
+
+    let margin_u = (u_max - u_min) * 0.01;
+    let margin_v = (v_max - v_min) * 0.01;
+
+    // Build parametric domain for containment checks
+    let domain = ParametricDomain::new(
+        outer_uv.clone(),
+        (u_min - margin_u, u_max + margin_u),
+        (v_min - margin_v, v_max + margin_v),
+    ).with_holes_from(normalized_holes_uv.iter().cloned());
+
+    // Generate interior grid points
+    let (n_u, n_v) = if params.adaptive {
+        crate::adaptive::required_samples_capped(
+            surface,
+            u_min, u_max, v_min, v_max,
+            params.max_deviation, params.detail_level,
+            params.max_face_triangles,
+        )
+    } else {
+        let mut n_u = params.angular_samples;
+        let mut n_v = params.height_samples;
+        let approx_tris = 2 * n_u * n_v;
+        if approx_tris > params.max_face_triangles {
+            let scale = (params.max_face_triangles as f64 / approx_tris as f64).sqrt();
+            n_u = ((n_u as f64 * scale).ceil() as usize).max(4);
+            n_v = ((n_v as f64 * scale).ceil() as usize).max(2);
+        }
+        (n_u, n_v)
+    };
+
+    let boundary_margin_u = (u_max - u_min) / n_u.max(1) as f64 * 0.3;
+    let boundary_margin_v = (v_max - v_min) / n_v.max(1) as f64 * 0.3;
+    let boundary_margin = boundary_margin_u.min(boundary_margin_v);
+    let interior_uv_points = generate_interior_points(&domain, n_u, n_v, boundary_margin);
+
+    // ============================================================
+    // Build earcutr input: [boundary_uv...][hole_uv...]
+    // Interior points are added later via subdivision for better mesh quality.
+    // ============================================================
+
+    let n_boundary = outer_uv.len();
+
+    let mut coords: Vec<f64> = Vec::with_capacity((n_boundary + normalized_holes_uv.iter().map(|h| h.len()).sum::<usize>()) * 2);
+
+    // Outer boundary UV
+    for p in &outer_uv {
+        coords.push(p.u);
+        coords.push(p.v);
+    }
+
+    // Hole UVs
+    let mut hole_start_indices: Vec<usize> = Vec::new();
+    for huv in &normalized_holes_uv {
+        if huv.len() < 3 {
+            continue;
+        }
+        hole_start_indices.push(coords.len() / 2);
+        for p in huv {
+            coords.push(p.u);
+            coords.push(p.v);
+        }
+    }
+
+    // Run earcutr triangulation (boundary + holes only, no interior yet)
+    let triangle_indices = earcutr::earcut(&coords, &hole_start_indices, 2);
+
+    // Collect raw triangles
+    let mut result_triangles: Vec<[u32; 3]> = Vec::new();
+    for chunk in triangle_indices.chunks(3) {
+        if chunk.len() < 3 { break; }
+        let a = chunk[0] as u32;
+        let b = chunk[1] as u32;
+        let c = chunk[2] as u32;
+        if a == b || b == c || a == c { continue; }
+        result_triangles.push([a, b, c]);
+    }
+
+    // Build all_uv: [boundary_uv...][hole_uv...]
+    let mut all_uv: Vec<Point2d> = outer_uv.clone();
+    for huv in &normalized_holes_uv {
+        all_uv.extend_from_slice(huv);
+    }
+
+    // Insert interior points by subdividing containing triangles.
+    // This ensures interior points are connected to the mesh properly.
+    for &pt in interior_uv_points.iter() {
+        let uv_idx = all_uv.len() as u32;
+        all_uv.push(pt);
+
+        // Find a triangle that contains this point and subdivide it
+        let mut found = false;
+        for tri in &mut result_triangles {
+            let a = all_uv[tri[0] as usize];
+            let b = all_uv[tri[1] as usize];
+            let c = all_uv[tri[2] as usize];
+            if point_in_triangle_2d(&pt, &a, &b, &c) {
+                let old = *tri;
+                *tri = [old[0], old[1], uv_idx];
+                result_triangles.push([old[1], old[2], uv_idx]);
+                result_triangles.push([old[2], old[0], uv_idx]);
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            // Point not in any triangle — skip it
+            all_uv.pop();
+        }
+    }
+
+    // ============================================================
+    // Build 3D mesh: boundary vertices use cached 3D, interior use surface.point_at
+    // ============================================================
+
+    // Build combined 3D point array for boundary + hole vertices
+    let mut all_boundary_3d: Vec<Point3d> = boundary_3d.clone();
+    for h3d in &holes_3d {
+        all_boundary_3d.extend_from_slice(h3d);
+    }
+    let n_boundary_and_holes = all_boundary_3d.len();
+
+    // Filter triangles by domain containment and build mesh
+    let mut mesh = TriangleMesh::new();
+    let mut vertex_map: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+
+    for tri in &result_triangles {
+        // Bounds check — skip triangles with invalid indices
+        if tri[0] as usize >= all_uv.len() || tri[1] as usize >= all_uv.len() || tri[2] as usize >= all_uv.len() {
+            continue;
+        }
+
+        // Get UV positions
+        let a_uv = all_uv[tri[0] as usize];
+        let b_uv = all_uv[tri[1] as usize];
+        let c_uv = all_uv[tri[2] as usize];
+
+        // Check if triangle centroid is inside the domain
+        let centroid = Point2d::new(
+            (a_uv.u + b_uv.u + c_uv.u) / 3.0,
+            (a_uv.v + b_uv.v + c_uv.v) / 3.0,
+        );
+        if !domain.contains(&centroid) {
+            continue;
+        }
+
+        // Check for degenerate triangle
+        let area = triangle_area_2d(a_uv.u, a_uv.v, b_uv.u, b_uv.v, c_uv.u, c_uv.v);
+        if area < 1e-20 {
+            continue;
+        }
+
+        // Add vertices and triangle
+        let mut tri_indices = [0u32; 3];
+        for (k, &idx) in tri.iter().enumerate() {
+            let idx_usize = idx as usize;
+            let entry = vertex_map.entry(idx).or_insert_with(|| {
+                if idx_usize < n_boundary_and_holes {
+                    // Boundary/hole vertex: use cached 3D point directly
+                    let p3d = all_boundary_3d[idx_usize];
+                    let uv = all_uv[idx_usize];
+                    let n = surface.normal_at(uv.u, uv.v);
+                    let vi = mesh.add_vertex(p3d);
+                    mesh.add_vertex_normal(vi, [n.x, n.y, n.z]);
+                    vi
+                } else {
+                    // Interior vertex: compute 3D from UV via surface.point_at
+                    let uv = all_uv[idx_usize];
+                    let p3d = surface.point_at(uv.u, uv.v);
+                    let n = surface.normal_at(uv.u, uv.v);
+                    let vi = mesh.add_vertex(p3d);
+                    mesh.add_vertex_normal(vi, [n.x, n.y, n.z]);
+                    vi
+                }
+            });
+            tri_indices[k] = *entry;
+        }
+
+        if forward {
+            mesh.add_triangle(tri_indices[0], tri_indices[1], tri_indices[2]);
+        } else {
+            mesh.add_triangle(tri_indices[0], tri_indices[2], tri_indices[1]);
+        }
+    }
+
+    mesh
 }
 
 // ============================================================

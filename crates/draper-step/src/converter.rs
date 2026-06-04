@@ -29,7 +29,7 @@ use draper_geometry::{
     NurbsSurface, Curve3d, Curve2d, Line, Circle, Ellipse, Arc, NurbsCurve,
     Line2d, Circle2d, Ellipse2d, Nurbs2d,
 };
-use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary, ear_clip};
+use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary_and_holes_uv, ear_clip};
 use draper_topology::{Face, Wire, CoEdge, Edge as TopoEdge, Shell, Solid};
 use draper_topology::healing::{heal_solid, HealingParams, HealingReport};
 use draper_geometry::tolerance::ToleranceContext;
@@ -6760,21 +6760,31 @@ impl<'a> StepConverter<'a> {
         let mut boundary_points = Vec::new();
         let mut inner_boundary_points: Vec<Vec<Point3d>> = Vec::new();
 
+        // Collect UV coordinates for boundary points, computed from PCURVE
+        // (if available) or surface.project_point() (as fallback).
+        let mut boundary_uvs: Vec<Point2d> = Vec::new();
+        let mut inner_boundary_uvs: Vec<Vec<Point2d>> = Vec::new();
+
+        // Whether we have any analytical PCURVE data for this face
+        let _has_pcurves = face_data.edge_curves_2d.iter().any(|c| c.is_some());
+
         // Sample outer edges using the cache
         for (edge_idx, edge) in face_data.outer_edges.iter().enumerate() {
             let step_id = face_data.outer_edge_step_ids.get(edge_idx).copied().unwrap_or(0);
             let n_samples = self.edge_sample_count(edge);
+            let curve_2d = face_data.edge_curves_2d.get(edge_idx).and_then(|c| c.as_ref());
+
             if step_id != 0 {
                 let pts = edge_cache.discretize(step_id, edge, n_samples);
+                // Compute UV for each boundary point
+                let uvs = self.compute_edge_uvs(&pts, edge, &face_data.surface, curve_2d);
                 boundary_points.extend(pts);
+                boundary_uvs.extend(uvs);
             } else {
                 // No STEP ID (e.g., synthetic edge) — sample independently
-                for i in 0..n_samples {
-                    let t = i as f64 / (n_samples - 1).max(1) as f64;
-                    if let Some(p) = edge.point_at(t) {
-                        boundary_points.push(p);
-                    }
-                }
+                let (pts_3d, pts_uv) = self.sample_edge_points_with_uv(edge, &face_data.surface, curve_2d);
+                boundary_points.extend(pts_3d);
+                boundary_uvs.extend(pts_uv);
             }
         }
 
@@ -6784,25 +6794,30 @@ impl<'a> StepConverter<'a> {
             _ => {
                 for (loop_idx, inner_edges) in face_data.inner_edges.iter().enumerate() {
                     let mut hole_pts = Vec::new();
+                    let mut hole_uvs = Vec::new();
                     let step_ids = face_data.inner_edge_step_ids.get(loop_idx);
                     for (edge_idx, edge) in inner_edges.iter().enumerate() {
                         let step_id = step_ids.and_then(|ids| ids.get(edge_idx).copied()).unwrap_or(0);
                         let n_samples = self.edge_sample_count(edge);
+                        // Try to find the curve_2d for this inner edge
+                        let curve_2d = self.find_curve_2d_for_edge(edge, face_data);
+
                         if step_id != 0 {
                             let pts = edge_cache.discretize(step_id, edge, n_samples);
+                            let uvs = self.compute_edge_uvs(&pts, edge, &face_data.surface, curve_2d);
                             hole_pts.extend(pts);
+                            hole_uvs.extend(uvs);
                         } else {
-                            for i in 0..n_samples {
-                                let t = i as f64 / (n_samples - 1).max(1) as f64;
-                                if let Some(p) = edge.point_at(t) {
-                                    hole_pts.push(p);
-                                }
-                            }
+                            let (pts_3d, pts_uv) = self.sample_edge_points_with_uv(edge, &face_data.surface, curve_2d);
+                            hole_pts.extend(pts_3d);
+                            hole_uvs.extend(pts_uv);
                         }
                     }
                     if !hole_pts.is_empty() {
-                        hole_pts = deduplicate_points_3d(&hole_pts, 1e-6);
-                        inner_boundary_points.push(hole_pts);
+                        // Deduplicate 3D and UV points together (keep them in sync)
+                        let (deduped_pts, deduped_uvs) = deduplicate_points_3d_with_uv(&hole_pts, &hole_uvs, 1e-6);
+                        inner_boundary_points.push(deduped_pts);
+                        inner_boundary_uvs.push(deduped_uvs);
                     }
                 }
             }
@@ -6813,25 +6828,39 @@ impl<'a> StepConverter<'a> {
             for (edge_idx, edge) in face_data.edges.iter().enumerate() {
                 let step_id = face_data.edge_step_ids.get(edge_idx).copied().unwrap_or(0);
                 let n_samples = self.edge_sample_count(edge);
+                let curve_2d = face_data.edge_curves_2d.get(edge_idx).and_then(|c| c.as_ref());
+
                 if step_id != 0 {
                     let pts = edge_cache.discretize(step_id, edge, n_samples);
+                    let uvs = self.compute_edge_uvs(&pts, edge, &face_data.surface, curve_2d);
                     boundary_points.extend(pts);
+                    boundary_uvs.extend(uvs);
                 } else {
-                    for i in 0..n_samples {
-                        let t = i as f64 / (n_samples - 1).max(1) as f64;
-                        if let Some(p) = edge.point_at(t) {
-                            boundary_points.push(p);
-                        }
-                    }
+                    let (pts_3d, pts_uv) = self.sample_edge_points_with_uv(edge, &face_data.surface, curve_2d);
+                    boundary_points.extend(pts_3d);
+                    boundary_uvs.extend(pts_uv);
                 }
             }
         }
 
-        // Deduplicate boundary points
-        boundary_points = deduplicate_points_3d(&boundary_points, 1e-6);
+        // Deduplicate boundary points and their corresponding UVs together
+        let (boundary_points, boundary_uvs) = deduplicate_points_3d_with_uv(&boundary_points, &boundary_uvs, 1e-6);
 
         // If we have boundary points, use boundary-aware triangulation
+        // Use the UV-aware API when we have UV coordinates (from PCURVE or projection)
         if !boundary_points.is_empty() {
+            if !boundary_uvs.is_empty() && boundary_uvs.len() == boundary_points.len() {
+                return triangulate_face_with_boundary_and_holes_uv(
+                    &face_data.surface,
+                    &boundary_points,
+                    &boundary_uvs,
+                    &inner_boundary_points,
+                    &inner_boundary_uvs,
+                    face_data.forward,
+                    params,
+                );
+            }
+            // Fallback: use the non-UV API when UVs are not available or mismatched
             return draper_mesh::triangulate_face_with_boundary_and_holes(
                 &face_data.surface,
                 &boundary_points,
@@ -7240,6 +7269,108 @@ impl<'a> StepConverter<'a> {
             }
         }
         pts
+    }
+
+    /// Sample 3D points and their UV coordinates from an edge curve.
+    ///
+    /// Uses the analytical PCURVE (`curve_2d`) if available for accurate UV,
+    /// otherwise falls back to `surface.project_point()`.
+    fn sample_edge_points_with_uv(
+        &self,
+        edge: &TopoEdge,
+        surface: &Surface,
+        curve_2d: Option<&Curve2d>,
+    ) -> (Vec<Point3d>, Vec<Point2d>) {
+        let n_samples = self.edge_sample_count(edge);
+        let mut pts_3d = Vec::with_capacity(n_samples);
+        let mut pts_uv = Vec::with_capacity(n_samples);
+
+        if let Some(c2d) = curve_2d {
+            let (t_min, t_max) = c2d.param_range();
+            let (e_min, e_max) = edge.param_range;
+            let (pmin, pmax) = if e_min <= e_max { (e_min, e_max) } else { (e_max, e_min) };
+            let e_range = pmax - pmin;
+
+            for i in 0..n_samples {
+                let t_frac = i as f64 / (n_samples - 1).max(1) as f64;
+                // Map fraction to edge parameter, then to curve_2d parameter
+                let edge_t = pmin + t_frac * e_range;
+                if let Some(p) = edge.point_at(t_frac) {
+                    let curve_t = t_min + t_frac * (t_max - t_min);
+                    let uv = c2d.point_at(curve_t);
+                    pts_3d.push(p);
+                    pts_uv.push(uv);
+                }
+            }
+        } else {
+            // No PCURVE — sample 3D points and project to surface
+            for i in 0..n_samples {
+                let t = i as f64 / (n_samples - 1).max(1) as f64;
+                if let Some(p) = edge.point_at(t) {
+                    let (u, v) = surface.project_point(&p);
+                    pts_3d.push(p);
+                    pts_uv.push(Point2d::new(u, v));
+                }
+            }
+        }
+
+        (pts_3d, pts_uv)
+    }
+
+    /// Compute UV coordinates for a set of already-discretized 3D edge points.
+    ///
+    /// Uses the analytical PCURVE (`curve_2d`) if available for accurate UV,
+    /// otherwise falls back to `surface.project_point()`.
+    fn compute_edge_uvs(
+        &self,
+        points_3d: &[Point3d],
+        edge: &TopoEdge,
+        surface: &Surface,
+        curve_2d: Option<&Curve2d>,
+    ) -> Vec<Point2d> {
+        if let Some(c2d) = curve_2d {
+            let (t_min, t_max) = c2d.param_range();
+            let (e_min, e_max) = edge.param_range;
+            let (pmin, pmax) = if e_min <= e_max { (e_min, e_max) } else { (e_max, e_min) };
+            let e_range = pmax - pmin;
+
+            // Map each 3D point back to its parameter on the edge, then evaluate
+            // the curve_2d at the corresponding parameter.
+            // Since we know the points were sampled uniformly, we can reconstruct
+            // the parameter values.
+            points_3d.iter().enumerate().map(|(i, _)| {
+                let t_frac = if points_3d.len() > 1 {
+                    i as f64 / (points_3d.len() - 1) as f64
+                } else {
+                    0.0
+                };
+                let curve_t = t_min + t_frac * (t_max - t_min);
+                c2d.point_at(curve_t)
+            }).collect()
+        } else {
+            // No PCURVE — project 3D points to surface
+            points_3d.iter().map(|p| {
+                let (u, v) = surface.project_point(p);
+                Point2d::new(u, v)
+            }).collect()
+        }
+    }
+
+    /// Find the Curve2d for an edge within the FaceData.
+    ///
+    /// Searches through the `edges` list and returns the corresponding
+    /// entry from `edge_curves_2d` if found.
+    fn find_curve_2d_for_edge<'b>(
+        &self,
+        edge: &TopoEdge,
+        face_data: &'b FaceData,
+    ) -> Option<&'b Curve2d> {
+        for (i, e) in face_data.edges.iter().enumerate() {
+            if e.id == edge.id {
+                return face_data.edge_curves_2d.get(i).and_then(|c| c.as_ref());
+            }
+        }
+        None
     }
 
     /// Triangulate a PLANE surface with no boundary edges, using the bounding box
@@ -7851,6 +7982,70 @@ fn deduplicate_points_3d(points: &[Point3d], tolerance: f64) -> Vec<Point3d> {
         }
     }
     unique
+}
+
+/// Deduplicate 3D points while keeping UV coordinates in sync.
+///
+/// When two consecutive 3D points are within `tolerance` of each other,
+/// only the first is kept, and its UV coordinate is preserved.
+/// This is essential for the consistent triangulation path where
+/// UV coordinates must correspond 1:1 with 3D boundary points.
+fn deduplicate_points_3d_with_uv(points: &[Point3d], uvs: &[Point2d], tolerance: f64) -> (Vec<Point3d>, Vec<Point2d>) {
+    if points.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    // If UVs don't match points length, just deduplicate 3D points
+    if uvs.len() != points.len() {
+        return (deduplicate_points_3d(points, tolerance), uvs.to_vec());
+    }
+
+    let tol_sq = tolerance * tolerance;
+    let mut unique_pts = vec![points[0]];
+    let mut unique_uvs = vec![uvs[0]];
+
+    for i in 1..points.len() {
+        if let Some(last) = unique_pts.last() {
+            let dx = points[i].x - last.x;
+            let dy = points[i].y - last.y;
+            let dz = points[i].z - last.z;
+            if dx * dx + dy * dy + dz * dz > tol_sq {
+                unique_pts.push(points[i]);
+                unique_uvs.push(uvs[i]);
+            }
+        }
+    }
+
+    // Also check last vs first (closed loop)
+    if unique_pts.len() > 1 {
+        let first_pt = unique_pts[0];
+        if let Some(last_pt) = unique_pts.last() {
+            let dx = first_pt.x - last_pt.x;
+            let dy = first_pt.y - last_pt.y;
+            let dz = first_pt.z - last_pt.z;
+            if dx * dx + dy * dy + dz * dz <= tol_sq {
+                unique_pts.pop();
+                unique_uvs.pop();
+            }
+        }
+    }
+
+    // Check for non-adjacent duplicates (bowtie detection)
+    if unique_pts.len() > 3 {
+        let n = unique_pts.len();
+        let last = unique_pts[n - 1];
+        for i in 0..n - 2 {
+            let dx = last.x - unique_pts[i].x;
+            let dy = last.y - unique_pts[i].y;
+            let dz = last.z - unique_pts[i].z;
+            if dx * dx + dy * dy + dz * dz <= tol_sq {
+                unique_pts.truncate(i + 1);
+                unique_uvs.truncate(i + 1);
+                break;
+            }
+        }
+    }
+
+    (unique_pts, unique_uvs)
 }
 
 /// Project two 3D points onto a circle and return the angular parameter range (t1, t2).
