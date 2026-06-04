@@ -2461,6 +2461,40 @@ impl eframe::App for ViewerApp {
                                                 .flat_map(|pl| pl.iter().map(|pt| (pt.u, pt.v)))
                                                 .collect();
 
+                                            // Draw UV triangles (the actual triangulation)
+                                            if !face.uv_triangles.is_empty() {
+                                                // Build hole polygons for classification
+                                                let hole_polys: Vec<Vec<(f64, f64)>> = face.inner_uv_boundaries.iter()
+                                                    .flat_map(|boundaries| boundaries.iter().map(|poly| {
+                                                        poly.iter().map(|pt| (pt.u, pt.v)).collect()
+                                                    }))
+                                                    .collect();
+
+                                                for (ti, tri) in face.uv_triangles.iter().enumerate() {
+                                                    let cu = (tri[0].u + tri[1].u + tri[2].u) / 3.0;
+                                                    let cv = (tri[0].v + tri[1].v + tri[2].v) / 3.0;
+                                                    let in_hole = hole_polys.iter().any(|h| point_in_polygon(cu, cv, h));
+                                                    let in_outer = !outer_uv_poly.is_empty() && point_in_polygon(cu, cv, &outer_uv_poly);
+
+                                                    let p0 = egui::pos2(map_u(tri[0].u), map_v(tri[0].v));
+                                                    let p1 = egui::pos2(map_u(tri[1].u), map_v(tri[1].v));
+                                                    let p2 = egui::pos2(map_u(tri[2].u), map_v(tri[2].v));
+
+                                                    if in_hole || !in_outer {
+                                                        // Triangle inside hole — red
+                                                        ui.painter().line_segment([p0, p1], egui::Stroke::new(0.5, egui::Color32::from_rgba_premultiplied(255, 68, 68, 100)));
+                                                        ui.painter().line_segment([p1, p2], egui::Stroke::new(0.5, egui::Color32::from_rgba_premultiplied(255, 68, 68, 100)));
+                                                        ui.painter().line_segment([p2, p0], egui::Stroke::new(0.5, egui::Color32::from_rgba_premultiplied(255, 68, 68, 100)));
+                                                    } else {
+                                                        // Valid triangle — blue outline
+                                                        ui.painter().line_segment([p0, p1], egui::Stroke::new(0.3, egui::Color32::from_rgba_premultiplied(68, 136, 255, 150)));
+                                                        ui.painter().line_segment([p1, p2], egui::Stroke::new(0.3, egui::Color32::from_rgba_premultiplied(68, 136, 255, 150)));
+                                                        ui.painter().line_segment([p2, p0], egui::Stroke::new(0.3, egui::Color32::from_rgba_premultiplied(68, 136, 255, 150)));
+                                                    }
+                                                    if ti >= 1500 { break; }
+                                                }
+                                            }
+
                                             // Draw grid intersection points (only inside boundary)
                                             for i in 0..=u_divs {
                                                 for j in 0..=v_divs {
@@ -3393,6 +3427,47 @@ fn generate_uv_svg(face: &FaceInfo, u_divs: usize, v_divs: usize) -> String {
     let outer_uv_poly: Vec<(f64, f64)> = face.outer_uv_boundary.iter()
         .flat_map(|pl| pl.iter().map(|pt| (pt.u, pt.v)))
         .collect();
+
+    // Draw UV triangles (the actual triangulation result)
+    if !face.uv_triangles.is_empty() {
+        // Build hole polygons for classification
+        let hole_polys: Vec<Vec<(f64, f64)>> = face.inner_uv_boundaries.iter()
+            .flat_map(|boundaries| boundaries.iter().map(|poly| {
+                poly.iter().map(|pt| (pt.u, pt.v)).collect()
+            }))
+            .collect();
+
+        for (ti, tri) in face.uv_triangles.iter().enumerate() {
+            let x0 = map_u(tri[0].u);
+            let y0 = map_v(tri[0].v);
+            let x1 = map_u(tri[1].u);
+            let y1 = map_v(tri[1].v);
+            let x2 = map_u(tri[2].u);
+            let y2 = map_v(tri[2].v);
+
+            // Classify: check if centroid is inside any hole
+            let cu = (tri[0].u + tri[1].u + tri[2].u) / 3.0;
+            let cv = (tri[0].v + tri[1].v + tri[2].v) / 3.0;
+            let in_hole = hole_polys.iter().any(|h| point_in_polygon(cu, cv, h));
+            let in_outer = !outer_uv_poly.is_empty() && point_in_polygon(cu, cv, &outer_uv_poly);
+
+            if in_hole || !in_outer {
+                // Triangle inside a hole or outside boundary — red outline
+                svg.push_str(&format!(
+                    "  <polygon points=\"{:.2},{:.2} {:.2},{:.2} {:.2},{:.2}\" fill=\"#ff222233\" stroke=\"#ff4444\" stroke-width=\"0.5\" opacity=\"0.4\"/>\n",
+                    x0, y0, x1, y1, x2, y2
+                ));
+            } else {
+                // Valid triangle — semi-transparent blue fill, thin outline
+                svg.push_str(&format!(
+                    "  <polygon points=\"{:.2},{:.2} {:.2},{:.2} {:.2},{:.2}\" fill=\"#4488ff11\" stroke=\"#4488ff\" stroke-width=\"0.5\" opacity=\"0.6\"/>\n",
+                    x0, y0, x1, y1, x2, y2
+                ));
+            }
+            // Limit to 2000 triangles in SVG for performance
+            if ti >= 2000 { break; }
+        }
+    }
 
     for i in 0..=u_divs {
         for j in 0..=v_divs {

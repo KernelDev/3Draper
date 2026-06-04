@@ -802,13 +802,36 @@ fn triangulate_planar_face(face: &Face, plane: &Plane, _params: &TriangulationPa
 
         let triangles = ear_clip(&merged_2d);
 
+        // Post-filter: remove triangles whose centroid falls inside any hole.
+        // Bridge-edge + ear-clip can produce triangles that span across holes,
+        // especially for circular bolt holes where bridge edges may not fully
+        // separate the hole from the surrounding polygon.
+        let filtered_triangles: Vec<[u32; 3]> = triangles.iter()
+            .filter(|tri| {
+                let a = merged_2d[tri[0] as usize];
+                let b = merged_2d[tri[1] as usize];
+                let c = merged_2d[tri[2] as usize];
+                let centroid_u = (a.u + b.u + c.u) / 3.0;
+                let centroid_v = (a.v + b.v + c.v) / 3.0;
+                // Check that centroid is NOT inside any hole
+                for hole in &holes_2d {
+                    if point_in_polygon_check(&Point2d::new(centroid_u, centroid_v), hole) {
+                        return false; // Triangle centroid is inside a hole — skip it
+                    }
+                }
+                // Also verify centroid is inside the outer boundary
+                point_in_polygon_check(&Point2d::new(centroid_u, centroid_v), &points_2d)
+            })
+            .cloned()
+            .collect();
+
         // Add all vertices
         for p in &merged_3d {
             mesh.add_vertex(*p);
         }
 
         // Ear-clip indices directly map to merged arrays
-        for tri in &triangles {
+        for tri in &filtered_triangles {
             if forward {
                 mesh.add_triangle(tri[0], tri[1], tri[2]);
             } else {
@@ -4120,13 +4143,20 @@ pub fn merge_coincident_vertices(mesh: &mut TriangleMesh, tolerance: f64) {
     }
 
     // Apply remap to triangles and filter degenerate ones
+    // Also preserve triangle_face_ids in sync with the filtered triangles
     let old_triangles = std::mem::take(&mut mesh.triangles);
-    for tri in &old_triangles {
+    let old_face_ids = mesh.triangle_face_ids.take();
+    for (i, tri) in old_triangles.iter().enumerate() {
         let a = remap[tri[0] as usize];
         let b = remap[tri[1] as usize];
         let c = remap[tri[2] as usize];
         if a != b && b != c && a != c {
             mesh.triangles.push([a, b, c]);
+            if let Some(ref ids) = old_face_ids {
+                if let Some(&fid) = ids.get(i) {
+                    mesh.triangle_face_ids.get_or_insert_with(Vec::new).push(fid);
+                }
+            }
         }
     }
 
@@ -4149,8 +4179,9 @@ pub fn merge_coincident_vertices(mesh: &mut TriangleMesh, tolerance: f64) {
 pub fn filter_degenerate_triangles(mesh: &mut TriangleMesh, tolerance: f64) {
     let min_area_sq = tolerance * tolerance;
     let old_triangles = std::mem::take(&mut mesh.triangles);
+    let old_face_ids = mesh.triangle_face_ids.take();
 
-    for tri in &old_triangles {
+    for (i, tri) in old_triangles.iter().enumerate() {
         let a_idx = tri[0] as usize;
         let b_idx = tri[1] as usize;
         let c_idx = tri[2] as usize;
@@ -4196,6 +4227,11 @@ pub fn filter_degenerate_triangles(mesh: &mut TriangleMesh, tolerance: f64) {
         }
 
         mesh.triangles.push(*tri);
+        if let Some(ref ids) = old_face_ids {
+            if let Some(&fid) = ids.get(i) {
+                mesh.triangle_face_ids.get_or_insert_with(Vec::new).push(fid);
+            }
+        }
     }
 }
 

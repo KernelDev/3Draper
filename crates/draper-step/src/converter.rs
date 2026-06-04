@@ -515,6 +515,9 @@ pub struct FaceInfo {
     pub triangle_range: (usize, usize),
     /// Whether the face normal matches the surface normal.
     pub forward: bool,
+    /// UV-space triangles for visualization: each triangle is 3 UV points.
+    /// Used to display the actual triangulation in the UV grid SVG.
+    pub uv_triangles: Vec<[Point2d; 3]>,
 }
 /// A mesh instance to be rendered — the mesh geometry is transformed by the given matrix
 /// and painted with the given color. Multiple instances can reference the same BREP geometry
@@ -3003,6 +3006,24 @@ impl<'a> StepConverter<'a> {
                 .map(|edges| self.sample_edges_to_uv_polylines(edges, &face_data.surface))
                 .collect();
 
+            // Project each triangle's vertices to UV space for visualization
+            let surface_ref = &face_data.surface;
+            let uv_triangles: Vec<[Point2d; 3]> = face_mesh_with_ids.triangles.iter()
+                .map(|tri| {
+                    let v0 = face_mesh_with_ids.vertices[tri[0] as usize];
+                    let v1 = face_mesh_with_ids.vertices[tri[1] as usize];
+                    let v2 = face_mesh_with_ids.vertices[tri[2] as usize];
+                    let (u0, v0v) = surface_ref.project_point(&v0);
+                    let (u1, v1v) = surface_ref.project_point(&v1);
+                    let (u2, v2v) = surface_ref.project_point(&v2);
+                    [
+                        Point2d::new(u0, v0v),
+                        Point2d::new(u1, v1v),
+                        Point2d::new(u2, v2v),
+                    ]
+                })
+                .collect();
+
             face_infos.push(FaceInfo {
                 face_id,
                 step_face_id,
@@ -3014,6 +3035,7 @@ impl<'a> StepConverter<'a> {
                 inner_uv_boundaries,
                 triangle_range: (tri_start, tri_end),
                 forward: face_data.forward,
+                uv_triangles,
             });
         }
         // Merge coincident vertices to make the mesh watertight
@@ -7048,8 +7070,33 @@ impl<'a> StepConverter<'a> {
                 &outer_2d, &outer_points_3d, &hole_points_2d, &hole_points_3d,
             );
             let triangles = ear_clip(&merged_2d);
+
+            // Post-filter: remove triangles whose centroid falls inside any hole.
+            // This is essential for correctness — bridge-edge + ear-clip can produce
+            // triangles that span across holes, especially for circular holes where
+            // the bridge edges may not fully separate the hole from the polygon.
+            let filtered_triangles: Vec<[u32; 3]> = triangles.iter()
+                .filter(|tri| {
+                    let a = merged_2d[tri[0] as usize];
+                    let b = merged_2d[tri[1] as usize];
+                    let c = merged_2d[tri[2] as usize];
+                    let centroid_u = (a.u + b.u + c.u) / 3.0;
+                    let centroid_v = (a.v + b.v + c.v) / 3.0;
+                    let centroid = Point2d::new(centroid_u, centroid_v);
+                    // Check that centroid is NOT inside any hole
+                    for hole in &hole_points_2d {
+                        if point_in_polygon_2d_converter(&centroid, hole) {
+                            return false; // Triangle centroid is inside a hole — skip it
+                        }
+                    }
+                    // Also verify centroid is inside the outer boundary
+                    point_in_polygon_2d_converter(&centroid, &outer_2d)
+                })
+                .cloned()
+                .collect();
+
             for p in &merged_3d { mesh.add_vertex(*p); }
-            for tri in &triangles {
+            for tri in &filtered_triangles {
                 if forward { mesh.add_triangle(tri[0], tri[1], tri[2]); }
                 else { mesh.add_triangle(tri[0], tri[2], tri[1]); }
             }
@@ -7107,11 +7154,34 @@ impl<'a> StepConverter<'a> {
         // Ear clipping triangulation of the merged polygon
         let triangles = ear_clip(&merged_2d);
 
+        // Post-filter: remove triangles whose centroid falls inside any hole.
+        // Bridge-edge + ear-clip can produce triangles spanning across holes,
+        // especially for circular bolt holes. Filter by centroid containment.
+        let filtered_triangles: Vec<[u32; 3]> = triangles.iter()
+            .filter(|tri| {
+                let a = merged_2d[tri[0] as usize];
+                let b = merged_2d[tri[1] as usize];
+                let c = merged_2d[tri[2] as usize];
+                let centroid_u = (a.u + b.u + c.u) / 3.0;
+                let centroid_v = (a.v + b.v + c.v) / 3.0;
+                let centroid = Point2d::new(centroid_u, centroid_v);
+                // Check that centroid is NOT inside any hole
+                for hole in &hole_points_2d {
+                    if point_in_polygon_2d_converter(&centroid, hole) {
+                        return false;
+                    }
+                }
+                // Also verify centroid is inside the outer boundary
+                point_in_polygon_2d_converter(&centroid, &outer_2d)
+            })
+            .cloned()
+            .collect();
+
         // Add vertices and triangles
         for p in &merged_3d {
             mesh.add_vertex(*p);
         }
-        for tri in &triangles {
+        for tri in &filtered_triangles {
             if forward {
                 mesh.add_triangle(tri[0], tri[1], tri[2]);
             } else {
