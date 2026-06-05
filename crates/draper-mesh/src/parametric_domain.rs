@@ -292,6 +292,79 @@ fn uv_triangles_to_3d(
     mesh
 }
 
+/// Re-project a 3D point onto a NURBS surface using Newton-Raphson
+/// starting from an initial UV guess. This is much more accurate and
+/// faster than a full grid search when we have a reasonable initial guess.
+fn reproject_nurbs_point(
+    nurbs: &draper_geometry::NurbsSurface,
+    point: &Point3d,
+    init_u: f64,
+    init_v: f64,
+) -> (f64, f64) {
+    use draper_geometry::Surface;
+
+    let (u_min, u_max) = nurbs.u_range();
+    let (v_min, v_max) = nurbs.v_range();
+    let surface = Surface::Nurbs(nurbs.clone());
+
+    let mut best_u = init_u.clamp(u_min, u_max);
+    let mut best_v = init_v.clamp(v_min, v_max);
+    let mut best_dist = {
+        let p = surface.point_at(best_u, best_v);
+        (p.x - point.x).powi(2) + (p.y - point.y).powi(2) + (p.z - point.z).powi(2)
+    };
+
+    // Newton-Raphson refinement from the initial guess
+    for _ in 0..15 {
+        let derivs = nurbs.derivatives_at(best_u, best_v);
+        let sp = derivs.point;
+        let dx = sp.x - point.x;
+        let dy = sp.y - point.y;
+        let dz = sp.z - point.z;
+
+        let gu = derivs.du.x * dx + derivs.du.y * dy + derivs.du.z * dz;
+        let gv = derivs.dv.x * dx + derivs.dv.y * dy + derivs.dv.z * dz;
+
+        let hu_u = derivs.du.x * derivs.du.x + derivs.du.y * derivs.du.y + derivs.du.z * derivs.du.z;
+        let hu_v = derivs.du.x * derivs.dv.x + derivs.du.y * derivs.dv.y + derivs.du.z * derivs.dv.z;
+        let hv_v = derivs.dv.x * derivs.dv.x + derivs.dv.y * derivs.dv.y + derivs.dv.z * derivs.dv.z;
+
+        let det = hu_u * hv_v - hu_v * hu_v;
+        if det.abs() < 1e-20 { break; }
+
+        let du = -(hv_v * gu - hu_v * gv) / det;
+        let dv = -(-hu_v * gu + hu_u * gv) / det;
+
+        let u_range = u_max - u_min;
+        let v_range = v_max - v_min;
+        let step_limit_u = u_range * 0.1;
+        let step_limit_v = v_range * 0.1;
+        let du = du.clamp(-step_limit_u, step_limit_u);
+        let dv = dv.clamp(-step_limit_v, step_limit_v);
+
+        let new_u = (best_u + du).clamp(u_min, u_max);
+        let new_v = (best_v + dv).clamp(v_min, v_max);
+
+        let new_p = surface.point_at(new_u, new_v);
+        let new_dist = (new_p.x - point.x).powi(2) + (new_p.y - point.y).powi(2) + (new_p.z - point.z).powi(2);
+
+        if new_dist < best_dist {
+            if (best_dist - new_dist) < 1e-12 * best_dist.max(1e-20) {
+                best_u = new_u;
+                best_v = new_v;
+                break;
+            }
+            best_u = new_u;
+            best_v = new_v;
+            best_dist = new_dist;
+        } else {
+            break;
+        }
+    }
+
+    (best_u, best_v)
+}
+
 /// Compute the area of a 2D triangle.
 fn triangle_area_2d(x0: f64, y0: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64 {
     ((x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)).abs() * 0.5
@@ -570,12 +643,72 @@ pub fn triangulate_surface_consistent(
     }
 
     // ============================================================
+    // Step 0: Validate and fix UV coordinates for NURBS surfaces
+    //
+    // For NURBS surfaces, project_point() can return inaccurate UV
+    // coordinates. We validate by checking that surface.point_at(uv)
+    // is close to the original 3D point. If not, we re-project.
+    // ============================================================
+    let mut outer_uv = boundary_uvs.to_vec();
+    if let Surface::Nurbs(ref nurbs) = surface {
+        let (nurb_u_min, nurb_u_max) = nurbs.u_range();
+        let (nurb_v_min, nurb_v_max) = nurbs.v_range();
+        let nurb_diag = {
+            let p0 = surface.point_at(nurb_u_min, nurb_v_min);
+            let p1 = surface.point_at(nurb_u_max, nurb_v_max);
+            let dx = p1.x - p0.x; let dy = p1.y - p0.y; let dz = p1.z - p0.z;
+            (dx*dx + dy*dy + dz*dz).sqrt().max(1e-10)
+        };
+        let uv_tolerance = nurb_diag * 0.01; // 1% of surface diagonal
+
+        let mut fixed_count = 0;
+        for (i, uv) in outer_uv.iter_mut().enumerate() {
+            // Check if UV is within the valid NURBS parameter range
+            let uv_in_range = uv.u >= nurb_u_min - 1e-6 && uv.u <= nurb_u_max + 1e-6
+                && uv.v >= nurb_v_min - 1e-6 && uv.v <= nurb_v_max + 1e-6;
+
+            if uv_in_range {
+                // Check reprojection error
+                let p3d = surface.point_at(uv.u, uv.v);
+                let dx = p3d.x - boundary_points_3d[i].x;
+                let dy = p3d.y - boundary_points_3d[i].y;
+                let dz = p3d.z - boundary_points_3d[i].z;
+                let err = (dx*dx + dy*dy + dz*dz).sqrt();
+
+                if err > uv_tolerance {
+                    // UV is inaccurate — re-project using Newton from this guess
+                    let (new_u, new_v) = reproject_nurbs_point(nurbs, &boundary_points_3d[i], uv.u, uv.v);
+                    let new_p = surface.point_at(new_u, new_v);
+                    let new_dx = new_p.x - boundary_points_3d[i].x;
+                    let new_dy = new_p.y - boundary_points_3d[i].y;
+                    let new_dz = new_p.z - boundary_points_3d[i].z;
+                    let new_err = (new_dx*new_dx + new_dy*new_dy + new_dz*new_dz).sqrt();
+                    if new_err < err {
+                        uv.u = new_u;
+                        uv.v = new_v;
+                        fixed_count += 1;
+                    }
+                }
+            } else {
+                // UV is completely out of range — full re-projection needed
+                let (new_u, new_v) = surface.project_point(&boundary_points_3d[i]);
+                uv.u = new_u;
+                uv.v = new_v;
+                fixed_count += 1;
+            }
+        }
+        if fixed_count > 0 {
+            log::debug!("triangulate_surface_consistent: fixed {} of {} NURBS boundary UVs (tol={:.6})",
+                fixed_count, outer_uv.len(), uv_tolerance);
+        }
+    }
+
+    // ============================================================
     // Step 1: Normalize UV for periodic surfaces
     // ============================================================
     let u_period = if surface.is_u_periodic() { Some(2.0 * PI) } else { None };
     let v_period = if surface.is_v_periodic() { Some(2.0 * PI) } else { None };
 
-    let mut outer_uv = boundary_uvs.to_vec();
     crate::triangulate::normalize_uv_polygon(&mut outer_uv, u_period, v_period);
 
     let mut normalized_holes_uv: Vec<Vec<Point2d>> = Vec::new();
@@ -632,28 +765,56 @@ pub fn triangulate_surface_consistent(
 
     // ============================================================
     // Step 3: Generate interior grid points
+    //
+    // For NURBS surfaces, use knot-span-aware interior points
+    // for better surface approximation.
     // ============================================================
-    let (n_u, n_v) = if params.adaptive {
-        crate::adaptive::required_samples_capped(
-            surface,
-            u_min, u_max, v_min, v_max,
-            params.max_deviation, params.detail_level,
-            params.max_face_triangles,
-        )
+    let interior_uv_points = if let Surface::Nurbs(ref nurbs) = surface {
+        let (n_u, n_v) = if params.adaptive {
+            crate::adaptive::required_samples_capped(
+                surface,
+                u_min, u_max, v_min, v_max,
+                params.max_deviation, params.detail_level,
+                params.max_face_triangles,
+            )
+        } else {
+            let mut n_u = params.angular_samples;
+            let mut n_v = params.height_samples;
+            let approx_tris = 2 * n_u * n_v;
+            if approx_tris > params.max_face_triangles {
+                let scale = (params.max_face_triangles as f64 / approx_tris as f64).sqrt();
+                n_u = ((n_u as f64 * scale).ceil() as usize).max(4);
+                n_v = ((n_v as f64 * scale).ceil() as usize).max(2);
+            }
+            (n_u, n_v)
+        };
+        // Use knot-span subdivision for NURBS — respects the surface
+        // parameterization and gives better triangulation quality.
+        // n_sub controls how many points per knot span.
+        let n_sub = (n_u.max(n_v) / 4).max(2).min(8);
+        generate_nurbs_interior_points(&domain, &nurbs.u_knots, &nurbs.v_knots, n_sub)
     } else {
-        let mut n_u = params.angular_samples;
-        let mut n_v = params.height_samples;
-        let approx_tris = 2 * n_u * n_v;
-        if approx_tris > params.max_face_triangles {
-            let scale = (params.max_face_triangles as f64 / approx_tris as f64).sqrt();
-            n_u = ((n_u as f64 * scale).ceil() as usize).max(4);
-            n_v = ((n_v as f64 * scale).ceil() as usize).max(2);
-        }
-        (n_u, n_v)
+        let (n_u, n_v) = if params.adaptive {
+            crate::adaptive::required_samples_capped(
+                surface,
+                u_min, u_max, v_min, v_max,
+                params.max_deviation, params.detail_level,
+                params.max_face_triangles,
+            )
+        } else {
+            let mut n_u = params.angular_samples;
+            let mut n_v = params.height_samples;
+            let approx_tris = 2 * n_u * n_v;
+            if approx_tris > params.max_face_triangles {
+                let scale = (params.max_face_triangles as f64 / approx_tris as f64).sqrt();
+                n_u = ((n_u as f64 * scale).ceil() as usize).max(4);
+                n_v = ((n_v as f64 * scale).ceil() as usize).max(2);
+            }
+            (n_u, n_v)
+        };
+        let boundary_margin = (u_max - u_min) / n_u.max(1) as f64 * 0.3;
+        generate_interior_points(&domain, n_u, n_v, boundary_margin)
     };
-
-    let boundary_margin = (u_max - u_min) / n_u.max(1) as f64 * 0.3;
-    let interior_uv_points = generate_interior_points(&domain, n_u, n_v, boundary_margin);
 
     // ============================================================
     // Step 4: Build earcutr input with ALL points
@@ -673,7 +834,20 @@ pub fn triangulate_surface_consistent(
     let n_boundary_and_holes = all_uv.len();
 
     // Add interior points as Steiner points
-    all_uv.extend_from_slice(&interior_uv_points);
+    // CAP: Limit total points to prevent triangle explosion.
+    // earcutr produces ~2× points triangles, so we cap interior points
+    // so that total triangles stay within max_face_triangles.
+    let max_interior = if params.max_face_triangles > n_boundary_and_holes * 2 {
+        (params.max_face_triangles / 2).saturating_sub(n_boundary_and_holes)
+    } else {
+        0 // Boundary already uses up the budget
+    };
+    let interior_capped: &[Point2d] = if interior_uv_points.len() > max_interior {
+        &interior_uv_points[..max_interior]
+    } else {
+        &interior_uv_points
+    };
+    all_uv.extend_from_slice(interior_capped);
 
     // Build flat coordinate array for earcutr
     let mut coords: Vec<f64> = Vec::with_capacity(all_uv.len() * 2);
