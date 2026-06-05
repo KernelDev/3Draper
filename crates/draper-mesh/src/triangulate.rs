@@ -158,14 +158,14 @@ impl Default for TriangulationParams {
         Self {
             max_edge_length: 1.0,
             max_deviation: 0.01,
-            angular_samples: 48,
+            angular_samples: 32,
             height_samples: 8,
             max_angular_deviation: 0.1,
             detail_level: 1.0,
             adaptive: true,
             parallel: false,
             progress_callback: None,
-            max_face_triangles: 8000,
+            max_face_triangles: 2000,
         }
     }
 }

@@ -21,15 +21,16 @@ use draper_geometry::Surface;
 const MIN_ANGULAR_SAMPLES: usize = 6;
 
 /// Maximum number of angular samples (to prevent excessive tessellation).
-/// Kept at 64 to avoid generating millions of triangles for a single face.
-/// A face with 64×64 grid produces ~8K triangles, which is reasonable.
-const MAX_ANGULAR_SAMPLES: usize = 64;
+/// Kept at 32 to avoid generating too many triangles for a single face.
+/// A face with 32×32 grid produces ~2K triangles, which is reasonable
+/// for interactive viewing.
+const MAX_ANGULAR_SAMPLES: usize = 32;
 
 /// Minimum number of height/v samples for any curved surface.
 const MIN_HEIGHT_SAMPLES: usize = 2;
 
 /// Maximum number of height/v samples.
-const MAX_HEIGHT_SAMPLES: usize = 64;
+const MAX_HEIGHT_SAMPLES: usize = 32;
 
 /// Compute the required number of angular (u-direction) samples for a surface
 /// given a maximum deviation tolerance.
@@ -238,7 +239,7 @@ pub fn required_samples(
 /// that freeze the browser on WASM.
 /// 8000 triangles per face provides good visual quality for complex surfaces
 /// while keeping the mesh count manageable.
-pub const DEFAULT_MAX_FACE_TRIANGLES: usize = 8000;
+pub const DEFAULT_MAX_FACE_TRIANGLES: usize = 2000;
 
 /// Compute adaptive samples for both u and v directions simultaneously,
 /// capped so that the resulting grid does not exceed `max_face_triangles`.
