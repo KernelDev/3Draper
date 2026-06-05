@@ -887,111 +887,94 @@ pub fn triangulate_surface_consistent(
     domain.init_containment_grid();
 
     // ============================================================
-    // Step 2.5: Downsample boundary and hole points to prevent
-    // triangle explosion.
+    // Step 2.5: DO NOT downsample boundary points!
     //
-    // The edge cache can produce up to 64 points per edge, and a face
-    // with 8+ edges can have 500+ boundary points. When all of these
-    // are passed to earcutr, the resulting triangle count explodes.
+    // Boundary points from the edge cache represent the EXACT face
+    // boundary. Downsampling them produces an incorrect polygon that
+    // doesn't match the actual face boundary, leading to wrong
+    // triangulation (triangles in wrong regions, gaps, overlaps).
     //
-    // Solution: Before triangulation, downsample boundary and hole
-    // points to a reasonable count that fits within the triangle budget.
-    // earcutr produces ~2× points triangles, so we want total points
-    // (boundary + holes + interior) ≤ max_face_triangles / 2.
+    // earcutr is O(n log n) and handles even 500+ boundary points
+    // efficiently. The resulting triangle count from earcutr is
+    // approximately 2×(N_boundary + N_holes + N_interior) - 2, which
+    // is very reasonable.
     //
-    // Inspired by STP2X3D's approach: Open CASCADE's BRepMesh uses
-    // deflection-based control, not boundary point count. We achieve
-    // a similar effect by limiting total vertex count.
+    // Instead of downsampling boundaries, we control the total triangle
+    // count by limiting INTERIOR points only.
     // ============================================================
+    let boundary_points_3d = boundary_points_3d.to_vec();
+    let outer_uv = outer_uv; // Already a Vec, no downsampling
+
+    // Keep all hole points too — holes define where NOT to triangulate
+    let hole_polylines_3d_capped: Vec<Vec<Point3d>> = hole_polylines_3d.iter().map(|h| h.clone()).collect();
+    let normalized_holes_uv_capped: Vec<Vec<Point2d>> = normalized_holes_uv;
+
     let max_total_points = (params.max_face_triangles / 2).max(6);
-    // Reserve budget: boundary + holes should use at most 60% of total
-    let max_boundary_and_holes = (max_total_points * 3 / 5).max(6);
-    let max_boundary = (max_boundary_and_holes * 3 / 4).max(4);
-    let max_per_hole = (max_boundary_and_holes / 4).max(4).min(50);
-
-    // Downsample outer boundary
-    let (boundary_points_3d, outer_uv) = if boundary_points_3d.len() > max_boundary {
-        log::debug!(
-            "triangulate_surface_consistent: downsampling boundary from {} to {} points",
-            boundary_points_3d.len(), max_boundary
-        );
-        downsample_polyline(boundary_points_3d, &outer_uv, max_boundary)
-    } else {
-        (boundary_points_3d.to_vec(), outer_uv)
-    };
-
-    // Downsample each hole polyline
-    let mut normalized_holes_uv_capped: Vec<Vec<Point2d>> = Vec::new();
-    let mut hole_polylines_3d_capped: Vec<Vec<Point3d>> = Vec::new();
-    for (h3d, huv) in hole_polylines_3d.iter().zip(normalized_holes_uv.iter()) {
-        if h3d.len() > max_per_hole {
-            let (capped_3d, capped_uv) = downsample_polyline(h3d, huv, max_per_hole);
-            hole_polylines_3d_capped.push(capped_3d);
-            normalized_holes_uv_capped.push(capped_uv);
-        } else {
-            hole_polylines_3d_capped.push(h3d.clone());
-            normalized_holes_uv_capped.push(huv.clone());
-        }
-    }
 
     // ============================================================
     // Step 3: Generate interior grid points
     //
-    // For NURBS surfaces, use knot-span-aware interior points
-    // for better surface approximation.
+    // IMPORTANT DESIGN PRINCIPLE:
+    // Interior points are needed ONLY to improve surface approximation
+    // for curved surfaces. For flat surfaces (planes, bilinear NURBS),
+    // NO interior points are needed — the boundary polygon alone,
+    // triangulated by earcutr, produces a perfect mesh.
     //
-    // IMPORTANT: We strictly limit the number of interior points
-    // to prevent triangle explosion. The budget is computed as:
-    // max_face_triangles/2 minus boundary+hole points already used.
+    // For curved surfaces (cylinder, sphere, high-degree NURBS),
+    // interior points help the triangulation follow the surface
+    // curvature. We add the MINIMUM number needed.
+    //
+    // The total triangle budget is: max_face_triangles per face.
+    // Since we keep ALL boundary points (for watertightness),
+    // the interior point budget is:
+    //   max_face_triangles/2 - boundary_points - hole_points
     // ============================================================
     let n_boundary_and_holes = boundary_points_3d.len()
         + hole_polylines_3d_capped.iter().map(|h| h.len()).sum::<usize>();
     let max_interior_budget = if max_total_points > n_boundary_and_holes {
         max_total_points - n_boundary_and_holes
     } else {
-        0 // Boundary already uses up the budget
+        0 // Boundary already uses up the budget — no interior points needed
     };
 
     let interior_uv_points = if let Surface::Nurbs(ref nurbs) = surface {
-        let (n_u, n_v) = if params.adaptive {
-            crate::adaptive::required_samples_capped(
+        let u_deg = nurbs.u_degree;
+        let v_deg = nurbs.v_degree;
+
+        // For bilinear (deg=1×1) NURBS surfaces, no interior points needed.
+        // The surface is flat and boundary points alone triangulate it perfectly.
+        if u_deg <= 1 && v_deg <= 1 {
+            Vec::new()
+        } else if u_deg <= 1 || v_deg <= 1 {
+            // Ruled surface (linear in one direction): very few interior points.
+            // Just 1-2 subdivisions per knot span is enough to capture the
+            // curvature in the non-linear direction.
+            let n_sub = 2; // Minimal subdivisions for ruled surfaces
+            let mut pts = generate_nurbs_interior_points(&domain, &nurbs.u_knots, &nurbs.v_knots, n_sub);
+            if pts.len() > max_interior_budget {
+                pts.truncate(max_interior_budget);
+            }
+            pts
+        } else {
+            // High-degree NURBS (both directions curved): use adaptive sampling
+            // but cap interior points strictly.
+            let (n_u, n_v) = crate::adaptive::required_samples_capped(
                 surface,
                 u_min, u_max, v_min, v_max,
                 params.max_deviation, params.detail_level,
                 params.max_face_triangles,
-            )
-        } else {
-            let mut n_u = params.angular_samples;
-            let mut n_v = params.height_samples;
-            let approx_tris = 2 * n_u * n_v;
-            if approx_tris > params.max_face_triangles {
-                let scale = (params.max_face_triangles as f64 / approx_tris as f64).sqrt();
-                n_u = ((n_u as f64 * scale).ceil() as usize).max(4);
-                n_v = ((n_v as f64 * scale).ceil() as usize).max(2);
+            );
+            // Use knot-span subdivision for NURBS — respects the surface
+            // parameterization and gives better triangulation quality.
+            let n_sub = (n_u.max(n_v) / 8).max(2).min(4);
+            let mut pts = generate_nurbs_interior_points(&domain, &nurbs.u_knots, &nurbs.v_knots, n_sub);
+            if pts.len() > max_interior_budget {
+                pts.truncate(max_interior_budget);
             }
-            (n_u, n_v)
-        };
-        // Use knot-span subdivision for NURBS — respects the surface
-        // parameterization and gives better triangulation quality.
-        // Keep n_sub LOW (2-3) to avoid triangle explosion.
-        // For low-degree NURBS (deg 1 in either direction), use fewer
-        // subdivisions since the surface is linear/rule in that direction.
-        let u_deg = nurbs.u_degree;
-        let v_deg = nurbs.v_degree;
-        let n_sub_base = (n_u.max(n_v) / 8).max(2).min(3);
-        // For degree-1 (linear) direction, only 2 subdivisions needed
-        let n_sub = if u_deg <= 1 || v_deg <= 1 {
-            2 // Linear/ruled surface — very few subdivisions needed
-        } else {
-            n_sub_base
-        };
-        let mut pts = generate_nurbs_interior_points(&domain, &nurbs.u_knots, &nurbs.v_knots, n_sub);
-        // Strict cap: limit interior points to budget
-        if pts.len() > max_interior_budget {
-            pts.truncate(max_interior_budget);
+            pts
         }
-        pts
     } else {
+        // Non-NURBS curved surfaces (Torus, Revolution, Extrusion)
         let (n_u, n_v) = if params.adaptive {
             crate::adaptive::required_samples_capped(
                 surface,
@@ -1012,7 +995,6 @@ pub fn triangulate_surface_consistent(
         };
         let boundary_margin = (u_max - u_min) / n_u.max(1) as f64 * 0.3;
         let mut pts = generate_interior_points(&domain, n_u, n_v, boundary_margin);
-        // Strict cap: limit interior points to budget
         if pts.len() > max_interior_budget {
             pts.truncate(max_interior_budget);
         }

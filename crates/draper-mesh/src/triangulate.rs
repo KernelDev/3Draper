@@ -2427,10 +2427,18 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
             }
         }
         Surface::Cylinder(cyl) => {
-            // Cylinder: use grid-based triangulation with boundary snapping
-            // The general consistent path doesn't handle cylindrical periodicity well
-            triangulate_cylinder_face_with_boundary_uv(
-                cyl, boundary_points, boundary_uvs, hole_polylines, hole_uvs, forward, params,
+            // Use consistent UV-space triangulation for watertightness.
+            // The grid-based approach creates its own vertices that don't
+            // match the cached edge 3D points, breaking watertightness.
+            let surface = Surface::Cylinder(cyl.clone());
+            crate::parametric_domain::triangulate_surface_consistent(
+                &surface,
+                boundary_points,
+                boundary_uvs,
+                hole_polylines,
+                hole_uvs,
+                forward,
+                params,
             )
         }
         Surface::Cone(cone) => {
@@ -2699,26 +2707,25 @@ fn triangulate_cylinder_face_with_boundary_uv(
 fn triangulate_cone_face_with_boundary_uv(
     cone: &ConeSurface,
     boundary_points: &[Point3d],
-    _boundary_uvs: &[Point2d],
+    boundary_uvs: &[Point2d],
     hole_polylines: &[Vec<Point3d>],
-    _hole_uvs: &[Vec<Point2d>],
+    hole_uvs: &[Vec<Point2d>],
     forward: bool,
     params: &TriangulationParams,
 ) -> TriangleMesh {
-    // For cones, the existing boundary-based triangulation already handles
-    // apex degeneracy. Use the consistent triangulation for the general case,
-    // but fall back to the non-UV path for cones with apex faces since those
-    // need special handling.
+    // Use the consistent UV-space triangulation which preserves bit-identical
+    // boundary 3D points across shared edges. This is essential for watertightness.
     //
-    // For now, delegate to the consistent surface triangulation function
-    // which handles all curved surfaces via earcutr in UV space.
+    // Apex degeneracy is handled by merge_coincident_vertices in the solid-level
+    // post-processing — all boundary points near the apex will be merged into
+    // a single vertex.
     let surface = Surface::Cone(cone.clone());
     crate::parametric_domain::triangulate_surface_consistent(
         &surface,
         boundary_points,
-        _boundary_uvs,
+        boundary_uvs,
         hole_polylines,
-        _hole_uvs,
+        hole_uvs,
         forward,
         params,
     )
@@ -2730,19 +2737,25 @@ fn triangulate_cone_face_with_boundary_uv(
 fn triangulate_sphere_face_with_boundary_uv(
     sphere: &SphereSurface,
     boundary_points: &[Point3d],
-    _boundary_uvs: &[Point2d],
+    boundary_uvs: &[Point2d],
     hole_polylines: &[Vec<Point3d>],
-    _hole_uvs: &[Vec<Point2d>],
+    hole_uvs: &[Vec<Point2d>],
     forward: bool,
     params: &TriangulationParams,
 ) -> TriangleMesh {
+    // Use the consistent UV-space triangulation which preserves bit-identical
+    // boundary 3D points across shared edges. This is essential for watertightness.
+    //
+    // Pole degeneracy is handled by merge_coincident_vertices in the solid-level
+    // post-processing — all boundary points near a pole will be merged into
+    // a single vertex.
     let surface = Surface::Sphere(sphere.clone());
     crate::parametric_domain::triangulate_surface_consistent(
         &surface,
         boundary_points,
-        _boundary_uvs,
+        boundary_uvs,
         hole_polylines,
-        _hole_uvs,
+        hole_uvs,
         forward,
         params,
     )

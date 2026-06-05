@@ -237,10 +237,13 @@ pub fn required_samples(
 /// Default maximum number of triangles per face.
 /// This prevents a single face from generating millions of triangles
 /// that freeze the browser on WASM or exceed GPU buffer limits.
-/// 1000 triangles per face provides good visual quality while keeping
-/// total mesh size manageable. For a model with 200 faces, this gives
-/// ~200K total triangles, well within GPU buffer limits.
-pub const DEFAULT_MAX_FACE_TRIANGLES: usize = 1000;
+/// 4000 triangles per face provides good visual quality.
+/// Boundary points from the edge cache are never downsampled (to preserve
+/// watertightness), so the budget must accommodate faces with many boundary
+/// vertices (up to ~200 per face). With earcutr producing ~2×N triangles
+/// for N boundary points, a budget of 4000 allows up to ~2000 boundary
+/// points per face (far more than needed in practice).
+pub const DEFAULT_MAX_FACE_TRIANGLES: usize = 4000;
 
 /// Compute adaptive samples for both u and v directions simultaneously,
 /// capped so that the resulting grid does not exceed `max_face_triangles`.
