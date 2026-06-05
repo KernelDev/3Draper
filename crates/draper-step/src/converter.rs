@@ -777,7 +777,15 @@ impl<'a> StepConversionContext<'a> {
             let dz = bmax.z - bmin.z;
             let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
             if diagonal > 1.0 {
-                params.max_deviation = params.max_deviation.max(diagonal * 0.0002);
+                params.max_deviation = params.max_deviation.max(diagonal * 0.001);
+                // For very large assemblies, reduce per-face triangle budget
+                // to prevent total triangle explosion (e.g., 700K+ triangles)
+                if diagonal > 500.0 {
+                    params.max_face_triangles = (params.max_face_triangles / 2).max(200);
+                }
+                if diagonal > 2000.0 {
+                    params.max_face_triangles = (params.max_face_triangles / 2).max(100);
+                }
             }
         }
 
@@ -883,7 +891,15 @@ impl OwnedStepConversionContext {
             let dz = bmax.z - bmin.z;
             let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
             if diagonal > 1.0 {
-                params.max_deviation = params.max_deviation.max(diagonal * 0.0002);
+                params.max_deviation = params.max_deviation.max(diagonal * 0.001);
+                // For very large assemblies, reduce per-face triangle budget
+                // to prevent total triangle explosion (e.g., 700K+ triangles)
+                if diagonal > 500.0 {
+                    params.max_face_triangles = (params.max_face_triangles / 2).max(200);
+                }
+                if diagonal > 2000.0 {
+                    params.max_face_triangles = (params.max_face_triangles / 2).max(100);
+                }
             }
         }
 
@@ -1920,7 +1936,15 @@ impl<'a> StepConverter<'a> {
             let dz = bmax.z - bmin.z;
             let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
             if diagonal > 1.0 {
-                params.max_deviation = params.max_deviation.max(diagonal * 0.0002);
+                params.max_deviation = params.max_deviation.max(diagonal * 0.001);
+                // For very large assemblies, reduce per-face triangle budget
+                // to prevent total triangle explosion (e.g., 700K+ triangles)
+                if diagonal > 500.0 {
+                    params.max_face_triangles = (params.max_face_triangles / 2).max(200);
+                }
+                if diagonal > 2000.0 {
+                    params.max_face_triangles = (params.max_face_triangles / 2).max(100);
+                }
             }
         }
         let color_map = self.extract_color_map();
@@ -2243,7 +2267,15 @@ impl<'a> StepConverter<'a> {
             let dz = bmax.z - bmin.z;
             let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
             if diagonal > 1.0 {
-                params.max_deviation = params.max_deviation.max(diagonal * 0.0002);
+                params.max_deviation = params.max_deviation.max(diagonal * 0.001);
+                // For very large assemblies, reduce per-face triangle budget
+                // to prevent total triangle explosion (e.g., 700K+ triangles)
+                if diagonal > 500.0 {
+                    params.max_face_triangles = (params.max_face_triangles / 2).max(200);
+                }
+                if diagonal > 2000.0 {
+                    params.max_face_triangles = (params.max_face_triangles / 2).max(100);
+                }
             }
         }
         let color_map = self.extract_color_map();
@@ -2908,7 +2940,19 @@ impl<'a> StepConverter<'a> {
         // Merge coincident vertices to make the mesh watertight
         // (still needed for non-shared edges, but the cache ensures shared edges
         // already have identical vertices)
-        draper_mesh::merge_coincident_vertices(&mut mesh, 1e-4);
+        // Scale merge tolerance based on bounding box diagonal — larger models
+        // need larger tolerance to merge vertices that are close but not identical
+        // due to floating-point precision in surface evaluation.
+        let merge_tol = if let Some((bmin, bmax)) = bbox {
+            let dx = bmax.x - bmin.x;
+            let dy = bmax.y - bmin.y;
+            let dz = bmax.z - bmin.z;
+            let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
+            (diagonal * 1e-6).max(1e-5).min(1e-2)
+        } else {
+            1e-4
+        };
+        draper_mesh::merge_coincident_vertices(&mut mesh, merge_tol);
 
         // Phase 2: Validate watertightness of the merged mesh
         let wt_report = validate_watertight(&mesh, false);

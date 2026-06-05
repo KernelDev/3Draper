@@ -158,14 +158,14 @@ impl Default for TriangulationParams {
         Self {
             max_edge_length: 1.0,
             max_deviation: 0.01,
-            angular_samples: 32,
+            angular_samples: 24,
             height_samples: 8,
             max_angular_deviation: 0.1,
             detail_level: 1.0,
             adaptive: true,
             parallel: false,
             progress_callback: None,
-            max_face_triangles: 2000,
+            max_face_triangles: crate::adaptive::DEFAULT_MAX_FACE_TRIANGLES,
         }
     }
 }
@@ -217,7 +217,16 @@ fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams) -> 
         mesh.merge(&face_mesh);
     }
     // Merge coincident boundary vertices to make the solid watertight
-    merge_coincident_vertices(&mut mesh, 1e-6);
+    // Use a tolerance scaled to the mesh bounding box
+    let merge_tol = {
+        let (bmin, bmax) = mesh.bounding_box();
+        let dx = bmax.x - bmin.x;
+        let dy = bmax.y - bmin.y;
+        let dz = bmax.z - bmin.z;
+        let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
+        (diagonal * 1e-6).max(1e-5).min(1e-2)
+    };
+    merge_coincident_vertices(&mut mesh, merge_tol);
     // Use a very small tolerance for degenerate filtering — only remove truly degenerate triangles
     // (zero area or NaN/Inf), not small valid triangles
     filter_degenerate_triangles(&mut mesh, 1e-10);
@@ -459,7 +468,16 @@ fn triangulate_solid_parallel(solid: &Solid, params: &TriangulationParams) -> Tr
 
     // Step 4: Post-processing
     let mut mesh = merged;
-    merge_coincident_vertices(&mut mesh, 1e-6);
+    // Use bounding-box-scaled merge tolerance for watertightness
+    let merge_tol = {
+        let (bmin, bmax) = mesh.bounding_box();
+        let dx = bmax.x - bmin.x;
+        let dy = bmax.y - bmin.y;
+        let dz = bmax.z - bmin.z;
+        let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
+        (diagonal * 1e-6).max(1e-5).min(1e-2)
+    };
+    merge_coincident_vertices(&mut mesh, merge_tol);
     filter_degenerate_triangles(&mut mesh, 1e-10);
     // Safety check: ensure all per-triangle arrays have the same length
     debug_assert_mesh_consistency(&mesh);
@@ -582,7 +600,15 @@ pub fn triangulate_shell(shell: &Shell, params: &TriangulationParams) -> Triangl
         let face_mesh = triangulate_face(face, params);
         mesh.merge(&face_mesh);
     }
-    merge_coincident_vertices(&mut mesh, 1e-6);
+    let merge_tol = {
+        let (bmin, bmax) = mesh.bounding_box();
+        let diagonal = {
+            let dx = bmax.x - bmin.x; let dy = bmax.y - bmin.y; let dz = bmax.z - bmin.z;
+            (dx*dx + dy*dy + dz*dz).sqrt()
+        };
+        (diagonal * 1e-6).max(1e-5).min(1e-2)
+    };
+    merge_coincident_vertices(&mut mesh, merge_tol);
     filter_degenerate_triangles(&mut mesh, 1e-10);
     mesh
 }

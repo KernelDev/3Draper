@@ -839,7 +839,15 @@ pub fn triangulate_surface_consistent(
     //
     // For NURBS surfaces, use knot-span-aware interior points
     // for better surface approximation.
+    //
+    // IMPORTANT: We strictly limit the number of interior points
+    // to prevent triangle explosion. The max_face_triangles budget
+    // controls how many interior points are allowed — earcutr
+    // produces ~2× points triangles, so we cap interior points
+    // at max_face_triangles/4.
     // ============================================================
+    let max_interior_budget = params.max_face_triangles / 4;
+
     let interior_uv_points = if let Surface::Nurbs(ref nurbs) = surface {
         let (n_u, n_v) = if params.adaptive {
             crate::adaptive::required_samples_capped(
@@ -861,11 +869,24 @@ pub fn triangulate_surface_consistent(
         };
         // Use knot-span subdivision for NURBS — respects the surface
         // parameterization and gives better triangulation quality.
-        // n_sub controls how many points per knot span.
-        // Keep n_sub LOW to avoid triangle explosion — the max_face_triangles
-        // cap further limits the total count below.
-        let n_sub = (n_u.max(n_v) / 8).max(2).min(4);
-        generate_nurbs_interior_points(&domain, &nurbs.u_knots, &nurbs.v_knots, n_sub)
+        // Keep n_sub LOW (2-3) to avoid triangle explosion.
+        // For low-degree NURBS (deg 1 in either direction), use fewer
+        // subdivisions since the surface is linear/rule in that direction.
+        let u_deg = nurbs.u_degree;
+        let v_deg = nurbs.v_degree;
+        let n_sub_base = (n_u.max(n_v) / 8).max(2).min(3);
+        // For degree-1 (linear) direction, only 2 subdivisions needed
+        let n_sub = if u_deg <= 1 || v_deg <= 1 {
+            2 // Linear/ruled surface — very few subdivisions needed
+        } else {
+            n_sub_base
+        };
+        let mut pts = generate_nurbs_interior_points(&domain, &nurbs.u_knots, &nurbs.v_knots, n_sub);
+        // Strict cap: limit interior points to budget
+        if pts.len() > max_interior_budget {
+            pts.truncate(max_interior_budget);
+        }
+        pts
     } else {
         let (n_u, n_v) = if params.adaptive {
             crate::adaptive::required_samples_capped(
@@ -886,7 +907,12 @@ pub fn triangulate_surface_consistent(
             (n_u, n_v)
         };
         let boundary_margin = (u_max - u_min) / n_u.max(1) as f64 * 0.3;
-        generate_interior_points(&domain, n_u, n_v, boundary_margin)
+        let mut pts = generate_interior_points(&domain, n_u, n_v, boundary_margin);
+        // Strict cap: limit interior points to budget
+        if pts.len() > max_interior_budget {
+            pts.truncate(max_interior_budget);
+        }
+        pts
     };
 
     // ============================================================
