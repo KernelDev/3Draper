@@ -1037,6 +1037,23 @@ fn create_vertex_buffer(device: &wgpu::Device, vertices: &[MeshVertex]) -> wgpu:
     }
 }
 
+/// Create a mesh vertex buffer, truncating if it exceeds GPU limits.
+fn create_vertex_buffer_safe(device: &wgpu::Device, vertices: &[MeshVertex]) -> (wgpu::Buffer, u32) {
+    let buffer_size = vertices.len() * MESH_VERTEX_SIZE;
+    if buffer_size > MAX_GPU_BUFFER_SIZE {
+        let max_vertices = MAX_GPU_BUFFER_SIZE / MESH_VERTEX_SIZE;
+        log::warn!(
+            "Mesh vertex buffer ({} MB) exceeds GPU limit ({} MB). Truncating to {} vertices.",
+            buffer_size / (1024 * 1024),
+            MAX_GPU_BUFFER_SIZE / (1024 * 1024),
+            max_vertices,
+        );
+        (create_vertex_buffer(device, &vertices[..max_vertices]), max_vertices as u32)
+    } else {
+        (create_vertex_buffer(device, vertices), vertices.len() as u32)
+    }
+}
+
 fn create_index_buffer(device: &wgpu::Device, indices: &[u32]) -> wgpu::Buffer {
     if indices.is_empty() {
         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1054,15 +1071,34 @@ fn create_index_buffer(device: &wgpu::Device, indices: &[u32]) -> wgpu::Buffer {
 }
 
 /// Update mesh data in GPU buffers.
+///
+/// If the vertex or index data exceeds the GPU's maximum buffer size,
+/// it is truncated to fit. This prevents a crash when loading large models.
 pub fn update_mesh_buffers(
     resources: &mut SceneResources,
     device: &wgpu::Device,
     vertices: &[MeshVertex],
     indices: &[u32],
 ) {
-    resources.vertex_buffer = create_vertex_buffer(device, vertices);
-    resources.index_buffer = create_index_buffer(device, indices);
-    resources.index_count = indices.len() as u32;
+    let (vbuf, _vcount) = create_vertex_buffer_safe(device, vertices);
+    resources.vertex_buffer = vbuf;
+
+    // Index buffer: 4 bytes per u32, check against GPU limit
+    let index_buffer_size = indices.len() * 4;
+    if index_buffer_size > MAX_GPU_BUFFER_SIZE {
+        let max_indices = MAX_GPU_BUFFER_SIZE / 4;
+        log::warn!(
+            "Index buffer ({} MB) exceeds GPU limit ({} MB). Truncating to {} indices.",
+            index_buffer_size / (1024 * 1024),
+            MAX_GPU_BUFFER_SIZE / (1024 * 1024),
+            max_indices,
+        );
+        resources.index_buffer = create_index_buffer(device, &indices[..max_indices]);
+        resources.index_count = max_indices as u32;
+    } else {
+        resources.index_buffer = create_index_buffer(device, indices);
+        resources.index_count = indices.len() as u32;
+    }
 }
 
 fn create_edge_vertex_buffer(device: &wgpu::Device, vertices: &[LineVertex]) -> wgpu::Buffer {
@@ -1091,6 +1127,17 @@ pub fn update_edge_buffers(
     resources.edge_vertex_count = vertices.len() as u32;
 }
 
+/// Maximum GPU buffer size (256 MB – 1 MB safety margin).
+/// WebGPU/wgpu guarantees at least 256 MB, but some drivers report exactly
+/// 268435456 (256 MiB). We leave a 1 MB margin to avoid overflow.
+const MAX_GPU_BUFFER_SIZE: usize = 255 * 1024 * 1024;
+
+/// Size of a single LineVertex in bytes.
+const LINE_VERTEX_SIZE: usize = std::mem::size_of::<LineVertex>();
+
+/// Size of a single MeshVertex in bytes.
+const MESH_VERTEX_SIZE: usize = std::mem::size_of::<MeshVertex>();
+
 fn create_wireframe_overlay_vertex_buffer(device: &wgpu::Device, vertices: &[LineVertex]) -> wgpu::Buffer {
     if vertices.is_empty() {
         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1108,13 +1155,35 @@ fn create_wireframe_overlay_vertex_buffer(device: &wgpu::Device, vertices: &[Lin
 }
 
 /// Update wireframe overlay line data in GPU buffers.
+///
+/// If the wireframe data exceeds the GPU's maximum buffer size, it is
+/// truncated to fit. This prevents a panic/crash when loading large models
+/// that would otherwise produce a 256+ MB wireframe buffer.
 pub fn update_wireframe_overlay_buffers(
     resources: &mut SceneResources,
     device: &wgpu::Device,
     vertices: &[LineVertex],
 ) {
-    resources.wireframe_overlay_vertex_buffer = create_wireframe_overlay_vertex_buffer(device, vertices);
-    resources.wireframe_overlay_vertex_count = vertices.len() as u32;
+    let buffer_size = vertices.len() * LINE_VERTEX_SIZE;
+    if buffer_size > MAX_GPU_BUFFER_SIZE {
+        // Truncate to fit within GPU buffer limits.
+        // Keep only the first N vertices that fit. Since LineList topology
+        // uses pairs of vertices, round down to an even count.
+        let max_vertices = MAX_GPU_BUFFER_SIZE / LINE_VERTEX_SIZE;
+        let max_vertices = max_vertices & !1; // Round down to even (complete line segments)
+        log::warn!(
+            "Wireframe overlay buffer ({} MB) exceeds GPU limit ({} MB). Truncating to {} vertices ({} lines).",
+            buffer_size / (1024 * 1024),
+            MAX_GPU_BUFFER_SIZE / (1024 * 1024),
+            max_vertices,
+            max_vertices / 2,
+        );
+        resources.wireframe_overlay_vertex_buffer = create_wireframe_overlay_vertex_buffer(device, &vertices[..max_vertices]);
+        resources.wireframe_overlay_vertex_count = max_vertices as u32;
+    } else {
+        resources.wireframe_overlay_vertex_buffer = create_wireframe_overlay_vertex_buffer(device, vertices);
+        resources.wireframe_overlay_vertex_count = vertices.len() as u32;
+    }
 }
 
 /// Update the uniform buffer.

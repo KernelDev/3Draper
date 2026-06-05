@@ -237,8 +237,8 @@ pub fn required_samples(
 /// Default maximum number of triangles per face.
 /// This prevents a single face from generating millions of triangles
 /// that freeze the browser on WASM.
-/// 2000 triangles per face provides good visual quality for most surfaces
-/// while keeping total mesh count manageable for interactive viewing.
+/// 2000 triangles per face provides good visual quality for complex surfaces
+/// while keeping the mesh count manageable and GPU buffers within limits.
 pub const DEFAULT_MAX_FACE_TRIANGLES: usize = 2000;
 
 /// Compute adaptive samples for both u and v directions simultaneously,

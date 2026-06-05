@@ -1515,7 +1515,25 @@ impl ViewerApp {
     ///
     /// The vertices are in the same coordinate space as the mesh (world space),
     /// so depth testing against the solid mesh will properly occlude hidden edges.
+    ///
+    /// For large meshes (>100K triangles), the wireframe overlay is skipped entirely
+    /// because it would consume too much GPU memory and rendering it would be slow.
+    /// The B-Rep edge lines already show the model structure without the overhead.
     fn build_wireframe_overlay_vertices(&self) -> Vec<LineVertex> {
+        // Skip wireframe overlay for very large meshes — it consumes too much
+        // GPU memory (6 LineVertex × 24 bytes per triangle) and the B-Rep edge
+        // lines already convey the model structure. For a 500K-triangle mesh,
+        // the overlay would need ~72 MB, which is wasteful.
+        const MAX_TRIANGLES_FOR_WIREFRAME_OVERLAY: usize = 100_000;
+        if self.mesh.triangles.len() > MAX_TRIANGLES_FOR_WIREFRAME_OVERLAY {
+            log::info!(
+                "Skipping wireframe overlay: {} triangles > {} limit. B-Rep edges still shown.",
+                self.mesh.triangles.len(),
+                MAX_TRIANGLES_FOR_WIREFRAME_OVERLAY,
+            );
+            return Vec::new();
+        }
+
         let mut vertices: Vec<LineVertex> = Vec::new();
 
         // Wireframe overlay color: subtle dark gray
