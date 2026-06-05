@@ -17,6 +17,7 @@ pub mod adaptive;
 pub mod parametric_domain;
 pub mod certification;
 pub mod text3d;
+pub mod watertight;
 
 #[cfg(feature = "export-3mf")]
 pub mod export;
@@ -30,3 +31,4 @@ pub use text3d::*;
 #[cfg(feature = "export-3mf")]
 pub use export::*;
 pub use certification::*;
+pub use watertight::*;

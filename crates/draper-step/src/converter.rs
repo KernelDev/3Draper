@@ -29,7 +29,7 @@ use draper_geometry::{
     NurbsSurface, Curve3d, Curve2d, Line, Circle, Ellipse, Arc, NurbsCurve,
     Line2d, Circle2d, Ellipse2d, Nurbs2d,
 };
-use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary_and_holes_uv, ear_clip};
+use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary_and_holes_uv, ear_clip, validate_watertight};
 use draper_topology::{Face, Wire, CoEdge, Edge as TopoEdge, Shell, Solid};
 use draper_topology::healing::{heal_solid, HealingParams, HealingReport};
 use draper_geometry::tolerance::ToleranceContext;
@@ -2873,6 +2873,21 @@ impl<'a> StepConverter<'a> {
         // (still needed for non-shared edges, but the cache ensures shared edges
         // already have identical vertices)
         draper_mesh::merge_coincident_vertices(&mut mesh, 1e-4);
+
+        // Phase 2: Validate watertightness of the merged mesh
+        let wt_report = validate_watertight(&mesh, false);
+        if wt_report.is_watertight() {
+            log::info!("BREP #{}: watertight ✓ ({} interior edges, Euler χ={})",
+                brep_id, wt_report.interior_edge_count, wt_report.euler_characteristic);
+        } else {
+            log::warn!("BREP #{}: NOT watertight — {} boundary edges, {} non-manifold edges, χ={}",
+                brep_id, wt_report.boundary_edge_count, wt_report.non_manifold_edge_count,
+                wt_report.euler_characteristic);
+            if wt_report.degenerate_triangle_count > 0 {
+                log::warn!("BREP #{}: {} degenerate triangles", brep_id, wt_report.degenerate_triangle_count);
+            }
+        }
+
         log::info!("BREP #{}: edge_cache={} entries, mesh v={} t={}",
             brep_id, edge_cache.len(), mesh.vertex_count(), mesh.triangle_count());
         Some(mesh)
@@ -3050,6 +3065,21 @@ impl<'a> StepConverter<'a> {
         if skipped_faces > 0 {
             log::warn!("BREP #{} detailed: {} faces skipped due to time limit", brep_id, skipped_faces);
         }
+
+        // Phase 2: Validate watertightness of the merged mesh
+        let wt_report = validate_watertight(&mesh, false);
+        if wt_report.is_watertight() {
+            log::info!("BREP #{} detailed: watertight ✓ ({} interior edges, Euler χ={})",
+                brep_id, wt_report.interior_edge_count, wt_report.euler_characteristic);
+        } else {
+            log::warn!("BREP #{} detailed: NOT watertight — {} boundary edges, {} non-manifold edges, χ={}",
+                brep_id, wt_report.boundary_edge_count, wt_report.non_manifold_edge_count,
+                wt_report.euler_characteristic);
+            if wt_report.degenerate_triangle_count > 0 {
+                log::warn!("BREP #{} detailed: {} degenerate triangles", brep_id, wt_report.degenerate_triangle_count);
+            }
+        }
+
         log::info!("BREP #{} detailed: edge_cache={} entries, mesh v={} t={} skipped={}",
             brep_id, edge_cache.len(), mesh.vertex_count(), mesh.triangle_count(), skipped_faces);
         Some((mesh, face_infos))

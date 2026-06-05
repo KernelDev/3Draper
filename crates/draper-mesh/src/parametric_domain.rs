@@ -12,7 +12,7 @@
 //! Constrained Delaunay Triangulation (spade CDT) which can hang
 //! inside a single `add_constraint` call on degenerate inputs.
 
-use draper_geometry::{Point2d, Point3d, Surface};
+use draper_geometry::{Point2d, Point3d, Surface, DegeneracyFlags};
 use crate::mesh::TriangleMesh;
 use std::f64::consts::PI;
 
@@ -847,6 +847,23 @@ pub fn triangulate_surface_consistent(
         normalized_holes_uv.push(nhuv);
     }
 
+    // ============================================================
+    // Phase 2: Pole/apex degeneracy handling
+    //
+    // Detect degenerate boundary vertices where multiple UV points
+    // map to the same 3D point (sphere poles, cone apex). These
+    // must be collapsed to a single vertex BEFORE earcutr runs,
+    // otherwise earcutr creates degenerate triangles with zero-area.
+    // ============================================================
+    let (boundary_3d, outer_uv, holes_3d, normalized_holes_uv) =
+        collapse_degenerate_boundary_vertices(
+            boundary_3d, outer_uv, holes_3d, normalized_holes_uv, surface,
+        );
+
+    if outer_uv.len() < 3 {
+        return TriangleMesh::new();
+    }
+
     // Compute UV range
     let mut u_min = f64::MAX;
     let mut u_max = f64::MIN;
@@ -900,7 +917,54 @@ pub fn triangulate_surface_consistent(
     let boundary_margin_u = (u_max - u_min) / n_u.max(1) as f64 * 0.3;
     let boundary_margin_v = (v_max - v_min) / n_v.max(1) as f64 * 0.3;
     let boundary_margin = boundary_margin_u.min(boundary_margin_v);
-    let interior_uv_points = generate_interior_points(&domain, n_u, n_v, boundary_margin);
+
+    // ============================================================
+    // Phase 2: Adaptive interior point generation
+    //
+    // Generate interior points, adding extra samples near degenerate
+    // regions (poles, apex) to ensure good triangulation quality.
+    // ============================================================
+    let mut interior_uv_points = generate_interior_points(&domain, n_u, n_v, boundary_margin);
+
+    // Add extra interior points near degenerate boundary vertices
+    // (poles/apexes) for better fan triangulation quality
+    let degenerate_tol = 1e-3;
+    for (i, uv) in outer_uv.iter().enumerate() {
+        let flags = surface.is_degenerate_at(uv.u, uv.v, degenerate_tol);
+        if flags.contains(DegeneracyFlags::DU_ZERO) {
+            // This is a pole/apex — add nearby interior points to help
+            // earcutr create good fan triangulation
+            let step_u = (u_max - u_min) / n_u.max(1) as f64;
+            let step_v = (v_max - v_min) / n_v.max(1) as f64;
+            let small = step_u.min(step_v) * 0.5;
+
+            // Add points slightly away from the pole in the non-degenerate direction
+            if flags.contains(DegeneracyFlags::DV_ZERO) {
+                // Fully degenerate (apex) — add ring of points around it
+                for k in 0..6 {
+                    let angle = 2.0 * PI * k as f64 / 6.0;
+                    let du = small * angle.cos();
+                    let dv = small * angle.sin();
+                    let pt = Point2d::new(uv.u + du, uv.v + dv);
+                    if domain.contains(&pt) {
+                        interior_uv_points.push(pt);
+                    }
+                }
+            } else {
+                // DU_ZERO only (sphere pole) — add ring of points below/above
+                let v_dir = if uv.v < (v_min + v_max) * 0.5 { 1.0 } else { -1.0 };
+                let n_ring = n_u.max(6);
+                let ring_v = uv.v + v_dir * small;
+                for k in 0..n_ring {
+                    let u_val = u_min + (u_max - u_min) * k as f64 / n_ring as f64;
+                    let pt = Point2d::new(u_val, ring_v);
+                    if domain.contains(&pt) {
+                        interior_uv_points.push(pt);
+                    }
+                }
+            }
+        }
+    }
 
     // ============================================================
     // Build earcutr input: [boundary_uv...][hole_uv...]
@@ -978,6 +1042,22 @@ pub fn triangulate_surface_consistent(
     }
 
     // ============================================================
+    // Phase 2: Adaptive refinement
+    //
+    // After initial triangulation, check surface deviation of each
+    // triangle. If the midpoint of any edge deviates from the surface
+    // by more than max_deviation, subdivide that triangle by inserting
+    // the midpoint and splitting into sub-triangles.
+    // ============================================================
+    if params.adaptive && params.max_deviation > 0.0 {
+        adaptive_refine_triangles(
+            &mut result_triangles, &mut all_uv, surface,
+            params.max_deviation, params.max_face_triangles,
+            &domain,
+        );
+    }
+
+    // ============================================================
     // Build 3D mesh: boundary vertices use cached 3D, interior use surface.point_at
     // ============================================================
 
@@ -1052,6 +1132,367 @@ pub fn triangulate_surface_consistent(
     }
 
     mesh
+}
+
+// ============================================================
+// Phase 2: Pole/apex degeneracy handling
+// ============================================================
+
+/// Collapse degenerate boundary vertices where multiple UV points
+/// map to the same 3D point (sphere poles, cone apex).
+///
+/// When a boundary passes through a degenerate parametric point (where the
+/// surface parameterization collapses, e.g. a sphere pole where all u-values
+/// map to the same 3D point), the edge cache produces many boundary points
+/// with different UV coordinates but identical 3D positions. If we feed all
+/// of these to earcutr, it creates degenerate (zero-area) triangles.
+///
+/// This function detects such clusters and collapses them to a single vertex.
+/// It uses `Surface::is_degenerate_at()` to identify degenerate UV regions
+/// and groups nearby degenerate boundary points into a single representative.
+///
+/// # Algorithm
+/// 1. For each boundary point, check if it lies in a degenerate UV region.
+/// 2. Group consecutive degenerate points into clusters.
+/// 3. Replace each cluster with a single representative point (the first in the group).
+/// 4. Return the collapsed boundary arrays.
+fn collapse_degenerate_boundary_vertices(
+    boundary_3d: Vec<Point3d>,
+    boundary_uv: Vec<Point2d>,
+    holes_3d: Vec<Vec<Point3d>>,
+    holes_uv: Vec<Vec<Point2d>>,
+    surface: &Surface,
+) -> (Vec<Point3d>, Vec<Point2d>, Vec<Vec<Point3d>>, Vec<Vec<Point2d>>) {
+    let degenerate_tol = 1e-3; // Tolerance for degeneracy detection
+
+    // Process outer boundary
+    let (b3d, buv) = collapse_degenerate_ring(&boundary_3d, &boundary_uv, surface, degenerate_tol);
+
+    // Process holes
+    let mut h3d_result = Vec::new();
+    let mut huv_result = Vec::new();
+    for (h3d, huv) in holes_3d.into_iter().zip(holes_uv.into_iter()) {
+        let (collapsed_3d, collapsed_uv) = collapse_degenerate_ring(&h3d, &huv, surface, degenerate_tol);
+        h3d_result.push(collapsed_3d);
+        huv_result.push(collapsed_uv);
+    }
+
+    (b3d, buv, h3d_result, huv_result)
+}
+
+/// Collapse degenerate vertices in a single ring (outer boundary or hole).
+///
+/// Detects runs of consecutive degenerate boundary vertices and replaces
+/// each run with a single representative. The representative is the vertex
+/// closest to the midpoint of the run's 3D positions.
+fn collapse_degenerate_ring(
+    ring_3d: &[Point3d],
+    ring_uv: &[Point2d],
+    surface: &Surface,
+    degenerate_tol: f64,
+) -> (Vec<Point3d>, Vec<Point2d>) {
+    if ring_3d.len() < 3 {
+        return (ring_3d.to_vec(), ring_uv.to_vec());
+    }
+
+    // Mark which vertices are degenerate
+    let is_degenerate: Vec<bool> = ring_uv.iter()
+        .map(|uv| surface.is_degenerate_at(uv.u, uv.v, degenerate_tol).contains(DegeneracyFlags::DU_ZERO))
+        .collect();
+
+    // Count degenerate vertices — if none, return as-is
+    let n_degenerate = is_degenerate.iter().filter(|&&d| d).count();
+    if n_degenerate == 0 {
+        return (ring_3d.to_vec(), ring_uv.to_vec());
+    }
+
+    // Group consecutive degenerate vertices into clusters.
+    // A cluster is a maximal run of degenerate vertices.
+    // Each cluster is replaced by a single representative vertex.
+    let mut clusters: Vec<Vec<usize>> = Vec::new();
+    let mut current_cluster: Vec<usize> = Vec::new();
+    let n = ring_3d.len();
+
+    for i in 0..n {
+        if is_degenerate[i] {
+            current_cluster.push(i);
+        } else {
+            if !current_cluster.is_empty() {
+                clusters.push(std::mem::take(&mut current_cluster));
+            }
+        }
+    }
+    // Handle wrap-around: if first and last vertices are both degenerate,
+    // merge the last cluster into the first
+    if !current_cluster.is_empty() {
+        if !clusters.is_empty() && is_degenerate[0] {
+            // Wrap-around: merge last partial cluster into first cluster
+            let last_cluster = std::mem::take(&mut current_cluster);
+            clusters[0].extend(last_cluster);
+        } else {
+            clusters.push(current_cluster);
+        }
+    }
+
+    // Build index map: old index → new index (after collapsing)
+    let mut index_map: Vec<Option<usize>> = vec![None; n];
+    let mut new_3d: Vec<Point3d> = Vec::new();
+    let mut new_uv: Vec<Point2d> = Vec::new();
+
+    // For each cluster, choose a representative (the one whose 3D point
+    // is closest to the centroid of all cluster 3D points)
+    for cluster in &clusters {
+        // Compute centroid of cluster's 3D points
+        let mut cx = 0.0_f64;
+        let mut cy = 0.0_f64;
+        let mut cz = 0.0_f64;
+        for &idx in cluster {
+            cx += ring_3d[idx].x;
+            cy += ring_3d[idx].y;
+            cz += ring_3d[idx].z;
+        }
+        let n_pts = cluster.len() as f64;
+        cx /= n_pts;
+        cy /= n_pts;
+        cz /= n_pts;
+
+        // Find the vertex closest to the centroid
+        let mut best_idx = cluster[0];
+        let mut best_dist = f64::MAX;
+        for &idx in cluster {
+            let dx = ring_3d[idx].x - cx;
+            let dy = ring_3d[idx].y - cy;
+            let dz = ring_3d[idx].z - cz;
+            let dist = dx * dx + dy * dy + dz * dz;
+            if dist < best_dist {
+                best_dist = dist;
+                best_idx = idx;
+            }
+        }
+
+        // Use the representative vertex for the whole cluster.
+        // For the UV, use the centroid UV (average) — this gives a
+        // more stable position for earcutr to work with.
+        let rep_3d = ring_3d[best_idx];
+        let mut avg_u = 0.0_f64;
+        let mut avg_v = 0.0_f64;
+        for &idx in cluster {
+            avg_u += ring_uv[idx].u;
+            avg_v += ring_uv[idx].v;
+        }
+        avg_u /= n_pts;
+        avg_v /= n_pts;
+        let rep_uv = Point2d::new(avg_u, avg_v);
+
+        let new_idx = new_3d.len();
+        new_3d.push(rep_3d);
+        new_uv.push(rep_uv);
+
+        for &idx in cluster {
+            index_map[idx] = Some(new_idx);
+        }
+    }
+
+    // Add non-degenerate vertices
+    for i in 0..n {
+        if !is_degenerate[i] {
+            let new_idx = new_3d.len();
+            new_3d.push(ring_3d[i]);
+            new_uv.push(ring_uv[i]);
+            index_map[i] = Some(new_idx);
+        }
+    }
+
+    // If we collapsed everything to < 3 vertices, return the original
+    if new_3d.len() < 3 {
+        return (ring_3d.to_vec(), ring_uv.to_vec());
+    }
+
+    (new_3d, new_uv)
+}
+
+// ============================================================
+// Phase 2: Adaptive refinement
+// ============================================================
+
+/// Adaptively refine triangles by subdividing those whose chord deviation
+/// from the surface exceeds `max_deviation`.
+///
+/// For each triangle, checks the deviation of edge midpoints from the
+/// true surface. If any edge midpoint deviates too much, the triangle
+/// is subdivided by inserting midpoints and splitting into sub-triangles.
+///
+/// This is an iterative process with a maximum number of refinement passes
+/// to prevent infinite loops on pathological surfaces.
+///
+/// # Algorithm
+/// 1. For each triangle edge, compute the UV midpoint.
+/// 2. Evaluate the surface at the midpoint → p_mid_3d.
+/// 3. Compute the chord midpoint (average of endpoints' 3D positions).
+/// 4. If |p_mid_3d - chord_mid| > max_deviation, mark the edge for subdivision.
+/// 5. Subdivide marked triangles using midpoint insertion (Longest-edge bisection).
+fn adaptive_refine_triangles(
+    triangles: &mut Vec<[u32; 3]>,
+    all_uv: &mut Vec<Point2d>,
+    surface: &Surface,
+    max_deviation: f64,
+    max_face_triangles: usize,
+    domain: &ParametricDomain,
+) {
+    let max_passes = 3; // Maximum refinement iterations
+    let deviation_sq_threshold = max_deviation * max_deviation;
+
+    for _pass in 0..max_passes {
+        if triangles.len() >= max_face_triangles {
+            break;
+        }
+
+        // Find triangles that need refinement
+        let mut edges_to_split: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+
+        for tri in triangles.iter() {
+            let edges = [
+                (tri[0].min(tri[1]), tri[0].max(tri[1])),
+                (tri[1].min(tri[2]), tri[1].max(tri[2])),
+                (tri[2].min(tri[0]), tri[2].max(tri[0])),
+            ];
+
+            for (a, b) in &edges {
+                if edges_to_split.contains(&(*a, *b)) {
+                    continue; // Already marked
+                }
+
+                let uv_a = all_uv[*a as usize];
+                let uv_b = all_uv[*b as usize];
+
+                // UV midpoint
+                let mid_u = (uv_a.u + uv_b.u) * 0.5;
+                let mid_v = (uv_a.v + uv_b.v) * 0.5;
+
+                // Evaluate surface at midpoint
+                let p_mid_surface = surface.point_at(mid_u, mid_v);
+
+                // Chord midpoint: average of endpoint 3D positions
+                let p_a = surface.point_at(uv_a.u, uv_a.v);
+                let p_b = surface.point_at(uv_b.u, uv_b.v);
+                let chord_mid = Point3d::new(
+                    (p_a.x + p_b.x) * 0.5,
+                    (p_a.y + p_b.y) * 0.5,
+                    (p_a.z + p_b.z) * 0.5,
+                );
+
+                // Check deviation
+                let dx = p_mid_surface.x - chord_mid.x;
+                let dy = p_mid_surface.y - chord_mid.y;
+                let dz = p_mid_surface.z - chord_mid.z;
+                let deviation_sq = dx * dx + dy * dy + dz * dz;
+
+                if deviation_sq > deviation_sq_threshold {
+                    edges_to_split.insert((*a, *b));
+                }
+            }
+        }
+
+        if edges_to_split.is_empty() {
+            break; // No more refinement needed
+        }
+
+        // Compute midpoint UVs for each edge to split
+        let mut edge_midpoint: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
+
+        for &(a, b) in &edges_to_split {
+            let uv_a = all_uv[a as usize];
+            let uv_b = all_uv[b as usize];
+            let mid_uv = Point2d::new(
+                (uv_a.u + uv_b.u) * 0.5,
+                (uv_a.v + uv_b.v) * 0.5,
+            );
+
+            // Only add if the midpoint is inside the domain
+            if domain.contains(&mid_uv) {
+                let mid_idx = all_uv.len() as u32;
+                all_uv.push(mid_uv);
+                edge_midpoint.insert((a, b), mid_idx);
+            }
+        }
+
+        // Subdivide triangles
+        let mut new_triangles: Vec<[u32; 3]> = Vec::with_capacity(triangles.len());
+
+        for tri in triangles.drain(..) {
+            let a = tri[0];
+            let b = tri[1];
+            let c = tri[2];
+
+            // Get midpoint indices (if edge was split)
+            let ab_key = (a.min(b), a.max(b));
+            let bc_key = (b.min(c), b.max(c));
+            let ca_key = (c.min(a), c.max(a));
+
+            let ab_mid = edge_midpoint.get(&ab_key).copied();
+            let bc_mid = edge_midpoint.get(&bc_key).copied();
+            let ca_mid = edge_midpoint.get(&ca_key).copied();
+
+            match (ab_mid, bc_mid, ca_mid) {
+                // No edges split — keep the triangle
+                (None, None, None) => {
+                    new_triangles.push(tri);
+                }
+                // One edge split — split into 2 triangles
+                (Some(m), None, None) => {
+                    // AB split: vertex M on AB
+                    // Triangle 1: A, M, C
+                    // Triangle 2: M, B, C
+                    new_triangles.push([a, m, c]);
+                    new_triangles.push([m, b, c]);
+                }
+                (None, Some(m), None) => {
+                    // BC split: vertex M on BC
+                    new_triangles.push([a, b, m]);
+                    new_triangles.push([a, m, c]);
+                }
+                (None, None, Some(m)) => {
+                    // CA split: vertex M on CA
+                    new_triangles.push([a, b, m]);
+                    new_triangles.push([b, c, m]);
+                }
+                // Two edges split — split into 3 triangles
+                (Some(mab), Some(mbc), None) => {
+                    // AB and BC split
+                    new_triangles.push([a, mab, mbc]);
+                    new_triangles.push([mab, b, mbc]);
+                    new_triangles.push([a, mbc, c]);
+                }
+                (Some(mab), None, Some(mca)) => {
+                    // AB and CA split
+                    new_triangles.push([a, mab, mca]);
+                    new_triangles.push([mab, b, c]);
+                    new_triangles.push([mab, c, mca]);
+                }
+                (None, Some(mbc), Some(mca)) => {
+                    // BC and CA split
+                    new_triangles.push([a, b, mbc]);
+                    new_triangles.push([a, mbc, mca]);
+                    new_triangles.push([mbc, c, mca]);
+                }
+                // All three edges split — split into 4 triangles (central triangle)
+                (Some(mab), Some(mbc), Some(mca)) => {
+                    // 4 sub-triangles
+                    new_triangles.push([a, mab, mca]);
+                    new_triangles.push([mab, b, mbc]);
+                    new_triangles.push([mca, mbc, c]);
+                    new_triangles.push([mab, mbc, mca]); // Central triangle
+                }
+            }
+        }
+
+        *triangles = new_triangles;
+
+        // Check triangle budget
+        if triangles.len() >= max_face_triangles {
+            break;
+        }
+    }
 }
 
 // ============================================================
