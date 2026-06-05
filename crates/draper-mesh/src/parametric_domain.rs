@@ -156,7 +156,10 @@ impl ParametricDomain {
     /// Initialize the containment grid for fast contains() checks.
     pub fn init_containment_grid(&mut self) {
         if self.containment_grid.is_none() {
-            self.containment_grid = Some(ContainmentGrid::new(self, 24));
+            // Use a 16×16 grid — coarse enough to be fast, fine enough
+            // for accurate interior point generation. The previous 24×24
+            // was unnecessarily fine and slowed down face processing.
+            self.containment_grid = Some(ContainmentGrid::new(self, 16));
         }
     }
 
@@ -557,6 +560,15 @@ pub fn triangulate_surface_consistent(
         return TriangleMesh::new();
     }
 
+    // Length mismatch between 3D points and UVs indicates a bug in the caller
+    if boundary_points_3d.len() != boundary_uvs.len() {
+        log::warn!(
+            "triangulate_surface_consistent: 3D/UV length mismatch ({} vs {}) — returning empty mesh",
+            boundary_points_3d.len(), boundary_uvs.len()
+        );
+        return TriangleMesh::new();
+    }
+
     // ============================================================
     // Step 1: Normalize UV for periodic surfaces
     // ============================================================
@@ -601,6 +613,15 @@ pub fn triangulate_surface_consistent(
 
     let margin_u = (u_max - u_min) * 0.01;
     let margin_v = (v_max - v_min) * 0.01;
+
+    // Check for degenerate UV range (zero-area polygon)
+    if (u_max - u_min) < 1e-12 || (v_max - v_min) < 1e-12 {
+        log::warn!(
+            "triangulate_surface_consistent: degenerate UV range u=[{:.6}, {:.6}] v=[{:.6}, {:.6}], {} boundary pts — returning empty mesh",
+            u_min, u_max, v_min, v_max, outer_uv.len()
+        );
+        return TriangleMesh::new();
+    }
 
     let mut domain = ParametricDomain::new(
         outer_uv.clone(),

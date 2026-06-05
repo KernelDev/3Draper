@@ -165,7 +165,7 @@ impl Default for TriangulationParams {
             adaptive: true,
             parallel: false,
             progress_callback: None,
-            max_face_triangles: 2000,
+            max_face_triangles: 1000,
         }
     }
 }

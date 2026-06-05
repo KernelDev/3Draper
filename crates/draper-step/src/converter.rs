@@ -92,10 +92,21 @@ impl StepConversionConfig {
 ///    3D point sequence.
 ///
 /// This guarantees watertight meshes at shared edges — no post-hoc merging needed.
-#[derive(Clone, Debug)]
+
+/// Cached discretization of a single STEP edge: 3D points + normalized parameters.
+#[derive(Clone)]
+struct StepEdgeDiscretization {
+    /// 3D points along the edge curve (in forward direction).
+    points_3d: Vec<Point3d>,
+    /// Normalized parameter values [0, 1] for each point.
+    /// These are NOT uniformly spaced after adaptive refinement —
+    /// each value corresponds to the actual curve parameter at that point.
+    params: Vec<f64>,
+}
+
 struct StepEdgeCache {
-    /// Maps STEP EDGE_CURVE entity ID → discretized 3D points.
-    entries: HashMap<i64, Vec<Point3d>>,
+    /// Maps STEP EDGE_CURVE entity ID → discretized edge data.
+    entries: HashMap<i64, StepEdgeDiscretization>,
     /// Tolerance context for adaptive sampling.
     tol_ctx: ToleranceContext,
     /// Default number of samples per edge.
@@ -114,23 +125,28 @@ impl StepEdgeCache {
         }
     }
 
-    /// Get or compute discretized 3D points for an edge identified by its STEP entity ID.
-    /// If the edge is already cached, returns a clone of the cached points.
+    /// Get or compute discretized edge data for an edge identified by its STEP entity ID.
+    /// Returns (3D points, normalized parameter values [0..1]).
+    ///
+    /// If the edge is already cached, returns a clone of the cached data.
     /// If not, discretizes the edge and caches the result.
     ///
     /// IMPORTANT: When the edge is reversed (param_range.0 > param_range.1, i.e.,
-    /// the ORIENTED_EDGE had orientation=.F.), the cached forward-order points are
+    /// the ORIENTED_EDGE had orientation=.F.), the cached forward-order data is
     /// reversed before returning. This ensures that shared EDGE_CURVE entities
     /// produce correctly oriented boundary points for each face.
-    fn discretize(&mut self, step_edge_id: i64, edge: &TopoEdge, n_samples: usize) -> Vec<Point3d> {
-        if let Some(pts) = self.entries.get(&step_edge_id) {
-            let mut result = pts.clone();
+    fn discretize(&mut self, step_edge_id: i64, edge: &TopoEdge, n_samples: usize) -> (Vec<Point3d>, Vec<f64>) {
+        if let Some(disc) = self.entries.get(&step_edge_id) {
+            let mut pts = disc.points_3d.clone();
+            let mut params = disc.params.clone();
             // If the edge is reversed (ORIENTED_EDGE orientation=.F.),
             // reverse the point sequence to match the traversal direction.
             if edge.param_range.0 > edge.param_range.1 {
-                result.reverse();
+                pts.reverse();
+                // Reverse params and map: old param p → new param 1-p
+                params = params.into_iter().map(|p| 1.0 - p).collect();
             }
-            return result;
+            return (pts, params);
         }
 
         // Cache miss: always discretize in forward direction (param_range.0 < param_range.1).
@@ -142,8 +158,8 @@ impl StepEdgeCache {
             edge.clone()
         };
 
-        let pts = self.adaptive_discretize(&forward_edge, n_samples.max(2));
-        if pts.is_empty() {
+        let disc = self.adaptive_discretize(&forward_edge, n_samples.max(2));
+        if disc.points_3d.is_empty() {
             let curve_type = match &edge.curve {
                 Some(Curve3d::Line(_)) => "Line",
                 Some(Curve3d::Circle(_)) => "Circle",
@@ -155,25 +171,24 @@ impl StepEdgeCache {
             log::warn!("edge_cache: discretize(step_id={}, n_samples={}) returned empty — curve type: {}",
                 step_edge_id, n_samples, curve_type);
         }
-        // Cache the forward-direction points
-        self.entries.insert(step_edge_id, pts.clone());
+        // Cache the forward-direction discretization
+        self.entries.insert(step_edge_id, disc.clone());
 
         // If the original edge was reversed, reverse the result
         if edge.param_range.0 > edge.param_range.1 {
-            pts.into_iter().rev().collect()
+            let mut pts = disc.points_3d;
+            let mut params = disc.params;
+            pts.reverse();
+            params = params.into_iter().map(|p| 1.0 - p).collect();
+            (pts, params)
         } else {
-            pts
+            (disc.points_3d, disc.params)
         }
     }
 
     /// Check if an edge is already in the cache.
     fn contains(&self, step_edge_id: i64) -> bool {
         self.entries.contains_key(&step_edge_id)
-    }
-
-    /// Get cached points for an edge (if it exists).
-    fn get(&self, step_edge_id: i64) -> Option<&Vec<Point3d>> {
-        self.entries.get(&step_edge_id)
     }
 
     /// Number of cached edges.
@@ -184,24 +199,36 @@ impl StepEdgeCache {
     /// Adaptively discretize an edge based on curve curvature.
     /// Starts with uniformly-spaced points, then recursively subdivides
     /// where chord deviation exceeds a threshold.
-    fn adaptive_discretize(&self, edge: &TopoEdge, n_samples: usize) -> Vec<Point3d> {
+    ///
+    /// Returns `StepEdgeDiscretization` with both 3D points and their
+    /// normalized parameter values [0, 1]. These params are CRUCIAL for
+    /// correct UV computation via PCURVE — they must reflect the actual
+    /// curve parameter at each point, NOT the uniform index fraction.
+    fn adaptive_discretize(&self, edge: &TopoEdge, n_samples: usize) -> StepEdgeDiscretization {
         let curve = match &edge.curve {
             Some(c) => c,
             None => {
                 // No curve geometry — just use start/end points
                 let (p0, p1) = match (edge.start_point(), edge.end_point()) {
                     (Some(a), Some(b)) => (a, b),
-                    _ => return vec![],
+                    _ => return StepEdgeDiscretization { points_3d: vec![], params: vec![] },
                 };
-                return vec![p0, p1];
+                return StepEdgeDiscretization {
+                    points_3d: vec![p0, p1],
+                    params: vec![0.0, 1.0],
+                };
             }
         };
 
         let (t_min, t_max) = edge.param_range;
+        let t_range = t_max - t_min;
 
         // For line edges, just return endpoints
         if matches!(curve, Curve3d::Line(_)) {
-            return vec![curve.point_at(t_min), curve.point_at(t_max)];
+            return StepEdgeDiscretization {
+                points_3d: vec![curve.point_at(t_min), curve.point_at(t_max)],
+                params: vec![0.0, 1.0],
+            };
         }
 
         // Adaptive subdivision threshold: 10× absolute tolerance as chord deviation
@@ -210,13 +237,18 @@ impl StepEdgeCache {
         // Start with uniformly spaced points
         let n_initial = n_samples.min(256).max(2);
         let mut points: Vec<Point3d> = Vec::with_capacity(n_initial);
+        let mut t_params: Vec<f64> = Vec::with_capacity(n_initial); // normalized [0, 1]
 
         for i in 0..n_initial {
-            let t = t_min + (t_max - t_min) * i as f64 / (n_initial - 1) as f64;
+            let t_norm = i as f64 / (n_initial - 1) as f64;
+            let t = t_min + t_norm * t_range;
             points.push(curve.point_at(t));
+            t_params.push(t_norm);
         }
 
         // Refine: check chord deviation and subdivide where needed
+        // Track actual parameter values alongside points to ensure
+        // correct UV computation from PCURVE later.
         let mut refined = true;
         let mut refinement_passes = 0;
         let max_refinement_passes = 5;
@@ -230,25 +262,29 @@ impl StepEdgeCache {
             while i < points.len() - 1 && points.len() < max_points {
                 let p0 = points[i];
                 let p2 = points[i + 1];
-                let t_mid = (t_min + t_max * 0.5); // simplified midpoint
-                let t0 = t_min + (t_max - t_min) * i as f64 / (points.len() - 1) as f64;
-                let t1 = t_min + (t_max - t_min) * (i + 1) as f64 / (points.len() - 1) as f64;
-                let t_mid_actual = (t0 + t1) * 0.5;
+                // Compute the ACTUAL midpoint parameter from tracked params
+                let t_mid_norm = (t_params[i] + t_params[i + 1]) * 0.5;
+                let t_mid_actual = t_min + t_mid_norm * t_range;
                 let p_mid = curve.point_at(t_mid_actual);
 
                 let deviation = point_to_chord_distance_3d(&p_mid, &p0, &p2);
 
                 if deviation > max_deviation {
+                    // Insert midpoint with its correct parameter value
                     points.insert(i + 1, p_mid);
+                    t_params.insert(i + 1, t_mid_norm);
                     refined = true;
-                    i += 2;
+                    i += 2; // Skip the newly inserted point
                 } else {
                     i += 1;
                 }
             }
         }
 
-        points
+        StepEdgeDiscretization {
+            points_3d: points,
+            params: t_params,
+        }
     }
 }
 
@@ -6805,9 +6841,9 @@ impl<'a> StepConverter<'a> {
             let curve_2d = face_data.edge_curves_2d.get(edge_idx).and_then(|c| c.as_ref());
 
             if step_id != 0 {
-                let pts = edge_cache.discretize(step_id, edge, n_samples);
-                // Compute UV for each boundary point
-                let uvs = self.compute_edge_uvs(&pts, edge, &face_data.surface, curve_2d);
+                let (pts, params) = edge_cache.discretize(step_id, edge, n_samples);
+                // Compute UV for each boundary point using actual parameter values
+                let uvs = self.compute_edge_uvs_with_points(&params, &pts, &face_data.surface, curve_2d);
                 boundary_points.extend(pts);
                 boundary_uvs.extend(uvs);
             } else {
@@ -6833,8 +6869,8 @@ impl<'a> StepConverter<'a> {
                         let curve_2d = self.find_curve_2d_for_edge(edge, face_data);
 
                         if step_id != 0 {
-                            let pts = edge_cache.discretize(step_id, edge, n_samples);
-                            let uvs = self.compute_edge_uvs(&pts, edge, &face_data.surface, curve_2d);
+                            let (pts, params) = edge_cache.discretize(step_id, edge, n_samples);
+                            let uvs = self.compute_edge_uvs_with_points(&params, &pts, &face_data.surface, curve_2d);
                             hole_pts.extend(pts);
                             hole_uvs.extend(uvs);
                         } else {
@@ -6861,8 +6897,8 @@ impl<'a> StepConverter<'a> {
                 let curve_2d = face_data.edge_curves_2d.get(edge_idx).and_then(|c| c.as_ref());
 
                 if step_id != 0 {
-                    let pts = edge_cache.discretize(step_id, edge, n_samples);
-                    let uvs = self.compute_edge_uvs(&pts, edge, &face_data.surface, curve_2d);
+                    let (pts, params) = edge_cache.discretize(step_id, edge, n_samples);
+                    let uvs = self.compute_edge_uvs_with_points(&params, &pts, &face_data.surface, curve_2d);
                     boundary_points.extend(pts);
                     boundary_uvs.extend(uvs);
                 } else {
@@ -7052,7 +7088,7 @@ impl<'a> StepConverter<'a> {
             let step_id = outer_step_ids.get(edge_idx).copied().unwrap_or(0);
             let n_samples = self.edge_sample_count(edge);
             if step_id != 0 {
-                let pts = edge_cache.discretize(step_id, edge, n_samples);
+                let (pts, _params) = edge_cache.discretize(step_id, edge, n_samples);
                 outer_points_3d.extend(pts);
             } else {
                 outer_points_3d.extend(self.sample_edge_points(edge));
@@ -7093,7 +7129,7 @@ impl<'a> StepConverter<'a> {
                 let step_id = step_ids.and_then(|ids| ids.get(edge_idx).copied()).unwrap_or(0);
                 let n_samples = self.edge_sample_count(edge);
                 if step_id != 0 {
-                    let pts = edge_cache.discretize(step_id, edge, n_samples);
+                    let (pts, _params) = edge_cache.discretize(step_id, edge, n_samples);
                     hp3d.extend(pts);
                 } else {
                     hp3d.extend(self.sample_edge_points(edge));
@@ -7265,13 +7301,15 @@ impl<'a> StepConverter<'a> {
     /// On WASM, we use fewer samples to reduce the number of expensive project_point
     /// calls during UV-space triangulation of curved surfaces.
     fn edge_sample_count(&self, edge: &TopoEdge) -> usize {
-        // Use same sample counts on all platforms for consistent results
+        // Use same sample counts on all platforms for consistent results.
+        // Keeping these moderate to avoid excessive boundary points that
+        // slow down triangulation without improving quality.
         match &edge.curve {
             Some(Curve3d::Line(_)) => 2,
-            Some(Curve3d::Circle(_)) => 36,
-            Some(Curve3d::Ellipse(_)) => 36,
-            Some(Curve3d::Arc(_)) => 24,
-            Some(Curve3d::Nurbs(_)) => 48,
+            Some(Curve3d::Circle(_)) => 24,
+            Some(Curve3d::Ellipse(_)) => 24,
+            Some(Curve3d::Arc(_)) => 16,
+            Some(Curve3d::Nurbs(_)) => 32,
             None => 2,
         }
     }
@@ -7347,38 +7385,46 @@ impl<'a> StepConverter<'a> {
         (pts_3d, pts_uv)
     }
 
-    /// Compute UV coordinates for a set of already-discretized 3D edge points.
+    /// Compute UV coordinates for a set of already-discretized edge points.
     ///
     /// Uses the analytical PCURVE (`curve_2d`) if available for accurate UV,
     /// otherwise falls back to `surface.project_point()`.
-    fn compute_edge_uvs(
+    ///
+    /// # Arguments
+    /// * `params` — Normalized parameter values [0, 1] for each point, as returned
+    ///   by `StepEdgeCache::discretize()`. These are the ACTUAL parameter positions
+    ///   on the edge curve — NOT uniform index fractions — and must be used for
+    ///   correct PCURVE evaluation.
+    /// * `points_3d` — The 3D points corresponding to the params. Used for
+    ///   the no-PCURVE fallback (surface.project_point).
+    /// * `surface` — The surface of the face (for fallback projection).
+    /// * `curve_2d` — Optional analytical PCURVE in UV space.
+    fn compute_edge_uvs_with_points(
         &self,
+        params: &[f64],
         points_3d: &[Point3d],
-        edge: &TopoEdge,
         surface: &Surface,
         curve_2d: Option<&Curve2d>,
     ) -> Vec<Point2d> {
         if let Some(c2d) = curve_2d {
-            let (t_min, t_max) = c2d.param_range();
-            let (e_min, e_max) = edge.param_range;
-            let (pmin, pmax) = if e_min <= e_max { (e_min, e_max) } else { (e_max, e_min) };
-            let e_range = pmax - pmin;
+            let (c2d_t_min, c2d_t_max) = c2d.param_range();
 
-            // Map each 3D point back to its parameter on the edge, then evaluate
-            // the curve_2d at the corresponding parameter.
-            // Since we know the points were sampled uniformly, we can reconstruct
-            // the parameter values.
-            points_3d.iter().enumerate().map(|(i, _)| {
-                let t_frac = if points_3d.len() > 1 {
-                    i as f64 / (points_3d.len() - 1) as f64
-                } else {
-                    0.0
-                };
-                let curve_t = t_min + t_frac * (t_max - t_min);
+            // Map each normalized parameter [0,1] to the curve_2d parameter range
+            // and evaluate the PCURVE to get UV coordinates.
+            //
+            // IMPORTANT: The params are the ACTUAL parameter positions from
+            // adaptive discretization (not uniform index fractions). Using
+            // uniform fractions after adaptive refinement was the root cause
+            // of incorrect NURBS face triangulation — the midpoints inserted
+            // by adaptive refinement would shift all subsequent point indices,
+            // causing wrong UV coordinates for the entire edge.
+            params.iter().map(|&t_norm| {
+                let curve_t = c2d_t_min + t_norm * (c2d_t_max - c2d_t_min);
                 c2d.point_at(curve_t)
             }).collect()
         } else {
-            // No PCURVE — project 3D points to surface
+            // No PCURVE — project 3D points to surface.
+            // The 3D points are already computed by discretize(), so we use them directly.
             points_3d.iter().map(|p| {
                 let (u, v) = surface.project_point(p);
                 Point2d::new(u, v)
