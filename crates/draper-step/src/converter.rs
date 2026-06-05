@@ -7366,12 +7366,15 @@ impl<'a> StepConverter<'a> {
         // Use same sample counts on all platforms for consistent results.
         // Keeping these moderate to avoid excessive boundary points that
         // slow down triangulation without improving quality.
+        // NOTE: The adaptive_discretize in StepEdgeCache will add more points
+        // only where chord deviation exceeds tolerance (max 64 pts/edge),
+        // so the initial count can be relatively low.
         match &edge.curve {
             Some(Curve3d::Line(_)) => 2,
-            Some(Curve3d::Circle(_)) => 24,
-            Some(Curve3d::Ellipse(_)) => 24,
-            Some(Curve3d::Arc(_)) => 16,
-            Some(Curve3d::Nurbs(_)) => 32,
+            Some(Curve3d::Circle(_)) => 16,
+            Some(Curve3d::Ellipse(_)) => 16,
+            Some(Curve3d::Arc(_)) => 12,
+            Some(Curve3d::Nurbs(_)) => 16,
             None => 2,
         }
     }

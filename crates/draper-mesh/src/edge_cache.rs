@@ -58,7 +58,7 @@ impl EdgeDiscretizationCache {
         Self {
             entries: HashMap::new(),
             tol_ctx: ToleranceContext::new(),
-            max_samples: 256,
+            max_samples: 64,
         }
     }
 

@@ -441,6 +441,46 @@ pub fn generate_interior_points(
     points
 }
 
+/// Downsample a polyline (3D + UV) to at most `max_points` points while
+/// preserving the overall shape. Uses uniform stride sampling which is
+/// fast and preserves the polygon's general form.
+///
+/// Returns downsampled (3D, UV) point arrays.
+pub fn downsample_polyline(
+    points_3d: &[Point3d],
+    points_uv: &[Point2d],
+    max_points: usize,
+) -> (Vec<Point3d>, Vec<Point2d>) {
+    if points_3d.len() <= max_points || max_points < 3 {
+        return (points_3d.to_vec(), points_uv.to_vec());
+    }
+
+    let n = points_3d.len();
+    let mut result_3d = Vec::with_capacity(max_points);
+    let mut result_uv = Vec::with_capacity(max_points);
+
+    // Always include the first point
+    result_3d.push(points_3d[0]);
+    result_uv.push(points_uv[0]);
+
+    // Uniform stride for interior points
+    let stride = (n - 1) as f64 / (max_points - 1) as f64;
+    let mut next_idx: f64 = 1.0;
+    for _i in 1..max_points - 1 {
+        let idx = next_idx.round() as usize;
+        let idx = idx.min(n - 2).max(1); // Clamp to valid interior range
+        result_3d.push(points_3d[idx]);
+        result_uv.push(points_uv[idx]);
+        next_idx += stride;
+    }
+
+    // Always include the last point
+    result_3d.push(points_3d[n - 1]);
+    result_uv.push(points_uv[n - 1]);
+
+    (result_3d, result_uv)
+}
+
 /// Generate interior UV points for NURBS surfaces, respecting knot ranges.
 pub fn generate_nurbs_interior_points(
     domain: &ParametricDomain,
@@ -523,7 +563,7 @@ pub fn triangulate_surface_uv_cdt(
     }
 
     // Downsample boundary points to prevent O(n²) blowup
-    let max_boundary_points = 500;
+    let max_boundary_points = 150;
     let boundary_points = if boundary_points.len() > max_boundary_points {
         let step = boundary_points.len() as f64 / max_boundary_points as f64;
         let sampled: Vec<Point3d> = (0..max_boundary_points)
@@ -535,7 +575,7 @@ pub fn triangulate_surface_uv_cdt(
     };
 
     // Also downsample hole polylines
-    let max_hole_points = 200;
+    let max_hole_points = 50;
     let hole_polylines_downsampled: Vec<Vec<Point3d>> = hole_polylines.iter()
         .map(|hole| {
             if hole.len() > max_hole_points {
@@ -686,58 +726,70 @@ pub fn triangulate_surface_consistent(
     // For NURBS surfaces, project_point() can return inaccurate UV
     // coordinates. We validate by checking that surface.point_at(uv)
     // is close to the original 3D point. If not, we re-project.
+    //
+    // OPTIMIZATION: For degree-1 (ruled/linear) NURBS surfaces, skip
+    // the expensive per-point Newton-Raphson re-projection since these
+    // surfaces are simple and UV errors don't affect triangulation quality.
     // ============================================================
     let mut outer_uv = boundary_uvs.to_vec();
     if let Surface::Nurbs(ref nurbs) = surface {
-        let (nurb_u_min, nurb_u_max) = nurbs.u_range();
-        let (nurb_v_min, nurb_v_max) = nurbs.v_range();
-        let nurb_diag = {
-            let p0 = surface.point_at(nurb_u_min, nurb_v_min);
-            let p1 = surface.point_at(nurb_u_max, nurb_v_max);
-            let dx = p1.x - p0.x; let dy = p1.y - p0.y; let dz = p1.z - p0.z;
-            (dx*dx + dy*dy + dz*dz).sqrt().max(1e-10)
-        };
-        let uv_tolerance = nurb_diag * 0.01; // 1% of surface diagonal
+        let u_deg = nurbs.u_degree;
+        let v_deg = nurbs.v_degree;
 
-        let mut fixed_count = 0;
-        for (i, uv) in outer_uv.iter_mut().enumerate() {
-            // Check if UV is within the valid NURBS parameter range
-            let uv_in_range = uv.u >= nurb_u_min - 1e-6 && uv.u <= nurb_u_max + 1e-6
-                && uv.v >= nurb_v_min - 1e-6 && uv.v <= nurb_v_max + 1e-6;
+        // For bilinear (deg=1×1) or ruled (deg=1 in one dir) NURBS,
+        // the surface is simple enough that UV re-projection is rarely needed
+        // and when it is, the initial project_point() is usually close enough.
+        if u_deg > 1 || v_deg > 1 {
+            let (nurb_u_min, nurb_u_max) = nurbs.u_range();
+            let (nurb_v_min, nurb_v_max) = nurbs.v_range();
+            let nurb_diag = {
+                let p0 = surface.point_at(nurb_u_min, nurb_v_min);
+                let p1 = surface.point_at(nurb_u_max, nurb_v_max);
+                let dx = p1.x - p0.x; let dy = p1.y - p0.y; let dz = p1.z - p0.z;
+                (dx*dx + dy*dy + dz*dz).sqrt().max(1e-10)
+            };
+            let uv_tolerance = nurb_diag * 0.01; // 1% of surface diagonal
 
-            if uv_in_range {
-                // Check reprojection error
-                let p3d = surface.point_at(uv.u, uv.v);
-                let dx = p3d.x - boundary_points_3d[i].x;
-                let dy = p3d.y - boundary_points_3d[i].y;
-                let dz = p3d.z - boundary_points_3d[i].z;
-                let err = (dx*dx + dy*dy + dz*dz).sqrt();
+            let mut fixed_count = 0;
+            for (i, uv) in outer_uv.iter_mut().enumerate() {
+                // Check if UV is within the valid NURBS parameter range
+                let uv_in_range = uv.u >= nurb_u_min - 1e-6 && uv.u <= nurb_u_max + 1e-6
+                    && uv.v >= nurb_v_min - 1e-6 && uv.v <= nurb_v_max + 1e-6;
 
-                if err > uv_tolerance {
-                    // UV is inaccurate — re-project using Newton from this guess
-                    let (new_u, new_v) = reproject_nurbs_point(nurbs, &boundary_points_3d[i], uv.u, uv.v);
-                    let new_p = surface.point_at(new_u, new_v);
-                    let new_dx = new_p.x - boundary_points_3d[i].x;
-                    let new_dy = new_p.y - boundary_points_3d[i].y;
-                    let new_dz = new_p.z - boundary_points_3d[i].z;
-                    let new_err = (new_dx*new_dx + new_dy*new_dy + new_dz*new_dz).sqrt();
-                    if new_err < err {
-                        uv.u = new_u;
-                        uv.v = new_v;
-                        fixed_count += 1;
+                if uv_in_range {
+                    // Check reprojection error
+                    let p3d = surface.point_at(uv.u, uv.v);
+                    let dx = p3d.x - boundary_points_3d[i].x;
+                    let dy = p3d.y - boundary_points_3d[i].y;
+                    let dz = p3d.z - boundary_points_3d[i].z;
+                    let err = (dx*dx + dy*dy + dz*dz).sqrt();
+
+                    if err > uv_tolerance {
+                        // UV is inaccurate — re-project using Newton from this guess
+                        let (new_u, new_v) = reproject_nurbs_point(nurbs, &boundary_points_3d[i], uv.u, uv.v);
+                        let new_p = surface.point_at(new_u, new_v);
+                        let new_dx = new_p.x - boundary_points_3d[i].x;
+                        let new_dy = new_p.y - boundary_points_3d[i].y;
+                        let new_dz = new_p.z - boundary_points_3d[i].z;
+                        let new_err = (new_dx*new_dx + new_dy*new_dy + new_dz*new_dz).sqrt();
+                        if new_err < err {
+                            uv.u = new_u;
+                            uv.v = new_v;
+                            fixed_count += 1;
+                        }
                     }
+                } else {
+                    // UV is completely out of range — full re-projection needed
+                    let (new_u, new_v) = surface.project_point(&boundary_points_3d[i]);
+                    uv.u = new_u;
+                    uv.v = new_v;
+                    fixed_count += 1;
                 }
-            } else {
-                // UV is completely out of range — full re-projection needed
-                let (new_u, new_v) = surface.project_point(&boundary_points_3d[i]);
-                uv.u = new_u;
-                uv.v = new_v;
-                fixed_count += 1;
             }
-        }
-        if fixed_count > 0 {
-            log::debug!("triangulate_surface_consistent: fixed {} of {} NURBS boundary UVs (tol={:.6})",
-                fixed_count, outer_uv.len(), uv_tolerance);
+            if fixed_count > 0 {
+                log::debug!("triangulate_surface_consistent: fixed {} of {} NURBS boundary UVs (tol={:.6})",
+                    fixed_count, outer_uv.len(), uv_tolerance);
+            }
         }
     }
 
@@ -835,18 +887,70 @@ pub fn triangulate_surface_consistent(
     domain.init_containment_grid();
 
     // ============================================================
+    // Step 2.5: Downsample boundary and hole points to prevent
+    // triangle explosion.
+    //
+    // The edge cache can produce up to 64 points per edge, and a face
+    // with 8+ edges can have 500+ boundary points. When all of these
+    // are passed to earcutr, the resulting triangle count explodes.
+    //
+    // Solution: Before triangulation, downsample boundary and hole
+    // points to a reasonable count that fits within the triangle budget.
+    // earcutr produces ~2× points triangles, so we want total points
+    // (boundary + holes + interior) ≤ max_face_triangles / 2.
+    //
+    // Inspired by STP2X3D's approach: Open CASCADE's BRepMesh uses
+    // deflection-based control, not boundary point count. We achieve
+    // a similar effect by limiting total vertex count.
+    // ============================================================
+    let max_total_points = (params.max_face_triangles / 2).max(6);
+    // Reserve budget: boundary + holes should use at most 60% of total
+    let max_boundary_and_holes = (max_total_points * 3 / 5).max(6);
+    let max_boundary = (max_boundary_and_holes * 3 / 4).max(4);
+    let max_per_hole = (max_boundary_and_holes / 4).max(4).min(50);
+
+    // Downsample outer boundary
+    let (boundary_points_3d, outer_uv) = if boundary_points_3d.len() > max_boundary {
+        log::debug!(
+            "triangulate_surface_consistent: downsampling boundary from {} to {} points",
+            boundary_points_3d.len(), max_boundary
+        );
+        downsample_polyline(boundary_points_3d, &outer_uv, max_boundary)
+    } else {
+        (boundary_points_3d.to_vec(), outer_uv)
+    };
+
+    // Downsample each hole polyline
+    let mut normalized_holes_uv_capped: Vec<Vec<Point2d>> = Vec::new();
+    let mut hole_polylines_3d_capped: Vec<Vec<Point3d>> = Vec::new();
+    for (h3d, huv) in hole_polylines_3d.iter().zip(normalized_holes_uv.iter()) {
+        if h3d.len() > max_per_hole {
+            let (capped_3d, capped_uv) = downsample_polyline(h3d, huv, max_per_hole);
+            hole_polylines_3d_capped.push(capped_3d);
+            normalized_holes_uv_capped.push(capped_uv);
+        } else {
+            hole_polylines_3d_capped.push(h3d.clone());
+            normalized_holes_uv_capped.push(huv.clone());
+        }
+    }
+
+    // ============================================================
     // Step 3: Generate interior grid points
     //
     // For NURBS surfaces, use knot-span-aware interior points
     // for better surface approximation.
     //
     // IMPORTANT: We strictly limit the number of interior points
-    // to prevent triangle explosion. The max_face_triangles budget
-    // controls how many interior points are allowed — earcutr
-    // produces ~2× points triangles, so we cap interior points
-    // at max_face_triangles/4.
+    // to prevent triangle explosion. The budget is computed as:
+    // max_face_triangles/2 minus boundary+hole points already used.
     // ============================================================
-    let max_interior_budget = params.max_face_triangles / 4;
+    let n_boundary_and_holes = boundary_points_3d.len()
+        + hole_polylines_3d_capped.iter().map(|h| h.len()).sum::<usize>();
+    let max_interior_budget = if max_total_points > n_boundary_and_holes {
+        max_total_points - n_boundary_and_holes
+    } else {
+        0 // Boundary already uses up the budget
+    };
 
     let interior_uv_points = if let Surface::Nurbs(ref nurbs) = surface {
         let (n_u, n_v) = if params.adaptive {
@@ -927,26 +1031,13 @@ pub fn triangulate_surface_consistent(
 
     // Build combined point array: [boundary_uv...][hole_uv...][interior_uv...]
     let mut all_uv: Vec<Point2d> = outer_uv.clone();
-    for huv in &normalized_holes_uv {
+    for huv in &normalized_holes_uv_capped {
         all_uv.extend_from_slice(huv);
     }
-    let n_boundary_and_holes = all_uv.len();
+    let n_boundary_and_holes_actual = all_uv.len();
 
-    // Add interior points as Steiner points
-    // CAP: Limit total points to prevent triangle explosion.
-    // earcutr produces ~2× points triangles, so we cap interior points
-    // so that total triangles stay within max_face_triangles.
-    let max_interior = if params.max_face_triangles > n_boundary_and_holes * 2 {
-        (params.max_face_triangles / 2).saturating_sub(n_boundary_and_holes)
-    } else {
-        0 // Boundary already uses up the budget
-    };
-    let interior_capped: &[Point2d] = if interior_uv_points.len() > max_interior {
-        &interior_uv_points[..max_interior]
-    } else {
-        &interior_uv_points
-    };
-    all_uv.extend_from_slice(interior_capped);
+    // Add interior points as Steiner points — already capped by max_interior_budget
+    all_uv.extend_from_slice(&interior_uv_points);
 
     // Build flat coordinate array for earcutr
     let mut coords: Vec<f64> = Vec::with_capacity(all_uv.len() * 2);
@@ -958,7 +1049,7 @@ pub fn triangulate_surface_consistent(
     // Hole indices (point into the combined array)
     let mut hole_start_indices: Vec<usize> = Vec::new();
     let mut offset = n_boundary;
-    for huv in &normalized_holes_uv {
+    for huv in &normalized_holes_uv_capped {
         if huv.len() < 3 {
             continue;
         }
@@ -992,8 +1083,8 @@ pub fn triangulate_surface_consistent(
     // ============================================================
 
     // Build combined 3D point array for boundary + hole vertices
-    let mut all_boundary_3d: Vec<Point3d> = boundary_points_3d.to_vec();
-    for h3d in hole_polylines_3d {
+    let mut all_boundary_3d: Vec<Point3d> = boundary_points_3d.clone();
+    for h3d in &hole_polylines_3d_capped {
         all_boundary_3d.extend_from_slice(h3d);
     }
 
@@ -1015,7 +1106,7 @@ pub fn triangulate_surface_consistent(
         for (k, &idx) in tri.iter().enumerate() {
             let idx_usize = idx as usize;
             let entry = vertex_map.entry(idx).or_insert_with(|| {
-                if idx_usize < n_boundary_and_holes {
+                if idx_usize < n_boundary_and_holes_actual {
                     // Boundary/hole vertex: use cached 3D point directly
                     // This is what makes the mesh watertight — shared edge
                     // vertices have bit-identical 3D positions
