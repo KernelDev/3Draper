@@ -116,3 +116,16 @@ Stage Summary:
 - Key insight: boundary vertices from StepEdgeCache used directly (not re-projected)
 - UV coordinates from PCURVE ensure accurate parametric domain for curved surfaces
 - Watertight mesh guaranteed by consistent boundary + constraint-based triangulation
+---
+Task ID: 1
+Agent: main
+Task: Fix GPU buffer overflow crash, reduce triangle count, improve watertightness, fix NURBS low-degree handling
+
+Work Log:
+- Fixed GPU buffer overflow with dynamic device limits
+- Reduced triangle count (2000->1000 max_face_triangles, 32->24 max samples)
+- Added deflection-based scaling (0.1% bbox diagonal)
+- Fixed NURBS low-degree handling (2 subdivisions for deg<=1)
+- Improved watertightness with bbox-scaled merge tolerance
+- Pushed commit 3714ec1 to GitHub
+
