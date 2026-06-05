@@ -165,7 +165,7 @@ impl Default for TriangulationParams {
             adaptive: true,
             parallel: false,
             progress_callback: None,
-            max_face_triangles: 1000,
+            max_face_triangles: 2000,
         }
     }
 }
@@ -2400,6 +2400,13 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
                 )
             }
         }
+        Surface::Cylinder(cyl) => {
+            // Cylinder: use grid-based triangulation with boundary snapping
+            // The general consistent path doesn't handle cylindrical periodicity well
+            triangulate_cylinder_face_with_boundary_uv(
+                cyl, boundary_points, boundary_uvs, hole_polylines, hole_uvs, forward, params,
+            )
+        }
         Surface::Cone(cone) => {
             // Cone: must handle apex degeneracy
             triangulate_cone_face_with_boundary_uv(
@@ -2413,7 +2420,8 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
             )
         }
         _ => {
-            // Other curved surfaces: use the consistent UV-space triangulation
+            // Other curved surfaces (NURBS, Torus, Revolution, Extrusion):
+            // use the consistent UV-space triangulation
             crate::parametric_domain::triangulate_surface_consistent(
                 surface,
                 boundary_points,
@@ -2546,6 +2554,114 @@ fn triangulate_plane_with_boundary_and_holes_uv(
         Direction3d::new(-plane.normal.x, -plane.normal.y, -plane.normal.z).unwrap_or(Direction3d::Z)
     };
     mesh.face_normals = Some(vec![[normal.x, normal.y, normal.z]; mesh.triangles.len()]);
+
+    mesh
+}
+
+/// Triangulate a cylinder face with pre-computed UV coordinates.
+///
+/// Uses grid-based triangulation that respects cylindrical periodicity
+/// (periodic in u with period 2π). The cached boundary 3D points are
+/// snapped to the grid's top/bottom rows to maintain watertightness.
+///
+/// This is preferred over the general `triangulate_surface_consistent()` path
+/// for cylinders because:
+/// 1. It handles the u-periodicity (seam at u=0/2π) correctly
+/// 2. It produces a clean grid topology without depending on UV projection accuracy
+/// 3. It's much faster than earcutr-based triangulation
+fn triangulate_cylinder_face_with_boundary_uv(
+    cyl: &CylinderSurface,
+    boundary_points: &[Point3d],
+    _boundary_uvs: &[Point2d],
+    _hole_polylines: &[Vec<Point3d>],
+    _hole_uvs: &[Vec<Point2d>],
+    forward: bool,
+    params: &TriangulationParams,
+) -> TriangleMesh {
+    if boundary_points.is_empty() {
+        return TriangleMesh::new();
+    }
+
+    // Determine UV range from boundary 3D points
+    let (u_min, u_max, v_min, v_max) = cylinder_uv_range(cyl, boundary_points);
+    let u_range = u_max - u_min;
+
+    // Cylinder is periodic in u. If boundary doesn't cover more than ~half
+    // the period, assume the face needs the full period.
+    let full_circle = if u_range > 1.5 * PI {
+        u_range > 1.9 * PI
+    } else {
+        true
+    };
+
+    let u_start = if full_circle { 0.0 } else { u_min };
+    let u_end = if full_circle { 2.0 * PI } else { u_max };
+
+    let (n_u, n_v) = if params.adaptive {
+        crate::adaptive::required_samples(
+            &Surface::Cylinder(cyl.clone()), u_start, u_end, v_min, v_max,
+            params.max_deviation, params.detail_level,
+        )
+    } else {
+        let n_u = if full_circle { params.angular_samples } else { params.angular_samples.min(48) };
+        (n_u, params.height_samples.max(2))
+    };
+
+    let mut mesh = TriangleMesh::new();
+
+    // Generate vertices: n_v+1 rows (from v_min to v_max inclusive)
+    for j in 0..=n_v {
+        for i in 0..n_u {
+            let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
+            let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
+            let p = cyl.point_at(u, v);
+            let n = cyl.normal_at(u, v);
+            let idx = mesh.add_vertex(p);
+            mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+        }
+    }
+
+    // Snap boundary row vertices to the cached edge curve 3D points.
+    // This is what makes the mesh watertight — shared edge vertices have
+    // bit-identical 3D positions because they come from the same edge cache.
+    let bottom_ring = extract_boundary_ring_at_v(
+        boundary_points, cyl, v_min, n_u, full_circle, u_start, u_end,
+    );
+    let top_ring = extract_boundary_ring_at_v(
+        boundary_points, cyl, v_max, n_u, full_circle, u_start, u_end,
+    );
+
+    if !bottom_ring.is_empty() && n_u == bottom_ring.len() {
+        for i in 0..n_u {
+            mesh.vertices[i] = bottom_ring[i];
+        }
+    }
+    if !top_ring.is_empty() && n_u == top_ring.len() {
+        let offset = n_v * n_u;
+        for i in 0..n_u {
+            mesh.vertices[offset + i] = top_ring[i];
+        }
+    }
+
+    // Generate triangles
+    let n_u_loop = if full_circle { n_u } else { n_u - 1 };
+    for j in 0..n_v {
+        for i in 0..n_u_loop {
+            let i_next = (i + 1) % n_u;
+            let v0 = (j * n_u + i) as u32;
+            let v1 = (j * n_u + i_next) as u32;
+            let v2 = ((j + 1) * n_u + i_next) as u32;
+            let v3 = ((j + 1) * n_u + i) as u32;
+
+            if forward {
+                mesh.add_triangle(v0, v1, v2);
+                mesh.add_triangle(v0, v2, v3);
+            } else {
+                mesh.add_triangle(v0, v2, v1);
+                mesh.add_triangle(v0, v3, v2);
+            }
+        }
+    }
 
     mesh
 }

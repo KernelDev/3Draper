@@ -7100,6 +7100,22 @@ impl<'a> StepConverter<'a> {
             return mesh;
         }
 
+        // Snap boundary points onto the plane to eliminate numerical drift
+        // from edge curve sampling. Without this, vertices can be slightly off-plane,
+        // causing visible "wavy" artifacts on what should be a perfectly flat surface.
+        let snap_to_plane = |p: &Point3d| -> Point3d {
+            let dx = p.x - plane.origin.x;
+            let dy = p.y - plane.origin.y;
+            let dz = p.z - plane.origin.z;
+            let dist = dx * plane.normal.x + dy * plane.normal.y + dz * plane.normal.z;
+            Point3d::new(
+                p.x - dist * plane.normal.x,
+                p.y - dist * plane.normal.y,
+                p.z - dist * plane.normal.z,
+            )
+        };
+        outer_points_3d = outer_points_3d.iter().map(|p| snap_to_plane(p)).collect();
+
         // Log diagnostic info for complex planar faces
         if !inner_loops.is_empty() {
             log::info!("planar_face_with_holes: {} outer pts, {} holes, {} outer edges",
@@ -7137,6 +7153,8 @@ impl<'a> StepConverter<'a> {
             }
             if !hp3d.is_empty() {
                 hp3d = deduplicate_points_3d(&hp3d, 1e-6);
+                // Snap hole points onto the plane (same as outer boundary)
+                hp3d = hp3d.iter().map(|p| snap_to_plane(p)).collect();
                 let hp2d: Vec<Point2d> = hp3d.iter().map(|p| project(p)).collect();
                 hole_points_3d.push(hp3d);
                 hole_points_2d.push(hp2d);

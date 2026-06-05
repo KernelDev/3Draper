@@ -156,10 +156,10 @@ impl ParametricDomain {
     /// Initialize the containment grid for fast contains() checks.
     pub fn init_containment_grid(&mut self) {
         if self.containment_grid.is_none() {
-            // Use a 16×16 grid — coarse enough to be fast, fine enough
-            // for accurate interior point generation. The previous 24×24
-            // was unnecessarily fine and slowed down face processing.
-            self.containment_grid = Some(ContainmentGrid::new(self, 16));
+            // Use a 24×24 grid — fine enough for accurate interior point
+            // generation, especially for complex NURBS boundaries where
+            // a coarser grid marks valid interior points as "outside".
+            self.containment_grid = Some(ContainmentGrid::new(self, 24));
         }
     }
 
@@ -368,6 +368,44 @@ fn reproject_nurbs_point(
 /// Compute the area of a 2D triangle.
 fn triangle_area_2d(x0: f64, y0: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64 {
     ((x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)).abs() * 0.5
+}
+
+/// Compute the signed area of a 2D polygon using the shoelace formula.
+/// Returns a positive value for counter-clockwise, negative for clockwise.
+fn polygon_area_2d(polygon: &[Point2d]) -> f64 {
+    if polygon.len() < 3 {
+        return 0.0;
+    }
+    let mut area = 0.0;
+    let n = polygon.len();
+    for i in 0..n {
+        let j = (i + 1) % n;
+        area += polygon[i].u * polygon[j].v;
+        area -= polygon[j].u * polygon[i].v;
+    }
+    area.abs() * 0.5
+}
+
+/// Compute the approximate area of a 3D polygon using the Newell's method.
+/// This gives a reasonable area estimate even for non-planar polygons.
+fn polygon_area_3d(polygon: &[Point3d]) -> f64 {
+    if polygon.len() < 3 {
+        return 0.0;
+    }
+    // Compute the normal using Newell's method
+    let mut nx = 0.0_f64;
+    let mut ny = 0.0_f64;
+    let mut nz = 0.0_f64;
+    let n = polygon.len();
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let pi = &polygon[i];
+        let pj = &polygon[j];
+        nx += (pi.y - pj.y) * (pi.z + pj.z);
+        ny += (pi.z - pj.z) * (pi.x + pj.x);
+        nz += (pi.x - pj.x) * (pi.y + pj.y);
+    }
+    (nx * nx + ny * ny + nz * nz).sqrt() * 0.5
 }
 
 /// Generate interior UV grid points for a parametric domain.
@@ -723,6 +761,39 @@ pub fn triangulate_surface_consistent(
     }
 
     // ============================================================
+    // Step 1.5: Validate UV polygon quality
+    //
+    // After normalization, check if the UV polygon is degenerate or
+    // self-intersecting. This can happen when NURBS project_point()
+    // returns inaccurate UV coordinates that, after normalization,
+    // produce a polygon that doesn't match the actual surface region.
+    //
+    // If the UV polygon area is suspiciously small relative to the
+    // 3D boundary area, re-project all UVs from scratch.
+    // ============================================================
+    let uv_area = polygon_area_2d(&outer_uv);
+    let boundary_3d_area = polygon_area_3d(boundary_points_3d);
+    // If UV area is <1% of the 3D area (after normalizing both to similar scale),
+    // the UV projection is likely wrong.
+    let area_ratio = if boundary_3d_area > 1e-20 { uv_area / boundary_3d_area } else { 1.0 };
+    if area_ratio < 0.001 && boundary_3d_area > 1e-10 {
+        log::warn!(
+            "triangulate_surface_consistent: UV polygon area ({:.6}) much smaller than 3D area ({:.6}), ratio={:.6} — re-projecting UVs from scratch",
+            uv_area, boundary_3d_area, area_ratio
+        );
+        // Re-project all boundary UVs from scratch
+        outer_uv = boundary_points_3d.iter().map(|p| {
+            let (u, v) = surface.project_point(p);
+            Point2d::new(u, v)
+        }).collect();
+        // Re-normalize
+        crate::triangulate::normalize_uv_polygon(&mut outer_uv, u_period, v_period);
+        if outer_uv.len() < 3 {
+            return TriangleMesh::new();
+        }
+    }
+
+    // ============================================================
     // Step 2: Compute UV range and build domain
     // ============================================================
     let mut u_min = f64::MAX;
@@ -791,7 +862,9 @@ pub fn triangulate_surface_consistent(
         // Use knot-span subdivision for NURBS — respects the surface
         // parameterization and gives better triangulation quality.
         // n_sub controls how many points per knot span.
-        let n_sub = (n_u.max(n_v) / 4).max(2).min(8);
+        // Keep n_sub LOW to avoid triangle explosion — the max_face_triangles
+        // cap further limits the total count below.
+        let n_sub = (n_u.max(n_v) / 8).max(2).min(4);
         generate_nurbs_interior_points(&domain, &nurbs.u_knots, &nurbs.v_knots, n_sub)
     } else {
         let (n_u, n_v) = if params.adaptive {
