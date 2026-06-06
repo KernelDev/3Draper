@@ -19,7 +19,6 @@ pub mod certification;
 pub mod text3d;
 pub mod watertight;
 pub mod cdt_triangulate;
-pub mod robust_cdt;
 
 #[cfg(feature = "export-3mf")]
 pub mod export;

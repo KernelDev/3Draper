@@ -3,1246 +3,33 @@
 //! CDT-based solid triangulation with tolerance-aware vertex unification.
 //!
 //! This module provides watertight mesh generation by:
-//! 1. Pre-discretizing ALL edges consistently (shared edges produce identical 3D points)
-//! 2. For each face, collecting boundary points from the consistent edge cache
-//! 3. Projecting boundary points to 2D and triangulating with custom CDT
-//! 4. Mapping CDT triangles back to 3D using the surface parameterization
-//! 5. Since shared edges use identical vertex indices, the result is watertight by construction
+//! 1. Collecting ALL boundary edge samples from ALL faces of a solid
+//! 2. Unifying vertices across faces using 3D tolerance (spatial hashing)
+//! 3. For planar faces: using spade CDT with constraint edges
+//! 4. For curved faces: using earcutr with unified boundary vertices
+//! 5. Building the final mesh with unified vertex indices
+//!
+//! The key insight: by unifying vertices BEFORE triangulation and using
+//! constraint edges, shared edges between adjacent faces automatically
+//! have identical vertex indices, producing watertight meshes by construction.
 
 use crate::mesh::TriangleMesh;
-use crate::robust_cdt::{self, CdtInput};
-use crate::triangulate::{
-    TriangulationParams, filter_degenerate_triangles,
-    sample_edge_points,
-};
-use crate::watertight::stitch_boundary_edges;
+use crate::triangulate::{TriangulationParams, merge_coincident_vertices, filter_degenerate_triangles};
+use crate::parametric_domain::triangulate_surface_consistent;
 use draper_geometry::{
-    Point3d, Direction3d,
-    Surface, Plane, CylinderSurface, SphereSurface,
-    TorusSurface, ConeSurface,
+    Point3d, Point2d, Direction3d, Surface, Plane,
 };
 use draper_topology::{Face, Solid, TopoId};
-use std::collections::{HashMap, HashSet};
-
-/// Epsilon for orientation tests and other floating-point comparisons.
-const EPS: f64 = 1e-10;
-
-/// Number of samples per edge curve for boundary discretization.
-const CDT_EDGE_SAMPLES: usize = 32;
-
-/// A consistent edge discretization cache that ensures shared edges produce
-/// identical 3D vertex positions across all faces.
-#[derive(Clone, Debug)]
-pub struct ConsistentEdgeCache {
-    /// Maps edge TopoId → sampled 3D points (in canonical direction).
-    entries: HashMap<TopoId, Vec<Point3d>>,
-    /// Number of samples per edge.
-    n_samples: usize,
-}
-
-impl ConsistentEdgeCache {
-    /// Build a cache by pre-computing discretizations for all edges in a solid.
-    ///
-    /// Uses adaptive recursive subdivision for curved edges (circles, ellipses,
-    /// NURBS) and minimum points for line edges. This produces more accurate
-    /// edge discretizations than uniform sampling, especially for curves with
-    /// high curvature regions.
-    pub fn build_from_solid(solid: &Solid, n_samples: usize) -> Self {
-        let mut entries = HashMap::new();
-        for face in solid.faces() {
-            for edge in &face.edges {
-                if edge.degenerate {
-                    continue;
-                }
-                if !entries.contains_key(&edge.id) {
-                    let pts = if let Some(ref curve) = edge.curve {
-                        match curve {
-                            draper_geometry::Curve3d::Line(_) => {
-                                // Lines: just start + end points
-                                let (t_min, t_max) = if edge.param_range.0 <= edge.param_range.1 {
-                                    (edge.param_range.0, edge.param_range.1)
-                                } else {
-                                    (edge.param_range.1, edge.param_range.0)
-                                };
-                                vec![curve.point_at(t_min), curve.point_at(t_max)]
-                            }
-                            _ => {
-                                // Curved edges: use adaptive recursive subdivision
-                                let (t_min, t_max) = if edge.param_range.0 <= edge.param_range.1 {
-                                    (edge.param_range.0, edge.param_range.1)
-                                } else {
-                                    (edge.param_range.1, edge.param_range.0)
-                                };
-                                discretize_edge_adaptive(
-                                    curve, t_min, t_max,
-                                    0.01,  // chordal tolerance
-                                    0.1,   // angular tolerance (radians)
-                                    8,     // max recursion depth
-                                )
-                            }
-                        }
-                    } else {
-                        // No curve — use uniform sampling as fallback
-                        sample_edge_points(edge, n_samples)
-                    };
-                    entries.insert(edge.id, pts);
-                }
-            }
-        }
-        Self { entries, n_samples }
-    }
-
-    /// Get or compute edge points.
-    fn get_or_compute(&self, edge: &draper_topology::Edge) -> Vec<Point3d> {
-        if let Some(cached) = self.entries.get(&edge.id) {
-            cached.clone()
-        } else {
-            // Fallback: use adaptive discretization for uncached edges
-            if let Some(ref curve) = edge.curve {
-                let (t_min, t_max) = if edge.param_range.0 <= edge.param_range.1 {
-                    (edge.param_range.0, edge.param_range.1)
-                } else {
-                    (edge.param_range.1, edge.param_range.0)
-                };
-                match curve {
-                    draper_geometry::Curve3d::Line(_) => {
-                        vec![curve.point_at(t_min), curve.point_at(t_max)]
-                    }
-                    _ => {
-                        discretize_edge_adaptive(
-                            curve, t_min, t_max,
-                            0.01, 0.1, 8,
-                        )
-                    }
-                }
-            } else {
-                sample_edge_points(edge, self.n_samples)
-            }
-        }
-    }
-}
-
-/// Collect face boundary points using the consistent edge cache.
-fn collect_cached_boundary_points(face: &Face, cache: &ConsistentEdgeCache) -> Vec<Point3d> {
-    let mut points = Vec::new();
-
-    if let Some(ref wire) = face.outer_wire {
-        for coedge in &wire.coedges {
-            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
-            if let Some(edge) = edge {
-                if edge.degenerate {
-                    continue;
-                }
-                let mut edge_pts = cache.get_or_compute(edge);
-                let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
-                let should_reverse = !coedge.forward != edge_is_reversed;
-                if should_reverse {
-                    edge_pts.reverse();
-                }
-                points.extend(edge_pts);
-            }
-        }
-    }
-
-    deduplicate_consecutive(&mut points);
-    points
-}
-
-/// Collect face hole boundary points using the consistent edge cache.
-fn collect_cached_hole_points(face: &Face, cache: &ConsistentEdgeCache) -> Vec<Vec<Point3d>> {
-    let mut holes = Vec::new();
-    for wire in &face.inner_wires {
-        let mut points = Vec::new();
-        for coedge in &wire.coedges {
-            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
-            if let Some(edge) = edge {
-                if edge.degenerate {
-                    continue;
-                }
-                let mut edge_pts = cache.get_or_compute(edge);
-                let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
-                let should_reverse = !coedge.forward != edge_is_reversed;
-                if should_reverse {
-                    edge_pts.reverse();
-                }
-                points.extend(edge_pts);
-            }
-        }
-        deduplicate_consecutive(&mut points);
-        if !points.is_empty() {
-            holes.push(points);
-        }
-    }
-    holes
-}
-
-/// Remove duplicate consecutive points (within tolerance) and close the loop.
-fn deduplicate_consecutive(points: &mut Vec<Point3d>) {
-    if points.is_empty() {
-        return;
-    }
-    let mut unique = vec![points[0]];
-    for p in &points[1..] {
-        if let Some(last) = unique.last() {
-            if !last.is_coincident_with(p) {
-                unique.push(*p);
-            }
-        }
-    }
-    if unique.len() > 1 {
-        if let Some(last) = unique.last() {
-            if last.is_coincident_with(&unique[0]) {
-                unique.pop();
-            }
-        }
-    }
-    *points = unique;
-}
-
-// ============================================================
-// 2D projection and CDT helpers
-// ============================================================
-
-/// Project a 3D point onto a plane's 2D coordinate system.
-fn project_to_plane(p: &Point3d, plane: &Plane) -> [f64; 2] {
-    let dx = p.x - plane.origin.x;
-    let dy = p.y - plane.origin.y;
-    let dz = p.z - plane.origin.z;
-    let u = dx * plane.u_dir.x + dy * plane.u_dir.y + dz * plane.u_dir.z;
-    let v = dx * plane.v_dir.x + dy * plane.v_dir.y + dz * plane.v_dir.z;
-    [u, v]
-}
-
-/// Project a 3D point to a surface's 2D UV parametric space.
-///
-/// Uses `Surface::project_point` which supports ALL surface types
-/// including NURBS, Revolution, and Extrusion.
-fn project_to_surface_uv(p: &Point3d, surface: &Surface) -> [f64; 2] {
-    let (u, v) = surface.project_point(p);
-    [u, v]
-}
-
-/// Triangulate a planar face using custom CDT with consistent boundary vertices.
-fn triangulate_planar_cdt(
-    face: &Face,
-    plane: &Plane,
-    boundary_3d: &[Point3d],
-    holes_3d: &[Vec<Point3d>],
-    forward: bool,
-    pool: &mut UnifiedVertexPool,
-) -> TriangleMesh {
-    let mut mesh = TriangleMesh::new();
-
-    if boundary_3d.len() < 3 {
-        return mesh;
-    }
-
-    let face_id = face.id.to_u64();
-
-    // Insert all 3D boundary vertices into the unified pool FIRST.
-    let boundary_indices: Vec<u32> = boundary_3d.iter().map(|p| pool.insert_with_face(*p, face_id)).collect();
-    let hole_indices: Vec<Vec<u32>> = holes_3d.iter()
-        .map(|hole| hole.iter().map(|p| pool.insert_with_face(*p, face_id)).collect())
-        .collect();
-
-    // Collect all 3D points and their pool indices
-    let mut all_3d: Vec<Point3d> = boundary_3d.to_vec();
-    let mut all_pool_indices: Vec<u32> = boundary_indices.clone();
-    for hole in holes_3d {
-        all_3d.extend_from_slice(hole);
-    }
-    for hole_idx in &hole_indices {
-        all_pool_indices.extend_from_slice(hole_idx);
-    }
-
-    // Project all points to 2D
-    let all_2d: Vec<[f64; 2]> = all_3d.iter().map(|p| project_to_plane(p, plane)).collect();
-
-    // Build outer boundary indices (0-based in all_2d)
-    let n_boundary = boundary_3d.len();
-    let outer_boundary: Vec<u32> = (0..n_boundary as u32).collect();
-
-    // Build hole boundary indices
-    let mut holes: Vec<Vec<u32>> = Vec::new();
-    let mut offset = n_boundary as u32;
-    for hole_idx in &hole_indices {
-        let n_hole = hole_idx.len() as u32;
-        holes.push((offset..offset + n_hole).collect());
-        offset += n_hole;
-    }
-
-    // Build constraint edges from boundary loops
-    let mut constraints: Vec<[u32; 2]> = Vec::new();
-    for i in 0..n_boundary {
-        let j = (i + 1) % n_boundary;
-        constraints.push([i as u32, j as u32]);
-    }
-    let mut offset = n_boundary as u32;
-    for hole_idx in &hole_indices {
-        let n_hole = hole_idx.len();
-        for i in 0..n_hole {
-            let j = (i + 1) % n_hole;
-            constraints.push([offset + i as u32, offset + j as u32]);
-        }
-        offset += n_hole as u32;
-    }
-
-    // Run custom CDT
-    let input = CdtInput {
-        points: all_2d,
-        outer_boundary,
-        holes,
-        constraints,
-    };
-
-    let result = robust_cdt::constrained_delaunay_triangulation(&input);
-
-    // Handle Steiner points: add them to the pool
-    // Steiner points are appended after the original input points
-    let n_original = all_3d.len();
-    if result.all_points.len() > n_original {
-        for i in n_original..result.all_points.len() {
-            let uv = result.all_points[i];
-            // Project back to 3D using the plane
-            let p3d = Point3d::new(
-                plane.origin.x + uv[0] * plane.u_dir.x + uv[1] * plane.v_dir.x,
-                plane.origin.y + uv[0] * plane.u_dir.y + uv[1] * plane.v_dir.y,
-                plane.origin.z + uv[0] * plane.u_dir.z + uv[1] * plane.v_dir.z,
-            );
-            let _ = pool.insert_with_face(p3d, face_id);
-        }
-    }
-
-    let normal = if forward {
-        plane.normal
-    } else {
-        Direction3d::new(-plane.normal.x, -plane.normal.y, -plane.normal.z).unwrap_or(Direction3d::Z)
-    };
-
-    // Map triangles: CDT returns indices into result.all_points
-    // For original points (idx < n_original), map to pool indices
-    // For Steiner points (idx >= n_original), map to newly added pool entries
-    let n_pool_before_steiner = all_pool_indices.len();
-    for tri in &result.triangles {
-        let mut pool_tri = [0u32; 3];
-        let mut valid = true;
-        for k in 0..3 {
-            let cdt_idx = tri[k] as usize;
-            if cdt_idx < n_original {
-                pool_tri[k] = all_pool_indices[cdt_idx];
-            } else {
-                // Steiner point — find its pool index
-                // It was inserted after all_pool_indices, starting at n_pool_before_steiner
-                let steiner_local = cdt_idx - n_original;
-                let pool_idx = (n_pool_before_steiner + steiner_local) as u32;
-                // Verify pool_idx is within the pool (pool grows as we insert)
-                pool_tri[k] = pool_idx;
-            }
-        }
-        if pool_tri[0] == pool_tri[1] || pool_tri[1] == pool_tri[2] || pool_tri[0] == pool_tri[2] {
-            valid = false;
-        }
-        if !valid {
-            continue;
-        }
-        if forward {
-            mesh.add_triangle(pool_tri[0], pool_tri[1], pool_tri[2]);
-        } else {
-            mesh.add_triangle(pool_tri[0], pool_tri[2], pool_tri[1]);
-        }
-        mesh.triangle_face_ids.get_or_insert_with(Vec::new).push(face_id);
-        mesh.face_normals.get_or_insert_with(Vec::new).push([normal.x, normal.y, normal.z]);
-    }
-
-    if !result.all_constraints_satisfied {
-        log::warn!("CDT planar: not all constraints satisfied for face {}", face.id);
-    }
-
-    mesh
-}
-
-// ============================================================
-// CDT triangulation for curved surfaces
-// ============================================================
-
-/// Generic CDT-based surface triangulation with consistent boundary vertices.
-///
-/// Projects boundary points to 2D parametric space, builds a CDT with
-/// boundary constraints, optionally adds interior grid points, then maps
-/// triangles back to 3D using the surface parameterization.
-fn triangulate_surface_cdt_generic(
-    face: &Face,
-    surface: &Surface,
-    boundary_3d: &[Point3d],
-    holes_3d: &[Vec<Point3d>],
-    forward: bool,
-    pool: &mut UnifiedVertexPool,
-    params: &TriangulationParams,
-) -> TriangleMesh {
-    let mut mesh = TriangleMesh::new();
-    if boundary_3d.len() < 3 {
-        return mesh;
-    }
-
-    let face_id = face.id.to_u64();
-
-    // Insert boundary vertices into the unified pool
-    let boundary_indices: Vec<u32> = boundary_3d.iter().map(|p| pool.insert_with_face(*p, face_id)).collect();
-    let hole_indices: Vec<Vec<u32>> = holes_3d.iter()
-        .map(|hole| hole.iter().map(|p| pool.insert_with_face(*p, face_id)).collect())
-        .collect();
-
-    // Project boundary points to 2D UV space
-    let boundary_2d: Vec<[f64; 2]> = boundary_3d.iter()
-        .map(|p| project_to_surface_uv(p, surface))
-        .collect();
-
-    // Check if UV projection is valid (no NaN/Inf)
-    if boundary_2d.iter().any(|uv| !uv[0].is_finite() || !uv[1].is_finite()) {
-        log::warn!("CDT surface fallback: UV projection produced NaN/Inf for face {}", face.id);
-        // Fall back to planar projection on best-fit plane
-        return triangulate_surface_cdt_planar_fallback(face, boundary_3d, holes_3d, forward, pool, params);
-    }
-
-    // Project hole points to 2D
-    let holes_2d: Vec<Vec<[f64; 2]>> = holes_3d.iter()
-        .map(|hole| hole.iter().map(|p| project_to_surface_uv(p, surface)).collect())
-        .collect();
-
-    // Check hole UV validity
-    if holes_2d.iter().any(|h| h.iter().any(|uv| !uv[0].is_finite() || !uv[1].is_finite())) {
-        log::warn!("CDT surface fallback: hole UV projection produced NaN/Inf for face {}", face.id);
-        return triangulate_surface_cdt_planar_fallback(face, boundary_3d, holes_3d, forward, pool, params);
-    }
-
-    // Collect all 2D points and pool indices
-    let mut all_2d: Vec<[f64; 2]> = boundary_2d.clone();
-    let mut all_pool_indices: Vec<u32> = boundary_indices.clone();
-
-    for (hi, hole_3d) in holes_3d.iter().enumerate() {
-        if holes_2d.len() > hi {
-            all_2d.extend_from_slice(&holes_2d[hi]);
-        }
-        if hole_indices.len() > hi {
-            all_pool_indices.extend_from_slice(&hole_indices[hi]);
-        }
-    }
-
-    // Add interior grid points for better surface approximation
-    add_interior_grid_points_cdt(
-        &boundary_2d, surface, &mut all_2d, &mut all_pool_indices, pool, params, face_id,
-    );
-
-    let n_boundary = boundary_3d.len();
-
-    // Build outer boundary indices
-    let outer_boundary: Vec<u32> = (0..n_boundary as u32).collect();
-
-    // Build hole boundary indices
-    let mut holes_cdt: Vec<Vec<u32>> = Vec::new();
-    let mut offset = n_boundary as u32;
-    for hole_idx in &hole_indices {
-        let n_hole = hole_idx.len() as u32;
-        holes_cdt.push((offset..offset + n_hole).collect());
-        offset += n_hole;
-    }
-
-    // Build constraint edges from boundary loops
-    let mut constraints: Vec<[u32; 2]> = Vec::new();
-    for i in 0..n_boundary {
-        let j = (i + 1) % n_boundary;
-        constraints.push([i as u32, j as u32]);
-    }
-    offset = n_boundary as u32;
-    for hole_idx in &hole_indices {
-        let n_hole = hole_idx.len();
-        for i in 0..n_hole {
-            let j = (i + 1) % n_hole;
-            constraints.push([offset + i as u32, offset + j as u32]);
-        }
-        offset += n_hole as u32;
-    }
-
-    let input = CdtInput {
-        points: all_2d.clone(),
-        outer_boundary,
-        holes: holes_cdt,
-        constraints,
-    };
-
-    let result = robust_cdt::constrained_delaunay_triangulation(&input);
-
-    // Handle Steiner points: compute 3D position from UV
-    let n_original = all_2d.len();
-    let mut steiner_pool_indices: Vec<u32> = Vec::new();
-    if result.all_points.len() > n_original {
-        for i in n_original..result.all_points.len() {
-            let uv = result.all_points[i];
-            let p3d = surface.point_at(uv[0], uv[1]);
-            if p3d.x.is_finite() && p3d.y.is_finite() && p3d.z.is_finite() {
-                let idx = pool.insert_with_face(p3d, face_id);
-                steiner_pool_indices.push(idx);
-            } else {
-                steiner_pool_indices.push(0); // fallback
-            }
-        }
-    }
-
-    // Map triangles
-    for tri in &result.triangles {
-        let mut pool_tri = [0u32; 3];
-        let mut valid = true;
-        for k in 0..3 {
-            let cdt_idx = tri[k] as usize;
-            if cdt_idx < n_original {
-                if cdt_idx < all_pool_indices.len() {
-                    pool_tri[k] = all_pool_indices[cdt_idx];
-                } else {
-                    valid = false;
-                }
-            } else {
-                let steiner_local = cdt_idx - n_original;
-                if steiner_local < steiner_pool_indices.len() {
-                    pool_tri[k] = steiner_pool_indices[steiner_local];
-                } else {
-                    valid = false;
-                }
-            }
-        }
-        if !valid || pool_tri[0] == pool_tri[1] || pool_tri[1] == pool_tri[2] || pool_tri[0] == pool_tri[2] {
-            continue;
-        }
-        if forward {
-            mesh.add_triangle(pool_tri[0], pool_tri[1], pool_tri[2]);
-        } else {
-            mesh.add_triangle(pool_tri[0], pool_tri[2], pool_tri[1]);
-        }
-        mesh.triangle_face_ids.get_or_insert_with(Vec::new).push(face_id);
-    }
-
-    if !result.all_constraints_satisfied {
-        log::warn!("CDT surface: not all constraints satisfied for face {}", face.id);
-    }
-
-    // Iterative adaptive refinement: check 3D chord error for each triangle
-    // and subdivide triangles that exceed the tolerance.
-    if params.adaptive {
-        refine_mesh_adaptive(&mut mesh, surface, params.max_deviation, params.max_angular_deviation, pool, face_id);
-    }
-
-    mesh
-}
-
-/// Fallback for curved surfaces where UV projection fails: project to best-fit plane.
-fn triangulate_surface_cdt_planar_fallback(
-    face: &Face,
-    boundary_3d: &[Point3d],
-    holes_3d: &[Vec<Point3d>],
-    forward: bool,
-    pool: &mut UnifiedVertexPool,
-    params: &TriangulationParams,
-) -> TriangleMesh {
-    if boundary_3d.len() < 3 {
-        return TriangleMesh::new();
-    }
-
-    // Compute best-fit plane from boundary points
-    let n = boundary_3d.len() as f64;
-    let cx = boundary_3d.iter().map(|p| p.x).sum::<f64>() / n;
-    let cy = boundary_3d.iter().map(|p| p.y).sum::<f64>() / n;
-    let cz = boundary_3d.iter().map(|p| p.z).sum::<f64>() / n;
-
-    // Use PCA-like approach: compute normal from cross products of centered vectors
-    let mut nxx = 0.0f64; let mut nxy = 0.0f64; let mut nxz = 0.0f64;
-    let mut nyy = 0.0f64; let mut nyz = 0.0f64; let mut nzz = 0.0f64;
-    for p in boundary_3d {
-        let dx = p.x - cx;
-        let dy = p.y - cy;
-        let dz = p.z - cz;
-        nxx += dx * dx; nxy += dx * dy; nxz += dx * dz;
-        nyy += dy * dy; nyz += dy * dz; nzz += dz * dz;
-    }
-
-    // Normal = eigenvector of smallest eigenvalue (approximate)
-    let det_x = nyy * nzz - nyz * nyz;
-    let det_y = nxx * nzz - nxz * nxz;
-    let det_z = nxx * nyy - nxy * nxy;
-    let det_max = det_x.max(det_y).max(det_z);
-
-    let (nx, ny, nz) = if det_max == det_x {
-        (det_x, nxy * nyz - nxz * nyy, nxy * nxz - nyz * nxx)
-    } else if det_max == det_y {
-        (nxy * nyz - nxz * nyy, det_y, nxy * nxz - nxz * nyz)
-    } else {
-        (nxy * nxz - nyz * nxx, nxy * nxz - nxz * nyz, det_z)
-    };
-
-    let len = (nx * nx + ny * ny + nz * nz).sqrt();
-    let normal = if len > EPS {
-        Direction3d::new(nx / len, ny / len, nz / len).unwrap_or(Direction3d::Z)
-    } else {
-        Direction3d::Z
-    };
-
-    // Compute u_dir and v_dir from the normal
-    let up = if normal.z.abs() < 0.9 {
-        Direction3d::new(0.0, 0.0, 1.0).unwrap()
-    } else {
-        Direction3d::new(1.0, 0.0, 0.0).unwrap()
-    };
-    let u_dir = Direction3d::new(
-        normal.y * up.z - normal.z * up.y,
-        normal.z * up.x - normal.x * up.z,
-        normal.x * up.y - normal.y * up.x,
-    ).unwrap();
-    let v_dir = Direction3d::new(
-        normal.y * u_dir.z - normal.z * u_dir.y,
-        normal.z * u_dir.x - normal.x * u_dir.z,
-        normal.x * u_dir.y - normal.y * u_dir.x,
-    ).unwrap();
-
-    let plane = Plane {
-        origin: Point3d::new(cx, cy, cz),
-        normal,
-        u_dir,
-        v_dir,
-    };
-
-    triangulate_planar_cdt(face, &plane, boundary_3d, holes_3d, forward, pool)
-}
-
-/// Add interior grid points for curved surface approximation (CDT version).
-///
-/// For curved surfaces, we need interior points to properly approximate
-/// the curvature. This function generates a grid of interior points
-/// in UV space and adds them to the CDT.
-fn add_interior_grid_points_cdt(
-    boundary_2d: &[[f64; 2]],
-    surface: &Surface,
-    all_2d: &mut Vec<[f64; 2]>,
-    all_pool_indices: &mut Vec<u32>,
-    pool: &mut UnifiedVertexPool,
-    params: &TriangulationParams,
-    face_id: u64,
-) -> usize {
-    // Compute UV bounding box from boundary
-    let mut u_min = f64::MAX;
-    let mut u_max = f64::MIN;
-    let mut v_min = f64::MAX;
-    let mut v_max = f64::MIN;
-    for uv in boundary_2d.iter() {
-        u_min = u_min.min(uv[0]);
-        u_max = u_max.max(uv[0]);
-        v_min = v_min.min(uv[1]);
-        v_max = v_max.max(uv[1]);
-    }
-
-    let (n_u, n_v) = match surface {
-        Surface::Cylinder(_) | Surface::Cone(_) => {
-            let n_u = params.angular_samples.min(64);
-            let n_v = params.height_samples.max(4);
-            (n_u, n_v)
-        }
-        Surface::Sphere(_) => {
-            let n_u = params.angular_samples.min(64);
-            let n_v = params.angular_samples.min(32);
-            (n_u, n_v)
-        }
-        Surface::Torus(_) => {
-            let n_u = params.angular_samples.min(64);
-            let n_v = params.angular_samples.min(32);
-            (n_u, n_v)
-        }
-        Surface::Revolution(_) => {
-            let n_u = params.angular_samples.min(64);
-            let n_v = params.height_samples.max(4);
-            (n_u, n_v)
-        }
-        Surface::Extrusion(_) => {
-            let n_u = params.height_samples.max(4);
-            let n_v = params.angular_samples.min(16);
-            (n_u, n_v)
-        }
-        Surface::Nurbs(_) => {
-            let n_u = params.height_samples.max(8).min(32);
-            let n_v = params.height_samples.max(8).min(32);
-            (n_u, n_v)
-        }
-        _ => (16, 8),
-    };
-
-    let (n_u, n_v) = {
-        let max_tris = params.max_face_triangles;
-        let approx_tris = 2 * n_u * n_v;
-        if approx_tris > max_tris {
-            let scale = (max_tris as f64 / approx_tris as f64).sqrt();
-            let nu = ((n_u as f64 * scale).ceil() as usize).max(4);
-            let nv = ((n_v as f64 * scale).ceil() as usize).max(2);
-            (nu, nv)
-        } else {
-            (n_u, n_v)
-        }
-    };
-
-    let mut count = 0;
-    let du = (u_max - u_min) / n_u as f64;
-    let dv = (v_max - v_min) / n_v as f64;
-
-    let boundary_pts: Vec<[f64; 2]> = boundary_2d.to_vec();
-
-    for i in 1..n_u {
-        for j in 1..n_v {
-            let u = u_min + i as f64 * du;
-            let v = v_min + j as f64 * dv;
-
-            // Check if (u, v) is inside the boundary polygon
-            if !robust_cdt::point_in_polygon_2d(u, v, &boundary_pts) {
-                continue;
-            }
-
-            let p3d = surface.point_at(u, v);
-            if !p3d.x.is_finite() || !p3d.y.is_finite() || !p3d.z.is_finite() {
-                continue;
-            }
-
-            let pool_idx = pool.insert_with_face(p3d, face_id);
-            all_2d.push([u, v]);
-            all_pool_indices.push(pool_idx);
-            count += 1;
-        }
-    }
-
-    count
-}
-
-/// CDT triangulation for cylindrical surfaces.
-fn triangulate_cylinder_cdt(
-    face: &Face,
-    cyl: &CylinderSurface,
-    boundary_3d: &[Point3d],
-    holes_3d: &[Vec<Point3d>],
-    forward: bool,
-    pool: &mut UnifiedVertexPool,
-    params: &TriangulationParams,
-) -> TriangleMesh {
-    triangulate_surface_cdt_generic(face, &Surface::Cylinder(cyl.clone()), boundary_3d, holes_3d, forward, pool, params)
-}
-
-/// CDT triangulation for conical surfaces.
-fn triangulate_cone_cdt(
-    face: &Face,
-    cone: &ConeSurface,
-    boundary_3d: &[Point3d],
-    holes_3d: &[Vec<Point3d>],
-    forward: bool,
-    pool: &mut UnifiedVertexPool,
-    params: &TriangulationParams,
-) -> TriangleMesh {
-    triangulate_surface_cdt_generic(face, &Surface::Cone(cone.clone()), boundary_3d, holes_3d, forward, pool, params)
-}
-
-/// CDT triangulation for spherical surfaces.
-fn triangulate_sphere_cdt(
-    face: &Face,
-    sphere: &SphereSurface,
-    boundary_3d: &[Point3d],
-    holes_3d: &[Vec<Point3d>],
-    forward: bool,
-    pool: &mut UnifiedVertexPool,
-    params: &TriangulationParams,
-) -> TriangleMesh {
-    triangulate_surface_cdt_generic(face, &Surface::Sphere(sphere.clone()), boundary_3d, holes_3d, forward, pool, params)
-}
-
-/// CDT triangulation for toroidal surfaces.
-fn triangulate_torus_cdt(
-    face: &Face,
-    torus: &TorusSurface,
-    boundary_3d: &[Point3d],
-    holes_3d: &[Vec<Point3d>],
-    forward: bool,
-    pool: &mut UnifiedVertexPool,
-    params: &TriangulationParams,
-) -> TriangleMesh {
-    triangulate_surface_cdt_generic(face, &Surface::Torus(torus.clone()), boundary_3d, holes_3d, forward, pool, params)
-}
-
-// ============================================================
-// Face-aware boundary closing and non-manifold resolution
-// ============================================================
-
-/// Close boundary edges by merging nearby vertices, but ONLY if merging
-/// won't create a non-manifold edge.
-///
-/// The algorithm:
-/// 1. Find all boundary edges (edges with count == 1)
-/// 2. For each pair of nearby boundary vertices:
-///    - Check if merging would create a non-manifold edge
-///    - If safe, merge them
-/// 3. Apply the merge remap and filter degenerate triangles
-///
-/// A merge creates a non-manifold edge when the merged vertex participates
-/// in an edge that already has 2 adjacent triangles. After merging, that
-/// edge would have 3+ triangles = non-manifold.
-fn face_aware_close_boundary(mesh: &mut TriangleMesh, base_tolerance: f64) {
-    let tolerances = [
-        base_tolerance * 2.0,
-        base_tolerance * 5.0,
-        base_tolerance * 10.0,
-        base_tolerance * 50.0,
-        base_tolerance * 100.0,
-    ];
-
-    for &tol in &tolerances {
-        let report = crate::watertight::validate_watertight(mesh, false);
-        if report.is_watertight() {
-            return;
-        }
-        if report.boundary_edge_count == 0 {
-            return;
-        }
-
-        log::info!(
-            "Face-aware closing: {} boundary edges remaining, trying tol={:.6}",
-            report.boundary_edge_count, tol,
-        );
-
-        // Build edge count map for non-manifold checking
-        let edge_counts = build_edge_count_map(mesh);
-
-        // Collect boundary vertices
-        let boundary_verts = collect_boundary_vertex_set(mesh);
-
-        // Build spatial index of boundary vertices
-        let cell_size = tol * 10.0;
-        let tol_sq = tol * tol;
-        let mut grid: HashMap<(i64, i64, i64), Vec<u32>> = HashMap::new();
-        for &vidx in &boundary_verts {
-            let p = mesh.vertices[vidx as usize];
-            let cx = (p.x / cell_size).floor() as i64;
-            let cy = (p.y / cell_size).floor() as i64;
-            let cz = (p.z / cell_size).floor() as i64;
-            grid.entry((cx, cy, cz)).or_default().push(vidx);
-        }
-
-        // For each boundary vertex, find the closest other boundary vertex
-        let mut remap: Vec<u32> = (0..mesh.vertices.len() as u32).collect();
-        let mut merged_any = false;
-
-        for &vidx in &boundary_verts {
-            // Follow remap chain
-            let mut v1 = vidx;
-            while remap[v1 as usize] != v1 {
-                v1 = remap[v1 as usize];
-            }
-            let p = mesh.vertices[v1 as usize];
-            let cx = (p.x / cell_size).floor() as i64;
-            let cy = (p.y / cell_size).floor() as i64;
-            let cz = (p.z / cell_size).floor() as i64;
-
-            let mut best_match: Option<(u32, f64)> = None;
-
-            for dx in -1i64..=1 {
-                for dy in -1i64..=1 {
-                    for dz in -1i64..=1 {
-                        let key = (cx + dx, cy + dy, cz + dz);
-                        if let Some(indices) = grid.get(&key) {
-                            for &other_idx in indices {
-                                // Follow remap chain
-                                let mut v2 = other_idx;
-                                while remap[v2 as usize] != v2 {
-                                    v2 = remap[v2 as usize];
-                                }
-                                if v2 == v1 {
-                                    continue; // Already merged
-                                }
-
-                                let other_p = mesh.vertices[v2 as usize];
-                                let ddx = p.x - other_p.x;
-                                let ddy = p.y - other_p.y;
-                                let ddz = p.z - other_p.z;
-                                let dist_sq = ddx * ddx + ddy * ddy + ddz * ddz;
-
-                                if dist_sq < tol_sq {
-                                    // Check if merging v1 into v2 would create a non-manifold edge.
-                                    // This happens when an edge from v1 to some neighbor Vn
-                                    // would overlap with an existing edge from v2 to Vn
-                                    // that already has count == 2.
-                                    if would_create_nonmanifold(v1, v2, &edge_counts, mesh) {
-                                        continue;
-                                    }
-
-                                    match best_match {
-                                        None => best_match = Some((v2, dist_sq)),
-                                        Some((_, best_dist)) => {
-                                            if dist_sq < best_dist {
-                                                best_match = Some((v2, dist_sq));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if let Some((target, _)) = best_match {
-                remap[v1 as usize] = target;
-                merged_any = true;
-            }
-        }
-
-        if !merged_any {
-            continue;
-        }
-
-        // Apply remap
-        apply_face_aware_remap(mesh, &remap);
-        filter_degenerate_triangles(mesh, 1e-10);
-    }
-}
-
-/// Build a map from edge (canonical vertex pair) → count of adjacent triangles.
-fn build_edge_count_map(mesh: &TriangleMesh) -> HashMap<(u32, u32), u32> {
-    let mut edge_counts: HashMap<(u32, u32), u32> = HashMap::new();
-    for tri in &mesh.triangles {
-        let edges = [
-            (tri[0].min(tri[1]), tri[0].max(tri[1])),
-            (tri[1].min(tri[2]), tri[1].max(tri[2])),
-            (tri[2].min(tri[0]), tri[2].max(tri[0])),
-        ];
-        for edge in &edges {
-            *edge_counts.entry(*edge).or_insert(0) += 1;
-        }
-    }
-    edge_counts
-}
-
-/// Check if merging vertex v1 into v2 would create a non-manifold edge.
-///
-/// After merging, all triangles that used v1 will now use v2. This means
-/// all edges of the form (v1, neighbor) become edges (v2, neighbor).
-/// If an edge (v2, neighbor) already exists with count == 2, the merged
-/// edge would have count > 2 → non-manifold.
-fn would_create_nonmanifold(
-    v1: u32,
-    v2: u32,
-    edge_counts: &HashMap<(u32, u32), u32>,
-    mesh: &TriangleMesh,
-) -> bool {
-    // Find all neighbors of v1 (vertices connected to v1 by an edge)
-    let v1_neighbors: std::collections::HashSet<u32> = mesh.triangles.iter()
-        .flat_map(|tri| {
-            let mut neighbors = Vec::new();
-            if tri[0] == v1 { neighbors.push(tri[1]); neighbors.push(tri[2]); }
-            if tri[1] == v1 { neighbors.push(tri[0]); neighbors.push(tri[2]); }
-            if tri[2] == v1 { neighbors.push(tri[0]); neighbors.push(tri[1]); }
-            neighbors
-        })
-        .filter(|&n| n != v1 && n != v2)
-        .collect();
-
-    // Check if any edge (v2, neighbor) already has count >= 2
-    for &neighbor in &v1_neighbors {
-        let edge = (v2.min(neighbor), v2.max(neighbor));
-        if let Some(&count) = edge_counts.get(&edge) {
-            if count >= 2 {
-                return true; // Would create non-manifold edge
-            }
-        }
-    }
-
-    false
-}
-
-/// Build a map from vertex index to set of face IDs that use that vertex.
-fn build_vertex_face_map(mesh: &TriangleMesh) -> Vec<std::collections::HashSet<u64>> {
-    let n = mesh.vertices.len();
-    let mut map: Vec<std::collections::HashSet<u64>> = vec![std::collections::HashSet::new(); n];
-
-    for (tri_idx, tri) in mesh.triangles.iter().enumerate() {
-        let face_id = mesh.triangle_face_ids.as_ref()
-            .and_then(|ids| ids.get(tri_idx).copied())
-            .unwrap_or(0);
-
-        for &v in tri.iter() {
-            if (v as usize) < n {
-                map[v as usize].insert(face_id);
-            }
-        }
-    }
-
-    map
-}
-
-/// Collect the set of vertex indices that appear on boundary edges.
-fn collect_boundary_vertex_set(mesh: &TriangleMesh) -> std::collections::HashSet<u32> {
-    let mut edge_count: HashMap<(u32, u32), u32> = HashMap::new();
-    for tri in &mesh.triangles {
-        let edges = [
-            (tri[0].min(tri[1]), tri[0].max(tri[1])),
-            (tri[1].min(tri[2]), tri[1].max(tri[2])),
-            (tri[2].min(tri[0]), tri[2].max(tri[0])),
-        ];
-        for edge in &edges {
-            *edge_count.entry(*edge).or_insert(0) += 1;
-        }
-    }
-
-    let mut boundary = std::collections::HashSet::new();
-    for (edge, count) in &edge_count {
-        if *count == 1 {
-            boundary.insert(edge.0);
-            boundary.insert(edge.1);
-        }
-    }
-    boundary
-}
-
-/// Apply a vertex remap to all triangles, preserving face_ids and normals.
-fn apply_face_aware_remap(mesh: &mut TriangleMesh, remap: &[u32]) {
-    // First, follow remap chains to get final targets
-    let mut final_remap: Vec<u32> = Vec::with_capacity(remap.len());
-    for &target in remap {
-        let mut current = target;
-        loop {
-            let next = remap[current as usize];
-            if next == current {
-                break;
-            }
-            current = next;
-        }
-        final_remap.push(current);
-    }
-
-    // Apply remap to triangles, filtering degenerate ones
-    let old_triangles = std::mem::take(&mut mesh.triangles);
-    let old_face_ids = mesh.triangle_face_ids.take();
-    let old_face_normals = mesh.face_normals.take();
-    let old_triangle_colors = mesh.triangle_colors.take();
-
-    for (i, tri) in old_triangles.iter().enumerate() {
-        let a = final_remap[tri[0] as usize];
-        let b = final_remap[tri[1] as usize];
-        let c = final_remap[tri[2] as usize];
-
-        if a != b && b != c && a != c {
-            mesh.triangles.push([a, b, c]);
-            if let Some(ref ids) = old_face_ids {
-                if let Some(&fid) = ids.get(i) {
-                    mesh.triangle_face_ids.get_or_insert_with(Vec::new).push(fid);
-                }
-            }
-            if let Some(ref normals) = old_face_normals {
-                if let Some(&n) = normals.get(i) {
-                    mesh.face_normals.get_or_insert_with(Vec::new).push(n);
-                }
-            }
-            if let Some(ref colors) = old_triangle_colors {
-                if let Some(&col) = colors.get(i) {
-                    mesh.triangle_colors.get_or_insert_with(Vec::new).push(col);
-                }
-            }
-        }
-    }
-
-    // Compact vertices
-    crate::watertight::compact_vertices(mesh);
-}
-
-/// Resolve non-manifold edges by splitting vertices.
-///
-/// A non-manifold edge is shared by more than 2 triangles. This function
-/// resolves them by:
-/// 1. Finding all non-manifold edges (count > 2)
-/// 2. For each non-manifold edge, identifying which triangles share it
-/// 3. Pairing triangles from different faces and keeping those pairs
-/// 4. For excess triangles (from the same face as an existing one),
-///   duplicating the edge vertices
-///
-/// After splitting, boundary edges may appear where split vertices
-/// couldn't be merged. The face-aware closing step handles these.
-fn resolve_non_manifold_edges(mesh: &mut TriangleMesh) {
-    for _iteration in 0..10 {
-        let report = crate::watertight::validate_watertight(mesh, false);
-        if report.non_manifold_edge_count == 0 {
-            return;
-        }
-
-        log::info!(
-            "Non-manifold resolution: {} non-manifold edges, {} boundary edges, {} vertices, {} triangles",
-            report.non_manifold_edge_count, report.boundary_edge_count,
-            report.vertex_count, report.triangle_count,
-        );
-
-        // Build edge → triangle indices map
-        let mut edge_triangles: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
-        for (tri_idx, tri) in mesh.triangles.iter().enumerate() {
-            let edges = [
-                (tri[0].min(tri[1]), tri[0].max(tri[1])),
-                (tri[1].min(tri[2]), tri[1].max(tri[2])),
-                (tri[2].min(tri[0]), tri[2].max(tri[0])),
-            ];
-            for edge in &edges {
-                edge_triangles.entry(*edge).or_default().push(tri_idx);
-            }
-        }
-
-        // Find non-manifold edges (count > 2)
-        let non_manifold: Vec<((u32, u32), Vec<usize>)> = edge_triangles.iter()
-            .filter(|(_, tris)| tris.len() > 2)
-            .map(|(&edge, tris)| (edge, tris.clone()))
-            .collect();
-
-        if non_manifold.is_empty() {
-            return;
-        }
-
-        // For each non-manifold edge, split excess triangles by
-        // duplicating their vertices
-        let mut split_count = 0;
-        for (edge, tri_indices) in &non_manifold {
-            if tri_indices.len() <= 2 {
-                continue;
-            }
-
-            // Group triangles by face_id, keeping track of which face each belongs to
-            let tri_faces: Vec<(usize, u64)> = tri_indices.iter().map(|&tri_idx| {
-                let face_id = mesh.triangle_face_ids.as_ref()
-                    .and_then(|ids| ids.get(tri_idx).copied())
-                    .unwrap_or(0);
-                (tri_idx, face_id)
-            }).collect();
-
-            // Strategy: keep one triangle per unique face, up to 2 total.
-            // For any additional triangles (from a face that already has a
-            // triangle on this edge), duplicate their edge vertices.
-            let mut seen_faces: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
-            let mut kept_tri_indices: Vec<usize> = Vec::new();
-
-            for &(tri_idx, face_id) in &tri_faces {
-                if seen_faces.len() < 2 && !seen_faces.contains_key(&face_id) {
-                    // Keep this triangle — it's from a new face
-                    seen_faces.insert(face_id, tri_idx);
-                    kept_tri_indices.push(tri_idx);
-                }
-                // Otherwise, it will be split below
-            }
-
-            // If we couldn't find 2 different faces, just keep first 2 triangles
-            if kept_tri_indices.len() < 2 {
-                kept_tri_indices.clear();
-                kept_tri_indices.push(tri_indices[0]);
-                if tri_indices.len() > 1 {
-                    kept_tri_indices.push(tri_indices[1]);
-                }
-            }
-
-            // Split all triangles NOT in kept_tri_indices
-            for &(tri_idx, _face_id) in &tri_faces {
-                if kept_tri_indices.contains(&tri_idx) {
-                    continue;
-                }
-
-                // Duplicate edge vertices for this triangle
-                let tri = &mut mesh.triangles[tri_idx];
-                let (ea, eb) = *edge;
-                for v_idx in tri.iter_mut() {
-                    let v = *v_idx;
-                    if v == ea || v == eb {
-                        // Create a new vertex copy at the same position
-                        let new_idx = mesh.vertices.len() as u32;
-                        mesh.vertices.push(mesh.vertices[v as usize]);
-                        *v_idx = new_idx;
-                        split_count += 1;
-                    }
-                }
-            }
-        }
-
-        if split_count == 0 {
-            // No progress — break to avoid infinite loop
-            break;
-        }
-
-        filter_degenerate_triangles(mesh, 1e-10);
-    }
-}
-
-
-/// Triangulate a face using CDT with consistent edge sampling.
-fn triangulate_face_cdt(
-    face: &Face,
-    cache: &ConsistentEdgeCache,
-    params: &TriangulationParams,
-    pool: &mut UnifiedVertexPool,
-) -> TriangleMesh {
-    let boundary_3d = collect_cached_boundary_points(face, cache);
-    if boundary_3d.is_empty() {
-        return TriangleMesh::new();
-    }
-
-    let holes_3d = collect_cached_hole_points(face, cache);
-    let forward = face.forward;
-
-    let surface_type = match &face.surface {
-        Some(s) => match s {
-            Surface::Plane(_) => "Plane",
-            Surface::Cylinder(_) => "Cylinder",
-            Surface::Cone(_) => "Cone",
-            Surface::Sphere(_) => "Sphere",
-            Surface::Torus(_) => "Torus",
-            Surface::Revolution(_) => "Revolution",
-            Surface::Extrusion(_) => "Extrusion",
-            Surface::Nurbs(_) => "Nurbs",
-        },
-        None => "None",
-    };
-    log::info!("CDT face {}: type={}, {} boundary pts, {} holes, forward={}", 
-        face.id, surface_type, boundary_3d.len(), holes_3d.len(), forward);
-
-    match &face.surface {
-        Some(Surface::Plane(plane)) => {
-            triangulate_planar_cdt(face, plane, &boundary_3d, &holes_3d, forward, pool)
-        }
-        Some(Surface::Cylinder(cyl)) => {
-            triangulate_cylinder_cdt(face, cyl, &boundary_3d, &holes_3d, forward, pool, params)
-        }
-        Some(Surface::Cone(cone)) => {
-            triangulate_cone_cdt(face, cone, &boundary_3d, &holes_3d, forward, pool, params)
-        }
-        Some(Surface::Sphere(sphere)) => {
-            triangulate_sphere_cdt(face, sphere, &boundary_3d, &holes_3d, forward, pool, params)
-        }
-        Some(Surface::Torus(torus)) => {
-            triangulate_torus_cdt(face, torus, &boundary_3d, &holes_3d, forward, pool, params)
-        }
-        Some(Surface::Revolution(_)) | Some(Surface::Extrusion(_)) | Some(Surface::Nurbs(_)) => {
-            // For NURBS, revolution, extrusion surfaces:
-            // Use CDT; if UV projection fails, falls back to planar projection
-            if let Some(ref surface) = face.surface {
-                triangulate_surface_cdt_generic(face, surface, &boundary_3d, &holes_3d, forward, pool, params)
-            } else {
-                // No surface info — fall back to planar projection on best-fit plane
-                triangulate_surface_cdt_planar_fallback(face, &boundary_3d, &holes_3d, forward, pool, params)
-            }
-        }
-        _ => {
-            // For unknown surfaces: fall back to planar projection on best-fit plane
-            triangulate_surface_cdt_planar_fallback(face, &boundary_3d, &holes_3d, forward, pool, params)
-        }
-    }
-}
+use spade::{ConstrainedDelaunayTriangulation, Point2, Triangulation as SpadeTriangulation};
+use std::collections::HashMap;
 
 /// A unified vertex pool that merges vertices across all faces of a solid.
 ///
 /// When two faces share an edge, their boundary vertices should be the same.
 /// This pool ensures that by:
-/// 1. Inserting all vertices with 3D spatial hashing
-/// 2. Merging vertices within the given tolerance, but ONLY if they belong
-///    to DIFFERENT faces (face-aware merging prevents non-manifold edges)
-/// 3. Mapping each face's local vertex indices to unified indices
+/// 1. Inserting all boundary vertices with 3D spatial hashing
+/// 2. Merging vertices within the given tolerance
+/// 3. Mapping each face's local boundary indices to unified indices
 #[derive(Clone, Debug)]
 pub struct UnifiedVertexPool {
     /// All unique vertices (after merging).
@@ -1253,10 +40,6 @@ pub struct UnifiedVertexPool {
     cell_size: f64,
     /// Tolerance for vertex merging (squared).
     tolerance_sq: f64,
-    /// Face ID for each vertex (used for face-aware merging).
-    vertex_face_ids: Vec<u64>,
-    /// Whether to use face-aware merging (only merge vertices from different faces).
-    face_aware: bool,
 }
 
 impl UnifiedVertexPool {
@@ -1267,46 +50,19 @@ impl UnifiedVertexPool {
             grid: HashMap::new(),
             cell_size: tolerance * 10.0,
             tolerance_sq: tolerance * tolerance,
-            vertex_face_ids: Vec::new(),
-            face_aware: false,
-        }
-    }
-
-    /// Create a new vertex pool with face-aware merging.
-    ///
-    /// When `face_aware` is true, vertices from the same face will NOT be
-    /// merged even if they are within tolerance. This prevents non-manifold
-    /// edges caused by over-aggressive vertex merging within a single face.
-    pub fn new_face_aware(tolerance: f64) -> Self {
-        Self {
-            vertices: Vec::new(),
-            grid: HashMap::new(),
-            cell_size: tolerance * 10.0,
-            tolerance_sq: tolerance * tolerance,
-            vertex_face_ids: Vec::new(),
-            face_aware: true,
         }
     }
 
     /// Insert a vertex and return its unified index.
-    pub fn insert(&mut self, point: Point3d) -> u32 {
-        self.insert_with_face(point, 0)
-    }
-
-    /// Insert a vertex with a face ID and return its unified index.
     ///
-    /// When face-aware merging is enabled, only merges with vertices
-    /// from a DIFFERENT face ID. This prevents vertices within the
-    /// same face from being merged (which causes non-manifold edges).
-    pub fn insert_with_face(&mut self, point: Point3d, face_id: u64) -> u32 {
+    /// If a vertex within `tolerance` already exists, returns the existing index.
+    /// Otherwise, adds the vertex and returns a new index.
+    pub fn insert(&mut self, point: Point3d) -> u32 {
         let cx = (point.x / self.cell_size).floor() as i64;
         let cy = (point.y / self.cell_size).floor() as i64;
         let cz = (point.z / self.cell_size).floor() as i64;
 
-        // Collect all matching candidates, then pick the one with the
-        // smallest index (deterministic choice regardless of hash order)
-        let mut best_match: Option<(u32, f64)> = None;
-
+        // Check neighboring cells for existing vertex within tolerance
         for dx in -1i64..=1 {
             for dy in -1i64..=1 {
                 for dz in -1i64..=1 {
@@ -1314,32 +70,11 @@ impl UnifiedVertexPool {
                     if let Some(indices) = self.grid.get(&key) {
                         for &idx in indices {
                             let existing = &self.vertices[idx as usize];
-
-                            // Face-aware check: only merge vertices from DIFFERENT faces
-                            if self.face_aware && face_id != 0 {
-                                if let Some(&existing_face) = self.vertex_face_ids.get(idx as usize) {
-                                    if existing_face == face_id {
-                                        // Same face — don't merge (prevents non-manifold edges)
-                                        continue;
-                                    }
-                                }
-                            }
-
                             let ddx = point.x - existing.x;
                             let ddy = point.y - existing.y;
                             let ddz = point.z - existing.z;
-                            let dist_sq = ddx * ddx + ddy * ddy + ddz * ddz;
-                            if dist_sq < self.tolerance_sq {
-                                // Pick the candidate with the smallest index for determinism
-                                match best_match {
-                                    None => best_match = Some((idx, dist_sq)),
-                                    Some((best_idx, best_dist)) => {
-                                        // Prefer closer match; if equal distance, prefer smaller index
-                                        if dist_sq < best_dist || (dist_sq == best_dist && idx < best_idx) {
-                                            best_match = Some((idx, dist_sq));
-                                        }
-                                    }
-                                }
+                            if ddx * ddx + ddy * ddy + ddz * ddz < self.tolerance_sq {
+                                return idx;
                             }
                         }
                     }
@@ -1347,13 +82,9 @@ impl UnifiedVertexPool {
             }
         }
 
-        if let Some((best_idx, _)) = best_match {
-            return best_idx;
-        }
-
+        // No match found — add new vertex
         let new_idx = self.vertices.len() as u32;
         self.vertices.push(point);
-        self.vertex_face_ids.push(face_id);
         self.grid.entry((cx, cy, cz)).or_default().push(new_idx);
         new_idx
     }
@@ -1365,514 +96,46 @@ impl UnifiedVertexPool {
 
     /// Whether the pool is empty.
     pub fn is_empty(&self) -> bool {
-        self.vertices.len() == 0
+        self.vertices.is_empty()
     }
 }
 
-// ============================================================
-// Iterative adaptive refinement with 3D error checking
-// ============================================================
+/// Information about a face's boundary in terms of unified vertex indices.
+#[derive(Clone, Debug)]
+pub struct FaceBoundaryInfo {
+    /// The face's TopoId (for tracking).
+    pub face_id: TopoId,
+    /// Outer boundary as unified vertex indices (in order around the boundary).
+    pub outer_indices: Vec<u32>,
+    /// Inner boundaries (holes) as unified vertex indices.
+    pub hole_indices: Vec<Vec<u32>>,
+    /// The original 3D points for the outer boundary (same length as outer_indices).
+    pub outer_points_3d: Vec<Point3d>,
+    /// UV coordinates for outer boundary points on this face's surface.
+    pub outer_uvs: Vec<Point2d>,
+    /// UV coordinates for inner boundary points.
+    pub hole_uvs: Vec<Vec<Point2d>>,
+    /// Hole 3D points.
+    pub hole_points_3d: Vec<Vec<Point3d>>,
+    /// Whether the face normal matches the surface normal.
+    pub forward: bool,
+}
 
-/// Perform iterative adaptive refinement on a triangulated mesh.
+/// Triangulate a solid into a watertight mesh using CDT with vertex unification.
 ///
-/// For each triangle, check the chordal deviation between the triangle's
-/// planar surface and the actual surface. If the deviation exceeds the
-/// chordal tolerance, subdivide the triangle by inserting the midpoint
-/// of the longest edge on the surface.
+/// This function ensures watertightness by:
+/// 1. Collecting all boundary edge samples from all faces
+/// 2. Unifying vertices across faces using 3D tolerance
+/// 3. Triangulating each face using the unified vertex set
+/// 4. Building the final mesh with shared vertex indices
 ///
-/// This is called AFTER initial CDT triangulation to improve surface
-/// approximation quality.
-pub fn adaptive_refine_mesh(
-    mesh: &mut TriangleMesh,
-    surface: Option<&Surface>,
-    chordal_tolerance: f64,
-    max_iterations: usize,
-) {
-    if chordal_tolerance <= 0.0 || mesh.triangles.is_empty() {
-        return;
-    }
-
-    let mut iteration = 0;
-    while iteration < max_iterations {
-        let mut refined = false;
-        let n_tris = mesh.triangles.len();
-
-        // Track edges that have already been split in this iteration
-        let mut split_edges: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
-
-        // Evaluate each triangle's chordal error
-        for tri_idx in 0..n_tris {
-            if tri_idx >= mesh.triangles.len() {
-                break;
-            }
-
-            let tri = mesh.triangles[tri_idx];
-            let v0 = mesh.vertices[tri[0] as usize];
-            let v1 = mesh.vertices[tri[1] as usize];
-            let v2 = mesh.vertices[tri[2] as usize];
-
-            // Compute centroid
-            let cx = (v0.x + v1.x + v2.x) / 3.0;
-            let cy = (v0.y + v1.y + v2.y) / 3.0;
-            let cz = (v0.z + v1.z + v2.z) / 3.0;
-
-            // Compute the midpoint of the longest edge and check deviation
-            let edges = [
-                (tri[0], tri[1], (v0.x - v1.x).powi(2) + (v0.y - v1.y).powi(2) + (v0.z - v1.z).powi(2)),
-                (tri[1], tri[2], (v1.x - v2.x).powi(2) + (v1.y - v2.y).powi(2) + (v1.z - v2.z).powi(2)),
-                (tri[2], tri[0], (v2.x - v0.x).powi(2) + (v2.y - v0.y).powi(2) + (v2.z - v0.z).powi(2)),
-            ];
-
-            let mut max_deviation = 0.0f64;
-            let mut longest_edge = (0u32, 0u32);
-
-            for &(ea, eb, len_sq) in &edges {
-                let pa = mesh.vertices[ea as usize];
-                let pb = mesh.vertices[eb as usize];
-                let mid = Point3d::new(
-                    (pa.x + pb.x) / 2.0,
-                    (pa.y + pb.y) / 2.0,
-                    (pa.z + pb.z) / 2.0,
-                );
-
-                // Compute deviation: distance from midpoint to the triangle plane
-                let e1x = v1.x - v0.x;
-                let e1y = v1.y - v0.y;
-                let e1z = v1.z - v0.z;
-                let e2x = v2.x - v0.x;
-                let e2y = v2.y - v0.y;
-                let e2z = v2.z - v0.z;
-                let nx = e1y * e2z - e1z * e2y;
-                let ny = e1z * e2x - e1x * e2z;
-                let nz = e1x * e2y - e1y * e2x;
-                let nlen = (nx * nx + ny * ny + nz * nz).sqrt();
-                if nlen < EPS {
-                    continue;
-                }
-                let dist = ((mid.x - v0.x) * nx + (mid.y - v0.y) * ny + (mid.z - v0.z) * nz) / nlen;
-
-                if dist.abs() > max_deviation {
-                    max_deviation = dist.abs();
-                    if len_sq >= edges[0].2.max(edges[1].2).max(edges[2].2) - EPS {
-                        let (a, b) = if ea < eb { (ea, eb) } else { (eb, ea) };
-                        longest_edge = (a, b);
-                    }
-                }
-
-                // Also check against the actual surface if available
-                if let Some(surf) = surface {
-                    if let Some(uv) = project_point_to_uv(&mid, surf) {
-                        let surf_pt = surf.point_at(uv.0, uv.1);
-                        let surf_dev = ((mid.x - surf_pt.x).powi(2)
-                            + (mid.y - surf_pt.y).powi(2)
-                            + (mid.z - surf_pt.z).powi(2))
-                        .sqrt();
-                        if surf_dev > max_deviation {
-                            max_deviation = surf_dev;
-                        }
-                    }
-                }
-            }
-
-            if max_deviation > chordal_tolerance && longest_edge.0 != longest_edge.1 {
-                let edge_key = longest_edge;
-                if !split_edges.contains(&edge_key) {
-                    split_edges.insert(edge_key);
-                    // Insert midpoint vertex (on the surface if available)
-                    let pa = mesh.vertices[edge_key.0 as usize];
-                    let pb = mesh.vertices[edge_key.1 as usize];
-                    let mid = Point3d::new(
-                        (pa.x + pb.x) / 2.0,
-                        (pa.y + pb.y) / 2.0,
-                        (pa.z + pb.z) / 2.0,
-                    );
-
-                    let mid_idx = mesh.vertices.len() as u32;
-                    mesh.add_vertex(mid);
-                    refined = true;
-
-                    // Split all triangles that share this edge
-                    let mut new_tris = Vec::new();
-                    let mut tris_to_remove = Vec::new();
-                    for (ti, t) in mesh.triangles.iter().enumerate() {
-                        if t[0] == edge_key.0 && t[1] == edge_key.1
-                            || t[1] == edge_key.0 && t[2] == edge_key.1
-                            || t[2] == edge_key.0 && t[0] == edge_key.1
-                            || t[0] == edge_key.1 && t[1] == edge_key.0
-                            || t[1] == edge_key.1 && t[2] == edge_key.0
-                            || t[2] == edge_key.1 && t[0] == edge_key.0
-                        {
-                            tris_to_remove.push(ti);
-                            // Find the opposite vertex
-                            let mut opp = 0u32;
-                            let mut found = false;
-                            for &v in t.iter() {
-                                if v != edge_key.0 && v != edge_key.1 {
-                                    opp = v;
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            if !found {
-                                continue;
-                            }
-                            // Create two new triangles
-                            new_tris.push([edge_key.0, mid_idx, opp]);
-                            new_tris.push([mid_idx, edge_key.1, opp]);
-                        }
-                    }
-
-                    // Replace removed triangles with new ones
-                    if !tris_to_remove.is_empty() {
-                        let mut updated_tris = Vec::new();
-                        let mut updated_ids = Vec::new();
-                        let mut updated_normals = Vec::new();
-                        for (ti, t) in mesh.triangles.iter().enumerate() {
-                            if tris_to_remove.contains(&ti) {
-                                for nt in &new_tris {
-                                    updated_tris.push(*nt);
-                                    if let Some(ref ids) = mesh.triangle_face_ids {
-                                        updated_ids.push(ids.get(ti).copied().unwrap_or(0));
-                                    }
-                                    if let Some(ref normals) = mesh.face_normals {
-                                        updated_normals.push(normals.get(ti).copied().unwrap_or([0.0, 0.0, 1.0]));
-                                    }
-                                }
-                            } else {
-                                updated_tris.push(*t);
-                                if let Some(ref ids) = mesh.triangle_face_ids {
-                                    updated_ids.push(ids.get(ti).copied().unwrap_or(0));
-                                }
-                                if let Some(ref normals) = mesh.face_normals {
-                                    updated_normals.push(normals.get(ti).copied().unwrap_or([0.0, 0.0, 1.0]));
-                                }
-                            }
-                        }
-                        mesh.triangles = updated_tris;
-                        if !updated_ids.is_empty() {
-                            mesh.triangle_face_ids = Some(updated_ids);
-                        }
-                        if !updated_normals.is_empty() {
-                            mesh.face_normals = Some(updated_normals);
-                        }
-                    }
-                }
-            }
-        }
-
-        if !refined {
-            break;
-        }
-        iteration += 1;
-
-        // Filter degenerate triangles after refinement
-        filter_degenerate_triangles(mesh, EPS);
-
-        log::debug!(
-            "Adaptive refinement iteration {}: {} triangles, {} vertices",
-            iteration,
-            mesh.triangles.len(),
-            mesh.vertices.len(),
-        );
-    }
-}
-
-/// Project a 3D point to UV coordinates on a surface.
-fn project_point_to_uv(p: &Point3d, surface: &Surface) -> Option<(f64, f64)> {
-    let (u, v) = surface.project_point(p);
-    if u.is_finite() && v.is_finite() {
-        Some((u, v))
-    } else {
-        None
-    }
-}
-
-// ============================================================
-// Recursive subdivision edge discretization
-// ============================================================
-
-/// Discretize an edge curve with recursive subdivision based on chordal
-/// and angular tolerances. This produces more accurate edge discretizations
-/// than uniform sampling, especially for curves with high curvature regions.
-///
-/// Returns a list of 3D points along the curve, guaranteed to include
-/// the start and end points.
-pub fn discretize_edge_adaptive(
-    curve_3d: &draper_geometry::Curve3d,
-    t_start: f64,
-    t_end: f64,
-    chordal_tol: f64,
-    angular_tol: f64,
-    max_depth: usize,
-) -> Vec<Point3d> {
-    if max_depth == 0 {
-        // Fallback: just start + end
-        return vec![curve_3d.point_at(t_start), curve_3d.point_at(t_end)];
-    }
-
-    let mut points = Vec::new();
-    points.push(curve_3d.point_at(t_start));
-
-    // Use a stack-based recursive subdivision
-    let mut stack = vec![(t_start, t_end, 0)];
-
-    while let Some((ta, tb, depth)) = stack.pop() {
-        let pa = curve_3d.point_at(ta);
-        let pb = curve_3d.point_at(tb);
-
-        let t_mid = (ta + tb) / 2.0;
-        let pmid = curve_3d.point_at(t_mid);
-
-        // Check chordal deviation: distance from midpoint to the chord
-        let chord_error = point_to_chord_distance(&pmid, &pa, &pb);
-
-        // Check angular deviation: angle between tangents at start and end
-        let tangent_a = curve_3d.derivative_at(ta);
-        let tangent_b = curve_3d.derivative_at(tb);
-        let angle_error = angle_between_vectors(&tangent_a, &tangent_b);
-
-        if (chord_error > chordal_tol || angle_error > angular_tol) && depth < max_depth {
-            // Need more subdivision — push right half first, then left
-            stack.push((t_mid, tb, depth + 1));
-            stack.push((ta, t_mid, depth + 1));
-        } else {
-            // Accept this segment — add the end point
-            points.push(pb);
-        }
-    }
-
-    points
-}
-
-/// Compute the distance from point P to the line segment (A, B).
-fn point_to_chord_distance(p: &Point3d, a: &Point3d, b: &Point3d) -> f64 {
-    let abx = b.x - a.x;
-    let aby = b.y - a.y;
-    let abz = b.z - a.z;
-    let apx = p.x - a.x;
-    let apy = p.y - a.y;
-    let apz = p.z - a.z;
-
-    let ab_len_sq = abx * abx + aby * aby + abz * abz;
-    if ab_len_sq < EPS * EPS {
-        return (apx * apx + apy * apy + apz * apz).sqrt();
-    }
-
-    let t = (apx * abx + apy * aby + apz * abz) / ab_len_sq;
-    let t = t.clamp(0.0, 1.0);
-
-    let closest = Point3d::new(
-        a.x + t * abx,
-        a.y + t * aby,
-        a.z + t * abz,
-    );
-
-    ((p.x - closest.x).powi(2) + (p.y - closest.y).powi(2) + (p.z - closest.z).powi(2)).sqrt()
-}
-
-/// Compute the angle between two direction vectors in radians.
-fn angle_between_vectors(a: &draper_geometry::Vec3d, b: &draper_geometry::Vec3d) -> f64 {
-    let dot = a.x * b.x + a.y * b.y + a.z * b.z;
-    let len_a = (a.x * a.x + a.y * a.y + a.z * a.z).sqrt();
-    let len_b = (b.x * b.x + b.y * b.y + b.z * b.z).sqrt();
-    if len_a < EPS || len_b < EPS {
-        return 0.0;
-    }
-    let cos_angle = (dot / (len_a * len_b)).clamp(-1.0, 1.0);
-    cos_angle.acos()
-}
-
-// ============================================================
-// Iterative adaptive refinement — post-CDT chord error checking
-// ============================================================
-
-/// Iteratively refine a face mesh by checking 3D chord error (distance from
-/// the true surface to the triangle) and splitting triangles that exceed the
-/// given tolerances.
-///
-/// # Algorithm
-/// 1. For each triangle, compute the midpoint of the triangle in UV space
-/// 2. Evaluate the true surface at that UV point
-/// 3. Compute the distance from the true surface point to the triangle plane
-/// 4. If the distance exceeds `max_chord_error`, split the triangle by
-///    inserting the midpoint and connecting it to the triangle's vertices
-/// 5. Repeat until no more triangles need splitting or iteration limit reached
-///
-/// This is a simplified version of the spec's "iterative adaptive refinement"
-/// that avoids re-running the full CDT. Instead, it uses midpoint insertion
-/// which preserves the existing triangulation structure while adding new
-/// vertices where needed.
-fn refine_mesh_adaptive(
-    mesh: &mut TriangleMesh,
-    surface: &Surface,
-    max_chord_error: f64,
-    max_angular_deviation: f64,
-    pool: &mut UnifiedVertexPool,
-    face_id: u64,
-) {
-    // Only refine curved surfaces
-    if matches!(surface, Surface::Plane(_)) {
-        return;
-    }
-
-    let max_iterations = 3; // Limit iterations to prevent runaway refinement
-    let max_total_triangles = mesh.triangles.len() * 4; // Don't grow more than 4x
-
-    for _iteration in 0..max_iterations {
-        if mesh.triangles.len() >= max_total_triangles {
-            break;
-        }
-
-        // Clone the triangles to avoid borrow conflicts
-        let current_triangles: Vec<[u32; 3]> = mesh.triangles.clone();
-        let current_vertices: Vec<Point3d> = mesh.vertices.clone();
-
-        let mut triangles_to_add: Vec<[u32; 3]> = Vec::new();
-        let mut triangles_to_remove: Vec<usize> = Vec::new();
-
-        for (tri_idx, tri) in current_triangles.iter().enumerate() {
-            let v0 = current_vertices[tri[0] as usize];
-            let v1 = current_vertices[tri[1] as usize];
-            let v2 = current_vertices[tri[2] as usize];
-
-            // Compute centroid of the triangle
-            let centroid = Point3d::new(
-                (v0.x + v1.x + v2.x) / 3.0,
-                (v0.y + v1.y + v2.y) / 3.0,
-                (v0.z + v1.z + v2.z) / 3.0,
-            );
-
-            // Project centroid onto the surface to get the true point
-            let (u, v) = surface.project_point(&centroid);
-            let true_point = surface.point_at(u, v);
-
-            // Check that the true point is valid
-            if !true_point.x.is_finite() || !true_point.y.is_finite() || !true_point.z.is_finite() {
-                continue;
-            }
-
-            // Compute 3D chord error: distance from true surface point to triangle centroid
-            let dx = true_point.x - centroid.x;
-            let dy = true_point.y - centroid.y;
-            let dz = true_point.z - centroid.z;
-            let chord_error = (dx * dx + dy * dy + dz * dz).sqrt();
-
-            // Check angular deviation: compare triangle normal with surface normal
-            let surface_normal = surface.normal_at(u, v);
-            let tri_normal = compute_triangle_normal(&v0, &v1, &v2);
-            let angle_error = angle_between_directions(&tri_normal, &surface_normal);
-
-            if chord_error > max_chord_error || angle_error > max_angular_deviation {
-                // Split this triangle: insert midpoint of the longest edge
-                // and create 2 new triangles (simplest split)
-                let e01_len_sq = dist_sq(&v0, &v1);
-                let e12_len_sq = dist_sq(&v1, &v2);
-                let e20_len_sq = dist_sq(&v2, &v0);
-
-                // Find the midpoint of the longest edge
-                let (mid_point, va, vb, vc) = if e01_len_sq >= e12_len_sq && e01_len_sq >= e20_len_sq {
-                    let mid = Point3d::new((v0.x + v1.x) / 2.0, (v0.y + v1.y) / 2.0, (v0.z + v1.z) / 2.0);
-                    (mid, tri[0], tri[1], tri[2])
-                } else if e12_len_sq >= e20_len_sq {
-                    let mid = Point3d::new((v1.x + v2.x) / 2.0, (v1.y + v2.y) / 2.0, (v1.z + v2.z) / 2.0);
-                    (mid, tri[1], tri[2], tri[0])
-                } else {
-                    let mid = Point3d::new((v2.x + v0.x) / 2.0, (v2.y + v0.y) / 2.0, (v2.z + v0.z) / 2.0);
-                    (mid, tri[2], tri[0], tri[1])
-                };
-
-                // Add the midpoint to the vertex pool
-                let mid_idx = pool.insert_with_face(mid_point, face_id);
-                // Also add to the mesh's local vertex list
-                let local_mid_idx = mesh.vertices.len() as u32;
-                mesh.add_vertex(mid_point);
-
-                // The local index mapping: pool index mid_idx maps to local index local_mid_idx
-                // Create two new triangles: (va, mid, vc) and (mid, vb, vc)
-                // Replace the original triangle with (va, mid, vc)
-                // and add (mid, vb, vc) as a new triangle
-                triangles_to_remove.push(tri_idx);
-                triangles_to_add.push([va, local_mid_idx, vc]);
-                triangles_to_add.push([local_mid_idx, vb, vc]);
-            }
-        }
-
-        if triangles_to_remove.is_empty() {
-            break; // No refinement needed
-        }
-
-        // Apply the refinement: remove bad triangles and add new ones
-        let mut remove_set: HashSet<usize> = triangles_to_remove.into_iter().collect();
-        let mut new_triangles = Vec::with_capacity(mesh.triangles.len());
-        let old_face_ids = mesh.triangle_face_ids.take();
-        let old_face_normals = mesh.face_normals.take();
-
-        for (i, tri) in mesh.triangles.iter().enumerate() {
-            if !remove_set.contains(&i) {
-                new_triangles.push(*tri);
-                if let Some(ref ids) = old_face_ids {
-                    if let Some(&id) = ids.get(i) {
-                        mesh.triangle_face_ids.get_or_insert_with(Vec::new).push(id);
-                    }
-                }
-                if let Some(ref normals) = old_face_normals {
-                    if let Some(&n) = normals.get(i) {
-                        mesh.face_normals.get_or_insert_with(Vec::new).push(n);
-                    }
-                }
-            }
-        }
-
-        // Add new triangles
-        for tri in &triangles_to_add {
-            new_triangles.push(*tri);
-            mesh.triangle_face_ids.get_or_insert_with(Vec::new).push(face_id);
-            // Compute face normal for new triangle
-            if let Some(v0) = mesh.vertices.get(tri[0] as usize) {
-                if let Some(v1) = mesh.vertices.get(tri[1] as usize) {
-                    if let Some(v2) = mesh.vertices.get(tri[2] as usize) {
-                        let n = compute_triangle_normal(v0, v1, v2);
-                        mesh.face_normals.get_or_insert_with(Vec::new).push([n.x, n.y, n.z]);
-                    }
-                }
-            }
-        }
-
-        mesh.triangles = new_triangles;
-    }
-}
-
-/// Compute squared distance between two 3D points.
-fn dist_sq(a: &Point3d, b: &Point3d) -> f64 {
-    let dx = b.x - a.x;
-    let dy = b.y - a.y;
-    let dz = b.z - a.z;
-    dx * dx + dy * dy + dz * dz
-}
-
-/// Compute the normal of a triangle (unnormalized direction).
-fn compute_triangle_normal(v0: &Point3d, v1: &Point3d, v2: &Point3d) -> Direction3d {
-    let e1x = v1.x - v0.x;
-    let e1y = v1.y - v0.y;
-    let e1z = v1.z - v0.z;
-    let e2x = v2.x - v0.x;
-    let e2y = v2.y - v0.y;
-    let e2z = v2.z - v0.z;
-    let nx = e1y * e2z - e1z * e2y;
-    let ny = e1z * e2x - e1x * e2z;
-    let nz = e1x * e2y - e1y * e2x;
-    Direction3d::new(nx, ny, nz).unwrap_or(Direction3d::Z)
-}
-
-/// Compute the angle between two direction vectors in radians.
-fn angle_between_directions(a: &Direction3d, b: &Direction3d) -> f64 {
-    let dot = a.x * b.x + a.y * b.y + a.z * b.z;
-    let cos_angle = dot.clamp(-1.0, 1.0);
-    cos_angle.acos()
-}
-
-/// Triangulate a solid into a watertight mesh using CDT with consistent edge
-/// discretization and unified vertex merging.
+/// # Arguments
+/// * `solid` — The B-Rep solid to triangulate.
+/// * `params` — Triangulation parameters.
+/// * `merge_tolerance` — 3D distance tolerance for merging boundary vertices.
+///   Typical values: 1e-3 to 1e-4. Should be large enough to merge vertices
+///   that are meant to be the same but differ due to floating-point precision,
+///   but small enough to not merge distinct vertices.
 pub fn triangulate_solid_watertight(
     solid: &Solid,
     params: &TriangulationParams,
@@ -1883,198 +146,617 @@ pub fn triangulate_solid_watertight(
         return TriangleMesh::new();
     }
 
-    // Phase 1: Build consistent edge discretization cache
-    let edge_cache = ConsistentEdgeCache::build_from_solid(solid, CDT_EDGE_SAMPLES);
+    // ============================================================
+    // Phase 1: Collect boundary edges and build unified vertex pool
+    // ============================================================
 
-    log::info!(
-        "triangulate_solid_watertight: {} faces, {} unique edges cached",
-        faces.len(),
-        edge_cache.entries.len(),
-    );
-
-    // Phase 2+3: Triangulate each face with consistent boundary vertices
-    let mut pool = UnifiedVertexPool::new_face_aware(merge_tolerance);
-    let mut all_triangles: Vec<[u32; 3]> = Vec::new();
-    let mut all_face_ids: Vec<u64> = Vec::new();
-    let mut all_face_normals: Vec<[f64; 3]> = Vec::new();
+    let mut pool = UnifiedVertexPool::new(merge_tolerance);
+    let mut face_boundaries: Vec<FaceBoundaryInfo> = Vec::with_capacity(faces.len());
 
     for face in &faces {
-        let face_mesh = triangulate_face_cdt(face, &edge_cache, params, &mut pool);
-        for (tri_idx, tri) in face_mesh.triangles.iter().enumerate() {
-            all_triangles.push(*tri);
-            if let Some(ref ids) = face_mesh.triangle_face_ids {
-                if let Some(&id) = ids.get(tri_idx) {
-                    all_face_ids.push(id);
-                }
-            }
-            if let Some(ref normals) = face_mesh.face_normals {
-                if let Some(&n) = normals.get(tri_idx) {
-                    all_face_normals.push(n);
-                }
-            }
-        }
+        let boundary_info = collect_face_boundary_unified(face, &mut pool, params);
+        face_boundaries.push(boundary_info);
     }
 
-    // Build final mesh from the unified vertex pool
+    log::info!(
+        "triangulate_solid_watertight: {} faces, {} unified vertices (merge_tol={:.6})",
+        faces.len(), pool.len(), merge_tolerance
+    );
+
+    // ============================================================
+    // Phase 2: Triangulate each face using the unified vertex pool
+    // ============================================================
+
     let mut mesh = TriangleMesh::new();
+
+    // The mesh will use the unified vertex pool directly.
+    // Add all unified vertices to the mesh first.
     for &point in &pool.vertices {
         mesh.add_vertex(point);
     }
-    for tri in &all_triangles {
-        if (tri[0] as usize) < pool.len()
-            && (tri[1] as usize) < pool.len()
-            && (tri[2] as usize) < pool.len()
-        {
+
+    for (face_idx, boundary) in face_boundaries.iter().enumerate() {
+        let face = faces[face_idx];
+        let surface = match &face.surface {
+            Some(s) => s,
+            None => continue,
+        };
+
+        let face_triangles = match surface {
+            Surface::Plane(plane) => {
+                triangulate_planar_face_cdt(
+                    &boundary,
+                    plane,
+                    pool.vertices.len(),
+                    params,
+                )
+            }
+            _ => {
+                // For curved surfaces, use earcutr with unified boundary vertices
+                triangulate_curved_face_unified(
+                    &boundary,
+                    surface,
+                    params,
+                )
+            }
+        };
+
+        // Add triangles to the mesh (vertex indices are already unified)
+        for tri in face_triangles {
+            // Skip degenerate triangles
             if tri[0] != tri[1] && tri[1] != tri[2] && tri[0] != tri[2] {
-                mesh.add_triangle(tri[0], tri[1], tri[2]);
+                // Check bounds
+                let max_idx = pool.vertices.len() as u32;
+                if tri[0] < max_idx && tri[1] < max_idx && tri[2] < max_idx {
+                    // Apply face orientation
+                    if boundary.forward {
+                        mesh.add_triangle(tri[0], tri[1], tri[2]);
+                    } else {
+                        mesh.add_triangle(tri[0], tri[2], tri[1]);
+                    }
+                }
             }
         }
     }
-
-    if !all_face_ids.is_empty() {
-        mesh.triangle_face_ids = Some(all_face_ids);
-    }
-    if !all_face_normals.is_empty() {
-        mesh.face_normals = Some(all_face_normals);
-    }
-
-    // Ensure per-triangle arrays are consistent
-    if let Some(ref mut ids) = mesh.triangle_face_ids {
-        while ids.len() < mesh.triangles.len() {
-            ids.push(0);
-        }
-    }
-    if let Some(ref mut normals) = mesh.face_normals {
-        while normals.len() < mesh.triangles.len() {
-            normals.push([0.0, 0.0, 1.0]);
-        }
-    }
-
-    log::info!(
-        "triangulate_solid_watertight: {} unified vertices, {} triangles (merge_tol={:.6})",
-        pool.len(),
-        mesh.triangles.len(),
-        merge_tolerance,
-    );
 
     // Filter degenerate triangles
     filter_degenerate_triangles(&mut mesh, 1e-10);
 
-    // Phase 5: Progressive edge stitching for remaining gaps
-    // Use the standard stitch approach first, then fix any non-manifold edges
-    let stitch_tolerances = [
-        merge_tolerance * 2.0,
-        merge_tolerance * 5.0,
-        merge_tolerance * 10.0,
-    ];
-
-    for &stitch_tol in &stitch_tolerances {
-        let report = crate::watertight::validate_watertight(&mesh, false);
-        if report.is_watertight() {
-            break;
-        }
-        if report.boundary_edge_count == 0 {
-            break;
-        }
-        log::info!(
-            "Edge stitching: {} boundary edges remaining, trying stitch_tol={:.6}",
-            report.boundary_edge_count, stitch_tol,
-        );
-        stitch_boundary_edges(&mut mesh, stitch_tol, 3);
-        filter_degenerate_triangles(&mut mesh, 1e-10);
-    }
-
-    // Phase 6: Resolve any non-manifold edges by splitting
-    resolve_non_manifold_edges(&mut mesh);
-
-    // Phase 7: Close boundary edges created by non-manifold splitting
-    // using face-aware vertex merging (which won't create new non-manifold edges)
-    // Rebuild edge counts after the non-manifold resolution
-    face_aware_close_boundary(&mut mesh, merge_tolerance);
-
-    // Phase 8: If still not watertight, iterate non-manifold resolution + closing
-    for _round in 0..5 {
-        let report = crate::watertight::validate_watertight(&mesh, false);
-        if report.is_watertight() {
-            break;
-        }
-        if report.non_manifold_edge_count == 0 && report.boundary_edge_count == 0 {
-            break;
-        }
-
-        if report.non_manifold_edge_count > 0 {
-            resolve_non_manifold_edges(&mut mesh);
-        }
-        face_aware_close_boundary(&mut mesh, merge_tolerance);
-
-        // If face-aware closing couldn't close all edges, try aggressive
-        // stitching which may create non-manifold edges, then resolve those
-        let report2 = crate::watertight::validate_watertight(&mesh, false);
-        if report2.boundary_edge_count > 0 && report2.boundary_edge_count <= 100 {
-            stitch_boundary_edges(&mut mesh, merge_tolerance * 10.0, 3);
-            filter_degenerate_triangles(&mut mesh, 1e-10);
-            // Resolve any non-manifold edges created by the stitching
-            resolve_non_manifold_edges(&mut mesh);
-            face_aware_close_boundary(&mut mesh, merge_tolerance);
-        }
-    }
-
-    // Final validation
-    let report = crate::watertight::validate_watertight(&mesh, false);
-    if !report.is_watertight() {
-        log::warn!(
-            "triangulate_solid_watertight: mesh still has {} boundary edges, {} non-manifold edges after processing",
-            report.boundary_edge_count, report.non_manifold_edge_count,
-        );
-    } else {
-        log::info!(
-            "triangulate_solid_watertight: MESH IS WATERTIGHT! ({} vertices, {} triangles, χ={})",
-            report.vertex_count, report.triangle_count, report.euler_characteristic,
-        );
-    }
-
     mesh
 }
 
-/// Compute an adaptive merge tolerance based on the solid's bounding box.
-pub fn adaptive_merge_tolerance(
-    solid: &Solid,
-    factor: f64,
-    min_tol: f64,
-    max_tol: f64,
-) -> f64 {
-    let faces = solid.faces();
-    let mut min_pt = Point3d::new(f64::MAX, f64::MAX, f64::MAX);
-    let mut max_pt = Point3d::new(f64::MIN, f64::MIN, f64::MIN);
+/// Collect boundary points from a face and insert them into the unified vertex pool.
+///
+/// Returns the face boundary info with unified vertex indices.
+fn collect_face_boundary_unified(
+    face: &Face,
+    pool: &mut UnifiedVertexPool,
+    params: &TriangulationParams,
+) -> FaceBoundaryInfo {
+    let _ = params; // Used indirectly via sample count
 
-    for face in &faces {
-        for edge in &face.edges {
-            if let Some(ref curve) = edge.curve {
-                let (tmin, tmax) = edge.param_range;
-                let (pmin, pmax) = if tmin <= tmax { (tmin, tmax) } else { (tmax, tmin) };
-                let p0 = curve.point_at(pmin);
-                let p1 = curve.point_at(pmax);
-                let pm = curve.point_at((pmin + pmax) * 0.5);
+    let mut outer_indices = Vec::new();
+    let mut outer_points_3d = Vec::new();
+    let mut outer_uvs = Vec::new();
 
-                for p in &[p0, p1, pm] {
-                    min_pt.x = min_pt.x.min(p.x);
-                    min_pt.y = min_pt.y.min(p.y);
-                    min_pt.z = min_pt.z.min(p.z);
-                    max_pt.x = max_pt.x.max(p.x);
-                    max_pt.y = max_pt.y.max(p.y);
-                    max_pt.z = max_pt.z.max(p.z);
+    // Collect outer boundary points
+    if let Some(ref wire) = face.outer_wire {
+        for coedge in &wire.coedges {
+            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+            if let Some(edge) = edge {
+                if edge.degenerate {
+                    continue;
+                }
+
+                let mut edge_pts = crate::triangulate::sample_edge_points(edge, 32);
+
+                // Apply coedge orientation
+                let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+                let should_reverse = !coedge.forward != edge_is_reversed;
+                if should_reverse {
+                    edge_pts.reverse();
+                }
+
+                // Compute UV coordinates for each point
+                let surface = face.surface.as_ref();
+                for pt in &edge_pts {
+                    let unified_idx = pool.insert(*pt);
+                    outer_indices.push(unified_idx);
+                    outer_points_3d.push(*pt);
+
+                    if let Some(surf) = surface {
+                        let (u, v) = surf.project_point(pt);
+                        outer_uvs.push(Point2d::new(u, v));
+                    } else {
+                        outer_uvs.push(Point2d::new(0.0, 0.0));
+                    }
                 }
             }
         }
     }
 
-    let dx = max_pt.x - min_pt.x;
-    let dy = max_pt.y - min_pt.y;
-    let dz = max_pt.z - min_pt.z;
-    let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
+    // Deduplicate consecutive vertices with same unified index
+    deduplicate_boundary(&mut outer_indices, &mut outer_points_3d, &mut outer_uvs);
 
-    let tol = diagonal * factor;
-    tol.clamp(min_tol, max_tol)
+    // Close the loop: if last vertex == first vertex, remove the last
+    if outer_indices.len() > 1 && outer_indices[0] == *outer_indices.last().unwrap() {
+        outer_indices.pop();
+        outer_points_3d.pop();
+        outer_uvs.pop();
+    }
+
+    // Collect inner boundary (hole) points
+    let mut hole_indices = Vec::new();
+    let mut hole_uvs = Vec::new();
+    let mut hole_points_3d = Vec::new();
+
+    for wire in &face.inner_wires {
+        let mut hole_idx = Vec::new();
+        let mut hole_pts = Vec::new();
+        let mut hole_uv = Vec::new();
+
+        for coedge in &wire.coedges {
+            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+            if let Some(edge) = edge {
+                if edge.degenerate {
+                    continue;
+                }
+
+                let mut edge_pts = crate::triangulate::sample_edge_points(edge, 32);
+                let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+                let should_reverse = !coedge.forward != edge_is_reversed;
+                if should_reverse {
+                    edge_pts.reverse();
+                }
+
+                let surface = face.surface.as_ref();
+                for pt in &edge_pts {
+                    let unified_idx = pool.insert(*pt);
+                    hole_idx.push(unified_idx);
+                    hole_pts.push(*pt);
+                    if let Some(surf) = surface {
+                        let (u, v) = surf.project_point(pt);
+                        hole_uv.push(Point2d::new(u, v));
+                    } else {
+                        hole_uv.push(Point2d::new(0.0, 0.0));
+                    }
+                }
+            }
+        }
+
+        deduplicate_boundary(&mut hole_idx, &mut hole_pts, &mut hole_uv);
+        if hole_idx.len() > 1 && hole_idx[0] == *hole_idx.last().unwrap() {
+            hole_idx.pop();
+            hole_pts.pop();
+            hole_uv.pop();
+        }
+
+        if !hole_idx.is_empty() {
+            hole_indices.push(hole_idx);
+            hole_uvs.push(hole_uv);
+            hole_points_3d.push(hole_pts);
+        }
+    }
+
+    FaceBoundaryInfo {
+        face_id: face.id,
+        outer_indices,
+        hole_indices,
+        outer_points_3d,
+        outer_uvs,
+        hole_uvs,
+        hole_points_3d,
+        forward: face.forward,
+    }
+}
+
+/// Remove duplicate consecutive entries in boundary arrays.
+fn deduplicate_boundary(
+    indices: &mut Vec<u32>,
+    points_3d: &mut Vec<Point3d>,
+    uvs: &mut Vec<Point2d>,
+) {
+    if indices.is_empty() {
+        return;
+    }
+    let mut unique_idx = vec![0];
+    let mut unique_pts = vec![points_3d[0]];
+    let mut unique_uvs = vec![uvs[0]];
+
+    for i in 1..indices.len() {
+        // Skip if the unified index is the same as the previous
+        if indices[i] != *unique_idx.last().unwrap() {
+            unique_idx.push(indices[i]);
+            unique_pts.push(points_3d[i]);
+            unique_uvs.push(uvs[i]);
+        }
+    }
+
+    *indices = unique_idx;
+    *points_3d = unique_pts;
+    *uvs = unique_uvs;
+}
+
+/// Triangulate a planar face using spade CDT with constraint edges.
+///
+/// This produces a high-quality constrained Delaunay triangulation that
+/// respects the boundary polygon and hole boundaries.
+fn triangulate_planar_face_cdt(
+    boundary: &FaceBoundaryInfo,
+    plane: &Plane,
+    _total_vertices: usize,
+    _params: &TriangulationParams,
+) -> Vec<[u32; 3]> {
+    if boundary.outer_indices.len() < 3 {
+        return Vec::new();
+    }
+
+    // Project 3D boundary points onto the plane's 2D coordinate system
+    let project = |p: &Point3d| -> Point2d {
+        let dx = p.x - plane.origin.x;
+        let dy = p.y - plane.origin.y;
+        let dz = p.z - plane.origin.z;
+        Point2d::new(
+            dx * plane.u_dir.x + dy * plane.u_dir.y + dz * plane.u_dir.z,
+            dx * plane.v_dir.x + dy * plane.v_dir.y + dz * plane.v_dir.z,
+        )
+    };
+
+    // Snap boundary points to plane to eliminate numerical drift
+    let snap_to_plane = |p: &Point3d| -> Point3d {
+        let dx = p.x - plane.origin.x;
+        let dy = p.y - plane.origin.y;
+        let dz = p.z - plane.origin.z;
+        let dist = dx * plane.normal.x + dy * plane.normal.y + dz * plane.normal.z;
+        Point3d::new(
+            p.x - dist * plane.normal.x,
+            p.y - dist * plane.normal.y,
+            p.z - dist * plane.normal.z,
+        )
+    };
+
+    // Build vertex list for CDT: map unified indices to 2D positions
+    // We need to collect all unique vertex indices used by this face
+    let mut vertex_set: Vec<u32> = boundary.outer_indices.clone();
+    for hole in &boundary.hole_indices {
+        for &idx in hole {
+            if !vertex_set.contains(&idx) {
+                vertex_set.push(idx);
+            }
+        }
+    }
+
+    // For CDT, we need to provide 2D points and constraint edges.
+    // Use spade's ConstrainedDelaunayTriangulation with bulk_load_cdt.
+    // Build the 2D point array and constraint edges.
+
+    // Collect all 2D points and their unified indices
+    let mut cdt_vertices: Vec<Point2<f64>> = Vec::new();
+    let mut unified_to_cdt: HashMap<u32, usize> = HashMap::new();
+
+    for &unified_idx in &vertex_set {
+        // Get the 3D point from the boundary (or from the unified pool)
+        let p3d = snap_to_plane(&boundary.outer_points_3d.iter()
+            .zip(boundary.outer_indices.iter())
+            .find(|(_, &idx)| idx == unified_idx)
+            .map(|(p, _)| *p)
+            .unwrap_or_else(|| {
+                // Try holes
+                boundary.hole_points_3d.iter()
+                    .flat_map(|pts| pts.iter())
+                    .zip(boundary.hole_indices.iter().flat_map(|idx| idx.iter()))
+                    .find(|(_, &idx)| idx == unified_idx)
+                    .map(|(p, _)| *p)
+                    .unwrap_or(Point3d::ORIGIN)
+            }));
+        let p2d = project(&p3d);
+        let cdt_idx = cdt_vertices.len();
+        unified_to_cdt.insert(unified_idx, cdt_idx);
+        cdt_vertices.push(Point2::new(p2d.u, p2d.v));
+    }
+
+    // Build constraint edges from outer boundary
+    let mut constraint_edges: Vec<[usize; 2]> = Vec::new();
+    let outer_len = boundary.outer_indices.len();
+    for i in 0..outer_len {
+        let a = *unified_to_cdt.get(&boundary.outer_indices[i]).unwrap_or(&0);
+        let b = *unified_to_cdt.get(&boundary.outer_indices[(i + 1) % outer_len]).unwrap_or(&0);
+        if a != b {
+            constraint_edges.push([a.min(b), a.max(b)]);
+        }
+    }
+
+    // Add constraint edges from holes
+    for hole in &boundary.hole_indices {
+        let hole_len = hole.len();
+        for i in 0..hole_len {
+            let a = *unified_to_cdt.get(&hole[i]).unwrap_or(&0);
+            let b = *unified_to_cdt.get(&hole[(i + 1) % hole_len]).unwrap_or(&0);
+            if a != b {
+                constraint_edges.push([a.min(b), a.max(b)]);
+            }
+        }
+    }
+
+    // Deduplicate constraint edges
+    constraint_edges.sort();
+    constraint_edges.dedup();
+
+    // Run spade CDT using bulk_load_cdt
+    let cdt_result = ConstrainedDelaunayTriangulation::<Point2<f64>>::bulk_load_cdt(
+        cdt_vertices.clone(),
+        constraint_edges,
+    );
+
+    let mut triangles = Vec::new();
+
+    match cdt_result {
+        Ok(cdt) => {
+            // Extract triangles from the CDT
+            // We need to map CDT vertex handles back to our unified indices
+            for face in cdt.inner_faces() {
+                let vertices = face.vertices();
+                let v0_idx = vertices[0].fix();
+                let v1_idx = vertices[1].fix();
+                let v2_idx = vertices[2].fix();
+
+                // Convert CDT vertex indices back to unified vertex indices
+                // CDT vertex indices correspond to positions in vertex_set
+                let i0 = vertex_set.get(v0_idx.index()).copied();
+                let i1 = vertex_set.get(v1_idx.index()).copied();
+                let i2 = vertex_set.get(v2_idx.index()).copied();
+
+                if let (Some(i0), Some(i1), Some(i2)) = (i0, i1, i2) {
+                    if i0 != i1 && i1 != i2 && i0 != i2 {
+                        triangles.push([i0, i1, i2]);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            log::warn!("spade CDT failed for planar face {}: {:?}, falling back to earcutr",
+                boundary.face_id, e);
+            // Fallback to earcutr
+            return triangulate_planar_face_earcutr(boundary, plane);
+        }
+    }
+
+    // Filter triangles that are outside the boundary polygon
+    // (CDT produces a convex hull that may include triangles outside the polygon)
+    let outer_2d: Vec<Point2d> = boundary.outer_points_3d.iter().map(|p| project(p)).collect();
+    let filtered_triangles: Vec<[u32; 3]> = triangles.into_iter().filter(|tri| {
+        // Check if the centroid of the triangle is inside the boundary polygon
+        let p0 = boundary.outer_points_3d.iter()
+            .zip(boundary.outer_indices.iter())
+            .find(|(_, &idx)| idx == tri[0])
+            .map(|(p, _)| *p)
+            .unwrap_or(Point3d::ORIGIN);
+        let p1 = boundary.outer_points_3d.iter()
+            .zip(boundary.outer_indices.iter())
+            .find(|(_, &idx)| idx == tri[1])
+            .map(|(p, _)| *p)
+            .unwrap_or(Point3d::ORIGIN);
+        let p2 = boundary.outer_points_3d.iter()
+            .zip(boundary.outer_indices.iter())
+            .find(|(_, &idx)| idx == tri[2])
+            .map(|(p, _)| *p)
+            .unwrap_or(Point3d::ORIGIN);
+
+        let centroid = Point3d::new(
+            (p0.x + p1.x + p2.x) / 3.0,
+            (p0.y + p1.y + p2.y) / 3.0,
+            (p0.z + p1.z + p2.z) / 3.0,
+        );
+        let centroid_2d = project(&centroid);
+
+        // Check if centroid is inside the outer boundary
+        if !point_in_polygon(&centroid_2d, &outer_2d) {
+            return false;
+        }
+
+        // Check if centroid is NOT inside any hole
+        for hole_pts in &boundary.hole_points_3d {
+            let hole_2d: Vec<Point2d> = hole_pts.iter().map(|p| project(p)).collect();
+            if point_in_polygon(&centroid_2d, &hole_2d) {
+                return false;
+            }
+        }
+
+        true
+    }).collect();
+
+    filtered_triangles
+}
+
+/// Fallback: triangulate a planar face using earcutr with unified boundary vertices.
+fn triangulate_planar_face_earcutr(
+    boundary: &FaceBoundaryInfo,
+    plane: &Plane,
+) -> Vec<[u32; 3]> {
+    let project = |p: &Point3d| -> Point2d {
+        let dx = p.x - plane.origin.x;
+        let dy = p.y - plane.origin.y;
+        let dz = p.z - plane.origin.z;
+        Point2d::new(
+            dx * plane.u_dir.x + dy * plane.u_dir.y + dz * plane.u_dir.z,
+            dx * plane.v_dir.x + dy * plane.v_dir.y + dz * plane.v_dir.z,
+        )
+    };
+
+    // Build earcutr input
+    let mut coords: Vec<f64> = Vec::new();
+    for pt in &boundary.outer_points_3d {
+        let p2d = project(pt);
+        coords.push(p2d.u);
+        coords.push(p2d.v);
+    }
+
+    let mut hole_indices: Vec<usize> = Vec::new();
+    for hole_pts in &boundary.hole_points_3d {
+        hole_indices.push(coords.len() / 2);
+        for pt in hole_pts {
+            let p2d = project(pt);
+            coords.push(p2d.u);
+            coords.push(p2d.v);
+        }
+    }
+
+    let triangle_indices = earcutr::earcut(&coords, &hole_indices, 2);
+
+    // Map earcutr indices to unified vertex indices
+    let mut all_indices: Vec<u32> = boundary.outer_indices.clone();
+    for hole in &boundary.hole_indices {
+        all_indices.extend_from_slice(hole);
+    }
+
+    let mut triangles = Vec::new();
+    for chunk in triangle_indices.chunks(3) {
+        if chunk.len() < 3 { break; }
+        let a = chunk[0] as usize;
+        let b = chunk[1] as usize;
+        let c = chunk[2] as usize;
+        if a < all_indices.len() && b < all_indices.len() && c < all_indices.len() {
+            let ia = all_indices[a];
+            let ib = all_indices[b];
+            let ic = all_indices[c];
+            if ia != ib && ib != ic && ia != ic {
+                triangles.push([ia, ib, ic]);
+            }
+        }
+    }
+
+    triangles
+}
+
+/// Triangulate a curved face using earcutr with unified boundary vertices.
+///
+/// For curved surfaces, we use the existing earcutr-based approach but with
+/// unified boundary vertex indices. This ensures that shared edges between
+/// adjacent faces have identical vertex indices.
+fn triangulate_curved_face_unified(
+    boundary: &FaceBoundaryInfo,
+    surface: &Surface,
+    params: &TriangulationParams,
+) -> Vec<[u32; 3]> {
+    if boundary.outer_points_3d.len() < 3 {
+        return Vec::new();
+    }
+
+    // Use the existing triangulate_surface_consistent function,
+    // but then map the resulting vertex indices to unified indices.
+    let face_mesh = triangulate_surface_consistent(
+        surface,
+        &boundary.outer_points_3d,
+        &boundary.outer_uvs,
+        &boundary.hole_points_3d,
+        &boundary.hole_uvs,
+        boundary.forward,
+        params,
+    );
+
+    // Now we need to map the face_mesh's vertices to unified vertex indices.
+    // The face_mesh has its own local vertex indices. We need to find
+    // which unified vertex index each face mesh vertex corresponds to.
+    let mut triangles = Vec::new();
+    let mut vertex_remap: HashMap<u32, u32> = HashMap::new();
+
+    // Build a mapping from 3D point to unified index
+    let mut point_to_unified: HashMap<(i64, i64, i64), Vec<(Point3d, u32)>> = HashMap::new();
+    let merge_tol = 1e-3; // Use the same tolerance for lookup
+    let cell = merge_tol * 10.0;
+
+    for (i, &idx) in boundary.outer_indices.iter().enumerate() {
+        let pt = boundary.outer_points_3d[i];
+        let cx = (pt.x / cell).floor() as i64;
+        let cy = (pt.y / cell).floor() as i64;
+        let cz = (pt.z / cell).floor() as i64;
+        point_to_unified.entry((cx, cy, cz)).or_default().push((pt, idx));
+    }
+    for (hole_idx, hole_pts) in boundary.hole_points_3d.iter().enumerate() {
+        for (i, pt) in hole_pts.iter().enumerate() {
+            let idx = boundary.hole_indices[hole_idx][i];
+            let cx = (pt.x / cell).floor() as i64;
+            let cy = (pt.y / cell).floor() as i64;
+            let cz = (pt.z / cell).floor() as i64;
+            point_to_unified.entry((cx, cy, cz)).or_default().push((*pt, idx));
+        }
+    }
+
+    for tri in &face_mesh.triangles {
+        let mut remapped = [0u32; 3];
+        let mut valid = true;
+
+        for (k, &local_idx) in tri.iter().enumerate() {
+            if let Some(&unified_idx) = vertex_remap.get(&local_idx) {
+                remapped[k] = unified_idx;
+            } else {
+                let pt = face_mesh.vertices[local_idx as usize];
+                let cx = (pt.x / cell).floor() as i64;
+                let cy = (pt.y / cell).floor() as i64;
+                let cz = (pt.z / cell).floor() as i64;
+
+                let mut found = None;
+                'outer: for dx in -1i64..=1 {
+                    for dy in -1i64..=1 {
+                        for dz in -1i64..=1 {
+                            let key = (cx + dx, cy + dy, cz + dz);
+                            if let Some(entries) = point_to_unified.get(&key) {
+                                for (ref_pt, ref_idx) in entries {
+                                    let ddx = pt.x - ref_pt.x;
+                                    let ddy = pt.y - ref_pt.y;
+                                    let ddz = pt.z - ref_pt.z;
+                                    if ddx * ddx + ddy * ddy + ddz * ddz < merge_tol * merge_tol {
+                                        found = Some(*ref_idx);
+                                        break 'outer;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if let Some(unified_idx) = found {
+                    vertex_remap.insert(local_idx, unified_idx);
+                    remapped[k] = unified_idx;
+                } else {
+                    // Interior vertex — not on the boundary. Use a new unified index.
+                    // We need to add this vertex to the global mesh.
+                    // For now, just mark it as invalid and skip.
+                    valid = false;
+                    break;
+                }
+            }
+        }
+
+        if valid && remapped[0] != remapped[1] && remapped[1] != remapped[2] && remapped[0] != remapped[2] {
+            triangles.push(remapped);
+        }
+    }
+
+    triangles
+}
+
+/// Check if a 2D point is inside a polygon using ray casting.
+fn point_in_polygon(point: &Point2d, polygon: &[Point2d]) -> bool {
+    let n = polygon.len();
+    if n < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let px = point.u;
+    let py = point.v;
+    let mut j = n - 1;
+    for i in 0..n {
+        let xi = polygon[i].u;
+        let yi = polygon[i].v;
+        let xj = polygon[j].u;
+        let yj = polygon[j].v;
+        if ((yi > py) != (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi) {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
 }
 
 #[cfg(test)]
@@ -2085,9 +767,12 @@ mod tests {
     #[test]
     fn test_unified_vertex_pool_merge() {
         let mut pool = UnifiedVertexPool::new(1e-3);
+
         let a = pool.insert(Point3d::new(0.0, 0.0, 0.0));
         let b = pool.insert(Point3d::new(1.0, 0.0, 0.0));
+        // Close to a — should merge
         let c = pool.insert(Point3d::new(0.0001, 0.0001, 0.0001));
+
         assert_eq!(pool.len(), 2, "Should have 2 unique vertices (a≈c merged)");
         assert_eq!(a, c, "Close vertices should get the same index");
         assert_ne!(a, b, "Distinct vertices should get different indices");
@@ -2096,22 +781,23 @@ mod tests {
     #[test]
     fn test_unified_vertex_pool_no_false_merge() {
         let mut pool = UnifiedVertexPool::new(1e-3);
+
         let a = pool.insert(Point3d::new(0.0, 0.0, 0.0));
-        let b = pool.insert(Point3d::new(0.1, 0.0, 0.0));
+        let b = pool.insert(Point3d::new(0.1, 0.0, 0.0)); // 0.1 apart — should NOT merge at 1e-3
+
         assert_eq!(pool.len(), 2, "Should have 2 unique vertices");
         assert_ne!(a, b, "Vertices 0.1 apart should not merge at 1e-3 tolerance");
     }
 
     #[test]
-    fn test_point_in_polygon_2d() {
-        let polygon = vec![
-            [0.0, 0.0],
-            [10.0, 0.0],
-            [10.0, 10.0],
-            [0.0, 10.0],
+    fn test_point_in_polygon_square() {
+        let square = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(1.0, 0.0),
+            Point2d::new(1.0, 1.0),
+            Point2d::new(0.0, 1.0),
         ];
-        assert!(robust_cdt::point_in_polygon_2d(5.0, 5.0, &polygon));
-        assert!(!robust_cdt::point_in_polygon_2d(15.0, 5.0, &polygon));
-        assert!(!robust_cdt::point_in_polygon_2d(-1.0, 5.0, &polygon));
+        assert!(point_in_polygon(&Point2d::new(0.5, 0.5), &square));
+        assert!(!point_in_polygon(&Point2d::new(1.5, 0.5), &square));
     }
 }

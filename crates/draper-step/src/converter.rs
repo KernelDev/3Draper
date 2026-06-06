@@ -777,15 +777,7 @@ impl<'a> StepConversionContext<'a> {
             let dz = bmax.z - bmin.z;
             let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
             if diagonal > 1.0 {
-                params.max_deviation = params.max_deviation.max(diagonal * 0.001);
-                // For very large assemblies, reduce per-face triangle budget
-                // to prevent total triangle explosion (e.g., 700K+ triangles)
-                if diagonal > 500.0 {
-                    params.max_face_triangles = (params.max_face_triangles / 2).max(200);
-                }
-                if diagonal > 2000.0 {
-                    params.max_face_triangles = (params.max_face_triangles / 2).max(100);
-                }
+                params.max_deviation = params.max_deviation.max(diagonal * 0.0002);
             }
         }
 
@@ -891,15 +883,7 @@ impl OwnedStepConversionContext {
             let dz = bmax.z - bmin.z;
             let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
             if diagonal > 1.0 {
-                params.max_deviation = params.max_deviation.max(diagonal * 0.001);
-                // For very large assemblies, reduce per-face triangle budget
-                // to prevent total triangle explosion (e.g., 700K+ triangles)
-                if diagonal > 500.0 {
-                    params.max_face_triangles = (params.max_face_triangles / 2).max(200);
-                }
-                if diagonal > 2000.0 {
-                    params.max_face_triangles = (params.max_face_triangles / 2).max(100);
-                }
+                params.max_deviation = params.max_deviation.max(diagonal * 0.0002);
             }
         }
 
@@ -972,28 +956,6 @@ impl OwnedStepConversionContext {
     /// Get a reference to the owned StepFile.
     pub fn step_file(&self) -> &StepFile {
         &self.step_file
-    }
-
-    /// Extract a `Solid` topology object from a BREP without triangulating it.
-    ///
-    /// This allows callers to use alternative triangulation strategies
-    /// (e.g., CDT-based watertight triangulation) on the raw topology.
-    ///
-    /// Returns `None` if the BREP cannot be found or its faces cannot be extracted.
-    pub fn extract_solid_from_brep(&self, brep_id: i64) -> Option<draper_topology::Solid> {
-        let converter = StepConverter::from_cached_maps(
-            &self.step_file,
-            self.config.clone(),
-            self.entity_map.clone(),
-            self.pd_brep_map.clone(),
-            self.nauo_transform_map.clone(),
-        );
-
-        let shell_id = converter.find_shell_ref_by_brep_id(brep_id)?;
-        let face_data_list = converter.extract_shell_faces(shell_id)?;
-
-        let (solid, _face_id_map) = face_data_list_to_solid(&face_data_list);
-        Some(solid)
     }
 }
 
@@ -1958,15 +1920,7 @@ impl<'a> StepConverter<'a> {
             let dz = bmax.z - bmin.z;
             let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
             if diagonal > 1.0 {
-                params.max_deviation = params.max_deviation.max(diagonal * 0.001);
-                // For very large assemblies, reduce per-face triangle budget
-                // to prevent total triangle explosion (e.g., 700K+ triangles)
-                if diagonal > 500.0 {
-                    params.max_face_triangles = (params.max_face_triangles / 2).max(200);
-                }
-                if diagonal > 2000.0 {
-                    params.max_face_triangles = (params.max_face_triangles / 2).max(100);
-                }
+                params.max_deviation = params.max_deviation.max(diagonal * 0.0002);
             }
         }
         let color_map = self.extract_color_map();
@@ -2289,15 +2243,7 @@ impl<'a> StepConverter<'a> {
             let dz = bmax.z - bmin.z;
             let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
             if diagonal > 1.0 {
-                params.max_deviation = params.max_deviation.max(diagonal * 0.001);
-                // For very large assemblies, reduce per-face triangle budget
-                // to prevent total triangle explosion (e.g., 700K+ triangles)
-                if diagonal > 500.0 {
-                    params.max_face_triangles = (params.max_face_triangles / 2).max(200);
-                }
-                if diagonal > 2000.0 {
-                    params.max_face_triangles = (params.max_face_triangles / 2).max(100);
-                }
+                params.max_deviation = params.max_deviation.max(diagonal * 0.0002);
             }
         }
         let color_map = self.extract_color_map();
@@ -2962,19 +2908,7 @@ impl<'a> StepConverter<'a> {
         // Merge coincident vertices to make the mesh watertight
         // (still needed for non-shared edges, but the cache ensures shared edges
         // already have identical vertices)
-        // Scale merge tolerance based on bounding box diagonal — larger models
-        // need larger tolerance to merge vertices that are close but not identical
-        // due to floating-point precision in surface evaluation.
-        let merge_tol = if let Some((bmin, bmax)) = bbox {
-            let dx = bmax.x - bmin.x;
-            let dy = bmax.y - bmin.y;
-            let dz = bmax.z - bmin.z;
-            let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
-            (diagonal * 1e-6).max(1e-5).min(1e-2)
-        } else {
-            1e-4
-        };
-        draper_mesh::merge_coincident_vertices(&mut mesh, merge_tol);
+        draper_mesh::merge_coincident_vertices(&mut mesh, 1e-4);
 
         // Phase 1b: Stitch boundary edges to close gaps
         // After vertex merging, some boundary edges remain because vertices
@@ -3177,226 +3111,15 @@ impl<'a> StepConverter<'a> {
                 uv_triangles,
             });
         }
-        // ============================================================
-        // Watertight post-processing: face-aware boundary vertex merging
-        // ============================================================
-        //
-        // The per-face triangulation produces correct geometry for each face,
-        // but boundary vertices on shared edges between adjacent faces have
-        // different 3D coordinates. This happens because:
-        //   - Each face samples edge curves independently (even with StepEdgeCache,
-        //     the adaptive_discretize and deduplication can produce different results)
-        //   - Different surface parameterizations cause different edge orientations
-        //   - snap_to_plane moves boundary points off the shared edge curve
-        //
-        // The KEY insight: we should ONLY merge boundary vertices that belong
-        // to DIFFERENT faces. Merging vertices within the same face collapses
-        // triangles and creates non-manifold edges.
-        //
-        // Algorithm:
-        // 1. Find all boundary edges (edges shared by only 1 triangle)
-        // 2. Group boundary vertices by face_id
-        // 3. For each boundary vertex from face A, find the closest boundary
-        //    vertex from a DIFFERENT face B within tolerance
-        // 4. Merge them (remap one to the other)
-        // 5. Apply progressive zipper stitching for remaining gaps
+        // Merge coincident vertices to make the mesh watertight
+        draper_mesh::merge_coincident_vertices(&mut mesh, 1e-4);
+
+        // Stitch boundary edges to close gaps
         {
             let (bmin, bmax) = mesh.bounding_box();
             let diagonal = ((bmax.x - bmin.x).powi(2) + (bmax.y - bmin.y).powi(2) + (bmax.z - bmin.z).powi(2)).sqrt();
-
-            // Two-phase approach:
-            // Phase 1: Merge boundary vertices from different faces (moderate tolerance)
-            // Phase 2: Zipper stitch for remaining gaps (larger tolerance)
-
-            let merge_tol = diagonal * 0.005; // 0.5% of diagonal
-            let merge_tol = merge_tol.clamp(1e-4, 2.0);
-
-            log::info!("BREP #{}: watertight post-processing — diagonal={:.2}, merge_tol={:.6}",
-                brep_id, diagonal, merge_tol);
-
-            // Phase 1: Face-aware boundary vertex merging
-            // Only merge boundary vertices that belong to DIFFERENT faces
-            {
-                let report = draper_mesh::validate_watertight(&mesh, false);
-                if report.boundary_edge_count > 0 {
-                    // Build edge count map to identify boundary edges
-                    let mut edge_count: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
-                    for tri in &mesh.triangles {
-                        let edges = [
-                            (tri[0].min(tri[1]), tri[0].max(tri[1])),
-                            (tri[1].min(tri[2]), tri[1].max(tri[2])),
-                            (tri[2].min(tri[0]), tri[2].max(tri[0])),
-                        ];
-                        for edge in &edges {
-                            *edge_count.entry(*edge).or_insert(0) += 1;
-                        }
-                    }
-
-                    // Collect boundary vertices with their face IDs
-                    let mut boundary_vert_faces: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
-                    for (tri_idx, tri) in mesh.triangles.iter().enumerate() {
-                        let face_id = mesh.triangle_face_ids.as_ref()
-                            .and_then(|ids| ids.get(tri_idx).copied())
-                            .unwrap_or(0);
-
-                        let edges = [
-                            (tri[0].min(tri[1]), tri[0].max(tri[1])),
-                            (tri[1].min(tri[2]), tri[1].max(tri[2])),
-                            (tri[2].min(tri[0]), tri[2].max(tri[0])),
-                        ];
-
-                        for edge in &edges {
-                            if edge_count.get(edge).copied().unwrap_or(0) == 1 {
-                                // This is a boundary edge — record its vertices
-                                boundary_vert_faces.entry(edge.0).or_insert(face_id);
-                                boundary_vert_faces.entry(edge.1).or_insert(face_id);
-                            }
-                        }
-                    }
-
-                    // Build spatial index of boundary vertices grouped by face_id
-                    let cell_size = merge_tol * 10.0;
-                    let tol_sq = merge_tol * merge_tol;
-                    let mut grid: std::collections::HashMap<(i64, i64, i64), Vec<(u32, u64)>> = std::collections::HashMap::new();
-                    for (&vidx, &face_id) in &boundary_vert_faces {
-                        let p = mesh.vertices[vidx as usize];
-                        let cx = (p.x / cell_size).floor() as i64;
-                        let cy = (p.y / cell_size).floor() as i64;
-                        let cz = (p.z / cell_size).floor() as i64;
-                        grid.entry((cx, cy, cz)).or_default().push((vidx, face_id));
-                    }
-
-                    // For each boundary vertex, find closest boundary vertex from a DIFFERENT face
-                    let mut remap: Vec<u32> = (0..mesh.vertices.len() as u32).collect();
-                    let mut merged_any = false;
-
-                    for (&vidx, &face_id) in &boundary_vert_faces {
-                        let p = mesh.vertices[vidx as usize];
-                        let cx = (p.x / cell_size).floor() as i64;
-                        let cy = (p.y / cell_size).floor() as i64;
-                        let cz = (p.z / cell_size).floor() as i64;
-
-                        let mut best_match: Option<(u32, f64)> = None;
-
-                        for dx in -1i64..=1 {
-                            for dy in -1i64..=1 {
-                                for dz in -1i64..=1 {
-                                    let key = (cx + dx, cy + dy, cz + dz);
-                                    if let Some(entries) = grid.get(&key) {
-                                        for &(other_idx, other_face_id) in entries {
-                                            if other_idx == vidx {
-                                                continue;
-                                            }
-                                            // ONLY merge vertices from DIFFERENT faces
-                                            if other_face_id == face_id {
-                                                continue;
-                                            }
-                                            // Follow remap chains
-                                            let mut target = remap[other_idx as usize];
-                                            while target != remap[target as usize] {
-                                                target = remap[target as usize];
-                                            }
-                                            if target == vidx {
-                                                continue; // Already merged
-                                            }
-                                            let other_p = mesh.vertices[target as usize];
-                                            let ddx = p.x - other_p.x;
-                                            let ddy = p.y - other_p.y;
-                                            let ddz = p.z - other_p.z;
-                                            let dist_sq = ddx * ddx + ddy * ddy + ddz * ddz;
-                                            if dist_sq < tol_sq {
-                                                match best_match {
-                                                    None => best_match = Some((target, dist_sq)),
-                                                    Some((_, best_dist)) => {
-                                                        if dist_sq < best_dist {
-                                                            best_match = Some((target, dist_sq));
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        if let Some((target, _)) = best_match {
-                            remap[vidx as usize] = target;
-                            merged_any = true;
-                        }
-                    }
-
-                    if merged_any {
-                        // Apply remap to triangles and filter degenerate ones
-                        let old_triangles = std::mem::take(&mut mesh.triangles);
-                        let old_face_ids = mesh.triangle_face_ids.take();
-                        let old_face_normals = mesh.face_normals.take();
-                        let old_triangle_colors = mesh.triangle_colors.take();
-
-                        // Follow remap chains
-                        let mut final_remap: Vec<u32> = Vec::with_capacity(remap.len());
-                        for &target in &remap {
-                            let mut current = target;
-                            loop {
-                                let next = remap[current as usize];
-                                if next == current { break; }
-                                current = next;
-                            }
-                            final_remap.push(current);
-                        }
-
-                        for (i, tri) in old_triangles.iter().enumerate() {
-                            let a = final_remap[tri[0] as usize];
-                            let b = final_remap[tri[1] as usize];
-                            let c = final_remap[tri[2] as usize];
-
-                            if a != b && b != c && a != c {
-                                mesh.triangles.push([a, b, c]);
-                                if let Some(ref ids) = old_face_ids {
-                                    if let Some(&fid) = ids.get(i) {
-                                        mesh.triangle_face_ids.get_or_insert_with(Vec::new).push(fid);
-                                    }
-                                }
-                                if let Some(ref normals) = old_face_normals {
-                                    if let Some(&n) = normals.get(i) {
-                                        mesh.face_normals.get_or_insert_with(Vec::new).push(n);
-                                    }
-                                }
-                                if let Some(ref colors) = old_triangle_colors {
-                                    if let Some(&col) = colors.get(i) {
-                                        mesh.triangle_colors.get_or_insert_with(Vec::new).push(col);
-                                    }
-                                }
-                            }
-                        }
-
-                        // Compact vertices
-                        draper_mesh::merge_coincident_vertices(&mut mesh, merge_tol * 0.1);
-                        draper_mesh::filter_degenerate_triangles(&mut mesh, 1e-10);
-                    }
-                }
-            }
-
-            // Phase 2: Progressive zipper stitching for remaining gaps
-            let stitch_tolerances = [
-                merge_tol * 2.0,
-                merge_tol * 5.0,
-                merge_tol * 10.0,
-                diagonal * 0.01,
-                diagonal * 0.02,
-                diagonal * 0.05,
-            ];
-
-            for &stitch_tol in &stitch_tolerances {
-                let wt = draper_mesh::validate_watertight(&mesh, false);
-                if wt.is_watertight() || wt.boundary_edge_count == 0 {
-                    break;
-                }
-                log::info!("BREP #{}: zipper stitch — {} boundary edges, snap_tol={:.6}",
-                    brep_id, wt.boundary_edge_count, stitch_tol);
-                draper_mesh::zipper_stitch_boundary_edges(&mut mesh, stitch_tol, 5);
-                draper_mesh::filter_degenerate_triangles(&mut mesh, 1e-10);
-            }
+            let stitch_tol = (diagonal * 0.05).max(0.1);
+            draper_mesh::stitch_boundary_edges(&mut mesh, stitch_tol, 20);
         }
 
         if skipped_faces > 0 {
@@ -7401,14 +7124,21 @@ impl<'a> StepConverter<'a> {
             return mesh;
         }
 
-        // NOTE: We intentionally do NOT snap boundary points to the plane here.
-        // Snapping was previously done to eliminate numerical drift, but it
-        // causes boundary vertices on shared edges to have DIFFERENT 3D positions
-        // between adjacent faces (e.g., a planar cap face and a cylinder side face
-        // share a circular edge — the cap face snaps circle points to the cap plane,
-        // the cylinder face doesn't — creating gaps).
-        // The boundary points come from the StepEdgeCache which ensures shared
-        // edges produce identical 3D points. Snapping breaks this guarantee.
+        // Snap boundary points onto the plane to eliminate numerical drift
+        // from edge curve sampling. Without this, vertices can be slightly off-plane,
+        // causing visible "wavy" artifacts on what should be a perfectly flat surface.
+        let snap_to_plane = |p: &Point3d| -> Point3d {
+            let dx = p.x - plane.origin.x;
+            let dy = p.y - plane.origin.y;
+            let dz = p.z - plane.origin.z;
+            let dist = dx * plane.normal.x + dy * plane.normal.y + dz * plane.normal.z;
+            Point3d::new(
+                p.x - dist * plane.normal.x,
+                p.y - dist * plane.normal.y,
+                p.z - dist * plane.normal.z,
+            )
+        };
+        outer_points_3d = outer_points_3d.iter().map(|p| snap_to_plane(p)).collect();
 
         // Log diagnostic info for complex planar faces
         if !inner_loops.is_empty() {
@@ -7448,7 +7178,7 @@ impl<'a> StepConverter<'a> {
             if !hp3d.is_empty() {
                 hp3d = deduplicate_points_3d(&hp3d, 1e-6);
                 // Snap hole points onto the plane (same as outer boundary)
-                // Don't snap hole points to plane (same reason as outer boundary)
+                hp3d = hp3d.iter().map(|p| snap_to_plane(p)).collect();
                 let hp2d: Vec<Point2d> = hp3d.iter().map(|p| project(p)).collect();
                 hole_points_3d.push(hp3d);
                 hole_points_2d.push(hp2d);
@@ -7616,15 +7346,12 @@ impl<'a> StepConverter<'a> {
         // Use same sample counts on all platforms for consistent results.
         // Keeping these moderate to avoid excessive boundary points that
         // slow down triangulation without improving quality.
-        // NOTE: The adaptive_discretize in StepEdgeCache will add more points
-        // only where chord deviation exceeds tolerance (max 64 pts/edge),
-        // so the initial count can be relatively low.
         match &edge.curve {
             Some(Curve3d::Line(_)) => 2,
-            Some(Curve3d::Circle(_)) => 16,
-            Some(Curve3d::Ellipse(_)) => 16,
-            Some(Curve3d::Arc(_)) => 12,
-            Some(Curve3d::Nurbs(_)) => 16,
+            Some(Curve3d::Circle(_)) => 24,
+            Some(Curve3d::Ellipse(_)) => 24,
+            Some(Curve3d::Arc(_)) => 16,
+            Some(Curve3d::Nurbs(_)) => 32,
             None => 2,
         }
     }
