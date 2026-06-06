@@ -973,6 +973,28 @@ impl OwnedStepConversionContext {
     pub fn step_file(&self) -> &StepFile {
         &self.step_file
     }
+
+    /// Extract a `Solid` topology object from a BREP without triangulating it.
+    ///
+    /// This allows callers to use alternative triangulation strategies
+    /// (e.g., CDT-based watertight triangulation) on the raw topology.
+    ///
+    /// Returns `None` if the BREP cannot be found or its faces cannot be extracted.
+    pub fn extract_solid_from_brep(&self, brep_id: i64) -> Option<draper_topology::Solid> {
+        let converter = StepConverter::from_cached_maps(
+            &self.step_file,
+            self.config.clone(),
+            self.entity_map.clone(),
+            self.pd_brep_map.clone(),
+            self.nauo_transform_map.clone(),
+        );
+
+        let shell_id = converter.find_shell_ref_by_brep_id(brep_id)?;
+        let face_data_list = converter.extract_shell_faces(shell_id)?;
+
+        let (solid, _face_id_map) = face_data_list_to_solid(&face_data_list);
+        Some(solid)
+    }
 }
 
 pub fn triangulate_pending_instance(
