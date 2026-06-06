@@ -18,6 +18,7 @@ pub mod parametric_domain;
 pub mod certification;
 pub mod text3d;
 pub mod watertight;
+pub mod cdt_triangulate;
 
 #[cfg(feature = "export-3mf")]
 pub mod export;
@@ -32,3 +33,4 @@ pub use text3d::*;
 pub use export::*;
 pub use certification::*;
 pub use watertight::*;
+pub use cdt_triangulate::*;

@@ -659,7 +659,7 @@ pub fn triangulate_face(face: &Face, params: &TriangulationParams) -> TriangleMe
 /// adjacent faces have reversed Edge copies with swapped param_ranges.
 /// The coedge.forward flag controls whether the result is reversed to match
 /// the wire traversal direction.
-fn sample_edge_points(edge: &Edge, n_samples: usize) -> Vec<Point3d> {
+pub fn sample_edge_points(edge: &Edge, n_samples: usize) -> Vec<Point3d> {
     let mut pts = Vec::with_capacity(n_samples);
     if let Some(ref curve) = edge.curve {
         let (tmin, tmax) = edge.param_range;

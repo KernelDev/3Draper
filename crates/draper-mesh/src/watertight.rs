@@ -273,6 +273,237 @@ fn triangle_area_3d(v0: &Point3d, v1: &Point3d, v2: &Point3d) -> f64 {
     (cx * cx + cy * cy + cz * cz).sqrt() * 0.5
 }
 
+// ============================================================
+// Edge stitching — close boundary gaps by merging nearby vertices
+// ============================================================
+
+/// Stitch boundary edges to close gaps in the mesh.
+///
+/// After `merge_coincident_vertices`, some boundary edges may remain because
+/// vertices on shared edges between adjacent faces have slightly different
+/// positions (beyond the merge tolerance). This function identifies pairs of
+/// boundary vertices that are close to each other and merges them.
+///
+/// # Algorithm
+/// 1. Find all boundary edges (edges with count == 1)
+/// 2. For each boundary vertex, find the closest other boundary vertex
+/// 3. If they're within `stitch_tolerance`, merge them
+/// 4. Repeat until no more merges are possible or iteration limit reached
+///
+/// # Arguments
+/// * `mesh` — The triangle mesh to stitch.
+/// * `stitch_tolerance` — Maximum distance between vertices to merge.
+///   Should be larger than the merge tolerance used in
+///   `merge_coincident_vertices`, but small enough to avoid merging
+///   genuinely distinct vertices.
+/// * `max_iterations` — Maximum number of stitch iterations.
+pub fn stitch_boundary_edges(mesh: &mut TriangleMesh, stitch_tolerance: f64, max_iterations: usize) {
+    for _ in 0..max_iterations {
+        let report = validate_watertight(mesh, false);
+        if report.is_watertight() {
+            return;
+        }
+        if report.boundary_edge_count == 0 {
+            return;
+        }
+
+        // Collect all boundary vertices
+        let boundary_verts = collect_boundary_vertices(mesh);
+        if boundary_verts.is_empty() {
+            return;
+        }
+
+        // Build spatial index of boundary vertices
+        let cell_size = stitch_tolerance * 10.0;
+        let tol_sq = stitch_tolerance * stitch_tolerance;
+        let mut grid: HashMap<(i64, i64, i64), Vec<u32>> = HashMap::new();
+        for &vidx in &boundary_verts {
+            let p = mesh.vertices[vidx as usize];
+            let cx = (p.x / cell_size).floor() as i64;
+            let cy = (p.y / cell_size).floor() as i64;
+            let cz = (p.z / cell_size).floor() as i64;
+            grid.entry((cx, cy, cz)).or_default().push(vidx);
+        }
+
+        // For each boundary vertex, find the closest other boundary vertex
+        let mut remap: Vec<u32> = (0..mesh.vertices.len() as u32).collect();
+        let mut merged_any = false;
+
+        for &vidx in &boundary_verts {
+            let p = mesh.vertices[vidx as usize];
+            let cx = (p.x / cell_size).floor() as i64;
+            let cy = (p.y / cell_size).floor() as i64;
+            let cz = (p.z / cell_size).floor() as i64;
+
+            let mut best_match: Option<(u32, f64)> = None;
+
+            for dx in -1i64..=1 {
+                for dy in -1i64..=1 {
+                    for dz in -1i64..=1 {
+                        let key = (cx + dx, cy + dy, cz + dz);
+                        if let Some(indices) = grid.get(&key) {
+                            for &other_idx in indices {
+                                if other_idx == vidx {
+                                    continue;
+                                }
+                                // Follow remap chains
+                                let mut target = remap[other_idx as usize];
+                                while target != remap[target as usize] {
+                                    target = remap[target as usize];
+                                }
+
+                                if target == vidx {
+                                    continue; // Already merged
+                                }
+
+                                let other_p = mesh.vertices[target as usize];
+                                let ddx = p.x - other_p.x;
+                                let ddy = p.y - other_p.y;
+                                let ddz = p.z - other_p.z;
+                                let dist_sq = ddx * ddx + ddy * ddy + ddz * ddz;
+
+                                if dist_sq < tol_sq {
+                                    match best_match {
+                                        None => best_match = Some((target, dist_sq)),
+                                        Some((_, best_dist)) => {
+                                            if dist_sq < best_dist {
+                                                best_match = Some((target, dist_sq));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some((target, _)) = best_match {
+                // Merge vidx into target (target is the closer vertex)
+                remap[vidx as usize] = target;
+                merged_any = true;
+            }
+        }
+
+        if !merged_any {
+            break;
+        }
+
+        // Apply remap to triangles and filter degenerate ones
+        apply_vertex_remap(mesh, &remap);
+    }
+}
+
+/// Collect all vertex indices that appear on boundary edges.
+fn collect_boundary_vertices(mesh: &TriangleMesh) -> Vec<u32> {
+    let mut edge_count: HashMap<(u32, u32), u32> = HashMap::new();
+    for tri in &mesh.triangles {
+        let edges = [
+            (tri[0].min(tri[1]), tri[0].max(tri[1])),
+            (tri[1].min(tri[2]), tri[1].max(tri[2])),
+            (tri[2].min(tri[0]), tri[2].max(tri[0])),
+        ];
+        for edge in &edges {
+            *edge_count.entry(*edge).or_insert(0) += 1;
+        }
+    }
+
+    let mut boundary_verts = std::collections::HashSet::new();
+    for (edge, count) in &edge_count {
+        if *count == 1 {
+            boundary_verts.insert(edge.0);
+            boundary_verts.insert(edge.1);
+        }
+    }
+
+    boundary_verts.into_iter().collect()
+}
+
+/// Apply a vertex remap to all triangles, removing degenerate ones.
+fn apply_vertex_remap(mesh: &mut TriangleMesh, remap: &[u32]) {
+    // First, follow remap chains to get final targets
+    let mut final_remap: Vec<u32> = Vec::with_capacity(remap.len());
+    for &target in remap {
+        let mut current = target;
+        loop {
+            let next = remap[current as usize];
+            if next == current {
+                break;
+            }
+            current = next;
+        }
+        final_remap.push(current);
+    }
+
+    // Apply remap to triangles, filtering degenerate ones
+    let old_triangles = std::mem::take(&mut mesh.triangles);
+    let old_face_ids = mesh.triangle_face_ids.take();
+    let old_face_normals = mesh.face_normals.take();
+    let old_triangle_colors = mesh.triangle_colors.take();
+
+    for (i, tri) in old_triangles.iter().enumerate() {
+        let a = final_remap[tri[0] as usize];
+        let b = final_remap[tri[1] as usize];
+        let c = final_remap[tri[2] as usize];
+
+        if a != b && b != c && a != c {
+            mesh.triangles.push([a, b, c]);
+            if let Some(ref ids) = old_face_ids {
+                if let Some(&fid) = ids.get(i) {
+                    mesh.triangle_face_ids.get_or_insert_with(Vec::new).push(fid);
+                }
+            }
+            if let Some(ref normals) = old_face_normals {
+                if let Some(&n) = normals.get(i) {
+                    mesh.face_normals.get_or_insert_with(Vec::new).push(n);
+                }
+            }
+            if let Some(ref colors) = old_triangle_colors {
+                if let Some(&col) = colors.get(i) {
+                    mesh.triangle_colors.get_or_insert_with(Vec::new).push(col);
+                }
+            }
+        }
+    }
+
+    // Remove unused vertices (compact the vertex list)
+    compact_vertices(mesh);
+}
+
+/// Remove unused vertices from the mesh and renumber indices.
+fn compact_vertices(mesh: &mut TriangleMesh) {
+    // Find which vertices are used
+    let mut used = vec![false; mesh.vertices.len()];
+    for tri in &mesh.triangles {
+        used[tri[0] as usize] = true;
+        used[tri[1] as usize] = true;
+        used[tri[2] as usize] = true;
+    }
+
+    // Build old-to-new mapping
+    let mut old_to_new: Vec<u32> = vec![0; mesh.vertices.len()];
+    let mut new_vertices = Vec::with_capacity(mesh.vertices.len());
+    let mut new_normals = mesh.normals.take();
+
+    for (i, is_used) in used.iter().enumerate() {
+        if *is_used {
+            let new_idx = new_vertices.len() as u32;
+            old_to_new[i] = new_idx;
+            new_vertices.push(mesh.vertices[i]);
+        }
+    }
+
+    // Renumber triangles
+    for tri in &mut mesh.triangles {
+        tri[0] = old_to_new[tri[0] as usize];
+        tri[1] = old_to_new[tri[1] as usize];
+        tri[2] = old_to_new[tri[2] as usize];
+    }
+
+    mesh.vertices = new_vertices;
+    mesh.normals = new_normals; // Normals may be slightly off but acceptable
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

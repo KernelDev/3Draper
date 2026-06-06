@@ -1122,6 +1122,8 @@ dependencies = [
  "draper-mesh",
  "draper-step",
  "draper-topology",
+ "env_logger",
+ "log",
 ]
 
 [[package]]

@@ -4,9 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "watertight_check"
+path = "src/bin/watertight_check.rs"
+
 [dependencies]
 draper-geometry = { workspace = true }
 draper-topology = { workspace = true }
 draper-mesh = { workspace = true }
 draper-step = { workspace = true }
 draper-core = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }

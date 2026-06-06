@@ -2954,6 +2954,21 @@ impl<'a> StepConverter<'a> {
         };
         draper_mesh::merge_coincident_vertices(&mut mesh, merge_tol);
 
+        // Phase 1b: Stitch boundary edges to close gaps
+        // After vertex merging, some boundary edges remain because vertices
+        // on shared edges between faces have slightly different positions.
+        // Edge stitching finds and merges these nearby boundary vertices.
+        {
+            let (bmin, bmax) = mesh.bounding_box();
+            let diagonal = ((bmax.x - bmin.x).powi(2) + (bmax.y - bmin.y).powi(2) + (bmax.z - bmin.z).powi(2)).sqrt();
+            // Use adaptive stitch tolerance based on edge sampling density.
+            // Edge samples are spaced at diagonal / 32 apart on average.
+            // Start with a moderate tolerance, then increase progressively.
+            // 5% of diagonal covers ~1.6 sample spacings.
+            let stitch_tol = (diagonal * 0.05).max(0.1);
+            draper_mesh::stitch_boundary_edges(&mut mesh, stitch_tol, 20);
+        }
+
         // Phase 2: Validate watertightness of the merged mesh
         let wt_report = validate_watertight(&mesh, false);
         if wt_report.is_watertight() {
@@ -3142,6 +3157,15 @@ impl<'a> StepConverter<'a> {
         }
         // Merge coincident vertices to make the mesh watertight
         draper_mesh::merge_coincident_vertices(&mut mesh, 1e-4);
+
+        // Stitch boundary edges to close gaps
+        {
+            let (bmin, bmax) = mesh.bounding_box();
+            let diagonal = ((bmax.x - bmin.x).powi(2) + (bmax.y - bmin.y).powi(2) + (bmax.z - bmin.z).powi(2)).sqrt();
+            let stitch_tol = (diagonal * 0.05).max(0.1);
+            draper_mesh::stitch_boundary_edges(&mut mesh, stitch_tol, 20);
+        }
+
         if skipped_faces > 0 {
             log::warn!("BREP #{} detailed: {} faces skipped due to time limit", brep_id, skipped_faces);
         }
