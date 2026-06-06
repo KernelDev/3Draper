@@ -685,30 +685,12 @@ fn triangulate_surface_cdt_generic(
 }
 
 /// Project a 3D point to a surface's 2D UV parametric space.
+///
+/// Uses `Surface::project_point` which supports ALL surface types
+/// including NURBS, Revolution, and Extrusion.
 fn project_to_surface_uv(p: &Point3d, surface: &Surface) -> [f64; 2] {
-    match surface {
-        Surface::Plane(plane) => project_to_plane(p, plane),
-        Surface::Cylinder(cyl) => {
-            let (u, v) = cyl.project_point(p);
-            [u, v]
-        }
-        Surface::Cone(cone) => {
-            let (u, v) = cone.project_point(p);
-            [u, v]
-        }
-        Surface::Sphere(sphere) => {
-            let (u, v) = sphere.project_point(p);
-            [u, v]
-        }
-        Surface::Torus(torus) => {
-            let (u, v) = torus.project_point(p);
-            [u, v]
-        }
-        _ => {
-            // Fallback: use XY projection (not great but prevents crash)
-            [p.x, p.y]
-        }
-    }
+    let (u, v) = surface.project_point(p);
+    [u, v]
 }
 
 /// Add interior grid points for curved surface approximation.
@@ -740,12 +722,7 @@ fn add_interior_grid_points(
 
     // Determine grid resolution based on surface type and params
     let (n_u, n_v) = match surface {
-        Surface::Cylinder(_) => {
-            let n_u = params.angular_samples.min(64);
-            let n_v = params.height_samples.max(4);
-            (n_u, n_v)
-        }
-        Surface::Cone(_) => {
+        Surface::Cylinder(_) | Surface::Cone(_) => {
             let n_u = params.angular_samples.min(64);
             let n_v = params.height_samples.max(4);
             (n_u, n_v)
@@ -758,6 +735,22 @@ fn add_interior_grid_points(
         Surface::Torus(_) => {
             let n_u = params.angular_samples.min(64);
             let n_v = params.angular_samples.min(32);
+            (n_u, n_v)
+        }
+        Surface::Revolution(_) => {
+            let n_u = params.angular_samples.min(64);
+            let n_v = params.height_samples.max(4);
+            (n_u, n_v)
+        }
+        Surface::Extrusion(_) => {
+            let n_u = params.height_samples.max(4);
+            let n_v = params.angular_samples.min(16);
+            (n_u, n_v)
+        }
+        Surface::Nurbs(_) => {
+            // NURBS: moderate resolution grid
+            let n_u = params.height_samples.max(8).min(32);
+            let n_v = params.height_samples.max(8).min(32);
             (n_u, n_v)
         }
         _ => (16, 8),
@@ -813,21 +806,9 @@ fn add_interior_grid_points(
 }
 
 /// Evaluate a 3D point on a surface at UV parameters.
+/// Uses `Surface::point_at` which supports ALL surface types.
 fn surface_point_at(surface: &Surface, u: f64, v: f64) -> Point3d {
-    match surface {
-        Surface::Plane(plane) => {
-            Point3d::new(
-                plane.origin.x + u * plane.u_dir.x + v * plane.v_dir.x,
-                plane.origin.y + u * plane.u_dir.y + v * plane.v_dir.y,
-                plane.origin.z + u * plane.u_dir.z + v * plane.v_dir.z,
-            )
-        }
-        Surface::Cylinder(cyl) => cyl.point_at(u, v),
-        Surface::Cone(cone) => cone.point_at(u, v),
-        Surface::Sphere(sphere) => sphere.point_at(u, v),
-        Surface::Torus(torus) => torus.point_at(u, v),
-        _ => Point3d::new(u, v, 0.0),
-    }
+    surface.point_at(u, v)
 }
 
 /// CDT triangulation for cylindrical surfaces.
@@ -882,6 +863,410 @@ fn triangulate_torus_cdt(
     triangulate_surface_cdt_generic(face, &Surface::Torus(torus.clone()), boundary_3d, holes_3d, forward, pool, params)
 }
 
+// ============================================================
+// Face-aware boundary closing and non-manifold resolution
+// ============================================================
+
+/// Close boundary edges by merging nearby vertices, but ONLY if merging
+/// won't create a non-manifold edge.
+///
+/// The algorithm:
+/// 1. Find all boundary edges (edges with count == 1)
+/// 2. For each pair of nearby boundary vertices:
+///    - Check if merging would create a non-manifold edge
+///    - If safe, merge them
+/// 3. Apply the merge remap and filter degenerate triangles
+///
+/// A merge creates a non-manifold edge when the merged vertex participates
+/// in an edge that already has 2 adjacent triangles. After merging, that
+/// edge would have 3+ triangles = non-manifold.
+fn face_aware_close_boundary(mesh: &mut TriangleMesh, base_tolerance: f64) {
+    let tolerances = [
+        base_tolerance * 2.0,
+        base_tolerance * 5.0,
+        base_tolerance * 10.0,
+        base_tolerance * 50.0,
+        base_tolerance * 100.0,
+    ];
+
+    for &tol in &tolerances {
+        let report = crate::watertight::validate_watertight(mesh, false);
+        if report.is_watertight() {
+            return;
+        }
+        if report.boundary_edge_count == 0 {
+            return;
+        }
+
+        log::info!(
+            "Face-aware closing: {} boundary edges remaining, trying tol={:.6}",
+            report.boundary_edge_count, tol,
+        );
+
+        // Build edge count map for non-manifold checking
+        let edge_counts = build_edge_count_map(mesh);
+
+        // Collect boundary vertices
+        let boundary_verts = collect_boundary_vertex_set(mesh);
+
+        // Build spatial index of boundary vertices
+        let cell_size = tol * 10.0;
+        let tol_sq = tol * tol;
+        let mut grid: HashMap<(i64, i64, i64), Vec<u32>> = HashMap::new();
+        for &vidx in &boundary_verts {
+            let p = mesh.vertices[vidx as usize];
+            let cx = (p.x / cell_size).floor() as i64;
+            let cy = (p.y / cell_size).floor() as i64;
+            let cz = (p.z / cell_size).floor() as i64;
+            grid.entry((cx, cy, cz)).or_default().push(vidx);
+        }
+
+        // For each boundary vertex, find the closest other boundary vertex
+        let mut remap: Vec<u32> = (0..mesh.vertices.len() as u32).collect();
+        let mut merged_any = false;
+
+        for &vidx in &boundary_verts {
+            // Follow remap chain
+            let mut v1 = vidx;
+            while remap[v1 as usize] != v1 {
+                v1 = remap[v1 as usize];
+            }
+            let p = mesh.vertices[v1 as usize];
+            let cx = (p.x / cell_size).floor() as i64;
+            let cy = (p.y / cell_size).floor() as i64;
+            let cz = (p.z / cell_size).floor() as i64;
+
+            let mut best_match: Option<(u32, f64)> = None;
+
+            for dx in -1i64..=1 {
+                for dy in -1i64..=1 {
+                    for dz in -1i64..=1 {
+                        let key = (cx + dx, cy + dy, cz + dz);
+                        if let Some(indices) = grid.get(&key) {
+                            for &other_idx in indices {
+                                // Follow remap chain
+                                let mut v2 = other_idx;
+                                while remap[v2 as usize] != v2 {
+                                    v2 = remap[v2 as usize];
+                                }
+                                if v2 == v1 {
+                                    continue; // Already merged
+                                }
+
+                                let other_p = mesh.vertices[v2 as usize];
+                                let ddx = p.x - other_p.x;
+                                let ddy = p.y - other_p.y;
+                                let ddz = p.z - other_p.z;
+                                let dist_sq = ddx * ddx + ddy * ddy + ddz * ddz;
+
+                                if dist_sq < tol_sq {
+                                    // Check if merging v1 into v2 would create a non-manifold edge.
+                                    // This happens when an edge from v1 to some neighbor Vn
+                                    // would overlap with an existing edge from v2 to Vn
+                                    // that already has count == 2.
+                                    if would_create_nonmanifold(v1, v2, &edge_counts, mesh) {
+                                        continue;
+                                    }
+
+                                    match best_match {
+                                        None => best_match = Some((v2, dist_sq)),
+                                        Some((_, best_dist)) => {
+                                            if dist_sq < best_dist {
+                                                best_match = Some((v2, dist_sq));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some((target, _)) = best_match {
+                remap[v1 as usize] = target;
+                merged_any = true;
+            }
+        }
+
+        if !merged_any {
+            continue;
+        }
+
+        // Apply remap
+        apply_face_aware_remap(mesh, &remap);
+        filter_degenerate_triangles(mesh, 1e-10);
+    }
+}
+
+/// Build a map from edge (canonical vertex pair) → count of adjacent triangles.
+fn build_edge_count_map(mesh: &TriangleMesh) -> HashMap<(u32, u32), u32> {
+    let mut edge_counts: HashMap<(u32, u32), u32> = HashMap::new();
+    for tri in &mesh.triangles {
+        let edges = [
+            (tri[0].min(tri[1]), tri[0].max(tri[1])),
+            (tri[1].min(tri[2]), tri[1].max(tri[2])),
+            (tri[2].min(tri[0]), tri[2].max(tri[0])),
+        ];
+        for edge in &edges {
+            *edge_counts.entry(*edge).or_insert(0) += 1;
+        }
+    }
+    edge_counts
+}
+
+/// Check if merging vertex v1 into v2 would create a non-manifold edge.
+///
+/// After merging, all triangles that used v1 will now use v2. This means
+/// all edges of the form (v1, neighbor) become edges (v2, neighbor).
+/// If an edge (v2, neighbor) already exists with count == 2, the merged
+/// edge would have count > 2 → non-manifold.
+fn would_create_nonmanifold(
+    v1: u32,
+    v2: u32,
+    edge_counts: &HashMap<(u32, u32), u32>,
+    mesh: &TriangleMesh,
+) -> bool {
+    // Find all neighbors of v1 (vertices connected to v1 by an edge)
+    let v1_neighbors: std::collections::HashSet<u32> = mesh.triangles.iter()
+        .flat_map(|tri| {
+            let mut neighbors = Vec::new();
+            if tri[0] == v1 { neighbors.push(tri[1]); neighbors.push(tri[2]); }
+            if tri[1] == v1 { neighbors.push(tri[0]); neighbors.push(tri[2]); }
+            if tri[2] == v1 { neighbors.push(tri[0]); neighbors.push(tri[1]); }
+            neighbors
+        })
+        .filter(|&n| n != v1 && n != v2)
+        .collect();
+
+    // Check if any edge (v2, neighbor) already has count >= 2
+    for &neighbor in &v1_neighbors {
+        let edge = (v2.min(neighbor), v2.max(neighbor));
+        if let Some(&count) = edge_counts.get(&edge) {
+            if count >= 2 {
+                return true; // Would create non-manifold edge
+            }
+        }
+    }
+
+    false
+}
+
+/// Build a map from vertex index to set of face IDs that use that vertex.
+fn build_vertex_face_map(mesh: &TriangleMesh) -> Vec<std::collections::HashSet<u64>> {
+    let n = mesh.vertices.len();
+    let mut map: Vec<std::collections::HashSet<u64>> = vec![std::collections::HashSet::new(); n];
+
+    for (tri_idx, tri) in mesh.triangles.iter().enumerate() {
+        let face_id = mesh.triangle_face_ids.as_ref()
+            .and_then(|ids| ids.get(tri_idx).copied())
+            .unwrap_or(0);
+
+        for &v in tri.iter() {
+            if (v as usize) < n {
+                map[v as usize].insert(face_id);
+            }
+        }
+    }
+
+    map
+}
+
+/// Collect the set of vertex indices that appear on boundary edges.
+fn collect_boundary_vertex_set(mesh: &TriangleMesh) -> std::collections::HashSet<u32> {
+    let mut edge_count: HashMap<(u32, u32), u32> = HashMap::new();
+    for tri in &mesh.triangles {
+        let edges = [
+            (tri[0].min(tri[1]), tri[0].max(tri[1])),
+            (tri[1].min(tri[2]), tri[1].max(tri[2])),
+            (tri[2].min(tri[0]), tri[2].max(tri[0])),
+        ];
+        for edge in &edges {
+            *edge_count.entry(*edge).or_insert(0) += 1;
+        }
+    }
+
+    let mut boundary = std::collections::HashSet::new();
+    for (edge, count) in &edge_count {
+        if *count == 1 {
+            boundary.insert(edge.0);
+            boundary.insert(edge.1);
+        }
+    }
+    boundary
+}
+
+/// Apply a vertex remap to all triangles, preserving face_ids and normals.
+fn apply_face_aware_remap(mesh: &mut TriangleMesh, remap: &[u32]) {
+    // First, follow remap chains to get final targets
+    let mut final_remap: Vec<u32> = Vec::with_capacity(remap.len());
+    for &target in remap {
+        let mut current = target;
+        loop {
+            let next = remap[current as usize];
+            if next == current {
+                break;
+            }
+            current = next;
+        }
+        final_remap.push(current);
+    }
+
+    // Apply remap to triangles, filtering degenerate ones
+    let old_triangles = std::mem::take(&mut mesh.triangles);
+    let old_face_ids = mesh.triangle_face_ids.take();
+    let old_face_normals = mesh.face_normals.take();
+    let old_triangle_colors = mesh.triangle_colors.take();
+
+    for (i, tri) in old_triangles.iter().enumerate() {
+        let a = final_remap[tri[0] as usize];
+        let b = final_remap[tri[1] as usize];
+        let c = final_remap[tri[2] as usize];
+
+        if a != b && b != c && a != c {
+            mesh.triangles.push([a, b, c]);
+            if let Some(ref ids) = old_face_ids {
+                if let Some(&fid) = ids.get(i) {
+                    mesh.triangle_face_ids.get_or_insert_with(Vec::new).push(fid);
+                }
+            }
+            if let Some(ref normals) = old_face_normals {
+                if let Some(&n) = normals.get(i) {
+                    mesh.face_normals.get_or_insert_with(Vec::new).push(n);
+                }
+            }
+            if let Some(ref colors) = old_triangle_colors {
+                if let Some(&col) = colors.get(i) {
+                    mesh.triangle_colors.get_or_insert_with(Vec::new).push(col);
+                }
+            }
+        }
+    }
+
+    // Compact vertices
+    crate::watertight::compact_vertices(mesh);
+}
+
+/// Resolve non-manifold edges by splitting vertices.
+///
+/// A non-manifold edge is shared by more than 2 triangles. This function
+/// resolves them by:
+/// 1. Finding all non-manifold edges (count > 2)
+/// 2. For each non-manifold edge, identifying which triangles share it
+/// 3. Pairing triangles from different faces and keeping those pairs
+/// 4. For excess triangles (from the same face as an existing one),
+///   duplicating the edge vertices
+///
+/// After splitting, boundary edges may appear where split vertices
+/// couldn't be merged. The face-aware closing step handles these.
+fn resolve_non_manifold_edges(mesh: &mut TriangleMesh) {
+    for _iteration in 0..10 {
+        let report = crate::watertight::validate_watertight(mesh, false);
+        if report.non_manifold_edge_count == 0 {
+            return;
+        }
+
+        log::info!(
+            "Non-manifold resolution: {} non-manifold edges, {} boundary edges, {} vertices, {} triangles",
+            report.non_manifold_edge_count, report.boundary_edge_count,
+            report.vertex_count, report.triangle_count,
+        );
+
+        // Build edge → triangle indices map
+        let mut edge_triangles: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+        for (tri_idx, tri) in mesh.triangles.iter().enumerate() {
+            let edges = [
+                (tri[0].min(tri[1]), tri[0].max(tri[1])),
+                (tri[1].min(tri[2]), tri[1].max(tri[2])),
+                (tri[2].min(tri[0]), tri[2].max(tri[0])),
+            ];
+            for edge in &edges {
+                edge_triangles.entry(*edge).or_default().push(tri_idx);
+            }
+        }
+
+        // Find non-manifold edges (count > 2)
+        let non_manifold: Vec<((u32, u32), Vec<usize>)> = edge_triangles.iter()
+            .filter(|(_, tris)| tris.len() > 2)
+            .map(|(&edge, tris)| (edge, tris.clone()))
+            .collect();
+
+        if non_manifold.is_empty() {
+            return;
+        }
+
+        // For each non-manifold edge, split excess triangles by
+        // duplicating their vertices
+        let mut split_count = 0;
+        for (edge, tri_indices) in &non_manifold {
+            if tri_indices.len() <= 2 {
+                continue;
+            }
+
+            // Group triangles by face_id, keeping track of which face each belongs to
+            let tri_faces: Vec<(usize, u64)> = tri_indices.iter().map(|&tri_idx| {
+                let face_id = mesh.triangle_face_ids.as_ref()
+                    .and_then(|ids| ids.get(tri_idx).copied())
+                    .unwrap_or(0);
+                (tri_idx, face_id)
+            }).collect();
+
+            // Strategy: keep one triangle per unique face, up to 2 total.
+            // For any additional triangles (from a face that already has a
+            // triangle on this edge), duplicate their edge vertices.
+            let mut seen_faces: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+            let mut kept_tri_indices: Vec<usize> = Vec::new();
+
+            for &(tri_idx, face_id) in &tri_faces {
+                if seen_faces.len() < 2 && !seen_faces.contains_key(&face_id) {
+                    // Keep this triangle — it's from a new face
+                    seen_faces.insert(face_id, tri_idx);
+                    kept_tri_indices.push(tri_idx);
+                }
+                // Otherwise, it will be split below
+            }
+
+            // If we couldn't find 2 different faces, just keep first 2 triangles
+            if kept_tri_indices.len() < 2 {
+                kept_tri_indices.clear();
+                kept_tri_indices.push(tri_indices[0]);
+                if tri_indices.len() > 1 {
+                    kept_tri_indices.push(tri_indices[1]);
+                }
+            }
+
+            // Split all triangles NOT in kept_tri_indices
+            for &(tri_idx, _face_id) in &tri_faces {
+                if kept_tri_indices.contains(&tri_idx) {
+                    continue;
+                }
+
+                // Duplicate edge vertices for this triangle
+                let tri = &mut mesh.triangles[tri_idx];
+                let (ea, eb) = *edge;
+                for v_idx in tri.iter_mut() {
+                    let v = *v_idx;
+                    if v == ea || v == eb {
+                        // Create a new vertex copy at the same position
+                        let new_idx = mesh.vertices.len() as u32;
+                        mesh.vertices.push(mesh.vertices[v as usize]);
+                        *v_idx = new_idx;
+                        split_count += 1;
+                    }
+                }
+            }
+        }
+
+        if split_count == 0 {
+            // No progress — break to avoid infinite loop
+            break;
+        }
+
+        filter_degenerate_triangles(mesh, 1e-10);
+    }
+}
+
+
 /// Triangulate a face using CDT with consistent edge sampling.
 fn triangulate_face_cdt(
     face: &Face,
@@ -929,8 +1314,28 @@ fn triangulate_face_cdt(
         Some(Surface::Torus(torus)) => {
             triangulate_torus_cdt(face, torus, &boundary_3d, &holes_3d, forward, pool, params)
         }
+        Some(Surface::Revolution(_)) | Some(Surface::Extrusion(_)) | Some(Surface::Nurbs(_)) => {
+            // For NURBS, revolution, extrusion surfaces:
+            // Try CDT first; if UV projection fails, fall back to snap-boundary
+            if let Some(ref surface) = face.surface {
+                // Check if UV projection works for this surface
+                let test_uv: Vec<[f64; 2]> = boundary_3d.iter()
+                    .take(5)
+                    .map(|p| project_to_surface_uv(p, surface))
+                    .collect();
+                let uv_valid = test_uv.iter().all(|uv| uv[0].is_finite() && uv[1].is_finite());
+
+                if uv_valid {
+                    triangulate_surface_cdt_generic(face, surface, &boundary_3d, &holes_3d, forward, pool, params)
+                } else {
+                    triangulate_curved_face_consistent(face, &boundary_3d, params, pool)
+                }
+            } else {
+                triangulate_curved_face_consistent(face, &boundary_3d, params, pool)
+            }
+        }
         _ => {
-            // For NURBS, revolution, extrusion surfaces: use snap-boundary approach
+            // For unknown surfaces: use snap-boundary approach
             triangulate_curved_face_consistent(face, &boundary_3d, params, pool)
         }
     }
@@ -1004,6 +1409,10 @@ impl UnifiedVertexPool {
         let cy = (point.y / self.cell_size).floor() as i64;
         let cz = (point.z / self.cell_size).floor() as i64;
 
+        // Collect all matching candidates, then pick the one with the
+        // smallest index (deterministic choice regardless of hash order)
+        let mut best_match: Option<(u32, f64)> = None;
+
         for dx in -1i64..=1 {
             for dy in -1i64..=1 {
                 for dz in -1i64..=1 {
@@ -1025,13 +1434,27 @@ impl UnifiedVertexPool {
                             let ddx = point.x - existing.x;
                             let ddy = point.y - existing.y;
                             let ddz = point.z - existing.z;
-                            if ddx * ddx + ddy * ddy + ddz * ddz < self.tolerance_sq {
-                                return idx;
+                            let dist_sq = ddx * ddx + ddy * ddy + ddz * ddz;
+                            if dist_sq < self.tolerance_sq {
+                                // Pick the candidate with the smallest index for determinism
+                                match best_match {
+                                    None => best_match = Some((idx, dist_sq)),
+                                    Some((best_idx, best_dist)) => {
+                                        // Prefer closer match; if equal distance, prefer smaller index
+                                        if dist_sq < best_dist || (dist_sq == best_dist && idx < best_idx) {
+                                            best_match = Some((idx, dist_sq));
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
+        }
+
+        if let Some((best_idx, _)) = best_match {
+            return best_idx;
         }
 
         let new_idx = self.vertices.len() as u32;
@@ -1142,11 +1565,11 @@ pub fn triangulate_solid_watertight(
     filter_degenerate_triangles(&mut mesh, 1e-10);
 
     // Phase 5: Progressive edge stitching for remaining gaps
+    // Use the standard stitch approach first, then fix any non-manifold edges
     let stitch_tolerances = [
         merge_tolerance * 2.0,
         merge_tolerance * 5.0,
         merge_tolerance * 10.0,
-        merge_tolerance * 50.0,
     ];
 
     for &stitch_tol in &stitch_tolerances {
@@ -1165,18 +1588,38 @@ pub fn triangulate_solid_watertight(
         filter_degenerate_triangles(&mut mesh, 1e-10);
     }
 
-    // If still not watertight, try zipper stitching with conservative tolerance
-    // Only use zipper stitch when there are few remaining boundary edges
-    // (to avoid creating non-manifold edges from over-aggressive stitching)
-    {
+    // Phase 6: Resolve any non-manifold edges by splitting
+    resolve_non_manifold_edges(&mut mesh);
+
+    // Phase 7: Close boundary edges created by non-manifold splitting
+    // using face-aware vertex merging (which won't create new non-manifold edges)
+    // Rebuild edge counts after the non-manifold resolution
+    face_aware_close_boundary(&mut mesh, merge_tolerance);
+
+    // Phase 8: If still not watertight, iterate non-manifold resolution + closing
+    for _round in 0..5 {
         let report = crate::watertight::validate_watertight(&mesh, false);
-        if !report.is_watertight() && report.boundary_edge_count > 0 && report.boundary_edge_count <= 50 {
-            log::info!(
-                "Trying conservative zipper stitch for {} remaining boundary edges",
-                report.boundary_edge_count,
-            );
-            zipper_stitch_boundary_edges(&mut mesh, merge_tolerance * 20.0, 3);
+        if report.is_watertight() {
+            break;
+        }
+        if report.non_manifold_edge_count == 0 && report.boundary_edge_count == 0 {
+            break;
+        }
+
+        if report.non_manifold_edge_count > 0 {
+            resolve_non_manifold_edges(&mut mesh);
+        }
+        face_aware_close_boundary(&mut mesh, merge_tolerance);
+
+        // If face-aware closing couldn't close all edges, try aggressive
+        // stitching which may create non-manifold edges, then resolve those
+        let report2 = crate::watertight::validate_watertight(&mesh, false);
+        if report2.boundary_edge_count > 0 && report2.boundary_edge_count <= 100 {
+            stitch_boundary_edges(&mut mesh, merge_tolerance * 10.0, 3);
             filter_degenerate_triangles(&mut mesh, 1e-10);
+            // Resolve any non-manifold edges created by the stitching
+            resolve_non_manifold_edges(&mut mesh);
+            face_aware_close_boundary(&mut mesh, merge_tolerance);
         }
     }
 
@@ -1184,7 +1627,7 @@ pub fn triangulate_solid_watertight(
     let report = crate::watertight::validate_watertight(&mesh, false);
     if !report.is_watertight() {
         log::warn!(
-            "triangulate_solid_watertight: mesh still has {} boundary edges, {} non-manifold edges after stitching",
+            "triangulate_solid_watertight: mesh still has {} boundary edges, {} non-manifold edges after processing",
             report.boundary_edge_count, report.non_manifold_edge_count,
         );
     } else {

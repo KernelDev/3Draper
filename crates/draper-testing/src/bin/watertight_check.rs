@@ -120,9 +120,9 @@ fn main() {
             match solid {
                 Some(solid) => {
                     // Compute adaptive merge tolerance based on bounding box
-                    // Use a larger factor (5e-3 = 0.5%) to ensure boundary vertices
-                    // on shared edges between CDT and standard faces get merged
-                    let merge_tol = adaptive_merge_tolerance(&solid, 5e-3, 1e-3, 10.0);
+                    // Factor 8e-3 (0.8%) with max 20.0 to merge shared-edge
+                    // boundary vertices without over-merging within faces
+                    let merge_tol = adaptive_merge_tolerance(&solid, 8e-3, 1e-3, 20.0);
 
                     let params = TriangulationParams::default();
                     let mesh = triangulate_solid_watertight(&solid, &params, merge_tol);

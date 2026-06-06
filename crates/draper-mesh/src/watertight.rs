@@ -472,7 +472,7 @@ fn apply_vertex_remap(mesh: &mut TriangleMesh, remap: &[u32]) {
 }
 
 /// Remove unused vertices from the mesh and renumber indices.
-fn compact_vertices(mesh: &mut TriangleMesh) {
+pub fn compact_vertices(mesh: &mut TriangleMesh) {
     // Find which vertices are used
     let mut used = vec![false; mesh.vertices.len()];
     for tri in &mesh.triangles {
@@ -669,6 +669,54 @@ fn closest_point_on_segment(p: &Point3d, a: &Point3d, b: &Point3d) -> (Point3d, 
     let dy = p.y - closest.y;
     let dz = p.z - closest.z;
     (closest, dx * dx + dy * dy + dz * dz)
+}
+
+/// Build edge count map for non-manifold checking during stitching.
+fn build_stitch_edge_counts(mesh: &TriangleMesh) -> HashMap<(u32, u32), u32> {
+    let mut edge_counts: HashMap<(u32, u32), u32> = HashMap::new();
+    for tri in &mesh.triangles {
+        let edges = [
+            (tri[0].min(tri[1]), tri[0].max(tri[1])),
+            (tri[1].min(tri[2]), tri[1].max(tri[2])),
+            (tri[2].min(tri[0]), tri[2].max(tri[0])),
+        ];
+        for edge in &edges {
+            *edge_counts.entry(*edge).or_insert(0) += 1;
+        }
+    }
+    edge_counts
+}
+
+/// Check if merging vertex v1 into v2 would create a non-manifold edge.
+fn stitch_would_create_nonmanifold(
+    v1: u32,
+    v2: u32,
+    edge_counts: &HashMap<(u32, u32), u32>,
+    mesh: &TriangleMesh,
+) -> bool {
+    // Find all neighbors of v1
+    let v1_neighbors: std::collections::HashSet<u32> = mesh.triangles.iter()
+        .flat_map(|tri| {
+            let mut neighbors = Vec::new();
+            if tri[0] == v1 { neighbors.push(tri[1]); neighbors.push(tri[2]); }
+            if tri[1] == v1 { neighbors.push(tri[0]); neighbors.push(tri[2]); }
+            if tri[2] == v1 { neighbors.push(tri[0]); neighbors.push(tri[1]); }
+            neighbors
+        })
+        .filter(|&n| n != v1 && n != v2)
+        .collect();
+
+    // Check if any edge (v2, neighbor) already has count >= 2
+    for &neighbor in &v1_neighbors {
+        let edge = (v2.min(neighbor), v2.max(neighbor));
+        if let Some(&count) = edge_counts.get(&edge) {
+            if count >= 2 {
+                return true; // Would create non-manifold edge
+            }
+        }
+    }
+
+    false
 }
 
 #[cfg(test)]

@@ -78,7 +78,29 @@ Stage Summary:
 - triangle_face_ids now correctly maintained through vertex merging and degenerate filtering
 
 ---
-Task ID: consistent-triangulation-4
+Task ID: watertight-cdt-5
+Agent: Main
+Task: CDT-based watertight triangulation for all solid parts in as1-oc-214.stp
+
+Work Log:
+- Initial status: 13/18 (72.2%) watertight with original code, non-deterministic results
+- Root cause: aggressive stitching creates non-manifold edges; face-aware pool doesn't prevent all issues
+- Fixed project_to_surface_uv() to use Surface::project_point() for ALL surface types (was missing NURBS, Revolution, Extrusion)
+- Fixed surface_point_at() to use Surface::point_at() for all types
+- Added Revolution, Extrusion, NURBS grid resolution in add_interior_grid_points()
+- Updated triangulate_face_cdt() to try CDT for NURBS/Revolution/Extrusion surfaces with UV validity check
+- Created face_aware_close_boundary() that checks would_create_nonmanifold() before merging boundary vertices
+- Created resolve_non_manifold_edges() that splits non-manifold edges by duplicating vertices for excess triangles
+- Made UnifiedVertexPool deterministic: when multiple candidates within tolerance, pick closest (then smallest index)
+- Added iterative pipeline: stitch → non-manifold resolution → face-aware closing → repeat
+- Adjusted merge tolerance from 5e-3 to 8e-3 (0.8%) for better shared-edge vertex merging
+
+Stage Summary:
+- Watertight rate improved from 72.2% to 83-100% (typically 94.4%)
+- L-bracket and plate now consistently WATERTIGHT (were always LEAKY before)
+- Bolt_1 occasionally has 1 non-manifold edge (non-deterministic, ~30% of instances)
+- Key files modified: cdt_triangulate.rs, watertight.rs, watertight_check.rs
+- Release binary builds and runs successfully
 Agent: Main
 Task: Implement consistent (watertight) triangulation — fix shared edge vertex mismatch between plane and NURBS/curved faces
 
