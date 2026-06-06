@@ -21,6 +21,7 @@
 //! ```
 
 use crate::mesh::TriangleMesh;
+use crate::triangulate::{merge_coincident_vertices, filter_degenerate_triangles};
 use draper_geometry::Point3d;
 use std::collections::HashMap;
 
@@ -502,6 +503,172 @@ fn compact_vertices(mesh: &mut TriangleMesh) {
 
     mesh.vertices = new_vertices;
     mesh.normals = new_normals; // Normals may be slightly off but acceptable
+}
+
+// ============================================================
+// Zipper stitch — close gaps by snapping boundary vertices to
+// the nearest point on opposite boundary edges
+// ============================================================
+
+/// Close boundary gaps by snapping boundary vertices to their nearest
+/// counterpart on an opposing boundary edge.
+///
+/// Unlike `stitch_boundary_edges` which only merges vertices that are
+/// already close in 3D space, this function finds pairs of boundary
+/// edges that are geometrically near each other and snaps the vertices
+/// of one edge onto the other. This is more effective for closing the
+/// "cracks" that appear between adjacent faces in B-Rep solid triangulation,
+/// where the same shared edge is sampled independently by each face and
+/// produces slightly different 3D vertex positions.
+///
+/// # Algorithm
+/// For each boundary vertex V:
+/// 1. Find the closest point on any other boundary edge
+/// 2. If the distance is within `snap_tolerance`, snap V to that point
+/// 3. After snapping, run `merge_coincident_vertices` to unify the vertices
+///
+/// # Arguments
+/// * `mesh` — The triangle mesh to stitch.
+/// * `snap_tolerance` — Maximum distance for a vertex to be snapped to a boundary edge.
+/// * `max_iterations` — Maximum number of zipper iterations.
+pub fn zipper_stitch_boundary_edges(
+    mesh: &mut TriangleMesh,
+    snap_tolerance: f64,
+    max_iterations: usize,
+) {
+    for iter in 0..max_iterations {
+        let report = validate_watertight(mesh, false);
+        if report.is_watertight() {
+            return;
+        }
+        if report.boundary_edge_count == 0 {
+            return;
+        }
+
+        // Collect boundary edges (edges with count == 1)
+        let boundary_edges = collect_boundary_edges(mesh);
+        if boundary_edges.is_empty() {
+            return;
+        }
+
+        // Collect boundary vertices
+        let boundary_verts = collect_boundary_vertices(mesh);
+        if boundary_verts.is_empty() {
+            return;
+        }
+
+        let tol_sq = snap_tolerance * snap_tolerance;
+        let mut snapped_any = false;
+
+        // For each boundary vertex, find the closest point on any other boundary edge
+        for &vidx in &boundary_verts {
+            let p = mesh.vertices[vidx as usize];
+
+            let mut best_snap: Option<(Point3d, f64)> = None;
+
+            for &(ea, eb) in &boundary_edges {
+                // Skip edges that contain this vertex
+                if ea == vidx || eb == vidx {
+                    continue;
+                }
+
+                let pa = mesh.vertices[ea as usize];
+                let pb = mesh.vertices[eb as usize];
+
+                // Find closest point on segment pa-pb to p
+                let (closest, dist_sq) = closest_point_on_segment(&p, &pa, &pb);
+
+                if dist_sq < tol_sq {
+                    match best_snap {
+                        None => best_snap = Some((closest, dist_sq)),
+                        Some((_, best_dist)) => {
+                            if dist_sq < best_dist {
+                                best_snap = Some((closest, dist_sq));
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some((snap_point, _)) = best_snap {
+                mesh.vertices[vidx as usize] = snap_point;
+                snapped_any = true;
+            }
+        }
+
+        if !snapped_any {
+            // No progress — try merging coincident vertices as fallback
+            merge_coincident_vertices(mesh, snap_tolerance);
+            let report2 = validate_watertight(mesh, false);
+            if report2.boundary_edge_count >= report.boundary_edge_count {
+                break;
+            }
+            continue;
+        }
+
+        // After snapping, merge coincident vertices
+        merge_coincident_vertices(mesh, snap_tolerance * 0.5);
+        filter_degenerate_triangles(mesh, 1e-10);
+
+        log::debug!(
+            "zipper_stitch iteration {}: snapped vertices, checking remaining boundary edges",
+            iter
+        );
+    }
+}
+
+/// Collect all boundary edges (edges shared by only 1 triangle).
+fn collect_boundary_edges(mesh: &TriangleMesh) -> Vec<(u32, u32)> {
+    let mut edge_count: HashMap<(u32, u32), u32> = HashMap::new();
+    for tri in &mesh.triangles {
+        let edges = [
+            (tri[0].min(tri[1]), tri[0].max(tri[1])),
+            (tri[1].min(tri[2]), tri[1].max(tri[2])),
+            (tri[2].min(tri[0]), tri[2].max(tri[0])),
+        ];
+        for edge in &edges {
+            *edge_count.entry(*edge).or_insert(0) += 1;
+        }
+    }
+
+    edge_count.iter()
+        .filter(|(_, &count)| count == 1)
+        .map(|(&edge, _)| edge)
+        .collect()
+}
+
+/// Find the closest point on segment AB to point P.
+/// Returns (closest_point, distance_squared).
+fn closest_point_on_segment(p: &Point3d, a: &Point3d, b: &Point3d) -> (Point3d, f64) {
+    let abx = b.x - a.x;
+    let aby = b.y - a.y;
+    let abz = b.z - a.z;
+    let apx = p.x - a.x;
+    let apy = p.y - a.y;
+    let apz = p.z - a.z;
+
+    let ab_len_sq = abx * abx + aby * aby + abz * abz;
+    if ab_len_sq < 1e-30 {
+        // Degenerate segment
+        let dx = p.x - a.x;
+        let dy = p.y - a.y;
+        let dz = p.z - a.z;
+        return (*a, dx * dx + dy * dy + dz * dz);
+    }
+
+    let t = (apx * abx + apy * aby + apz * abz) / ab_len_sq;
+    let t = t.clamp(0.0, 1.0);
+
+    let closest = Point3d::new(
+        a.x + t * abx,
+        a.y + t * aby,
+        a.z + t * abz,
+    );
+
+    let dx = p.x - closest.x;
+    let dy = p.y - closest.y;
+    let dz = p.z - closest.z;
+    (closest, dx * dx + dy * dy + dz * dz)
 }
 
 #[cfg(test)]

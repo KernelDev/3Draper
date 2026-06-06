@@ -794,25 +794,12 @@ fn triangulate_planar_face(face: &Face, plane: &Plane, _params: &TriangulationPa
     let holes_3d = collect_face_hole_points(face);
     let forward = face.forward;
 
-    // Snap boundary points onto the plane to eliminate any numerical drift
-    // from edge curve sampling. Without this, vertices can be slightly off-plane,
-    // causing visible "wavy" artifacts on what should be a perfectly flat surface.
-    let snap_to_plane = |p: &Point3d| -> Point3d {
-        let dx = p.x - plane.origin.x;
-        let dy = p.y - plane.origin.y;
-        let dz = p.z - plane.origin.z;
-        let dist = dx * plane.normal.x + dy * plane.normal.y + dz * plane.normal.z;
-        Point3d::new(
-            p.x - dist * plane.normal.x,
-            p.y - dist * plane.normal.y,
-            p.z - dist * plane.normal.z,
-        )
-    };
-
-    let boundary_3d: Vec<Point3d> = boundary_3d.iter().map(|p| snap_to_plane(p)).collect();
-    let holes_3d: Vec<Vec<Point3d>> = holes_3d.iter()
-        .map(|hole| hole.iter().map(|p| snap_to_plane(p)).collect())
-        .collect();
+    // NOTE: We intentionally do NOT snap boundary points to the plane here.
+    // Snapping was previously done to eliminate numerical drift, but it
+    // causes boundary vertices on shared edges to have DIFFERENT 3D positions
+    // between adjacent faces. The boundary points come from edge curve sampling
+    // (potentially via StepEdgeCache), and snapping breaks the guarantee that
+    // shared edges produce identical 3D points.
 
     // Project 3D boundary points onto the plane's 2D coordinate system
     let project = |p: &Point3d| -> Point2d {
@@ -2487,20 +2474,14 @@ fn triangulate_plane_with_boundary_and_holes_uv(
         return mesh;
     }
 
-    // Snap boundary points onto the plane to eliminate numerical drift
-    let snap_to_plane = |p: &Point3d| -> Point3d {
-        let dx = p.x - plane.origin.x;
-        let dy = p.y - plane.origin.y;
-        let dz = p.z - plane.origin.z;
-        let dist = dx * plane.normal.x + dy * plane.normal.y + dz * plane.normal.z;
-        Point3d::new(
-            p.x - dist * plane.normal.x,
-            p.y - dist * plane.normal.y,
-            p.z - dist * plane.normal.z,
-        )
-    };
-
-    let snapped_boundary: Vec<Point3d> = boundary_points.iter().map(|p| snap_to_plane(p)).collect();
+    // NOTE: We intentionally do NOT snap boundary points to the plane here.
+    // Snapping was previously done to eliminate numerical drift, but it
+    // causes boundary vertices on shared edges to have DIFFERENT 3D positions
+    // between adjacent faces (e.g., a planar cap face and a cylinder side face
+    // share a circular edge — the cap face snaps circle points to the cap plane,
+    // the cylinder face doesn't — creating gaps).
+    // The boundary points come from the StepEdgeCache which ensures shared
+    // edges produce identical 3D points. Snapping breaks this guarantee.
 
     // Re-project the 3D points onto the plane's 2D coordinate system
     // (This is more accurate than using the passed-in UVs which may come from
@@ -2515,17 +2496,17 @@ fn triangulate_plane_with_boundary_and_holes_uv(
         )
     };
 
-    let points_2d: Vec<Point2d> = snapped_boundary.iter().map(|p| project(p)).collect();
+    let points_2d: Vec<Point2d> = boundary_points.iter().map(|p| project(p)).collect();
 
     if hole_polylines.is_empty() {
         // No holes — simple polygon triangulation using boundary 3D points directly
         let is_convex = is_convex_polygon(&points_2d);
 
-        if is_convex && snapped_boundary.len() >= 3 {
-            for p in &snapped_boundary {
+        if is_convex && boundary_points.len() >= 3 {
+            for p in boundary_points {
                 mesh.add_vertex(*p);
             }
-            let n = snapped_boundary.len() as u32;
+            let n = boundary_points.len() as u32;
             for i in 1..n - 1 {
                 if forward {
                     mesh.add_triangle(0, i, i + 1);
@@ -2535,7 +2516,7 @@ fn triangulate_plane_with_boundary_and_holes_uv(
             }
         } else {
             let triangles = ear_clip(&points_2d);
-            for p in &snapped_boundary {
+            for p in boundary_points {
                 mesh.add_vertex(*p);
             }
             for tri in &triangles {
@@ -2547,18 +2528,14 @@ fn triangulate_plane_with_boundary_and_holes_uv(
             }
         }
     } else {
-        // Has holes — use earcutr with the snapped boundary points
-        let snapped_holes: Vec<Vec<Point3d>> = hole_polylines.iter()
-            .map(|hole| hole.iter().map(|p| snap_to_plane(p)).collect())
-            .collect();
-
-        let holes_2d: Vec<Vec<Point2d>> = snapped_holes.iter()
+        // Has holes — use earcutr with boundary points (no snap_to_plane)
+        let holes_2d: Vec<Vec<Point2d>> = hole_polylines.iter()
             .map(|hole| hole.iter().map(|p| project(p)).collect())
             .collect();
 
         // Try earcutr first
         if let Some(m) = earcutr_triangulate_planar(
-            &points_2d, &snapped_boundary, &holes_2d, &snapped_holes, forward, plane.normal,
+            &points_2d, &boundary_points, &holes_2d, &hole_polylines, forward, plane.normal,
         ) {
             return m;
         }
@@ -2566,7 +2543,7 @@ fn triangulate_plane_with_boundary_and_holes_uv(
         // Fallback to ear-clip with bridge edges
         log::warn!("earcutr failed for planar face with UV-aware API, falling back to bridge-edge ear-clip");
         let (merged_2d, merged_3d) = merge_holes_into_polygon_planar(
-            &points_2d, &snapped_boundary, &holes_2d, &snapped_holes,
+            &points_2d, &boundary_points, &holes_2d, &hole_polylines,
         );
         let triangles = ear_clip(&merged_2d);
         for p in &merged_3d {

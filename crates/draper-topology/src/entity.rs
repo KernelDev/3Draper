@@ -31,6 +31,11 @@ impl TopoId {
     pub fn new() -> Self {
         TopoId(next_id())
     }
+
+    /// Get the raw u64 value of this ID.
+    pub fn to_u64(self) -> u64 {
+        self.0
+    }
 }
 
 impl fmt::Display for TopoId {
