@@ -801,28 +801,23 @@ fn collect_face_boundary_points_with_uv(
                     points_uv.extend(edge_pts_uv);
                 } else {
                     // No pcurve — fall back to surface.project_point()
-                    let edge_pts_3d = sample_edge_points(edge, EDGE_SAMPLES);
+                    let mut edge_pts_3d = sample_edge_points(edge, EDGE_SAMPLES);
                     let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
                     let should_reverse = !coedge.forward != edge_is_reversed;
 
-                    let edge_pts_uv: Vec<Point2d> = edge_pts_3d.iter().map(|p| {
+                    let mut edge_pts_uv: Vec<Point2d> = edge_pts_3d.iter().map(|p| {
                         let (u, v) = surface.project_point(p);
                         Point2d::new(u, v)
                     }).collect();
 
-                    // Reverse 3D points to match canonical direction logic
-                    let mut edge_pts_3d = edge_pts_3d;
+                    // Reverse both 3D and UV together when the coedge direction
+                    // doesn't match the canonical sampling direction
                     if should_reverse {
                         edge_pts_3d.reverse();
-                        // Also reverse UVs correspondingly
-                        let mut edge_pts_uv = edge_pts_uv;
                         edge_pts_uv.reverse();
-                        points_3d.extend(edge_pts_3d);
-                        points_uv.extend(edge_pts_uv);
-                    } else {
-                        points_3d.extend(edge_pts_3d);
-                        points_uv.extend(edge_pts_uv);
                     }
+                    points_3d.extend(edge_pts_3d);
+                    points_uv.extend(edge_pts_uv);
                 }
             }
         }

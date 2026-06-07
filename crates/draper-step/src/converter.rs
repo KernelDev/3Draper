@@ -363,21 +363,35 @@ fn face_data_list_to_solid(face_data_list: &[FaceData]) -> (Solid, HashMap<drape
     let mut face_id_to_index = HashMap::new();
 
     for (fd_idx, fd) in face_data_list.iter().enumerate() {
-        // Build outer wire from outer edges
+        // Build outer wire from outer edges — attach curve_2d (PCURVE) data
+        // so that triangulate_face can use it for accurate UV coordinates.
         let outer_wire = if fd.outer_edges.is_empty() {
             None
         } else {
             let coedges: Vec<CoEdge> = fd.outer_edges.iter()
-                .map(|edge| CoEdge::new(edge.id, true))
+                .map(|edge| {
+                    // Try to find the curve_2d for this edge
+                    let curve_2d = fd.edges.iter().position(|e| e.id == edge.id)
+                        .and_then(|idx| fd.edge_curves_2d.get(idx).and_then(|c| c.clone()));
+                    let mut coedge = CoEdge::new(edge.id, true);
+                    coedge.curve_2d = curve_2d;
+                    coedge
+                })
                 .collect();
             Some(Wire::new(coedges))
         };
 
-        // Build inner wires from inner edges (holes)
+        // Build inner wires from inner edges (holes) — also with curve_2d
         let inner_wires: Vec<Wire> = fd.inner_edges.iter()
             .map(|inner_edge_list| {
                 let coedges: Vec<CoEdge> = inner_edge_list.iter()
-                    .map(|edge| CoEdge::new(edge.id, true))
+                    .map(|edge| {
+                        let curve_2d = fd.edges.iter().position(|e| e.id == edge.id)
+                            .and_then(|idx| fd.edge_curves_2d.get(idx).and_then(|c| c.clone()));
+                        let mut coedge = CoEdge::new(edge.id, true);
+                        coedge.curve_2d = curve_2d;
+                        coedge
+                    })
                     .collect();
                 Wire::new(coedges)
             })
@@ -6961,8 +6975,12 @@ impl<'a> StepConverter<'a> {
         }
 
         // Fallback: use the old Face-based path
-        let coedges: Vec<CoEdge> = face_data.edges.iter().map(|e| {
-            CoEdge::new(e.id, true)
+        // IMPORTANT: Attach curve_2d data to CoEdges so that triangulate_face
+        // can use PCURVE data for accurate UV coordinates on NURBS surfaces.
+        let coedges: Vec<CoEdge> = face_data.edges.iter().enumerate().map(|(i, e)| {
+            let mut coedge = CoEdge::new(e.id, true);
+            coedge.curve_2d = face_data.edge_curves_2d.get(i).and_then(|c| c.clone());
+            coedge
         }).collect();
         let wire = Wire::new(coedges);
 
@@ -7078,8 +7096,12 @@ impl<'a> StepConverter<'a> {
         }
 
         // Fallback: use the old Face-based path
-        let coedges: Vec<CoEdge> = face_data.edges.iter().map(|e| {
-            CoEdge::new(e.id, true)
+        // IMPORTANT: Attach curve_2d data to CoEdges so that triangulate_face
+        // can use PCURVE data for accurate UV coordinates on NURBS surfaces.
+        let coedges: Vec<CoEdge> = face_data.edges.iter().enumerate().map(|(i, e)| {
+            let mut coedge = CoEdge::new(e.id, true);
+            coedge.curve_2d = face_data.edge_curves_2d.get(i).and_then(|c| c.clone());
+            coedge
         }).collect();
         let wire = Wire::new(coedges);
 
