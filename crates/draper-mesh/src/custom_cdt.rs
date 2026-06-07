@@ -18,7 +18,7 @@
 //! 3. Delaunay improvement: After all insertions, apply Lawson flips
 //!    to improve triangle quality while respecting constraints.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Tolerance for geometric comparisons.
 const EPS: f64 = 1e-10;
@@ -103,12 +103,18 @@ pub fn triangulate_polygon_cdt(
 
 /// Insert interior Steiner points into an existing triangulation
 /// using Bowyer-Watson point insertion.
+///
+/// Uses an edge-to-triangle adjacency map for O(1) neighbor lookups
+/// instead of O(n) linear search.
 fn insert_interior_points(
     all_2d: &[[f64; 2]],
     triangles: &mut Vec<[u32; 3]>,
     interior_start: usize,
     n_interior: usize,
 ) {
+    // Build edge-to-triangle adjacency map for fast neighbor lookups
+    let mut edge_map = build_edge_map(triangles);
+
     for i in 0..n_interior {
         let point_idx = (interior_start + i) as u32;
         let p = all_2d[point_idx as usize];
@@ -116,9 +122,9 @@ fn insert_interior_points(
         match find_containing_triangle(all_2d, triangles, p) {
             Some((tri_idx, on_edge)) => {
                 if on_edge {
-                    insert_point_on_edge(all_2d, triangles, tri_idx, point_idx);
+                    insert_point_on_edge_fast(all_2d, triangles, tri_idx, point_idx, &mut edge_map);
                 } else {
-                    insert_point_in_triangle(triangles, tri_idx, point_idx);
+                    insert_point_in_triangle_fast(triangles, tri_idx, point_idx, &mut edge_map);
                 }
             }
             None => {
@@ -127,6 +133,19 @@ fn insert_interior_points(
             }
         }
     }
+}
+
+/// Build a map from edge (min,max) → list of triangle indices that share that edge.
+fn build_edge_map(triangles: &[[u32; 3]]) -> HashMap<(u32, u32), Vec<usize>> {
+    let mut map: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+    for (ti, tri) in triangles.iter().enumerate() {
+        for i in 0..3 {
+            let a = tri[i].min(tri[(i + 1) % 3]);
+            let b = tri[i].max(tri[(i + 1) % 3]);
+            map.entry((a, b)).or_default().push(ti);
+        }
+    }
+    map
 }
 
 /// Find the triangle containing a point.
@@ -171,6 +190,31 @@ fn insert_point_in_triangle(
     triangles[tri_idx] = [a, b, point_idx];
     triangles.push([b, c, point_idx]);
     triangles.push([c, a, point_idx]);
+}
+
+/// Insert a point inside a triangle, also updating the edge map.
+fn insert_point_in_triangle_fast(
+    triangles: &mut Vec<[u32; 3]>,
+    tri_idx: usize,
+    point_idx: u32,
+    edge_map: &mut HashMap<(u32, u32), Vec<usize>>,
+) {
+    let [a, b, c] = triangles[tri_idx];
+
+    // Remove old triangle's edges from map
+    remove_tri_from_edge_map(edge_map, tri_idx, &[a, b, c]);
+
+    // Create 3 new triangles
+    triangles[tri_idx] = [a, b, point_idx];
+    let t1 = triangles.len() as u32;
+    triangles.push([b, c, point_idx]);
+    let t2 = triangles.len() as u32;
+    triangles.push([c, a, point_idx]);
+
+    // Add new triangles' edges to map
+    add_tri_to_edge_map(edge_map, tri_idx, &[a, b, point_idx]);
+    add_tri_to_edge_map(edge_map, t1 as usize, &[b, c, point_idx]);
+    add_tri_to_edge_map(edge_map, t2 as usize, &[c, a, point_idx]);
 }
 
 /// Insert a point that lies on an edge of a triangle.
@@ -227,6 +271,109 @@ fn insert_point_on_edge(
     }
 }
 
+/// Insert a point on an edge, also updating the edge map.
+fn insert_point_on_edge_fast(
+    vertices: &[[f64; 2]],
+    triangles: &mut Vec<[u32; 3]>,
+    tri_idx: usize,
+    point_idx: u32,
+    edge_map: &mut HashMap<(u32, u32), Vec<usize>>,
+) {
+    let p = vertices[point_idx as usize];
+    let [a, b, c] = triangles[tri_idx];
+
+    let pa = vertices[a as usize];
+    let pb = vertices[b as usize];
+    let pc = vertices[c as usize];
+
+    let d1 = orient2d(p, pa, pb).abs();
+    let d2 = orient2d(p, pb, pc).abs();
+    let d3 = orient2d(p, pc, pa).abs();
+
+    let (edge_v1, edge_v2, opposite_v) = if d1 <= d2 && d1 <= d3 {
+        (a, b, c)
+    } else if d2 <= d3 {
+        (b, c, a)
+    } else {
+        (c, a, b)
+    };
+
+    // Find neighbor using edge map
+    let edge_key = (edge_v1.min(edge_v2), edge_v1.max(edge_v2));
+    let neighbor_idx = edge_map.get(&edge_key)
+        .and_then(|indices| indices.iter().find(|&&i| i != tri_idx).copied());
+
+    // Remove old triangle edges from map
+    remove_tri_from_edge_map(edge_map, tri_idx, &[a, b, c]);
+
+    // Split the current triangle
+    triangles[tri_idx] = [opposite_v, edge_v1, point_idx];
+    let t1 = triangles.len() as u32;
+    triangles.push([opposite_v, point_idx, edge_v2]);
+
+    // Add new triangles' edges
+    add_tri_to_edge_map(edge_map, tri_idx, &[opposite_v, edge_v1, point_idx]);
+    add_tri_to_edge_map(edge_map, t1 as usize, &[opposite_v, point_idx, edge_v2]);
+
+    // Split the neighbor triangle
+    if let Some(nbr_idx) = neighbor_idx {
+        let [na, nb, nc] = triangles[nbr_idx];
+        let nbr_opposite = if na != edge_v1 && na != edge_v2 {
+            na
+        } else if nb != edge_v1 && nb != edge_v2 {
+            nb
+        } else {
+            nc
+        };
+
+        let (ev1_in_nbr, ev2_in_nbr) = find_edge_order_in_triangle(
+            &triangles[nbr_idx], edge_v1, edge_v2,
+        );
+
+        // Remove old neighbor edges
+        remove_tri_from_edge_map(edge_map, nbr_idx, &[na, nb, nc]);
+
+        triangles[nbr_idx] = [nbr_opposite, ev1_in_nbr, point_idx];
+        let t2 = triangles.len() as u32;
+        triangles.push([nbr_opposite, point_idx, ev2_in_nbr]);
+
+        // Add new neighbor triangles' edges
+        add_tri_to_edge_map(edge_map, nbr_idx, &[nbr_opposite, ev1_in_nbr, point_idx]);
+        add_tri_to_edge_map(edge_map, t2 as usize, &[nbr_opposite, point_idx, ev2_in_nbr]);
+    }
+}
+
+/// Remove a triangle's edges from the edge map.
+fn remove_tri_from_edge_map(
+    edge_map: &mut HashMap<(u32, u32), Vec<usize>>,
+    tri_idx: usize,
+    tri: &[u32; 3],
+) {
+    for i in 0..3 {
+        let a = tri[i].min(tri[(i + 1) % 3]);
+        let b = tri[i].max(tri[(i + 1) % 3]);
+        if let Some(indices) = edge_map.get_mut(&(a, b)) {
+            indices.retain(|&i| i != tri_idx);
+            if indices.is_empty() {
+                edge_map.remove(&(a, b));
+            }
+        }
+    }
+}
+
+/// Add a triangle's edges to the edge map.
+fn add_tri_to_edge_map(
+    edge_map: &mut HashMap<(u32, u32), Vec<usize>>,
+    tri_idx: usize,
+    tri: &[u32; 3],
+) {
+    for i in 0..3 {
+        let a = tri[i].min(tri[(i + 1) % 3]);
+        let b = tri[i].max(tri[(i + 1) % 3]);
+        edge_map.entry((a, b)).or_default().push(tri_idx);
+    }
+}
+
 /// Find a triangle (other than exclude) that contains the edge (v1, v2).
 fn find_triangle_with_edge(
     triangles: &[[u32; 3]],
@@ -262,6 +409,9 @@ fn find_edge_order_in_triangle(tri: &[u32; 3], v1: u32, v2: u32) -> (u32, u32) {
 ///
 /// A constraint edge is any edge of the outer boundary polygon or any hole polygon.
 /// These edges must not be flipped.
+///
+/// Uses an edge-to-triangle adjacency map for O(1) neighbor lookups
+/// instead of O(n) linear search per edge.
 fn lawson_flip(
     vertices: &[[f64; 2]],
     triangles: &mut Vec<[u32; 3]>,
@@ -269,6 +419,9 @@ fn lawson_flip(
     hole_ranges: &[(usize, usize)],
 ) {
     let constraint_edges = build_constraint_set(n_boundary, hole_ranges);
+
+    // Build edge-to-triangle adjacency map for O(1) neighbor lookups
+    let mut edge_map = build_edge_map(triangles);
 
     let max_iterations = triangles.len() * 3;
     let mut iteration = 0;
@@ -295,8 +448,10 @@ fn lawson_flip(
                     continue;
                 }
 
-                // Find neighboring triangle sharing this edge
-                let nbr_idx = find_triangle_with_edge(triangles, ev1, ev2, i);
+                // Find neighboring triangle using edge map (O(1))
+                let nbr_idx = edge_map.get(&edge_key)
+                    .and_then(|indices| indices.iter().find(|&&idx| idx != i).copied());
+
                 let nbr = match nbr_idx {
                     Some(idx) => triangles[idx],
                     None => continue,
@@ -327,16 +482,31 @@ fn lawson_flip(
                         vertices[new_tri2[2] as usize],
                     );
 
-                    if ccw1 > 0.0 && ccw2 > 0.0 {
+                    let valid_flip = if ccw1 > 0.0 && ccw2 > 0.0 {
                         triangles[i] = new_tri1;
                         if let Some(nbr) = nbr_idx {
                             triangles[nbr] = new_tri2;
                         }
-                        flipped = true;
+                        true
                     } else if ccw1 < 0.0 && ccw2 < 0.0 {
                         triangles[i] = [new_tri1[0], new_tri1[2], new_tri1[1]];
                         if let Some(nbr) = nbr_idx {
                             triangles[nbr] = [new_tri2[0], new_tri2[2], new_tri2[1]];
+                        }
+                        true
+                    } else {
+                        false
+                    };
+
+                    if valid_flip {
+                        // Update edge map: remove old edges, add new ones
+                        if let Some(ni) = nbr_idx {
+                            // Remove old triangle edges
+                            remove_tri_from_edge_map(&mut edge_map, i, &tri);
+                            remove_tri_from_edge_map(&mut edge_map, ni, &nbr);
+                            // Add new triangle edges
+                            add_tri_to_edge_map(&mut edge_map, i, &triangles[i]);
+                            add_tri_to_edge_map(&mut edge_map, ni, &triangles[ni]);
                         }
                         flipped = true;
                     }
