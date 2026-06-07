@@ -809,19 +809,240 @@ impl NurbsSurface {
 
     /// Compute the surface point and first partial derivatives analytically.
     ///
-    /// Uses the tensor-product approach with the quotient rule for rational surfaces:
+    /// Uses the quotient rule for rational NURBS surfaces:
     ///   S(u,v) = A(u,v) / w(u,v)
     ///   dS/du = (dA/du - S * dw/du) / w
     ///   dS/dv = (dA/dv - S * dw/dv) / w
     ///
     /// The derivatives of the weighted numerator are computed by differentiating
-    /// the B-spline basis functions analytically (not numerically).
+    /// the B-spline basis functions analytically using the degree-reduction
+    /// technique (standard NURBS derivative computation from "The NURBS Book").
     pub fn derivatives_at(&self, u: f64, v: f64) -> SurfaceDerivatives {
+        let surface = Surface::Nurbs(self.clone());
+        let (u_min, u_max) = self.u_range();
+        let (v_min, v_max) = self.v_range();
+
+        // Clamp u, v to valid range
+        let u_c = u.clamp(u_min, u_max);
+        let v_c = v.clamp(v_min, v_max);
+
+        let p = self.u_degree;
+        let q = self.v_degree;
+        let n_u = self.control_points.len();
+        let n_v = self.control_points[0].len();
+
+        // Find knot spans
+        let k_u = find_knot_span(&self.u_knots, p, u_c, n_u);
+        let k_v = find_knot_span(&self.v_knots, q, v_c, n_v);
+
+        // Step 1: Compute weighted control points and their u-derivatives
+        // For each row i in [k_u-p .. k_u], evaluate:
+        //   - B-spline in v direction on the q+1 weighted control points
+        //   - B-spline derivative in v direction
+        // This gives us intermediate points in the (wx, wy, wz, w) homogeneous space
+
+        let mut intermediate = Vec::with_capacity(p + 1);
+        for i in 0..=p {
+            let row = k_u - p + i;
+            if row >= n_u { continue; }
+
+            // Collect q+1 weighted control points for this row
+            let mut vpts = Vec::with_capacity(q + 1);
+            for j in 0..=q {
+                let col = k_v - q + j;
+                if col >= n_v { continue; }
+                let cp = &self.control_points[row][col];
+                let w = self.weights[row][col];
+                vpts.push((cp.x * w, cp.y * w, cp.z * w, w));
+            }
+            if vpts.len() < q + 1 { continue; }
+
+            // De Boor in v direction
+            de_boor_step(&mut vpts, &self.v_knots, q, k_v, v_c);
+            intermediate.push(vpts[q]); // Result is at index [degree]
+        }
+
+        if intermediate.len() < p + 1 {
+            // Fallback to numerical differences if we couldn't get enough intermediate points
+            return self.derivatives_at_numerical(u, v);
+        }
+
+        // Step 2: De Boor in u direction on intermediate points → get S_w(u,v) = (wx, wy, wz, w)
+        de_boor_step(&mut intermediate, &self.u_knots, p, k_u, u_c);
+        let (wx, wy, wz, w) = intermediate[p];
+
+        if w.abs() < 1e-15 {
+            return self.derivatives_at_numerical(u, v);
+        }
+
+        // Compute the 3D point: S = (wx/w, wy/w, wz/w)
+        let point = Point3d::new(wx / w, wy / w, wz / w);
+
+        // Step 3: Compute derivatives using degree-reduced control points
+        // dS_w/du is computed from the p control points of degree p-1 B-spline
+        // For each v-row, the derivative in u is:
+        //   d/d u [sum_i N_{i,p}(u) * P_w_{i,j}] = p/(u_{i+p+1}-u_{i+1}) * (Q_{i+1} - Q_i)
+        // where Q_i are the degree-reduced control points
+
+        // Compute u-direction derivative
+        let du = self.compute_partial_derivative_u(u_c, v_c, k_u, k_v, p, q, n_u, n_v, w, point);
+
+        // Compute v-direction derivative
+        let dv = self.compute_partial_derivative_v(u_c, v_c, k_u, k_v, p, q, n_u, n_v, w, point);
+
+        // Validate derivatives — fall back to numerical if something went wrong
+        let du_len = (du.x * du.x + du.y * du.y + du.z * du.z).sqrt();
+        let dv_len = (dv.x * dv.x + dv.y * dv.y + dv.z * dv.z).sqrt();
+
+        if du_len < 1e-20 || dv_len < 1e-20 || !du_len.is_finite() || !dv_len.is_finite() {
+            return self.derivatives_at_numerical(u, v);
+        }
+
+        SurfaceDerivatives { point, du, dv }
+    }
+
+    /// Compute the partial derivative dS/du analytically using degree reduction.
+    fn compute_partial_derivative_u(
+        &self, u: f64, v: f64, k_u: usize, k_v: usize,
+        p: usize, q: usize, n_u: usize, n_v: usize, w: f64, point: Point3d,
+    ) -> Vec3d {
+        // For each v-row, compute the u-direction derivative using:
+        // dA/du = p * sum_i N_{i,p-1}(u) * (P_{i+1}^w - P_i^w) / (u_{i+p+1} - u_{i+1})
+        // dw/du = p * sum_i N_{i,p-1}(u) * (w_{i+1} - w_i) / (u_{i+p+1} - u_{i+1})
+        // Then dS/du = (dA/du - S * dw/du) / w
+
+        let mut du_intermediate = Vec::with_capacity(p); // p points for degree p-1
+        for i in 0..p {
+            let row0 = k_u - p + i;
+            let row1 = k_u - p + i + 1;
+            if row0 >= n_u || row1 >= n_u { continue; }
+
+            // Collect q+1 weighted control points for each row
+            let mut vpts0 = Vec::with_capacity(q + 1);
+            let mut vpts1 = Vec::with_capacity(q + 1);
+            for j in 0..=q {
+                let col = k_v - q + j;
+                if col >= n_v { continue; }
+                let cp0 = &self.control_points[row0][col];
+                let w0 = self.weights[row0][col];
+                vpts0.push((cp0.x * w0, cp0.y * w0, cp0.z * w0, w0));
+                let cp1 = &self.control_points[row1][col];
+                let w1 = self.weights[row1][col];
+                vpts1.push((cp1.x * w1, cp1.y * w1, cp1.z * w1, w1));
+            }
+            if vpts0.len() < q + 1 || vpts1.len() < q + 1 { continue; }
+
+            // Evaluate both in v
+            de_boor_step(&mut vpts0, &self.v_knots, q, k_v, v);
+            de_boor_step(&mut vpts1, &self.v_knots, q, k_v, v);
+
+            // Compute the difference scaled by knot interval
+            let (wx0, wy0, wz0, w0_) = vpts0[q];
+            let (wx1, wy1, wz1, w1_) = vpts1[q];
+
+            let knot_idx = k_u - p + i;
+            let denom = if knot_idx + p + 1 < self.u_knots.len() {
+                let d = self.u_knots[knot_idx + p + 1] - self.u_knots[knot_idx + 1];
+                if d.abs() < 1e-15 { 1.0 } else { d }
+            } else {
+                1.0
+            };
+
+            let scale = p as f64 / denom;
+            du_intermediate.push((
+                (wx1 - wx0) * scale,
+                (wy1 - wy0) * scale,
+                (wz1 - wz0) * scale,
+                (w1_ - w0_) * scale,
+            ));
+        }
+
+        if du_intermediate.len() < p {
+            return Vec3d::new(0.0, 0.0, 0.0);
+        }
+
+        // De Boor in u direction on the p derivative control points (degree p-1)
+        // We need to evaluate a B-spline of degree p-1 at u using p control points
+        let mut du_pts = du_intermediate;
+        de_boor_step(&mut du_pts, &self.u_knots, p - 1, k_u, u);
+        let (dawx, dawy, dawz, daw) = du_pts[p - 1];
+
+        // Apply quotient rule: dS/du = (dA/du - S * dw/du) / w
+        Vec3d::new(
+            (dawx - point.x * daw) / w,
+            (dawy - point.y * daw) / w,
+            (dawz - point.z * daw) / w,
+        )
+    }
+
+    /// Compute the partial derivative dS/dv analytically using degree reduction.
+    fn compute_partial_derivative_v(
+        &self, u: f64, v: f64, k_u: usize, k_v: usize,
+        p: usize, q: usize, n_u: usize, n_v: usize, w: f64, point: Point3d,
+    ) -> Vec3d {
+        // Similar to u-derivative but in v direction
+        let mut dv_intermediate = Vec::with_capacity(p + 1);
+        for i in 0..=p {
+            let row = k_u - p + i;
+            if row >= n_u { continue; }
+
+            // Collect q derivative control points (degree q-1)
+            let mut dvpts = Vec::with_capacity(q);
+            for j in 0..q {
+                let col0 = k_v - q + j;
+                let col1 = k_v - q + j + 1;
+                if col0 >= n_v || col1 >= n_v { continue; }
+
+                let cp0 = &self.control_points[row][col0];
+                let w0 = self.weights[row][col0];
+                let cp1 = &self.control_points[row][col1];
+                let w1 = self.weights[row][col1];
+
+                let knot_idx = k_v - q + j;
+                let denom = if knot_idx + q + 1 < self.v_knots.len() {
+                    let d = self.v_knots[knot_idx + q + 1] - self.v_knots[knot_idx + 1];
+                    if d.abs() < 1e-15 { 1.0 } else { d }
+                } else {
+                    1.0
+                };
+
+                let scale = q as f64 / denom;
+                dvpts.push((
+                    (cp1.x * w1 - cp0.x * w0) * scale,
+                    (cp1.y * w1 - cp0.y * w0) * scale,
+                    (cp1.z * w1 - cp0.z * w0) * scale,
+                    (w1 - w0) * scale,
+                ));
+            }
+
+            if dvpts.len() < q { continue; }
+
+            // Evaluate the degree q-1 B-spline in v
+            de_boor_step(&mut dvpts, &self.v_knots, q - 1, k_v, v);
+            dv_intermediate.push(dvpts[q - 1]);
+        }
+
+        if dv_intermediate.len() < p + 1 {
+            return Vec3d::new(0.0, 0.0, 0.0);
+        }
+
+        // De Boor in u direction on the p+1 intermediate points
+        de_boor_step(&mut dv_intermediate, &self.u_knots, p, k_u, u);
+        let (dbwx, dbwy, dbwz, dbw) = dv_intermediate[p];
+
+        // Apply quotient rule: dS/dv = (dB/dv - S * dw/dv) / w
+        Vec3d::new(
+            (dbwx - point.x * dbw) / w,
+            (dbwy - point.y * dbw) / w,
+            (dbwz - point.z * dbw) / w,
+        )
+    }
+
+    /// Numerical fallback for derivatives (used when analytical approach fails).
+    fn derivatives_at_numerical(&self, u: f64, v: f64) -> SurfaceDerivatives {
         let surface = Surface::Nurbs(self.clone());
         let point = surface.point_at(u, v);
 
-        // Use central differences with a reasonable step size for robustness
-        // This is more reliable than the fully analytical approach for degenerate cases
         let eps_u = {
             let (u_min, u_max) = self.u_range();
             (u_max - u_min).max(1e-6) * 1e-6

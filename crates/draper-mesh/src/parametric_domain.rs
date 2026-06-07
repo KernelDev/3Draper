@@ -156,10 +156,10 @@ impl ParametricDomain {
     /// Initialize the containment grid for fast contains() checks.
     pub fn init_containment_grid(&mut self) {
         if self.containment_grid.is_none() {
-            // Use a 24×24 grid — fine enough for accurate interior point
+            // Use a 48×48 grid — fine enough for accurate interior point
             // generation, especially for complex NURBS boundaries where
             // a coarser grid marks valid interior points as "outside".
-            self.containment_grid = Some(ContainmentGrid::new(self, 24));
+            self.containment_grid = Some(ContainmentGrid::new(self, 48));
         }
     }
 
@@ -929,13 +929,19 @@ pub fn triangulate_surface_consistent(
     // the interior point budget is:
     //   max_face_triangles/2 - boundary_points - hole_points
     // ============================================================
+    // Interior point budget: boundary points are mandatory for watertightness
+    // and should NOT consume the interior budget. Interior points are needed
+    // for curved surface approximation quality. We compute the interior budget
+    // separately to ensure curved surfaces always get enough interior Steiner points.
     let n_boundary_and_holes = boundary_points_3d.len()
         + hole_polylines_3d_capped.iter().map(|h| h.len()).sum::<usize>();
-    let max_interior_budget = if max_total_points > n_boundary_and_holes {
-        max_total_points - n_boundary_and_holes
-    } else {
-        0 // Boundary already uses up the budget — no interior points needed
-    };
+
+    // Minimum interior points for curved surfaces based on the number of
+    // boundary vertices. A curved surface needs at least ~1/3 as many interior
+    // points as boundary points to produce a good triangulation that follows
+    // the surface curvature. For high-degree NURBS, we need more.
+    let min_interior_for_curved = (n_boundary_and_holes / 3).max(20);
+    let max_interior_budget = max_total_points.saturating_sub(n_boundary_and_holes).max(min_interior_for_curved);
 
     let interior_uv_points = if let Surface::Nurbs(ref nurbs) = surface {
         let u_deg = nurbs.u_degree;
@@ -946,18 +952,21 @@ pub fn triangulate_surface_consistent(
         if u_deg <= 1 && v_deg <= 1 {
             Vec::new()
         } else if u_deg <= 1 || v_deg <= 1 {
-            // Ruled surface (linear in one direction): very few interior points.
-            // Just 1-2 subdivisions per knot span is enough to capture the
-            // curvature in the non-linear direction.
-            let n_sub = 2; // Minimal subdivisions for ruled surfaces
+            // Ruled surface (linear in one direction): needs interior points
+            // to capture curvature in the non-linear direction.
+            // Use 4 subdivisions per knot span for ruled NURBS — this gives
+            // much better surface approximation than the previous n_sub=2.
+            let n_sub = 4;
             let mut pts = generate_nurbs_interior_points(&domain, &nurbs.u_knots, &nurbs.v_knots, n_sub);
             if pts.len() > max_interior_budget {
                 pts.truncate(max_interior_budget);
             }
             pts
         } else {
-            // High-degree NURBS (both directions curved): use adaptive sampling
-            // but cap interior points strictly.
+            // High-degree NURBS (both directions curved): use adaptive sampling.
+            // Use more subdivisions per knot span for better surface approximation.
+            // The previous formula n_sub = (n_u.max(n_v) / 8).max(2).min(4) gave
+            // at most 4 subdivisions — way too coarse for high-curvature surfaces.
             let (n_u, n_v) = crate::adaptive::required_samples_capped(
                 surface,
                 u_min, u_max, v_min, v_max,
@@ -966,7 +975,8 @@ pub fn triangulate_surface_consistent(
             );
             // Use knot-span subdivision for NURBS — respects the surface
             // parameterization and gives better triangulation quality.
-            let n_sub = (n_u.max(n_v) / 8).max(2).min(4);
+            // Scale n_sub based on adaptive sample count, allowing up to 8 subdivisions.
+            let n_sub = (n_u.max(n_v) / 4).max(4).min(8);
             let mut pts = generate_nurbs_interior_points(&domain, &nurbs.u_knots, &nurbs.v_knots, n_sub);
             if pts.len() > max_interior_budget {
                 pts.truncate(max_interior_budget);

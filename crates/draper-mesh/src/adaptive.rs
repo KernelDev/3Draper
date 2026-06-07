@@ -21,16 +21,17 @@ use draper_geometry::Surface;
 const MIN_ANGULAR_SAMPLES: usize = 6;
 
 /// Maximum number of angular samples (to prevent excessive tessellation).
-/// Kept at 24 to avoid generating too many triangles for a single face.
-/// A face with 24×24 grid produces ~1.15K triangles, which is reasonable
-/// for interactive viewing and fits within the 1000 triangle budget.
-const MAX_ANGULAR_SAMPLES: usize = 24;
+/// Increased to 64 to allow finer resolution for high-curvature NURBS surfaces.
+/// The actual triangle count is controlled by `max_face_triangles` which caps
+/// the total per-face triangle budget.
+const MAX_ANGULAR_SAMPLES: usize = 64;
 
 /// Minimum number of height/v samples for any curved surface.
 const MIN_HEIGHT_SAMPLES: usize = 2;
 
 /// Maximum number of height/v samples.
-const MAX_HEIGHT_SAMPLES: usize = 24;
+/// Increased to 64 to match angular samples for high-curvature NURBS.
+const MAX_HEIGHT_SAMPLES: usize = 64;
 
 /// Compute the required number of angular (u-direction) samples for a surface
 /// given a maximum deviation tolerance.
@@ -237,13 +238,14 @@ pub fn required_samples(
 /// Default maximum number of triangles per face.
 /// This prevents a single face from generating millions of triangles
 /// that freeze the browser on WASM or exceed GPU buffer limits.
-/// 4000 triangles per face provides good visual quality.
+/// 8000 triangles per face provides good visual quality for NURBS surfaces.
 /// Boundary points from the edge cache are never downsampled (to preserve
 /// watertightness), so the budget must accommodate faces with many boundary
 /// vertices (up to ~200 per face). With earcutr producing ~2×N triangles
-/// for N boundary points, a budget of 4000 allows up to ~2000 boundary
-/// points per face (far more than needed in practice).
-pub const DEFAULT_MAX_FACE_TRIANGLES: usize = 4000;
+/// for N boundary points, a budget of 8000 allows up to ~4000 boundary
+/// points per face (far more than needed in practice) and provides sufficient
+/// interior Steiner points for accurate curved surface approximation.
+pub const DEFAULT_MAX_FACE_TRIANGLES: usize = 8000;
 
 /// Compute adaptive samples for both u and v directions simultaneously,
 /// capped so that the resulting grid does not exceed `max_face_triangles`.

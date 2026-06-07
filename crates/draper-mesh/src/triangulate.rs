@@ -637,7 +637,11 @@ pub fn triangulate_face(face: &Face, params: &TriangulationParams) -> TriangleMe
             Surface::Revolution(rev) => triangulate_revolution_face(face, rev, params),
             Surface::Extrusion(ext) => triangulate_extrusion_face(face, ext, params),
             Surface::Nurbs(_) => {
-                triangulate_generic_surface(face, surface, params)
+                // NURBS surfaces MUST use boundary-aware triangulation.
+                // triangulate_generic_surface() has NO trimming — it generates
+                // triangles over the entire UV rectangle regardless of the actual
+                // face boundary, producing visible overhang and garbage geometry.
+                triangulate_nurbs_face(face, surface, params)
             }
         }
     } else {
@@ -2300,6 +2304,38 @@ fn triangulate_generic_surface(face: &Face, surface: &Surface, params: &Triangul
     mesh
 }
 
+/// Triangulate a NURBS face with proper trimming.
+///
+/// This is the NURBS-specific entry point from `triangulate_face()`.
+/// It collects boundary points from the face's wire topology, projects them
+/// to UV space, and uses earcutr-based triangulation with proper trimming.
+///
+/// This replaces the old `triangulate_generic_surface()` path for NURBS,
+/// which had NO trimming — it generated triangles over the entire UV rectangle
+/// regardless of the actual face boundary, producing visible overhang and
+/// garbage geometry.
+fn triangulate_nurbs_face(face: &Face, surface: &Surface, params: &TriangulationParams) -> TriangleMesh {
+    let boundary_3d = collect_face_boundary_points(face);
+    let holes_3d = collect_face_hole_points(face);
+
+    if boundary_3d.is_empty() {
+        // No boundary edges — fall back to the full UV rectangle approach.
+        // This happens for faces without proper wire topology.
+        return triangulate_generic_surface(face, surface, params);
+    }
+
+    // Use the earcutr-based UV triangulation which properly handles
+    // trimming via the boundary polygon. This produces correct NURBS
+    // meshes that follow the actual face boundary.
+    crate::parametric_domain::triangulate_surface_uv_cdt(
+        surface,
+        &boundary_3d,
+        &holes_3d,
+        face.forward,
+        params,
+    )
+}
+
 // ============================================================
 // Boundary-aware triangulation (new API for STEP converter)
 // ============================================================
@@ -3286,13 +3322,15 @@ fn triangulate_surface_uv_trimmed(
     }
 
     // 8. Add boundary vertices and create boundary strip triangles
-    // For NURBS surfaces, skip the expensive boundary strip — the UV grid
-    // already provides adequate coverage, and project_point is very slow for NURBS.
-    // Boundary strip is mainly needed for cylinder/cone/torus where the boundary
-    // constrains the face tightly.
+    // For NURBS surfaces, the UV grid approach without a boundary strip
+    // produces jagged staircase boundaries. Instead, redirect to the
+    // earcutr-based CDT approach which natively handles the boundary
+    // as part of the triangulation (no separate strip needed).
     let is_nurbs = matches!(surface, Surface::Nurbs(_));
     if is_nurbs {
-        return mesh;
+        return crate::parametric_domain::triangulate_surface_uv_cdt(
+            surface, boundary_points_3d, hole_polylines_3d, forward, params,
+        );
     }
 
     let n_boundary = boundary_points_3d.len();
