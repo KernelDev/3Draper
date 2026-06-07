@@ -22,7 +22,7 @@ use draper_geometry::{
     TorusSurface, ConeSurface,
 };
 use draper_topology::{Face, Solid, TopoId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Epsilon for orientation tests and other floating-point comparisons.
 const EPS: f64 = 1e-10;
@@ -42,6 +42,11 @@ pub struct ConsistentEdgeCache {
 
 impl ConsistentEdgeCache {
     /// Build a cache by pre-computing discretizations for all edges in a solid.
+    ///
+    /// Uses adaptive recursive subdivision for curved edges (circles, ellipses,
+    /// NURBS) and minimum points for line edges. This produces more accurate
+    /// edge discretizations than uniform sampling, especially for curves with
+    /// high curvature regions.
     pub fn build_from_solid(solid: &Solid, n_samples: usize) -> Self {
         let mut entries = HashMap::new();
         for face in solid.faces() {
@@ -50,7 +55,36 @@ impl ConsistentEdgeCache {
                     continue;
                 }
                 if !entries.contains_key(&edge.id) {
-                    let pts = sample_edge_points(edge, n_samples);
+                    let pts = if let Some(ref curve) = edge.curve {
+                        match curve {
+                            draper_geometry::Curve3d::Line(_) => {
+                                // Lines: just start + end points
+                                let (t_min, t_max) = if edge.param_range.0 <= edge.param_range.1 {
+                                    (edge.param_range.0, edge.param_range.1)
+                                } else {
+                                    (edge.param_range.1, edge.param_range.0)
+                                };
+                                vec![curve.point_at(t_min), curve.point_at(t_max)]
+                            }
+                            _ => {
+                                // Curved edges: use adaptive recursive subdivision
+                                let (t_min, t_max) = if edge.param_range.0 <= edge.param_range.1 {
+                                    (edge.param_range.0, edge.param_range.1)
+                                } else {
+                                    (edge.param_range.1, edge.param_range.0)
+                                };
+                                discretize_edge_adaptive(
+                                    curve, t_min, t_max,
+                                    0.01,  // chordal tolerance
+                                    0.1,   // angular tolerance (radians)
+                                    8,     // max recursion depth
+                                )
+                            }
+                        }
+                    } else {
+                        // No curve — use uniform sampling as fallback
+                        sample_edge_points(edge, n_samples)
+                    };
                     entries.insert(edge.id, pts);
                 }
             }
@@ -63,7 +97,27 @@ impl ConsistentEdgeCache {
         if let Some(cached) = self.entries.get(&edge.id) {
             cached.clone()
         } else {
-            sample_edge_points(edge, self.n_samples)
+            // Fallback: use adaptive discretization for uncached edges
+            if let Some(ref curve) = edge.curve {
+                let (t_min, t_max) = if edge.param_range.0 <= edge.param_range.1 {
+                    (edge.param_range.0, edge.param_range.1)
+                } else {
+                    (edge.param_range.1, edge.param_range.0)
+                };
+                match curve {
+                    draper_geometry::Curve3d::Line(_) => {
+                        vec![curve.point_at(t_min), curve.point_at(t_max)]
+                    }
+                    _ => {
+                        discretize_edge_adaptive(
+                            curve, t_min, t_max,
+                            0.01, 0.1, 8,
+                        )
+                    }
+                }
+            } else {
+                sample_edge_points(edge, self.n_samples)
+            }
         }
     }
 }
@@ -468,6 +522,12 @@ fn triangulate_surface_cdt_generic(
 
     if !result.all_constraints_satisfied {
         log::warn!("CDT surface: not all constraints satisfied for face {}", face.id);
+    }
+
+    // Iterative adaptive refinement: check 3D chord error for each triangle
+    // and subdivide triangles that exceed the tolerance.
+    if params.adaptive {
+        refine_mesh_adaptive(&mut mesh, surface, params.max_deviation, params.max_angular_deviation, pool, face_id);
     }
 
     mesh
@@ -1446,7 +1506,7 @@ pub fn adaptive_refine_mesh(
                             // Find the opposite vertex
                             let mut opp = 0u32;
                             let mut found = false;
-                            for &v in &t {
+                            for &v in t.iter() {
                                 if v != edge_key.0 && v != edge_key.1 {
                                     opp = v;
                                     found = true;
@@ -1611,7 +1671,7 @@ fn point_to_chord_distance(p: &Point3d, a: &Point3d, b: &Point3d) -> f64 {
 }
 
 /// Compute the angle between two direction vectors in radians.
-fn angle_between_vectors(a: &draper_geometry::Vector3d, b: &draper_geometry::Vector3d) -> f64 {
+fn angle_between_vectors(a: &draper_geometry::Vec3d, b: &draper_geometry::Vec3d) -> f64 {
     let dot = a.x * b.x + a.y * b.y + a.z * b.z;
     let len_a = (a.x * a.x + a.y * a.y + a.z * a.z).sqrt();
     let len_b = (b.x * b.x + b.y * b.y + b.z * b.z).sqrt();
@@ -1619,6 +1679,195 @@ fn angle_between_vectors(a: &draper_geometry::Vector3d, b: &draper_geometry::Vec
         return 0.0;
     }
     let cos_angle = (dot / (len_a * len_b)).clamp(-1.0, 1.0);
+    cos_angle.acos()
+}
+
+// ============================================================
+// Iterative adaptive refinement — post-CDT chord error checking
+// ============================================================
+
+/// Iteratively refine a face mesh by checking 3D chord error (distance from
+/// the true surface to the triangle) and splitting triangles that exceed the
+/// given tolerances.
+///
+/// # Algorithm
+/// 1. For each triangle, compute the midpoint of the triangle in UV space
+/// 2. Evaluate the true surface at that UV point
+/// 3. Compute the distance from the true surface point to the triangle plane
+/// 4. If the distance exceeds `max_chord_error`, split the triangle by
+///    inserting the midpoint and connecting it to the triangle's vertices
+/// 5. Repeat until no more triangles need splitting or iteration limit reached
+///
+/// This is a simplified version of the spec's "iterative adaptive refinement"
+/// that avoids re-running the full CDT. Instead, it uses midpoint insertion
+/// which preserves the existing triangulation structure while adding new
+/// vertices where needed.
+fn refine_mesh_adaptive(
+    mesh: &mut TriangleMesh,
+    surface: &Surface,
+    max_chord_error: f64,
+    max_angular_deviation: f64,
+    pool: &mut UnifiedVertexPool,
+    face_id: u64,
+) {
+    // Only refine curved surfaces
+    if matches!(surface, Surface::Plane(_)) {
+        return;
+    }
+
+    let max_iterations = 3; // Limit iterations to prevent runaway refinement
+    let max_total_triangles = mesh.triangles.len() * 4; // Don't grow more than 4x
+
+    for _iteration in 0..max_iterations {
+        if mesh.triangles.len() >= max_total_triangles {
+            break;
+        }
+
+        // Clone the triangles to avoid borrow conflicts
+        let current_triangles: Vec<[u32; 3]> = mesh.triangles.clone();
+        let current_vertices: Vec<Point3d> = mesh.vertices.clone();
+
+        let mut triangles_to_add: Vec<[u32; 3]> = Vec::new();
+        let mut triangles_to_remove: Vec<usize> = Vec::new();
+
+        for (tri_idx, tri) in current_triangles.iter().enumerate() {
+            let v0 = current_vertices[tri[0] as usize];
+            let v1 = current_vertices[tri[1] as usize];
+            let v2 = current_vertices[tri[2] as usize];
+
+            // Compute centroid of the triangle
+            let centroid = Point3d::new(
+                (v0.x + v1.x + v2.x) / 3.0,
+                (v0.y + v1.y + v2.y) / 3.0,
+                (v0.z + v1.z + v2.z) / 3.0,
+            );
+
+            // Project centroid onto the surface to get the true point
+            let (u, v) = surface.project_point(&centroid);
+            let true_point = surface.point_at(u, v);
+
+            // Check that the true point is valid
+            if !true_point.x.is_finite() || !true_point.y.is_finite() || !true_point.z.is_finite() {
+                continue;
+            }
+
+            // Compute 3D chord error: distance from true surface point to triangle centroid
+            let dx = true_point.x - centroid.x;
+            let dy = true_point.y - centroid.y;
+            let dz = true_point.z - centroid.z;
+            let chord_error = (dx * dx + dy * dy + dz * dz).sqrt();
+
+            // Check angular deviation: compare triangle normal with surface normal
+            let surface_normal = surface.normal_at(u, v);
+            let tri_normal = compute_triangle_normal(&v0, &v1, &v2);
+            let angle_error = angle_between_directions(&tri_normal, &surface_normal);
+
+            if chord_error > max_chord_error || angle_error > max_angular_deviation {
+                // Split this triangle: insert midpoint of the longest edge
+                // and create 2 new triangles (simplest split)
+                let e01_len_sq = dist_sq(&v0, &v1);
+                let e12_len_sq = dist_sq(&v1, &v2);
+                let e20_len_sq = dist_sq(&v2, &v0);
+
+                // Find the midpoint of the longest edge
+                let (mid_point, va, vb, vc) = if e01_len_sq >= e12_len_sq && e01_len_sq >= e20_len_sq {
+                    let mid = Point3d::new((v0.x + v1.x) / 2.0, (v0.y + v1.y) / 2.0, (v0.z + v1.z) / 2.0);
+                    (mid, tri[0], tri[1], tri[2])
+                } else if e12_len_sq >= e20_len_sq {
+                    let mid = Point3d::new((v1.x + v2.x) / 2.0, (v1.y + v2.y) / 2.0, (v1.z + v2.z) / 2.0);
+                    (mid, tri[1], tri[2], tri[0])
+                } else {
+                    let mid = Point3d::new((v2.x + v0.x) / 2.0, (v2.y + v0.y) / 2.0, (v2.z + v0.z) / 2.0);
+                    (mid, tri[2], tri[0], tri[1])
+                };
+
+                // Add the midpoint to the vertex pool
+                let mid_idx = pool.insert_with_face(mid_point, face_id);
+                // Also add to the mesh's local vertex list
+                let local_mid_idx = mesh.vertices.len() as u32;
+                mesh.add_vertex(mid_point);
+
+                // The local index mapping: pool index mid_idx maps to local index local_mid_idx
+                // Create two new triangles: (va, mid, vc) and (mid, vb, vc)
+                // Replace the original triangle with (va, mid, vc)
+                // and add (mid, vb, vc) as a new triangle
+                triangles_to_remove.push(tri_idx);
+                triangles_to_add.push([va, local_mid_idx, vc]);
+                triangles_to_add.push([local_mid_idx, vb, vc]);
+            }
+        }
+
+        if triangles_to_remove.is_empty() {
+            break; // No refinement needed
+        }
+
+        // Apply the refinement: remove bad triangles and add new ones
+        let mut remove_set: HashSet<usize> = triangles_to_remove.into_iter().collect();
+        let mut new_triangles = Vec::with_capacity(mesh.triangles.len());
+        let old_face_ids = mesh.triangle_face_ids.take();
+        let old_face_normals = mesh.face_normals.take();
+
+        for (i, tri) in mesh.triangles.iter().enumerate() {
+            if !remove_set.contains(&i) {
+                new_triangles.push(*tri);
+                if let Some(ref ids) = old_face_ids {
+                    if let Some(&id) = ids.get(i) {
+                        mesh.triangle_face_ids.get_or_insert_with(Vec::new).push(id);
+                    }
+                }
+                if let Some(ref normals) = old_face_normals {
+                    if let Some(&n) = normals.get(i) {
+                        mesh.face_normals.get_or_insert_with(Vec::new).push(n);
+                    }
+                }
+            }
+        }
+
+        // Add new triangles
+        for tri in &triangles_to_add {
+            new_triangles.push(*tri);
+            mesh.triangle_face_ids.get_or_insert_with(Vec::new).push(face_id);
+            // Compute face normal for new triangle
+            if let Some(v0) = mesh.vertices.get(tri[0] as usize) {
+                if let Some(v1) = mesh.vertices.get(tri[1] as usize) {
+                    if let Some(v2) = mesh.vertices.get(tri[2] as usize) {
+                        let n = compute_triangle_normal(v0, v1, v2);
+                        mesh.face_normals.get_or_insert_with(Vec::new).push([n.x, n.y, n.z]);
+                    }
+                }
+            }
+        }
+
+        mesh.triangles = new_triangles;
+    }
+}
+
+/// Compute squared distance between two 3D points.
+fn dist_sq(a: &Point3d, b: &Point3d) -> f64 {
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    let dz = b.z - a.z;
+    dx * dx + dy * dy + dz * dz
+}
+
+/// Compute the normal of a triangle (unnormalized direction).
+fn compute_triangle_normal(v0: &Point3d, v1: &Point3d, v2: &Point3d) -> Direction3d {
+    let e1x = v1.x - v0.x;
+    let e1y = v1.y - v0.y;
+    let e1z = v1.z - v0.z;
+    let e2x = v2.x - v0.x;
+    let e2y = v2.y - v0.y;
+    let e2z = v2.z - v0.z;
+    let nx = e1y * e2z - e1z * e2y;
+    let ny = e1z * e2x - e1x * e2z;
+    let nz = e1x * e2y - e1y * e2x;
+    Direction3d::new(nx, ny, nz).unwrap_or(Direction3d::Z)
+}
+
+/// Compute the angle between two direction vectors in radians.
+fn angle_between_directions(a: &Direction3d, b: &Direction3d) -> f64 {
+    let dot = a.x * b.x + a.y * b.y + a.z * b.z;
+    let cos_angle = dot.clamp(-1.0, 1.0);
     cos_angle.acos()
 }
 

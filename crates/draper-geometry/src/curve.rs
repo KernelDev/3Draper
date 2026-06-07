@@ -158,6 +158,16 @@ impl Ellipse {
             self.center.z + self.semi_major * t.cos() * self.x_axis.z + self.semi_minor * t.sin() * y_axis.z,
         )
     }
+
+    /// Evaluate the first derivative (tangent vector) at parameter t.
+    pub fn derivative_at(&self, t: f64) -> Vec3d {
+        let y_axis = self.normal.cross(&self.x_axis);
+        Vec3d::new(
+            -self.semi_major * t.sin() * self.x_axis.x + self.semi_minor * t.cos() * y_axis.x,
+            -self.semi_major * t.sin() * self.x_axis.y + self.semi_minor * t.cos() * y_axis.y,
+            -self.semi_major * t.sin() * self.x_axis.z + self.semi_minor * t.cos() * y_axis.z,
+        )
+    }
 }
 
 /// An arc (trimmed circle segment).
@@ -186,6 +196,21 @@ impl Arc {
 
     pub fn end_point(&self) -> Point3d {
         self.circle.point_at(self.end_angle)
+    }
+
+    /// Evaluate the first derivative (tangent vector) at parameter t.
+    ///
+    /// The parameter t ∈ [0, 1] maps to [start_angle, end_angle].
+    /// The derivative includes the chain rule factor dθ/dt = end_angle - start_angle.
+    pub fn derivative_at(&self, t: f64) -> Vec3d {
+        let d_theta = self.end_angle - self.start_angle;
+        let angle = self.start_angle + t * d_theta;
+        let d_circle = self.circle.derivative_at(angle);
+        Vec3d::new(
+            d_circle.x * d_theta,
+            d_circle.y * d_theta,
+            d_circle.z * d_theta,
+        )
     }
 }
 
@@ -383,6 +408,45 @@ impl Curve3d {
             Curve3d::Ellipse(ellipse) => ellipse.point_at(t),
             Curve3d::Arc(arc) => arc.point_at(t),
             Curve3d::Nurbs(nurbs) => nurbs_eval(nurbs, t),
+        }
+    }
+
+    /// Evaluate the first derivative (tangent vector) at parameter t.
+    ///
+    /// For NURBS curves, computes the derivative numerically using central differences.
+    /// For analytical curves (Line, Circle, Ellipse, Arc), uses exact derivatives.
+    pub fn derivative_at(&self, t: f64) -> Vec3d {
+        match self {
+            Curve3d::Line(line) => line.derivative_at(t),
+            Curve3d::Circle(circle) => circle.derivative_at(t),
+            Curve3d::Ellipse(ellipse) => ellipse.derivative_at(t),
+            Curve3d::Arc(arc) => arc.derivative_at(t),
+            Curve3d::Nurbs(nurbs) => {
+                // Numerical derivative using central differences
+                let (t_min, t_max) = {
+                    let n = nurbs.knots.len();
+                    if n > nurbs.degree {
+                        (nurbs.knots[nurbs.degree], nurbs.knots[n - nurbs.degree - 1])
+                    } else {
+                        (0.0, 1.0)
+                    }
+                };
+                let dt = (t_max - t_min) * 1e-7;
+                let t_lo = (t - dt).max(t_min);
+                let t_hi = (t + dt).min(t_max);
+                let p_lo = nurbs_eval(nurbs, t_lo);
+                let p_hi = nurbs_eval(nurbs, t_hi);
+                let actual_dt = t_hi - t_lo;
+                if actual_dt.abs() < 1e-30 {
+                    Vec3d::ZERO
+                } else {
+                    Vec3d::new(
+                        (p_hi.x - p_lo.x) / actual_dt,
+                        (p_hi.y - p_lo.y) / actual_dt,
+                        (p_hi.z - p_lo.z) / actual_dt,
+                    )
+                }
+            }
         }
     }
 
