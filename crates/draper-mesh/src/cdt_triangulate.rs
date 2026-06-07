@@ -15,7 +15,7 @@ use crate::triangulate::{
     sample_edge_points,
 };
 use crate::custom_cdt;
-use crate::watertight::{stitch_boundary_edges, zipper_stitch_boundary_edges};
+use crate::watertight::stitch_boundary_edges;
 use draper_geometry::{
     Point3d, Point2d, Direction3d,
     Surface, Plane, CylinderSurface, SphereSurface,

@@ -471,7 +471,7 @@ fn apply_vertex_remap(mesh: &mut TriangleMesh, remap: &[u32]) {
 }
 
 /// Remove unused vertices from the mesh and renumber indices.
-fn compact_vertices(mesh: &mut TriangleMesh) {
+pub fn compact_vertices(mesh: &mut TriangleMesh) {
     // Find which vertices are used
     let mut used = vec![false; mesh.vertices.len()];
     for tri in &mesh.triangles {
