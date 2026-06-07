@@ -940,7 +940,16 @@ pub fn triangulate_surface_consistent(
     // boundary vertices. A curved surface needs at least ~1/3 as many interior
     // points as boundary points to produce a good triangulation that follows
     // the surface curvature. For high-degree NURBS, we need more.
-    let min_interior_for_curved = (n_boundary_and_holes / 3).max(20);
+    //
+    // NURBS surfaces on mechanical parts (bolts, gears, etc.) often have
+    // complex curvature that requires significantly more interior points
+    // than the minimum. Increase the floor from 20 to 50 for NURBS.
+    let is_nurbs = matches!(surface, Surface::Nurbs(_));
+    let min_interior_for_curved = if is_nurbs {
+        (n_boundary_and_holes / 2).max(50)
+    } else {
+        (n_boundary_and_holes / 3).max(20)
+    };
     let max_interior_budget = max_total_points.saturating_sub(n_boundary_and_holes).max(min_interior_for_curved);
 
     let interior_uv_points = if let Surface::Nurbs(ref nurbs) = surface {
@@ -954,9 +963,10 @@ pub fn triangulate_surface_consistent(
         } else if u_deg <= 1 || v_deg <= 1 {
             // Ruled surface (linear in one direction): needs interior points
             // to capture curvature in the non-linear direction.
-            // Use 4 subdivisions per knot span for ruled NURBS — this gives
-            // much better surface approximation than the previous n_sub=2.
-            let n_sub = 4;
+            // Use 6 subdivisions per knot span for ruled NURBS — this gives
+            // better surface approximation for cylindrical/conical surfaces
+            // found on bolts and other mechanical parts.
+            let n_sub = 6;
             let mut pts = generate_nurbs_interior_points(&domain, &nurbs.u_knots, &nurbs.v_knots, n_sub);
             if pts.len() > max_interior_budget {
                 pts.truncate(max_interior_budget);
@@ -975,8 +985,9 @@ pub fn triangulate_surface_consistent(
             );
             // Use knot-span subdivision for NURBS — respects the surface
             // parameterization and gives better triangulation quality.
-            // Scale n_sub based on adaptive sample count, allowing up to 8 subdivisions.
-            let n_sub = (n_u.max(n_v) / 4).max(4).min(8);
+            // Scale n_sub based on adaptive sample count, allowing up to 12
+            // subdivisions for high-curvature NURBS surfaces (bolts, etc.).
+            let n_sub = (n_u.max(n_v) / 2).max(6).min(12);
             let mut pts = generate_nurbs_interior_points(&domain, &nurbs.u_knots, &nurbs.v_knots, n_sub);
             if pts.len() > max_interior_budget {
                 pts.truncate(max_interior_budget);

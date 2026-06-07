@@ -2177,36 +2177,35 @@ fn triangulate_extrusion_face(face: &Face, ext: &draper_geometry::ExtrusionSurfa
     mesh
 }
 
-/// NURBS surface triangulation using custom CDT with boundary trimming.
+/// NURBS surface triangulation using UV-space earcutr with Newton-Raphson re-projection.
 ///
-/// Unlike `triangulate_generic_surface` which creates a rectangular UV grid
-/// without respecting the trimming boundary, this function:
-/// 1. Projects boundary edge points to 2D UV space
-/// 2. Generates interior Steiner points for surface approximation
-/// 3. Triangulates using our custom CDT (earcutr + Bowyer-Watson)
-/// 4. Guarantees all boundary vertices appear as triangle vertices
-/// 5. Guarantees all boundary edges appear as triangle edges
+/// This function produces high-quality NURBS triangulation by delegating to
+/// `parametric_domain::triangulate_surface_consistent()`, which provides:
+/// 1. Newton-Raphson re-projection for accurate UV coordinates
+/// 2. UV normalization for periodic surfaces
+/// 3. UV polygon quality validation (area ratio check)
+/// 4. Knot-span subdivision for interior Steiner points
+/// 5. earcutr-based triangulation (O(n log n), handles holes natively)
+/// 6. Boundary 3D points used directly for watertight meshes
 fn triangulate_nurbs_cdt(face: &Face, surface: &Surface, params: &TriangulationParams) -> TriangleMesh {
-    let mut mesh = TriangleMesh::new();
-
     // Collect boundary points from the face
     let boundary_3d = collect_face_boundary_points(face);
     if boundary_3d.len() < 3 {
-        return mesh;
+        return TriangleMesh::new();
     }
 
     let holes_3d = collect_face_hole_points(face);
 
     // Project boundary points to 2D UV space
-    let boundary_2d: Vec<[f64; 2]> = boundary_3d.iter()
+    let boundary_uvs: Vec<Point2d> = boundary_3d.iter()
         .map(|p| {
             let (u, v) = surface.project_point(p);
-            [u, v]
+            Point2d::new(u, v)
         })
         .collect();
 
     // Check if UV projection is valid
-    if boundary_2d.iter().any(|uv| !uv[0].is_finite() || !uv[1].is_finite()) {
+    if boundary_uvs.iter().any(|uv| !uv.u.is_finite() || !uv.v.is_finite()) {
         log::warn!("NURBS CDT fallback: UV projection NaN/Inf, using generic surface");
         return triangulate_generic_surface(face, surface, params);
     }
@@ -2216,79 +2215,62 @@ fn triangulate_nurbs_cdt(face: &Face, surface: &Surface, params: &TriangulationP
         face.id,
         boundary_3d.len(),
         holes_3d.len(),
-        boundary_2d.iter().map(|uv| uv[0]).fold(f64::MAX, f64::min),
-        boundary_2d.iter().map(|uv| uv[0]).fold(f64::MIN, f64::max),
-        boundary_2d.iter().map(|uv| uv[1]).fold(f64::MAX, f64::min),
-        boundary_2d.iter().map(|uv| uv[1]).fold(f64::MIN, f64::max),
+        boundary_uvs.iter().map(|uv| uv.u).fold(f64::MAX, f64::min),
+        boundary_uvs.iter().map(|uv| uv.u).fold(f64::MIN, f64::max),
+        boundary_uvs.iter().map(|uv| uv.v).fold(f64::MAX, f64::min),
+        boundary_uvs.iter().map(|uv| uv.v).fold(f64::MIN, f64::max),
     );
 
-    // Project hole points to 2D
-    let holes_2d: Vec<Vec<[f64; 2]>> = holes_3d.iter()
+    // Project hole points to UV
+    let holes_uvs: Vec<Vec<Point2d>> = holes_3d.iter()
         .map(|hole| hole.iter()
             .map(|p| {
                 let (u, v) = surface.project_point(p);
-                [u, v]
+                Point2d::new(u, v)
             })
             .collect())
         .collect();
 
     // Check hole UV validity
-    if holes_2d.iter().any(|h| h.iter().any(|uv| !uv[0].is_finite() || !uv[1].is_finite())) {
+    if holes_uvs.iter().any(|h| h.iter().any(|uv| !uv.u.is_finite() || !uv.v.is_finite())) {
         log::warn!("NURBS CDT fallback: hole UV NaN/Inf, using generic surface");
         return triangulate_generic_surface(face, surface, params);
     }
 
-    // Generate interior Steiner points on the NURBS surface
-    let interior_2d = generate_nurbs_interior_points(&boundary_2d, surface, params);
-
-    // Run custom CDT triangulation
-    let cdt_triangles = crate::custom_cdt::triangulate_polygon_cdt(
-        &boundary_2d, &holes_2d, &interior_2d,
+    // Delegate to parametric_domain::triangulate_surface_consistent() which provides:
+    // - Newton-Raphson re-projection for accurate NURBS UV coordinates
+    // - UV normalization for periodic surfaces
+    // - UV polygon quality validation (area ratio check)
+    // - Knot-span subdivision for interior Steiner points
+    // - earcutr triangulation with native hole support
+    // - Direct use of boundary 3D points for watertight mesh
+    let result = crate::parametric_domain::triangulate_surface_consistent(
+        surface,
+        &boundary_3d,
+        &boundary_uvs,
+        &holes_3d,
+        &holes_uvs,
+        face.forward,
+        params,
     );
 
-    // Build the combined vertex array:
-    // [boundary][hole0][hole1]...[interior]
-    // with 3D positions evaluated from UV
-    let mut all_3d: Vec<Point3d> = boundary_3d.clone();
-    for hole in &holes_3d {
-        all_3d.extend_from_slice(hole);
-    }
-    for uv in &interior_2d {
-        let p3d = surface.point_at(uv[0], uv[1]);
-        all_3d.push(p3d);
+    // If the consistent path produced an empty mesh (e.g., degenerate UV polygon),
+    // fall back to the generic surface triangulation
+    if result.vertices.is_empty() {
+        log::warn!("NURBS CDT fallback: consistent triangulation returned empty mesh, using generic surface");
+        return triangulate_generic_surface(face, surface, params);
     }
 
-    // Build the mesh
-    let forward = face.forward;
-    for tri in &cdt_triangles {
-        let a = tri[0] as usize;
-        let b = tri[1] as usize;
-        let c = tri[2] as usize;
-
-        if a >= all_3d.len() || b >= all_3d.len() || c >= all_3d.len() {
-            continue;
-        }
-
-        // Add vertices and get their indices
-        let ia = mesh.add_vertex(all_3d[a]);
-        let ib = mesh.add_vertex(all_3d[b]);
-        let ic = mesh.add_vertex(all_3d[c]);
-
-        if ia == ib || ib == ic || ia == ic {
-            continue;
-        }
-
-        if forward {
-            mesh.add_triangle(ia, ib, ic);
-        } else {
-            mesh.add_triangle(ia, ic, ib);
-        }
-    }
-
-    mesh
+    result
 }
 
 /// Generate interior Steiner points for NURBS surface approximation.
+///
+/// NOTE: This function is kept for potential future use but is currently not
+/// called from the main code path. NURBS triangulation now delegates to
+/// `parametric_domain::triangulate_surface_consistent()` which uses its own
+/// `generate_nurbs_interior_points` with knot-span subdivision.
+#[allow(dead_code)]
 fn generate_nurbs_interior_points(
     boundary_2d: &[[f64; 2]],
     surface: &Surface,
@@ -2309,13 +2291,16 @@ fn generate_nurbs_interior_points(
     }
 
     // Use adaptive or fixed resolution
+    // Increased minimum from 12/48 to 24/96 for better NURBS surface approximation.
+    // Bolt threads and other cylindrical NURBS surfaces need more interior points
+    // to avoid jagged, faceted results.
     let (n_u, n_v) = if params.adaptive {
         crate::adaptive::required_samples_capped(
             surface, u_min, u_max, v_min, v_max,
             params.max_deviation, params.detail_level, params.max_face_triangles,
         )
     } else {
-        let n = params.angular_samples.max(12).min(48);
+        let n = params.angular_samples.max(24).min(96);
         (n, n)
     };
 
@@ -3093,7 +3078,11 @@ fn triangulate_cap_face(
 
 /// Triangulate a curved surface with boundary trimming in UV space.
 ///
-/// Algorithm:
+/// For NURBS surfaces, delegates to `parametric_domain::triangulate_surface_consistent()`
+/// which provides Newton-Raphson re-projection, UV normalization, area validation,
+/// and knot-span subdivision for high-quality results.
+///
+/// For other curved surfaces, uses the grid-based algorithm:
 /// 1. Project boundary points to UV space → UV polygon
 /// 2. Normalize UV polygon for periodic surfaces
 /// 3. Compute UV bounding box from the polygon
@@ -3108,6 +3097,59 @@ fn triangulate_surface_uv_trimmed(
     forward: bool,
     params: &TriangulationParams,
 ) -> TriangleMesh {
+    // For NURBS surfaces, use the consistent triangulation path which provides:
+    // - Newton-Raphson re-projection for accurate UV coordinates
+    // - UV normalization for periodic surfaces
+    // - UV polygon quality validation (area ratio check)
+    // - Knot-span subdivision for interior Steiner points
+    // - earcutr-based triangulation with native hole support
+    // This produces much better results than the grid-based approach below.
+    if matches!(surface, Surface::Nurbs(_)) {
+        if boundary_points_3d.len() < 3 {
+            return TriangleMesh::new();
+        }
+
+        // Project boundary to UV space
+        let boundary_uvs: Vec<Point2d> = boundary_points_3d.iter()
+            .map(|p| {
+                let (u, v) = surface.project_point(p);
+                Point2d::new(u, v)
+            })
+            .collect();
+
+        // Check if UV projection is valid
+        if boundary_uvs.iter().any(|uv| !uv.u.is_finite() || !uv.v.is_finite()) {
+            log::warn!("NURBS UV trimmed fallback: UV projection NaN/Inf");
+            return TriangleMesh::new();
+        }
+
+        // Project hole polylines to UV
+        let holes_uvs: Vec<Vec<Point2d>> = hole_polylines_3d.iter().map(|hole| {
+            hole.iter().map(|p| {
+                let (u, v) = surface.project_point(p);
+                Point2d::new(u, v)
+            }).collect()
+        }).collect();
+
+        // Check hole UV validity
+        if holes_uvs.iter().any(|h| h.iter().any(|uv| !uv.u.is_finite() || !uv.v.is_finite())) {
+            log::warn!("NURBS UV trimmed fallback: hole UV NaN/Inf");
+            return TriangleMesh::new();
+        }
+
+        let result = crate::parametric_domain::triangulate_surface_consistent(
+            surface,
+            boundary_points_3d,
+            &boundary_uvs,
+            hole_polylines_3d,
+            &holes_uvs,
+            forward,
+            params,
+        );
+
+        return result;
+    }
+
     let mut mesh = TriangleMesh::new();
 
     // 1. Project boundary to UV space
