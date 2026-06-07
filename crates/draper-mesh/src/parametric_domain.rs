@@ -1141,7 +1141,267 @@ pub fn triangulate_surface_consistent(
         }
     }
 
+    // ============================================================
+    // Step 6: Adaptive chord-error refinement
+    //
+    // For curved surfaces (not planes), check each triangle's chord
+    // error — the distance from the midpoint of each edge to the
+    // true surface point at the corresponding UV. If any edge exceeds
+    // max_deviation, subdivide the triangle by inserting a point at
+    // the surface midpoint.
+    //
+    // This is iterative — we repeat until no edge exceeds the
+    // tolerance or we hit a maximum iteration count.
+    // ============================================================
+    if !matches!(surface, Surface::Plane(_)) && params.max_deviation > 0.0 {
+        refine_mesh_chord_error(&mut mesh, surface, forward, params.max_deviation, 3);
+    }
+
     mesh
+}
+
+// ============================================================
+// Adaptive chord-error refinement
+// ============================================================
+
+/// Iteratively refine a triangle mesh on a curved surface by checking
+/// the chord error of each edge and subdividing edges that exceed
+/// the maximum deviation tolerance.
+///
+/// The chord error of an edge is the distance from the midpoint of
+/// the straight line segment (in 3D) to the true surface point at
+/// the corresponding UV parameter. For curved surfaces like cylinders
+/// and NURBS, this measures how well the triangle mesh approximates
+/// the true surface.
+///
+/// # Algorithm
+/// For each iteration:
+/// 1. For each triangle edge, compute the midpoint in 3D
+/// 2. Project the midpoint onto the surface to get the "true" point
+/// 3. If the distance exceeds max_deviation, mark the edge for subdivision
+/// 4. For each triangle with a marked edge, insert the surface point
+///    and subdivide the triangle into 2-4 sub-triangles
+///
+/// # Arguments
+/// * `mesh` — The triangle mesh to refine
+/// * `surface` — The parametric surface the mesh approximates
+/// * `forward` — Whether face normal matches surface normal
+/// * `max_deviation` — Maximum allowed chord error
+/// * `max_iterations` — Maximum number of refinement iterations
+fn refine_mesh_chord_error(
+    mesh: &mut TriangleMesh,
+    surface: &Surface,
+    forward: bool,
+    max_deviation: f64,
+    max_iterations: usize,
+) {
+    use std::collections::HashMap;
+
+    for _iter in 0..max_iterations {
+        // Find edges that need subdivision
+        // edge = (v0, v1) where v0 < v1
+        let mut edges_to_split: HashMap<(u32, u32), u32> = HashMap::new();
+
+        for tri in &mesh.triangles {
+            for k in 0..3 {
+                let v0 = tri[k];
+                let v1 = tri[(k + 1) % 3];
+                let edge = if v0 < v1 { (v0, v1) } else { (v1, v0) };
+
+                if edges_to_split.contains_key(&edge) {
+                    continue; // Already marked
+                }
+
+                let p0 = mesh.vertices[v0 as usize];
+                let p1 = mesh.vertices[v1 as usize];
+
+                // Compute midpoint of the edge in 3D
+                let mid = Point3d::new(
+                    (p0.x + p1.x) * 0.5,
+                    (p0.y + p1.y) * 0.5,
+                    (p0.z + p1.z) * 0.5,
+                );
+
+                // Project midpoint onto the surface
+                let (u, v) = surface.project_point(&mid);
+                let p_surf = surface.point_at(u, v);
+
+                // Chord error: distance from line midpoint to surface point
+                let dx = mid.x - p_surf.x;
+                let dy = mid.y - p_surf.y;
+                let dz = mid.z - p_surf.z;
+                let chord_error = (dx * dx + dy * dy + dz * dz).sqrt();
+
+                if chord_error > max_deviation {
+                    // Mark this edge for subdivision — the new vertex index
+                    // will be assigned when we actually split it
+                    edges_to_split.insert(edge, u32::MAX); // Placeholder
+                }
+            }
+        }
+
+        if edges_to_split.is_empty() {
+            break; // No more edges to split
+        }
+
+        // Now insert the surface points and update the map
+        let mut new_edges: HashMap<(u32, u32), u32> = HashMap::new();
+        for (edge, _) in &edges_to_split {
+            let p0 = mesh.vertices[edge.0 as usize];
+            let p1 = mesh.vertices[edge.1 as usize];
+
+            let mid = Point3d::new(
+                (p0.x + p1.x) * 0.5,
+                (p0.y + p1.y) * 0.5,
+                (p0.z + p1.z) * 0.5,
+            );
+
+            let (u, v) = surface.project_point(&mid);
+            let p_surf = surface.point_at(u, v);
+            let n = surface.normal_at(u, v);
+
+            let vi = mesh.add_vertex(p_surf);
+            mesh.add_vertex_normal(vi, [n.x, n.y, n.z]);
+            new_edges.insert(*edge, vi);
+        }
+
+        // Now rebuild the triangle list, splitting triangles that have
+        // edges marked for subdivision
+        let old_triangles = std::mem::take(&mut mesh.triangles);
+        mesh.triangles.reserve(old_triangles.len());
+
+        for tri in &old_triangles {
+            // Check which edges of this triangle are split
+            let mut split_verts = [None; 3];
+            let mut n_splits = 0;
+            for k in 0..3 {
+                let v0 = tri[k];
+                let v1 = tri[(k + 1) % 3];
+                let edge = if v0 < v1 { (v0, v1) } else { (v1, v0) };
+                if let Some(&new_v) = new_edges.get(&edge) {
+                    split_verts[k] = Some(new_v);
+                    n_splits += 1;
+                }
+            }
+
+            if n_splits == 0 {
+                // No splits — keep the triangle as-is
+                mesh.triangles.push(*tri);
+            } else if n_splits == 1 {
+                // One edge split — triangle becomes 2 triangles
+                // Find which edge is split
+                let split_k = split_verts.iter().position(|v| v.is_some()).unwrap();
+                let vm = split_verts[split_k].unwrap();
+                let v0 = tri[split_k];
+                let v1 = tri[(split_k + 1) % 3];
+                let v2 = tri[(split_k + 2) % 3];
+
+                if forward {
+                    mesh.triangles.push([v0, vm, v2]);
+                    mesh.triangles.push([vm, v1, v2]);
+                } else {
+                    mesh.triangles.push([v0, v2, vm]);
+                    mesh.triangles.push([vm, v2, v1]);
+                }
+            } else if n_splits == 2 {
+                // Two edges split — triangle becomes 3 triangles
+                let split_edges: Vec<usize> = split_verts.iter()
+                    .enumerate()
+                    .filter(|(_, v)| v.is_some())
+                    .map(|(i, _)| i)
+                    .collect();
+                let k0 = split_edges[0];
+                let k1 = split_edges[1];
+                let vm0 = split_verts[k0].unwrap();
+                let vm1 = split_verts[k1].unwrap();
+                let v0 = tri[k0];
+                let v1 = tri[(k0 + 1) % 3];
+                let v2 = tri[(k0 + 2) % 3];
+
+                // k0 is the first split edge: v0 -> v1
+                // k1 is the second split edge: v1 -> v2 (if adjacent)
+                if (k0 + 1) % 3 == k1 {
+                    // Split edges are adjacent: v0-vm0-v1-vm1-v2
+                    if forward {
+                        mesh.triangles.push([v0, vm0, vm1]);
+                        mesh.triangles.push([vm0, v1, vm1]);
+                        mesh.triangles.push([v0, vm1, v2]);
+                    } else {
+                        mesh.triangles.push([v0, vm1, vm0]);
+                        mesh.triangles.push([vm0, vm1, v1]);
+                        mesh.triangles.push([v0, v2, vm1]);
+                    }
+                } else {
+                    // k1 is on the other side: v0-vm0-v1, v0-vm1-v2
+                    // Actually k0=0, k1=2 means edges v0->v1 and v2->v0
+                    // v2-vm1-v0-vm0-v1
+                    if forward {
+                        mesh.triangles.push([v0, vm0, v1]);
+                        mesh.triangles.push([v2, vm1, vm0]);
+                        mesh.triangles.push([vm0, v0, vm1]);
+                    } else {
+                        mesh.triangles.push([v0, v1, vm0]);
+                        mesh.triangles.push([v2, vm0, vm1]);
+                        mesh.triangles.push([vm0, vm1, v0]);
+                    }
+                }
+            } else {
+                // All 3 edges split — triangle becomes 4 triangles
+                let vm0 = split_verts[0].unwrap();
+                let vm1 = split_verts[1].unwrap();
+                let vm2 = split_verts[2].unwrap();
+                let v0 = tri[0];
+                let v1 = tri[1];
+                let v2 = tri[2];
+
+                if forward {
+                    mesh.triangles.push([v0, vm0, vm2]);
+                    mesh.triangles.push([vm0, v1, vm1]);
+                    mesh.triangles.push([vm2, vm1, v2]);
+                    mesh.triangles.push([vm0, vm1, vm2]);
+                } else {
+                    mesh.triangles.push([v0, vm2, vm0]);
+                    mesh.triangles.push([vm0, vm1, v1]);
+                    mesh.triangles.push([vm2, v2, vm1]);
+                    mesh.triangles.push([vm0, vm2, vm1]);
+                }
+            }
+        }
+
+        // Also update face_normals if present
+        if let Some(ref mut face_normals) = mesh.face_normals {
+            let n_old = face_normals.len();
+            let n_new = mesh.triangles.len();
+            if n_new > n_old {
+                // Compute normals for the new triangles
+                for i in n_old..n_new {
+                    let tri = mesh.triangles[i];
+                    let p0 = mesh.vertices[tri[0] as usize];
+                    let p1 = mesh.vertices[tri[1] as usize];
+                    let p2 = mesh.vertices[tri[2] as usize];
+                    let ab = [p1.x - p0.x, p1.y - p0.y, p1.z - p0.z];
+                    let ac = [p2.x - p0.x, p2.y - p0.y, p2.z - p0.z];
+                    let nx = ab[1] * ac[2] - ab[2] * ac[1];
+                    let ny = ab[2] * ac[0] - ab[0] * ac[2];
+                    let nz = ab[0] * ac[1] - ab[1] * ac[0];
+                    let len = (nx * nx + ny * ny + nz * nz).sqrt().max(1e-15);
+                    face_normals.push([nx / len, ny / len, nz / len]);
+                }
+            }
+        }
+
+        // Also update triangle_face_ids if present
+        if let Some(ref mut face_ids) = mesh.triangle_face_ids {
+            let n_old = face_ids.len();
+            let n_new = mesh.triangles.len();
+            if n_new > n_old {
+                // All new triangles inherit the face ID of the triangle they came from
+                // Since we process sequentially, just extend with the last face ID
+                let last_id = face_ids.last().copied().unwrap_or(0);
+                face_ids.extend(std::iter::repeat(last_id).take(n_new - n_old));
+            }
+        }
+    }
 }
 
 // ============================================================
