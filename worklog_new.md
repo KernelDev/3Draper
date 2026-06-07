@@ -151,3 +151,31 @@ Work Log:
 - Improved watertightness with bbox-scaled merge tolerance
 - Pushed commit 3714ec1 to GitHub
 
+---
+Task ID: 2
+Agent: main
+Task: Fix NURBS/cylinder/cone triangulation quality for bolts and rods in as1-oc-214.stp
+
+Work Log:
+- Analyzed user screenshot showing terrible bolt/rod triangulation
+- Root cause 1: NURBS project_point() used 5x5 grid — too coarse for cylindrical surfaces where 72° angular spacing caused Newton-Raphson to converge to wrong local minima
+- Root cause 2: triangulate_nurbs_cdt() ignored CoEdge.curve_2d/pcurve data and used surface.project_point() for UV — wrong for NURBS
+- Root cause 3: Cylinder/Cone/Sphere triangulate_*_face_with_boundary_uv() IGNORED boundary_uvs parameter
+- Root cause 4: Containment grid 48x48 too coarse for thin/complex NURBS boundaries
+- Root cause 5: No adaptive chord-error refinement after initial triangulation
+
+- Fixed NURBS project_point(): 20x20 grid + top-3 multi-start Newton-Raphson
+- Added collect_face_boundary_points_with_uv() and collect_face_hole_points_with_uv() that read PCURVE data from CoEdge.curve_2d and CoEdge.pcurve
+- Updated triangulate_nurbs_cdt() to use pcurve-aware UV collection
+- Replaced grid-based cylinder/cone/sphere triangulation with consistent UV-aware earcutr path
+- Increased containment grid resolution 48→128
+- Added adaptive chord-error refinement (refine_mesh_chord_error) with up to 3 iterations
+- Attached curve_2d data to CoEdges in all STEP converter paths (surface_to_mesh fallback, face_data_list_to_solid)
+- All tests pass, committed and pushed 3 commits to main
+
+Stage Summary:
+- NURBS project_point now much more reliable (20x20 grid vs 5x5)
+- PCURVE data now used for UV coordinates throughout the pipeline
+- Cylinder/cone/sphere use consistent UV-aware triangulation
+- Adaptive chord-error refinement ensures max_deviation is met
+- Deployed to GitHub Pages via GitHub Actions
