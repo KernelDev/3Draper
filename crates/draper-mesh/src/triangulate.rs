@@ -165,13 +165,16 @@ impl Default for TriangulationParams {
             adaptive: true,
             parallel: false,
             progress_callback: None,
-            max_face_triangles: 2000,
+            max_face_triangles: 8000,
         }
     }
 }
 
 /// Number of samples per edge curve for boundary discretization.
-const EDGE_SAMPLES: usize = 32;
+/// Increased from 32 to 48 for better NURBS boundary representation —
+/// bolt threads and other fine features need more boundary points
+/// to avoid gaps and poor triangulation at edges.
+const EDGE_SAMPLES: usize = 48;
 
 /// Cap grid resolution (n_u, n_v) so that the resulting mesh does not exceed
 /// `max_face_triangles`. A grid of n_u × n_v produces ~2 × n_u × n_v triangles.
