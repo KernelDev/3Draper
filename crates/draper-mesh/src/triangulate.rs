@@ -158,14 +158,14 @@ impl Default for TriangulationParams {
         Self {
             max_edge_length: 1.0,
             max_deviation: 0.01,
-            angular_samples: 24,
+            angular_samples: 32,
             height_samples: 8,
             max_angular_deviation: 0.1,
             detail_level: 1.0,
             adaptive: true,
             parallel: false,
             progress_callback: None,
-            max_face_triangles: crate::adaptive::DEFAULT_MAX_FACE_TRIANGLES,
+            max_face_triangles: 2000,
         }
     }
 }
@@ -217,16 +217,7 @@ fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams) -> 
         mesh.merge(&face_mesh);
     }
     // Merge coincident boundary vertices to make the solid watertight
-    // Use a tolerance scaled to the mesh bounding box
-    let merge_tol = {
-        let (bmin, bmax) = mesh.bounding_box();
-        let dx = bmax.x - bmin.x;
-        let dy = bmax.y - bmin.y;
-        let dz = bmax.z - bmin.z;
-        let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
-        (diagonal * 1e-6).max(1e-5).min(1e-2)
-    };
-    merge_coincident_vertices(&mut mesh, merge_tol);
+    merge_coincident_vertices(&mut mesh, 1e-6);
     // Use a very small tolerance for degenerate filtering — only remove truly degenerate triangles
     // (zero area or NaN/Inf), not small valid triangles
     filter_degenerate_triangles(&mut mesh, 1e-10);
@@ -468,16 +459,7 @@ fn triangulate_solid_parallel(solid: &Solid, params: &TriangulationParams) -> Tr
 
     // Step 4: Post-processing
     let mut mesh = merged;
-    // Use bounding-box-scaled merge tolerance for watertightness
-    let merge_tol = {
-        let (bmin, bmax) = mesh.bounding_box();
-        let dx = bmax.x - bmin.x;
-        let dy = bmax.y - bmin.y;
-        let dz = bmax.z - bmin.z;
-        let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
-        (diagonal * 1e-6).max(1e-5).min(1e-2)
-    };
-    merge_coincident_vertices(&mut mesh, merge_tol);
+    merge_coincident_vertices(&mut mesh, 1e-6);
     filter_degenerate_triangles(&mut mesh, 1e-10);
     // Safety check: ensure all per-triangle arrays have the same length
     debug_assert_mesh_consistency(&mesh);
@@ -600,15 +582,7 @@ pub fn triangulate_shell(shell: &Shell, params: &TriangulationParams) -> Triangl
         let face_mesh = triangulate_face(face, params);
         mesh.merge(&face_mesh);
     }
-    let merge_tol = {
-        let (bmin, bmax) = mesh.bounding_box();
-        let diagonal = {
-            let dx = bmax.x - bmin.x; let dy = bmax.y - bmin.y; let dz = bmax.z - bmin.z;
-            (dx*dx + dy*dy + dz*dz).sqrt()
-        };
-        (diagonal * 1e-6).max(1e-5).min(1e-2)
-    };
-    merge_coincident_vertices(&mut mesh, merge_tol);
+    merge_coincident_vertices(&mut mesh, 1e-6);
     filter_degenerate_triangles(&mut mesh, 1e-10);
     mesh
 }
@@ -637,11 +611,7 @@ pub fn triangulate_face(face: &Face, params: &TriangulationParams) -> TriangleMe
             Surface::Revolution(rev) => triangulate_revolution_face(face, rev, params),
             Surface::Extrusion(ext) => triangulate_extrusion_face(face, ext, params),
             Surface::Nurbs(_) => {
-                // NURBS surfaces MUST use boundary-aware triangulation.
-                // triangulate_generic_surface() has NO trimming — it generates
-                // triangles over the entire UV rectangle regardless of the actual
-                // face boundary, producing visible overhang and garbage geometry.
-                triangulate_nurbs_face(face, surface, params)
+                triangulate_nurbs_cdt(face, surface, params)
             }
         }
     } else {
@@ -2207,6 +2177,174 @@ fn triangulate_extrusion_face(face: &Face, ext: &draper_geometry::ExtrusionSurfa
     mesh
 }
 
+/// NURBS surface triangulation using custom CDT with boundary trimming.
+///
+/// Unlike `triangulate_generic_surface` which creates a rectangular UV grid
+/// without respecting the trimming boundary, this function:
+/// 1. Projects boundary edge points to 2D UV space
+/// 2. Generates interior Steiner points for surface approximation
+/// 3. Triangulates using our custom CDT (earcutr + Bowyer-Watson)
+/// 4. Guarantees all boundary vertices appear as triangle vertices
+/// 5. Guarantees all boundary edges appear as triangle edges
+fn triangulate_nurbs_cdt(face: &Face, surface: &Surface, params: &TriangulationParams) -> TriangleMesh {
+    let mut mesh = TriangleMesh::new();
+
+    // Collect boundary points from the face
+    let boundary_3d = collect_face_boundary_points(face);
+    if boundary_3d.len() < 3 {
+        return mesh;
+    }
+
+    let holes_3d = collect_face_hole_points(face);
+
+    // Project boundary points to 2D UV space
+    let boundary_2d: Vec<[f64; 2]> = boundary_3d.iter()
+        .map(|p| {
+            let (u, v) = surface.project_point(p);
+            [u, v]
+        })
+        .collect();
+
+    // Check if UV projection is valid
+    if boundary_2d.iter().any(|uv| !uv[0].is_finite() || !uv[1].is_finite()) {
+        log::warn!("NURBS CDT fallback: UV projection NaN/Inf, using generic surface");
+        return triangulate_generic_surface(face, surface, params);
+    }
+
+    log::info!(
+        "NURBS CDT: face {}, {} boundary pts, {} holes, UV range [{:.2},{:.2}]x[{:.2},{:.2}]",
+        face.id,
+        boundary_3d.len(),
+        holes_3d.len(),
+        boundary_2d.iter().map(|uv| uv[0]).fold(f64::MAX, f64::min),
+        boundary_2d.iter().map(|uv| uv[0]).fold(f64::MIN, f64::max),
+        boundary_2d.iter().map(|uv| uv[1]).fold(f64::MAX, f64::min),
+        boundary_2d.iter().map(|uv| uv[1]).fold(f64::MIN, f64::max),
+    );
+
+    // Project hole points to 2D
+    let holes_2d: Vec<Vec<[f64; 2]>> = holes_3d.iter()
+        .map(|hole| hole.iter()
+            .map(|p| {
+                let (u, v) = surface.project_point(p);
+                [u, v]
+            })
+            .collect())
+        .collect();
+
+    // Check hole UV validity
+    if holes_2d.iter().any(|h| h.iter().any(|uv| !uv[0].is_finite() || !uv[1].is_finite())) {
+        log::warn!("NURBS CDT fallback: hole UV NaN/Inf, using generic surface");
+        return triangulate_generic_surface(face, surface, params);
+    }
+
+    // Generate interior Steiner points on the NURBS surface
+    let interior_2d = generate_nurbs_interior_points(&boundary_2d, surface, params);
+
+    // Run custom CDT triangulation
+    let cdt_triangles = crate::custom_cdt::triangulate_polygon_cdt(
+        &boundary_2d, &holes_2d, &interior_2d,
+    );
+
+    // Build the combined vertex array:
+    // [boundary][hole0][hole1]...[interior]
+    // with 3D positions evaluated from UV
+    let mut all_3d: Vec<Point3d> = boundary_3d.clone();
+    for hole in &holes_3d {
+        all_3d.extend_from_slice(hole);
+    }
+    for uv in &interior_2d {
+        let p3d = surface.point_at(uv[0], uv[1]);
+        all_3d.push(p3d);
+    }
+
+    // Build the mesh
+    let forward = face.forward;
+    for tri in &cdt_triangles {
+        let a = tri[0] as usize;
+        let b = tri[1] as usize;
+        let c = tri[2] as usize;
+
+        if a >= all_3d.len() || b >= all_3d.len() || c >= all_3d.len() {
+            continue;
+        }
+
+        // Add vertices and get their indices
+        let ia = mesh.add_vertex(all_3d[a]);
+        let ib = mesh.add_vertex(all_3d[b]);
+        let ic = mesh.add_vertex(all_3d[c]);
+
+        if ia == ib || ib == ic || ia == ic {
+            continue;
+        }
+
+        if forward {
+            mesh.add_triangle(ia, ib, ic);
+        } else {
+            mesh.add_triangle(ia, ic, ib);
+        }
+    }
+
+    mesh
+}
+
+/// Generate interior Steiner points for NURBS surface approximation.
+fn generate_nurbs_interior_points(
+    boundary_2d: &[[f64; 2]],
+    surface: &Surface,
+    params: &TriangulationParams,
+) -> Vec<[f64; 2]> {
+    let mut interior = Vec::new();
+
+    // Compute UV bounding box from boundary
+    let mut u_min = f64::MAX;
+    let mut u_max = f64::MIN;
+    let mut v_min = f64::MAX;
+    let mut v_max = f64::MIN;
+    for uv in boundary_2d.iter() {
+        u_min = u_min.min(uv[0]);
+        u_max = u_max.max(uv[0]);
+        v_min = v_min.min(uv[1]);
+        v_max = v_max.max(uv[1]);
+    }
+
+    // Use adaptive or fixed resolution
+    let (n_u, n_v) = if params.adaptive {
+        crate::adaptive::required_samples_capped(
+            surface, u_min, u_max, v_min, v_max,
+            params.max_deviation, params.detail_level, params.max_face_triangles,
+        )
+    } else {
+        let n = params.angular_samples.max(12).min(48);
+        (n, n)
+    };
+
+    let du = (u_max - u_min) / n_u as f64;
+    let dv = (v_max - v_min) / n_v as f64;
+
+    for i in 1..n_u {
+        for j in 1..n_v {
+            let u = u_min + i as f64 * du;
+            let v = v_min + j as f64 * dv;
+
+            // Check if (u, v) is inside the boundary polygon
+            if !crate::custom_cdt::point_in_polygon([u, v], boundary_2d) {
+                continue;
+            }
+
+            // Check if point on surface is valid
+            let p3d = surface.point_at(u, v);
+            if !p3d.x.is_finite() || !p3d.y.is_finite() || !p3d.z.is_finite() {
+                continue;
+            }
+
+            interior.push([u, v]);
+        }
+    }
+
+    interior
+}
+
 /// Generic surface triangulation by sampling on a grid.
 /// For NURBS surfaces, uses the actual knot range.
 fn triangulate_generic_surface(face: &Face, surface: &Surface, params: &TriangulationParams) -> TriangleMesh {
@@ -2302,38 +2440,6 @@ fn triangulate_generic_surface(face: &Face, surface: &Surface, params: &Triangul
     }
 
     mesh
-}
-
-/// Triangulate a NURBS face with proper trimming.
-///
-/// This is the NURBS-specific entry point from `triangulate_face()`.
-/// It collects boundary points from the face's wire topology, projects them
-/// to UV space, and uses earcutr-based triangulation with proper trimming.
-///
-/// This replaces the old `triangulate_generic_surface()` path for NURBS,
-/// which had NO trimming — it generated triangles over the entire UV rectangle
-/// regardless of the actual face boundary, producing visible overhang and
-/// garbage geometry.
-fn triangulate_nurbs_face(face: &Face, surface: &Surface, params: &TriangulationParams) -> TriangleMesh {
-    let boundary_3d = collect_face_boundary_points(face);
-    let holes_3d = collect_face_hole_points(face);
-
-    if boundary_3d.is_empty() {
-        // No boundary edges — fall back to the full UV rectangle approach.
-        // This happens for faces without proper wire topology.
-        return triangulate_generic_surface(face, surface, params);
-    }
-
-    // Use the earcutr-based UV triangulation which properly handles
-    // trimming via the boundary polygon. This produces correct NURBS
-    // meshes that follow the actual face boundary.
-    crate::parametric_domain::triangulate_surface_uv_cdt(
-        surface,
-        &boundary_3d,
-        &holes_3d,
-        face.forward,
-        params,
-    )
 }
 
 // ============================================================
@@ -2450,18 +2556,10 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
             }
         }
         Surface::Cylinder(cyl) => {
-            // Use consistent UV-space triangulation for watertightness.
-            // The grid-based approach creates its own vertices that don't
-            // match the cached edge 3D points, breaking watertightness.
-            let surface = Surface::Cylinder(cyl.clone());
-            crate::parametric_domain::triangulate_surface_consistent(
-                &surface,
-                boundary_points,
-                boundary_uvs,
-                hole_polylines,
-                hole_uvs,
-                forward,
-                params,
+            // Cylinder: use grid-based triangulation with boundary snapping
+            // The general consistent path doesn't handle cylindrical periodicity well
+            triangulate_cylinder_face_with_boundary_uv(
+                cyl, boundary_points, boundary_uvs, hole_polylines, hole_uvs, forward, params,
             )
         }
         Surface::Cone(cone) => {
@@ -2720,25 +2818,26 @@ fn triangulate_cylinder_face_with_boundary_uv(
 fn triangulate_cone_face_with_boundary_uv(
     cone: &ConeSurface,
     boundary_points: &[Point3d],
-    boundary_uvs: &[Point2d],
+    _boundary_uvs: &[Point2d],
     hole_polylines: &[Vec<Point3d>],
-    hole_uvs: &[Vec<Point2d>],
+    _hole_uvs: &[Vec<Point2d>],
     forward: bool,
     params: &TriangulationParams,
 ) -> TriangleMesh {
-    // Use the consistent UV-space triangulation which preserves bit-identical
-    // boundary 3D points across shared edges. This is essential for watertightness.
+    // For cones, the existing boundary-based triangulation already handles
+    // apex degeneracy. Use the consistent triangulation for the general case,
+    // but fall back to the non-UV path for cones with apex faces since those
+    // need special handling.
     //
-    // Apex degeneracy is handled by merge_coincident_vertices in the solid-level
-    // post-processing — all boundary points near the apex will be merged into
-    // a single vertex.
+    // For now, delegate to the consistent surface triangulation function
+    // which handles all curved surfaces via earcutr in UV space.
     let surface = Surface::Cone(cone.clone());
     crate::parametric_domain::triangulate_surface_consistent(
         &surface,
         boundary_points,
-        boundary_uvs,
+        _boundary_uvs,
         hole_polylines,
-        hole_uvs,
+        _hole_uvs,
         forward,
         params,
     )
@@ -2750,25 +2849,19 @@ fn triangulate_cone_face_with_boundary_uv(
 fn triangulate_sphere_face_with_boundary_uv(
     sphere: &SphereSurface,
     boundary_points: &[Point3d],
-    boundary_uvs: &[Point2d],
+    _boundary_uvs: &[Point2d],
     hole_polylines: &[Vec<Point3d>],
-    hole_uvs: &[Vec<Point2d>],
+    _hole_uvs: &[Vec<Point2d>],
     forward: bool,
     params: &TriangulationParams,
 ) -> TriangleMesh {
-    // Use the consistent UV-space triangulation which preserves bit-identical
-    // boundary 3D points across shared edges. This is essential for watertightness.
-    //
-    // Pole degeneracy is handled by merge_coincident_vertices in the solid-level
-    // post-processing — all boundary points near a pole will be merged into
-    // a single vertex.
     let surface = Surface::Sphere(sphere.clone());
     crate::parametric_domain::triangulate_surface_consistent(
         &surface,
         boundary_points,
-        boundary_uvs,
+        _boundary_uvs,
         hole_polylines,
-        hole_uvs,
+        _hole_uvs,
         forward,
         params,
     )
@@ -3322,15 +3415,13 @@ fn triangulate_surface_uv_trimmed(
     }
 
     // 8. Add boundary vertices and create boundary strip triangles
-    // For NURBS surfaces, the UV grid approach without a boundary strip
-    // produces jagged staircase boundaries. Instead, redirect to the
-    // earcutr-based CDT approach which natively handles the boundary
-    // as part of the triangulation (no separate strip needed).
+    // For NURBS surfaces, skip the expensive boundary strip — the UV grid
+    // already provides adequate coverage, and project_point is very slow for NURBS.
+    // Boundary strip is mainly needed for cylinder/cone/torus where the boundary
+    // constrains the face tightly.
     let is_nurbs = matches!(surface, Surface::Nurbs(_));
     if is_nurbs {
-        return crate::parametric_domain::triangulate_surface_uv_cdt(
-            surface, boundary_points_3d, hole_polylines_3d, forward, params,
-        );
+        return mesh;
     }
 
     let n_boundary = boundary_points_3d.len();
