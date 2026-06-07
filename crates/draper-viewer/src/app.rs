@@ -842,7 +842,7 @@ impl ViewerApp {
 
     /// Load a NURBS surface — demonstrates NurbsSurface.
     fn load_nurbs(&mut self) {
-        use draper_geometry::{NurbsSurface, Point3d as P3};
+        use draper_geometry::{NurbsSurface, Point2d as P2, Point3d as P3};
         // Create a bicubic NURBS surface (a wavy sheet)
         let control_points = vec![
             vec![P3::new(-50.0, -50.0,  0.0), P3::new(-50.0, -15.0, 10.0), P3::new(-50.0,  15.0, 10.0), P3::new(-50.0,  50.0,  0.0)],
@@ -860,35 +860,46 @@ impl ViewerApp {
             u_knots, v_knots,
         };
 
-        // Sample boundary points from the NURBS surface for triangulation
+        // Sample boundary points AND their UV coordinates from the NURBS surface.
+        // Using the UV-aware API avoids the inaccurate project_point() call
+        // which is the root cause of broken NURBS triangulation — for NURBS
+        // surfaces, projecting a 3D point back to UV is numerically unstable
+        // (grid search + Newton-Raphson often converges to wrong local minima).
         let (u_min, u_max) = nurbs_surface.u_range();
         let (v_min, v_max) = nurbs_surface.v_range();
         let surface = Surface::Nurbs(nurbs_surface);
-        let mut boundary = Vec::new();
+        let mut boundary_3d = Vec::new();
+        let mut boundary_uv = Vec::new();
         let steps = 20;
         // Bottom edge (v = v_min)
         for i in 0..=steps {
             let u = u_min + (u_max - u_min) * i as f64 / steps as f64;
-            boundary.push(surface.point_at(u, v_min));
+            boundary_3d.push(surface.point_at(u, v_min));
+            boundary_uv.push(P2::new(u, v_min));
         }
         // Right edge (u = u_max)
         for i in 1..=steps {
             let v = v_min + (v_max - v_min) * i as f64 / steps as f64;
-            boundary.push(surface.point_at(u_max, v));
+            boundary_3d.push(surface.point_at(u_max, v));
+            boundary_uv.push(P2::new(u_max, v));
         }
         // Top edge (v = v_max), reversed
         for i in (0..steps).rev() {
             let u = u_min + (u_max - u_min) * i as f64 / steps as f64;
-            boundary.push(surface.point_at(u, v_max));
+            boundary_3d.push(surface.point_at(u, v_max));
+            boundary_uv.push(P2::new(u, v_max));
         }
         // Left edge (u = u_min), reversed
         for i in (1..steps).rev() {
             let v = v_min + (v_max - v_min) * i as f64 / steps as f64;
-            boundary.push(surface.point_at(u_min, v));
+            boundary_3d.push(surface.point_at(u_min, v));
+            boundary_uv.push(P2::new(u_min, v));
         }
 
         let params = TriangulationParams::default();
-        let mesh = draper_mesh::triangulate_face_with_boundary(&surface, &boundary, true, &params);
+        let mesh = draper_mesh::triangulate_face_with_boundary_and_holes_uv(
+            &surface, &boundary_3d, &boundary_uv, &[], &[], true, &params,
+        );
 
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
@@ -1023,7 +1034,7 @@ impl ViewerApp {
 
     /// Load NURBS with "3" hole CUT OUT (projected as flat plane).
     fn load_nurbs_text(&mut self) {
-        use draper_geometry::{NurbsSurface, Point3d as P3};
+        use draper_geometry::{NurbsSurface, Point2d as P2, Point3d as P3};
         let control_points = vec![
             vec![P3::new(-50.0, -50.0,  0.0), P3::new(-50.0, -15.0, 10.0), P3::new(-50.0,  15.0, 10.0), P3::new(-50.0,  50.0,  0.0)],
             vec![P3::new(-15.0, -50.0, 10.0), P3::new(-15.0, -15.0, 30.0), P3::new(-15.0,  15.0, 25.0), P3::new(-15.0,  50.0,  5.0)],
@@ -1041,14 +1052,33 @@ impl ViewerApp {
         let (u_min, u_max) = nurbs_surface.u_range();
         let (v_min, v_max) = nurbs_surface.v_range();
         let surface = Surface::Nurbs(nurbs_surface);
-        let mut boundary = Vec::new();
+        let mut boundary_3d = Vec::new();
+        let mut boundary_uv = Vec::new();
         let steps = 20;
-        for i in 0..=steps { boundary.push(surface.point_at(u_min + (u_max-u_min)*i as f64/steps as f64, v_min)); }
-        for i in 1..=steps { boundary.push(surface.point_at(u_max, v_min + (v_max-v_min)*i as f64/steps as f64)); }
-        for i in (0..steps).rev() { boundary.push(surface.point_at(u_min + (u_max-u_min)*i as f64/steps as f64, v_max)); }
-        for i in (1..steps).rev() { boundary.push(surface.point_at(u_min, v_min + (v_max-v_min)*i as f64/steps as f64)); }
+        for i in 0..=steps {
+            let u = u_min + (u_max-u_min)*i as f64/steps as f64;
+            boundary_3d.push(surface.point_at(u, v_min));
+            boundary_uv.push(P2::new(u, v_min));
+        }
+        for i in 1..=steps {
+            let v = v_min + (v_max-v_min)*i as f64/steps as f64;
+            boundary_3d.push(surface.point_at(u_max, v));
+            boundary_uv.push(P2::new(u_max, v));
+        }
+        for i in (0..steps).rev() {
+            let u = u_min + (u_max-u_min)*i as f64/steps as f64;
+            boundary_3d.push(surface.point_at(u, v_max));
+            boundary_uv.push(P2::new(u, v_max));
+        }
+        for i in (1..steps).rev() {
+            let v = v_min + (v_max-v_min)*i as f64/steps as f64;
+            boundary_3d.push(surface.point_at(u_min, v));
+            boundary_uv.push(P2::new(u_min, v));
+        }
         let params = TriangulationParams::default();
-        let base_mesh = draper_mesh::triangulate_face_with_boundary(&surface, &boundary, true, &params);
+        let base_mesh = draper_mesh::triangulate_face_with_boundary_and_holes_uv(
+            &surface, &boundary_3d, &boundary_uv, &[], &[], true, &params,
+        );
         // NURBS sheet is roughly flat at z~0 to z~30, use plane projection at average z
         let mesh = cut_text_holes_in_mesh(
             &base_mesh,

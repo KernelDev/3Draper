@@ -1154,7 +1154,10 @@ pub fn triangulate_surface_consistent(
     // tolerance or we hit a maximum iteration count.
     // ============================================================
     if !matches!(surface, Surface::Plane(_)) && params.max_deviation > 0.0 {
-        refine_mesh_chord_error(&mut mesh, surface, forward, params.max_deviation, 3);
+        // Use more iterations for NURBS surfaces since project_point is
+        // less accurate and initial triangulation may be coarser.
+        let max_refine_iters = if matches!(surface, Surface::Nurbs(_)) { 5 } else { 3 };
+        refine_mesh_chord_error(&mut mesh, surface, forward, params.max_deviation, max_refine_iters);
     }
 
     mesh
@@ -1226,6 +1229,33 @@ fn refine_mesh_chord_error(
                 let (u, v) = surface.project_point(&mid);
                 let p_surf = surface.point_at(u, v);
 
+                // For NURBS surfaces, project_point can be inaccurate.
+                // Try Newton-Raphson refinement if the initial projection
+                // is far from the midpoint.
+                let (u, v, p_surf) = if let Surface::Nurbs(ref nurbs) = surface {
+                    let dx0 = p_surf.x - mid.x;
+                    let dy0 = p_surf.y - mid.y;
+                    let dz0 = p_surf.z - mid.z;
+                    let err0 = (dx0*dx0 + dy0*dy0 + dz0*dz0).sqrt();
+                    if err0 > max_deviation * 0.1 {
+                        let (u2, v2) = reproject_nurbs_point(nurbs, &mid, u, v);
+                        let p2 = surface.point_at(u2, v2);
+                        let dx2 = p2.x - mid.x;
+                        let dy2 = p2.y - mid.y;
+                        let dz2 = p2.z - mid.z;
+                        let err2 = (dx2*dx2 + dy2*dy2 + dz2*dz2).sqrt();
+                        if err2 < err0 {
+                            (u2, v2, p2)
+                        } else {
+                            (u, v, p_surf)
+                        }
+                    } else {
+                        (u, v, p_surf)
+                    }
+                } else {
+                    (u, v, p_surf)
+                };
+
                 // Chord error: distance from line midpoint to surface point
                 let dx = mid.x - p_surf.x;
                 let dy = mid.y - p_surf.y;
@@ -1258,6 +1288,36 @@ fn refine_mesh_chord_error(
 
             let (u, v) = surface.project_point(&mid);
             let p_surf = surface.point_at(u, v);
+
+            // For NURBS surfaces, project_point can be inaccurate.
+            // Verify the re-projection quality and re-project using
+            // Newton-Raphson if the initial result is poor.
+            let (u, v, p_surf) = if let Surface::Nurbs(ref nurbs) = surface {
+                // Check re-projection error
+                let dx = p_surf.x - mid.x;
+                let dy = p_surf.y - mid.y;
+                let dz = p_surf.z - mid.z;
+                let reproj_err = (dx*dx + dy*dy + dz*dz).sqrt();
+
+                // If re-projection error is large, try Newton-Raphson refinement
+                if reproj_err > max_deviation * 0.1 {
+                    let (u2, v2) = reproject_nurbs_point(nurbs, &mid, u, v);
+                    let p2 = surface.point_at(u2, v2);
+                    let dx2 = p2.x - mid.x;
+                    let dy2 = p2.y - mid.y;
+                    let dz2 = p2.z - mid.z;
+                    let err2 = (dx2*dx2 + dy2*dy2 + dz2*dz2).sqrt();
+                    if err2 < reproj_err {
+                        (u2, v2, p2)
+                    } else {
+                        (u, v, p_surf)
+                    }
+                } else {
+                    (u, v, p_surf)
+                }
+            } else {
+                (u, v, p_surf)
+            };
             let n = surface.normal_at(u, v);
 
             let vi = mesh.add_vertex(p_surf);

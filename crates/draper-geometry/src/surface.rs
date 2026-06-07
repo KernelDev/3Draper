@@ -1621,99 +1621,80 @@ impl Surface {
                 // completely wrong UV, and Newton-Raphson would converge to a local
                 // minimum instead of the global one.
                 //
-                // New approach:
-                // Phase 1: Coarse 20×20 grid (400 evaluations) to find candidate minima
-                // Phase 2: Take top-3 candidates and refine each with Newton-Raphson
-                // Phase 3: Return the best result across all candidates
+                // Current approach:
+                // Phase 1: Coarse 32×32 grid (1024 evaluations) to find candidate minima
+                // Phase 2: Take top-5 candidates and refine each with Newton-Raphson (20 iterations)
+                // Phase 3: If best result is still poor, do a finer 64×64 sub-grid search
+                //          around the top candidates
+                // Phase 4: Return the best result across all candidates
                 let (u_min, u_max) = n.u_range();
                 let (v_min, v_max) = n.v_range();
                 let u_range = u_max - u_min;
                 let v_range = v_max - v_min;
 
-                // Phase 1: Coarse 20×20 grid to find the best candidates
-                let coarse = 20;
-                let mut candidates: Vec<(f64, f64, f64)> = Vec::with_capacity(9);
+                let target = [point.x, point.y, point.z];
+
+                // Phase 1: Coarse 32×32 grid to find the best candidates
+                let coarse = 32;
                 let mut grid_dists: Vec<(f64, f64, f64)> = Vec::with_capacity((coarse + 1) * (coarse + 1));
 
                 for i in 0..=coarse {
+                    let u = u_min + u_range * i as f64 / coarse as f64;
                     for j in 0..=coarse {
-                        let u = u_min + u_range * i as f64 / coarse as f64;
                         let v = v_min + v_range * j as f64 / coarse as f64;
                         let p = self.point_at(u, v);
-                        let dist = (p.x - point.x).powi(2) + (p.y - point.y).powi(2) + (p.z - point.z).powi(2);
+                        let dist = (p.x - target[0]).powi(2) + (p.y - target[1]).powi(2) + (p.z - target[2]).powi(2);
                         grid_dists.push((u, v, dist));
                     }
                 }
 
                 // Sort by distance and take top candidates
                 grid_dists.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
-                let n_candidates = 3.min(grid_dists.len());
+                let n_candidates = 5.min(grid_dists.len());
+
+                // Phase 2: Refine each candidate with Newton-Raphson (20 iterations)
+                let mut best_u = grid_dists[0].0;
+                let mut best_v = grid_dists[0].1;
+                let mut best_dist = grid_dists[0].2;
+
                 for k in 0..n_candidates {
-                    candidates.push(grid_dists[k]);
-                }
+                    let (init_u, init_v, _) = grid_dists[k];
+                    let (cu, cv, cd) = nurbs_newton_refine(n, self, &target, init_u, init_v, u_min, u_max, v_min, v_max, 20);
 
-                // Phase 2: Refine each candidate with Newton-Raphson
-                let mut best_u = candidates[0].0;
-                let mut best_v = candidates[0].1;
-                let mut best_dist = candidates[0].2;
-
-                for (init_u, init_v, _) in &candidates {
-                    let mut cu = *init_u;
-                    let mut cv = *init_v;
-                    let mut cd = f64::MAX;
-
-                    for _ in 0..15 {
-                        let derivs = n.derivatives_at(cu, cv);
-                        let sp = derivs.point;
-                        let dx = sp.x - point.x;
-                        let dy = sp.y - point.y;
-                        let dz = sp.z - point.z;
-
-                        let gu = derivs.du.x * dx + derivs.du.y * dy + derivs.du.z * dz;
-                        let gv = derivs.dv.x * dx + derivs.dv.y * dy + derivs.dv.z * dz;
-
-                        let hu_u = derivs.du.x * derivs.du.x + derivs.du.y * derivs.du.y + derivs.du.z * derivs.du.z;
-                        let hu_v = derivs.du.x * derivs.dv.x + derivs.du.y * derivs.dv.y + derivs.du.z * derivs.dv.z;
-                        let hv_v = derivs.dv.x * derivs.dv.x + derivs.dv.y * derivs.dv.y + derivs.dv.z * derivs.dv.z;
-
-                        let det = hu_u * hv_v - hu_v * hu_v;
-                        if det.abs() < 1e-20 { break; }
-
-                        let du = -(hv_v * gu - hu_v * gv) / det;
-                        let dv = -(-hu_v * gu + hu_u * gv) / det;
-
-                        // Clamp step size relative to parametric range
-                        let step_limit_u = u_range * 0.1;
-                        let step_limit_v = v_range * 0.1;
-                        let du = du.clamp(-step_limit_u, step_limit_u);
-                        let dv = dv.clamp(-step_limit_v, step_limit_v);
-
-                        let new_u = (cu + du).clamp(u_min, u_max);
-                        let new_v = (cv + dv).clamp(v_min, v_max);
-
-                        let new_p = self.point_at(new_u, new_v);
-                        let new_dist_sq = (new_p.x - point.x).powi(2) + (new_p.y - point.y).powi(2) + (new_p.z - point.z).powi(2);
-
-                        if new_dist_sq < cd {
-                            if (cd - new_dist_sq) < 1e-10 * cd.max(1e-20) {
-                                cu = new_u;
-                                cv = new_v;
-                                cd = new_dist_sq;
-                                break; // Converged
-                            }
-                            cu = new_u;
-                            cv = new_v;
-                            cd = new_dist_sq;
-                        } else {
-                            break; // Not improving
-                        }
-                    }
-
-                    // Phase 3: Keep the best across all candidates
                     if cd < best_dist {
                         best_dist = cd;
                         best_u = cu;
                         best_v = cv;
+                    }
+                }
+
+                // Phase 3: If the best result is still poor (distance > 1e-6 of surface diagonal),
+                // do a finer sub-grid search around the top 2 candidates.
+                // This handles cases where the coarse grid missed the true minimum
+                // (e.g., for highly curved NURBS surfaces with multiple local minima).
+                if best_dist > 1e-6 {
+                    for k in 0..2.min(grid_dists.len()) {
+                        let (center_u, center_v, _) = grid_dists[k];
+                        let sub_radius_u = u_range / coarse as f64;
+                        let sub_radius_v = v_range / coarse as f64;
+                        let sub_res = 16;
+                        for i in 0..=sub_res {
+                            let u = (center_u - sub_radius_u + 2.0 * sub_radius_u * i as f64 / sub_res as f64).clamp(u_min, u_max);
+                            for j in 0..=sub_res {
+                                let v = (center_v - sub_radius_v + 2.0 * sub_radius_v * j as f64 / sub_res as f64).clamp(v_min, v_max);
+                                let p = self.point_at(u, v);
+                                let dist = (p.x - target[0]).powi(2) + (p.y - target[1]).powi(2) + (p.z - target[2]).powi(2);
+                                if dist < best_dist {
+                                    // Refine this new candidate with Newton-Raphson
+                                    let (cu, cv, cd) = nurbs_newton_refine(n, self, &target, u, v, u_min, u_max, v_min, v_max, 20);
+                                    if cd < best_dist {
+                                        best_dist = cd;
+                                        best_u = cu;
+                                        best_v = cv;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -1777,6 +1758,80 @@ impl Surface {
             }),
         }
     }
+}
+
+/// Newton-Raphson refinement for NURBS point projection.
+///
+/// Given an initial UV guess, iteratively refines to minimize the distance
+/// between surface.point_at(u,v) and the target 3D point.
+/// Returns (u, v, squared_distance) of the best result.
+fn nurbs_newton_refine(
+    nurbs: &NurbsSurface,
+    surface: &Surface,
+    target: &[f64; 3],
+    init_u: f64,
+    init_v: f64,
+    u_min: f64,
+    u_max: f64,
+    v_min: f64,
+    v_max: f64,
+    max_iter: usize,
+) -> (f64, f64, f64) {
+    let u_range = u_max - u_min;
+    let v_range = v_max - v_min;
+
+    let mut cu = init_u;
+    let mut cv = init_v;
+    let mut cd = f64::MAX;
+
+    for _ in 0..max_iter {
+        let derivs = nurbs.derivatives_at(cu, cv);
+        let sp = derivs.point;
+        let dx = sp.x - target[0];
+        let dy = sp.y - target[1];
+        let dz = sp.z - target[2];
+
+        let gu = derivs.du.x * dx + derivs.du.y * dy + derivs.du.z * dz;
+        let gv = derivs.dv.x * dx + derivs.dv.y * dy + derivs.dv.z * dz;
+
+        let hu_u = derivs.du.x * derivs.du.x + derivs.du.y * derivs.du.y + derivs.du.z * derivs.du.z;
+        let hu_v = derivs.du.x * derivs.dv.x + derivs.du.y * derivs.dv.y + derivs.du.z * derivs.dv.z;
+        let hv_v = derivs.dv.x * derivs.dv.x + derivs.dv.y * derivs.dv.y + derivs.dv.z * derivs.dv.z;
+
+        let det = hu_u * hv_v - hu_v * hu_v;
+        if det.abs() < 1e-20 { break; }
+
+        let du = -(hv_v * gu - hu_v * gv) / det;
+        let dv = -(-hu_v * gu + hu_u * gv) / det;
+
+        // Clamp step size relative to parametric range
+        let step_limit_u = u_range * 0.1;
+        let step_limit_v = v_range * 0.1;
+        let du = du.clamp(-step_limit_u, step_limit_u);
+        let dv = dv.clamp(-step_limit_v, step_limit_v);
+
+        let new_u = (cu + du).clamp(u_min, u_max);
+        let new_v = (cv + dv).clamp(v_min, v_max);
+
+        let new_p = surface.point_at(new_u, new_v);
+        let new_dist_sq = (new_p.x - target[0]).powi(2) + (new_p.y - target[1]).powi(2) + (new_p.z - target[2]).powi(2);
+
+        if new_dist_sq < cd {
+            if (cd - new_dist_sq) < 1e-10 * cd.max(1e-20) {
+                cu = new_u;
+                cv = new_v;
+                cd = new_dist_sq;
+                break; // Converged
+            }
+            cu = new_u;
+            cv = new_v;
+            cd = new_dist_sq;
+        } else {
+            break; // Not improving
+        }
+    }
+
+    (cu, cv, cd)
 }
 
 /// NURBS surface evaluation using de Boor's algorithm.

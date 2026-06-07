@@ -2941,24 +2941,180 @@ fn triangulate_cylinder_face_with_boundary_uv(
         return TriangleMesh::new();
     }
 
-    // Use the UV-aware consistent triangulation path for cylinders.
-    // The previous grid-based approach had fundamental problems:
-    // 1. It IGNORED boundary_uvs (prefixed with _)
-    // 2. Grid snapping was fragile — only worked for full cylinders
-    // 3. No trimming for partial cylinders → triangles outside the boundary
-    // 4. No hole support
+    // For cylinders WITHOUT holes, use grid-based triangulation.
+    // Grid-based is superior to earcutr for cylinders because:
+    // 1. It correctly handles the u-periodicity (seam at u=0/2π)
+    // 2. It produces a clean grid topology
+    // 3. It's much faster than earcutr
+    // 4. It naturally follows the surface parameterization
     //
-    // The consistent UV path handles all of these correctly via earcutr.
+    // For cylinders WITH holes, fall back to earcutr-based consistent path
+    // which handles holes natively.
+    if !hole_polylines.is_empty() {
+        let surface = Surface::Cylinder(cyl.clone());
+        return crate::parametric_domain::triangulate_surface_consistent(
+            &surface,
+            boundary_points,
+            boundary_uvs,
+            hole_polylines,
+            hole_uvs,
+            forward,
+            params,
+        );
+    }
+
+    // Determine UV range from boundary UVs
+    let mut u_min = f64::MAX;
+    let mut u_max = f64::MIN;
+    let mut v_min = f64::MAX;
+    let mut v_max = f64::MIN;
+    for uv in boundary_uvs {
+        u_min = u_min.min(uv.u);
+        u_max = u_max.max(uv.u);
+        v_min = v_min.min(uv.v);
+        v_max = v_max.max(uv.v);
+    }
+
+    // Handle wrap-around: if boundary UVs span nearly the full period,
+    // use the full period range for the grid
+    let u_range = u_max - u_min;
+    let full_circle = u_range > 1.5 * PI;
+    let u_start = if full_circle { 0.0 } else { u_min };
+    let u_end = if full_circle { 2.0 * PI } else { u_max };
+
+    // Determine grid resolution
     let surface = Surface::Cylinder(cyl.clone());
-    crate::parametric_domain::triangulate_surface_consistent(
-        &surface,
-        boundary_points,
-        boundary_uvs,
-        hole_polylines,
-        hole_uvs,
-        forward,
-        params,
-    )
+    let (n_u, n_v) = if params.adaptive {
+        crate::adaptive::required_samples_capped(
+            &surface, u_start, u_end, v_min, v_max,
+            params.max_deviation, params.detail_level,
+            params.max_face_triangles,
+        )
+    } else {
+        let n_u = if full_circle { params.angular_samples } else { params.angular_samples.min(48) };
+        (n_u, params.height_samples.max(2))
+    };
+
+    let mut mesh = TriangleMesh::new();
+
+    // Generate vertices: n_v+1 rows (from v_min to v_max inclusive)
+    // For full circles, the first and last column are the same point (seam)
+    let n_u_cols = if full_circle { n_u } else { n_u + 1 };
+    for j in 0..=n_v {
+        for i in 0..n_u_cols {
+            let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
+            let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
+            let p = cyl.point_at(u, v);
+            let n = cyl.normal_at(u, v);
+            let idx = mesh.add_vertex(p);
+            mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+        }
+    }
+
+    // Snap boundary row vertices to the cached boundary 3D points.
+    // This ensures watertightness — shared edges between adjacent faces
+    // produce bit-identical 3D vertex positions.
+    let bottom_ring = extract_boundary_ring_at_v_from_uv(
+        boundary_points, boundary_uvs, cyl, v_min, n_u_cols, full_circle, u_start, u_end,
+    );
+    let top_ring = extract_boundary_ring_at_v_from_uv(
+        boundary_points, boundary_uvs, cyl, v_max, n_u_cols, full_circle, u_start, u_end,
+    );
+
+    if !bottom_ring.is_empty() && n_u_cols == bottom_ring.len() {
+        for i in 0..n_u_cols {
+            mesh.vertices[i] = bottom_ring[i];
+        }
+    }
+    if !top_ring.is_empty() && n_u_cols == top_ring.len() {
+        let offset = n_v * n_u_cols;
+        for i in 0..n_u_cols {
+            mesh.vertices[offset + i] = top_ring[i];
+        }
+    }
+
+    // Generate triangles
+    let n_u_loop = if full_circle { n_u } else { n_u_cols - 1 };
+    for j in 0..n_v {
+        for i in 0..n_u_loop {
+            let i_next = (i + 1) % n_u_cols;
+            let v0 = (j * n_u_cols + i) as u32;
+            let v1 = (j * n_u_cols + i_next) as u32;
+            let v2 = ((j + 1) * n_u_cols + i_next) as u32;
+            let v3 = ((j + 1) * n_u_cols + i) as u32;
+
+            if forward {
+                mesh.add_triangle(v0, v1, v2);
+                mesh.add_triangle(v0, v2, v3);
+            } else {
+                mesh.add_triangle(v0, v2, v1);
+                mesh.add_triangle(v0, v3, v2);
+            }
+        }
+    }
+
+    mesh
+}
+
+/// Extract boundary ring points at a specific v value from boundary UV data.
+/// Unlike extract_boundary_ring_at_v (which uses project_point), this version
+/// uses the pre-computed boundary UVs to find boundary points near the target v.
+fn extract_boundary_ring_at_v_from_uv(
+    boundary_3d: &[Point3d],
+    boundary_uvs: &[Point2d],
+    cyl: &CylinderSurface,
+    target_v: f64,
+    n_u: usize,
+    full_circle: bool,
+    u_start: f64,
+    u_end: f64,
+) -> Vec<Point3d> {
+    let v_tol = 1e-4;
+    let mut ring_pts: Vec<(f64, Point3d)> = Vec::new();
+
+    for (i, uv) in boundary_uvs.iter().enumerate() {
+        if (uv.v - target_v).abs() < v_tol * (target_v.abs().max(1.0)) + 1e-6 {
+            if i < boundary_3d.len() {
+                ring_pts.push((uv.u, boundary_3d[i]));
+            }
+        }
+    }
+
+    if ring_pts.len() < 3 {
+        return Vec::new();
+    }
+
+    // Sort by u
+    ring_pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Generate n_u points at evenly spaced u values, using boundary points when close
+    let mut result = Vec::with_capacity(n_u);
+    for i in 0..n_u {
+        let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
+        // Find the closest boundary point by angle
+        let mut best_dist = f64::MAX;
+        let mut best_pt = None;
+        for (ru, rp) in &ring_pts {
+            let du = if full_circle {
+                let diff = (u - ru).abs();
+                diff.min(2.0 * PI - diff)
+            } else {
+                (u - ru).abs()
+            };
+            if du < best_dist {
+                best_dist = du;
+                best_pt = Some(*rp);
+            }
+        }
+        let angle_tol = (u_end - u_start) / n_u as f64 * 0.3;
+        if best_dist < angle_tol {
+            result.push(best_pt.unwrap());
+        } else {
+            result.push(cyl.point_at(u, target_v));
+        }
+    }
+
+    result
 }
 
 /// Triangulate a cone face with pre-computed UV coordinates and hole UV coordinates.
