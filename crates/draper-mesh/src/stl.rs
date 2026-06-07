@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 KernelDev
-//! STL file import and export.
+//! STL and OBJ file import and export.
 
 use crate::mesh::TriangleMesh;
 use draper_geometry::Point3d;
@@ -200,4 +200,65 @@ fn import_stl_ascii_from_data(data: &[u8]) -> io::Result<TriangleMesh> {
 
     mesh.compute_face_normals();
     Ok(mesh)
+}
+
+// ============================================================
+// OBJ export
+// ============================================================
+
+/// Export a triangle mesh to Wavefront OBJ format.
+///
+/// OBJ format uses 1-based indices. Vertices are written as `v x y z`,
+/// and faces as `f i j k` where indices start at 1.
+pub fn export_obj(mesh: &TriangleMesh, name: &str) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# 3Draper OBJ - {}\n", name));
+    out.push_str(&format!("# {} vertices, {} triangles\n\n", mesh.vertices.len(), mesh.triangles.len()));
+
+    // Write vertices
+    for v in &mesh.vertices {
+        out.push_str(&format!("v {} {} {}\n", v.x, v.y, v.z));
+    }
+
+    // Write optional vertex normals
+    if let Some(ref normals) = mesh.normals {
+        for n in normals {
+            out.push_str(&format!("vn {} {} {}\n", n[0], n[1], n[2]));
+        }
+    }
+
+    out.push_str(&format!("\no {}\n", name));
+
+    // Write faces (OBJ uses 1-based indices)
+    if mesh.normals.is_some() {
+        // Write faces with vertex normals: f v//vn v//vn v//vn
+        for tri in &mesh.triangles {
+            out.push_str(&format!(
+                "f {}//{} {}//{} {}//{}\n",
+                tri[0] + 1, tri[0] + 1,
+                tri[1] + 1, tri[1] + 1,
+                tri[2] + 1, tri[2] + 1,
+            ));
+        }
+    } else {
+        // Write faces without normals: f v v v
+        for tri in &mesh.triangles {
+            out.push_str(&format!(
+                "f {} {} {}\n",
+                tri[0] + 1,
+                tri[1] + 1,
+                tri[2] + 1,
+            ));
+        }
+    }
+
+    out
+}
+
+/// Write OBJ to a file.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn write_obj_file(mesh: &TriangleMesh, path: &str) -> io::Result<()> {
+    let data = export_obj(mesh, "3Draper");
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(data.as_bytes())
 }

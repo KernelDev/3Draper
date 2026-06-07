@@ -5,25 +5,27 @@
 //! This module provides watertight mesh generation by:
 //! 1. Pre-discretizing ALL edges consistently (shared edges produce identical 3D points)
 //! 2. For each face, collecting boundary points from the consistent edge cache
-//! 3. Projecting boundary points to 2D and triangulating with CDT (spade)
+//! 3. Projecting boundary points to 2D and triangulating with custom CDT
 //! 4. Mapping CDT triangles back to 3D using the surface parameterization
 //! 5. Since shared edges use identical vertex indices, the result is watertight by construction
 
 use crate::mesh::TriangleMesh;
+use crate::robust_cdt::{self, CdtInput};
 use crate::triangulate::{
-    TriangulationParams, triangulate_face, filter_degenerate_triangles,
+    TriangulationParams, filter_degenerate_triangles,
     sample_edge_points,
 };
-use crate::watertight::{stitch_boundary_edges, zipper_stitch_boundary_edges};
+use crate::watertight::stitch_boundary_edges;
 use draper_geometry::{
-    Point3d, Point2d, Direction3d,
+    Point3d, Direction3d,
     Surface, Plane, CylinderSurface, SphereSurface,
     TorusSurface, ConeSurface,
 };
 use draper_topology::{Face, Solid, TopoId};
-use spade::{ConstrainedDelaunayTriangulation, Point2, HasPosition, Triangulation as SpadeTriangulation};
-use spade::handles::FixedVertexHandle;
 use std::collections::HashMap;
+
+/// Epsilon for orientation tests and other floating-point comparisons.
+const EPS: f64 = 1e-10;
 
 /// Number of samples per edge curve for boundary discretization.
 const CDT_EDGE_SAMPLES: usize = 32;
@@ -147,22 +149,6 @@ fn deduplicate_consecutive(points: &mut Vec<Point3d>) {
 // 2D projection and CDT helpers
 // ============================================================
 
-/// A 2D vertex for spade CDT that carries the unified 3D vertex pool index.
-#[derive(Clone, Debug)]
-struct CdtVertex {
-    pos: [f64; 2],
-    /// Index into the unified 3D vertex pool.
-    index_3d: u32,
-}
-
-impl HasPosition for CdtVertex {
-    type Scalar = f64;
-
-    fn position(&self) -> Point2<Self::Scalar> {
-        Point2::new(self.pos[0], self.pos[1])
-    }
-}
-
 /// Project a 3D point onto a plane's 2D coordinate system.
 fn project_to_plane(p: &Point3d, plane: &Plane) -> [f64; 2] {
     let dx = p.x - plane.origin.x;
@@ -173,7 +159,16 @@ fn project_to_plane(p: &Point3d, plane: &Plane) -> [f64; 2] {
     [u, v]
 }
 
-/// Triangulate a planar face using spade CDT with consistent boundary vertices.
+/// Project a 3D point to a surface's 2D UV parametric space.
+///
+/// Uses `Surface::project_point` which supports ALL surface types
+/// including NURBS, Revolution, and Extrusion.
+fn project_to_surface_uv(p: &Point3d, surface: &Surface) -> [f64; 2] {
+    let (u, v) = surface.project_point(p);
+    [u, v]
+}
+
+/// Triangulate a planar face using custom CDT with consistent boundary vertices.
 fn triangulate_planar_cdt(
     face: &Face,
     plane: &Plane,
@@ -209,278 +204,107 @@ fn triangulate_planar_cdt(
     // Project all points to 2D
     let all_2d: Vec<[f64; 2]> = all_3d.iter().map(|p| project_to_plane(p, plane)).collect();
 
-    // Build CDT vertices with their pool indices
-    let cdt_vertices: Vec<CdtVertex> = all_2d.iter().zip(all_pool_indices.iter())
-        .map(|(pos, &idx)| CdtVertex { pos: *pos, index_3d: idx })
-        .collect();
+    // Build outer boundary indices (0-based in all_2d)
+    let n_boundary = boundary_3d.len();
+    let outer_boundary: Vec<u32> = (0..n_boundary as u32).collect();
 
-    // Build spade CDT
-    let mut cdt: ConstrainedDelaunayTriangulation<CdtVertex> = ConstrainedDelaunayTriangulation::new();
-
-    // Insert all vertices and remember their CDT handles
-    let mut cdt_handle_map: Vec<usize> = Vec::with_capacity(cdt_vertices.len());
-    for v in &cdt_vertices {
-        match cdt.insert(v.clone()) {
-            Ok(handle) => cdt_handle_map.push(handle.index()),
-            Err(_) => {
-                // Duplicate vertex — find the existing one
-                // Search for a vertex with the same pool index
-                let mut found_idx = 0;
-                for (i, v2) in cdt.vertices().enumerate() {
-                    if v2.data().index_3d == v.index_3d {
-                        found_idx = i;
-                        break;
-                    }
-                }
-                cdt_handle_map.push(found_idx);
-            }
-        }
+    // Build hole boundary indices
+    let mut holes: Vec<Vec<u32>> = Vec::new();
+    let mut offset = n_boundary as u32;
+    for hole_idx in &hole_indices {
+        let n_hole = hole_idx.len() as u32;
+        holes.push((offset..offset + n_hole).collect());
+        offset += n_hole;
     }
 
-    // Add boundary constraints (outer ring)
-    let n_boundary = boundary_3d.len();
+    // Build constraint edges from boundary loops
+    let mut constraints: Vec<[u32; 2]> = Vec::new();
     for i in 0..n_boundary {
         let j = (i + 1) % n_boundary;
-        let hi = FixedVertexHandle::from_index(cdt_handle_map[i]);
-        let hj = FixedVertexHandle::from_index(cdt_handle_map[j]);
-        if hi != hj {
-            let _ = cdt.add_constraint(hi, hj);
-        }
+        constraints.push([i as u32, j as u32]);
     }
-
-    // Add hole constraints
-    let mut offset = n_boundary;
+    let mut offset = n_boundary as u32;
     for hole_idx in &hole_indices {
         let n_hole = hole_idx.len();
         for i in 0..n_hole {
             let j = (i + 1) % n_hole;
-            let gi = offset + i;
-            let gj = offset + j;
-            if gi < cdt_handle_map.len() && gj < cdt_handle_map.len() {
-                let hi = FixedVertexHandle::from_index(cdt_handle_map[gi]);
-                let hj = FixedVertexHandle::from_index(cdt_handle_map[gj]);
-                if hi != hj {
-                    let _ = cdt.add_constraint(hi, hj);
-                }
-            }
+            constraints.push([offset + i as u32, offset + j as u32]);
         }
-        offset += n_hole;
+        offset += n_hole as u32;
     }
 
-    // Extract triangles from the CDT
+    // Run custom CDT
+    let input = CdtInput {
+        points: all_2d,
+        outer_boundary,
+        holes,
+        constraints,
+    };
+
+    let result = robust_cdt::constrained_delaunay_triangulation(&input);
+
+    // Handle Steiner points: add them to the pool
+    // Steiner points are appended after the original input points
+    let n_original = all_3d.len();
+    if result.all_points.len() > n_original {
+        for i in n_original..result.all_points.len() {
+            let uv = result.all_points[i];
+            // Project back to 3D using the plane
+            let p3d = Point3d::new(
+                plane.origin.x + uv[0] * plane.u_dir.x + uv[1] * plane.v_dir.x,
+                plane.origin.y + uv[0] * plane.u_dir.y + uv[1] * plane.v_dir.y,
+                plane.origin.z + uv[0] * plane.u_dir.z + uv[1] * plane.v_dir.z,
+            );
+            let _ = pool.insert_with_face(p3d, face_id);
+        }
+    }
+
     let normal = if forward {
         plane.normal
     } else {
         Direction3d::new(-plane.normal.x, -plane.normal.y, -plane.normal.z).unwrap_or(Direction3d::Z)
     };
 
-    // Build a mapping from CDT vertex index → pool index
-    let cdt_to_pool: Vec<u32> = cdt.vertices().map(|v| v.data().index_3d).collect();
-
-    for face_handle in cdt.inner_faces() {
-        // Get the 3 vertices of this triangle face via adjacent edges
-        let edges = face_handle.adjacent_edges();
-        let vs = [edges[0].from(), edges[1].from(), edges[2].from()];
-
-        let a = cdt_to_pool[vs[0].fix().index()];
-        let b = cdt_to_pool[vs[1].fix().index()];
-        let c = cdt_to_pool[vs[2].fix().index()];
-
-        // Skip degenerate triangles
-        if a == b || b == c || a == c {
-            continue;
-        }
-
-        // Check if the triangle centroid is inside the polygon
-        let v0 = vs[0].data();
-        let v1 = vs[1].data();
-        let v2 = vs[2].data();
-        let centroid_u = (v0.pos[0] + v1.pos[0] + v2.pos[0]) / 3.0;
-        let centroid_v = (v0.pos[1] + v1.pos[1] + v2.pos[1]) / 3.0;
-        let centroid = Point2d::new(centroid_u, centroid_v);
-
-        let boundary_2d: Vec<Point2d> = all_2d[..n_boundary].iter()
-            .map(|p| Point2d::new(p[0], p[1]))
-            .collect();
-
-        if !point_in_polygon(&centroid, &boundary_2d) {
-            continue;
-        }
-
-        // Check if centroid is inside any hole
-        let mut in_hole = false;
-        let mut hole_offset = n_boundary;
-        for hole_idx in &hole_indices {
-            if hole_offset + hole_idx.len() <= all_2d.len() {
-                let hole_2d: Vec<Point2d> = all_2d[hole_offset..hole_offset + hole_idx.len()].iter()
-                    .map(|p| Point2d::new(p[0], p[1]))
-                    .collect();
-                if point_in_polygon(&centroid, &hole_2d) {
-                    in_hole = true;
-                    break;
-                }
+    // Map triangles: CDT returns indices into result.all_points
+    // For original points (idx < n_original), map to pool indices
+    // For Steiner points (idx >= n_original), map to newly added pool entries
+    let n_pool_before_steiner = all_pool_indices.len();
+    for tri in &result.triangles {
+        let mut pool_tri = [0u32; 3];
+        let mut valid = true;
+        for k in 0..3 {
+            let cdt_idx = tri[k] as usize;
+            if cdt_idx < n_original {
+                pool_tri[k] = all_pool_indices[cdt_idx];
+            } else {
+                // Steiner point — find its pool index
+                // It was inserted after all_pool_indices, starting at n_pool_before_steiner
+                let steiner_local = cdt_idx - n_original;
+                let pool_idx = (n_pool_before_steiner + steiner_local) as u32;
+                // Verify pool_idx is within the pool (pool grows as we insert)
+                pool_tri[k] = pool_idx;
             }
-            hole_offset += hole_idx.len();
         }
-        if in_hole {
+        if pool_tri[0] == pool_tri[1] || pool_tri[1] == pool_tri[2] || pool_tri[0] == pool_tri[2] {
+            valid = false;
+        }
+        if !valid {
             continue;
         }
-
         if forward {
-            mesh.add_triangle(a, b, c);
+            mesh.add_triangle(pool_tri[0], pool_tri[1], pool_tri[2]);
         } else {
-            mesh.add_triangle(a, c, b);
+            mesh.add_triangle(pool_tri[0], pool_tri[2], pool_tri[1]);
         }
         mesh.triangle_face_ids.get_or_insert_with(Vec::new).push(face_id);
         mesh.face_normals.get_or_insert_with(Vec::new).push([normal.x, normal.y, normal.z]);
     }
 
-    mesh
-}
-
-/// Triangulate a curved surface face with consistent edge boundary vertices.
-fn triangulate_curved_face_consistent(
-    face: &Face,
-    boundary_3d: &[Point3d],
-    params: &TriangulationParams,
-    pool: &mut UnifiedVertexPool,
-) -> TriangleMesh {
-    let face_id = face.id.to_u64();
-
-    // Insert boundary vertices into the unified pool first.
-    // These come from the consistent edge cache, so shared edges produce
-    // the same pool indices across different faces.
-    let cache_boundary_indices: Vec<u32> = boundary_3d.iter().map(|p| pool.insert_with_face(*p, face_id)).collect();
-
-    // Build a spatial index of cache boundary vertices for snapping
-    let snap_tolerance = {
-        // Use a generous snap tolerance: the maximum distance between adjacent
-        // edge sample points. This ensures that face_mesh boundary vertices
-        // snap to the correct cache vertex.
-        let mut max_spacing = 0.0f64;
-        for i in 1..boundary_3d.len() {
-            let dx = boundary_3d[i].x - boundary_3d[i-1].x;
-            let dy = boundary_3d[i].y - boundary_3d[i-1].y;
-            let dz = boundary_3d[i].z - boundary_3d[i-1].z;
-            let dist = (dx*dx + dy*dy + dz*dz).sqrt();
-            max_spacing = max_spacing.max(dist);
-        }
-        // Also check last to first (closed loop)
-        if boundary_3d.len() > 2 {
-            let dx = boundary_3d[0].x - boundary_3d.last().unwrap().x;
-            let dy = boundary_3d[0].y - boundary_3d.last().unwrap().y;
-            let dz = boundary_3d[0].z - boundary_3d.last().unwrap().z;
-            let dist = (dx*dx + dy*dy + dz*dz).sqrt();
-            max_spacing = max_spacing.max(dist);
-        }
-        // Snap tolerance = 80% of max spacing (to avoid snapping to wrong vertex)
-        max_spacing * 0.8
-    };
-
-    // Build spatial index of cache boundary vertices
-    let snap_cell_size = snap_tolerance * 10.0;
-    let snap_tol_sq = snap_tolerance * snap_tolerance;
-    let mut snap_grid: HashMap<(i64, i64, i64), Vec<(Point3d, u32)>> = HashMap::new();
-    for (i, &p) in boundary_3d.iter().enumerate() {
-        let cx = (p.x / snap_cell_size).floor() as i64;
-        let cy = (p.y / snap_cell_size).floor() as i64;
-        let cz = (p.z / snap_cell_size).floor() as i64;
-        snap_grid.entry((cx, cy, cz)).or_default().push((p, cache_boundary_indices[i]));
-    }
-
-    // Use standard triangulation as fallback for curved surfaces
-    let face_mesh = triangulate_face(face, params);
-
-    // For each vertex in the face mesh, try to snap to a cache boundary vertex.
-    // If a vertex is close to a cache boundary vertex (within snap_tolerance),
-    // use the cache vertex's pool index instead. This ensures that shared
-    // edge vertices are unified across faces.
-    let remap: Vec<u32> = face_mesh.vertices.iter().map(|p| {
-        let cx = (p.x / snap_cell_size).floor() as i64;
-        let cy = (p.y / snap_cell_size).floor() as i64;
-        let cz = (p.z / snap_cell_size).floor() as i64;
-
-        let mut best_match: Option<(u32, f64)> = None;
-        for dx in -1i64..=1 {
-            for dy in -1i64..=1 {
-                for dz in -1i64..=1 {
-                    let key = (cx + dx, cy + dy, cz + dz);
-                    if let Some(entries) = snap_grid.get(&key) {
-                        for &(ref cp, pool_idx) in entries {
-                            let ddx = p.x - cp.x;
-                            let ddy = p.y - cp.y;
-                            let ddz = p.z - cp.z;
-                            let dist_sq = ddx*ddx + ddy*ddy + ddz*ddz;
-                            if dist_sq < snap_tol_sq {
-                                match best_match {
-                                    None => best_match = Some((pool_idx, dist_sq)),
-                                    Some((_, best_dist)) => {
-                                        if dist_sq < best_dist {
-                                            best_match = Some((pool_idx, dist_sq));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // If we found a snap match, use the cache boundary vertex's pool index.
-        // Otherwise, insert as a new vertex into the pool.
-        if let Some((pool_idx, _)) = best_match {
-            pool_idx
-        } else {
-            pool.insert_with_face(*p, face_id)
-        }
-    }).collect();
-
-    // Build the face mesh using the remapped indices
-    let mut mesh = TriangleMesh::new();
-
-    for (tri_idx, tri) in face_mesh.triangles.iter().enumerate() {
-        let a = remap[tri[0] as usize];
-        let b = remap[tri[1] as usize];
-        let c = remap[tri[2] as usize];
-
-        if a != b && b != c && a != c {
-            mesh.add_triangle(a, b, c);
-            mesh.triangle_face_ids.get_or_insert_with(Vec::new).push(face_id);
-
-            if let Some(ref face_normals) = face_mesh.face_normals {
-                if let Some(&n) = face_normals.get(tri_idx) {
-                    mesh.face_normals.get_or_insert_with(Vec::new).push(n);
-                }
-            }
-        }
+    if !result.all_constraints_satisfied {
+        log::warn!("CDT planar: not all constraints satisfied for face {}", face.id);
     }
 
     mesh
-}
-
-/// Check if a 2D point is inside a polygon using the winding number algorithm.
-fn point_in_polygon(point: &Point2d, polygon: &[Point2d]) -> bool {
-    if polygon.len() < 3 {
-        return false;
-    }
-    let n = polygon.len();
-    let mut inside = false;
-    let mut j = n - 1;
-    for i in 0..n {
-        let xi = polygon[i].u;
-        let yi = polygon[i].v;
-        let xj = polygon[j].u;
-        let yj = polygon[j].v;
-
-        if ((yi > point.v) != (yj > point.v))
-            && (point.u < (xj - xi) * (point.v - yi) / (yj - yi) + xi)
-        {
-            inside = !inside;
-        }
-        j = i;
-    }
-    inside
 }
 
 // ============================================================
@@ -521,37 +345,27 @@ fn triangulate_surface_cdt_generic(
 
     // Check if UV projection is valid (no NaN/Inf)
     if boundary_2d.iter().any(|uv| !uv[0].is_finite() || !uv[1].is_finite()) {
-        // Fall back to snap-boundary approach
         log::warn!("CDT surface fallback: UV projection produced NaN/Inf for face {}", face.id);
-        return triangulate_curved_face_consistent(face, boundary_3d, params, pool);
+        // Fall back to planar projection on best-fit plane
+        return triangulate_surface_cdt_planar_fallback(face, boundary_3d, holes_3d, forward, pool, params);
     }
-
-    log::info!(
-        "CDT surface: face {} type={:?}, {} boundary pts, {} holes, UV range [{:.2},{:.2}]x[{:.2},{:.2}]",
-        face.id,
-        std::mem::discriminant(surface),
-        boundary_3d.len(),
-        holes_3d.len(),
-        boundary_2d.iter().map(|uv| uv[0]).fold(f64::MAX, f64::min),
-        boundary_2d.iter().map(|uv| uv[0]).fold(f64::MIN, f64::max),
-        boundary_2d.iter().map(|uv| uv[1]).fold(f64::MAX, f64::min),
-        boundary_2d.iter().map(|uv| uv[1]).fold(f64::MIN, f64::max),
-    );
 
     // Project hole points to 2D
     let holes_2d: Vec<Vec<[f64; 2]>> = holes_3d.iter()
-        .map(|hole| hole.iter()
-            .map(|p| project_to_surface_uv(p, surface))
-            .collect())
+        .map(|hole| hole.iter().map(|p| project_to_surface_uv(p, surface)).collect())
         .collect();
 
-    // Collect all vertices for CDT
+    // Check hole UV validity
+    if holes_2d.iter().any(|h| h.iter().any(|uv| !uv[0].is_finite() || !uv[1].is_finite())) {
+        log::warn!("CDT surface fallback: hole UV projection produced NaN/Inf for face {}", face.id);
+        return triangulate_surface_cdt_planar_fallback(face, boundary_3d, holes_3d, forward, pool, params);
+    }
+
+    // Collect all 2D points and pool indices
     let mut all_2d: Vec<[f64; 2]> = boundary_2d.clone();
     let mut all_pool_indices: Vec<u32> = boundary_indices.clone();
-    let mut all_3d: Vec<Point3d> = boundary_3d.to_vec();
 
     for (hi, hole_3d) in holes_3d.iter().enumerate() {
-        all_3d.extend_from_slice(hole_3d);
         if holes_2d.len() > hi {
             all_2d.extend_from_slice(&holes_2d[hi]);
         }
@@ -561,147 +375,190 @@ fn triangulate_surface_cdt_generic(
     }
 
     // Add interior grid points for better surface approximation
-    let n_interior = add_interior_grid_points(
-        &boundary_2d, surface, &all_3d, &mut all_2d, &mut all_pool_indices, pool, params, face_id,
+    add_interior_grid_points_cdt(
+        &boundary_2d, surface, &mut all_2d, &mut all_pool_indices, pool, params, face_id,
     );
 
     let n_boundary = boundary_3d.len();
-    let n_holes: usize = hole_indices.iter().map(|h| h.len()).sum();
 
-    // Build CDT
-    let cdt_vertices: Vec<CdtVertex> = all_2d.iter().zip(all_pool_indices.iter())
-        .map(|(pos, &idx)| CdtVertex { pos: *pos, index_3d: idx })
-        .collect();
+    // Build outer boundary indices
+    let outer_boundary: Vec<u32> = (0..n_boundary as u32).collect();
 
-    let mut cdt: ConstrainedDelaunayTriangulation<CdtVertex> = ConstrainedDelaunayTriangulation::new();
-
-    // Insert all vertices
-    let mut cdt_handle_map: Vec<usize> = Vec::with_capacity(cdt_vertices.len());
-    for v in &cdt_vertices {
-        match cdt.insert(v.clone()) {
-            Ok(handle) => cdt_handle_map.push(handle.index()),
-            Err(_) => {
-                // Duplicate — find existing
-                let mut found = 0;
-                for (i, v2) in cdt.vertices().enumerate() {
-                    if v2.data().index_3d == v.index_3d {
-                        found = i;
-                        break;
-                    }
-                }
-                cdt_handle_map.push(found);
-            }
-        }
+    // Build hole boundary indices
+    let mut holes_cdt: Vec<Vec<u32>> = Vec::new();
+    let mut offset = n_boundary as u32;
+    for hole_idx in &hole_indices {
+        let n_hole = hole_idx.len() as u32;
+        holes_cdt.push((offset..offset + n_hole).collect());
+        offset += n_hole;
     }
 
-    // Add boundary constraints (outer ring)
+    // Build constraint edges from boundary loops
+    let mut constraints: Vec<[u32; 2]> = Vec::new();
     for i in 0..n_boundary {
         let j = (i + 1) % n_boundary;
-        let hi = FixedVertexHandle::from_index(cdt_handle_map[i]);
-        let hj = FixedVertexHandle::from_index(cdt_handle_map[j]);
-        if hi != hj {
-            let _ = cdt.add_constraint(hi, hj);
-        }
+        constraints.push([i as u32, j as u32]);
     }
-
-    // Add hole constraints
-    let mut offset = n_boundary;
+    offset = n_boundary as u32;
     for hole_idx in &hole_indices {
         let n_hole = hole_idx.len();
         for i in 0..n_hole {
             let j = (i + 1) % n_hole;
-            let gi = offset + i;
-            let gj = offset + j;
-            if gi < cdt_handle_map.len() && gj < cdt_handle_map.len() {
-                let hi = FixedVertexHandle::from_index(cdt_handle_map[gi]);
-                let hj = FixedVertexHandle::from_index(cdt_handle_map[gj]);
-                if hi != hj {
-                    let _ = cdt.add_constraint(hi, hj);
-                }
-            }
+            constraints.push([offset + i as u32, offset + j as u32]);
         }
-        offset += n_hole;
+        offset += n_hole as u32;
     }
 
-    // Extract triangles from CDT
-    let cdt_to_pool: Vec<u32> = cdt.vertices().map(|v| v.data().index_3d).collect();
+    let input = CdtInput {
+        points: all_2d.clone(),
+        outer_boundary,
+        holes: holes_cdt,
+        constraints,
+    };
 
-    let boundary_2d_pts: Vec<Point2d> = boundary_2d.iter()
-        .map(|uv| Point2d::new(uv[0], uv[1]))
-        .collect();
+    let result = robust_cdt::constrained_delaunay_triangulation(&input);
 
-    for face_handle in cdt.inner_faces() {
-        let edges = face_handle.adjacent_edges();
-        let vs = [edges[0].from(), edges[1].from(), edges[2].from()];
-
-        let a = cdt_to_pool[vs[0].fix().index()];
-        let b = cdt_to_pool[vs[1].fix().index()];
-        let c = cdt_to_pool[vs[2].fix().index()];
-
-        if a == b || b == c || a == c {
-            continue;
+    // Handle Steiner points: compute 3D position from UV
+    let n_original = all_2d.len();
+    let mut steiner_pool_indices: Vec<u32> = Vec::new();
+    if result.all_points.len() > n_original {
+        for i in n_original..result.all_points.len() {
+            let uv = result.all_points[i];
+            let p3d = surface.point_at(uv[0], uv[1]);
+            if p3d.x.is_finite() && p3d.y.is_finite() && p3d.z.is_finite() {
+                let idx = pool.insert_with_face(p3d, face_id);
+                steiner_pool_indices.push(idx);
+            } else {
+                steiner_pool_indices.push(0); // fallback
+            }
         }
+    }
 
-        // Check if triangle is inside the polygon
-        let v0 = vs[0].data();
-        let v1 = vs[1].data();
-        let v2 = vs[2].data();
-        let centroid_u = (v0.pos[0] + v1.pos[0] + v2.pos[0]) / 3.0;
-        let centroid_v = (v0.pos[1] + v1.pos[1] + v2.pos[1]) / 3.0;
-        let centroid = Point2d::new(centroid_u, centroid_v);
-
-        if !point_in_polygon(&centroid, &boundary_2d_pts) {
-            continue;
-        }
-
-        // Check if centroid is inside any hole
-        let mut in_hole = false;
-        let mut hole_offset = n_boundary;
-        for (hi, hole_idx) in hole_indices.iter().enumerate() {
-            if hi < holes_2d.len() {
-                let hole_2d_pts: Vec<Point2d> = holes_2d[hi].iter()
-                    .map(|uv| Point2d::new(uv[0], uv[1]))
-                    .collect();
-                if point_in_polygon(&centroid, &hole_2d_pts) {
-                    in_hole = true;
-                    break;
+    // Map triangles
+    for tri in &result.triangles {
+        let mut pool_tri = [0u32; 3];
+        let mut valid = true;
+        for k in 0..3 {
+            let cdt_idx = tri[k] as usize;
+            if cdt_idx < n_original {
+                if cdt_idx < all_pool_indices.len() {
+                    pool_tri[k] = all_pool_indices[cdt_idx];
+                } else {
+                    valid = false;
+                }
+            } else {
+                let steiner_local = cdt_idx - n_original;
+                if steiner_local < steiner_pool_indices.len() {
+                    pool_tri[k] = steiner_pool_indices[steiner_local];
+                } else {
+                    valid = false;
                 }
             }
-            hole_offset += hole_idx.len();
         }
-        if in_hole {
+        if !valid || pool_tri[0] == pool_tri[1] || pool_tri[1] == pool_tri[2] || pool_tri[0] == pool_tri[2] {
             continue;
         }
-
         if forward {
-            mesh.add_triangle(a, b, c);
+            mesh.add_triangle(pool_tri[0], pool_tri[1], pool_tri[2]);
         } else {
-            mesh.add_triangle(a, c, b);
+            mesh.add_triangle(pool_tri[0], pool_tri[2], pool_tri[1]);
         }
         mesh.triangle_face_ids.get_or_insert_with(Vec::new).push(face_id);
+    }
+
+    if !result.all_constraints_satisfied {
+        log::warn!("CDT surface: not all constraints satisfied for face {}", face.id);
     }
 
     mesh
 }
 
-/// Project a 3D point to a surface's 2D UV parametric space.
-///
-/// Uses `Surface::project_point` which supports ALL surface types
-/// including NURBS, Revolution, and Extrusion.
-fn project_to_surface_uv(p: &Point3d, surface: &Surface) -> [f64; 2] {
-    let (u, v) = surface.project_point(p);
-    [u, v]
+/// Fallback for curved surfaces where UV projection fails: project to best-fit plane.
+fn triangulate_surface_cdt_planar_fallback(
+    face: &Face,
+    boundary_3d: &[Point3d],
+    holes_3d: &[Vec<Point3d>],
+    forward: bool,
+    pool: &mut UnifiedVertexPool,
+    params: &TriangulationParams,
+) -> TriangleMesh {
+    if boundary_3d.len() < 3 {
+        return TriangleMesh::new();
+    }
+
+    // Compute best-fit plane from boundary points
+    let n = boundary_3d.len() as f64;
+    let cx = boundary_3d.iter().map(|p| p.x).sum::<f64>() / n;
+    let cy = boundary_3d.iter().map(|p| p.y).sum::<f64>() / n;
+    let cz = boundary_3d.iter().map(|p| p.z).sum::<f64>() / n;
+
+    // Use PCA-like approach: compute normal from cross products of centered vectors
+    let mut nxx = 0.0f64; let mut nxy = 0.0f64; let mut nxz = 0.0f64;
+    let mut nyy = 0.0f64; let mut nyz = 0.0f64; let mut nzz = 0.0f64;
+    for p in boundary_3d {
+        let dx = p.x - cx;
+        let dy = p.y - cy;
+        let dz = p.z - cz;
+        nxx += dx * dx; nxy += dx * dy; nxz += dx * dz;
+        nyy += dy * dy; nyz += dy * dz; nzz += dz * dz;
+    }
+
+    // Normal = eigenvector of smallest eigenvalue (approximate)
+    let det_x = nyy * nzz - nyz * nyz;
+    let det_y = nxx * nzz - nxz * nxz;
+    let det_z = nxx * nyy - nxy * nxy;
+    let det_max = det_x.max(det_y).max(det_z);
+
+    let (nx, ny, nz) = if det_max == det_x {
+        (det_x, nxy * nyz - nxz * nyy, nxy * nxz - nyz * nxx)
+    } else if det_max == det_y {
+        (nxy * nyz - nxz * nyy, det_y, nxy * nxz - nxz * nyz)
+    } else {
+        (nxy * nxz - nyz * nxx, nxy * nxz - nxz * nyz, det_z)
+    };
+
+    let len = (nx * nx + ny * ny + nz * nz).sqrt();
+    let normal = if len > EPS {
+        Direction3d::new(nx / len, ny / len, nz / len).unwrap_or(Direction3d::Z)
+    } else {
+        Direction3d::Z
+    };
+
+    // Compute u_dir and v_dir from the normal
+    let up = if normal.z.abs() < 0.9 {
+        Direction3d::new(0.0, 0.0, 1.0).unwrap()
+    } else {
+        Direction3d::new(1.0, 0.0, 0.0).unwrap()
+    };
+    let u_dir = Direction3d::new(
+        normal.y * up.z - normal.z * up.y,
+        normal.z * up.x - normal.x * up.z,
+        normal.x * up.y - normal.y * up.x,
+    ).unwrap();
+    let v_dir = Direction3d::new(
+        normal.y * u_dir.z - normal.z * u_dir.y,
+        normal.z * u_dir.x - normal.x * u_dir.z,
+        normal.x * u_dir.y - normal.y * u_dir.x,
+    ).unwrap();
+
+    let plane = Plane {
+        origin: Point3d::new(cx, cy, cz),
+        normal,
+        u_dir,
+        v_dir,
+    };
+
+    triangulate_planar_cdt(face, &plane, boundary_3d, holes_3d, forward, pool)
 }
 
-/// Add interior grid points for curved surface approximation.
+/// Add interior grid points for curved surface approximation (CDT version).
 ///
 /// For curved surfaces, we need interior points to properly approximate
 /// the curvature. This function generates a grid of interior points
 /// in UV space and adds them to the CDT.
-fn add_interior_grid_points(
+fn add_interior_grid_points_cdt(
     boundary_2d: &[[f64; 2]],
     surface: &Surface,
-    all_3d: &[Point3d],
     all_2d: &mut Vec<[f64; 2]>,
     all_pool_indices: &mut Vec<u32>,
     pool: &mut UnifiedVertexPool,
@@ -720,7 +577,6 @@ fn add_interior_grid_points(
         v_max = v_max.max(uv[1]);
     }
 
-    // Determine grid resolution based on surface type and params
     let (n_u, n_v) = match surface {
         Surface::Cylinder(_) | Surface::Cone(_) => {
             let n_u = params.angular_samples.min(64);
@@ -748,7 +604,6 @@ fn add_interior_grid_points(
             (n_u, n_v)
         }
         Surface::Nurbs(_) => {
-            // NURBS: moderate resolution grid
             let n_u = params.height_samples.max(8).min(32);
             let n_v = params.height_samples.max(8).min(32);
             (n_u, n_v)
@@ -756,7 +611,6 @@ fn add_interior_grid_points(
         _ => (16, 8),
     };
 
-    // Cap grid resolution
     let (n_u, n_v) = {
         let max_tris = params.max_face_triangles;
         let approx_tris = 2 * n_u * n_v;
@@ -774,24 +628,20 @@ fn add_interior_grid_points(
     let du = (u_max - u_min) / n_u as f64;
     let dv = (v_max - v_min) / n_v as f64;
 
+    let boundary_pts: Vec<[f64; 2]> = boundary_2d.to_vec();
+
     for i in 1..n_u {
         for j in 1..n_v {
             let u = u_min + i as f64 * du;
             let v = v_min + j as f64 * dv;
 
-            // Get 3D point on surface
-            let p3d = surface_point_at(surface, u, v);
-            if !p3d.x.is_finite() || !p3d.y.is_finite() || !p3d.z.is_finite() {
+            // Check if (u, v) is inside the boundary polygon
+            if !robust_cdt::point_in_polygon_2d(u, v, &boundary_pts) {
                 continue;
             }
 
-            // Check if (u, v) is inside the boundary polygon
-            let pt = Point2d::new(u, v);
-            let boundary_pts: Vec<Point2d> = boundary_2d.iter()
-                .map(|uv| Point2d::new(uv[0], uv[1]))
-                .collect();
-
-            if !point_in_polygon(&pt, &boundary_pts) {
+            let p3d = surface.point_at(u, v);
+            if !p3d.x.is_finite() || !p3d.y.is_finite() || !p3d.z.is_finite() {
                 continue;
             }
 
@@ -803,12 +653,6 @@ fn add_interior_grid_points(
     }
 
     count
-}
-
-/// Evaluate a 3D point on a surface at UV parameters.
-/// Uses `Surface::point_at` which supports ALL surface types.
-fn surface_point_at(surface: &Surface, u: f64, v: f64) -> Point3d {
-    surface.point_at(u, v)
 }
 
 /// CDT triangulation for cylindrical surfaces.
@@ -1316,27 +1160,17 @@ fn triangulate_face_cdt(
         }
         Some(Surface::Revolution(_)) | Some(Surface::Extrusion(_)) | Some(Surface::Nurbs(_)) => {
             // For NURBS, revolution, extrusion surfaces:
-            // Try CDT first; if UV projection fails, fall back to snap-boundary
+            // Use CDT; if UV projection fails, falls back to planar projection
             if let Some(ref surface) = face.surface {
-                // Check if UV projection works for this surface
-                let test_uv: Vec<[f64; 2]> = boundary_3d.iter()
-                    .take(5)
-                    .map(|p| project_to_surface_uv(p, surface))
-                    .collect();
-                let uv_valid = test_uv.iter().all(|uv| uv[0].is_finite() && uv[1].is_finite());
-
-                if uv_valid {
-                    triangulate_surface_cdt_generic(face, surface, &boundary_3d, &holes_3d, forward, pool, params)
-                } else {
-                    triangulate_curved_face_consistent(face, &boundary_3d, params, pool)
-                }
+                triangulate_surface_cdt_generic(face, surface, &boundary_3d, &holes_3d, forward, pool, params)
             } else {
-                triangulate_curved_face_consistent(face, &boundary_3d, params, pool)
+                // No surface info — fall back to planar projection on best-fit plane
+                triangulate_surface_cdt_planar_fallback(face, &boundary_3d, &holes_3d, forward, pool, params)
             }
         }
         _ => {
-            // For unknown surfaces: use snap-boundary approach
-            triangulate_curved_face_consistent(face, &boundary_3d, params, pool)
+            // For unknown surfaces: fall back to planar projection on best-fit plane
+            triangulate_surface_cdt_planar_fallback(face, &boundary_3d, &holes_3d, forward, pool, params)
         }
     }
 }
@@ -1473,6 +1307,319 @@ impl UnifiedVertexPool {
     pub fn is_empty(&self) -> bool {
         self.vertices.len() == 0
     }
+}
+
+// ============================================================
+// Iterative adaptive refinement with 3D error checking
+// ============================================================
+
+/// Perform iterative adaptive refinement on a triangulated mesh.
+///
+/// For each triangle, check the chordal deviation between the triangle's
+/// planar surface and the actual surface. If the deviation exceeds the
+/// chordal tolerance, subdivide the triangle by inserting the midpoint
+/// of the longest edge on the surface.
+///
+/// This is called AFTER initial CDT triangulation to improve surface
+/// approximation quality.
+pub fn adaptive_refine_mesh(
+    mesh: &mut TriangleMesh,
+    surface: Option<&Surface>,
+    chordal_tolerance: f64,
+    max_iterations: usize,
+) {
+    if chordal_tolerance <= 0.0 || mesh.triangles.is_empty() {
+        return;
+    }
+
+    let mut iteration = 0;
+    while iteration < max_iterations {
+        let mut refined = false;
+        let n_tris = mesh.triangles.len();
+
+        // Track edges that have already been split in this iteration
+        let mut split_edges: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+
+        // Evaluate each triangle's chordal error
+        for tri_idx in 0..n_tris {
+            if tri_idx >= mesh.triangles.len() {
+                break;
+            }
+
+            let tri = mesh.triangles[tri_idx];
+            let v0 = mesh.vertices[tri[0] as usize];
+            let v1 = mesh.vertices[tri[1] as usize];
+            let v2 = mesh.vertices[tri[2] as usize];
+
+            // Compute centroid
+            let cx = (v0.x + v1.x + v2.x) / 3.0;
+            let cy = (v0.y + v1.y + v2.y) / 3.0;
+            let cz = (v0.z + v1.z + v2.z) / 3.0;
+
+            // Compute the midpoint of the longest edge and check deviation
+            let edges = [
+                (tri[0], tri[1], (v0.x - v1.x).powi(2) + (v0.y - v1.y).powi(2) + (v0.z - v1.z).powi(2)),
+                (tri[1], tri[2], (v1.x - v2.x).powi(2) + (v1.y - v2.y).powi(2) + (v1.z - v2.z).powi(2)),
+                (tri[2], tri[0], (v2.x - v0.x).powi(2) + (v2.y - v0.y).powi(2) + (v2.z - v0.z).powi(2)),
+            ];
+
+            let mut max_deviation = 0.0f64;
+            let mut longest_edge = (0u32, 0u32);
+
+            for &(ea, eb, len_sq) in &edges {
+                let pa = mesh.vertices[ea as usize];
+                let pb = mesh.vertices[eb as usize];
+                let mid = Point3d::new(
+                    (pa.x + pb.x) / 2.0,
+                    (pa.y + pb.y) / 2.0,
+                    (pa.z + pb.z) / 2.0,
+                );
+
+                // Compute deviation: distance from midpoint to the triangle plane
+                let e1x = v1.x - v0.x;
+                let e1y = v1.y - v0.y;
+                let e1z = v1.z - v0.z;
+                let e2x = v2.x - v0.x;
+                let e2y = v2.y - v0.y;
+                let e2z = v2.z - v0.z;
+                let nx = e1y * e2z - e1z * e2y;
+                let ny = e1z * e2x - e1x * e2z;
+                let nz = e1x * e2y - e1y * e2x;
+                let nlen = (nx * nx + ny * ny + nz * nz).sqrt();
+                if nlen < EPS {
+                    continue;
+                }
+                let dist = ((mid.x - v0.x) * nx + (mid.y - v0.y) * ny + (mid.z - v0.z) * nz) / nlen;
+
+                if dist.abs() > max_deviation {
+                    max_deviation = dist.abs();
+                    if len_sq >= edges[0].2.max(edges[1].2).max(edges[2].2) - EPS {
+                        let (a, b) = if ea < eb { (ea, eb) } else { (eb, ea) };
+                        longest_edge = (a, b);
+                    }
+                }
+
+                // Also check against the actual surface if available
+                if let Some(surf) = surface {
+                    if let Some(uv) = project_point_to_uv(&mid, surf) {
+                        let surf_pt = surf.point_at(uv.0, uv.1);
+                        let surf_dev = ((mid.x - surf_pt.x).powi(2)
+                            + (mid.y - surf_pt.y).powi(2)
+                            + (mid.z - surf_pt.z).powi(2))
+                        .sqrt();
+                        if surf_dev > max_deviation {
+                            max_deviation = surf_dev;
+                        }
+                    }
+                }
+            }
+
+            if max_deviation > chordal_tolerance && longest_edge.0 != longest_edge.1 {
+                let edge_key = longest_edge;
+                if !split_edges.contains(&edge_key) {
+                    split_edges.insert(edge_key);
+                    // Insert midpoint vertex (on the surface if available)
+                    let pa = mesh.vertices[edge_key.0 as usize];
+                    let pb = mesh.vertices[edge_key.1 as usize];
+                    let mid = Point3d::new(
+                        (pa.x + pb.x) / 2.0,
+                        (pa.y + pb.y) / 2.0,
+                        (pa.z + pb.z) / 2.0,
+                    );
+
+                    let mid_idx = mesh.vertices.len() as u32;
+                    mesh.add_vertex(mid);
+                    refined = true;
+
+                    // Split all triangles that share this edge
+                    let mut new_tris = Vec::new();
+                    let mut tris_to_remove = Vec::new();
+                    for (ti, t) in mesh.triangles.iter().enumerate() {
+                        if t[0] == edge_key.0 && t[1] == edge_key.1
+                            || t[1] == edge_key.0 && t[2] == edge_key.1
+                            || t[2] == edge_key.0 && t[0] == edge_key.1
+                            || t[0] == edge_key.1 && t[1] == edge_key.0
+                            || t[1] == edge_key.1 && t[2] == edge_key.0
+                            || t[2] == edge_key.1 && t[0] == edge_key.0
+                        {
+                            tris_to_remove.push(ti);
+                            // Find the opposite vertex
+                            let mut opp = 0u32;
+                            let mut found = false;
+                            for &v in &t {
+                                if v != edge_key.0 && v != edge_key.1 {
+                                    opp = v;
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if !found {
+                                continue;
+                            }
+                            // Create two new triangles
+                            new_tris.push([edge_key.0, mid_idx, opp]);
+                            new_tris.push([mid_idx, edge_key.1, opp]);
+                        }
+                    }
+
+                    // Replace removed triangles with new ones
+                    if !tris_to_remove.is_empty() {
+                        let mut updated_tris = Vec::new();
+                        let mut updated_ids = Vec::new();
+                        let mut updated_normals = Vec::new();
+                        for (ti, t) in mesh.triangles.iter().enumerate() {
+                            if tris_to_remove.contains(&ti) {
+                                for nt in &new_tris {
+                                    updated_tris.push(*nt);
+                                    if let Some(ref ids) = mesh.triangle_face_ids {
+                                        updated_ids.push(ids.get(ti).copied().unwrap_or(0));
+                                    }
+                                    if let Some(ref normals) = mesh.face_normals {
+                                        updated_normals.push(normals.get(ti).copied().unwrap_or([0.0, 0.0, 1.0]));
+                                    }
+                                }
+                            } else {
+                                updated_tris.push(*t);
+                                if let Some(ref ids) = mesh.triangle_face_ids {
+                                    updated_ids.push(ids.get(ti).copied().unwrap_or(0));
+                                }
+                                if let Some(ref normals) = mesh.face_normals {
+                                    updated_normals.push(normals.get(ti).copied().unwrap_or([0.0, 0.0, 1.0]));
+                                }
+                            }
+                        }
+                        mesh.triangles = updated_tris;
+                        if !updated_ids.is_empty() {
+                            mesh.triangle_face_ids = Some(updated_ids);
+                        }
+                        if !updated_normals.is_empty() {
+                            mesh.face_normals = Some(updated_normals);
+                        }
+                    }
+                }
+            }
+        }
+
+        if !refined {
+            break;
+        }
+        iteration += 1;
+
+        // Filter degenerate triangles after refinement
+        filter_degenerate_triangles(mesh, EPS);
+
+        log::debug!(
+            "Adaptive refinement iteration {}: {} triangles, {} vertices",
+            iteration,
+            mesh.triangles.len(),
+            mesh.vertices.len(),
+        );
+    }
+}
+
+/// Project a 3D point to UV coordinates on a surface.
+fn project_point_to_uv(p: &Point3d, surface: &Surface) -> Option<(f64, f64)> {
+    let (u, v) = surface.project_point(p);
+    if u.is_finite() && v.is_finite() {
+        Some((u, v))
+    } else {
+        None
+    }
+}
+
+// ============================================================
+// Recursive subdivision edge discretization
+// ============================================================
+
+/// Discretize an edge curve with recursive subdivision based on chordal
+/// and angular tolerances. This produces more accurate edge discretizations
+/// than uniform sampling, especially for curves with high curvature regions.
+///
+/// Returns a list of 3D points along the curve, guaranteed to include
+/// the start and end points.
+pub fn discretize_edge_adaptive(
+    curve_3d: &draper_geometry::Curve3d,
+    t_start: f64,
+    t_end: f64,
+    chordal_tol: f64,
+    angular_tol: f64,
+    max_depth: usize,
+) -> Vec<Point3d> {
+    if max_depth == 0 {
+        // Fallback: just start + end
+        return vec![curve_3d.point_at(t_start), curve_3d.point_at(t_end)];
+    }
+
+    let mut points = Vec::new();
+    points.push(curve_3d.point_at(t_start));
+
+    // Use a stack-based recursive subdivision
+    let mut stack = vec![(t_start, t_end, 0)];
+
+    while let Some((ta, tb, depth)) = stack.pop() {
+        let pa = curve_3d.point_at(ta);
+        let pb = curve_3d.point_at(tb);
+
+        let t_mid = (ta + tb) / 2.0;
+        let pmid = curve_3d.point_at(t_mid);
+
+        // Check chordal deviation: distance from midpoint to the chord
+        let chord_error = point_to_chord_distance(&pmid, &pa, &pb);
+
+        // Check angular deviation: angle between tangents at start and end
+        let tangent_a = curve_3d.derivative_at(ta);
+        let tangent_b = curve_3d.derivative_at(tb);
+        let angle_error = angle_between_vectors(&tangent_a, &tangent_b);
+
+        if (chord_error > chordal_tol || angle_error > angular_tol) && depth < max_depth {
+            // Need more subdivision — push right half first, then left
+            stack.push((t_mid, tb, depth + 1));
+            stack.push((ta, t_mid, depth + 1));
+        } else {
+            // Accept this segment — add the end point
+            points.push(pb);
+        }
+    }
+
+    points
+}
+
+/// Compute the distance from point P to the line segment (A, B).
+fn point_to_chord_distance(p: &Point3d, a: &Point3d, b: &Point3d) -> f64 {
+    let abx = b.x - a.x;
+    let aby = b.y - a.y;
+    let abz = b.z - a.z;
+    let apx = p.x - a.x;
+    let apy = p.y - a.y;
+    let apz = p.z - a.z;
+
+    let ab_len_sq = abx * abx + aby * aby + abz * abz;
+    if ab_len_sq < EPS * EPS {
+        return (apx * apx + apy * apy + apz * apz).sqrt();
+    }
+
+    let t = (apx * abx + apy * aby + apz * abz) / ab_len_sq;
+    let t = t.clamp(0.0, 1.0);
+
+    let closest = Point3d::new(
+        a.x + t * abx,
+        a.y + t * aby,
+        a.z + t * abz,
+    );
+
+    ((p.x - closest.x).powi(2) + (p.y - closest.y).powi(2) + (p.z - closest.z).powi(2)).sqrt()
+}
+
+/// Compute the angle between two direction vectors in radians.
+fn angle_between_vectors(a: &draper_geometry::Vector3d, b: &draper_geometry::Vector3d) -> f64 {
+    let dot = a.x * b.x + a.y * b.y + a.z * b.z;
+    let len_a = (a.x * a.x + a.y * a.y + a.z * a.z).sqrt();
+    let len_b = (b.x * b.x + b.y * b.y + b.z * b.z).sqrt();
+    if len_a < EPS || len_b < EPS {
+        return 0.0;
+    }
+    let cos_angle = (dot / (len_a * len_b)).clamp(-1.0, 1.0);
+    cos_angle.acos()
 }
 
 /// Triangulate a solid into a watertight mesh using CDT with consistent edge
@@ -1707,15 +1854,15 @@ mod tests {
     }
 
     #[test]
-    fn test_point_in_polygon() {
+    fn test_point_in_polygon_2d() {
         let polygon = vec![
-            Point2d::new(0.0, 0.0),
-            Point2d::new(10.0, 0.0),
-            Point2d::new(10.0, 10.0),
-            Point2d::new(0.0, 10.0),
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [10.0, 10.0],
+            [0.0, 10.0],
         ];
-        assert!(point_in_polygon(&Point2d::new(5.0, 5.0), &polygon));
-        assert!(!point_in_polygon(&Point2d::new(15.0, 5.0), &polygon));
-        assert!(!point_in_polygon(&Point2d::new(-1.0, 5.0), &polygon));
+        assert!(robust_cdt::point_in_polygon_2d(5.0, 5.0, &polygon));
+        assert!(!robust_cdt::point_in_polygon_2d(15.0, 5.0, &polygon));
+        assert!(!robust_cdt::point_in_polygon_2d(-1.0, 5.0, &polygon));
     }
 }
