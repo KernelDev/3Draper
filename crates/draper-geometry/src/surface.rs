@@ -1613,80 +1613,107 @@ impl Surface {
                 (best_u, v)
             }
             Surface::Nurbs(n) => {
-                // Optimized NURBS point projection: coarse grid + Newton-Raphson
-                // Previous 3-phase grid search: (11*11)+(9*9)+(7*7)+5 Newton = 256 evaluations
-                // New approach: 5×5 grid + 10 Newton = ~35 evaluations, with better accuracy
-                // because Newton converges fast from a good initial guess.
+                // Robust NURBS point projection: multi-resolution grid + multi-start Newton-Raphson.
+                //
+                // The previous 5×5 grid was too coarse for cylindrical NURBS surfaces
+                // (bolts, rods) where the angular spacing of 2π/5 ≈ 72° meant that
+                // points on the opposite side of the cylinder would project to a
+                // completely wrong UV, and Newton-Raphson would converge to a local
+                // minimum instead of the global one.
+                //
+                // New approach:
+                // Phase 1: Coarse 20×20 grid (400 evaluations) to find candidate minima
+                // Phase 2: Take top-3 candidates and refine each with Newton-Raphson
+                // Phase 3: Return the best result across all candidates
                 let (u_min, u_max) = n.u_range();
                 let (v_min, v_max) = n.v_range();
-                let mut best_u = (u_min + u_max) * 0.5;
-                let mut best_v = (v_min + v_max) * 0.5;
-                let mut best_dist = f64::MAX;
+                let u_range = u_max - u_min;
+                let v_range = v_max - v_min;
 
-                // Phase 1: Coarse 5×5 grid (25 evaluations)
-                let coarse = 5;
+                // Phase 1: Coarse 20×20 grid to find the best candidates
+                let coarse = 20;
+                let mut candidates: Vec<(f64, f64, f64)> = Vec::with_capacity(9);
+                let mut grid_dists: Vec<(f64, f64, f64)> = Vec::with_capacity((coarse + 1) * (coarse + 1));
+
                 for i in 0..=coarse {
                     for j in 0..=coarse {
-                        let u = u_min + (u_max - u_min) * i as f64 / coarse as f64;
-                        let v = v_min + (v_max - v_min) * j as f64 / coarse as f64;
+                        let u = u_min + u_range * i as f64 / coarse as f64;
+                        let v = v_min + v_range * j as f64 / coarse as f64;
                         let p = self.point_at(u, v);
                         let dist = (p.x - point.x).powi(2) + (p.y - point.y).powi(2) + (p.z - point.z).powi(2);
-                        if dist < best_dist {
-                            best_dist = dist;
-                            best_u = u;
-                            best_v = v;
-                        }
+                        grid_dists.push((u, v, dist));
                     }
                 }
 
-                // Phase 2: Newton-Raphson refinement (up to 10 iterations)
-                for _ in 0..10 {
-                    let derivs = n.derivatives_at(best_u, best_v);
-                    let sp = derivs.point;
-                    let dx = sp.x - point.x;
-                    let dy = sp.y - point.y;
-                    let dz = sp.z - point.z;
+                // Sort by distance and take top candidates
+                grid_dists.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+                let n_candidates = 3.min(grid_dists.len());
+                for k in 0..n_candidates {
+                    candidates.push(grid_dists[k]);
+                }
 
-                    // Gradient: g = [dS/du · (S-P), dS/dv · (S-P)]
-                    let gu = derivs.du.x * dx + derivs.du.y * dy + derivs.du.z * dz;
-                    let gv = derivs.dv.x * dx + derivs.dv.y * dy + derivs.dv.z * dz;
+                // Phase 2: Refine each candidate with Newton-Raphson
+                let mut best_u = candidates[0].0;
+                let mut best_v = candidates[0].1;
+                let mut best_dist = candidates[0].2;
 
-                    // Hessian approximation (Gauss-Newton)
-                    let hu_u = derivs.du.x * derivs.du.x + derivs.du.y * derivs.du.y + derivs.du.z * derivs.du.z;
-                    let hu_v = derivs.du.x * derivs.dv.x + derivs.du.y * derivs.dv.y + derivs.du.z * derivs.dv.z;
-                    let hv_v = derivs.dv.x * derivs.dv.x + derivs.dv.y * derivs.dv.y + derivs.dv.z * derivs.dv.z;
+                for (init_u, init_v, _) in &candidates {
+                    let mut cu = *init_u;
+                    let mut cv = *init_v;
+                    let mut cd = f64::MAX;
 
-                    let det = hu_u * hv_v - hu_v * hu_v;
-                    if det.abs() < 1e-20 { break; }
+                    for _ in 0..15 {
+                        let derivs = n.derivatives_at(cu, cv);
+                        let sp = derivs.point;
+                        let dx = sp.x - point.x;
+                        let dy = sp.y - point.y;
+                        let dz = sp.z - point.z;
 
-                    let du = -(hv_v * gu - hu_v * gv) / det;
-                    let dv = -(-hu_v * gu + hu_u * gv) / det;
+                        let gu = derivs.du.x * dx + derivs.du.y * dy + derivs.du.z * dz;
+                        let gv = derivs.dv.x * dx + derivs.dv.y * dy + derivs.dv.z * dz;
 
-                    // Clamp step size relative to parametric range
-                    let u_range = u_max - u_min;
-                    let v_range = v_max - v_min;
-                    let step_limit_u = u_range * 0.1;
-                    let step_limit_v = v_range * 0.1;
-                    let du = du.clamp(-step_limit_u, step_limit_u);
-                    let dv = dv.clamp(-step_limit_v, step_limit_v);
+                        let hu_u = derivs.du.x * derivs.du.x + derivs.du.y * derivs.du.y + derivs.du.z * derivs.du.z;
+                        let hu_v = derivs.du.x * derivs.dv.x + derivs.du.y * derivs.dv.y + derivs.du.z * derivs.dv.z;
+                        let hv_v = derivs.dv.x * derivs.dv.x + derivs.dv.y * derivs.dv.y + derivs.dv.z * derivs.dv.z;
 
-                    let new_u = (best_u + du).clamp(u_min, u_max);
-                    let new_v = (best_v + dv).clamp(v_min, v_max);
+                        let det = hu_u * hv_v - hu_v * hu_v;
+                        if det.abs() < 1e-20 { break; }
 
-                    let new_p = self.point_at(new_u, new_v);
-                    let new_dist_sq = (new_p.x - point.x).powi(2) + (new_p.y - point.y).powi(2) + (new_p.z - point.z).powi(2);
+                        let du = -(hv_v * gu - hu_v * gv) / det;
+                        let dv = -(-hu_v * gu + hu_u * gv) / det;
 
-                    if new_dist_sq < best_dist {
-                        if (best_dist - new_dist_sq) < 1e-10 * best_dist.max(1e-20) {
-                            best_u = new_u;
-                            best_v = new_v;
-                            break; // Converged
+                        // Clamp step size relative to parametric range
+                        let step_limit_u = u_range * 0.1;
+                        let step_limit_v = v_range * 0.1;
+                        let du = du.clamp(-step_limit_u, step_limit_u);
+                        let dv = dv.clamp(-step_limit_v, step_limit_v);
+
+                        let new_u = (cu + du).clamp(u_min, u_max);
+                        let new_v = (cv + dv).clamp(v_min, v_max);
+
+                        let new_p = self.point_at(new_u, new_v);
+                        let new_dist_sq = (new_p.x - point.x).powi(2) + (new_p.y - point.y).powi(2) + (new_p.z - point.z).powi(2);
+
+                        if new_dist_sq < cd {
+                            if (cd - new_dist_sq) < 1e-10 * cd.max(1e-20) {
+                                cu = new_u;
+                                cv = new_v;
+                                cd = new_dist_sq;
+                                break; // Converged
+                            }
+                            cu = new_u;
+                            cv = new_v;
+                            cd = new_dist_sq;
+                        } else {
+                            break; // Not improving
                         }
-                        best_u = new_u;
-                        best_v = new_v;
-                        best_dist = new_dist_sq;
-                    } else {
-                        break; // Not improving
+                    }
+
+                    // Phase 3: Keep the best across all candidates
+                    if cd < best_dist {
+                        best_dist = cd;
+                        best_u = cu;
+                        best_v = cv;
                     }
                 }
 

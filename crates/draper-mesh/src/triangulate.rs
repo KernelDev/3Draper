@@ -711,6 +711,252 @@ fn collect_face_boundary_points(face: &Face) -> Vec<Point3d> {
     points
 }
 
+/// Collect boundary UV coordinates from a face's outer wire using pcurves.
+///
+/// When CoEdge.curve_2d or CoEdge.pcurve is available, uses them directly
+/// for accurate UV coordinates (no projection error). Otherwise falls back
+/// to surface.project_point().
+///
+/// Returns Vec<Point2d> with the same length as collect_face_boundary_points()
+/// would return for the same face. IMPORTANT: The deduplication logic must
+/// match exactly, so we compute 3D and UV points together.
+fn collect_face_boundary_points_with_uv(
+    face: &Face,
+    surface: &Surface,
+) -> (Vec<Point3d>, Vec<Point2d>) {
+    let mut points_3d = Vec::new();
+    let mut points_uv = Vec::new();
+
+    if let Some(ref wire) = face.outer_wire {
+        for coedge in &wire.coedges {
+            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+            if let Some(edge) = edge {
+                if edge.degenerate {
+                    continue;
+                }
+
+                // Check if this coedge has an analytical curve_2d (PCURVE from STEP)
+                let has_curve_2d = coedge.curve_2d.is_some();
+                let has_pcurve = coedge.pcurve.is_some();
+
+                if has_curve_2d || has_pcurve {
+                    // Sample using pcurve for accurate UV coordinates
+                    let edge_pts_3d = sample_edge_points(edge, EDGE_SAMPLES);
+                    let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+                    let should_reverse = !coedge.forward != edge_is_reversed;
+
+                    // Sample UV from the pcurve at the same parameter values
+                    let (tmin, tmax) = edge.param_range;
+                    let (pmin, pmax) = if tmin <= tmax { (tmin, tmax) } else { (tmax, tmin) };
+
+                    let mut edge_pts_uv: Vec<Point2d> = if let Some(ref curve_2d) = coedge.curve_2d {
+                        // Use analytical curve_2d (most accurate)
+                        let (c2d_t_min, c2d_t_max) = curve_2d.param_range();
+                        (0..EDGE_SAMPLES).map(|i| {
+                            let t_frac = i as f64 / EDGE_SAMPLES as f64;
+                            let edge_t = pmin + t_frac * (pmax - pmin);
+                            // Map edge parameter fraction to curve_2d parameter
+                            let norm_t = (edge_t - pmin) / (pmax - pmin).max(1e-15);
+                            let curve_t = c2d_t_min + norm_t * (c2d_t_max - c2d_t_min);
+                            curve_2d.point_at(curve_t)
+                        }).collect()
+                    } else if let Some(ref pcurve) = coedge.pcurve {
+                        // Use pcurve polyline (interpolate)
+                        let n_pcurve = pcurve.polyline_2d.len();
+                        if n_pcurve == 0 {
+                            edge_pts_3d.iter().map(|p| {
+                                let (u, v) = surface.project_point(p);
+                                Point2d::new(u, v)
+                            }).collect()
+                        } else if n_pcurve == 1 {
+                            vec![pcurve.polyline_2d[0]; edge_pts_3d.len()]
+                        } else {
+                            (0..EDGE_SAMPLES).map(|i| {
+                                let t_frac = i as f64 / EDGE_SAMPLES as f64;
+                                let idx_f = t_frac * (n_pcurve - 1) as f64;
+                                let idx_lo = idx_f.floor() as usize;
+                                let idx_hi = (idx_lo + 1).min(n_pcurve - 1);
+                                let frac = idx_f - idx_lo as f64;
+                                let lo = pcurve.polyline_2d[idx_lo];
+                                let hi = pcurve.polyline_2d[idx_hi];
+                                Point2d::new(
+                                    lo.u + frac * (hi.u - lo.u),
+                                    lo.v + frac * (hi.v - lo.v),
+                                )
+                            }).collect()
+                        }
+                    } else {
+                        // Unreachable (both checked above), but fallback
+                        edge_pts_3d.iter().map(|p| {
+                            let (u, v) = surface.project_point(p);
+                            Point2d::new(u, v)
+                        }).collect()
+                    };
+
+                    if should_reverse {
+                        edge_pts_uv.reverse();
+                    }
+
+                    points_3d.extend(edge_pts_3d);
+                    points_uv.extend(edge_pts_uv);
+                } else {
+                    // No pcurve — fall back to surface.project_point()
+                    let edge_pts_3d = sample_edge_points(edge, EDGE_SAMPLES);
+                    let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+                    let should_reverse = !coedge.forward != edge_is_reversed;
+
+                    let edge_pts_uv: Vec<Point2d> = edge_pts_3d.iter().map(|p| {
+                        let (u, v) = surface.project_point(p);
+                        Point2d::new(u, v)
+                    }).collect();
+
+                    // Reverse 3D points to match canonical direction logic
+                    let mut edge_pts_3d = edge_pts_3d;
+                    if should_reverse {
+                        edge_pts_3d.reverse();
+                        // Also reverse UVs correspondingly
+                        let mut edge_pts_uv = edge_pts_uv;
+                        edge_pts_uv.reverse();
+                        points_3d.extend(edge_pts_3d);
+                        points_uv.extend(edge_pts_uv);
+                    } else {
+                        points_3d.extend(edge_pts_3d);
+                        points_uv.extend(edge_pts_uv);
+                    }
+                }
+            }
+        }
+    }
+
+    // Remove duplicate consecutive points (within tolerance) — keep 3D and UV in sync
+    if !points_3d.is_empty() {
+        let mut unique_3d = vec![points_3d[0]];
+        let mut unique_uv = vec![points_uv[0]];
+        for i in 1..points_3d.len() {
+            if let Some(last) = unique_3d.last() {
+                if !last.is_coincident_with(&points_3d[i]) {
+                    unique_3d.push(points_3d[i]);
+                    unique_uv.push(points_uv[i]);
+                }
+            }
+        }
+        // Also check last vs first (closed loop)
+        if unique_3d.len() > 1 {
+            if let Some(last) = unique_3d.last() {
+                if last.is_coincident_with(&unique_3d[0]) {
+                    unique_3d.pop();
+                    unique_uv.pop();
+                }
+            }
+        }
+        points_3d = unique_3d;
+        points_uv = unique_uv;
+    }
+
+    (points_3d, points_uv)
+}
+
+/// Collect hole UV coordinates from a face's inner wires using pcurves.
+fn collect_face_hole_points_with_uv(
+    face: &Face,
+    surface: &Surface,
+) -> (Vec<Vec<Point3d>>, Vec<Vec<Point2d>>) {
+    let mut holes_3d = Vec::new();
+    let mut holes_uv = Vec::new();
+
+    for wire in &face.inner_wires {
+        let mut pts_3d = Vec::new();
+        let mut pts_uv = Vec::new();
+
+        for coedge in &wire.coedges {
+            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+            if let Some(edge) = edge {
+                if edge.degenerate {
+                    continue;
+                }
+
+                let edge_pts_3d = sample_edge_points(edge, EDGE_SAMPLES);
+                let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+                let should_reverse = !coedge.forward != edge_is_reversed;
+
+                let edge_pts_uv: Vec<Point2d> = if let Some(ref curve_2d) = coedge.curve_2d {
+                    let (tmin, tmax) = edge.param_range;
+                    let (pmin, pmax) = if tmin <= tmax { (tmin, tmax) } else { (tmax, tmin) };
+                    let (c2d_t_min, c2d_t_max) = curve_2d.param_range();
+                    (0..EDGE_SAMPLES).map(|i| {
+                        let t_frac = i as f64 / EDGE_SAMPLES as f64;
+                        let norm_t = t_frac;
+                        let curve_t = c2d_t_min + norm_t * (c2d_t_max - c2d_t_min);
+                        curve_2d.point_at(curve_t)
+                    }).collect()
+                } else if let Some(ref pcurve) = coedge.pcurve {
+                    let n_pcurve = pcurve.polyline_2d.len();
+                    if n_pcurve <= 1 {
+                        edge_pts_3d.iter().map(|p| {
+                            let (u, v) = surface.project_point(p);
+                            Point2d::new(u, v)
+                        }).collect()
+                    } else {
+                        (0..EDGE_SAMPLES).map(|i| {
+                            let t_frac = i as f64 / EDGE_SAMPLES as f64;
+                            let idx_f = t_frac * (n_pcurve - 1) as f64;
+                            let idx_lo = idx_f.floor() as usize;
+                            let idx_hi = (idx_lo + 1).min(n_pcurve - 1);
+                            let frac = idx_f - idx_lo as f64;
+                            let lo = pcurve.polyline_2d[idx_lo];
+                            let hi = pcurve.polyline_2d[idx_hi];
+                            Point2d::new(
+                                lo.u + frac * (hi.u - lo.u),
+                                lo.v + frac * (hi.v - lo.v),
+                            )
+                        }).collect()
+                    }
+                } else {
+                    edge_pts_3d.iter().map(|p| {
+                        let (u, v) = surface.project_point(p);
+                        Point2d::new(u, v)
+                    }).collect()
+                };
+
+                let mut edge_pts_3d = edge_pts_3d;
+                let mut edge_pts_uv = edge_pts_uv;
+                if should_reverse {
+                    edge_pts_3d.reverse();
+                    edge_pts_uv.reverse();
+                }
+                pts_3d.extend(edge_pts_3d);
+                pts_uv.extend(edge_pts_uv);
+            }
+        }
+
+        // Deduplicate — keep 3D and UV in sync
+        if !pts_3d.is_empty() {
+            let mut unique_3d = vec![pts_3d[0]];
+            let mut unique_uv = vec![pts_uv[0]];
+            for i in 1..pts_3d.len() {
+                if let Some(last) = unique_3d.last() {
+                    if !last.is_coincident_with(&pts_3d[i]) {
+                        unique_3d.push(pts_3d[i]);
+                        unique_uv.push(pts_uv[i]);
+                    }
+                }
+            }
+            if unique_3d.len() > 1 {
+                if let Some(last) = unique_3d.last() {
+                    if last.is_coincident_with(&unique_3d[0]) {
+                        unique_3d.pop();
+                        unique_uv.pop();
+                    }
+                }
+            }
+            holes_3d.push(unique_3d);
+            holes_uv.push(unique_uv);
+        }
+    }
+
+    (holes_3d, holes_uv)
+}
+
 /// Collect boundary points from a face's inner wires (holes).
 fn collect_face_hole_points(face: &Face) -> Vec<Vec<Point3d>> {
     let mut holes = Vec::new();
@@ -2191,21 +2437,16 @@ fn triangulate_extrusion_face(face: &Face, ext: &draper_geometry::ExtrusionSurfa
 /// 5. earcutr-based triangulation (O(n log n), handles holes natively)
 /// 6. Boundary 3D points used directly for watertight meshes
 fn triangulate_nurbs_cdt(face: &Face, surface: &Surface, params: &TriangulationParams) -> TriangleMesh {
-    // Collect boundary points from the face
-    let boundary_3d = collect_face_boundary_points(face);
+    // Collect boundary points AND UV coordinates using pcurves when available.
+    // This is CRITICAL for NURBS surfaces — surface.project_point() is
+    // unreliable (5×5 grid → Newton-Raphson converges to wrong minimum),
+    // but PCURVE data from STEP files gives exact UV coordinates.
+    let (boundary_3d, boundary_uvs) = collect_face_boundary_points_with_uv(face, surface);
     if boundary_3d.len() < 3 {
         return TriangleMesh::new();
     }
 
-    let holes_3d = collect_face_hole_points(face);
-
-    // Project boundary points to 2D UV space
-    let boundary_uvs: Vec<Point2d> = boundary_3d.iter()
-        .map(|p| {
-            let (u, v) = surface.project_point(p);
-            Point2d::new(u, v)
-        })
-        .collect();
+    let (holes_3d, holes_uvs) = collect_face_hole_points_with_uv(face, surface);
 
     // Check if UV projection is valid
     if boundary_uvs.iter().any(|uv| !uv.u.is_finite() || !uv.v.is_finite()) {
@@ -2223,16 +2464,6 @@ fn triangulate_nurbs_cdt(face: &Face, surface: &Surface, params: &TriangulationP
         boundary_uvs.iter().map(|uv| uv.v).fold(f64::MAX, f64::min),
         boundary_uvs.iter().map(|uv| uv.v).fold(f64::MIN, f64::max),
     );
-
-    // Project hole points to UV
-    let holes_uvs: Vec<Vec<Point2d>> = holes_3d.iter()
-        .map(|hole| hole.iter()
-            .map(|p| {
-                let (u, v) = surface.project_point(p);
-                Point2d::new(u, v)
-            })
-            .collect())
-        .collect();
 
     // Check hole UV validity
     if holes_uvs.iter().any(|h| h.iter().any(|uv| !uv.u.is_finite() || !uv.v.is_finite())) {
@@ -2705,9 +2936,9 @@ fn triangulate_plane_with_boundary_and_holes_uv(
 fn triangulate_cylinder_face_with_boundary_uv(
     cyl: &CylinderSurface,
     boundary_points: &[Point3d],
-    _boundary_uvs: &[Point2d],
-    _hole_polylines: &[Vec<Point3d>],
-    _hole_uvs: &[Vec<Point2d>],
+    boundary_uvs: &[Point2d],
+    hole_polylines: &[Vec<Point3d>],
+    hole_uvs: &[Vec<Point2d>],
     forward: bool,
     params: &TriangulationParams,
 ) -> TriangleMesh {
@@ -2715,88 +2946,24 @@ fn triangulate_cylinder_face_with_boundary_uv(
         return TriangleMesh::new();
     }
 
-    // Determine UV range from boundary 3D points
-    let (u_min, u_max, v_min, v_max) = cylinder_uv_range(cyl, boundary_points);
-    let u_range = u_max - u_min;
-
-    // Cylinder is periodic in u. If boundary doesn't cover more than ~half
-    // the period, assume the face needs the full period.
-    let full_circle = if u_range > 1.5 * PI {
-        u_range > 1.9 * PI
-    } else {
-        true
-    };
-
-    let u_start = if full_circle { 0.0 } else { u_min };
-    let u_end = if full_circle { 2.0 * PI } else { u_max };
-
-    let (n_u, n_v) = if params.adaptive {
-        crate::adaptive::required_samples(
-            &Surface::Cylinder(cyl.clone()), u_start, u_end, v_min, v_max,
-            params.max_deviation, params.detail_level,
-        )
-    } else {
-        let n_u = if full_circle { params.angular_samples } else { params.angular_samples.min(48) };
-        (n_u, params.height_samples.max(2))
-    };
-
-    let mut mesh = TriangleMesh::new();
-
-    // Generate vertices: n_v+1 rows (from v_min to v_max inclusive)
-    for j in 0..=n_v {
-        for i in 0..n_u {
-            let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
-            let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
-            let p = cyl.point_at(u, v);
-            let n = cyl.normal_at(u, v);
-            let idx = mesh.add_vertex(p);
-            mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
-        }
-    }
-
-    // Snap boundary row vertices to the cached edge curve 3D points.
-    // This is what makes the mesh watertight — shared edge vertices have
-    // bit-identical 3D positions because they come from the same edge cache.
-    let bottom_ring = extract_boundary_ring_at_v(
-        boundary_points, cyl, v_min, n_u, full_circle, u_start, u_end,
-    );
-    let top_ring = extract_boundary_ring_at_v(
-        boundary_points, cyl, v_max, n_u, full_circle, u_start, u_end,
-    );
-
-    if !bottom_ring.is_empty() && n_u == bottom_ring.len() {
-        for i in 0..n_u {
-            mesh.vertices[i] = bottom_ring[i];
-        }
-    }
-    if !top_ring.is_empty() && n_u == top_ring.len() {
-        let offset = n_v * n_u;
-        for i in 0..n_u {
-            mesh.vertices[offset + i] = top_ring[i];
-        }
-    }
-
-    // Generate triangles
-    let n_u_loop = if full_circle { n_u } else { n_u - 1 };
-    for j in 0..n_v {
-        for i in 0..n_u_loop {
-            let i_next = (i + 1) % n_u;
-            let v0 = (j * n_u + i) as u32;
-            let v1 = (j * n_u + i_next) as u32;
-            let v2 = ((j + 1) * n_u + i_next) as u32;
-            let v3 = ((j + 1) * n_u + i) as u32;
-
-            if forward {
-                mesh.add_triangle(v0, v1, v2);
-                mesh.add_triangle(v0, v2, v3);
-            } else {
-                mesh.add_triangle(v0, v2, v1);
-                mesh.add_triangle(v0, v3, v2);
-            }
-        }
-    }
-
-    mesh
+    // Use the UV-aware consistent triangulation path for cylinders.
+    // The previous grid-based approach had fundamental problems:
+    // 1. It IGNORED boundary_uvs (prefixed with _)
+    // 2. Grid snapping was fragile — only worked for full cylinders
+    // 3. No trimming for partial cylinders → triangles outside the boundary
+    // 4. No hole support
+    //
+    // The consistent UV path handles all of these correctly via earcutr.
+    let surface = Surface::Cylinder(cyl.clone());
+    crate::parametric_domain::triangulate_surface_consistent(
+        &surface,
+        boundary_points,
+        boundary_uvs,
+        hole_polylines,
+        hole_uvs,
+        forward,
+        params,
+    )
 }
 
 /// Triangulate a cone face with pre-computed UV coordinates and hole UV coordinates.
@@ -2806,26 +2973,22 @@ fn triangulate_cylinder_face_with_boundary_uv(
 fn triangulate_cone_face_with_boundary_uv(
     cone: &ConeSurface,
     boundary_points: &[Point3d],
-    _boundary_uvs: &[Point2d],
+    boundary_uvs: &[Point2d],
     hole_polylines: &[Vec<Point3d>],
-    _hole_uvs: &[Vec<Point2d>],
+    hole_uvs: &[Vec<Point2d>],
     forward: bool,
     params: &TriangulationParams,
 ) -> TriangleMesh {
-    // For cones, the existing boundary-based triangulation already handles
-    // apex degeneracy. Use the consistent triangulation for the general case,
-    // but fall back to the non-UV path for cones with apex faces since those
-    // need special handling.
-    //
-    // For now, delegate to the consistent surface triangulation function
-    // which handles all curved surfaces via earcutr in UV space.
+    // Use the consistent UV-aware triangulation path for cones.
+    // This properly handles apex degeneracy, hole support, and
+    // uses the boundary_uvs from STEP PCURVE data for accuracy.
     let surface = Surface::Cone(cone.clone());
     crate::parametric_domain::triangulate_surface_consistent(
         &surface,
         boundary_points,
-        _boundary_uvs,
+        boundary_uvs,
         hole_polylines,
-        _hole_uvs,
+        hole_uvs,
         forward,
         params,
     )
@@ -2837,19 +3000,22 @@ fn triangulate_cone_face_with_boundary_uv(
 fn triangulate_sphere_face_with_boundary_uv(
     sphere: &SphereSurface,
     boundary_points: &[Point3d],
-    _boundary_uvs: &[Point2d],
+    boundary_uvs: &[Point2d],
     hole_polylines: &[Vec<Point3d>],
-    _hole_uvs: &[Vec<Point2d>],
+    hole_uvs: &[Vec<Point2d>],
     forward: bool,
     params: &TriangulationParams,
 ) -> TriangleMesh {
+    // Use the consistent UV-aware triangulation path for spheres.
+    // This properly handles pole degeneracy, hole support, and
+    // uses the boundary_uvs from STEP PCURVE data for accuracy.
     let surface = Surface::Sphere(sphere.clone());
     crate::parametric_domain::triangulate_surface_consistent(
         &surface,
         boundary_points,
-        _boundary_uvs,
+        boundary_uvs,
         hole_polylines,
-        _hole_uvs,
+        hole_uvs,
         forward,
         params,
     )

@@ -156,10 +156,12 @@ impl ParametricDomain {
     /// Initialize the containment grid for fast contains() checks.
     pub fn init_containment_grid(&mut self) {
         if self.containment_grid.is_none() {
-            // Use a 48×48 grid — fine enough for accurate interior point
+            // Use a 128×128 grid — fine enough for accurate interior point
             // generation, especially for complex NURBS boundaries where
             // a coarser grid marks valid interior points as "outside".
-            self.containment_grid = Some(ContainmentGrid::new(self, 48));
+            // The previous 48×48 was too coarse for thin/curved NURBS
+            // regions (bolt threads, rod surfaces).
+            self.containment_grid = Some(ContainmentGrid::new(self, 128));
         }
     }
 
