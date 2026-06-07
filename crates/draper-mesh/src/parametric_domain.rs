@@ -781,10 +781,40 @@ pub fn triangulate_surface_consistent(
                         }
                     }
                 } else {
-                    // UV is completely out of range — full re-projection needed
-                    let (new_u, new_v) = surface.project_point(&boundary_points_3d[i]);
-                    uv.u = new_u;
-                    uv.v = new_v;
+                    // UV is completely out of range — try Newton-Raphson from
+                    // the center of the NURBS parameter range as a starting guess.
+                    // This is much cheaper than surface.project_point() which does
+                    // a 32×32 grid search + Newton-Raphson (~1000+ evaluations).
+                    let center_u = (nurb_u_min + nurb_u_max) * 0.5;
+                    let center_v = (nurb_v_min + nurb_v_max) * 0.5;
+                    let (new_u, new_v) = reproject_nurbs_point(nurbs, &boundary_points_3d[i], center_u, center_v);
+                    // If Newton-Raphson didn't converge well, fall back to project_point()
+                    let new_p = surface.point_at(new_u, new_v);
+                    let dx = new_p.x - boundary_points_3d[i].x;
+                    let dy = new_p.y - boundary_points_3d[i].y;
+                    let dz = new_p.z - boundary_points_3d[i].z;
+                    let err = (dx*dx + dy*dy + dz*dz).sqrt();
+                    if err > uv_tolerance * 10.0 {
+                        // Newton from center didn't converge — try from the out-of-range UV
+                        // as starting point (clamp it to valid range first)
+                        let clamped_u = uv.u.clamp(nurb_u_min, nurb_u_max);
+                        let clamped_v = uv.v.clamp(nurb_v_min, nurb_v_max);
+                        let (nu, nv) = reproject_nurbs_point(nurbs, &boundary_points_3d[i], clamped_u, clamped_v);
+                        let np = surface.point_at(nu, nv);
+                        let ne = ((np.x - boundary_points_3d[i].x).powi(2)
+                                 + (np.y - boundary_points_3d[i].y).powi(2)
+                                 + (np.z - boundary_points_3d[i].z).powi(2)).sqrt();
+                        if ne < err {
+                            uv.u = nu;
+                            uv.v = nv;
+                        } else {
+                            uv.u = new_u;
+                            uv.v = new_v;
+                        }
+                    } else {
+                        uv.u = new_u;
+                        uv.v = new_v;
+                    }
                     fixed_count += 1;
                 }
             }
@@ -835,11 +865,27 @@ pub fn triangulate_surface_consistent(
             "triangulate_surface_consistent: UV polygon area ({:.6}) much smaller than 3D area ({:.6}), ratio={:.6} — re-projecting UVs from scratch",
             uv_area, boundary_3d_area, area_ratio
         );
-        // Re-project all boundary UVs from scratch
-        outer_uv = boundary_points_3d.iter().map(|p| {
-            let (u, v) = surface.project_point(p);
-            Point2d::new(u, v)
-        }).collect();
+        // Re-project all boundary UVs from scratch.
+        // CAUTION: For NURBS surfaces, project_point() is very expensive (~1000 evaluations
+        // per call). To avoid hanging, limit the number of points we re-project and use
+        // Newton-Raphson when possible (if we have an initial UV guess from the bad projection).
+        if matches!(surface, Surface::Nurbs(_)) && boundary_points_3d.len() > 200 {
+            // Too many points for full re-projection on NURBS — use Newton-Raphson
+            // from the existing (bad) UVs instead of expensive project_point()
+            log::warn!("Skipping full NURBS re-projection ({} pts > 200) — using Newton-Raphson from existing UVs", boundary_points_3d.len());
+            for (i, uv) in outer_uv.iter_mut().enumerate() {
+                if let Surface::Nurbs(ref nurbs) = surface {
+                    let (nu, nv) = reproject_nurbs_point(nurbs, &boundary_points_3d[i], uv.u, uv.v);
+                    uv.u = nu;
+                    uv.v = nv;
+                }
+            }
+        } else {
+            outer_uv = boundary_points_3d.iter().map(|p| {
+                let (u, v) = surface.project_point(p);
+                Point2d::new(u, v)
+            }).collect();
+        }
         // Re-normalize
         crate::triangulate::normalize_uv_polygon(&mut outer_uv, u_period, v_period);
         if outer_uv.len() < 3 {
@@ -1152,12 +1198,30 @@ pub fn triangulate_surface_consistent(
     //
     // This is iterative — we repeat until no edge exceeds the
     // tolerance or we hit a maximum iteration count.
+    //
+    // KEY OPTIMIZATION: We build a vertex UV array so that midpoint
+    // UVs can be computed by averaging adjacent vertex UVs instead of
+    // calling surface.project_point(). For NURBS surfaces, project_point()
+    // costs ~1000+ evaluations per call (32×32 grid search + Newton-Raphson),
+    // making chord-error refinement catastrophically slow. By using UV
+    // averaging, each midpoint costs just 1 surface.point_at() evaluation.
     // ============================================================
     if !matches!(surface, Surface::Plane(_)) && params.max_deviation > 0.0 {
-        // Use more iterations for NURBS surfaces since project_point is
-        // less accurate and initial triangulation may be coarser.
-        let max_refine_iters = if matches!(surface, Surface::Nurbs(_)) { 5 } else { 3 };
-        refine_mesh_chord_error(&mut mesh, surface, forward, params.max_deviation, max_refine_iters);
+        let max_refine_iters = 3;
+
+        // Build vertex UV array — maps mesh vertex index to UV coordinate.
+        // This enables O(1) midpoint UV computation instead of O(1000) project_point().
+        let mut vertex_uvs: Vec<Point2d> = vec![Point2d::new(0.0, 0.0); mesh.vertices.len()];
+        for (idx, uv) in all_uv.iter().enumerate() {
+            if let Some(&mesh_idx) = vertex_map.get(&(idx as u32)) {
+                vertex_uvs[mesh_idx as usize] = *uv;
+            }
+        }
+
+        refine_mesh_chord_error_uv(
+            &mut mesh, surface, forward, params.max_deviation, max_refine_iters,
+            &mut vertex_uvs,
+        );
     }
 
     mesh
@@ -1191,6 +1255,7 @@ pub fn triangulate_surface_consistent(
 /// * `forward` — Whether face normal matches surface normal
 /// * `max_deviation` — Maximum allowed chord error
 /// * `max_iterations` — Maximum number of refinement iterations
+#[allow(dead_code)] // Kept for potential non-UV-aware use cases; consistent path uses UV-aware variant
 fn refine_mesh_chord_error(
     mesh: &mut TriangleMesh,
     surface: &Surface,
@@ -1464,6 +1529,337 @@ fn refine_mesh_chord_error(
     }
 }
 
+/// UV-aware chord-error refinement — O(1) per edge instead of O(1000).
+///
+/// This is the fast variant of `refine_mesh_chord_error` that uses pre-computed
+/// UV coordinates for each vertex. Instead of calling the extremely expensive
+/// `surface.project_point()` (which for NURBS costs ~1000+ evaluations per call),
+/// it computes the midpoint UV by averaging adjacent vertex UVs, then evaluates
+/// `surface.point_at(mid_u, mid_v)` directly — a single evaluation.
+///
+/// This provides a ~1000× speedup for NURBS surfaces in the refinement step.
+///
+/// # Arguments
+/// * `mesh` — The triangle mesh to refine
+/// * `surface` — The parametric surface the mesh approximates
+/// * `forward` — Whether face normal matches surface normal
+/// * `max_deviation` — Maximum allowed chord error
+/// * `max_iterations` — Maximum number of refinement iterations
+/// * `vertex_uvs` — UV coordinates for each vertex in the mesh (mutated as new vertices are added)
+fn refine_mesh_chord_error_uv(
+    mesh: &mut TriangleMesh,
+    surface: &Surface,
+    forward: bool,
+    max_deviation: f64,
+    max_iterations: usize,
+    vertex_uvs: &mut Vec<Point2d>,
+) {
+    use std::collections::HashMap;
+
+    // For NURBS, we might need Newton-Raphson refinement of the midpoint UV.
+    // But first, try the simple UV averaging which is correct for well-parameterized surfaces.
+    let is_nurbs = matches!(surface, Surface::Nurbs(_));
+    let (nurb_u_min, nurb_u_max, nurb_v_min, nurb_v_max) = if let Surface::Nurbs(ref nurbs) = surface {
+        (nurbs.u_range().0, nurbs.u_range().1, nurbs.v_range().0, nurbs.v_range().1)
+    } else {
+        (0.0, 1.0, 0.0, 1.0)
+    };
+
+    for _iter in 0..max_iterations {
+        // Find edges that need subdivision
+        let mut edges_to_split: HashMap<(u32, u32), u32> = HashMap::new();
+
+        for tri in &mesh.triangles {
+            for k in 0..3 {
+                let v0 = tri[k];
+                let v1 = tri[(k + 1) % 3];
+                let edge = if v0 < v1 { (v0, v1) } else { (v1, v0) };
+
+                if edges_to_split.contains_key(&edge) {
+                    continue; // Already marked
+                }
+
+                // Compute midpoint UV by averaging — O(1) instead of O(1000)
+                let uv0 = vertex_uvs[v0 as usize];
+                let uv1 = vertex_uvs[v1 as usize];
+                let mid_u = (uv0.u + uv1.u) * 0.5;
+                let mid_v = (uv0.v + uv1.v) * 0.5;
+
+                // Handle periodic surfaces: if UVs wrap around, averaging is wrong.
+                // For periodic u, if |uv0.u - uv1.u| > half_period, one UV is near
+                // the wrap boundary. Adjust the average accordingly.
+                let mid_u = if surface.is_u_periodic() {
+                    let period = 2.0 * PI; // Standard period for our surfaces
+                    let du = (uv1.u - uv0.u).abs();
+                    if du > period * 0.5 {
+                        // UVs wrap around — adjust
+                        let (lo, hi) = if uv0.u < uv1.u { (uv0.u, uv1.u) } else { (uv1.u, uv0.u) };
+                        ((lo + period + hi) * 0.5) % period
+                    } else {
+                        mid_u
+                    }
+                } else {
+                    mid_u
+                };
+
+                let mid_v = if surface.is_v_periodic() {
+                    let period = 2.0 * PI;
+                    let dv = (uv1.v - uv0.v).abs();
+                    if dv > period * 0.5 {
+                        let (lo, hi) = if uv0.v < uv1.v { (uv0.v, uv1.v) } else { (uv1.v, uv0.v) };
+                        ((lo + period + hi) * 0.5) % period
+                    } else {
+                        mid_v
+                    }
+                } else {
+                    mid_v
+                };
+
+                // Clamp to surface parameter range (important for NURBS)
+                let mid_u_clamped = if is_nurbs { mid_u.clamp(nurb_u_min, nurb_u_max) } else { mid_u };
+                let mid_v_clamped = if is_nurbs { mid_v.clamp(nurb_v_min, nurb_v_max) } else { mid_v };
+
+                // Compute the surface point at the midpoint UV — ONE evaluation
+                let p_surf = surface.point_at(mid_u_clamped, mid_v_clamped);
+
+                // Compute 3D midpoint of the edge
+                let p0 = mesh.vertices[v0 as usize];
+                let p1 = mesh.vertices[v1 as usize];
+                let mid_3d = Point3d::new(
+                    (p0.x + p1.x) * 0.5,
+                    (p0.y + p1.y) * 0.5,
+                    (p0.z + p1.z) * 0.5,
+                );
+
+                // Chord error: distance from 3D midpoint to surface point
+                let dx = mid_3d.x - p_surf.x;
+                let dy = mid_3d.y - p_surf.y;
+                let dz = mid_3d.z - p_surf.z;
+                let chord_error = (dx * dx + dy * dy + dz * dz).sqrt();
+
+                if chord_error > max_deviation {
+                    edges_to_split.insert(edge, u32::MAX); // Placeholder
+                }
+            }
+        }
+
+        if edges_to_split.is_empty() {
+            break; // No more edges to split
+        }
+
+        // Insert surface points for each edge to split
+        let mut new_edges: HashMap<(u32, u32), u32> = HashMap::new();
+        for (edge, _) in &edges_to_split {
+            let v0 = edge.0;
+            let v1 = edge.1;
+
+            // Compute midpoint UV by averaging
+            let uv0 = vertex_uvs[v0 as usize];
+            let uv1 = vertex_uvs[v1 as usize];
+            let mut mid_u = (uv0.u + uv1.u) * 0.5;
+            let mut mid_v = (uv0.v + uv1.v) * 0.5;
+
+            // Handle periodic wrapping
+            if surface.is_u_periodic() {
+                let period = 2.0 * PI;
+                let du = (uv1.u - uv0.u).abs();
+                if du > period * 0.5 {
+                    let (lo, hi) = if uv0.u < uv1.u { (uv0.u, uv1.u) } else { (uv1.u, uv0.u) };
+                    mid_u = ((lo + period + hi) * 0.5) % period;
+                }
+            }
+            if surface.is_v_periodic() {
+                let period = 2.0 * PI;
+                let dv = (uv1.v - uv0.v).abs();
+                if dv > period * 0.5 {
+                    let (lo, hi) = if uv0.v < uv1.v { (uv0.v, uv1.v) } else { (uv1.v, uv0.v) };
+                    mid_v = ((lo + period + hi) * 0.5) % period;
+                }
+            }
+
+            // Clamp to surface parameter range
+            if is_nurbs {
+                mid_u = mid_u.clamp(nurb_u_min, nurb_u_max);
+                mid_v = mid_v.clamp(nurb_v_min, nurb_v_max);
+            }
+
+            // For NURBS, optionally refine the midpoint UV using Newton-Raphson
+            // to get a more accurate surface point. This is much cheaper than
+            // project_point() since we have a good initial guess (the averaged UV).
+            let (final_u, final_v, p_surf) = if is_nurbs {
+                if let Surface::Nurbs(ref nurbs) = surface {
+                    // Compute the 3D midpoint
+                    let p0 = mesh.vertices[v0 as usize];
+                    let p1 = mesh.vertices[v1 as usize];
+                    let mid_3d = Point3d::new(
+                        (p0.x + p1.x) * 0.5,
+                        (p0.y + p1.y) * 0.5,
+                        (p0.z + p1.z) * 0.5,
+                    );
+                    // One Newton-Raphson refinement step from the averaged UV
+                    // This is ~15 evaluations instead of ~1000 for project_point()
+                    let (nu, nv) = reproject_nurbs_point(nurbs, &mid_3d, mid_u, mid_v);
+                    let np = surface.point_at(nu, nv);
+                    // Check if Newton result is better than simple averaging
+                    let err_avg = {
+                        let pa = surface.point_at(mid_u, mid_v);
+                        let dx = pa.x - mid_3d.x; let dy = pa.y - mid_3d.y; let dz = pa.z - mid_3d.z;
+                        (dx*dx + dy*dy + dz*dz).sqrt()
+                    };
+                    let err_newton = {
+                        let dx = np.x - mid_3d.x; let dy = np.y - mid_3d.y; let dz = np.z - mid_3d.z;
+                        (dx*dx + dy*dy + dz*dz).sqrt()
+                    };
+                    if err_newton < err_avg {
+                        (nu, nv, np)
+                    } else {
+                        let pa = surface.point_at(mid_u, mid_v);
+                        (mid_u, mid_v, pa)
+                    }
+                } else {
+                    let p = surface.point_at(mid_u, mid_v);
+                    (mid_u, mid_v, p)
+                }
+            } else {
+                let p = surface.point_at(mid_u, mid_v);
+                (mid_u, mid_v, p)
+            };
+
+            let n = surface.normal_at(final_u, final_v);
+
+            let vi = mesh.add_vertex(p_surf);
+            mesh.add_vertex_normal(vi, [n.x, n.y, n.z]);
+
+            // Store UV for the new vertex
+            vertex_uvs.push(Point2d::new(final_u, final_v));
+
+            new_edges.insert(*edge, vi);
+        }
+
+        // Rebuild the triangle list, splitting triangles that have edges marked for subdivision
+        let old_triangles = std::mem::take(&mut mesh.triangles);
+        mesh.triangles.reserve(old_triangles.len());
+
+        for tri in &old_triangles {
+            let mut split_verts = [None; 3];
+            let mut n_splits = 0;
+            for k in 0..3 {
+                let v0 = tri[k];
+                let v1 = tri[(k + 1) % 3];
+                let edge = if v0 < v1 { (v0, v1) } else { (v1, v0) };
+                if let Some(&new_v) = new_edges.get(&edge) {
+                    split_verts[k] = Some(new_v);
+                    n_splits += 1;
+                }
+            }
+
+            if n_splits == 0 {
+                mesh.triangles.push(*tri);
+            } else if n_splits == 1 {
+                let split_k = split_verts.iter().position(|v| v.is_some()).unwrap();
+                let vm = split_verts[split_k].unwrap();
+                let v0 = tri[split_k];
+                let v1 = tri[(split_k + 1) % 3];
+                let v2 = tri[(split_k + 2) % 3];
+
+                if forward {
+                    mesh.triangles.push([v0, vm, v2]);
+                    mesh.triangles.push([vm, v1, v2]);
+                } else {
+                    mesh.triangles.push([v0, v2, vm]);
+                    mesh.triangles.push([vm, v2, v1]);
+                }
+            } else if n_splits == 2 {
+                let split_edges: Vec<usize> = split_verts.iter()
+                    .enumerate()
+                    .filter(|(_, v)| v.is_some())
+                    .map(|(i, _)| i)
+                    .collect();
+                let k0 = split_edges[0];
+                let k1 = split_edges[1];
+                let vm0 = split_verts[k0].unwrap();
+                let vm1 = split_verts[k1].unwrap();
+                let v0 = tri[k0];
+                let v1 = tri[(k0 + 1) % 3];
+                let v2 = tri[(k0 + 2) % 3];
+
+                if (k0 + 1) % 3 == k1 {
+                    if forward {
+                        mesh.triangles.push([v0, vm0, vm1]);
+                        mesh.triangles.push([vm0, v1, vm1]);
+                        mesh.triangles.push([v0, vm1, v2]);
+                    } else {
+                        mesh.triangles.push([v0, vm1, vm0]);
+                        mesh.triangles.push([vm0, vm1, v1]);
+                        mesh.triangles.push([v0, v2, vm1]);
+                    }
+                } else {
+                    if forward {
+                        mesh.triangles.push([v0, vm0, v1]);
+                        mesh.triangles.push([v2, vm1, vm0]);
+                        mesh.triangles.push([vm0, v0, vm1]);
+                    } else {
+                        mesh.triangles.push([v0, v1, vm0]);
+                        mesh.triangles.push([v2, vm0, vm1]);
+                        mesh.triangles.push([vm0, vm1, v0]);
+                    }
+                }
+            } else {
+                // All 3 edges split — triangle becomes 4 triangles
+                let vm0 = split_verts[0].unwrap();
+                let vm1 = split_verts[1].unwrap();
+                let vm2 = split_verts[2].unwrap();
+                let v0 = tri[0];
+                let v1 = tri[1];
+                let v2 = tri[2];
+
+                if forward {
+                    mesh.triangles.push([v0, vm0, vm2]);
+                    mesh.triangles.push([vm0, v1, vm1]);
+                    mesh.triangles.push([vm2, vm1, v2]);
+                    mesh.triangles.push([vm0, vm1, vm2]);
+                } else {
+                    mesh.triangles.push([v0, vm2, vm0]);
+                    mesh.triangles.push([vm0, vm1, v1]);
+                    mesh.triangles.push([vm2, v2, vm1]);
+                    mesh.triangles.push([vm0, vm2, vm1]);
+                }
+            }
+        }
+
+        // Update face_normals if present
+        if let Some(ref mut face_normals) = mesh.face_normals {
+            let n_old = face_normals.len();
+            let n_new = mesh.triangles.len();
+            if n_new > n_old {
+                for i in n_old..n_new {
+                    let tri = mesh.triangles[i];
+                    let p0 = mesh.vertices[tri[0] as usize];
+                    let p1 = mesh.vertices[tri[1] as usize];
+                    let p2 = mesh.vertices[tri[2] as usize];
+                    let ab = [p1.x - p0.x, p1.y - p0.y, p1.z - p0.z];
+                    let ac = [p2.x - p0.x, p2.y - p0.y, p2.z - p0.z];
+                    let nx = ab[1] * ac[2] - ab[2] * ac[1];
+                    let ny = ab[2] * ac[0] - ab[0] * ac[2];
+                    let nz = ab[0] * ac[1] - ab[1] * ac[0];
+                    let len = (nx * nx + ny * ny + nz * nz).sqrt().max(1e-15);
+                    face_normals.push([nx / len, ny / len, nz / len]);
+                }
+            }
+        }
+
+        // Update triangle_face_ids if present
+        if let Some(ref mut face_ids) = mesh.triangle_face_ids {
+            let n_old = face_ids.len();
+            let n_new = mesh.triangles.len();
+            if n_new > n_old {
+                let last_id = face_ids.last().copied().unwrap_or(0);
+                face_ids.extend(std::iter::repeat(last_id).take(n_new - n_old));
+            }
+        }
+    }
+}
+
 // ============================================================
 // Tests
 // ============================================================
@@ -1688,5 +2084,76 @@ mod tests {
 
         assert!(!mesh.triangles.is_empty(), "Should generate triangles");
         assert!(elapsed.as_millis() < 200, "Consistent triangulation should be fast, took {}ms", elapsed.as_millis());
+    }
+
+    #[test]
+    fn test_nurbs_triangulation_performance() {
+        use draper_geometry::{NurbsSurface, Surface, Point3d as P3, Point2d as P2};
+
+        // Create a bicubic NURBS surface (same as the test button in the app)
+        let control_points = vec![
+            vec![P3::new(-50.0, -50.0,  0.0), P3::new(-50.0, -15.0, 10.0), P3::new(-50.0,  15.0, 10.0), P3::new(-50.0,  50.0,  0.0)],
+            vec![P3::new(-15.0, -50.0, 10.0), P3::new(-15.0, -15.0, 30.0), P3::new(-15.0,  15.0, 25.0), P3::new(-15.0,  50.0,  5.0)],
+            vec![P3::new( 15.0, -50.0, 10.0), P3::new( 15.0, -15.0, 25.0), P3::new( 15.0,  15.0, 30.0), P3::new( 15.0,  50.0, 10.0)],
+            vec![P3::new( 50.0, -50.0,  0.0), P3::new( 50.0, -15.0,  5.0), P3::new( 50.0,  15.0, 10.0), P3::new( 50.0,  50.0,  0.0)],
+        ];
+        let weights = vec![vec![1.0; 4]; 4];
+        let u_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+        let v_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+
+        let nurbs = NurbsSurface {
+            u_degree: 3, v_degree: 3,
+            control_points, weights,
+            u_knots, v_knots,
+        };
+
+        let (u_min, u_max) = nurbs.u_range();
+        let (v_min, v_max) = nurbs.v_range();
+        let surface = Surface::Nurbs(nurbs);
+
+        // Sample boundary
+        let mut boundary_3d = Vec::new();
+        let mut boundary_uv = Vec::new();
+        let steps = 20;
+        for i in 0..=steps {
+            let u = u_min + (u_max - u_min) * i as f64 / steps as f64;
+            boundary_3d.push(surface.point_at(u, v_min));
+            boundary_uv.push(P2::new(u, v_min));
+        }
+        for i in 1..=steps {
+            let v = v_min + (v_max - v_min) * i as f64 / steps as f64;
+            boundary_3d.push(surface.point_at(u_max, v));
+            boundary_uv.push(P2::new(u_max, v));
+        }
+        for i in (0..steps).rev() {
+            let u = u_min + (u_max - u_min) * i as f64 / steps as f64;
+            boundary_3d.push(surface.point_at(u, v_max));
+            boundary_uv.push(P2::new(u, v_max));
+        }
+        for i in (1..steps).rev() {
+            let v = v_min + (v_max - v_min) * i as f64 / steps as f64;
+            boundary_3d.push(surface.point_at(u_min, v));
+            boundary_uv.push(P2::new(u_min, v));
+        }
+
+        let params = crate::triangulate::TriangulationParams::default();
+
+        let start = std::time::Instant::now();
+        let mesh = triangulate_surface_consistent(
+            &surface, &boundary_3d, &boundary_uv, &[], &[], true, &params,
+        );
+        let elapsed = start.elapsed();
+
+        assert!(!mesh.triangles.is_empty(), "Should generate triangles");
+        assert!(elapsed.as_millis() < 5000, "NURBS triangulation should be fast (was hanging before), took {}ms", elapsed.as_millis());
+
+        // Quality checks
+        let nan_count = mesh.vertices.iter().filter(|v| !v.x.is_finite() || !v.y.is_finite() || !v.z.is_finite()).count();
+        assert_eq!(nan_count, 0, "No NaN vertices");
+
+        let degen = mesh.triangles.iter().filter(|t| t[0] == t[1] || t[1] == t[2] || t[0] == t[2]).count();
+        assert_eq!(degen, 0, "No degenerate triangles");
+
+        assert!(mesh.triangles.len() >= 50, "Should have at least 50 triangles, got {}", mesh.triangles.len());
     }
 }
