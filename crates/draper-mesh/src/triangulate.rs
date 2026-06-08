@@ -2572,8 +2572,13 @@ fn triangulate_generic_surface(face: &Face, surface: &Surface, params: &Triangul
         (0.0, 2.0 * PI, 0.0, PI)
     };
 
-    // If we have boundary edges, refine the parametric range
-    let (u_min, u_max, v_min, v_max) = if let Some(ref wire) = face.outer_wire {
+    // For NURBS surfaces, we already know the exact UV range from the knot
+    // vectors — there's no need to project boundary points to refine it.
+    // project_point() on NURBS is catastrophically slow (32×32 grid search
+    // + Newton-Raphson ≈ 1767 evaluations per point), so we avoid it entirely.
+    let (u_min, u_max, v_min, v_max) = if let Surface::Nurbs(_) = surface {
+        (base_u_min, base_u_max, base_v_min, base_v_max)
+    } else if let Some(ref wire) = face.outer_wire {
         if wire.coedges.is_empty() {
             (base_u_min, base_u_max, base_v_min, base_v_max)
         } else {

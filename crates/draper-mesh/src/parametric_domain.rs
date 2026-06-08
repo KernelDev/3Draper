@@ -848,48 +848,41 @@ pub fn triangulate_surface_consistent(
     // Step 1.5: Validate UV polygon quality
     //
     // After normalization, check if the UV polygon is degenerate or
-    // self-intersecting. This can happen when NURBS project_point()
+    // self-intersecting. This can happen when project_point()
     // returns inaccurate UV coordinates that, after normalization,
     // produce a polygon that doesn't match the actual surface region.
     //
-    // If the UV polygon area is suspiciously small relative to the
-    // 3D boundary area, re-project all UVs from scratch.
+    // IMPORTANT: The area ratio check is ONLY meaningful for analytic
+    // surfaces (cylinder, sphere, cone, torus, revolution, extrusion)
+    // where UV coordinates have a fixed geometric interpretation
+    // (radians, distances). For NURBS surfaces, the UV parameterization
+    // is completely arbitrary — a surface with UV range [0,1]×[0,1]
+    // can have any 3D area. Therefore, the area ratio is meaningless
+    // for NURBS and we skip this check entirely.
+    //
+    // Additionally, we NEVER call surface.project_point() for NURBS
+    // during triangulation — it does a 32×32 grid search + Newton-Raphson
+    // (~1767 NURBS evaluations per point) which is catastrophically slow
+    // and would hang the application.
     // ============================================================
-    let uv_area = polygon_area_2d(&outer_uv);
-    let boundary_3d_area = polygon_area_3d(boundary_points_3d);
-    // If UV area is <1% of the 3D area (after normalizing both to similar scale),
-    // the UV projection is likely wrong.
-    let area_ratio = if boundary_3d_area > 1e-20 { uv_area / boundary_3d_area } else { 1.0 };
-    if area_ratio < 0.001 && boundary_3d_area > 1e-10 {
-        log::warn!(
-            "triangulate_surface_consistent: UV polygon area ({:.6}) much smaller than 3D area ({:.6}), ratio={:.6} — re-projecting UVs from scratch",
-            uv_area, boundary_3d_area, area_ratio
-        );
-        // Re-project all boundary UVs from scratch.
-        // CAUTION: For NURBS surfaces, project_point() is very expensive (~1000 evaluations
-        // per call). To avoid hanging, limit the number of points we re-project and use
-        // Newton-Raphson when possible (if we have an initial UV guess from the bad projection).
-        if matches!(surface, Surface::Nurbs(_)) && boundary_points_3d.len() > 200 {
-            // Too many points for full re-projection on NURBS — use Newton-Raphson
-            // from the existing (bad) UVs instead of expensive project_point()
-            log::warn!("Skipping full NURBS re-projection ({} pts > 200) — using Newton-Raphson from existing UVs", boundary_points_3d.len());
-            for (i, uv) in outer_uv.iter_mut().enumerate() {
-                if let Surface::Nurbs(ref nurbs) = surface {
-                    let (nu, nv) = reproject_nurbs_point(nurbs, &boundary_points_3d[i], uv.u, uv.v);
-                    uv.u = nu;
-                    uv.v = nv;
-                }
-            }
-        } else {
+    if !matches!(surface, Surface::Nurbs(_)) {
+        let uv_area = polygon_area_2d(&outer_uv);
+        let boundary_3d_area = polygon_area_3d(boundary_points_3d);
+        let area_ratio = if boundary_3d_area > 1e-20 { uv_area / boundary_3d_area } else { 1.0 };
+        if area_ratio < 0.001 && boundary_3d_area > 1e-10 {
+            log::warn!(
+                "triangulate_surface_consistent: UV polygon area ({:.6}) much smaller than 3D area ({:.6}), ratio={:.6} — re-projecting UVs from scratch",
+                uv_area, boundary_3d_area, area_ratio
+            );
             outer_uv = boundary_points_3d.iter().map(|p| {
                 let (u, v) = surface.project_point(p);
                 Point2d::new(u, v)
             }).collect();
-        }
-        // Re-normalize
-        crate::triangulate::normalize_uv_polygon(&mut outer_uv, u_period, v_period);
-        if outer_uv.len() < 3 {
-            return TriangleMesh::new();
+            // Re-normalize
+            crate::triangulate::normalize_uv_polygon(&mut outer_uv, u_period, v_period);
+            if outer_uv.len() < 3 {
+                return TriangleMesh::new();
+            }
         }
     }
 
@@ -1207,7 +1200,9 @@ pub fn triangulate_surface_consistent(
     // averaging, each midpoint costs just 1 surface.point_at() evaluation.
     // ============================================================
     if !matches!(surface, Surface::Plane(_)) && params.max_deviation > 0.0 {
-        let max_refine_iters = 3;
+        // Use more iterations for NURBS surfaces which need more refinement
+        // to capture complex curvature (bicubic surfaces, bolt threads, etc.)
+        let max_refine_iters = if matches!(surface, Surface::Nurbs(_)) { 5 } else { 3 };
 
         // Build vertex UV array — maps mesh vertex index to UV coordinate.
         // This enables O(1) midpoint UV computation instead of O(1000) project_point().

@@ -870,7 +870,7 @@ impl ViewerApp {
         let surface = Surface::Nurbs(nurbs_surface);
         let mut boundary_3d = Vec::new();
         let mut boundary_uv = Vec::new();
-        let steps = 20;
+        let steps = 32;
         // Bottom edge (v = v_min)
         for i in 0..=steps {
             let u = u_min + (u_max - u_min) * i as f64 / steps as f64;
