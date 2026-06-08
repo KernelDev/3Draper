@@ -2968,22 +2968,30 @@ fn triangulate_cylinder_face_with_boundary_uv(
         );
     }
 
-    // Determine UV range from boundary UVs
-    let mut u_min = f64::MAX;
-    let mut u_max = f64::MIN;
+    // Determine UV range from boundary UVs.
+    // IMPORTANT: Use compute_angular_range() to handle angular wrap-around
+    // correctly. When boundary UVs come from project_point() (atan2), they
+    // can be in (-π, π], and raw min/max would give wrong results for
+    // partial cylinders crossing the seam at u=±π.
+    let u_angles: Vec<f64> = boundary_uvs.iter().map(|uv| uv.u).collect();
+    let (u_min, u_max) = compute_angular_range(&u_angles);
+
     let mut v_min = f64::MAX;
     let mut v_max = f64::MIN;
     for uv in boundary_uvs {
-        u_min = u_min.min(uv.u);
-        u_max = u_max.max(uv.u);
         v_min = v_min.min(uv.v);
         v_max = v_max.max(uv.v);
     }
 
-    // Handle wrap-around: if boundary UVs span nearly the full period,
-    // use the full period range for the grid
     let u_range = u_max - u_min;
-    let full_circle = u_range > 1.5 * PI;
+    // Two-tier full-circle check (same as non-UV path):
+    // - Small range: boundary doesn't constrain u, assume full circle
+    // - Large range (>1.5π): only full circle if >1.9π (~342°)
+    let full_circle = if u_range > 1.5 * PI {
+        u_range > 1.9 * PI
+    } else {
+        true
+    };
     let u_start = if full_circle { 0.0 } else { u_min };
     let u_end = if full_circle { 2.0 * PI } else { u_max };
 
@@ -3004,9 +3012,12 @@ fn triangulate_cylinder_face_with_boundary_uv(
 
     // Generate vertices: n_v+1 rows (from v_min to v_max inclusive)
     // For full circles, the first and last column are the same point (seam)
+    // For partial cylinders, n_u_cols = n_u+1 to include both endpoints
     let n_u_cols = if full_circle { n_u } else { n_u + 1 };
     for j in 0..=n_v {
         for i in 0..n_u_cols {
+            // For partial cylinders: use i/n_u so that i=n_u gives u_end
+            // For full circles: use i/n_u so that i=n_u wraps to u_start
             let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
             let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
             let p = cyl.point_at(u, v);
@@ -3019,11 +3030,14 @@ fn triangulate_cylinder_face_with_boundary_uv(
     // Snap boundary row vertices to the cached boundary 3D points.
     // This ensures watertightness — shared edges between adjacent faces
     // produce bit-identical 3D vertex positions.
+    //
+    // IMPORTANT: Pass n_u (not n_u_cols) so that the ring extraction
+    // computes the same u values as the grid vertices above.
     let bottom_ring = extract_boundary_ring_at_v_from_uv(
-        boundary_points, boundary_uvs, cyl, v_min, n_u_cols, full_circle, u_start, u_end,
+        boundary_points, boundary_uvs, cyl, v_min, n_u, full_circle, u_start, u_end,
     );
     let top_ring = extract_boundary_ring_at_v_from_uv(
-        boundary_points, boundary_uvs, cyl, v_max, n_u_cols, full_circle, u_start, u_end,
+        boundary_points, boundary_uvs, cyl, v_max, n_u, full_circle, u_start, u_end,
     );
 
     if !bottom_ring.is_empty() && n_u_cols == bottom_ring.len() {
@@ -3064,6 +3078,10 @@ fn triangulate_cylinder_face_with_boundary_uv(
 /// Extract boundary ring points at a specific v value from boundary UV data.
 /// Unlike extract_boundary_ring_at_v (which uses project_point), this version
 /// uses the pre-computed boundary UVs to find boundary points near the target v.
+///
+/// The `n_u` parameter is the grid resolution (number of quads in u direction).
+/// For full circles, generates n_u points (the last wraps to the first).
+/// For partial cylinders, generates n_u+1 points (including both endpoints).
 fn extract_boundary_ring_at_v_from_uv(
     boundary_3d: &[Point3d],
     boundary_uvs: &[Point2d],
@@ -3092,9 +3110,14 @@ fn extract_boundary_ring_at_v_from_uv(
     // Sort by u
     ring_pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Generate n_u points at evenly spaced u values, using boundary points when close
-    let mut result = Vec::with_capacity(n_u);
-    for i in 0..n_u {
+    // Number of output points matches grid vertex count:
+    // - Full circle: n_u points (last wraps to first)
+    // - Partial cylinder: n_u+1 points (includes both endpoints at u_start and u_end)
+    let n_pts = if full_circle { n_u } else { n_u + 1 };
+    let mut result = Vec::with_capacity(n_pts);
+    for i in 0..n_pts {
+        // Use the same formula as the grid vertex generation: i / n_u
+        // This ensures u values match exactly between grid and ring points.
         let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
         // Find the closest boundary point by angle
         let mut best_dist = f64::MAX;
