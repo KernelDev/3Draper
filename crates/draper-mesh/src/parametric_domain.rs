@@ -2129,7 +2129,8 @@ mod tests {
         let params = crate::triangulate::TriangulationParams::default();
 
         let start = std::time::Instant::now();
-        let mesh = triangulate_surface_consistent(
+        // Use the public API that routes NURBS through the grid-based path
+        let mesh = crate::triangulate::triangulate_face_with_boundary_and_holes_uv(
             &surface, &boundary_3d, &boundary_uv, &[], &[], true, &params,
         );
         let elapsed = start.elapsed();
