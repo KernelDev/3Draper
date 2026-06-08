@@ -6,9 +6,9 @@
     <title>3Draper — 3D Geometric Kernel</title>
     <meta name="description" content="3Draper: A 3D geometric kernel with B-Rep topology, STEP/STL I/O, and interactive 3D viewer running entirely in your browser via WebAssembly.">
     
-<script type="module">
-import init, * as bindings from '/draper-viewer-95099ac981288df6.js';
-const wasm = await init({ module_or_path: '/draper-viewer-95099ac981288df6_bg.wasm' });
+<script type="module" nonce="fzcsVjE5okW9CPiS3BI4DA==">
+import init, * as bindings from '/draper-viewer-11ea2b60e473db59.js';
+const wasm = await init('/draper-viewer-11ea2b60e473db59_bg.wasm');
 
 
 window.wasmBindings = bindings;
@@ -78,7 +78,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
             100% { transform: rotate(360deg); }
         }
     </style>
-<link rel="modulepreload" href="/draper-viewer-95099ac981288df6.js" crossorigin="anonymous" integrity="sha384-5nFWwyolqDOAs41mGmKvmSiSsbeR2UXxKH5ydrp+BcRUQCxsngdZ6f0JHrFbHAI7"><link rel="preload" href="/draper-viewer-95099ac981288df6_bg.wasm" crossorigin="anonymous" integrity="sha384-uem1jxu6i8EmHo0WxgqpZ0WW/D7yvBAM86X+hjvg7vhiFHyBZ+mTf3iHqJcPfX/c" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="/draper-viewer-11ea2b60e473db59.js" crossorigin=anonymous integrity="sha384-Hv4BMme2Xb0dfFhIR4mLWhy3B8zh+LBBtcpjB9fB0MunQjTdPVvfQSOiAx790kPI"><link rel="preload" href="/draper-viewer-11ea2b60e473db59_bg.wasm" crossorigin=anonymous integrity="sha384-Y16fubq1nGSFn8uVdkuUTh0l+63Ksgsj+lfB6SmGygVVMghP5F6NIq9VdAKVkFzi" as="fetch" type="application/wasm"></head>
 <body>
     <div id="loading">
         <div class="logo">3Draper<span>Viewer</span></div>
