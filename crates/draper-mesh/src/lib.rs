@@ -35,3 +35,4 @@ pub use export::*;
 pub use certification::*;
 pub use watertight::*;
 pub use cdt_triangulate::*;
+pub use parametric_domain::reproject_nurbs_point;

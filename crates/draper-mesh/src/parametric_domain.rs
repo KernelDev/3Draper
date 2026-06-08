@@ -295,7 +295,7 @@ fn uv_triangles_to_3d(
 /// Re-project a 3D point onto a NURBS surface using Newton-Raphson
 /// starting from an initial UV guess. This is much more accurate and
 /// faster than a full grid search when we have a reasonable initial guess.
-fn reproject_nurbs_point(
+pub fn reproject_nurbs_point(
     nurbs: &draper_geometry::NurbsSurface,
     point: &Point3d,
     init_u: f64,

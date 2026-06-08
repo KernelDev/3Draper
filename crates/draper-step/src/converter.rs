@@ -7436,12 +7436,46 @@ impl<'a> StepConverter<'a> {
             }
         } else {
             // No PCURVE — sample 3D points and project to surface
-            for i in 0..n_samples {
-                let t = i as f64 / (n_samples - 1).max(1) as f64;
-                if let Some(p) = edge.point_at(t) {
-                    let (u, v) = surface.project_point(&p);
-                    pts_3d.push(p);
-                    pts_uv.push(Point2d::new(u, v));
+            // For NURBS, use Newton-Raphson from previous UV as starting guess
+            // (much faster than full project_point() which does 146+ evaluations per point).
+            if let Surface::Nurbs(ref nurbs) = surface {
+                let (u_min, u_max) = nurbs.u_range();
+                let (v_min, v_max) = nurbs.v_range();
+                let mut prev_u = (u_min + u_max) * 0.5;
+                let mut prev_v = (v_min + v_max) * 0.5;
+                let mut first = true;
+                for i in 0..n_samples {
+                    let t = i as f64 / (n_samples - 1).max(1) as f64;
+                    if let Some(p) = edge.point_at(t) {
+                        let (u, v) = if first {
+                            first = false;
+                            surface.project_point(&p)
+                        } else {
+                            let (u, v) = draper_mesh::reproject_nurbs_point(nurbs, &p, prev_u, prev_v);
+                            // Verify Newton convergence
+                            let pp = surface.point_at(u, v);
+                            let err = (pp.x - p.x).powi(2) + (pp.y - p.y).powi(2) + (pp.z - p.z).powi(2);
+                            if err.sqrt() > 1e-3 {
+                                surface.project_point(&p)
+                            } else {
+                                (u, v)
+                            }
+                        };
+                        pts_3d.push(p);
+                        pts_uv.push(Point2d::new(u, v));
+                        prev_u = u;
+                        prev_v = v;
+                    }
+                }
+            } else {
+                // Non-NURBS: fast analytic projection
+                for i in 0..n_samples {
+                    let t = i as f64 / (n_samples - 1).max(1) as f64;
+                    if let Some(p) = edge.point_at(t) {
+                        let (u, v) = surface.project_point(&p);
+                        pts_3d.push(p);
+                        pts_uv.push(Point2d::new(u, v));
+                    }
                 }
             }
         }
@@ -7488,11 +7522,60 @@ impl<'a> StepConverter<'a> {
             }).collect()
         } else {
             // No PCURVE — project 3D points to surface.
-            // The 3D points are already computed by discretize(), so we use them directly.
-            points_3d.iter().map(|p| {
-                let (u, v) = surface.project_point(p);
-                Point2d::new(u, v)
-            }).collect()
+            // For NURBS surfaces, project_point() is extremely slow (~146 surface evaluations
+            // per point) and can be inaccurate. Use a two-step approach instead:
+            // 1. Try the full project_point() on the first point to get an initial UV
+            // 2. For subsequent points, use Newton-Raphson from the previous point's UV
+            //    as a starting guess — this is ~10x faster since the initial guess is close.
+            if let Surface::Nurbs(ref nurbs) = surface {
+                let (u_min, u_max) = nurbs.u_range();
+                let (v_min, v_max) = nurbs.v_range();
+                let mut uvs = Vec::with_capacity(points_3d.len());
+                let mut prev_u = (u_min + u_max) * 0.5;
+                let mut prev_v = (v_min + v_max) * 0.5;
+
+                for (i, p) in points_3d.iter().enumerate() {
+                    if i == 0 {
+                        // First point: use the expensive full projection
+                        let (u, v) = surface.project_point(p);
+                        uvs.push(Point2d::new(u, v));
+                        prev_u = u;
+                        prev_v = v;
+                    } else {
+                        // Subsequent points: use Newton-Raphson from previous UV.
+                        // Since boundary points are close together, the previous UV
+                        // is an excellent starting guess (~3-5 Newton iterations instead
+                        // of 146 grid search evaluations).
+                        let (u, v) = draper_mesh::reproject_nurbs_point(
+                            nurbs, p, prev_u, prev_v,
+                        );
+                        // Verify the result — if Newton diverged, fall back
+                        let proj_p = surface.point_at(u, v);
+                        let dx = proj_p.x - p.x;
+                        let dy = proj_p.y - p.y;
+                        let dz = proj_p.z - p.z;
+                        let err = (dx*dx + dy*dy + dz*dz).sqrt();
+                        if err > 1e-3 {
+                            // Newton-Raphson diverged — use full projection
+                            let (u, v) = surface.project_point(p);
+                            uvs.push(Point2d::new(u, v));
+                            prev_u = u;
+                            prev_v = v;
+                        } else {
+                            uvs.push(Point2d::new(u, v));
+                            prev_u = u;
+                            prev_v = v;
+                        }
+                    }
+                }
+                uvs
+            } else {
+                // Non-NURBS surfaces: project_point() is fast (analytic formulas)
+                points_3d.iter().map(|p| {
+                    let (u, v) = surface.project_point(p);
+                    Point2d::new(u, v)
+                }).collect()
+            }
         }
     }
 
