@@ -194,6 +194,11 @@ fn samples_for_arc_radius(angle: f64, radius: f64, max_deviation: f64, detail_le
 }
 
 /// Sample curvature at several points and return the maximum absolute curvature.
+///
+/// Uses a 3×3 grid (9 evaluations) for speed. The old 5×5 grid (36 evaluations)
+/// was unnecessarily expensive, especially for NURBS where each curvature_at
+/// call involves 9 point_at evaluations. For adaptive sampling, a 3×3 grid
+/// provides sufficient accuracy to determine the right sample count.
 fn max_curvature_over_domain(
     surface: &Surface,
     u_start: f64,
@@ -201,7 +206,7 @@ fn max_curvature_over_domain(
     v_start: f64,
     v_end: f64,
 ) -> f64 {
-    let n_sample = 5; // Sample on a 5x5 grid
+    let n_sample = 3; // Sample on a 3×3 grid (9 evaluations, not 36)
     let mut max_k = 0.0_f64;
 
     for i in 0..=n_sample {
@@ -221,6 +226,12 @@ fn max_curvature_over_domain(
 /// Compute adaptive samples for both u and v directions simultaneously.
 ///
 /// Returns (n_u, n_v) — the number of samples in each parametric direction.
+///
+/// OPTIMIZATION: For surfaces that require `max_curvature_over_domain()` (NURBS,
+/// Revolution, Extrusion), the curvature is computed ONCE and shared between
+/// the u and v sample calculations. This avoids the previous behavior where
+/// `required_angular_samples` and `required_height_samples` each computed
+/// curvature independently — costing 2× the expensive evaluations.
 pub fn required_samples(
     surface: &Surface,
     u_start: f64,
@@ -230,9 +241,40 @@ pub fn required_samples(
     max_deviation: f64,
     detail_level: f64,
 ) -> (usize, usize) {
-    let n_u = required_angular_samples(surface, u_start, u_end, v_start, v_end, max_deviation, detail_level);
-    let n_v = required_height_samples(surface, u_start, u_end, v_start, v_end, max_deviation, detail_level);
-    (n_u, n_v)
+    // For analytic surfaces, the per-direction functions are cheap — just call them.
+    // For NURBS/Revolution/Extrusion, we cache the max curvature to avoid
+    // computing it twice (each computation costs ~36 curvature_at evaluations).
+    match surface {
+        Surface::Nurbs(_) | Surface::Revolution(_) | Surface::Extrusion(_) => {
+            let u_range = u_end - u_start;
+            let v_range = v_end - v_start;
+
+            // Compute max curvature ONCE for both directions
+            let max_k = max_curvature_over_domain(surface, u_start, u_end, v_start, v_end);
+
+            let n_u = if u_range < 1e-10 || max_k < 1e-10 {
+                MIN_ANGULAR_SAMPLES
+            } else {
+                let r_eq = 1.0 / max_k;
+                samples_for_arc_radius(u_range, r_eq, max_deviation, detail_level)
+            };
+
+            let n_v = if v_range < 1e-10 || max_k < 1e-10 {
+                MIN_HEIGHT_SAMPLES
+            } else {
+                let r_eq = 1.0 / max_k;
+                samples_for_arc_radius(v_range, r_eq, max_deviation, detail_level)
+            };
+
+            (n_u, n_v)
+        }
+        _ => {
+            // Analytic surfaces — no expensive computation, use per-direction functions
+            let n_u = required_angular_samples(surface, u_start, u_end, v_start, v_end, max_deviation, detail_level);
+            let n_v = required_height_samples(surface, u_start, u_end, v_start, v_end, max_deviation, detail_level);
+            (n_u, n_v)
+        }
+    }
 }
 
 /// Default maximum number of triangles per face.

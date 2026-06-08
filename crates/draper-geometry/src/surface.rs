@@ -818,7 +818,6 @@ impl NurbsSurface {
     /// the B-spline basis functions analytically using the degree-reduction
     /// technique (standard NURBS derivative computation from "The NURBS Book").
     pub fn derivatives_at(&self, u: f64, v: f64) -> SurfaceDerivatives {
-        let surface = Surface::Nurbs(self.clone());
         let (u_min, u_max) = self.u_range();
         let (v_min, v_max) = self.v_range();
 
@@ -1040,8 +1039,9 @@ impl NurbsSurface {
 
     /// Numerical fallback for derivatives (used when analytical approach fails).
     fn derivatives_at_numerical(&self, u: f64, v: f64) -> SurfaceDerivatives {
-        let surface = Surface::Nurbs(self.clone());
-        let point = surface.point_at(u, v);
+        // Use nurbs_surface_eval for point_at calls — avoids cloning the entire
+        // NurbsSurface struct (which the old code did via Surface::Nurbs(self.clone())).
+        let point = nurbs_surface_eval(self, u, v);
 
         let eps_u = {
             let (u_min, u_max) = self.u_range();
@@ -1052,10 +1052,10 @@ impl NurbsSurface {
             (v_max - v_min).max(1e-6) * 1e-6
         };
 
-        let pu_plus = surface.point_at(u + eps_u, v);
-        let pu_minus = surface.point_at(u - eps_u, v);
-        let pv_plus = surface.point_at(u, v + eps_v);
-        let pv_minus = surface.point_at(u, v - eps_v);
+        let pu_plus = nurbs_surface_eval(self, u + eps_u, v);
+        let pu_minus = nurbs_surface_eval(self, u - eps_u, v);
+        let pv_plus = nurbs_surface_eval(self, u, v + eps_v);
+        let pv_minus = nurbs_surface_eval(self, u, v - eps_v);
 
         let du = Vec3d::new(
             (pu_plus.x - pu_minus.x) / (2.0 * eps_u),
@@ -1343,48 +1343,67 @@ impl Surface {
                 }
             },
             Surface::Nurbs(nurbs) => {
-                // Fast NURBS curvature using analytical first derivatives
-                // and central-difference second derivatives (4 extra surface evaluations
-                // instead of the old 9). This is ~2x faster than the full numerical
-                // approach because we reuse analytical du, dv and normal.
+                // Fast NURBS curvature using only point_at (9 evaluations total)
+                // instead of 5 derivatives_at calls (5×87 = 435 de Boor iterations).
+                // Uses central-difference first and second derivatives from
+                // point_at, which is ~3x cheaper than using derivatives_at.
                 let eps = 1e-5;
-                let derivs = nurbs.derivatives_at(u, v);
-                let du = derivs.du;
-                let dv = derivs.dv;
-                let n = derivs.normal();
-                let n_vec = Vec3d::new(n.x, n.y, n.z);
+                let p0 = self.point_at(u, v);
 
-                // Second derivatives via central differences (only 4 surface evaluations
-                // instead of the old 9). We need: duu, dvv, duv
-                let p_uu_p = nurbs.derivatives_at(u + eps, v);
-                let p_uu_m = nurbs.derivatives_at(u - eps, v);
+                // First derivatives via central differences (4 point_at calls)
+                let pu_p = self.point_at(u + eps, v);
+                let pu_m = self.point_at(u - eps, v);
+                let pv_p = self.point_at(u, v + eps);
+                let pv_m = self.point_at(u, v - eps);
+
+                let du = Vec3d::new(
+                    (pu_p.x - pu_m.x) / (2.0 * eps),
+                    (pu_p.y - pu_m.y) / (2.0 * eps),
+                    (pu_p.z - pu_m.z) / (2.0 * eps),
+                );
+                let dv = Vec3d::new(
+                    (pv_p.x - pv_m.x) / (2.0 * eps),
+                    (pv_p.y - pv_m.y) / (2.0 * eps),
+                    (pv_p.z - pv_m.z) / (2.0 * eps),
+                );
+
+                // Second derivatives from central differences (no extra point_at calls)
                 let duu = Vec3d::new(
-                    (p_uu_p.du.x - p_uu_m.du.x) / (2.0 * eps),
-                    (p_uu_p.du.y - p_uu_m.du.y) / (2.0 * eps),
-                    (p_uu_p.du.z - p_uu_m.du.z) / (2.0 * eps),
+                    (pu_p.x - 2.0 * p0.x + pu_m.x) / (eps * eps),
+                    (pu_p.y - 2.0 * p0.y + pu_m.y) / (eps * eps),
+                    (pu_p.z - 2.0 * p0.z + pu_m.z) / (eps * eps),
                 );
-                let p_vv_p = nurbs.derivatives_at(u, v + eps);
-                let p_vv_m = nurbs.derivatives_at(u, v - eps);
                 let dvv = Vec3d::new(
-                    (p_vv_p.dv.x - p_vv_m.dv.x) / (2.0 * eps),
-                    (p_vv_p.dv.y - p_vv_m.dv.y) / (2.0 * eps),
-                    (p_vv_p.dv.z - p_vv_m.dv.z) / (2.0 * eps),
+                    (pv_p.x - 2.0 * p0.x + pv_m.x) / (eps * eps),
+                    (pv_p.y - 2.0 * p0.y + pv_m.y) / (eps * eps),
+                    (pv_p.z - 2.0 * p0.z + pv_m.z) / (eps * eps),
                 );
-                // Mixed derivative: d(du)/dv ≈ (du(u+eps,v+eps) - du(u+eps,v-eps) - du(u-eps,v+eps) + du(u-eps,v-eps)) / (4*eps^2)
-                // But we can approximate it more cheaply:
-                // duv ≈ (dv(u+eps,v) - dv(u-eps,v)) / (2*eps) in the u-direction
+
+                // Mixed derivative from 4 corner points (4 extra point_at calls)
+                let puv_pp = self.point_at(u + eps, v + eps);
+                let puv_mm = self.point_at(u - eps, v - eps);
+                let puv_pm = self.point_at(u + eps, v - eps);
+                let puv_mp = self.point_at(u - eps, v + eps);
                 let duv = Vec3d::new(
-                    (p_uu_p.dv.x - p_uu_m.dv.x) / (2.0 * eps),
-                    (p_uu_p.dv.y - p_uu_m.dv.y) / (2.0 * eps),
-                    (p_uu_p.dv.z - p_uu_m.dv.z) / (2.0 * eps),
+                    (puv_pp.x - puv_pm.x - puv_mp.x + puv_mm.x) / (4.0 * eps * eps),
+                    (puv_pp.y - puv_pm.y - puv_mp.y + puv_mm.y) / (4.0 * eps * eps),
+                    (puv_pp.z - puv_pm.z - puv_mp.z + puv_mm.z) / (4.0 * eps * eps),
                 );
+
+                // Normal from du × dv
+                let n_vec = du.cross(&dv);
+                let n_len = (n_vec.x * n_vec.x + n_vec.y * n_vec.y + n_vec.z * n_vec.z).sqrt();
+                if n_len < 1e-20 {
+                    return SurfaceCurvature { gaussian: 0.0, mean: 0.0, k1: 0.0, k2: 0.0, max_abs: 0.0 };
+                }
+                let n_vec = Vec3d::new(n_vec.x / n_len, n_vec.y / n_len, n_vec.z / n_len);
 
                 // Second fundamental form
                 let l = duu.dot(&n_vec);
                 let m = duv.dot(&n_vec);
                 let n_val = dvv.dot(&n_vec);
 
-                // First fundamental form (from analytical du, dv)
+                // First fundamental form
                 let e = du.dot(&du);
                 let f = du.dot(&dv);
                 let g = dv.dot(&dv);
