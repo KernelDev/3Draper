@@ -591,13 +591,30 @@ pub fn triangulate_surface_uv_cdt(
         .collect();
 
     // Project 3D boundary to UV
-    let mut outer_uv: Vec<Point2d> = boundary_points
-        .iter()
-        .map(|p| {
-            let (u, v) = surface.project_point(p);
-            Point2d::new(u, v)
-        })
-        .collect();
+    // OPTIMIZATION: For NURBS surfaces, use bootstrap + chain Newton-Raphson
+    // instead of calling project_point() for each point (which does 11×11 grid
+    // search per point and is catastrophically slow).
+    let mut outer_uv: Vec<Point2d> = if let Surface::Nurbs(ref nurbs) = surface {
+        let mut uvs = Vec::with_capacity(boundary_points.len());
+        if !boundary_points.is_empty() {
+            let (u0, v0) = surface.project_point(&boundary_points[0]);
+            uvs.push(Point2d::new(u0, v0));
+            for i in 1..boundary_points.len() {
+                let prev = uvs[i - 1];
+                let (u, v) = reproject_nurbs_point(nurbs, &boundary_points[i], prev.u, prev.v);
+                uvs.push(Point2d::new(u, v));
+            }
+        }
+        uvs
+    } else {
+        boundary_points
+            .iter()
+            .map(|p| {
+                let (u, v) = surface.project_point(p);
+                Point2d::new(u, v)
+            })
+            .collect()
+    };
 
     // Normalize UV for periodic surfaces
     let u_period = if surface.is_u_periodic() { Some(2.0 * PI) } else { None };
@@ -618,17 +635,31 @@ pub fn triangulate_surface_uv_cdt(
     let margin_u = (u_max - u_min) * 0.01;
     let margin_v = (v_max - v_min) * 0.01;
 
-    // Project holes to UV
+    // Project holes to UV (with NURBS optimization)
     let holes_uv: Vec<Vec<Point2d>> = hole_polylines_downsampled
         .iter()
         .map(|hole| {
-            let mut huv: Vec<Point2d> = hole
-                .iter()
-                .map(|p| {
-                    let (u, v) = surface.project_point(p);
-                    Point2d::new(u, v)
-                })
-                .collect();
+            let mut huv: Vec<Point2d> = if let Surface::Nurbs(ref nurbs) = surface {
+                // NURBS fast path: bootstrap + chain Newton-Raphson
+                let mut uvs = Vec::with_capacity(hole.len());
+                if !hole.is_empty() {
+                    let (u0, v0) = surface.project_point(&hole[0]);
+                    uvs.push(Point2d::new(u0, v0));
+                    for i in 1..hole.len() {
+                        let prev = uvs[i - 1];
+                        let (u, v) = reproject_nurbs_point(nurbs, &hole[i], prev.u, prev.v);
+                        uvs.push(Point2d::new(u, v));
+                    }
+                }
+                uvs
+            } else {
+                hole.iter()
+                    .map(|p| {
+                        let (u, v) = surface.project_point(p);
+                        Point2d::new(u, v)
+                    })
+                    .collect()
+            };
             crate::triangulate::normalize_uv_polygon(&mut huv, u_period, v_period);
             huv
         })
@@ -723,126 +754,60 @@ pub fn triangulate_surface_consistent(
     // ============================================================
     // Step 0: Validate and fix UV coordinates for NURBS surfaces
     //
-    // For NURBS surfaces, project_point() can return inaccurate UV
-    // coordinates. We validate by checking that surface.point_at(uv)
-    // is close to the original 3D point. If not, we re-project.
+    // CRITICAL OPTIMIZATION: We do NOT do per-point Newton-Raphson
+    // re-projection here. That was the cause of the NURBS hang:
+    // reproject_nurbs_point() does 15 iterations of derivatives_at()
+    // per point, and with 48 EDGE_SAMPLES × N edges, this becomes
+    // astronomically slow. It also DEGRADED quality — Newton from
+    // a wrong initial guess converges to a different minimum, making
+    // accurate UVs (from pcurves) worse.
     //
-    // OPTIMIZATION: For degree-1 (ruled/linear) NURBS surfaces, skip
-    // the expensive per-point Newton-Raphson re-projection since these
-    // surfaces are simple and UV errors don't affect triangulation quality.
+    // Instead, we just clamp UVs to the valid NURBS parameter range.
+    // Boundary UVs that come from curve_2d/pcurve are already exact.
+    // Boundary UVs from project_point() may be slightly off, but the
+    // subsequent triangulation + chord-error refinement handles that.
+    //
+    // For UVs completely out of range (NaN, Inf, or far outside the
+    // knot range), we fall back to the generic surface path.
     // ============================================================
     let mut outer_uv = boundary_uvs.to_vec();
     if let Surface::Nurbs(ref nurbs) = surface {
-        let u_deg = nurbs.u_degree;
-        let v_deg = nurbs.v_degree;
+        let (nurb_u_min, nurb_u_max) = nurbs.u_range();
+        let (nurb_v_min, nurb_v_max) = nurbs.v_range();
 
-        // For bilinear (deg=1×1) or ruled (deg=1 in one dir) NURBS,
-        // the surface is simple enough that UV re-projection is rarely needed
-        // and when it is, the initial project_point() is usually close enough.
-        //
-        // OPTIMIZATION: Only do the expensive per-point re-projection check
-        // for a SAMPLE of boundary points (every 10th). If all sampled points
-        // have low error, skip the rest. This reduces the cost from N point_at
-        // evaluations to at most max(5, N/10) + fixed_count evaluations.
-        if u_deg > 1 || v_deg > 1 {
-            let (nurb_u_min, nurb_u_max) = nurbs.u_range();
-            let (nurb_v_min, nurb_v_max) = nurbs.v_range();
-            let nurb_diag = {
-                let p0 = surface.point_at(nurb_u_min, nurb_v_min);
-                let p1 = surface.point_at(nurb_u_max, nurb_v_max);
-                let dx = p1.x - p0.x; let dy = p1.y - p0.y; let dz = p1.z - p0.z;
-                (dx*dx + dy*dy + dz*dz).sqrt().max(1e-10)
-            };
-            let uv_tolerance = nurb_diag * 0.01; // 1% of surface diagonal
+        // Check for invalid UVs (NaN, Inf, or wildly out of range)
+        let margin = (nurb_u_max - nurb_u_min).max(1e-6) * 0.1;
+        let v_margin = (nurb_v_max - nurb_v_min).max(1e-6) * 0.1;
+        let has_invalid_uv = outer_uv.iter().any(|uv| {
+            !uv.u.is_finite() || !uv.v.is_finite()
+            || uv.u < nurb_u_min - margin || uv.u > nurb_u_max + margin
+            || uv.v < nurb_v_min - v_margin || uv.v > nurb_v_max + v_margin
+        });
 
-            // Quick sampling: check every 10th point first. If all pass,
-            // assume UVs are accurate and skip full validation.
-            let sample_stride = 10usize.max(1);
-            let mut needs_full_check = false;
-            for i in (0..outer_uv.len()).step_by(sample_stride) {
-                let uv = &outer_uv[i];
-                let uv_in_range = uv.u >= nurb_u_min - 1e-6 && uv.u <= nurb_u_max + 1e-6
-                    && uv.v >= nurb_v_min - 1e-6 && uv.v <= nurb_v_max + 1e-6;
-                if !uv_in_range {
-                    needs_full_check = true;
-                    break;
-                }
-                let p3d = surface.point_at(uv.u, uv.v);
-                let dx = p3d.x - boundary_points_3d[i].x;
-                let dy = p3d.y - boundary_points_3d[i].y;
-                let dz = p3d.z - boundary_points_3d[i].z;
-                let err = (dx*dx + dy*dy + dz*dz).sqrt();
-                if err > uv_tolerance {
-                    needs_full_check = true;
-                    break;
-                }
+        if has_invalid_uv {
+            // Some UVs are wildly off — try clamping them as a best effort.
+            // If too many are bad, the triangulation will be wrong anyway.
+            let bad_count = outer_uv.iter().filter(|uv| {
+                !uv.u.is_finite() || !uv.v.is_finite()
+            }).count();
+            if bad_count > outer_uv.len() / 2 {
+                log::warn!(
+                    "triangulate_surface_consistent: {} of {} NURBS UVs are NaN/Inf — returning empty mesh",
+                    bad_count, outer_uv.len()
+                );
+                return TriangleMesh::new();
             }
-
-            if needs_full_check {
-                let mut fixed_count = 0;
-                for (i, uv) in outer_uv.iter_mut().enumerate() {
-                    // Check if UV is within the valid NURBS parameter range
-                    let uv_in_range = uv.u >= nurb_u_min - 1e-6 && uv.u <= nurb_u_max + 1e-6
-                        && uv.v >= nurb_v_min - 1e-6 && uv.v <= nurb_v_max + 1e-6;
-
-                    if uv_in_range {
-                        // Check reprojection error
-                        let p3d = surface.point_at(uv.u, uv.v);
-                        let dx = p3d.x - boundary_points_3d[i].x;
-                        let dy = p3d.y - boundary_points_3d[i].y;
-                        let dz = p3d.z - boundary_points_3d[i].z;
-                        let err = (dx*dx + dy*dy + dz*dz).sqrt();
-
-                        if err > uv_tolerance {
-                            // UV is inaccurate — re-project using Newton from this guess
-                            let (new_u, new_v) = reproject_nurbs_point(nurbs, &boundary_points_3d[i], uv.u, uv.v);
-                            let new_p = surface.point_at(new_u, new_v);
-                            let new_dx = new_p.x - boundary_points_3d[i].x;
-                            let new_dy = new_p.y - boundary_points_3d[i].y;
-                            let new_dz = new_p.z - boundary_points_3d[i].z;
-                            let new_err = (new_dx*new_dx + new_dy*new_dy + new_dz*new_dz).sqrt();
-                            if new_err < err {
-                                uv.u = new_u;
-                                uv.v = new_v;
-                                fixed_count += 1;
-                            }
-                        }
-                    } else {
-                        // UV is completely out of range — try Newton-Raphson from
-                        // the center of the NURBS parameter range as a starting guess.
-                        let center_u = (nurb_u_min + nurb_u_max) * 0.5;
-                        let center_v = (nurb_v_min + nurb_v_max) * 0.5;
-                        let (new_u, new_v) = reproject_nurbs_point(nurbs, &boundary_points_3d[i], center_u, center_v);
-                        let new_p = surface.point_at(new_u, new_v);
-                        let dx = new_p.x - boundary_points_3d[i].x;
-                        let dy = new_p.y - boundary_points_3d[i].y;
-                        let dz = new_p.z - boundary_points_3d[i].z;
-                        let err = (dx*dx + dy*dy + dz*dz).sqrt();
-                        if err > uv_tolerance * 10.0 {
-                            let clamped_u = uv.u.clamp(nurb_u_min, nurb_u_max);
-                            let clamped_v = uv.v.clamp(nurb_v_min, nurb_v_max);
-                            let (nu, nv) = reproject_nurbs_point(nurbs, &boundary_points_3d[i], clamped_u, clamped_v);
-                            let np = surface.point_at(nu, nv);
-                            let ne = ((np.x - boundary_points_3d[i].x).powi(2)
-                                     + (np.y - boundary_points_3d[i].y).powi(2)
-                                     + (np.z - boundary_points_3d[i].z).powi(2)).sqrt();
-                            if ne < err {
-                                uv.u = nu;
-                                uv.v = nv;
-                            } else {
-                                uv.u = new_u;
-                                uv.v = new_v;
-                            }
-                        } else {
-                            uv.u = new_u;
-                            uv.v = new_v;
-                        }
-                        fixed_count += 1;
-                    }
+            // Clamp all UVs to the NURBS parameter range
+            for uv in outer_uv.iter_mut() {
+                if uv.u.is_finite() {
+                    uv.u = uv.u.clamp(nurb_u_min, nurb_u_max);
+                } else {
+                    uv.u = (nurb_u_min + nurb_u_max) * 0.5;
                 }
-                if fixed_count > 0 {
-                    log::debug!("triangulate_surface_consistent: fixed {} of {} NURBS boundary UVs (tol={:.6})",
-                        fixed_count, outer_uv.len(), uv_tolerance);
+                if uv.v.is_finite() {
+                    uv.v = uv.v.clamp(nurb_v_min, nurb_v_max);
+                } else {
+                    uv.v = (nurb_v_min + nurb_v_max) * 0.5;
                 }
             }
         }

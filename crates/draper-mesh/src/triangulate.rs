@@ -760,6 +760,40 @@ fn collect_face_boundary_points(face: &Face) -> Vec<Point3d> {
     points
 }
 
+/// Fast UV projection for a sequence of 3D points on a NURBS surface.
+///
+/// Uses one full `project_point()` call to bootstrap, then chains
+/// Newton-Raphson re-projection from each point's predecessor.
+/// This is ~8× faster than calling `project_point()` for each point.
+fn nurbs_uv_fast_projection(surface: &Surface, points_3d: &[Point3d]) -> Vec<Point2d> {
+    if points_3d.is_empty() {
+        return Vec::new();
+    }
+
+    if let Surface::Nurbs(ref nurbs) = surface {
+        let mut uvs = Vec::with_capacity(points_3d.len());
+        // First point: full project_point()
+        let (u0, v0) = surface.project_point(&points_3d[0]);
+        uvs.push(Point2d::new(u0, v0));
+
+        // Subsequent points: chain Newton-Raphson from previous UV
+        for i in 1..points_3d.len() {
+            let prev = uvs[i - 1];
+            let (u, v) = crate::parametric_domain::reproject_nurbs_point(
+                nurbs, &points_3d[i], prev.u, prev.v,
+            );
+            uvs.push(Point2d::new(u, v));
+        }
+        uvs
+    } else {
+        // Non-NURBS: project_point() is fast, use it directly
+        points_3d.iter().map(|p| {
+            let (u, v) = surface.project_point(p);
+            Point2d::new(u, v)
+        }).collect()
+    }
+}
+
 /// Collect boundary UV coordinates from a face's outer wire using pcurves.
 ///
 /// When CoEdge.curve_2d or CoEdge.pcurve is available, uses them directly
@@ -813,10 +847,8 @@ fn collect_face_boundary_points_with_uv(
                         // Use pcurve polyline (interpolate)
                         let n_pcurve = pcurve.polyline_2d.len();
                         if n_pcurve == 0 {
-                            edge_pts_3d.iter().map(|p| {
-                                let (u, v) = surface.project_point(p);
-                                Point2d::new(u, v)
-                            }).collect()
+                            // NURBS optimization: bootstrap + chain Newton-Raphson
+                            nurbs_uv_fast_projection(surface, &edge_pts_3d)
                         } else if n_pcurve == 1 {
                             vec![pcurve.polyline_2d[0]; edge_pts_3d.len()]
                         } else {
@@ -836,10 +868,7 @@ fn collect_face_boundary_points_with_uv(
                         }
                     } else {
                         // Unreachable (both checked above), but fallback
-                        edge_pts_3d.iter().map(|p| {
-                            let (u, v) = surface.project_point(p);
-                            Point2d::new(u, v)
-                        }).collect()
+                        nurbs_uv_fast_projection(surface, &edge_pts_3d)
                     };
 
                     if should_reverse {
@@ -849,18 +878,52 @@ fn collect_face_boundary_points_with_uv(
                     points_3d.extend(edge_pts_3d);
                     points_uv.extend(edge_pts_uv);
                 } else {
-                    // No pcurve — fall back to surface.project_point()
+                    // No pcurve — fall back to projecting 3D points to UV.
+                    //
+                    // CRITICAL OPTIMIZATION for NURBS: surface.project_point()
+                    // does 11×11 + 5×5 grid search + Newton-Raphson per point,
+                    // which is ~146 evaluations each. With 48 EDGE_SAMPLES × N edges,
+                    // this is catastrophically slow.
+                    //
+                    // Strategy for NURBS: Do ONE project_point() for the first point
+                    // on the edge, then use Newton-Raphson from the previous UV
+                    // for subsequent points (they're along a curve, so sequential
+                    // parameter values map to nearby UVs). This reduces cost from
+                    // 146 × 48 = 7008 to ~146 + 47 × 15 = 851 evaluations per edge.
                     let mut edge_pts_3d = sample_edge_points(edge, EDGE_SAMPLES);
                     let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
                     let should_reverse = !coedge.forward != edge_is_reversed;
 
-                    let mut edge_pts_uv: Vec<Point2d> = edge_pts_3d.iter().map(|p| {
-                        let (u, v) = surface.project_point(p);
-                        Point2d::new(u, v)
-                    }).collect();
+                    let edge_pts_uv: Vec<Point2d> = if let Surface::Nurbs(ref nurbs) = surface {
+                        // NURBS fast path: bootstrap from first projection, then chain Newton-Raphson
+                        let mut uvs = Vec::with_capacity(edge_pts_3d.len());
+                        if !edge_pts_3d.is_empty() {
+                            // First point: use full project_point()
+                            let (u0, v0) = surface.project_point(&edge_pts_3d[0]);
+                            uvs.push(Point2d::new(u0, v0));
+
+                            // Subsequent points: Newton-Raphson from previous UV
+                            for i in 1..edge_pts_3d.len() {
+                                let prev_uv = uvs[i - 1];
+                                let (u, v) = crate::parametric_domain::reproject_nurbs_point(
+                                    nurbs, &edge_pts_3d[i], prev_uv.u, prev_uv.v,
+                                );
+                                uvs.push(Point2d::new(u, v));
+                            }
+                        }
+                        uvs
+                    } else {
+                        // Non-NURBS surfaces: project_point() is fast (O(1) to O(64))
+                        edge_pts_3d.iter().map(|p| {
+                            let (u, v) = surface.project_point(p);
+                            Point2d::new(u, v)
+                        }).collect()
+                    };
 
                     // Reverse both 3D and UV together when the coedge direction
                     // doesn't match the canonical sampling direction
+                    let mut edge_pts_3d = edge_pts_3d;
+                    let mut edge_pts_uv = edge_pts_uv;
                     if should_reverse {
                         edge_pts_3d.reverse();
                         edge_pts_uv.reverse();
@@ -936,10 +999,8 @@ fn collect_face_hole_points_with_uv(
                 } else if let Some(ref pcurve) = coedge.pcurve {
                     let n_pcurve = pcurve.polyline_2d.len();
                     if n_pcurve <= 1 {
-                        edge_pts_3d.iter().map(|p| {
-                            let (u, v) = surface.project_point(p);
-                            Point2d::new(u, v)
-                        }).collect()
+                        // NURBS optimization: bootstrap + chain Newton-Raphson
+                        nurbs_uv_fast_projection(surface, &edge_pts_3d)
                     } else {
                         (0..EDGE_SAMPLES).map(|i| {
                             let t_frac = i as f64 / EDGE_SAMPLES as f64;
@@ -956,10 +1017,8 @@ fn collect_face_hole_points_with_uv(
                         }).collect()
                     }
                 } else {
-                    edge_pts_3d.iter().map(|p| {
-                        let (u, v) = surface.project_point(p);
-                        Point2d::new(u, v)
-                    }).collect()
+                    // No pcurve — use fast NURBS projection
+                    nurbs_uv_fast_projection(surface, &edge_pts_3d)
                 };
 
                 let mut edge_pts_3d = edge_pts_3d;
