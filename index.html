@@ -5,17 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>3Draper — 3D Geometric Kernel</title>
     <meta name="description" content="3Draper: A 3D geometric kernel with B-Rep topology, STEP/STL I/O, and interactive 3D viewer running entirely in your browser via WebAssembly.">
-    
-<script type="module" nonce="fzcsVjE5okW9CPiS3BI4DA==">
-import init, * as bindings from '/draper-viewer-11ea2b60e473db59.js';
-const wasm = await init('/draper-viewer-11ea2b60e473db59_bg.wasm');
-
-
+<script type="module">
+import init, * as bindings from './draper-viewer.js';
+const wasm = await init('./draper-viewer_bg.wasm');
 window.wasmBindings = bindings;
-
-
 dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
-
 </script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -30,7 +24,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
             width: 100%;
             height: 100vh;
             display: block;
-            touch-action: none; /* Prevent browser from intercepting touch gestures */
+            touch-action: none;
         }
         #loading {
             position: fixed;
@@ -78,7 +72,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
             100% { transform: rotate(360deg); }
         }
     </style>
-<link rel="modulepreload" href="/draper-viewer-11ea2b60e473db59.js" crossorigin=anonymous integrity="sha384-Hv4BMme2Xb0dfFhIR4mLWhy3B8zh+LBBtcpjB9fB0MunQjTdPVvfQSOiAx790kPI"><link rel="preload" href="/draper-viewer-11ea2b60e473db59_bg.wasm" crossorigin=anonymous integrity="sha384-Y16fubq1nGSFn8uVdkuUTh0l+63Ksgsj+lfB6SmGygVVMghP5F6NIq9VdAKVkFzi" as="fetch" type="application/wasm"></head>
+</head>
 <body>
     <div id="loading">
         <div class="logo">3Draper<span>Viewer</span></div>
@@ -87,7 +81,6 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
     </div>
     <canvas id="the_canvas_id"></canvas>
     <script>
-        // Hide loading overlay once WASM application has fully started
         var loadingEl = document.getElementById("loading");
         function hideLoading() {
             if (loadingEl) {
@@ -95,11 +88,9 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
                 setTimeout(function() { loadingEl.style.display = "none"; }, 600);
             }
         }
-        // Listen for the TrunkApplicationStarted event (dispatched after WASM init)
         window.addEventListener("TrunkApplicationStarted", function() {
             setTimeout(hideLoading, 100);
         });
-        // Fallback: hide after 15 seconds even if WASM fails to load
         setTimeout(hideLoading, 15000);
     </script>
 </body>
