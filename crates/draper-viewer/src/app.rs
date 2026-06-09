@@ -1549,11 +1549,11 @@ impl ViewerApp {
     /// because it would consume too much GPU memory and rendering it would be slow.
     /// The B-Rep edge lines already show the model structure without the overhead.
     fn build_wireframe_overlay_vertices(&self) -> Vec<LineVertex> {
-        // Skip wireframe overlay for very large meshes — it consumes too much
-        // GPU memory (6 LineVertex × 24 bytes per triangle) and the B-Rep edge
-        // lines already convey the model structure. For a 500K-triangle mesh,
-        // the overlay would need ~72 MB, which is wasteful.
-        const MAX_TRIANGLES_FOR_WIREFRAME_OVERLAY: usize = 200_000;
+        // Skip wireframe overlay for extremely large meshes — it would consume
+        // too much GPU memory. With edge deduplication, each manifold edge
+        // requires only 2 LineVertex × 24 bytes = 48 bytes. For a 1M-triangle
+        // mesh, there are ~1.5M edges, needing ~72 MB — still manageable.
+        const MAX_TRIANGLES_FOR_WIREFRAME_OVERLAY: usize = 1_000_000;
         if self.mesh.triangles.len() > MAX_TRIANGLES_FOR_WIREFRAME_OVERLAY {
             log::info!(
                 "Skipping wireframe overlay: {} triangles > {} limit. B-Rep edges still shown.",
@@ -1572,10 +1572,11 @@ impl ViewerApp {
         let hidden = &self.hidden_instances;
         let ranges = &self.instance_triangle_ranges;
 
-        // For each triangle, generate 3 line segments (6 vertices)
-        // Adjacent triangles will share edges — each shared edge is drawn twice,
-        // which is acceptable for a wireframe overlay.
-        // Skip triangles belonging to hidden instances.
+        // Deduplicate edges: each shared edge between adjacent triangles is
+        // drawn only once instead of twice. This cuts the vertex count by ~50%
+        // for manifold meshes and makes the overlay work for much larger models.
+        let mut edge_set: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+
         for (i, tri) in mesh.triangles.iter().enumerate() {
             // Check if this triangle belongs to a hidden instance
             let mut is_hidden = false;
@@ -1597,39 +1598,23 @@ impl ViewerApp {
                 log::warn!("Wireframe overlay: skipping triangle with OOB indices [{}, {}, {}] (max={})", v0_idx, v1_idx, v2_idx, mesh.vertices.len());
                 continue;
             }
-            let v0 = &mesh.vertices[v0_idx];
-            let v1 = &mesh.vertices[v1_idx];
-            let v2 = &mesh.vertices[v2_idx];
 
-            // Edge 0→1
-            vertices.push(LineVertex {
-                position: [v0.x as f32, v0.y as f32, v0.z as f32],
-                color: overlay_color,
-            });
-            vertices.push(LineVertex {
-                position: [v1.x as f32, v1.y as f32, v1.z as f32],
-                color: overlay_color,
-            });
-
-            // Edge 1→2
-            vertices.push(LineVertex {
-                position: [v1.x as f32, v1.y as f32, v1.z as f32],
-                color: overlay_color,
-            });
-            vertices.push(LineVertex {
-                position: [v2.x as f32, v2.y as f32, v2.z as f32],
-                color: overlay_color,
-            });
-
-            // Edge 2→0
-            vertices.push(LineVertex {
-                position: [v2.x as f32, v2.y as f32, v2.z as f32],
-                color: overlay_color,
-            });
-            vertices.push(LineVertex {
-                position: [v0.x as f32, v0.y as f32, v0.z as f32],
-                color: overlay_color,
-            });
+            // Generate edges with deduplication
+            for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                let edge = if a < b { (a, b) } else { (b, a) };
+                if edge_set.insert(edge) {
+                    let va = &mesh.vertices[a as usize];
+                    let vb = &mesh.vertices[b as usize];
+                    vertices.push(LineVertex {
+                        position: [va.x as f32, va.y as f32, va.z as f32],
+                        color: overlay_color,
+                    });
+                    vertices.push(LineVertex {
+                        position: [vb.x as f32, vb.y as f32, vb.z as f32],
+                        color: overlay_color,
+                    });
+                }
+            }
         }
 
         vertices

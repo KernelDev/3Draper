@@ -2566,19 +2566,26 @@ fn triangulate_nurbs_cdt(face: &Face, surface: &Surface, params: &TriangulationP
         return triangulate_generic_surface(face, surface, params);
     }
 
-    // Use the grid-based NURBS triangulation with trimming.
-    // This approach is fundamentally different from earcutr-based CDT:
-    // 1. Sample the NURBS surface on a regular UV grid
-    // 2. Create a quad mesh from the grid
-    // 3. Split quads into triangles
-    // 4. Trim triangles outside the face boundary (UV containment)
-    // 5. Snap boundary grid vertices to cached boundary 3D points for watertightness
+    // Use the earcutr-based consistent triangulation approach.
     //
-    // This approach is correct because the NURBS surface IS its UV parameterization.
-    // A regular grid in UV space maps to a structured mesh on the surface.
-    // The earcutr approach was incorrect because it operates on the UV polygon
-    // shape, which for NURBS is arbitrary and doesn't correspond to 3D geometry.
-    let result = triangulate_nurbs_grid_trimmed(
+    // RADICAL FIX: The old grid-based approach (triangulate_nurbs_grid_trimmed)
+    // had fundamental flaws:
+    // 1. Missing triangles at corners — ray-casting containment on regular grid
+    //    vertices misclassified corner grid points as "outside", causing gaps
+    // 2. No boundary strip triangles — only grid vertex snapping, which doesn't
+    //    guarantee coverage when boundary UVs don't align with grid points
+    // 3. Over-tessellation — fixed grid resolution regardless of surface curvature
+    // 4. Slow — evaluates derivatives_at() for every grid point, even flat regions
+    //
+    // The earcutr-based approach (triangulate_surface_consistent) fixes all of these:
+    // 1. Boundary vertices are part of the triangulation input — earcutr creates
+    //    triangles at every corner automatically, no containment check needed
+    // 2. Boundary 3D points are used directly — bit-identical for watertight meshes
+    // 3. Adaptive interior points — knot-span subdivision + curvature-based sampling
+    //    gives more points where the surface curves, fewer where it's flat
+    // 4. Chord-error refinement — iterative post-triangulation check ensures
+    //    the mesh stays within max_deviation of the true surface
+    let result = crate::parametric_domain::triangulate_surface_consistent(
         surface,
         &boundary_3d,
         &boundary_uvs,
@@ -2588,9 +2595,9 @@ fn triangulate_nurbs_cdt(face: &Face, surface: &Surface, params: &TriangulationP
         params,
     );
 
-    // If the grid-based path produced an empty mesh, fall back to generic surface
+    // If the consistent path produced an empty mesh, fall back to generic surface
     if result.vertices.is_empty() {
-        log::warn!("NURBS CDT fallback: grid triangulation returned empty mesh, using generic surface");
+        log::warn!("NURBS CDT fallback: consistent triangulation returned empty mesh, using generic surface");
         return triangulate_generic_surface(face, surface, params);
     }
 

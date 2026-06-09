@@ -199,7 +199,7 @@ fn samples_for_arc_radius(angle: f64, radius: f64, max_deviation: f64, detail_le
 /// was unnecessarily expensive, especially for NURBS where each curvature_at
 /// call involves 9 point_at evaluations. For adaptive sampling, a 3×3 grid
 /// provides sufficient accuracy to determine the right sample count.
-fn max_curvature_over_domain(
+pub fn max_curvature_over_domain(
     surface: &Surface,
     u_start: f64,
     u_end: f64,
