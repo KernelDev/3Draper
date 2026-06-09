@@ -827,7 +827,7 @@ fn collect_face_boundary_points_with_uv(
 
                 if has_curve_2d || has_pcurve {
                     // Sample using pcurve for accurate UV coordinates
-                    let edge_pts_3d = sample_edge_points(edge, EDGE_SAMPLES);
+                    let mut edge_pts_3d = sample_edge_points(edge, EDGE_SAMPLES);
                     let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
                     let should_reverse = !coedge.forward != edge_is_reversed;
 
@@ -874,7 +874,11 @@ fn collect_face_boundary_points_with_uv(
                         nurbs_uv_fast_projection(surface, &edge_pts_3d)
                     };
 
+                    // CRITICAL: Both 3D and UV must be reversed together!
+                    // Previously only UV was reversed, causing a complete mismatch
+                    // between 3D positions and UV coordinates for ~50% of edges.
                     if should_reverse {
+                        edge_pts_3d.reverse();
                         edge_pts_uv.reverse();
                     }
 
@@ -1269,10 +1273,13 @@ fn earcutr_triangulate_planar(
     }
 
     // Hole points — each hole starts at the current vertex count
-    for hole in holes_2d {
+    // Track which holes are included so the 3D vertex array stays in sync
+    let mut valid_hole_indices: Vec<usize> = Vec::new();
+    for (hi, hole) in holes_2d.iter().enumerate() {
         if hole.len() < 3 {
             continue;
         }
+        valid_hole_indices.push(hi);
         hole_indices.push(coords.len() / 2);
         for p in hole {
             coords.push(p.u);
@@ -1287,10 +1294,12 @@ fn earcutr_triangulate_planar(
         return None;
     }
 
-    // Build combined 3D vertex array: outer vertices first, then hole vertices
+    // Build combined 3D vertex array: outer vertices first, then valid hole vertices
+    // CRITICAL: Only include holes that were also added to coords, so 3D indices
+    // match earcutr's 2D indices exactly.
     let mut all_3d: Vec<Point3d> = outer_3d.to_vec();
-    for hole in holes_3d {
-        all_3d.extend_from_slice(hole);
+    for &hi in &valid_hole_indices {
+        all_3d.extend_from_slice(&holes_3d[hi]);
     }
 
     // Verify that all triangle indices are within bounds
@@ -5777,9 +5786,36 @@ pub fn merge_coincident_vertices(mesh: &mut TriangleMesh, tolerance: f64) {
 
     mesh.vertices = new_vertices;
 
-    // Rebuild vertex normals (they are invalidated by vertex merging)
-    if mesh.normals.is_some() {
-        mesh.normals = None;
+    // Rebuild vertex normals by averaging normals of merged vertices.
+    // Previously, normals were simply discarded (set to None), causing
+    // flat shading on merged meshes. Now we average the normals of all
+    // vertices that were merged together, then renormalize.
+    if let Some(old_normals) = mesh.normals.take() {
+        if !old_normals.is_empty() {
+            let n_new = mesh.vertices.len();
+            let mut new_normals: Vec<[f64; 3]> = vec![[0.0, 0.0, 0.0]; n_new];
+            let mut counts: Vec<usize> = vec![0; n_new];
+            for (i, &remapped) in remap.iter().enumerate() {
+                if i < old_normals.len() {
+                    let n = old_normals[i];
+                    new_normals[remapped as usize][0] += n[0];
+                    new_normals[remapped as usize][1] += n[1];
+                    new_normals[remapped as usize][2] += n[2];
+                    counts[remapped as usize] += 1;
+                }
+            }
+            // Normalize the averaged normals
+            for (i, n) in new_normals.iter_mut().enumerate() {
+                if counts[i] > 0 {
+                    *n = [n[0] / counts[i] as f64, n[1] / counts[i] as f64, n[2] / counts[i] as f64];
+                    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                    if len > 1e-10 {
+                        *n = [n[0] / len, n[1] / len, n[2] / len];
+                    }
+                }
+            }
+            mesh.normals = Some(new_normals);
+        }
     }
 }
 

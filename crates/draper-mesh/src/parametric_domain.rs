@@ -1090,10 +1090,22 @@ pub fn triangulate_surface_consistent(
 
     let n_boundary = outer_uv.len();
 
-    // Build combined point array: [boundary_uv...][hole_uv...][interior_uv...]
+    // Build combined point array: [boundary_uv...][valid_hole_uv...][interior_uv...]
+    // CRITICAL: Only include holes with >= 3 points. Small holes are degenerate
+    // and would corrupt earcutr's triangulation. We must also track which holes
+    // were included so the 3D vertex array (Step 5) stays in sync with UV indices.
     let mut all_uv: Vec<Point2d> = outer_uv.clone();
-    for huv in &normalized_holes_uv_capped {
-        all_uv.extend_from_slice(huv);
+    let mut valid_hole_indices: Vec<usize> = Vec::new(); // indices into normalized_holes_uv_capped
+    let mut hole_start_indices: Vec<usize> = Vec::new();
+    let mut offset = n_boundary;
+    for (hi, huv) in normalized_holes_uv_capped.iter().enumerate() {
+        if huv.len() >= 3 {
+            valid_hole_indices.push(hi);
+            hole_start_indices.push(offset);
+            all_uv.extend_from_slice(huv);
+            offset += huv.len();
+        }
+        // Skip holes with < 3 points — they're degenerate
     }
     let n_boundary_and_holes_actual = all_uv.len();
 
@@ -1107,18 +1119,8 @@ pub fn triangulate_surface_consistent(
         coords.push(p.v);
     }
 
-    // Hole indices (point into the combined array)
-    let mut hole_start_indices: Vec<usize> = Vec::new();
-    let mut offset = n_boundary;
-    for huv in &normalized_holes_uv_capped {
-        if huv.len() < 3 {
-            continue;
-        }
-        hole_start_indices.push(offset);
-        offset += huv.len();
-    }
-
     // Run earcutr triangulation with ALL points at once
+    // hole_start_indices was built above, only including valid holes (>= 3 points)
     let triangle_indices = earcutr::earcut(&coords, &hole_start_indices, 2);
 
     // Collect triangles, filtering degenerate ones
@@ -1144,9 +1146,11 @@ pub fn triangulate_surface_consistent(
     // ============================================================
 
     // Build combined 3D point array for boundary + hole vertices
+    // CRITICAL: Only include holes that are also in all_uv (valid_hole_indices).
+    // This ensures the 3D vertex indices match the UV indices used by earcutr.
     let mut all_boundary_3d: Vec<Point3d> = boundary_points_3d.clone();
-    for h3d in &hole_polylines_3d_capped {
-        all_boundary_3d.extend_from_slice(h3d);
+    for &hi in &valid_hole_indices {
+        all_boundary_3d.extend_from_slice(&hole_polylines_3d_capped[hi]);
     }
 
     // Build mesh — use cached 3D points for boundary/hole vertices
