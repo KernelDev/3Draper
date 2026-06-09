@@ -171,10 +171,13 @@ impl Default for TriangulationParams {
 }
 
 /// Number of samples per edge curve for boundary discretization.
-/// Increased from 32 to 48 for better NURBS boundary representation —
-/// bolt threads and other fine features need more boundary points
-/// to avoid gaps and poor triangulation at edges.
-const EDGE_SAMPLES: usize = 48;
+/// Reduced from 48 to 20 for performance — each boundary point on a NURBS
+/// face requires expensive project_point() or reproject_nurbs_point() calls.
+/// For watertightness, the edge cache ensures shared edges produce identical
+/// 3D points regardless of sample count. 20 samples provides sufficient
+/// boundary resolution for accurate triangulation while being ~2.4x faster
+/// than 48 samples.
+const EDGE_SAMPLES: usize = 20;
 
 /// Project a sequence of 3D points onto a NURBS surface efficiently.
 ///
@@ -2665,23 +2668,19 @@ fn generate_nurbs_interior_points(
 /// This is the CORRECT approach for NURBS surfaces:
 /// 1. Sample the NURBS surface on a regular UV grid
 /// 2. Create a quad mesh from the grid (split into triangles)
-/// 3. Trim triangles that fall outside the face boundary (UV containment)
+/// 3. Trim quads that are entirely outside the face boundary (UV containment)
 /// 4. Snap boundary grid vertices to the cached boundary 3D points for watertightness
 ///
-/// Why this works: A NURBS surface IS its UV parameterization. A regular grid
-/// in UV space maps to a well-structured mesh on the 3D surface. The earcutr
-/// approach was fundamentally wrong for NURBS because it operates on the 2D
-/// UV polygon shape, which for NURBS is arbitrary and doesn't correspond to
-/// the 3D geometry.
+/// # Trimming Strategy
+/// A quad cell is kept if ANY of its 4 vertices is inside the boundary polygon.
+/// The old centroid-based check missed corner quads where the centroid falls
+/// outside but vertices are inside. For full-range surfaces (boundary covers
+/// ~98%+ of the knot range with no holes), trimming is skipped entirely.
 ///
-/// # Algorithm
-/// 1. Compute UV range from boundary UVs (or NURBS knot range if no boundary)
-/// 2. Create a regular grid of (u, v) points within the range
-/// 3. For each grid point, evaluate `surface.point_at(u, v)` and `surface.normal_at(u, v)`
-/// 4. Create triangles from the grid (2 per quad cell)
-/// 5. For each triangle, check if its centroid is inside the boundary polygon (in UV space)
-/// 6. Remove triangles whose centroids are inside any hole polygon
-/// 7. Snap grid vertices that are close to boundary 3D points (for watertightness)
+/// # Performance
+/// - Grid resolution is capped by `max_face_triangles`
+/// - Boundary snapping uses direct grid-index computation (O(N) not O(N×M))
+/// - Bilinear NURBS (degree 1/1) skip curvature sampling entirely
 fn triangulate_nurbs_grid_trimmed(
     surface: &Surface,
     boundary_points_3d: &[Point3d],
@@ -2702,6 +2701,8 @@ fn triangulate_nurbs_grid_trimmed(
 
     let (nurb_u_min, nurb_u_max) = nurbs.u_range();
     let (nurb_v_min, nurb_v_max) = nurbs.v_range();
+    let nurb_u_range = nurb_u_max - nurb_u_min;
+    let nurb_v_range = nurb_v_max - nurb_v_min;
 
     // Clamp boundary UVs to the NURBS parameter range
     let outer_uv: Vec<Point2d> = boundary_uvs.iter().map(|uv| {
@@ -2745,6 +2746,18 @@ fn triangulate_nurbs_grid_trimmed(
     v_min = v_min.max(nurb_v_min);
     v_max = v_max.min(nurb_v_max);
 
+    // Detect if the face covers the full NURBS parameter range.
+    // If the boundary UVs span ~98%+ of the knot range in both directions
+    // and there are no holes, we can skip the expensive trimming check
+    // entirely and just render the full grid. This is the common case for
+    // simple NURBS faces (rectangular patches) and avoids the centroid
+    // containment bug that misses corner quads.
+    let boundary_u_range = u_max - u_min;
+    let boundary_v_range = v_max - v_min;
+    let is_full_range = hole_uvs.is_empty()
+        && boundary_u_range > nurb_u_range * 0.98
+        && boundary_v_range > nurb_v_range * 0.98;
+
     // Compute grid resolution using adaptive sampling
     let (n_u, n_v) = if params.adaptive {
         crate::adaptive::required_samples_capped(
@@ -2761,9 +2774,9 @@ fn triangulate_nurbs_grid_trimmed(
     let (n_u, n_v) = cap_grid_resolution(n_u, n_v, params.max_face_triangles);
 
     log::info!(
-        "NURBS grid: {}x{} grid, UV [{:.3},{:.3}]x[{:.3},{:.3}], {} boundary pts, {} holes",
+        "NURBS grid: {}x{} grid, UV [{:.3},{:.3}]x[{:.3},{:.3}], {} boundary pts, {} holes, full_range={}",
         n_u, n_v, u_min, u_max, v_min, v_max,
-        boundary_points_3d.len(), hole_polylines_3d.len(),
+        boundary_points_3d.len(), hole_polylines_3d.len(), is_full_range,
     );
 
     // Step 1: Generate the UV grid and evaluate the NURBS surface at each point
@@ -2791,9 +2804,9 @@ fn triangulate_nurbs_grid_trimmed(
     // This ensures watertightness — shared edges between adjacent faces
     // produce bit-identical 3D vertex positions.
     //
-    // For each grid vertex, find the closest boundary point (in UV space).
-    // If the UV distance is within one grid cell, snap the grid vertex
-    // to the boundary 3D point.
+    // OPTIMIZATION: Instead of scanning ALL grid vertices for each boundary
+    // point (O(boundary × grid)), compute the grid cell index directly
+    // from the boundary point's UV (O(boundary)).
     let du = (u_max - u_min) / n_u as f64;
     let dv = (v_max - v_min) / n_v as f64;
     let snap_tol_u = du * 0.6; // slightly more than half a cell
@@ -2804,35 +2817,57 @@ fn triangulate_nurbs_grid_trimmed(
             break;
         }
         let bp_3d = boundary_points_3d[bi];
-        // Find the closest grid vertex
-        let mut best_dist_u = f64::MAX;
-        let mut best_idx = 0;
-        for (gi, guv) in grid_uvs.iter().enumerate() {
-            let dist_u = (guv.u - bp_uv.u).abs();
-            let dist_v = (guv.v - bp_uv.v).abs();
-            if dist_u < snap_tol_u && dist_v < snap_tol_v {
-                // Use combined distance for best match
-                let combined = dist_u + dist_v;
-                if combined < best_dist_u {
-                    best_dist_u = combined;
-                    best_idx = gi;
+
+        // Compute approximate grid cell index from UV
+        let fi = ((bp_uv.u - u_min) / du).round() as i64;
+        let fj = ((bp_uv.v - v_min) / dv).round() as i64;
+
+        // Search a small neighborhood (±1 cell) around the computed index
+        let mut best_dist = f64::MAX;
+        let mut best_idx: Option<usize> = None;
+        for di in -1i64..=1 {
+            for dj in -1i64..=1 {
+                let gi = fi + di;
+                let gj = fj + dj;
+                if gi < 0 || gi >= n_u_pts as i64 || gj < 0 || gj >= n_v_pts as i64 {
+                    continue;
+                }
+                let idx = (gj as usize) * n_u_pts + (gi as usize);
+                let guv = &grid_uvs[idx];
+                let dist_u = (guv.u - bp_uv.u).abs();
+                let dist_v = (guv.v - bp_uv.v).abs();
+                if dist_u < snap_tol_u && dist_v < snap_tol_v {
+                    let combined = dist_u + dist_v;
+                    if combined < best_dist {
+                        best_dist = combined;
+                        best_idx = Some(idx);
+                    }
                 }
             }
         }
-        if best_dist_u < f64::MAX {
+        if let Some(idx) = best_idx {
             // Snap this grid vertex to the boundary 3D point
-            grid_vertices[best_idx] = bp_3d;
+            grid_vertices[idx] = bp_3d;
             // Also update the normal from the surface at this UV
             let n = surface.normal_at(bp_uv.u, bp_uv.v);
-            grid_normals[best_idx] = [n.x, n.y, n.z];
+            grid_normals[idx] = [n.x, n.y, n.z];
         }
     }
 
     // Step 3: Build the triangle mesh with trimming
     //
-    // For each quad cell in the grid, check if it's inside the boundary.
-    // A quad is kept if its centroid is inside the boundary polygon.
-    // A quad is excluded if its centroid is inside any hole polygon.
+    // CRITICAL FIX: Use VERTEX-based containment instead of centroid-based.
+    // The old centroid check missed corner quads where the centroid is
+    // outside the polygon but 2+ vertices are inside — this caused
+    // missing triangles at corners (Face #2 STEP #1674).
+    //
+    // New approach: Keep a quad cell if ANY of its 4 vertices is inside
+    // the boundary polygon AND NOT inside any hole. This ensures we never
+    // miss boundary quads while still trimming interior quads that are
+    // fully outside the face.
+    //
+    // For full-range surfaces (rectangular patches with no holes), skip
+    // containment checking entirely — all quads are inside.
     let mut mesh = TriangleMesh::new();
     let mut vertex_map: Vec<u32> = vec![u32::MAX; grid_vertices.len()];
 
@@ -2846,6 +2881,36 @@ fn triangulate_nurbs_grid_trimmed(
         vi
     };
 
+    // Pre-clamp hole UVs
+    let clamped_holes_uv: Vec<Vec<Point2d>> = hole_uvs.iter().map(|huv| {
+        huv.iter().map(|uv| {
+            Point2d::new(
+                uv.u.clamp(nurb_u_min, nurb_u_max),
+                uv.v.clamp(nurb_v_min, nurb_v_max),
+            )
+        }).collect()
+    }).collect();
+
+    // Pre-compute per-vertex containment flags for efficiency
+    // This avoids repeated point_in_polygon_2d calls for shared vertices
+    let vertex_inside: Vec<bool> = if is_full_range {
+        // All vertices are inside for full-range surfaces
+        vec![true; grid_uvs.len()]
+    } else {
+        grid_uvs.iter().map(|uv| {
+            if !point_in_polygon_2d(uv, &outer_uv) {
+                return false;
+            }
+            // Check if inside any hole
+            for chuv in &clamped_holes_uv {
+                if chuv.len() >= 3 && point_in_polygon_2d(uv, chuv) {
+                    return false;
+                }
+            }
+            true
+        }).collect()
+    };
+
     for j in 0..n_v {
         for i in 0..n_u {
             let i0 = j * n_u_pts + i;
@@ -2853,33 +2918,13 @@ fn triangulate_nurbs_grid_trimmed(
             let i2 = (j + 1) * n_u_pts + i + 1;
             let i3 = (j + 1) * n_u_pts + i;
 
-            // Quad centroid UV
-            let cu = (grid_uvs[i0].u + grid_uvs[i1].u + grid_uvs[i2].u + grid_uvs[i3].u) * 0.25;
-            let cv = (grid_uvs[i0].v + grid_uvs[i1].v + grid_uvs[i2].v + grid_uvs[i3].v) * 0.25;
-            let centroid = Point2d::new(cu, cv);
+            // Keep quad if ANY vertex is inside the boundary and not in a hole.
+            // This prevents missing corner triangles while still trimming
+            // quads that are completely outside the face.
+            let any_inside = vertex_inside[i0] || vertex_inside[i1]
+                || vertex_inside[i2] || vertex_inside[i3];
 
-            // Check if centroid is inside the boundary
-            if !point_in_polygon_2d(&centroid, &outer_uv) {
-                continue;
-            }
-
-            // Check if centroid is inside any hole
-            let mut in_hole = false;
-            for huv in hole_uvs {
-                if huv.len() >= 3 {
-                    let clamped_huv: Vec<Point2d> = huv.iter().map(|uv| {
-                        Point2d::new(
-                            uv.u.clamp(nurb_u_min, nurb_u_max),
-                            uv.v.clamp(nurb_v_min, nurb_v_max),
-                        )
-                    }).collect();
-                    if point_in_polygon_2d(&centroid, &clamped_huv) {
-                        in_hole = true;
-                        break;
-                    }
-                }
-            }
-            if in_hole {
+            if !any_inside {
                 continue;
             }
 
@@ -2899,19 +2944,6 @@ fn triangulate_nurbs_grid_trimmed(
             }
         }
     }
-
-    // Step 4: Boundary snapping is already done in Step 2.
-    //
-    // For STEP file NURBS faces, watertightness is guaranteed by:
-    // 1. Grid vertices are snapped to boundary 3D points (Step 2)
-    // 2. The final merge_coincident_vertices() post-processing step
-    //    in triangulate_solid() merges vertices from adjacent faces
-    //    that share the same edge, ensuring bit-identical positions.
-    //
-    // No additional boundary strip triangles are needed — the grid
-    // trimming naturally produces a mesh that follows the boundary
-    // (thanks to the centroid containment check), and the boundary
-    // 3D points are used for the snapped vertices.
 
     log::info!(
         "NURBS grid result: {} vertices, {} triangles",

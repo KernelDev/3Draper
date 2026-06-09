@@ -1553,7 +1553,7 @@ impl ViewerApp {
         // GPU memory (6 LineVertex × 24 bytes per triangle) and the B-Rep edge
         // lines already convey the model structure. For a 500K-triangle mesh,
         // the overlay would need ~72 MB, which is wasteful.
-        const MAX_TRIANGLES_FOR_WIREFRAME_OVERLAY: usize = 100_000;
+        const MAX_TRIANGLES_FOR_WIREFRAME_OVERLAY: usize = 200_000;
         if self.mesh.triangles.len() > MAX_TRIANGLES_FOR_WIREFRAME_OVERLAY {
             log::info!(
                 "Skipping wireframe overlay: {} triangles > {} limit. B-Rep edges still shown.",
@@ -1589,9 +1589,17 @@ impl ViewerApp {
                 continue;
             }
 
-            let v0 = &mesh.vertices[tri[0] as usize];
-            let v1 = &mesh.vertices[tri[1] as usize];
-            let v2 = &mesh.vertices[tri[2] as usize];
+            let v0_idx = tri[0] as usize;
+            let v1_idx = tri[1] as usize;
+            let v2_idx = tri[2] as usize;
+            // Safety: skip triangles with out-of-bounds vertex indices
+            if v0_idx >= mesh.vertices.len() || v1_idx >= mesh.vertices.len() || v2_idx >= mesh.vertices.len() {
+                log::warn!("Wireframe overlay: skipping triangle with OOB indices [{}, {}, {}] (max={})", v0_idx, v1_idx, v2_idx, mesh.vertices.len());
+                continue;
+            }
+            let v0 = &mesh.vertices[v0_idx];
+            let v1 = &mesh.vertices[v1_idx];
+            let v2 = &mesh.vertices[v2_idx];
 
             // Edge 0→1
             vertices.push(LineVertex {

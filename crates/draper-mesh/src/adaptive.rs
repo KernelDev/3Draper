@@ -206,6 +206,14 @@ fn max_curvature_over_domain(
     v_start: f64,
     v_end: f64,
 ) -> f64 {
+    // Fast path: bilinear NURBS surfaces (degree 1 in both directions)
+    // have zero curvature everywhere — no need to sample.
+    if let Surface::Nurbs(ref nurbs) = surface {
+        if nurbs.u_degree <= 1 && nurbs.v_degree <= 1 {
+            return 0.0;
+        }
+    }
+
     let n_sample = 3; // Sample on a 3×3 grid (9 evaluations, not 36)
     let mut max_k = 0.0_f64;
 
