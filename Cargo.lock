@@ -916,6 +916,7 @@ dependencies = [
  "draper-step",
  "draper-topology",
  "env_logger",
+ "log",
 ]
 
 [[package]]

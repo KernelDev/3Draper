@@ -11,6 +11,7 @@
 //! 5. TriangulationGuard prevents runaway computation on pathological faces.
 
 use crate::mesh::TriangleMesh;
+use crate::edge_cache::EdgeDiscretizationCache;
 use draper_geometry::{
     Point3d, Point2d, Direction3d,
     Surface, Plane, CylinderSurface, SphereSurface, TorusSurface,
@@ -253,22 +254,39 @@ fn cap_grid_resolution(n_u: usize, n_v: usize, max_face_triangles: usize) -> (us
 /// 1. Merge coincident boundary vertices
 /// 2. Remove degenerate (zero-area) triangles
 /// 3. Remove triangles with NaN/Inf vertices
+/// 4. Validate watertightness and log diagnostics
+/// 5. Smooth normals across shared edges
+/// 6. Stitch remaining boundary edges if not watertight
 ///
 /// When `params.parallel` is `true`, faces are triangulated in parallel using
 /// rayon and per-face meshes are merged with pre-computed vertex offsets.
 pub fn triangulate_solid(solid: &Solid, params: &TriangulationParams) -> TriangleMesh {
+    let mut cache = EdgeDiscretizationCache::new();
+    triangulate_solid_with_cache(solid, params, &mut cache)
+}
+
+/// Triangulate a solid using a shared edge discretization cache.
+///
+/// The cache ensures that shared edges between adjacent faces produce
+/// identical 3D point sequences, which is critical for watertight meshes.
+pub fn triangulate_solid_with_cache(solid: &Solid, params: &TriangulationParams, cache: &mut EdgeDiscretizationCache) -> TriangleMesh {
     if params.parallel {
-        triangulate_solid_parallel(solid, params)
+        // For parallel: pre-populate the cache fully, then share as immutable
+        cache.pre_populate_for_solid_full(solid, EDGE_SAMPLES);
+        triangulate_solid_parallel(solid, params, cache)
     } else {
-        triangulate_solid_sequential(solid, params)
+        triangulate_solid_sequential(solid, params, cache)
     }
 }
 
-/// Sequential (single-threaded) solid triangulation — the original path.
-fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams) -> TriangleMesh {
+/// Sequential (single-threaded) solid triangulation with edge cache.
+///
+/// Each face pre-populates its edges into the shared cache (idempotent for
+/// already-cached edges), ensuring shared edges produce identical 3D points.
+fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams, cache: &mut EdgeDiscretizationCache) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
     for face in solid.faces() {
-        let face_mesh = triangulate_face(face, params);
+        let face_mesh = triangulate_face_with_cache(face, params, cache);
         mesh.merge(&face_mesh);
     }
     // Merge coincident boundary vertices to make the solid watertight
@@ -276,6 +294,45 @@ fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams) -> 
     // Use a very small tolerance for degenerate filtering — only remove truly degenerate triangles
     // (zero area or NaN/Inf), not small valid triangles
     filter_degenerate_triangles(&mut mesh, 1e-10);
+
+    // Validate watertightness
+    let report = crate::watertight::validate_watertight(&mesh, false);
+    if !report.is_watertight() {
+        log::warn!(
+            "Solid triangulation not watertight: {} boundary edges, {} non-manifold edges, {} degenerate triangles (V={}, E={}, F={}, χ={})",
+            report.boundary_edge_count,
+            report.non_manifold_edge_count,
+            report.degenerate_triangle_count,
+            report.vertex_count,
+            report.edge_count,
+            report.triangle_count,
+            report.euler_characteristic,
+        );
+
+        // Attempt mesh stitching to close remaining boundary edges
+        if report.boundary_edge_count < 1000 {
+            log::info!("Attempting mesh stitching to close {} boundary edges...", report.boundary_edge_count);
+            crate::watertight::stitch_boundary_edges(&mut mesh, 1e-4, 3);
+
+            let report2 = crate::watertight::validate_watertight(&mesh, false);
+            if report2.is_watertight() {
+                log::info!("Mesh stitching successful — mesh is now watertight");
+            } else {
+                log::warn!("Mesh stitching: {} boundary edges remain after stitching", report2.boundary_edge_count);
+            }
+        }
+    }
+
+    // Smooth normals across shared edges for better visual quality
+    crate::watertight::smooth_normals(&mut mesh, 0.524);
+
+    // TODO: Chord error refinement — check if triangle midpoints deviate
+    // from the true surface by more than max_deviation and subdivide if needed.
+    // This is a single-pass refinement for performance. Skip for planar faces
+    // (chord error is always 0 for planes). The existing adaptive interior points
+    // already handle curvature, so this is a secondary refinement.
+    // refine_chord_error(&mut mesh, params);
+
     // Safety check: ensure all per-triangle arrays have the same length
     debug_assert_mesh_consistency(&mesh);
     mesh
@@ -287,11 +344,13 @@ fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams) -> 
 
 /// Pre-computed edge discretization cache for parallel triangulation.
 ///
-/// Before starting parallel face triangulation, we discretize all unique edges
-/// in the solid and store their 3D point sequences keyed by `TopoId`. This
-/// ensures that shared edges between faces produce *identical* 3D boundary
-/// points (no locking needed since the cache is read-only during parallel
-/// execution).
+/// **SUPERSEDED** by `EdgeDiscretizationCache` (in `edge_cache.rs`), which
+/// stores both 3D points AND per-face UV coordinates. The old `EdgeSampleCache`
+/// only stores 3D points and does not support UV computation for NURBS faces.
+///
+/// Kept for backward compatibility but NOT used in the main pipeline anymore.
+/// The main pipeline now uses `EdgeDiscretizationCache` with `pre_populate_for_solid_full`.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 struct EdgeSampleCache {
     /// Maps edge TopoId → sampled 3D points.
@@ -301,6 +360,7 @@ struct EdgeSampleCache {
 
 impl EdgeSampleCache {
     /// Build a cache by pre-computing discretizations for all edges in a solid.
+    #[allow(dead_code)]
     fn build_from_solid(solid: &Solid) -> Self {
         let mut entries = HashMap::new();
         for face in solid.faces() {
@@ -433,52 +493,34 @@ fn collect_face_hole_points_cached(face: &Face, cache: &EdgeSampleCache) -> Vec<
 
 /// Triangulate a single face using the pre-computed edge sample cache.
 ///
-/// This is the cached variant of `triangulate_face` that uses pre-computed
-/// edge discretizations instead of computing them on-the-fly. The cache is
-/// read-only, making it safe for parallel execution.
+/// **SUPERSEDED** by `triangulate_face_impl` which uses `EdgeDiscretizationCache`.
+/// Kept for backward compatibility but NOT used in the main pipeline anymore.
+#[allow(dead_code)]
 fn triangulate_face_cached(face: &Face, params: &TriangulationParams, cache: &EdgeSampleCache) -> TriangleMesh {
-    // We need to override the boundary point collection to use the cache.
-    // The surface-specific triangulation functions internally call
-    // collect_face_boundary_points, so we create wrapper versions that
-    // use the cached collection.
-    //
-    // However, to minimize code duplication, we take a simpler approach:
-    // temporarily patch the face's boundary by doing the surface-specific
-    // triangulation with a modified face that has been enriched with
-    // cached edge data.
-    //
-    // The simplest correct approach: just call triangulate_face.
-    // The cache ensures shared edges produce identical 3D points because
-    // sample_edge_points is deterministic for a given edge — the same edge
-    // always produces the same points regardless of which face it's called from.
-    // The real benefit of the cache is avoiding recomputation (performance)
-    // and guaranteeing consistency even if edge state were to change.
-    //
-    // For the parallel path, we use the cache for correctness documentation
-    // but the actual benefit is that pre-computing ensures all edges are
-    // resolved before any parallel work begins.
-    let _ = cache; // Cache is available for future use; current face triangulation is self-contained
+    // This function is superseded by triangulate_face_impl which uses the
+    // full EdgeDiscretizationCache (with UV coordinates). The old EdgeSampleCache
+    // only stores 3D points and does not support UV computation for NURBS faces.
+    let _ = cache;
     triangulate_face(face, params)
 }
 
 /// Parallel solid triangulation using rayon.
 ///
 /// # Algorithm
-/// 1. **Pre-compute** edge discretizations into a read-only `EdgeSampleCache`.
+/// 1. **Pre-compute** edge discretizations into a read-only `EdgeDiscretizationCache`
+///    (done before calling this function via `pre_populate_for_solid_full`).
 /// 2. **Parallel triangulate** each face independently using `rayon::par_iter()`.
 /// 3. **Merge** per-face meshes with pre-computed vertex offsets (avoids
 ///    sequential `merge` calls).
-/// 4. **Post-process**: merge coincident vertices and filter degenerate triangles.
+/// 4. **Post-process**: merge coincident vertices, validate watertightness,
+///    smooth normals, stitch boundary edges, filter degenerate triangles.
 ///
 /// # Thread safety
-/// - The `EdgeSampleCache` is shared immutably across threads (no locking needed).
+/// - The `EdgeDiscretizationCache` is shared immutably across threads (no locking needed).
 /// - Each face produces its own `TriangleMesh` — no shared mutable state.
 /// - The progress callback uses `AtomicUsize` for lock-free counting.
-fn triangulate_solid_parallel(solid: &Solid, params: &TriangulationParams) -> TriangleMesh {
+fn triangulate_solid_parallel(solid: &Solid, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
     use rayon::prelude::*;
-
-    // Step 1: Pre-compute edge discretizations
-    let edge_cache = EdgeSampleCache::build_from_solid(solid);
 
     // Collect faces into a Vec for parallel iteration
     let faces: Vec<&Face> = solid.faces();
@@ -488,14 +530,14 @@ fn triangulate_solid_parallel(solid: &Solid, params: &TriangulationParams) -> Tr
         return TriangleMesh::new();
     }
 
-    // Step 2: Parallel face triangulation
+    // Step 1: Parallel face triangulation
     let completed_count = AtomicUsize::new(0);
     let progress_cb = params.progress_callback.clone();
 
     let face_meshes: Vec<TriangleMesh> = faces
         .par_iter()
         .map(|face| {
-            let mesh = triangulate_face_cached(face, params, &edge_cache);
+            let mesh = triangulate_face_impl(face, params, cache);
 
             // Progress reporting (lock-free)
             if progress_cb.is_some() {
@@ -509,13 +551,45 @@ fn triangulate_solid_parallel(solid: &Solid, params: &TriangulationParams) -> Tr
         })
         .collect();
 
-    // Step 3: Merge per-face meshes with pre-computed offsets
+    // Step 2: Merge per-face meshes with pre-computed offsets
     let merged = merge_meshes_parallel(&face_meshes);
 
-    // Step 4: Post-processing
+    // Step 3: Post-processing
     let mut mesh = merged;
     merge_coincident_vertices(&mut mesh, 1e-6);
     filter_degenerate_triangles(&mut mesh, 1e-10);
+
+    // Validate watertightness
+    let report = crate::watertight::validate_watertight(&mesh, false);
+    if !report.is_watertight() {
+        log::warn!(
+            "Solid triangulation not watertight (parallel): {} boundary edges, {} non-manifold edges, {} degenerate triangles (V={}, E={}, F={}, χ={})",
+            report.boundary_edge_count,
+            report.non_manifold_edge_count,
+            report.degenerate_triangle_count,
+            report.vertex_count,
+            report.edge_count,
+            report.triangle_count,
+            report.euler_characteristic,
+        );
+
+        // Attempt mesh stitching to close remaining boundary edges
+        if report.boundary_edge_count < 1000 {
+            log::info!("Attempting mesh stitching to close {} boundary edges...", report.boundary_edge_count);
+            crate::watertight::stitch_boundary_edges(&mut mesh, 1e-4, 3);
+
+            let report2 = crate::watertight::validate_watertight(&mesh, false);
+            if report2.is_watertight() {
+                log::info!("Mesh stitching successful — mesh is now watertight");
+            } else {
+                log::warn!("Mesh stitching: {} boundary edges remain after stitching", report2.boundary_edge_count);
+            }
+        }
+    }
+
+    // Smooth normals across shared edges for better visual quality
+    crate::watertight::smooth_normals(&mut mesh, 0.524);
+
     // Safety check: ensure all per-triangle arrays have the same length
     debug_assert_mesh_consistency(&mesh);
     mesh
@@ -655,18 +729,46 @@ pub fn triangulate_compound(compound: &Compound, params: &TriangulationParams) -
 }
 
 /// Triangulate a single face.
+///
+/// This is the backward-compatible public API that creates a local cache.
+/// For better watertightness when triangulating multiple faces of a solid,
+/// use `triangulate_face_with_cache` with a shared cache instead.
 pub fn triangulate_face(face: &Face, params: &TriangulationParams) -> TriangleMesh {
+    let mut cache = EdgeDiscretizationCache::new();
+    triangulate_face_with_cache(face, params, &mut cache)
+}
+
+/// Triangulate a single face using a shared edge discretization cache.
+///
+/// The cache ensures that shared edges between adjacent faces produce
+/// identical 3D point sequences, which is critical for watertight meshes.
+/// This function pre-populates the cache for the face's edges, then
+/// delegates to `triangulate_face_impl` which uses the immutable cache.
+pub fn triangulate_face_with_cache(face: &Face, params: &TriangulationParams, cache: &mut EdgeDiscretizationCache) -> TriangleMesh {
+    // Pre-populate edges for this face so the cache is complete
+    // before we pass it as an immutable reference
+    if let Some(ref surface) = face.surface {
+        pre_populate_face_edges(cache, face, surface);
+    }
+    triangulate_face_impl(face, params, cache)
+}
+
+/// Internal implementation: triangulate a face with a read-only cache.
+///
+/// This is used both by `triangulate_face_with_cache` (sequential path)
+/// and by the parallel path (after the cache has been fully pre-populated).
+fn triangulate_face_impl(face: &Face, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
     if let Some(ref surface) = face.surface {
         match surface {
-            Surface::Plane(plane) => triangulate_planar_face(face, plane, params),
-            Surface::Cylinder(cyl) => triangulate_cylinder_face(face, cyl, params),
-            Surface::Sphere(sphere) => triangulate_sphere_face(face, sphere, params),
-            Surface::Torus(torus) => triangulate_torus_face(face, torus, params),
-            Surface::Cone(cone) => triangulate_cone_face(face, cone, params),
-            Surface::Revolution(rev) => triangulate_revolution_face(face, rev, params),
-            Surface::Extrusion(ext) => triangulate_extrusion_face(face, ext, params),
+            Surface::Plane(plane) => triangulate_planar_face(face, plane, params, cache),
+            Surface::Cylinder(cyl) => triangulate_cylinder_face(face, cyl, params, cache),
+            Surface::Sphere(sphere) => triangulate_sphere_face(face, sphere, params, cache),
+            Surface::Torus(torus) => triangulate_torus_face(face, torus, params, cache),
+            Surface::Cone(cone) => triangulate_cone_face(face, cone, params, cache),
+            Surface::Revolution(rev) => triangulate_revolution_face(face, rev, params, cache),
+            Surface::Extrusion(ext) => triangulate_extrusion_face(face, ext, params, cache),
             Surface::Nurbs(_) => {
-                triangulate_nurbs_cdt(face, surface, params)
+                triangulate_nurbs_cdt(face, surface, params, cache)
             }
         }
     } else {
@@ -1109,6 +1211,348 @@ fn collect_face_hole_points(face: &Face) -> Vec<Vec<Point3d>> {
 }
 
 // ============================================================
+// Cached boundary collection — uses EdgeDiscretizationCache
+// ============================================================
+
+/// Pre-populate the cache with all edge discretizations for a single face.
+///
+/// This is used in the sequential path where each face's edges are
+/// lazily populated into the cache. After calling this, the cache
+/// contains entries for all non-degenerate edges of this face,
+/// and the face can be triangulated using only `&EdgeDiscretizationCache`.
+fn pre_populate_face_edges(cache: &mut EdgeDiscretizationCache, face: &Face, surface: &Surface) {
+    // Outer wire
+    if let Some(ref wire) = face.outer_wire {
+        for coedge in &wire.coedges {
+            if let Some(edge) = face.edges.iter().find(|e| e.id == coedge.edge) {
+                if edge.degenerate { continue; }
+                cache.discretize_edge(edge, face.id, surface, EDGE_SAMPLES, coedge.curve_2d.as_ref());
+            }
+        }
+    }
+    // Inner wires
+    for wire in &face.inner_wires {
+        for coedge in &wire.coedges {
+            if let Some(edge) = face.edges.iter().find(|e| e.id == coedge.edge) {
+                if edge.degenerate { continue; }
+                cache.discretize_edge(edge, face.id, surface, EDGE_SAMPLES, coedge.curve_2d.as_ref());
+            }
+        }
+    }
+}
+
+/// Collect boundary points from a face's outer wire using the edge discretization cache.
+///
+/// This replaces `collect_face_boundary_points` in the main pipeline.
+/// The cache ensures that shared edges between adjacent faces produce
+/// identical 3D point sequences, which is critical for watertight meshes.
+///
+/// NOTE: This function requires that the cache has been pre-populated for
+/// this face (via `pre_populate_face_edges` or `pre_populate_for_solid_full`).
+fn collect_face_boundary_from_cache(
+    face: &Face,
+    cache: &EdgeDiscretizationCache,
+    surface: &Surface,
+) -> Vec<Point3d> {
+    let mut points = Vec::new();
+
+    if let Some(ref wire) = face.outer_wire {
+        for coedge in &wire.coedges {
+            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+            if let Some(edge) = edge {
+                if edge.degenerate { continue; }
+
+                // Get cached discretization
+                if let Some(disc) = cache.get(edge.id) {
+                    let mut edge_pts = disc.points_3d.clone();
+
+                    // Same reversal logic as collect_face_boundary_points
+                    let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+                    let should_reverse = !coedge.forward != edge_is_reversed;
+                    if should_reverse {
+                        edge_pts.reverse();
+                    }
+                    points.extend(edge_pts);
+                } else {
+                    // Fallback: should not happen if cache was pre-populated
+                    log::warn!("Edge {} not found in cache for face {}, falling back to sample_edge_points", edge.id, face.id);
+                    let mut edge_pts = sample_edge_points(edge, EDGE_SAMPLES);
+                    let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+                    let should_reverse = !coedge.forward != edge_is_reversed;
+                    if should_reverse {
+                        edge_pts.reverse();
+                    }
+                    points.extend(edge_pts);
+                }
+            }
+        }
+    }
+
+    // Remove duplicate consecutive points (within tolerance)
+    if !points.is_empty() {
+        let mut unique = vec![points[0]];
+        for p in &points[1..] {
+            if let Some(last) = unique.last() {
+                if !last.is_coincident_with(p) {
+                    unique.push(*p);
+                }
+            }
+        }
+        // Also check last vs first (closed loop)
+        if unique.len() > 1 {
+            if let Some(last) = unique.last() {
+                if last.is_coincident_with(&unique[0]) {
+                    unique.pop();
+                }
+            }
+        }
+        points = unique;
+    }
+
+    points
+}
+
+/// Collect boundary points AND UV coordinates from a face's outer wire using the cache.
+///
+/// This replaces `collect_face_boundary_points_with_uv` in the main pipeline.
+/// UV coordinates are retrieved from the cache's per-face UV map.
+fn collect_face_boundary_with_uv_from_cache(
+    face: &Face,
+    cache: &EdgeDiscretizationCache,
+    surface: &Surface,
+) -> (Vec<Point3d>, Vec<Point2d>) {
+    let mut points_3d = Vec::new();
+    let mut points_uv = Vec::new();
+
+    if let Some(ref wire) = face.outer_wire {
+        for coedge in &wire.coedges {
+            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+            if let Some(edge) = edge {
+                if edge.degenerate { continue; }
+
+                if let Some(disc) = cache.get(edge.id) {
+                    let mut edge_pts_3d = disc.points_3d.clone();
+
+                    // Get UV for this face; if missing, compute as fallback
+                    let mut edge_pts_uv = if let Some(uvs) = disc.uv_per_face.get(&face.id) {
+                        uvs.clone()
+                    } else {
+                        // Fallback: compute UVs from the surface projection
+                        log::debug!("Computing UV fallback for edge {} face {}", edge.id, face.id);
+                        EdgeDiscretizationCache::compute_uvs(
+                            &disc.points_3d, &disc.params, surface, coedge.curve_2d.as_ref(),
+                        )
+                    };
+
+                    // Same reversal logic — both 3D and UV must be reversed together
+                    let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+                    let should_reverse = !coedge.forward != edge_is_reversed;
+                    if should_reverse {
+                        edge_pts_3d.reverse();
+                        edge_pts_uv.reverse();
+                    }
+
+                    points_3d.extend(edge_pts_3d);
+                    points_uv.extend(edge_pts_uv);
+                } else {
+                    // Fallback: should not happen if cache was pre-populated
+                    log::warn!("Edge {} not found in cache for face {}, falling back to uncached collection", edge.id, face.id);
+                    // Use the old uncached path for this edge
+                    let mut edge_pts_3d = sample_edge_points(edge, EDGE_SAMPLES);
+                    let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+                    let should_reverse = !coedge.forward != edge_is_reversed;
+
+                    let edge_pts_uv = nurbs_uv_fast_projection(surface, &edge_pts_3d);
+
+                    if should_reverse {
+                        edge_pts_3d.reverse();
+                    }
+                    let mut edge_pts_uv = edge_pts_uv;
+                    if should_reverse {
+                        edge_pts_uv.reverse();
+                    }
+
+                    points_3d.extend(edge_pts_3d);
+                    points_uv.extend(edge_pts_uv);
+                }
+            }
+        }
+    }
+
+    // Remove duplicate consecutive points (within tolerance) — keep 3D and UV in sync
+    if !points_3d.is_empty() {
+        let mut unique_3d = vec![points_3d[0]];
+        let mut unique_uv = vec![points_uv[0]];
+        for i in 1..points_3d.len() {
+            if let Some(last) = unique_3d.last() {
+                if !last.is_coincident_with(&points_3d[i]) {
+                    unique_3d.push(points_3d[i]);
+                    unique_uv.push(points_uv[i]);
+                }
+            }
+        }
+        // Also check last vs first (closed loop)
+        if unique_3d.len() > 1 {
+            if let Some(last) = unique_3d.last() {
+                if last.is_coincident_with(&unique_3d[0]) {
+                    unique_3d.pop();
+                    unique_uv.pop();
+                }
+            }
+        }
+        points_3d = unique_3d;
+        points_uv = unique_uv;
+    }
+
+    (points_3d, points_uv)
+}
+
+/// Collect hole boundary points from a face's inner wires using the cache.
+///
+/// This replaces `collect_face_hole_points` in the main pipeline.
+fn collect_face_holes_from_cache(
+    face: &Face,
+    cache: &EdgeDiscretizationCache,
+    surface: &Surface,
+) -> Vec<Vec<Point3d>> {
+    let mut holes = Vec::new();
+    for wire in &face.inner_wires {
+        let mut points = Vec::new();
+        for coedge in &wire.coedges {
+            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+            if let Some(edge) = edge {
+                if edge.degenerate { continue; }
+
+                if let Some(disc) = cache.get(edge.id) {
+                    let mut edge_pts = disc.points_3d.clone();
+                    let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+                    let should_reverse = !coedge.forward != edge_is_reversed;
+                    if should_reverse {
+                        edge_pts.reverse();
+                    }
+                    points.extend(edge_pts);
+                } else {
+                    let mut edge_pts = sample_edge_points(edge, EDGE_SAMPLES);
+                    let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+                    let should_reverse = !coedge.forward != edge_is_reversed;
+                    if should_reverse {
+                        edge_pts.reverse();
+                    }
+                    points.extend(edge_pts);
+                }
+            }
+        }
+        // Deduplicate
+        if !points.is_empty() {
+            let mut unique = vec![points[0]];
+            for p in &points[1..] {
+                if let Some(last) = unique.last() {
+                    if !last.is_coincident_with(p) {
+                        unique.push(*p);
+                    }
+                }
+            }
+            if unique.len() > 1 {
+                if let Some(last) = unique.last() {
+                    if last.is_coincident_with(&unique[0]) {
+                        unique.pop();
+                    }
+                }
+            }
+            holes.push(unique);
+        }
+    }
+    holes
+}
+
+/// Collect hole boundary points AND UV coordinates from a face's inner wires using the cache.
+///
+/// This replaces `collect_face_hole_points_with_uv` in the main pipeline.
+fn collect_face_holes_with_uv_from_cache(
+    face: &Face,
+    cache: &EdgeDiscretizationCache,
+    surface: &Surface,
+) -> (Vec<Vec<Point3d>>, Vec<Vec<Point2d>>) {
+    let mut holes_3d = Vec::new();
+    let mut holes_uv = Vec::new();
+
+    for wire in &face.inner_wires {
+        let mut pts_3d = Vec::new();
+        let mut pts_uv = Vec::new();
+
+        for coedge in &wire.coedges {
+            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+            if let Some(edge) = edge {
+                if edge.degenerate { continue; }
+
+                if let Some(disc) = cache.get(edge.id) {
+                    let mut edge_pts_3d = disc.points_3d.clone();
+
+                    let mut edge_pts_uv = if let Some(uvs) = disc.uv_per_face.get(&face.id) {
+                        uvs.clone()
+                    } else {
+                        EdgeDiscretizationCache::compute_uvs(
+                            &disc.points_3d, &disc.params, surface, coedge.curve_2d.as_ref(),
+                        )
+                    };
+
+                    let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+                    let should_reverse = !coedge.forward != edge_is_reversed;
+                    if should_reverse {
+                        edge_pts_3d.reverse();
+                        edge_pts_uv.reverse();
+                    }
+
+                    pts_3d.extend(edge_pts_3d);
+                    pts_uv.extend(edge_pts_uv);
+                } else {
+                    // Fallback
+                    let mut edge_pts_3d = sample_edge_points(edge, EDGE_SAMPLES);
+                    let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+                    let should_reverse = !coedge.forward != edge_is_reversed;
+                    let edge_pts_uv = nurbs_uv_fast_projection(surface, &edge_pts_3d);
+                    if should_reverse {
+                        edge_pts_3d.reverse();
+                    }
+                    let mut edge_pts_uv = edge_pts_uv;
+                    if should_reverse {
+                        edge_pts_uv.reverse();
+                    }
+                    pts_3d.extend(edge_pts_3d);
+                    pts_uv.extend(edge_pts_uv);
+                }
+            }
+        }
+
+        // Deduplicate — keep 3D and UV in sync
+        if !pts_3d.is_empty() {
+            let mut unique_3d = vec![pts_3d[0]];
+            let mut unique_uv = vec![pts_uv[0]];
+            for i in 1..pts_3d.len() {
+                if let Some(last) = unique_3d.last() {
+                    if !last.is_coincident_with(&pts_3d[i]) {
+                        unique_3d.push(pts_3d[i]);
+                        unique_uv.push(pts_uv[i]);
+                    }
+                }
+            }
+            if unique_3d.len() > 1 {
+                if let Some(last) = unique_3d.last() {
+                    if last.is_coincident_with(&unique_3d[0]) {
+                        unique_3d.pop();
+                        unique_uv.pop();
+                    }
+                }
+            }
+            holes_3d.push(unique_3d);
+            holes_uv.push(unique_uv);
+        }
+    }
+
+    (holes_3d, holes_uv)
+}
+
+// ============================================================
 // Planar face triangulation — minimum triangle count
 // ============================================================
 
@@ -1116,15 +1560,17 @@ fn collect_face_hole_points(face: &Face) -> Vec<Vec<Point3d>> {
 /// Uses ear-clipping on the boundary polygon — this produces the minimum
 /// number of triangles for a given boundary polygon (N-2 for convex).
 /// Supports holes via bridge-edge technique.
-fn triangulate_planar_face(face: &Face, plane: &Plane, _params: &TriangulationParams) -> TriangleMesh {
+fn triangulate_planar_face(face: &Face, plane: &Plane, _params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
 
-    let boundary_3d = collect_face_boundary_points(face);
+    // Use cached boundary collection for watertight meshes
+    let surface = Surface::Plane(plane.clone());
+    let boundary_3d = collect_face_boundary_from_cache(face, cache, &surface);
     if boundary_3d.is_empty() {
         return mesh;
     }
 
-    let holes_3d = collect_face_hole_points(face);
+    let holes_3d = collect_face_holes_from_cache(face, cache, &surface);
     let forward = face.forward;
 
     // NOTE: We intentionally do NOT snap boundary points to the plane here.
@@ -1715,8 +2161,9 @@ fn triangulate_ring_surface(
 /// constrain the u direction (u_range < ~half period), we use the full
 /// u range [0, 2π] — this handles the common case of a full cylinder
 /// where the boundary edges are only the top/bottom circles and seam.
-fn triangulate_cylinder_face(face: &Face, cyl: &CylinderSurface, params: &TriangulationParams) -> TriangleMesh {
-    let boundary_3d = collect_face_boundary_points(face);
+fn triangulate_cylinder_face(face: &Face, cyl: &CylinderSurface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
+    let surface = Surface::Cylinder(cyl.clone());
+    let boundary_3d = collect_face_boundary_from_cache(face, cache, &surface);
 
     if boundary_3d.is_empty() {
         // No boundary edges — sample full cylinder
@@ -1919,8 +2366,9 @@ fn extract_boundary_ring_at_v(
 /// constrain the u direction, we use the full u range [0, 2π].
 /// Handles apex degeneracy: when v_max reaches the apex height, all
 /// vertices in the top row collapse to a single point.
-fn triangulate_cone_face(face: &Face, cone: &ConeSurface, params: &TriangulationParams) -> TriangleMesh {
-    let boundary_3d = collect_face_boundary_points(face);
+fn triangulate_cone_face(face: &Face, cone: &ConeSurface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
+    let surface = Surface::Cone(cone.clone());
+    let boundary_3d = collect_face_boundary_from_cache(face, cache, &surface);
 
     if boundary_3d.is_empty() {
         return triangulate_cone_full(face, cone, params);
@@ -2156,7 +2604,7 @@ fn triangulate_cone_full(face: &Face, cone: &ConeSurface, params: &Triangulation
 /// Pole degeneracy handling: At v=0 (north pole) and v=π (south pole),
 /// all vertices in that row collapse to a single point. We merge them
 /// into a single vertex to avoid degenerate (zero-area) triangles.
-fn triangulate_sphere_face(face: &Face, sphere: &SphereSurface, params: &TriangulationParams) -> TriangleMesh {
+fn triangulate_sphere_face(face: &Face, sphere: &SphereSurface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
 
     // Default: full sphere [0, 2π] × [0, π]
@@ -2165,7 +2613,8 @@ fn triangulate_sphere_face(face: &Face, sphere: &SphereSurface, params: &Triangu
     let mut v_start = 0.0_f64;
     let mut v_end = PI;
 
-    let boundary_3d = collect_face_boundary_points(face);
+    let surface = Surface::Sphere(sphere.clone());
+    let boundary_3d = collect_face_boundary_from_cache(face, cache, &surface);
     if !boundary_3d.is_empty() {
         let (bu_min, bu_max, bv_min, bv_max) = sphere_uv_range(sphere, &boundary_3d);
         let u_range = bu_max - bu_min;
@@ -2375,8 +2824,9 @@ fn triangulate_sphere_face(face: &Face, sphere: &SphereSurface, params: &Triangu
 /// we assume the face needs the full period in that direction.
 /// This handles the common case of a full torus with only a single
 /// v-circle boundary edge.
-fn triangulate_torus_face(face: &Face, torus: &TorusSurface, params: &TriangulationParams) -> TriangleMesh {
-    let boundary_3d = collect_face_boundary_points(face);
+fn triangulate_torus_face(face: &Face, torus: &TorusSurface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
+    let surface = Surface::Torus(torus.clone());
+    let boundary_3d = collect_face_boundary_from_cache(face, cache, &surface);
 
     // Default: full torus [0, 2π] × [0, 2π]
     let mut u_start = 0.0_f64;
@@ -2451,7 +2901,7 @@ fn triangulate_torus_face(face: &Face, torus: &TorusSurface, params: &Triangulat
 }
 
 /// Triangulate a revolution surface face.
-fn triangulate_revolution_face(face: &Face, rev: &draper_geometry::RevolutionSurface, params: &TriangulationParams) -> TriangleMesh {
+fn triangulate_revolution_face(face: &Face, rev: &draper_geometry::RevolutionSurface, params: &TriangulationParams, _cache: &EdgeDiscretizationCache) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
     let (v_min, v_max) = rev.profile.param_range();
 
@@ -2497,7 +2947,7 @@ fn triangulate_revolution_face(face: &Face, rev: &draper_geometry::RevolutionSur
 }
 
 /// Triangulate an extrusion surface face.
-fn triangulate_extrusion_face(face: &Face, ext: &draper_geometry::ExtrusionSurface, params: &TriangulationParams) -> TriangleMesh {
+fn triangulate_extrusion_face(face: &Face, ext: &draper_geometry::ExtrusionSurface, params: &TriangulationParams, _cache: &EdgeDiscretizationCache) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
 
     let (v_min, v_max) = compute_extrusion_v_range(face, ext);
@@ -2551,28 +3001,28 @@ fn triangulate_extrusion_face(face: &Face, ext: &draper_geometry::ExtrusionSurfa
 /// 4. Knot-span subdivision for interior Steiner points
 /// 5. earcutr-based triangulation (O(n log n), handles holes natively)
 /// 6. Boundary 3D points used directly for watertight meshes
-fn triangulate_nurbs_cdt(face: &Face, surface: &Surface, params: &TriangulationParams) -> TriangleMesh {
-    // Collect boundary points AND UV coordinates using pcurves when available.
-    // This is CRITICAL for NURBS surfaces — surface.project_point() is
-    // unreliable (5×5 grid → Newton-Raphson converges to wrong minimum),
-    // but PCURVE data from STEP files gives exact UV coordinates.
-    let (boundary_3d, boundary_uvs) = collect_face_boundary_points_with_uv(face, surface);
+fn triangulate_nurbs_cdt(face: &Face, surface: &Surface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
+    // Collect boundary points AND UV coordinates using the edge discretization cache.
+    // The cache ensures shared edges produce identical 3D points for watertight meshes.
+    // UV coordinates come from the cache's per-face UV map (computed from PCURVEs
+    // when available, otherwise via surface projection).
+    let (boundary_3d, boundary_uvs) = collect_face_boundary_with_uv_from_cache(face, cache, surface);
     if boundary_3d.len() < 3 {
         return TriangleMesh::new();
     }
 
-    let (holes_3d, holes_uvs) = collect_face_hole_points_with_uv(face, surface);
+    let (holes_3d, holes_uvs) = collect_face_holes_with_uv_from_cache(face, cache, surface);
 
     // Check if UV projection is valid
     if boundary_uvs.iter().any(|uv| !uv.u.is_finite() || !uv.v.is_finite()) {
         log::warn!("NURBS CDT fallback: UV projection NaN/Inf, using generic surface");
-        return triangulate_generic_surface(face, surface, params);
+        return triangulate_generic_surface(face, surface, params, cache);
     }
 
     // Check hole UV validity
     if holes_uvs.iter().any(|h| h.iter().any(|uv| !uv.u.is_finite() || !uv.v.is_finite())) {
         log::warn!("NURBS CDT fallback: hole UV NaN/Inf, using generic surface");
-        return triangulate_generic_surface(face, surface, params);
+        return triangulate_generic_surface(face, surface, params, cache);
     }
 
     // Use the earcutr-based consistent triangulation approach.
@@ -2607,7 +3057,7 @@ fn triangulate_nurbs_cdt(face: &Face, surface: &Surface, params: &TriangulationP
     // If the consistent path produced an empty mesh, fall back to generic surface
     if result.vertices.is_empty() {
         log::warn!("NURBS CDT fallback: consistent triangulation returned empty mesh, using generic surface");
-        return triangulate_generic_surface(face, surface, params);
+        return triangulate_generic_surface(face, surface, params, cache);
     }
 
     result
@@ -2971,7 +3421,7 @@ fn triangulate_nurbs_grid_trimmed(
 
 /// Generic surface triangulation by sampling on a grid.
 /// For NURBS surfaces, uses the actual knot range.
-fn triangulate_generic_surface(face: &Face, surface: &Surface, params: &TriangulationParams) -> TriangleMesh {
+fn triangulate_generic_surface(face: &Face, surface: &Surface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
 
     let (base_u_min, base_u_max, base_v_min, base_v_max) = if let Surface::Nurbs(nurbs) = surface {
@@ -2992,7 +3442,7 @@ fn triangulate_generic_surface(face: &Face, surface: &Surface, params: &Triangul
         if wire.coedges.is_empty() {
             (base_u_min, base_u_max, base_v_min, base_v_max)
         } else {
-            let boundary_pts = collect_face_boundary_points(face);
+            let boundary_pts = collect_face_boundary_from_cache(face, cache, surface);
             if !boundary_pts.is_empty() {
                 let mut proj_u_min = f64::MAX;
                 let mut proj_u_max = f64::MIN;
@@ -5711,6 +6161,35 @@ fn is_convex_polygon(points: &[Point2d]) -> bool {
         }
     }
     sign != 0
+}
+
+// ============================================================
+// Chord error refinement (placeholder)
+// ============================================================
+
+/// Refine mesh triangles based on chord error from the true surface.
+///
+/// For each triangle on a curved surface (has face_id info), check if the
+/// midpoint of each edge deviates more than `params.max_deviation` from the
+/// surface. If so, subdivide the triangle by inserting the midpoint.
+///
+/// This is a single-pass refinement (not iterative) for performance.
+/// Skip for planar faces (chord error is always 0 for planes).
+///
+/// TODO: This is complex to implement correctly and the existing adaptive
+/// interior points already handle curvature. For now, this is a placeholder.
+/// Future implementation should:
+/// 1. For each triangle with a known face_id, look up the surface
+/// 2. For each edge midpoint, compute the deviation from the surface
+/// 3. If deviation > max_deviation, insert the midpoint and subdivide
+/// 4. This requires access to the face-to-surface mapping (via face_id → Surface)
+#[allow(dead_code)]
+fn refine_chord_error(_mesh: &mut TriangleMesh, _params: &TriangulationParams) {
+    // Placeholder — not yet implemented
+    // The existing adaptive interior points in the surface-specific triangulation
+    // functions already handle curvature-based refinement. This function would
+    // provide an additional post-hoc refinement pass for edges that were not
+    // sufficiently sampled during initial triangulation.
 }
 
 // ============================================================

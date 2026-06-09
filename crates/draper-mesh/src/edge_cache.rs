@@ -24,7 +24,7 @@
 //! triangulation to produce boundary-conforming triangles.
 
 use draper_geometry::{Point3d, Point2d, Curve3d, Curve2d, Surface, tolerance::ToleranceContext};
-use draper_topology::{Edge, TopoId};
+use draper_topology::{Edge, Solid, TopoId};
 use std::collections::HashMap;
 
 /// Cached discretization of a single edge.
@@ -231,7 +231,7 @@ impl EdgeDiscretizationCache {
     /// accurate and faster than surface.project_point().
     ///
     /// If no Curve2d is available, falls back to surface.project_point().
-    fn compute_uvs(points_3d: &[Point3d], params: &[f64], surface: &Surface, curve_2d: Option<&Curve2d>) -> Vec<Point2d> {
+    pub(crate) fn compute_uvs(points_3d: &[Point3d], params: &[f64], surface: &Surface, curve_2d: Option<&Curve2d>) -> Vec<Point2d> {
         if let Some(c2d) = curve_2d {
             // Use analytical PCURVE — evaluate the 2D curve at each parameter value
             let (t_min, t_max) = c2d.param_range();
@@ -249,6 +249,84 @@ impl EdgeDiscretizationCache {
                     Point2d::new(u, v)
                 })
                 .collect()
+        }
+    }
+
+    /// Get the UV coordinates for a specific face-edge pair.
+    ///
+    /// Returns `None` if the edge is not in the cache, or if UV coordinates
+    /// haven't been computed for the given face yet.
+    pub fn get_uv_for_face(&self, edge_id: TopoId, face_id: TopoId) -> Option<&Vec<Point2d>> {
+        self.entries.get(&edge_id).and_then(|e| e.uv_per_face.get(&face_id))
+    }
+
+    /// Pre-populate the cache with all edge discretizations and UV coordinates
+    /// for every face-edge pair in the solid.
+    ///
+    /// After calling this method, the cache is fully read-only and can be
+    /// shared as `&EdgeDiscretizationCache` across threads (for parallel
+    /// triangulation). No further calls to `discretize_edge` are needed.
+    ///
+    /// # Algorithm
+    /// 1. First pass: discretize all edges (3D points only)
+    /// 2. Second pass: compute UVs for each face-edge pair
+    pub fn pre_populate_for_solid_full(&mut self, solid: &Solid, default_n_samples: usize) {
+        // First pass: discretize all edges (3D points only)
+        for face in solid.faces() {
+            if let Some(ref surface) = face.surface {
+                for edge in &face.edges {
+                    if edge.degenerate { continue; }
+                    if !self.entries.contains_key(&edge.id) {
+                        let (points_3d, params) = self.adaptive_discretize(edge, default_n_samples);
+                        self.entries.insert(edge.id, EdgeDiscretization {
+                            points_3d,
+                            uv_per_face: HashMap::new(),
+                            params,
+                        });
+                    }
+                }
+            }
+        }
+        // Second pass: compute UVs for each face-edge pair
+        for face in solid.faces() {
+            if let Some(ref surface) = face.surface {
+                // Outer wire
+                if let Some(ref wire) = face.outer_wire {
+                    for coedge in &wire.coedges {
+                        let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+                        if let Some(edge) = edge {
+                            if edge.degenerate { continue; }
+                            if let Some(entry) = self.entries.get_mut(&edge.id) {
+                                if !entry.uv_per_face.contains_key(&face.id) {
+                                    let uvs = Self::compute_uvs(
+                                        &entry.points_3d, &entry.params,
+                                        surface, coedge.curve_2d.as_ref(),
+                                    );
+                                    entry.uv_per_face.insert(face.id, uvs);
+                                }
+                            }
+                        }
+                    }
+                }
+                // Inner wires
+                for wire in &face.inner_wires {
+                    for coedge in &wire.coedges {
+                        let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+                        if let Some(edge) = edge {
+                            if edge.degenerate { continue; }
+                            if let Some(entry) = self.entries.get_mut(&edge.id) {
+                                if !entry.uv_per_face.contains_key(&face.id) {
+                                    let uvs = Self::compute_uvs(
+                                        &entry.points_3d, &entry.params,
+                                        surface, coedge.curve_2d.as_ref(),
+                                    );
+                                    entry.uv_per_face.insert(face.id, uvs);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
