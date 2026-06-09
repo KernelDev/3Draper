@@ -29,7 +29,7 @@ use draper_geometry::{
     NurbsSurface, Curve3d, Curve2d, Line, Circle, Ellipse, Arc, NurbsCurve,
     Line2d, Circle2d, Ellipse2d, Nurbs2d,
 };
-use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary_and_holes_uv, ear_clip, validate_watertight};
+use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary_and_holes_uv, ear_clip, validate_watertight, smooth_normals};
 use draper_topology::{Face, Wire, CoEdge, Edge as TopoEdge, Shell, Solid};
 use draper_topology::healing::{heal_solid, HealingParams, HealingReport};
 use draper_geometry::tolerance::ToleranceContext;
@@ -3135,6 +3135,12 @@ impl<'a> StepConverter<'a> {
             let stitch_tol = (diagonal * 0.05).max(0.1);
             draper_mesh::stitch_boundary_edges(&mut mesh, stitch_tol, 20);
         }
+
+        // Smooth vertex normals across shared edges for Gouraud-like shading.
+        // Use a crease angle of 45° (0.785 rad) — edges sharper than this
+        // maintain their sharp appearance (e.g., box edges), while smoother
+        // transitions (cylinders, spheres) get averaged normals.
+        draper_mesh::smooth_normals(&mut mesh, 0.785);
 
         if skipped_faces > 0 {
             log::warn!("BREP #{} detailed: {} faces skipped due to time limit", brep_id, skipped_faces);
@@ -7146,21 +7152,15 @@ impl<'a> StepConverter<'a> {
             return mesh;
         }
 
-        // Snap boundary points onto the plane to eliminate numerical drift
-        // from edge curve sampling. Without this, vertices can be slightly off-plane,
-        // causing visible "wavy" artifacts on what should be a perfectly flat surface.
-        let snap_to_plane = |p: &Point3d| -> Point3d {
-            let dx = p.x - plane.origin.x;
-            let dy = p.y - plane.origin.y;
-            let dz = p.z - plane.origin.z;
-            let dist = dx * plane.normal.x + dy * plane.normal.y + dz * plane.normal.z;
-            Point3d::new(
-                p.x - dist * plane.normal.x,
-                p.y - dist * plane.normal.y,
-                p.z - dist * plane.normal.z,
-            )
-        };
-        outer_points_3d = outer_points_3d.iter().map(|p| snap_to_plane(p)).collect();
+        // NOTE: We intentionally do NOT snap boundary points onto the plane.
+        // Snapping was previously done to eliminate numerical drift from edge
+        // curve sampling, but it causes boundary vertices on shared edges to
+        // have DIFFERENT 3D positions between adjacent faces (e.g., a planar
+        // cap face and a cylinder side face share a circular edge — the cap
+        // face would snap circle points to the cap plane, the cylinder face
+        // wouldn't — creating gaps). The boundary points come from the
+        // StepEdgeCache which ensures shared edges produce identical 3D points.
+        // Snapping breaks this watertightness guarantee.
 
         // Log diagnostic info for complex planar faces
         if !inner_loops.is_empty() {
@@ -7199,8 +7199,7 @@ impl<'a> StepConverter<'a> {
             }
             if !hp3d.is_empty() {
                 hp3d = deduplicate_points_3d(&hp3d, 1e-6);
-                // Snap hole points onto the plane (same as outer boundary)
-                hp3d = hp3d.iter().map(|p| snap_to_plane(p)).collect();
+                // No snap_to_plane — see comment above about watertightness
                 let hp2d: Vec<Point2d> = hp3d.iter().map(|p| project(p)).collect();
                 hole_points_3d.push(hp3d);
                 hole_points_2d.push(hp2d);

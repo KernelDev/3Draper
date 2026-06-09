@@ -3184,11 +3184,20 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
                 )
             }
         }
-        Surface::Cylinder(cyl) => {
-            // Cylinder: use grid-based triangulation with boundary snapping
-            // The general consistent path doesn't handle cylindrical periodicity well
-            triangulate_cylinder_face_with_boundary_uv(
-                cyl, boundary_points, boundary_uvs, hole_polylines, hole_uvs, forward, params,
+        Surface::Cylinder(_) => {
+            // Cylinder: use earcutr-based consistent triangulation.
+            // The grid-based approach with boundary snapping only approximates
+            // boundary vertex positions (nearest grid cell), which can produce
+            // gaps on shared edges with non-cylindrical adjacent faces.
+            // The consistent path uses cached boundary 3D points directly.
+            crate::parametric_domain::triangulate_surface_consistent(
+                surface,
+                boundary_points,
+                boundary_uvs,
+                hole_polylines,
+                hole_uvs,
+                forward,
+                params,
             )
         }
         Surface::Cone(cone) => {
@@ -3204,13 +3213,22 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
             )
         }
         Surface::Nurbs(_) => {
-            // NURBS: use grid-based triangulation with trimming.
-            // This is the correct approach because the NURBS surface IS its
-            // UV parameterization — a regular grid in UV maps to a structured
-            // mesh on the 3D surface. The earcutr CDT approach was incorrect
-            // because it operates on the 2D UV polygon which for NURBS is
-            // arbitrary and doesn't correspond to 3D geometry.
-            triangulate_nurbs_grid_trimmed(
+            // NURBS: use earcutr-based consistent triangulation.
+            //
+            // The grid-based approach (triangulate_nurbs_grid_trimmed) had
+            // critical flaws for watertightness:
+            // 1. Only snaps grid vertices near boundary UVs — boundary points
+            //    that fall between grid cells are NOT used, creating gaps
+                       // 2. Creates its own grid via nurbs.derivatives_at() which
+            //    produces different 3D coordinates than cached boundary points
+            // 3. Containment check is vertex-based and can miss edge cases
+            //
+            // The earcutr approach (triangulate_surface_consistent) fixes these:
+            // 1. Boundary 3D points are used DIRECTLY — bit-identical for watertightness
+            // 2. earcutr creates triangles at every corner automatically
+            // 3. Adaptive interior points via knot-span subdivision
+            // 4. Chord-error refinement for surface accuracy
+            crate::parametric_domain::triangulate_surface_consistent(
                 surface,
                 boundary_points,
                 boundary_uvs,

@@ -483,13 +483,21 @@ pub fn compact_vertices(mesh: &mut TriangleMesh) {
     // Build old-to-new mapping
     let mut old_to_new: Vec<u32> = vec![0; mesh.vertices.len()];
     let mut new_vertices = Vec::with_capacity(mesh.vertices.len());
-    let mut new_normals = mesh.normals.take();
+    let mut new_normals: Vec<[f64; 3]> = Vec::with_capacity(mesh.vertices.len());
+    let old_normals = mesh.normals.take();
 
     for (i, is_used) in used.iter().enumerate() {
         if *is_used {
             let new_idx = new_vertices.len() as u32;
             old_to_new[i] = new_idx;
             new_vertices.push(mesh.vertices[i]);
+            if let Some(ref old_n) = old_normals {
+                if i < old_n.len() {
+                    new_normals.push(old_n[i]);
+                } else {
+                    new_normals.push([0.0, 0.0, 1.0]);
+                }
+            }
         }
     }
 
@@ -501,7 +509,144 @@ pub fn compact_vertices(mesh: &mut TriangleMesh) {
     }
 
     mesh.vertices = new_vertices;
-    mesh.normals = new_normals; // Normals may be slightly off but acceptable
+    if old_normals.is_some() && !new_normals.is_empty() {
+        mesh.normals = Some(new_normals);
+    }
+}
+
+// ============================================================
+// Normal smoothing — average normals across shared edges
+// ============================================================
+
+/// Compute face normals from the mesh triangles.
+fn compute_face_normals(mesh: &TriangleMesh) -> Vec<[f64; 3]> {
+    mesh.triangles.iter().map(|tri| {
+        let v0 = mesh.vertices[tri[0] as usize];
+        let v1 = mesh.vertices[tri[1] as usize];
+        let v2 = mesh.vertices[tri[2] as usize];
+        let e1 = (v1.x - v0.x, v1.y - v0.y, v1.z - v0.z);
+        let e2 = (v2.x - v0.x, v2.y - v0.y, v2.z - v0.z);
+        let nx = e1.1 * e2.2 - e1.2 * e2.1;
+        let ny = e1.2 * e2.0 - e1.0 * e2.2;
+        let nz = e1.0 * e2.1 - e1.1 * e2.0;
+        let len = (nx * nx + ny * ny + nz * nz).sqrt();
+        if len > 1e-15 { [nx / len, ny / len, nz / len] } else { [0.0, 0.0, 1.0] }
+    }).collect()
+}
+
+/// Smooth vertex normals by averaging normals of all triangles sharing a vertex.
+///
+/// Without smoothing, each face computes its vertex normals independently from
+/// `surface.normal_at(u, v)`, which produces sharp lighting discontinuities
+/// (Mach bands) at shared edges. Smoothing averages the normals with
+/// area-weighted contributions, producing smooth Gouraud-like shading.
+///
+/// # Arguments
+/// * `mesh` — The triangle mesh whose normals should be smoothed.
+/// * `crease_angle` — Angle in radians above which edges are considered sharp
+///   and should NOT be smoothed across. Typical values: 30° = 0.524 rad,
+///   45° = 0.785 rad. Set to π to smooth all edges.
+pub fn smooth_normals(mesh: &mut TriangleMesh, crease_angle: f64) {
+    let normals = match mesh.normals {
+        Some(ref n) if n.len() == mesh.vertices.len() => n.clone(),
+        Some(ref n) => {
+            // Normal count doesn't match vertex count — skip smoothing
+            log::warn!("smooth_normals: normal count ({}) != vertex count ({}), skipping",
+                       n.len(), mesh.vertices.len());
+            return;
+        }
+        None => return, // No normals to smooth
+    };
+
+    // Compute face normals if not present (needed for area weighting)
+    let face_normals: Vec<[f64; 3]> = if let Some(ref fn_ref) = mesh.face_normals {
+        if fn_ref.len() == mesh.triangles.len() {
+            fn_ref.clone()
+        } else {
+            // Face normals array length mismatch — recompute
+            compute_face_normals(mesh)
+        }
+    } else {
+        compute_face_normals(mesh)
+    };
+
+    // Build vertex → incident triangles map
+    let n_verts = mesh.vertices.len();
+    let mut vertex_triangles: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n_verts];
+    for (ti, tri) in mesh.triangles.iter().enumerate() {
+        let v0 = mesh.vertices[tri[0] as usize];
+        let v1 = mesh.vertices[tri[1] as usize];
+        let v2 = mesh.vertices[tri[2] as usize];
+        let e1 = (v1.x - v0.x, v1.y - v0.y, v1.z - v0.z);
+        let e2 = (v2.x - v0.x, v2.y - v0.y, v2.z - v0.z);
+        let area = ((e1.1 * e2.2 - e1.2 * e2.1).powi(2)
+                   + (e1.2 * e2.0 - e1.0 * e2.2).powi(2)
+                   + (e1.0 * e2.1 - e1.1 * e2.0).powi(2)).sqrt() * 0.5;
+        vertex_triangles[tri[0] as usize].push((ti, area));
+        vertex_triangles[tri[1] as usize].push((ti, area));
+        vertex_triangles[tri[2] as usize].push((ti, area));
+    }
+
+    // Build edge → face normals map for crease detection
+    let mut edge_face_normals: HashMap<(u32, u32), Vec<[f64; 3]>> = HashMap::new();
+    for (ti, tri) in mesh.triangles.iter().enumerate() {
+        let edges = [
+            (tri[0].min(tri[1]), tri[0].max(tri[1])),
+            (tri[1].min(tri[2]), tri[1].max(tri[2])),
+            (tri[2].min(tri[0]), tri[2].max(tri[0])),
+        ];
+        for &edge in &edges {
+            edge_face_normals.entry(edge).or_default().push(face_normals[ti]);
+        }
+    }
+
+    // For each vertex, compute the smoothed normal by averaging
+    // the face normals of all incident triangles, weighted by area.
+    // Only average across faces where the edge angle is below crease_angle.
+    let mut smoothed = vec![[0.0_f64; 3]; n_verts];
+
+    for vi in 0..n_verts {
+        let incidents = &vertex_triangles[vi];
+        if incidents.is_empty() {
+            if vi < normals.len() {
+                smoothed[vi] = normals[vi];
+            }
+            continue;
+        }
+
+        let mut sum_nx = 0.0_f64;
+        let mut sum_ny = 0.0_f64;
+        let mut sum_nz = 0.0_f64;
+
+        // Use the face normal of the first incident triangle as reference
+        let ref_fn = face_normals[incidents[0].0];
+
+        for &(ti, area) in incidents {
+            let fn_i = face_normals[ti];
+
+            // Check if this face's normal is within crease_angle of the reference
+            let dot = ref_fn[0] * fn_i[0] + ref_fn[1] * fn_i[1] + ref_fn[2] * fn_i[2];
+            let angle = dot.clamp(-1.0, 1.0).acos();
+
+            if angle <= crease_angle {
+                sum_nx += fn_i[0] * area;
+                sum_ny += fn_i[1] * area;
+                sum_nz += fn_i[2] * area;
+            }
+        }
+
+        let len = (sum_nx * sum_nx + sum_ny * sum_ny + sum_nz * sum_nz).sqrt();
+        if len > 1e-15 {
+            smoothed[vi] = [sum_nx / len, sum_ny / len, sum_nz / len];
+        } else if vi < normals.len() {
+            smoothed[vi] = normals[vi];
+        }
+    }
+
+    // Only update normals if we computed valid smoothed normals
+    if smoothed.iter().any(|n| n[0] != 0.0 || n[1] != 0.0 || n[2] != 0.0) {
+        mesh.normals = Some(smoothed);
+    }
 }
 
 #[cfg(test)]
