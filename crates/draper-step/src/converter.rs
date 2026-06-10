@@ -33,6 +33,7 @@ use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangula
 use draper_topology::{Face, Wire, CoEdge, Edge as TopoEdge, Shell, Solid};
 use draper_topology::healing::{heal_solid, HealingParams, HealingReport};
 use draper_geometry::tolerance::ToleranceContext;
+use draper_mesh::edge_cache::{EdgeDiscretizationCache, AdaptiveTolerance};
 use std::collections::HashMap;
 
 // WASM-compatible Instant: on native uses std::time::Instant,
@@ -74,248 +75,8 @@ impl StepConversionConfig {
 }
 
 // ============================================================
-// STEP Edge Discretization Cache
+// FaceData — extracted face data with surface and boundary edges
 // ============================================================
-
-/// Cache that ensures shared STEP edges between faces produce identical 3D points.
-///
-/// When two faces reference the same EDGE_CURVE entity in a STEP file, they
-/// must produce identical boundary 3D points. Without this cache, each face
-/// independently samples its boundary edges, producing *different* points on
-/// shared edges. This creates gaps (cracks) between adjacent faces in the mesh,
-/// which `merge_coincident_vertices` cannot always fix correctly.
-///
-/// With this cache:
-/// 1. The first face that references an EDGE_CURVE triggers its discretization.
-/// 2. The resulting 3D points are cached by STEP EDGE_CURVE entity ID.
-/// 3. Subsequent faces that share the same EDGE_CURVE receive the *identical*
-///    3D point sequence.
-///
-/// This guarantees watertight meshes at shared edges — no post-hoc merging needed.
-
-/// Cached discretization of a single STEP edge: 3D points + normalized parameters.
-#[derive(Clone)]
-struct StepEdgeDiscretization {
-    /// 3D points along the edge curve (in forward direction).
-    points_3d: Vec<Point3d>,
-    /// Normalized parameter values [0, 1] for each point.
-    /// These are NOT uniformly spaced after adaptive refinement —
-    /// each value corresponds to the actual curve parameter at that point.
-    params: Vec<f64>,
-}
-
-struct StepEdgeCache {
-    /// Maps STEP EDGE_CURVE entity ID → discretized edge data.
-    entries: HashMap<i64, StepEdgeDiscretization>,
-    /// Tolerance context for adaptive sampling.
-    tol_ctx: ToleranceContext,
-    /// Default number of samples per edge.
-    default_samples: usize,
-}
-
-impl StepEdgeCache {
-    fn new(tol_ctx: ToleranceContext) -> Self {
-        // Use same default samples on all platforms for consistent results
-        let default_samples = 32;
-
-        Self {
-            entries: HashMap::new(),
-            tol_ctx,
-            default_samples,
-        }
-    }
-
-    /// Get or compute discretized edge data for an edge identified by its STEP entity ID.
-    /// Returns (3D points, normalized parameter values [0..1]).
-    ///
-    /// If the edge is already cached, returns a clone of the cached data.
-    /// If not, discretizes the edge and caches the result.
-    ///
-    /// IMPORTANT: When the edge is reversed (param_range.0 > param_range.1, i.e.,
-    /// the ORIENTED_EDGE had orientation=.F.), the cached forward-order data is
-    /// reversed before returning. This ensures that shared EDGE_CURVE entities
-    /// produce correctly oriented boundary points for each face.
-    fn discretize(&mut self, step_edge_id: i64, edge: &TopoEdge, n_samples: usize) -> (Vec<Point3d>, Vec<f64>) {
-        if let Some(disc) = self.entries.get(&step_edge_id) {
-            let mut pts = disc.points_3d.clone();
-            let mut params = disc.params.clone();
-            // If the edge is reversed (ORIENTED_EDGE orientation=.F.),
-            // reverse the point sequence to match the traversal direction.
-            if edge.param_range.0 > edge.param_range.1 {
-                pts.reverse();
-                // Reverse params and map: old param p → new param 1-p
-                params = params.into_iter().map(|p| 1.0 - p).collect();
-            }
-            return (pts, params);
-        }
-
-        // Cache miss: always discretize in forward direction (param_range.0 < param_range.1).
-        // If the edge is reversed, we still discretize in forward direction and cache that,
-        // then reverse for the caller.
-        let forward_edge = if edge.param_range.0 > edge.param_range.1 {
-            edge.reversed()
-        } else {
-            edge.clone()
-        };
-
-        let disc = self.adaptive_discretize(&forward_edge, n_samples.max(2));
-        if disc.points_3d.is_empty() {
-            let curve_type = match &edge.curve {
-                Some(Curve3d::Line(_)) => "Line",
-                Some(Curve3d::Circle(_)) => "Circle",
-                Some(Curve3d::Ellipse(_)) => "Ellipse",
-                Some(Curve3d::Arc(_)) => "Arc",
-                Some(Curve3d::Nurbs(_)) => "Nurbs",
-                None => "None",
-            };
-            log::warn!("edge_cache: discretize(step_id={}, n_samples={}) returned empty — curve type: {}",
-                step_edge_id, n_samples, curve_type);
-        }
-        // Cache the forward-direction discretization
-        self.entries.insert(step_edge_id, disc.clone());
-
-        // If the original edge was reversed, reverse the result
-        if edge.param_range.0 > edge.param_range.1 {
-            let mut pts = disc.points_3d;
-            let mut params = disc.params;
-            pts.reverse();
-            params = params.into_iter().map(|p| 1.0 - p).collect();
-            (pts, params)
-        } else {
-            (disc.points_3d, disc.params)
-        }
-    }
-
-    /// Check if an edge is already in the cache.
-    fn contains(&self, step_edge_id: i64) -> bool {
-        self.entries.contains_key(&step_edge_id)
-    }
-
-    /// Number of cached edges.
-    fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Adaptively discretize an edge based on curve curvature.
-    /// Starts with uniformly-spaced points, then recursively subdivides
-    /// where chord deviation exceeds a threshold.
-    ///
-    /// Returns `StepEdgeDiscretization` with both 3D points and their
-    /// normalized parameter values [0, 1]. These params are CRUCIAL for
-    /// correct UV computation via PCURVE — they must reflect the actual
-    /// curve parameter at each point, NOT the uniform index fraction.
-    fn adaptive_discretize(&self, edge: &TopoEdge, n_samples: usize) -> StepEdgeDiscretization {
-        let curve = match &edge.curve {
-            Some(c) => c,
-            None => {
-                // No curve geometry — just use start/end points
-                let (p0, p1) = match (edge.start_point(), edge.end_point()) {
-                    (Some(a), Some(b)) => (a, b),
-                    _ => return StepEdgeDiscretization { points_3d: vec![], params: vec![] },
-                };
-                return StepEdgeDiscretization {
-                    points_3d: vec![p0, p1],
-                    params: vec![0.0, 1.0],
-                };
-            }
-        };
-
-        let (t_min, t_max) = edge.param_range;
-        let t_range = t_max - t_min;
-
-        // For line edges, just return endpoints
-        if matches!(curve, Curve3d::Line(_)) {
-            return StepEdgeDiscretization {
-                points_3d: vec![curve.point_at(t_min), curve.point_at(t_max)],
-                params: vec![0.0, 1.0],
-            };
-        }
-
-        // Adaptive subdivision threshold: 10× absolute tolerance as chord deviation
-        let max_deviation = self.tol_ctx.absolute * 10.0;
-
-        // Start with uniformly spaced points
-        let n_initial = n_samples.min(256).max(2);
-        let mut points: Vec<Point3d> = Vec::with_capacity(n_initial);
-        let mut t_params: Vec<f64> = Vec::with_capacity(n_initial); // normalized [0, 1]
-
-        for i in 0..n_initial {
-            let t_norm = i as f64 / (n_initial - 1) as f64;
-            let t = t_min + t_norm * t_range;
-            points.push(curve.point_at(t));
-            t_params.push(t_norm);
-        }
-
-        // Refine: check chord deviation and subdivide where needed
-        // Track actual parameter values alongside points to ensure
-        // correct UV computation from PCURVE later.
-        let mut refined = true;
-        let mut refinement_passes = 0;
-        let max_refinement_passes = 5;
-        let max_points = 64;
-
-        while refined && refinement_passes < max_refinement_passes && points.len() < max_points {
-            refined = false;
-            refinement_passes += 1;
-
-            let mut i = 0;
-            while i < points.len() - 1 && points.len() < max_points {
-                let p0 = points[i];
-                let p2 = points[i + 1];
-                // Compute the ACTUAL midpoint parameter from tracked params
-                let t_mid_norm = (t_params[i] + t_params[i + 1]) * 0.5;
-                let t_mid_actual = t_min + t_mid_norm * t_range;
-                let p_mid = curve.point_at(t_mid_actual);
-
-                let deviation = point_to_chord_distance_3d(&p_mid, &p0, &p2);
-
-                if deviation > max_deviation {
-                    // Insert midpoint with its correct parameter value
-                    points.insert(i + 1, p_mid);
-                    t_params.insert(i + 1, t_mid_norm);
-                    refined = true;
-                    i += 2; // Skip the newly inserted point
-                } else {
-                    i += 1;
-                }
-            }
-        }
-
-        StepEdgeDiscretization {
-            points_3d: points,
-            params: t_params,
-        }
-    }
-}
-
-impl Default for StepEdgeCache {
-    fn default() -> Self {
-        Self::new(ToleranceContext::new())
-    }
-}
-
-/// Compute the distance from a point to a line segment (chord) in 3D.
-fn point_to_chord_distance_3d(point: &Point3d, a: &Point3d, b: &Point3d) -> f64 {
-    let abx = b.x - a.x;
-    let aby = b.y - a.y;
-    let abz = b.z - a.z;
-    let apx = point.x - a.x;
-    let apy = point.y - a.y;
-    let apz = point.z - a.z;
-
-    let ab_len_sq = abx * abx + aby * aby + abz * abz;
-    if ab_len_sq < 1e-30 {
-        return (apx * apx + apy * apy + apz * apz).sqrt();
-    }
-
-    let t = (apx * abx + apy * aby + apz * abz) / ab_len_sq;
-    let t = t.clamp(0.0, 1.0);
-
-    let cx = a.x + t * abx - point.x;
-    let cy = a.y + t * aby - point.y;
-    let cz = a.z + t * abz - point.z;
-    (cx * cx + cy * cy + cz * cz).sqrt()
-}
 
 /// Extracted face data with surface and boundary edges.
 #[derive(Clone)]
@@ -425,7 +186,7 @@ fn face_data_list_to_solid(face_data_list: &[FaceData]) -> (Solid, HashMap<drape
 /// - **Preserves** STEP-specific metadata (step_face_id, edge_step_ids,
 ///   edge_curves_2d, etc.) for faces that originated from the STEP file.
 ///   The original edge data and STEP IDs are kept intact because the
-///   StepEdgeCache already handles watertightness at the mesh level.
+///   EdgeDiscretizationCache already handles watertightness at the mesh level.
 /// - **Updates** the `forward` flag if the healing pipeline flipped a face
 ///   normal.
 /// - **Removes** faces that were removed by the healing pipeline (small
@@ -2865,7 +2626,7 @@ impl<'a> StepConverter<'a> {
 
         // Create edge discretization cache for this BREP to ensure
         // shared edges produce identical 3D points (watertightness).
-        let mut edge_cache = StepEdgeCache::new(tol_ctx);
+        let mut edge_cache = EdgeDiscretizationCache::with_tolerance(tol_ctx.clone(), 64);
 
         let mut mesh = TriangleMesh::new();
         for (fi, face_data) in face_data_list.iter().enumerate() {
@@ -2919,24 +2680,14 @@ impl<'a> StepConverter<'a> {
                 fbmin.x, fbmin.y, fbmin.z, fbmax.x, fbmax.y, fbmax.z);
             mesh.merge(&face_mesh);
         }
-        // Merge coincident vertices to make the mesh watertight
-        // (still needed for non-shared edges, but the cache ensures shared edges
-        // already have identical vertices)
-        draper_mesh::merge_coincident_vertices(&mut mesh, 1e-4);
+        // Use adaptive tolerance for merge and stitch
+        let adaptive_tol = edge_cache.adaptive_tolerance().merge_tolerance();
+        draper_mesh::merge_coincident_vertices(&mut mesh, adaptive_tol);
 
-        // Phase 1b: Stitch boundary edges to close gaps
-        // After vertex merging, some boundary edges remain because vertices
-        // on shared edges between faces have slightly different positions.
-        // Edge stitching finds and merges these nearby boundary vertices.
+        // Stitch only as fallback with adaptive tolerance
         {
-            let (bmin, bmax) = mesh.bounding_box();
-            let diagonal = ((bmax.x - bmin.x).powi(2) + (bmax.y - bmin.y).powi(2) + (bmax.z - bmin.z).powi(2)).sqrt();
-            // Use adaptive stitch tolerance based on edge sampling density.
-            // Edge samples are spaced at diagonal / 32 apart on average.
-            // Start with a moderate tolerance, then increase progressively.
-            // 5% of diagonal covers ~1.6 sample spacings.
-            let stitch_tol = (diagonal * 0.05).max(0.1);
-            draper_mesh::stitch_boundary_edges(&mut mesh, stitch_tol, 20);
+            let stitch_tol = edge_cache.adaptive_tolerance().stitch_tolerance();
+            draper_mesh::stitch_boundary_edges(&mut mesh, stitch_tol, 3);
         }
 
         // Phase 2: Validate watertightness of the merged mesh
@@ -2986,7 +2737,7 @@ impl<'a> StepConverter<'a> {
         };
 
         // Create edge discretization cache for this BREP
-        let mut edge_cache = StepEdgeCache::new(tol_ctx);
+        let mut edge_cache = EdgeDiscretizationCache::with_tolerance(tol_ctx.clone(), 64);
 
         // Time guard: limit per-BREP triangulation time.
         // WASM uses a moderate limit to avoid browser freezes;
@@ -3125,15 +2876,14 @@ impl<'a> StepConverter<'a> {
                 uv_triangles,
             });
         }
-        // Merge coincident vertices to make the mesh watertight
-        draper_mesh::merge_coincident_vertices(&mut mesh, 1e-4);
+        // Use adaptive tolerance for merge and stitch
+        let adaptive_tol = edge_cache.adaptive_tolerance().merge_tolerance();
+        draper_mesh::merge_coincident_vertices(&mut mesh, adaptive_tol);
 
-        // Stitch boundary edges to close gaps
+        // Stitch only as fallback with adaptive tolerance
         {
-            let (bmin, bmax) = mesh.bounding_box();
-            let diagonal = ((bmax.x - bmin.x).powi(2) + (bmax.y - bmin.y).powi(2) + (bmax.z - bmin.z).powi(2)).sqrt();
-            let stitch_tol = (diagonal * 0.05).max(0.1);
-            draper_mesh::stitch_boundary_edges(&mut mesh, stitch_tol, 20);
+            let stitch_tol = edge_cache.adaptive_tolerance().stitch_tolerance();
+            draper_mesh::stitch_boundary_edges(&mut mesh, stitch_tol, 3);
         }
 
         // Smooth vertex normals across shared edges for Gouraud-like shading.
@@ -6837,7 +6587,7 @@ impl<'a> StepConverter<'a> {
         face_data: &FaceData,
         params: &TriangulationParams,
         bbox: &Option<(Point3d, Point3d)>,
-        edge_cache: &mut StepEdgeCache,
+        edge_cache: &mut EdgeDiscretizationCache,
     ) -> TriangleMesh {
         if face_data.edges.is_empty() {
             // No boundary edges — fall back to bounding-box-based triangulation for planes,
@@ -6885,7 +6635,7 @@ impl<'a> StepConverter<'a> {
             let curve_2d = face_data.edge_curves_2d.get(edge_idx).and_then(|c| c.as_ref());
 
             if step_id != 0 {
-                let (pts, params) = edge_cache.discretize(step_id, edge, n_samples);
+                let (pts, params) = edge_cache.discretize_step_edge(step_id, edge, n_samples);
                 // Compute UV for each boundary point using actual parameter values
                 let uvs = self.compute_edge_uvs_with_points(&params, &pts, &face_data.surface, curve_2d);
                 boundary_points.extend(pts);
@@ -6913,7 +6663,7 @@ impl<'a> StepConverter<'a> {
                         let curve_2d = self.find_curve_2d_for_edge(edge, face_data);
 
                         if step_id != 0 {
-                            let (pts, params) = edge_cache.discretize(step_id, edge, n_samples);
+                            let (pts, params) = edge_cache.discretize_step_edge(step_id, edge, n_samples);
                             let uvs = self.compute_edge_uvs_with_points(&params, &pts, &face_data.surface, curve_2d);
                             hole_pts.extend(pts);
                             hole_uvs.extend(uvs);
@@ -6941,7 +6691,7 @@ impl<'a> StepConverter<'a> {
                 let curve_2d = face_data.edge_curves_2d.get(edge_idx).and_then(|c| c.as_ref());
 
                 if step_id != 0 {
-                    let (pts, params) = edge_cache.discretize(step_id, edge, n_samples);
+                    let (pts, params) = edge_cache.discretize_step_edge(step_id, edge, n_samples);
                     let uvs = self.compute_edge_uvs_with_points(&params, &pts, &face_data.surface, curve_2d);
                     boundary_points.extend(pts);
                     boundary_uvs.extend(uvs);
@@ -7130,7 +6880,7 @@ impl<'a> StepConverter<'a> {
         inner_loops: &[Vec<TopoEdge>],
         inner_step_ids: &[Vec<i64>],
         forward: bool,
-        edge_cache: &mut StepEdgeCache,
+        edge_cache: &mut EdgeDiscretizationCache,
     ) -> TriangleMesh {
         let mut mesh = TriangleMesh::new();
 
@@ -7140,7 +6890,7 @@ impl<'a> StepConverter<'a> {
             let step_id = outer_step_ids.get(edge_idx).copied().unwrap_or(0);
             let n_samples = self.edge_sample_count(edge);
             if step_id != 0 {
-                let (pts, _params) = edge_cache.discretize(step_id, edge, n_samples);
+                let (pts, _params) = edge_cache.discretize_step_edge(step_id, edge, n_samples);
                 outer_points_3d.extend(pts);
             } else {
                 outer_points_3d.extend(self.sample_edge_points(edge));
@@ -7159,7 +6909,7 @@ impl<'a> StepConverter<'a> {
         // cap face and a cylinder side face share a circular edge — the cap
         // face would snap circle points to the cap plane, the cylinder face
         // wouldn't — creating gaps). The boundary points come from the
-        // StepEdgeCache which ensures shared edges produce identical 3D points.
+        // EdgeDiscretizationCache which ensures shared edges produce identical 3D points.
         // Snapping breaks this watertightness guarantee.
 
         // Log diagnostic info for complex planar faces
@@ -7191,7 +6941,7 @@ impl<'a> StepConverter<'a> {
                 let step_id = step_ids.and_then(|ids| ids.get(edge_idx).copied()).unwrap_or(0);
                 let n_samples = self.edge_sample_count(edge);
                 if step_id != 0 {
-                    let (pts, _params) = edge_cache.discretize(step_id, edge, n_samples);
+                    let (pts, _params) = edge_cache.discretize_step_edge(step_id, edge, n_samples);
                     hp3d.extend(pts);
                 } else {
                     hp3d.extend(self.sample_edge_points(edge));
@@ -7489,7 +7239,7 @@ impl<'a> StepConverter<'a> {
     ///
     /// # Arguments
     /// * `params` — Normalized parameter values [0, 1] for each point, as returned
-    ///   by `StepEdgeCache::discretize()`. These are the ACTUAL parameter positions
+    ///   by `EdgeDiscretizationCache::discretize_step_edge()`. These are the ACTUAL parameter positions
     ///   on the edge curve — NOT uniform index fractions — and must be used for
     ///   correct PCURVE evaluation.
     /// * `points_3d` — The 3D points corresponding to the params. Used for

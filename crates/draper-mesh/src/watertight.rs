@@ -21,7 +21,9 @@
 //! ```
 
 use crate::mesh::TriangleMesh;
-use draper_geometry::Point3d;
+use crate::edge_cache::compute_adaptive_crease_angle;
+use draper_geometry::{Point3d, Surface};
+use draper_topology::Solid;
 use std::collections::HashMap;
 
 /// Result of watertight validation on a merged solid mesh.
@@ -644,6 +646,128 @@ pub fn smooth_normals(mesh: &mut TriangleMesh, crease_angle: f64) {
     }
 
     // Only update normals if we computed valid smoothed normals
+    if smoothed.iter().any(|n| n[0] != 0.0 || n[1] != 0.0 || n[2] != 0.0) {
+        mesh.normals = Some(smoothed);
+    }
+}
+
+/// Smooth vertex normals using adaptive crease angle based on surface type.
+///
+/// Instead of using a fixed 30° crease angle for all surfaces, this function
+/// computes an appropriate crease angle for each face based on its surface type:
+/// - Planes: 0° (sharp edges, no smoothing across face boundaries)
+/// - Cylinders/Cones/Spheres/Tori: 180° (smooth everything)
+/// - Revolution/Extrusion: 90° (moderate smoothing)
+/// - NURBS: 60° (compromise)
+///
+/// This produces much better visual quality on mixed-geometry models where
+/// a single fixed crease angle causes either over-smoothing on sharp edges
+/// or under-smoothing on curved surfaces.
+///
+/// # Arguments
+/// * `mesh` — The triangle mesh whose normals should be smoothed.
+/// * `solid` — The source solid, used to determine surface types per face.
+pub fn smooth_normals_adaptive(mesh: &mut TriangleMesh, solid: &Solid) {
+    let normals = match mesh.normals {
+        Some(ref n) if n.len() == mesh.vertices.len() => n.clone(),
+        Some(ref n) => {
+            log::warn!("smooth_normals_adaptive: normal count ({}) != vertex count ({}), skipping",
+                       n.len(), mesh.vertices.len());
+            return;
+        }
+        None => return,
+    };
+
+    // Compute face normals
+    let face_normals: Vec<[f64; 3]> = if let Some(ref fn_ref) = mesh.face_normals {
+        if fn_ref.len() == mesh.triangles.len() {
+            fn_ref.clone()
+        } else {
+            compute_face_normals(mesh)
+        }
+    } else {
+        compute_face_normals(mesh)
+    };
+
+    // Build a mapping from face_id → surface type for adaptive crease angles
+    let mut face_crease_angles: HashMap<u64, f64> = HashMap::new();
+    for face in solid.faces() {
+        if let Some(ref surface) = face.surface {
+            let angle = compute_adaptive_crease_angle(surface);
+            face_crease_angles.insert(face.id.to_u64(), angle);
+        }
+    }
+
+    // Build vertex → incident triangles map
+    let n_verts = mesh.vertices.len();
+    let mut vertex_triangles: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n_verts];
+    for (ti, tri) in mesh.triangles.iter().enumerate() {
+        let v0 = mesh.vertices[tri[0] as usize];
+        let v1 = mesh.vertices[tri[1] as usize];
+        let v2 = mesh.vertices[tri[2] as usize];
+        let e1 = (v1.x - v0.x, v1.y - v0.y, v1.z - v0.z);
+        let e2 = (v2.x - v0.x, v2.y - v0.y, v2.z - v0.z);
+        let area = ((e1.1 * e2.2 - e1.2 * e2.1).powi(2)
+                   + (e1.2 * e2.0 - e1.0 * e2.2).powi(2)
+                   + (e1.0 * e2.1 - e1.1 * e2.0).powi(2)).sqrt() * 0.5;
+        vertex_triangles[tri[0] as usize].push((ti, area));
+        vertex_triangles[tri[1] as usize].push((ti, area));
+        vertex_triangles[tri[2] as usize].push((ti, area));
+    }
+
+    // For each vertex, compute the smoothed normal using adaptive crease angle
+    let mut smoothed = vec![[0.0_f64; 3]; n_verts];
+
+    for vi in 0..n_verts {
+        let incidents = &vertex_triangles[vi];
+        if incidents.is_empty() {
+            if vi < normals.len() {
+                smoothed[vi] = normals[vi];
+            }
+            continue;
+        }
+
+        let mut sum_nx = 0.0_f64;
+        let mut sum_ny = 0.0_f64;
+        let mut sum_nz = 0.0_f64;
+
+        // Use the face normal of the first incident triangle as reference
+        let ref_fn = face_normals[incidents[0].0];
+
+        // Get the crease angle for this vertex's most representative face
+        // Use the largest face's crease angle as the smoothing threshold
+        let crease_angle = incidents.iter()
+            .filter_map(|&(ti, _)| {
+                mesh.triangle_face_ids.as_ref()
+                    .and_then(|ids| ids.get(ti).copied())
+                    .and_then(|fid| face_crease_angles.get(&fid))
+            })
+            .copied()
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or(std::f64::consts::FRAC_PI_6); // Default 30°
+
+        for &(ti, area) in incidents {
+            let fn_i = face_normals[ti];
+
+            // Check if this face's normal is within crease_angle of the reference
+            let dot = ref_fn[0] * fn_i[0] + ref_fn[1] * fn_i[1] + ref_fn[2] * fn_i[2];
+            let angle = dot.clamp(-1.0, 1.0).acos();
+
+            if angle <= crease_angle {
+                sum_nx += fn_i[0] * area;
+                sum_ny += fn_i[1] * area;
+                sum_nz += fn_i[2] * area;
+            }
+        }
+
+        let len = (sum_nx * sum_nx + sum_ny * sum_ny + sum_nz * sum_nz).sqrt();
+        if len > 1e-15 {
+            smoothed[vi] = [sum_nx / len, sum_ny / len, sum_nz / len];
+        } else if vi < normals.len() {
+            smoothed[vi] = normals[vi];
+        }
+    }
+
     if smoothed.iter().any(|n| n[0] != 0.0 || n[1] != 0.0 || n[2] != 0.0) {
         mesh.normals = Some(smoothed);
     }

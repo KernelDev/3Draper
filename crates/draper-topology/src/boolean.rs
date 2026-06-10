@@ -2154,6 +2154,7 @@ fn split_general_face(
         forward: true,
         tolerance: tol,
         degenerate: false,
+        step_entity_id: None,
     };
 
     // Create two sub-faces

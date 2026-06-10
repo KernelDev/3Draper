@@ -246,22 +246,25 @@ fn cap_grid_resolution(n_u: usize, n_v: usize, max_face_triangles: usize) -> (us
 // Top-level entry points
 // ============================================================
 
-/// Triangulate a solid into a triangle mesh.
-/// After merging all faces, merges coincident vertices to ensure
-/// that shared edges are watertight.
+/// Triangulate a solid into a triangle mesh using topology-first approach.
 ///
-/// Post-processing steps:
-/// 1. Merge coincident boundary vertices
-/// 2. Remove degenerate (zero-area) triangles
-/// 3. Remove triangles with NaN/Inf vertices
-/// 4. Validate watertightness and log diagnostics
-/// 5. Smooth normals across shared edges
-/// 6. Stitch remaining boundary edges if not watertight
+/// The unified edge cache guarantees bit-identical 3D points on shared edges,
+/// making the mesh watertight **by construction** — no post-hoc vertex merging
+/// or edge stitching is needed.
+///
+/// Post-processing steps (topology-first):
+/// 1. Filter degenerate (zero-area) triangles and NaN/Inf vertices
+/// 2. Validate watertightness and attempt automatic repair if needed
+/// 3. Smooth normals across shared edges with adaptive crease angle
 ///
 /// When `params.parallel` is `true`, faces are triangulated in parallel using
 /// rayon and per-face meshes are merged with pre-computed vertex offsets.
 pub fn triangulate_solid(solid: &Solid, params: &TriangulationParams) -> TriangleMesh {
-    let mut cache = EdgeDiscretizationCache::new();
+    // Compute adaptive tolerance from the solid's bounding box
+    let bbox = solid_bounding_box(solid);
+    let mut cache = EdgeDiscretizationCache::with_adaptive_tolerance(
+        &bbox.0, &bbox.1, 64,
+    );
     triangulate_solid_with_cache(solid, params, &mut cache)
 }
 
@@ -281,21 +284,25 @@ pub fn triangulate_solid_with_cache(solid: &Solid, params: &TriangulationParams,
 
 /// Sequential (single-threaded) solid triangulation with edge cache.
 ///
-/// Each face pre-populates its edges into the shared cache (idempotent for
-/// already-cached edges), ensuring shared edges produce identical 3D points.
+/// Uses topology-first approach: the edge cache guarantees bit-identical
+/// 3D points on shared edges, so the mesh is watertight by construction.
 fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams, cache: &mut EdgeDiscretizationCache) -> TriangleMesh {
+    // Phase 1: Pre-populate edge cache with deterministic rounding
+    cache.pre_populate_for_solid(solid, EDGE_SAMPLES);
+
+    // Phase 2: Triangulate all faces using cached boundary data
     let mut mesh = TriangleMesh::new();
     for face in solid.faces() {
         let face_mesh = triangulate_face_with_cache(face, params, cache);
         mesh.merge(&face_mesh);
     }
-    // Merge coincident boundary vertices to make the solid watertight
-    merge_coincident_vertices(&mut mesh, 1e-6);
-    // Use a very small tolerance for degenerate filtering — only remove truly degenerate triangles
-    // (zero area or NaN/Inf), not small valid triangles
+
+    // Phase 3: Post-processing (topology-first — no merge/stitch needed)
+    // Filter degenerate triangles (zero area or NaN/Inf)
     filter_degenerate_triangles(&mut mesh, 1e-10);
 
-    // Validate watertightness
+    // Phase 4: Validation with automatic recovery
+    let adaptive_tol = cache.adaptive_tolerance().merge_tolerance();
     let report = crate::watertight::validate_watertight(&mesh, false);
     if !report.is_watertight() {
         log::warn!(
@@ -309,22 +316,36 @@ fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams, cac
             report.euler_characteristic,
         );
 
-        // Attempt mesh stitching to close remaining boundary edges
-        if report.boundary_edge_count < 1000 {
-            log::info!("Attempting mesh stitching to close {} boundary edges...", report.boundary_edge_count);
-            crate::watertight::stitch_boundary_edges(&mut mesh, 1e-4, 3);
+        // Automatic recovery: try adaptive merge + stitch as a LAST RESORT
+        // This is NOT the primary path — the topology-first approach should
+        // make this unnecessary for well-formed B-Rep data.
+        if report.boundary_edge_count > 0 && report.boundary_edge_count < 5000 {
+            log::info!("Attempting automatic repair for {} boundary edges (tol={:.2e})...",
+                report.boundary_edge_count, adaptive_tol);
+            // Merge with adaptive tolerance (smaller than before)
+            merge_coincident_vertices(&mut mesh, adaptive_tol);
 
             let report2 = crate::watertight::validate_watertight(&mesh, false);
-            if report2.is_watertight() {
-                log::info!("Mesh stitching successful — mesh is now watertight");
+            if !report2.is_watertight() && report2.boundary_edge_count < 1000 {
+                // Stitch only as a fallback, with adaptive tolerance
+                let stitch_tol = cache.adaptive_tolerance().stitch_tolerance();
+                crate::watertight::stitch_boundary_edges(&mut mesh, stitch_tol, 3);
+            }
+
+            let report3 = crate::watertight::validate_watertight(&mesh, false);
+            if report3.is_watertight() {
+                log::info!("Automatic repair successful — mesh is now watertight");
             } else {
-                log::warn!("Mesh stitching: {} boundary edges remain after stitching", report2.boundary_edge_count);
+                log::warn!("Automatic repair: {} boundary edges remain", report3.boundary_edge_count);
             }
         }
+    } else {
+        log::info!("Solid is watertight ✓ ({} interior edges, {} triangles, χ={})",
+            report.interior_edge_count, report.triangle_count, report.euler_characteristic);
     }
 
-    // Smooth normals across shared edges for better visual quality
-    crate::watertight::smooth_normals(&mut mesh, 0.524);
+    // Phase 5: Smooth normals with adaptive crease angle per surface type
+    crate::watertight::smooth_normals_adaptive(&mut mesh, solid);
 
     // TODO: Chord error refinement — check if triangle midpoints deviate
     // from the true surface by more than max_deviation and subdivide if needed.
@@ -504,16 +525,16 @@ fn triangulate_face_cached(face: &Face, params: &TriangulationParams, cache: &Ed
     triangulate_face(face, params)
 }
 
-/// Parallel solid triangulation using rayon.
+/// Parallel solid triangulation using rayon (topology-first approach).
 ///
 /// # Algorithm
 /// 1. **Pre-compute** edge discretizations into a read-only `EdgeDiscretizationCache`
-///    (done before calling this function via `pre_populate_for_solid_full`).
+///    with deterministic rounding (done before calling this function).
 /// 2. **Parallel triangulate** each face independently using `rayon::par_iter()`.
 /// 3. **Merge** per-face meshes with pre-computed vertex offsets (avoids
 ///    sequential `merge` calls).
-/// 4. **Post-process**: merge coincident vertices, validate watertightness,
-///    smooth normals, stitch boundary edges, filter degenerate triangles.
+/// 4. **Post-process**: filter degenerate triangles, validate watertightness,
+///    adaptive repair if needed, smooth normals with adaptive crease angle.
 ///
 /// # Thread safety
 /// - The `EdgeDiscretizationCache` is shared immutably across threads (no locking needed).
@@ -554,12 +575,12 @@ fn triangulate_solid_parallel(solid: &Solid, params: &TriangulationParams, cache
     // Step 2: Merge per-face meshes with pre-computed offsets
     let merged = merge_meshes_parallel(&face_meshes);
 
-    // Step 3: Post-processing
+    // Step 3: Post-processing (topology-first — no mandatory merge/stitch)
     let mut mesh = merged;
-    merge_coincident_vertices(&mut mesh, 1e-6);
     filter_degenerate_triangles(&mut mesh, 1e-10);
 
-    // Validate watertightness
+    // Step 4: Validation with adaptive recovery
+    let adaptive_tol = cache.adaptive_tolerance().merge_tolerance();
     let report = crate::watertight::validate_watertight(&mesh, false);
     if !report.is_watertight() {
         log::warn!(
@@ -573,22 +594,32 @@ fn triangulate_solid_parallel(solid: &Solid, params: &TriangulationParams, cache
             report.euler_characteristic,
         );
 
-        // Attempt mesh stitching to close remaining boundary edges
-        if report.boundary_edge_count < 1000 {
-            log::info!("Attempting mesh stitching to close {} boundary edges...", report.boundary_edge_count);
-            crate::watertight::stitch_boundary_edges(&mut mesh, 1e-4, 3);
+        // Automatic recovery as LAST RESORT
+        if report.boundary_edge_count > 0 && report.boundary_edge_count < 5000 {
+            log::info!("Attempting automatic repair (parallel) for {} boundary edges (tol={:.2e})...",
+                report.boundary_edge_count, adaptive_tol);
+            merge_coincident_vertices(&mut mesh, adaptive_tol);
 
             let report2 = crate::watertight::validate_watertight(&mesh, false);
-            if report2.is_watertight() {
-                log::info!("Mesh stitching successful — mesh is now watertight");
+            if !report2.is_watertight() && report2.boundary_edge_count < 1000 {
+                let stitch_tol = cache.adaptive_tolerance().stitch_tolerance();
+                crate::watertight::stitch_boundary_edges(&mut mesh, stitch_tol, 3);
+            }
+
+            let report3 = crate::watertight::validate_watertight(&mesh, false);
+            if report3.is_watertight() {
+                log::info!("Automatic repair (parallel) successful — mesh is now watertight");
             } else {
-                log::warn!("Mesh stitching: {} boundary edges remain after stitching", report2.boundary_edge_count);
+                log::warn!("Automatic repair (parallel): {} boundary edges remain", report3.boundary_edge_count);
             }
         }
+    } else {
+        log::info!("Solid is watertight ✓ (parallel, {} interior edges, {} triangles, χ={})",
+            report.interior_edge_count, report.triangle_count, report.euler_characteristic);
     }
 
-    // Smooth normals across shared edges for better visual quality
-    crate::watertight::smooth_normals(&mut mesh, 0.524);
+    // Step 5: Smooth normals with adaptive crease angle
+    crate::watertight::smooth_normals_adaptive(&mut mesh, solid);
 
     // Safety check: ensure all per-triangle arrays have the same length
     debug_assert_mesh_consistency(&mesh);
@@ -704,14 +735,42 @@ fn merge_meshes_parallel(meshes: &[TriangleMesh]) -> TriangleMesh {
     merged
 }
 
-/// Triangulate a shell into a triangle mesh.
+/// Compute the bounding box of a Solid from its face surfaces and edge vertices.
+fn solid_bounding_box(solid: &Solid) -> (Point3d, Point3d) {
+    let mut min = Point3d::new(f64::MAX, f64::MAX, f64::MAX);
+    let mut max = Point3d::new(f64::MIN, f64::MIN, f64::MIN);
+    let mut has_points = false;
+
+    for face in solid.faces() {
+        for edge in &face.edges {
+            if edge.degenerate { continue; }
+            if let Some(p) = edge.start_point() {
+                min.x = min.x.min(p.x); min.y = min.y.min(p.y); min.z = min.z.min(p.z);
+                max.x = max.x.max(p.x); max.y = max.y.max(p.y); max.z = max.z.max(p.z);
+                has_points = true;
+            }
+            if let Some(p) = edge.end_point() {
+                min.x = min.x.min(p.x); min.y = min.y.min(p.y); min.z = min.z.min(p.z);
+                max.x = max.x.max(p.x); max.y = max.y.max(p.y); max.z = max.z.max(p.z);
+                has_points = true;
+            }
+        }
+    }
+
+    if !has_points {
+        return (Point3d::ORIGIN, Point3d::new(1.0, 1.0, 1.0));
+    }
+    (min, max)
+}
+
+/// Triangulate a shell into a triangle mesh (topology-first approach).
 pub fn triangulate_shell(shell: &Shell, params: &TriangulationParams) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
+    let mut cache = EdgeDiscretizationCache::new();
     for face in &shell.faces {
-        let face_mesh = triangulate_face(face, params);
+        let face_mesh = triangulate_face_with_cache(face, params, &mut cache);
         mesh.merge(&face_mesh);
     }
-    merge_coincident_vertices(&mut mesh, 1e-6);
     filter_degenerate_triangles(&mut mesh, 1e-10);
     mesh
 }

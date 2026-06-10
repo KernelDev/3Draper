@@ -1962,6 +1962,7 @@ mod tests {
             forward: true,
             tolerance: 1e-6,
             degenerate: false,
+            step_entity_id: None,
         };
         face.edges.push(degenerate_edge);
 
@@ -1976,6 +1977,7 @@ mod tests {
             forward: true,
             tolerance: 1e-6,
             degenerate: false,
+            step_entity_id: None,
         };
         face.edges.push(degen_circle_edge);
 

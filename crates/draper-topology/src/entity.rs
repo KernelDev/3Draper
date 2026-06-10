@@ -92,6 +92,13 @@ pub struct Edge {
     /// Whether this edge is degenerate (zero-length or degenerate curve).
     /// Set during validation when the edge's curve is found to be degenerate.
     pub degenerate: bool,
+    /// STEP entity ID of the underlying EDGE_CURVE.
+    /// When two ORIENTED_EDGEs share the same EDGE_CURVE, they get
+    /// different TopoIds but the same step_entity_id. This field enables
+    /// the unified edge cache to guarantee bit-identical 3D points on
+    /// shared edges regardless of which face triggers the discretization.
+    /// Set to `None` for edges not originating from STEP files.
+    pub step_entity_id: Option<i64>,
 }
 
 impl Edge {
@@ -106,6 +113,7 @@ impl Edge {
             forward: true,
             tolerance: 1e-6,
             degenerate: false,
+            step_entity_id: None,
         }
     }
 
@@ -129,6 +137,7 @@ impl Edge {
         let mut edge = Self::new(curve, (0.0, distance));
         edge.vertex_start = Some(TopoId::new());
         edge.vertex_end = Some(TopoId::new());
+        edge.step_entity_id = None;
         edge
     }
 
@@ -162,6 +171,7 @@ impl Edge {
             forward: !self.forward,
             tolerance: self.tolerance,
             degenerate: self.degenerate,
+            step_entity_id: self.step_entity_id,
         }
     }
 }
