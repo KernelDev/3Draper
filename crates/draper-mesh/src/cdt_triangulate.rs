@@ -15,7 +15,7 @@ use crate::triangulate::{
     sample_edge_points,
 };
 use crate::custom_cdt;
-use crate::watertight::stitch_boundary_edges;
+use crate::watertight::repair_mesh;
 use draper_geometry::{
     Point3d, Point2d, Direction3d,
     Surface, Plane, CylinderSurface, SphereSurface,
@@ -1763,28 +1763,19 @@ pub fn triangulate_solid_watertight(
     // Filter degenerate triangles
     filter_degenerate_triangles(&mut mesh, 1e-10);
 
-    // Phase 5: Progressive edge stitching for remaining gaps
-    // Use the standard stitch approach first, then fix any non-manifold edges
-    let stitch_tolerances = [
-        merge_tolerance * 2.0,
-        merge_tolerance * 5.0,
-        merge_tolerance * 10.0,
-    ];
-
-    for &stitch_tol in &stitch_tolerances {
+    // Phase 5: Repair remaining gaps using adaptive tolerance
+    // repair_mesh uses bounding-box-based adaptive tolerance instead of
+    // the deprecated stitch_boundary_edges with fixed tolerance.
+    {
         let report = crate::watertight::validate_watertight(&mesh, false);
-        if report.is_watertight() {
-            break;
+        if !report.is_watertight() && report.boundary_edge_count > 0 && report.boundary_edge_count < 2000 {
+            log::info!(
+                "Auto-repair: {} boundary edges remaining, attempting adaptive repair",
+                report.boundary_edge_count,
+            );
+            repair_mesh(&mut mesh, report.boundary_edge_count);
+            filter_degenerate_triangles(&mut mesh, 1e-10);
         }
-        if report.boundary_edge_count == 0 {
-            break;
-        }
-        log::info!(
-            "Edge stitching: {} boundary edges remaining, trying stitch_tol={:.6}",
-            report.boundary_edge_count, stitch_tol,
-        );
-        stitch_boundary_edges(&mut mesh, stitch_tol, 3);
-        filter_degenerate_triangles(&mut mesh, 1e-10);
     }
 
     // Phase 6: Resolve any non-manifold edges by splitting
@@ -1810,13 +1801,13 @@ pub fn triangulate_solid_watertight(
         }
         face_aware_close_boundary(&mut mesh, merge_tolerance);
 
-        // If face-aware closing couldn't close all edges, try aggressive
-        // stitching which may create non-manifold edges, then resolve those
+        // If face-aware closing couldn't close all edges, try adaptive repair
+        // (uses bounding-box-based tolerance instead of the deprecated stitch_boundary_edges)
         let report2 = crate::watertight::validate_watertight(&mesh, false);
         if report2.boundary_edge_count > 0 && report2.boundary_edge_count <= 100 {
-            stitch_boundary_edges(&mut mesh, merge_tolerance * 10.0, 3);
+            repair_mesh(&mut mesh, report2.boundary_edge_count);
             filter_degenerate_triangles(&mut mesh, 1e-10);
-            // Resolve any non-manifold edges created by the stitching
+            // Resolve any non-manifold edges created by the repair
             resolve_non_manifold_edges(&mut mesh);
             face_aware_close_boundary(&mut mesh, merge_tolerance);
         }
