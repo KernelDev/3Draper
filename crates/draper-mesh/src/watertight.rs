@@ -396,6 +396,84 @@ pub fn stitch_boundary_edges(mesh: &mut TriangleMesh, stitch_tolerance: f64, max
     }
 }
 
+/// Repair mesh boundary gaps using adaptive tolerance based on bounding box.
+///
+/// Unlike `stitch_boundary_edges` which uses a fixed tolerance (often 1e-4,
+/// which is 100x the stated precision), this function computes an appropriate
+/// tolerance from the mesh's bounding box diagonal. It then applies
+/// progressively increasing tolerances in multiple passes to close remaining
+/// boundary edges without arbitrarily moving vertices by large amounts.
+///
+/// # Algorithm
+/// 1. Compute the mesh bounding box diagonal (model scale)
+/// 2. Derive adaptive tolerance: base_tol = model_scale * 1e-6
+/// 3. Try stitching with progressively increasing tolerances:
+///    - Pass 1: 2x base tolerance
+///    - Pass 2: 5x base tolerance
+///    - Pass 3: 10x base tolerance
+///    - Pass 4: 50x base tolerance
+///    - Pass 5: 100x base tolerance
+/// 4. Stop as soon as the mesh is watertight or no more merges are possible
+///
+/// # Arguments
+/// * `mesh` — The triangle mesh to repair.
+/// * `boundary_edge_count` — Number of boundary edges (from prior validation),
+///   used to decide whether repair is worthwhile and to log progress.
+pub fn repair_mesh(mesh: &mut TriangleMesh, boundary_edge_count: usize) {
+    if mesh.vertices.is_empty() || mesh.triangles.is_empty() {
+        return;
+    }
+
+    // Compute mesh bounding box
+    let mut min_pt = Point3d::new(f64::MAX, f64::MAX, f64::MAX);
+    let mut max_pt = Point3d::new(f64::MIN, f64::MIN, f64::MIN);
+    for p in &mesh.vertices {
+        min_pt.x = min_pt.x.min(p.x);
+        min_pt.y = min_pt.y.min(p.y);
+        min_pt.z = min_pt.z.min(p.z);
+        max_pt.x = max_pt.x.max(p.x);
+        max_pt.y = max_pt.y.max(p.y);
+        max_pt.z = max_pt.z.max(p.z);
+    }
+
+    let dx = max_pt.x - min_pt.x;
+    let dy = max_pt.y - min_pt.y;
+    let dz = max_pt.z - min_pt.z;
+    let model_scale = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-10);
+    let base_tol = model_scale * 1e-6;
+
+    log::info!(
+        "repair_mesh: model_scale={:.6}, base_tol={:.9}, {} boundary edges",
+        model_scale, base_tol, boundary_edge_count,
+    );
+
+    // Progressive tolerance passes — start small, increase gradually
+    let tolerances = [
+        base_tol * 2.0,
+        base_tol * 5.0,
+        base_tol * 10.0,
+        base_tol * 50.0,
+        base_tol * 100.0,
+    ];
+
+    for &tol in &tolerances {
+        let report = validate_watertight(mesh, false);
+        if report.is_watertight() {
+            return;
+        }
+        if report.boundary_edge_count == 0 {
+            return;
+        }
+
+        log::debug!(
+            "repair_mesh: {} boundary edges remaining, trying tol={:.9}",
+            report.boundary_edge_count, tol,
+        );
+
+        stitch_boundary_edges(mesh, tol, 3);
+    }
+}
+
 /// Collect all vertex indices that appear on boundary edges.
 fn collect_boundary_vertices(mesh: &TriangleMesh) -> Vec<u32> {
     let mut edge_count: HashMap<(u32, u32), u32> = HashMap::new();

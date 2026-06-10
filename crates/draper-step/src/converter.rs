@@ -29,7 +29,7 @@ use draper_geometry::{
     NurbsSurface, Curve3d, Curve2d, Line, Circle, Ellipse, Arc, NurbsCurve,
     Line2d, Circle2d, Ellipse2d, Nurbs2d,
 };
-use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary_and_holes_uv, ear_clip, validate_watertight, smooth_normals};
+use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary_and_holes_uv, ear_clip, validate_watertight, smooth_normals, smooth_normals_adaptive, repair_mesh};
 use draper_topology::{Face, Wire, CoEdge, Edge as TopoEdge, Shell, Solid};
 use draper_topology::healing::{heal_solid, HealingParams, HealingReport};
 use draper_geometry::tolerance::ToleranceContext;
@@ -2680,14 +2680,15 @@ impl<'a> StepConverter<'a> {
                 fbmin.x, fbmin.y, fbmin.z, fbmax.x, fbmax.y, fbmax.z);
             mesh.merge(&face_mesh);
         }
-        // Use adaptive tolerance for merge and stitch
+        // Use adaptive repair with progressive tolerance (replaces
+        // merge_coincident_vertices + stitch_boundary_edges with a single
+        // bounding-box-based adaptive approach)
         let adaptive_tol = edge_cache.adaptive_tolerance().merge_tolerance();
-        draper_mesh::merge_coincident_vertices(&mut mesh, adaptive_tol);
-
-        // Stitch only as fallback with adaptive tolerance
-        {
-            let stitch_tol = edge_cache.adaptive_tolerance().stitch_tolerance();
-            draper_mesh::stitch_boundary_edges(&mut mesh, stitch_tol, 3);
+        let report_before = validate_watertight(&mesh, false);
+        if !report_before.is_watertight() && report_before.boundary_edge_count > 0 {
+            log::info!("BREP #{}: {} boundary edges, attempting adaptive repair (tol={:.2e})",
+                brep_id, report_before.boundary_edge_count, adaptive_tol);
+            repair_mesh(&mut mesh, report_before.boundary_edge_count);
         }
 
         // Phase 2: Validate watertightness of the merged mesh
@@ -2876,20 +2877,23 @@ impl<'a> StepConverter<'a> {
                 uv_triangles,
             });
         }
-        // Use adaptive tolerance for merge and stitch
+        // Use adaptive repair with progressive tolerance (replaces
+        // merge_coincident_vertices + stitch_boundary_edges with a single
+        // bounding-box-based adaptive approach)
         let adaptive_tol = edge_cache.adaptive_tolerance().merge_tolerance();
-        draper_mesh::merge_coincident_vertices(&mut mesh, adaptive_tol);
-
-        // Stitch only as fallback with adaptive tolerance
-        {
-            let stitch_tol = edge_cache.adaptive_tolerance().stitch_tolerance();
-            draper_mesh::stitch_boundary_edges(&mut mesh, stitch_tol, 3);
+        let report_before = validate_watertight(&mesh, false);
+        if !report_before.is_watertight() && report_before.boundary_edge_count > 0 {
+            log::info!("BREP #{} detailed: {} boundary edges, attempting adaptive repair (tol={:.2e})",
+                brep_id, report_before.boundary_edge_count, adaptive_tol);
+            repair_mesh(&mut mesh, report_before.boundary_edge_count);
         }
 
         // Smooth vertex normals across shared edges for Gouraud-like shading.
         // Use a crease angle of 45° (0.785 rad) — edges sharper than this
         // maintain their sharp appearance (e.g., box edges), while smoother
         // transitions (cylinders, spheres) get averaged normals.
+        // TODO: Use smooth_normals_adaptive with a Solid reference when available
+        // in this context, for surface-type-specific crease angles.
         draper_mesh::smooth_normals(&mut mesh, 0.785);
 
         if skipped_faces > 0 {

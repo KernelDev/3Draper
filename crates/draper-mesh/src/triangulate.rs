@@ -316,21 +316,17 @@ fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams, cac
             report.euler_characteristic,
         );
 
-        // Automatic recovery: try adaptive merge + stitch as a LAST RESORT
+        // Automatic recovery: try repair_mesh with adaptive tolerance as a LAST RESORT.
         // This is NOT the primary path — the topology-first approach should
         // make this unnecessary for well-formed B-Rep data.
+        // repair_mesh computes tolerance from the mesh bounding box and applies
+        // progressive stitching passes, replacing the old fixed-tolerance
+        // merge_coincident_vertices + stitch_boundary_edges combination.
         if report.boundary_edge_count > 0 && report.boundary_edge_count < 5000 {
-            log::info!("Attempting automatic repair for {} boundary edges (tol={:.2e})...",
+            log::info!("Attempting automatic repair for {} boundary edges (adaptive_tol={:.2e})...",
                 report.boundary_edge_count, adaptive_tol);
-            // Merge with adaptive tolerance (smaller than before)
-            merge_coincident_vertices(&mut mesh, adaptive_tol);
-
-            let report2 = crate::watertight::validate_watertight(&mesh, false);
-            if !report2.is_watertight() && report2.boundary_edge_count < 1000 {
-                // Stitch only as a fallback, with adaptive tolerance
-                let stitch_tol = cache.adaptive_tolerance().stitch_tolerance();
-                crate::watertight::stitch_boundary_edges(&mut mesh, stitch_tol, 3);
-            }
+            crate::watertight::repair_mesh(&mut mesh, report.boundary_edge_count);
+            filter_degenerate_triangles(&mut mesh, 1e-10);
 
             let report3 = crate::watertight::validate_watertight(&mesh, false);
             if report3.is_watertight() {
@@ -594,17 +590,12 @@ fn triangulate_solid_parallel(solid: &Solid, params: &TriangulationParams, cache
             report.euler_characteristic,
         );
 
-        // Automatic recovery as LAST RESORT
+        // Automatic recovery as LAST RESORT (using adaptive repair)
         if report.boundary_edge_count > 0 && report.boundary_edge_count < 5000 {
             log::info!("Attempting automatic repair (parallel) for {} boundary edges (tol={:.2e})...",
                 report.boundary_edge_count, adaptive_tol);
-            merge_coincident_vertices(&mut mesh, adaptive_tol);
-
-            let report2 = crate::watertight::validate_watertight(&mesh, false);
-            if !report2.is_watertight() && report2.boundary_edge_count < 1000 {
-                let stitch_tol = cache.adaptive_tolerance().stitch_tolerance();
-                crate::watertight::stitch_boundary_edges(&mut mesh, stitch_tol, 3);
-            }
+            crate::watertight::repair_mesh(&mut mesh, report.boundary_edge_count);
+            filter_degenerate_triangles(&mut mesh, 1e-10);
 
             let report3 = crate::watertight::validate_watertight(&mesh, false);
             if report3.is_watertight() {
@@ -2419,6 +2410,117 @@ fn extract_boundary_ring_at_v(
     result
 }
 
+/// Snap boundary row vertices of a periodic-in-u surface (revolution, extrusion with u-wrap)
+/// to cached edge curve samples.
+///
+/// For periodic surfaces, boundary edges typically run along constant-v rings
+/// (top/bottom caps) or along constant-u meridians (side edges).
+/// This function identifies which grid rows correspond to boundary edges and
+/// replaces their vertex positions with the cached 3D points from the edge cache.
+fn snap_periodic_boundary_rows(
+    mesh: &mut TriangleMesh,
+    boundary_3d: &[Point3d],
+    surface: &Surface,
+    n_u: usize,
+    n_v: usize,
+    v_min: f64,
+    v_max: f64,
+    full_circle: bool,
+    u_start: f64,
+    u_end: f64,
+) {
+    let v_tol = 1e-4;
+
+    // Collect boundary points at each v-level (ring)
+    for j in 0..=n_v {
+        let target_v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
+
+        // Find boundary points near this v level
+        let mut ring_pts: Vec<(f64, Point3d)> = Vec::new();
+        for p in boundary_3d {
+            let (u, v) = surface.project_point(p);
+            if (v - target_v).abs() < v_tol * target_v.abs().max(1.0) + 1e-6 {
+                ring_pts.push((u, *p));
+            }
+        }
+
+        if ring_pts.len() < 3 {
+            continue;
+        }
+
+        // Sort by u for consistent matching
+        ring_pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Snap each grid vertex in this row to the closest boundary point
+        for i in 0..n_u {
+            let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
+
+            // Find closest boundary point by angle
+            let mut best_dist = f64::MAX;
+            let mut best_pt = mesh.vertices[j * n_u + i];
+            for (ru, rp) in &ring_pts {
+                let du = if full_circle {
+                    let diff = (u - ru).abs();
+                    diff.min(2.0 * PI - diff)
+                } else {
+                    (u - ru).abs()
+                };
+                if du < best_dist {
+                    best_dist = du;
+                    best_pt = *rp;
+                }
+            }
+
+            let angle_tol = (u_end - u_start) / n_u as f64 * 0.3;
+            if best_dist < angle_tol {
+                mesh.vertices[j * n_u + i] = best_pt;
+            }
+        }
+    }
+}
+
+/// Snap boundary vertices of an extrusion surface face to cached edge curve samples.
+///
+/// For extrusion surfaces, boundary edges can run along:
+/// - Constant-v rows (top/bottom edges along the extrusion direction)
+/// - Constant-u columns (side edges along the profile)
+/// This function handles both cases by projecting boundary points into UV space
+/// and matching them to the nearest grid vertices.
+fn snap_extrusion_boundary_vertices(
+    mesh: &mut TriangleMesh,
+    boundary_3d: &[Point3d],
+    surface: &Surface,
+    n_u: usize,
+    n_v: usize,
+    u_min: f64,
+    u_max: f64,
+    v_min: f64,
+    v_max: f64,
+) {
+    let u_tol = (u_max - u_min) / (n_u - 1).max(1) as f64 * 0.4;
+    let v_tol = (v_max - v_min) / n_v as f64 * 0.4;
+
+    // Project all boundary points to UV and group by grid cell
+    for p in boundary_3d {
+        let (bu, bv) = surface.project_point(p);
+
+        // Find the closest grid vertex
+        let i_f = if n_u > 1 { (bu - u_min) / (u_max - u_min) * (n_u - 1) as f64 } else { 0.0 };
+        let j_f = (bv - v_min) / (v_max - v_min) * n_v as f64;
+
+        let i = (i_f.round() as usize).min(n_u - 1);
+        let j = (j_f.round() as usize).min(n_v);
+
+        // Check if this grid vertex is close enough to snap
+        let grid_u = if n_u > 1 { u_min + (u_max - u_min) * i as f64 / (n_u - 1) as f64 } else { u_min };
+        let grid_v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
+
+        if (bu - grid_u).abs() < u_tol && (bv - grid_v).abs() < v_tol {
+            mesh.vertices[j * n_u + i] = *p;
+        }
+    }
+}
+
 /// Triangulate a cone face.
 ///
 /// A cone is periodic in u with period 2π. When the boundary doesn't
@@ -2960,7 +3062,93 @@ fn triangulate_torus_face(face: &Face, torus: &TorusSurface, params: &Triangulat
 }
 
 /// Triangulate a revolution surface face.
-fn triangulate_revolution_face(face: &Face, rev: &draper_geometry::RevolutionSurface, params: &TriangulationParams, _cache: &EdgeDiscretizationCache) -> TriangleMesh {
+fn triangulate_revolution_face(face: &Face, rev: &draper_geometry::RevolutionSurface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
+    let surface = face.surface.as_ref().cloned().unwrap_or(Surface::Revolution(rev.clone()));
+
+    // Phase 1: Get boundary points from the edge cache for consistent vertices
+    let boundary_3d = collect_face_boundary_from_cache(face, cache, &surface);
+
+    if boundary_3d.is_empty() {
+        // No boundary edges — fallback to full revolution grid without cache snapping
+        return triangulate_revolution_full(face, rev, params);
+    }
+
+    let (v_min, v_max) = rev.profile.param_range();
+
+    // Phase 2: Determine UV range from boundary points
+    let mut u_min_b = f64::MAX;
+    let mut u_max_b = f64::MIN;
+    for p in &boundary_3d {
+        let (u, _v) = surface.project_point(p);
+        u_min_b = u_min_b.min(u);
+        u_max_b = u_max_b.max(u);
+    }
+    let u_range = u_max_b - u_min_b;
+
+    // Revolution is periodic in u. If boundary doesn't cover more than ~half
+    // the period, assume the face needs the full period.
+    let full_circle = if u_range > 1.5 * PI {
+        u_range > 1.9 * PI
+    } else {
+        true
+    };
+
+    let u_start = if full_circle { 0.0 } else { u_min_b };
+    let u_end = if full_circle { 2.0 * PI } else { u_max_b };
+
+    let (n_u, n_v) = if params.adaptive {
+        crate::adaptive::required_samples(
+            &surface, u_start, u_end, v_min, v_max,
+            params.max_deviation, params.detail_level,
+        )
+    } else {
+        (params.angular_samples, params.angular_samples)
+    };
+
+    let mut mesh = TriangleMesh::new();
+
+    // Phase 3: Generate grid vertices (n_v+1 rows for inclusive v range)
+    for j in 0..=n_v {
+        for i in 0..n_u {
+            let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
+            let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
+            let p = rev.point_at(u, v);
+            let n = face.surface.as_ref().map(|s| s.normal_at(u, v)).unwrap_or(Direction3d::Z);
+            let idx = mesh.add_vertex(p);
+            mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+        }
+    }
+
+    // Phase 4: Snap boundary vertices to edge curve samples from cache.
+    // This ensures that shared edges between this face and adjacent faces
+    // have bit-identical vertex positions, making the mesh watertight.
+    snap_periodic_boundary_rows(&mut mesh, &boundary_3d, &surface, n_u, n_v, v_min, v_max, full_circle, u_start, u_end);
+
+    // Phase 5: Generate triangles
+    let n_u_loop = if full_circle { n_u } else { n_u - 1 };
+    for j in 0..n_v {
+        for i in 0..n_u_loop {
+            let i_next = (i + 1) % n_u;
+            let v0 = (j * n_u + i) as u32;
+            let v1 = (j * n_u + i_next) as u32;
+            let v2 = ((j + 1) * n_u + i_next) as u32;
+            let v3 = ((j + 1) * n_u + i) as u32;
+
+            if face.forward {
+                mesh.add_triangle(v0, v1, v2);
+                mesh.add_triangle(v0, v2, v3);
+            } else {
+                mesh.add_triangle(v0, v2, v1);
+                mesh.add_triangle(v0, v3, v2);
+            }
+        }
+    }
+
+    mesh
+}
+
+/// Full revolution triangulation (no boundary edges) — fallback when cache is empty.
+fn triangulate_revolution_full(face: &Face, rev: &draper_geometry::RevolutionSurface, params: &TriangulationParams) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
     let (v_min, v_max) = rev.profile.param_range();
 
@@ -2974,10 +3162,10 @@ fn triangulate_revolution_face(face: &Face, rev: &draper_geometry::RevolutionSur
         (params.angular_samples, params.angular_samples)
     };
 
-    for j in 0..n_v {
+    for j in 0..=n_v {
         for i in 0..n_u {
             let u = 2.0 * PI * i as f64 / n_u as f64;
-            let v = v_min + (v_max - v_min) * j as f64 / (n_v - 1).max(1) as f64;
+            let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
             let p = rev.point_at(u, v);
             let n = face.surface.as_ref().map(|s| s.normal_at(u, v)).unwrap_or(Direction3d::Z);
             let idx = mesh.add_vertex(p);
@@ -2985,7 +3173,7 @@ fn triangulate_revolution_face(face: &Face, rev: &draper_geometry::RevolutionSur
         }
     }
 
-    for j in 0..n_v - 1 {
+    for j in 0..n_v {
         for i in 0..n_u {
             let i_next = (i + 1) % n_u;
             let v0 = (j * n_u + i) as u32;
@@ -3006,7 +3194,70 @@ fn triangulate_revolution_face(face: &Face, rev: &draper_geometry::RevolutionSur
 }
 
 /// Triangulate an extrusion surface face.
-fn triangulate_extrusion_face(face: &Face, ext: &draper_geometry::ExtrusionSurface, params: &TriangulationParams, _cache: &EdgeDiscretizationCache) -> TriangleMesh {
+fn triangulate_extrusion_face(face: &Face, ext: &draper_geometry::ExtrusionSurface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
+    let surface = face.surface.as_ref().cloned().unwrap_or(Surface::Extrusion(ext.clone()));
+
+    // Phase 1: Get boundary points from the edge cache for consistent vertices
+    let boundary_3d = collect_face_boundary_from_cache(face, cache, &surface);
+
+    if boundary_3d.is_empty() {
+        // No boundary edges — fallback to full extrusion grid without cache snapping
+        return triangulate_extrusion_full(face, ext, params);
+    }
+
+    let (v_min, v_max) = compute_extrusion_v_range(face, ext);
+    let (u_min, u_max) = ext.profile.param_range();
+
+    let (n_u, n_v) = if params.adaptive {
+        crate::adaptive::required_samples(
+            &surface, u_min, u_max, v_min, v_max,
+            params.max_deviation, params.detail_level,
+        )
+    } else {
+        (params.angular_samples, params.height_samples.max(2))
+    };
+
+    let mut mesh = TriangleMesh::new();
+
+    // Phase 2: Generate grid vertices
+    for j in 0..=n_v {
+        for i in 0..n_u {
+            let u = u_min + (u_max - u_min) * i as f64 / (n_u - 1).max(1) as f64;
+            let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
+            let p = ext.point_at(u, v);
+            let n = face.surface.as_ref().map(|s| s.normal_at(u, v)).unwrap_or(Direction3d::Z);
+            let idx = mesh.add_vertex(p);
+            mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+        }
+    }
+
+    // Phase 3: Snap boundary vertices to edge curve samples from cache.
+    // For extrusion surfaces, boundary edges typically run along constant-v
+    // rows (top/bottom) and constant-u columns (sides).
+    snap_extrusion_boundary_vertices(&mut mesh, &boundary_3d, &surface, n_u, n_v, u_min, u_max, v_min, v_max);
+
+    // Phase 4: Generate triangles
+    for j in 0..n_v {
+        for i in 0..n_u - 1 {
+            let v0 = (j * n_u + i) as u32;
+            let v1 = (j * n_u + i + 1) as u32;
+            let v2 = ((j + 1) * n_u + i + 1) as u32;
+            let v3 = ((j + 1) * n_u + i) as u32;
+            if face.forward {
+                mesh.add_triangle(v0, v1, v2);
+                mesh.add_triangle(v0, v2, v3);
+            } else {
+                mesh.add_triangle(v0, v2, v1);
+                mesh.add_triangle(v0, v3, v2);
+            }
+        }
+    }
+
+    mesh
+}
+
+/// Full extrusion triangulation (no boundary edges) — fallback when cache is empty.
+fn triangulate_extrusion_full(face: &Face, ext: &draper_geometry::ExtrusionSurface, params: &TriangulationParams) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
 
     let (v_min, v_max) = compute_extrusion_v_range(face, ext);
@@ -3022,16 +3273,16 @@ fn triangulate_extrusion_face(face: &Face, ext: &draper_geometry::ExtrusionSurfa
         (params.angular_samples, params.height_samples.max(2))
     };
 
-    for j in 0..n_v {
+    for j in 0..=n_v {
         for i in 0..n_u {
             let u = u_min + (u_max - u_min) * i as f64 / (n_u - 1).max(1) as f64;
-            let v = v_min + (v_max - v_min) * j as f64 / (n_v - 1).max(1) as f64;
+            let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
             let p = ext.point_at(u, v);
             mesh.add_vertex(p);
         }
     }
 
-    for j in 0..n_v - 1 {
+    for j in 0..n_v {
         for i in 0..n_u - 1 {
             let v0 = (j * n_u + i) as u32;
             let v1 = (j * n_u + i + 1) as u32;
