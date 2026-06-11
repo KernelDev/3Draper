@@ -290,11 +290,24 @@ fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams, cac
     // Phase 1: Pre-populate edge cache with deterministic rounding
     cache.pre_populate_for_solid(solid, EDGE_SAMPLES);
 
-    // Phase 2: Triangulate all faces using cached boundary data
+    // Phase 2: Triangulate all faces using cached boundary data.
+    // Use merge_deduplicating to ensure shared-edge vertices get the same
+    // vertex index in the final mesh. The edge cache guarantees bit-identical
+    // 3D coordinates on shared edges, so bit-exact deduplication is correct.
     let mut mesh = TriangleMesh::new();
+    let mut dedup_map = crate::mesh::VertexDedupMap::new();
+    let mut total_face_vertices = 0usize;
     for face in solid.faces() {
         let face_mesh = triangulate_face_with_cache(face, params, cache);
-        mesh.merge(&face_mesh);
+        total_face_vertices += face_mesh.vertices.len();
+        mesh.merge_deduplicating(&face_mesh, &mut dedup_map);
+    }
+    let deduped_vertices = total_face_vertices - mesh.vertices.len();
+    if deduped_vertices > 0 {
+        log::info!(
+            "Vertex deduplication: {} face vertices → {} unique ({} shared)",
+            total_face_vertices, mesh.vertices.len(), deduped_vertices,
+        );
     }
 
     // Phase 3: Post-processing (topology-first — no merge/stitch needed)
@@ -632,112 +645,24 @@ fn triangulate_solid_parallel(solid: &Solid, params: &TriangulationParams, cache
     mesh
 }
 
-/// Merge multiple meshes into one using pre-computed vertex offsets.
+/// Merge multiple per-face meshes into one using vertex deduplication.
 ///
-/// This is more efficient than sequential `merge` calls because:
-/// 1. Offsets are pre-computed in a single pass.
-/// 2. The final vectors are pre-allocated with exact capacity.
-/// 3. No need for repeated reallocation as meshes are merged one-by-one.
+/// In the parallel path, each face produces its own mesh. When merging,
+/// shared-edge vertices must be deduplicated so that the final mesh is
+/// watertight by construction. The edge cache guarantees bit-identical
+/// 3D coordinates on shared edges, so bit-exact deduplication via
+/// `VertexDedupMap` is correct and efficient.
 fn merge_meshes_parallel(meshes: &[TriangleMesh]) -> TriangleMesh {
     if meshes.is_empty() {
         return TriangleMesh::new();
     }
 
-    // Pre-compute vertex offsets for each mesh
-    let mut vertex_offsets: Vec<u32> = Vec::with_capacity(meshes.len());
-    let mut running_offset: u32 = 0;
-    for mesh in meshes {
-        vertex_offsets.push(running_offset);
-        running_offset += mesh.vertices.len() as u32;
-    }
-
-    // Pre-compute total sizes for pre-allocation
-    let total_vertices: usize = meshes.iter().map(|m| m.vertices.len()).sum();
-    let total_triangles: usize = meshes.iter().map(|m| m.triangles.len()).sum();
-    let has_normals: bool = meshes.iter().any(|m| m.normals.is_some());
-    let has_face_normals: bool = meshes.iter().any(|m| m.face_normals.is_some());
-    let has_face_ids: bool = meshes.iter().any(|m| m.triangle_face_ids.is_some());
-
+    // Use merge_deduplicating for topology-first watertightness
     let mut merged = TriangleMesh::new();
-    merged.vertices.reserve(total_vertices);
-    merged.triangles.reserve(total_triangles);
-
-    // Merge normals
-    let mut merged_normals: Option<Vec<[f64; 3]>> = if has_normals {
-        Some(Vec::with_capacity(total_vertices))
-    } else {
-        None
-    };
-    let mut merged_face_normals: Option<Vec<[f64; 3]>> = if has_face_normals {
-        Some(Vec::with_capacity(total_triangles))
-    } else {
-        None
-    };
-    let mut merged_face_ids: Option<Vec<u64>> = if has_face_ids {
-        Some(Vec::with_capacity(total_triangles))
-    } else {
-        None
-    };
-
-    for (i, mesh) in meshes.iter().enumerate() {
-        let offset = vertex_offsets[i];
-
-        // Merge vertices
-        merged.vertices.extend(mesh.vertices.iter().cloned());
-
-        // Merge triangles with offset
-        for tri in &mesh.triangles {
-            merged.triangles.push([tri[0] + offset, tri[1] + offset, tri[2] + offset]);
-        }
-
-        // Merge normals
-        match (&mut merged_normals, &mesh.normals) {
-            (Some(ref mut dest), Some(ref src)) => {
-                dest.extend(src.iter().cloned());
-            }
-            (None, Some(ref src)) => {
-                // Fill default normals for previously merged vertices
-                let n_existing = merged.vertices.len() - mesh.vertices.len();
-                let mut combined = vec![[0.0, 0.0, 1.0]; n_existing];
-                combined.extend(src.iter().cloned());
-                merged_normals = Some(combined);
-            }
-            _ => {}
-        }
-
-        // Merge face normals
-        match (&mut merged_face_normals, &mesh.face_normals) {
-            (Some(ref mut dest), Some(ref src)) => {
-                dest.extend(src.iter().cloned());
-            }
-            (None, Some(ref src)) => {
-                let n_existing = merged.triangles.len() - mesh.triangles.len();
-                let mut combined = vec![[0.0, 0.0, 1.0]; n_existing];
-                combined.extend(src.iter().cloned());
-                merged_face_normals = Some(combined);
-            }
-            _ => {}
-        }
-
-        // Merge face IDs
-        match (&mut merged_face_ids, &mesh.triangle_face_ids) {
-            (Some(ref mut dest), Some(ref src)) => {
-                dest.extend(src.iter().cloned());
-            }
-            (None, Some(ref src)) => {
-                let n_existing = merged.triangles.len() - mesh.triangles.len();
-                let mut combined = vec![0; n_existing];
-                combined.extend(src.iter().cloned());
-                merged_face_ids = Some(combined);
-            }
-            _ => {}
-        }
+    let mut dedup_map = crate::mesh::VertexDedupMap::new();
+    for mesh in meshes {
+        merged.merge_deduplicating(mesh, &mut dedup_map);
     }
-
-    merged.normals = merged_normals;
-    merged.face_normals = merged_face_normals;
-    merged.triangle_face_ids = merged_face_ids;
-
     merged
 }
 
@@ -773,9 +698,10 @@ fn solid_bounding_box(solid: &Solid) -> (Point3d, Point3d) {
 pub fn triangulate_shell(shell: &Shell, params: &TriangulationParams) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
     let mut cache = EdgeDiscretizationCache::new();
+    let mut dedup_map = crate::mesh::VertexDedupMap::new();
     for face in &shell.faces {
         let face_mesh = triangulate_face_with_cache(face, params, &mut cache);
-        mesh.merge(&face_mesh);
+        mesh.merge_deduplicating(&face_mesh, &mut dedup_map);
     }
     filter_degenerate_triangles(&mut mesh, 1e-10);
     mesh

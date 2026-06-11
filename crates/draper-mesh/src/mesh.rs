@@ -3,7 +3,33 @@
 //! Mesh data structures.
 
 use draper_geometry::Point3d;
+use std::collections::HashMap;
 use std::fmt;
+
+/// A bit-exact hash key for a 3D point, used for vertex deduplication.
+///
+/// Since the edge cache applies deterministic rounding (48-bit mantissa precision),
+/// shared-edge vertices produce bit-identical f64 values. Using the raw bit
+/// representation as a hash key is both correct and fast — no epsilon comparison
+/// is needed because the rounding already guarantees consistent bit patterns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct VertexKey(u64, u64, u64);
+
+impl VertexKey {
+    /// Create a bit-exact key from a Point3d.
+    #[inline]
+    pub fn from_point(p: &Point3d) -> Self {
+        VertexKey(p.x.to_bits(), p.y.to_bits(), p.z.to_bits())
+    }
+}
+
+/// A vertex deduplication map that tracks which 3D points have already been
+/// added to a mesh, mapping them to their vertex indices.
+///
+/// Used during the "topology-first" merge step to ensure that shared-edge
+/// vertices from different faces get the same vertex index in the final mesh,
+/// making it watertight by construction.
+pub type VertexDedupMap = HashMap<VertexKey, u32>;
 
 /// A 3D triangle mesh.
 #[derive(Clone, Debug)]
@@ -147,6 +173,134 @@ impl TriangleMesh {
             _ => {}
         }
         // Merge face IDs
+        if self.triangle_face_ids.is_none() && other.triangle_face_ids.is_some() {
+            let existing_count = self.triangles.len() - other.triangles.len();
+            self.triangle_face_ids = Some(vec![0; existing_count]);
+        }
+        match (&mut self.triangle_face_ids, &other.triangle_face_ids) {
+            (Some(ref mut ids), Some(ref other_ids)) => {
+                ids.extend(other_ids.iter().cloned());
+            }
+            _ => {}
+        }
+    }
+
+    /// Merge another mesh into this one with vertex deduplication.
+    ///
+    /// This is the **topology-first** merge: when two faces share an edge,
+    /// their boundary vertices have identical 3D coordinates (guaranteed by
+    /// the `EdgeDiscretizationCache` with deterministic rounding). Instead of
+    /// blindly appending all vertices with an offset (like `merge()`), this
+    /// method reuses existing vertex indices for points that are already
+    /// present in the accumulated mesh.
+    ///
+    /// # How it works
+    ///
+    /// 1. For each vertex in `other`, compute a `VertexKey` from its bit-exact
+    ///    coordinates.
+    /// 2. If the key exists in `dedup_map`, reuse the existing vertex index.
+    /// 3. Otherwise, add the vertex and store its index in `dedup_map`.
+    /// 4. Remap triangle indices from `other`'s local indices to the
+    ///    (deduplicated) global indices.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` — The per-face mesh to merge in.
+    /// * `dedup_map` — A mutable vertex deduplication map that persists
+    ///   across calls. Must be created once before the first call and reused
+    ///   for all subsequent face merges in the same solid.
+    ///
+    /// # Why this matters
+    ///
+    /// Without deduplication, shared-edge vertices get different indices in
+    /// the final mesh, producing boundary edges. The mesh is NOT watertight
+    /// even though the edge cache guarantees bit-identical 3D coordinates.
+    /// With deduplication, shared vertices get the same index, making the
+    /// mesh watertight **by construction** — no post-hoc repair needed.
+    pub fn merge_deduplicating(&mut self, other: &TriangleMesh, dedup_map: &mut VertexDedupMap) {
+        // Build index remapping: other's local vertex index → global index
+        let mut index_map: Vec<u32> = Vec::with_capacity(other.vertices.len());
+
+        for vertex in &other.vertices {
+            let key = VertexKey::from_point(vertex);
+            if let Some(&existing_idx) = dedup_map.get(&key) {
+                // Vertex already exists — reuse its index
+                index_map.push(existing_idx);
+            } else {
+                // New vertex — add to mesh and record in dedup map
+                let new_idx = self.vertices.len() as u32;
+                self.vertices.push(*vertex);
+                dedup_map.insert(key, new_idx);
+                index_map.push(new_idx);
+            }
+        }
+
+        // Add triangles with remapped indices
+        for tri in &other.triangles {
+            self.triangles.push([
+                index_map[tri[0] as usize],
+                index_map[tri[1] as usize],
+                index_map[tri[2] as usize],
+            ]);
+        }
+
+        // Handle vertex normals: when deduplicating, the first face's normal
+        // wins for shared vertices. This is acceptable because normals are
+        // later smoothed by `smooth_normals_adaptive` which computes proper
+        // averaged normals across shared edges.
+        match (&mut self.normals, &other.normals) {
+            (Some(ref mut self_normals), Some(ref other_normals)) => {
+                // For new vertices, add their normals. For reused vertices,
+                // skip (keep the first face's normal).
+                for (i, vertex) in other.vertices.iter().enumerate() {
+                    let key = VertexKey::from_point(vertex);
+                    let global_idx = index_map[i] as usize;
+                    // Only add normal if this is a new vertex (global_idx == current length before push)
+                    if global_idx >= self_normals.len() {
+                        self_normals.push(other_normals[i]);
+                    }
+                }
+            }
+            (None, Some(ref other_normals)) => {
+                // Fill default normals for existing vertices, then add new ones
+                let mut combined = vec![[0.0, 0.0, 1.0]; self.vertices.len() - other.vertices.len()];
+                for (i, vertex) in other.vertices.iter().enumerate() {
+                    let key = VertexKey::from_point(vertex);
+                    let global_idx = index_map[i] as usize;
+                    if global_idx >= combined.len() {
+                        combined.push(other_normals[i]);
+                    }
+                }
+                self.normals = Some(combined);
+            }
+            _ => {}
+        }
+
+        // Merge face normals (per-triangle, no deduplication needed)
+        if self.face_normals.is_none() && other.face_normals.is_some() {
+            let existing_count = self.triangles.len() - other.triangles.len();
+            self.face_normals = Some(vec![[0.0, 0.0, 1.0]; existing_count]);
+        }
+        match (&mut self.face_normals, &other.face_normals) {
+            (Some(ref mut dest), Some(ref src)) => {
+                dest.extend(src.iter().cloned());
+            }
+            _ => {}
+        }
+
+        // Merge triangle colors (per-triangle, no deduplication needed)
+        if self.triangle_colors.is_none() && other.triangle_colors.is_some() {
+            let existing_count = self.triangles.len() - other.triangles.len();
+            self.triangle_colors = Some(vec![[0.62, 0.65, 0.70, 1.0]; existing_count]);
+        }
+        match (&mut self.triangle_colors, &other.triangle_colors) {
+            (Some(ref mut dest), Some(ref src)) => {
+                dest.extend(src.iter().cloned());
+            }
+            _ => {}
+        }
+
+        // Merge face IDs (per-triangle, no deduplication needed)
         if self.triangle_face_ids.is_none() && other.triangle_face_ids.is_some() {
             let existing_count = self.triangles.len() - other.triangles.len();
             self.triangle_face_ids = Some(vec![0; existing_count]);

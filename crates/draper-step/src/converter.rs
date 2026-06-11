@@ -2629,6 +2629,8 @@ impl<'a> StepConverter<'a> {
         let mut edge_cache = EdgeDiscretizationCache::with_tolerance(tol_ctx.clone(), 64);
 
         let mut mesh = TriangleMesh::new();
+        let mut dedup_map = draper_mesh::mesh::VertexDedupMap::new();
+        let mut total_face_vertices = 0usize;
         for (fi, face_data) in face_data_list.iter().enumerate() {
             let surface_type = match &face_data.surface {
                 Surface::Plane(_) => "Plane",
@@ -2678,7 +2680,15 @@ impl<'a> StepConverter<'a> {
             log::debug!("  -> v={} t={} bbox=({:.2},{:.2},{:.2})..({:.2},{:.2},{:.2})",
                 face_mesh.vertex_count(), face_mesh.triangle_count(),
                 fbmin.x, fbmin.y, fbmin.z, fbmax.x, fbmax.y, fbmax.z);
-            mesh.merge(&face_mesh);
+            total_face_vertices += face_mesh.vertices.len();
+            mesh.merge_deduplicating(&face_mesh, &mut dedup_map);
+        }
+        let deduped_vertices = total_face_vertices - mesh.vertices.len();
+        if deduped_vertices > 0 {
+            log::info!(
+                "BREP #{} vertex deduplication: {} face vertices → {} unique ({} shared)",
+                brep_id, total_face_vertices, mesh.vertices.len(), deduped_vertices,
+            );
         }
         // Validation — do NOT apply repair_mesh. If the mesh is not watertight,
         // that indicates a bug in the edge cache or surface discretization.
@@ -2794,6 +2804,8 @@ impl<'a> StepConverter<'a> {
         let brep_start = StdInstant::now();
 
         let mut mesh = TriangleMesh::new();
+        let mut dedup_map = draper_mesh::mesh::VertexDedupMap::new();
+        let mut total_face_vertices_detailed = 0usize;
         let mut face_infos = Vec::new();
         let mut next_face_id: u64 = 1;
         let mut skipped_faces = 0;
@@ -2860,7 +2872,8 @@ impl<'a> StepConverter<'a> {
             let mut face_mesh_with_ids = face_mesh.clone();
             face_mesh_with_ids.triangle_face_ids = Some(vec![face_id; face_tri_count]);
             
-            mesh.merge(&face_mesh_with_ids);
+            mesh.merge_deduplicating(&face_mesh_with_ids, &mut dedup_map);
+            total_face_vertices_detailed += face_mesh_with_ids.vertices.len();
             let tri_end = mesh.triangle_count();
 
             // Sample boundary edges into polylines (3D and UV)
@@ -2924,6 +2937,12 @@ impl<'a> StepConverter<'a> {
                 "BUG: BREP #{} detailed not watertight: {} boundary edges ({:.2}%), {} non-manifold (tol={:.2e})",
                 brep_id, report_before.boundary_edge_count, boundary_pct,
                 report_before.non_manifold_edge_count, adaptive_tol
+            );
+            let deduped = total_face_vertices_detailed - mesh.vertices.len();
+            log::error!(
+                "  Dedup stats: {} face vertices → {} unique ({} shared), dedup_rate={:.1}%",
+                total_face_vertices_detailed, mesh.vertices.len(), deduped,
+                if total_face_vertices_detailed > 0 { deduped as f64 / total_face_vertices_detailed as f64 * 100.0 } else { 0.0 },
             );
             if boundary_pct > 1.0 {
                 log::error!("More than 1% boundary edges — edge cache is NOT working correctly!");
@@ -3054,9 +3073,10 @@ impl<'a> StepConverter<'a> {
         };
 
         let mut mesh = TriangleMesh::new();
+        let mut dedup_map = draper_mesh::mesh::VertexDedupMap::new();
         for face_data in &face_data_list {
             let face_mesh = self.surface_to_mesh(face_data, params, bbox);
-            mesh.merge(&face_mesh);
+            mesh.merge_deduplicating(&face_mesh, &mut dedup_map);
         }
         if mesh.vertex_count() == 0 { None } else { Some(mesh) }
     }
