@@ -213,6 +213,28 @@ pub struct EdgeDiscretizationCache {
     adaptive_tol: AdaptiveTolerance,
     /// Maximum number of sample points per edge.
     max_samples: usize,
+    /// ── Instrumentation counters ──
+    /// Number of cache hits (edge already discretized).
+    cache_hits: usize,
+    /// Number of cache misses (edge needed discretization).
+    cache_misses: usize,
+    /// Number of edges that are shared by 2+ faces (computed on demand).
+    shared_edges: usize,
+}
+
+/// Statistics from the edge discretization cache, used for debugging
+/// and validation. If cache_misses is too high relative to cache_hits,
+/// edges are being re-discretized, which defeats the topology-first approach.
+#[derive(Clone, Debug, Default)]
+pub struct EdgeCacheStats {
+    /// Total number of cached edge discretizations.
+    pub total_edges: usize,
+    /// Number of cache hits (edge was already cached).
+    pub cache_hits: usize,
+    /// Number of cache misses (edge needed fresh discretization).
+    pub cache_misses: usize,
+    /// Number of edges shared by 2+ faces (approximation from uv_per_face).
+    pub shared_edges: usize,
 }
 
 impl EdgeDiscretizationCache {
@@ -223,6 +245,9 @@ impl EdgeDiscretizationCache {
             topo_id_to_key: HashMap::new(),
             adaptive_tol: AdaptiveTolerance::new(),
             max_samples: 64,
+            cache_hits: 0,
+            cache_misses: 0,
+            shared_edges: 0,
         }
     }
 
@@ -233,6 +258,9 @@ impl EdgeDiscretizationCache {
             topo_id_to_key: HashMap::new(),
             adaptive_tol: AdaptiveTolerance::from_model_scale(tol_ctx.model_scale),
             max_samples: max_samples.max(4),
+            cache_hits: 0,
+            cache_misses: 0,
+            shared_edges: 0,
         }
     }
 
@@ -243,6 +271,9 @@ impl EdgeDiscretizationCache {
             topo_id_to_key: HashMap::new(),
             adaptive_tol: AdaptiveTolerance::from_bounding_box(min, max),
             max_samples: max_samples.max(4),
+            cache_hits: 0,
+            cache_misses: 0,
+            shared_edges: 0,
         }
     }
 
@@ -273,6 +304,8 @@ impl EdgeDiscretizationCache {
 
         // If not yet cached, compute and insert the discretization
         if !self.entries.contains_key(&key) {
+            self.cache_misses += 1;
+
             let (mut points_3d, params) = self.adaptive_discretize(edge, n_samples_hint);
 
             // Apply deterministic rounding to all 3D points
@@ -290,6 +323,14 @@ impl EdgeDiscretizationCache {
                 uv_per_face,
                 params,
             });
+        } else {
+            self.cache_hits += 1;
+            // Track shared edges: if this edge already has UV for a different face
+            if let Some(entry) = self.entries.get(&key) {
+                if !entry.uv_per_face.contains_key(&face_id) && entry.uv_per_face.len() >= 1 {
+                    self.shared_edges += 1;
+                }
+            }
         }
 
         // Entry is guaranteed to exist now — add UV for this face if missing
@@ -330,6 +371,8 @@ impl EdgeDiscretizationCache {
         self.topo_id_to_key.insert(edge.id, key);
 
         if !self.entries.contains_key(&key) {
+            self.cache_misses += 1;
+
             // Cache miss: discretize in forward direction (canonical)
             let forward_edge = if edge.param_range.0 > edge.param_range.1 {
                 edge.reversed()
@@ -349,6 +392,8 @@ impl EdgeDiscretizationCache {
                 uv_per_face: HashMap::new(),
                 params,
             });
+        } else {
+            self.cache_hits += 1;
         }
 
         // Retrieve the cached entry
@@ -416,6 +461,26 @@ impl EdgeDiscretizationCache {
     /// Whether the cache is empty.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Get cache statistics for debugging and validation.
+    ///
+    /// Key metrics:
+    /// - `cache_hits` / (`cache_hits` + `cache_misses`) = hit rate.
+    ///   Should be >50% for well-structured B-Rep data.
+    /// - `shared_edges` should equal the number of edges shared by 2+ faces.
+    /// - `cache_misses` should equal `total_edges` (each edge is discretized once).
+    pub fn stats(&self) -> EdgeCacheStats {
+        // Recompute shared_edges from uv_per_face (more accurate than counter)
+        let shared = self.entries.values()
+            .filter(|e| e.uv_per_face.len() >= 2)
+            .count();
+        EdgeCacheStats {
+            total_edges: self.entries.len(),
+            cache_hits: self.cache_hits,
+            cache_misses: self.cache_misses,
+            shared_edges: shared,
+        }
     }
 
     /// Get the adaptive tolerance.

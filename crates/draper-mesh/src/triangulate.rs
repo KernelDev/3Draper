@@ -7,7 +7,7 @@
 //!    between adjacent faces produce identical 3D points (triangulation consistency).
 //! 2. Planes use minimum number of triangles (ear-clipping, no interior subdivision).
 //! 3. Curved surfaces use edge samples as boundary ring vertices.
-//! 4. Post-hoc merge_coincident_vertices ensures watertight closed solids.
+//! 4. Watertight by construction — shared edges produce bit-identical vertices via the unified edge cache.
 //! 5. TriangulationGuard prevents runaway computation on pathological faces.
 
 use crate::mesh::TriangleMesh;
@@ -301,40 +301,59 @@ fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams, cac
     // Filter degenerate triangles (zero area or NaN/Inf)
     filter_degenerate_triangles(&mut mesh, 1e-10);
 
-    // Phase 4: Validation with automatic recovery
-    let adaptive_tol = cache.adaptive_tolerance().merge_tolerance();
+    // Phase 4: Validation — log but do NOT apply repair_mesh.
+    // If the mesh is not watertight, that indicates a BUG in the edge cache
+    // or the face triangulation. repair_mesh/stitch_boundary_edges mask the
+    // real problem by moving vertices by up to 100× base_tol, which
+    // degrades mesh quality and breaks normals. Instead, we log the
+    // boundary edge count as an error so the root cause can be fixed.
     let report = crate::watertight::validate_watertight(&mesh, false);
     if !report.is_watertight() {
-        log::warn!(
-            "Solid triangulation not watertight: {} boundary edges, {} non-manifold edges, {} degenerate triangles (V={}, E={}, F={}, χ={})",
+        let adaptive_tol = cache.adaptive_tolerance().merge_tolerance();
+        let boundary_pct = if report.edge_count > 0 {
+            report.boundary_edge_count as f64 / report.edge_count as f64 * 100.0
+        } else {
+            0.0
+        };
+        log::error!(
+            "BUG: Solid triangulation not watertight: {} boundary edges ({:.2}%), {} non-manifold, {} degenerate (V={}, E={}, F={}, χ={}, tol={:.2e})",
             report.boundary_edge_count,
+            boundary_pct,
             report.non_manifold_edge_count,
             report.degenerate_triangle_count,
             report.vertex_count,
             report.edge_count,
             report.triangle_count,
             report.euler_characteristic,
+            adaptive_tol,
         );
-
-        // Automatic recovery: try repair_mesh with adaptive tolerance as a LAST RESORT.
-        // This is NOT the primary path — the topology-first approach should
-        // make this unnecessary for well-formed B-Rep data.
-        // repair_mesh computes tolerance from the mesh bounding box and applies
-        // progressive stitching passes, replacing the old fixed-tolerance
-        // merge_coincident_vertices + stitch_boundary_edges combination.
-        if report.boundary_edge_count > 0 && report.boundary_edge_count < 5000 {
-            log::info!("Attempting automatic repair for {} boundary edges (adaptive_tol={:.2e})...",
-                report.boundary_edge_count, adaptive_tol);
-            crate::watertight::repair_mesh(&mut mesh, report.boundary_edge_count);
-            filter_degenerate_triangles(&mut mesh, 1e-10);
-
-            let report3 = crate::watertight::validate_watertight(&mesh, false);
-            if report3.is_watertight() {
-                log::info!("Automatic repair successful — mesh is now watertight");
-            } else {
-                log::warn!("Automatic repair: {} boundary edges remain", report3.boundary_edge_count);
-            }
+        if boundary_pct > 1.0 {
+            log::error!("More than 1% boundary edges — edge cache is NOT working correctly for this solid!");
         }
+        // Run edge consistency validation to diagnose the root cause
+        let consistency = crate::watertight::validate_edge_consistency(&mesh, adaptive_tol);
+        log::error!(
+            "Edge consistency: {}/{} shared edges consistent, {} inconsistent ({:.2}%), max_dist={:.2e}",
+            consistency.consistent_edges,
+            consistency.shared_edges_checked,
+            consistency.inconsistent_edges,
+            consistency.inconsistency_rate(),
+            consistency.max_vertex_distance,
+        );
+        for inc in &consistency.worst_inconsistencies {
+            log::error!(
+                "  Inconsistent edge: vertices ({}, {}), distance={:.2e}, faces={:?}",
+                inc.vertex_indices.0, inc.vertex_indices.1, inc.distance, inc.face_ids,
+            );
+        }
+        // Log edge cache statistics for debugging
+        let stats = cache.stats();
+        log::info!("Edge cache stats: {} entries, {} hits, {} misses, {} shared edges, hit_rate={:.1}%",
+            stats.total_edges, stats.cache_hits, stats.cache_misses, stats.shared_edges,
+            if stats.cache_hits + stats.cache_misses > 0 {
+                stats.cache_hits as f64 / (stats.cache_hits + stats.cache_misses) as f64 * 100.0
+            } else { 0.0 },
+        );
     } else {
         log::info!("Solid is watertight ✓ ({} interior edges, {} triangles, χ={})",
             report.interior_edge_count, report.triangle_count, report.euler_characteristic);
@@ -575,34 +594,30 @@ fn triangulate_solid_parallel(solid: &Solid, params: &TriangulationParams, cache
     let mut mesh = merged;
     filter_degenerate_triangles(&mut mesh, 1e-10);
 
-    // Step 4: Validation with adaptive recovery
-    let adaptive_tol = cache.adaptive_tolerance().merge_tolerance();
+    // Step 4: Validation — log but do NOT apply repair_mesh.
+    // See sequential path comments for rationale.
     let report = crate::watertight::validate_watertight(&mesh, false);
     if !report.is_watertight() {
-        log::warn!(
-            "Solid triangulation not watertight (parallel): {} boundary edges, {} non-manifold edges, {} degenerate triangles (V={}, E={}, F={}, χ={})",
+        let adaptive_tol = cache.adaptive_tolerance().merge_tolerance();
+        let boundary_pct = if report.edge_count > 0 {
+            report.boundary_edge_count as f64 / report.edge_count as f64 * 100.0
+        } else {
+            0.0
+        };
+        log::error!(
+            "BUG: Solid triangulation not watertight (parallel): {} boundary edges ({:.2}%), {} non-manifold, {} degenerate (V={}, E={}, F={}, χ={}, tol={:.2e})",
             report.boundary_edge_count,
+            boundary_pct,
             report.non_manifold_edge_count,
             report.degenerate_triangle_count,
             report.vertex_count,
             report.edge_count,
             report.triangle_count,
             report.euler_characteristic,
+            adaptive_tol,
         );
-
-        // Automatic recovery as LAST RESORT (using adaptive repair)
-        if report.boundary_edge_count > 0 && report.boundary_edge_count < 5000 {
-            log::info!("Attempting automatic repair (parallel) for {} boundary edges (tol={:.2e})...",
-                report.boundary_edge_count, adaptive_tol);
-            crate::watertight::repair_mesh(&mut mesh, report.boundary_edge_count);
-            filter_degenerate_triangles(&mut mesh, 1e-10);
-
-            let report3 = crate::watertight::validate_watertight(&mesh, false);
-            if report3.is_watertight() {
-                log::info!("Automatic repair (parallel) successful — mesh is now watertight");
-            } else {
-                log::warn!("Automatic repair (parallel): {} boundary edges remain", report3.boundary_edge_count);
-            }
+        if boundary_pct > 1.0 {
+            log::error!("More than 1% boundary edges — edge cache is NOT working correctly for this solid!");
         }
     } else {
         log::info!("Solid is watertight ✓ (parallel, {} interior edges, {} triangles, χ={})",
@@ -6509,6 +6524,17 @@ fn refine_chord_error(_mesh: &mut TriangleMesh, _params: &TriangulationParams) {
 /// Merge coincident vertices in a mesh within the given tolerance.
 /// This makes closed solids watertight by ensuring that shared edge
 /// vertices between adjacent faces use the same vertex index.
+///
+/// # ⚠️ DEPRECATED — DO NOT USE in the main triangulation pipeline.
+///
+/// This function MASKS bugs in the edge cache by arbitrarily moving vertices
+/// within `tolerance`. The unified edge cache should produce **bit-identical**
+/// vertices on shared edges, making this function unnecessary. If boundary
+/// edges exist after triangulation, fix the edge cache instead.
+#[deprecated(
+    since = "0.3.0",
+    note = "Do not use in main pipeline. If mesh has boundary edges, fix the edge cache instead."
+)]
 pub fn merge_coincident_vertices(mesh: &mut TriangleMesh, tolerance: f64) {
     if mesh.vertices.is_empty() {
         return;

@@ -76,6 +76,178 @@ impl WatertightReport {
     }
 }
 
+/// Result of edge consistency validation.
+///
+/// After topology-first triangulation, shared edges between faces should have
+/// **bit-identical** vertex positions. If they don't, the edge cache is not
+/// working correctly and the mesh will have gaps/cracks.
+#[derive(Clone, Debug)]
+pub struct EdgeConsistencyReport {
+    /// Total number of interior edges (shared by 2+ faces) examined.
+    pub shared_edges_checked: usize,
+    /// Number of shared edges where all incident vertices are bit-identical.
+    pub consistent_edges: usize,
+    /// Number of shared edges where incident vertices differ (BUG in edge cache!).
+    pub inconsistent_edges: usize,
+    /// Maximum distance between corresponding vertices on shared edges.
+    /// Should be 0.0 if the edge cache works correctly.
+    pub max_vertex_distance: f64,
+    /// Details of the worst inconsistencies (limited to 10 for log readability).
+    pub worst_inconsistencies: Vec<EdgeInconsistency>,
+}
+
+/// Details of an inconsistent shared edge.
+#[derive(Clone, Debug)]
+pub struct EdgeInconsistency {
+    /// Vertex indices that should be the same but aren't.
+    pub vertex_indices: (u32, u32),
+    /// Distance between the two vertices.
+    pub distance: f64,
+    /// Face IDs of the triangles sharing this edge (if available).
+    pub face_ids: Vec<u64>,
+}
+
+impl EdgeConsistencyReport {
+    /// Check if all shared edges are consistent (bit-identical vertices).
+    pub fn is_consistent(&self) -> bool {
+        self.inconsistent_edges == 0
+    }
+
+    /// Percentage of shared edges that are inconsistent.
+    pub fn inconsistency_rate(&self) -> f64 {
+        if self.shared_edges_checked == 0 {
+            0.0
+        } else {
+            self.inconsistent_edges as f64 / self.shared_edges_checked as f64 * 100.0
+        }
+    }
+}
+
+/// Validate that shared edges in the mesh have bit-identical vertex positions.
+///
+/// This is the key diagnostic for the topology-first approach: if the unified
+/// edge cache works correctly, two faces sharing an edge should produce the
+/// exact same vertex indices in the merged mesh. If they produce different
+/// vertex indices, the corresponding Point3d values should at least be
+/// bit-identical (distance = 0).
+///
+/// # Algorithm
+/// 1. Build the edge→face-count map (same as `validate_watertight`)
+/// 2. For each interior edge (shared by 2 triangles), check that the
+///    two vertex indices are the SAME. If not, compute the distance
+///    between the two Point3d values.
+/// 3. Report the number of inconsistent edges and the maximum distance.
+///
+/// # Arguments
+/// * `mesh` — The triangle mesh to validate.
+/// * `tolerance` — Distance threshold for flagging inconsistencies.
+///   Use 0.0 for strict bit-identity, or a small value (e.g., 1e-12) for
+///   floating-point tolerance.
+pub fn validate_edge_consistency(mesh: &TriangleMesh, tolerance: f64) -> EdgeConsistencyReport {
+    let mut report = EdgeConsistencyReport {
+        shared_edges_checked: 0,
+        consistent_edges: 0,
+        inconsistent_edges: 0,
+        max_vertex_distance: 0.0,
+        worst_inconsistencies: Vec::new(),
+    };
+
+    if mesh.vertices.is_empty() || mesh.triangles.is_empty() {
+        return report;
+    }
+
+    // Build edge → list of (triangle_index, vertex_index_pair) map
+    let mut edge_map: HashMap<(u32, u32), Vec<(usize, u32, u32)>> = HashMap::new();
+    for (ti, tri) in mesh.triangles.iter().enumerate() {
+        let edges = [
+            (tri[0].min(tri[1]), tri[0].max(tri[1]), tri[0], tri[1]),
+            (tri[1].min(tri[2]), tri[1].max(tri[2]), tri[1], tri[2]),
+            (tri[2].min(tri[0]), tri[2].max(tri[0]), tri[2], tri[0]),
+        ];
+        for (lo, hi, v_lo, v_hi) in &edges {
+            edge_map.entry((*lo, *hi)).or_default().push((ti, *v_lo, *v_hi));
+        }
+    }
+
+    // For interior edges (count == 2), check vertex consistency
+    let tol_sq = tolerance * tolerance;
+    let face_ids = mesh.triangle_face_ids.as_deref();
+
+    for ((lo, hi), entries) in &edge_map {
+        if entries.len() < 2 {
+            continue; // Boundary edge — skip
+        }
+
+        report.shared_edges_checked += 1;
+
+        // Check if all triangles sharing this edge use the SAME vertex indices
+        let first_lo = entries[0].1;
+        let first_hi = entries[0].2;
+
+        let all_same_indices = entries.iter().all(|(_, v_lo, v_hi)| {
+            *v_lo == first_lo && *v_hi == first_hi
+        });
+
+        if all_same_indices {
+            // Perfect: all triangles use identical vertex indices
+            report.consistent_edges += 1;
+        } else {
+            // Different vertex indices for the same geometric edge.
+            // Check if the Point3d values at least match within tolerance.
+            let p_lo_first = mesh.vertices[first_lo as usize];
+            let p_hi_first = mesh.vertices[first_hi as usize];
+
+            let mut max_dist = 0.0_f64;
+            let mut worst_pair = (first_lo, first_hi);
+
+            for (_, v_lo, v_hi) in entries.iter().skip(1) {
+                let p_lo = mesh.vertices[*v_lo as usize];
+                let p_hi = mesh.vertices[*v_hi as usize];
+
+                let d_lo = (p_lo.x - p_lo_first.x).powi(2)
+                    + (p_lo.y - p_lo_first.y).powi(2)
+                    + (p_lo.z - p_lo_first.z).powi(2);
+                let d_hi = (p_hi.x - p_hi_first.x).powi(2)
+                    + (p_hi.y - p_hi_first.y).powi(2)
+                    + (p_hi.z - p_hi_first.z).powi(2);
+
+                let dist = d_lo.max(d_hi).sqrt();
+                if dist > max_dist {
+                    max_dist = dist;
+                    worst_pair = (*v_lo, *v_hi);
+                }
+            }
+
+            if max_dist * max_dist <= tol_sq {
+                // Close enough within tolerance — probably floating-point rounding
+                report.consistent_edges += 1;
+            } else {
+                report.inconsistent_edges += 1;
+                report.max_vertex_distance = report.max_vertex_distance.max(max_dist);
+
+                // Collect face IDs for this inconsistency
+                let fids: Vec<u64> = entries.iter().filter_map(|(ti, _, _)| {
+                    face_ids.and_then(|ids| ids.get(*ti).copied())
+                }).collect();
+
+                report.worst_inconsistencies.push(EdgeInconsistency {
+                    vertex_indices: worst_pair,
+                    distance: max_dist,
+                    face_ids: fids,
+                });
+            }
+        }
+    }
+
+    // Sort by distance (worst first) and keep top 10
+    report.worst_inconsistencies.sort_by(|a, b| {
+        b.distance.partial_cmp(&a.distance).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    report.worst_inconsistencies.truncate(10);
+
+    report
+}
+
 /// Validate that a merged solid mesh is watertight.
 ///
 /// For a closed solid, every edge should be shared by exactly 2 triangles.
@@ -292,13 +464,22 @@ fn triangle_area_3d(v0: &Point3d, v1: &Point3d, v2: &Point3d) -> f64 {
 /// 3. If they're within `stitch_tolerance`, merge them
 /// 4. Repeat until no more merges are possible or iteration limit reached
 ///
+/// # ⚠️ DEPRECATED — DO NOT USE in the main triangulation pipeline.
+///
+/// This function MASKS bugs in the edge cache by moving vertices by up to
+/// `stitch_tolerance` (often 1e-4 or 100× base_tol). If the unified edge
+/// cache works correctly, shared edges have **bit-identical** vertices and
+/// this function is NEVER needed. If you find boundary edges after
+/// triangulation, fix the edge cache instead of calling this function.
+///
 /// # Arguments
 /// * `mesh` — The triangle mesh to stitch.
 /// * `stitch_tolerance` — Maximum distance between vertices to merge.
-///   Should be larger than the merge tolerance used in
-///   `merge_coincident_vertices`, but small enough to avoid merging
-///   genuinely distinct vertices.
 /// * `max_iterations` — Maximum number of stitch iterations.
+#[deprecated(
+    since = "0.3.0",
+    note = "Do not use in main pipeline. If mesh has boundary edges, fix the edge cache instead."
+)]
 pub fn stitch_boundary_edges(mesh: &mut TriangleMesh, stitch_tolerance: f64, max_iterations: usize) {
     for _ in 0..max_iterations {
         let report = validate_watertight(mesh, false);
@@ -396,15 +577,15 @@ pub fn stitch_boundary_edges(mesh: &mut TriangleMesh, stitch_tolerance: f64, max
     }
 }
 
-/// Repair mesh boundary gaps using adaptive tolerance based on bounding box.
+/// # ⚠️ DEPRECATED — DO NOT USE in the main triangulation pipeline.
 ///
-/// Unlike `stitch_boundary_edges` which uses a fixed tolerance (often 1e-4,
-/// which is 100x the stated precision), this function computes an appropriate
-/// tolerance from the mesh's bounding box diagonal. It then applies
-/// progressively increasing tolerances in multiple passes to close remaining
-/// boundary edges without arbitrarily moving vertices by large amounts.
+/// This function MASKS bugs in the edge cache by progressively moving vertices
+/// by up to 100× base_tol. It was used as a last resort when the topology-first
+/// approach produced boundary edges, but this is counterproductive: it hides the
+/// real problem instead of fixing it. If the unified edge cache works correctly,
+/// shared edges have **bit-identical** vertices and this function is NEVER needed.
 ///
-/// # Algorithm
+/// # Algorithm (DEPRECATED)
 /// 1. Compute the mesh bounding box diagonal (model scale)
 /// 2. Derive adaptive tolerance: base_tol = model_scale * 1e-6
 /// 3. Try stitching with progressively increasing tolerances:
@@ -419,6 +600,10 @@ pub fn stitch_boundary_edges(mesh: &mut TriangleMesh, stitch_tolerance: f64, max
 /// * `mesh` — The triangle mesh to repair.
 /// * `boundary_edge_count` — Number of boundary edges (from prior validation),
 ///   used to decide whether repair is worthwhile and to log progress.
+#[deprecated(
+    since = "0.3.0",
+    note = "Do not use in main pipeline. If mesh has boundary edges, fix the edge cache instead."
+)]
 pub fn repair_mesh(mesh: &mut TriangleMesh, boundary_edge_count: usize) {
     if mesh.vertices.is_empty() || mesh.triangles.is_empty() {
         return;
@@ -470,6 +655,7 @@ pub fn repair_mesh(mesh: &mut TriangleMesh, boundary_edge_count: usize) {
             report.boundary_edge_count, tol,
         );
 
+        #[allow(deprecated)]
         stitch_boundary_edges(mesh, tol, 3);
     }
 }

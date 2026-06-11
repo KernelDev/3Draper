@@ -15,7 +15,7 @@ use crate::triangulate::{
     sample_edge_points,
 };
 use crate::custom_cdt;
-use crate::watertight::repair_mesh;
+use crate::watertight::{validate_watertight, validate_edge_consistency};
 use draper_geometry::{
     Point3d, Point2d, Direction3d,
     Surface, Plane, CylinderSurface, SphereSurface,
@@ -1763,18 +1763,29 @@ pub fn triangulate_solid_watertight(
     // Filter degenerate triangles
     filter_degenerate_triangles(&mut mesh, 1e-10);
 
-    // Phase 5: Repair remaining gaps using adaptive tolerance
-    // repair_mesh uses bounding-box-based adaptive tolerance instead of
-    // the deprecated stitch_boundary_edges with fixed tolerance.
+    // Phase 5: Diagnose remaining gaps — do NOT apply repair_mesh.
+    // If boundary edges remain, that indicates a bug in edge cache or CDT.
+    // repair_mesh masks the problem by moving vertices; instead, log diagnostics.
     {
-        let report = crate::watertight::validate_watertight(&mesh, false);
-        if !report.is_watertight() && report.boundary_edge_count > 0 && report.boundary_edge_count < 2000 {
-            log::info!(
-                "Auto-repair: {} boundary edges remaining, attempting adaptive repair",
-                report.boundary_edge_count,
+        let report = validate_watertight(&mesh, false);
+        if !report.is_watertight() {
+            let boundary_pct = if report.edge_count > 0 {
+                report.boundary_edge_count as f64 / report.edge_count as f64 * 100.0
+            } else { 0.0 };
+            log::error!(
+                "BUG: CDT mesh not watertight: {} boundary edges ({:.2}%), {} non-manifold",
+                report.boundary_edge_count, boundary_pct, report.non_manifold_edge_count
             );
-            repair_mesh(&mut mesh, report.boundary_edge_count);
-            filter_degenerate_triangles(&mut mesh, 1e-10);
+            if boundary_pct > 1.0 {
+                log::error!("More than 1% boundary edges — edge cache/CDT not working correctly!");
+            }
+            let consistency = validate_edge_consistency(&mesh, merge_tolerance);
+            log::error!(
+                "Edge consistency: {}/{} consistent, {} inconsistent ({:.2}%), max_dist={:.2e}",
+                consistency.consistent_edges, consistency.shared_edges_checked,
+                consistency.inconsistent_edges, consistency.inconsistency_rate(),
+                consistency.max_vertex_distance
+            );
         }
     }
 
@@ -1801,15 +1812,20 @@ pub fn triangulate_solid_watertight(
         }
         face_aware_close_boundary(&mut mesh, merge_tolerance);
 
-        // If face-aware closing couldn't close all edges, try adaptive repair
-        // (uses bounding-box-based tolerance instead of the deprecated stitch_boundary_edges)
-        let report2 = crate::watertight::validate_watertight(&mesh, false);
-        if report2.boundary_edge_count > 0 && report2.boundary_edge_count <= 100 {
-            repair_mesh(&mut mesh, report2.boundary_edge_count);
-            filter_degenerate_triangles(&mut mesh, 1e-10);
-            // Resolve any non-manifold edges created by the repair
-            resolve_non_manifold_edges(&mut mesh);
-            face_aware_close_boundary(&mut mesh, merge_tolerance);
+        // If face-aware closing couldn't close all edges, log diagnostic
+        let report2 = validate_watertight(&mesh, false);
+        if report2.boundary_edge_count > 0 {
+            log::error!(
+                "BUG: {} boundary edges remain after face-aware closing",
+                report2.boundary_edge_count
+            );
+            let consistency = validate_edge_consistency(&mesh, merge_tolerance);
+            log::error!(
+                "Edge consistency: {}/{} consistent, {} inconsistent ({:.2}%), max_dist={:.2e}",
+                consistency.consistent_edges, consistency.shared_edges_checked,
+                consistency.inconsistent_edges, consistency.inconsistency_rate(),
+                consistency.max_vertex_distance
+            );
         }
     }
 

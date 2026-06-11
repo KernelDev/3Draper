@@ -29,7 +29,7 @@ use draper_geometry::{
     NurbsSurface, Curve3d, Curve2d, Line, Circle, Ellipse, Arc, NurbsCurve,
     Line2d, Circle2d, Ellipse2d, Nurbs2d,
 };
-use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary_and_holes_uv, ear_clip, validate_watertight, smooth_normals, smooth_normals_adaptive, repair_mesh};
+use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary_and_holes_uv, ear_clip, validate_watertight, validate_edge_consistency, smooth_normals, smooth_normals_adaptive};
 use draper_topology::{Face, Wire, CoEdge, Edge as TopoEdge, Shell, Solid};
 use draper_topology::healing::{heal_solid, HealingParams, HealingReport};
 use draper_geometry::tolerance::ToleranceContext;
@@ -2680,15 +2680,49 @@ impl<'a> StepConverter<'a> {
                 fbmin.x, fbmin.y, fbmin.z, fbmax.x, fbmax.y, fbmax.z);
             mesh.merge(&face_mesh);
         }
-        // Use adaptive repair with progressive tolerance (replaces
-        // merge_coincident_vertices + stitch_boundary_edges with a single
-        // bounding-box-based adaptive approach)
+        // Validation — do NOT apply repair_mesh. If the mesh is not watertight,
+        // that indicates a bug in the edge cache or surface discretization.
+        // repair_mask/stitch_boundary_edges mask the real problem by moving
+        // vertices by up to 100× base_tol. Instead, log the issue and run
+        // edge consistency validation to diagnose the root cause.
         let adaptive_tol = edge_cache.adaptive_tolerance().merge_tolerance();
         let report_before = validate_watertight(&mesh, false);
-        if !report_before.is_watertight() && report_before.boundary_edge_count > 0 {
-            log::info!("BREP #{}: {} boundary edges, attempting adaptive repair (tol={:.2e})",
-                brep_id, report_before.boundary_edge_count, adaptive_tol);
-            repair_mesh(&mut mesh, report_before.boundary_edge_count);
+        if !report_before.is_watertight() {
+            let boundary_pct = if report_before.edge_count > 0 {
+                report_before.boundary_edge_count as f64 / report_before.edge_count as f64 * 100.0
+            } else {
+                0.0
+            };
+            log::error!(
+                "BUG: BREP #{} not watertight: {} boundary edges ({:.2}%), {} non-manifold (tol={:.2e})",
+                brep_id, report_before.boundary_edge_count, boundary_pct,
+                report_before.non_manifold_edge_count, adaptive_tol
+            );
+            if boundary_pct > 1.0 {
+                log::error!("More than 1% boundary edges — edge cache is NOT working correctly!");
+            }
+            // Run edge consistency validation to diagnose
+            let consistency = validate_edge_consistency(&mesh, adaptive_tol);
+            log::error!(
+                "Edge consistency: {}/{} consistent, {} inconsistent ({:.2}%), max_dist={:.2e}",
+                consistency.consistent_edges, consistency.shared_edges_checked,
+                consistency.inconsistent_edges, consistency.inconsistency_rate(),
+                consistency.max_vertex_distance
+            );
+            for inc in &consistency.worst_inconsistencies {
+                log::error!(
+                    "  Inconsistent edge: vertices ({}, {}), dist={:.2e}, faces={:?}",
+                    inc.vertex_indices.0, inc.vertex_indices.1, inc.distance, inc.face_ids
+                );
+            }
+            // Log edge cache stats
+            let stats = edge_cache.stats();
+            log::info!("Edge cache stats: {} entries, {} hits, {} misses, {} shared, hit_rate={:.1}%",
+                stats.total_edges, stats.cache_hits, stats.cache_misses, stats.shared_edges,
+                if stats.cache_hits + stats.cache_misses > 0 {
+                    stats.cache_hits as f64 / (stats.cache_hits + stats.cache_misses) as f64 * 100.0
+                } else { 0.0 }
+            );
         }
 
         // Phase 2: Validate watertightness of the merged mesh
@@ -2877,15 +2911,43 @@ impl<'a> StepConverter<'a> {
                 uv_triangles,
             });
         }
-        // Use adaptive repair with progressive tolerance (replaces
-        // merge_coincident_vertices + stitch_boundary_edges with a single
-        // bounding-box-based adaptive approach)
+        // Validation — do NOT apply repair_mesh (see comment in triangulate_brep).
         let adaptive_tol = edge_cache.adaptive_tolerance().merge_tolerance();
         let report_before = validate_watertight(&mesh, false);
-        if !report_before.is_watertight() && report_before.boundary_edge_count > 0 {
-            log::info!("BREP #{} detailed: {} boundary edges, attempting adaptive repair (tol={:.2e})",
-                brep_id, report_before.boundary_edge_count, adaptive_tol);
-            repair_mesh(&mut mesh, report_before.boundary_edge_count);
+        if !report_before.is_watertight() {
+            let boundary_pct = if report_before.edge_count > 0 {
+                report_before.boundary_edge_count as f64 / report_before.edge_count as f64 * 100.0
+            } else {
+                0.0
+            };
+            log::error!(
+                "BUG: BREP #{} detailed not watertight: {} boundary edges ({:.2}%), {} non-manifold (tol={:.2e})",
+                brep_id, report_before.boundary_edge_count, boundary_pct,
+                report_before.non_manifold_edge_count, adaptive_tol
+            );
+            if boundary_pct > 1.0 {
+                log::error!("More than 1% boundary edges — edge cache is NOT working correctly!");
+            }
+            let consistency = validate_edge_consistency(&mesh, adaptive_tol);
+            log::error!(
+                "Edge consistency: {}/{} consistent, {} inconsistent ({:.2}%), max_dist={:.2e}",
+                consistency.consistent_edges, consistency.shared_edges_checked,
+                consistency.inconsistent_edges, consistency.inconsistency_rate(),
+                consistency.max_vertex_distance
+            );
+            for inc in &consistency.worst_inconsistencies {
+                log::error!(
+                    "  Inconsistent edge: vertices ({}, {}), dist={:.2e}, faces={:?}",
+                    inc.vertex_indices.0, inc.vertex_indices.1, inc.distance, inc.face_ids
+                );
+            }
+            let stats = edge_cache.stats();
+            log::info!("Edge cache stats: {} entries, {} hits, {} misses, {} shared, hit_rate={:.1}%",
+                stats.total_edges, stats.cache_hits, stats.cache_misses, stats.shared_edges,
+                if stats.cache_hits + stats.cache_misses > 0 {
+                    stats.cache_hits as f64 / (stats.cache_hits + stats.cache_misses) as f64 * 100.0
+                } else { 0.0 }
+            );
         }
 
         // Smooth vertex normals across shared edges for Gouraud-like shading.

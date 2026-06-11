@@ -477,6 +477,13 @@ pub struct ViewerApp {
     error_count: usize,
     /// Number of faces that failed triangulation (for graceful degradation).
     failed_face_count: usize,
+    /// When enabled, validates edge consistency after loading and logs details.
+    /// This is the `--validate-consistency` diagnostic mode — it runs
+    /// `validate_edge_consistency` on the final mesh to check that shared edges
+    /// have bit-identical vertex positions. Useful for debugging mesh quality issues.
+    validate_consistency: bool,
+    /// Last edge consistency report (for display in the UI).
+    last_consistency_report: Option<String>,
 
     // ─── JSON API state ────────────────────────────────────────────────────
     /// JSON API engine.
@@ -495,6 +502,10 @@ pub struct ViewerApp {
     mobile_panel: Option<MobilePanel>,
     /// Whether the mobile log panel is visible.
     mobile_log_open: bool,
+
+    // ─── Chunked triangulation ──────────────────────────────────────────────
+    /// Time-budgeted BREP triangulation processor.
+    chunked_triangulator: ChunkedBrepTriangulator,
 }
 
 /// Mobile overlay panel type.
@@ -504,6 +515,66 @@ enum MobilePanel {
     Controls,
     /// Right structure panel (tree, faces, UV, face info)
     Structure,
+}
+
+/// Result of processing a single chunk of BREP triangulation.
+#[derive(Clone, Debug, PartialEq)]
+enum ChunkResult {
+    /// A BREP was fully triangulated and merged into the mesh.
+    BrepCompleted {
+        /// Name of the completed instance.
+        name: String,
+        /// Number of triangles added.
+        triangles_added: usize,
+        /// Time taken for this BREP.
+        elapsed_ms: f64,
+    },
+    /// No more BREPs to process — loading is complete.
+    AllDone,
+    /// Time budget exceeded — call again next frame.
+    TimeBudgetExceeded,
+    /// Triangulation failed for this instance.
+    Failed {
+        name: String,
+        reason: String,
+    },
+}
+
+/// Time-budgeted BREP triangulation processor.
+///
+/// Processes pending BREP instances one at a time, respecting a frame time budget.
+/// This keeps the browser/UI responsive during loading of large STEP assemblies.
+///
+/// # Time Budget Strategy
+/// - **WASM**: 8ms per frame (targets 120fps, leaves headroom for rendering)
+/// - **Native**: 16ms per frame (targets 60fps, but allows batch processing)
+///
+/// Individual BREPs are processed atomically — if a single BREP takes longer than
+/// the budget, we accept the frame drop but log a warning. Future work: intra-BREP
+/// chunked triangulation would require refactoring the converter API.
+struct ChunkedBrepTriangulator {
+    /// Time budget per frame for triangulation work.
+    time_budget: std::time::Duration,
+}
+
+impl ChunkedBrepTriangulator {
+    /// Create a new chunked processor with platform-appropriate time budget.
+    fn new() -> Self {
+        let time_budget = if cfg!(target_arch = "wasm32") {
+            // 8ms for 120fps target on WASM
+            std::time::Duration::from_millis(8)
+        } else {
+            // 16ms for 60fps target on native
+            std::time::Duration::from_millis(16)
+        };
+        Self { time_budget }
+    }
+
+    /// Create with a custom time budget (for testing).
+    #[allow(dead_code)]
+    fn with_budget(time_budget: std::time::Duration) -> Self {
+        Self { time_budget }
+    }
 }
 
 impl ViewerApp {
@@ -687,6 +758,8 @@ impl ViewerApp {
             warning_count: 0,
             error_count: 0,
             failed_face_count: 0,
+            validate_consistency: false,
+            last_consistency_report: None,
             json_api: draper_json::JsonApi::new(),
             json_api_input: String::new(),
             json_api_output: String::new(),
@@ -694,6 +767,7 @@ impl ViewerApp {
             is_mobile: false,
             mobile_panel: None,
             mobile_log_open: false,
+            chunked_triangulator: ChunkedBrepTriangulator::new(),
         };
         app.log("3Draper Viewer started");
         app.log(&format!("Default model: Box 100x100x100 ({} vertices, {} triangles)",
@@ -736,6 +810,31 @@ impl ViewerApp {
         self.log(&format!("Loaded: {} ({} vertices, {} triangles) — {}",
             name, self.current_model.vertex_count, self.current_model.triangle_count,
             if is_watertight { "watertight" } else { "not watertight" }));
+
+        // Run edge consistency validation if enabled
+        if self.validate_consistency {
+            let report = draper_mesh::watertight::validate_edge_consistency(&self.mesh, 0.0);
+            let msg = format!(
+                "Edge consistency: {}/{} consistent, {} inconsistent ({:.2}%), max_dist={:.2e}",
+                report.consistent_edges, report.shared_edges_checked,
+                report.inconsistent_edges, report.inconsistency_rate(),
+                report.max_vertex_distance
+            );
+            if report.is_consistent() {
+                self.log(&msg);
+            } else {
+                self.log_warning(&msg);
+                for inc in &report.worst_inconsistencies {
+                    self.log_warning(&format!(
+                        "  Edge: vertices ({}, {}) dist={:.2e}",
+                        inc.vertex_indices.0, inc.vertex_indices.1, inc.distance
+                    ));
+                }
+            }
+            self.last_consistency_report = Some(msg);
+        } else {
+            self.last_consistency_report = None;
+        }
     }
 
     fn load_box(&mut self) {
@@ -1634,39 +1733,32 @@ impl ViewerApp {
         self.total_instance_count = 0;
     }
 
-    /// Process one pending BREP per frame (called from update()).
-    /// Triangulates a single BREP instance and merges it into the scene mesh.
+    /// Process pending BREPs with time budget (called from update()).
+    ///
+    /// Uses `ChunkedBrepTriangulator` to respect a per-frame time budget,
+    /// keeping the browser/UI responsive during loading of large assemblies.
+    /// On WASM, the budget is 8ms (for 120fps); on native, 16ms (for 60fps).
+    ///
+    /// Individual BREPs are processed atomically — if a single BREP takes longer
+    /// than the budget, we accept the frame drop but log a warning. This is
+    /// acceptable because most BREPs have 6-50 faces and complete in <5ms.
+    ///
     /// Returns true if there are still more instances to process.
-    ///
-    /// This is the key to keeping the browser responsive: instead of triangulating
-    /// all BREPs in one blocking call, we do ONE BREP per animation frame.
-    /// Each BREP's triangulation is still synchronous, but it's bounded by the
-    /// number of faces in that single BREP (typically 6-50 faces for most parts).
-    ///
-    /// On native, we process MULTIPLE BREPs per frame (batch) and use
-    /// parallel face triangulation (rayon) for each BREP. This significantly
-    /// speeds up loading of large assemblies without breaking selection/visibility,
-    /// because `instance_triangle_ranges` is still built in sequential order.
     fn process_pending_breps(&mut self) -> bool {
         if !self.is_loading || self.pending_breps.is_empty() {
             return false;
         }
 
         // LAZY: Create the conversion context on the first frame.
-        // This is expensive (builds entity maps, computes bounding box) but
-        // doing it here instead of in process_step_file() means the browser
-        // can render the tree structure before this heavy computation starts.
         if self.conversion_ctx.is_none() {
             if let Some(step_file) = self.pending_step_file.take() {
                 self.log("Building conversion context (entity maps, bounding box)...");
-                // Wrap in catch_unwind to prevent WASM panics from crashing the entire app.
                 let ctx_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     OwnedStepConversionContext::new(step_file)
                 }));
                 match ctx_result {
                     Ok(ctx) => {
                         self.conversion_ctx = Some(ctx);
-                        // Log parallel mode status
                         #[cfg(not(target_arch = "wasm32"))]
                         self.log("Conversion context ready — starting triangulation (parallel mode)...");
                         #[cfg(target_arch = "wasm32")]
@@ -1681,13 +1773,12 @@ impl ViewerApp {
                     }
                 }
             } else {
-                // No step file and no context — can't proceed
                 self.is_loading = false;
                 return false;
             }
         }
 
-        // Check for global loading timeout (5 minutes on all platforms)
+        // Check for global loading timeout (5 minutes)
         if let Some(start) = self.loading_start {
             let timeout = std::time::Duration::from_secs(300);
             if start.elapsed() > timeout {
@@ -1709,41 +1800,37 @@ impl ViewerApp {
             }
         }
 
-        // Determine batch size: on native process multiple BREPs per frame
-        // to take advantage of parallel face triangulation (rayon).
-        // On WASM, keep 1-per-frame to avoid blocking the browser.
-        #[cfg(not(target_arch = "wasm32"))]
-        let batch_size = std::cmp::min(self.pending_breps.len(), 8);
-        #[cfg(target_arch = "wasm32")]
-        let batch_size = 1;
-
-        let mut processed = 0;
+        // Time-budgeted processing: process BREPs until the frame budget is exceeded.
         // Use web_time::Instant on WASM (std::time::Instant panics on wasm32).
         #[cfg(not(target_arch = "wasm32"))]
         let frame_start = std::time::Instant::now();
         #[cfg(target_arch = "wasm32")]
         let frame_start = web_time::Instant::now();
-        // On native, allow up to 200ms per frame for batch processing.
-        // On WASM, process just 1 BREP per frame (no time budget needed).
-        #[cfg(not(target_arch = "wasm32"))]
-        let frame_budget = std::time::Duration::from_millis(200);
-        #[cfg(target_arch = "wasm32")]
-        let frame_budget = std::time::Duration::from_secs(10); // effectively no budget on WASM
+        let frame_budget = self.chunked_triangulator.time_budget;
 
-        while processed < batch_size && !self.pending_breps.is_empty() {
-            // Check frame time budget on native
+        let mut processed = 0;
+        // On native, process up to 8 BREPs per frame if time allows.
+        // On WASM, process just 1 BREP per frame.
+        #[cfg(not(target_arch = "wasm32"))]
+        let max_batch = std::cmp::min(self.pending_breps.len(), 8);
+        #[cfg(target_arch = "wasm32")]
+        let max_batch = 1;
+
+        while processed < max_batch && !self.pending_breps.is_empty() {
+            // Check time budget (skip check for first BREP — we always process at least one)
             if processed > 0 && frame_start.elapsed() > frame_budget {
+                log::debug!("Frame time budget exceeded after {} BREPs ({:.1}ms), yielding",
+                    processed, frame_start.elapsed().as_secs_f64() * 1000.0);
                 break;
             }
 
-            // Take the next pending BREP from the front
+            // Take the next pending BREP
             let pending = self.pending_breps.remove(0);
 
             // Log transform info for debugging positioning issues
             if let Some(ref tf) = pending.transform {
                 let is_identity = (tf[0][0] - 1.0).abs() < 1e-10 && (tf[1][1] - 1.0).abs() < 1e-10 && (tf[2][2] - 1.0).abs() < 1e-10 && tf[0][3].abs() < 1e-10 && tf[1][3].abs() < 1e-10 && tf[2][3].abs() < 1e-10;
                 if !is_identity {
-                    // Check if there's any rotation (diagonal != 1 or off-diagonal != 0)
                     let has_rotation = (tf[0][0] - 1.0).abs() > 1e-6 || (tf[1][1] - 1.0).abs() > 1e-6 || (tf[2][2] - 1.0).abs() > 1e-6
                         || tf[0][1].abs() > 1e-6 || tf[0][2].abs() > 1e-6
                         || tf[1][0].abs() > 1e-6 || tf[1][2].abs() > 1e-6
@@ -1766,11 +1853,13 @@ impl ViewerApp {
                 }
             }
 
+            // Time this BREP's triangulation
+            #[cfg(not(target_arch = "wasm32"))]
+            let brep_start = std::time::Instant::now();
+            #[cfg(target_arch = "wasm32")]
+            let brep_start = web_time::Instant::now();
+
             // Triangulate this single BREP using the CACHED conversion context.
-            // The context (OwnedStepConversionContext) is created ONCE when loading starts
-            // and reused across all frames — this avoids rebuilding entity maps, cloning
-            // HashMaps, and recomputing bounding boxes on every frame (major perf win).
-            // Wrap in catch_unwind to prevent WASM panics from crashing the entire app.
             let instance = if let Some(ref mut ctx) = self.conversion_ctx {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     ctx.triangulate_pending(&pending)
@@ -1782,31 +1871,33 @@ impl ViewerApp {
                 None
             };
 
+            let brep_elapsed = brep_start.elapsed();
+            let brep_elapsed_ms = brep_elapsed.as_secs_f64() * 1000.0;
+
+            // Warn if this BREP exceeded the time budget (indicates a complex BREP
+            // that would benefit from intra-BREP chunked triangulation in the future)
+            if brep_elapsed > frame_budget && processed == 0 {
+                log::warn!("BREP '{}' took {:.1}ms (exceeded {:.0}ms budget) — consider intra-BREP chunking",
+                    pending.name, brep_elapsed_ms, frame_budget.as_secs_f64() * 1000.0);
+            }
+
             match instance {
                 Some(inst) => {
-                    // Check if this instance has a valid mesh
                     if inst.mesh.triangle_count() == 0 && inst.mesh.vertex_count() == 0 {
                         self.log_warning(&format!(
-                            "Instance '{}' (BREP #{}) produced empty mesh — skipping",
-                            inst.name, inst.brep_id
+                            "Instance '{}' (BREP #{}) produced empty mesh — skipping ({:.1}ms)",
+                            inst.name, inst.brep_id, brep_elapsed_ms
                         ));
                         self.failed_face_count += 1;
                     } else {
                         let tri_start = self.mesh.triangle_count();
-                        // Use STEP color if available, otherwise assign a per-instance color
-                        // from a muted CAD-style palette so different parts are visually distinct
                         let color = inst.color.unwrap_or_else(|| {
                             Self::instance_color(self.triangulated_count)
                         });
                         self.mesh.merge_with_color(&inst.mesh, color);
                         let tri_end = self.mesh.triangle_count();
-                        // IMPORTANT: instance_triangle_ranges is built sequentially in order.
-                        // This preserves the invariant that selection and visibility use
-                        // original mesh indices — parallel triangulation within each BREP
-                        // does not affect this because we merge one BREP at a time.
                         self.instance_triangle_ranges.push((tri_start, tri_end));
 
-                        // Update the assembly tree: link this instance to its tree node
                         let inst_idx = self.instance_triangle_ranges.len() - 1;
                         if let Some(ref mut tree) = self.assembly_tree {
                             assign_instance_to_tree(tree, inst_idx);
@@ -1817,8 +1908,8 @@ impl ViewerApp {
                 }
                 None => {
                     self.log_warning(&format!(
-                        "Instance '{}' (BREP #{}) failed triangulation — skipping",
-                        pending.name, pending.brep_id
+                        "Instance '{}' (BREP #{}) failed triangulation — skipping ({:.1}ms)",
+                        pending.name, pending.brep_id, brep_elapsed_ms
                     ));
                     self.failed_face_count += 1;
                 }
@@ -2215,6 +2306,11 @@ impl eframe::App for ViewerApp {
                     ui.checkbox(&mut self.show_axes, "Show axes");
                     ui.checkbox(&mut self.show_grid, "Show grid");
                     ui.checkbox(&mut self.show_structure, "Structure Panel");
+                    ui.separator();
+                    ui.checkbox(&mut self.validate_consistency, "Validate Edge Consistency");
+                    if let Some(ref report) = self.last_consistency_report {
+                        ui.label(egui::RichText::new(report).small().color(egui::Color32::YELLOW));
+                    }
                     ui.separator();
                     if ui.button("Reset Camera").clicked() {
                         let (bbox_min, bbox_max) = self.mesh.bounding_box();
