@@ -12,6 +12,7 @@
 
 use draper_geometry::{Point2d, Point3d, Surface};
 use crate::mesh::TriangleMesh;
+use crate::edge_cache::deterministic_round_point;
 use std::f64::consts::PI;
 
 /// A closed polygon in UV parameter space.
@@ -917,6 +918,57 @@ pub fn triangulate_surface_consistent(
     }
 
     // ============================================================
+    // Step 1.6: NURBS UV polygon self-intersection check
+    //
+    // For NURBS surfaces, the UV polygon can be self-intersecting
+    // when Newton-Raphson converges to a wrong UV for some boundary
+    // points (e.g., on surfaces with large UV ranges or bad
+    // parameterization). A self-intersecting UV polygon produces
+    // incorrect triangulation — triangles on the wrong side of
+    // the surface, inverted normals, etc.
+    //
+    // If the UV polygon is self-intersecting, we fall back to
+    // re-projecting all UVs from scratch using surface.project_point().
+    // This is slow (~146 evaluations per point) but more robust.
+    // ============================================================
+    if let Surface::Nurbs(ref nurbs) = surface {
+        let uv_area = polygon_area_2d(&outer_uv);
+        // A negative or zero UV area means the polygon is self-intersecting
+        // or degenerate (collapsed to a line/point).
+        if uv_area <= 0.0 && outer_uv.len() >= 3 {
+            log::warn!(
+                "NURBS UV polygon is self-intersecting/degenerate: area={:.6}, {} points, u_range=[{:.2},{:.2}] v_range=[{:.2},{:.2}] — re-projecting from scratch",
+                uv_area, outer_uv.len(),
+                outer_uv.iter().map(|p| p.u).fold(f64::MAX, f64::min),
+                outer_uv.iter().map(|p| p.u).fold(f64::MIN, f64::max),
+                outer_uv.iter().map(|p| p.v).fold(f64::MAX, f64::min),
+                outer_uv.iter().map(|p| p.v).fold(f64::MIN, f64::max),
+            );
+            // Re-project all boundary UVs using full project_point()
+            let (nu_min, nu_max) = nurbs.u_range();
+            let (nv_min, nv_max) = nurbs.v_range();
+            outer_uv = boundary_points_3d.iter().map(|p| {
+                let (u, v) = surface.project_point(p);
+                // Clamp to NURBS parameter range
+                Point2d::new(
+                    u.clamp(nu_min, nu_max),
+                    v.clamp(nv_min, nv_max),
+                )
+            }).collect();
+            // Re-normalize
+            crate::triangulate::normalize_uv_polygon(&mut outer_uv, u_period, v_period);
+            if outer_uv.len() < 3 {
+                return TriangleMesh::new();
+            }
+            let new_area = polygon_area_2d(&outer_uv);
+            log::info!(
+                "NURBS UV polygon re-projected: area={:.6} (was {:.6})",
+                new_area, uv_area
+            );
+        }
+    }
+
+    // ============================================================
     // Step 2: Compute UV range and build domain
     // ============================================================
     let mut u_min = f64::MAX;
@@ -1227,12 +1279,14 @@ pub fn triangulate_surface_consistent(
                     // For NURBS, use derivatives_at once to get both point and
                     // normal in a single call (87 de Boor iterations) instead of
                     // point_at (30) + normal_at (87) = 117 iterations separately.
+                    // Apply deterministic rounding to ensure consistent vertex positions
+                    // across faces (matches edge cache's rounding for boundary vertices).
                     let uv = all_uv[idx_usize];
                     let (p3d, n) = if let Surface::Nurbs(ref nurbs) = surface {
                         let derivs = nurbs.derivatives_at(uv.u, uv.v);
-                        (derivs.point, derivs.normal())
+                        (deterministic_round_point(derivs.point), derivs.normal())
                     } else {
-                        (surface.point_at(uv.u, uv.v), surface.normal_at(uv.u, uv.v))
+                        (deterministic_round_point(surface.point_at(uv.u, uv.v)), surface.normal_at(uv.u, uv.v))
                     };
                     let vi = mesh.add_vertex(p3d);
                     mesh.add_vertex_normal(vi, [n.x, n.y, n.z]);
@@ -1286,9 +1340,22 @@ pub fn triangulate_surface_consistent(
             }
         }
 
+        // Track which mesh vertices are boundary (from edge cache) vs interior.
+        // Boundary vertices have bit-identical 3D coordinates across faces,
+        // so splitting a boundary-boundary edge would create new vertices
+        // that can't be deduplicated — breaking watertightness.
+        let mut is_boundary_vertex: Vec<bool> = vec![false; mesh.vertices.len()];
+        for (idx, _) in all_uv.iter().enumerate() {
+            if let Some(&mesh_idx) = vertex_map.get(&(idx as u32)) {
+                // Vertices from boundary/hole polylines (indices < n_boundary_and_holes_actual)
+                // are "boundary" vertices from the edge cache.
+                is_boundary_vertex[mesh_idx as usize] = idx < n_boundary_and_holes_actual;
+            }
+        }
+
         refine_mesh_chord_error_uv(
             &mut mesh, surface, forward, params.max_deviation, max_refine_iters,
-            &mut vertex_uvs,
+            &mut vertex_uvs, &mut is_boundary_vertex,
         );
     }
 
@@ -1621,6 +1688,7 @@ fn refine_mesh_chord_error_uv(
     max_deviation: f64,
     max_iterations: usize,
     vertex_uvs: &mut Vec<Point2d>,
+    is_boundary_vertex: &mut Vec<bool>,
 ) {
     use std::collections::HashMap;
 
@@ -1658,6 +1726,23 @@ fn refine_mesh_chord_error_uv(
 
                 if edges_to_split.contains_key(&edge) {
                     continue; // Already marked
+                }
+
+                // CRITICAL: Skip splitting edges between two boundary vertices.
+                // Boundary vertices come from the edge cache with bit-identical
+                // 3D coordinates across faces. Splitting a boundary-boundary edge
+                // creates a new midpoint vertex computed from surface.point_at(),
+                // which produces DIFFERENT f64 bits for each face. This new vertex
+                // can't be deduplicated, breaking watertightness.
+                //
+                // The edge cache already ensures sufficient sampling on boundary
+                // edges (via adaptive_discretize). If chord error is too large
+                // on a boundary edge, the fix is to increase edge sampling, not
+                // to split the edge here.
+                let v0_is_boundary = is_boundary_vertex.get(v0 as usize).copied().unwrap_or(false);
+                let v1_is_boundary = is_boundary_vertex.get(v1 as usize).copied().unwrap_or(false);
+                if v0_is_boundary && v1_is_boundary {
+                    continue; // Don't split boundary-boundary edges
                 }
 
                 // Compute midpoint UV by averaging — O(1) instead of O(1000)
@@ -1780,8 +1865,7 @@ fn refine_mesh_chord_error_uv(
             // 3. The chord error check already verified the averaged UV is reasonable
             // 4. For NURBS with bad parameterization, Newton often doesn't converge
             //    better than simple averaging anyway
-            let p_surf = surface.point_at(mid_u, mid_v);
-
+            let p_surf = deterministic_round_point(surface.point_at(mid_u, mid_v));
             let n = surface.normal_at(mid_u, mid_v);
 
             let vi = mesh.add_vertex(p_surf);
@@ -1789,6 +1873,12 @@ fn refine_mesh_chord_error_uv(
 
             // Store UV for the new vertex
             vertex_uvs.push(Point2d::new(mid_u, mid_v));
+
+            // New vertices from chord-error refinement are NOT boundary vertices —
+            // they're computed from surface.point_at(), not from the edge cache.
+            // Marking them as non-boundary ensures that future refinement iterations
+            // can still split edges involving these vertices.
+            is_boundary_vertex.push(false);
 
             new_edges.insert(*edge, vi);
         }
