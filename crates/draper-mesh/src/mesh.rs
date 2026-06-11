@@ -218,6 +218,9 @@ impl TriangleMesh {
     /// With deduplication, shared vertices get the same index, making the
     /// mesh watertight **by construction** — no post-hoc repair needed.
     pub fn merge_deduplicating(&mut self, other: &TriangleMesh, dedup_map: &mut VertexDedupMap) {
+        // Save pre-merge vertex count for correct normals sizing
+        let old_vertex_count = self.vertices.len();
+
         // Build index remapping: other's local vertex index → global index
         let mut index_map: Vec<u32> = Vec::with_capacity(other.vertices.len());
 
@@ -252,20 +255,20 @@ impl TriangleMesh {
             (Some(ref mut self_normals), Some(ref other_normals)) => {
                 // For new vertices, add their normals. For reused vertices,
                 // skip (keep the first face's normal).
-                for (i, vertex) in other.vertices.iter().enumerate() {
-                    let key = VertexKey::from_point(vertex);
+                for (i, _vertex) in other.vertices.iter().enumerate() {
                     let global_idx = index_map[i] as usize;
-                    // Only add normal if this is a new vertex (global_idx == current length before push)
+                    // Only add normal if this is a new vertex
                     if global_idx >= self_normals.len() {
                         self_normals.push(other_normals[i]);
                     }
                 }
             }
             (None, Some(ref other_normals)) => {
-                // Fill default normals for existing vertices, then add new ones
-                let mut combined = vec![[0.0, 0.0, 1.0]; self.vertices.len() - other.vertices.len()];
-                for (i, vertex) in other.vertices.iter().enumerate() {
-                    let key = VertexKey::from_point(vertex);
+                // Fill default normals for pre-existing vertices that don't
+                // have normals yet, then add normals for new vertices.
+                // Use old_vertex_count (saved before merge) to avoid underflow.
+                let mut combined = vec![[0.0, 0.0, 1.0]; old_vertex_count];
+                for (i, _vertex) in other.vertices.iter().enumerate() {
                     let global_idx = index_map[i] as usize;
                     if global_idx >= combined.len() {
                         combined.push(other_normals[i]);

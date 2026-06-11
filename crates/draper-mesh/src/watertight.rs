@@ -156,7 +156,28 @@ pub fn validate_edge_consistency(mesh: &TriangleMesh, tolerance: f64) -> EdgeCon
         return report;
     }
 
-    // Build edge → list of (triangle_index, vertex_index_pair) map
+    // Build edge → list of (triangle_index, vertex_a, vertex_b) map.
+    // Key: canonical sorted pair (lo, hi).
+    // Value: original unsorted pair (a, b) from the triangle — needed to
+    // detect when two different vertex indices map to the same geometric edge.
+    //
+    // When merge_deduplicating works correctly, two faces sharing an edge
+    // produce the SAME vertex indices (e.g., both have edge (5,8)). When it
+    // fails, they produce DIFFERENT indices that happen to have the same
+    // 3D positions (e.g., one has (5,8) and another has (12,15)), but
+    // those different indices will NOT share an edge_map key because
+    // (5,8) ≠ (12,15). They'll appear as two separate boundary edges instead.
+    //
+    // So actually, if two triangles share an edge_map key (lo, hi), they
+    // necessarily use the SAME vertex indices. The "inconsistency" scenario
+    // (different indices, same positions) manifests as boundary edges, not
+    // as interior edges with mismatched indices.
+    //
+    // This validation checks interior edges for a subtler issue: when a
+    // single face's triangulation produces an edge where two vertices that
+    // SHOULD be the same point have different indices but close 3D positions.
+    // This can happen when the edge cache returns slightly different points
+    // for the same edge at different parametric locations.
     let mut edge_map: HashMap<(u32, u32), Vec<(usize, u32, u32)>> = HashMap::new();
     for (ti, tri) in mesh.triangles.iter().enumerate() {
         let edges = [
@@ -164,12 +185,12 @@ pub fn validate_edge_consistency(mesh: &TriangleMesh, tolerance: f64) -> EdgeCon
             (tri[1].min(tri[2]), tri[1].max(tri[2]), tri[1], tri[2]),
             (tri[2].min(tri[0]), tri[2].max(tri[0]), tri[2], tri[0]),
         ];
-        for (lo, hi, v_lo, v_hi) in &edges {
-            edge_map.entry((*lo, *hi)).or_default().push((ti, *v_lo, *v_hi));
+        for (lo, hi, a, b) in &edges {
+            edge_map.entry((*lo, *hi)).or_default().push((ti, *a, *b));
         }
     }
 
-    // For interior edges (count == 2), check vertex consistency
+    // For interior edges (count >= 2), check vertex consistency
     let tol_sq = tolerance * tolerance;
     let face_ids = mesh.triangle_face_ids.as_deref();
 
@@ -180,63 +201,104 @@ pub fn validate_edge_consistency(mesh: &TriangleMesh, tolerance: f64) -> EdgeCon
 
         report.shared_edges_checked += 1;
 
-        // Check if all triangles sharing this edge use the SAME vertex indices
-        let first_lo = entries[0].1;
-        let first_hi = entries[0].2;
+        // Since the edge_map key is the canonical (lo, hi), all entries
+        // sharing this key use the same two vertex indices (by definition:
+        // min(a,b)=lo and max(a,b)=hi). Therefore, if dedup worked, all
+        // entries have identical (lo, hi) and the edge is consistent.
+        //
+        // The only way to get genuinely different indices for the same
+        // geometric edge is if the vertices have different index values but
+        // happen to have the same 3D positions. But then they'd produce
+        // different (lo, hi) keys and wouldn't be grouped together.
+        //
+        // So for interior edges grouped by canonical key, they are ALWAYS
+        // consistent by construction. The real diagnostic is the boundary
+        // edge count from validate_watertight().
+        report.consistent_edges += 1;
+    }
 
-        let all_same_indices = entries.iter().all(|(_, v_lo, v_hi)| {
-            *v_lo == first_lo && *v_hi == first_hi
-        });
+    // The real edge cache diagnostic: count boundary edges that should be
+    // interior (shared between faces). This is done by validate_watertight(),
+    // not here. But we also check for "near-miss" edges: boundary edges
+    // from different faces whose endpoints are close in 3D space but
+    // weren't merged by dedup (indicating the edge cache produced slightly
+    // different positions for the same logical edge).
+    let boundary_edges: Vec<((u32, u32), Vec<(usize, u32, u32)>)> = edge_map
+        .iter()
+        .filter(|(_, entries)| entries.len() == 1)
+        .map(|(k, v)| (*k, v.clone()))
+        .collect();
 
-        if all_same_indices {
-            // Perfect: all triangles use identical vertex indices
-            report.consistent_edges += 1;
-        } else {
-            // Different vertex indices for the same geometric edge.
-            // Check if the Point3d values at least match within tolerance.
-            let p_lo_first = mesh.vertices[first_lo as usize];
-            let p_hi_first = mesh.vertices[first_hi as usize];
-
-            let mut max_dist = 0.0_f64;
-            let mut worst_pair = (first_lo, first_hi);
-
-            for (_, v_lo, v_hi) in entries.iter().skip(1) {
-                let p_lo = mesh.vertices[*v_lo as usize];
-                let p_hi = mesh.vertices[*v_hi as usize];
-
-                let d_lo = (p_lo.x - p_lo_first.x).powi(2)
-                    + (p_lo.y - p_lo_first.y).powi(2)
-                    + (p_lo.z - p_lo_first.z).powi(2);
-                let d_hi = (p_hi.x - p_hi_first.x).powi(2)
-                    + (p_hi.y - p_hi_first.y).powi(2)
-                    + (p_hi.z - p_hi_first.z).powi(2);
-
-                let dist = d_lo.max(d_hi).sqrt();
-                if dist > max_dist {
-                    max_dist = dist;
-                    worst_pair = (*v_lo, *v_hi);
-                }
+    if !boundary_edges.is_empty() {
+        // Build spatial index of boundary vertex positions for near-miss detection
+        let mut vertex_positions: HashMap<u32, Point3d> = HashMap::new();
+        for &(lo, hi) in boundary_edges.iter().map(|(k, _)| k) {
+            if !vertex_positions.contains_key(&lo) {
+                vertex_positions.insert(lo, mesh.vertices[lo as usize]);
             }
-
-            if max_dist * max_dist <= tol_sq {
-                // Close enough within tolerance — probably floating-point rounding
-                report.consistent_edges += 1;
-            } else {
-                report.inconsistent_edges += 1;
-                report.max_vertex_distance = report.max_vertex_distance.max(max_dist);
-
-                // Collect face IDs for this inconsistency
-                let fids: Vec<u64> = entries.iter().filter_map(|(ti, _, _)| {
-                    face_ids.and_then(|ids| ids.get(*ti).copied())
-                }).collect();
-
-                report.worst_inconsistencies.push(EdgeInconsistency {
-                    vertex_indices: worst_pair,
-                    distance: max_dist,
-                    face_ids: fids,
-                });
+            if !vertex_positions.contains_key(&hi) {
+                vertex_positions.insert(hi, mesh.vertices[hi as usize]);
             }
         }
+
+        // For each boundary edge, check if there's another boundary edge
+        // from a DIFFERENT face with close but not identical endpoints.
+        // This indicates the edge cache produced slightly different positions.
+        let near_miss_tol = tolerance.max(1e-6);
+        let near_miss_tol_sq = near_miss_tol * near_miss_tol;
+
+        for (i, (edge_i, entries_i)) in boundary_edges.iter().enumerate() {
+            let face_id_i = face_ids
+                .and_then(|ids| ids.get(entries_i[0].0).copied())
+                .unwrap_or(0);
+            let p_lo_i = vertex_positions[&edge_i.0];
+            let p_hi_i = vertex_positions[&edge_i.1];
+
+            for (j, (edge_j, entries_j)) in boundary_edges.iter().enumerate() {
+                if j <= i { continue; } // Avoid duplicate checks
+
+                let face_id_j = face_ids
+                    .and_then(|ids| ids.get(entries_j[0].0).copied())
+                    .unwrap_or(0);
+
+                // Skip edges from the same face (they're just face boundaries)
+                if face_id_i == face_id_j && face_id_i != 0 { continue; }
+
+                let p_lo_j = vertex_positions[&edge_j.0];
+                let p_hi_j = vertex_positions[&edge_j.1];
+
+                // Check both alignment options (lo↔lo,hi↔hi or lo↔hi,hi↔lo)
+                let d_ll = dist_sq(&p_lo_i, &p_lo_j);
+                let d_hh = dist_sq(&p_hi_i, &p_hi_j);
+                let d_lh = dist_sq(&p_lo_i, &p_hi_j);
+                let d_hl = dist_sq(&p_hi_i, &p_lo_j);
+
+                let aligned_dist = (d_ll + d_hh).sqrt();
+                let flipped_dist = (d_lh + d_hl).sqrt();
+                let best_dist = aligned_dist.min(flipped_dist);
+
+                // Only count as near-miss if vertices are close but NOT identical
+                // (identical would mean they should have been merged by dedup)
+                let is_close = best_dist < near_miss_tol * 100.0;
+                let is_not_identical = best_dist > 0.0;
+
+                if is_close && is_not_identical {
+                    report.inconsistent_edges += 1;
+                    report.max_vertex_distance = report.max_vertex_distance.max(best_dist);
+
+                    if report.worst_inconsistencies.len() < 10 {
+                        report.worst_inconsistencies.push(EdgeInconsistency {
+                            vertex_indices: (edge_i.0, edge_j.0),
+                            distance: best_dist,
+                            face_ids: vec![face_id_i, face_id_j],
+                        });
+                    }
+                }
+            }
+        }
+
+        // Adjust shared_edges_checked to include near-miss pairs
+        report.shared_edges_checked += report.inconsistent_edges;
     }
 
     // Sort by distance (worst first) and keep top 10
@@ -431,6 +493,14 @@ fn compute_per_face_summary(
     }
 
     summary
+}
+
+/// Compute squared distance between two 3D points.
+fn dist_sq(a: &Point3d, b: &Point3d) -> f64 {
+    let dx = a.x - b.x;
+    let dy = a.y - b.y;
+    let dz = a.z - b.z;
+    dx * dx + dy * dy + dz * dz
 }
 
 /// Compute the 3D area of a triangle.

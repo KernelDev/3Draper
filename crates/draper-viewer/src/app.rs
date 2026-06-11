@@ -1889,6 +1889,10 @@ impl ViewerApp {
                             inst.name, inst.brep_id, brep_elapsed_ms
                         ));
                         self.failed_face_count += 1;
+                        // Consume the tree leaf for this failed instance
+                        if let Some(ref mut tree) = self.assembly_tree {
+                            skip_instance_in_tree(tree);
+                        }
                     } else {
                         let tri_start = self.mesh.triangle_count();
                         let color = inst.color.unwrap_or_else(|| {
@@ -1912,6 +1916,15 @@ impl ViewerApp {
                         pending.name, pending.brep_id, brep_elapsed_ms
                     ));
                     self.failed_face_count += 1;
+                    // Mark the corresponding tree leaf as "failed" so that
+                    // subsequent successful instances get the correct leaf.
+                    // Without this, failed instances leave their leaf nodes
+                    // with instance_index=None, and the next successful
+                    // instance gets assigned to the wrong leaf (e.g., nut's
+                    // leaf gets bolt's instance_idx, causing name mismatch).
+                    if let Some(ref mut tree) = self.assembly_tree {
+                        skip_instance_in_tree(tree);
+                    }
                 }
             }
 
@@ -4567,13 +4580,15 @@ fn draw_assembly_node_static(
         None => String::new(),
     };
     let inst_str = match node.instance_index {
+        Some(idx) if idx == usize::MAX => " [failed]".to_string(),
         Some(idx) => format!(" [{}]", idx),
         None => String::new(),
     };
     let label = format!("{}{}{}", node.name, brep_str, inst_str);
 
     // Use instance_index for selection (exact mapping to instance)
-    let is_selected = node.instance_index.map_or(false, |idx| selected_instance == Some(idx));
+    // usize::MAX sentinel means "failed triangulation" — not selectable
+    let is_selected = node.instance_index.map_or(false, |idx| idx != usize::MAX && selected_instance == Some(idx));
 
     if has_children {
         let should_be_open = open_tree_nodes.contains(&key);
@@ -4605,16 +4620,22 @@ fn draw_assembly_node_static(
         // Leaf node: draw visibility checkbox + selectable label
         ui.horizontal(|ui| {
             // Visibility checkbox (eye icon equivalent)
+            // usize::MAX sentinel = failed instance, not selectable
             if let Some(idx) = node.instance_index {
-                let is_visible = !hidden_instances.contains(&idx);
-                let checkbox_color = if is_visible {
-                    egui::Color32::from_rgb(80, 180, 80)
+                if idx == usize::MAX {
+                    // Failed instance — show red X, no toggle
+                    ui.label(egui::RichText::new("X").size(11.0).color(egui::Color32::from_rgb(180, 80, 80)));
                 } else {
-                    egui::Color32::from_rgb(180, 80, 80)
-                };
-                let eye_text = if is_visible { "👁" } else { "  " };
-                if ui.add(egui::Label::new(egui::RichText::new(eye_text).size(11.0).color(checkbox_color)).sense(egui::Sense::click())).clicked() {
-                    *pending_visibility_toggle = Some(idx);
+                    let is_visible = !hidden_instances.contains(&idx);
+                    let checkbox_color = if is_visible {
+                        egui::Color32::from_rgb(80, 180, 80)
+                    } else {
+                        egui::Color32::from_rgb(180, 80, 80)
+                    };
+                    let eye_text = if is_visible { "👁" } else { "  " };
+                    if ui.add(egui::Label::new(egui::RichText::new(eye_text).size(11.0).color(checkbox_color)).sense(egui::Sense::click())).clicked() {
+                        *pending_visibility_toggle = Some(idx);
+                    }
                 }
             }
             // Selectable label for the instance
@@ -4625,8 +4646,11 @@ fn draw_assembly_node_static(
             }
             if response.clicked() {
                 // Use instance_index for precise selection
+                // Skip failed instances (usize::MAX sentinel)
                 if let Some(idx) = node.instance_index {
-                    *pending_instance_select = Some(idx);
+                    if idx != usize::MAX {
+                        *pending_instance_select = Some(idx);
+                    }
                 }
             }
         });
@@ -4761,6 +4785,29 @@ fn assign_instance_to_tree(node: &mut AssemblyNode, instance_idx: usize) {
             return;
         }
         // Push children in reverse order so leftmost is processed first
+        for child in n.children.iter_mut().rev() {
+            stack.push(child);
+        }
+    }
+}
+
+/// Skip the next unassigned leaf node in the assembly tree (DFS order).
+/// Called when a BREP instance fails triangulation — we must consume the
+/// corresponding tree leaf so that subsequent successful instances get
+/// the correct leaf assignment. Without this, failed instances cause
+/// leaf-to-instance misalignment (e.g., plate_1's leaf gets nut_3's name).
+///
+/// We mark the leaf with `instance_index = Some(usize::MAX)` as a sentinel
+/// meaning "failed — no graphical instance". The tree display code treats
+/// this the same as `None` for selection/highlighting purposes.
+fn skip_instance_in_tree(node: &mut AssemblyNode) {
+    let mut stack: Vec<&mut AssemblyNode> = vec![node];
+    while let Some(n) = stack.pop() {
+        if n.children.is_empty() && n.brep_id.is_some() && n.instance_index.is_none() {
+            // Mark as failed: use usize::MAX as sentinel
+            n.instance_index = Some(usize::MAX);
+            return;
+        }
         for child in n.children.iter_mut().rev() {
             stack.push(child);
         }
