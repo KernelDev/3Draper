@@ -513,7 +513,11 @@ impl EdgeDiscretizationCache {
     /// by evaluating the curve at the corresponding parameter values. This is more
     /// accurate and faster than surface.project_point().
     ///
-    /// If no Curve2d is available, falls back to surface.project_point().
+    /// If no Curve2d is available, falls back to surface projection.
+    /// For NURBS surfaces, uses chain Newton-Raphson (bootstrap from first point,
+    /// then use previous UV as initial guess for next point). This is both faster
+    /// and more accurate than calling surface.project_point() for each point
+    /// independently (which does a 32×32 grid search per call).
     pub(crate) fn compute_uvs(points_3d: &[Point3d], params: &[f64], surface: &Surface, curve_2d: Option<&Curve2d>) -> Vec<Point2d> {
         if let Some(c2d) = curve_2d {
             // Use analytical PCURVE — evaluate the 2D curve at each parameter value
@@ -523,8 +527,29 @@ impl EdgeDiscretizationCache {
                 let curve_t = t_min + t * (t_max - t_min);
                 c2d.point_at(curve_t)
             }).collect()
+        } else if let Surface::Nurbs(ref nurbs) = surface {
+            // NURBS fast path: bootstrap + chain Newton-Raphson.
+            // This avoids the expensive 32×32 grid search that surface.project_point()
+            // performs for each point independently. Instead, we:
+            // 1. Use project_point() for the first point (bootstrap)
+            // 2. Use reproject_nurbs_point() with the previous UV as initial guess
+            //    for subsequent points — Newton-Raphson converges in ~3-5 iterations
+            //    when starting from a nearby UV, vs ~146 iterations from scratch.
+            let mut uvs = Vec::with_capacity(points_3d.len());
+            if !points_3d.is_empty() {
+                let (u0, v0) = surface.project_point(&points_3d[0]);
+                uvs.push(Point2d::new(u0, v0));
+                for i in 1..points_3d.len() {
+                    let prev = uvs[i - 1];
+                    let (u, v) = crate::parametric_domain::reproject_nurbs_point(
+                        nurbs, &points_3d[i], prev.u, prev.v,
+                    );
+                    uvs.push(Point2d::new(u, v));
+                }
+            }
+            uvs
         } else {
-            // Fallback: project 3D points onto the surface
+            // Non-NURBS surfaces: project_point() is fast, use it directly
             points_3d
                 .iter()
                 .map(|p| {

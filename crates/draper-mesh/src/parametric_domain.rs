@@ -156,10 +156,13 @@ impl ParametricDomain {
     /// Initialize the containment grid for fast contains() checks.
     pub fn init_containment_grid(&mut self) {
         if self.containment_grid.is_none() {
-            // Use a 64×64 grid — sufficient for accurate interior point generation.
-            // The previous 128×128 was 4× more expensive (16K vs 4K ray-casting
-            // tests per boundary point) with negligible quality improvement.
-            self.containment_grid = Some(ContainmentGrid::new(self, 64));
+            // Use a 128×128 grid for accurate interior point generation.
+            // The previous 64×64 was too coarse for complex NURBS trimming regions,
+            // causing interior points near boundaries to be incorrectly excluded,
+            // which produced irregular triangle distributions and gaps.
+            // 128×128 costs ~16K ray-casting tests at initialization, which is
+            // negligible compared to the NURBS surface evaluations in triangulation.
+            self.containment_grid = Some(ContainmentGrid::new(self, 128));
         }
     }
 
@@ -544,6 +547,35 @@ pub fn generate_nurbs_interior_points(
     points
 }
 
+/// Downsample interior UV points to a budget using stride-based sampling.
+///
+/// Unlike `truncate()` which removes points from the END of the list
+/// (creating position bias — dense at low-v, sparse at high-v),
+/// stride-based sampling preserves uniform spatial coverage by keeping
+/// every N-th point. This produces a more even triangle distribution
+/// across the entire surface.
+///
+/// If `pts.len() <= budget`, returns a clone of the input.
+fn downsample_interior_points(pts: &[Point2d], budget: usize) -> Vec<Point2d> {
+    if pts.len() <= budget {
+        return pts.to_vec();
+    }
+    if budget == 0 {
+        return Vec::new();
+    }
+    // Stride-based downsampling: keep every (len/budget)-th point
+    let stride = pts.len() as f64 / budget as f64;
+    let mut result = Vec::with_capacity(budget);
+    let mut next_idx = 0.0f64;
+    while result.len() < budget {
+        let idx = next_idx.round() as usize;
+        let idx = idx.min(pts.len() - 1);
+        result.push(pts[idx]);
+        next_idx += stride;
+    }
+    result
+}
+
 // ============================================================
 // Integration: earcutr-based surface triangulation (non-consistent)
 // ============================================================
@@ -790,6 +822,16 @@ pub fn triangulate_surface_consistent(
             let bad_count = outer_uv.iter().filter(|uv| {
                 !uv.u.is_finite() || !uv.v.is_finite()
             }).count();
+            let clamped_count = outer_uv.iter().filter(|uv| {
+                uv.u < nurb_u_min || uv.u > nurb_u_max || uv.v < nurb_v_min || uv.v > nurb_v_max
+            }).count();
+            if clamped_count > 0 || bad_count > 0 {
+                log::warn!(
+                    "NURBS UV clamp: {} of {} UVs out of range, {} NaN/Inf (u=[{:.4},{:.4}] v=[{:.4},{:.4}])",
+                    clamped_count, outer_uv.len(), bad_count,
+                    nurb_u_min, nurb_u_max, nurb_v_min, nurb_v_max,
+                );
+            }
             if bad_count > outer_uv.len() / 2 {
                 log::warn!(
                     "triangulate_surface_consistent: {} of {} NURBS UVs are NaN/Inf — returning empty mesh",
@@ -1022,11 +1064,8 @@ pub fn triangulate_surface_consistent(
             } else {
                 6
             };
-            let mut pts = generate_nurbs_interior_points(&domain, &nurbs.u_knots, &nurbs.v_knots, n_sub);
-            if pts.len() > max_interior_budget {
-                pts.truncate(max_interior_budget);
-            }
-            pts
+            let pts = generate_nurbs_interior_points(&domain, &nurbs.u_knots, &nurbs.v_knots, n_sub);
+            downsample_interior_points(&pts, max_interior_budget)
         } else {
             // High-degree NURBS (both directions curved): use adaptive sampling.
             // Compute curvature to determine how many subdivisions are needed.
@@ -1046,11 +1085,8 @@ pub fn triangulate_surface_consistent(
             } else {
                 8
             };
-            let mut pts = generate_nurbs_interior_points(&domain, &nurbs.u_knots, &nurbs.v_knots, n_sub);
-            if pts.len() > max_interior_budget {
-                pts.truncate(max_interior_budget);
-            }
-            pts
+            let pts = generate_nurbs_interior_points(&domain, &nurbs.u_knots, &nurbs.v_knots, n_sub);
+            downsample_interior_points(&pts, max_interior_budget)
         }
     } else {
         // Non-NURBS curved surfaces (Torus, Revolution, Extrusion)
@@ -1073,11 +1109,8 @@ pub fn triangulate_surface_consistent(
             (n_u, n_v)
         };
         let boundary_margin = (u_max - u_min) / n_u.max(1) as f64 * 0.3;
-        let mut pts = generate_interior_points(&domain, n_u, n_v, boundary_margin);
-        if pts.len() > max_interior_budget {
-            pts.truncate(max_interior_budget);
-        }
-        pts
+        let pts = generate_interior_points(&domain, n_u, n_v, boundary_margin);
+        downsample_interior_points(&pts, max_interior_budget)
     };
 
     // ============================================================
@@ -1236,12 +1269,13 @@ pub fn triangulate_surface_consistent(
     // averaging, each midpoint costs just 1 surface.point_at() evaluation.
     // ============================================================
     if !matches!(surface, Surface::Plane(_)) && params.max_deviation > 0.0 {
-        // Use 2 refinement iterations for all curved surfaces including NURBS.
-        // The old setting of 5 iterations for NURBS caused exponential triangle
-        // growth (~814K de Boor iterations) while providing minimal visual
-        // improvement over 2 iterations. The interior Steiner points from
-        // knot-span subdivision (Step 3) already provide good surface coverage.
-        let max_refine_iters = 2;
+        // Use 3 refinement iterations for NURBS (2 for other curved surfaces).
+        // NURBS surfaces with high curvature benefit from the extra iteration
+        // because knot-span interior points may not capture all curvature regions.
+        // The UV-averaging approach avoids the expensive project_point() — each
+        // midpoint costs just 1 surface.point_at() evaluation, so 3 iterations
+        // is affordable even for large NURBS surfaces.
+        let max_refine_iters = if matches!(surface, Surface::Nurbs(_)) { 3 } else { 2 };
 
         // Build vertex UV array — maps mesh vertex index to UV coordinate.
         // This enables O(1) midpoint UV computation instead of O(1000) project_point().
