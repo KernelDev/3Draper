@@ -33,7 +33,7 @@ use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangula
 use draper_topology::{Face, Wire, CoEdge, Edge as TopoEdge, Shell, Solid};
 use draper_topology::healing::{heal_solid, HealingParams, HealingReport};
 use draper_geometry::tolerance::ToleranceContext;
-use draper_mesh::edge_cache::{EdgeDiscretizationCache, AdaptiveTolerance};
+use draper_mesh::edge_cache::{EdgeDiscretizationCache, AdaptiveTolerance, deterministic_round_point};
 use std::collections::HashMap;
 
 // WASM-compatible Instant: on native uses std::time::Instant,
@@ -3009,6 +3009,7 @@ impl<'a> StepConverter<'a> {
                 for i in 0..=steps {
                     let t = i as f64 / steps as f64;
                     if let Some(p) = edge.point_at(t) {
+                        let p = deterministic_round_point(p);
                         if points.last().map_or(true, |last: &Point3d| last.distance_to(&p) > 1e-8) {
                             points.push(p);
                         }
@@ -3031,6 +3032,7 @@ impl<'a> StepConverter<'a> {
                 for i in 0..=steps {
                     let t = i as f64 / steps as f64;
                     if let Some(p) = edge.point_at(t) {
+                        let p = deterministic_round_point(p);
                         let (u, v) = surface.project_point(&p);
                         let pt = Point2d::new(u, v);
                         // Deduplicate: skip if same as last point (at edge junctions)
@@ -6715,6 +6717,7 @@ impl<'a> StepConverter<'a> {
         let _has_pcurves = face_data.edge_curves_2d.iter().any(|c| c.is_some());
 
         // Sample outer edges using the cache
+        let mut edges_without_step_id = 0usize;
         for (edge_idx, edge) in face_data.outer_edges.iter().enumerate() {
             let step_id = face_data.outer_edge_step_ids.get(edge_idx).copied().unwrap_or(0);
             let n_samples = self.edge_sample_count(edge);
@@ -6727,10 +6730,13 @@ impl<'a> StepConverter<'a> {
                 boundary_points.extend(pts);
                 boundary_uvs.extend(uvs);
             } else {
+                log::warn!("BREP face: edge has step_id=0 (no cache), surface={:?}, edge_id={}", 
+                    std::mem::discriminant(&face_data.surface), edge.id);
                 // No STEP ID (e.g., synthetic edge) — sample independently
                 let (pts_3d, pts_uv) = self.sample_edge_points_with_uv(edge, &face_data.surface, curve_2d);
                 boundary_points.extend(pts_3d);
                 boundary_uvs.extend(pts_uv);
+                edges_without_step_id += 1;
             }
         }
 
@@ -6754,9 +6760,12 @@ impl<'a> StepConverter<'a> {
                             hole_pts.extend(pts);
                             hole_uvs.extend(uvs);
                         } else {
+                            log::warn!("BREP face: inner edge has step_id=0 (no cache), surface={:?}, edge_id={}", 
+                                std::mem::discriminant(&face_data.surface), edge.id);
                             let (pts_3d, pts_uv) = self.sample_edge_points_with_uv(edge, &face_data.surface, curve_2d);
                             hole_pts.extend(pts_3d);
                             hole_uvs.extend(pts_uv);
+                            edges_without_step_id += 1;
                         }
                     }
                     if !hole_pts.is_empty() {
@@ -6782,11 +6791,18 @@ impl<'a> StepConverter<'a> {
                     boundary_points.extend(pts);
                     boundary_uvs.extend(uvs);
                 } else {
+                    log::warn!("BREP face: fallback edge has step_id=0 (no cache), surface={:?}, edge_id={}", 
+                        std::mem::discriminant(&face_data.surface), edge.id);
                     let (pts_3d, pts_uv) = self.sample_edge_points_with_uv(edge, &face_data.surface, curve_2d);
                     boundary_points.extend(pts_3d);
                     boundary_uvs.extend(pts_uv);
+                    edges_without_step_id += 1;
                 }
             }
+        }
+
+        if edges_without_step_id > 0 {
+            log::warn!("surface_to_mesh_cached: {} edges without step_id (bypassing edge cache)", edges_without_step_id);
         }
 
         // Deduplicate boundary points and their corresponding UVs together
@@ -7313,6 +7329,11 @@ impl<'a> StepConverter<'a> {
                     }
                 }
             }
+        }
+
+        // Apply deterministic rounding to 3D points for consistent deduplication
+        for p in &mut pts_3d {
+            *p = deterministic_round_point(*p);
         }
 
         (pts_3d, pts_uv)
@@ -7997,43 +8018,42 @@ fn deduplicate_points_3d(points: &[Point3d], tolerance: f64) -> Vec<Point3d> {
         return Vec::new();
     }
 
-    let tol_sq = tolerance * tolerance;
+    // Use bit-exact VertexKey comparison for deterministic deduplication.
+    // After deterministic rounding, shared-edge vertices produce bit-identical
+    // f64 values, so bit-exact dedup is correct and avoids the problem where
+    // tolerance-based dedup removes different points from different faces
+    // (because the preceding edge is different, changing which point gets
+    // removed at edge junctions).
+    use draper_mesh::mesh::VertexKey;
     let mut unique = vec![points[0]];
+    let mut unique_keys = vec![VertexKey::from_point(&points[0])];
     for p in &points[1..] {
-        if let Some(last) = unique.last() {
-            let dx = p.x - last.x;
-            let dy = p.y - last.y;
-            let dz = p.z - last.z;
-            if dx * dx + dy * dy + dz * dz > tol_sq {
+        let key = VertexKey::from_point(p);
+        if let Some(last_key) = unique_keys.last() {
+            if key != *last_key {
                 unique.push(*p);
+                unique_keys.push(key);
             }
         }
     }
-    // Also check last vs first (closed loop)
+    // Also check last vs first (closed loop) — bit-exact
     if unique.len() > 1 {
-        let first = unique[0];
-        if let Some(last) = unique.last() {
-            let dx = first.x - last.x;
-            let dy = first.y - last.y;
-            let dz = first.z - last.z;
-            if dx * dx + dy * dy + dz * dz <= tol_sq {
+        let first_key = unique_keys[0];
+        if let Some(last_key) = unique_keys.last() {
+            if first_key == *last_key {
                 unique.pop();
+                unique_keys.pop();
             }
         }
     }
-    // Also check for non-adjacent duplicates that could create self-intersecting
-    // polygons (e.g., when reversed edge cache produces bowtie patterns).
-    // Scan from the end: if the last point is near any earlier point (except
-    // its immediate predecessor), trim the loop.
-    if unique.len() > 3 {
-        let n = unique.len();
-        let last = unique[n - 1];
+    // Also check for non-adjacent duplicates (bowtie detection).
+    // Scan from the end: if the last point duplicates any earlier point
+    // (except its immediate predecessor), trim the loop.
+    if unique_keys.len() > 3 {
+        let n = unique_keys.len();
+        let last_key = unique_keys[n - 1];
         for i in 0..n - 2 {
-            let dx = last.x - unique[i].x;
-            let dy = last.y - unique[i].y;
-            let dz = last.z - unique[i].z;
-            if dx * dx + dy * dy + dz * dz <= tol_sq {
-                // The last point duplicates an earlier point — trim from there
+            if last_key == unique_keys[i] {
                 unique.truncate(i + 1);
                 break;
             }
@@ -8048,54 +8068,53 @@ fn deduplicate_points_3d(points: &[Point3d], tolerance: f64) -> Vec<Point3d> {
 /// only the first is kept, and its UV coordinate is preserved.
 /// This is essential for the consistent triangulation path where
 /// UV coordinates must correspond 1:1 with 3D boundary points.
-fn deduplicate_points_3d_with_uv(points: &[Point3d], uvs: &[Point2d], tolerance: f64) -> (Vec<Point3d>, Vec<Point2d>) {
+fn deduplicate_points_3d_with_uv(points: &[Point3d], uvs: &[Point2d], _tolerance: f64) -> (Vec<Point3d>, Vec<Point2d>) {
     if points.is_empty() {
         return (Vec::new(), Vec::new());
     }
     // If UVs don't match points length, just deduplicate 3D points
     if uvs.len() != points.len() {
-        return (deduplicate_points_3d(points, tolerance), uvs.to_vec());
+        return (deduplicate_points_3d(points, _tolerance), uvs.to_vec());
     }
 
-    let tol_sq = tolerance * tolerance;
+    // Use bit-exact VertexKey comparison for deterministic deduplication.
+    // After deterministic rounding, shared-edge vertices produce bit-identical
+    // f64 values, so bit-exact dedup is correct and avoids the problem where
+    // tolerance-based dedup removes different points from different faces.
+    use draper_mesh::mesh::VertexKey;
     let mut unique_pts = vec![points[0]];
     let mut unique_uvs = vec![uvs[0]];
+    let mut unique_keys = vec![VertexKey::from_point(&points[0])];
 
     for i in 1..points.len() {
-        if let Some(last) = unique_pts.last() {
-            let dx = points[i].x - last.x;
-            let dy = points[i].y - last.y;
-            let dz = points[i].z - last.z;
-            if dx * dx + dy * dy + dz * dz > tol_sq {
+        let key = VertexKey::from_point(&points[i]);
+        if let Some(last_key) = unique_keys.last() {
+            if key != *last_key {
                 unique_pts.push(points[i]);
                 unique_uvs.push(uvs[i]);
+                unique_keys.push(key);
             }
         }
     }
 
-    // Also check last vs first (closed loop)
-    if unique_pts.len() > 1 {
-        let first_pt = unique_pts[0];
-        if let Some(last_pt) = unique_pts.last() {
-            let dx = first_pt.x - last_pt.x;
-            let dy = first_pt.y - last_pt.y;
-            let dz = first_pt.z - last_pt.z;
-            if dx * dx + dy * dy + dz * dz <= tol_sq {
+    // Also check last vs first (closed loop) — bit-exact
+    if unique_keys.len() > 1 {
+        let first_key = unique_keys[0];
+        if let Some(last_key) = unique_keys.last() {
+            if first_key == *last_key {
                 unique_pts.pop();
                 unique_uvs.pop();
+                unique_keys.pop();
             }
         }
     }
 
-    // Check for non-adjacent duplicates (bowtie detection)
-    if unique_pts.len() > 3 {
-        let n = unique_pts.len();
-        let last = unique_pts[n - 1];
+    // Check for non-adjacent duplicates (bowtie detection) — bit-exact
+    if unique_keys.len() > 3 {
+        let n = unique_keys.len();
+        let last_key = unique_keys[n - 1];
         for i in 0..n - 2 {
-            let dx = last.x - unique_pts[i].x;
-            let dy = last.y - unique_pts[i].y;
-            let dz = last.z - unique_pts[i].z;
-            if dx * dx + dy * dy + dz * dz <= tol_sq {
+            if last_key == unique_keys[i] {
                 unique_pts.truncate(i + 1);
                 unique_uvs.truncate(i + 1);
                 break;

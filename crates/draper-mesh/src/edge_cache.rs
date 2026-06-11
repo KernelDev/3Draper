@@ -61,7 +61,7 @@ fn deterministic_round(value: f64) -> f64 {
 
 /// Round a 3D point deterministically.
 #[inline]
-fn deterministic_round_point(p: Point3d) -> Point3d {
+pub fn deterministic_round_point(p: Point3d) -> Point3d {
     Point3d::new(
         deterministic_round(p.x),
         deterministic_round(p.y),

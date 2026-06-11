@@ -795,6 +795,10 @@ pub fn sample_edge_points(edge: &Edge, n_samples: usize) -> Vec<Point3d> {
             pts.push(curve.point_at(t));
         }
     }
+    // Apply deterministic rounding for consistent vertex deduplication
+    for p in &mut pts {
+        *p = crate::edge_cache::deterministic_round_point(*p);
+    }
     pts
 }
 

@@ -299,6 +299,49 @@ pub fn validate_edge_consistency(mesh: &TriangleMesh, tolerance: f64) -> EdgeCon
 
         // Adjust shared_edges_checked to include near-miss pairs
         report.shared_edges_checked += report.inconsistent_edges;
+
+        // Vertex-level near-miss diagnostic: find boundary vertices from different faces
+        // that are close in 3D space but not bit-identical (would indicate dedup failure)
+        let mut vertex_near_misses = 0usize;
+        let mut vertex_near_miss_max_dist = 0.0f64;
+        let vertex_nm_tol = tolerance.max(1e-6);
+        let vertex_nm_tol_sq = vertex_nm_tol * vertex_nm_tol;
+
+        // Collect unique boundary vertex (index, position, face_id) tuples
+        let mut boundary_vertex_info: Vec<(u32, Point3d, u64)> = Vec::new();
+        for ((lo, hi), entries) in &edge_map {
+            if entries.len() == 1 {
+                let face_id = face_ids.and_then(|ids| ids.get(entries[0].0).copied()).unwrap_or(0);
+                if !boundary_vertex_info.iter().any(|(idx, _, _)| *idx == *lo) {
+                    boundary_vertex_info.push((*lo, mesh.vertices[*lo as usize], face_id));
+                }
+                if !boundary_vertex_info.iter().any(|(idx, _, _)| *idx == *hi) {
+                    boundary_vertex_info.push((*hi, mesh.vertices[*hi as usize], face_id));
+                }
+            }
+        }
+
+        // Check pairs of boundary vertices from different faces
+        for i in 0..boundary_vertex_info.len() {
+            for j in (i+1)..boundary_vertex_info.len() {
+                let (vi, pi, fi) = &boundary_vertex_info[i];
+                let (vj, pj, fj) = &boundary_vertex_info[j];
+                if fi == fj && *fi != 0 { continue; } // Same face
+                let dx = pi.x - pj.x;
+                let dy = pi.y - pj.y;
+                let dz = pi.z - pj.z;
+                let dist_sq = dx*dx + dy*dy + dz*dz;
+                if dist_sq > 0.0 && dist_sq < vertex_nm_tol_sq * 10000.0 {
+                    vertex_near_misses += 1;
+                    let dist = dist_sq.sqrt();
+                    vertex_near_miss_max_dist = vertex_near_miss_max_dist.max(dist);
+                }
+            }
+        }
+        if vertex_near_misses > 0 {
+            log::warn!("Vertex near-miss diagnostic: {} boundary vertex pairs from different faces are close but not bit-identical (max_dist={:.2e}, tol={:.2e})",
+                vertex_near_misses, vertex_near_miss_max_dist, vertex_nm_tol);
+        }
     }
 
     // Sort by distance (worst first) and keep top 10
