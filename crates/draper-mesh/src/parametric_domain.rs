@@ -1304,6 +1304,70 @@ pub fn triangulate_surface_consistent(
     }
 
     // ============================================================
+    // Step 5.5: DIAGNOSTIC — Verify that earcutr preserved all boundary edges
+    //
+    // After earcutr triangulation, every consecutive pair of boundary vertices
+    // should be connected by an edge in at least one triangle. If earcutr
+    // skips a boundary edge, the mesh will have a boundary edge that should
+    // be shared with an adjacent face — breaking watertightness.
+    // ============================================================
+    {
+        let n_bnd = n_boundary_and_holes_actual;
+        // Count boundary edges in the mesh (edges between consecutive boundary vertices)
+        let mut boundary_edges_in_mesh: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+        for tri in &mesh.triangles {
+            for k in 0..3 {
+                let a = tri[k];
+                let b = tri[(k + 1) % 3];
+                boundary_edges_in_mesh.insert((a.min(b), a.max(b)));
+            }
+        }
+        // Check: for each consecutive pair of boundary vertices, is there an edge?
+        let mut missing_boundary_edges = 0usize;
+        for i in 0..n_bnd {
+            let i_next = (i + 1) % n_bnd;
+            let va = *vertex_map.get(&(i as u32)).unwrap_or(&u32::MAX);
+            let vb = *vertex_map.get(&(i_next as u32)).unwrap_or(&u32::MAX);
+            if va != u32::MAX && vb != u32::MAX {
+                let key = (va.min(vb), va.max(vb));
+                if !boundary_edges_in_mesh.contains(&key) {
+                    missing_boundary_edges += 1;
+                }
+            }
+        }
+        if missing_boundary_edges > 0 {
+            // Log details about the first few missing edges
+            let mut logged = 0;
+            for i in 0..n_bnd {
+                let i_next = (i + 1) % n_bnd;
+                let va = *vertex_map.get(&(i as u32)).unwrap_or(&u32::MAX);
+                let vb = *vertex_map.get(&(i_next as u32)).unwrap_or(&u32::MAX);
+                if va != u32::MAX && vb != u32::MAX {
+                    let key = (va.min(vb), va.max(vb));
+                    if !boundary_edges_in_mesh.contains(&key) {
+                        let pa = mesh.vertices[va as usize];
+                        let pb = mesh.vertices[vb as usize];
+                        let dist = ((pa.x - pb.x).powi(2) + (pa.y - pb.y).powi(2) + (pa.z - pb.z).powi(2)).sqrt();
+                        log::warn!(
+                            "  MISSING boundary edge: bnd_idx {}→{} mesh_idx {}→{} dist={:.6}",
+                            i, i_next, va, vb, dist
+                        );
+                        logged += 1;
+                        if logged >= 5 { break; }
+                    }
+                }
+            }
+            log::warn!(
+                "DIAG: earcutr missing {}/{} boundary edges for surface {:?} (n_bnd={}, n_holes={}, verts={}, tris={})",
+                missing_boundary_edges, n_bnd,
+                std::mem::discriminant(surface),
+                n_bnd, hole_polylines_3d.len(),
+                mesh.vertices.len(), mesh.triangles.len(),
+            );
+        }
+    }
+
+    // ============================================================
     // Step 6: Adaptive chord-error refinement
     //
     // For curved surfaces (not planes), check each triangle's chord

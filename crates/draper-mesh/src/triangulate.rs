@@ -295,7 +295,9 @@ fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams, cac
     // vertex index in the final mesh. The edge cache guarantees bit-identical
     // 3D coordinates on shared edges, so bit-exact deduplication is correct.
     let mut mesh = TriangleMesh::new();
-    let mut dedup_map = crate::mesh::VertexDedupMap::new();
+    // Use tolerance-based dedup for near-identical boundary vertices
+    let merge_tol = cache.adaptive_tolerance().model_scale() * 1e-4;
+    let mut dedup_map = crate::mesh::VertexDedupMap::with_tolerance(merge_tol);
     let mut total_face_vertices = 0usize;
     for face in solid.faces() {
         let face_mesh = triangulate_face_with_cache(face, params, cache);
@@ -658,6 +660,8 @@ fn merge_meshes_parallel(meshes: &[TriangleMesh]) -> TriangleMesh {
     }
 
     // Use merge_deduplicating for topology-first watertightness
+    // Note: parallel path uses bit-exact dedup only (no tolerance fallback).
+    // The sequential path (triangulate_solid_sequential) uses tolerance-based dedup.
     let mut merged = TriangleMesh::new();
     let mut dedup_map = crate::mesh::VertexDedupMap::new();
     for mesh in meshes {
@@ -698,7 +702,8 @@ fn solid_bounding_box(solid: &Solid) -> (Point3d, Point3d) {
 pub fn triangulate_shell(shell: &Shell, params: &TriangulationParams) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
     let mut cache = EdgeDiscretizationCache::new();
-    let mut dedup_map = crate::mesh::VertexDedupMap::new();
+    let merge_tol = cache.adaptive_tolerance().model_scale() * 1e-4;
+    let mut dedup_map = crate::mesh::VertexDedupMap::with_tolerance(merge_tol);
     for face in &shell.faces {
         let face_mesh = triangulate_face_with_cache(face, params, &mut cache);
         mesh.merge_deduplicating(&face_mesh, &mut dedup_map);

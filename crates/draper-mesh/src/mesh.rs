@@ -24,12 +24,140 @@ impl VertexKey {
 }
 
 /// A vertex deduplication map that tracks which 3D points have already been
-/// added to a mesh, mapping them to their vertex indices.
+/// added to a mesh, mapping them to vertex indices.
 ///
 /// Used during the "topology-first" merge step to ensure that shared-edge
 /// vertices from different faces get the same vertex index in the final mesh,
 /// making it watertight by construction.
-pub type VertexDedupMap = HashMap<VertexKey, u32>;
+///
+/// # Two-tier lookup strategy:
+///
+/// 1. **Bit-exact**: First tries `VertexKey` (bit-exact f64 comparison).
+///    This is O(1) and handles the common case where the edge cache produces
+///    bit-identical coordinates for shared edges.
+///
+/// 2. **Tolerance-based**: Falls back to spatial hash grid for near-miss
+///    vertices that are geometrically close but not bit-identical. This
+///    handles the case where adjacent faces use different STEP EDGE_CURVE
+///    entities on their common geometric boundary (the edge cache can't
+///    produce bit-identical points because the STEP entities differ).
+pub struct VertexDedupMap {
+    /// Bit-exact vertex → index mapping (fast path).
+    exact: HashMap<VertexKey, u32>,
+    /// Spatial hash grid for tolerance-based near-miss lookups (slow path).
+    /// Maps (cell_x, cell_y, cell_z) → list of (vertex_index, Point3d).
+    spatial: HashMap<(i64, i64, i64), Vec<(u32, Point3d)>>,
+    /// Cell size for spatial hash (= merge tolerance).
+    tolerance: f64,
+    /// Whether tolerance-based fallback is enabled.
+    use_tolerance: bool,
+}
+
+impl VertexDedupMap {
+    /// Create a new dedup map with bit-exact comparison only.
+    pub fn new() -> Self {
+        Self {
+            exact: HashMap::new(),
+            spatial: HashMap::new(),
+            tolerance: 0.0,
+            use_tolerance: false,
+        }
+    }
+
+    /// Create a new dedup map with tolerance-based fallback.
+    /// The tolerance should be based on the model's bounding box
+    /// (e.g., 1e-6 × model_scale for typical CAD models).
+    pub fn with_tolerance(tolerance: f64) -> Self {
+        Self {
+            exact: HashMap::new(),
+            spatial: HashMap::new(),
+            tolerance: tolerance.max(1e-15),
+            use_tolerance: tolerance > 0.0,
+        }
+    }
+
+    /// Look up a vertex. Returns Some(index) if found, None otherwise.
+    /// First tries bit-exact match, then tolerance-based spatial lookup.
+    pub fn get(&self, p: &Point3d) -> Option<u32> {
+        // Fast path: bit-exact match
+        let key = VertexKey::from_point(p);
+        if let Some(&idx) = self.exact.get(&key) {
+            return Some(idx);
+        }
+
+        // Slow path: tolerance-based spatial lookup
+        if self.use_tolerance {
+            let cell = self.cell_key(p);
+            if let Some(candidates) = self.spatial.get(&cell) {
+                let tol_sq = self.tolerance * self.tolerance;
+                for &(idx, ref vp) in candidates {
+                    let dx = p.x - vp.x;
+                    let dy = p.y - vp.y;
+                    let dz = p.z - vp.z;
+                    if dx * dx + dy * dy + dz * dz <= tol_sq {
+                        return Some(idx);
+                    }
+                }
+            }
+            // Also check neighboring cells (vertex may be near cell boundary)
+            let cx = (p.x / self.tolerance).floor() as i64;
+            let cy = (p.y / self.tolerance).floor() as i64;
+            let cz = (p.z / self.tolerance).floor() as i64;
+            for dx in -1i64..=1 {
+                for dy in -1i64..=1 {
+                    for dz in -1i64..=1 {
+                        if dx == 0 && dy == 0 && dz == 0 { continue; }
+                        let neighbor = (cx + dx, cy + dy, cz + dz);
+                        if let Some(candidates) = self.spatial.get(&neighbor) {
+                            let tol_sq = self.tolerance * self.tolerance;
+                            for &(idx, ref vp) in candidates {
+                                let ddx = p.x - vp.x;
+                                let ddy = p.y - vp.y;
+                                let ddz = p.z - vp.z;
+                                if ddx * ddx + ddy * ddy + ddz * ddz <= tol_sq {
+                                    return Some(idx);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Insert a vertex with its index.
+    pub fn insert(&mut self, p: &Point3d, idx: u32) {
+        let key = VertexKey::from_point(p);
+        self.exact.insert(key, idx);
+
+        if self.use_tolerance {
+            let cell = self.cell_key(p);
+            self.spatial.entry(cell).or_default().push((idx, *p));
+        }
+    }
+
+    /// Compute spatial hash cell key for a point.
+    #[inline]
+    fn cell_key(&self, p: &Point3d) -> (i64, i64, i64) {
+        (
+            (p.x / self.tolerance).floor() as i64,
+            (p.y / self.tolerance).floor() as i64,
+            (p.z / self.tolerance).floor() as i64,
+        )
+    }
+
+    /// Returns the number of bit-exact entries.
+    pub fn len(&self) -> usize {
+        self.exact.len()
+    }
+
+    /// Returns whether the map is empty.
+    pub fn is_empty(&self) -> bool {
+        self.exact.is_empty()
+    }
+}
 
 /// A 3D triangle mesh.
 #[derive(Clone, Debug)]
@@ -225,15 +353,14 @@ impl TriangleMesh {
         let mut index_map: Vec<u32> = Vec::with_capacity(other.vertices.len());
 
         for vertex in &other.vertices {
-            let key = VertexKey::from_point(vertex);
-            if let Some(&existing_idx) = dedup_map.get(&key) {
+            if let Some(existing_idx) = dedup_map.get(vertex) {
                 // Vertex already exists — reuse its index
                 index_map.push(existing_idx);
             } else {
                 // New vertex — add to mesh and record in dedup map
                 let new_idx = self.vertices.len() as u32;
                 self.vertices.push(*vertex);
-                dedup_map.insert(key, new_idx);
+                dedup_map.insert(vertex, new_idx);
                 index_map.push(new_idx);
             }
         }
