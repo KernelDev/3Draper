@@ -294,14 +294,15 @@ fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams, cac
     // Use merge_deduplicating to ensure shared-edge vertices get the same
     // vertex index in the final mesh.
     //
-    // Dedup strategy (two-tier):
-    // 1. Bit-exact match (fast path): Edge cache with deterministic rounding
-    //    produces bit-identical 3D coordinates for shared edges. These should
-    //    match exactly and account for the vast majority of shared vertices.
-    // 2. Tolerance-based fallback (slow path): Some STEP edges lack step_id
-    //    (step_id==0) or use different EDGE_CURVE entities on the same
-    //    geometric boundary. These produce near-identical but not bit-identical
-    //    vertices. A small tolerance catches these.
+    // Dedup strategy (bit-exact primary + tolerance diagnostic):
+    // 1. Bit-exact match: Edge cache with deterministic rounding produces
+    //    bit-identical 3D coordinates for shared edges. This is the PRIMARY
+    //    path — it's O(1) and guarantees no false merges.
+    // 2. Tolerance-based diagnostic: Some STEP edges lack step_id (step_id==0)
+    //    or use different EDGE_CURVE entities on the same geometric boundary.
+    //    These produce near-identical but not bit-identical vertices. We use
+    //    a small tolerance to CATCH these for diagnostic logging, but the
+    //    goal is tolerance_hits == 0 (all merges should be bit-exact).
     //
     // If tolerance_hits > 0, it means the edge cache is NOT fully bit-identical
     // and we log a diagnostic warning. The goal is tolerance_hits == 0.
@@ -3516,19 +3517,37 @@ pub fn triangulate_face_with_boundary_and_holes(
             if boundary_points.len() < 3 {
                 return TriangleMesh::new();
             }
-            // Project boundary to UV space
-            let boundary_uvs: Vec<Point2d> = boundary_points.iter()
-                .map(|p| {
-                    let (u, v) = surface.project_point(p);
-                    Point2d::new(u, v)
-                })
-                .collect();
-            // Project hole polylines to UV
+
+            // Check if the boundary wraps the full u-period (full surface).
+            // When a boundary spans the full period (≈2π for revolution surfaces),
+            // the UV polygon degenerates because u=0 and u=2π map to the same
+            // geometric line (the seam). Earcutr can't handle this — it needs
+            // a non-degenerate 2D polygon. Delegate to grid-based full-surface
+            // triangulation instead, which handles seams and degeneracies natively.
+            let u_period = surface_u_period(surface);
+            if is_full_period_boundary(surface, boundary_points, u_period) {
+                log::info!(
+                    "triangulate_face_with_boundary: full-period boundary detected ({} pts), delegating to grid-based path",
+                    boundary_points.len(),
+                );
+                let wire = Wire::new(vec![]);
+                let mut face = Face::new(surface.clone(), wire);
+                face.forward = forward;
+                face.edges = vec![];
+                return triangulate_face(&face, params);
+            }
+
+            // Project boundary to UV space using CHAIN-BASED projection.
+            // For periodic surfaces, project_point() may return u=0 for points
+            // at u=2π, collapsing the UV polygon. Chain projection maintains
+            // continuity by adjusting each UV to be close to the previous one.
+            let v_period = surface_v_period(surface);
+            let boundary_uvs = project_boundary_to_uv_chain(
+                surface, boundary_points, u_period, v_period,
+            );
+            // Project hole polylines to UV (same chain-based approach)
             let hole_uvs: Vec<Vec<Point2d>> = hole_polylines.iter().map(|hole| {
-                hole.iter().map(|p| {
-                    let (u, v) = surface.project_point(p);
-                    Point2d::new(u, v)
-                }).collect()
+                project_boundary_to_uv_chain(surface, hole, u_period, v_period)
             }).collect();
             crate::parametric_domain::triangulate_surface_consistent(
                 surface,
@@ -3547,17 +3566,13 @@ pub fn triangulate_face_with_boundary_and_holes(
             if boundary_points.len() < 3 {
                 return TriangleMesh::new();
             }
-            let boundary_uvs: Vec<Point2d> = boundary_points.iter()
-                .map(|p| {
-                    let (u, v) = surface.project_point(p);
-                    Point2d::new(u, v)
-                })
-                .collect();
+            let u_period = surface_u_period(surface);
+            let v_period = surface_v_period(surface);
+            let boundary_uvs = project_boundary_to_uv_chain(
+                surface, boundary_points, u_period, v_period,
+            );
             let hole_uvs: Vec<Vec<Point2d>> = hole_polylines.iter().map(|hole| {
-                hole.iter().map(|p| {
-                    let (u, v) = surface.project_point(p);
-                    Point2d::new(u, v)
-                }).collect()
+                project_boundary_to_uv_chain(surface, hole, u_period, v_period)
             }).collect();
             crate::parametric_domain::triangulate_surface_consistent(
                 surface,
@@ -4139,6 +4154,125 @@ fn surface_v_period(surface: &Surface) -> Option<f64> {
         Surface::Torus(_) => Some(2.0 * PI),
         _ => None,
     }
+}
+
+/// Project boundary 3D points to UV space using chain-based continuity.
+///
+/// For periodic surfaces, `surface.project_point()` may return u=0 for points
+/// at u=2π (or vice versa), which collapses the UV polygon and produces
+/// degenerate triangulation. This function prevents that by adjusting each
+/// UV coordinate to be as close as possible to the previous one, adding or
+/// subtracting periods as needed.
+///
+/// # Algorithm
+/// 1. Project the first point normally via `surface.project_point()`
+/// 2. For each subsequent point, project normally, then:
+///    - If the surface is u-periodic and the u jump > period/2,
+///      shift the new u by ±period to minimize the jump
+///    - Same for v-periodic surfaces
+/// 3. This maintains continuity along the boundary curve, even across seams
+fn project_boundary_to_uv_chain(
+    surface: &Surface,
+    points: &[Point3d],
+    u_period: Option<f64>,
+    v_period: Option<f64>,
+) -> Vec<Point2d> {
+    if points.is_empty() {
+        return Vec::new();
+    }
+
+    let mut uvs = Vec::with_capacity(points.len());
+
+    // First point: project normally
+    let (u0, v0) = surface.project_point(&points[0]);
+    uvs.push(Point2d::new(u0, v0));
+
+    // Chain projection for subsequent points
+    for i in 1..points.len() {
+        let (mut u, v) = surface.project_point(&points[i]);
+
+        // Adjust u for periodicity to maintain continuity with previous point
+        if let Some(period) = u_period {
+            let prev_u = uvs[i - 1].u;
+            u = adjust_periodic_value(u, prev_u, period);
+        }
+
+        // Adjust v for periodicity (torus has v-period)
+        let mut adjusted_v = v;
+        if let Some(period) = v_period {
+            let prev_v = uvs[i - 1].v;
+            adjusted_v = adjust_periodic_value(v, prev_v, period);
+        }
+
+        uvs.push(Point2d::new(u, adjusted_v));
+    }
+
+    uvs
+}
+
+/// Adjust a periodic parameter value to be as close as possible to a reference,
+/// by adding or subtracting the period.
+///
+/// For example, if `value = 0.1`, `reference = 6.2`, and `period = 2π ≈ 6.283`,
+/// the adjusted value would be `0.1 + 6.283 ≈ 6.383` (closer to 6.2 than 0.1).
+#[inline]
+fn adjust_periodic_value(value: f64, reference: f64, period: f64) -> f64 {
+    let diff = value - reference;
+    if diff > period * 0.5 {
+        value - period
+    } else if diff < -period * 0.5 {
+        value + period
+    } else {
+        value
+    }
+}
+
+/// Detect whether a boundary wraps the full u-period of a periodic surface.
+///
+/// A full-period boundary means the boundary points span the entire angular range
+/// (0 to 2π) on a revolution-type surface (cylinder, cone, sphere, torus).
+/// When this happens, the UV polygon degenerates because u=0 and u=2π map to
+/// the same geometric seam, and earcutr cannot produce a valid triangulation.
+///
+/// # Algorithm
+/// Projects all boundary points to UV space and checks if the u-range (after
+/// chain normalization) spans ≥ 90% of the period. This threshold catches both
+/// exact full-wrap boundaries and near-full-wrap ones that still cause problems.
+fn is_full_period_boundary(
+    surface: &Surface,
+    boundary_points: &[Point3d],
+    u_period: Option<f64>,
+) -> bool {
+    let period = match u_period {
+        Some(p) => p,
+        None => return false, // Non-periodic surface — never full-wrap
+    };
+
+    if boundary_points.len() < 4 {
+        return false;
+    }
+
+    // Project all points to UV and find the u-range using chain normalization
+    let mut u_min = f64::MAX;
+    let mut u_max = f64::MIN;
+    let mut prev_u = 0.0f64;
+    let mut first = true;
+
+    for p in boundary_points {
+        let (mut u, _v) = surface.project_point(p);
+        if !first {
+            u = adjust_periodic_value(u, prev_u, period);
+        }
+        first = false;
+        prev_u = u;
+        u_min = u_min.min(u);
+        u_max = u_max.max(u);
+    }
+
+    let u_range = u_max - u_min;
+
+    // If the u-range covers ≥90% of the period, this is a full-wrap boundary
+    u_range >= period * 0.9
 }
 
 /// Triangulate a "cap" face on a curved surface — a disc-like face where the boundary

@@ -63,7 +63,26 @@ pub struct VertexDedupMap {
 impl VertexDedupMap {
     /// Create a new dedup map with bit-exact comparison only.
     /// Use this when edge cache guarantees bit-identical 3D coordinates.
+    ///
+    /// Alias for [`bit_exact()`](Self::bit_exact) — prefer using `bit_exact()`
+    /// for clarity in production code to make the dedup strategy explicit.
     pub fn new() -> Self {
+        Self::bit_exact()
+    }
+
+    /// Create a new dedup map with **bit-exact** comparison only.
+    ///
+    /// This is the recommended dedup strategy when the edge cache uses
+    /// deterministic rounding (48-bit mantissa), guaranteeing that shared
+    /// edges between adjacent faces produce bit-identical 3D coordinates.
+    /// Vertices that are not bit-exact will NOT be merged — they represent
+    /// genuine geometry differences that should be caught by watertight
+    /// validation, not silently merged.
+    ///
+    /// Use [`with_tolerance()`](Self::with_tolerance) only as a diagnostic
+    /// tool to identify edges where the cache is not producing bit-identical
+    /// coordinates (e.g., STEP edges without step_id).
+    pub fn bit_exact() -> Self {
         Self {
             exact: HashMap::new(),
             spatial: HashMap::new(),

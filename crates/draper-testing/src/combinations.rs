@@ -100,6 +100,7 @@ pub fn make_block_with_hole() -> Solid {
         forward: true,
         tolerance: 1e-6,
         degenerate: false,
+        step_entity_id: None,
     };
     let top_hole_coedge = CoEdge::new(top_hole_edge.id, false); // Reversed for inner wire
     let top_hole_wire = Wire::new(vec![top_hole_coedge]);
@@ -138,6 +139,7 @@ pub fn make_block_with_hole() -> Solid {
         forward: true,
         tolerance: 1e-6,
         degenerate: false,
+        step_entity_id: None,
     };
     let bottom_hole_coedge = CoEdge::new(bottom_hole_edge.id, false);
     let bottom_hole_wire = Wire::new(vec![bottom_hole_coedge]);
@@ -175,6 +177,7 @@ pub fn make_block_with_hole() -> Solid {
         forward: true,
         tolerance: 1e-6,
         degenerate: false,
+        step_entity_id: None,
     };
     let cyl_edge_top = Edge {
         id: TopoId::new(),
@@ -185,6 +188,7 @@ pub fn make_block_with_hole() -> Solid {
         forward: true,
         tolerance: 1e-6,
         degenerate: false,
+        step_entity_id: None,
     };
 
     let cyl_coedge_bottom = CoEdge::new(cyl_edge_bottom.id, true);
