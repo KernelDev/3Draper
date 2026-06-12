@@ -1375,7 +1375,7 @@ pub fn triangulate_surface_consistent(
         for (k, &idx) in tri.iter().enumerate() {
             let idx_usize = idx as usize;
             let entry = vertex_map.entry(idx).or_insert_with(|| {
-                if idx_usize < n_boundary_and_holes_actual {
+                if idx_usize < n_boundary_and_holes_actual && idx_usize < all_boundary_3d.len() {
                     // Boundary/hole vertex: use cached 3D point directly
                     // This is what makes the mesh watertight — shared edge
                     // vertices have bit-identical 3D positions

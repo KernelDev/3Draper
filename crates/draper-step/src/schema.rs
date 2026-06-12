@@ -96,6 +96,21 @@ impl StepFile {
         }
     }
 
+    /// Create a StepFile from a header and a Vec of entities.
+    /// Builds the entity index automatically.
+    pub fn from_entities(header: StepHeader, entities: Vec<StepEntity>) -> Self {
+        let mut file = Self {
+            header,
+            entities,
+            entity_index: HashMap::new(),
+            type_index: std::cell::RefCell::new(None),
+            pd_brep_index: std::cell::RefCell::new(None),
+            nauo_transform_index: std::cell::RefCell::new(None),
+        };
+        file.build_index();
+        file
+    }
+
     /// Build the entity index for fast lookups. Called automatically after parsing.
     pub fn build_index(&mut self) {
         self.entity_index = self.entities.iter()

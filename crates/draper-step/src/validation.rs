@@ -1495,6 +1495,187 @@ pub fn validate_step_for_conversion(step_file: &StepFile) -> Result<StepValidati
 }
 
 // ============================================================
+// Phase 2.4: StepValidator with auto-fix
+// ============================================================
+
+/// Result of validate_and_fix: the (possibly modified) StepFile and a report
+/// of what was found and what was fixed.
+#[derive(Clone, Debug)]
+pub struct StepValidationAndFixResult {
+    /// The STEP file after applying auto-fixes (may be the same as input if no fixes applied).
+    pub step_file: StepFile,
+    /// Validation report listing issues found (before fixes) and fixes applied.
+    pub report: StepValidationReport,
+    /// Number of auto-fixes applied.
+    pub fixes_applied: usize,
+    /// Descriptions of each fix applied.
+    pub fix_descriptions: Vec<String>,
+}
+
+/// Validate a STEP file and automatically fix common defects that would
+/// prevent successful conversion to mesh.
+///
+/// # Auto-fixes applied
+///
+/// 1. **Zero-radius cylinders/cones**: Clamps to minimum radius (1e-6)
+///    to prevent degenerate geometry.
+/// 2. **Degenerate NURBS (zero knot span)**: Expands degenerate knot spans
+///    to minimum width (1e-10).
+/// 3. **Orphan ADVANCED_FACE entities**: Faces with missing surface geometry
+///    are logged as errors (cannot safely auto-create replacement surfaces).
+///
+/// # Returns
+///
+/// A `StepValidationAndFixResult` containing the fixed StepFile and a report
+/// of issues found and fixes applied.
+pub fn validate_and_fix(step_file: &StepFile) -> StepValidationAndFixResult {
+    let mut report = validate_step_file(step_file);
+    let mut fixed_entities = step_file.entities.clone();
+    let mut fixes_applied = 0usize;
+    let mut fix_descriptions = Vec::new();
+
+    // Fix 1: Zero-radius cylinders — clamp to minimum radius
+    let zero_radius_fixes = fix_zero_radius_cylinders_vec(&mut fixed_entities);
+    if zero_radius_fixes > 0 {
+        fixes_applied += zero_radius_fixes;
+        fix_descriptions.push(format!(
+            "Clamped {} zero-radius cylinder(s)/cone(s) to minimum radius",
+            zero_radius_fixes
+        ));
+    }
+
+    // Fix 2: Degenerate NURBS knot spans — expand to minimum width
+    let nurbs_fixes = fix_degenerate_nurbs_knots_vec(&mut fixed_entities);
+    if nurbs_fixes > 0 {
+        fixes_applied += nurbs_fixes;
+        fix_descriptions.push(format!(
+            "Expanded {} degenerate NURBS knot span(s) to minimum width",
+            nurbs_fixes
+        ));
+    }
+
+    // Rebuild the StepFile with fixed entities (preserving header and indices)
+    let fixed_file = if fixes_applied > 0 {
+        StepFile::from_entities(step_file.header.clone(), fixed_entities)
+    } else {
+        step_file.clone()
+    };
+
+    // Re-validate after fixes to update the report
+    if fixes_applied > 0 {
+        report = validate_step_file(&fixed_file);
+    }
+
+    StepValidationAndFixResult {
+        step_file: fixed_file,
+        report,
+        fixes_applied,
+        fix_descriptions,
+    }
+}
+
+/// Fix zero-radius cylinders and cones by clamping to a minimum radius.
+fn fix_zero_radius_cylinders_vec(entities: &mut Vec<StepEntity>) -> usize {
+    let min_radius = 1e-6;
+    let mut fixes = 0usize;
+
+    for entity in entities.iter_mut() {
+        let entity_type = entity.type_name.as_str();
+        if entity_type == "CYLINDRICAL_SURFACE" || entity_type == "CONICAL_SURFACE" {
+            if let Some(radius_param) = find_radius_parameter(entity) {
+                if radius_param <= 0.0 || radius_param.is_nan() || radius_param.is_infinite() || radius_param < min_radius {
+                    set_radius_parameter(entity, min_radius);
+                    fixes += 1;
+                }
+            }
+        }
+    }
+
+    fixes
+}
+
+/// Fix degenerate NURBS knot spans (zero-width knot intervals).
+fn fix_degenerate_nurbs_knots_vec(entities: &mut Vec<StepEntity>) -> usize {
+    let min_span = 1e-10;
+    let mut fixes = 0usize;
+
+    for entity in entities.iter_mut() {
+        let entity_type = entity.type_name.as_str();
+        if entity_type == "B_SPLINE_SURFACE_WITH_KNOTS"
+            || entity_type == "B_SPLINE_CURVE_WITH_KNOTS"
+            || entity_type == "RATIONAL_B_SPLINE_SURFACE"
+            || entity_type == "RATIONAL_B_SPLINE_CURVE"
+        {
+            fixes += fix_nurbs_knots_in_entity(entity, min_span);
+        }
+    }
+
+    fixes
+}
+
+/// Find the radius parameter in a CYLINDRICAL_SURFACE or CONICAL_SURFACE entity.
+fn find_radius_parameter(entity: &StepEntity) -> Option<f64> {
+    for param in entity.params.iter().rev() {
+        if let StepValue::Float(r) = param {
+            return Some(*r);
+        }
+    }
+    None
+}
+
+/// Set the radius parameter in a CYLINDRICAL_SURFACE or CONICAL_SURFACE entity.
+fn set_radius_parameter(entity: &mut StepEntity, new_radius: f64) {
+    for param in entity.params.iter_mut().rev() {
+        if let StepValue::Float(r) = param {
+            *r = new_radius;
+            return;
+        }
+    }
+}
+
+/// Fix degenerate knot spans in a NURBS entity by expanding zero-width spans.
+fn fix_nurbs_knots_in_entity(entity: &mut StepEntity, min_span: f64) -> usize {
+    let mut fixes = 0usize;
+
+    for param in entity.params.iter_mut() {
+        if let StepValue::List(items) = param {
+            let mut knots: Vec<f64> = Vec::new();
+            let mut all_float = true;
+            for item in items.iter() {
+                if let StepValue::Float(f) = item {
+                    knots.push(*f);
+                } else {
+                    all_float = false;
+                    break;
+                }
+            }
+
+            if all_float && knots.len() >= 2 {
+                let mut needs_fix = false;
+                for i in 0..knots.len() - 1 {
+                    if (knots[i + 1] - knots[i]).abs() < min_span && knots[i + 1] >= knots[i] {
+                        needs_fix = true;
+                        break;
+                    }
+                }
+
+                if needs_fix {
+                    for i in 0..knots.len() - 1 {
+                        if (knots[i + 1] - knots[i]).abs() < min_span && knots[i + 1] >= knots[i] {
+                            knots[i + 1] = knots[i] + min_span;
+                            fixes += 1;
+                        }
+                    }
+                    *items = knots.into_iter().map(StepValue::Float).collect();
+                }
+            }
+        }
+    }
+
+    fixes
+}
+
+// ============================================================
 // Unit tests
 // ============================================================
 
