@@ -730,10 +730,14 @@ fn solid_bounding_box(solid: &Solid) -> (Point3d, Point3d) {
 pub fn triangulate_shell(shell: &Shell, params: &TriangulationParams) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
     let mut cache = EdgeDiscretizationCache::new();
-    // Use strict tolerance (1 PPM) — bit-exact dedup is the primary path,
-    // tolerance fallback is only for non-cached edges (step_id==0).
-    let merge_tol = cache.adaptive_tolerance().model_scale() * 1e-6;
-    let mut dedup_map = crate::mesh::VertexDedupMap::with_tolerance(merge_tol);
+    // Bit-exact-only dedup (same strategy as sequential/parallel solid paths).
+    // The edge cache with deterministic rounding (48-bit mantissa) guarantees
+    // that shared edges between adjacent faces produce bit-identical 3D
+    // coordinates. Tolerance-based dedup contradicts this guarantee — it
+    // silently merges non-identical vertices, hiding bugs in the edge cache
+    // and potentially distorting geometry. If vertices are not bit-identical,
+    // that is a BUG that should be caught by watertight validation.
+    let mut dedup_map = crate::mesh::VertexDedupMap::bit_exact();
     for face in &shell.faces {
         let face_mesh = triangulate_face_with_cache(face, params, &mut cache);
         mesh.merge_deduplicating(&face_mesh, &mut dedup_map);
