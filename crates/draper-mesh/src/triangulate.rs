@@ -2731,72 +2731,59 @@ fn triangulate_torus_face(face: &Face, torus: &TorusSurface, params: &Triangulat
     let surface = Surface::Torus(torus.clone());
     let boundary_3d = collect_face_boundary_from_cache(face, cache, &surface);
 
-    // Default: full torus [0, 2π] × [0, 2π]
-    let mut u_start = 0.0_f64;
-    let mut u_end = 2.0 * PI;
-    let mut v_start = 0.0_f64;
-    let mut v_end = 2.0 * PI;
-
-    if !boundary_3d.is_empty() {
-        let (bu_min, bu_max, bv_min, bv_max) = torus_uv_range(torus, &boundary_3d);
-        let u_range = bu_max - bu_min;
-        let v_range = bv_max - bv_min;
-
-        // Torus is periodic in both u and v with period 2π.
-        // If the boundary spans more than ~half the period, it's close to full.
-        // If it spans less, the face likely needs the full period
-        // (the boundary only constrains one parametric direction).
-        if u_range > 1.5 * PI {
-            // Boundary covers most of u — use the computed range
-            if u_range > 1.9 * PI {
-                u_start = 0.0;
-                u_end = 2.0 * PI;
-            } else {
-                u_start = bu_min;
-                u_end = bu_max;
-            }
-        }
-        // else: boundary doesn't constrain u → keep full [0, 2π]
-
-        if v_range > 1.5 * PI {
-            if v_range > 1.9 * PI {
-                v_start = 0.0;
-                v_end = 2.0 * PI;
-            } else {
-                v_start = bv_min;
-                v_end = bv_max;
-            }
-        }
-        // else: boundary doesn't constrain v → keep full [0, 2π]
+    if boundary_3d.is_empty() {
+        // No boundary edges — fall back to grid-based full torus.
+        // Since there are no shared edges, watertightness is not a concern here.
+        return triangulate_torus_full_grid(face, torus, params);
     }
 
-    let u_periodic = (u_end - u_start) > 1.9 * PI;
-    let v_periodic = (v_end - v_start) > 1.9 * PI;
+    // Use earcutr-based consistent triangulation which uses boundary 3D points
+    // DIRECTLY as mesh vertices, guaranteeing watertightness.
+    // Handles bi-periodicity (u and v both periodic with period 2π) and holes natively.
+    let boundary_uvs: Vec<Point2d> = boundary_3d.iter()
+        .map(|p| {
+            let (u, v) = surface.project_point(p);
+            Point2d::new(u, v)
+        })
+        .collect();
 
+    let hole_polylines: Vec<Vec<Point3d>> = Vec::new();
+    let hole_uvs: Vec<Vec<Point2d>> = Vec::new();
+
+    crate::parametric_domain::triangulate_surface_consistent(
+        &surface,
+        &boundary_3d,
+        &boundary_uvs,
+        &hole_polylines,
+        &hole_uvs,
+        face.forward,
+        params,
+    )
+}
+
+/// Full torus triangulation (no boundary edges) using a simple grid approach.
+/// Since there are no shared edges with other faces, watertightness is not a concern.
+fn triangulate_torus_full_grid(face: &Face, torus: &TorusSurface, params: &TriangulationParams) -> TriangleMesh {
+    let surface = Surface::Torus(torus.clone());
     let (n_u, n_v) = if params.adaptive {
         crate::adaptive::required_samples(
-            &Surface::Torus(torus.clone()), u_start, u_end, v_start, v_end,
+            &surface, 0.0, 2.0 * PI, 0.0, 2.0 * PI,
             params.max_deviation, params.detail_level,
         )
     } else {
         (params.angular_samples, params.angular_samples)
     };
 
-    // For v-periodic torus, generate one extra row so the last strip
-    // connects back to the v_start position. The duplicate vertices at
-    // the v-seam will be merged by merge_coincident_vertices.
-    let n_v_grid = if v_periodic { n_v } else { n_v };
-
     triangulate_ring_surface(
-        n_u, n_v_grid, u_periodic, face.forward,
+        n_u, n_v, true, face.forward,
         |i, j| {
-            let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
-            let v = v_start + (v_end - v_start) * j as f64 / n_v_grid as f64;
+            let u = 2.0 * PI * i as f64 / n_u as f64;
+            let v = 2.0 * PI * j as f64 / n_v as f64;
             torus.point_at(u, v)
         },
         |i, j| {
-            let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
-            let v = v_start + (v_end - v_start) * j as f64 / n_v_grid as f64;
+            let u = 2.0 * PI * i as f64 / n_u as f64;
+            let v = 2.0 * PI * j as f64 / n_v as f64;
             torus.normal_at(u, v)
         },
         |_j| false, // Torus has no degenerate rows
@@ -2815,78 +2802,29 @@ fn triangulate_revolution_face(face: &Face, rev: &draper_geometry::RevolutionSur
         return triangulate_revolution_full(face, rev, params);
     }
 
-    let (v_min, v_max) = rev.profile.param_range();
+    // Use earcutr-based consistent triangulation which uses boundary 3D points
+    // DIRECTLY as mesh vertices, guaranteeing watertightness.
+    // Revolution surfaces are periodic in u (period 2π) — handled natively
+    // by normalize_uv_polygon. Hole support via earcutr.
+    let boundary_uvs: Vec<Point2d> = boundary_3d.iter()
+        .map(|p| {
+            let (u, v) = surface.project_point(p);
+            Point2d::new(u, v)
+        })
+        .collect();
 
-    // Phase 2: Determine UV range from boundary points
-    let mut u_min_b = f64::MAX;
-    let mut u_max_b = f64::MIN;
-    for p in &boundary_3d {
-        let (u, _v) = surface.project_point(p);
-        u_min_b = u_min_b.min(u);
-        u_max_b = u_max_b.max(u);
-    }
-    let u_range = u_max_b - u_min_b;
+    let hole_polylines: Vec<Vec<Point3d>> = Vec::new();
+    let hole_uvs: Vec<Vec<Point2d>> = Vec::new();
 
-    // Revolution is periodic in u. If boundary doesn't cover more than ~half
-    // the period, assume the face needs the full period.
-    let full_circle = if u_range > 1.5 * PI {
-        u_range > 1.9 * PI
-    } else {
-        true
-    };
-
-    let u_start = if full_circle { 0.0 } else { u_min_b };
-    let u_end = if full_circle { 2.0 * PI } else { u_max_b };
-
-    let (n_u, n_v) = if params.adaptive {
-        crate::adaptive::required_samples(
-            &surface, u_start, u_end, v_min, v_max,
-            params.max_deviation, params.detail_level,
-        )
-    } else {
-        (params.angular_samples, params.angular_samples)
-    };
-
-    let mut mesh = TriangleMesh::new();
-
-    // Phase 3: Generate grid vertices (n_v+1 rows for inclusive v range)
-    for j in 0..=n_v {
-        for i in 0..n_u {
-            let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
-            let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
-            let p = rev.point_at(u, v);
-            let n = face.surface.as_ref().map(|s| s.normal_at(u, v)).unwrap_or(Direction3d::Z);
-            let idx = mesh.add_vertex(p);
-            mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
-        }
-    }
-
-    // Phase 4: Snap boundary vertices to edge curve samples from cache.
-    // This ensures that shared edges between this face and adjacent faces
-    // have bit-identical vertex positions, making the mesh watertight.
-    snap_periodic_boundary_rows(&mut mesh, &boundary_3d, &surface, n_u, n_v, v_min, v_max, full_circle, u_start, u_end);
-
-    // Phase 5: Generate triangles
-    let n_u_loop = if full_circle { n_u } else { n_u - 1 };
-    for j in 0..n_v {
-        for i in 0..n_u_loop {
-            let i_next = (i + 1) % n_u;
-            let v0 = (j * n_u + i) as u32;
-            let v1 = (j * n_u + i_next) as u32;
-            let v2 = ((j + 1) * n_u + i_next) as u32;
-            let v3 = ((j + 1) * n_u + i) as u32;
-
-            if face.forward {
-                mesh.add_triangle(v0, v1, v2);
-                mesh.add_triangle(v0, v2, v3);
-            } else {
-                mesh.add_triangle(v0, v2, v1);
-                mesh.add_triangle(v0, v3, v2);
-            }
-        }
-    }
-
-    mesh
+    crate::parametric_domain::triangulate_surface_consistent(
+        &surface,
+        &boundary_3d,
+        &boundary_uvs,
+        &hole_polylines,
+        &hole_uvs,
+        face.forward,
+        params,
+    )
 }
 
 /// Full revolution triangulation (no boundary edges) — fallback when cache is empty.
@@ -2947,55 +2885,29 @@ fn triangulate_extrusion_face(face: &Face, ext: &draper_geometry::ExtrusionSurfa
         return triangulate_extrusion_full(face, ext, params);
     }
 
-    let (v_min, v_max) = compute_extrusion_v_range(face, ext);
-    let (u_min, u_max) = ext.profile.param_range();
+    // Use earcutr-based consistent triangulation which uses boundary 3D points
+    // DIRECTLY as mesh vertices, guaranteeing watertightness.
+    // Extrusion surfaces are NOT periodic — no UV normalization needed.
+    // Hole support via earcutr.
+    let boundary_uvs: Vec<Point2d> = boundary_3d.iter()
+        .map(|p| {
+            let (u, v) = surface.project_point(p);
+            Point2d::new(u, v)
+        })
+        .collect();
 
-    let (n_u, n_v) = if params.adaptive {
-        crate::adaptive::required_samples(
-            &surface, u_min, u_max, v_min, v_max,
-            params.max_deviation, params.detail_level,
-        )
-    } else {
-        (params.angular_samples, params.height_samples.max(2))
-    };
+    let hole_polylines: Vec<Vec<Point3d>> = Vec::new();
+    let hole_uvs: Vec<Vec<Point2d>> = Vec::new();
 
-    let mut mesh = TriangleMesh::new();
-
-    // Phase 2: Generate grid vertices
-    for j in 0..=n_v {
-        for i in 0..n_u {
-            let u = u_min + (u_max - u_min) * i as f64 / (n_u - 1).max(1) as f64;
-            let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
-            let p = ext.point_at(u, v);
-            let n = face.surface.as_ref().map(|s| s.normal_at(u, v)).unwrap_or(Direction3d::Z);
-            let idx = mesh.add_vertex(p);
-            mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
-        }
-    }
-
-    // Phase 3: Snap boundary vertices to edge curve samples from cache.
-    // For extrusion surfaces, boundary edges typically run along constant-v
-    // rows (top/bottom) and constant-u columns (sides).
-    snap_extrusion_boundary_vertices(&mut mesh, &boundary_3d, &surface, n_u, n_v, u_min, u_max, v_min, v_max);
-
-    // Phase 4: Generate triangles
-    for j in 0..n_v {
-        for i in 0..n_u - 1 {
-            let v0 = (j * n_u + i) as u32;
-            let v1 = (j * n_u + i + 1) as u32;
-            let v2 = ((j + 1) * n_u + i + 1) as u32;
-            let v3 = ((j + 1) * n_u + i) as u32;
-            if face.forward {
-                mesh.add_triangle(v0, v1, v2);
-                mesh.add_triangle(v0, v2, v3);
-            } else {
-                mesh.add_triangle(v0, v2, v1);
-                mesh.add_triangle(v0, v3, v2);
-            }
-        }
-    }
-
-    mesh
+    crate::parametric_domain::triangulate_surface_consistent(
+        &surface,
+        &boundary_3d,
+        &boundary_uvs,
+        &hole_polylines,
+        &hole_uvs,
+        face.forward,
+        params,
+    )
 }
 
 /// Full extrusion triangulation (no boundary edges) — fallback when cache is empty.

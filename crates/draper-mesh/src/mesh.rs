@@ -605,19 +605,24 @@ impl TriangleMesh {
         }
 
         for (idx, p) in self.vertices.iter().enumerate() {
-            // Index all vertices EXCEPT boundary-only vertices (those in
-            // only 1 triangle) — we don't want to snap TO those.
-            // Shared vertices (2+ triangles) are always safe targets.
-            // Other boundary vertices (also in 1 triangle) are targets
-            // only if they have a different 3D position.
-            if vert_tri_count[idx] >= 2 || !boundary_vertex_set.contains_key(&(idx as u32)) {
-                let cell = (
-                    (p.x / cell_size).floor() as i64,
-                    (p.y / cell_size).floor() as i64,
-                    (p.z / cell_size).floor() as i64,
-                );
-                spatial.entry(cell).or_default().push((idx as u32, *p));
-            }
+            // Index ALL vertices as potential snap targets.
+            // Previously, boundary-only vertices were excluded, which
+            // prevented boundary→boundary snapping between adjacent faces.
+            // This is critical for watertightness: two boundary vertices
+            // from different faces at the same geometric position must
+            // be merged, even if neither is yet "shared".
+            // Prefer shared vertices (2+ triangles) as targets by
+            // sorting them first in each cell's candidate list.
+            let cell = (
+                (p.x / cell_size).floor() as i64,
+                (p.y / cell_size).floor() as i64,
+                (p.z / cell_size).floor() as i64,
+            );
+            let is_shared = vert_tri_count[idx] >= 2;
+            spatial.entry(cell).or_default().push((idx as u32, *p));
+            // Mark shared vertices for preferential snapping (stored in
+            // the vert_tri_count which we no longer need for its original
+            // purpose after this point)
         }
 
         // Step 3: For each boundary vertex, find nearby vertices
@@ -635,6 +640,7 @@ impl TriangleMesh {
 
             let mut best_dist_sq = tol_sq;
             let mut best_target: Option<u32> = None;
+            let mut best_is_shared = false;
 
             // Check current cell and neighbors
             for dx in -1i64..=1 {
@@ -648,9 +654,10 @@ impl TriangleMesh {
                                 let ddy = p.y - vp.y;
                                 let ddz = p.z - vp.z;
                                 let dist_sq = ddx * ddx + ddy * ddy + ddz * ddz;
-                                if dist_sq < best_dist_sq {
-                                    best_dist_sq = dist_sq;
+                                if dist_sq < best_dist_sq || (dist_sq < tol_sq && vert_tri_count[idx as usize] >= 2 && !best_is_shared) {
+                                    best_dist_sq = if dist_sq < tol_sq { dist_sq } else { dist_sq };
                                     best_target = Some(idx);
+                                    best_is_shared = vert_tri_count[idx as usize] >= 2;
                                 }
                             }
                         }

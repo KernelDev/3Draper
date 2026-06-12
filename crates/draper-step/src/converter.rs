@@ -29,7 +29,7 @@ use draper_geometry::{
     NurbsSurface, Curve3d, Curve2d, Line, Circle, Ellipse, Arc, NurbsCurve,
     Line2d, Circle2d, Ellipse2d, Nurbs2d,
 };
-use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary_and_holes_uv, ear_clip, validate_watertight, validate_edge_consistency, smooth_normals, smooth_normals_adaptive};
+use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary_and_holes_uv, ear_clip, validate_watertight, validate_edge_consistency, smooth_normals, smooth_normals_adaptive, filter_degenerate_triangles};
 use draper_topology::{Face, Wire, CoEdge, Edge as TopoEdge, Shell, Solid};
 use draper_topology::healing::{heal_solid, HealingParams, HealingReport};
 use draper_geometry::tolerance::ToleranceContext;
@@ -2643,6 +2643,9 @@ impl<'a> StepConverter<'a> {
         // the NURBS step_id as canonical. Otherwise the NURBS face gets
         // only 2 boundary points, producing a degenerate triangulation.
         {
+            // Phase 1: STEP entity ID-based aliasing (existing approach)
+            // Uses VERTEX_POINT entity IDs to match edges sharing the same
+            // geometric boundary.
             let mut vertex_pair_to_step_ids: HashMap<(i64, i64), Vec<i64>> = HashMap::new();
             for face_data in &face_data_list {
                 for &step_id in &face_data.edge_step_ids {
@@ -2669,6 +2672,89 @@ impl<'a> StepConverter<'a> {
                 log::info!(
                     "BREP #{}: registered {} step_id aliases from vertex-pair matching",
                     brep_id, alias_count
+                );
+            }
+
+            // Phase 2: 3D coordinate-based aliasing (supplementary approach)
+            // When STEP files use DIFFERENT VERTEX_POINT entities for the
+            // same geometric endpoint, the entity-ID approach misses them.
+            // This phase matches edges by their 3D endpoint coordinates,
+            // catching edges that share the same geometric boundary but
+            // have different STEP entity IDs.
+            //
+            // Algorithm:
+            // 1. For each edge's step_id, compute its start and end 3D points
+            // 2. Create a spatial key from the rounded 3D coordinates
+            // 3. Group step_ids by their 3D endpoint pair
+            // 4. Alias non-canonical step_ids to the canonical one
+            let coord_tol = tol_ctx.model_scale * 1e-3; // 0.1% of model scale for coordinate matching
+            let mut coord_pair_to_step_ids: HashMap<(i64, i64, i64, i64, i64, i64), Vec<i64>> = HashMap::new();
+            let mut step_id_endpoints: HashMap<i64, (Point3d, Point3d)> = HashMap::new();
+            let mut unaliased_count = 0usize;
+            for face_data in &face_data_list {
+                for (edge_idx, &step_id) in face_data.edge_step_ids.iter().enumerate() {
+                    if step_id == 0 { continue; }
+                    // Skip if already aliased (from Phase 1)
+                    if edge_cache.resolve_canonical_step_id(step_id) != step_id {
+                        continue;
+                    }
+                    unaliased_count += 1;
+                    // Get edge endpoints from the Edge object
+                    let edge = &face_data.edges[edge_idx];
+                    let start = match edge.start_point() {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    let end = match edge.end_point() {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    step_id_endpoints.insert(step_id, (start, end));
+                    // Quantize 3D coordinates to grid cells for spatial matching
+                    let sk = (
+                        (start.x / coord_tol).round() as i64,
+                        (start.y / coord_tol).round() as i64,
+                        (start.z / coord_tol).round() as i64,
+                        (end.x / coord_tol).round() as i64,
+                        (end.y / coord_tol).round() as i64,
+                        (end.z / coord_tol).round() as i64,
+                    );
+                    // Also try reversed endpoint order (same geometric edge, opposite direction)
+                    let sk_rev = (
+                        (end.x / coord_tol).round() as i64,
+                        (end.y / coord_tol).round() as i64,
+                        (end.z / coord_tol).round() as i64,
+                        (start.x / coord_tol).round() as i64,
+                        (start.y / coord_tol).round() as i64,
+                        (start.z / coord_tol).round() as i64,
+                    );
+                    // Use canonical ordering (smaller key first) for consistent grouping
+                    let canonical_key = if sk <= sk_rev { sk } else { sk_rev };
+                    coord_pair_to_step_ids.entry(canonical_key).or_default().push(step_id);
+                }
+            }
+            log::info!(
+                "BREP #{}: Phase 2 alias: {} unaliased step_ids, {} coordinate groups, tol={:.2e}",
+                brep_id, unaliased_count, coord_pair_to_step_ids.len(), coord_tol
+            );
+            let mut coord_alias_count = 0usize;
+            for (_key, step_ids) in &coord_pair_to_step_ids {
+                if step_ids.len() < 2 { continue; }
+                // Choose canonical: highest complexity score (densest sampling)
+                let canonical = *step_ids.iter().max_by_key(|&&sid| {
+                    self.edge_curve_complexity_score(sid)
+                }).unwrap();
+                for &sid in step_ids {
+                    if sid != canonical {
+                        edge_cache.register_step_id_alias(sid, canonical);
+                        coord_alias_count += 1;
+                    }
+                }
+            }
+            if coord_alias_count > 0 {
+                log::info!(
+                    "BREP #{}: registered {} additional step_id aliases from 3D coordinate matching (tol={:.2e})",
+                    brep_id, coord_alias_count, coord_tol
                 );
             }
         }
@@ -2739,6 +2825,12 @@ impl<'a> StepConverter<'a> {
                 brep_id, total_face_vertices, mesh.vertices.len(), deduped_vertices,
             );
         }
+
+        // ─── Post-merge: filter degenerate triangles ────────────────
+        // Degenerate triangles (zero area, NaN/Inf vertices, or collapsed
+        // indices) create non-manifold edges and false boundary edges.
+        // Remove them before validation and snapping.
+        filter_degenerate_triangles(&mut mesh, 1e-10);
 
         // ─── Post-merge boundary vertex snapping ────────────────────────
         // When the STEP file uses different VERTEX_POINT entities for the
@@ -2883,6 +2975,59 @@ impl<'a> StepConverter<'a> {
                 log::info!(
                     "BREP #{}: registered {} step_id aliases from vertex-pair matching (detailed path)",
                     brep_id, alias_count
+                );
+            }
+
+            // Phase 2: 3D coordinate-based aliasing (supplementary)
+            // Same logic as in triangulate_brep() — see comments there.
+            let coord_tol = tol_ctx.model_scale * 1e-3;
+            let mut coord_pair_to_step_ids: HashMap<(i64, i64, i64, i64, i64, i64), Vec<i64>> = HashMap::new();
+            for face_data in &face_data_list {
+                for (edge_idx, &step_id) in face_data.edge_step_ids.iter().enumerate() {
+                    if step_id == 0 { continue; }
+                    if edge_cache.resolve_canonical_step_id(step_id) != step_id {
+                        continue;
+                    }
+                    let edge = &face_data.edges[edge_idx];
+                    let start = match edge.start_point() { Some(p) => p, None => continue };
+                    let end = match edge.end_point() { Some(p) => p, None => continue };
+                    let sk = (
+                        (start.x / coord_tol).round() as i64,
+                        (start.y / coord_tol).round() as i64,
+                        (start.z / coord_tol).round() as i64,
+                        (end.x / coord_tol).round() as i64,
+                        (end.y / coord_tol).round() as i64,
+                        (end.z / coord_tol).round() as i64,
+                    );
+                    let sk_rev = (
+                        (end.x / coord_tol).round() as i64,
+                        (end.y / coord_tol).round() as i64,
+                        (end.z / coord_tol).round() as i64,
+                        (start.x / coord_tol).round() as i64,
+                        (start.y / coord_tol).round() as i64,
+                        (start.z / coord_tol).round() as i64,
+                    );
+                    let canonical_key = if sk <= sk_rev { sk } else { sk_rev };
+                    coord_pair_to_step_ids.entry(canonical_key).or_default().push(step_id);
+                }
+            }
+            let mut coord_alias_count = 0usize;
+            for (_key, step_ids) in &coord_pair_to_step_ids {
+                if step_ids.len() < 2 { continue; }
+                let canonical = *step_ids.iter().max_by_key(|&&sid| {
+                    self.edge_curve_complexity_score(sid)
+                }).unwrap();
+                for &sid in step_ids {
+                    if sid != canonical {
+                        edge_cache.register_step_id_alias(sid, canonical);
+                        coord_alias_count += 1;
+                    }
+                }
+            }
+            if coord_alias_count > 0 {
+                log::info!(
+                    "BREP #{}: registered {} additional step_id aliases from 3D coordinate matching (detailed path, tol={:.2e})",
+                    brep_id, coord_alias_count, coord_tol
                 );
             }
         }

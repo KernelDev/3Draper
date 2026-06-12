@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 fn main() {
     env_logger::builder()
-        .filter_level(log::LevelFilter::Warn)
+        .filter_level(log::LevelFilter::Info)
         .init();
 
     let args: Vec<String> = std::env::args().collect();
