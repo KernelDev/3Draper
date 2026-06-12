@@ -1,0 +1,1528 @@
+warning: /home/z/my-project/crates/draper-json/Cargo.toml: `default-features` is ignored for draper-mesh, since `default-features` was not specified for `workspace.dependencies.draper-mesh`, this could become a hard error in the future
+warning: /home/z/my-project/crates/draper-viewer/Cargo.toml: `default-features` is ignored for draper-mesh, since `default-features` was not specified for `workspace.dependencies.draper-mesh`, this could become a hard error in the future
+warning: /home/z/my-project/crates/draper-core/Cargo.toml: `default-features` is ignored for draper-mesh, since `default-features` was not specified for `workspace.dependencies.draper-mesh`, this could become a hard error in the future
+warning: /home/z/my-project/crates/draper-ffi/Cargo.toml: `default-features` is ignored for draper-mesh, since `default-features` was not specified for `workspace.dependencies.draper-mesh`, this could become a hard error in the future
+warning: /home/z/my-project/crates/draper-step/Cargo.toml: `default-features` is ignored for draper-mesh, since `default-features` was not specified for `workspace.dependencies.draper-mesh`, this could become a hard error in the future
+warning: unused import: `Vector3`
+ --> crates/draper-geometry/src/point.rs:6:24
+  |
+6 | use nalgebra::{Point3, Vector3};
+  |                        ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Vec3d`
+ --> crates/draper-geometry/src/transform.rs:5:35
+  |
+5 | use crate::{Direction3d, Point3d, Vec3d};
+  |                                   ^^^^^
+
+warning: unused import: `Point2d`
+ --> crates/draper-geometry/src/curve.rs:5:35
+  |
+5 | use crate::{Direction3d, Point3d, Point2d, Vec3d, Transform};
+  |                                   ^^^^^^^
+
+warning: unused import: `std::fmt`
+ --> crates/draper-geometry/src/curve.rs:6:5
+  |
+6 | use std::fmt;
+  |     ^^^^^^^^
+
+warning: unused import: `Point2d`
+ --> crates/draper-geometry/src/surface.rs:5:35
+  |
+5 | use crate::{Direction3d, Point3d, Point2d, Vec3d, Transform, curve::Curve3d};
+  |                                   ^^^^^^^
+
+warning: unused import: `std::fmt`
+ --> crates/draper-geometry/src/surface.rs:6:5
+  |
+6 | use std::fmt;
+  |     ^^^^^^^^
+
+warning: unused import: `Direction3d`
+ --> crates/draper-geometry/src/intersection.rs:5:22
+  |
+5 | use crate::{Point3d, Direction3d, Vec3d, curve::*, surface::*, tolerance::TOLERANCE};
+  |                      ^^^^^^^^^^^
+
+warning: unused variable: `det`
+   --> crates/draper-geometry/src/transform.rs:161:13
+    |
+161 |         let det = m[0][0]*inv[0][0] + m[0][1]*inv[0][2+0] + m[0][2]*inv[0][2] + m[0][3]*inv[0][3]; // Fix: use proper indexing
+    |             ^^^ help: if this is intentional, prefix it with an underscore: `_det`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `v_min`
+    --> crates/draper-geometry/src/surface.rs:1152:22
+     |
+1152 |                 let (v_min, v_max) = nurbs.v_range();
+     |                      ^^^^^ help: if this is intentional, prefix it with an underscore: `_v_min`
+
+warning: unused variable: `v_max`
+    --> crates/draper-geometry/src/surface.rs:1152:29
+     |
+1152 |                 let (v_min, v_max) = nurbs.v_range();
+     |                             ^^^^^ help: if this is intentional, prefix it with an underscore: `_v_max`
+
+warning: unused variable: `nurbs`
+    --> crates/draper-geometry/src/surface.rs:1345:28
+     |
+1345 |             Surface::Nurbs(nurbs) => {
+     |                            ^^^^^ help: if this is intentional, prefix it with an underscore: `_nurbs`
+
+warning: variable `R` should have a snake case name
+    --> crates/draper-geometry/src/surface.rs:1332:21
+     |
+1332 |                 let R = torus.major_radius;
+     |                     ^ help: convert the identifier to snake case: `r`
+     |
+     = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: `draper-geometry` (lib) generated 12 warnings (run `cargo fix --lib -p draper-geometry` to apply 11 suggestions)
+warning: unused imports: `Arc`, `ExtrusionSurface`, `Line`, `Point2d`, `RevolutionSurface`, and `Vec3d`
+  --> crates/draper-topology/src/builder.rs:7:14
+   |
+ 7 |     Point3d, Point2d, Direction3d, Vec3d,
+   |              ^^^^^^^               ^^^^^
+ 8 |     Curve3d, Line, Circle, Arc,
+   |              ^^^^          ^^^
+ 9 |     Surface, Plane, CylinderSurface, SphereSurface, ConeSurface, TorusSurface,
+10 |     RevolutionSurface, ExtrusionSurface,
+   |     ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `angle`
+   --> crates/draper-topology/src/builder.rs:256:46
+    |
+256 |     pub fn make_revolution(profile: Curve3d, angle: f64) -> Solid {
+    |                                              ^^^^^ help: if this is intentional, prefix it with an underscore: `_angle`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `distance`
+   --> crates/draper-topology/src/builder.rs:271:69
+    |
+271 |     pub fn make_extrusion(profile: Curve3d, direction: Direction3d, distance: f64) -> Solid {
+    |                                                                     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_distance`
+
+warning: `draper-topology` (lib) generated 3 warnings (run `cargo fix --lib -p draper-topology` to apply 3 suggestions)
+warning: unused import: `std::fmt`
+ --> crates/draper-mesh/src/mesh.rs:8:5
+  |
+8 | use std::fmt;
+  |     ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Curve3d`
+  --> crates/draper-mesh/src/triangulate.rs:18:18
+   |
+18 |     ConeSurface, Curve3d,
+   |                  ^^^^^^^
+
+warning: unused import: `CoEdge`
+  --> crates/draper-mesh/src/triangulate.rs:20:35
+   |
+20 | use draper_topology::{Face, Wire, CoEdge, Edge, Solid, Shell, Compound, TopoId};
+   |                                   ^^^^^^
+
+warning: unused import: `Surface`
+  --> crates/draper-mesh/src/watertight.rs:25:32
+   |
+25 | use draper_geometry::{Point3d, Surface};
+   |                                ^^^^^^^
+
+warning: ambiguous glob re-exports
+  --> crates/draper-mesh/src/lib.rs:29:9
+   |
+29 | pub use stl::*;
+   |         ^^^^^^ the name `export_obj` in the value namespace is first re-exported here
+...
+34 | pub use export::*;
+   |         --------- but the name `export_obj` in the value namespace is also re-exported here
+   |
+   = note: `#[warn(ambiguous_glob_reexports)]` on by default
+
+warning: unused variable: `is_shared`
+   --> crates/draper-mesh/src/mesh.rs:640:17
+    |
+640 |             let is_shared = vert_tri_count[idx] >= 2;
+    |                 ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_is_shared`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> crates/draper-mesh/src/triangulate.rs:1059:25
+     |
+1059 |                     let mut edge_pts_3d = sample_edge_points(edge, EDGE_SAMPLES);
+     |                         ----^^^^^^^^^^^
+     |                         |
+     |                         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `pmin`
+    --> crates/draper-mesh/src/triangulate.rs:1157:26
+     |
+1157 |                     let (pmin, pmax) = if tmin <= tmax { (tmin, tmax) } else { (tmax, tmin) };
+     |                          ^^^^ help: if this is intentional, prefix it with an underscore: `_pmin`
+
+warning: unused variable: `pmax`
+    --> crates/draper-mesh/src/triangulate.rs:1157:32
+     |
+1157 |                     let (pmin, pmax) = if tmin <= tmax { (tmin, tmax) } else { (tmax, tmin) };
+     |                                ^^^^ help: if this is intentional, prefix it with an underscore: `_pmax`
+
+warning: unused variable: `surface`
+    --> crates/draper-mesh/src/triangulate.rs:1312:5
+     |
+1312 |     surface: &Surface,
+     |     ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_surface`
+
+warning: unused variable: `surface`
+    --> crates/draper-mesh/src/triangulate.rs:1473:5
+     |
+1473 |     surface: &Surface,
+     |     ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_surface`
+
+warning: variable `apex_vertex` is assigned to, but never used
+    --> crates/draper-mesh/src/triangulate.rs:2528:9
+     |
+2528 |     let mut apex_vertex: Option<u32> = None;
+     |         ^^^^^^^^^^^^^^^
+     |
+     = note: consider using `_apex_vertex` instead
+
+warning: value assigned to `apex_vertex` is never read
+    --> crates/draper-mesh/src/triangulate.rs:2542:13
+     |
+2542 |             apex_vertex = Some(idx);
+     |             ^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `boundary_uvs`
+    --> crates/draper-mesh/src/triangulate.rs:3723:5
+     |
+3723 |     boundary_uvs: &[Point2d],
+     |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_boundary_uvs`
+
+warning: unused variable: `hole_uvs`
+    --> crates/draper-mesh/src/triangulate.rs:3725:5
+     |
+3725 |     hole_uvs: &[Vec<Point2d>],
+     |     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_hole_uvs`
+
+warning: variable `apex_vertex` is assigned to, but never used
+    --> crates/draper-mesh/src/triangulate.rs:5212:9
+     |
+5212 |     let mut apex_vertex: Option<u32> = None;
+     |         ^^^^^^^^^^^^^^^
+     |
+     = note: consider using `_apex_vertex` instead
+
+warning: value assigned to `apex_vertex` is never read
+    --> crates/draper-mesh/src/triangulate.rs:5226:13
+     |
+5226 |             apex_vertex = Some(idx);
+     |             ^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: variable `pole_vertex_north` is assigned to, but never used
+    --> crates/draper-mesh/src/triangulate.rs:5398:9
+     |
+5398 |     let mut pole_vertex_north: Option<u32> = None;
+     |         ^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: consider using `_pole_vertex_north` instead
+
+warning: variable `pole_vertex_south` is assigned to, but never used
+    --> crates/draper-mesh/src/triangulate.rs:5399:9
+     |
+5399 |     let mut pole_vertex_south: Option<u32> = None;
+     |         ^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: consider using `_pole_vertex_south` instead
+
+warning: value assigned to `pole_vertex_north` is never read
+    --> crates/draper-mesh/src/triangulate.rs:5413:13
+     |
+5413 |             pole_vertex_north = Some(idx);
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `pole_vertex_south` is never read
+    --> crates/draper-mesh/src/triangulate.rs:5423:13
+     |
+5423 |             pole_vertex_south = Some(idx);
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: unused variable: `adaptive_tol`
+    --> crates/draper-mesh/src/triangulate.rs:6913:17
+     |
+6913 |             let adaptive_tol = self.cache.adaptive_tolerance().merge_tolerance();
+     |                 ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_adaptive_tol`
+
+warning: unused variable: `surface`
+   --> crates/draper-mesh/src/edge_cache.rs:768:25
+    |
+768 |             if let Some(ref surface) = face.surface {
+    |                         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_surface`
+
+warning: unused variable: `u`
+    --> crates/draper-mesh/src/parametric_domain.rs:1582:22
+     |
+1582 |                 let (u, v, p_surf) = if let Surface::Nurbs(ref nurbs) = surface {
+     |                      ^ help: if this is intentional, prefix it with an underscore: `_u`
+
+warning: unused variable: `v`
+    --> crates/draper-mesh/src/parametric_domain.rs:1582:25
+     |
+1582 |                 let (u, v, p_surf) = if let Surface::Nurbs(ref nurbs) = surface {
+     |                         ^ help: if this is intentional, prefix it with an underscore: `_v`
+
+warning: unreachable pattern
+   --> crates/draper-mesh/src/certification.rs:375:9
+    |
+375 |         _ => (0.0, 1.0),
+    |         ^ no value can reach this
+    |
+note: multiple earlier patterns match some of the same values
+   --> crates/draper-mesh/src/certification.rs:375:9
+    |
+367 |         Surface::Plane(_) => (-1000.0, 1000.0), // Planes are infinite
+    |         ----------------- matches some of the same values
+368 |         Surface::Cylinder(c) => c.u_range(),
+    |         -------------------- matches some of the same values
+369 |         Surface::Cone(_) => (0.0, 2.0 * std::f64::consts::PI),
+    |         ---------------- matches some of the same values
+370 |         Surface::Sphere(_) => (0.0, 2.0 * std::f64::consts::PI),
+    |         ------------------ matches some of the same values
+...
+375 |         _ => (0.0, 1.0),
+    |         ^ ...and 4 other patterns collectively make this unreachable
+    = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable pattern
+   --> crates/draper-mesh/src/certification.rs:390:9
+    |
+390 |         _ => (0.0, 1.0),
+    |         ^ no value can reach this
+    |
+note: multiple earlier patterns match some of the same values
+   --> crates/draper-mesh/src/certification.rs:390:9
+    |
+382 |         Surface::Plane(_) => (-1000.0, 1000.0), // Planes are infinite
+    |         ----------------- matches some of the same values
+383 |         Surface::Cylinder(_) => (-1000.0, 1000.0), // Cylinders are infinite along axis
+    |         -------------------- matches some of the same values
+384 |         Surface::Cone(_) => (-1000.0, 1000.0),
+    |         ---------------- matches some of the same values
+385 |         Surface::Sphere(_) => (0.0, std::f64::consts::PI),
+    |         ------------------ matches some of the same values
+...
+390 |         _ => (0.0, 1.0),
+    |         ^ ...and 4 other patterns collectively make this unreachable
+
+warning: unused variable: `tol_sq`
+   --> crates/draper-mesh/src/watertight.rs:194:9
+    |
+194 |     let tol_sq = tolerance * tolerance;
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_tol_sq`
+
+warning: unused variable: `lo`
+   --> crates/draper-mesh/src/watertight.rs:197:11
+    |
+197 |     for ((lo, hi), entries) in &edge_map {
+    |           ^^ help: if this is intentional, prefix it with an underscore: `_lo`
+
+warning: unused variable: `hi`
+   --> crates/draper-mesh/src/watertight.rs:197:15
+    |
+197 |     for ((lo, hi), entries) in &edge_map {
+    |               ^^ help: if this is intentional, prefix it with an underscore: `_hi`
+
+warning: unused variable: `near_miss_tol_sq`
+   --> crates/draper-mesh/src/watertight.rs:248:13
+    |
+248 |         let near_miss_tol_sq = near_miss_tol * near_miss_tol;
+    |             ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_near_miss_tol_sq`
+
+warning: unused variable: `vi`
+   --> crates/draper-mesh/src/watertight.rs:327:22
+    |
+327 |                 let (vi, pi, fi) = &boundary_vertex_info[i];
+    |                      ^^ help: if this is intentional, prefix it with an underscore: `_vi`
+
+warning: unused variable: `vj`
+   --> crates/draper-mesh/src/watertight.rs:328:22
+    |
+328 |                 let (vj, pj, fj) = &boundary_vertex_info[j];
+    |                      ^^ help: if this is intentional, prefix it with an underscore: `_vj`
+
+warning: unused variable: `n_interior`
+   --> crates/draper-mesh/src/cdt_triangulate.rs:565:9
+    |
+565 |     let n_interior = add_interior_grid_points(
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_n_interior`
+
+warning: unused variable: `n_holes`
+   --> crates/draper-mesh/src/cdt_triangulate.rs:570:9
+    |
+570 |     let n_holes: usize = hole_indices.iter().map(|h| h.len()).sum();
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_n_holes`
+
+warning: variable `hole_offset` is assigned to, but never used
+   --> crates/draper-mesh/src/cdt_triangulate.rs:660:13
+    |
+660 |         let mut hole_offset = n_boundary;
+    |             ^^^^^^^^^^^^^^^
+    |
+    = note: consider using `_hole_offset` instead
+
+warning: value assigned to `hole_offset` is never read
+   --> crates/draper-mesh/src/cdt_triangulate.rs:671:13
+    |
+671 |             hole_offset += hole_idx.len();
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: unused variable: `all_3d`
+   --> crates/draper-mesh/src/cdt_triangulate.rs:903:5
+    |
+903 |     all_3d: &[Point3d],
+    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_all_3d`
+
+warning: function `project_points_nurbs_fast` is never used
+   --> crates/draper-mesh/src/triangulate.rs:190:4
+    |
+190 | fn project_points_nurbs_fast(surface: &Surface, points: &[Point3d]) -> Vec<Point2d> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `cap_grid_resolution` is never used
+   --> crates/draper-mesh/src/triangulate.rs:234:4
+    |
+234 | fn cap_grid_resolution(n_u: usize, n_v: usize, max_face_triangles: usize) -> (usize, usize) {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `collect_face_boundary_points` is never used
+   --> crates/draper-mesh/src/triangulate.rs:874:4
+    |
+874 | fn collect_face_boundary_points(face: &Face) -> Vec<Point3d> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `collect_face_boundary_points_with_uv` is never used
+   --> crates/draper-mesh/src/triangulate.rs:968:4
+    |
+968 | fn collect_face_boundary_points_with_uv(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `collect_face_hole_points_with_uv` is never used
+    --> crates/draper-mesh/src/triangulate.rs:1133:4
+     |
+1133 | fn collect_face_hole_points_with_uv(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `collect_face_hole_points` is never used
+    --> crates/draper-mesh/src/triangulate.rs:1230:4
+     |
+1230 | fn collect_face_hole_points(face: &Face) -> Vec<Vec<Point3d>> {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `extract_boundary_ring_at_v` is never used
+    --> crates/draper-mesh/src/triangulate.rs:2299:4
+     |
+2299 | fn extract_boundary_ring_at_v(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `snap_periodic_boundary_rows` is never used
+    --> crates/draper-mesh/src/triangulate.rs:2367:4
+     |
+2367 | fn snap_periodic_boundary_rows(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `snap_extrusion_boundary_vertices` is never used
+    --> crates/draper-mesh/src/triangulate.rs:2436:4
+     |
+2436 | fn snap_extrusion_boundary_vertices(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `triangulate_nurbs_grid_trimmed` is never used
+    --> crates/draper-mesh/src/triangulate.rs:3093:4
+     |
+3093 | fn triangulate_nurbs_grid_trimmed(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `triangulate_cylinder_face_with_boundary_uv` is never used
+    --> crates/draper-mesh/src/triangulate.rs:3840:4
+     |
+3840 | fn triangulate_cylinder_face_with_boundary_uv(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `extract_boundary_ring_at_v_from_uv` is never used
+    --> crates/draper-mesh/src/triangulate.rs:3874:4
+     |
+3874 | fn extract_boundary_ring_at_v_from_uv(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `is_nearly_coplanar` is never used
+    --> crates/draper-mesh/src/triangulate.rs:3998:4
+     |
+3998 | fn is_nearly_coplanar(points: &[Point3d], tolerance: f64) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `point_in_polygon_2d` is never used
+    --> crates/draper-mesh/src/triangulate.rs:4060:4
+     |
+4060 | fn point_in_polygon_2d(point: &Point2d, polygon: &[Point2d]) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `triangulate_cap_face` is never used
+    --> crates/draper-mesh/src/triangulate.rs:4283:4
+     |
+4283 | fn triangulate_cap_face(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `triangulate_surface_uv_trimmed` is never used
+    --> crates/draper-mesh/src/triangulate.rs:4349:4
+     |
+4349 | fn triangulate_surface_uv_trimmed(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `triangulate_cylinder_with_boundary` is never used
+    --> crates/draper-mesh/src/triangulate.rs:4952:4
+     |
+4952 | fn triangulate_cylinder_with_boundary(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `triangulate_cone_with_boundary` is never used
+    --> crates/draper-mesh/src/triangulate.rs:5002:4
+     |
+5002 | fn triangulate_cone_with_boundary(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `triangulate_sphere_with_boundary` is never used
+    --> crates/draper-mesh/src/triangulate.rs:5052:4
+     |
+5052 | fn triangulate_sphere_with_boundary(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `triangulate_cone_face_with_boundary` is never used
+    --> crates/draper-mesh/src/triangulate.rs:5111:4
+     |
+5111 | fn triangulate_cone_face_with_boundary(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `triangulate_sphere_face_with_boundary` is never used
+    --> crates/draper-mesh/src/triangulate.rs:5312:4
+     |
+5312 | fn triangulate_sphere_face_with_boundary(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `triangulate_torus_with_boundary` is never used
+    --> crates/draper-mesh/src/triangulate.rs:5505:4
+     |
+5505 | fn triangulate_torus_with_boundary(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `triangulate_generic_with_boundary` is never used
+    --> crates/draper-mesh/src/triangulate.rs:5569:4
+     |
+5569 | fn triangulate_generic_with_boundary(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `cylinder_uv_range` is never used
+    --> crates/draper-mesh/src/triangulate.rs:5653:4
+     |
+5653 | fn cylinder_uv_range(cyl: &CylinderSurface, boundary_points: &[Point3d]) -> (f64, f64, f64, f64) {
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: function `cone_uv_range` is never used
+    --> crates/draper-mesh/src/triangulate.rs:5670:4
+     |
+5670 | fn cone_uv_range(cone: &ConeSurface, boundary_points: &[Point3d]) -> (f64, f64, f64, f64) {
+     |    ^^^^^^^^^^^^^
+
+warning: function `sphere_uv_range` is never used
+    --> crates/draper-mesh/src/triangulate.rs:5687:4
+     |
+5687 | fn sphere_uv_range(sphere: &SphereSurface, boundary_points: &[Point3d]) -> (f64, f64, f64, f64) {
+     |    ^^^^^^^^^^^^^^^
+
+warning: function `torus_uv_range` is never used
+    --> crates/draper-mesh/src/triangulate.rs:5704:4
+     |
+5704 | fn torus_uv_range(torus: &TorusSurface, boundary_points: &[Point3d]) -> (f64, f64, f64, f64) {
+     |    ^^^^^^^^^^^^^^
+
+warning: function `compute_angular_range` is never used
+    --> crates/draper-mesh/src/triangulate.rs:5720:4
+     |
+5720 | fn compute_angular_range(angles: &[f64]) -> (f64, f64) {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `estimate_v_range` is never used
+    --> crates/draper-mesh/src/triangulate.rs:5773:4
+     |
+5773 | fn estimate_v_range(face: &Face) -> Option<(f64, f64)> {
+     |    ^^^^^^^^^^^^^^^^
+
+warning: function `snap_boundary_rings` is never used
+    --> crates/draper-mesh/src/triangulate.rs:5932:4
+     |
+5932 | fn snap_boundary_rings(
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: field `merge_tol` is never read
+    --> crates/draper-mesh/src/triangulate.rs:6827:5
+     |
+6819 | pub struct ChunkedBrepTriangulator {
+     |            ----------------------- field in this struct
+...
+6827 |     merge_tol: f64,
+     |     ^^^^^^^^^
+
+warning: function `triangle_area_2d` is never used
+   --> crates/draper-mesh/src/parametric_domain.rs:373:4
+    |
+373 | fn triangle_area_2d(x0: f64, y0: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64 {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `vertex_penetrates_triangle` is never used
+   --> crates/draper-mesh/src/certification.rs:987:4
+    |
+987 | fn vertex_penetrates_triangle(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `coplanar_triangles_intersect` is never used
+    --> crates/draper-mesh/src/certification.rs:1039:4
+     |
+1039 | fn coplanar_triangles_intersect(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `segments_intersect_3d` is never used
+    --> crates/draper-mesh/src/certification.rs:1062:4
+     |
+1062 | fn segments_intersect_3d(a0: &Point3d, a1: &Point3d, b0: &Point3d, b1: &Point3d) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `segment_segment_distance` is never used
+    --> crates/draper-mesh/src/certification.rs:1069:4
+     |
+1069 | fn segment_segment_distance(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `point_in_triangle_2d` is never used
+    --> crates/draper-mesh/src/certification.rs:1111:4
+     |
+1111 | fn point_in_triangle_2d(p: &Point3d, a: &Point3d, b: &Point3d, c: &Point3d) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `cut_text_holes_simple` is never used
+    --> crates/draper-mesh/src/text3d.rs:1128:4
+     |
+1128 | fn cut_text_holes_simple(
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `build_vertex_face_map` is never used
+    --> crates/draper-mesh/src/cdt_triangulate.rs:1255:4
+     |
+1255 | fn build_vertex_face_map(mesh: &TriangleMesh) -> Vec<std::collections::HashSet<u64>> {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `insert_point_in_triangle` is never used
+   --> crates/draper-mesh/src/custom_cdt.rs:184:4
+    |
+184 | fn insert_point_in_triangle(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `insert_point_on_edge` is never used
+   --> crates/draper-mesh/src/custom_cdt.rs:221:4
+    |
+221 | fn insert_point_on_edge(
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `find_triangle_with_edge` is never used
+   --> crates/draper-mesh/src/custom_cdt.rs:378:4
+    |
+378 | fn find_triangle_with_edge(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variable `R` should have a snake case name
+   --> crates/draper-mesh/src/text3d.rs:413:17
+    |
+413 |             let R = *major_radius;
+    |                 ^ help: convert the identifier to snake case: `r`
+    |
+    = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: variable `R` should have a snake case name
+   --> crates/draper-mesh/src/text3d.rs:959:17
+    |
+959 |             let R = *major_radius;
+    |                 ^ help: convert the identifier to snake case: `r`
+
+warning: `draper-mesh` (lib) generated 82 warnings (run `cargo fix --lib -p draper-mesh` to apply 25 suggestions)
+warning: unused import: `std::collections::HashMap`
+  --> crates/draper-step/src/parser.rs:11:5
+   |
+11 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `crate::schema::*`
+ --> crates/draper-step/src/exporter.rs:9:5
+  |
+9 | use crate::schema::*;
+  |     ^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Face` and `Shell`
+  --> crates/draper-step/src/exporter.rs:11:30
+   |
+11 | use draper_topology::{Solid, Shell, Face, Edge, Compound};
+   |                              ^^^^^  ^^^^
+
+warning: unused import: `Ellipse`
+  --> crates/draper-step/src/converter.rs:29:51
+   |
+29 |     NurbsSurface, Curve3d, Curve2d, Line, Circle, Ellipse, Arc, NurbsCurve,
+   |                                                   ^^^^^^^
+
+warning: unused imports: `smooth_normals_adaptive` and `smooth_normals`
+  --> crates/draper-step/src/converter.rs:32:175
+   |
+32 | ...idate_watertight, validate_edge_consistency, smooth_normals, smooth_normals_adaptive, filter_degenerate_triangles};
+   |                                                 ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `AdaptiveTolerance`
+  --> crates/draper-step/src/converter.rs:36:56
+   |
+36 | use draper_mesh::edge_cache::{EdgeDiscretizationCache, AdaptiveTolerance, deterministic_round_point};
+   |                                                        ^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `edge_start_vtx_id`
+  --> crates/draper-step/src/exporter.rs:60:41
+   |
+60 |                     let (edge_curve_id, edge_start_vtx_id, edge_end_vtx_id) = if let Some(e) = edge {
+   |                                         ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_edge_start_vtx_id`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `edge_end_vtx_id`
+  --> crates/draper-step/src/exporter.rs:60:60
+   |
+60 |                     let (edge_curve_id, edge_start_vtx_id, edge_end_vtx_id) = if let Some(e) = edge {
+   |                                                            ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_edge_end_vtx_id`
+
+warning: unused variable: `child_pd_id`
+    --> crates/draper-step/src/converter.rs:2505:32
+     |
+2505 |                 for &(nauo_id, child_pd_id, _) in children {
+     |                                ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_child_pd_id`
+
+warning: unused variable: `vp`
+    --> crates/draper-step/src/converter.rs:2659:18
+     |
+2659 |             for (vp, step_ids) in &vertex_pair_to_step_ids {
+     |                  ^^ help: if this is intentional, prefix it with an underscore: `_vp`
+
+warning: variable does not need to be mutable
+    --> crates/draper-step/src/converter.rs:3063:13
+     |
+3063 |         let mut timed_out_faces = 0;
+     |             ----^^^^^^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `timed_out_faces`
+    --> crates/draper-step/src/converter.rs:3063:13
+     |
+3063 |         let mut timed_out_faces = 0;
+     |             ^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_timed_out_faces`
+
+warning: unused variable: `face_start`
+    --> crates/draper-step/src/converter.rs:3088:17
+     |
+3088 |             let face_start = StdInstant::now();
+     |                 ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_face_start`
+
+warning: unused variable: `curve`
+    --> crates/draper-step/src/converter.rs:3269:25
+     |
+3269 |             if let Some(ref curve) = edge.curve {
+     |                         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_curve`
+
+warning: variable does not need to be mutable
+    --> crates/draper-step/src/converter.rs:5380:13
+     |
+5380 |         let mut basis = self.resolve_curve_2d(basis_id)?;
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `edge_t`
+    --> crates/draper-step/src/converter.rs:7672:21
+     |
+7672 |                 let edge_t = pmin + t_frac * e_range;
+     |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_edge_t`
+
+warning: unused variable: `tolerance`
+    --> crates/draper-step/src/converter.rs:8408:46
+     |
+8408 | fn deduplicate_points_3d(points: &[Point3d], tolerance: f64) -> Vec<Point3d> {
+     |                                              ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_tolerance`
+
+warning: field `surface_step_id` is never read
+  --> crates/draper-step/src/converter.rs:95:5
+   |
+83 | struct FaceData {
+   |        -------- field in this struct
+...
+95 |     surface_step_id: Option<i64>,
+   |     ^^^^^^^^^^^^^^^
+   |
+   = note: `FaceData` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: multiple methods are never used
+    --> crates/draper-step/src/converter.rs:3452:8
+     |
+ 949 | impl<'a> StepConverter<'a> {
+     | -------------------------- methods in this implementation
+...
+3452 |     fn find_nauo_transform_uncached(&self, nauo_id: i64, _related_pd_id: i64) -> Option<[[f64; 4]; 4]> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3468 |     fn cdsr_links_to_nauo(&self, cdsr: &crate::schema::StepEntity, nauo_id: i64) -> bool {
+     |        ^^^^^^^^^^^^^^^^^^
+...
+3507 |     fn extract_transform_from_srr(&self, srr: &crate::schema::StepEntity) -> Option<[[f64; 4]; 4]> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3563 |     fn compute_item_defined_transform(&self, idt: &crate::schema::StepEntity) -> Option<[[f64; 4]; 4]> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3617 |     fn compute_cartesian_transform(&self, cto: &crate::schema::StepEntity) -> Option<[[f64; 4]; 4]> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3700 |     fn get_direction_from_param(&self, param: &StepValue) -> Option<[f64; 3]> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3728 |     fn find_pd_brep_uncached(&self, pd_id: i64) -> Option<i64> {
+     |        ^^^^^^^^^^^^^^^^^^^^^
+...
+3767 |     fn find_brep_in_representation(&self, sr_id: i64) -> Option<i64> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3826 |     fn find_brep_via_srr(&self, sr_id: i64, depth: usize) -> Option<i64> {
+     |        ^^^^^^^^^^^^^^^^^
+...
+3910 |     fn absr_belongs_to_pd(&self, absr: &crate::schema::StepEntity, pd_id: i64) -> bool {
+     |        ^^^^^^^^^^^^^^^^^^
+...
+4548 |     fn extract_face_bounds(&self, face: &crate::schema::StepEntity) -> Vec<TopoEdge> {
+     |        ^^^^^^^^^^^^^^^^^^^
+...
+4561 |     fn extract_face_bounds_separated(&self, face: &crate::schema::StepEntity) -> (Vec<TopoEdge>, Vec<Vec<TopoEdge>>) {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+4629 |     fn resolve_face_bound(&self, bound_entity: &crate::schema::StepEntity) -> Option<Vec<TopoEdge>> {
+     |        ^^^^^^^^^^^^^^^^^^
+...
+4671 |     fn resolve_edge_loop(&self, loop_id: i64) -> Vec<TopoEdge> {
+     |        ^^^^^^^^^^^^^^^^^
+...
+4705 |     fn resolve_oriented_edge(&self, oe_id: i64) -> Option<TopoEdge> {
+     |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `find_bridge_edge_2d` is never used
+    --> crates/draper-step/src/converter.rs:8293:4
+     |
+8293 | fn find_bridge_edge_2d(outer_2d: &[Point2d], hole_2d: &[Point2d]) -> (usize, usize) {
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: variable `pN` should have a snake case name
+    --> crates/draper-step/src/converter.rs:7092:25
+     |
+7092 |                     let pN = pts.last();
+     |                         ^^ help: convert the identifier to snake case: `p_n`
+     |
+     = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: `draper-step` (lib) generated 21 warnings (run `cargo fix --lib -p draper-step` to apply 17 suggestions)
+warning: unused imports: `Arc`, `Circle`, `Curve3d`, `CylinderSurface`, `Line`, `Plane`, `Surface`, and `Vec3d`
+ --> crates/draper-core/src/operations.rs:6:27
+  |
+6 |     Point3d, Direction3d, Vec3d, Transform,
+  |                           ^^^^^
+7 |     Curve3d, Line, Circle, Arc,
+  |     ^^^^^^^  ^^^^  ^^^^^^  ^^^
+8 |     Surface, Plane, CylinderSurface,
+  |     ^^^^^^^  ^^^^^  ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `CoEdge`, `Edge`, `Face`, `ShapeBuilder`, `Shell`, `Vertex`, and `Wire`
+  --> crates/draper-core/src/operations.rs:11:12
+   |
+11 |     Solid, Shell, Face, Wire, CoEdge, Edge, Vertex,
+   |            ^^^^^  ^^^^  ^^^^  ^^^^^^  ^^^^  ^^^^^^
+12 |     ShapeBuilder,
+   |     ^^^^^^^^^^^^
+
+warning: unused imports: `CylinderSurface`, `Plane`, `Transform`, and `Vec3d`
+  --> crates/draper-core/src/boolean.rs:13:27
+   |
+13 |     Point3d, Direction3d, Vec3d,
+   |                           ^^^^^
+14 |     Surface, Plane, CylinderSurface,
+   |              ^^^^^  ^^^^^^^^^^^^^^^
+15 |     Transform,
+   |     ^^^^^^^^^
+
+warning: unused imports: `CoEdge`, `Edge`, `Face`, `ShapeBuilder`, `Vertex`, and `Wire`
+  --> crates/draper-core/src/boolean.rs:18:19
+   |
+18 |     Solid, Shell, Face, Wire, CoEdge, Edge, Vertex,
+   |                   ^^^^  ^^^^  ^^^^^^  ^^^^  ^^^^^^
+19 |     ShapeBuilder,
+   |     ^^^^^^^^^^^^
+
+warning: unused import: `crate::operations`
+  --> crates/draper-core/src/boolean.rs:21:5
+   |
+21 | use crate::operations;
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `solid`
+  --> crates/draper-core/src/operations.rs:17:20
+   |
+17 | pub fn fillet_edge(solid: &mut Solid, _edge_index: usize, radius: f64) -> Result<(), String> {
+   |                    ^^^^^ help: if this is intentional, prefix it with an underscore: `_solid`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `radius`
+  --> crates/draper-core/src/operations.rs:17:59
+   |
+17 | pub fn fillet_edge(solid: &mut Solid, _edge_index: usize, radius: f64) -> Result<(), String> {
+   |                                                           ^^^^^^ help: if this is intentional, prefix it with an underscore: `_radius`
+
+warning: unused variable: `solid`
+  --> crates/draper-core/src/operations.rs:31:21
+   |
+31 | pub fn chamfer_edge(solid: &mut Solid, _edge_index: usize, distance: f64) -> Result<(), String> {
+   |                     ^^^^^ help: if this is intentional, prefix it with an underscore: `_solid`
+
+warning: unused variable: `distance`
+  --> crates/draper-core/src/operations.rs:31:60
+   |
+31 | pub fn chamfer_edge(solid: &mut Solid, _edge_index: usize, distance: f64) -> Result<(), String> {
+   |                                                            ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_distance`
+
+warning: unused variable: `solid`
+  --> crates/draper-core/src/operations.rs:37:19
+   |
+37 | pub fn make_shell(solid: &mut Solid, thickness: f64) -> Result<(), String> {
+   |                   ^^^^^ help: if this is intentional, prefix it with an underscore: `_solid`
+
+warning: unused variable: `thickness`
+  --> crates/draper-core/src/operations.rs:37:38
+   |
+37 | pub fn make_shell(solid: &mut Solid, thickness: f64) -> Result<(), String> {
+   |                                      ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_thickness`
+
+warning: unused variable: `b`
+  --> crates/draper-core/src/boolean.rs:75:37
+   |
+75 | pub fn boolean_intersect(a: &Solid, b: &Solid) -> BooleanResult {
+   |                                     ^ help: if this is intentional, prefix it with an underscore: `_b`
+
+warning: unused variable: `hit`
+   --> crates/draper-core/src/boolean.rs:110:37
+    |
+110 |                         if let Some(hit) = draper_geometry::intersection::intersect_line_plane(&ray, plane) {
+    |                                     ^^^ help: if this is intentional, prefix it with an underscore: `_hit`
+
+warning: unused variable: `crank_r`
+   --> crates/draper-core/src/engine.rs:133:9
+    |
+133 |     let crank_r = config.crank_radius;
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_crank_r`
+
+warning: unused variable: `rod_journal_radius`
+   --> crates/draper-core/src/engine.rs:135:9
+    |
+135 |     let rod_journal_radius = 24.0;
+    |         ^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rod_journal_radius`
+
+warning: unused variable: `wall`
+   --> crates/draper-core/src/engine.rs:190:9
+    |
+190 |     let wall = config.wall_thickness;
+    |         ^^^^ help: if this is intentional, prefix it with an underscore: `_wall`
+
+warning: `draper-core` (lib) generated 16 warnings (run `cargo fix --lib -p draper-core` to apply 16 suggestions)
+warning: unused import: `generate_3draper_text`
+  --> crates/draper-viewer/src/app.rs:16:105
+   |
+16 | use draper_mesh::{triangulate_solid, TriangleMesh, TriangulationParams, check_manifold, ManifoldReport, generate_3draper_text, cut_t...
+   |                                                                                                         ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Point2d`
+  --> crates/draper-viewer/src/app.rs:18:32
+   |
+18 | use draper_geometry::{Surface, Point2d};
+   |                                ^^^^^^^
+
+warning: unnecessary parentheses around assigned value
+   --> crates/draper-viewer/src/camera.rs:376:21
+    |
+376 |         let ndc_x = (2.0 * (screen_pos[0]) / vw - 1.0);
+    |                     ^                                ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+376 -         let ndc_x = (2.0 * (screen_pos[0]) / vw - 1.0);
+376 +         let ndc_x = 2.0 * (screen_pos[0]) / vw - 1.0;
+    |
+
+warning: unnecessary parentheses around assigned value
+   --> crates/draper-viewer/src/camera.rs:377:21
+    |
+377 |         let ndc_y = (1.0 - 2.0 * (screen_pos[1]) / vh); // flip Y
+    |                     ^                                ^
+    |
+help: remove these parentheses
+    |
+377 -         let ndc_y = (1.0 - 2.0 * (screen_pos[1]) / vh); // flip Y
+377 +         let ndc_y = 1.0 - 2.0 * (screen_pos[1]) / vh; // flip Y
+    |
+
+warning: unused variable: `ui`
+    --> crates/draper-viewer/src/app.rs:3620:45
+     |
+3620 |                     ui.menu_button("File", |ui| {
+     |                                             ^^ help: if this is intentional, prefix it with an underscore: `_ui`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: enum `FileLoadResult` is never used
+   --> crates/draper-viewer/src/app.rs:334:6
+    |
+334 | enum FileLoadResult {
+    |      ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `controls_panel_open` is never read
+   --> crates/draper-viewer/src/app.rs:459:5
+    |
+344 | pub struct ViewerApp {
+    |            --------- field in this struct
+...
+459 |     controls_panel_open: bool,
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: enum `ChunkResult` is never used
+   --> crates/draper-viewer/src/app.rs:522:6
+    |
+522 | enum ChunkResult {
+    |      ^^^^^^^^^^^
+
+warning: methods `import_stl_from_bytes` and `import_step_from_str` are never used
+    --> crates/draper-viewer/src/app.rs:1961:8
+     |
+ 580 | impl ViewerApp {
+     | -------------- methods in this implementation
+...
+1961 |     fn import_stl_from_bytes(&mut self, data: &[u8], name: &str) {
+     |        ^^^^^^^^^^^^^^^^^^^^^
+...
+1973 |     fn import_step_from_str(&mut self, content: &str, name: &str) {
+     |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: `draper-viewer` (lib) generated 9 warnings (run `cargo fix --lib -p draper-viewer` to apply 5 suggestions)
+warning: field `inner` is never read
+   --> crates/draper-ffi/src/lib.rs:201:5
+    |
+200 | pub struct DraperSolid {
+    |            ----------- field in this struct
+201 |     inner: Solid,
+    |     ^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `draper-ffi` (lib) generated 1 warning
+warning: unused import: `PendingBrepInstance`
+  --> crates/draper-testing/src/bin/watertight_check.rs:10:54
+   |
+10 |     step_structure_lazy, OwnedStepConversionContext, PendingBrepInstance,
+   |                                                      ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `WatertightReport`
+  --> crates/draper-testing/src/bin/watertight_check.rs:12:40
+   |
+12 | use draper_mesh::{validate_watertight, WatertightReport};
+   |                                        ^^^^^^^^^^^^^^^^
+
+warning: unused variable: `i`
+  --> crates/draper-testing/src/bin/watertight_check.rs:74:10
+   |
+74 |     for (i, pending) in pending_instances.iter().enumerate() {
+   |          ^ help: if this is intentional, prefix it with an underscore: `_i`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Direction3d`
+   --> crates/draper-mesh/src/edge_cache.rs:898:34
+    |
+898 |     use draper_geometry::{Plane, Direction3d, Line2d};
+    |                                  ^^^^^^^^^^^
+
+warning: unused import: `Point3d`
+    --> crates/draper-mesh/src/parametric_domain.rs:2213:48
+     |
+2213 |         use draper_geometry::{CylinderSurface, Point3d, Surface};
+     |                                                ^^^^^^^
+
+warning: variable does not need to be mutable
+    --> crates/draper-mesh/src/parametric_domain.rs:2348:13
+     |
+2348 |         let mut boundary_uv: Vec<Point2d> = (0..n_pts)
+     |             ----^^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: `draper-testing` (bin "watertight_check" test) generated 3 warnings (run `cargo fix --bin "watertight_check" -p draper-testing --tests` to apply 3 suggestions)
+warning: `draper-mesh` (lib test) generated 85 warnings (82 duplicates) (run `cargo fix --lib -p draper-mesh --tests` to apply 3 suggestions)
+warning: methods `rotate_world_yaw` and `rotate_local_pitch` are never used
+   --> crates/draper-viewer/src/camera.rs:259:12
+    |
+132 | impl OrbitCamera {
+    | ---------------- methods in this implementation
+...
+259 |     pub fn rotate_world_yaw(&mut self, angle_rad: f32) {
+    |            ^^^^^^^^^^^^^^^^
+...
+265 |     pub fn rotate_local_pitch(&mut self, angle_rad: f32) {
+    |            ^^^^^^^^^^^^^^^^^^
+
+warning: field `mesh_bind_group_layout` is never read
+   --> crates/draper-viewer/src/renderer.rs:102:9
+    |
+ 80 | pub struct SceneResources {
+    |            -------------- field in this struct
+...
+102 |     pub mesh_bind_group_layout: wgpu::BindGroupLayout,
+    |         ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `color_view` is never read
+   --> crates/draper-viewer/src/renderer.rs:119:9
+    |
+118 | pub struct OffscreenResult {
+    |            --------------- field in this struct
+119 |     pub color_view: wgpu::TextureView,
+    |         ^^^^^^^^^^
+
+warning: `draper-viewer` (bin "draper-viewer" test) generated 12 warnings (9 duplicates)
+warning: `draper-ffi` (lib test) generated 1 warning (1 duplicate)
+warning: `draper-viewer` (lib test) generated 9 warnings (9 duplicates)
+   Compiling draper-testing v0.1.0 (/home/z/my-project/crates/draper-testing)
+warning: unused import: `draper_core::Document`
+ --> crates/draper-core/examples/engine_export.rs:8:5
+  |
+8 | use draper_core::Document;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `draper-core` (example "engine_export") generated 1 warning (run `cargo fix --example "engine_export" -p draper-core` to apply 1 suggestion)
+warning: unused variable: `result`
+  --> tools/src/bin/hang_diag.rs:47:13
+   |
+47 |         let result = std::thread::scope(|s| {
+   |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_result`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `draper-core` (lib test) generated 16 warnings (16 duplicates)
+warning: `draper-diag` (bin "hang_diag" test) generated 1 warning (run `cargo fix --bin "hang_diag" -p draper-diag --tests` to apply 1 suggestion)
+warning: `draper-step` (lib test) generated 21 warnings (21 duplicates)
+warning: variable `parse_fail` is assigned to, but never used
+   --> crates/draper-step/tests/nist_test_suite.rs:417:9
+    |
+417 |     let mut parse_fail = 0;
+    |         ^^^^^^^^^^^^^^
+    |
+    = note: consider using `_parse_fail` instead
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable `mesh_fail` is assigned to, but never used
+   --> crates/draper-step/tests/nist_test_suite.rs:419:9
+    |
+419 |     let mut mesh_fail = 0;
+    |         ^^^^^^^^^^^^^
+    |
+    = note: consider using `_mesh_fail` instead
+
+warning: value assigned to `parse_fail` is never read
+   --> crates/draper-step/tests/nist_test_suite.rs:441:17
+    |
+431 |                 parse_fail += 1;
+    |                 --------------- `parse_fail` is overwritten here before the previous value is read
+...
+441 |                 parse_fail += 1;
+    |                 ^^^^^^^^^^^^^^^ this value is reassigned later and never used
+    |
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `parse_fail` is never read
+   --> crates/draper-step/tests/nist_test_suite.rs:431:17
+    |
+431 |                 parse_fail += 1;
+    |                 ^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `mesh_fail` is never read
+   --> crates/draper-step/tests/nist_test_suite.rs:471:21
+    |
+471 |                     mesh_fail += 1;
+    |                     ^^^^^^^^^^^^^^ this value is reassigned later and never used
+...
+477 |                 mesh_fail += 1;
+    |                 -------------- `mesh_fail` is overwritten here before the previous value is read
+
+warning: value assigned to `mesh_fail` is never read
+   --> crates/draper-step/tests/nist_test_suite.rs:477:17
+    |
+477 |                 mesh_fail += 1;
+    |                 ^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: `draper-step` (test "nist_test_suite") generated 6 warnings
+warning: unused import: `TriangulationParams`
+ --> tools/src/bin/watertight_diag.rs:9:40
+  |
+9 | use draper_mesh::{validate_watertight, TriangulationParams};
+  |                                        ^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::path::Path`
+  --> crates/draper-step/tests/integration_test.rs:10:5
+   |
+10 | use std::path::Path;
+   |     ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `params`
+  --> crates/draper-step/tests/integration_test.rs:36:9
+   |
+36 |     let params = TriangulationParams::default();
+   |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_params`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `params`
+  --> crates/draper-step/tests/integration_test.rs:92:9
+   |
+92 |     let params = TriangulationParams {
+   |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_params`
+
+warning: `draper-diag` (bin "watertight_diag" test) generated 1 warning (run `cargo fix --bin "watertight_diag" -p draper-diag --tests` to apply 1 suggestion)
+warning: `draper-step` (test "integration_test") generated 3 warnings (run `cargo fix --test "integration_test" -p draper-step` to apply 3 suggestions)
+warning: variable does not need to be mutable
+    --> crates/draper-topology/src/healing.rs:1683:13
+     |
+1683 |         let mut box_solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+     |             ----^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> crates/draper-topology/src/healing.rs:1729:13
+     |
+1729 |         let mut shell = Shell::new(faces);
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `e_shared`
+    --> crates/draper-topology/src/healing.rs:2114:13
+     |
+2114 |         let e_shared = Edge::new_line(p1, p2); // shared along u=π/2
+     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_e_shared`
+
+warning: variable `expected_K` should have a snake case name
+    --> crates/draper-geometry/src/surface.rs:2167:13
+     |
+2167 |         let expected_K = expected_k * expected_k;
+     |             ^^^^^^^^^^ help: convert the identifier to snake case (notice the capitalization): `expected_k`
+
+warning: variable `expected_H` should have a snake case name
+    --> crates/draper-geometry/src/surface.rs:2171:13
+     |
+2171 |         let expected_H = expected_k;
+     |             ^^^^^^^^^^ help: convert the identifier to snake case: `expected_h`
+
+warning: `draper-topology` (lib test) generated 6 warnings (3 duplicates) (run `cargo fix --lib -p draper-topology --tests` to apply 3 suggestions)
+warning: `draper-geometry` (lib test) generated 14 warnings (12 duplicates)
+error[E0061]: this function takes 0 arguments but 2 arguments were supplied
+   --> crates/draper-testing/src/watertight.rs:108:22
+    |
+108 |         let result = test_watertight_with_genus(&mesh, 0);
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^ -----  - unexpected argument #2 of type `{integer}`
+    |                                                 |
+    |                                                 unexpected argument #1 of type `&draper_mesh::TriangleMesh`
+    |
+note: function defined here
+   --> crates/draper-testing/src/watertight.rs:106:8
+    |
+106 |     fn test_watertight_with_genus() {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: remove the extra arguments
+    |
+108 -         let result = test_watertight_with_genus(&mesh, 0);
+108 +         let result = test_watertight_with_genus();
+    |
+
+error[E0609]: no field `is_watertight` on type `()`
+   --> crates/draper-testing/src/watertight.rs:109:24
+    |
+109 |         assert!(result.is_watertight);
+    |                        ^^^^^^^^^^^^^ unknown field
+
+error[E0609]: no field `expected_euler` on type `()`
+   --> crates/draper-testing/src/watertight.rs:110:27
+    |
+110 |         assert_eq!(result.expected_euler, 2);
+    |                           ^^^^^^^^^^^^^^ unknown field
+
+error[E0609]: no field `euler_char` on type `()`
+   --> crates/draper-testing/src/watertight.rs:111:27
+    |
+111 |         assert_eq!(result.euler_char, result.expected_euler);
+    |                           ^^^^^^^^^^ unknown field
+
+error[E0609]: no field `expected_euler` on type `()`
+   --> crates/draper-testing/src/watertight.rs:111:46
+    |
+111 |         assert_eq!(result.euler_char, result.expected_euler);
+    |                                              ^^^^^^^^^^^^^^ unknown field
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/validity.rs:180:25
+    |
+180 |         mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0));
+    |                         ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/validity.rs:181:25
+    |
+181 |         mesh.add_vertex(Point3d::new(1.0, 0.0, 0.0));
+    |                         ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/validity.rs:182:25
+    |
+182 |         mesh.add_vertex(Point3d::new(0.5, 1.0, 0.0));
+    |                         ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/validity.rs:194:25
+    |
+194 |         mesh.add_vertex(Point3d::new(f64::NAN, 0.0, 0.0));
+    |                         ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/validity.rs:195:25
+    |
+195 |         mesh.add_vertex(Point3d::new(1.0, 0.0, 0.0));
+    |                         ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/validity.rs:196:25
+    |
+196 |         mesh.add_vertex(Point3d::new(0.5, 1.0, 0.0));
+    |                         ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/validity.rs:207:25
+    |
+207 |         mesh.add_vertex(Point3d::new(f64::INFINITY, 0.0, 0.0));
+    |                         ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/validity.rs:208:25
+    |
+208 |         mesh.add_vertex(Point3d::new(1.0, 0.0, 0.0));
+    |                         ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/validity.rs:209:25
+    |
+209 |         mesh.add_vertex(Point3d::new(0.5, 1.0, 0.0));
+    |                         ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/validity.rs:220:25
+    |
+220 |         mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0));
+    |                         ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/validity.rs:221:25
+    |
+221 |         mesh.add_vertex(Point3d::new(1.0, 0.0, 0.0));
+    |                         ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/validity.rs:222:25
+    |
+222 |         mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0)); // Same as vertex 0 → zero area
+    |                         ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/validity.rs:233:25
+    |
+233 |         mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0));
+    |                         ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/validity.rs:234:25
+    |
+234 |         mesh.add_vertex(Point3d::new(1.0, 0.0, 0.0));
+    |                         ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/validity.rs:235:25
+    |
+235 |         mesh.add_vertex(Point3d::new(0.5, 1.0, 0.0)); // Normal
+    |                         ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/validity.rs:236:25
+    |
+236 |         mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0)); // Degenerate
+    |                         ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/validity.rs:248:25
+    |
+248 |         mesh.add_vertex(Point3d::new(f64::NAN, 0.0, 0.0)); // NaN vertex
+    |                         ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/validity.rs:249:25
+    |
+249 |         mesh.add_vertex(Point3d::new(1.0, 0.0, 0.0));
+    |                         ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/validity.rs:250:25
+    |
+250 |         mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0)); // Zero-area with v0
+    |                         ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/normals.rs:120:13
+    |
+120 |             Point3d::new(0.0, 0.0, 0.0),
+    |             ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/normals.rs:121:13
+    |
+121 |             Point3d::new(1.0, 0.0, 0.0),
+    |             ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/normals.rs:122:13
+    |
+122 |             Point3d::new(1.0, 1.0, 0.0),
+    |             ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/normals.rs:123:13
+    |
+123 |             Point3d::new(0.0, 1.0, 0.0),
+    |             ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/normals.rs:124:13
+    |
+124 |             Point3d::new(0.0, 0.0, 1.0),
+    |             ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/normals.rs:125:13
+    |
+125 |             Point3d::new(1.0, 0.0, 1.0),
+    |             ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/normals.rs:126:13
+    |
+126 |             Point3d::new(1.0, 1.0, 1.0),
+    |             ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/normals.rs:127:13
+    |
+127 |             Point3d::new(0.0, 1.0, 1.0),
+    |             ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/normals.rs:162:25
+    |
+162 |         mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0));
+    |                         ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/normals.rs:163:25
+    |
+163 |         mesh.add_vertex(Point3d::new(1.0, 0.0, 0.0));
+    |                         ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/normals.rs:164:25
+    |
+164 |         mesh.add_vertex(Point3d::new(0.5, 1.0, 0.0));
+    |                         ^^^^^^^ use of undeclared type `Point3d`
+
+error[E0433]: cannot find type `Point3d` in this scope
+   --> crates/draper-testing/src/normals.rs:165:25
+    |
+165 |         mesh.add_vertex(Point3d::new(0.5, 0.5, 1.0));
+    |                         ^^^^^^^ use of undeclared type `Point3d`
+
+Some errors have detailed explanations: E0061, E0433, E0609.
+For more information about an error, try `rustc --explain E0061`.
+error: could not compile `draper-testing` (lib test) due to 36 previous errors
+exit: 101

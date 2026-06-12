@@ -1,0 +1,839 @@
+     1→// SPDX-License-Identifier: GPL-3.0-or-later
+     2→// Copyright (c) 2026 KernelDev
+     3→//! Mesh data structures.
+     4→
+     5→use draper_geometry::Point3d;
+     6→use std::cell::Cell;
+     7→use std::collections::HashMap;
+     8→use std::fmt;
+     9→
+    10→/// A bit-exact hash key for a 3D point, used for vertex deduplication.
+    11→///
+    12→/// Since the edge cache applies deterministic rounding (48-bit mantissa precision),
+    13→/// shared-edge vertices produce bit-identical f64 values. Using the raw bit
+    14→/// representation as a hash key is both correct and fast — no epsilon comparison
+    15→/// is needed because the rounding already guarantees consistent bit patterns.
+    16→#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    17→pub struct VertexKey(u64, u64, u64);
+    18→
+    19→impl VertexKey {
+    20→    /// Create a bit-exact key from a Point3d.
+    21→    #[inline]
+    22→    pub fn from_point(p: &Point3d) -> Self {
+    23→        VertexKey(p.x.to_bits(), p.y.to_bits(), p.z.to_bits())
+    24→    }
+    25→}
+    26→
+    27→/// A vertex deduplication map that tracks which 3D points have already been
+    28→/// added to a mesh, mapping them to vertex indices.
+    29→///
+    30→/// Used during the "topology-first" merge step to ensure that shared-edge
+    31→/// vertices from different faces get the same vertex index in the final mesh,
+    32→/// making it watertight by construction.
+    33→///
+    34→/// # Two-tier lookup strategy:
+    35→///
+    36→/// 1. **Bit-exact**: First tries `VertexKey` (bit-exact f64 comparison).
+    37→///    This is O(1) and handles the common case where the edge cache produces
+    38→///    bit-identical coordinates for shared edges.
+    39→///
+    40→/// 2. **Tolerance-based**: Falls back to spatial hash grid for near-miss
+    41→///    vertices that are geometrically close but not bit-identical. This
+    42→///    handles the case where adjacent faces use different STEP EDGE_CURVE
+    43→///    entities on their common geometric boundary (the edge cache can't
+    44→///    produce bit-identical points because the STEP entities differ).
+    45→pub struct VertexDedupMap {
+    46→    /// Bit-exact vertex → index mapping (fast path).
+    47→    exact: HashMap<VertexKey, u32>,
+    48→    /// Spatial hash grid for tolerance-based near-miss lookups (slow path).
+    49→    /// Maps (cell_x, cell_y, cell_z) → list of (vertex_index, Point3d).
+    50→    spatial: HashMap<(i64, i64, i64), Vec<(u32, Point3d)>>,
+    51→    /// Cell size for spatial hash (= merge tolerance).
+    52→    tolerance: f64,
+    53→    /// Whether tolerance-based fallback is enabled.
+    54→    use_tolerance: bool,
+    55→    /// Number of bit-exact matches (edge cache working correctly).
+    56→    exact_hits: Cell<usize>,
+    57→    /// Number of tolerance-based matches (near-miss from non-cached edges).
+    58→    tolerance_hits: Cell<usize>,
+    59→    /// Number of new vertex insertions.
+    60→    misses: Cell<usize>,
+    61→}
+    62→
+    63→impl VertexDedupMap {
+    64→    /// Create a new dedup map with bit-exact comparison only.
+    65→    /// Use this when edge cache guarantees bit-identical 3D coordinates.
+    66→    pub fn new() -> Self {
+    67→        Self {
+    68→            exact: HashMap::new(),
+    69→            spatial: HashMap::new(),
+    70→            tolerance: 0.0,
+    71→            use_tolerance: false,
+    72→            exact_hits: Cell::new(0),
+    73→            tolerance_hits: Cell::new(0),
+    74→            misses: Cell::new(0),
+    75→        }
+    76→    }
+    77→
+    78→    /// Create a new dedup map with tolerance-based fallback.
+    79→    /// Use this when some edges lack step_id (step_id==0) and their
+    80→    /// discretization may produce near-identical but not bit-identical vertices.
+    81→    /// The tolerance should be small enough to not collapse distinct features
+    82→    /// but large enough to catch edge cache near-misses.
+    83→    /// Recommended: model_scale * 1e-6 (1 PPM) for production,
+    84→    ///              model_scale * 1e-4 (100 PPM) as diagnostic.
+    85→    pub fn with_tolerance(tolerance: f64) -> Self {
+    86→        Self {
+    87→            exact: HashMap::new(),
+    88→            spatial: HashMap::new(),
+    89→            tolerance: tolerance.max(1e-15),
+    90→            use_tolerance: tolerance > 0.0,
+    91→            exact_hits: Cell::new(0),
+    92→            tolerance_hits: Cell::new(0),
+    93→            misses: Cell::new(0),
+    94→        }
+    95→    }
+    96→
+    97→    /// Look up a vertex. Returns Some(index) if found, None otherwise.
+    98→    /// First tries bit-exact match, then tolerance-based spatial lookup.
+    99→    /// Tracks hit statistics: exact_hits (bit-identical), tolerance_hits (near-miss).
+   100→    pub fn get(&self, p: &Point3d) -> Option<u32> {
+   101→        // Fast path: bit-exact match
+   102→        let key = VertexKey::from_point(p);
+   103→        if let Some(&idx) = self.exact.get(&key) {
+   104→            self.exact_hits.set(self.exact_hits.get() + 1);
+   105→            return Some(idx);
+   106→        }
+   107→
+   108→        // Slow path: tolerance-based spatial lookup
+   109→        if self.use_tolerance {
+   110→            let cell = self.cell_key(p);
+   111→            if let Some(candidates) = self.spatial.get(&cell) {
+   112→                let tol_sq = self.tolerance * self.tolerance;
+   113→                for &(idx, ref vp) in candidates {
+   114→                    let dx = p.x - vp.x;
+   115→                    let dy = p.y - vp.y;
+   116→                    let dz = p.z - vp.z;
+   117→                    if dx * dx + dy * dy + dz * dz <= tol_sq {
+   118→                        self.tolerance_hits.set(self.tolerance_hits.get() + 1);
+   119→                        return Some(idx);
+   120→                    }
+   121→                }
+   122→            }
+   123→            // Also check neighboring cells (vertex may be near cell boundary)
+   124→            let cx = (p.x / self.tolerance).floor() as i64;
+   125→            let cy = (p.y / self.tolerance).floor() as i64;
+   126→            let cz = (p.z / self.tolerance).floor() as i64;
+   127→            for dx in -1i64..=1 {
+   128→                for dy in -1i64..=1 {
+   129→                    for dz in -1i64..=1 {
+   130→                        if dx == 0 && dy == 0 && dz == 0 { continue; }
+   131→                        let neighbor = (cx + dx, cy + dy, cz + dz);
+   132→                        if let Some(candidates) = self.spatial.get(&neighbor) {
+   133→                            let tol_sq = self.tolerance * self.tolerance;
+   134→                            for &(idx, ref vp) in candidates {
+   135→                                let ddx = p.x - vp.x;
+   136→                                let ddy = p.y - vp.y;
+   137→                                let ddz = p.z - vp.z;
+   138→                                if ddx * ddx + ddy * ddy + ddz * ddz <= tol_sq {
+   139→                                    self.tolerance_hits.set(self.tolerance_hits.get() + 1);
+   140→                                    return Some(idx);
+   141→                                }
+   142→                            }
+   143→                        }
+   144→                    }
+   145→                }
+   146→            }
+   147→        }
+   148→
+   149→        None
+   150→    }
+   151→
+   152→    /// Insert a vertex with its index.
+   153→    pub fn insert(&mut self, p: &Point3d, idx: u32) {
+   154→        let key = VertexKey::from_point(p);
+   155→        self.exact.insert(key, idx);
+   156→        self.misses.set(self.misses.get() + 1);
+   157→
+   158→        if self.use_tolerance {
+   159→            let cell = self.cell_key(p);
+   160→            self.spatial.entry(cell).or_default().push((idx, *p));
+   161→        }
+   162→    }
+   163→
+   164→    /// Compute spatial hash cell key for a point.
+   165→    #[inline]
+   166→    fn cell_key(&self, p: &Point3d) -> (i64, i64, i64) {
+   167→        (
+   168→            (p.x / self.tolerance).floor() as i64,
+   169→            (p.y / self.tolerance).floor() as i64,
+   170→            (p.z / self.tolerance).floor() as i64,
+   171→        )
+   172→    }
+   173→
+   174→    /// Return dedup statistics: (exact_hits, tolerance_hits, misses).
+   175→    /// - exact_hits: bit-identical matches (edge cache working correctly)
+   176→    /// - tolerance_hits: near-miss matches (non-cached edges or FP drift)
+   177→    /// - misses: new vertex insertions
+   178→    pub fn stats(&self) -> (usize, usize, usize) {
+   179→        (self.exact_hits.get(), self.tolerance_hits.get(), self.misses.get())
+   180→    }
+   181→
+   182→    /// Returns the number of bit-exact entries.
+   183→    pub fn len(&self) -> usize {
+   184→        self.exact.len()
+   185→    }
+   186→
+   187→    /// Returns whether the map is empty.
+   188→    pub fn is_empty(&self) -> bool {
+   189→        self.exact.is_empty()
+   190→    }
+   191→}
+   192→
+   193→/// A 3D triangle mesh.
+   194→#[derive(Clone, Debug)]
+   195→#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+   196→pub struct TriangleMesh {
+   197→    /// Vertex positions.
+   198→    pub vertices: Vec<Point3d>,
+   199→    /// Triangle indices (3 vertex indices per triangle).
+   200→    pub triangles: Vec<[u32; 3]>,
+   201→    /// Optional vertex normals.
+   202→    pub normals: Option<Vec<[f64; 3]>>,
+   203→    /// Optional triangle normals.
+   204→    pub face_normals: Option<Vec<[f64; 3]>>,
+   205→    /// Optional per-triangle RGBA colors (0..1 range).
+   206→    pub triangle_colors: Option<Vec<[f32; 4]>>,
+   207→    /// Optional per-triangle face ID (TopoId of the source BRep face).
+   208→    /// Used for selection, highlighting, and UV grid display.
+   209→    pub triangle_face_ids: Option<Vec<u64>>,
+   210→}
+   211→
+   212→impl TriangleMesh {
+   213→    pub fn new() -> Self {
+   214→        Self {
+   215→            vertices: Vec::new(),
+   216→            triangles: Vec::new(),
+   217→            normals: None,
+   218→            face_normals: None,
+   219→            triangle_colors: None,
+   220→            triangle_face_ids: None,
+   221→        }
+   222→    }
+   223→
+   224→    /// Create from vertices and triangle indices.
+   225→    pub fn from_data(vertices: Vec<Point3d>, triangles: Vec<[u32; 3]>) -> Self {
+   226→        Self {
+   227→            vertices,
+   228→            triangles,
+   229→            normals: None,
+   230→            face_normals: None,
+   231→            triangle_colors: None,
+   232→            triangle_face_ids: None,
+   233→        }
+   234→    }
+   235→
+   236→    /// Add a vertex and return its index.
+   237→    pub fn add_vertex(&mut self, p: Point3d) -> u32 {
+   238→        let idx = self.vertices.len() as u32;
+   239→        self.vertices.push(p);
+   240→        idx
+   241→    }
+   242→
+   243→    /// Add a vertex normal. Call after add_vertex with the returned index.
+   244→    pub fn add_vertex_normal(&mut self, _idx: u32, normal: [f64; 3]) {
+   245→        if self.normals.is_none() {
+   246→            self.normals = Some(vec![[0.0, 0.0, 1.0]; self.vertices.len() - 1]);
+   247→        }
+   248→        if let Some(ref mut normals) = self.normals {
+   249→            normals.push(normal);
+   250→        }
+   251→    }
+   252→
+   253→    /// Add a triangle.
+   254→    pub fn add_triangle(&mut self, i: u32, j: u32, k: u32) {
+   255→        self.triangles.push([i, j, k]);
+   256→    }
+   257→
+   258→    /// Number of vertices.
+   259→    pub fn vertex_count(&self) -> usize {
+   260→        self.vertices.len()
+   261→    }
+   262→
+   263→    /// Number of triangles.
+   264→    pub fn triangle_count(&self) -> usize {
+   265→        self.triangles.len()
+   266→    }
+   267→
+   268→    /// Compute face normals.
+   269→    pub fn compute_face_normals(&mut self) {
+   270→        let mut normals = Vec::with_capacity(self.triangles.len());
+   271→        for tri in &self.triangles {
+   272→            let v0 = self.vertices[tri[0] as usize];
+   273→            let v1 = self.vertices[tri[1] as usize];
+   274→            let v2 = self.vertices[tri[2] as usize];
+   275→
+   276→            let e1 = (v1.x - v0.x, v1.y - v0.y, v1.z - v0.z);
+   277→            let e2 = (v2.x - v0.x, v2.y - v0.y, v2.z - v0.z);
+   278→
+   279→            let nx = e1.1 * e2.2 - e1.2 * e2.1;
+   280→            let ny = e1.2 * e2.0 - e1.0 * e2.2;
+   281→            let nz = e1.0 * e2.1 - e1.1 * e2.0;
+   282→            let len = (nx * nx + ny * ny + nz * nz).sqrt();
+   283→            if len > 1e-15 {
+   284→                normals.push([nx / len, ny / len, nz / len]);
+   285→            } else {
+   286→                normals.push([0.0, 0.0, 1.0]);
+   287→            }
+   288→        }
+   289→        self.face_normals = Some(normals);
+   290→    }
+   291→
+   292→    /// Merge another mesh into this one.
+   293→    pub fn merge(&mut self, other: &TriangleMesh) {
+   294→        let offset = self.vertices.len() as u32;
+   295→        self.vertices.extend(other.vertices.iter().cloned());
+   296→        for tri in &other.triangles {
+   297→            self.triangles.push([tri[0] + offset, tri[1] + offset, tri[2] + offset]);
+   298→        }
+   299→        // Merge vertex normals
+   300→        match (&mut self.normals, &other.normals) {
+   301→            (Some(ref mut self_normals), Some(ref other_normals)) => {
+   302→                self_normals.extend(other_normals.iter().cloned());
+   303→            }
+   304→            (None, Some(ref other_normals)) => {
+   305→                // We need to fill in default normals for existing vertices
+   306→                let mut combined = vec![[0.0, 0.0, 1.0]; self.vertices.len() - other.vertices.len()];
+   307→                combined.extend(other_normals.iter().cloned());
+   308→                self.normals = Some(combined);
+   309→            }
+   310→            _ => {}
+   311→        }
+   312→        // Merge face normals (per-triangle)
+   313→        if self.face_normals.is_none() && other.face_normals.is_some() {
+   314→            let existing_count = self.triangles.len() - other.triangles.len();
+   315→            self.face_normals = Some(vec![[0.0, 0.0, 1.0]; existing_count]);
+   316→        }
+   317→        match (&mut self.face_normals, &other.face_normals) {
+   318→            (Some(ref mut dest), Some(ref src)) => {
+   319→                dest.extend(src.iter().cloned());
+   320→            }
+   321→            _ => {}
+   322→        }
+   323→        // Merge triangle colors (per-triangle)
+   324→        if self.triangle_colors.is_none() && other.triangle_colors.is_some() {
+   325→            let existing_count = self.triangles.len() - other.triangles.len();
+   326→            self.triangle_colors = Some(vec![[0.62, 0.65, 0.70, 1.0]; existing_count]);
+   327→        }
+   328→        match (&mut self.triangle_colors, &other.triangle_colors) {
+   329→            (Some(ref mut dest), Some(ref src)) => {
+   330→                dest.extend(src.iter().cloned());
+   331→            }
+   332→            _ => {}
+   333→        }
+   334→        // Merge face IDs
+   335→        if self.triangle_face_ids.is_none() && other.triangle_face_ids.is_some() {
+   336→            let existing_count = self.triangles.len() - other.triangles.len();
+   337→            self.triangle_face_ids = Some(vec![0; existing_count]);
+   338→        }
+   339→        match (&mut self.triangle_face_ids, &other.triangle_face_ids) {
+   340→            (Some(ref mut ids), Some(ref other_ids)) => {
+   341→                ids.extend(other_ids.iter().cloned());
+   342→            }
+   343→            _ => {}
+   344→        }
+   345→    }
+   346→
+   347→    /// Merge another mesh into this one with vertex deduplication.
+   348→    ///
+   349→    /// This is the **topology-first** merge: when two faces share an edge,
+   350→    /// their boundary vertices have identical 3D coordinates (guaranteed by
+   351→    /// the `EdgeDiscretizationCache` with deterministic rounding). Instead of
+   352→    /// blindly appending all vertices with an offset (like `merge()`), this
+   353→    /// method reuses existing vertex indices for points that are already
+   354→    /// present in the accumulated mesh.
+   355→    ///
+   356→    /// # How it works
+   357→    ///
+   358→    /// 1. For each vertex in `other`, compute a `VertexKey` from its bit-exact
+   359→    ///    coordinates.
+   360→    /// 2. If the key exists in `dedup_map`, reuse the existing vertex index.
+   361→    /// 3. Otherwise, add the vertex and store its index in `dedup_map`.
+   362→    /// 4. Remap triangle indices from `other`'s local indices to the
+   363→    ///    (deduplicated) global indices.
+   364→    ///
+   365→    /// # Arguments
+   366→    ///
+   367→    /// * `other` — The per-face mesh to merge in.
+   368→    /// * `dedup_map` — A mutable vertex deduplication map that persists
+   369→    ///   across calls. Must be created once before the first call and reused
+   370→    ///   for all subsequent face merges in the same solid.
+   371→    ///
+   372→    /// # Why this matters
+   373→    ///
+   374→    /// Without deduplication, shared-edge vertices get different indices in
+   375→    /// the final mesh, producing boundary edges. The mesh is NOT watertight
+   376→    /// even though the edge cache guarantees bit-identical 3D coordinates.
+   377→    /// With deduplication, shared vertices get the same index, making the
+   378→    /// mesh watertight **by construction** — no post-hoc repair needed.
+   379→    pub fn merge_deduplicating(&mut self, other: &TriangleMesh, dedup_map: &mut VertexDedupMap) {
+   380→        // Save pre-merge vertex count for correct normals sizing
+   381→        let old_vertex_count = self.vertices.len();
+   382→
+   383→        // Build index remapping: other's local vertex index → global index
+   384→        let mut index_map: Vec<u32> = Vec::with_capacity(other.vertices.len());
+   385→
+   386→        for vertex in &other.vertices {
+   387→            if let Some(existing_idx) = dedup_map.get(vertex) {
+   388→                // Vertex already exists — reuse its index
+   389→                index_map.push(existing_idx);
+   390→            } else {
+   391→                // New vertex — add to mesh and record in dedup map
+   392→                let new_idx = self.vertices.len() as u32;
+   393→                self.vertices.push(*vertex);
+   394→                dedup_map.insert(vertex, new_idx);
+   395→                index_map.push(new_idx);
+   396→            }
+   397→        }
+   398→
+   399→        // Add triangles with remapped indices
+   400→        for tri in &other.triangles {
+   401→            self.triangles.push([
+   402→                index_map[tri[0] as usize],
+   403→                index_map[tri[1] as usize],
+   404→                index_map[tri[2] as usize],
+   405→            ]);
+   406→        }
+   407→
+   408→        // Handle vertex normals: when deduplicating, the first face's normal
+   409→        // wins for shared vertices. This is acceptable because normals are
+   410→        // later smoothed by `smooth_normals_adaptive` which computes proper
+   411→        // averaged normals across shared edges.
+   412→        match (&mut self.normals, &other.normals) {
+   413→            (Some(ref mut self_normals), Some(ref other_normals)) => {
+   414→                // For new vertices, add their normals. For reused vertices,
+   415→                // skip (keep the first face's normal).
+   416→                for (i, _vertex) in other.vertices.iter().enumerate() {
+   417→                    let global_idx = index_map[i] as usize;
+   418→                    // Only add normal if this is a new vertex
+   419→                    if global_idx >= self_normals.len() {
+   420→                        self_normals.push(other_normals[i]);
+   421→                    }
+   422→                }
+   423→            }
+   424→            (None, Some(ref other_normals)) => {
+   425→                // Fill default normals for pre-existing vertices that don't
+   426→                // have normals yet, then add normals for new vertices.
+   427→                // Use old_vertex_count (saved before merge) to avoid underflow.
+   428→                let mut combined = vec![[0.0, 0.0, 1.0]; old_vertex_count];
+   429→                for (i, _vertex) in other.vertices.iter().enumerate() {
+   430→                    let global_idx = index_map[i] as usize;
+   431→                    if global_idx >= combined.len() {
+   432→                        combined.push(other_normals[i]);
+   433→                    }
+   434→                }
+   435→                self.normals = Some(combined);
+   436→            }
+   437→            _ => {}
+   438→        }
+   439→
+   440→        // Merge face normals (per-triangle, no deduplication needed)
+   441→        if self.face_normals.is_none() && other.face_normals.is_some() {
+   442→            let existing_count = self.triangles.len() - other.triangles.len();
+   443→            self.face_normals = Some(vec![[0.0, 0.0, 1.0]; existing_count]);
+   444→        }
+   445→        match (&mut self.face_normals, &other.face_normals) {
+   446→            (Some(ref mut dest), Some(ref src)) => {
+   447→                dest.extend(src.iter().cloned());
+   448→            }
+   449→            _ => {}
+   450→        }
+   451→
+   452→        // Merge triangle colors (per-triangle, no deduplication needed)
+   453→        if self.triangle_colors.is_none() && other.triangle_colors.is_some() {
+   454→            let existing_count = self.triangles.len() - other.triangles.len();
+   455→            self.triangle_colors = Some(vec![[0.62, 0.65, 0.70, 1.0]; existing_count]);
+   456→        }
+   457→        match (&mut self.triangle_colors, &other.triangle_colors) {
+   458→            (Some(ref mut dest), Some(ref src)) => {
+   459→                dest.extend(src.iter().cloned());
+   460→            }
+   461→            _ => {}
+   462→        }
+   463→
+   464→        // Merge face IDs (per-triangle, no deduplication needed)
+   465→        if self.triangle_face_ids.is_none() && other.triangle_face_ids.is_some() {
+   466→            let existing_count = self.triangles.len() - other.triangles.len();
+   467→            self.triangle_face_ids = Some(vec![0; existing_count]);
+   468→        }
+   469→        match (&mut self.triangle_face_ids, &other.triangle_face_ids) {
+   470→            (Some(ref mut ids), Some(ref other_ids)) => {
+   471→                ids.extend(other_ids.iter().cloned());
+   472→            }
+   473→            _ => {}
+   474→        }
+   475→    }
+   476→
+   477→    /// Merge another mesh with a uniform color applied to all its triangles.
+   478→    pub fn merge_with_color(&mut self, other: &TriangleMesh, color: [f32; 4]) {
+   479→        let offset = self.vertices.len() as u32;
+   480→        self.vertices.extend(other.vertices.iter().cloned());
+   481→        for tri in &other.triangles {
+   482→            self.triangles.push([tri[0] + offset, tri[1] + offset, tri[2] + offset]);
+   483→        }
+   484→        if self.triangle_colors.is_none() {
+   485→            let existing_count = self.triangles.len() - other.triangles.len();
+   486→            self.triangle_colors = Some(vec![[0.62, 0.65, 0.70, 1.0]; existing_count]);
+   487→        }
+   488→        if let Some(ref mut colors) = self.triangle_colors {
+   489→            for _ in 0..other.triangles.len() {
+   490→                colors.push(color);
+   491→            }
+   492→        }
+   493→        // Merge vertex normals
+   494→        match (&mut self.normals, &other.normals) {
+   495→            (Some(ref mut self_normals), Some(ref other_normals)) => {
+   496→                self_normals.extend(other_normals.iter().cloned());
+   497→            }
+   498→            (None, Some(ref other_normals)) => {
+   499→                // Fill in default normals for existing vertices
+   500→                let mut combined = vec![[0.0, 0.0, 1.0]; self.vertices.len() - other.vertices.len()];
+   501→                combined.extend(other_normals.iter().cloned());
+   502→                self.normals = Some(combined);
+   503→            }
+   504→            _ => {}
+   505→        }
+   506→        // Merge face normals (per-triangle)
+   507→        if self.face_normals.is_none() && other.face_normals.is_some() {
+   508→            let existing_count = self.triangles.len() - other.triangles.len();
+   509→            self.face_normals = Some(vec![[0.0, 0.0, 1.0]; existing_count]);
+   510→        }
+   511→        match (&mut self.face_normals, &other.face_normals) {
+   512→            (Some(ref mut dest), Some(ref src)) => {
+   513→                dest.extend(src.iter().cloned());
+   514→            }
+   515→            _ => {}
+   516→        }
+   517→        // Merge face IDs
+   518→        if self.triangle_face_ids.is_none() && other.triangle_face_ids.is_some() {
+   519→            let existing_count = self.triangles.len() - other.triangles.len();
+   520→            self.triangle_face_ids = Some(vec![0; existing_count]);
+   521→        }
+   522→        match (&mut self.triangle_face_ids, &other.triangle_face_ids) {
+   523→            (Some(ref mut ids), Some(ref other_ids)) => {
+   524→                ids.extend(other_ids.iter().cloned());
+   525→            }
+   526→            _ => {}
+   527→        }
+   528→    }
+   529→
+   530→    /// Snap boundary vertices to nearby vertices (shared or boundary).
+   531→    ///
+   532→    /// After merging face meshes with bit-exact deduplication, some vertices
+   533→    /// from different faces may be geometrically close but not bit-identical
+   534→    /// (because the STEP file uses different VERTEX_POINT entities for the
+   535→    /// same geometric boundary). This method finds such pairs and snaps the
+   536→    /// boundary vertex to the nearby vertex, effectively "welding" them
+   537→    /// together and reducing the number of boundary edges.
+   538→    ///
+   539→    /// # Algorithm
+   540→    /// 1. Build a spatial hash of ALL vertices
+   541→    /// 2. Find boundary edges (edges appearing in only one triangle)
+   542→    /// 3. For each boundary vertex, check if there's a nearby vertex
+   543→    ///    within `snap_tolerance`
+   544→    /// 4. If found, remap the boundary vertex to the nearby one
+   545→    ///
+   546→    /// Runs multiple iterations because snapping boundary vertices can
+   547→    /// create new shared vertices that enable further snapping.
+   548→    pub fn snap_boundary_vertices(&mut self, snap_tolerance: f64) -> usize {
+   549→        if snap_tolerance <= 0.0 || self.vertices.is_empty() || self.triangles.is_empty() {
+   550→            return 0;
+   551→        }
+   552→
+   553→        let mut total_snapped = 0usize;
+   554→        // Iterate: each round may create new shared vertices that enable
+   555→        // further snapping in the next round.
+   556→        for iteration in 0..5 {
+   557→            let snapped = self.snap_boundary_vertices_once(snap_tolerance);
+   558→            total_snapped += snapped;
+   559→            if snapped == 0 {
+   560→                break;
+   561→            }
+   562→            log::debug!("snap_boundary_vertices iteration {}: snapped {} vertices", iteration, snapped);
+   563→        }
+   564→        total_snapped
+   565→    }
+   566→
+   567→    /// Single iteration of boundary vertex snapping.
+   568→    fn snap_boundary_vertices_once(&mut self, snap_tolerance: f64) -> usize {
+   569→        // Step 1: Count edge occurrences to find boundary vertices
+   570→        let mut edge_count: HashMap<(u32, u32), u32> = HashMap::new();
+   571→        for tri in &self.triangles {
+   572→            for k in 0..3 {
+   573→                let a = tri[k].min(tri[(k + 1) % 3]);
+   574→                let b = tri[k].max(tri[(k + 1) % 3]);
+   575→                *edge_count.entry((a, b)).or_insert(0) += 1;
+   576→            }
+   577→        }
+   578→
+   579→        // Find vertices that are on boundary edges
+   580→        let mut boundary_vertex_set: HashMap<u32, u32> = HashMap::new();
+   581→        for (&(a, b), &count) in &edge_count {
+   582→            if count == 1 {
+   583→                boundary_vertex_set.entry(a).or_insert(0);
+   584→                boundary_vertex_set.entry(b).or_insert(0);
+   585→            }
+   586→        }
+   587→
+   588→        if boundary_vertex_set.is_empty() {
+   589→            return 0;
+   590→        }
+   591→
+   592→        // Step 2: Build spatial hash of ALL vertices (both boundary and shared)
+   593→        // We allow snapping boundary→boundary as well as boundary→shared,
+   594→        // because two boundary vertices from adjacent faces at the same
+   595→        // geometric position should be merged.
+   596→        let cell_size = snap_tolerance;
+   597→        let mut spatial: HashMap<(i64, i64, i64), Vec<(u32, Point3d)>> = HashMap::new();
+   598→
+   599→        // Count how many triangles each vertex appears in
+   600→        let mut vert_tri_count = vec![0u32; self.vertices.len()];
+   601→        for tri in &self.triangles {
+   602→            for &v in tri {
+   603→                vert_tri_count[v as usize] += 1;
+   604→            }
+   605→        }
+   606→
+   607→        for (idx, p) in self.vertices.iter().enumerate() {
+   608→            // Index ALL vertices as potential snap targets.
+   609→            // Previously, boundary-only vertices were excluded, which
+   610→            // prevented boundary→boundary snapping between adjacent faces.
+   611→            // This is critical for watertightness: two boundary vertices
+   612→            // from different faces at the same geometric position must
+   613→            // be merged, even if neither is yet "shared".
+   614→            // Prefer shared vertices (2+ triangles) as targets by
+   615→            // sorting them first in each cell's candidate list.
+   616→            let cell = (
+   617→                (p.x / cell_size).floor() as i64,
+   618→                (p.y / cell_size).floor() as i64,
+   619→                (p.z / cell_size).floor() as i64,
+   620→            );
+   621→            let is_shared = vert_tri_count[idx] >= 2;
+   622→            spatial.entry(cell).or_default().push((idx as u32, *p));
+   623→            // Mark shared vertices for preferential snapping (stored in
+   624→            // the vert_tri_count which we no longer need for its original
+   625→            // purpose after this point)
+   626→        }
+   627→
+   628→        // Step 3: For each boundary vertex, find nearby vertices
+   629→        let mut remap: Vec<u32> = (0..self.vertices.len() as u32).collect();
+   630→        let mut snap_count = 0usize;
+   631→        let tol_sq = snap_tolerance * snap_tolerance;
+   632→
+   633→        for &bv in boundary_vertex_set.keys() {
+   634→            let p = self.vertices[bv as usize];
+   635→            let cell = (
+   636→                (p.x / cell_size).floor() as i64,
+   637→                (p.y / cell_size).floor() as i64,
+   638→                (p.z / cell_size).floor() as i64,
+   639→            );
+   640→
+   641→            let mut best_dist_sq = tol_sq;
+   642→            let mut best_target: Option<u32> = None;
+   643→            let mut best_is_shared = false;
+   644→
+   645→            // Check current cell and neighbors
+   646→            for dx in -1i64..=1 {
+   647→                for dy in -1i64..=1 {
+   648→                    for dz in -1i64..=1 {
+   649→                        let neighbor = (cell.0 + dx, cell.1 + dy, cell.2 + dz);
+   650→                        if let Some(candidates) = spatial.get(&neighbor) {
+   651→                            for &(idx, ref vp) in candidates {
+   652→                                if idx == bv { continue; }
+   653→                                let ddx = p.x - vp.x;
+   654→                                let ddy = p.y - vp.y;
+   655→                                let ddz = p.z - vp.z;
+   656→                                let dist_sq = ddx * ddx + ddy * ddy + ddz * ddz;
+   657→                                if dist_sq < best_dist_sq || (dist_sq < tol_sq && vert_tri_count[idx as usize] >= 2 && !best_is_shared) {
+   658→                                    best_dist_sq = if dist_sq < tol_sq { dist_sq } else { dist_sq };
+   659→                                    best_target = Some(idx);
+   660→                                    best_is_shared = vert_tri_count[idx as usize] >= 2;
+   661→                                }
+   662→                            }
+   663→                        }
+   664→                    }
+   665→                }
+   666→            }
+   667→
+   668→            if let Some(target) = best_target {
+   669→                // Prefer snapping to shared vertices (higher tri count)
+   670→                // over other boundary vertices
+   671→                remap[bv as usize] = target;
+   672→                snap_count += 1;
+   673→            }
+   674→        }
+   675→
+   676→        // Step 4: Apply remapping to all triangles
+   677→        if snap_count > 0 {
+   678→            // Resolve chains (if A→B and B→C, then A→C)
+   679→            for i in 0..remap.len() {
+   680→                let mut current = remap[i];
+   681→                let mut seen = std::collections::HashSet::new();
+   682→                while remap[current as usize] != current {
+   683→                    if !seen.insert(current) { break; } // cycle protection
+   684→                    current = remap[current as usize];
+   685→                }
+   686→                remap[i] = current;
+   687→            }
+   688→
+   689→            for tri in &mut self.triangles {
+   690→                tri[0] = remap[tri[0] as usize];
+   691→                tri[1] = remap[tri[1] as usize];
+   692→                tri[2] = remap[tri[2] as usize];
+   693→            }
+   694→        }
+   695→
+   696→        snap_count
+   697→    }
+   698→
+   699→    /// Ensure triangle_colors matches triangles length, filling with default color if needed.
+   700→    pub fn ensure_colors(&mut self, default: [f32; 4]) {
+   701→        if self.triangle_colors.is_none() {
+   702→            self.triangle_colors = Some(vec![default; self.triangles.len()]);
+   703→        } else if let Some(ref mut colors) = self.triangle_colors {
+   704→            while colors.len() < self.triangles.len() {
+   705→                colors.push(default);
+   706→            }
+   707→        }
+   708→    }
+   709→
+   710→    /// Compute bounding box.
+   711→    pub fn bounding_box(&self) -> (Point3d, Point3d) {
+   712→        if self.vertices.is_empty() {
+   713→            return (Point3d::ORIGIN, Point3d::ORIGIN);
+   714→        }
+   715→        let mut min = self.vertices[0];
+   716→        let mut max = self.vertices[0];
+   717→        for v in &self.vertices[1..] {
+   718→            min.x = min.x.min(v.x);
+   719→            min.y = min.y.min(v.y);
+   720→            min.z = min.z.min(v.z);
+   721→            max.x = max.x.max(v.x);
+   722→            max.y = max.y.max(v.y);
+   723→            max.z = max.z.max(v.z);
+   724→        }
+   725→        (min, max)
+   726→    }
+   727→
+   728→    /// Total surface area.
+   729→    pub fn surface_area(&self) -> f64 {
+   730→        let mut area = 0.0;
+   731→        for tri in &self.triangles {
+   732→            let v0 = self.vertices[tri[0] as usize];
+   733→            let v1 = self.vertices[tri[1] as usize];
+   734→            let v2 = self.vertices[tri[2] as usize];
+   735→            // Cross product of two edges / 2
+   736→            let e1x = v1.x - v0.x;
+   737→            let e1y = v1.y - v0.y;
+   738→            let e1z = v1.z - v0.z;
+   739→            let e2x = v2.x - v0.x;
+   740→            let e2y = v2.y - v0.y;
+   741→            let e2z = v2.z - v0.z;
+   742→            let cx = e1y * e2z - e1z * e2y;
+   743→            let cy = e1z * e2x - e1x * e2z;
+   744→            let cz = e1x * e2y - e1y * e2x;
+   745→            area += (cx * cx + cy * cy + cz * cz).sqrt() * 0.5;
+   746→        }
+   747→        area
+   748→    }
+   749→
+   750→    /// Transform all vertices and normals.
+   751→    ///
+   752→    /// Vertices are transformed by the full 4×4 matrix (including translation).
+   753→    /// Normals are transformed by the inverse-transpose of the upper-left 3×3
+   754→    /// submatrix — this preserves correct lighting/backface-culling for
+   755→    /// non-uniform scaling and reflection transforms.
+   756→    pub fn transform(&mut self, m: &[[f64; 4]; 4]) {
+   757→        for v in &mut self.vertices {
+   758→            *v = v.transform(m);
+   759→        }
+   760→        // Transform normals by inverse-transpose of 3×3 rotation
+   761→        if let Some(ref mut normals) = self.normals {
+   762→            let inv_transpose = compute_normal_transform(m);
+   763→            for n in normals.iter_mut() {
+   764→                let nx = inv_transpose[0][0] * n[0] + inv_transpose[0][1] * n[1] + inv_transpose[0][2] * n[2];
+   765→                let ny = inv_transpose[1][0] * n[0] + inv_transpose[1][1] * n[1] + inv_transpose[1][2] * n[2];
+   766→                let nz = inv_transpose[2][0] * n[0] + inv_transpose[2][1] * n[1] + inv_transpose[2][2] * n[2];
+   767→                let len = (nx * nx + ny * ny + nz * nz).sqrt();
+   768→                if len > 1e-15 {
+   769→                    *n = [nx / len, ny / len, nz / len];
+   770→                }
+   771→            }
+   772→        }
+   773→        // Face normals also need to be transformed
+   774→        if let Some(ref mut face_normals) = self.face_normals {
+   775→            let inv_transpose = compute_normal_transform(m);
+   776→            for n in face_normals.iter_mut() {
+   777→                let nx = inv_transpose[0][0] * n[0] + inv_transpose[0][1] * n[1] + inv_transpose[0][2] * n[2];
+   778→                let ny = inv_transpose[1][0] * n[0] + inv_transpose[1][1] * n[1] + inv_transpose[1][2] * n[2];
+   779→                let nz = inv_transpose[2][0] * n[0] + inv_transpose[2][1] * n[1] + inv_transpose[2][2] * n[2];
+   780→                let len = (nx * nx + ny * ny + nz * nz).sqrt();
+   781→                if len > 1e-15 {
+   782→                    *n = [nx / len, ny / len, nz / len];
+   783→                }
+   784→            }
+   785→        }
+   786→    }
+   787→}
+   788→
+   789→/// A 2D point for triangulation (in parametric space).
+   790→#[derive(Clone, Copy, Debug)]
+   791→pub struct Point2dForTriangulation {
+   792→    pub x: f64,
+   793→    pub y: f64,
+   794→    pub original_index: usize,
+   795→}
+   796→
+   797→/// Edge constraint for triangulation.
+   798→#[derive(Clone, Copy, Debug)]
+   799→pub struct ConstraintEdge {
+   800→    pub start: usize,
+   801→    pub end: usize,
+   802→}
+   803→
+   804→/// Compute the inverse-transpose of the upper-left 3×3 submatrix of a 4×4 matrix.
+   805→///
+   806→/// This is used for transforming normals: if vertices are transformed by M,
+   807→/// then normals must be transformed by (M⁻¹)ᵀ to remain correct under
+   808→/// non-uniform scaling and reflection transforms.
+   809→fn compute_normal_transform(m: &[[f64; 4]; 4]) -> [[f64; 3]; 3] {
+   810→    // Extract 3×3 submatrix
+   811→    let a = m[0][0]; let b = m[0][1]; let c = m[0][2];
+   812→    let d = m[1][0]; let e = m[1][1]; let f = m[1][2];
+   813→    let g = m[2][0]; let h = m[2][1]; let i = m[2][2];
+   814→
+   815→    // Compute determinant of 3×3
+   816→    let det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+   817→
+   818→    if det.abs() < 1e-15 {
+   819→        // Degenerate matrix — return identity
+   820→        return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+   821→    }
+   822→
+   823→    let inv_det = 1.0 / det;
+   824→
+   825→    // Compute inverse of 3×3 (cofactor matrix transposed, divided by det)
+   826→    let inv = [
+   827→        [(e * i - f * h) * inv_det, (c * h - b * i) * inv_det, (b * f - c * e) * inv_det],
+   828→        [(f * g - d * i) * inv_det, (a * i - c * g) * inv_det, (c * d - a * f) * inv_det],
+   829→        [(d * h - e * g) * inv_det, (b * g - a * h) * inv_det, (a * e - b * d) * inv_det],
+   830→    ];
+   831→
+   832→    // Transpose the inverse to get (M⁻¹)ᵀ
+   833→    [
+   834→        [inv[0][0], inv[1][0], inv[2][0]],
+   835→        [inv[0][1], inv[1][1], inv[2][1]],
+   836→        [inv[0][2], inv[1][2], inv[2][2]],
+   837→    ]
+   838→}
+   839→
