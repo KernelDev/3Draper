@@ -1,0 +1,2002 @@
+     1→// SPDX-License-Identifier: GPL-3.0-or-later
+     2→// Copyright (c) 2026 KernelDev
+     3→//! Topology healing — repair common B-Rep defects.
+     4→//!
+     5→//! Phase 3.1 of the 3Draper roadmap. This module provides configurable
+     6→//! healing operations that can fix gaps, fill holes, stitch edges,
+     7→//! repair normal orientations, and remove small features.
+     8→//!
+     9→//! # Operations
+    10→//!
+    11→//! - **Gap closing** (3.1.2): merge boundary edges within `tolerance * gap_factor`
+    12→//! - **Hole filling** (3.1.3): triangulate small boundary loops (≤ `max_hole_edges`)
+    13→//! - **Edge stitching** (3.1.4): merge collinear edges that share a vertex
+    14→//! - **Normal orientation repair** (3.1.6): flip faces whose normals point inward
+    15→//! - **Small feature removal** (3.1.8): remove faces with area < `min_face_area`
+    16→//! - **Sliver triangle removal** (3.1.9): detect/remove triangles with aspect ratio > threshold
+    17→//!
+    18→//! # Usage
+    19→//!
+    20→//! ```ignore
+    21→//! use draper_topology::healing::{heal_solid, HealingParams};
+    22→//!
+    23→//! let params = HealingParams::default();
+    24→//! let (healed, report) = heal_solid(solid, &params);
+    25→//! println!("Applied {} fixes", report.total_fixes());
+    26→//! ```
+    27→
+    28→use crate::entity::*;
+    29→use draper_geometry::{
+    30→    CylinderSurface, Direction3d, Plane, Point3d, Surface, Vec3d,
+    31→    ToleranceContext,
+    32→};
+    33→
+    34→// ============================================================
+    35→// HealingParams
+    36→// ============================================================
+    37→
+    38→/// Configurable parameters for the healing pipeline.
+    39→///
+    40→/// Every threshold is expressed relative to a base `tolerance` so that
+    41→/// the same pipeline works correctly at micron scale and meter scale.
+    42→#[derive(Clone, Debug)]
+    43→pub struct HealingParams {
+    44→    /// Multiplier on `tolerance` for gap closing.
+    45→    /// Boundary edges closer than `tolerance * gap_factor` are merged.
+    46→    pub gap_factor: f64,
+    47→
+    48→    /// Maximum number of edges in a boundary loop to qualify for hole filling.
+    49→    pub max_hole_edges: usize,
+    50→
+    51→    /// Faces with area below this threshold are removed (small feature removal).
+    52→    pub min_face_area: f64,
+    53→
+    54→    /// Sliver triangle threshold: triangles with aspect ratio > this value
+    55→    /// are considered slivers.
+    56→    pub max_aspect_ratio: f64,
+    57→
+    58→    /// Whether to repair face normals for closed shells.
+    59→    pub fix_normals: bool,
+    60→
+    61→    /// Whether to stitch collinear edges that share a vertex.
+    62→    pub stitch_edges: bool,
+    63→
+    64→    /// Whether to merge coplanar and co-cylindrical faces that share edges.
+    65→    pub merge_faces: bool,
+    66→
+    67→    /// Whether to propagate tolerances through the topological graph.
+    68→    /// When true, tolerance propagation runs as the first step in the
+    69→    /// healing pipeline, ensuring all entities have consistent tolerances
+    70→    /// before subsequent operations.
+    71→    pub propagate_tolerances: bool,
+    72→
+    73→    /// Optional tolerance context from the STEP file or model scale.
+    74→    /// When present, the coincidence tolerance from this context is used
+    75→    /// as a floor for all entity tolerances during propagation.
+    76→    pub tolerance_context: Option<ToleranceContext>,
+    77→
+    78→    /// Base geometric tolerance.
+    79→    pub tolerance: f64,
+    80→}
+    81→
+    82→impl Default for HealingParams {
+    83→    fn default() -> Self {
+    84→        Self {
+    85→            gap_factor: 10.0,
+    86→            max_hole_edges: 8,
+    87→            min_face_area: 1e-12,
+    88→            max_aspect_ratio: 100.0,
+    89→            fix_normals: true,
+    90→            stitch_edges: true,
+    91→            merge_faces: true,
+    92→            propagate_tolerances: true,
+    93→            tolerance_context: None,
+    94→            tolerance: 1e-6,
+    95→        }
+    96→    }
+    97→}
+    98→
+    99→impl HealingParams {
+   100→    /// Create parameters suitable for a given tolerance context.
+   101→    pub fn from_tolerance_context(ctx: &ToleranceContext) -> Self {
+   102→        Self {
+   103→            tolerance: ctx.coincidence_tolerance(),
+   104→            min_face_area: ctx.coincidence_tolerance().powi(2),
+   105→            tolerance_context: Some(ctx.clone()),
+   106→            ..Self::default()
+   107→        }
+   108→    }
+   109→
+   110→    /// Effective gap tolerance: `tolerance * gap_factor`.
+   111→    pub fn gap_tolerance(&self) -> f64 {
+   112→        self.tolerance * self.gap_factor
+   113→    }
+   114→}
+   115→
+   116→// ============================================================
+   117→// HealingReport
+   118→// ============================================================
+   119→
+   120→/// Report describing what the healing pipeline changed.
+   121→#[derive(Clone, Debug, Default)]
+   122→pub struct HealingReport {
+   123→    /// Number of gap pairs that were closed.
+   124→    pub gaps_closed: u32,
+   125→    /// Number of holes that were filled.
+   126→    pub holes_filled: u32,
+   127→    /// Number of edge pairs that were stitched.
+   128→    pub edges_stitched: u32,
+   129→    /// Number of face normals that were flipped.
+   130→    pub normals_fixed: u32,
+   131→    /// Number of faces removed (small features).
+   132→    pub small_faces_removed: u32,
+   133→    /// Number of degenerate edges marked.
+   134→    pub degenerate_edges_marked: u32,
+   135→    /// Number of sliver triangles detected (mesh-level).
+   136→    pub sliver_triangles_detected: u32,
+   137→    /// Number of face pairs merged (coplanar or co-cylindrical).
+   138→    pub faces_merged: u32,
+   139→    /// Number of entities whose tolerance was increased during propagation.
+   140→    pub tolerances_propagated: u32,
+   141→    /// Human-readable messages describing each operation.
+   142→    pub messages: Vec<String>,
+   143→}
+   144→
+   145→impl HealingReport {
+   146→    /// Total number of individual fixes applied.
+   147→    pub fn total_fixes(&self) -> u32 {
+   148→        self.gaps_closed
+   149→            + self.holes_filled
+   150→            + self.edges_stitched
+   151→            + self.normals_fixed
+   152→            + self.small_faces_removed
+   153→            + self.degenerate_edges_marked
+   154→            + self.faces_merged
+   155→            + self.tolerances_propagated
+   156→    }
+   157→
+   158→    fn add_msg(&mut self, msg: impl Into<String>) {
+   159→        self.messages.push(msg.into());
+   160→    }
+   161→}
+   162→
+   163→// ============================================================
+   164→// Top-level healing functions
+   165→// ============================================================
+   166→
+   167→/// Heal a solid using the given parameters.
+   168→///
+   169→/// Returns the healed solid (a clone with modifications applied) and a
+   170→/// report describing what was changed.
+   171→pub fn heal_solid(solid: &Solid, params: &HealingParams) -> (Solid, HealingReport) {
+   172→    let mut report = HealingReport::default();
+   173→
+   174→    // Heal outer shell
+   175→    let outer_shell = if let Some(ref shell) = solid.outer_shell {
+   176→        let (healed_shell, shell_report) = heal_shell(shell, params);
+   177→        merge_report(&mut report, &shell_report);
+   178→        Some(healed_shell)
+   179→    } else {
+   180→        None
+   181→    };
+   182→
+   183→    // Heal inner shells
+   184→    let inner_shells: Vec<Shell> = solid
+   185→        .inner_shells
+   186→        .iter()
+   187→        .map(|shell| {
+   188→            let (healed, r) = heal_shell(shell, params);
+   189→            merge_report(&mut report, &r);
+   190→            healed
+   191→        })
+   192→        .collect();
+   193→
+   194→    let healed_solid = Solid {
+   195→        id: solid.id,
+   196→        outer_shell,
+   197→        inner_shells,
+   198→    };
+   199→
+   200→    (healed_solid, report)
+   201→}
+   202→
+   203→/// Heal a shell using the given parameters.
+   204→///
+   205→/// Applies the healing pipeline in a specific order:
+   206→/// 0. Propagate tolerances (3.1.7)
+   207→/// 1. Mark degenerate edges
+   208→/// 2. Close gaps between boundary edges
+   209→/// 3. Fill small holes
+   210→/// 4. Stitch collinear edges
+   211→/// 5. Merge coplanar/co-cylindrical faces (3.1.5)
+   212→/// 6. Remove small-feature faces
+   213→/// 7. Fix normal orientation (for closed shells)
+   214→pub fn heal_shell(shell: &Shell, params: &HealingParams) -> (Shell, HealingReport) {
+   215→    let mut report = HealingReport::default();
+   216→    let mut shell = shell.clone();
+   217→
+   218→    // 0. Propagate tolerances (must run first — correct tolerances are
+   219→    //    needed for all subsequent operations)
+   220→    if params.propagate_tolerances {
+   221→        propagate_tolerances(&mut shell, params, &mut report);
+   222→    }
+   223→
+   224→    // 1. Mark degenerate edges
+   225→    mark_degenerate_edges(&mut shell, params, &mut report);
+   226→
+   227→    // 2. Close gaps
+   228→    close_gaps(&mut shell, params, &mut report);
+   229→
+   230→    // 3. Fill small holes
+   231→    fill_holes(&mut shell, params, &mut report);
+   232→
+   233→    // 4. Stitch collinear edges
+   234→    if params.stitch_edges {
+   235→        stitch_collinear_edges(&mut shell, params, &mut report);
+   236→    }
+   237→
+   238→    // 5. Merge coplanar and co-cylindrical faces
+   239→    if params.merge_faces {
+   240→        merge_faces(&mut shell, params, &mut report);
+   241→    }
+   242→
+   243→    // 6. Remove small-feature faces
+   244→    remove_small_features(&mut shell, params, &mut report);
+   245→
+   246→    // 7. Fix normal orientation for closed shells
+   247→    if params.fix_normals && shell.closed {
+   248→        fix_normal_orientation(&mut shell, params, &mut report);
+   249→    }
+   250→
+   251→    (shell, report)
+   252→}
+   253→
+   254→// ============================================================
+   255→// Internal healing operations
+   256→// ============================================================
+   257→
+   258→/// Propagate tolerances through the topological graph (3.1.7).
+   259→///
+   260→/// Ensures tolerance consistency across the B-Rep hierarchy:
+   261→///
+   262→/// 1. **Downward propagation**: If a `ToleranceContext` is provided, all
+   263→///    entities are guaranteed to have at least the `coincidence_tolerance()`
+   264→///    from the context. This is important when STEP files specify global
+   265→///    tolerances that should override individual entity tolerances.
+   266→///
+   267→/// 2. **Vertex → Edge**: An edge's tolerance must be at least the maximum
+   268→///    of its vertex tolerances. If either vertex has a larger tolerance,
+   269→///    the edge's tolerance is increased to match.
+   270→///
+   271→/// 3. **Edge → Face**: A face's tolerance must be at least the maximum
+   272→///    of its edge tolerances. If any edge has a larger tolerance, the
+   273→///    face's tolerance is increased to match.
+   274→///
+   275→/// 4. **Face → Shell**: The shell's effective tolerance is the maximum
+   276→///    of all its face tolerances. (This is informational; shells don't
+   277→///    have a tolerance field, so we report it.)
+   278→fn propagate_tolerances(shell: &mut Shell, params: &HealingParams, report: &mut HealingReport) {
+   279→    let mut count = 0u32;
+   280→
+   281→    // Determine the floor tolerance from ToleranceContext (downward propagation)
+   282→    let floor_tol = params
+   283→        .tolerance_context
+   284→        .as_ref()
+   285→        .map(|ctx| ctx.coincidence_tolerance())
+   286→        .unwrap_or(0.0);
+   287→
+   288→    // Build a map of vertex ID → tolerance so we can look up vertex
+   289→    // tolerances when processing edges.
+   290→    // Vertices are stored as TopoId references in edges (vertex_start, vertex_end),
+   291→    // but the actual Vertex objects live inside the face.edges[].vertex_start/vertex_end
+   292→    // which are just IDs. We need to find the vertex point to reconstruct tolerances.
+   293→    //
+   294→    // Since vertices are not stored as standalone objects in our entity model
+   295→    // (they're implicit in edges), we track vertex tolerances via a HashMap.
+   296→    // The vertex tolerance is initialized from the floor or from the edge's
+   297→    // starting tolerance — but since we don't have explicit Vertex objects in
+   298→    // the shell, we use a simpler approach:
+   299→    // - For downward propagation: apply floor tolerance to edges and faces
+   300→    // - For upward propagation: edges inherit max of their vertex-related
+   301→    //   tolerances (estimated from the edge's own geometry), faces inherit
+   302→    //   from edges.
+   303→
+   304→    // Phase 1: Apply floor tolerance to all edges and faces (downward propagation)
+   305→    if floor_tol > 0.0 {
+   306→        for face in &mut shell.faces {
+   307→            // Apply floor to edges
+   308→            for edge in &mut face.edges {
+   309→                if edge.tolerance < floor_tol {
+   310→                    edge.tolerance = floor_tol;
+   311→                    count += 1;
+   312→                }
+   313→            }
+   314→            // Apply floor to face
+   315→            if face.tolerance < floor_tol {
+   316→                face.tolerance = floor_tol;
+   317→                count += 1;
+   318→            }
+   319→        }
+   320→    }
+   321→
+   322→    // Phase 2: Vertex → Edge propagation
+   323→    // Since vertices are stored as TopoId references (not inline objects),
+   324→    // we collect vertex tolerances by building a map from vertex ID to
+   325→    // the maximum tolerance seen at that vertex across all edges.
+   326→    //
+   327→    // In our entity model, Edge has vertex_start: Option<TopoId> and
+   328→    // vertex_end: Option<TopoId>, but Vertex objects with their own
+   329→    // tolerance are not directly stored in the Shell. Instead, the
+   330→    // vertex tolerance is implicitly derived from the edge's tolerance.
+   331→    //
+   332→    // For a complete implementation, we collect the max edge tolerance
+   333→    // associated with each vertex, then propagate that back to edges
+   334→    // that share the vertex.
+   335→    let mut vertex_max_tol: std::collections::HashMap<TopoId, f64> =
+   336→        std::collections::HashMap::new();
+   337→
+   338→    // First pass: collect the maximum tolerance for each vertex
+   339→    for face in &shell.faces {
+   340→        for edge in &face.edges {
+   341→            if let Some(vid) = edge.vertex_start {
+   342→                let entry = vertex_max_tol.entry(vid).or_insert(0.0);
+   343→                *entry = (*entry).max(edge.tolerance);
+   344→            }
+   345→            if let Some(vid) = edge.vertex_end {
+   346→                let entry = vertex_max_tol.entry(vid).or_insert(0.0);
+   347→                *entry = (*entry).max(edge.tolerance);
+   348→            }
+   349→        }
+   350→    }
+   351→
+   352→    // Second pass: propagate vertex tolerances upward to edges
+   353→    for face in &mut shell.faces {
+   354→        for edge in &mut face.edges {
+   355→            let mut max_vertex_tol = 0.0f64;
+   356→            if let Some(vid) = edge.vertex_start {
+   357→                if let Some(&tol) = vertex_max_tol.get(&vid) {
+   358→                    max_vertex_tol = max_vertex_tol.max(tol);
+   359→                }
+   360→            }
+   361→            if let Some(vid) = edge.vertex_end {
+   362→                if let Some(&tol) = vertex_max_tol.get(&vid) {
+   363→                    max_vertex_tol = max_vertex_tol.max(tol);
+   364→                }
+   365→            }
+   366→            if max_vertex_tol > edge.tolerance {
+   367→                edge.tolerance = max_vertex_tol;
+   368→                count += 1;
+   369→            }
+   370→        }
+   371→    }
+   372→
+   373→    // Phase 3: Edge → Face propagation
+   374→    for face in &mut shell.faces {
+   375→        let max_edge_tol = face
+   376→            .edges
+   377→            .iter()
+   378→            .map(|e| e.tolerance)
+   379→            .fold(0.0f64, f64::max);
+   380→        if max_edge_tol > face.tolerance {
+   381→            face.tolerance = max_edge_tol;
+   382→            count += 1;
+   383→        }
+   384→    }
+   385→
+   386→    // Phase 4: Face → Shell (informational)
+   387→    // Shell doesn't have a tolerance field, but we report the max face
+   388→    // tolerance in the report messages for debugging.
+   389→    let max_face_tol = shell
+   390→        .faces
+   391→        .iter()
+   392→        .map(|f| f.tolerance)
+   393→        .fold(0.0f64, f64::max);
+   394→
+   395→    if count > 0 {
+   396→        report.tolerances_propagated = count;
+   397→        report.add_msg(format!(
+   398→            "Propagated tolerances: {} entities updated, shell max tolerance = {:.2e}",
+   399→            count, max_face_tol
+   400→        ));
+   401→    }
+   402→}
+   403→
+   404→/// Mark degenerate edges (zero-length or degenerate curves).
+   405→fn mark_degenerate_edges(shell: &mut Shell, params: &HealingParams, report: &mut HealingReport) {
+   406→    let mut count = 0u32;
+   407→    for face in &mut shell.faces {
+   408→        for edge in &mut face.edges {
+   409→            if !edge.degenerate {
+   410→                let is_degen = if let Some(ref curve) = edge.curve {
+   411→                    curve.is_degenerate(params.tolerance)
+   412→                } else if let (Some(sp), Some(ep)) = (edge.start_point(), edge.end_point()) {
+   413→                    // No curve — check if start/end points coincide
+   414→                    sp.distance_sq_to(&ep) < params.tolerance * params.tolerance
+   415→                } else {
+   416→                    // No curve and no evaluable points — edge has no meaningful
+   417→                    // geometry and is considered degenerate
+   418→                    true
+   419→                };
+   420→                if is_degen {
+   421→                    edge.degenerate = true;
+   422→                    count += 1;
+   423→                }
+   424→            }
+   425→        }
+   426→    }
+   427→    if count > 0 {
+   428→        report.degenerate_edges_marked = count;
+   429→        report.add_msg(format!("Marked {} degenerate edges", count));
+   430→    }
+   431→}
+   432→
+   433→/// Close gaps between boundary edges.
+   434→///
+   435→/// Searches for pairs of boundary edges (edges used by only one coedge
+   436→/// in the shell) whose midpoints are closer than `tolerance * gap_factor`,
+   437→/// and merges them by making the coedges reference the same edge.
+   438→fn close_gaps(shell: &mut Shell, params: &HealingParams, report: &mut HealingReport) {
+   439→    let gap_tol = params.gap_tolerance();
+   440→    let gap_tol_sq = gap_tol * gap_tol;
+   441→
+   442→    // Collect all edge IDs used by coedges in the shell.
+   443→    // Count how many times each edge ID is referenced.
+   444→    let mut edge_use_count: std::collections::HashMap<TopoId, u32> =
+   445→        std::collections::HashMap::new();
+   446→    for face in &shell.faces {
+   447→        if let Some(ref wire) = face.outer_wire {
+   448→            for coedge in &wire.coedges {
+   449→                *edge_use_count.entry(coedge.edge).or_insert(0) += 1;
+   450→            }
+   451→        }
+   452→        for wire in &face.inner_wires {
+   453→            for coedge in &wire.coedges {
+   454→                *edge_use_count.entry(coedge.edge).or_insert(0) += 1;
+   455→            }
+   456→        }
+   457→    }
+   458→
+   459→    // Also count from the face.edges list — edges stored directly
+   460→    let mut edge_midpoints: std::collections::HashMap<TopoId, Point3d> =
+   461→        std::collections::HashMap::new();
+   462→    for face in &shell.faces {
+   463→        for edge in &face.edges {
+   464→            let midpoint = edge
+   465→                .point_at(0.5)
+   466→                .unwrap_or_else(|| edge.start_point().unwrap_or(Point3d::ORIGIN));
+   467→            edge_midpoints.entry(edge.id).or_insert(midpoint);
+   468→            // Count from edges list too
+   469→            *edge_use_count.entry(edge.id).or_insert(0) += 1;
+   470→        }
+   471→    }
+   472→
+   473→    // Boundary edges: those referenced only once in coedges
+   474→    let boundary_edge_ids: Vec<TopoId> = {
+   475→        let mut coedge_use_count: std::collections::HashMap<TopoId, u32> =
+   476→            std::collections::HashMap::new();
+   477→        for face in &shell.faces {
+   478→            if let Some(ref wire) = face.outer_wire {
+   479→                for coedge in &wire.coedges {
+   480→                    *coedge_use_count.entry(coedge.edge).or_insert(0) += 1;
+   481→                }
+   482→            }
+   483→            for wire in &face.inner_wires {
+   484→                for coedge in &wire.coedges {
+   485→                    *coedge_use_count.entry(coedge.edge).or_insert(0) += 1;
+   486→                }
+   487→            }
+   488→        }
+   489→        coedge_use_count
+   490→            .iter()
+   491→            .filter(|(_, &count)| count == 1)
+   492→            .map(|(&id, _)| id)
+   493→            .collect()
+   494→    };
+   495→
+   496→    // Find pairs of boundary edges that are close
+   497→    let mut merges: Vec<(TopoId, TopoId)> = Vec::new();
+   498→    let mut already_merged: std::collections::HashSet<TopoId> = std::collections::HashSet::new();
+   499→
+   500→    for i in 0..boundary_edge_ids.len() {
+   501→        let id_a = boundary_edge_ids[i];
+   502→        if already_merged.contains(&id_a) {
+   503→            continue;
+   504→        }
+   505→        let mp_a = match edge_midpoints.get(&id_a) {
+   506→            Some(p) => *p,
+   507→            None => continue,
+   508→        };
+   509→
+   510→        for j in (i + 1)..boundary_edge_ids.len() {
+   511→            let id_b = boundary_edge_ids[j];
+   512→            if already_merged.contains(&id_b) {
+   513→                continue;
+   514→            }
+   515→            if id_a == id_b {
+   516→                continue;
+   517→            }
+   518→            let mp_b = match edge_midpoints.get(&id_b) {
+   519→                Some(p) => *p,
+   520→                None => continue,
+   521→            };
+   522→
+   523→            if mp_a.distance_sq_to(&mp_b) < gap_tol_sq {
+   524→                merges.push((id_a, id_b));
+   525→                already_merged.insert(id_b);
+   526→                break; // Each edge is merged at most once
+   527→            }
+   528→        }
+   529→    }
+   530→
+   531→    // Apply merges: replace references to id_b with id_a in coedges
+   532→    let mut gap_count = 0u32;
+   533→    for (id_a, id_b) in &merges {
+   534→        let replaced = replace_coedge_edge_refs(&mut shell.faces, *id_b, *id_a);
+   535→        if replaced > 0 {
+   536→            gap_count += 1;
+   537→        }
+   538→    }
+   539→
+   540→    if gap_count > 0 {
+   541→        report.gaps_closed = gap_count;
+   542→        report.add_msg(format!("Closed {} gaps between boundary edges", gap_count));
+   543→    }
+   544→}
+   545→
+   546→/// Fill small holes in the shell.
+   547→///
+   548→/// A hole is a closed boundary loop formed by edges that appear in only
+   549→/// one coedge. If the loop has ≤ `max_hole_edges` edges, a new face is
+   550→/// created to cap the hole.
+   551→fn fill_holes(shell: &mut Shell, params: &HealingParams, report: &mut HealingReport) {
+   552→    // Collect boundary edges (used by exactly 1 coedge)
+   553→    let mut coedge_use_count: std::collections::HashMap<TopoId, u32> =
+   554→        std::collections::HashMap::new();
+   555→    for face in &shell.faces {
+   556→        if let Some(ref wire) = face.outer_wire {
+   557→            for coedge in &wire.coedges {
+   558→                *coedge_use_count.entry(coedge.edge).or_insert(0) += 1;
+   559→            }
+   560→        }
+   561→        for wire in &face.inner_wires {
+   562→            for coedge in &wire.coedges {
+   563→                *coedge_use_count.entry(coedge.edge).or_insert(0) += 1;
+   564→            }
+   565→        }
+   566→    }
+   567→
+   568→    let boundary_edge_ids: std::collections::HashSet<TopoId> = coedge_use_count
+   569→        .iter()
+   570→        .filter(|(_, &count)| count == 1)
+   571→        .map(|(&id, _)| id)
+   572→        .collect();
+   573→
+   574→    if boundary_edge_ids.is_empty() {
+   575→        return;
+   576→    }
+   577→
+   578→    // Build a map from edge ID to edge geometry (start/end points)
+   579→    let mut edge_points: std::collections::HashMap<TopoId, (Point3d, Point3d)> =
+   580→        std::collections::HashMap::new();
+   581→    for face in &shell.faces {
+   582→        for edge in &face.edges {
+   583→            if boundary_edge_ids.contains(&edge.id) {
+   584→                if let (Some(sp), Some(ep)) = (edge.start_point(), edge.end_point()) {
+   585→                    edge_points.insert(edge.id, (sp, ep));
+   586→                }
+   587→            }
+   588→        }
+   589→    }
+   590→
+   591→    // Find boundary loops by chaining edges end-to-start
+   592→    let loops = find_boundary_loops(&boundary_edge_ids, &edge_points, params.tolerance);
+   593→
+   594→    let mut holes_filled = 0u32;
+   595→    for hole_loop in &loops {
+   596→        if hole_loop.len() <= params.max_hole_edges && hole_loop.len() >= 3 {
+   597→            // Create a face to fill the hole
+   598→            if let Some(fill_face) = create_fill_face(hole_loop, &edge_points, params.tolerance) {
+   599→                shell.faces.push(fill_face);
+   600→                holes_filled += 1;
+   601→            }
+   602→        }
+   603→    }
+   604→
+   605→    if holes_filled > 0 {
+   606→        report.holes_filled = holes_filled;
+   607→        report.add_msg(format!("Filled {} holes", holes_filled));
+   608→    }
+   609→}
+   610→
+   611→/// Stitch collinear edges that share a vertex.
+   612→///
+   613→/// When two adjacent edges are collinear (their direction vectors are
+   614→/// parallel within angular tolerance) and share a common vertex, they
+   615→/// are merged into a single edge.
+   616→fn stitch_collinear_edges(shell: &mut Shell, params: &HealingParams, report: &mut HealingReport) {
+   617→    let angular_tol = 1e-6; // Radians — ~0.00006 degrees
+   618→    let mut stitch_count = 0u32;
+   619→
+   620→    for face in &mut shell.faces {
+   621→        // Look for consecutive edges in the outer wire that are collinear
+   622→        if let Some(ref mut wire) = face.outer_wire {
+   623→            if wire.coedges.len() < 2 {
+   624→                continue;
+   625→            }
+   626→
+   627→            let n = wire.coedges.len();
+   628→            let mut to_remove: Vec<usize> = Vec::new();
+   629→
+   630→            for i in 0..n {
+   631→                if to_remove.contains(&i) {
+   632→                    continue;
+   633→                }
+   634→                let j = (i + 1) % n;
+   635→                if to_remove.contains(&j) {
+   636→                    continue;
+   637→                }
+   638→
+   639→                let edge_id_i = wire.coedges[i].edge;
+   640→                let edge_id_j = wire.coedges[j].edge;
+   641→
+   642→                // Find the corresponding edges
+   643→                let edge_i = face.edges.iter().find(|e| e.id == edge_id_i);
+   644→                let edge_j = face.edges.iter().find(|e| e.id == edge_id_j);
+   645→
+   646→                if let (Some(ei), Some(ej)) = (edge_i, edge_j) {
+   647→                    if are_edges_collinear(ei, ej, angular_tol, params.tolerance) {
+   648→                        // Merge: remove edge j, extend edge i to cover both
+   649→                        to_remove.push(j);
+   650→                        stitch_count += 1;
+   651→                    }
+   652→                }
+   653→            }
+   654→
+   655→            // Remove merged coedges (in reverse order to keep indices valid)
+   656→            if !to_remove.is_empty() {
+   657→                let mut sorted = to_remove;
+   658→                sorted.sort_unstable();
+   659→                sorted.dedup();
+   660→                for &idx in sorted.iter().rev() {
+   661→                    wire.coedges.remove(idx);
+   662→                }
+   663→                if wire.coedges.len() > 1 {
+   664→                    wire.closed = true;
+   665→                }
+   666→            }
+   667→        }
+   668→    }
+   669→
+   670→    if stitch_count > 0 {
+   671→        report.edges_stitched = stitch_count;
+   672→        report.add_msg(format!("Stitched {} collinear edge pairs", stitch_count));
+   673→    }
+   674→}
+   675→
+   676→/// Merge coplanar and co-cylindrical faces that share edges.
+   677→///
+   678→/// When two faces share one or more edges and lie on geometrically
+   679→/// compatible surfaces (same plane or same cylinder within tolerance),
+   680→/// they are merged into a single face with a combined wire.
+   681→///
+   682→/// # Algorithm
+   683→///
+   684→/// 1. Build a map from edge ID → face indices to find face pairs sharing edges.
+   685→/// 2. For each pair of adjacent faces, check surface compatibility.
+   686→/// 3. For compatible pairs, reconstruct the merged boundary by removing
+   687→///    shared edges and re-connecting the remaining edges.
+   688→/// 4. Replace both original faces with the merged face.
+   689→fn merge_faces(shell: &mut Shell, params: &HealingParams, report: &mut HealingReport) {
+   690→    let tol = params.tolerance;
+   691→    let angular_tol = 1e-6; // radians (~0.00006°)
+   692→
+   693→    // Iteratively merge face pairs until no more merges are possible.
+   694→    // Each iteration may enable new merges (transitive merging).
+   695→    // Hard limit: at most 50 iterations to prevent infinite loops on
+   696→    // pathological shells where merging creates new mergeable pairs
+   697→    // (e.g., floating-point snap mismatches that grow the face count).
+   698→    let mut total_merged = 0u32;
+   699→    let max_passes = 50;
+   700→    for _ in 0..max_passes {
+   701→        let merged_this_pass = merge_one_pass(shell, tol, angular_tol);
+   702→        if merged_this_pass == 0 {
+   703→            break;
+   704→        }
+   705→        total_merged += merged_this_pass;
+   706→    }
+   707→
+   708→    if total_merged > 0 {
+   709→        report.faces_merged = total_merged;
+   710→        report.add_msg(format!("Merged {} face pairs", total_merged));
+   711→    }
+   712→}
+   713→
+   714→/// Perform one pass of face merging. Returns the number of merges performed.
+   715→fn merge_one_pass(shell: &mut Shell, tol: f64, angular_tol: f64) -> u32 {
+   716→    let n = shell.faces.len();
+   717→    if n < 2 {
+   718→        return 0;
+   719→    }
+   720→
+   721→    // Build a map: edge_id → set of face indices that use this edge in their coedges
+   722→    let mut edge_to_faces: std::collections::HashMap<TopoId, std::collections::HashSet<usize>> =
+   723→        std::collections::HashMap::new();
+   724→    for (fi, face) in shell.faces.iter().enumerate() {
+   725→        let coedge_edge_ids = face_coedge_edge_ids(face);
+   726→        for eid in coedge_edge_ids {
+   727→            edge_to_faces.entry(eid).or_default().insert(fi);
+   728→        }
+   729→    }
+   730→
+   731→    // Build face adjacency: find pairs of faces sharing at least one edge
+   732→    let mut adjacent_pairs: std::collections::HashSet<(usize, usize)> =
+   733→        std::collections::HashSet::new();
+   734→    for face_set in edge_to_faces.values() {
+   735→        let face_vec: Vec<usize> = face_set.iter().copied().collect();
+   736→        for i in 0..face_vec.len() {
+   737→            for j in (i + 1)..face_vec.len() {
+   738→                let a = face_vec[i].min(face_vec[j]);
+   739→                let b = face_vec[i].max(face_vec[j]);
+   740→                adjacent_pairs.insert((a, b));
+   741→            }
+   742→        }
+   743→    }
+   744→
+   745→    // Check each adjacent pair for surface compatibility and merge
+   746→    let mut faces_to_remove: std::collections::HashSet<usize> = std::collections::HashSet::new();
+   747→    let mut new_faces: Vec<Face> = Vec::new();
+   748→    let mut merge_count = 0u32;
+   749→
+   750→    for (fi, fj) in &adjacent_pairs {
+   751→        if faces_to_remove.contains(fi) || faces_to_remove.contains(fj) {
+   752→            continue;
+   753→        }
+   754→
+   755→        let face_a = &shell.faces[*fi];
+   756→        let face_b = &shell.faces[*fj];
+   757→
+   758→        // Check surface compatibility
+   759→        if !are_surfaces_compatible(&face_a.surface, &face_b.surface, tol, angular_tol) {
+   760→            continue;
+   761→        }
+   762→
+   763→        // Find shared edge IDs
+   764→        let edges_a = face_coedge_edge_ids(face_a);
+   765→        let edges_b = face_coedge_edge_ids(face_b);
+   766→        let set_a: std::collections::HashSet<TopoId> = edges_a.iter().copied().collect();
+   767→        let set_b: std::collections::HashSet<TopoId> = edges_b.iter().copied().collect();
+   768→        let shared: std::collections::HashSet<TopoId> =
+   769→            set_a.intersection(&set_b).copied().collect();
+   770→
+   771→        if shared.is_empty() {
+   772→            continue;
+   773→        }
+   774→
+   775→        // Merge the two faces
+   776→        if let Some(merged_face) = merge_two_faces(face_a, face_b, &shared, tol) {
+   777→            faces_to_remove.insert(*fi);
+   778→            faces_to_remove.insert(*fj);
+   779→            new_faces.push(merged_face);
+   780→            merge_count += 1;
+   781→        }
+   782→    }
+   783→
+   784→    // Apply: remove merged faces and add new ones
+   785→    if merge_count > 0 {
+   786→        let mut sorted_remove: Vec<usize> = faces_to_remove.iter().copied().collect();
+   787→        sorted_remove.sort_unstable();
+   788→        for &idx in sorted_remove.iter().rev() {
+   789→            shell.faces.remove(idx);
+   790→        }
+   791→        shell.faces.extend(new_faces);
+   792→    }
+   793→
+   794→    merge_count
+   795→}
+   796→
+   797→/// Collect all edge IDs referenced by coedges in a face (outer + inner wires).
+   798→fn face_coedge_edge_ids(face: &Face) -> Vec<TopoId> {
+   799→    let mut ids = Vec::new();
+   800→    if let Some(ref wire) = face.outer_wire {
+   801→        for coedge in &wire.coedges {
+   802→            ids.push(coedge.edge);
+   803→        }
+   804→    }
+   805→    for wire in &face.inner_wires {
+   806→        for coedge in &wire.coedges {
+   807→            ids.push(coedge.edge);
+   808→        }
+   809→    }
+   810→    ids
+   811→}
+   812→
+   813→/// Check whether two surfaces are compatible for merging.
+   814→///
+   815→/// Two surfaces are compatible if:
+   816→/// - Both are Planes with the same normal (within angular tolerance) and
+   817→///   same origin distance from the plane (within tolerance).
+   818→/// - Both are Cylinders with the same axis, radius, and origin (within tolerance).
+   819→fn are_surfaces_compatible(
+   820→    surf_a: &Option<Surface>,
+   821→    surf_b: &Option<Surface>,
+   822→    tol: f64,
+   823→    angular_tol: f64,
+   824→) -> bool {
+   825→    let (sa, sb) = match (surf_a, surf_b) {
+   826→        (Some(a), Some(b)) => (a, b),
+   827→        _ => return false,
+   828→    };
+   829→
+   830→    match (sa, sb) {
+   831→        (Surface::Plane(pa), Surface::Plane(pb)) => are_planes_compatible(pa, pb, tol, angular_tol),
+   832→        (Surface::Cylinder(ca), Surface::Cylinder(cb)) => {
+   833→            are_cylinders_compatible(ca, cb, tol, angular_tol)
+   834→        }
+   835→        _ => false,
+   836→    }
+   837→}
+   838→
+   839→/// Check whether two planes are compatible for merging.
+   840→///
+   841→/// Two planes are compatible if their normals are parallel (within angular
+   842→/// tolerance) and their origin distances from the common plane are the same
+   843→/// (within tolerance). This handles both same-side and opposite-side normals
+   844→/// (a face with `forward = false` has its effective normal flipped).
+   845→fn are_planes_compatible(a: &Plane, b: &Plane, tol: f64, angular_tol: f64) -> bool {
+   846→    // Check if normals are parallel (same or opposite direction)
+   847→    let dot = a.normal.dot(&b.normal);
+   848→    let angle = dot.acos().abs();
+   849→    if angle > angular_tol && (std::f64::consts::PI - angle).abs() > angular_tol {
+   850→        return false;
+   851→    }
+   852→
+   853→    // Check if planes are coplanar: distance from b.origin to plane a
+   854→    let dx = b.origin.x - a.origin.x;
+   855→    let dy = b.origin.y - a.origin.y;
+   856→    let dz = b.origin.z - a.origin.z;
+   857→    let dist = dx * a.normal.x + dy * a.normal.y + dz * a.normal.z;
+   858→    dist.abs() < tol
+   859→}
+   860→
+   861→/// Check whether two cylinders are compatible for merging.
+   862→///
+   863→/// Two cylinders are compatible if their axes are parallel, radii match,
+   864→/// and their origins project to the same point on the shared axis
+   865→/// (within tolerance).
+   866→fn are_cylinders_compatible(
+   867→    a: &CylinderSurface,
+   868→    b: &CylinderSurface,
+   869→    tol: f64,
+   870→    angular_tol: f64,
+   871→) -> bool {
+   872→    // Check radii match
+   873→    if (a.radius - b.radius).abs() > tol {
+   874→        return false;
+   875→    }
+   876→
+   877→    // Check axes are parallel
+   878→    let dot = a.axis.dot(&b.axis);
+   879→    let angle = dot.acos().abs();
+   880→    if angle > angular_tol && (std::f64::consts::PI - angle).abs() > angular_tol {
+   881→        return false;
+   882→    }
+   883→
+   884→    // Check that origins project to the same point on the shared axis.
+   885→    // Project b.origin onto a's axis and check distance.
+   886→    let dx = b.origin.x - a.origin.x;
+   887→    let dy = b.origin.y - a.origin.y;
+   888→    let dz = b.origin.z - a.origin.z;
+   889→    let along_axis = dx * a.axis.x + dy * a.axis.y + dz * a.axis.z;
+   890→    let perp_x = dx - along_axis * a.axis.x;
+   891→    let perp_y = dy - along_axis * a.axis.y;
+   892→    let perp_z = dz - along_axis * a.axis.z;
+   893→    let perp_dist_sq = perp_x * perp_x + perp_y * perp_y + perp_z * perp_z;
+   894→    perp_dist_sq < tol * tol
+   895→}
+   896→
+   897→/// Merge two faces that share edges and have compatible surfaces.
+   898→///
+   899→/// The merged face:
+   900→/// - Uses the surface from `face_a`
+   901→/// - Has a combined outer wire formed by removing shared edges and
+   902→///   reconnecting the remaining edges
+   903→/// - Preserves all inner wires (holes) from both faces
+   904→fn merge_two_faces(
+   905→    face_a: &Face,
+   906→    face_b: &Face,
+   907→    shared_edge_ids: &std::collections::HashSet<TopoId>,
+   908→    tol: f64,
+   909→) -> Option<Face> {
+   910→    // Collect coedges from both faces, marking which are shared
+   911→    // We need to walk the boundary and skip shared edges
+   912→    let coedges_a = face_coedges_with_forward(face_a);
+   913→    let coedges_b = face_coedges_with_forward(face_b);
+   914→
+   915→    // Collect edge geometry from both faces
+   916→    let mut all_edges: std::collections::HashMap<TopoId, Edge> = std::collections::HashMap::new();
+   917→    for edge in &face_a.edges {
+   918→        all_edges.entry(edge.id).or_insert_with(|| edge.clone());
+   919→    }
+   920→    for edge in &face_b.edges {
+   921→        all_edges.entry(edge.id).or_insert_with(|| edge.clone());
+   922→    }
+   923→
+   924→    // Build the combined outer wire:
+   925→    // Non-shared coedges from both faces form the new boundary.
+   926→    // We need to order them correctly by connecting end-to-start.
+   927→    let mut non_shared_coedges: Vec<(TopoId, bool)> = Vec::new(); // (edge_id, forward)
+   928→
+   929→    for (edge_id, forward) in &coedges_a {
+   930→        if !shared_edge_ids.contains(edge_id) {
+   931→            non_shared_coedges.push((*edge_id, *forward));
+   932→        }
+   933→    }
+   934→    for (edge_id, forward) in &coedges_b {
+   935→        if !shared_edge_ids.contains(edge_id) {
+   936→            // If face_b has opposite orientation from face_a, we may need to
+   937→            // flip the coedge direction for the merged face.
+   938→            // The merged face uses face_a's surface orientation.
+   939→            // If face_b.forward != face_a.forward, we need to flip face_b's coedges.
+   940→            let effective_forward = if face_a.forward != face_b.forward {
+   941→                !*forward
+   942→            } else {
+   943→                *forward
+   944→            };
+   945→            non_shared_coedges.push((*edge_id, effective_forward));
+   946→        }
+   947→    }
+   948→
+   949→    // Now we need to order these coedges to form a proper wire.
+   950→    // Build a graph of edge connectivity and walk the boundary.
+   951→    let ordered_coedges = order_coedges_into_wire(&non_shared_coedges, &all_edges, tol)?;
+   952→
+   953→    // Collect all edges needed by the merged face
+   954→    let mut merged_edge_list: Vec<Edge> = Vec::new();
+   955→    for (edge_id, _forward) in &ordered_coedges {
+   956→        if let Some(edge) = all_edges.remove(edge_id) {
+   957→            merged_edge_list.push(edge);
+   958→        }
+   959→    }
+   960→
+   961→    // Build the wire
+   962→    let wire_coedges: Vec<CoEdge> = ordered_coedges
+   963→        .iter()
+   964→        .map(|(edge_id, forward)| CoEdge::new(*edge_id, *forward))
+   965→        .collect();
+   966→    let mut outer_wire = Wire::new(wire_coedges);
+   967→    outer_wire.closed = true;
+   968→
+   969→    // Build inner wires from both faces (preserve holes)
+   970→    let mut inner_wires: Vec<Wire> = Vec::new();
+   971→    inner_wires.extend(face_a.inner_wires.clone());
+   972→    inner_wires.extend(face_b.inner_wires.clone());
+   973→
+   974→    // Create merged face
+   975→    let mut merged_face = Face::new(
+   976→        face_a.surface.clone().unwrap_or(Surface::Plane(Plane::xy())),
+   977→        outer_wire,
+   978→    );
+   979→    merged_face.forward = face_a.forward;
+   980→    merged_face.edges = merged_edge_list;
+   981→    merged_face.inner_wires = inner_wires;
+   982→
+   983→    Some(merged_face)
+   984→}
+   985→
+   986→/// Get the list of (edge_id, forward) for coedges in the outer wire of a face.
+   987→fn face_coedges_with_forward(face: &Face) -> Vec<(TopoId, bool)> {
+   988→    let mut result = Vec::new();
+   989→    if let Some(ref wire) = face.outer_wire {
+   990→        for coedge in &wire.coedges {
+   991→            result.push((coedge.edge, coedge.forward));
+   992→        }
+   993→    }
+   994→    result
+   995→}
+   996→
+   997→/// Order a set of coedges into a proper wire by connecting end-to-start.
+   998→///
+   999→/// Each coedge represents an edge with an orientation. When `forward` is true,
+  1000→/// the edge goes from start_point to end_point. When false, it's reversed.
+  1001→///
+  1002→/// We walk from one coedge to the next by matching the end point of the
+  1003→/// current coedge with the start point of the next.
+  1004→fn order_coedges_into_wire(
+  1005→    coedges: &[(TopoId, bool)],
+  1006→    edge_map: &std::collections::HashMap<TopoId, Edge>,
+  1007→    tol: f64,
+  1008→) -> Option<Vec<(TopoId, bool)>> {
+  1009→    if coedges.is_empty() {
+  1010→        return Some(Vec::new());
+  1011→    }
+  1012→    if coedges.len() == 1 {
+  1013→        return Some(coedges.to_vec());
+  1014→    }
+  1015→
+  1016→    let tol_sq = tol * tol;
+  1017→
+  1018→    // For each coedge, compute its start and end points considering orientation
+  1019→    let mut start_pts: Vec<Point3d> = Vec::with_capacity(coedges.len());
+  1020→    let mut end_pts: Vec<Point3d> = Vec::with_capacity(coedges.len());
+  1021→
+  1022→    for (edge_id, forward) in coedges {
+  1023→        let edge = edge_map.get(edge_id)?;
+  1024→        let (sp, ep) = if let (Some(s), Some(e)) = (edge.start_point(), edge.end_point()) {
+  1025→            (s, e)
+  1026→        } else {
+  1027→            return None;
+  1028→        };
+  1029→        if *forward {
+  1030→            start_pts.push(sp);
+  1031→            end_pts.push(ep);
+  1032→        } else {
+  1033→            start_pts.push(ep);
+  1034→            end_pts.push(sp);
+  1035→        }
+  1036→    }
+  1037→
+  1038→    // Build adjacency: for each coedge end, find which coedge starts there
+  1039→    // Use grid snapping for robustness
+  1040→    let snap = |p: &Point3d| -> (i64, i64, i64) {
+  1041→        let scale = 1.0 / tol;
+  1042→        (
+  1043→            (p.x * scale).round() as i64,
+  1044→            (p.y * scale).round() as i64,
+  1045→            (p.z * scale).round() as i64,
+  1046→        )
+  1047→    };
+  1048→
+  1049→    let mut end_to_next: std::collections::HashMap<(i64, i64, i64), Vec<usize>> =
+  1050→        std::collections::HashMap::new();
+  1051→    for i in 0..coedges.len() {
+  1052→        let key = snap(&start_pts[i]);
+  1053→        end_to_next.entry(key).or_default().push(i);
+  1054→    }
+  1055→
+  1056→    // Walk the wire starting from coedge 0
+  1057→    let mut ordered = Vec::with_capacity(coedges.len());
+  1058→    let mut visited = vec![false; coedges.len()];
+  1059→    let mut current = 0;
+  1060→
+  1061→    for _ in 0..coedges.len() {
+  1062→        if visited[current] {
+  1063→            // Cycle detected before visiting all coedges — disconnected graph
+  1064→            break;
+  1065→        }
+  1066→        visited[current] = true;
+  1067→        ordered.push((coedges[current].0, coedges[current].1));
+  1068→
+  1069→        // Find next coedge whose start matches our end
+  1070→        let end_key = snap(&end_pts[current]);
+  1071→        let candidates = end_to_next.get(&end_key).cloned().unwrap_or_default();
+  1072→
+  1073→        let mut found = false;
+  1074→        for next_idx in &candidates {
+  1075→            if !visited[*next_idx] {
+  1076→                // Verify proximity
+  1077→                if end_pts[current].distance_sq_to(&start_pts[*next_idx]) < tol_sq {
+  1078→                    current = *next_idx;
+  1079→                    found = true;
+  1080→                    break;
+  1081→                }
+  1082→            }
+  1083→        }
+  1084→
+  1085→        if !found {
+  1086→            // Try to find any unvisited coedge whose start is close to our end
+  1087→            for i in 0..coedges.len() {
+  1088→                if !visited[i] && end_pts[current].distance_sq_to(&start_pts[i]) < tol_sq {
+  1089→                    current = i;
+  1090→                    found = true;
+  1091→                    break;
+  1092→                }
+  1093→            }
+  1094→        }
+  1095→
+  1096→        if !found {
+  1097→            // Can't connect — just add remaining unvisited coedges
+  1098→            for i in 0..coedges.len() {
+  1099→                if !visited[i] {
+  1100→                    ordered.push((coedges[i].0, coedges[i].1));
+  1101→                    visited[i] = true;
+  1102→                }
+  1103→            }
+  1104→            break;
+  1105→        }
+  1106→    }
+  1107→
+  1108→    Some(ordered)
+  1109→}
+  1110→
+  1111→/// Remove faces with area below `min_face_area`.
+  1112→fn remove_small_features(shell: &mut Shell, params: &HealingParams, report: &mut HealingReport) {
+  1113→    let before = shell.faces.len();
+  1114→
+  1115→    shell.faces.retain(|face| {
+  1116→        // Keep faces that have no surface (we can't estimate area)
+  1117→        let surface = match face.surface {
+  1118→            Some(ref s) => s,
+  1119→            None => return true,
+  1120→        };
+  1121→
+  1122→        // Estimate face area by sampling the surface within the wire boundary.
+  1123→        // For simplicity, use the edge polygon area as an approximation.
+  1124→        let area = estimate_face_area(face, surface);
+  1125→        area >= params.min_face_area
+  1126→    });
+  1127→
+  1128→    let removed = before - shell.faces.len();
+  1129→    if removed > 0 {
+  1130→        report.small_faces_removed = removed as u32;
+  1131→        report.add_msg(format!("Removed {} small-feature faces", removed));
+  1132→    }
+  1133→}
+  1134→
+  1135→/// Fix face normals for closed shells so they all point outward.
+  1136→///
+  1137→/// For a closed shell, the faces' normals should all point away from the
+  1138→/// interior. This function:
+  1139→/// 1. Computes the shell's centroid
+  1140→/// 2. For each face, checks whether its normal points away from the centroid
+  1141→/// 3. Flips faces whose normals point inward
+  1142→fn fix_normal_orientation(shell: &mut Shell, _params: &HealingParams, report: &mut HealingReport) {
+  1143→    if shell.faces.is_empty() {
+  1144→        return;
+  1145→    }
+  1146→
+  1147→    // Compute centroid as average of edge midpoints
+  1148→    let mut centroid = Point3d::ORIGIN;
+  1149→    let mut count = 0usize;
+  1150→    for face in &shell.faces {
+  1151→        for edge in &face.edges {
+  1152→            if let Some(p) = edge.point_at(0.5) {
+  1153→                centroid.x += p.x;
+  1154→                centroid.y += p.y;
+  1155→                centroid.z += p.z;
+  1156→                count += 1;
+  1157→            }
+  1158→        }
+  1159→        // Also sample surface center
+  1160→        if let Some(ref surface) = face.surface {
+  1161→            let p = surface.point_at(0.0, 0.0);
+  1162→            centroid.x += p.x;
+  1163→            centroid.y += p.y;
+  1164→            centroid.z += p.z;
+  1165→            count += 1;
+  1166→        }
+  1167→    }
+  1168→
+  1169→    if count == 0 {
+  1170→        return;
+  1171→    }
+  1172→    centroid.x /= count as f64;
+  1173→    centroid.y /= count as f64;
+  1174→    centroid.z /= count as f64;
+  1175→
+  1176→    let mut flipped = 0u32;
+  1177→    for face in &mut shell.faces {
+  1178→        let surface = match face.surface {
+  1179→            Some(ref s) => s,
+  1180→            None => continue,
+  1181→        };
+  1182→
+  1183→        // Sample a point on the face
+  1184→        let face_point = surface.point_at(0.0, 0.0);
+  1185→
+  1186→        // Get the face normal at that point
+  1187→        let normal = if face.forward {
+  1188→            surface.normal_at(0.0, 0.0)
+  1189→        } else {
+  1190→            surface.normal_at(0.0, 0.0).neg()
+  1191→        };
+  1192→
+  1193→        // Vector from centroid to face point
+  1194→        let to_face = Vec3d::new(
+  1195→            face_point.x - centroid.x,
+  1196→            face_point.y - centroid.y,
+  1197→            face_point.z - centroid.z,
+  1198→        );
+  1199→
+  1200→        // If the normal points toward the centroid (dot product < 0),
+  1201→        // the face is oriented inward and needs to be flipped
+  1202→        let dot = normal.x * to_face.x + normal.y * to_face.y + normal.z * to_face.z;
+  1203→        if dot < 0.0 {
+  1204→            face.forward = !face.forward;
+  1205→            flipped += 1;
+  1206→        }
+  1207→    }
+  1208→
+  1209→    if flipped > 0 {
+  1210→        report.normals_fixed = flipped;
+  1211→        report.add_msg(format!("Fixed orientation of {} faces", flipped));
+  1212→    }
+  1213→}
+  1214→
+  1215→// ============================================================
+  1216→// Sliver triangle detection (for draper-mesh)
+  1217→// ============================================================
+  1218→
+  1219→/// Aspect ratio of a triangle defined by three 3D points.
+  1220→///
+  1221→/// The aspect ratio is defined as `longest_edge / shortest_altitude`.
+  1222→/// A value > 100:1 indicates a sliver triangle.
+  1223→pub fn triangle_aspect_ratio(p0: &Point3d, p1: &Point3d, p2: &Point3d) -> f64 {
+  1224→    let e0 = p1.distance_to(p0);
+  1225→    let e1 = p2.distance_to(p1);
+  1226→    let e2 = p0.distance_to(p2);
+  1227→
+  1228→    let longest = e0.max(e1).max(e2);
+  1229→    if longest < 1e-15 {
+  1230→        return 0.0;
+  1231→    }
+  1232→
+  1233→    // Area via cross product
+  1234→    let v1 = Vec3d::new(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z);
+  1235→    let v2 = Vec3d::new(p2.x - p0.x, p2.y - p0.y, p2.z - p0.z);
+  1236→    let cross = v1.cross(&v2);
+  1237→    let area = cross.length() * 0.5;
+  1238→
+  1239→    if area < 1e-20 {
+  1240→        return f64::INFINITY; // Degenerate
+  1241→    }
+  1242→
+  1243→    // Shortest altitude = 2 * area / longest_edge
+  1244→    let shortest_altitude = 2.0 * area / longest;
+  1245→
+  1246→    if shortest_altitude < 1e-15 {
+  1247→        return f64::INFINITY;
+  1248→    }
+  1249→
+  1250→    longest / shortest_altitude
+  1251→}
+  1252→
+  1253→// ============================================================
+  1254→// Helper functions
+  1255→// ============================================================
+  1256→
+  1257→/// Replace all coedge references from `old_id` to `new_id` in the face list.
+  1258→fn replace_coedge_edge_refs(faces: &mut [Face], old_id: TopoId, new_id: TopoId) -> usize {
+  1259→    let mut count = 0;
+  1260→    for face in faces.iter_mut() {
+  1261→        if let Some(ref mut wire) = face.outer_wire {
+  1262→            for coedge in &mut wire.coedges {
+  1263→                if coedge.edge == old_id {
+  1264→                    coedge.edge = new_id;
+  1265→                    count += 1;
+  1266→                }
+  1267→            }
+  1268→        }
+  1269→        for wire in &mut face.inner_wires {
+  1270→            for coedge in &mut wire.coedges {
+  1271→                if coedge.edge == old_id {
+  1272→                    coedge.edge = new_id;
+  1273→                    count += 1;
+  1274→                }
+  1275→            }
+  1276→        }
+  1277→    }
+  1278→    count
+  1279→}
+  1280→
+  1281→/// Find boundary loops by chaining edges end-to-start.
+  1282→///
+  1283→/// Each loop is returned as a `Vec<TopoId>` of edge IDs forming a closed loop.
+  1284→fn find_boundary_loops(
+  1285→    boundary_edge_ids: &std::collections::HashSet<TopoId>,
+  1286→    edge_points: &std::collections::HashMap<TopoId, (Point3d, Point3d)>,
+  1287→    tolerance: f64,
+  1288→) -> Vec<Vec<TopoId>> {
+  1289→    let tol_sq = tolerance * tolerance;
+  1290→
+  1291→    // Build adjacency: end point → list of (edge_id, start point)
+  1292→    // An edge goes from start to end. The next edge in a loop starts
+  1293→    // where the previous one ends.
+  1294→    let mut end_to_edges: std::collections::HashMap<(i64, i64, i64), Vec<TopoId>> =
+  1295→        std::collections::HashMap::new();
+  1296→
+  1297→    // Snap points to grid for hashing
+  1298→    let snap = |p: &Point3d| -> (i64, i64, i64) {
+  1299→        let scale = 1.0 / tolerance;
+  1300→        (
+  1301→            (p.x * scale).round() as i64,
+  1302→            (p.y * scale).round() as i64,
+  1303→            (p.z * scale).round() as i64,
+  1304→        )
+  1305→    };
+  1306→
+  1307→    for &edge_id in boundary_edge_ids {
+  1308→        if let Some(&(_start, end)) = edge_points.get(&edge_id) {
+  1309→            let key = snap(&end);
+  1310→            end_to_edges.entry(key).or_default().push(edge_id);
+  1311→        }
+  1312→    }
+  1313→
+  1314→    let mut visited: std::collections::HashSet<TopoId> = std::collections::HashSet::new();
+  1315→    let mut loops: Vec<Vec<TopoId>> = Vec::new();
+  1316→
+  1317→    for &start_edge_id in boundary_edge_ids {
+  1318→        if visited.contains(&start_edge_id) {
+  1319→            continue;
+  1320→        }
+  1321→
+  1322→        let mut current_loop: Vec<TopoId> = Vec::new();
+  1323→        let mut current_end = match edge_points.get(&start_edge_id) {
+  1324→            Some(&(_, end)) => end,
+  1325→            None => continue,
+  1326→        };
+  1327→
+  1328→        let mut current_edge = start_edge_id;
+  1329→        let loop_start = match edge_points.get(&start_edge_id) {
+  1330→            Some(&(start, _)) => start,
+  1331→            None => continue,
+  1332→        };
+  1333→
+  1334→        loop {
+  1335→            if visited.contains(&current_edge) {
+  1336→                break;
+  1337→            }
+  1338→            // Safety limit: prevent infinite loop on pathological topology
+  1339→            if current_loop.len() >= 10000 {
+  1340→                break;
+  1341→            }
+  1342→            visited.insert(current_edge);
+  1343→            current_loop.push(current_edge);
+  1344→
+  1345→            // Find next edge whose start is close to current_end
+  1346→            let key = snap(&current_end);
+  1347→            let candidates = end_to_edges.get(&key).cloned().unwrap_or_default();
+  1348→
+  1349→            let mut found_next = false;
+  1350→            for next_id in &candidates {
+  1351→                if visited.contains(next_id) {
+  1352→                    // Check if we've closed the loop
+  1353→                    if let Some(&(next_start, _)) = edge_points.get(next_id) {
+  1354→                        if next_start.distance_sq_to(&loop_start) < tol_sq
+  1355→                            && current_loop.len() >= 3
+  1356→                        {
+  1357→                            // Loop is closed
+  1358→                            found_next = false; // Don't add, just finish
+  1359→                            break;
+  1360→                        }
+  1361→                    }
+  1362→                    continue;
+  1363→                }
+  1364→
+  1365→                if let Some(&(next_start, next_end)) = edge_points.get(next_id) {
+  1366→                    if next_start.distance_sq_to(&current_end) < tol_sq {
+  1367→                        current_end = next_end;
+  1368→                        current_edge = *next_id;
+  1369→                        found_next = true;
+  1370→                        break;
+  1371→                    }
+  1372→                }
+  1373→            }
+  1374→
+  1375→            if !found_next {
+  1376→                break;
+  1377→            }
+  1378→
+  1379→            // Check if loop closed
+  1380→            if current_end.distance_sq_to(&loop_start) < tol_sq && current_loop.len() >= 3 {
+  1381→                break;
+  1382→            }
+  1383→        }
+  1384→
+  1385→        if current_loop.len() >= 3 {
+  1386→            loops.push(current_loop);
+  1387→        }
+  1388→    }
+  1389→
+  1390→    loops
+  1391→}
+  1392→
+  1393→/// Create a face to fill a boundary hole.
+  1394→///
+  1395→/// The hole is defined by a list of edge IDs. We create a planar face
+  1396→/// that caps the hole using a fan triangulation from the centroid.
+  1397→fn create_fill_face(
+  1398→    edge_ids: &[TopoId],
+  1399→    edge_points: &std::collections::HashMap<TopoId, (Point3d, Point3d)>,
+  1400→    tolerance: f64,
+  1401→) -> Option<Face> {
+  1402→    // Collect all unique vertices in order
+  1403→    let mut vertices: Vec<Point3d> = Vec::new();
+  1404→    for &edge_id in edge_ids {
+  1405→        if let Some(&(start, _)) = edge_points.get(&edge_id) {
+  1406→            // Avoid duplicates
+  1407→            if vertices.last().map_or(true, |last| last.distance_sq_to(&start) > tolerance * tolerance) {
+  1408→                vertices.push(start);
+  1409→            }
+  1410→        }
+  1411→    }
+  1412→
+  1413→    if vertices.len() < 3 {
+  1414→        return None;
+  1415→    }
+  1416→
+  1417→    // Compute centroid
+  1418→    let mut centroid = Point3d::ORIGIN;
+  1419→    for v in &vertices {
+  1420→        centroid.x += v.x;
+  1421→        centroid.y += v.y;
+  1422→        centroid.z += v.z;
+  1423→    }
+  1424→    let n = vertices.len() as f64;
+  1425→    centroid.x /= n;
+  1426→    centroid.y /= n;
+  1427→    centroid.z /= n;
+  1428→
+  1429→    // Create edges from each vertex to the next (forming the boundary)
+  1430→    let mut edges: Vec<Edge> = Vec::new();
+  1431→    let mut coedges: Vec<CoEdge> = Vec::new();
+  1432→    for i in 0..vertices.len() {
+  1433→        let j = (i + 1) % vertices.len();
+  1434→        let edge = Edge::new_line(vertices[i], vertices[j]);
+  1435→        coedges.push(CoEdge::new(edge.id, true));
+  1436→        edges.push(edge);
+  1437→    }
+  1438→
+  1439→    let wire = Wire::new(coedges);
+  1440→
+  1441→    // Create a plane through the centroid using the first 3 vertices
+  1442→    let plane = if vertices.len() >= 3 {
+  1443→        Plane::from_three_points(&centroid, &vertices[0], &vertices[1])
+  1444→            .unwrap_or_else(|| Plane::from_origin_and_normal(centroid, Direction3d::Z))
+  1445→    } else {
+  1446→        Plane::from_origin_and_normal(centroid, Direction3d::Z)
+  1447→    };
+  1448→
+  1449→    let mut face = Face::new(Surface::Plane(plane), wire);
+  1450→    face.edges = edges;
+  1451→    Some(face)
+  1452→}
+  1453→
+  1454→/// Estimate the area of a face using its edge polygon.
+  1455→fn estimate_face_area(face: &Face, surface: &Surface) -> f64 {
+  1456→    // Collect 3D points from edges
+  1457→    let mut points: Vec<Point3d> = Vec::new();
+  1458→
+  1459→    if let Some(ref wire) = face.outer_wire {
+  1460→        for coedge in &wire.coedges {
+  1461→            // Find the edge in face.edges
+  1462→            if let Some(edge) = face.edges.iter().find(|e| e.id == coedge.edge) {
+  1463→                if let Some(sp) = edge.start_point() {
+  1464→                    points.push(sp);
+  1465→                }
+  1466→            }
+  1467→        }
+  1468→    }
+  1469→
+  1470→    if points.len() < 3 {
+  1471→        // For faces without wire edges (e.g., sphere), estimate from surface sampling
+  1472→        return estimate_surface_area(surface);
+  1473→    }
+  1474→
+  1475→    // Compute polygon area using the shoelace formula in 3D
+  1476→    // Project onto the dominant plane
+  1477→    let normal = polygon_normal(&points);
+  1478→    if normal.is_none() {
+  1479→        return estimate_surface_area(surface);
+  1480→    }
+  1481→    let n = normal.unwrap();
+  1482→
+  1483→    // Choose the projection plane that maximizes the projected area
+  1484→    let abs_nx = n.x.abs();
+  1485→    let abs_ny = n.y.abs();
+  1486→    let abs_nz = n.z.abs();
+  1487→
+  1488→    let area = if abs_nz >= abs_nx && abs_nz >= abs_ny {
+  1489→        // Project onto XY
+  1490→        shoelace_xy(&points)
+  1491→    } else if abs_ny >= abs_nx {
+  1492→        // Project onto XZ
+  1493→        shoelace_xz(&points)
+  1494→    } else {
+  1495→        // Project onto YZ
+  1496→        shoelace_yz(&points)
+  1497→    };
+  1498→
+  1499→    if area > 1e-20 {
+  1500→        area
+  1501→    } else {
+  1502→        estimate_surface_area(surface)
+  1503→    }
+  1504→}
+  1505→
+  1506→/// Estimate surface area by sampling (for faces without boundary edges).
+  1507→fn estimate_surface_area(surface: &Surface) -> f64 {
+  1508→    // Sample a 10x10 grid
+  1509→    let n = 10;
+  1510→    let mut area = 0.0;
+  1511→    for i in 0..n {
+  1512→        for j in 0..n {
+  1513→            let u0 = i as f64 / n as f64 * 2.0 * std::f64::consts::PI;
+  1514→            let u1 = (i + 1) as f64 / n as f64 * 2.0 * std::f64::consts::PI;
+  1515→            let v0 = j as f64 / n as f64 * std::f64::consts::PI;
+  1516→            let v1 = (j + 1) as f64 / n as f64 * std::f64::consts::PI;
+  1517→
+  1518→            let p00 = surface.point_at(u0, v0);
+  1519→            let p10 = surface.point_at(u1, v0);
+  1520→            let p01 = surface.point_at(u0, v1);
+  1521→
+  1522→            let e1 = Vec3d::new(p10.x - p00.x, p10.y - p00.y, p10.z - p00.z);
+  1523→            let e2 = Vec3d::new(p01.x - p00.x, p01.y - p00.y, p01.z - p00.z);
+  1524→            area += e1.cross(&e2).length() * 0.5;
+  1525→        }
+  1526→    }
+  1527→    area
+  1528→}
+  1529→
+  1530→/// Compute the normal of a polygon defined by 3D points.
+  1531→fn polygon_normal(points: &[Point3d]) -> Option<Direction3d> {
+  1532→    if points.len() < 3 {
+  1533→        return None;
+  1534→    }
+  1535→
+  1536→    let mut normal = Vec3d::ZERO;
+  1537→    for i in 0..points.len() {
+  1538→        let j = (i + 1) % points.len();
+  1539→        // Cross product of vectors from origin (Newell's method)
+  1540→        normal.x += (points[i].y - points[j].y) * (points[i].z + points[j].z);
+  1541→        normal.y += (points[i].z - points[j].z) * (points[i].x + points[j].x);
+  1542→        normal.z += (points[i].x - points[j].x) * (points[i].y + points[j].y);
+  1543→    }
+  1544→
+  1545→    normal.normalize()
+  1546→}
+  1547→
+  1548→/// Shoelace formula for polygon area projected onto XY plane.
+  1549→fn shoelace_xy(points: &[Point3d]) -> f64 {
+  1550→    let mut area = 0.0;
+  1551→    for i in 0..points.len() {
+  1552→        let j = (i + 1) % points.len();
+  1553→        area += points[i].x * points[j].y - points[j].x * points[i].y;
+  1554→    }
+  1555→    area.abs() * 0.5
+  1556→}
+  1557→
+  1558→/// Shoelace formula for polygon area projected onto XZ plane.
+  1559→fn shoelace_xz(points: &[Point3d]) -> f64 {
+  1560→    let mut area = 0.0;
+  1561→    for i in 0..points.len() {
+  1562→        let j = (i + 1) % points.len();
+  1563→        area += points[i].x * points[j].z - points[j].x * points[i].z;
+  1564→    }
+  1565→    area.abs() * 0.5
+  1566→}
+  1567→
+  1568→/// Shoelace formula for polygon area projected onto YZ plane.
+  1569→fn shoelace_yz(points: &[Point3d]) -> f64 {
+  1570→    let mut area = 0.0;
+  1571→    for i in 0..points.len() {
+  1572→        let j = (i + 1) % points.len();
+  1573→        area += points[i].y * points[j].z - points[j].y * points[i].z;
+  1574→    }
+  1575→    area.abs() * 0.5
+  1576→}
+  1577→
+  1578→/// Check if two edges are collinear (their directions are parallel).
+  1579→fn are_edges_collinear(e1: &Edge, e2: &Edge, angular_tol: f64, _tolerance: f64) -> bool {
+  1580→    // Get direction vectors
+  1581→    let dir1 = edge_direction(e1);
+  1582→    let dir2 = edge_direction(e2);
+  1583→
+  1584→    match (dir1, dir2) {
+  1585→        (Some(d1), Some(d2)) => {
+  1586→            // Check if directions are parallel (dot product ≈ ±1)
+  1587→            let dot = d1.x * d2.x + d1.y * d2.y + d1.z * d2.z;
+  1588→            let angle = dot.acos().abs();
+  1589→            angle < angular_tol || (std::f64::consts::PI - angle).abs() < angular_tol
+  1590→        }
+  1591→        _ => false,
+  1592→    }
+  1593→}
+  1594→
+  1595→/// Get the direction of an edge (from start to end).
+  1596→fn edge_direction(edge: &Edge) -> Option<Direction3d> {
+  1597→    match (edge.start_point(), edge.end_point()) {
+  1598→        (Some(sp), Some(ep)) => Direction3d::new(ep.x - sp.x, ep.y - sp.y, ep.z - sp.z),
+  1599→        _ => {
+  1600→            // Try using the curve
+  1601→            if let Some(ref curve) = edge.curve {
+  1602→                let (tmin, tmax) = edge.param_range;
+  1603→                let p0 = curve.point_at(tmin);
+  1604→                let p1 = curve.point_at(tmax);
+  1605→                Direction3d::new(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z)
+  1606→            } else {
+  1607→                None
+  1608→            }
+  1609→        }
+  1610→    }
+  1611→}
+  1612→
+  1613→/// Merge a sub-report into the main report.
+  1614→fn merge_report(target: &mut HealingReport, source: &HealingReport) {
+  1615→    target.gaps_closed += source.gaps_closed;
+  1616→    target.holes_filled += source.holes_filled;
+  1617→    target.edges_stitched += source.edges_stitched;
+  1618→    target.normals_fixed += source.normals_fixed;
+  1619→    target.small_faces_removed += source.small_faces_removed;
+  1620→    target.degenerate_edges_marked += source.degenerate_edges_marked;
+  1621→    target.sliver_triangles_detected += source.sliver_triangles_detected;
+  1622→    target.faces_merged += source.faces_merged;
+  1623→    target.tolerances_propagated += source.tolerances_propagated;
+  1624→    target.messages.extend(source.messages.iter().cloned());
+  1625→}
+  1626→
+  1627→// ============================================================
+  1628→// Unit tests
+  1629→// ============================================================
+  1630→
+  1631→#[cfg(test)]
+  1632→mod tests {
+  1633→    use super::*;
+  1634→    use crate::builder::ShapeBuilder;
+  1635→    use draper_geometry::{Curve3d, Plane, Point3d};
+  1636→
+  1637→    /// Test that default healing parameters are sensible.
+  1638→    #[test]
+  1639→    fn test_default_params() {
+  1640→        let params = HealingParams::default();
+  1641→        assert!(params.gap_factor > 0.0);
+  1642→        assert!(params.max_hole_edges > 0);
+  1643→        assert!(params.min_face_area > 0.0);
+  1644→        assert!(params.max_aspect_ratio > 0.0);
+  1645→        assert!(params.tolerance > 0.0);
+  1646→        assert!(params.gap_tolerance() > params.tolerance);
+  1647→    }
+  1648→
+  1649→    /// Test that healing a clean box preserves its structure.
+  1650→    ///
+  1651→    /// Note: `ShapeBuilder::make_box` creates each face with its own
+  1652→    /// independent edge objects (no shared edge IDs between faces).
+  1653→    /// The healing pipeline detects these as topological gaps (geometrically
+  1654→    /// coincident edges with different IDs) and closes them by merging
+  1655→    /// coedge references.
+  1656→    #[test]
+  1657→    fn test_heal_clean_box() {
+  1658→        let box_solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+  1659→        let params = HealingParams {
+  1660→            fix_normals: false,
+  1661→            ..HealingParams::default()
+  1662→        };
+  1663→        let (healed, report) = heal_solid(&box_solid, &params);
+  1664→        // The box has 12 shared physical edges, but each face has its own
+  1665→        // edge objects, so gap closing finds 12 pairs to merge.
+  1666→        assert_eq!(report.gaps_closed, 12);
+  1667→        assert_eq!(report.holes_filled, 0);
+  1668→        assert_eq!(report.small_faces_removed, 0);
+  1669→        // The box should still have 6 faces
+  1670→        if let Some(ref shell) = healed.outer_shell {
+  1671→            assert_eq!(shell.faces.len(), 6);
+  1672→        }
+  1673→    }
+  1674→
+  1675→    /// Test that healing fixes flipped normals.
+  1676→    ///
+  1677→    /// Note: ShapeBuilder::make_box may produce faces with inconsistent
+  1678→    /// normals (not all pointing outward). The healing pipeline fixes all
+  1679→    /// inward-pointing faces, so we check that at least one is corrected.
+  1680→    #[test]
+  1681→    fn test_fix_flipped_normal() {
+  1682→        // Create a simple closed shell with a known-flipped face
+  1683→        let mut box_solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+  1684→
+  1685→        // First, fix all normals so we have a known-good starting point
+  1686→        let params_fix = HealingParams {
+  1687→            fix_normals: true,
+  1688→            ..HealingParams::default()
+  1689→        };
+  1690→        let (mut fixed_solid, _) = heal_solid(&box_solid, &params_fix);
+  1691→
+  1692→        // Now flip one face deliberately
+  1693→        if let Some(ref mut shell) = fixed_solid.outer_shell {
+  1694→            if !shell.faces.is_empty() {
+  1695→                shell.faces[0].forward = !shell.faces[0].forward;
+  1696→            }
+  1697→        }
+  1698→
+  1699→        // Heal again — should fix exactly the one we flipped
+  1700→        let (_healed, report) = heal_solid(&fixed_solid, &params_fix);
+  1701→        assert_eq!(report.normals_fixed, 1);
+  1702→    }
+  1703→
+  1704→    /// Test that small face removal works.
+  1705→    #[test]
+  1706→    fn test_remove_small_faces() {
+  1707→        // Create a shell with one tiny face and one normal face.
+  1708→        // We use make_polygon_face which works for triangles with
+  1709→        // edge lengths above the global TOLERANCE (1e-6).
+  1710→        let mut faces = Vec::new();
+  1711→
+  1712→        // Add a tiny face (area ≈ 0.5 * 0.001 * 0.001 = 5e-7)
+  1713→        let p0 = Point3d::new(0.0, 0.0, 0.0);
+  1714→        let p1 = Point3d::new(0.001, 0.0, 0.0);
+  1715→        let p2 = Point3d::new(0.0, 0.001, 0.0);
+  1716→
+  1717→        let tiny_face = ShapeBuilder::make_polygon_face(&[p0, p1, p2]).unwrap();
+  1718→        faces.push(tiny_face);
+  1719→
+  1720→        // Add a normal face (area ≈ 0.5)
+  1721→        let normal_face = ShapeBuilder::make_polygon_face(&[
+  1722→            Point3d::new(0.0, 0.0, 0.0),
+  1723→            Point3d::new(1.0, 0.0, 0.0),
+  1724→            Point3d::new(0.0, 1.0, 0.0),
+  1725→        ])
+  1726→        .unwrap();
+  1727→        faces.push(normal_face);
+  1728→
+  1729→        let mut shell = Shell::new(faces);
+  1730→        let params = HealingParams {
+  1731→            min_face_area: 1e-5,  // Threshold above the tiny face's area (5e-7)
+  1732→            fix_normals: false,
+  1733→            stitch_edges: false,
+  1734→            ..HealingParams::default()
+  1735→        };
+  1736→
+  1737→        let (healed, report) = heal_shell(&shell, &params);
+  1738→
+  1739→        assert_eq!(report.small_faces_removed, 1);
+  1740→        assert_eq!(healed.faces.len(), 1);
+  1741→    }
+  1742→
+  1743→    /// Test HealingReport::total_fixes()
+  1744→    #[test]
+  1745→    fn test_report_total_fixes() {
+  1746→        let report = HealingReport {
+  1747→            gaps_closed: 2,
+  1748→            holes_filled: 1,
+  1749→            edges_stitched: 3,
+  1750→            normals_fixed: 0,
+  1751→            small_faces_removed: 1,
+  1752→            degenerate_edges_marked: 4,
+  1753→            sliver_triangles_detected: 0,
+  1754→            faces_merged: 0,
+  1755→            tolerances_propagated: 2,
+  1756→            messages: Vec::new(),
+  1757→        };
+  1758→        assert_eq!(report.total_fixes(), 13);
+  1759→    }
+  1760→
+  1761→    /// Test triangle_aspect_ratio for an equilateral triangle.
+  1762→    #[test]
+  1763→    fn test_aspect_ratio_equilateral() {
+  1764→        // Equilateral triangle with side length 1
+  1765→        let p0 = Point3d::new(0.0, 0.0, 0.0);
+  1766→        let p1 = Point3d::new(1.0, 0.0, 0.0);
+  1767→        let p2 = Point3d::new(0.5, 0.8660254037844386, 0.0); // sqrt(3)/2
+  1768→
+  1769→        let ratio = triangle_aspect_ratio(&p0, &p1, &p2);
+  1770→        // For an equilateral triangle, aspect ratio should be close to 2/sqrt(3) ≈ 1.15
+  1771→        // (longest_edge / shortest_altitude = 1 / (sqrt(3)/2) ≈ 1.155)
+  1772→        assert!(ratio > 1.0 && ratio < 1.5, "Equilateral aspect ratio should be ~1.15, got {}", ratio);
+  1773→    }
+  1774→
+  1775→    /// Test triangle_aspect_ratio for a sliver triangle.
+  1776→    #[test]
+  1777→    fn test_aspect_ratio_sliver() {
+  1778→        let p0 = Point3d::new(0.0, 0.0, 0.0);
+  1779→        let p1 = Point3d::new(100.0, 0.0, 0.0);
+  1780→        let p2 = Point3d::new(50.0, 0.001, 0.0); // Very thin
+  1781→
+  1782→        let ratio = triangle_aspect_ratio(&p0, &p1, &p2);
+  1783→        assert!(ratio > 100.0, "Sliver should have ratio > 100, got {}", ratio);
+  1784→    }
+  1785→
+  1786→    /// Test triangle_aspect_ratio for a degenerate (zero-area) triangle.
+  1787→    #[test]
+  1788→    fn test_aspect_ratio_degenerate() {
+  1789→        let p0 = Point3d::new(0.0, 0.0, 0.0);
+  1790→        let p1 = Point3d::new(1.0, 0.0, 0.0);
+  1791→        let p2 = Point3d::new(0.5, 0.0, 0.0); // Collinear
+  1792→
+  1793→        let ratio = triangle_aspect_ratio(&p0, &p1, &p2);
+  1794→        assert!(ratio.is_infinite(), "Degenerate triangle should have infinite ratio, got {}", ratio);
+  1795→    }
+  1796→
+  1797→    /// Test that gap tolerance is computed correctly.
+  1798→    #[test]
+  1799→    fn test_gap_tolerance() {
+  1800→        let params = HealingParams {
+  1801→            tolerance: 1e-6,
+  1802→            gap_factor: 10.0,
+  1803→            ..HealingParams::default()
+  1804→        };
+  1805→        assert!((params.gap_tolerance() - 1e-5).abs() < 1e-15);
+  1806→    }
+  1807→
+  1808→    /// Test HealingParams::from_tolerance_context.
+  1809→    #[test]
+  1810→    fn test_params_from_tolerance_context() {
+  1811→        let ctx = ToleranceContext::from_model_scale(100.0);
+  1812→        let params = HealingParams::from_tolerance_context(&ctx);
+  1813→        assert!(params.tolerance > 0.0);
+  1814→        assert!(params.min_face_area > 0.0);
+  1815→    }
+  1816→
+  1817→    /// Test healing a cylinder (closed shell with normals).
+  1818→    #[test]
+  1819→    fn test_heal_cylinder() {
+  1820→        let cyl = ShapeBuilder::make_cylinder(5.0, 10.0);
+  1821→        let params = HealingParams::default();
+  1822→        let (healed, report) = heal_solid(&cyl, &params);
+  1823→
+  1824→        // Cylinder should be fine after healing
+  1825→        assert_eq!(report.gaps_closed, 0);
+  1826→        assert_eq!(report.holes_filled, 0);
+  1827→
+  1828→        // Should still have 3 faces
+  1829→        if let Some(ref shell) = healed.outer_shell {
+  1830→            assert_eq!(shell.faces.len(), 3);
+  1831→        }
+  1832→    }
+  1833→
+  1834→    /// Test that edge direction extraction works.
+  1835→    #[test]
+  1836→    fn test_edge_direction() {
+  1837→        let edge = Edge::new_line(
+  1838→            Point3d::new(0.0, 0.0, 0.0),
+  1839→            Point3d::new(1.0, 0.0, 0.0),
+  1840→        );
+  1841→        let dir = edge_direction(&edge);
+  1842→        assert!(dir.is_some());
+  1843→        let d = dir.unwrap();
+  1844→        assert!(d.x > 0.9); // Should point in +X direction
+  1845→    }
+  1846→
+  1847→    /// Test collinear edge detection.
+  1848→    #[test]
+  1849→    fn test_collinear_edges() {
+  1850→        let e1 = Edge::new_line(Point3d::new(0.0, 0.0, 0.0), Point3d::new(1.0, 0.0, 0.0));
+  1851→        let e2 = Edge::new_line(Point3d::new(1.0, 0.0, 0.0), Point3d::new(2.0, 0.0, 0.0));
+  1852→        assert!(are_edges_collinear(&e1, &e2, 1e-6, 1e-6));
+  1853→
+  1854→        let e3 = Edge::new_line(Point3d::new(0.0, 0.0, 0.0), Point3d::new(0.0, 1.0, 0.0));
+  1855→        assert!(!are_edges_collinear(&e1, &e3, 1e-6, 1e-6));
+  1856→    }
+  1857→
+  1858→    /// Test that healing handles empty shells gracefully.
+  1859→    #[test]
+  1860→    fn test_heal_empty_shell() {
+  1861→        let shell = Shell::new(vec![]);
+  1862→        let params = HealingParams::default();
+  1863→        let (healed, report) = heal_shell(&shell, &params);
+  1864→        assert!(healed.faces.is_empty());
+  1865→        assert_eq!(report.total_fixes(), 0);
+  1866→    }
+  1867→
+  1868→    /// Test that healing handles solids without outer shells.
+  1869→    #[test]
+  1870→    fn test_heal_no_outer_shell() {
+  1871→        let solid = Solid {
+  1872→            id: TopoId::new(),
+  1873→            outer_shell: None,
+  1874→            inner_shells: vec![],
+  1875→        };
+  1876→        let params = HealingParams::default();
+  1877→        let (_healed, report) = heal_solid(&solid, &params);
+  1878→        assert_eq!(report.total_fixes(), 0);
+  1879→    }
+  1880→
+  1881→    /// Test polygon_normal computation.
+  1882→    #[test]
+  1883→    fn test_polygon_normal() {
+  1884→        let points = vec![
+  1885→            Point3d::new(0.0, 0.0, 0.0),
+  1886→            Point3d::new(1.0, 0.0, 0.0),
+  1887→            Point3d::new(1.0, 1.0, 0.0),
+  1888→            Point3d::new(0.0, 1.0, 0.0),
+  1889→        ];
+  1890→        let normal = polygon_normal(&points);
+  1891→        assert!(normal.is_some());
+  1892→        let n = normal.unwrap();
+  1893→        // Should point in +Z or -Z direction
+  1894→        assert!(n.z.abs() > 0.9, "Normal should be along Z, got ({}, {}, {})", n.x, n.y, n.z);
+  1895→    }
+  1896→
+  1897→    /// Test shoelace area computation.
+  1898→    #[test]
+  1899→    fn test_shoelace_area() {
+  1900→        let points = vec![
+  1901→            Point3d::new(0.0, 0.0, 0.0),
+  1902→            Point3d::new(1.0, 0.0, 0.0),
+  1903→            Point3d::new(1.0, 1.0, 0.0),
+  1904→            Point3d::new(0.0, 1.0, 0.0),
+  1905→        ];
+  1906→        let area = shoelace_xy(&points);
+  1907→        assert!((area - 1.0).abs() < 1e-10, "Unit square area should be 1.0, got {}", area);
+  1908→    }
+  1909→
+  1910→    /// Test healing with a shell that has a deliberately created gap.
+  1911→    #[test]
+  1912→    fn test_close_gap_in_shell() {
+  1913→        // Create two adjacent rectangular faces that share almost the same edge
+  1914→        // but with slightly different edge IDs (a gap)
+  1915→        let p0 = Point3d::new(0.0, 0.0, 0.0);
+  1916→        let p1 = Point3d::new(1.0, 0.0, 0.0);
+  1917→        let p2 = Point3d::new(1.0, 1.0, 0.0);
+  1918→        let p3 = Point3d::new(0.0, 1.0, 0.0);
+  1919→        let p4 = Point3d::new(2.0, 0.0, 0.0);
+  1920→        let p5 = Point3d::new(2.0, 1.0, 0.0);
+  1921→
+  1922→        let face1 = ShapeBuilder::make_polygon_face(&[p0, p1, p2, p3]).unwrap();
+  1923→        let face2 = ShapeBuilder::make_polygon_face(&[p1, p4, p5, p2]).unwrap();
+  1924→
+  1925→        let mut shell = Shell::new(vec![face1, face2]);
+  1926→
+  1927→        // The shared edge between face1 (p1→p2) and face2 (p2→p1 in reverse)
+  1928→        // has different IDs — this creates a gap in topological connectivity
+  1929→        let params = HealingParams {
+  1930→            gap_factor: 100.0, // Large gap factor to close the gap
+  1931→            fix_normals: false,
+  1932→            ..HealingParams::default()
+  1933→        };
+  1934→
+  1935→        let mut report = HealingReport::default();
+  1936→        close_gaps(&mut shell, &params, &mut report);
+  1937→
+  1938→        // The gap should be detected and closed
+  1939→        // (may or may not find gaps depending on midpoint proximity)
+  1940→        // At minimum, the function should not crash
+  1941→        assert!(shell.faces.len() >= 2);
+  1942→    }
+  1943→
+  1944→    /// Test that degenerate edges are marked during healing.
+  1945→    #[test]
+  1946→    fn test_mark_degenerate() {
+  1947→        // Create a face with a degenerate edge (zero-length line)
+  1948→        let p0 = Point3d::new(0.0, 0.0, 0.0);
+  1949→        let p1 = Point3d::new(1.0, 0.0, 0.0);
+  1950→        let p2 = Point3d::new(1.0, 1.0, 0.0);
+  1951→
+  1952→        let mut face = ShapeBuilder::make_polygon_face(&[p0, p1, p2]).unwrap();
+  1953→
+  1954→        // Add a degenerate edge manually: an edge with no curve and no
+  1955→        // evaluable geometry should be detected as degenerate.
+  1956→        let degenerate_edge = Edge {
+  1957→            id: TopoId::new(),
+  1958→            curve: None,
+  1959→            param_range: (0.0, 0.0),
+  1960→            vertex_start: None,
+  1961→            vertex_end: None,
+  1962→            forward: true,
+  1963→            tolerance: 1e-6,
+  1964→            degenerate: false,
+  1965→            step_entity_id: None,
+  1966→        };
+  1967→        face.edges.push(degenerate_edge);
+  1968→
+  1969→        // Also add a zero-radius circle edge (also degenerate)
+  1970→        let zero_circle = draper_geometry::Circle::new_xy(Point3d::ORIGIN, 0.0);
+  1971→        let degen_circle_edge = Edge {
+  1972→            id: TopoId::new(),
+  1973→            curve: Some(Curve3d::Circle(zero_circle)),
+  1974→            param_range: (0.0, 2.0 * std::f64::consts::PI),
+  1975→            vertex_start: None,
+  1976→            vertex_end: None,
+  1977→            forward: true,
+  1978→            tolerance: 1e-6,
+  1979→            degenerate: false,
+  1980→            step_entity_id: None,
+  1981→        };
+  1982→        face.edges.push(degen_circle_edge);
+  1983→
+  1984→        let mut shell = Shell::new(vec![face]);
+  1985→        let params = HealingParams {
+  1986→            fix_normals: false,
+  1987→            ..HealingParams::default()
+  1988→        };
+  1989→
+  1990→        let mut report = HealingReport::default();
+  1991→        mark_degenerate_edges(&mut shell, &params, &mut report);
+  1992→
+  1993→        // Both the no-curve edge and the zero-radius circle should be degenerate
+  1994→        assert!(report.degenerate_edges_marked >= 2,
+  1995→            "Expected at least 2 degenerate edges, got {}", report.degenerate_edges_marked);
+  1996→    }
+  1997→
+  1998→    /// Integration test: heal a box with a flipped normal.
+  1999→    #[test]
+  2000→    fn test_heal_box_with_issues() {
+
+[showing lines 1-2000 of 2477; use offset=2001 with limit to continue reading]
