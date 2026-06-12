@@ -2739,6 +2739,24 @@ impl<'a> StepConverter<'a> {
                 brep_id, total_face_vertices, mesh.vertices.len(), deduped_vertices,
             );
         }
+
+        // ─── Post-merge boundary vertex snapping ────────────────────────
+        // When the STEP file uses different VERTEX_POINT entities for the
+        // same geometric boundary (e.g., Plane face uses LINE, NURBS face
+        // uses NURBS curve), bit-exact dedup can't merge the boundary
+        // vertices. This post-processing step snaps boundary vertices to
+        // nearby shared vertices, welding the mesh at geometrically
+        // coincident boundaries.
+        {
+            let snap_tol = tol_ctx.model_scale * 1e-3; // 1000 PPM of model scale
+            let snapped = mesh.snap_boundary_vertices(snap_tol);
+            if snapped > 0 {
+                log::info!(
+                    "BREP #{}: snapped {} boundary vertices to shared vertices (tol={:.2e})",
+                    brep_id, snapped, snap_tol
+                );
+            }
+        }
         // Validation — do NOT apply repair_mesh. If the mesh is not watertight,
         // that indicates a bug in the edge cache or surface discretization.
         // repair_mask/stitch_boundary_edges mask the real problem by moving
@@ -3012,6 +3030,17 @@ impl<'a> StepConverter<'a> {
             });
         }
         // Validation — do NOT apply repair_mesh (see comment in triangulate_brep).
+        // Post-merge boundary vertex snapping for STEP files with disjoint VERTEX_POINT entities
+        {
+            let snap_tol = tol_ctx.model_scale * 1e-3;
+            let snapped = mesh.snap_boundary_vertices(snap_tol);
+            if snapped > 0 {
+                log::info!(
+                    "BREP #{}: snapped {} boundary vertices (detailed path, tol={:.2e})",
+                    brep_id, snapped, snap_tol
+                );
+            }
+        }
         let adaptive_tol = edge_cache.adaptive_tolerance().merge_tolerance();
         let report_before = validate_watertight(&mesh, false);
         if !report_before.is_watertight() {

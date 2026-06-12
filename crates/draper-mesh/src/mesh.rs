@@ -496,6 +496,150 @@ impl TriangleMesh {
         }
     }
 
+    /// Snap boundary vertices to nearby non-boundary vertices.
+    ///
+    /// After merging face meshes with bit-exact deduplication, some vertices
+    /// from different faces may be geometrically close but not bit-identical
+    /// (because the STEP file uses different VERTEX_POINT entities for the
+    /// same geometric boundary). This method finds such pairs and snaps the
+    /// boundary vertex to the nearby vertex, effectively "welding" them
+    /// together and reducing the number of boundary edges.
+    ///
+    /// # Algorithm
+    /// 1. Build a spatial hash of ALL vertices
+    /// 2. Find boundary edges (edges appearing in only one triangle)
+    /// 3. For each boundary vertex, check if there's a nearby non-boundary
+    ///    vertex within `snap_tolerance`
+    /// 4. If found, remap the boundary vertex to the nearby one
+    ///
+    /// # Safety
+    /// - Only snaps to vertices that are ALREADY shared by 2+ triangles
+    ///   (non-manifold-safe)
+    /// - Uses a spatial hash for O(1) lookups
+    /// - Does NOT create new vertices, only remaps existing ones
+    pub fn snap_boundary_vertices(&mut self, snap_tolerance: f64) -> usize {
+        if snap_tolerance <= 0.0 || self.vertices.is_empty() || self.triangles.is_empty() {
+            return 0;
+        }
+
+        // Step 1: Count edge occurrences to find boundary vertices
+        let mut edge_count: HashMap<(u32, u32), u32> = HashMap::new();
+        for tri in &self.triangles {
+            for k in 0..3 {
+                let a = tri[k].min(tri[(k + 1) % 3]);
+                let b = tri[k].max(tri[(k + 1) % 3]);
+                *edge_count.entry((a, b)).or_insert(0) += 1;
+            }
+        }
+
+        // Find vertices that are on boundary edges
+        let mut boundary_vertex_set: HashMap<u32, u32> = HashMap::new();
+        for (&(a, b), &count) in &edge_count {
+            if count == 1 {
+                // This is a boundary edge
+                boundary_vertex_set.entry(a).or_insert(0);
+                boundary_vertex_set.entry(b).or_insert(0);
+            }
+        }
+
+        if boundary_vertex_set.is_empty() {
+            return 0;
+        }
+
+        // Step 2: Build spatial hash of non-boundary vertices
+        // (vertices that are already shared by 2+ triangles)
+        let cell_size = snap_tolerance;
+        let mut spatial: HashMap<(i64, i64, i64), Vec<(u32, Point3d)>> = HashMap::new();
+
+        // Count how many triangles each vertex appears in
+        let mut vert_tri_count = vec![0u32; self.vertices.len()];
+        for tri in &self.triangles {
+            for &v in tri {
+                vert_tri_count[v as usize] += 1;
+            }
+        }
+
+        for (idx, p) in self.vertices.iter().enumerate() {
+            // Only index vertices that are shared (2+ triangles) — these
+            // are "interior" or "shared boundary" vertices that are safe
+            // snap targets.
+            if vert_tri_count[idx] >= 2 {
+                let cell = (
+                    (p.x / cell_size).floor() as i64,
+                    (p.y / cell_size).floor() as i64,
+                    (p.z / cell_size).floor() as i64,
+                );
+                spatial.entry(cell).or_default().push((idx as u32, *p));
+            }
+        }
+
+        // Step 3: For each boundary vertex, find nearby shared vertices
+        let mut remap: Vec<u32> = (0..self.vertices.len() as u32).collect();
+        let mut snap_count = 0usize;
+        let tol_sq = snap_tolerance * snap_tolerance;
+
+        for &bv in boundary_vertex_set.keys() {
+            let p = self.vertices[bv as usize];
+            let cell = (
+                (p.x / cell_size).floor() as i64,
+                (p.y / cell_size).floor() as i64,
+                (p.z / cell_size).floor() as i64,
+            );
+
+            let mut best_dist_sq = tol_sq;
+            let mut best_target: Option<u32> = None;
+
+            // Check current cell and neighbors
+            for dx in -1i64..=1 {
+                for dy in -1i64..=1 {
+                    for dz in -1i64..=1 {
+                        let neighbor = (cell.0 + dx, cell.1 + dy, cell.2 + dz);
+                        if let Some(candidates) = spatial.get(&neighbor) {
+                            for &(idx, ref vp) in candidates {
+                                if idx == bv { continue; }
+                                let ddx = p.x - vp.x;
+                                let ddy = p.y - vp.y;
+                                let ddz = p.z - vp.z;
+                                let dist_sq = ddx * ddx + ddy * ddy + ddz * ddz;
+                                if dist_sq < best_dist_sq {
+                                    best_dist_sq = dist_sq;
+                                    best_target = Some(idx);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(target) = best_target {
+                remap[bv as usize] = target;
+                snap_count += 1;
+            }
+        }
+
+        // Step 4: Apply remapping to all triangles
+        if snap_count > 0 {
+            // Resolve chains (if A→B and B→C, then A→C)
+            for i in 0..remap.len() {
+                let mut current = remap[i];
+                let mut seen = std::collections::HashSet::new();
+                while remap[current as usize] != current {
+                    if !seen.insert(current) { break; } // cycle protection
+                    current = remap[current as usize];
+                }
+                remap[i] = current;
+            }
+
+            for tri in &mut self.triangles {
+                tri[0] = remap[tri[0] as usize];
+                tri[1] = remap[tri[1] as usize];
+                tri[2] = remap[tri[2] as usize];
+            }
+        }
+
+        snap_count
+    }
+
     /// Ensure triangle_colors matches triangles length, filling with default color if needed.
     pub fn ensure_colors(&mut self, default: [f32; 4]) {
         if self.triangle_colors.is_none() {
