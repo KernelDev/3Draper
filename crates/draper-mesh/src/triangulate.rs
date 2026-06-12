@@ -622,8 +622,9 @@ fn triangulate_solid_parallel(solid: &Solid, params: &TriangulationParams, cache
         })
         .collect();
 
-    // Step 2: Merge per-face meshes with pre-computed offsets
-    let merged = merge_meshes_parallel(&face_meshes);
+    // Step 2: Merge per-face meshes with two-tier dedup (same as sequential)
+    let merge_tol = cache.adaptive_tolerance().model_scale() * 1e-6; // 1 PPM — strict!
+    let merged = merge_meshes_parallel(&face_meshes, merge_tol);
 
     // Step 3: Post-processing (topology-first — no mandatory merge/stitch)
     let mut mesh = merged;
@@ -654,6 +655,16 @@ fn triangulate_solid_parallel(solid: &Solid, params: &TriangulationParams, cache
         if boundary_pct > 1.0 {
             log::error!("More than 1% boundary edges — edge cache is NOT working correctly for this solid!");
         }
+        // Run edge consistency validation to diagnose the root cause (same as sequential)
+        let consistency = crate::watertight::validate_edge_consistency(&mesh, adaptive_tol);
+        log::error!(
+            "Edge consistency (parallel): {}/{} shared edges consistent, {} inconsistent ({:.2}%), max_dist={:.2e}",
+            consistency.consistent_edges,
+            consistency.shared_edges_checked,
+            consistency.inconsistent_edges,
+            consistency.inconsistency_rate(),
+            consistency.max_vertex_distance,
+        );
     } else {
         log::info!("Solid is watertight ✓ (parallel, {} interior edges, {} triangles, χ={})",
             report.interior_edge_count, report.triangle_count, report.euler_characteristic);
@@ -674,18 +685,41 @@ fn triangulate_solid_parallel(solid: &Solid, params: &TriangulationParams, cache
 /// watertight by construction. The edge cache guarantees bit-identical
 /// 3D coordinates on shared edges, so bit-exact deduplication via
 /// `VertexDedupMap` is correct and efficient.
-fn merge_meshes_parallel(meshes: &[TriangleMesh]) -> TriangleMesh {
+///
+/// Uses two-tier dedup like the sequential path:
+/// 1. Bit-exact match (fast path) — catches vertices from edges with step_id
+/// 2. Tolerance-based fallback (slow path) — catches vertices from edges
+///    without step_id (step_id==0) that can't produce bit-identical points
+fn merge_meshes_parallel(meshes: &[TriangleMesh], merge_tol: f64) -> TriangleMesh {
     if meshes.is_empty() {
         return TriangleMesh::new();
     }
 
-    // Use merge_deduplicating for topology-first watertightness
-    // Note: parallel path uses bit-exact dedup only (no tolerance fallback).
-    // The sequential path (triangulate_solid_sequential) uses tolerance-based dedup.
+    // Use two-tier dedup: bit-exact + tolerance fallback
+    // Same strategy as the sequential path for consistency
     let mut merged = TriangleMesh::new();
-    let mut dedup_map = crate::mesh::VertexDedupMap::new();
+    let mut dedup_map = crate::mesh::VertexDedupMap::with_tolerance(merge_tol);
+    let mut total_face_vertices = 0usize;
     for mesh in meshes {
+        total_face_vertices += mesh.vertices.len();
         merged.merge_deduplicating(mesh, &mut dedup_map);
+    }
+    let deduped_vertices = total_face_vertices - merged.vertices.len();
+    if deduped_vertices > 0 {
+        let (exact_hits, tolerance_hits, misses) = dedup_map.stats();
+        let total_lookups = exact_hits + tolerance_hits + misses;
+        let exact_pct = if total_lookups > 0 { exact_hits as f64 / total_lookups as f64 * 100.0 } else { 0.0 };
+        log::info!(
+            "Parallel vertex dedup: {} face vertices → {} unique ({} shared: {} bit-exact [{:.1}%], {} tolerance-match)",
+            total_face_vertices, merged.vertices.len(), deduped_vertices,
+            exact_hits, exact_pct, tolerance_hits,
+        );
+        if tolerance_hits > 0 {
+            log::warn!(
+                "DEDUP (parallel): {} tolerance-based matches out of {} — edge cache is NOT fully bit-identical (tol={:.2e})",
+                tolerance_hits, total_lookups, merge_tol,
+            );
+        }
     }
     merged
 }
@@ -2185,31 +2219,21 @@ fn triangulate_ring_surface(
 /// where the boundary edges are only the top/bottom circles and seam.
 fn triangulate_cylinder_face(face: &Face, cyl: &CylinderSurface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
     let surface = Surface::Cylinder(cyl.clone());
-    let boundary_3d = collect_face_boundary_from_cache(face, cache, &surface);
+
+    // Use cached boundary collection WITH UVs for consistency.
+    // This uses PCURVE-based UVs when available (more accurate than project_point)
+    // and ensures UVs match the edge cache's pre-computed values.
+    let (boundary_3d, boundary_uvs) = collect_face_boundary_with_uv_from_cache(face, cache, &surface);
 
     if boundary_3d.is_empty() {
         // No boundary edges — sample full cylinder
         return triangulate_cylinder_full(face, cyl, params);
     }
 
-    // Use earcutr-based consistent triangulation which uses boundary 3D points
-    // DIRECTLY as mesh vertices. This guarantees watertightness — shared edges
-    // between adjacent faces produce bit-identical 3D vertex positions.
-    //
-    // Previously, grid-based triangulation generated n_u × (n_v+1) interior
-    // vertices via cyl.point_at() and then tried to snap boundary rows to
-    // cached points. This snapping failed when the grid resolution didn't match
-    // the boundary discretization, leaving 17-25% boundary edges non-watertight.
-    let boundary_uvs: Vec<Point2d> = boundary_3d.iter()
-        .map(|p| {
-            let (u, v) = surface.project_point(p);
-            Point2d::new(u, v)
-        })
-        .collect();
-
-    // Collect holes from inner loops
-    let hole_polylines: Vec<Vec<Point3d>> = Vec::new();
-    let hole_uvs: Vec<Vec<Point2d>> = Vec::new();
+    // Collect holes from inner loops — critical for faces with through-holes,
+    // keyways, and other internal boundaries. Without holes, earcutr fills
+    // the entire outer boundary, producing triangles where there should be voids.
+    let (hole_polylines, hole_uvs) = collect_face_holes_with_uv_from_cache(face, cache, &surface);
 
     crate::parametric_domain::triangulate_surface_consistent(
         &surface,
@@ -2451,24 +2475,16 @@ fn snap_extrusion_boundary_vertices(
 /// vertices in the top row collapse to a single point.
 fn triangulate_cone_face(face: &Face, cone: &ConeSurface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
     let surface = Surface::Cone(cone.clone());
-    let boundary_3d = collect_face_boundary_from_cache(face, cache, &surface);
+
+    // Use cached boundary collection WITH UVs for consistency.
+    let (boundary_3d, boundary_uvs) = collect_face_boundary_with_uv_from_cache(face, cache, &surface);
 
     if boundary_3d.is_empty() {
         return triangulate_cone_full(face, cone, params);
     }
 
-    // Use earcutr-based consistent triangulation which uses boundary 3D points
-    // DIRECTLY as mesh vertices, guaranteeing watertightness.
-    // Handles apex degeneracy, u-periodicity, and holes natively.
-    let boundary_uvs: Vec<Point2d> = boundary_3d.iter()
-        .map(|p| {
-            let (u, v) = surface.project_point(p);
-            Point2d::new(u, v)
-        })
-        .collect();
-
-    let hole_polylines: Vec<Vec<Point3d>> = Vec::new();
-    let hole_uvs: Vec<Vec<Point2d>> = Vec::new();
+    // Collect holes from inner loops
+    let (hole_polylines, hole_uvs) = collect_face_holes_with_uv_from_cache(face, cache, &surface);
 
     crate::parametric_domain::triangulate_surface_consistent(
         &surface,
@@ -2599,7 +2615,9 @@ fn triangulate_cone_full(face: &Face, cone: &ConeSurface, params: &Triangulation
 /// into a single vertex to avoid degenerate (zero-area) triangles.
 fn triangulate_sphere_face(face: &Face, sphere: &SphereSurface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
     let surface = Surface::Sphere(sphere.clone());
-    let boundary_3d = collect_face_boundary_from_cache(face, cache, &surface);
+
+    // Use cached boundary collection WITH UVs for consistency.
+    let (boundary_3d, boundary_uvs) = collect_face_boundary_with_uv_from_cache(face, cache, &surface);
 
     if boundary_3d.is_empty() {
         // No boundary edges — fall back to grid-based full sphere.
@@ -2607,18 +2625,8 @@ fn triangulate_sphere_face(face: &Face, sphere: &SphereSurface, params: &Triangu
         return triangulate_sphere_full_grid(face, sphere, params);
     }
 
-    // Use earcutr-based consistent triangulation which uses boundary 3D points
-    // DIRECTLY as mesh vertices, guaranteeing watertightness.
-    // Handles pole degeneracy, u-periodicity, and holes natively.
-    let boundary_uvs: Vec<Point2d> = boundary_3d.iter()
-        .map(|p| {
-            let (u, v) = surface.project_point(p);
-            Point2d::new(u, v)
-        })
-        .collect();
-
-    let hole_polylines: Vec<Vec<Point3d>> = Vec::new();
-    let hole_uvs: Vec<Vec<Point2d>> = Vec::new();
+    // Collect holes from inner loops
+    let (hole_polylines, hole_uvs) = collect_face_holes_with_uv_from_cache(face, cache, &surface);
 
     crate::parametric_domain::triangulate_surface_consistent(
         &surface,
@@ -2729,7 +2737,9 @@ fn triangulate_sphere_full_grid(face: &Face, sphere: &SphereSurface, params: &Tr
 /// v-circle boundary edge.
 fn triangulate_torus_face(face: &Face, torus: &TorusSurface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
     let surface = Surface::Torus(torus.clone());
-    let boundary_3d = collect_face_boundary_from_cache(face, cache, &surface);
+
+    // Use cached boundary collection WITH UVs for consistency.
+    let (boundary_3d, boundary_uvs) = collect_face_boundary_with_uv_from_cache(face, cache, &surface);
 
     if boundary_3d.is_empty() {
         // No boundary edges — fall back to grid-based full torus.
@@ -2737,18 +2747,8 @@ fn triangulate_torus_face(face: &Face, torus: &TorusSurface, params: &Triangulat
         return triangulate_torus_full_grid(face, torus, params);
     }
 
-    // Use earcutr-based consistent triangulation which uses boundary 3D points
-    // DIRECTLY as mesh vertices, guaranteeing watertightness.
-    // Handles bi-periodicity (u and v both periodic with period 2π) and holes natively.
-    let boundary_uvs: Vec<Point2d> = boundary_3d.iter()
-        .map(|p| {
-            let (u, v) = surface.project_point(p);
-            Point2d::new(u, v)
-        })
-        .collect();
-
-    let hole_polylines: Vec<Vec<Point3d>> = Vec::new();
-    let hole_uvs: Vec<Vec<Point2d>> = Vec::new();
+    // Collect holes from inner loops
+    let (hole_polylines, hole_uvs) = collect_face_holes_with_uv_from_cache(face, cache, &surface);
 
     crate::parametric_domain::triangulate_surface_consistent(
         &surface,
@@ -2794,27 +2794,16 @@ fn triangulate_torus_full_grid(face: &Face, torus: &TorusSurface, params: &Trian
 fn triangulate_revolution_face(face: &Face, rev: &draper_geometry::RevolutionSurface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
     let surface = face.surface.as_ref().cloned().unwrap_or(Surface::Revolution(rev.clone()));
 
-    // Phase 1: Get boundary points from the edge cache for consistent vertices
-    let boundary_3d = collect_face_boundary_from_cache(face, cache, &surface);
+    // Use cached boundary collection WITH UVs for consistency.
+    let (boundary_3d, boundary_uvs) = collect_face_boundary_with_uv_from_cache(face, cache, &surface);
 
     if boundary_3d.is_empty() {
         // No boundary edges — fallback to full revolution grid without cache snapping
         return triangulate_revolution_full(face, rev, params);
     }
 
-    // Use earcutr-based consistent triangulation which uses boundary 3D points
-    // DIRECTLY as mesh vertices, guaranteeing watertightness.
-    // Revolution surfaces are periodic in u (period 2π) — handled natively
-    // by normalize_uv_polygon. Hole support via earcutr.
-    let boundary_uvs: Vec<Point2d> = boundary_3d.iter()
-        .map(|p| {
-            let (u, v) = surface.project_point(p);
-            Point2d::new(u, v)
-        })
-        .collect();
-
-    let hole_polylines: Vec<Vec<Point3d>> = Vec::new();
-    let hole_uvs: Vec<Vec<Point2d>> = Vec::new();
+    // Collect holes from inner loops
+    let (hole_polylines, hole_uvs) = collect_face_holes_with_uv_from_cache(face, cache, &surface);
 
     crate::parametric_domain::triangulate_surface_consistent(
         &surface,
@@ -2877,27 +2866,16 @@ fn triangulate_revolution_full(face: &Face, rev: &draper_geometry::RevolutionSur
 fn triangulate_extrusion_face(face: &Face, ext: &draper_geometry::ExtrusionSurface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
     let surface = face.surface.as_ref().cloned().unwrap_or(Surface::Extrusion(ext.clone()));
 
-    // Phase 1: Get boundary points from the edge cache for consistent vertices
-    let boundary_3d = collect_face_boundary_from_cache(face, cache, &surface);
+    // Use cached boundary collection WITH UVs for consistency.
+    let (boundary_3d, boundary_uvs) = collect_face_boundary_with_uv_from_cache(face, cache, &surface);
 
     if boundary_3d.is_empty() {
         // No boundary edges — fallback to full extrusion grid without cache snapping
         return triangulate_extrusion_full(face, ext, params);
     }
 
-    // Use earcutr-based consistent triangulation which uses boundary 3D points
-    // DIRECTLY as mesh vertices, guaranteeing watertightness.
-    // Extrusion surfaces are NOT periodic — no UV normalization needed.
-    // Hole support via earcutr.
-    let boundary_uvs: Vec<Point2d> = boundary_3d.iter()
-        .map(|p| {
-            let (u, v) = surface.project_point(p);
-            Point2d::new(u, v)
-        })
-        .collect();
-
-    let hole_polylines: Vec<Vec<Point3d>> = Vec::new();
-    let hole_uvs: Vec<Vec<Point2d>> = Vec::new();
+    // Collect holes from inner loops
+    let (hole_polylines, hole_uvs) = collect_face_holes_with_uv_from_cache(face, cache, &surface);
 
     crate::parametric_domain::triangulate_surface_consistent(
         &surface,
@@ -6602,7 +6580,7 @@ mod parallel_tests {
         m2.add_vertex(Point3d::new(0.0, 1.0, 1.0));
         m2.add_triangle(0, 1, 2);
 
-        let merged = merge_meshes_parallel(&[m1, m2]);
+        let merged = merge_meshes_parallel(&[m1, m2], 1e-6);
 
         assert_eq!(merged.vertices.len(), 6, "Should have 6 vertices");
         assert_eq!(merged.triangles.len(), 2, "Should have 2 triangles");
@@ -6649,5 +6627,206 @@ mod parallel_tests {
         // so the cache should be empty (faces have no edges).
         // But the cache should still be buildable without errors.
         let _ = cache;
+    }
+}
+
+// ============================================================
+// Phase 1.2: Chunked BREP Triangulator
+//
+// Incremental triangulation that respects a time budget per frame.
+// This prevents the browser from freezing when loading large STEP files.
+// Designed for 60/120 FPS — each frame processes as many faces as
+// possible within the time budget (default: 8ms for 120 FPS).
+// ============================================================
+
+/// Result of a single frame of chunked triangulation.
+#[derive(Debug, Clone)]
+pub enum ChunkResult {
+    /// Triangulation is still in progress. Contains the partial mesh built so far.
+    InProgress {
+        /// Number of faces processed so far.
+        faces_completed: usize,
+        /// Total number of faces to process.
+        faces_total: usize,
+    },
+    /// Triangulation is complete. Contains the final mesh.
+    Complete(TriangleMesh),
+}
+
+/// Incremental BREP triangulator that processes faces in time-bounded chunks.
+///
+/// # Usage
+/// ```ignore
+/// let mut triangulator = ChunkedBrepTriangulator::new(solid, params, Duration::from_millis(8));
+/// loop {
+///     match triangulator.process_frame() {
+///         ChunkResult::InProgress { faces_completed, faces_total } => {
+///             // Update UI progress bar
+///             update_progress(faces_completed, faces_total);
+///             // Yield to the browser for rendering
+///         }
+///         ChunkResult::Complete(mesh) => {
+///             // All faces done — display the mesh
+///             display_mesh(mesh);
+///             break;
+///         }
+///     }
+/// }
+/// ```
+///
+/// # Design
+/// - **Time-budgeted**: Each `process_frame()` call processes as many faces as
+///   possible within the configured time budget, then returns control.
+/// - **Watertight by construction**: Uses the same edge cache and dedup strategy
+///   as the sequential path, ensuring shared edges produce bit-identical vertices.
+/// - **Progress reporting**: Returns the number of faces completed vs total.
+/// - **No locking**: The edge cache is pre-populated before chunked processing
+///   begins, so it's read-only during face triangulation.
+pub struct ChunkedBrepTriangulator {
+    /// The solid being triangulated.
+    faces: Vec<Face>,
+    /// Triangulation parameters.
+    params: TriangulationParams,
+    /// Pre-populated edge cache (read-only during chunked processing).
+    cache: EdgeDiscretizationCache,
+    /// Merge tolerance for vertex deduplication.
+    merge_tol: f64,
+    /// Vertex deduplication map (accumulated across chunks).
+    dedup_map: crate::mesh::VertexDedupMap,
+    /// Accumulated mesh from all processed faces.
+    partial_mesh: TriangleMesh,
+    /// Index of the next face to process.
+    next_face_idx: usize,
+    /// Total number of faces.
+    total_faces: usize,
+    /// Time budget per frame.
+    time_budget: std::time::Duration,
+    /// Whether triangulation is complete.
+    is_complete: bool,
+}
+
+impl ChunkedBrepTriangulator {
+    /// Create a new chunked triangulator for the given solid.
+    ///
+    /// Pre-populates the edge cache (sequential, happens once) and prepares
+    /// for incremental face processing.
+    ///
+    /// # Arguments
+    /// * `solid` — The solid to triangulate.
+    /// * `params` — Triangulation parameters (max_deviation, detail_level, etc.).
+    /// * `time_budget` — Maximum time to spend per `process_frame()` call.
+    ///   Recommended: 8ms for 120 FPS, 16ms for 60 FPS.
+    pub fn new(solid: &Solid, params: TriangulationParams, time_budget: std::time::Duration) -> Self {
+        // Compute adaptive tolerance from the solid's bounding box
+        let bbox = solid_bounding_box(solid);
+        let mut cache = EdgeDiscretizationCache::with_adaptive_tolerance(
+            &bbox.0, &bbox.1, EDGE_SAMPLES,
+        );
+
+        // Pre-populate the edge cache (sequential — it's read-only after this)
+        cache.pre_populate_for_solid(solid, EDGE_SAMPLES);
+
+        let merge_tol = cache.adaptive_tolerance().model_scale() * 1e-6; // 1 PPM
+        let faces: Vec<Face> = solid.faces().into_iter().cloned().collect();
+        let total_faces = faces.len();
+
+        Self {
+            faces,
+            params,
+            cache,
+            merge_tol,
+            dedup_map: crate::mesh::VertexDedupMap::with_tolerance(merge_tol),
+            partial_mesh: TriangleMesh::new(),
+            next_face_idx: 0,
+            total_faces,
+            time_budget,
+            is_complete: false,
+        }
+    }
+
+    /// Process one frame of triangulation, respecting the time budget.
+    ///
+    /// Processes as many faces as possible within the time budget, then returns.
+    /// The first call may take slightly longer due to edge cache lazy UV computation.
+    pub fn process_frame(&mut self) -> ChunkResult {
+        if self.is_complete {
+            return ChunkResult::Complete(self.partial_mesh.clone());
+        }
+
+        let start = Instant::now();
+
+        while self.next_face_idx < self.total_faces {
+            // Check time budget before processing each face
+            if start.elapsed() >= self.time_budget {
+                return ChunkResult::InProgress {
+                    faces_completed: self.next_face_idx,
+                    faces_total: self.total_faces,
+                };
+            }
+
+            let face = &self.faces[self.next_face_idx];
+            let face_mesh = triangulate_face_impl(face, &self.params, &self.cache);
+            self.partial_mesh.merge_deduplicating(&face_mesh, &mut self.dedup_map);
+            self.next_face_idx += 1;
+        }
+
+        // All faces processed — finalize
+        filter_degenerate_triangles(&mut self.partial_mesh, 1e-10);
+
+        // Validate watertightness
+        let report = crate::watertight::validate_watertight(&self.partial_mesh, false);
+        if !report.is_watertight() {
+            let adaptive_tol = self.cache.adaptive_tolerance().merge_tolerance();
+            let boundary_pct = if report.edge_count > 0 {
+                report.boundary_edge_count as f64 / report.edge_count as f64 * 100.0
+            } else {
+                0.0
+            };
+            log::error!(
+                "BUG: Chunked triangulation not watertight: {} boundary edges ({:.2}%) (V={}, E={}, F={})",
+                report.boundary_edge_count, boundary_pct,
+                report.vertex_count, report.edge_count, report.triangle_count,
+            );
+        } else {
+            log::info!(
+                "Chunked triangulation watertight ✓ ({} interior edges, {} triangles)",
+                report.interior_edge_count, report.triangle_count,
+            );
+        }
+
+        // Log dedup stats
+        let (exact_hits, tolerance_hits, misses) = self.dedup_map.stats();
+        let total_lookups = exact_hits + tolerance_hits + misses;
+        if total_lookups > 0 {
+            log::info!(
+                "Chunked dedup: {} bit-exact [{:.1}%], {} tolerance, {} misses",
+                exact_hits, exact_hits as f64 / total_lookups as f64 * 100.0,
+                tolerance_hits, misses,
+            );
+        }
+
+        self.is_complete = true;
+        ChunkResult::Complete(self.partial_mesh.clone())
+    }
+
+    /// Get the current progress as (faces_completed, faces_total).
+    pub fn progress(&self) -> (usize, usize) {
+        (self.next_face_idx, self.total_faces)
+    }
+
+    /// Check if triangulation is complete.
+    pub fn is_complete(&self) -> bool {
+        self.is_complete
+    }
+
+    /// Get the partial mesh built so far (for progressive rendering).
+    ///
+    /// Returns `None` if no faces have been processed yet.
+    pub fn partial_mesh(&self) -> Option<&TriangleMesh> {
+        if self.next_face_idx > 0 {
+            Some(&self.partial_mesh)
+        } else {
+            None
+        }
     }
 }
