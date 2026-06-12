@@ -933,6 +933,35 @@ pub fn triangulate_surface_consistent(
     // ============================================================
     if let Surface::Nurbs(ref nurbs) = surface {
         let uv_area = polygon_area_2d(&outer_uv);
+        // Log per-edge UV ranges to diagnose degenerate polygons
+        {
+            let (nu_min, nu_max) = nurbs.u_range();
+            let (nv_min, nv_max) = nurbs.v_range();
+            let u_min_all = outer_uv.iter().map(|p| p.u).fold(f64::MAX, f64::min);
+            let u_max_all = outer_uv.iter().map(|p| p.u).fold(f64::MIN, f64::max);
+            let v_min_all = outer_uv.iter().map(|p| p.v).fold(f64::MAX, f64::min);
+            let v_max_all = outer_uv.iter().map(|p| p.v).fold(f64::MIN, f64::max);
+            log::info!(
+                "NURBS UV polygon: area={:.6}, {} points, u_range=[{:.4},{:.4}] v_range=[{:.4},{:.4}], nurbs_range=u[{:.4},{:.4}]v[{:.4},{:.4}]",
+                uv_area, outer_uv.len(),
+                u_min_all, u_max_all, v_min_all, v_max_all,
+                nu_min, nu_max, nv_min, nv_max,
+            );
+            // Log first 5 and last 5 UVs for debugging
+            if outer_uv.len() <= 20 {
+                for (i, uv) in outer_uv.iter().enumerate() {
+                    log::info!("  UV[{}] = ({:.4}, {:.4})", i, uv.u, uv.v);
+                }
+            } else {
+                for i in 0..5 {
+                    log::info!("  UV[{}] = ({:.4}, {:.4})", i, outer_uv[i].u, outer_uv[i].v);
+                }
+                log::info!("  ... ({} points) ...", outer_uv.len() - 10);
+                for i in (outer_uv.len()-5)..outer_uv.len() {
+                    log::info!("  UV[{}] = ({:.4}, {:.4})", i, outer_uv[i].u, outer_uv[i].v);
+                }
+            }
+        }
         // A negative or zero UV area means the polygon is self-intersecting
         // or degenerate (collapsed to a line/point).
         if uv_area <= 0.0 && outer_uv.len() >= 3 {

@@ -1,0 +1,1690 @@
+warning: /home/z/my-project/crates/draper-viewer/Cargo.toml: `default-features` is ignored for draper-mesh, since `default-features` was not specified for `workspace.dependencies.draper-mesh`, this could become a hard error in the future
+warning: /home/z/my-project/crates/draper-json/Cargo.toml: `default-features` is ignored for draper-mesh, since `default-features` was not specified for `workspace.dependencies.draper-mesh`, this could become a hard error in the future
+warning: /home/z/my-project/crates/draper-step/Cargo.toml: `default-features` is ignored for draper-mesh, since `default-features` was not specified for `workspace.dependencies.draper-mesh`, this could become a hard error in the future
+warning: /home/z/my-project/crates/draper-ffi/Cargo.toml: `default-features` is ignored for draper-mesh, since `default-features` was not specified for `workspace.dependencies.draper-mesh`, this could become a hard error in the future
+warning: /home/z/my-project/crates/draper-core/Cargo.toml: `default-features` is ignored for draper-mesh, since `default-features` was not specified for `workspace.dependencies.draper-mesh`, this could become a hard error in the future
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded adler2 v2.0.1
+  Downloaded ab_glyph_rasterizer v0.1.10
+  Downloaded ab_glyph v0.2.32
+  Downloaded gl_generator v0.14.0
+  Downloaded glutin_egl_sys v0.7.1
+  Downloaded gpu-alloc v0.6.0
+  Downloaded glutin-winit v0.5.0
+  Downloaded glutin_glx_sys v0.6.1
+  Downloaded percent-encoding v2.3.2
+  Downloaded potential_utf v0.1.5
+  Downloaded dpi v0.1.2
+  Downloaded bit-set v0.8.0
+  Downloaded env_filter v1.0.1
+  Downloaded ahash v0.8.12
+  Downloaded atomic-waker v1.1.2
+  Downloaded gpu-descriptor-types v0.2.0
+  Downloaded gpu-alloc-types v0.3.0
+  Downloaded hexf-parse v0.2.1
+  Downloaded gpu-descriptor v0.3.2
+  Downloaded heck v0.4.1
+  Downloaded calloop-wayland-source v0.4.1
+  Downloaded async-recursion v1.1.1
+  Downloaded byteorder-lite v0.1.0
+  Downloaded colorchoice v1.0.5
+  Downloaded proc-macro-crate v3.5.0
+  Downloaded nohash-hasher v0.2.0
+  Downloaded renderdoc-sys v1.1.0
+  Downloaded rawpointer v0.2.1
+  Downloaded rustc-hash v1.1.0
+  Downloaded idna_adapter v1.2.2
+  Downloaded memoffset v0.9.1
+  Downloaded parking v2.2.1
+  Downloaded heck v0.5.0
+  Downloaded hex v0.4.3
+  Downloaded enumflags2_derive v0.7.12
+  Downloaded scoped-tls v1.0.1
+  Downloaded cfg_aliases v0.2.1
+  Downloaded quick-error v2.0.1
+  Downloaded owned_ttf_parser v0.25.1
+  Downloaded futures-task v0.3.32
+  Downloaded rustc-hash v2.1.2
+  Downloaded futures-core v0.3.32
+  Downloaded cursor-icon v1.2.0
+  Downloaded clap_lex v1.1.0
+  Downloaded futures-macro v0.3.32
+  Downloaded futures-io v0.3.32
+  Downloaded cfg-if v1.0.4
+  Downloaded endi v1.1.1
+  Downloaded dlib v0.5.3
+  Downloaded itoa v1.0.18
+  Downloaded is_terminal_polyfill v1.70.2
+  Downloaded nalgebra-macros v0.2.2
+  Downloaded profiling v1.0.18
+  Downloaded event-listener-strategy v0.5.4
+  Downloaded approx v0.5.1
+  Downloaded gethostname v1.1.0
+  Downloaded scopeguard v1.2.0
+  Downloaded document-features v0.2.12
+  Downloaded as-raw-xcb-connection v1.0.1
+  Downloaded serde_repr v0.1.20
+  Downloaded serde_spanned v0.6.9
+  Downloaded smol_str v0.2.2
+  Downloaded pkg-config v0.3.33
+  Downloaded ordered-stream v0.2.0
+  Downloaded lock_api v0.4.14
+  Downloaded anstyle-query v1.1.5
+  Downloaded piper v0.2.5
+  Downloaded rand_core v0.9.5
+  Downloaded bytemuck_derive v1.10.2
+  Downloaded ppv-lite86 v0.2.21
+  Downloaded pollster v0.4.0
+  Downloaded raw-window-handle v0.6.2
+  Downloaded ecolor v0.31.1
+  Downloaded rustversion v1.0.22
+  Downloaded fastrand v2.4.1
+  Downloaded num-integer v0.1.46
+  Downloaded async-net v2.0.0
+  Downloaded env_logger v0.11.10
+  Downloaded pin-project-lite v0.2.17
+  Downloaded ordered-float v4.6.0
+  Downloaded downcast-rs v1.2.1
+  Downloaded blocking v1.6.2
+  Downloaded form_urlencoded v1.2.2
+  Downloaded khronos-egl v6.0.0
+  Downloaded num-complex v0.4.6
+  Downloaded quote v1.0.45
+  Downloaded stable_deref_trait v1.2.1
+  Downloaded find-msvc-tools v0.1.9
+  Downloaded either v1.16.0
+  Downloaded rand_chacha v0.9.0
+  Downloaded jobserver v0.1.34
+  Downloaded enumflags2 v0.7.12
+  Downloaded foldhash v0.1.5
+  Downloaded errno v0.3.14
+  Downloaded egui-winit v0.31.1
+  Downloaded async-trait v0.1.89
+  Downloaded anstyle v1.0.14
+  Downloaded strum v0.26.3
+  Downloaded fax v0.2.7
+  Downloaded calloop-wayland-source v0.3.0
+  Downloaded num-rational v0.4.2
+  Downloaded fdeflate v0.3.7
+  Downloaded concurrent-queue v2.5.0
+  Downloaded bit-vec v0.8.0
+  Downloaded smithay-clipboard v0.7.3
+  Downloaded shlex v2.0.1
+  Downloaded autocfg v1.5.1
+  Downloaded async-process v2.5.0
+  Downloaded anstream v1.0.0
+  Downloaded arrayvec v0.7.6
+  Downloaded equivalent v1.0.2
+  Downloaded crossbeam-deque v0.8.6
+  Downloaded parking_lot_core v0.9.12
+  Downloaded paste v1.0.15
+  Downloaded async-signal v0.2.14
+  Downloaded emath v0.31.1
+  Downloaded memmap2 v0.9.10
+  Downloaded litemap v0.8.2
+  Downloaded async-broadcast v0.7.2
+  Downloaded parking_lot v0.12.5
+  Downloaded crossbeam-epoch v0.9.18
+  Downloaded libloading v0.8.9
+  Downloaded futures-channel v0.3.32
+  Downloaded futures-lite v2.6.1
+  Downloaded async-channel v2.5.0
+  Downloaded strsim v0.11.1
+  Downloaded signal-hook-registry v1.4.8
+  Downloaded crc32fast v1.5.0
+  Downloaded slab v0.4.12
+  Downloaded simd-adler32 v0.3.9
+  Downloaded egui_glow v0.31.1
+  Downloaded spirv v0.3.0+sdk-1.3.268.0
+  Downloaded foldhash v0.2.0
+  Downloaded async-task v4.7.1
+  Downloaded crossbeam-utils v0.8.21
+  Downloaded codespan-reporting v0.11.1
+  Downloaded getrandom v0.4.2
+  Downloaded litrs v1.0.0
+  Downloaded egui-wgpu v0.31.1
+  Downloaded bytemuck v1.25.0
+  Downloaded strum_macros v0.26.4
+  Downloaded icu_provider v2.2.0
+  Downloaded displaydoc v0.2.6
+  Downloaded toml_datetime v0.6.11
+  Downloaded async-lock v3.4.2
+  Downloaded icu_properties v2.2.0
+  Downloaded synstructure v0.13.2
+  Downloaded async-fs v2.2.0
+  Downloaded anstyle-parse v1.0.0
+  Downloaded static_assertions v1.1.0
+  Downloaded bitflags v2.12.1
+  Downloaded thiserror-impl v2.0.18
+  Downloaded thiserror-impl v1.0.69
+  Downloaded unicode-xid v0.2.6
+  Downloaded thiserror v2.0.18
+  Downloaded toml_write v0.1.2
+  Downloaded once_cell v1.21.4
+  Downloaded num-traits v0.2.19
+  Downloaded smallvec v1.15.1
+  Downloaded rfd v0.15.4
+  Downloaded matrixmultiply v0.3.10
+  Downloaded termcolor v1.4.1
+  Downloaded async-executor v1.14.0
+  Downloaded type-map v0.5.1
+  Downloaded getrandom v0.3.4
+  Downloaded event-listener v5.4.1
+  Downloaded clap v4.6.1
+  Downloaded polling v3.11.0
+  Downloaded async-io v2.6.0
+  Downloaded allocator-api2 v0.2.21
+  Downloaded calloop v0.13.0
+  Downloaded tinystr v0.8.3
+  Downloaded toml_datetime v1.1.1+spec-1.1.0
+  Downloaded simba v0.9.1
+  Downloaded thiserror v1.0.69
+  Downloaded tempfile v3.27.0
+  Downloaded urlencoding v2.1.3
+  Downloaded utf8parse v0.2.2
+  Downloaded wayland-cursor v0.31.14
+  Downloaded wayland-protocols-misc v0.3.12
+  Downloaded wayland-sys v0.31.11
+  Downloaded wayland-csd-frame v0.3.0
+  Downloaded rayon-core v1.13.0
+  Downloaded proc-macro2 v1.0.106
+  Downloaded safe_arch v0.7.4
+  Downloaded half v2.7.1
+  Downloaded arboard v3.6.1
+  Downloaded calloop v0.14.4
+  Downloaded log v0.4.31
+  Downloaded version_check v0.9.5
+  Downloaded miniz_oxide v0.8.9
+  Downloaded icu_normalizer_data v2.2.0
+  Downloaded icu_locale_core v2.2.0
+  Downloaded serde_core v1.0.228
+  Downloaded utf8_iter v1.0.4
+  Downloaded toml_parser v1.1.2+spec-1.1.0
+  Downloaded xkbcommon-dl v0.4.2
+  Downloaded xcursor v0.3.10
+  Downloaded cc v1.2.63
+  Downloaded serde_derive v1.0.228
+  Downloaded tracing-attributes v0.1.31
+  Downloaded glutin v0.32.3
+  Downloaded web-time v1.1.0
+  Downloaded wayland-protocols-experimental v20250721.0.1
+  Downloaded epaint v0.31.1
+  Downloaded flate2 v1.1.9
+  Downloaded icu_collections v2.2.0
+  Downloaded toml v0.8.23
+  Downloaded yoke-derive v0.8.2
+  Downloaded zerofrom v0.1.8
+  Downloaded icu_normalizer v2.2.0
+  Downloaded serde v1.0.228
+  Downloaded zerofrom-derive v0.1.7
+  Downloaded writeable v0.6.3
+  Downloaded unicode-ident v1.0.24
+  Downloaded zvariant_utils v3.4.0
+  Downloaded wayland-protocols-wlr v0.3.12
+  Downloaded bumpalo v3.20.3
+  Downloaded tracing-core v0.1.36
+  Downloaded rand v0.9.4
+  Downloaded eframe v0.31.1
+  Downloaded memchr v2.8.1
+  Downloaded zmij v1.0.21
+  Downloaded zerovec-derive v0.11.3
+  Downloaded wayland-scanner v0.31.10
+  Downloaded weezl v0.1.12
+  Downloaded toml_edit v0.25.12+spec-1.1.0
+  Downloaded zbus_names v4.3.2
+  Downloaded zune-core v0.5.1
+  Downloaded zvariant_derive v5.12.0
+  Downloaded indexmap v2.14.0
+  Downloaded num-bigint v0.4.6
+  Downloaded yoke v0.8.2
+  Downloaded zbus_macros v5.16.0
+  Downloaded webbrowser v1.2.1
+  Downloaded toml_edit v0.22.27
+  Downloaded wayland-client v0.31.14
+  Downloaded url v2.5.8
+  Downloaded wgpu-types v24.0.0
+  Downloaded x11-dl v2.21.0
+  Downloaded uuid v1.23.2
+  Downloaded tiff v0.11.3
+  Downloaded xml-rs v0.8.28
+  Downloaded wayland-protocols-plasma v0.3.12
+  Downloaded png v0.18.1
+  Downloaded zopfli v0.8.3
+  Downloaded ashpd v0.11.1
+  Downloaded smithay-client-toolkit v0.19.2
+  Downloaded hashbrown v0.15.5
+  Downloaded wayland-backend v0.3.15
+  Downloaded aho-corasick v1.1.4
+  Downloaded idna v1.1.0
+  Downloaded glow v0.16.0
+  Downloaded zune-jpeg v0.5.15
+  Downloaded clap_builder v4.6.0
+  Downloaded zerotrie v0.2.4
+  Downloaded hashbrown v0.17.1
+  Downloaded hashbrown v0.16.1
+  Downloaded typenum v1.20.1
+  Downloaded wide v0.7.33
+  Downloaded smithay-client-toolkit v0.20.0
+  Downloaded zip v2.4.2
+  Downloaded zvariant v5.12.0
+  Downloaded serde_json v1.0.150
+  Downloaded regex v1.12.3
+  Downloaded futures-util v0.3.32
+  Downloaded zerocopy-derive v0.8.50
+  Downloaded xkeysym v0.2.1
+  Downloaded rayon v1.12.0
+  Downloaded zerovec v0.11.6
+  Downloaded cbindgen v0.27.0
+  Downloaded wgpu v24.0.5
+  Downloaded zbus v5.16.0
+  Downloaded ttf-parser v0.25.1
+  Downloaded moxcms v0.8.1
+  Downloaded icu_properties_data v2.2.0
+  Downloaded winnow v1.0.3
+  Downloaded quick-xml v0.39.4
+  Downloaded x11rb v0.13.2
+  Downloaded wayland-protocols v0.32.12
+  Downloaded egui v0.31.1
+  Downloaded winnow v0.7.15
+  Downloaded ash v0.38.0+1.3.281
+  Downloaded tracing v0.1.44
+  Downloaded earcutr v0.2.0
+  Downloaded rustix v1.1.4
+  Downloaded epaint_default_fonts v0.31.1
+  Downloaded image v0.25.10
+  Downloaded wgpu-core v24.0.5
+  Downloaded unicode-width v0.1.14
+  Downloaded syn v2.0.117
+  Downloaded zerocopy v0.8.50
+  Downloaded regex-syntax v0.8.10
+  Downloaded nalgebra v0.33.3
+  Downloaded rustix v0.38.44
+  Downloaded wgpu-hal v24.0.4
+  Downloaded robust v1.2.0
+  Downloaded spade v2.15.1
+  Downloaded khronos_api v3.1.0
+  Downloaded x11rb-protocol v0.13.2
+  Downloaded regex-automata v0.4.14
+  Downloaded winit v0.30.13
+  Downloaded naga v24.0.0
+  Downloaded jiff v0.2.28
+  Downloaded libc v0.2.186
+  Downloaded pxfm v0.1.29
+  Downloaded linux-raw-sys v0.4.15
+  Downloaded linux-raw-sys v0.12.1
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling serde_core v1.0.228
+   Compiling cfg-if v1.0.4
+   Compiling log v0.4.31
+   Compiling smallvec v1.15.1
+   Compiling autocfg v1.5.1
+   Compiling serde v1.0.228
+   Compiling num-traits v0.2.19
+   Compiling once_cell v1.21.4
+   Compiling crossbeam-utils v0.8.21
+   Compiling syn v2.0.117
+   Compiling rustix v1.1.4
+   Compiling libc v0.2.186
+   Compiling linux-raw-sys v0.12.1
+   Compiling bitflags v2.12.1
+   Compiling libloading v0.8.9
+   Compiling thiserror v2.0.18
+   Compiling pin-project-lite v0.2.17
+   Compiling pkg-config v0.3.33
+   Compiling memchr v2.8.1
+   Compiling zmij v1.0.21
+   Compiling crc32fast v1.5.0
+   Compiling shlex v2.0.1
+   Compiling equivalent v1.0.2
+   Compiling synstructure v0.13.2
+   Compiling simd-adler32 v0.3.9
+   Compiling find-msvc-tools v0.1.9
+   Compiling cc v1.2.63
+   Compiling wayland-sys v0.31.11
+   Compiling dlib v0.5.3
+   Compiling serde_json v1.0.150
+   Compiling serde_derive v1.0.228
+   Compiling bytemuck_derive v1.10.2
+   Compiling bytemuck v1.25.0
+   Compiling displaydoc v0.2.6
+   Compiling thiserror-impl v2.0.18
+   Compiling zerofrom-derive v0.1.7
+   Compiling wayland-backend v0.3.15
+   Compiling yoke-derive v0.8.2
+   Compiling zerofrom v0.1.8
+   Compiling stable_deref_trait v1.2.1
+   Compiling adler2 v2.0.1
+   Compiling hashbrown v0.17.1
+   Compiling miniz_oxide v0.8.9
+   Compiling yoke v0.8.2
+   Compiling indexmap v2.14.0
+   Compiling slab v0.4.12
+   Compiling scoped-tls v1.0.1
+   Compiling downcast-rs v1.2.1
+   Compiling flate2 v1.1.9
+   Compiling zerovec-derive v0.11.3
+   Compiling quick-xml v0.39.4
+   Compiling paste v1.0.15
+   Compiling wayland-client v0.31.14
+   Compiling safe_arch v0.7.4
+   Compiling zerovec v0.11.6
+   Compiling wayland-scanner v0.31.10
+   Compiling polling v3.11.0
+   Compiling matrixmultiply v0.3.10
+   Compiling cfg_aliases v0.2.1
+   Compiling wide v0.7.33
+   Compiling num-complex v0.4.6
+   Compiling approx v0.5.1
+   Compiling num-integer v0.1.46
+   Compiling rawpointer v0.2.1
+   Compiling num-rational v0.4.2
+   Compiling simba v0.9.1
+   Compiling nalgebra-macros v0.2.2
+   Compiling crossbeam-epoch v0.9.18
+   Compiling futures-core v0.3.32
+   Compiling itoa v1.0.18
+   Compiling typenum v1.20.1
+   Compiling rayon-core v1.13.0
+   Compiling parking v2.2.1
+   Compiling crossbeam-deque v0.8.6
+   Compiling tinystr v0.8.3
+   Compiling concurrent-queue v2.5.0
+   Compiling zip v2.4.2
+   Compiling allocator-api2 v0.2.21
+   Compiling nalgebra v0.33.3
+   Compiling litemap v0.8.2
+   Compiling foldhash v0.2.0
+   Compiling writeable v0.6.3
+   Compiling bumpalo v3.20.3
+   Compiling icu_locale_core v2.2.0
+   Compiling zopfli v0.8.3
+   Compiling hashbrown v0.16.1
+   Compiling potential_utf v0.1.5
+   Compiling zerotrie v0.2.4
+   Compiling icu_normalizer_data v2.2.0
+   Compiling either v1.16.0
+   Compiling utf8_iter v1.0.4
+   Compiling zerocopy v0.8.50
+   Compiling icu_properties_data v2.2.0
+   Compiling getrandom v0.3.4
+   Compiling robust v1.2.0
+   Compiling icu_collections v2.2.0
+   Compiling spade v2.15.1
+   Compiling rayon v1.12.0
+   Compiling icu_provider v2.2.0
+   Compiling wayland-protocols v0.32.12
+   Compiling draper-geometry v0.1.0 (/home/z/my-project/crates/draper-geometry)
+   Compiling earcutr v0.2.0
+warning: unused import: `Vector3`
+ --> crates/draper-geometry/src/point.rs:6:24
+  |
+6 | use nalgebra::{Point3, Vector3};
+  |                        ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Vec3d`
+ --> crates/draper-geometry/src/transform.rs:5:35
+  |
+5 | use crate::{Direction3d, Point3d, Vec3d};
+  |                                   ^^^^^
+
+warning: unused import: `Point2d`
+ --> crates/draper-geometry/src/curve.rs:5:35
+  |
+5 | use crate::{Direction3d, Point3d, Point2d, Vec3d, Transform};
+  |                                   ^^^^^^^
+
+warning: unused import: `std::fmt`
+ --> crates/draper-geometry/src/curve.rs:6:5
+  |
+6 | use std::fmt;
+  |     ^^^^^^^^
+
+warning: unused import: `Point2d`
+ --> crates/draper-geometry/src/surface.rs:5:35
+  |
+5 | use crate::{Direction3d, Point3d, Point2d, Vec3d, Transform, curve::Curve3d};
+  |                                   ^^^^^^^
+
+warning: unused import: `std::fmt`
+ --> crates/draper-geometry/src/surface.rs:6:5
+  |
+6 | use std::fmt;
+  |     ^^^^^^^^
+
+warning: unused import: `Direction3d`
+ --> crates/draper-geometry/src/intersection.rs:5:22
+  |
+5 | use crate::{Point3d, Direction3d, Vec3d, curve::*, surface::*, tolerance::TOLERANCE};
+  |                      ^^^^^^^^^^^
+
+   Compiling percent-encoding v2.3.2
+warning: unused variable: `det`
+   --> crates/draper-geometry/src/transform.rs:161:13
+    |
+161 |         let det = m[0][0]*inv[0][0] + m[0][1]*inv[0][2+0] + m[0][2]*inv[0][2] + m[0][3]*inv[0][3]; // Fix: use proper indexing
+    |             ^^^ help: if this is intentional, prefix it with an underscore: `_det`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling winnow v1.0.3
+warning: unused variable: `v_min`
+    --> crates/draper-geometry/src/surface.rs:1152:22
+     |
+1152 |                 let (v_min, v_max) = nurbs.v_range();
+     |                      ^^^^^ help: if this is intentional, prefix it with an underscore: `_v_min`
+
+warning: unused variable: `v_max`
+    --> crates/draper-geometry/src/surface.rs:1152:29
+     |
+1152 |                 let (v_min, v_max) = nurbs.v_range();
+     |                             ^^^^^ help: if this is intentional, prefix it with an underscore: `_v_max`
+
+warning: unused variable: `nurbs`
+    --> crates/draper-geometry/src/surface.rs:1345:28
+     |
+1345 |             Surface::Nurbs(nurbs) => {
+     |                            ^^^^^ help: if this is intentional, prefix it with an underscore: `_nurbs`
+
+warning: variable `R` should have a snake case name
+    --> crates/draper-geometry/src/surface.rs:1332:21
+     |
+1332 |                 let R = torus.major_radius;
+     |                     ^ help: convert the identifier to snake case: `r`
+     |
+     = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+   Compiling draper-topology v0.1.0 (/home/z/my-project/crates/draper-topology)
+   Compiling futures-io v0.3.32
+warning: unused imports: `Arc`, `ExtrusionSurface`, `Line`, `Point2d`, `RevolutionSurface`, and `Vec3d`
+  --> crates/draper-topology/src/builder.rs:7:14
+   |
+ 7 |     Point3d, Point2d, Direction3d, Vec3d,
+   |              ^^^^^^^               ^^^^^
+ 8 |     Curve3d, Line, Circle, Arc,
+   |              ^^^^          ^^^
+ 9 |     Surface, Plane, CylinderSurface, SphereSurface, ConeSurface, TorusSurface,
+10 |     RevolutionSurface, ExtrusionSurface,
+   |     ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `angle`
+   --> crates/draper-topology/src/builder.rs:256:46
+    |
+256 |     pub fn make_revolution(profile: Curve3d, angle: f64) -> Solid {
+    |                                              ^^^^^ help: if this is intentional, prefix it with an underscore: `_angle`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `distance`
+   --> crates/draper-topology/src/builder.rs:271:69
+    |
+271 |     pub fn make_extrusion(profile: Curve3d, direction: Direction3d, distance: f64) -> Solid {
+    |                                                                     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_distance`
+
+warning: `draper-geometry` (lib) generated 12 warnings (run `cargo fix --lib -p draper-geometry` to apply 11 suggestions)
+   Compiling tracing-attributes v0.1.31
+   Compiling draper-mesh v0.1.0 (/home/z/my-project/crates/draper-mesh)
+warning: unused import: `std::fmt`
+ --> crates/draper-mesh/src/mesh.rs:7:5
+  |
+7 | use std::fmt;
+  |     ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Curve3d`
+  --> crates/draper-mesh/src/triangulate.rs:18:18
+   |
+18 |     ConeSurface, Curve3d,
+   |                  ^^^^^^^
+
+warning: unused import: `CoEdge`
+  --> crates/draper-mesh/src/triangulate.rs:20:35
+   |
+20 | use draper_topology::{Face, Wire, CoEdge, Edge, Solid, Shell, Compound, TopoId};
+   |                                   ^^^^^^
+
+warning: unused import: `Surface`
+  --> crates/draper-mesh/src/watertight.rs:25:32
+   |
+25 | use draper_geometry::{Point3d, Surface};
+   |                                ^^^^^^^
+
+warning: ambiguous glob re-exports
+  --> crates/draper-mesh/src/lib.rs:29:9
+   |
+29 | pub use stl::*;
+   |         ^^^^^^ the name `export_obj` in the value namespace is first re-exported here
+...
+34 | pub use export::*;
+   |         --------- but the name `export_obj` in the value namespace is also re-exported here
+   |
+   = note: `#[warn(ambiguous_glob_reexports)]` on by default
+
+warning: variable does not need to be mutable
+    --> crates/draper-mesh/src/triangulate.rs:1002:25
+     |
+1002 |                     let mut edge_pts_3d = sample_edge_points(edge, EDGE_SAMPLES);
+     |                         ----^^^^^^^^^^^
+     |                         |
+     |                         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `pmin`
+    --> crates/draper-mesh/src/triangulate.rs:1100:26
+     |
+1100 |                     let (pmin, pmax) = if tmin <= tmax { (tmin, tmax) } else { (tmax, tmin) };
+     |                          ^^^^ help: if this is intentional, prefix it with an underscore: `_pmin`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `pmax`
+    --> crates/draper-mesh/src/triangulate.rs:1100:32
+     |
+1100 |                     let (pmin, pmax) = if tmin <= tmax { (tmin, tmax) } else { (tmax, tmin) };
+     |                                ^^^^ help: if this is intentional, prefix it with an underscore: `_pmax`
+
+warning: unused variable: `surface`
+    --> crates/draper-mesh/src/triangulate.rs:1255:5
+     |
+1255 |     surface: &Surface,
+     |     ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_surface`
+
+warning: unused variable: `surface`
+    --> crates/draper-mesh/src/triangulate.rs:1416:5
+     |
+1416 |     surface: &Surface,
+     |     ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_surface`
+
+warning: variable `apex_vertex` is assigned to, but never used
+    --> crates/draper-mesh/src/triangulate.rs:2489:9
+     |
+2489 |     let mut apex_vertex: Option<u32> = None;
+     |         ^^^^^^^^^^^^^^^
+     |
+     = note: consider using `_apex_vertex` instead
+
+warning: value assigned to `apex_vertex` is never read
+    --> crates/draper-mesh/src/triangulate.rs:2503:13
+     |
+2503 |             apex_vertex = Some(idx);
+     |             ^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `boundary_uvs`
+    --> crates/draper-mesh/src/triangulate.rs:3796:5
+     |
+3796 |     boundary_uvs: &[Point2d],
+     |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_boundary_uvs`
+
+warning: unused variable: `hole_uvs`
+    --> crates/draper-mesh/src/triangulate.rs:3798:5
+     |
+3798 |     hole_uvs: &[Vec<Point2d>],
+     |     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_hole_uvs`
+
+warning: variable `apex_vertex` is assigned to, but never used
+    --> crates/draper-mesh/src/triangulate.rs:5166:9
+     |
+5166 |     let mut apex_vertex: Option<u32> = None;
+     |         ^^^^^^^^^^^^^^^
+     |
+     = note: consider using `_apex_vertex` instead
+
+warning: value assigned to `apex_vertex` is never read
+    --> crates/draper-mesh/src/triangulate.rs:5180:13
+     |
+5180 |             apex_vertex = Some(idx);
+     |             ^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: variable `pole_vertex_north` is assigned to, but never used
+    --> crates/draper-mesh/src/triangulate.rs:5352:9
+     |
+5352 |     let mut pole_vertex_north: Option<u32> = None;
+     |         ^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: consider using `_pole_vertex_north` instead
+
+warning: variable `pole_vertex_south` is assigned to, but never used
+    --> crates/draper-mesh/src/triangulate.rs:5353:9
+     |
+5353 |     let mut pole_vertex_south: Option<u32> = None;
+     |         ^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: consider using `_pole_vertex_south` instead
+
+warning: value assigned to `pole_vertex_north` is never read
+    --> crates/draper-mesh/src/triangulate.rs:5367:13
+     |
+5367 |             pole_vertex_north = Some(idx);
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `pole_vertex_south` is never read
+    --> crates/draper-mesh/src/triangulate.rs:5377:13
+     |
+5377 |             pole_vertex_south = Some(idx);
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: unused variable: `surface`
+   --> crates/draper-mesh/src/edge_cache.rs:743:25
+    |
+743 |             if let Some(ref surface) = face.surface {
+    |                         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_surface`
+
+warning: unused variable: `u`
+    --> crates/draper-mesh/src/parametric_domain.rs:1553:22
+     |
+1553 |                 let (u, v, p_surf) = if let Surface::Nurbs(ref nurbs) = surface {
+     |                      ^ help: if this is intentional, prefix it with an underscore: `_u`
+
+warning: unused variable: `v`
+    --> crates/draper-mesh/src/parametric_domain.rs:1553:25
+     |
+1553 |                 let (u, v, p_surf) = if let Surface::Nurbs(ref nurbs) = surface {
+     |                         ^ help: if this is intentional, prefix it with an underscore: `_v`
+
+warning: unreachable pattern
+   --> crates/draper-mesh/src/certification.rs:375:9
+    |
+375 |         _ => (0.0, 1.0),
+    |         ^ no value can reach this
+    |
+note: multiple earlier patterns match some of the same values
+   --> crates/draper-mesh/src/certification.rs:375:9
+    |
+367 |         Surface::Plane(_) => (-1000.0, 1000.0), // Planes are infinite
+    |         ----------------- matches some of the same values
+368 |         Surface::Cylinder(c) => c.u_range(),
+    |         -------------------- matches some of the same values
+369 |         Surface::Cone(_) => (0.0, 2.0 * std::f64::consts::PI),
+    |         ---------------- matches some of the same values
+370 |         Surface::Sphere(_) => (0.0, 2.0 * std::f64::consts::PI),
+    |         ------------------ matches some of the same values
+...
+375 |         _ => (0.0, 1.0),
+    |         ^ ...and 4 other patterns collectively make this unreachable
+    = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable pattern
+   --> crates/draper-mesh/src/certification.rs:390:9
+    |
+390 |         _ => (0.0, 1.0),
+    |         ^ no value can reach this
+    |
+note: multiple earlier patterns match some of the same values
+   --> crates/draper-mesh/src/certification.rs:390:9
+    |
+382 |         Surface::Plane(_) => (-1000.0, 1000.0), // Planes are infinite
+    |         ----------------- matches some of the same values
+383 |         Surface::Cylinder(_) => (-1000.0, 1000.0), // Cylinders are infinite along axis
+    |         -------------------- matches some of the same values
+384 |         Surface::Cone(_) => (-1000.0, 1000.0),
+    |         ---------------- matches some of the same values
+385 |         Surface::Sphere(_) => (0.0, std::f64::consts::PI),
+    |         ------------------ matches some of the same values
+...
+390 |         _ => (0.0, 1.0),
+    |         ^ ...and 4 other patterns collectively make this unreachable
+
+warning: unused variable: `tol_sq`
+   --> crates/draper-mesh/src/watertight.rs:194:9
+    |
+194 |     let tol_sq = tolerance * tolerance;
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_tol_sq`
+
+warning: unused variable: `lo`
+   --> crates/draper-mesh/src/watertight.rs:197:11
+    |
+197 |     for ((lo, hi), entries) in &edge_map {
+    |           ^^ help: if this is intentional, prefix it with an underscore: `_lo`
+
+warning: unused variable: `hi`
+   --> crates/draper-mesh/src/watertight.rs:197:15
+    |
+197 |     for ((lo, hi), entries) in &edge_map {
+    |               ^^ help: if this is intentional, prefix it with an underscore: `_hi`
+
+warning: unused variable: `near_miss_tol_sq`
+   --> crates/draper-mesh/src/watertight.rs:248:13
+    |
+248 |         let near_miss_tol_sq = near_miss_tol * near_miss_tol;
+    |             ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_near_miss_tol_sq`
+
+warning: unused variable: `vi`
+   --> crates/draper-mesh/src/watertight.rs:327:22
+    |
+327 |                 let (vi, pi, fi) = &boundary_vertex_info[i];
+    |                      ^^ help: if this is intentional, prefix it with an underscore: `_vi`
+
+warning: unused variable: `vj`
+   --> crates/draper-mesh/src/watertight.rs:328:22
+    |
+328 |                 let (vj, pj, fj) = &boundary_vertex_info[j];
+    |                      ^^ help: if this is intentional, prefix it with an underscore: `_vj`
+
+warning: unused variable: `n_interior`
+   --> crates/draper-mesh/src/cdt_triangulate.rs:565:9
+    |
+565 |     let n_interior = add_interior_grid_points(
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_n_interior`
+
+warning: unused variable: `n_holes`
+   --> crates/draper-mesh/src/cdt_triangulate.rs:570:9
+    |
+570 |     let n_holes: usize = hole_indices.iter().map(|h| h.len()).sum();
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_n_holes`
+
+warning: variable `hole_offset` is assigned to, but never used
+   --> crates/draper-mesh/src/cdt_triangulate.rs:660:13
+    |
+660 |         let mut hole_offset = n_boundary;
+    |             ^^^^^^^^^^^^^^^
+    |
+    = note: consider using `_hole_offset` instead
+
+warning: value assigned to `hole_offset` is never read
+   --> crates/draper-mesh/src/cdt_triangulate.rs:671:13
+    |
+671 |             hole_offset += hole_idx.len();
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: unused variable: `all_3d`
+   --> crates/draper-mesh/src/cdt_triangulate.rs:903:5
+    |
+903 |     all_3d: &[Point3d],
+    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_all_3d`
+
+warning: function `project_points_nurbs_fast` is never used
+   --> crates/draper-mesh/src/triangulate.rs:190:4
+    |
+190 | fn project_points_nurbs_fast(surface: &Surface, points: &[Point3d]) -> Vec<Point2d> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `cap_grid_resolution` is never used
+   --> crates/draper-mesh/src/triangulate.rs:234:4
+    |
+234 | fn cap_grid_resolution(n_u: usize, n_v: usize, max_face_triangles: usize) -> (usize, usize) {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `collect_face_boundary_points` is never used
+   --> crates/draper-mesh/src/triangulate.rs:817:4
+    |
+817 | fn collect_face_boundary_points(face: &Face) -> Vec<Point3d> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `collect_face_boundary_points_with_uv` is never used
+   --> crates/draper-mesh/src/triangulate.rs:911:4
+    |
+911 | fn collect_face_boundary_points_with_uv(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `collect_face_hole_points_with_uv` is never used
+    --> crates/draper-mesh/src/triangulate.rs:1076:4
+     |
+1076 | fn collect_face_hole_points_with_uv(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `collect_face_hole_points` is never used
+    --> crates/draper-mesh/src/triangulate.rs:1173:4
+     |
+1173 | fn collect_face_hole_points(face: &Face) -> Vec<Vec<Point3d>> {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `extract_boundary_ring_at_v` is never used
+    --> crates/draper-mesh/src/triangulate.rs:2252:4
+     |
+2252 | fn extract_boundary_ring_at_v(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `triangulate_nurbs_grid_trimmed` is never used
+    --> crates/draper-mesh/src/triangulate.rs:3180:4
+     |
+3180 | fn triangulate_nurbs_grid_trimmed(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `triangulate_cylinder_face_with_boundary_uv` is never used
+    --> crates/draper-mesh/src/triangulate.rs:3913:4
+     |
+3913 | fn triangulate_cylinder_face_with_boundary_uv(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `extract_boundary_ring_at_v_from_uv` is never used
+    --> crates/draper-mesh/src/triangulate.rs:3947:4
+     |
+3947 | fn extract_boundary_ring_at_v_from_uv(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `is_nearly_coplanar` is never used
+    --> crates/draper-mesh/src/triangulate.rs:4071:4
+     |
+4071 | fn is_nearly_coplanar(points: &[Point3d], tolerance: f64) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `point_in_polygon_2d` is never used
+    --> crates/draper-mesh/src/triangulate.rs:4133:4
+     |
+4133 | fn point_in_polygon_2d(point: &Point2d, polygon: &[Point2d]) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `surface_u_period` is never used
+    --> crates/draper-mesh/src/triangulate.rs:4215:4
+     |
+4215 | fn surface_u_period(surface: &Surface) -> Option<f64> {
+     |    ^^^^^^^^^^^^^^^^
+
+warning: function `surface_v_period` is never used
+    --> crates/draper-mesh/src/triangulate.rs:4225:4
+     |
+4225 | fn surface_v_period(surface: &Surface) -> Option<f64> {
+     |    ^^^^^^^^^^^^^^^^
+
+warning: function `triangulate_cap_face` is never used
+    --> crates/draper-mesh/src/triangulate.rs:4237:4
+     |
+4237 | fn triangulate_cap_face(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `triangulate_surface_uv_trimmed` is never used
+    --> crates/draper-mesh/src/triangulate.rs:4303:4
+     |
+4303 | fn triangulate_surface_uv_trimmed(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `triangulate_cylinder_with_boundary` is never used
+    --> crates/draper-mesh/src/triangulate.rs:4906:4
+     |
+4906 | fn triangulate_cylinder_with_boundary(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `triangulate_cone_with_boundary` is never used
+    --> crates/draper-mesh/src/triangulate.rs:4956:4
+     |
+4956 | fn triangulate_cone_with_boundary(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `triangulate_sphere_with_boundary` is never used
+    --> crates/draper-mesh/src/triangulate.rs:5006:4
+     |
+5006 | fn triangulate_sphere_with_boundary(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `triangulate_cone_face_with_boundary` is never used
+    --> crates/draper-mesh/src/triangulate.rs:5065:4
+     |
+5065 | fn triangulate_cone_face_with_boundary(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `triangulate_sphere_face_with_boundary` is never used
+    --> crates/draper-mesh/src/triangulate.rs:5266:4
+     |
+5266 | fn triangulate_sphere_face_with_boundary(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `triangulate_torus_with_boundary` is never used
+    --> crates/draper-mesh/src/triangulate.rs:5459:4
+     |
+5459 | fn triangulate_torus_with_boundary(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `triangulate_generic_with_boundary` is never used
+    --> crates/draper-mesh/src/triangulate.rs:5523:4
+     |
+5523 | fn triangulate_generic_with_boundary(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `cylinder_uv_range` is never used
+    --> crates/draper-mesh/src/triangulate.rs:5607:4
+     |
+5607 | fn cylinder_uv_range(cyl: &CylinderSurface, boundary_points: &[Point3d]) -> (f64, f64, f64, f64) {
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: function `cone_uv_range` is never used
+    --> crates/draper-mesh/src/triangulate.rs:5624:4
+     |
+5624 | fn cone_uv_range(cone: &ConeSurface, boundary_points: &[Point3d]) -> (f64, f64, f64, f64) {
+     |    ^^^^^^^^^^^^^
+
+warning: function `sphere_uv_range` is never used
+    --> crates/draper-mesh/src/triangulate.rs:5641:4
+     |
+5641 | fn sphere_uv_range(sphere: &SphereSurface, boundary_points: &[Point3d]) -> (f64, f64, f64, f64) {
+     |    ^^^^^^^^^^^^^^^
+
+warning: function `estimate_v_range` is never used
+    --> crates/draper-mesh/src/triangulate.rs:5727:4
+     |
+5727 | fn estimate_v_range(face: &Face) -> Option<(f64, f64)> {
+     |    ^^^^^^^^^^^^^^^^
+
+warning: function `snap_boundary_rings` is never used
+    --> crates/draper-mesh/src/triangulate.rs:5886:4
+     |
+5886 | fn snap_boundary_rings(
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `triangle_area_2d` is never used
+   --> crates/draper-mesh/src/parametric_domain.rs:373:4
+    |
+373 | fn triangle_area_2d(x0: f64, y0: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64 {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `vertex_penetrates_triangle` is never used
+   --> crates/draper-mesh/src/certification.rs:987:4
+    |
+987 | fn vertex_penetrates_triangle(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `coplanar_triangles_intersect` is never used
+    --> crates/draper-mesh/src/certification.rs:1039:4
+     |
+1039 | fn coplanar_triangles_intersect(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `segments_intersect_3d` is never used
+    --> crates/draper-mesh/src/certification.rs:1062:4
+     |
+1062 | fn segments_intersect_3d(a0: &Point3d, a1: &Point3d, b0: &Point3d, b1: &Point3d) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `segment_segment_distance` is never used
+    --> crates/draper-mesh/src/certification.rs:1069:4
+     |
+1069 | fn segment_segment_distance(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `point_in_triangle_2d` is never used
+    --> crates/draper-mesh/src/certification.rs:1111:4
+     |
+1111 | fn point_in_triangle_2d(p: &Point3d, a: &Point3d, b: &Point3d, c: &Point3d) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `cut_text_holes_simple` is never used
+    --> crates/draper-mesh/src/text3d.rs:1128:4
+     |
+1128 | fn cut_text_holes_simple(
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `build_vertex_face_map` is never used
+    --> crates/draper-mesh/src/cdt_triangulate.rs:1255:4
+     |
+1255 | fn build_vertex_face_map(mesh: &TriangleMesh) -> Vec<std::collections::HashSet<u64>> {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `insert_point_in_triangle` is never used
+   --> crates/draper-mesh/src/custom_cdt.rs:184:4
+    |
+184 | fn insert_point_in_triangle(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `insert_point_on_edge` is never used
+   --> crates/draper-mesh/src/custom_cdt.rs:221:4
+    |
+221 | fn insert_point_on_edge(
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `find_triangle_with_edge` is never used
+   --> crates/draper-mesh/src/custom_cdt.rs:378:4
+    |
+378 | fn find_triangle_with_edge(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variable `R` should have a snake case name
+   --> crates/draper-mesh/src/text3d.rs:413:17
+    |
+413 |             let R = *major_radius;
+    |                 ^ help: convert the identifier to snake case: `r`
+    |
+    = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: variable `R` should have a snake case name
+   --> crates/draper-mesh/src/text3d.rs:959:17
+    |
+959 |             let R = *major_radius;
+    |                 ^ help: convert the identifier to snake case: `r`
+
+   Compiling aho-corasick v1.1.4
+warning: `draper-topology` (lib) generated 3 warnings (run `cargo fix --lib -p draper-topology` to apply 3 suggestions)
+   Compiling tracing-core v0.1.36
+   Compiling parking_lot_core v0.9.12
+   Compiling fastrand v2.4.1
+   Compiling regex-syntax v0.8.10
+   Compiling tracing v0.1.44
+   Compiling draper-step v0.1.0 (/home/z/my-project/crates/draper-step)
+warning: unused import: `std::collections::HashMap`
+  --> crates/draper-step/src/parser.rs:11:5
+   |
+11 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `crate::schema::*`
+ --> crates/draper-step/src/exporter.rs:9:5
+  |
+9 | use crate::schema::*;
+  |     ^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Face` and `Shell`
+  --> crates/draper-step/src/exporter.rs:11:30
+   |
+11 | use draper_topology::{Solid, Shell, Face, Edge, Compound};
+   |                              ^^^^^  ^^^^
+
+warning: unused import: `Ellipse`
+  --> crates/draper-step/src/converter.rs:29:51
+   |
+29 |     NurbsSurface, Curve3d, Curve2d, Line, Circle, Ellipse, Arc, NurbsCurve,
+   |                                                   ^^^^^^^
+
+warning: unused imports: `smooth_normals_adaptive` and `smooth_normals`
+  --> crates/draper-step/src/converter.rs:32:175
+   |
+32 | ...idate_watertight, validate_edge_consistency, smooth_normals, smooth_normals_adaptive};
+   |                                                 ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `AdaptiveTolerance`
+  --> crates/draper-step/src/converter.rs:36:56
+   |
+36 | use draper_mesh::edge_cache::{EdgeDiscretizationCache, AdaptiveTolerance, deterministic_round_point};
+   |                                                        ^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `edge_start_vtx_id`
+  --> crates/draper-step/src/exporter.rs:60:41
+   |
+60 |                     let (edge_curve_id, edge_start_vtx_id, edge_end_vtx_id) = if let Some(e) = edge {
+   |                                         ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_edge_start_vtx_id`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `edge_end_vtx_id`
+  --> crates/draper-step/src/exporter.rs:60:60
+   |
+60 |                     let (edge_curve_id, edge_start_vtx_id, edge_end_vtx_id) = if let Some(e) = edge {
+   |                                                            ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_edge_end_vtx_id`
+
+warning: unused variable: `child_pd_id`
+    --> crates/draper-step/src/converter.rs:2505:32
+     |
+2505 |                 for &(nauo_id, child_pd_id, _) in children {
+     |                                ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_child_pd_id`
+
+warning: unused variable: `vp`
+    --> crates/draper-step/src/converter.rs:2656:18
+     |
+2656 |             for (vp, step_ids) in &vertex_pair_to_step_ids {
+     |                  ^^ help: if this is intentional, prefix it with an underscore: `_vp`
+
+warning: variable does not need to be mutable
+    --> crates/draper-step/src/converter.rs:2917:13
+     |
+2917 |         let mut timed_out_faces = 0;
+     |             ----^^^^^^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `timed_out_faces`
+    --> crates/draper-step/src/converter.rs:2917:13
+     |
+2917 |         let mut timed_out_faces = 0;
+     |             ^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_timed_out_faces`
+
+warning: unused variable: `face_start`
+    --> crates/draper-step/src/converter.rs:2942:17
+     |
+2942 |             let face_start = StdInstant::now();
+     |                 ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_face_start`
+
+warning: unused variable: `curve`
+    --> crates/draper-step/src/converter.rs:3123:25
+     |
+3123 |             if let Some(ref curve) = edge.curve {
+     |                         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_curve`
+
+warning: variable does not need to be mutable
+    --> crates/draper-step/src/converter.rs:5233:13
+     |
+5233 |         let mut basis = self.resolve_curve_2d(basis_id)?;
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `edge_t`
+    --> crates/draper-step/src/converter.rs:7495:21
+     |
+7495 |                 let edge_t = pmin + t_frac * e_range;
+     |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_edge_t`
+
+warning: unused variable: `tolerance`
+    --> crates/draper-step/src/converter.rs:8231:46
+     |
+8231 | fn deduplicate_points_3d(points: &[Point3d], tolerance: f64) -> Vec<Point3d> {
+     |                                              ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_tolerance`
+
+warning: field `surface_step_id` is never read
+  --> crates/draper-step/src/converter.rs:95:5
+   |
+83 | struct FaceData {
+   |        -------- field in this struct
+...
+95 |     surface_step_id: Option<i64>,
+   |     ^^^^^^^^^^^^^^^
+   |
+   = note: `FaceData` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: multiple methods are never used
+    --> crates/draper-step/src/converter.rs:3305:8
+     |
+ 949 | impl<'a> StepConverter<'a> {
+     | -------------------------- methods in this implementation
+...
+3305 |     fn find_nauo_transform_uncached(&self, nauo_id: i64, _related_pd_id: i64) -> Option<[[f64; 4]; 4]> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3321 |     fn cdsr_links_to_nauo(&self, cdsr: &crate::schema::StepEntity, nauo_id: i64) -> bool {
+     |        ^^^^^^^^^^^^^^^^^^
+...
+3360 |     fn extract_transform_from_srr(&self, srr: &crate::schema::StepEntity) -> Option<[[f64; 4]; 4]> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3416 |     fn compute_item_defined_transform(&self, idt: &crate::schema::StepEntity) -> Option<[[f64; 4]; 4]> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3470 |     fn compute_cartesian_transform(&self, cto: &crate::schema::StepEntity) -> Option<[[f64; 4]; 4]> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3553 |     fn get_direction_from_param(&self, param: &StepValue) -> Option<[f64; 3]> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3581 |     fn find_pd_brep_uncached(&self, pd_id: i64) -> Option<i64> {
+     |        ^^^^^^^^^^^^^^^^^^^^^
+...
+3620 |     fn find_brep_in_representation(&self, sr_id: i64) -> Option<i64> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3679 |     fn find_brep_via_srr(&self, sr_id: i64, depth: usize) -> Option<i64> {
+     |        ^^^^^^^^^^^^^^^^^
+...
+3763 |     fn absr_belongs_to_pd(&self, absr: &crate::schema::StepEntity, pd_id: i64) -> bool {
+     |        ^^^^^^^^^^^^^^^^^^
+...
+4401 |     fn extract_face_bounds(&self, face: &crate::schema::StepEntity) -> Vec<TopoEdge> {
+     |        ^^^^^^^^^^^^^^^^^^^
+...
+4414 |     fn extract_face_bounds_separated(&self, face: &crate::schema::StepEntity) -> (Vec<TopoEdge>, Vec<Vec<TopoEdge>>) {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+4482 |     fn resolve_face_bound(&self, bound_entity: &crate::schema::StepEntity) -> Option<Vec<TopoEdge>> {
+     |        ^^^^^^^^^^^^^^^^^^
+...
+4524 |     fn resolve_edge_loop(&self, loop_id: i64) -> Vec<TopoEdge> {
+     |        ^^^^^^^^^^^^^^^^^
+...
+4558 |     fn resolve_oriented_edge(&self, oe_id: i64) -> Option<TopoEdge> {
+     |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `find_bridge_edge_2d` is never used
+    --> crates/draper-step/src/converter.rs:8116:4
+     |
+8116 | fn find_bridge_edge_2d(outer_2d: &[Point2d], hole_2d: &[Point2d]) -> (usize, usize) {
+     |    ^^^^^^^^^^^^^^^^^^^
+
+   Compiling regex-automata v0.4.14
+   Compiling icu_properties v2.2.0
+   Compiling icu_normalizer v2.2.0
+   Compiling toml_parser v1.1.2+spec-1.1.0
+   Compiling event-listener v5.4.1
+   Compiling utf8parse v0.2.2
+   Compiling scopeguard v1.2.0
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+warning: `draper-mesh` (lib) generated 77 warnings (run `cargo fix --lib -p draper-mesh` to apply 23 suggestions)
+   Compiling lock_api v0.4.14
+   Compiling toml_edit v0.25.12+spec-1.1.0
+   Compiling anstyle-parse v1.0.0
+   Compiling event-listener-strategy v0.5.4
+   Compiling idna_adapter v1.2.2
+   Compiling regex v1.12.3
+   Compiling futures-lite v2.6.1
+   Compiling enumflags2_derive v0.7.12
+   Compiling anstyle v1.0.14
+   Compiling anstyle-query v1.1.5
+   Compiling rustversion v1.0.22
+   Compiling colorchoice v1.0.5
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling anstream v1.0.0
+   Compiling parking_lot v0.12.5
+   Compiling env_filter v1.0.1
+   Compiling proc-macro-crate v3.5.0
+   Compiling idna v1.1.0
+   Compiling zvariant_utils v3.4.0
+   Compiling form_urlencoded v1.2.2
+   Compiling rustix v0.38.44
+   Compiling thiserror v1.0.69
+   Compiling version_check v0.9.5
+   Compiling raw-window-handle v0.6.2
+   Compiling jiff v0.2.28
+   Compiling ahash v0.8.12
+warning: `draper-step` (lib) generated 20 warnings (run `cargo fix --lib -p draper-step` to apply 17 suggestions)
+   Compiling url v2.5.8
+   Compiling zvariant_derive v5.12.0
+   Compiling thiserror-impl v1.0.69
+   Compiling env_logger v0.11.10
+   Compiling async-io v2.6.0
+   Compiling profiling v1.0.18
+   Compiling heck v0.5.0
+   Compiling cursor-icon v1.2.0
+   Compiling xkeysym v0.2.1
+   Compiling linux-raw-sys v0.4.15
+   Compiling xcursor v0.3.10
+   Compiling async-task v4.7.1
+   Compiling wayland-cursor v0.31.14
+   Compiling strum_macros v0.26.4
+   Compiling wayland-csd-frame v0.3.0
+   Compiling async-channel v2.5.0
+   Compiling wayland-protocols-wlr v0.3.12
+   Compiling naga v24.0.0
+   Compiling memmap2 v0.9.10
+   Compiling ttf-parser v0.25.1
+   Compiling termcolor v1.4.1
+   Compiling bit-vec v0.8.0
+   Compiling khronos-egl v6.0.0
+   Compiling foldhash v0.1.5
+   Compiling unicode-width v0.1.14
+   Compiling ash v0.38.0+1.3.281
+   Compiling atomic-waker v1.1.2
+   Compiling piper v0.2.5
+   Compiling codespan-reporting v0.11.1
+   Compiling hashbrown v0.15.5
+   Compiling bit-set v0.8.0
+   Compiling owned_ttf_parser v0.25.1
+   Compiling calloop v0.13.0
+   Compiling strum v0.26.3
+   Compiling enumflags2 v0.7.12
+   Compiling wgpu-hal v24.0.4
+   Compiling emath v0.31.1
+   Compiling gethostname v1.1.0
+   Compiling x11-dl v2.21.0
+   Compiling errno v0.3.14
+   Compiling spirv v0.3.0+sdk-1.3.268.0
+   Compiling gpu-alloc-types v0.3.0
+   Compiling gpu-descriptor-types v0.2.0
+   Compiling smithay-client-toolkit v0.19.2
+   Compiling rustc-hash v1.1.0
+   Compiling ab_glyph_rasterizer v0.1.10
+   Compiling x11rb-protocol v0.13.2
+   Compiling arrayvec v0.7.6
+   Compiling hexf-parse v0.2.1
+   Compiling endi v1.1.1
+   Compiling unicode-xid v0.2.6
+   Compiling as-raw-xcb-connection v1.0.1
+   Compiling zvariant v5.12.0
+   Compiling ab_glyph v0.2.32
+   Compiling gpu-descriptor v0.3.2
+   Compiling gpu-alloc v0.6.0
+   Compiling signal-hook-registry v1.4.8
+   Compiling x11rb v0.13.2
+   Compiling ecolor v0.31.1
+   Compiling calloop-wayland-source v0.3.0
+   Compiling blocking v1.6.2
+   Compiling async-lock v3.4.2
+   Compiling calloop v0.14.4
+   Compiling wgpu-core v24.0.5
+   Compiling winit v0.30.13
+   Compiling fdeflate v0.3.7
+   Compiling wgpu-types v24.0.0
+   Compiling ordered-float v4.6.0
+   Compiling pxfm v0.1.29
+   Compiling getrandom v0.4.2
+   Compiling smithay-client-toolkit v0.20.0
+   Compiling glow v0.16.0
+   Compiling nohash-hasher v0.2.0
+   Compiling litrs v1.0.0
+   Compiling epaint_default_fonts v0.31.1
+   Compiling renderdoc-sys v1.1.0
+   Compiling epaint v0.31.1
+   Compiling document-features v0.2.12
+   Compiling moxcms v0.8.1
+   Compiling png v0.18.1
+   Compiling calloop-wayland-source v0.4.1
+   Compiling async-signal v0.2.14
+   Compiling zbus_names v4.3.2
+   Compiling xkbcommon-dl v0.4.2
+   Compiling ppv-lite86 v0.2.21
+   Compiling wayland-protocols-misc v0.3.12
+   Compiling wayland-protocols-experimental v20250721.0.1
+   Compiling wayland-protocols-plasma v0.3.12
+   Compiling rand_core v0.9.5
+   Compiling wgpu v24.0.5
+   Compiling toml_datetime v0.6.11
+   Compiling serde_spanned v0.6.9
+   Compiling winnow v0.7.15
+   Compiling strsim v0.11.1
+   Compiling toml_write v0.1.2
+   Compiling smol_str v0.2.2
+   Compiling clap_lex v1.1.0
+   Compiling byteorder-lite v0.1.0
+   Compiling dpi v0.1.2
+   Compiling toml_edit v0.22.27
+   Compiling image v0.25.10
+   Compiling clap_builder v4.6.0
+   Compiling rand_chacha v0.9.0
+   Compiling zbus_macros v5.16.0
+   Compiling async-process v2.5.0
+   Compiling egui v0.31.1
+   Compiling async-executor v1.14.0
+   Compiling async-broadcast v0.7.2
+   Compiling ordered-stream v0.2.0
+   Compiling futures-macro v0.3.32
+   Compiling async-recursion v1.1.1
+   Compiling serde_repr v0.1.20
+   Compiling async-trait v0.1.89
+   Compiling uuid v1.23.2
+   Compiling futures-task v0.3.32
+   Compiling static_assertions v1.1.0
+   Compiling cbindgen v0.27.0
+   Compiling web-time v1.1.0
+   Compiling hex v0.4.3
+   Compiling rustc-hash v2.1.2
+   Compiling type-map v0.5.1
+   Compiling zbus v5.16.0
+   Compiling tempfile v3.27.0
+   Compiling futures-util v0.3.32
+   Compiling smithay-clipboard v0.7.3
+   Compiling rand v0.9.4
+   Compiling clap v4.6.1
+   Compiling arboard v3.6.1
+   Compiling toml v0.8.23
+   Compiling async-fs v2.2.0
+   Compiling async-net v2.0.0
+   Compiling webbrowser v1.2.1
+   Compiling draper-core v0.1.0 (/home/z/my-project/crates/draper-core)
+warning: unused imports: `Arc`, `Circle`, `Curve3d`, `CylinderSurface`, `Line`, `Plane`, `Surface`, and `Vec3d`
+ --> crates/draper-core/src/operations.rs:6:27
+  |
+6 |     Point3d, Direction3d, Vec3d, Transform,
+  |                           ^^^^^
+7 |     Curve3d, Line, Circle, Arc,
+  |     ^^^^^^^  ^^^^  ^^^^^^  ^^^
+8 |     Surface, Plane, CylinderSurface,
+  |     ^^^^^^^  ^^^^^  ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `CoEdge`, `Edge`, `Face`, `ShapeBuilder`, `Shell`, `Vertex`, and `Wire`
+  --> crates/draper-core/src/operations.rs:11:12
+   |
+11 |     Solid, Shell, Face, Wire, CoEdge, Edge, Vertex,
+   |            ^^^^^  ^^^^  ^^^^  ^^^^^^  ^^^^  ^^^^^^
+12 |     ShapeBuilder,
+   |     ^^^^^^^^^^^^
+
+warning: unused imports: `CylinderSurface`, `Plane`, `Transform`, and `Vec3d`
+  --> crates/draper-core/src/boolean.rs:13:27
+   |
+13 |     Point3d, Direction3d, Vec3d,
+   |                           ^^^^^
+14 |     Surface, Plane, CylinderSurface,
+   |              ^^^^^  ^^^^^^^^^^^^^^^
+15 |     Transform,
+   |     ^^^^^^^^^
+
+warning: unused imports: `CoEdge`, `Edge`, `Face`, `ShapeBuilder`, `Vertex`, and `Wire`
+  --> crates/draper-core/src/boolean.rs:18:19
+   |
+18 |     Solid, Shell, Face, Wire, CoEdge, Edge, Vertex,
+   |                   ^^^^  ^^^^  ^^^^^^  ^^^^  ^^^^^^
+19 |     ShapeBuilder,
+   |     ^^^^^^^^^^^^
+
+warning: unused import: `crate::operations`
+  --> crates/draper-core/src/boolean.rs:21:5
+   |
+21 | use crate::operations;
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `solid`
+  --> crates/draper-core/src/operations.rs:17:20
+   |
+17 | pub fn fillet_edge(solid: &mut Solid, _edge_index: usize, radius: f64) -> Result<(), String> {
+   |                    ^^^^^ help: if this is intentional, prefix it with an underscore: `_solid`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `radius`
+  --> crates/draper-core/src/operations.rs:17:59
+   |
+17 | pub fn fillet_edge(solid: &mut Solid, _edge_index: usize, radius: f64) -> Result<(), String> {
+   |                                                           ^^^^^^ help: if this is intentional, prefix it with an underscore: `_radius`
+
+warning: unused variable: `solid`
+  --> crates/draper-core/src/operations.rs:31:21
+   |
+31 | pub fn chamfer_edge(solid: &mut Solid, _edge_index: usize, distance: f64) -> Result<(), String> {
+   |                     ^^^^^ help: if this is intentional, prefix it with an underscore: `_solid`
+
+warning: unused variable: `distance`
+  --> crates/draper-core/src/operations.rs:31:60
+   |
+31 | pub fn chamfer_edge(solid: &mut Solid, _edge_index: usize, distance: f64) -> Result<(), String> {
+   |                                                            ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_distance`
+
+warning: unused variable: `solid`
+  --> crates/draper-core/src/operations.rs:37:19
+   |
+37 | pub fn make_shell(solid: &mut Solid, thickness: f64) -> Result<(), String> {
+   |                   ^^^^^ help: if this is intentional, prefix it with an underscore: `_solid`
+
+warning: unused variable: `thickness`
+  --> crates/draper-core/src/operations.rs:37:38
+   |
+37 | pub fn make_shell(solid: &mut Solid, thickness: f64) -> Result<(), String> {
+   |                                      ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_thickness`
+
+warning: unused variable: `b`
+  --> crates/draper-core/src/boolean.rs:75:37
+   |
+75 | pub fn boolean_intersect(a: &Solid, b: &Solid) -> BooleanResult {
+   |                                     ^ help: if this is intentional, prefix it with an underscore: `_b`
+
+warning: unused variable: `hit`
+   --> crates/draper-core/src/boolean.rs:110:37
+    |
+110 |                         if let Some(hit) = draper_geometry::intersection::intersect_line_plane(&ray, plane) {
+    |                                     ^^^ help: if this is intentional, prefix it with an underscore: `_hit`
+
+warning: unused variable: `crank_r`
+   --> crates/draper-core/src/engine.rs:133:9
+    |
+133 |     let crank_r = config.crank_radius;
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_crank_r`
+
+warning: unused variable: `rod_journal_radius`
+   --> crates/draper-core/src/engine.rs:135:9
+    |
+135 |     let rod_journal_radius = 24.0;
+    |         ^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rod_journal_radius`
+
+warning: unused variable: `wall`
+   --> crates/draper-core/src/engine.rs:190:9
+    |
+190 |     let wall = config.wall_thickness;
+    |         ^^^^ help: if this is intentional, prefix it with an underscore: `_wall`
+
+warning: `draper-core` (lib) generated 16 warnings (run `cargo fix --lib -p draper-core` to apply 16 suggestions)
+   Compiling futures-channel v0.3.32
+   Compiling rfd v0.15.4
+   Compiling pollster v0.4.0
+   Compiling heck v0.4.1
+   Compiling ashpd v0.11.1
+   Compiling egui-winit v0.31.1
+   Compiling egui-wgpu v0.31.1
+   Compiling urlencoding v2.1.3
+   Compiling eframe v0.31.1
+   Compiling draper-ffi v0.1.0 (/home/z/my-project/crates/draper-ffi)
+   Compiling draper-json v0.1.0 (/home/z/my-project/crates/draper-json)
+   Compiling draper-viewer v0.1.0 (/home/z/my-project/crates/draper-viewer)
+warning: unused import: `generate_3draper_text`
+  --> crates/draper-viewer/src/app.rs:16:105
+   |
+16 | use draper_mesh::{triangulate_solid, TriangleMesh, TriangulationParams, check_manifold, ManifoldReport, generate_3draper_text, cut_t...
+   |                                                                                                         ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Point2d`
+  --> crates/draper-viewer/src/app.rs:18:32
+   |
+18 | use draper_geometry::{Surface, Point2d};
+   |                                ^^^^^^^
+
+warning: unnecessary parentheses around assigned value
+   --> crates/draper-viewer/src/camera.rs:376:21
+    |
+376 |         let ndc_x = (2.0 * (screen_pos[0]) / vw - 1.0);
+    |                     ^                                ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+376 -         let ndc_x = (2.0 * (screen_pos[0]) / vw - 1.0);
+376 +         let ndc_x = 2.0 * (screen_pos[0]) / vw - 1.0;
+    |
+
+warning: unnecessary parentheses around assigned value
+   --> crates/draper-viewer/src/camera.rs:377:21
+    |
+377 |         let ndc_y = (1.0 - 2.0 * (screen_pos[1]) / vh); // flip Y
+    |                     ^                                ^
+    |
+help: remove these parentheses
+    |
+377 -         let ndc_y = (1.0 - 2.0 * (screen_pos[1]) / vh); // flip Y
+377 +         let ndc_y = 1.0 - 2.0 * (screen_pos[1]) / vh; // flip Y
+    |
+
+warning: unused variable: `ui`
+    --> crates/draper-viewer/src/app.rs:3620:45
+     |
+3620 |                     ui.menu_button("File", |ui| {
+     |                                             ^^ help: if this is intentional, prefix it with an underscore: `_ui`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: enum `FileLoadResult` is never used
+   --> crates/draper-viewer/src/app.rs:334:6
+    |
+334 | enum FileLoadResult {
+    |      ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `controls_panel_open` is never read
+   --> crates/draper-viewer/src/app.rs:459:5
+    |
+344 | pub struct ViewerApp {
+    |            --------- field in this struct
+...
+459 |     controls_panel_open: bool,
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: enum `ChunkResult` is never used
+   --> crates/draper-viewer/src/app.rs:522:6
+    |
+522 | enum ChunkResult {
+    |      ^^^^^^^^^^^
+
+warning: methods `import_stl_from_bytes` and `import_step_from_str` are never used
+    --> crates/draper-viewer/src/app.rs:1961:8
+     |
+ 580 | impl ViewerApp {
+     | -------------- methods in this implementation
+...
+1961 |     fn import_stl_from_bytes(&mut self, data: &[u8], name: &str) {
+     |        ^^^^^^^^^^^^^^^^^^^^^
+...
+1973 |     fn import_step_from_str(&mut self, content: &str, name: &str) {
+     |        ^^^^^^^^^^^^^^^^^^^^
+
+   Compiling draper-diag v0.1.0 (/home/z/my-project/tools)
+warning: unused variable: `result`
+  --> tools/src/bin/hang_diag.rs:47:13
+   |
+47 |         let result = std::thread::scope(|s| {
+   |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_result`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `draper-viewer` (lib) generated 9 warnings (run `cargo fix --lib -p draper-viewer` to apply 5 suggestions)
+warning: `draper-diag` (bin "hang_diag") generated 1 warning (run `cargo fix --bin "hang_diag" -p draper-diag` to apply 1 suggestion)
+warning: methods `rotate_world_yaw` and `rotate_local_pitch` are never used
+   --> crates/draper-viewer/src/camera.rs:259:12
+    |
+132 | impl OrbitCamera {
+    | ---------------- methods in this implementation
+...
+259 |     pub fn rotate_world_yaw(&mut self, angle_rad: f32) {
+    |            ^^^^^^^^^^^^^^^^
+...
+265 |     pub fn rotate_local_pitch(&mut self, angle_rad: f32) {
+    |            ^^^^^^^^^^^^^^^^^^
+
+warning: field `mesh_bind_group_layout` is never read
+   --> crates/draper-viewer/src/renderer.rs:102:9
+    |
+ 80 | pub struct SceneResources {
+    |            -------------- field in this struct
+...
+102 |     pub mesh_bind_group_layout: wgpu::BindGroupLayout,
+    |         ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `color_view` is never read
+   --> crates/draper-viewer/src/renderer.rs:119:9
+    |
+118 | pub struct OffscreenResult {
+    |            --------------- field in this struct
+119 |     pub color_view: wgpu::TextureView,
+    |         ^^^^^^^^^^
+
+warning: unused import: `TriangulationParams`
+ --> tools/src/bin/watertight_diag.rs:9:40
+  |
+9 | use draper_mesh::{validate_watertight, TriangulationParams};
+  |                                        ^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `draper-diag` (bin "watertight_diag") generated 1 warning (run `cargo fix --bin "watertight_diag" -p draper-diag` to apply 1 suggestion)
+warning: field `inner` is never read
+   --> crates/draper-ffi/src/lib.rs:201:5
+    |
+200 | pub struct DraperSolid {
+    |            ----------- field in this struct
+201 |     inner: Solid,
+    |     ^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `draper-ffi` (lib) generated 1 warning
+warning: `draper-viewer` (bin "draper-viewer") generated 12 warnings (9 duplicates)
+    Finished `release` profile [optimized] target(s) in 2m 27s

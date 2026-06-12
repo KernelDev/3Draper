@@ -6932,9 +6932,25 @@ impl<'a> StepConverter<'a> {
 
             if step_id != 0 {
                 let (pts, params) = edge_cache.discretize_step_edge(step_id, edge, n_samples);
-                edge_debug_info.push(format!("step_id={}→{}pts", step_id, pts.len()));
                 // Compute UV for each boundary point using actual parameter values
                 let uvs = self.compute_edge_uvs_with_points(&params, &pts, &face_data.surface, curve_2d);
+                // Diagnostic: log per-edge UV range for NURBS faces
+                if matches!(&face_data.surface, Surface::Nurbs(_)) && !uvs.is_empty() {
+                    let eu_min = uvs.iter().map(|p| p.u).fold(f64::MAX, f64::min);
+                    let eu_max = uvs.iter().map(|p| p.u).fold(f64::MIN, f64::max);
+                    let ev_min = uvs.iter().map(|p| p.v).fold(f64::MAX, f64::min);
+                    let ev_max = uvs.iter().map(|p| p.v).fold(f64::MIN, f64::max);
+                    let has_c2d = curve_2d.is_some();
+                    let p0 = pts.first();
+                    let pN = pts.last();
+                    log::info!(
+                        "EDGE_UV_DIAG: edge_idx={} step_id={} n_pts={} pcurve={} u=[{:.4},{:.4}] v=[{:.4},{:.4}] 3d_first=({:.2},{:.2},{:.2}) 3d_last=({:.2},{:.2},{:.2})",
+                        edge_idx, step_id, uvs.len(), has_c2d, eu_min, eu_max, ev_min, ev_max,
+                        p0.map(|p| p.x).unwrap_or(0.0), p0.map(|p| p.y).unwrap_or(0.0), p0.map(|p| p.z).unwrap_or(0.0),
+                        pN.map(|p| p.x).unwrap_or(0.0), pN.map(|p| p.y).unwrap_or(0.0), pN.map(|p| p.z).unwrap_or(0.0)
+                    );
+                }
+                edge_debug_info.push(format!("step_id={}→{}pts", step_id, pts.len()));
                 boundary_points.extend(pts);
                 boundary_uvs.extend(uvs);
             } else {
@@ -7014,7 +7030,21 @@ impl<'a> StepConverter<'a> {
         }
 
         // Deduplicate boundary points and their corresponding UVs together
-        let (boundary_points, boundary_uvs) = deduplicate_points_3d_with_uv(&boundary_points, &boundary_uvs, 1e-6);
+        let before_dedup = boundary_points.len();
+        let (boundary_points, boundary_uvs) = if matches!(&face_data.surface, Surface::Nurbs(_)) {
+            // For NURBS: skip dedup entirely. UV-aware dedup still removes
+            // too many points when edges share 3D curves but have different
+            // UV parameterizations. earcutr can handle duplicate vertices.
+            (boundary_points, boundary_uvs)
+        } else {
+            deduplicate_points_3d_with_uv(&boundary_points, &boundary_uvs, 1e-6)
+        };
+        if before_dedup != boundary_points.len() {
+            log::info!(
+                "DEDUP: {}→{} points (removed {})",
+                before_dedup, boundary_points.len(), before_dedup - boundary_points.len()
+            );
+        }
 
         // If we have boundary points, use boundary-aware triangulation
         // Use the UV-aware API when we have UV coordinates (from PCURVE or projection)
@@ -8292,11 +8322,33 @@ fn deduplicate_points_3d_with_uv(points: &[Point3d], uvs: &[Point2d], _tolerance
         return (deduplicate_points_3d(points, _tolerance), uvs.to_vec());
     }
 
-    // Use bit-exact VertexKey comparison for deterministic deduplication.
-    // After deterministic rounding, shared-edge vertices produce bit-identical
-    // f64 values, so bit-exact dedup is correct and avoids the problem where
-    // tolerance-based dedup removes different points from different faces.
+    // UV-aware deduplication for NURBS and other parametric surfaces.
+    //
+    // For analytic surfaces (plane, cylinder), every distinct 3D point maps
+    // to a unique UV, so pure 3D dedup is correct. But for NURBS surfaces
+    // with degenerate boundaries, multiple distinct UV points can map to the
+    // SAME 3D point (e.g., an edge that collapses to a single point on the
+    // surface but spans a UV range). Pure 3D dedup would remove these,
+    // collapsing the UV polygon and producing non-watertight meshes.
+    //
+    // Solution: Only consider two consecutive points duplicates if BOTH
+    // their 3D positions AND UV coordinates match. Points at the same 3D
+    // location but different UVs (degenerate boundary) are preserved.
     use draper_mesh::mesh::VertexKey;
+
+    // Compute UV range for relative tolerance
+    let u_min = uvs.iter().map(|p| p.u).fold(f64::MAX, f64::min);
+    let u_max = uvs.iter().map(|p| p.u).fold(f64::MIN, f64::max);
+    let v_min = uvs.iter().map(|p| p.v).fold(f64::MAX, f64::min);
+    let v_max = uvs.iter().map(|p| p.v).fold(f64::MIN, f64::max);
+    let u_span = (u_max - u_min).max(1e-10);
+    let v_span = (v_max - v_min).max(1e-10);
+    // Relative UV tolerance: two UVs are "the same" if their relative
+    // difference is < 1e-10 of the total UV span. This is effectively
+    // bit-exact for normal cases but preserves degenerate-boundary points
+    // that span a significant UV range.
+    let uv_rel_tol = 1e-10;
+
     let mut unique_pts = vec![points[0]];
     let mut unique_uvs = vec![uvs[0]];
     let mut unique_keys = vec![VertexKey::from_point(&points[0])];
@@ -8305,34 +8357,69 @@ fn deduplicate_points_3d_with_uv(points: &[Point3d], uvs: &[Point2d], _tolerance
         let key = VertexKey::from_point(&points[i]);
         if let Some(last_key) = unique_keys.last() {
             if key != *last_key {
+                // 3D points differ — always keep
                 unique_pts.push(points[i]);
                 unique_uvs.push(uvs[i]);
                 unique_keys.push(key);
+            } else {
+                // 3D points are bit-exact identical — check UV too.
+                // For degenerate NURBS boundaries, multiple boundary points
+                // at the same 3D location have DIFFERENT UVs and must be
+                // preserved to maintain a valid UV polygon for triangulation.
+                let last_uv = unique_uvs.last().unwrap();
+                let du = (uvs[i].u - last_uv.u).abs() / u_span;
+                let dv = (uvs[i].v - last_uv.v).abs() / v_span;
+                if du > uv_rel_tol || dv > uv_rel_tol {
+                    // UV differs — this is a degenerate-boundary point, KEEP it
+                    unique_pts.push(points[i]);
+                    unique_uvs.push(uvs[i]);
+                    unique_keys.push(key);
+                } else {
+                    // Both 3D and UV match — true duplicate, skip
+                    // But log for NURBS debugging
+                    if du < 1e-6 && dv < 1e-6 && i < 5 {
+                        log::debug!(
+                            "DEDUP_SKIP: idx={} 3d=({:.4},{:.4},{:.4}) uv=({:.4},{:.4}) matches prev",
+                            i, points[i].x, points[i].y, points[i].z, uvs[i].u, uvs[i].v
+                        );
+                    }
+                }
             }
         }
     }
 
-    // Also check last vs first (closed loop) — bit-exact
+    // Also check last vs first (closed loop) — UV-aware
     if unique_keys.len() > 1 {
         let first_key = unique_keys[0];
         if let Some(last_key) = unique_keys.last() {
             if first_key == *last_key {
-                unique_pts.pop();
-                unique_uvs.pop();
-                unique_keys.pop();
+                let first_uv = unique_uvs[0];
+                let last_uv = *unique_uvs.last().unwrap();
+                let du = (last_uv.u - first_uv.u).abs() / u_span;
+                let dv = (last_uv.v - first_uv.v).abs() / v_span;
+                if du <= uv_rel_tol && dv <= uv_rel_tol {
+                    unique_pts.pop();
+                    unique_uvs.pop();
+                    unique_keys.pop();
+                }
             }
         }
     }
 
-    // Check for non-adjacent duplicates (bowtie detection) — bit-exact
+    // Check for non-adjacent duplicates (bowtie detection) — UV-aware
     if unique_keys.len() > 3 {
         let n = unique_keys.len();
         let last_key = unique_keys[n - 1];
+        let last_uv = unique_uvs[n - 1];
         for i in 0..n - 2 {
             if last_key == unique_keys[i] {
-                unique_pts.truncate(i + 1);
-                unique_uvs.truncate(i + 1);
-                break;
+                let du = (last_uv.u - unique_uvs[i].u).abs() / u_span;
+                let dv = (last_uv.v - unique_uvs[i].v).abs() / v_span;
+                if du <= uv_rel_tol && dv <= uv_rel_tol {
+                    unique_pts.truncate(i + 1);
+                    unique_uvs.truncate(i + 1);
+                    break;
+                }
             }
         }
     }
