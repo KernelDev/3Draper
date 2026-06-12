@@ -1064,7 +1064,7 @@ mod tests {
 /// Cache key: hash of the face geometry + triangulation parameters.
 /// Two faces produce the same key iff they have the same surface geometry,
 /// the same boundary edge topology, and the same params.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TriangulationCacheKey(u64);
 
 impl TriangulationCacheKey {
@@ -1098,17 +1098,53 @@ impl TriangulationCacheKey {
 
         TriangulationCacheKey(hasher.finish())
     }
+
+    /// Compute a cache key for an entire solid + params combination.
+    /// Hashes all faces' geometry and topology for a more reliable key
+    /// than using just the first face as a proxy.
+    pub fn from_solid_and_params(solid: &draper_topology::Solid, params: &crate::triangulate::TriangulationParams) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+
+        // Hash the solid's face count and each face's key
+        let faces = solid.faces();
+        faces.len().hash(&mut hasher);
+        for face in &faces {
+            if let Some(ref surface) = face.surface {
+                std::mem::discriminant(surface).hash(&mut hasher);
+            }
+            if let Some(ref wire) = face.outer_wire {
+                wire.coedges.len().hash(&mut hasher);
+                for coedge in &wire.coedges {
+                    coedge.edge.hash(&mut hasher);
+                    coedge.forward.hash(&mut hasher);
+                }
+            }
+            face.inner_wires.len().hash(&mut hasher);
+            face.forward.hash(&mut hasher);
+        }
+
+        // Hash key triangulation params
+        params.max_deviation.to_bits().hash(&mut hasher);
+        params.detail_level.to_bits().hash(&mut hasher);
+        params.adaptive.hash(&mut hasher);
+        params.max_face_triangles.hash(&mut hasher);
+
+        TriangulationCacheKey(hasher.finish())
+    }
 }
 
-/// LRU cache for triangulation results.
+/// O(1) LRU cache for triangulation results using index-based doubly-linked list.
 ///
-/// Keeps the most recently used triangulations in memory, evicting
-/// the least recently used when the capacity is exceeded.
+/// Unlike the previous Vec-based implementation (O(n) eviction via `remove(0)`),
+/// this uses an index-based doubly-linked list embedded in the entry nodes,
+/// providing O(1) insertion, lookup, and eviction.
 ///
 /// # Performance
 /// - Cache hit: O(1) lookup + clone — **< 1ms** for typical meshes
 /// - Cache miss: Full triangulation — **50ms-5s** depending on model
-/// - Memory: ~1KB per 100 triangles (positions + normals + indices)
+/// - LRU eviction: O(1) — no shifting or reallocation
+/// - Memory: ~1KB per 100 triangles (positions + normals + indices) + 24 bytes overhead per entry
 ///
 /// # Usage
 /// ```ignore
@@ -1119,10 +1155,12 @@ impl TriangulationCacheKey {
 /// let mesh = cache.get_or_triangulate(solid, &params);
 /// ```
 pub struct TriangulationCache {
-    /// The LRU cache: key → triangulated mesh
-    cache: std::collections::HashMap<TriangulationCacheKey, crate::mesh::TriangleMesh>,
-    /// Access order for LRU eviction
-    order: Vec<TriangulationCacheKey>,
+    /// The cache entries: key → (mesh, linked list node)
+    cache: HashMap<TriangulationCacheKey, CacheEntry>,
+    /// Sentinel head of the doubly-linked list (most recently used)
+    head: Option<TriangulationCacheKey>,
+    /// Sentinel tail of the doubly-linked list (least recently used)
+    tail: Option<TriangulationCacheKey>,
     /// Maximum number of entries
     capacity: usize,
     /// Number of cache hits
@@ -1131,21 +1169,130 @@ pub struct TriangulationCache {
     misses: usize,
 }
 
+/// A cache entry with embedded doubly-linked list pointers for O(1) LRU.
+struct CacheEntry {
+    mesh: crate::mesh::TriangleMesh,
+    /// Key of the previous (more recently used) entry in the LRU list
+    prev: Option<TriangulationCacheKey>,
+    /// Key of the next (less recently used) entry in the LRU list
+    next: Option<TriangulationCacheKey>,
+}
+
 impl TriangulationCache {
     /// Create a new triangulation cache with the given capacity.
     pub fn new(capacity: usize) -> Self {
         Self {
-            cache: std::collections::HashMap::new(),
-            order: Vec::new(),
+            cache: HashMap::new(),
+            head: None,
+            tail: None,
             capacity: capacity.max(1),
             hits: 0,
             misses: 0,
         }
     }
 
+    /// Move an entry to the head of the LRU list (most recently used).
+    fn touch(&mut self, key: &TriangulationCacheKey) {
+        // Already at head — nothing to do
+        if self.head.as_ref() == Some(key) {
+            return;
+        }
+
+        // Get the entry and its neighbors
+        let (prev, next) = {
+            let entry = self.cache.get(key).expect("touch: key must exist");
+            (entry.prev.clone(), entry.next.clone())
+        };
+
+        // Unlink from current position
+        if let Some(ref prev_key) = prev {
+            if let Some(prev_entry) = self.cache.get_mut(prev_key) {
+                prev_entry.next = next.clone();
+            }
+        }
+        if let Some(ref next_key) = next {
+            if let Some(next_entry) = self.cache.get_mut(next_key) {
+                next_entry.prev = prev;
+            }
+        }
+
+        // Update tail if we moved the tail entry
+        if self.tail.as_ref() == Some(key) {
+            self.tail = prev.or_else(|| self.head.clone());
+        }
+
+        // Link at head
+        if let Some(head_key) = self.head.take() {
+            if let Some(head_entry) = self.cache.get_mut(&head_key) {
+                head_entry.prev = Some(key.clone());
+            }
+            if let Some(entry) = self.cache.get_mut(key) {
+                entry.next = Some(head_key);
+                entry.prev = None;
+            }
+        } else {
+            // List was empty (shouldn't happen since key exists)
+            if let Some(entry) = self.cache.get_mut(key) {
+                entry.prev = None;
+                entry.next = None;
+            }
+        }
+        self.head = Some(key.clone());
+    }
+
+    /// Remove the tail (least recently used) entry from the cache.
+    fn evict_lru(&mut self) {
+        let lru_key = match self.tail.take() {
+            Some(k) => k,
+            None => return,
+        };
+
+        let (prev, _) = {
+            let entry = self.cache.get(&lru_key).expect("evict_lru: tail key must exist");
+            (entry.prev.clone(), entry.next.clone())
+        };
+
+        // Unlink from list
+        if let Some(ref prev_key) = prev {
+            if let Some(prev_entry) = self.cache.get_mut(prev_key) {
+                prev_entry.next = None;
+            }
+        } else {
+            // Only one entry — list becomes empty
+            self.head = None;
+        }
+
+        self.tail = prev;
+        self.cache.remove(&lru_key);
+    }
+
+    /// Insert a new entry at the head of the LRU list.
+    fn insert_at_head(&mut self, key: TriangulationCacheKey, mesh: crate::mesh::TriangleMesh) {
+        // Link at head
+        let entry = CacheEntry {
+            mesh,
+            prev: None,
+            next: self.head.clone(),
+        };
+
+        if let Some(ref head_key) = self.head {
+            if let Some(head_entry) = self.cache.get_mut(head_key) {
+                head_entry.prev = Some(key.clone());
+            }
+        }
+
+        self.cache.insert(key.clone(), entry);
+        self.head = Some(key);
+
+        // If this is the first entry, it's also the tail
+        if self.tail.is_none() {
+            self.tail = self.head.clone();
+        }
+    }
+
     /// Get a cached triangulation, or compute and cache it.
     ///
-    /// If the face+params combination is in the cache, returns the cached mesh.
+    /// If the solid+params combination is in the cache, returns the cached mesh.
     /// Otherwise, triangulates the solid, caches the result, and returns it.
     pub fn get_or_triangulate<F>(
         &mut self,
@@ -1156,21 +1303,14 @@ impl TriangulationCache {
     where
         F: FnOnce(&draper_topology::Solid, &crate::triangulate::TriangulationParams) -> crate::mesh::TriangleMesh,
     {
-        // Use the first face as a proxy key for the entire solid.
-        // This is a simplification — ideally we'd hash the entire solid,
-        // but that's expensive. In practice, the first face's geometry
-        // combined with the solid's face count is usually sufficient.
-        let key = if let Some(face) = solid.faces().first() {
-            TriangulationCacheKey::from_face_and_params(face, params)
-        } else {
-            // Empty solid — no caching needed
-            return triangulate_fn(solid, params);
-        };
+        let key = TriangulationCacheKey::from_solid_and_params(solid, params);
 
-        if let Some(cached) = self.cache.get(&key) {
+        if let Some(entry) = self.cache.get(&key) {
             self.hits += 1;
-            log::debug!("TriangulationCache HIT (hits={}, misses={})", self.hits, self.misses);
-            return cached.clone();
+            let mesh = entry.mesh.clone();
+            self.touch(&key);
+            log::debug!("TriangulationCache HIT (hits={}, misses={}, entries={})", self.hits, self.misses, self.cache.len());
+            return mesh;
         }
 
         self.misses += 1;
@@ -1178,14 +1318,10 @@ impl TriangulationCache {
 
         // Evict LRU entry if at capacity
         if self.cache.len() >= self.capacity {
-            if let Some(lru_key) = self.order.first().cloned() {
-                self.cache.remove(&lru_key);
-                self.order.remove(0);
-            }
+            self.evict_lru();
         }
 
-        self.cache.insert(key.clone(), mesh.clone());
-        self.order.push(key);
+        self.insert_at_head(key, mesh.clone());
 
         log::debug!("TriangulationCache MISS (hits={}, misses={}, entries={})", self.hits, self.misses, self.cache.len());
         mesh
@@ -1194,7 +1330,8 @@ impl TriangulationCache {
     /// Clear the cache.
     pub fn clear(&mut self) {
         self.cache.clear();
-        self.order.clear();
+        self.head = None;
+        self.tail = None;
     }
 
     /// Get cache statistics.
@@ -1210,5 +1347,15 @@ impl TriangulationCache {
         } else {
             0.0
         }
+    }
+
+    /// Get the current number of entries in the cache.
+    pub fn len(&self) -> usize {
+        self.cache.len()
+    }
+
+    /// Check if the cache is empty.
+    pub fn is_empty(&self) -> bool {
+        self.cache.is_empty()
     }
 }
