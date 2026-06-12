@@ -803,7 +803,7 @@ pub fn triangulate_surface_consistent(
     // For UVs completely out of range (NaN, Inf, or far outside the
     // knot range), we fall back to the generic surface path.
     // ============================================================
-    let mut outer_uv = boundary_uvs.to_vec();
+    let mut outer_uv: Vec<Point2d> = boundary_uvs.to_vec();
     if let Surface::Nurbs(ref nurbs) = surface {
         let (nurb_u_min, nurb_u_max) = nurbs.u_range();
         let (nurb_v_min, nurb_v_max) = nurbs.v_range();
@@ -857,6 +857,42 @@ pub fn triangulate_surface_consistent(
     }
 
     // ============================================================
+    // Step 0.5: DegeneracyHandler — merge coincident boundary points
+    //
+    // On surfaces with degeneracies (cone apex, sphere poles), multiple
+    // boundary vertices can map to the same 3D point. For example, on a
+    // cone with an apex, all edges meeting at the apex produce boundary
+    // points that are geometrically identical but have different UV
+    // coordinates. If left as separate vertices, earcutr creates
+    // degenerate (zero-area) triangles between them.
+    //
+    // The handler detects clusters of coincident boundary 3D points
+    // (within model-scale tolerance) and merges them into a single
+    // representative point, keeping the UV coordinate of the first
+    // point in the cluster. This produces a correct UV polygon for
+    // earcutr while preserving the 3D geometry.
+    //
+    // We store the merged data in owned Vecs and rebind the slice
+    // references to point to the owned data, so the rest of the code
+    // continues using slice references without modification.
+    // ============================================================
+    let _merged_data: (Vec<Point3d>, Vec<Point2d>);
+    let boundary_points_3d: &[Point3d] = {
+        let tol = params.max_deviation * 0.01; // 1% of max_deviation as degeneracy tolerance
+        let (merged_3d, merged_uv) = merge_coincident_boundary_points(boundary_points_3d, boundary_uvs, tol);
+        if merged_3d.len() < 3 {
+            log::warn!(
+                "triangulate_surface_consistent: {} boundary points after degeneracy merge — returning empty mesh",
+                merged_3d.len()
+            );
+            return TriangleMesh::new();
+        }
+        _merged_data = (merged_3d, merged_uv);
+        &_merged_data.0
+    };
+    let boundary_uvs: &[Point2d] = &_merged_data.1;
+
+    // ============================================================
     // Step 1: Normalize UV for periodic surfaces
     // ============================================================
     let u_period = if surface.is_u_periodic() { Some(2.0 * PI) } else { None };
@@ -898,7 +934,7 @@ pub fn triangulate_surface_consistent(
     // ============================================================
     if !matches!(surface, Surface::Nurbs(_)) {
         let uv_area = polygon_area_2d(&outer_uv);
-        let boundary_3d_area = polygon_area_3d(boundary_points_3d);
+        let boundary_3d_area = polygon_area_3d(&boundary_points_3d);
         let area_ratio = if boundary_3d_area > 1e-20 { uv_area / boundary_3d_area } else { 1.0 };
         if area_ratio < 0.001 && boundary_3d_area > 1e-10 {
             log::warn!(
@@ -2157,6 +2193,80 @@ fn refine_mesh_chord_error_uv(
 // ============================================================
 // Tests
 // ============================================================
+
+/// Merge coincident boundary 3D points (DegeneracyHandler).
+///
+/// On surfaces with degeneracies (cone apex where radius→0, sphere poles
+/// where latitude rings collapse), multiple boundary vertices from the
+/// edge cache map to the same 3D point. For example, on a cone, edges
+/// meeting at the apex all have their endpoint at the same 3D location,
+/// but with different UV coordinates (different u-values at v=apex_v).
+///
+/// If left as separate vertices, earcutr creates degenerate (zero-area)
+/// triangles between them, which degrade mesh quality. This function
+/// detects clusters of coincident boundary points (within `tolerance`)
+/// and merges each cluster into a single representative point, keeping
+/// the UV coordinate of the first point in the cluster.
+///
+/// # Arguments
+/// * `points_3d` — 3D boundary points (from edge cache, with deterministic rounding)
+/// * `uvs` — UV coordinates corresponding to each 3D point
+/// * `tolerance` — Distance threshold for coincident point detection.
+///   Recommended: 1% of max_deviation or model_scale * 1e-4
+///
+/// # Returns
+/// Merged (points_3d, uvs) pair with coincident points removed.
+fn merge_coincident_boundary_points(
+    points_3d: &[Point3d],
+    uvs: &[Point2d],
+    tolerance: f64,
+) -> (Vec<Point3d>, Vec<Point2d>) {
+    if points_3d.len() <= 3 {
+        // Too few points to merge — just clone
+        return (points_3d.to_vec(), uvs.to_vec());
+    }
+
+    let tol_sq = tolerance * tolerance;
+    let n = points_3d.len();
+    let mut merged_3d = Vec::with_capacity(n);
+    let mut merged_uv = Vec::with_capacity(n);
+    let mut skip = vec![false; n];
+
+    // Track clusters: for each point, check if it coincides with any
+    // previously kept point. Only keep the first point in each cluster.
+    let mut merge_count = 0usize;
+    for i in 0..n {
+        if skip[i] {
+            continue;
+        }
+        merged_3d.push(points_3d[i]);
+        merged_uv.push(uvs[i]);
+
+        // Check subsequent points for coincidence with this one
+        for j in (i + 1)..n {
+            if skip[j] {
+                continue;
+            }
+            let dx = points_3d[i].x - points_3d[j].x;
+            let dy = points_3d[i].y - points_3d[j].y;
+            let dz = points_3d[i].z - points_3d[j].z;
+            let dist_sq = dx * dx + dy * dy + dz * dz;
+            if dist_sq < tol_sq {
+                skip[j] = true;
+                merge_count += 1;
+            }
+        }
+    }
+
+    if merge_count > 0 {
+        log::info!(
+            "DegeneracyHandler: merged {} coincident boundary points (tol={:.2e}, {}→{})",
+            merge_count, tolerance, n, merged_3d.len(),
+        );
+    }
+
+    (merged_3d, merged_uv)
+}
 
 #[cfg(test)]
 mod tests {
