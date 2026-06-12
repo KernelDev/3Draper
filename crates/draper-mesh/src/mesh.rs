@@ -3,6 +3,7 @@
 //! Mesh data structures.
 
 use draper_geometry::Point3d;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -51,37 +52,56 @@ pub struct VertexDedupMap {
     tolerance: f64,
     /// Whether tolerance-based fallback is enabled.
     use_tolerance: bool,
+    /// Number of bit-exact matches (edge cache working correctly).
+    exact_hits: Cell<usize>,
+    /// Number of tolerance-based matches (near-miss from non-cached edges).
+    tolerance_hits: Cell<usize>,
+    /// Number of new vertex insertions.
+    misses: Cell<usize>,
 }
 
 impl VertexDedupMap {
     /// Create a new dedup map with bit-exact comparison only.
+    /// Use this when edge cache guarantees bit-identical 3D coordinates.
     pub fn new() -> Self {
         Self {
             exact: HashMap::new(),
             spatial: HashMap::new(),
             tolerance: 0.0,
             use_tolerance: false,
+            exact_hits: Cell::new(0),
+            tolerance_hits: Cell::new(0),
+            misses: Cell::new(0),
         }
     }
 
     /// Create a new dedup map with tolerance-based fallback.
-    /// The tolerance should be based on the model's bounding box
-    /// (e.g., 1e-6 × model_scale for typical CAD models).
+    /// Use this when some edges lack step_id (step_id==0) and their
+    /// discretization may produce near-identical but not bit-identical vertices.
+    /// The tolerance should be small enough to not collapse distinct features
+    /// but large enough to catch edge cache near-misses.
+    /// Recommended: model_scale * 1e-6 (1 PPM) for production,
+    ///              model_scale * 1e-4 (100 PPM) as diagnostic.
     pub fn with_tolerance(tolerance: f64) -> Self {
         Self {
             exact: HashMap::new(),
             spatial: HashMap::new(),
             tolerance: tolerance.max(1e-15),
             use_tolerance: tolerance > 0.0,
+            exact_hits: Cell::new(0),
+            tolerance_hits: Cell::new(0),
+            misses: Cell::new(0),
         }
     }
 
     /// Look up a vertex. Returns Some(index) if found, None otherwise.
     /// First tries bit-exact match, then tolerance-based spatial lookup.
+    /// Tracks hit statistics: exact_hits (bit-identical), tolerance_hits (near-miss).
     pub fn get(&self, p: &Point3d) -> Option<u32> {
         // Fast path: bit-exact match
         let key = VertexKey::from_point(p);
         if let Some(&idx) = self.exact.get(&key) {
+            self.exact_hits.set(self.exact_hits.get() + 1);
             return Some(idx);
         }
 
@@ -95,6 +115,7 @@ impl VertexDedupMap {
                     let dy = p.y - vp.y;
                     let dz = p.z - vp.z;
                     if dx * dx + dy * dy + dz * dz <= tol_sq {
+                        self.tolerance_hits.set(self.tolerance_hits.get() + 1);
                         return Some(idx);
                     }
                 }
@@ -115,6 +136,7 @@ impl VertexDedupMap {
                                 let ddy = p.y - vp.y;
                                 let ddz = p.z - vp.z;
                                 if ddx * ddx + ddy * ddy + ddz * ddz <= tol_sq {
+                                    self.tolerance_hits.set(self.tolerance_hits.get() + 1);
                                     return Some(idx);
                                 }
                             }
@@ -131,6 +153,7 @@ impl VertexDedupMap {
     pub fn insert(&mut self, p: &Point3d, idx: u32) {
         let key = VertexKey::from_point(p);
         self.exact.insert(key, idx);
+        self.misses.set(self.misses.get() + 1);
 
         if self.use_tolerance {
             let cell = self.cell_key(p);
@@ -146,6 +169,14 @@ impl VertexDedupMap {
             (p.y / self.tolerance).floor() as i64,
             (p.z / self.tolerance).floor() as i64,
         )
+    }
+
+    /// Return dedup statistics: (exact_hits, tolerance_hits, misses).
+    /// - exact_hits: bit-identical matches (edge cache working correctly)
+    /// - tolerance_hits: near-miss matches (non-cached edges or FP drift)
+    /// - misses: new vertex insertions
+    pub fn stats(&self) -> (usize, usize, usize) {
+        (self.exact_hits.get(), self.tolerance_hits.get(), self.misses.get())
     }
 
     /// Returns the number of bit-exact entries.

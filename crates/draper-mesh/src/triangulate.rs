@@ -292,11 +292,21 @@ fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams, cac
 
     // Phase 2: Triangulate all faces using cached boundary data.
     // Use merge_deduplicating to ensure shared-edge vertices get the same
-    // vertex index in the final mesh. The edge cache guarantees bit-identical
-    // 3D coordinates on shared edges, so bit-exact deduplication is correct.
+    // vertex index in the final mesh.
+    //
+    // Dedup strategy (two-tier):
+    // 1. Bit-exact match (fast path): Edge cache with deterministic rounding
+    //    produces bit-identical 3D coordinates for shared edges. These should
+    //    match exactly and account for the vast majority of shared vertices.
+    // 2. Tolerance-based fallback (slow path): Some STEP edges lack step_id
+    //    (step_id==0) or use different EDGE_CURVE entities on the same
+    //    geometric boundary. These produce near-identical but not bit-identical
+    //    vertices. A small tolerance catches these.
+    //
+    // If tolerance_hits > 0, it means the edge cache is NOT fully bit-identical
+    // and we log a diagnostic warning. The goal is tolerance_hits == 0.
     let mut mesh = TriangleMesh::new();
-    // Use tolerance-based dedup for near-identical boundary vertices
-    let merge_tol = cache.adaptive_tolerance().model_scale() * 1e-4;
+    let merge_tol = cache.adaptive_tolerance().model_scale() * 1e-6; // 1 PPM — strict!
     let mut dedup_map = crate::mesh::VertexDedupMap::with_tolerance(merge_tol);
     let mut total_face_vertices = 0usize;
     for face in solid.faces() {
@@ -306,10 +316,20 @@ fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams, cac
     }
     let deduped_vertices = total_face_vertices - mesh.vertices.len();
     if deduped_vertices > 0 {
+        let (exact_hits, tolerance_hits, misses) = dedup_map.stats();
+        let total_lookups = exact_hits + tolerance_hits + misses;
+        let exact_pct = if total_lookups > 0 { exact_hits as f64 / total_lookups as f64 * 100.0 } else { 0.0 };
         log::info!(
-            "Vertex deduplication: {} face vertices → {} unique ({} shared)",
+            "Vertex dedup: {} face vertices → {} unique ({} shared: {} bit-exact [{:.1}%], {} tolerance-match)",
             total_face_vertices, mesh.vertices.len(), deduped_vertices,
+            exact_hits, exact_pct, tolerance_hits,
         );
+        if tolerance_hits > 0 {
+            log::warn!(
+                "DEDUP: {} tolerance-based matches out of {} — edge cache is NOT fully bit-identical (tol={:.2e})",
+                tolerance_hits, total_lookups, merge_tol,
+            );
+        }
     }
 
     // Phase 3: Post-processing (topology-first — no merge/stitch needed)
@@ -702,7 +722,9 @@ fn solid_bounding_box(solid: &Solid) -> (Point3d, Point3d) {
 pub fn triangulate_shell(shell: &Shell, params: &TriangulationParams) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
     let mut cache = EdgeDiscretizationCache::new();
-    let merge_tol = cache.adaptive_tolerance().model_scale() * 1e-4;
+    // Use strict tolerance (1 PPM) — bit-exact dedup is the primary path,
+    // tolerance fallback is only for non-cached edges (step_id==0).
+    let merge_tol = cache.adaptive_tolerance().model_scale() * 1e-6;
     let mut dedup_map = crate::mesh::VertexDedupMap::with_tolerance(merge_tol);
     for face in &shell.faces {
         let face_mesh = triangulate_face_with_cache(face, params, &mut cache);

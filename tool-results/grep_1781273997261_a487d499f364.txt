@@ -1,0 +1,244 @@
+/home/z/my-project/generate_report.js-247-
+/home/z/my-project/generate_report.js-248-        heading3("3.2.5 \u041f\u0440\u0435\u0434\u043e\u0442\u0432\u0440\u0430\u0449\u0435\u043d\u0438\u0435 \u0440\u0430\u0437\u0434\u0435\u043b\u0435\u043d\u0438\u044f \u0433\u0440\u0430\u043d\u0438\u0447\u043d\u044b\u0445 \u0440\u0451\u0431\u0435\u0440 \u043f\u0440\u0438 chord-error refinement"),
+/home/z/my-project/generate_report.js-249-        bodyText("\u041a\u0440\u0438\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0439 \u0444\u0438\u043a\u0441: refine_mesh_chord_error_uv \u0442\u0435\u043f\u0435\u0440\u044c \u043f\u0440\u043e\u043f\u0443\u0441\u043a\u0430\u0435\u0442 \u0440\u0430\u0437\u0434\u0435\u043b\u0435\u043d\u0438\u0435 \u0440\u0451\u0431\u0435\u0440 \u043c\u0435\u0436\u0434\u0443 \u0434\u0432\u0443\u043c\u044f \u0433\u0440\u0430\u043d\u0438\u0447\u043d\u044b\u043c\u0438 \u0432\u0435\u0440\u0448\u0438\u043d\u0430\u043c\u0438. \u0413\u0440\u0430\u043d\u0438\u0447\u043d\u044b\u0435 \u0432\u0435\u0440\u0448\u0438\u043d\u044b \u043f\u043e\u0441\u0442\u0443\u043f\u0430\u044e\u0442 \u0438\u0437 \u043a\u044d\u0448\u0430 \u0441 bit-identical 3D-\u043a\u043e\u043e\u0440\u0434\u0438\u043d\u0430\u0442\u0430\u043c\u0438. \u0420\u0430\u0437\u0434\u0435\u043b\u0435\u043d\u0438\u0435 \u0442\u0430\u043a\u043e\u0433\u043e \u0440\u0435\u0431\u0440\u0430 \u0441\u043e\u0437\u0434\u0430\u0451\u0442 \u043d\u043e\u0432\u0443\u044e midpoint-\u0432\u0435\u0440\u0448\u0438\u043d\u0443 \u0447\u0435\u0440\u0435\u0437 surface.point_at(), \u043a\u043e\u0442\u043e\u0440\u0430\u044f \u043f\u0440\u043e\u0438\u0437\u0432\u043e\u0434\u0438\u0442 \u0420\u0410\u0417\u041d\u042b\u0415 f64 bits \u0434\u043b\u044f \u043a\u0430\u0436\u0434\u043e\u0439 \u0433\u0440\u0430\u043d\u0438, \u043d\u0435\u043f\u043e\u0434\u0434\u0430\u044e\u0449\u0438\u0435\u0441\u044f dedup. \u0414\u043e\u0431\u0430\u0432\u043b\u0435\u043d \u043c\u0430\u0441\u0441\u0438\u0432 is_boundary_vertex \u0434\u043b\u044f \u043e\u0442\u0441\u043b\u0435\u0436\u0438\u0432\u0430\u043d\u0438\u044f \u0433\u0440\u0430\u043d\u0438\u0447\u043d\u044b\u0445 \u0432\u0435\u0440\u0448\u0438\u043d."),
+/home/z/my-project/generate_report.js-250-
+/home/z/my-project/generate_report.js-251-        heading2("3.3 \u0414\u0435\u0434\u0443\u043f\u043b\u0438\u043a\u0430\u0446\u0438\u044f \u0438 snapping (12 \u0438\u044e\u043d\u044f)"),
+/home/z/my-project/generate_report.js:252:        heading3("3.3.1 VertexDedupMap: two-tier \u043f\u043e\u0438\u0441\u043a"),
+/home/z/my-project/generate_report.js:253:        bodyText("Bit-exact-only VertexDedupMap \u0437\u0430\u043c\u0435\u043d\u0451\u043d \u043d\u0430 \u0434\u0432\u0443\u0445\u0443\u0440\u043e\u0432\u043d\u0435\u0432\u044b\u0439 \u043f\u043e\u0438\u0441\u043a: 1) Bit-exact (fast path) \u0434\u043b\u044f \u0432\u0435\u0440\u0448\u0438\u043d \u0438\u0437 \u043a\u044d\u0448\u0430, 2) Spatial hash tolerance-based (slow path) \u0434\u043b\u044f near-miss \u0432\u0435\u0440\u0448\u0438\u043d. \u041e\u0431\u043d\u0430\u0440\u0443\u0436\u0435\u043d \u043a\u043e\u0440\u043d\u0435\u0432\u043e\u0439 \u043f\u0440\u0438\u0447\u0438\u043d\u0435: \u0441\u043c\u0435\u0436\u043d\u044b\u0435 \u0433\u0440\u0430\u043d\u0438 \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u044e\u0442 \u0420\u0410\u0417\u041d\u042b\u0415 STEP EDGE_CURVE \u043d\u0430 \u043e\u0431\u0449\u0435\u0439 \u0433\u0435\u043e\u043c\u0435\u0442\u0440\u0438\u0447\u0435\u0441\u043a\u043e\u0439 \u0433\u0440\u0430\u043d\u0438\u0446\u0435 (\u043d\u0430\u043f\u0440\u0438\u043c\u0435\u0440, \u043f\u043b\u043e\u0441\u043a\u0430\u044f \u0433\u0440\u0430\u043d\u044c \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0435\u0442 LINE #427, NURBS-\u0433\u0440\u0430\u043d\u044c \u2014 NURBS #628). \u041a\u044d\u0448, \u043a\u043b\u044e\u0447\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u044b\u0439 \u043f\u043e StepEntityId, \u043d\u0435 \u043c\u043e\u0436\u0435\u0442 \u043f\u0440\u043e\u0438\u0437\u0432\u0435\u0441\u0442\u0438 bit-identical \u0432\u0435\u0440\u0448\u0438\u043d\u044b, \u043f\u043e\u0442\u043e\u043c\u0443 \u0447\u0442\u043e STEP-\u0441\u0443\u0449\u043d\u043e\u0441\u0442\u0438 \u0440\u0430\u0437\u043b\u0438\u0447\u0430\u044e\u0442\u0441\u044f. \u042d\u0442\u043e \u0442\u043e\u043f\u043e\u043b\u043e\u0433\u0438\u0447\u0435\u0441\u043a\u0430\u044f \u0434\u0438\u0441\u043a\u043e\u043d\u0442\u0438\u043d\u0443\u0438\u0437\u0430\u0446\u0438\u044f \u0432 \u0441\u0430\u043c\u043e\u043c STEP-\u0444\u0430\u0439\u043b\u0435."),
+/home/z/my-project/generate_report.js-254-
+/home/z/my-project/generate_report.js-255-        heading3("3.3.2 Step_id aliasing: \u043e\u0431\u044a\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u0435 \u0440\u0430\u0437\u043b\u0438\u0447\u043d\u044b\u0445 EDGE_CURVE"),
+/home/z/my-project/generate_report.js-256-        bodyText("\u0414\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u0430 \u0441\u0438\u0441\u0442\u0435\u043c\u0430 step_id_aliases \u0432 EdgeDiscretizationCache: \u043e\u0431\u044a\u0435\u0434\u0438\u043d\u044f\u0435\u0442 \u0440\u0430\u0437\u043d\u044b\u0435 STEP EDGE_CURVE \u0441 \u043e\u0434\u0438\u043d\u0430\u043a\u043e\u0432\u044b\u043c\u0438 VERTEX_POINT \u043a\u043e\u043d\u0446\u0430\u043c\u0438. \u041a\u0430\u043d\u043e\u043d\u0438\u0447\u0435\u0441\u043a\u0438\u0439 step_id \u0432\u044b\u0431\u0438\u0440\u0430\u0435\u0442\u0441\u044f \u043f\u043e \u0441\u043b\u043e\u0436\u043d\u043e\u0441\u0442\u0438 \u043a\u0440\u0438\u0432\u043e\u0439 (NURBS > Circle > Line), \u0447\u0442\u043e\u0431\u044b \u0433\u0430\u0440\u0430\u043d\u0442\u0438\u0440\u043e\u0432\u0430\u0442\u044c \u0441\u0430\u043c\u0443\u044e \u043f\u043b\u043e\u0442\u043d\u0443\u044e \u0434\u0438\u0441\u043a\u0440\u0435\u0442\u0438\u0437\u0430\u0446\u0438\u044e. \u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442: BREP #63 659\u2192352 \u0433\u0440\u0430\u043d\u0438\u0447\u043d\u044b\u0445 \u0440\u0451\u0431\u0435\u0440 (46% \u0441\u043d\u0438\u0436\u0435\u043d\u0438\u0435). \u0422\u0430\u043a\u0436\u0435 \u0434\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u0430 \u0434\u0435\u0433\u0435\u043d\u0435\u0440\u0430\u0446\u0438\u044f \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430 UV fan triangulation \u0434\u043b\u044f \u0432\u044b\u0440\u043e\u0436\u0434\u0435\u043d\u043d\u044b\u0445 UV-\u0434\u0438\u0430\u043f\u0430\u0437\u043e\u043d\u043e\u0432."),
+/home/z/my-project/generate_report.js-257-
+/home/z/my-project/generate_report.js-258-        heading3("3.3.3 \u0418\u0442\u0435\u0440\u0430\u0442\u0438\u0432\u043d\u044b\u0439 boundary vertex snapping"),
+--
+/home/z/my-project/generate_report.js-280-        commitEntry("1b32e8c", "06-11 11:24", "(session checkpoint)"),
+/home/z/my-project/generate_report.js-281-        commitEntry("dffbb2b", "06-11 11:53", "fix: 3 critical bugs \u2014 capacity overflow crash, edge validation false positives, tree misalignment"),
+/home/z/my-project/generate_report.js-282-        commitEntry("62ad141", "06-11 12:29", "Fix boundary edges: deterministic rounding + bit-exact dedup"),
+/home/z/my-project/generate_report.js-283-        commitEntry("803fcbd", "06-11 13:11", "fix(watertight): prevent chord-error refinement from splitting boundary edges"),
+/home/z/my-project/generate_report.js-284-        commitEntry("0f253ab", "06-12 06:13", "(session checkpoint)"),
+/home/z/my-project/generate_report.js:285:        commitEntry("71c2000", "06-12 07:38", "feat: tolerance-based VertexDedupMap + boundary edge diagnostics"),
+/home/z/my-project/generate_report.js-286-        commitEntry("04d0f0e", "06-12 08:35", "feat: vertex-pair step_id aliasing + degenerate UV fan triangulation"),
+/home/z/my-project/generate_report.js-287-        commitEntry("ba4cb1a", "06-12 08:40", "feat: boundary vertex snapping for STEP files with disjoint VERTEX_POINT entities"),
+/home/z/my-project/generate_report.js-288-        commitEntry("7ca6314", "06-12 08:42", "feat: iterative boundary vertex snapping with boundary-to-boundary support"),
+/home/z/my-project/generate_report.js-289-
+/home/z/my-project/generate_report.js-290-        // ===== 5. FILES CHANGED =====
+--
+/home/z/my-project/generate_report.js-292-        makeTable(
+/home/z/my-project/generate_report.js-293-          ["\u0424\u0430\u0439\u043b", "+/- \u0441\u0442\u0440\u043e\u043a", "\u041e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0439"],
+/home/z/my-project/generate_report.js-294-          [
+/home/z/my-project/generate_report.js-295-            ["triangulate.rs", "+745/\u2212440", "\u0422\u0440\u0438\u0430\u043d\u0433\u0443\u043b\u044f\u0446\u0438\u044f: topology-first, ensure_face_uvs, adaptive crease, chord-error guard"],
+/home/z/my-project/generate_report.js-296-            ["converter.rs", "+385/\u221298", "step_id aliasing, FACE_DIAG logging, snap_boundary_vertices, vertex-pair resolution"],
+/home/z/my-project/generate_report.js:297:            ["mesh.rs", "+446", "merge_deduplicating fix, VertexDedupMap two-tier, snap_boundary_vertices (iterative)"],
+/home/z/my-project/generate_report.js-298-            ["parametric_domain.rs", "+297/\u221230", "chord-error boundary guard, is_boundary_vertex, containment grid 128x128, stride-based downsampling"],
+/home/z/my-project/generate_report.js-299-            ["watertight.rs", "+320/\u221260", "validate_edge_consistency (canonical pairs, near-miss), EdgeCacheStats instrumentation"],
+/home/z/my-project/generate_report.js-300-            ["edge_cache.rs", "+100/\u22128", "deterministic_round_point() public, step_id_aliases, edge_curve_vertex_pair"],
+/home/z/my-project/generate_report.js-301-            ["cdt_triangulate.rs", "+35/\u221218", "repair_mesh removed, ChunkedBrepTriangulator integration"],
+/home/z/my-project/generate_report.js-302-            ["app.rs", "+180/\u221275", "Validate Edge Consistency checkbox, tree [failed] label, UI instrumentation"],
+--
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-295-   295→    // vertex index in the final mesh. The edge cache guarantees bit-identical
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-296-   296→    // 3D coordinates on shared edges, so bit-exact deduplication is correct.
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-297-   297→    let mut mesh = TriangleMesh::new();
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-298-   298→    // Use tolerance-based dedup for near-identical boundary vertices
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-299-   299→    let merge_tol = cache.adaptive_tolerance().model_scale() * 1e-4;
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt:300:   300→    let mut dedup_map = crate::mesh::VertexDedupMap::with_tolerance(merge_tol);
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-301-   301→    let mut total_face_vertices = 0usize;
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-302-   302→    for face in solid.faces() {
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-303-   303→        let face_mesh = triangulate_face_with_cache(face, params, cache);
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-304-   304→        total_face_vertices += face_mesh.vertices.len();
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-305-   305→        mesh.merge_deduplicating(&face_mesh, &mut dedup_map);
+--
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-651-   651→///
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-652-   652→/// In the parallel path, each face produces its own mesh. When merging,
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-653-   653→/// shared-edge vertices must be deduplicated so that the final mesh is
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-654-   654→/// watertight by construction. The edge cache guarantees bit-identical
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-655-   655→/// 3D coordinates on shared edges, so bit-exact deduplication via
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt:656:   656→/// `VertexDedupMap` is correct and efficient.
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-657-   657→fn merge_meshes_parallel(meshes: &[TriangleMesh]) -> TriangleMesh {
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-658-   658→    if meshes.is_empty() {
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-659-   659→        return TriangleMesh::new();
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-660-   660→    }
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-661-   661→
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-662-   662→    // Use merge_deduplicating for topology-first watertightness
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-663-   663→    // Note: parallel path uses bit-exact dedup only (no tolerance fallback).
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-664-   664→    // The sequential path (triangulate_solid_sequential) uses tolerance-based dedup.
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-665-   665→    let mut merged = TriangleMesh::new();
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt:666:   666→    let mut dedup_map = crate::mesh::VertexDedupMap::new();
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-667-   667→    for mesh in meshes {
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-668-   668→        merged.merge_deduplicating(mesh, &mut dedup_map);
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-669-   669→    }
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-670-   670→    merged
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-671-   671→}
+--
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-701-   701→/// Triangulate a shell into a triangle mesh (topology-first approach).
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-702-   702→pub fn triangulate_shell(shell: &Shell, params: &TriangulationParams) -> TriangleMesh {
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-703-   703→    let mut mesh = TriangleMesh::new();
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-704-   704→    let mut cache = EdgeDiscretizationCache::new();
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-705-   705→    let merge_tol = cache.adaptive_tolerance().model_scale() * 1e-4;
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt:706:   706→    let mut dedup_map = crate::mesh::VertexDedupMap::with_tolerance(merge_tol);
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-707-   707→    for face in &shell.faces {
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-708-   708→        let face_mesh = triangulate_face_with_cache(face, params, &mut cache);
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-709-   709→        mesh.merge_deduplicating(&face_mesh, &mut dedup_map);
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-710-   710→    }
+/home/z/my-project/tool-results/read_1781273996672_9441dacf5226.txt-711-   711→    filter_degenerate_triangles(&mut mesh, 1e-10);
+--
+/home/z/my-project/crates/draper-step/src/converter.rs-2676-        let mut mesh = TriangleMesh::new();
+/home/z/my-project/crates/draper-step/src/converter.rs-2677-        // Use tolerance-based dedup: adjacent faces may use different STEP EDGE_CURVE
+/home/z/my-project/crates/draper-step/src/converter.rs-2678-        // entities on their common geometric boundary, producing near-identical (but
+/home/z/my-project/crates/draper-step/src/converter.rs-2679-        // not bit-identical) 3D coordinates. The spatial hash fallback merges these.
+/home/z/my-project/crates/draper-step/src/converter.rs-2680-        let merge_tol = tol_ctx.model_scale * 1e-4; // 100 PPM of model scale
+/home/z/my-project/crates/draper-step/src/converter.rs:2681:        let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
+/home/z/my-project/crates/draper-step/src/converter.rs-2682-        let mut total_face_vertices = 0usize;
+/home/z/my-project/crates/draper-step/src/converter.rs-2683-        for (fi, face_data) in face_data_list.iter().enumerate() {
+/home/z/my-project/crates/draper-step/src/converter.rs-2684-            let surface_type = match &face_data.surface {
+/home/z/my-project/crates/draper-step/src/converter.rs-2685-                Surface::Plane(_) => "Plane",
+/home/z/my-project/crates/draper-step/src/converter.rs-2686-                Surface::Cylinder(_) => "Cylinder",
+--
+/home/z/my-project/crates/draper-step/src/converter.rs-2907-        let brep_start = StdInstant::now();
+/home/z/my-project/crates/draper-step/src/converter.rs-2908-
+/home/z/my-project/crates/draper-step/src/converter.rs-2909-        let mut mesh = TriangleMesh::new();
+/home/z/my-project/crates/draper-step/src/converter.rs-2910-        // Use tolerance-based dedup for near-identical boundary vertices
+/home/z/my-project/crates/draper-step/src/converter.rs-2911-        let merge_tol = tol_ctx.model_scale * 1e-4;
+/home/z/my-project/crates/draper-step/src/converter.rs:2912:        let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
+/home/z/my-project/crates/draper-step/src/converter.rs-2913-        let mut total_face_vertices_detailed = 0usize;
+/home/z/my-project/crates/draper-step/src/converter.rs-2914-        let mut face_infos = Vec::new();
+/home/z/my-project/crates/draper-step/src/converter.rs-2915-        let mut next_face_id: u64 = 1;
+/home/z/my-project/crates/draper-step/src/converter.rs-2916-        let mut skipped_faces = 0;
+/home/z/my-project/crates/draper-step/src/converter.rs-2917-        let mut timed_out_faces = 0;
+--
+/home/z/my-project/crates/draper-step/src/converter.rs-3190-            face_data_list
+/home/z/my-project/crates/draper-step/src/converter.rs-3191-        };
+/home/z/my-project/crates/draper-step/src/converter.rs-3192-
+/home/z/my-project/crates/draper-step/src/converter.rs-3193-        let mut mesh = TriangleMesh::new();
+/home/z/my-project/crates/draper-step/src/converter.rs-3194-        let merge_tol = tol_ctx.model_scale * 1e-4;
+/home/z/my-project/crates/draper-step/src/converter.rs:3195:        let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
+/home/z/my-project/crates/draper-step/src/converter.rs-3196-        for face_data in &face_data_list {
+/home/z/my-project/crates/draper-step/src/converter.rs-3197-            let face_mesh = self.surface_to_mesh(face_data, params, bbox);
+/home/z/my-project/crates/draper-step/src/converter.rs-3198-            mesh.merge_deduplicating(&face_mesh, &mut dedup_map);
+/home/z/my-project/crates/draper-step/src/converter.rs-3199-        }
+/home/z/my-project/crates/draper-step/src/converter.rs-3200-        if mesh.vertex_count() == 0 { None } else { Some(mesh) }
+--
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-293-   293→    // Phase 2: Triangulate all faces using cached boundary data.
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-294-   294→    // Use merge_deduplicating to ensure shared-edge vertices get the same
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-295-   295→    // vertex index in the final mesh. The edge cache guarantees bit-identical
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-296-   296→    // 3D coordinates on shared edges, so bit-exact deduplication is correct.
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-297-   297→    let mut mesh = TriangleMesh::new();
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt:298:   298→    let mut dedup_map = crate::mesh::VertexDedupMap::new();
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-299-   299→    let mut total_face_vertices = 0usize;
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-300-   300→    for face in solid.faces() {
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-301-   301→        let face_mesh = triangulate_face_with_cache(face, params, cache);
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-302-   302→        total_face_vertices += face_mesh.vertices.len();
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-303-   303→        mesh.merge_deduplicating(&face_mesh, &mut dedup_map);
+--
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-649-   649→///
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-650-   650→/// In the parallel path, each face produces its own mesh. When merging,
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-651-   651→/// shared-edge vertices must be deduplicated so that the final mesh is
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-652-   652→/// watertight by construction. The edge cache guarantees bit-identical
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-653-   653→/// 3D coordinates on shared edges, so bit-exact deduplication via
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt:654:   654→/// `VertexDedupMap` is correct and efficient.
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-655-   655→fn merge_meshes_parallel(meshes: &[TriangleMesh]) -> TriangleMesh {
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-656-   656→    if meshes.is_empty() {
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-657-   657→        return TriangleMesh::new();
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-658-   658→    }
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-659-   659→
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-660-   660→    // Use merge_deduplicating for topology-first watertightness
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-661-   661→    let mut merged = TriangleMesh::new();
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt:662:   662→    let mut dedup_map = crate::mesh::VertexDedupMap::new();
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-663-   663→    for mesh in meshes {
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-664-   664→        merged.merge_deduplicating(mesh, &mut dedup_map);
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-665-   665→    }
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-666-   666→    merged
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-667-   667→}
+--
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-696-   696→
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-697-   697→/// Triangulate a shell into a triangle mesh (topology-first approach).
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-698-   698→pub fn triangulate_shell(shell: &Shell, params: &TriangulationParams) -> TriangleMesh {
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-699-   699→    let mut mesh = TriangleMesh::new();
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-700-   700→    let mut cache = EdgeDiscretizationCache::new();
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt:701:   701→    let mut dedup_map = crate::mesh::VertexDedupMap::new();
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-702-   702→    for face in &shell.faces {
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-703-   703→        let face_mesh = triangulate_face_with_cache(face, params, &mut cache);
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-704-   704→        mesh.merge_deduplicating(&face_mesh, &mut dedup_map);
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-705-   705→    }
+/home/z/my-project/tool-results/read_1781242859394_ecd75ff4b4fe.txt-706-   706→    filter_degenerate_triangles(&mut mesh, 1e-10);
+--
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-39-/// 2. **Tolerance-based**: Falls back to spatial hash grid for near-miss
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-40-///    vertices that are geometrically close but not bit-identical. This
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-41-///    handles the case where adjacent faces use different STEP EDGE_CURVE
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-42-///    entities on their common geometric boundary (the edge cache can't
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-43-///    produce bit-identical points because the STEP entities differ).
+/home/z/my-project/crates/draper-mesh/src/mesh.rs:44:pub struct VertexDedupMap {
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-45-    /// Bit-exact vertex → index mapping (fast path).
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-46-    exact: HashMap<VertexKey, u32>,
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-47-    /// Spatial hash grid for tolerance-based near-miss lookups (slow path).
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-48-    /// Maps (cell_x, cell_y, cell_z) → list of (vertex_index, Point3d).
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-49-    spatial: HashMap<(i64, i64, i64), Vec<(u32, Point3d)>>,
+--
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-51-    tolerance: f64,
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-52-    /// Whether tolerance-based fallback is enabled.
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-53-    use_tolerance: bool,
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-54-}
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-55-
+/home/z/my-project/crates/draper-mesh/src/mesh.rs:56:impl VertexDedupMap {
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-57-    /// Create a new dedup map with bit-exact comparison only.
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-58-    pub fn new() -> Self {
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-59-        Self {
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-60-            exact: HashMap::new(),
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-61-            spatial: HashMap::new(),
+--
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-343-    /// Without deduplication, shared-edge vertices get different indices in
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-344-    /// the final mesh, producing boundary edges. The mesh is NOT watertight
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-345-    /// even though the edge cache guarantees bit-identical 3D coordinates.
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-346-    /// With deduplication, shared vertices get the same index, making the
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-347-    /// mesh watertight **by construction** — no post-hoc repair needed.
+/home/z/my-project/crates/draper-mesh/src/mesh.rs:348:    pub fn merge_deduplicating(&mut self, other: &TriangleMesh, dedup_map: &mut VertexDedupMap) {
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-349-        // Save pre-merge vertex count for correct normals sizing
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-350-        let old_vertex_count = self.vertices.len();
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-351-
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-352-        // Build index remapping: other's local vertex index → global index
+/home/z/my-project/crates/draper-mesh/src/mesh.rs-353-        let mut index_map: Vec<u32> = Vec::with_capacity(other.vertices.len());
+--
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-295-    // vertex index in the final mesh. The edge cache guarantees bit-identical
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-296-    // 3D coordinates on shared edges, so bit-exact deduplication is correct.
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-297-    let mut mesh = TriangleMesh::new();
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-298-    // Use tolerance-based dedup for near-identical boundary vertices
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-299-    let merge_tol = cache.adaptive_tolerance().model_scale() * 1e-4;
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs:300:    let mut dedup_map = crate::mesh::VertexDedupMap::with_tolerance(merge_tol);
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-301-    let mut total_face_vertices = 0usize;
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-302-    for face in solid.faces() {
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-303-        let face_mesh = triangulate_face_with_cache(face, params, cache);
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-304-        total_face_vertices += face_mesh.vertices.len();
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-305-        mesh.merge_deduplicating(&face_mesh, &mut dedup_map);
+--
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-651-///
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-652-/// In the parallel path, each face produces its own mesh. When merging,
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-653-/// shared-edge vertices must be deduplicated so that the final mesh is
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-654-/// watertight by construction. The edge cache guarantees bit-identical
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-655-/// 3D coordinates on shared edges, so bit-exact deduplication via
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs:656:/// `VertexDedupMap` is correct and efficient.
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-657-fn merge_meshes_parallel(meshes: &[TriangleMesh]) -> TriangleMesh {
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-658-    if meshes.is_empty() {
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-659-        return TriangleMesh::new();
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-660-    }
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-661-
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-662-    // Use merge_deduplicating for topology-first watertightness
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-663-    // Note: parallel path uses bit-exact dedup only (no tolerance fallback).
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-664-    // The sequential path (triangulate_solid_sequential) uses tolerance-based dedup.
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-665-    let mut merged = TriangleMesh::new();
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs:666:    let mut dedup_map = crate::mesh::VertexDedupMap::new();
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-667-    for mesh in meshes {
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-668-        merged.merge_deduplicating(mesh, &mut dedup_map);
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-669-    }
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-670-    merged
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-671-}
+--
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-701-/// Triangulate a shell into a triangle mesh (topology-first approach).
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-702-pub fn triangulate_shell(shell: &Shell, params: &TriangulationParams) -> TriangleMesh {
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-703-    let mut mesh = TriangleMesh::new();
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-704-    let mut cache = EdgeDiscretizationCache::new();
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-705-    let merge_tol = cache.adaptive_tolerance().model_scale() * 1e-4;
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs:706:    let mut dedup_map = crate::mesh::VertexDedupMap::with_tolerance(merge_tol);
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-707-    for face in &shell.faces {
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-708-        let face_mesh = triangulate_face_with_cache(face, params, &mut cache);
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-709-        mesh.merge_deduplicating(&face_mesh, &mut dedup_map);
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-710-    }
+/home/z/my-project/crates/draper-mesh/src/triangulate.rs-711-    filter_degenerate_triangles(&mut mesh, 1e-10);

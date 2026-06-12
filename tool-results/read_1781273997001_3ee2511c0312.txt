@@ -1,0 +1,2002 @@
+     1→// SPDX-License-Identifier: GPL-3.0-or-later
+     2→// Copyright (c) 2026 KernelDev
+     3→//! Parametric domain representation for trimmed surface triangulation.
+     4→//!
+     5→//! A ParametricDomain represents the 2D region in UV-parameter space
+     6→//! that defines the valid area of a trimmed surface. It consists of:
+     7→//! - An outer boundary (the trimming loop)
+     8→//! - Optional inner boundaries (holes)
+     9→//!
+    10→//! The domain is triangulated using earcutr with interior Steiner points,
+    11→//! which is fast (O(n log n) typical) and handles holes natively.
+    12→
+    13→use draper_geometry::{Point2d, Point3d, Surface};
+    14→use crate::mesh::TriangleMesh;
+    15→use crate::edge_cache::deterministic_round_point;
+    16→use std::f64::consts::PI;
+    17→
+    18→/// A closed polygon in UV parameter space.
+    19→pub type UVPolygon = Vec<Point2d>;
+    20→
+    21→/// The parametric domain of a trimmed surface face.
+    22→///
+    23→/// Defines the valid 2D region in UV space that should be triangulated.
+    24→/// The outer boundary defines the exterior contour, and inner boundaries
+    25→/// define holes that should be excluded from the triangulation.
+    26→#[derive(Clone, Debug)]
+    27→pub struct ParametricDomain {
+    28→    /// The outer boundary of the domain (counter-clockwise in UV space).
+    29→    pub outer_boundary: UVPolygon,
+    30→    /// Inner boundaries (holes) — each is a clockwise polygon in UV space.
+    31→    pub holes: Vec<UVPolygon>,
+    32→    /// The UV range of the surface: (u_min, u_max).
+    33→    pub u_range: (f64, f64),
+    34→    /// The V range of the surface: (v_min, v_max).
+    35→    pub v_range: (f64, f64),
+    36→    /// Cached spatial grid for fast containment checks (lazy-initialized).
+    37→    containment_grid: Option<ContainmentGrid>,
+    38→}
+    39→
+    40→/// Grid-based spatial index for fast point-in-domain checks.
+    41→///
+    42→/// Pre-computes a grid of cells, each marked as inside or outside.
+    43→/// This provides O(1) containment checks for interior point generation.
+    44→#[derive(Clone, Debug)]
+    45→struct ContainmentGrid {
+    46→    cells: Vec<bool>,
+    47→    n_u: usize,
+    48→    n_v: usize,
+    49→    u_min: f64,
+    50→    v_min: f64,
+    51→    du: f64,
+    52→    dv: f64,
+    53→}
+    54→
+    55→impl ContainmentGrid {
+    56→    fn new(domain: &ParametricDomain, resolution: usize) -> Self {
+    57→        let (u_min, u_max, v_min, v_max) = domain.bounding_box();
+    58→        let u_range = (u_max - u_min).max(1e-10);
+    59→        let v_range = (v_max - v_min).max(1e-10);
+    60→
+    61→        let aspect = v_range / u_range;
+    62→        let n_u = if aspect > 1.0 {
+    63→            (resolution as f64 / aspect.sqrt()).max(8.0) as usize
+    64→        } else {
+    65→            (resolution as f64 * aspect.sqrt()).max(8.0) as usize
+    66→        };
+    67→        let n_v = (n_u as f64 * aspect).max(8.0) as usize;
+    68→
+    69→        let du = u_range / n_u as f64;
+    70→        let dv = v_range / n_v as f64;
+    71→
+    72→        // Pre-compute containment for each grid cell center
+    73→        let mut cells = Vec::with_capacity(n_u * n_v);
+    74→        for j in 0..n_v {
+    75→            for i in 0..n_u {
+    76→                let u = u_min + (i as f64 + 0.5) * du;
+    77→                let v = v_min + (j as f64 + 0.5) * dv;
+    78→                let pt = Point2d::new(u, v);
+    79→                cells.push(domain.contains_ray(&pt));
+    80→            }
+    81→        }
+    82→
+    83→        ContainmentGrid { cells, n_u, n_v, u_min, v_min, du, dv }
+    84→    }
+    85→
+    86→    #[inline]
+    87→    fn is_inside(&self, point: &Point2d) -> bool {
+    88→        let iu = ((point.u - self.u_min) / self.du) as i64;
+    89→        let iv = ((point.v - self.v_min) / self.dv) as i64;
+    90→        if iu < 0 || iu >= self.n_u as i64 || iv < 0 || iv >= self.n_v as i64 {
+    91→            return false;
+    92→        }
+    93→        self.cells[iu as usize + iv as usize * self.n_u]
+    94→    }
+    95→}
+    96→
+    97→impl ParametricDomain {
+    98→    /// Create a new parametric domain from an outer boundary.
+    99→    pub fn new(outer_boundary: UVPolygon, u_range: (f64, f64), v_range: (f64, f64)) -> Self {
+   100→        Self {
+   101→            outer_boundary,
+   102→            holes: Vec::new(),
+   103→            u_range,
+   104→            v_range,
+   105→            containment_grid: None,
+   106→        }
+   107→    }
+   108→
+   109→    /// Add a hole (inner boundary) to the domain.
+   110→    pub fn with_hole(mut self, hole: UVPolygon) -> Self {
+   111→        self.holes.push(hole);
+   112→        self.containment_grid = None;
+   113→        self
+   114→    }
+   115→
+   116→    /// Add multiple holes (inner boundaries) to the domain.
+   117→    pub fn with_holes_from<I: IntoIterator<Item = UVPolygon>>(mut self, holes: I) -> Self {
+   118→        self.holes.extend(holes);
+   119→        self.containment_grid = None;
+   120→        self
+   121→    }
+   122→
+   123→    /// Compute the bounding box of the domain.
+   124→    pub fn bounding_box(&self) -> (f64, f64, f64, f64) {
+   125→        let mut u_min = f64::MAX;
+   126→        let mut u_max = f64::MIN;
+   127→        let mut v_min = f64::MAX;
+   128→        let mut v_max = f64::MIN;
+   129→
+   130→        for p in &self.outer_boundary {
+   131→            u_min = u_min.min(p.u);
+   132→            u_max = u_max.max(p.u);
+   133→            v_min = v_min.min(p.v);
+   134→            v_max = v_max.max(p.v);
+   135→        }
+   136→        for hole in &self.holes {
+   137→            for p in hole {
+   138→                u_min = u_min.min(p.u);
+   139→                u_max = u_max.max(p.u);
+   140→                v_min = v_min.min(p.v);
+   141→                v_max = v_max.max(p.v);
+   142→            }
+   143→        }
+   144→
+   145→        (u_min, u_max, v_min, v_max)
+   146→    }
+   147→
+   148→    /// Check if a UV point is inside the domain using cached grid (fast).
+   149→    pub fn contains(&self, point: &Point2d) -> bool {
+   150→        if let Some(ref grid) = self.containment_grid {
+   151→            grid.is_inside(point)
+   152→        } else {
+   153→            self.contains_ray(point)
+   154→        }
+   155→    }
+   156→
+   157→    /// Initialize the containment grid for fast contains() checks.
+   158→    pub fn init_containment_grid(&mut self) {
+   159→        if self.containment_grid.is_none() {
+   160→            // Use a 128×128 grid for accurate interior point generation.
+   161→            // The previous 64×64 was too coarse for complex NURBS trimming regions,
+   162→            // causing interior points near boundaries to be incorrectly excluded,
+   163→            // which produced irregular triangle distributions and gaps.
+   164→            // 128×128 costs ~16K ray-casting tests at initialization, which is
+   165→            // negligible compared to the NURBS surface evaluations in triangulation.
+   166→            self.containment_grid = Some(ContainmentGrid::new(self, 128));
+   167→        }
+   168→    }
+   169→
+   170→    /// Check if a UV point is inside the domain using ray-casting (slow but exact).
+   171→    fn contains_ray(&self, point: &Point2d) -> bool {
+   172→        if !point_in_polygon(point, &self.outer_boundary) {
+   173→            return false;
+   174→        }
+   175→        for hole in &self.holes {
+   176→            if point_in_polygon(point, hole) {
+   177→                return false;
+   178→            }
+   179→        }
+   180→        true
+   181→    }
+   182→}
+   183→
+   184→/// Test if a 2D point is inside a closed polygon using ray casting.
+   185→fn point_in_polygon(point: &Point2d, polygon: &[Point2d]) -> bool {
+   186→    let n = polygon.len();
+   187→    if n < 3 {
+   188→        return false;
+   189→    }
+   190→    let mut inside = false;
+   191→    let px = point.u;
+   192→    let py = point.v;
+   193→    let mut j = n - 1;
+   194→    for i in 0..n {
+   195→        let xi = polygon[i].u;
+   196→        let yi = polygon[i].v;
+   197→        let xj = polygon[j].u;
+   198→        let yj = polygon[j].v;
+   199→        if ((yi > py) != (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi) {
+   200→            inside = !inside;
+   201→        }
+   202→        j = i;
+   203→    }
+   204→    inside
+   205→}
+   206→
+   207→// ============================================================
+   208→// Ear-clipping triangulation
+   209→// ============================================================
+   210→
+   211→/// Triangulate a parametric domain using earcutr.
+   212→///
+   213→/// earcutr is O(n log n) typical, handles holes natively, and
+   214→/// never hangs on degenerate inputs.
+   215→pub fn triangulate_cdt(
+   216→    domain: &ParametricDomain,
+   217→    surface: &Surface,
+   218→    forward: bool,
+   219→    interior_uv_points: &[Point2d],
+   220→) -> TriangleMesh {
+   221→    if domain.outer_boundary.len() < 3 {
+   222→        return TriangleMesh::new();
+   223→    }
+   224→
+   225→    // Build combined point array: [boundary...][holes...][interior...]
+   226→    let mut all_points: Vec<Point2d> = domain.outer_boundary.clone();
+   227→    let mut hole_start_indices: Vec<usize> = Vec::new();
+   228→
+   229→    for hole in &domain.holes {
+   230→        if hole.len() < 3 {
+   231→            continue;
+   232→        }
+   233→        hole_start_indices.push(all_points.len());
+   234→        all_points.extend_from_slice(hole);
+   235→    }
+   236→
+   237→    // Add interior points as Steiner points
+   238→    all_points.extend_from_slice(interior_uv_points);
+   239→
+   240→    // Build flat coordinate array for earcutr
+   241→    let mut coords: Vec<f64> = Vec::with_capacity(all_points.len() * 2);
+   242→    for p in &all_points {
+   243→        coords.push(p.u);
+   244→        coords.push(p.v);
+   245→    }
+   246→
+   247→    // Run earcutr
+   248→    let triangle_indices = earcutr::earcut(&coords, &hole_start_indices, 2);
+   249→
+   250→    // Collect triangles, filtering degenerate ones
+   251→    let mut result_triangles: Vec<[u32; 3]> = Vec::with_capacity(triangle_indices.len() / 3);
+   252→    for chunk in triangle_indices.chunks(3) {
+   253→        if chunk.len() < 3 { break; }
+   254→        let a = chunk[0] as u32;
+   255→        let b = chunk[1] as u32;
+   256→        let c = chunk[2] as u32;
+   257→        if a == b || b == c || a == c { continue; }
+   258→        result_triangles.push([a, b, c]);
+   259→    }
+   260→
+   261→    // Map UV to 3D
+   262→    uv_triangles_to_3d(&result_triangles, &all_points, surface, forward)
+   263→}
+   264→
+   265→/// Map 2D UV triangles to 3D using the surface evaluation.
+   266→fn uv_triangles_to_3d(
+   267→    triangles: &[[u32; 3]],
+   268→    points: &[Point2d],
+   269→    surface: &Surface,
+   270→    forward: bool,
+   271→) -> TriangleMesh {
+   272→    let mut mesh = TriangleMesh::new();
+   273→    let mut vertex_map: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+   274→
+   275→    for tri in triangles {
+   276→        let mut tri_indices = [0u32; 3];
+   277→        for (k, &idx) in tri.iter().enumerate() {
+   278→            let entry = vertex_map.entry(idx).or_insert_with(|| {
+   279→                let uv = points[idx as usize];
+   280→                let p3d = surface.point_at(uv.u, uv.v);
+   281→                let n = surface.normal_at(uv.u, uv.v);
+   282→                let vi = mesh.add_vertex(p3d);
+   283→                mesh.add_vertex_normal(vi, [n.x, n.y, n.z]);
+   284→                vi
+   285→            });
+   286→            tri_indices[k] = *entry;
+   287→        }
+   288→
+   289→        if forward {
+   290→            mesh.add_triangle(tri_indices[0], tri_indices[1], tri_indices[2]);
+   291→        } else {
+   292→            mesh.add_triangle(tri_indices[0], tri_indices[2], tri_indices[1]);
+   293→        }
+   294→    }
+   295→
+   296→    mesh
+   297→}
+   298→
+   299→/// Re-project a 3D point onto a NURBS surface using Newton-Raphson
+   300→/// starting from an initial UV guess. This is much more accurate and
+   301→/// faster than a full grid search when we have a reasonable initial guess.
+   302→pub fn reproject_nurbs_point(
+   303→    nurbs: &draper_geometry::NurbsSurface,
+   304→    point: &Point3d,
+   305→    init_u: f64,
+   306→    init_v: f64,
+   307→) -> (f64, f64) {
+   308→    use draper_geometry::Surface;
+   309→
+   310→    let (u_min, u_max) = nurbs.u_range();
+   311→    let (v_min, v_max) = nurbs.v_range();
+   312→    let surface = Surface::Nurbs(nurbs.clone());
+   313→
+   314→    let mut best_u = init_u.clamp(u_min, u_max);
+   315→    let mut best_v = init_v.clamp(v_min, v_max);
+   316→    let mut best_dist = {
+   317→        let p = surface.point_at(best_u, best_v);
+   318→        (p.x - point.x).powi(2) + (p.y - point.y).powi(2) + (p.z - point.z).powi(2)
+   319→    };
+   320→
+   321→    // Newton-Raphson refinement from the initial guess
+   322→    for _ in 0..15 {
+   323→        let derivs = nurbs.derivatives_at(best_u, best_v);
+   324→        let sp = derivs.point;
+   325→        let dx = sp.x - point.x;
+   326→        let dy = sp.y - point.y;
+   327→        let dz = sp.z - point.z;
+   328→
+   329→        let gu = derivs.du.x * dx + derivs.du.y * dy + derivs.du.z * dz;
+   330→        let gv = derivs.dv.x * dx + derivs.dv.y * dy + derivs.dv.z * dz;
+   331→
+   332→        let hu_u = derivs.du.x * derivs.du.x + derivs.du.y * derivs.du.y + derivs.du.z * derivs.du.z;
+   333→        let hu_v = derivs.du.x * derivs.dv.x + derivs.du.y * derivs.dv.y + derivs.du.z * derivs.dv.z;
+   334→        let hv_v = derivs.dv.x * derivs.dv.x + derivs.dv.y * derivs.dv.y + derivs.dv.z * derivs.dv.z;
+   335→
+   336→        let det = hu_u * hv_v - hu_v * hu_v;
+   337→        if det.abs() < 1e-20 { break; }
+   338→
+   339→        let du = -(hv_v * gu - hu_v * gv) / det;
+   340→        let dv = -(-hu_v * gu + hu_u * gv) / det;
+   341→
+   342→        let u_range = u_max - u_min;
+   343→        let v_range = v_max - v_min;
+   344→        let step_limit_u = u_range * 0.1;
+   345→        let step_limit_v = v_range * 0.1;
+   346→        let du = du.clamp(-step_limit_u, step_limit_u);
+   347→        let dv = dv.clamp(-step_limit_v, step_limit_v);
+   348→
+   349→        let new_u = (best_u + du).clamp(u_min, u_max);
+   350→        let new_v = (best_v + dv).clamp(v_min, v_max);
+   351→
+   352→        let new_p = surface.point_at(new_u, new_v);
+   353→        let new_dist = (new_p.x - point.x).powi(2) + (new_p.y - point.y).powi(2) + (new_p.z - point.z).powi(2);
+   354→
+   355→        if new_dist < best_dist {
+   356→            if (best_dist - new_dist) < 1e-12 * best_dist.max(1e-20) {
+   357→                best_u = new_u;
+   358→                best_v = new_v;
+   359→                break;
+   360→            }
+   361→            best_u = new_u;
+   362→            best_v = new_v;
+   363→            best_dist = new_dist;
+   364→        } else {
+   365→            break;
+   366→        }
+   367→    }
+   368→
+   369→    (best_u, best_v)
+   370→}
+   371→
+   372→/// Compute the area of a 2D triangle.
+   373→fn triangle_area_2d(x0: f64, y0: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64 {
+   374→    ((x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)).abs() * 0.5
+   375→}
+   376→
+   377→/// Compute the signed area of a 2D polygon using the shoelace formula.
+   378→/// Returns a positive value for counter-clockwise, negative for clockwise.
+   379→fn polygon_area_2d(polygon: &[Point2d]) -> f64 {
+   380→    if polygon.len() < 3 {
+   381→        return 0.0;
+   382→    }
+   383→    let mut area = 0.0;
+   384→    let n = polygon.len();
+   385→    for i in 0..n {
+   386→        let j = (i + 1) % n;
+   387→        area += polygon[i].u * polygon[j].v;
+   388→        area -= polygon[j].u * polygon[i].v;
+   389→    }
+   390→    area.abs() * 0.5
+   391→}
+   392→
+   393→/// Compute the approximate area of a 3D polygon using the Newell's method.
+   394→/// This gives a reasonable area estimate even for non-planar polygons.
+   395→fn polygon_area_3d(polygon: &[Point3d]) -> f64 {
+   396→    if polygon.len() < 3 {
+   397→        return 0.0;
+   398→    }
+   399→    // Compute the normal using Newell's method
+   400→    let mut nx = 0.0_f64;
+   401→    let mut ny = 0.0_f64;
+   402→    let mut nz = 0.0_f64;
+   403→    let n = polygon.len();
+   404→    for i in 0..n {
+   405→        let j = (i + 1) % n;
+   406→        let pi = &polygon[i];
+   407→        let pj = &polygon[j];
+   408→        nx += (pi.y - pj.y) * (pi.z + pj.z);
+   409→        ny += (pi.z - pj.z) * (pi.x + pj.x);
+   410→        nz += (pi.x - pj.x) * (pi.y + pj.y);
+   411→    }
+   412→    (nx * nx + ny * ny + nz * nz).sqrt() * 0.5
+   413→}
+   414→
+   415→/// Generate interior UV grid points for a parametric domain.
+   416→///
+   417→/// Creates a regular grid of points within the domain's bounding box,
+   418→/// excluding points that are outside the domain.
+   419→/// Uses the containment grid for O(1) checks when available.
+   420→///
+   421→/// NOTE: We do NOT check distance to boundary vertices. This is intentional:
+   422→/// 1. It's O(n_u × n_v × boundary_len) which is extremely slow
+   423→/// 2. earcutr handles boundary proximity correctly
+   424→/// 3. Steiner points near boundaries improve triangulation quality
+   425→pub fn generate_interior_points(
+   426→    domain: &ParametricDomain,
+   427→    n_u: usize,
+   428→    n_v: usize,
+   429→    _boundary_margin: f64,
+   430→) -> Vec<Point2d> {
+   431→    let (u_min, u_max, v_min, v_max) = domain.bounding_box();
+   432→    let mut points = Vec::with_capacity(n_u * n_v / 4);
+   433→
+   434→    for j in 1..n_v {
+   435→        let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
+   436→        for i in 1..n_u {
+   437→            let u = u_min + (u_max - u_min) * i as f64 / n_u as f64;
+   438→            let pt = Point2d::new(u, v);
+   439→            if domain.contains(&pt) {
+   440→                points.push(pt);
+   441→            }
+   442→        }
+   443→    }
+   444→
+   445→    points
+   446→}
+   447→
+   448→/// Downsample a polyline (3D + UV) to at most `max_points` points while
+   449→/// preserving the overall shape. Uses uniform stride sampling which is
+   450→/// fast and preserves the polygon's general form.
+   451→///
+   452→/// Returns downsampled (3D, UV) point arrays.
+   453→pub fn downsample_polyline(
+   454→    points_3d: &[Point3d],
+   455→    points_uv: &[Point2d],
+   456→    max_points: usize,
+   457→) -> (Vec<Point3d>, Vec<Point2d>) {
+   458→    if points_3d.len() <= max_points || max_points < 3 {
+   459→        return (points_3d.to_vec(), points_uv.to_vec());
+   460→    }
+   461→
+   462→    let n = points_3d.len();
+   463→    let mut result_3d = Vec::with_capacity(max_points);
+   464→    let mut result_uv = Vec::with_capacity(max_points);
+   465→
+   466→    // Always include the first point
+   467→    result_3d.push(points_3d[0]);
+   468→    result_uv.push(points_uv[0]);
+   469→
+   470→    // Uniform stride for interior points
+   471→    let stride = (n - 1) as f64 / (max_points - 1) as f64;
+   472→    let mut next_idx: f64 = 1.0;
+   473→    for _i in 1..max_points - 1 {
+   474→        let idx = next_idx.round() as usize;
+   475→        let idx = idx.min(n - 2).max(1); // Clamp to valid interior range
+   476→        result_3d.push(points_3d[idx]);
+   477→        result_uv.push(points_uv[idx]);
+   478→        next_idx += stride;
+   479→    }
+   480→
+   481→    // Always include the last point
+   482→    result_3d.push(points_3d[n - 1]);
+   483→    result_uv.push(points_uv[n - 1]);
+   484→
+   485→    (result_3d, result_uv)
+   486→}
+   487→
+   488→/// Generate interior UV points for NURBS surfaces, respecting knot ranges.
+   489→pub fn generate_nurbs_interior_points(
+   490→    domain: &ParametricDomain,
+   491→    u_knots: &[f64],
+   492→    v_knots: &[f64],
+   493→    n_sub: usize,
+   494→) -> Vec<Point2d> {
+   495→    let (u_min, u_max, v_min, v_max) = domain.bounding_box();
+   496→    let mut points = Vec::new();
+   497→
+   498→    let u_knots_in_range: Vec<f64> = u_knots
+   499→        .iter()
+   500→        .filter(|&&k| k > u_min && k < u_max)
+   501→        .cloned()
+   502→        .collect();
+   503→    let v_knots_in_range: Vec<f64> = v_knots
+   504→        .iter()
+   505→        .filter(|&&k| k > v_min && k < v_max)
+   506→        .cloned()
+   507→        .collect();
+   508→
+   509→    let mut u_values: Vec<f64> = vec![u_min];
+   510→    for k in &u_knots_in_range {
+   511→        u_values.push(*k);
+   512→    }
+   513→    u_values.push(u_max);
+   514→
+   515→    let mut v_values: Vec<f64> = vec![v_min];
+   516→    for k in &v_knots_in_range {
+   517→        v_values.push(*k);
+   518→    }
+   519→    v_values.push(v_max);
+   520→
+   521→    let mut u_grid: Vec<f64> = Vec::new();
+   522→    for i in 0..u_values.len() - 1 {
+   523→        for j in 0..n_sub {
+   524→            let t = j as f64 / n_sub as f64;
+   525→            u_grid.push(u_values[i] + t * (u_values[i + 1] - u_values[i]));
+   526→        }
+   527→    }
+   528→    u_grid.push(u_max);
+   529→
+   530→    let mut v_grid: Vec<f64> = Vec::new();
+   531→    for i in 0..v_values.len() - 1 {
+   532→        for j in 0..n_sub {
+   533→            let t = j as f64 / n_sub as f64;
+   534→            v_grid.push(v_values[i] + t * (v_values[i + 1] - v_values[i]));
+   535→        }
+   536→    }
+   537→    v_grid.push(v_max);
+   538→
+   539→    for &u in &u_grid {
+   540→        for &v in &v_grid {
+   541→            let pt = Point2d::new(u, v);
+   542→            if domain.contains(&pt) {
+   543→                points.push(pt);
+   544→            }
+   545→        }
+   546→    }
+   547→
+   548→    points
+   549→}
+   550→
+   551→/// Downsample interior UV points to a budget using stride-based sampling.
+   552→///
+   553→/// Unlike `truncate()` which removes points from the END of the list
+   554→/// (creating position bias — dense at low-v, sparse at high-v),
+   555→/// stride-based sampling preserves uniform spatial coverage by keeping
+   556→/// every N-th point. This produces a more even triangle distribution
+   557→/// across the entire surface.
+   558→///
+   559→/// If `pts.len() <= budget`, returns a clone of the input.
+   560→fn downsample_interior_points(pts: &[Point2d], budget: usize) -> Vec<Point2d> {
+   561→    if pts.len() <= budget {
+   562→        return pts.to_vec();
+   563→    }
+   564→    if budget == 0 {
+   565→        return Vec::new();
+   566→    }
+   567→    // Stride-based downsampling: keep every (len/budget)-th point
+   568→    let stride = pts.len() as f64 / budget as f64;
+   569→    let mut result = Vec::with_capacity(budget);
+   570→    let mut next_idx = 0.0f64;
+   571→    while result.len() < budget {
+   572→        let idx = next_idx.round() as usize;
+   573→        let idx = idx.min(pts.len() - 1);
+   574→        result.push(pts[idx]);
+   575→        next_idx += stride;
+   576→    }
+   577→    result
+   578→}
+   579→
+   580→// ============================================================
+   581→// Integration: earcutr-based surface triangulation (non-consistent)
+   582→// ============================================================
+   583→
+   584→/// Triangulate a curved surface using UV-space earcutr with holes.
+   585→///
+   586→/// Uses earcutr which handles holes natively and is fast O(n log n).
+   587→pub fn triangulate_surface_uv_cdt(
+   588→    surface: &Surface,
+   589→    boundary_points: &[Point3d],
+   590→    hole_polylines: &[Vec<Point3d>],
+   591→    forward: bool,
+   592→    params: &crate::triangulate::TriangulationParams,
+   593→) -> TriangleMesh {
+   594→    if boundary_points.is_empty() {
+   595→        return TriangleMesh::new();
+   596→    }
+   597→
+   598→    // Downsample boundary points to prevent O(n²) blowup
+   599→    let max_boundary_points = 150;
+   600→    let boundary_points = if boundary_points.len() > max_boundary_points {
+   601→        let step = boundary_points.len() as f64 / max_boundary_points as f64;
+   602→        let sampled: Vec<Point3d> = (0..max_boundary_points)
+   603→            .map(|i| boundary_points[((i as f64 * step) as usize).min(boundary_points.len() - 1)])
+   604→            .collect();
+   605→        sampled
+   606→    } else {
+   607→        boundary_points.to_vec()
+   608→    };
+   609→
+   610→    // Also downsample hole polylines
+   611→    let max_hole_points = 50;
+   612→    let hole_polylines_downsampled: Vec<Vec<Point3d>> = hole_polylines.iter()
+   613→        .map(|hole| {
+   614→            if hole.len() > max_hole_points {
+   615→                let step = hole.len() as f64 / max_hole_points as f64;
+   616→                let sampled: Vec<Point3d> = (0..max_hole_points)
+   617→                    .map(|i| hole[((i as f64 * step) as usize).min(hole.len() - 1)])
+   618→                    .collect();
+   619→                sampled
+   620→            } else {
+   621→                hole.clone()
+   622→            }
+   623→        })
+   624→        .collect();
+   625→
+   626→    // Project 3D boundary to UV
+   627→    // OPTIMIZATION: For NURBS surfaces, use bootstrap + chain Newton-Raphson
+   628→    // instead of calling project_point() for each point (which does 11×11 grid
+   629→    // search per point and is catastrophically slow).
+   630→    let mut outer_uv: Vec<Point2d> = if let Surface::Nurbs(ref nurbs) = surface {
+   631→        let mut uvs = Vec::with_capacity(boundary_points.len());
+   632→        if !boundary_points.is_empty() {
+   633→            let (u0, v0) = surface.project_point(&boundary_points[0]);
+   634→            uvs.push(Point2d::new(u0, v0));
+   635→            for i in 1..boundary_points.len() {
+   636→                let prev = uvs[i - 1];
+   637→                let (u, v) = reproject_nurbs_point(nurbs, &boundary_points[i], prev.u, prev.v);
+   638→                uvs.push(Point2d::new(u, v));
+   639→            }
+   640→        }
+   641→        uvs
+   642→    } else {
+   643→        boundary_points
+   644→            .iter()
+   645→            .map(|p| {
+   646→                let (u, v) = surface.project_point(p);
+   647→                Point2d::new(u, v)
+   648→            })
+   649→            .collect()
+   650→    };
+   651→
+   652→    // Normalize UV for periodic surfaces
+   653→    let u_period = if surface.is_u_periodic() { Some(2.0 * PI) } else { None };
+   654→    let v_period = if surface.is_v_periodic() { Some(2.0 * PI) } else { None };
+   655→    crate::triangulate::normalize_uv_polygon(&mut outer_uv, u_period, v_period);
+   656→
+   657→    // Compute UV range
+   658→    let mut u_min = f64::MAX;
+   659→    let mut u_max = f64::MIN;
+   660→    let mut v_min = f64::MAX;
+   661→    let mut v_max = f64::MIN;
+   662→    for p in &outer_uv {
+   663→        u_min = u_min.min(p.u);
+   664→        u_max = u_max.max(p.u);
+   665→        v_min = v_min.min(p.v);
+   666→        v_max = v_max.max(p.v);
+   667→    }
+   668→    let margin_u = (u_max - u_min) * 0.01;
+   669→    let margin_v = (v_max - v_min) * 0.01;
+   670→
+   671→    // Project holes to UV (with NURBS optimization)
+   672→    let holes_uv: Vec<Vec<Point2d>> = hole_polylines_downsampled
+   673→        .iter()
+   674→        .map(|hole| {
+   675→            let mut huv: Vec<Point2d> = if let Surface::Nurbs(ref nurbs) = surface {
+   676→                // NURBS fast path: bootstrap + chain Newton-Raphson
+   677→                let mut uvs = Vec::with_capacity(hole.len());
+   678→                if !hole.is_empty() {
+   679→                    let (u0, v0) = surface.project_point(&hole[0]);
+   680→                    uvs.push(Point2d::new(u0, v0));
+   681→                    for i in 1..hole.len() {
+   682→                        let prev = uvs[i - 1];
+   683→                        let (u, v) = reproject_nurbs_point(nurbs, &hole[i], prev.u, prev.v);
+   684→                        uvs.push(Point2d::new(u, v));
+   685→                    }
+   686→                }
+   687→                uvs
+   688→            } else {
+   689→                hole.iter()
+   690→                    .map(|p| {
+   691→                        let (u, v) = surface.project_point(p);
+   692→                        Point2d::new(u, v)
+   693→                    })
+   694→                    .collect()
+   695→            };
+   696→            crate::triangulate::normalize_uv_polygon(&mut huv, u_period, v_period);
+   697→            huv
+   698→        })
+   699→        .collect();
+   700→
+   701→    // Create parametric domain with containment grid
+   702→    let mut domain = ParametricDomain::new(
+   703→        outer_uv,
+   704→        (u_min - margin_u, u_max + margin_u),
+   705→        (v_min - margin_v, v_max + margin_v),
+   706→    );
+   707→    for hole in &holes_uv {
+   708→        domain = domain.with_hole(hole.clone());
+   709→    }
+   710→    domain.init_containment_grid();
+   711→
+   712→    // Generate interior points using adaptive sampling
+   713→    let (n_u, n_v) = if params.adaptive {
+   714→        crate::adaptive::required_samples_capped(
+   715→            surface,
+   716→            u_min, u_max, v_min, v_max,
+   717→            params.max_deviation, params.detail_level,
+   718→            params.max_face_triangles,
+   719→        )
+   720→    } else {
+   721→        let mut n_u = params.angular_samples;
+   722→        let mut n_v = params.height_samples;
+   723→        let approx_tris = 2 * n_u * n_v;
+   724→        if approx_tris > params.max_face_triangles {
+   725→            let scale = (params.max_face_triangles as f64 / approx_tris as f64).sqrt();
+   726→            n_u = ((n_u as f64 * scale).ceil() as usize).max(4);
+   727→            n_v = ((n_v as f64 * scale).ceil() as usize).max(2);
+   728→        }
+   729→        (n_u, n_v)
+   730→    };
+   731→
+   732→    let u_step = (u_max - u_min) / n_u.max(1) as f64;
+   733→    let v_step = (v_max - v_min) / n_v.max(1) as f64;
+   734→    let boundary_margin = u_step.min(v_step) * 0.3;
+   735→
+   736→    let interior_points = generate_interior_points(&domain, n_u, n_v, boundary_margin);
+   737→
+   738→    triangulate_cdt(&domain, surface, forward, &interior_points)
+   739→}
+   740→
+   741→// ============================================================
+   742→// Consistent (watertight) triangulation — HIGHLY OPTIMIZED
+   743→// ============================================================
+   744→
+   745→/// Triangulate a curved surface with **consistent** boundary vertices.
+   746→///
+   747→/// This function produces watertight meshes where shared edges between
+   748→/// adjacent faces have **bit-identical** 3D vertex positions.
+   749→///
+   750→/// # Key optimizations:
+   751→/// 1. No per-triangle containment check — earcutr handles holes natively
+   752→/// 2. No boundary distance check in interior point generation
+   753→/// 3. Boundary vertices use cached 3D points directly (bit-identical)
+   754→/// 4. Interior vertices computed from UV via surface.point_at()
+   755→/// 5. Uses earcutr O(n log n) for the actual triangulation
+   756→///
+   757→/// # Arguments
+   758→/// * `surface` — The parametric surface to triangulate.
+   759→/// * `boundary_points_3d` — 3D points along the outer boundary (from cache).
+   760→/// * `boundary_uvs` — Pre-computed UV coordinates for boundary points.
+   761→/// * `hole_polylines_3d` — 3D points along each hole boundary.
+   762→/// * `hole_uvs` — Pre-computed UV coordinates for hole points.
+   763→/// * `forward` — Whether face normal matches surface normal.
+   764→/// * `params` — Triangulation parameters (for grid resolution).
+   765→pub fn triangulate_surface_consistent(
+   766→    surface: &Surface,
+   767→    boundary_points_3d: &[Point3d],
+   768→    boundary_uvs: &[Point2d],
+   769→    hole_polylines_3d: &[Vec<Point3d>],
+   770→    hole_uvs: &[Vec<Point2d>],
+   771→    forward: bool,
+   772→    params: &crate::triangulate::TriangulationParams,
+   773→) -> TriangleMesh {
+   774→    if boundary_points_3d.is_empty() || boundary_uvs.len() < 3 {
+   775→        return TriangleMesh::new();
+   776→    }
+   777→
+   778→    // Length mismatch between 3D points and UVs indicates a bug in the caller
+   779→    if boundary_points_3d.len() != boundary_uvs.len() {
+   780→        log::warn!(
+   781→            "triangulate_surface_consistent: 3D/UV length mismatch ({} vs {}) — returning empty mesh",
+   782→            boundary_points_3d.len(), boundary_uvs.len()
+   783→        );
+   784→        return TriangleMesh::new();
+   785→    }
+   786→
+   787→    // ============================================================
+   788→    // Step 0: Validate and fix UV coordinates for NURBS surfaces
+   789→    //
+   790→    // CRITICAL OPTIMIZATION: We do NOT do per-point Newton-Raphson
+   791→    // re-projection here. That was the cause of the NURBS hang:
+   792→    // reproject_nurbs_point() does 15 iterations of derivatives_at()
+   793→    // per point, and with 48 EDGE_SAMPLES × N edges, this becomes
+   794→    // astronomically slow. It also DEGRADED quality — Newton from
+   795→    // a wrong initial guess converges to a different minimum, making
+   796→    // accurate UVs (from pcurves) worse.
+   797→    //
+   798→    // Instead, we just clamp UVs to the valid NURBS parameter range.
+   799→    // Boundary UVs that come from curve_2d/pcurve are already exact.
+   800→    // Boundary UVs from project_point() may be slightly off, but the
+   801→    // subsequent triangulation + chord-error refinement handles that.
+   802→    //
+   803→    // For UVs completely out of range (NaN, Inf, or far outside the
+   804→    // knot range), we fall back to the generic surface path.
+   805→    // ============================================================
+   806→    let mut outer_uv = boundary_uvs.to_vec();
+   807→    if let Surface::Nurbs(ref nurbs) = surface {
+   808→        let (nurb_u_min, nurb_u_max) = nurbs.u_range();
+   809→        let (nurb_v_min, nurb_v_max) = nurbs.v_range();
+   810→
+   811→        // Check for invalid UVs (NaN, Inf, or wildly out of range)
+   812→        let margin = (nurb_u_max - nurb_u_min).max(1e-6) * 0.1;
+   813→        let v_margin = (nurb_v_max - nurb_v_min).max(1e-6) * 0.1;
+   814→        let has_invalid_uv = outer_uv.iter().any(|uv| {
+   815→            !uv.u.is_finite() || !uv.v.is_finite()
+   816→            || uv.u < nurb_u_min - margin || uv.u > nurb_u_max + margin
+   817→            || uv.v < nurb_v_min - v_margin || uv.v > nurb_v_max + v_margin
+   818→        });
+   819→
+   820→        if has_invalid_uv {
+   821→            // Some UVs are wildly off — try clamping them as a best effort.
+   822→            // If too many are bad, the triangulation will be wrong anyway.
+   823→            let bad_count = outer_uv.iter().filter(|uv| {
+   824→                !uv.u.is_finite() || !uv.v.is_finite()
+   825→            }).count();
+   826→            let clamped_count = outer_uv.iter().filter(|uv| {
+   827→                uv.u < nurb_u_min || uv.u > nurb_u_max || uv.v < nurb_v_min || uv.v > nurb_v_max
+   828→            }).count();
+   829→            if clamped_count > 0 || bad_count > 0 {
+   830→                log::warn!(
+   831→                    "NURBS UV clamp: {} of {} UVs out of range, {} NaN/Inf (u=[{:.4},{:.4}] v=[{:.4},{:.4}])",
+   832→                    clamped_count, outer_uv.len(), bad_count,
+   833→                    nurb_u_min, nurb_u_max, nurb_v_min, nurb_v_max,
+   834→                );
+   835→            }
+   836→            if bad_count > outer_uv.len() / 2 {
+   837→                log::warn!(
+   838→                    "triangulate_surface_consistent: {} of {} NURBS UVs are NaN/Inf — returning empty mesh",
+   839→                    bad_count, outer_uv.len()
+   840→                );
+   841→                return TriangleMesh::new();
+   842→            }
+   843→            // Clamp all UVs to the NURBS parameter range
+   844→            for uv in outer_uv.iter_mut() {
+   845→                if uv.u.is_finite() {
+   846→                    uv.u = uv.u.clamp(nurb_u_min, nurb_u_max);
+   847→                } else {
+   848→                    uv.u = (nurb_u_min + nurb_u_max) * 0.5;
+   849→                }
+   850→                if uv.v.is_finite() {
+   851→                    uv.v = uv.v.clamp(nurb_v_min, nurb_v_max);
+   852→                } else {
+   853→                    uv.v = (nurb_v_min + nurb_v_max) * 0.5;
+   854→                }
+   855→            }
+   856→        }
+   857→    }
+   858→
+   859→    // ============================================================
+   860→    // Step 1: Normalize UV for periodic surfaces
+   861→    // ============================================================
+   862→    let u_period = if surface.is_u_periodic() { Some(2.0 * PI) } else { None };
+   863→    let v_period = if surface.is_v_periodic() { Some(2.0 * PI) } else { None };
+   864→
+   865→    crate::triangulate::normalize_uv_polygon(&mut outer_uv, u_period, v_period);
+   866→
+   867→    let mut normalized_holes_uv: Vec<Vec<Point2d>> = Vec::new();
+   868→    for huv in hole_uvs {
+   869→        let mut nhuv = huv.clone();
+   870→        crate::triangulate::normalize_uv_polygon(&mut nhuv, u_period, v_period);
+   871→        normalized_holes_uv.push(nhuv);
+   872→    }
+   873→
+   874→    if outer_uv.len() < 3 {
+   875→        return TriangleMesh::new();
+   876→    }
+   877→
+   878→    // ============================================================
+   879→    // Step 1.5: Validate UV polygon quality
+   880→    //
+   881→    // After normalization, check if the UV polygon is degenerate or
+   882→    // self-intersecting. This can happen when project_point()
+   883→    // returns inaccurate UV coordinates that, after normalization,
+   884→    // produce a polygon that doesn't match the actual surface region.
+   885→    //
+   886→    // IMPORTANT: The area ratio check is ONLY meaningful for analytic
+   887→    // surfaces (cylinder, sphere, cone, torus, revolution, extrusion)
+   888→    // where UV coordinates have a fixed geometric interpretation
+   889→    // (radians, distances). For NURBS surfaces, the UV parameterization
+   890→    // is completely arbitrary — a surface with UV range [0,1]×[0,1]
+   891→    // can have any 3D area. Therefore, the area ratio is meaningless
+   892→    // for NURBS and we skip this check entirely.
+   893→    //
+   894→    // Additionally, we NEVER call surface.project_point() for NURBS
+   895→    // during triangulation — it does a 32×32 grid search + Newton-Raphson
+   896→    // (~1767 NURBS evaluations per point) which is catastrophically slow
+   897→    // and would hang the application.
+   898→    // ============================================================
+   899→    if !matches!(surface, Surface::Nurbs(_)) {
+   900→        let uv_area = polygon_area_2d(&outer_uv);
+   901→        let boundary_3d_area = polygon_area_3d(boundary_points_3d);
+   902→        let area_ratio = if boundary_3d_area > 1e-20 { uv_area / boundary_3d_area } else { 1.0 };
+   903→        if area_ratio < 0.001 && boundary_3d_area > 1e-10 {
+   904→            log::warn!(
+   905→                "triangulate_surface_consistent: UV polygon area ({:.6}) much smaller than 3D area ({:.6}), ratio={:.6} — re-projecting UVs from scratch",
+   906→                uv_area, boundary_3d_area, area_ratio
+   907→            );
+   908→            outer_uv = boundary_points_3d.iter().map(|p| {
+   909→                let (u, v) = surface.project_point(p);
+   910→                Point2d::new(u, v)
+   911→            }).collect();
+   912→            // Re-normalize
+   913→            crate::triangulate::normalize_uv_polygon(&mut outer_uv, u_period, v_period);
+   914→            if outer_uv.len() < 3 {
+   915→                return TriangleMesh::new();
+   916→            }
+   917→        }
+   918→    }
+   919→
+   920→    // ============================================================
+   921→    // Step 1.6: NURBS UV polygon self-intersection check
+   922→    //
+   923→    // For NURBS surfaces, the UV polygon can be self-intersecting
+   924→    // when Newton-Raphson converges to a wrong UV for some boundary
+   925→    // points (e.g., on surfaces with large UV ranges or bad
+   926→    // parameterization). A self-intersecting UV polygon produces
+   927→    // incorrect triangulation — triangles on the wrong side of
+   928→    // the surface, inverted normals, etc.
+   929→    //
+   930→    // If the UV polygon is self-intersecting, we fall back to
+   931→    // re-projecting all UVs from scratch using surface.project_point().
+   932→    // This is slow (~146 evaluations per point) but more robust.
+   933→    // ============================================================
+   934→    if let Surface::Nurbs(ref nurbs) = surface {
+   935→        let uv_area = polygon_area_2d(&outer_uv);
+   936→        // Log per-edge UV ranges to diagnose degenerate polygons
+   937→        {
+   938→            let (nu_min, nu_max) = nurbs.u_range();
+   939→            let (nv_min, nv_max) = nurbs.v_range();
+   940→            let u_min_all = outer_uv.iter().map(|p| p.u).fold(f64::MAX, f64::min);
+   941→            let u_max_all = outer_uv.iter().map(|p| p.u).fold(f64::MIN, f64::max);
+   942→            let v_min_all = outer_uv.iter().map(|p| p.v).fold(f64::MAX, f64::min);
+   943→            let v_max_all = outer_uv.iter().map(|p| p.v).fold(f64::MIN, f64::max);
+   944→            log::info!(
+   945→                "NURBS UV polygon: area={:.6}, {} points, u_range=[{:.4},{:.4}] v_range=[{:.4},{:.4}], nurbs_range=u[{:.4},{:.4}]v[{:.4},{:.4}]",
+   946→                uv_area, outer_uv.len(),
+   947→                u_min_all, u_max_all, v_min_all, v_max_all,
+   948→                nu_min, nu_max, nv_min, nv_max,
+   949→            );
+   950→            // Log first 5 and last 5 UVs for debugging
+   951→            if outer_uv.len() <= 20 {
+   952→                for (i, uv) in outer_uv.iter().enumerate() {
+   953→                    log::info!("  UV[{}] = ({:.4}, {:.4})", i, uv.u, uv.v);
+   954→                }
+   955→            } else {
+   956→                for i in 0..5 {
+   957→                    log::info!("  UV[{}] = ({:.4}, {:.4})", i, outer_uv[i].u, outer_uv[i].v);
+   958→                }
+   959→                log::info!("  ... ({} points) ...", outer_uv.len() - 10);
+   960→                for i in (outer_uv.len()-5)..outer_uv.len() {
+   961→                    log::info!("  UV[{}] = ({:.4}, {:.4})", i, outer_uv[i].u, outer_uv[i].v);
+   962→                }
+   963→            }
+   964→        }
+   965→        // A negative or zero UV area means the polygon is self-intersecting
+   966→        // or degenerate (collapsed to a line/point).
+   967→        if uv_area <= 0.0 && outer_uv.len() >= 3 {
+   968→            log::warn!(
+   969→                "NURBS UV polygon is self-intersecting/degenerate: area={:.6}, {} points, u_range=[{:.2},{:.2}] v_range=[{:.2},{:.2}] — re-projecting from scratch",
+   970→                uv_area, outer_uv.len(),
+   971→                outer_uv.iter().map(|p| p.u).fold(f64::MAX, f64::min),
+   972→                outer_uv.iter().map(|p| p.u).fold(f64::MIN, f64::max),
+   973→                outer_uv.iter().map(|p| p.v).fold(f64::MAX, f64::min),
+   974→                outer_uv.iter().map(|p| p.v).fold(f64::MIN, f64::max),
+   975→            );
+   976→            // Re-project all boundary UVs using full project_point()
+   977→            let (nu_min, nu_max) = nurbs.u_range();
+   978→            let (nv_min, nv_max) = nurbs.v_range();
+   979→            outer_uv = boundary_points_3d.iter().map(|p| {
+   980→                let (u, v) = surface.project_point(p);
+   981→                // Clamp to NURBS parameter range
+   982→                Point2d::new(
+   983→                    u.clamp(nu_min, nu_max),
+   984→                    v.clamp(nv_min, nv_max),
+   985→                )
+   986→            }).collect();
+   987→            // Re-normalize
+   988→            crate::triangulate::normalize_uv_polygon(&mut outer_uv, u_period, v_period);
+   989→            if outer_uv.len() < 3 {
+   990→                return TriangleMesh::new();
+   991→            }
+   992→            let new_area = polygon_area_2d(&outer_uv);
+   993→            log::info!(
+   994→                "NURBS UV polygon re-projected: area={:.6} (was {:.6})",
+   995→                new_area, uv_area
+   996→            );
+   997→        }
+   998→    }
+   999→
+  1000→    // ============================================================
+  1001→    // Step 2: Compute UV range and build domain
+  1002→    // ============================================================
+  1003→    let mut u_min = f64::MAX;
+  1004→    let mut u_max = f64::MIN;
+  1005→    let mut v_min = f64::MAX;
+  1006→    let mut v_max = f64::MIN;
+  1007→    for p in &outer_uv {
+  1008→        u_min = u_min.min(p.u);
+  1009→        u_max = u_max.max(p.u);
+  1010→        v_min = v_min.min(p.v);
+  1011→        v_max = v_max.max(p.v);
+  1012→    }
+  1013→    for huv in &normalized_holes_uv {
+  1014→        for p in huv {
+  1015→            u_min = u_min.min(p.u);
+  1016→            u_max = u_max.max(p.u);
+  1017→            v_min = v_min.min(p.v);
+  1018→            v_max = v_max.max(p.v);
+  1019→        }
+  1020→    }
+  1021→
+  1022→    let margin_u = (u_max - u_min) * 0.01;
+  1023→    let margin_v = (v_max - v_min) * 0.01;
+  1024→
+  1025→    // Check for degenerate UV range (zero-area polygon).
+  1026→    // When the boundary collapses to a line in UV space (constant u or v),
+  1027→    // earcutr cannot triangulate it. Fall back to a simple strip triangulation
+  1028→    // that connects the two boundary curves directly in 3D space.
+  1029→    // This happens for faces like the flat side of a hex nut, where the
+  1030→    // boundary lies at a constant angular position on a NURBS surface.
+  1031→    let u_range = u_max - u_min;
+  1032→    let v_range = v_max - v_min;
+  1033→    let u_degenerate = u_range < 1e-6;
+  1034→    let v_degenerate = v_range < 1e-6;
+  1035→
+  1036→    if u_degenerate && v_degenerate {
+  1037→        log::warn!(
+  1038→            "triangulate_surface_consistent: fully degenerate UV range u=[{:.6}, {:.6}] v=[{:.6}, {:.6}], {} boundary pts — returning empty mesh",
+  1039→            u_min, u_max, v_min, v_max, outer_uv.len()
+  1040→        );
+  1041→        return TriangleMesh::new();
+  1042→    }
+  1043→
+  1044→    if u_degenerate || v_degenerate {
+  1045→        // Degenerate UV polygon: boundary is a line in UV space.
+  1046→        // Create a simple strip triangulation from the 3D boundary points.
+  1047→        // The boundary forms a closed loop, so we triangulate it as a
+  1048→        // fan from the centroid (like ear-clipping a convex polygon).
+  1049→        log::info!(
+  1050→            "triangulate_surface_consistent: degenerate UV ({}) with {} boundary pts — using fan triangulation",
+  1051→            if u_degenerate { "constant-u" } else { "constant-v" },
+  1052→            outer_uv.len()
+  1053→        );
+  1054→        let mut mesh = TriangleMesh::new();
+  1055→        let n = boundary_points_3d.len();
+  1056→        if n < 3 {
+  1057→            return mesh;
+  1058→        }
+  1059→        // Compute centroid for fan triangulation
+  1060→        let mut cx = 0.0_f64; let mut cy = 0.0_f64; let mut cz = 0.0_f64;
+  1061→        for p in boundary_points_3d {
+  1062→            cx += p.x; cy += p.y; cz += p.z;
+  1063→        }
+  1064→        let inv_n = 1.0 / n as f64;
+  1065→        let centroid = draper_geometry::Point3d::new(cx * inv_n, cy * inv_n, cz * inv_n);
+  1066→
+  1067→        // Add centroid as vertex 0, then boundary points
+  1068→        let c_idx = mesh.add_vertex(centroid);
+  1069→        mesh.add_vertex_normal(c_idx, [0.0, 0.0, 1.0]); // approximate
+  1070→
+  1071→        for p in boundary_points_3d {
+  1072→            let idx = mesh.add_vertex(*p);
+  1073→            mesh.add_vertex_normal(idx, [0.0, 0.0, 1.0]); // approximate
+  1074→        }
+  1075→
+  1076→        // Triangulate as a fan from the centroid
+  1077→        for i in 0..n {
+  1078→            let i_next = (i + 1) % n;
+  1079→            if forward {
+  1080→                mesh.add_triangle(0, (i + 1) as u32, (i_next + 1) as u32);
+  1081→            } else {
+  1082→                mesh.add_triangle(0, (i_next + 1) as u32, (i + 1) as u32);
+  1083→            }
+  1084→        }
+  1085→        return mesh;
+  1086→    }
+  1087→
+  1088→    let mut domain = ParametricDomain::new(
+  1089→        outer_uv.clone(),
+  1090→        (u_min - margin_u, u_max + margin_u),
+  1091→        (v_min - margin_v, v_max + margin_v),
+  1092→    ).with_holes_from(normalized_holes_uv.iter().cloned());
+  1093→    domain.init_containment_grid();
+  1094→
+  1095→    // ============================================================
+  1096→    // Step 2.5: DO NOT downsample boundary points!
+  1097→    //
+  1098→    // Boundary points from the edge cache represent the EXACT face
+  1099→    // boundary. Downsampling them produces an incorrect polygon that
+  1100→    // doesn't match the actual face boundary, leading to wrong
+  1101→    // triangulation (triangles in wrong regions, gaps, overlaps).
+  1102→    //
+  1103→    // earcutr is O(n log n) and handles even 500+ boundary points
+  1104→    // efficiently. The resulting triangle count from earcutr is
+  1105→    // approximately 2×(N_boundary + N_holes + N_interior) - 2, which
+  1106→    // is very reasonable.
+  1107→    //
+  1108→    // Instead of downsampling boundaries, we control the total triangle
+  1109→    // count by limiting INTERIOR points only.
+  1110→    // ============================================================
+  1111→    let boundary_points_3d = boundary_points_3d.to_vec();
+  1112→    let outer_uv = outer_uv; // Already a Vec, no downsampling
+  1113→
+  1114→    // Keep all hole points too — holes define where NOT to triangulate
+  1115→    let hole_polylines_3d_capped: Vec<Vec<Point3d>> = hole_polylines_3d.iter().map(|h| h.clone()).collect();
+  1116→    let normalized_holes_uv_capped: Vec<Vec<Point2d>> = normalized_holes_uv;
+  1117→
+  1118→    let max_total_points = (params.max_face_triangles / 2).max(6);
+  1119→
+  1120→    // ============================================================
+  1121→    // Step 3: Generate interior grid points
+  1122→    //
+  1123→    // IMPORTANT DESIGN PRINCIPLE:
+  1124→    // Interior points are needed ONLY to improve surface approximation
+  1125→    // for curved surfaces. For flat surfaces (planes, bilinear NURBS),
+  1126→    // NO interior points are needed — the boundary polygon alone,
+  1127→    // triangulated by earcutr, produces a perfect mesh.
+  1128→    //
+  1129→    // For curved surfaces (cylinder, sphere, high-degree NURBS),
+  1130→    // interior points help the triangulation follow the surface
+  1131→    // curvature. We add the MINIMUM number needed.
+  1132→    //
+  1133→    // The total triangle budget is: max_face_triangles per face.
+  1134→    // Since we keep ALL boundary points (for watertightness),
+  1135→    // the interior point budget is:
+  1136→    //   max_face_triangles/2 - boundary_points - hole_points
+  1137→    // ============================================================
+  1138→    // Interior point budget: boundary points are mandatory for watertightness
+  1139→    // and should NOT consume the interior budget. Interior points are needed
+  1140→    // for curved surface approximation quality. We compute the interior budget
+  1141→    // separately to ensure curved surfaces always get enough interior Steiner points.
+  1142→    let n_boundary_and_holes = boundary_points_3d.len()
+  1143→        + hole_polylines_3d_capped.iter().map(|h| h.len()).sum::<usize>();
+  1144→
+  1145→    // Minimum interior points for curved surfaces based on the number of
+  1146→    // boundary vertices. A curved surface needs at least ~1/3 as many interior
+  1147→    // points as boundary points to produce a good triangulation that follows
+  1148→    // the surface curvature.
+  1149→    //
+  1150→    // ADAPTIVE: For NURBS, the minimum is based on curvature rather than a
+  1151→    // fixed floor. Bilinear NURBS (deg 1×1) need 0 interior points. Ruled
+  1152→    // NURBS (deg 1×N) need fewer points than high-degree NURBS (deg M×N).
+  1153→    // The chord-error refinement will add more points where needed.
+  1154→    let is_nurbs = matches!(surface, Surface::Nurbs(_));
+  1155→    let is_nurbs_bilinear = if let Surface::Nurbs(ref nurbs) = surface {
+  1156→        nurbs.u_degree <= 1 && nurbs.v_degree <= 1
+  1157→    } else {
+  1158→        false
+  1159→    };
+  1160→    let is_nurbs_ruled = if let Surface::Nurbs(ref nurbs) = surface {
+  1161→        (nurbs.u_degree <= 1) != (nurbs.v_degree <= 1) // exactly one direction is linear
+  1162→    } else {
+  1163→        false
+  1164→    };
+  1165→    let min_interior_for_curved = if is_nurbs_bilinear {
+  1166→        0 // Bilinear NURBS are flat — no interior points needed
+  1167→    } else if is_nurbs_ruled {
+  1168→        (n_boundary_and_holes / 4).max(8) // Ruled surfaces: fewer interior points
+  1169→    } else if is_nurbs {
+  1170→        (n_boundary_and_holes / 3).max(20) // High-degree NURBS: moderate floor
+  1171→    } else {
+  1172→        (n_boundary_and_holes / 3).max(20)
+  1173→    };
+  1174→    let max_interior_budget = max_total_points.saturating_sub(n_boundary_and_holes).max(min_interior_for_curved);
+  1175→
+  1176→    let interior_uv_points = if let Surface::Nurbs(ref nurbs) = surface {
+  1177→        let u_deg = nurbs.u_degree;
+  1178→        let v_deg = nurbs.v_degree;
+  1179→
+  1180→        // For bilinear (deg=1×1) NURBS surfaces, no interior points needed.
+  1181→        // The surface is flat and boundary points alone triangulate it perfectly.
+  1182→        if u_deg <= 1 && v_deg <= 1 {
+  1183→            Vec::new()
+  1184→        } else if u_deg <= 1 || v_deg <= 1 {
+  1185→            // Ruled surface (linear in one direction): needs interior points
+  1186→            // to capture curvature in the non-linear direction.
+  1187→            // Use adaptive subdivision based on actual curvature — fewer
+  1188→            // subdivisions for nearly-flat surfaces, more for curved ones.
+  1189→            let max_k = crate::adaptive::max_curvature_over_domain(
+  1190→                surface, u_min, u_max, v_min, v_max,
+  1191→            );
+  1192→            // n_sub ranges from 2 (nearly flat, max_k < 0.01) to 8 (high curvature)
+  1193→            let n_sub = if max_k < 0.01 {
+  1194→                2
+  1195→            } else if max_k < 0.1 {
+  1196→                3
+  1197→            } else if max_k < 1.0 {
+  1198→                4
+  1199→            } else {
+  1200→                6
+  1201→            };
+  1202→            let pts = generate_nurbs_interior_points(&domain, &nurbs.u_knots, &nurbs.v_knots, n_sub);
+  1203→            downsample_interior_points(&pts, max_interior_budget)
+  1204→        } else {
+  1205→            // High-degree NURBS (both directions curved): use adaptive sampling.
+  1206→            // Compute curvature to determine how many subdivisions are needed.
+  1207→            let max_k = crate::adaptive::max_curvature_over_domain(
+  1208→                surface, u_min, u_max, v_min, v_max,
+  1209→            );
+  1210→            // n_sub ranges from 3 (low curvature) to 8 (high curvature).
+  1211→            // This is more conservative than the old formula which used up to
+  1212→            // 12 subdivisions — the chord-error refinement adds more points
+  1213→            // where actually needed, so we don't need excessive initial sampling.
+  1214→            let n_sub = if max_k < 0.01 {
+  1215→                3
+  1216→            } else if max_k < 0.1 {
+  1217→                4
+  1218→            } else if max_k < 1.0 {
+  1219→                5
+  1220→            } else {
+  1221→                8
+  1222→            };
+  1223→            let pts = generate_nurbs_interior_points(&domain, &nurbs.u_knots, &nurbs.v_knots, n_sub);
+  1224→            downsample_interior_points(&pts, max_interior_budget)
+  1225→        }
+  1226→    } else {
+  1227→        // Non-NURBS curved surfaces (Torus, Revolution, Extrusion)
+  1228→        let (n_u, n_v) = if params.adaptive {
+  1229→            crate::adaptive::required_samples_capped(
+  1230→                surface,
+  1231→                u_min, u_max, v_min, v_max,
+  1232→                params.max_deviation, params.detail_level,
+  1233→                params.max_face_triangles,
+  1234→            )
+  1235→        } else {
+  1236→            let mut n_u = params.angular_samples;
+  1237→            let mut n_v = params.height_samples;
+  1238→            let approx_tris = 2 * n_u * n_v;
+  1239→            if approx_tris > params.max_face_triangles {
+  1240→                let scale = (params.max_face_triangles as f64 / approx_tris as f64).sqrt();
+  1241→                n_u = ((n_u as f64 * scale).ceil() as usize).max(4);
+  1242→                n_v = ((n_v as f64 * scale).ceil() as usize).max(2);
+  1243→            }
+  1244→            (n_u, n_v)
+  1245→        };
+  1246→        let boundary_margin = (u_max - u_min) / n_u.max(1) as f64 * 0.3;
+  1247→        let pts = generate_interior_points(&domain, n_u, n_v, boundary_margin);
+  1248→        downsample_interior_points(&pts, max_interior_budget)
+  1249→    };
+  1250→
+  1251→    // ============================================================
+  1252→    // Step 4: Build earcutr input with ALL points
+  1253→    //
+  1254→    // KEY: Pass interior points as part of the earcutr input
+  1255→    // directly. earcutr handles Steiner points natively and
+  1256→    // produces quality triangulation in O(n log n).
+  1257→    // ============================================================
+  1258→
+  1259→    let n_boundary = outer_uv.len();
+  1260→
+  1261→    // Build combined point array: [boundary_uv...][valid_hole_uv...][interior_uv...]
+  1262→    // CRITICAL: Only include holes with >= 3 points. Small holes are degenerate
+  1263→    // and would corrupt earcutr's triangulation. We must also track which holes
+  1264→    // were included so the 3D vertex array (Step 5) stays in sync with UV indices.
+  1265→    let mut all_uv: Vec<Point2d> = outer_uv.clone();
+  1266→    let mut valid_hole_indices: Vec<usize> = Vec::new(); // indices into normalized_holes_uv_capped
+  1267→    let mut hole_start_indices: Vec<usize> = Vec::new();
+  1268→    let mut offset = n_boundary;
+  1269→    for (hi, huv) in normalized_holes_uv_capped.iter().enumerate() {
+  1270→        if huv.len() >= 3 {
+  1271→            valid_hole_indices.push(hi);
+  1272→            hole_start_indices.push(offset);
+  1273→            all_uv.extend_from_slice(huv);
+  1274→            offset += huv.len();
+  1275→        }
+  1276→        // Skip holes with < 3 points — they're degenerate
+  1277→    }
+  1278→    let n_boundary_and_holes_actual = all_uv.len();
+  1279→
+  1280→    // Add interior points as Steiner points — already capped by max_interior_budget
+  1281→    all_uv.extend_from_slice(&interior_uv_points);
+  1282→
+  1283→    // Build flat coordinate array for earcutr
+  1284→    let mut coords: Vec<f64> = Vec::with_capacity(all_uv.len() * 2);
+  1285→    for p in &all_uv {
+  1286→        coords.push(p.u);
+  1287→        coords.push(p.v);
+  1288→    }
+  1289→
+  1290→    // Run earcutr triangulation with ALL points at once
+  1291→    // hole_start_indices was built above, only including valid holes (>= 3 points)
+  1292→    let triangle_indices = earcutr::earcut(&coords, &hole_start_indices, 2);
+  1293→
+  1294→    // Collect triangles, filtering degenerate ones
+  1295→    let mut result_triangles: Vec<[u32; 3]> = Vec::with_capacity(triangle_indices.len() / 3);
+  1296→    for chunk in triangle_indices.chunks(3) {
+  1297→        if chunk.len() < 3 { break; }
+  1298→        let a = chunk[0] as u32;
+  1299→        let b = chunk[1] as u32;
+  1300→        let c = chunk[2] as u32;
+  1301→        if a == b || b == c || a == c { continue; }
+  1302→        result_triangles.push([a, b, c]);
+  1303→    }
+  1304→
+  1305→    // ============================================================
+  1306→    // Step 5: Build 3D mesh
+  1307→    //
+  1308→    // IMPORTANT: No per-triangle containment check!
+  1309→    // earcutr already produces correct triangulation when given
+  1310→    // proper hole indices. The old centroid check was:
+  1311→    // 1. O(triangles × boundary_len) — extremely slow
+  1312→    // 2. Incorrect for triangles near boundaries (coarse grid gives false negatives)
+  1313→    // 3. Caused "not watertight" gaps in the mesh
+  1314→    // ============================================================
+  1315→
+  1316→    // Build combined 3D point array for boundary + hole vertices
+  1317→    // CRITICAL: Only include holes that are also in all_uv (valid_hole_indices).
+  1318→    // This ensures the 3D vertex indices match the UV indices used by earcutr.
+  1319→    let mut all_boundary_3d: Vec<Point3d> = boundary_points_3d.clone();
+  1320→    for &hi in &valid_hole_indices {
+  1321→        all_boundary_3d.extend_from_slice(&hole_polylines_3d_capped[hi]);
+  1322→    }
+  1323→
+  1324→    // Build mesh — use cached 3D points for boundary/hole vertices
+  1325→    let mut mesh = TriangleMesh::new();
+  1326→    let mut vertex_map: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+  1327→
+  1328→    for tri in &result_triangles {
+  1329→        // Bounds check
+  1330→        if tri[0] as usize >= all_uv.len()
+  1331→            || tri[1] as usize >= all_uv.len()
+  1332→            || tri[2] as usize >= all_uv.len()
+  1333→        {
+  1334→            continue;
+  1335→        }
+  1336→
+  1337→        // Add vertices and triangle
+  1338→        let mut tri_indices = [0u32; 3];
+  1339→        for (k, &idx) in tri.iter().enumerate() {
+  1340→            let idx_usize = idx as usize;
+  1341→            let entry = vertex_map.entry(idx).or_insert_with(|| {
+  1342→                if idx_usize < n_boundary_and_holes_actual {
+  1343→                    // Boundary/hole vertex: use cached 3D point directly
+  1344→                    // This is what makes the mesh watertight — shared edge
+  1345→                    // vertices have bit-identical 3D positions
+  1346→                    let p3d = all_boundary_3d[idx_usize];
+  1347→                    let uv = all_uv[idx_usize];
+  1348→                    // For boundary vertices, we need the normal.
+  1349→                    // For NURBS, use derivatives_at to get both point and normal
+  1350→                    // in one call (saves a separate normal_at = derivatives_at call).
+  1351→                    let n = if let Surface::Nurbs(ref nurbs) = surface {
+  1352→                        let derivs = nurbs.derivatives_at(uv.u, uv.v);
+  1353→                        derivs.normal()
+  1354→                    } else {
+  1355→                        surface.normal_at(uv.u, uv.v)
+  1356→                    };
+  1357→                    let vi = mesh.add_vertex(p3d);
+  1358→                    mesh.add_vertex_normal(vi, [n.x, n.y, n.z]);
+  1359→                    vi
+  1360→                } else {
+  1361→                    // Interior vertex: compute 3D point and normal from UV.
+  1362→                    // For NURBS, use derivatives_at once to get both point and
+  1363→                    // normal in a single call (87 de Boor iterations) instead of
+  1364→                    // point_at (30) + normal_at (87) = 117 iterations separately.
+  1365→                    // Apply deterministic rounding to ensure consistent vertex positions
+  1366→                    // across faces (matches edge cache's rounding for boundary vertices).
+  1367→                    let uv = all_uv[idx_usize];
+  1368→                    let (p3d, n) = if let Surface::Nurbs(ref nurbs) = surface {
+  1369→                        let derivs = nurbs.derivatives_at(uv.u, uv.v);
+  1370→                        (deterministic_round_point(derivs.point), derivs.normal())
+  1371→                    } else {
+  1372→                        (deterministic_round_point(surface.point_at(uv.u, uv.v)), surface.normal_at(uv.u, uv.v))
+  1373→                    };
+  1374→                    let vi = mesh.add_vertex(p3d);
+  1375→                    mesh.add_vertex_normal(vi, [n.x, n.y, n.z]);
+  1376→                    vi
+  1377→                }
+  1378→            });
+  1379→            tri_indices[k] = *entry;
+  1380→        }
+  1381→
+  1382→        if forward {
+  1383→            mesh.add_triangle(tri_indices[0], tri_indices[1], tri_indices[2]);
+  1384→        } else {
+  1385→            mesh.add_triangle(tri_indices[0], tri_indices[2], tri_indices[1]);
+  1386→        }
+  1387→    }
+  1388→
+  1389→    // ============================================================
+  1390→    // Step 5.5: DIAGNOSTIC — Verify that earcutr preserved all boundary edges
+  1391→    //
+  1392→    // After earcutr triangulation, every consecutive pair of boundary vertices
+  1393→    // should be connected by an edge in at least one triangle. If earcutr
+  1394→    // skips a boundary edge, the mesh will have a boundary edge that should
+  1395→    // be shared with an adjacent face — breaking watertightness.
+  1396→    // ============================================================
+  1397→    {
+  1398→        let n_bnd = n_boundary_and_holes_actual;
+  1399→        // Count boundary edges in the mesh (edges between consecutive boundary vertices)
+  1400→        let mut boundary_edges_in_mesh: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+  1401→        for tri in &mesh.triangles {
+  1402→            for k in 0..3 {
+  1403→                let a = tri[k];
+  1404→                let b = tri[(k + 1) % 3];
+  1405→                boundary_edges_in_mesh.insert((a.min(b), a.max(b)));
+  1406→            }
+  1407→        }
+  1408→        // Check: for each consecutive pair of boundary vertices, is there an edge?
+  1409→        let mut missing_boundary_edges = 0usize;
+  1410→        for i in 0..n_bnd {
+  1411→            let i_next = (i + 1) % n_bnd;
+  1412→            let va = *vertex_map.get(&(i as u32)).unwrap_or(&u32::MAX);
+  1413→            let vb = *vertex_map.get(&(i_next as u32)).unwrap_or(&u32::MAX);
+  1414→            if va != u32::MAX && vb != u32::MAX {
+  1415→                let key = (va.min(vb), va.max(vb));
+  1416→                if !boundary_edges_in_mesh.contains(&key) {
+  1417→                    missing_boundary_edges += 1;
+  1418→                }
+  1419→            }
+  1420→        }
+  1421→        if missing_boundary_edges > 0 {
+  1422→            // Log details about the first few missing edges
+  1423→            let mut logged = 0;
+  1424→            for i in 0..n_bnd {
+  1425→                let i_next = (i + 1) % n_bnd;
+  1426→                let va = *vertex_map.get(&(i as u32)).unwrap_or(&u32::MAX);
+  1427→                let vb = *vertex_map.get(&(i_next as u32)).unwrap_or(&u32::MAX);
+  1428→                if va != u32::MAX && vb != u32::MAX {
+  1429→                    let key = (va.min(vb), va.max(vb));
+  1430→                    if !boundary_edges_in_mesh.contains(&key) {
+  1431→                        let pa = mesh.vertices[va as usize];
+  1432→                        let pb = mesh.vertices[vb as usize];
+  1433→                        let dist = ((pa.x - pb.x).powi(2) + (pa.y - pb.y).powi(2) + (pa.z - pb.z).powi(2)).sqrt();
+  1434→                        log::warn!(
+  1435→                            "  MISSING boundary edge: bnd_idx {}→{} mesh_idx {}→{} dist={:.6}",
+  1436→                            i, i_next, va, vb, dist
+  1437→                        );
+  1438→                        logged += 1;
+  1439→                        if logged >= 5 { break; }
+  1440→                    }
+  1441→                }
+  1442→            }
+  1443→            log::warn!(
+  1444→                "DIAG: earcutr missing {}/{} boundary edges for surface {:?} (n_bnd={}, n_holes={}, verts={}, tris={})",
+  1445→                missing_boundary_edges, n_bnd,
+  1446→                std::mem::discriminant(surface),
+  1447→                n_bnd, hole_polylines_3d.len(),
+  1448→                mesh.vertices.len(), mesh.triangles.len(),
+  1449→            );
+  1450→        }
+  1451→    }
+  1452→
+  1453→    // ============================================================
+  1454→    // Step 6: Adaptive chord-error refinement
+  1455→    //
+  1456→    // For curved surfaces (not planes), check each triangle's chord
+  1457→    // error — the distance from the midpoint of each edge to the
+  1458→    // true surface point at the corresponding UV. If any edge exceeds
+  1459→    // max_deviation, subdivide the triangle by inserting a point at
+  1460→    // the surface midpoint.
+  1461→    //
+  1462→    // This is iterative — we repeat until no edge exceeds the
+  1463→    // tolerance or we hit a maximum iteration count.
+  1464→    //
+  1465→    // KEY OPTIMIZATION: We build a vertex UV array so that midpoint
+  1466→    // UVs can be computed by averaging adjacent vertex UVs instead of
+  1467→    // calling surface.project_point(). For NURBS surfaces, project_point()
+  1468→    // costs ~1000+ evaluations per call (32×32 grid search + Newton-Raphson),
+  1469→    // making chord-error refinement catastrophically slow. By using UV
+  1470→    // averaging, each midpoint costs just 1 surface.point_at() evaluation.
+  1471→    // ============================================================
+  1472→    if !matches!(surface, Surface::Plane(_)) && params.max_deviation > 0.0 {
+  1473→        // Use 3 refinement iterations for NURBS (2 for other curved surfaces).
+  1474→        // NURBS surfaces with high curvature benefit from the extra iteration
+  1475→        // because knot-span interior points may not capture all curvature regions.
+  1476→        // The UV-averaging approach avoids the expensive project_point() — each
+  1477→        // midpoint costs just 1 surface.point_at() evaluation, so 3 iterations
+  1478→        // is affordable even for large NURBS surfaces.
+  1479→        let max_refine_iters = if matches!(surface, Surface::Nurbs(_)) { 3 } else { 2 };
+  1480→
+  1481→        // Build vertex UV array — maps mesh vertex index to UV coordinate.
+  1482→        // This enables O(1) midpoint UV computation instead of O(1000) project_point().
+  1483→        let mut vertex_uvs: Vec<Point2d> = vec![Point2d::new(0.0, 0.0); mesh.vertices.len()];
+  1484→        for (idx, uv) in all_uv.iter().enumerate() {
+  1485→            if let Some(&mesh_idx) = vertex_map.get(&(idx as u32)) {
+  1486→                vertex_uvs[mesh_idx as usize] = *uv;
+  1487→            }
+  1488→        }
+  1489→
+  1490→        // Track which mesh vertices are boundary (from edge cache) vs interior.
+  1491→        // Boundary vertices have bit-identical 3D coordinates across faces,
+  1492→        // so splitting a boundary-boundary edge would create new vertices
+  1493→        // that can't be deduplicated — breaking watertightness.
+  1494→        let mut is_boundary_vertex: Vec<bool> = vec![false; mesh.vertices.len()];
+  1495→        for (idx, _) in all_uv.iter().enumerate() {
+  1496→            if let Some(&mesh_idx) = vertex_map.get(&(idx as u32)) {
+  1497→                // Vertices from boundary/hole polylines (indices < n_boundary_and_holes_actual)
+  1498→                // are "boundary" vertices from the edge cache.
+  1499→                is_boundary_vertex[mesh_idx as usize] = idx < n_boundary_and_holes_actual;
+  1500→            }
+  1501→        }
+  1502→
+  1503→        refine_mesh_chord_error_uv(
+  1504→            &mut mesh, surface, forward, params.max_deviation, max_refine_iters,
+  1505→            &mut vertex_uvs, &mut is_boundary_vertex,
+  1506→        );
+  1507→    }
+  1508→
+  1509→    mesh
+  1510→}
+  1511→
+  1512→// ============================================================
+  1513→// Adaptive chord-error refinement
+  1514→// ============================================================
+  1515→
+  1516→/// Iteratively refine a triangle mesh on a curved surface by checking
+  1517→/// the chord error of each edge and subdividing edges that exceed
+  1518→/// the maximum deviation tolerance.
+  1519→///
+  1520→/// The chord error of an edge is the distance from the midpoint of
+  1521→/// the straight line segment (in 3D) to the true surface point at
+  1522→/// the corresponding UV parameter. For curved surfaces like cylinders
+  1523→/// and NURBS, this measures how well the triangle mesh approximates
+  1524→/// the true surface.
+  1525→///
+  1526→/// # Algorithm
+  1527→/// For each iteration:
+  1528→/// 1. For each triangle edge, compute the midpoint in 3D
+  1529→/// 2. Project the midpoint onto the surface to get the "true" point
+  1530→/// 3. If the distance exceeds max_deviation, mark the edge for subdivision
+  1531→/// 4. For each triangle with a marked edge, insert the surface point
+  1532→///    and subdivide the triangle into 2-4 sub-triangles
+  1533→///
+  1534→/// # Arguments
+  1535→/// * `mesh` — The triangle mesh to refine
+  1536→/// * `surface` — The parametric surface the mesh approximates
+  1537→/// * `forward` — Whether face normal matches surface normal
+  1538→/// * `max_deviation` — Maximum allowed chord error
+  1539→/// * `max_iterations` — Maximum number of refinement iterations
+  1540→#[allow(dead_code)] // Kept for potential non-UV-aware use cases; consistent path uses UV-aware variant
+  1541→fn refine_mesh_chord_error(
+  1542→    mesh: &mut TriangleMesh,
+  1543→    surface: &Surface,
+  1544→    forward: bool,
+  1545→    max_deviation: f64,
+  1546→    max_iterations: usize,
+  1547→) {
+  1548→    use std::collections::HashMap;
+  1549→
+  1550→    for _iter in 0..max_iterations {
+  1551→        // Find edges that need subdivision
+  1552→        // edge = (v0, v1) where v0 < v1
+  1553→        let mut edges_to_split: HashMap<(u32, u32), u32> = HashMap::new();
+  1554→
+  1555→        for tri in &mesh.triangles {
+  1556→            for k in 0..3 {
+  1557→                let v0 = tri[k];
+  1558→                let v1 = tri[(k + 1) % 3];
+  1559→                let edge = if v0 < v1 { (v0, v1) } else { (v1, v0) };
+  1560→
+  1561→                if edges_to_split.contains_key(&edge) {
+  1562→                    continue; // Already marked
+  1563→                }
+  1564→
+  1565→                let p0 = mesh.vertices[v0 as usize];
+  1566→                let p1 = mesh.vertices[v1 as usize];
+  1567→
+  1568→                // Compute midpoint of the edge in 3D
+  1569→                let mid = Point3d::new(
+  1570→                    (p0.x + p1.x) * 0.5,
+  1571→                    (p0.y + p1.y) * 0.5,
+  1572→                    (p0.z + p1.z) * 0.5,
+  1573→                );
+  1574→
+  1575→                // Project midpoint onto the surface
+  1576→                let (u, v) = surface.project_point(&mid);
+  1577→                let p_surf = surface.point_at(u, v);
+  1578→
+  1579→                // For NURBS surfaces, project_point can be inaccurate.
+  1580→                // Try Newton-Raphson refinement if the initial projection
+  1581→                // is far from the midpoint.
+  1582→                let (u, v, p_surf) = if let Surface::Nurbs(ref nurbs) = surface {
+  1583→                    let dx0 = p_surf.x - mid.x;
+  1584→                    let dy0 = p_surf.y - mid.y;
+  1585→                    let dz0 = p_surf.z - mid.z;
+  1586→                    let err0 = (dx0*dx0 + dy0*dy0 + dz0*dz0).sqrt();
+  1587→                    if err0 > max_deviation * 0.1 {
+  1588→                        let (u2, v2) = reproject_nurbs_point(nurbs, &mid, u, v);
+  1589→                        let p2 = surface.point_at(u2, v2);
+  1590→                        let dx2 = p2.x - mid.x;
+  1591→                        let dy2 = p2.y - mid.y;
+  1592→                        let dz2 = p2.z - mid.z;
+  1593→                        let err2 = (dx2*dx2 + dy2*dy2 + dz2*dz2).sqrt();
+  1594→                        if err2 < err0 {
+  1595→                            (u2, v2, p2)
+  1596→                        } else {
+  1597→                            (u, v, p_surf)
+  1598→                        }
+  1599→                    } else {
+  1600→                        (u, v, p_surf)
+  1601→                    }
+  1602→                } else {
+  1603→                    (u, v, p_surf)
+  1604→                };
+  1605→
+  1606→                // Chord error: distance from line midpoint to surface point
+  1607→                let dx = mid.x - p_surf.x;
+  1608→                let dy = mid.y - p_surf.y;
+  1609→                let dz = mid.z - p_surf.z;
+  1610→                let chord_error = (dx * dx + dy * dy + dz * dz).sqrt();
+  1611→
+  1612→                if chord_error > max_deviation {
+  1613→                    // Mark this edge for subdivision — the new vertex index
+  1614→                    // will be assigned when we actually split it
+  1615→                    edges_to_split.insert(edge, u32::MAX); // Placeholder
+  1616→                }
+  1617→            }
+  1618→        }
+  1619→
+  1620→        if edges_to_split.is_empty() {
+  1621→            break; // No more edges to split
+  1622→        }
+  1623→
+  1624→        // Now insert the surface points and update the map
+  1625→        let mut new_edges: HashMap<(u32, u32), u32> = HashMap::new();
+  1626→        for (edge, _) in &edges_to_split {
+  1627→            let p0 = mesh.vertices[edge.0 as usize];
+  1628→            let p1 = mesh.vertices[edge.1 as usize];
+  1629→
+  1630→            let mid = Point3d::new(
+  1631→                (p0.x + p1.x) * 0.5,
+  1632→                (p0.y + p1.y) * 0.5,
+  1633→                (p0.z + p1.z) * 0.5,
+  1634→            );
+  1635→
+  1636→            let (u, v) = surface.project_point(&mid);
+  1637→            let p_surf = surface.point_at(u, v);
+  1638→
+  1639→            // For NURBS surfaces, project_point can be inaccurate.
+  1640→            // Verify the re-projection quality and re-project using
+  1641→            // Newton-Raphson if the initial result is poor.
+  1642→            let (u, v, p_surf) = if let Surface::Nurbs(ref nurbs) = surface {
+  1643→                // Check re-projection error
+  1644→                let dx = p_surf.x - mid.x;
+  1645→                let dy = p_surf.y - mid.y;
+  1646→                let dz = p_surf.z - mid.z;
+  1647→                let reproj_err = (dx*dx + dy*dy + dz*dz).sqrt();
+  1648→
+  1649→                // If re-projection error is large, try Newton-Raphson refinement
+  1650→                if reproj_err > max_deviation * 0.1 {
+  1651→                    let (u2, v2) = reproject_nurbs_point(nurbs, &mid, u, v);
+  1652→                    let p2 = surface.point_at(u2, v2);
+  1653→                    let dx2 = p2.x - mid.x;
+  1654→                    let dy2 = p2.y - mid.y;
+  1655→                    let dz2 = p2.z - mid.z;
+  1656→                    let err2 = (dx2*dx2 + dy2*dy2 + dz2*dz2).sqrt();
+  1657→                    if err2 < reproj_err {
+  1658→                        (u2, v2, p2)
+  1659→                    } else {
+  1660→                        (u, v, p_surf)
+  1661→                    }
+  1662→                } else {
+  1663→                    (u, v, p_surf)
+  1664→                }
+  1665→            } else {
+  1666→                (u, v, p_surf)
+  1667→            };
+  1668→            let n = surface.normal_at(u, v);
+  1669→
+  1670→            let vi = mesh.add_vertex(p_surf);
+  1671→            mesh.add_vertex_normal(vi, [n.x, n.y, n.z]);
+  1672→            new_edges.insert(*edge, vi);
+  1673→        }
+  1674→
+  1675→        // Now rebuild the triangle list, splitting triangles that have
+  1676→        // edges marked for subdivision
+  1677→        let old_triangles = std::mem::take(&mut mesh.triangles);
+  1678→        mesh.triangles.reserve(old_triangles.len());
+  1679→
+  1680→        for tri in &old_triangles {
+  1681→            // Check which edges of this triangle are split
+  1682→            let mut split_verts = [None; 3];
+  1683→            let mut n_splits = 0;
+  1684→            for k in 0..3 {
+  1685→                let v0 = tri[k];
+  1686→                let v1 = tri[(k + 1) % 3];
+  1687→                let edge = if v0 < v1 { (v0, v1) } else { (v1, v0) };
+  1688→                if let Some(&new_v) = new_edges.get(&edge) {
+  1689→                    split_verts[k] = Some(new_v);
+  1690→                    n_splits += 1;
+  1691→                }
+  1692→            }
+  1693→
+  1694→            if n_splits == 0 {
+  1695→                // No splits — keep the triangle as-is
+  1696→                mesh.triangles.push(*tri);
+  1697→            } else if n_splits == 1 {
+  1698→                // One edge split — triangle becomes 2 triangles
+  1699→                // Find which edge is split
+  1700→                let split_k = split_verts.iter().position(|v| v.is_some()).unwrap();
+  1701→                let vm = split_verts[split_k].unwrap();
+  1702→                let v0 = tri[split_k];
+  1703→                let v1 = tri[(split_k + 1) % 3];
+  1704→                let v2 = tri[(split_k + 2) % 3];
+  1705→
+  1706→                if forward {
+  1707→                    mesh.triangles.push([v0, vm, v2]);
+  1708→                    mesh.triangles.push([vm, v1, v2]);
+  1709→                } else {
+  1710→                    mesh.triangles.push([v0, v2, vm]);
+  1711→                    mesh.triangles.push([vm, v2, v1]);
+  1712→                }
+  1713→            } else if n_splits == 2 {
+  1714→                // Two edges split — triangle becomes 3 triangles
+  1715→                let split_edges: Vec<usize> = split_verts.iter()
+  1716→                    .enumerate()
+  1717→                    .filter(|(_, v)| v.is_some())
+  1718→                    .map(|(i, _)| i)
+  1719→                    .collect();
+  1720→                let k0 = split_edges[0];
+  1721→                let k1 = split_edges[1];
+  1722→                let vm0 = split_verts[k0].unwrap();
+  1723→                let vm1 = split_verts[k1].unwrap();
+  1724→                let v0 = tri[k0];
+  1725→                let v1 = tri[(k0 + 1) % 3];
+  1726→                let v2 = tri[(k0 + 2) % 3];
+  1727→
+  1728→                // k0 is the first split edge: v0 -> v1
+  1729→                // k1 is the second split edge: v1 -> v2 (if adjacent)
+  1730→                if (k0 + 1) % 3 == k1 {
+  1731→                    // Split edges are adjacent: v0-vm0-v1-vm1-v2
+  1732→                    if forward {
+  1733→                        mesh.triangles.push([v0, vm0, vm1]);
+  1734→                        mesh.triangles.push([vm0, v1, vm1]);
+  1735→                        mesh.triangles.push([v0, vm1, v2]);
+  1736→                    } else {
+  1737→                        mesh.triangles.push([v0, vm1, vm0]);
+  1738→                        mesh.triangles.push([vm0, vm1, v1]);
+  1739→                        mesh.triangles.push([v0, v2, vm1]);
+  1740→                    }
+  1741→                } else {
+  1742→                    // k1 is on the other side: v0-vm0-v1, v0-vm1-v2
+  1743→                    // Actually k0=0, k1=2 means edges v0->v1 and v2->v0
+  1744→                    // v2-vm1-v0-vm0-v1
+  1745→                    if forward {
+  1746→                        mesh.triangles.push([v0, vm0, v1]);
+  1747→                        mesh.triangles.push([v2, vm1, vm0]);
+  1748→                        mesh.triangles.push([vm0, v0, vm1]);
+  1749→                    } else {
+  1750→                        mesh.triangles.push([v0, v1, vm0]);
+  1751→                        mesh.triangles.push([v2, vm0, vm1]);
+  1752→                        mesh.triangles.push([vm0, vm1, v0]);
+  1753→                    }
+  1754→                }
+  1755→            } else {
+  1756→                // All 3 edges split — triangle becomes 4 triangles
+  1757→                let vm0 = split_verts[0].unwrap();
+  1758→                let vm1 = split_verts[1].unwrap();
+  1759→                let vm2 = split_verts[2].unwrap();
+  1760→                let v0 = tri[0];
+  1761→                let v1 = tri[1];
+  1762→                let v2 = tri[2];
+  1763→
+  1764→                if forward {
+  1765→                    mesh.triangles.push([v0, vm0, vm2]);
+  1766→                    mesh.triangles.push([vm0, v1, vm1]);
+  1767→                    mesh.triangles.push([vm2, vm1, v2]);
+  1768→                    mesh.triangles.push([vm0, vm1, vm2]);
+  1769→                } else {
+  1770→                    mesh.triangles.push([v0, vm2, vm0]);
+  1771→                    mesh.triangles.push([vm0, vm1, v1]);
+  1772→                    mesh.triangles.push([vm2, v2, vm1]);
+  1773→                    mesh.triangles.push([vm0, vm2, vm1]);
+  1774→                }
+  1775→            }
+  1776→        }
+  1777→
+  1778→        // Also update face_normals if present
+  1779→        if let Some(ref mut face_normals) = mesh.face_normals {
+  1780→            let n_old = face_normals.len();
+  1781→            let n_new = mesh.triangles.len();
+  1782→            if n_new > n_old {
+  1783→                // Compute normals for the new triangles
+  1784→                for i in n_old..n_new {
+  1785→                    let tri = mesh.triangles[i];
+  1786→                    let p0 = mesh.vertices[tri[0] as usize];
+  1787→                    let p1 = mesh.vertices[tri[1] as usize];
+  1788→                    let p2 = mesh.vertices[tri[2] as usize];
+  1789→                    let ab = [p1.x - p0.x, p1.y - p0.y, p1.z - p0.z];
+  1790→                    let ac = [p2.x - p0.x, p2.y - p0.y, p2.z - p0.z];
+  1791→                    let nx = ab[1] * ac[2] - ab[2] * ac[1];
+  1792→                    let ny = ab[2] * ac[0] - ab[0] * ac[2];
+  1793→                    let nz = ab[0] * ac[1] - ab[1] * ac[0];
+  1794→                    let len = (nx * nx + ny * ny + nz * nz).sqrt().max(1e-15);
+  1795→                    face_normals.push([nx / len, ny / len, nz / len]);
+  1796→                }
+  1797→            }
+  1798→        }
+  1799→
+  1800→        // Also update triangle_face_ids if present
+  1801→        if let Some(ref mut face_ids) = mesh.triangle_face_ids {
+  1802→            let n_old = face_ids.len();
+  1803→            let n_new = mesh.triangles.len();
+  1804→            if n_new > n_old {
+  1805→                // All new triangles inherit the face ID of the triangle they came from
+  1806→                // Since we process sequentially, just extend with the last face ID
+  1807→                let last_id = face_ids.last().copied().unwrap_or(0);
+  1808→                face_ids.extend(std::iter::repeat(last_id).take(n_new - n_old));
+  1809→            }
+  1810→        }
+  1811→    }
+  1812→}
+  1813→
+  1814→/// UV-aware chord-error refinement — O(1) per edge instead of O(1000).
+  1815→///
+  1816→/// This is the fast variant of `refine_mesh_chord_error` that uses pre-computed
+  1817→/// UV coordinates for each vertex. Instead of calling the extremely expensive
+  1818→/// `surface.project_point()` (which for NURBS costs ~1000+ evaluations per call),
+  1819→/// it computes the midpoint UV by averaging adjacent vertex UVs, then evaluates
+  1820→/// `surface.point_at(mid_u, mid_v)` directly — a single evaluation.
+  1821→///
+  1822→/// This provides a ~1000× speedup for NURBS surfaces in the refinement step.
+  1823→///
+  1824→/// # Arguments
+  1825→/// * `mesh` — The triangle mesh to refine
+  1826→/// * `surface` — The parametric surface the mesh approximates
+  1827→/// * `forward` — Whether face normal matches surface normal
+  1828→/// * `max_deviation` — Maximum allowed chord error
+  1829→/// * `max_iterations` — Maximum number of refinement iterations
+  1830→/// * `vertex_uvs` — UV coordinates for each vertex in the mesh (mutated as new vertices are added)
+  1831→fn refine_mesh_chord_error_uv(
+  1832→    mesh: &mut TriangleMesh,
+  1833→    surface: &Surface,
+  1834→    forward: bool,
+  1835→    max_deviation: f64,
+  1836→    max_iterations: usize,
+  1837→    vertex_uvs: &mut Vec<Point2d>,
+  1838→    is_boundary_vertex: &mut Vec<bool>,
+  1839→) {
+  1840→    use std::collections::HashMap;
+  1841→
+  1842→    // For NURBS, we might need Newton-Raphson refinement of the midpoint UV.
+  1843→    // But first, try the simple UV averaging which is correct for well-parameterized surfaces.
+  1844→    let is_nurbs = matches!(surface, Surface::Nurbs(_));
+  1845→    let (nurb_u_min, nurb_u_max, nurb_v_min, nurb_v_max) = if let Surface::Nurbs(ref nurbs) = surface {
+  1846→        (nurbs.u_range().0, nurbs.u_range().1, nurbs.v_range().0, nurbs.v_range().1)
+  1847→    } else {
+  1848→        (0.0, 1.0, 0.0, 1.0)
+  1849→    };
+  1850→
+  1851→    // Minimum UV distance between edge endpoints — edges shorter than this
+  1852→    // are never split, preventing triangle explosion from non-convergent
+  1853→    // refinement (where chord error doesn't decrease despite subdivision).
+  1854→    let min_uv_dist = if is_nurbs {
+  1855→        // For NURBS, use a fraction of the parameter range as the minimum.
+  1856→        // This prevents infinite subdivision in areas with bad parameterization.
+  1857→        let u_size = (nurb_u_max - nurb_u_min).max(1e-10);
+  1858→        let v_size = (nurb_v_max - nurb_v_min).max(1e-10);
+  1859→        u_size.min(v_size) * 0.01 // 1% of the smaller parameter range
+  1860→    } else {
+  1861→        1e-10 // Effectively no minimum for analytic surfaces
+  1862→    };
+  1863→
+  1864→    for _iter in 0..max_iterations {
+  1865→        // Find edges that need subdivision
+  1866→        let mut edges_to_split: HashMap<(u32, u32), u32> = HashMap::new();
+  1867→
+  1868→        for tri in &mesh.triangles {
+  1869→            for k in 0..3 {
+  1870→                let v0 = tri[k];
+  1871→                let v1 = tri[(k + 1) % 3];
+  1872→                let edge = if v0 < v1 { (v0, v1) } else { (v1, v0) };
+  1873→
+  1874→                if edges_to_split.contains_key(&edge) {
+  1875→                    continue; // Already marked
+  1876→                }
+  1877→
+  1878→                // CRITICAL: Skip splitting edges between two boundary vertices.
+  1879→                // Boundary vertices come from the edge cache with bit-identical
+  1880→                // 3D coordinates across faces. Splitting a boundary-boundary edge
+  1881→                // creates a new midpoint vertex computed from surface.point_at(),
+  1882→                // which produces DIFFERENT f64 bits for each face. This new vertex
+  1883→                // can't be deduplicated, breaking watertightness.
+  1884→                //
+  1885→                // The edge cache already ensures sufficient sampling on boundary
+  1886→                // edges (via adaptive_discretize). If chord error is too large
+  1887→                // on a boundary edge, the fix is to increase edge sampling, not
+  1888→                // to split the edge here.
+  1889→                let v0_is_boundary = is_boundary_vertex.get(v0 as usize).copied().unwrap_or(false);
+  1890→                let v1_is_boundary = is_boundary_vertex.get(v1 as usize).copied().unwrap_or(false);
+  1891→                if v0_is_boundary && v1_is_boundary {
+  1892→                    continue; // Don't split boundary-boundary edges
+  1893→                }
+  1894→
+  1895→                // Compute midpoint UV by averaging — O(1) instead of O(1000)
+  1896→                let uv0 = vertex_uvs[v0 as usize];
+  1897→                let uv1 = vertex_uvs[v1 as usize];
+  1898→
+  1899→                // Minimum edge-length check: skip edges that are already very short
+  1900→                // in UV space to prevent triangle explosion
+  1901→                let du = (uv1.u - uv0.u).abs();
+  1902→                let dv = (uv1.v - uv0.v).abs();
+  1903→                if du < min_uv_dist && dv < min_uv_dist {
+  1904→                    continue;
+  1905→                }
+  1906→
+  1907→                let mid_u = (uv0.u + uv1.u) * 0.5;
+  1908→                let mid_v = (uv0.v + uv1.v) * 0.5;
+  1909→
+  1910→                // Handle periodic surfaces: if UVs wrap around, averaging is wrong.
+  1911→                // For periodic u, if |uv0.u - uv1.u| > half_period, one UV is near
+  1912→                // the wrap boundary. Adjust the average accordingly.
+  1913→                let mid_u = if surface.is_u_periodic() {
+  1914→                    let period = 2.0 * PI; // Standard period for our surfaces
+  1915→                    let du = (uv1.u - uv0.u).abs();
+  1916→                    if du > period * 0.5 {
+  1917→                        // UVs wrap around — adjust
+  1918→                        let (lo, hi) = if uv0.u < uv1.u { (uv0.u, uv1.u) } else { (uv1.u, uv0.u) };
+  1919→                        ((lo + period + hi) * 0.5) % period
+  1920→                    } else {
+  1921→                        mid_u
+  1922→                    }
+  1923→                } else {
+  1924→                    mid_u
+  1925→                };
+  1926→
+  1927→                let mid_v = if surface.is_v_periodic() {
+  1928→                    let period = 2.0 * PI;
+  1929→                    let dv = (uv1.v - uv0.v).abs();
+  1930→                    if dv > period * 0.5 {
+  1931→                        let (lo, hi) = if uv0.v < uv1.v { (uv0.v, uv1.v) } else { (uv1.v, uv0.v) };
+  1932→                        ((lo + period + hi) * 0.5) % period
+  1933→                    } else {
+  1934→                        mid_v
+  1935→                    }
+  1936→                } else {
+  1937→                    mid_v
+  1938→                };
+  1939→
+  1940→                // Clamp to surface parameter range (important for NURBS)
+  1941→                let mid_u_clamped = if is_nurbs { mid_u.clamp(nurb_u_min, nurb_u_max) } else { mid_u };
+  1942→                let mid_v_clamped = if is_nurbs { mid_v.clamp(nurb_v_min, nurb_v_max) } else { mid_v };
+  1943→
+  1944→                // Compute the surface point at the midpoint UV — ONE evaluation
+  1945→                let p_surf = surface.point_at(mid_u_clamped, mid_v_clamped);
+  1946→
+  1947→                // Compute 3D midpoint of the edge
+  1948→                let p0 = mesh.vertices[v0 as usize];
+  1949→                let p1 = mesh.vertices[v1 as usize];
+  1950→                let mid_3d = Point3d::new(
+  1951→                    (p0.x + p1.x) * 0.5,
+  1952→                    (p0.y + p1.y) * 0.5,
+  1953→                    (p0.z + p1.z) * 0.5,
+  1954→                );
+  1955→
+  1956→                // Chord error: distance from 3D midpoint to surface point
+  1957→                let dx = mid_3d.x - p_surf.x;
+  1958→                let dy = mid_3d.y - p_surf.y;
+  1959→                let dz = mid_3d.z - p_surf.z;
+  1960→                let chord_error = (dx * dx + dy * dy + dz * dz).sqrt();
+  1961→
+  1962→                if chord_error > max_deviation {
+  1963→                    edges_to_split.insert(edge, u32::MAX); // Placeholder
+  1964→                }
+  1965→            }
+  1966→        }
+  1967→
+  1968→        if edges_to_split.is_empty() {
+  1969→            break; // No more edges to split
+  1970→        }
+  1971→
+  1972→        // Insert surface points for each edge to split
+  1973→        let mut new_edges: HashMap<(u32, u32), u32> = HashMap::new();
+  1974→        for (edge, _) in &edges_to_split {
+  1975→            let v0 = edge.0;
+  1976→            let v1 = edge.1;
+  1977→
+  1978→            // Compute midpoint UV by averaging
+  1979→            let uv0 = vertex_uvs[v0 as usize];
+  1980→            let uv1 = vertex_uvs[v1 as usize];
+  1981→            let mut mid_u = (uv0.u + uv1.u) * 0.5;
+  1982→            let mut mid_v = (uv0.v + uv1.v) * 0.5;
+  1983→
+  1984→            // Handle periodic wrapping
+  1985→            if surface.is_u_periodic() {
+  1986→                let period = 2.0 * PI;
+  1987→                let du = (uv1.u - uv0.u).abs();
+  1988→                if du > period * 0.5 {
+  1989→                    let (lo, hi) = if uv0.u < uv1.u { (uv0.u, uv1.u) } else { (uv1.u, uv0.u) };
+  1990→                    mid_u = ((lo + period + hi) * 0.5) % period;
+  1991→                }
+  1992→            }
+  1993→            if surface.is_v_periodic() {
+  1994→                let period = 2.0 * PI;
+  1995→                let dv = (uv1.v - uv0.v).abs();
+  1996→                if dv > period * 0.5 {
+  1997→                    let (lo, hi) = if uv0.v < uv1.v { (uv0.v, uv1.v) } else { (uv1.v, uv0.v) };
+  1998→                    mid_v = ((lo + period + hi) * 0.5) % period;
+  1999→                }
+  2000→            }
+
+[showing lines 1-2000 of 2455; use offset=2001 with limit to continue reading]

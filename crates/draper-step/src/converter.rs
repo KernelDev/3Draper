@@ -2674,10 +2674,10 @@ impl<'a> StepConverter<'a> {
         }
 
         let mut mesh = TriangleMesh::new();
-        // Use tolerance-based dedup: adjacent faces may use different STEP EDGE_CURVE
-        // entities on their common geometric boundary, producing near-identical (but
-        // not bit-identical) 3D coordinates. The spatial hash fallback merges these.
-        let merge_tol = tol_ctx.model_scale * 1e-4; // 100 PPM of model scale
+        // Two-tier dedup: bit-exact first (edge cache), tolerance fallback for
+        // non-cached edges (step_id==0) and different EDGE_CURVE entities.
+        // Strict tolerance (1 PPM) — bit-exact is the primary path.
+        let merge_tol = tol_ctx.model_scale * 1e-6; // 1 PPM — strict!
         let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
         let mut total_face_vertices = 0usize;
         for (fi, face_data) in face_data_list.iter().enumerate() {
@@ -2907,8 +2907,9 @@ impl<'a> StepConverter<'a> {
         let brep_start = StdInstant::now();
 
         let mut mesh = TriangleMesh::new();
-        // Use tolerance-based dedup for near-identical boundary vertices
-        let merge_tol = tol_ctx.model_scale * 1e-4;
+        // Two-tier dedup: bit-exact first, tolerance fallback for non-cached edges.
+        // Strict tolerance (1 PPM) — bit-exact is the primary path.
+        let merge_tol = tol_ctx.model_scale * 1e-6; // 1 PPM — strict!
         let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
         let mut total_face_vertices_detailed = 0usize;
         let mut face_infos = Vec::new();
@@ -3191,7 +3192,8 @@ impl<'a> StepConverter<'a> {
         };
 
         let mut mesh = TriangleMesh::new();
-        let merge_tol = tol_ctx.model_scale * 1e-4;
+        // Two-tier dedup: bit-exact first, tolerance fallback for non-cached edges.
+        let merge_tol = tol_ctx.model_scale * 1e-6; // 1 PPM — strict!
         let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
         for face_data in &face_data_list {
             let face_mesh = self.surface_to_mesh(face_data, params, bbox);

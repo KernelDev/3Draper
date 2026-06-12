@@ -663,16 +663,41 @@ impl EdgeDiscretizationCache {
             // 2. Use reproject_nurbs_point() with the previous UV as initial guess
             //    for subsequent points — Newton-Raphson converges in ~3-5 iterations
             //    when starting from a nearby UV, vs ~146 iterations from scratch.
+            // 3. Validate each Newton-Raphson result: if the reprojected point is
+            //    too far from the target (error > 1e-6), fall back to project_point().
             let mut uvs = Vec::with_capacity(points_3d.len());
             if !points_3d.is_empty() {
                 let (u0, v0) = surface.project_point(&points_3d[0]);
                 uvs.push(Point2d::new(u0, v0));
+                let mut newton_failures = 0usize;
                 for i in 1..points_3d.len() {
                     let prev = uvs[i - 1];
                     let (u, v) = crate::parametric_domain::reproject_nurbs_point(
                         nurbs, &points_3d[i], prev.u, prev.v,
                     );
-                    uvs.push(Point2d::new(u, v));
+                    // Convergence check: verify the reprojected UV maps back to
+                    // a 3D point close to the target. If Newton-Raphson diverged
+                    // (e.g., due to surface inflection or bad initial guess), the
+                    // error will be large. Fall back to project_point() in that case.
+                    let reconstructed = surface.point_at(u, v);
+                    let err_x = reconstructed.x - points_3d[i].x;
+                    let err_y = reconstructed.y - points_3d[i].y;
+                    let err_z = reconstructed.z - points_3d[i].z;
+                    let error_sq = err_x * err_x + err_y * err_y + err_z * err_z;
+                    if error_sq > 1e-12 {
+                        // Newton-Raphson diverged — fallback to full grid search
+                        let (uf, vf) = surface.project_point(&points_3d[i]);
+                        newton_failures += 1;
+                        uvs.push(Point2d::new(uf, vf));
+                    } else {
+                        uvs.push(Point2d::new(u, v));
+                    }
+                }
+                if newton_failures > 0 {
+                    log::warn!(
+                        "NURBS UV: {}/{} Newton-Raphson projections diverged (>{:.0e} error), fell back to project_point()",
+                        newton_failures, points_3d.len(), 1e-6,
+                    );
                 }
             }
             uvs

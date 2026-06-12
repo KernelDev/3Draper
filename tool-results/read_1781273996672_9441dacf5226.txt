@@ -1,0 +1,2002 @@
+     1→// SPDX-License-Identifier: GPL-3.0-or-later
+     2→// Copyright (c) 2026 KernelDev
+     3→//! Face triangulation — converts B-Rep faces to triangle meshes.
+     4→//!
+     5→//! Design principles:
+     6→//! 1. Edge curves are sampled at consistent parameter values so shared edges
+     7→//!    between adjacent faces produce identical 3D points (triangulation consistency).
+     8→//! 2. Planes use minimum number of triangles (ear-clipping, no interior subdivision).
+     9→//! 3. Curved surfaces use edge samples as boundary ring vertices.
+    10→//! 4. Watertight by construction — shared edges produce bit-identical vertices via the unified edge cache.
+    11→//! 5. TriangulationGuard prevents runaway computation on pathological faces.
+    12→
+    13→use crate::mesh::TriangleMesh;
+    14→use crate::edge_cache::EdgeDiscretizationCache;
+    15→use draper_geometry::{
+    16→    Point3d, Point2d, Direction3d,
+    17→    Surface, Plane, CylinderSurface, SphereSurface, TorusSurface,
+    18→    ConeSurface, Curve3d,
+    19→};
+    20→use draper_topology::{Face, Wire, CoEdge, Edge, Solid, Shell, Compound, TopoId};
+    21→// WASM-compatible Instant: on native uses std::time::Instant,
+    22→// on wasm32 uses web_time::Instant (backed by performance.now()).
+    23→#[cfg(not(target_arch = "wasm32"))]
+    24→use std::time::Instant;
+    25→#[cfg(target_arch = "wasm32")]
+    26→use web_time::Instant;
+    27→use std::sync::atomic::{AtomicUsize, Ordering};
+    28→
+    29→/// Guard that prevents individual face triangulation from running too long.
+    30→///
+    31→/// If a face takes longer than the configured time limit, its triangulation
+    32→/// is aborted and an empty mesh is returned. This prevents the entire
+    33→/// application from hanging on pathological geometry (e.g., 660 NURBS faces
+    34→/// in drill_top.stp).
+    35→///
+    36→/// # Usage
+    37→/// ```ignore
+    38→/// let guard = TriangulationGuard::new(std::time::Duration::from_secs(5));
+    39→/// if guard.should_abort() {
+    40→///     return TriangleMesh::new();
+    41→/// }
+    42→/// ```
+    43→#[derive(Clone, Debug)]
+    44→pub struct TriangulationGuard {
+    45→    /// Maximum time allowed for triangulation of a single face.
+    46→    time_limit: std::time::Duration,
+    47→    /// When the guard was created.
+    48→    start: Instant,
+    49→    /// Whether the guard has been triggered.
+    50→    aborted: bool,
+    51→}
+    52→
+    53→impl TriangulationGuard {
+    54→    /// Create a new guard with a default time limit of 5 seconds per face.
+    55→    pub fn new() -> Self {
+    56→        Self::with_limit(std::time::Duration::from_secs(5))
+    57→    }
+    58→
+    59→    /// Create a new guard with a custom time limit.
+    60→    pub fn with_limit(time_limit: std::time::Duration) -> Self {
+    61→        Self {
+    62→            time_limit,
+    63→            start: Instant::now(),
+    64→            aborted: false,
+    65→        }
+    66→    }
+    67→
+    68→    /// Check if the time limit has been exceeded.
+    69→    /// Returns `true` if the triangulation should be aborted.
+    70→    pub fn should_abort(&mut self) -> bool {
+    71→        if self.aborted {
+    72→            return true;
+    73→        }
+    74→        if self.start.elapsed() > self.time_limit {
+    75→            self.aborted = true;
+    76→            true
+    77→        } else {
+    78→            false
+    79→        }
+    80→    }
+    81→
+    82→    /// Check if the guard has been triggered (read-only).
+    83→    pub fn is_aborted(&self) -> bool {
+    84→        self.aborted
+    85→    }
+    86→
+    87→    /// Reset the guard for a new face.
+    88→    pub fn reset(&mut self) {
+    89→        self.start = Instant::now();
+    90→        self.aborted = false;
+    91→    }
+    92→
+    93→    /// Get the elapsed time since the guard was created or last reset.
+    94→    pub fn elapsed(&self) -> std::time::Duration {
+    95→        self.start.elapsed()
+    96→    }
+    97→}
+    98→
+    99→impl Default for TriangulationGuard {
+   100→    fn default() -> Self {
+   101→        Self::new()
+   102→    }
+   103→}
+   104→use std::f64::consts::PI;
+   105→use std::collections::HashMap;
+   106→use std::sync::Arc;
+   107→
+   108→/// Triangulation parameters.
+   109→#[derive(Clone)]
+   110→pub struct TriangulationParams {
+   111→    /// Maximum edge length in the triangulation.
+   112→    pub max_edge_length: f64,
+   113→    /// Maximum deviation from the true surface.
+   114→    pub max_deviation: f64,
+   115→    /// Number of angular samples for cylindrical/spherical surfaces.
+   116→    pub angular_samples: usize,
+   117→    /// Number of height samples for cylindrical surfaces.
+   118→    pub height_samples: usize,
+   119→    /// Maximum angular deviation in radians between adjacent face normals.
+   120→    pub max_angular_deviation: f64,
+   121→    /// LOD detail level (1.0 = normal, 0.5 = coarser, 2.0 = finer).
+   122→    pub detail_level: f64,
+   123→    /// Whether to use adaptive sampling based on curvature.
+   124→    pub adaptive: bool,
+   125→    /// Whether to use parallel triangulation (multi-threaded via rayon).
+   126→    /// When `false` (default), uses the existing single-threaded path.
+   127→    /// When `true`, uses `rayon::par_iter()` to triangulate faces in parallel.
+   128→    pub parallel: bool,
+   129→    /// Optional progress callback invoked periodically during triangulation.
+   130→    /// Called with `(faces_completed, total_faces)`.
+   131→    /// Only used when `parallel` is `true`.
+   132→    pub progress_callback: Option<Arc<dyn Fn(usize, usize) + Send + Sync>>,
+   133→    /// Maximum number of triangles per face. If a face's grid would produce
+   134→    /// more triangles than this budget, the resolution is reduced.
+   135→    /// This prevents a single face from generating millions of triangles
+   136→    /// that freeze the browser on WASM. Default: 2000.
+   137→    pub max_face_triangles: usize,
+   138→}
+   139→
+   140→impl std::fmt::Debug for TriangulationParams {
+   141→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+   142→        f.debug_struct("TriangulationParams")
+   143→            .field("max_edge_length", &self.max_edge_length)
+   144→            .field("max_deviation", &self.max_deviation)
+   145→            .field("angular_samples", &self.angular_samples)
+   146→            .field("height_samples", &self.height_samples)
+   147→            .field("max_angular_deviation", &self.max_angular_deviation)
+   148→            .field("detail_level", &self.detail_level)
+   149→            .field("adaptive", &self.adaptive)
+   150→            .field("parallel", &self.parallel)
+   151→            .field("max_face_triangles", &self.max_face_triangles)
+   152→            .field("progress_callback", &self.progress_callback.as_ref().map(|_| "Some(...)"))
+   153→            .finish()
+   154→    }
+   155→}
+   156→
+   157→impl Default for TriangulationParams {
+   158→    fn default() -> Self {
+   159→        Self {
+   160→            max_edge_length: 1.0,
+   161→            max_deviation: 0.01,
+   162→            angular_samples: 32,
+   163→            height_samples: 8,
+   164→            max_angular_deviation: 0.1,
+   165→            detail_level: 1.0,
+   166→            adaptive: true,
+   167→            parallel: false,
+   168→            progress_callback: None,
+   169→            max_face_triangles: 8000,
+   170→        }
+   171→    }
+   172→}
+   173→
+   174→/// Number of samples per edge curve for boundary discretization.
+   175→/// Reduced from 48 to 20 for performance — each boundary point on a NURBS
+   176→/// face requires expensive project_point() or reproject_nurbs_point() calls.
+   177→/// For watertightness, the edge cache ensures shared edges produce identical
+   178→/// 3D points regardless of sample count. 20 samples provides sufficient
+   179→/// boundary resolution for accurate triangulation while being ~2.4x faster
+   180→/// than 48 samples.
+   181→const EDGE_SAMPLES: usize = 20;
+   182→
+   183→/// Project a sequence of 3D points onto a NURBS surface efficiently.
+   184→///
+   185→/// Uses Newton-Raphson with UV chaining: the first point uses the expensive
+   186→/// `project_point()` (146+ evaluations), and subsequent points use
+   187→/// Newton-Raphson from the previous point's UV as starting guess (~15
+   188→/// evaluations each). This is ~10x faster than calling `project_point()`
+   189→/// on every point, and also more accurate since the initial guess is close.
+   190→fn project_points_nurbs_fast(surface: &Surface, points: &[Point3d]) -> Vec<Point2d> {
+   191→    if points.is_empty() {
+   192→        return Vec::new();
+   193→    }
+   194→    if let Surface::Nurbs(ref nurbs) = surface {
+   195→        let (u_min, u_max) = nurbs.u_range();
+   196→        let (v_min, v_max) = nurbs.v_range();
+   197→        let mut uvs = Vec::with_capacity(points.len());
+   198→        let mut prev_u = (u_min + u_max) * 0.5;
+   199→        let mut prev_v = (v_min + v_max) * 0.5;
+   200→
+   201→        for (i, p) in points.iter().enumerate() {
+   202→            if i == 0 {
+   203→                let (u, v) = surface.project_point(p);
+   204→                uvs.push(Point2d::new(u, v));
+   205→                prev_u = u;
+   206→                prev_v = v;
+   207→            } else {
+   208→                let (u, v) = crate::parametric_domain::reproject_nurbs_point(nurbs, p, prev_u, prev_v);
+   209→                let proj_p = surface.point_at(u, v);
+   210→                let err = (proj_p.x - p.x).powi(2) + (proj_p.y - p.y).powi(2) + (proj_p.z - p.z).powi(2);
+   211→                if err.sqrt() > 1e-3 {
+   212→                    let (u, v) = surface.project_point(p);
+   213→                    uvs.push(Point2d::new(u, v));
+   214→                    prev_u = u;
+   215→                    prev_v = v;
+   216→                } else {
+   217→                    uvs.push(Point2d::new(u, v));
+   218→                    prev_u = u;
+   219→                    prev_v = v;
+   220→                }
+   221→            }
+   222→        }
+   223→        uvs
+   224→    } else {
+   225→        points.iter().map(|p| {
+   226→            let (u, v) = surface.project_point(p);
+   227→            Point2d::new(u, v)
+   228→        }).collect()
+   229→    }
+   230→}
+   231→
+   232→/// Cap grid resolution (n_u, n_v) so that the resulting mesh does not exceed
+   233→/// `max_face_triangles`. A grid of n_u × n_v produces ~2 × n_u × n_v triangles.
+   234→fn cap_grid_resolution(n_u: usize, n_v: usize, max_face_triangles: usize) -> (usize, usize) {
+   235→    let approx_tris = 2 * n_u * n_v;
+   236→    if approx_tris <= max_face_triangles {
+   237→        return (n_u, n_v);
+   238→    }
+   239→    let scale = (max_face_triangles as f64 / approx_tris as f64).sqrt();
+   240→    let n_u_capped = ((n_u as f64 * scale).ceil() as usize).max(4);
+   241→    let n_v_capped = ((n_v as f64 * scale).ceil() as usize).max(2);
+   242→    (n_u_capped, n_v_capped)
+   243→}
+   244→
+   245→// ============================================================
+   246→// Top-level entry points
+   247→// ============================================================
+   248→
+   249→/// Triangulate a solid into a triangle mesh using topology-first approach.
+   250→///
+   251→/// The unified edge cache guarantees bit-identical 3D points on shared edges,
+   252→/// making the mesh watertight **by construction** — no post-hoc vertex merging
+   253→/// or edge stitching is needed.
+   254→///
+   255→/// Post-processing steps (topology-first):
+   256→/// 1. Filter degenerate (zero-area) triangles and NaN/Inf vertices
+   257→/// 2. Validate watertightness and attempt automatic repair if needed
+   258→/// 3. Smooth normals across shared edges with adaptive crease angle
+   259→///
+   260→/// When `params.parallel` is `true`, faces are triangulated in parallel using
+   261→/// rayon and per-face meshes are merged with pre-computed vertex offsets.
+   262→pub fn triangulate_solid(solid: &Solid, params: &TriangulationParams) -> TriangleMesh {
+   263→    // Compute adaptive tolerance from the solid's bounding box
+   264→    let bbox = solid_bounding_box(solid);
+   265→    let mut cache = EdgeDiscretizationCache::with_adaptive_tolerance(
+   266→        &bbox.0, &bbox.1, 64,
+   267→    );
+   268→    triangulate_solid_with_cache(solid, params, &mut cache)
+   269→}
+   270→
+   271→/// Triangulate a solid using a shared edge discretization cache.
+   272→///
+   273→/// The cache ensures that shared edges between adjacent faces produce
+   274→/// identical 3D point sequences, which is critical for watertight meshes.
+   275→pub fn triangulate_solid_with_cache(solid: &Solid, params: &TriangulationParams, cache: &mut EdgeDiscretizationCache) -> TriangleMesh {
+   276→    if params.parallel {
+   277→        // For parallel: pre-populate the cache fully, then share as immutable
+   278→        cache.pre_populate_for_solid_full(solid, EDGE_SAMPLES);
+   279→        triangulate_solid_parallel(solid, params, cache)
+   280→    } else {
+   281→        triangulate_solid_sequential(solid, params, cache)
+   282→    }
+   283→}
+   284→
+   285→/// Sequential (single-threaded) solid triangulation with edge cache.
+   286→///
+   287→/// Uses topology-first approach: the edge cache guarantees bit-identical
+   288→/// 3D points on shared edges, so the mesh is watertight by construction.
+   289→fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams, cache: &mut EdgeDiscretizationCache) -> TriangleMesh {
+   290→    // Phase 1: Pre-populate edge cache with deterministic rounding
+   291→    cache.pre_populate_for_solid(solid, EDGE_SAMPLES);
+   292→
+   293→    // Phase 2: Triangulate all faces using cached boundary data.
+   294→    // Use merge_deduplicating to ensure shared-edge vertices get the same
+   295→    // vertex index in the final mesh. The edge cache guarantees bit-identical
+   296→    // 3D coordinates on shared edges, so bit-exact deduplication is correct.
+   297→    let mut mesh = TriangleMesh::new();
+   298→    // Use tolerance-based dedup for near-identical boundary vertices
+   299→    let merge_tol = cache.adaptive_tolerance().model_scale() * 1e-4;
+   300→    let mut dedup_map = crate::mesh::VertexDedupMap::with_tolerance(merge_tol);
+   301→    let mut total_face_vertices = 0usize;
+   302→    for face in solid.faces() {
+   303→        let face_mesh = triangulate_face_with_cache(face, params, cache);
+   304→        total_face_vertices += face_mesh.vertices.len();
+   305→        mesh.merge_deduplicating(&face_mesh, &mut dedup_map);
+   306→    }
+   307→    let deduped_vertices = total_face_vertices - mesh.vertices.len();
+   308→    if deduped_vertices > 0 {
+   309→        log::info!(
+   310→            "Vertex deduplication: {} face vertices → {} unique ({} shared)",
+   311→            total_face_vertices, mesh.vertices.len(), deduped_vertices,
+   312→        );
+   313→    }
+   314→
+   315→    // Phase 3: Post-processing (topology-first — no merge/stitch needed)
+   316→    // Filter degenerate triangles (zero area or NaN/Inf)
+   317→    filter_degenerate_triangles(&mut mesh, 1e-10);
+   318→
+   319→    // Phase 4: Validation — log but do NOT apply repair_mesh.
+   320→    // If the mesh is not watertight, that indicates a BUG in the edge cache
+   321→    // or the face triangulation. repair_mesh/stitch_boundary_edges mask the
+   322→    // real problem by moving vertices by up to 100× base_tol, which
+   323→    // degrades mesh quality and breaks normals. Instead, we log the
+   324→    // boundary edge count as an error so the root cause can be fixed.
+   325→    let report = crate::watertight::validate_watertight(&mesh, false);
+   326→    if !report.is_watertight() {
+   327→        let adaptive_tol = cache.adaptive_tolerance().merge_tolerance();
+   328→        let boundary_pct = if report.edge_count > 0 {
+   329→            report.boundary_edge_count as f64 / report.edge_count as f64 * 100.0
+   330→        } else {
+   331→            0.0
+   332→        };
+   333→        log::error!(
+   334→            "BUG: Solid triangulation not watertight: {} boundary edges ({:.2}%), {} non-manifold, {} degenerate (V={}, E={}, F={}, χ={}, tol={:.2e})",
+   335→            report.boundary_edge_count,
+   336→            boundary_pct,
+   337→            report.non_manifold_edge_count,
+   338→            report.degenerate_triangle_count,
+   339→            report.vertex_count,
+   340→            report.edge_count,
+   341→            report.triangle_count,
+   342→            report.euler_characteristic,
+   343→            adaptive_tol,
+   344→        );
+   345→        if boundary_pct > 1.0 {
+   346→            log::error!("More than 1% boundary edges — edge cache is NOT working correctly for this solid!");
+   347→        }
+   348→        // Run edge consistency validation to diagnose the root cause
+   349→        let consistency = crate::watertight::validate_edge_consistency(&mesh, adaptive_tol);
+   350→        log::error!(
+   351→            "Edge consistency: {}/{} shared edges consistent, {} inconsistent ({:.2}%), max_dist={:.2e}",
+   352→            consistency.consistent_edges,
+   353→            consistency.shared_edges_checked,
+   354→            consistency.inconsistent_edges,
+   355→            consistency.inconsistency_rate(),
+   356→            consistency.max_vertex_distance,
+   357→        );
+   358→        for inc in &consistency.worst_inconsistencies {
+   359→            log::error!(
+   360→                "  Inconsistent edge: vertices ({}, {}), distance={:.2e}, faces={:?}",
+   361→                inc.vertex_indices.0, inc.vertex_indices.1, inc.distance, inc.face_ids,
+   362→            );
+   363→        }
+   364→        // Log edge cache statistics for debugging
+   365→        let stats = cache.stats();
+   366→        log::info!("Edge cache stats: {} entries, {} hits, {} misses, {} shared edges, hit_rate={:.1}%",
+   367→            stats.total_edges, stats.cache_hits, stats.cache_misses, stats.shared_edges,
+   368→            if stats.cache_hits + stats.cache_misses > 0 {
+   369→                stats.cache_hits as f64 / (stats.cache_hits + stats.cache_misses) as f64 * 100.0
+   370→            } else { 0.0 },
+   371→        );
+   372→    } else {
+   373→        log::info!("Solid is watertight ✓ ({} interior edges, {} triangles, χ={})",
+   374→            report.interior_edge_count, report.triangle_count, report.euler_characteristic);
+   375→    }
+   376→
+   377→    // Phase 5: Smooth normals with adaptive crease angle per surface type
+   378→    crate::watertight::smooth_normals_adaptive(&mut mesh, solid);
+   379→
+   380→    // TODO: Chord error refinement — check if triangle midpoints deviate
+   381→    // from the true surface by more than max_deviation and subdivide if needed.
+   382→    // This is a single-pass refinement for performance. Skip for planar faces
+   383→    // (chord error is always 0 for planes). The existing adaptive interior points
+   384→    // already handle curvature, so this is a secondary refinement.
+   385→    // refine_chord_error(&mut mesh, params);
+   386→
+   387→    // Safety check: ensure all per-triangle arrays have the same length
+   388→    debug_assert_mesh_consistency(&mesh);
+   389→    mesh
+   390→}
+   391→
+   392→// ============================================================
+   393→// Parallel triangulation (3.5)
+   394→// ============================================================
+   395→
+   396→/// Pre-computed edge discretization cache for parallel triangulation.
+   397→///
+   398→/// **SUPERSEDED** by `EdgeDiscretizationCache` (in `edge_cache.rs`), which
+   399→/// stores both 3D points AND per-face UV coordinates. The old `EdgeSampleCache`
+   400→/// only stores 3D points and does not support UV computation for NURBS faces.
+   401→///
+   402→/// Kept for backward compatibility but NOT used in the main pipeline anymore.
+   403→/// The main pipeline now uses `EdgeDiscretizationCache` with `pre_populate_for_solid_full`.
+   404→#[allow(dead_code)]
+   405→#[derive(Clone, Debug)]
+   406→struct EdgeSampleCache {
+   407→    /// Maps edge TopoId → sampled 3D points.
+   408→    #[allow(dead_code)] // Will be used when surface-specific functions are refactored to accept cache
+   409→    entries: HashMap<TopoId, Vec<Point3d>>,
+   410→}
+   411→
+   412→impl EdgeSampleCache {
+   413→    /// Build a cache by pre-computing discretizations for all edges in a solid.
+   414→    #[allow(dead_code)]
+   415→    fn build_from_solid(solid: &Solid) -> Self {
+   416→        let mut entries = HashMap::new();
+   417→        for face in solid.faces() {
+   418→            for edge in &face.edges {
+   419→                if edge.degenerate {
+   420→                    continue;
+   421→                }
+   422→                if !entries.contains_key(&edge.id) {
+   423→                    let pts = sample_edge_points(edge, EDGE_SAMPLES);
+   424→                    entries.insert(edge.id, pts);
+   425→                }
+   426→            }
+   427→        }
+   428→        Self { entries }
+   429→    }
+   430→
+   431→    /// Get the pre-computed sample points for an edge.
+   432→    #[allow(dead_code)] // Will be used when surface-specific functions are refactored to accept cache
+   433→    fn get(&self, edge_id: TopoId) -> Option<&Vec<Point3d>> {
+   434→        self.entries.get(&edge_id)
+   435→    }
+   436→}
+   437→
+   438→/// Collect boundary points from a face's outer wire using the pre-computed
+   439→/// edge sample cache (read-only, safe for parallel use).
+   440→///
+   441→/// This function will be used when surface-specific triangulation functions
+   442→/// are refactored to accept an optional cache parameter.
+   443→#[allow(dead_code)]
+   444→fn collect_face_boundary_points_cached(face: &Face, cache: &EdgeSampleCache) -> Vec<Point3d> {
+   445→    let mut points = Vec::new();
+   446→
+   447→    if let Some(ref wire) = face.outer_wire {
+   448→        for coedge in &wire.coedges {
+   449→            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+   450→            if let Some(edge) = edge {
+   451→                // Skip degenerate edges
+   452→                if edge.degenerate {
+   453→                    continue;
+   454→                }
+   455→                // Use cached edge points if available, otherwise compute inline
+   456→                let mut edge_pts = if let Some(cached) = cache.get(edge.id) {
+   457→                    cached.clone()
+   458→                } else {
+   459→                    sample_edge_points(edge, EDGE_SAMPLES)
+   460→                };
+   461→                // Canonical-direction reversal logic (same as collect_face_boundary_points)
+   462→                let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+   463→                let should_reverse = !coedge.forward != edge_is_reversed;
+   464→                if should_reverse {
+   465→                    edge_pts.reverse();
+   466→                }
+   467→                points.extend(edge_pts);
+   468→            }
+   469→        }
+   470→    }
+   471→
+   472→    // Remove duplicate consecutive points (within tolerance)
+   473→    if !points.is_empty() {
+   474→        let mut unique = vec![points[0]];
+   475→        for p in &points[1..] {
+   476→            if let Some(last) = unique.last() {
+   477→                if !last.is_coincident_with(p) {
+   478→                    unique.push(*p);
+   479→                }
+   480→            }
+   481→        }
+   482→        // Also check last vs first (closed loop)
+   483→        if unique.len() > 1 {
+   484→            if let Some(last) = unique.last() {
+   485→                if last.is_coincident_with(&unique[0]) {
+   486→                    unique.pop();
+   487→                }
+   488→            }
+   489→        }
+   490→        points = unique;
+   491→    }
+   492→
+   493→    points
+   494→}
+   495→
+   496→/// Collect boundary points from a face's inner wires using the cache.
+   497→///
+   498→/// This function will be used when surface-specific triangulation functions
+   499→/// are refactored to accept an optional cache parameter.
+   500→#[allow(dead_code)]
+   501→fn collect_face_hole_points_cached(face: &Face, cache: &EdgeSampleCache) -> Vec<Vec<Point3d>> {
+   502→    let mut holes = Vec::new();
+   503→    for wire in &face.inner_wires {
+   504→        let mut points = Vec::new();
+   505→        for coedge in &wire.coedges {
+   506→            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+   507→            if let Some(edge) = edge {
+   508→                let mut edge_pts = if let Some(cached) = cache.get(edge.id) {
+   509→                    cached.clone()
+   510→                } else {
+   511→                    sample_edge_points(edge, EDGE_SAMPLES)
+   512→                };
+   513→                // Canonical-direction reversal logic (same as collect_face_boundary_points)
+   514→                let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+   515→                let should_reverse = !coedge.forward != edge_is_reversed;
+   516→                if should_reverse {
+   517→                    edge_pts.reverse();
+   518→                }
+   519→                points.extend(edge_pts);
+   520→            }
+   521→        }
+   522→        // Deduplicate
+   523→        if !points.is_empty() {
+   524→            let mut unique = vec![points[0]];
+   525→            for p in &points[1..] {
+   526→                if let Some(last) = unique.last() {
+   527→                    if !last.is_coincident_with(p) {
+   528→                        unique.push(*p);
+   529→                    }
+   530→                }
+   531→            }
+   532→            if unique.len() > 1 {
+   533→                if let Some(last) = unique.last() {
+   534→                    if last.is_coincident_with(&unique[0]) {
+   535→                        unique.pop();
+   536→                    }
+   537→                }
+   538→            }
+   539→            holes.push(unique);
+   540→        }
+   541→    }
+   542→    holes
+   543→}
+   544→
+   545→/// Triangulate a single face using the pre-computed edge sample cache.
+   546→///
+   547→/// **SUPERSEDED** by `triangulate_face_impl` which uses `EdgeDiscretizationCache`.
+   548→/// Kept for backward compatibility but NOT used in the main pipeline anymore.
+   549→#[allow(dead_code)]
+   550→fn triangulate_face_cached(face: &Face, params: &TriangulationParams, cache: &EdgeSampleCache) -> TriangleMesh {
+   551→    // This function is superseded by triangulate_face_impl which uses the
+   552→    // full EdgeDiscretizationCache (with UV coordinates). The old EdgeSampleCache
+   553→    // only stores 3D points and does not support UV computation for NURBS faces.
+   554→    let _ = cache;
+   555→    triangulate_face(face, params)
+   556→}
+   557→
+   558→/// Parallel solid triangulation using rayon (topology-first approach).
+   559→///
+   560→/// # Algorithm
+   561→/// 1. **Pre-compute** edge discretizations into a read-only `EdgeDiscretizationCache`
+   562→///    with deterministic rounding (done before calling this function).
+   563→/// 2. **Parallel triangulate** each face independently using `rayon::par_iter()`.
+   564→/// 3. **Merge** per-face meshes with pre-computed vertex offsets (avoids
+   565→///    sequential `merge` calls).
+   566→/// 4. **Post-process**: filter degenerate triangles, validate watertightness,
+   567→///    adaptive repair if needed, smooth normals with adaptive crease angle.
+   568→///
+   569→/// # Thread safety
+   570→/// - The `EdgeDiscretizationCache` is shared immutably across threads (no locking needed).
+   571→/// - Each face produces its own `TriangleMesh` — no shared mutable state.
+   572→/// - The progress callback uses `AtomicUsize` for lock-free counting.
+   573→fn triangulate_solid_parallel(solid: &Solid, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
+   574→    use rayon::prelude::*;
+   575→
+   576→    // Collect faces into a Vec for parallel iteration
+   577→    let faces: Vec<&Face> = solid.faces();
+   578→    let total_faces = faces.len();
+   579→
+   580→    if total_faces == 0 {
+   581→        return TriangleMesh::new();
+   582→    }
+   583→
+   584→    // Step 1: Parallel face triangulation
+   585→    let completed_count = AtomicUsize::new(0);
+   586→    let progress_cb = params.progress_callback.clone();
+   587→
+   588→    let face_meshes: Vec<TriangleMesh> = faces
+   589→        .par_iter()
+   590→        .map(|face| {
+   591→            let mesh = triangulate_face_impl(face, params, cache);
+   592→
+   593→            // Progress reporting (lock-free)
+   594→            if progress_cb.is_some() {
+   595→                let completed = completed_count.fetch_add(1, Ordering::Relaxed) + 1;
+   596→                if let Some(ref cb) = progress_cb {
+   597→                    cb(completed, total_faces);
+   598→                }
+   599→            }
+   600→
+   601→            mesh
+   602→        })
+   603→        .collect();
+   604→
+   605→    // Step 2: Merge per-face meshes with pre-computed offsets
+   606→    let merged = merge_meshes_parallel(&face_meshes);
+   607→
+   608→    // Step 3: Post-processing (topology-first — no mandatory merge/stitch)
+   609→    let mut mesh = merged;
+   610→    filter_degenerate_triangles(&mut mesh, 1e-10);
+   611→
+   612→    // Step 4: Validation — log but do NOT apply repair_mesh.
+   613→    // See sequential path comments for rationale.
+   614→    let report = crate::watertight::validate_watertight(&mesh, false);
+   615→    if !report.is_watertight() {
+   616→        let adaptive_tol = cache.adaptive_tolerance().merge_tolerance();
+   617→        let boundary_pct = if report.edge_count > 0 {
+   618→            report.boundary_edge_count as f64 / report.edge_count as f64 * 100.0
+   619→        } else {
+   620→            0.0
+   621→        };
+   622→        log::error!(
+   623→            "BUG: Solid triangulation not watertight (parallel): {} boundary edges ({:.2}%), {} non-manifold, {} degenerate (V={}, E={}, F={}, χ={}, tol={:.2e})",
+   624→            report.boundary_edge_count,
+   625→            boundary_pct,
+   626→            report.non_manifold_edge_count,
+   627→            report.degenerate_triangle_count,
+   628→            report.vertex_count,
+   629→            report.edge_count,
+   630→            report.triangle_count,
+   631→            report.euler_characteristic,
+   632→            adaptive_tol,
+   633→        );
+   634→        if boundary_pct > 1.0 {
+   635→            log::error!("More than 1% boundary edges — edge cache is NOT working correctly for this solid!");
+   636→        }
+   637→    } else {
+   638→        log::info!("Solid is watertight ✓ (parallel, {} interior edges, {} triangles, χ={})",
+   639→            report.interior_edge_count, report.triangle_count, report.euler_characteristic);
+   640→    }
+   641→
+   642→    // Step 5: Smooth normals with adaptive crease angle
+   643→    crate::watertight::smooth_normals_adaptive(&mut mesh, solid);
+   644→
+   645→    // Safety check: ensure all per-triangle arrays have the same length
+   646→    debug_assert_mesh_consistency(&mesh);
+   647→    mesh
+   648→}
+   649→
+   650→/// Merge multiple per-face meshes into one using vertex deduplication.
+   651→///
+   652→/// In the parallel path, each face produces its own mesh. When merging,
+   653→/// shared-edge vertices must be deduplicated so that the final mesh is
+   654→/// watertight by construction. The edge cache guarantees bit-identical
+   655→/// 3D coordinates on shared edges, so bit-exact deduplication via
+   656→/// `VertexDedupMap` is correct and efficient.
+   657→fn merge_meshes_parallel(meshes: &[TriangleMesh]) -> TriangleMesh {
+   658→    if meshes.is_empty() {
+   659→        return TriangleMesh::new();
+   660→    }
+   661→
+   662→    // Use merge_deduplicating for topology-first watertightness
+   663→    // Note: parallel path uses bit-exact dedup only (no tolerance fallback).
+   664→    // The sequential path (triangulate_solid_sequential) uses tolerance-based dedup.
+   665→    let mut merged = TriangleMesh::new();
+   666→    let mut dedup_map = crate::mesh::VertexDedupMap::new();
+   667→    for mesh in meshes {
+   668→        merged.merge_deduplicating(mesh, &mut dedup_map);
+   669→    }
+   670→    merged
+   671→}
+   672→
+   673→/// Compute the bounding box of a Solid from its face surfaces and edge vertices.
+   674→fn solid_bounding_box(solid: &Solid) -> (Point3d, Point3d) {
+   675→    let mut min = Point3d::new(f64::MAX, f64::MAX, f64::MAX);
+   676→    let mut max = Point3d::new(f64::MIN, f64::MIN, f64::MIN);
+   677→    let mut has_points = false;
+   678→
+   679→    for face in solid.faces() {
+   680→        for edge in &face.edges {
+   681→            if edge.degenerate { continue; }
+   682→            if let Some(p) = edge.start_point() {
+   683→                min.x = min.x.min(p.x); min.y = min.y.min(p.y); min.z = min.z.min(p.z);
+   684→                max.x = max.x.max(p.x); max.y = max.y.max(p.y); max.z = max.z.max(p.z);
+   685→                has_points = true;
+   686→            }
+   687→            if let Some(p) = edge.end_point() {
+   688→                min.x = min.x.min(p.x); min.y = min.y.min(p.y); min.z = min.z.min(p.z);
+   689→                max.x = max.x.max(p.x); max.y = max.y.max(p.y); max.z = max.z.max(p.z);
+   690→                has_points = true;
+   691→            }
+   692→        }
+   693→    }
+   694→
+   695→    if !has_points {
+   696→        return (Point3d::ORIGIN, Point3d::new(1.0, 1.0, 1.0));
+   697→    }
+   698→    (min, max)
+   699→}
+   700→
+   701→/// Triangulate a shell into a triangle mesh (topology-first approach).
+   702→pub fn triangulate_shell(shell: &Shell, params: &TriangulationParams) -> TriangleMesh {
+   703→    let mut mesh = TriangleMesh::new();
+   704→    let mut cache = EdgeDiscretizationCache::new();
+   705→    let merge_tol = cache.adaptive_tolerance().model_scale() * 1e-4;
+   706→    let mut dedup_map = crate::mesh::VertexDedupMap::with_tolerance(merge_tol);
+   707→    for face in &shell.faces {
+   708→        let face_mesh = triangulate_face_with_cache(face, params, &mut cache);
+   709→        mesh.merge_deduplicating(&face_mesh, &mut dedup_map);
+   710→    }
+   711→    filter_degenerate_triangles(&mut mesh, 1e-10);
+   712→    mesh
+   713→}
+   714→
+   715→/// Triangulate a compound into a triangle mesh.
+   716→pub fn triangulate_compound(compound: &Compound, params: &TriangulationParams) -> TriangleMesh {
+   717→    let mut mesh = TriangleMesh::new();
+   718→    for solid in &compound.solids {
+   719→        mesh.merge(&triangulate_solid(solid, params));
+   720→    }
+   721→    for sub in &compound.compounds {
+   722→        mesh.merge(&triangulate_compound(sub, params));
+   723→    }
+   724→    mesh
+   725→}
+   726→
+   727→/// Triangulate a single face.
+   728→///
+   729→/// This is the backward-compatible public API that creates a local cache.
+   730→/// For better watertightness when triangulating multiple faces of a solid,
+   731→/// use `triangulate_face_with_cache` with a shared cache instead.
+   732→pub fn triangulate_face(face: &Face, params: &TriangulationParams) -> TriangleMesh {
+   733→    let mut cache = EdgeDiscretizationCache::new();
+   734→    triangulate_face_with_cache(face, params, &mut cache)
+   735→}
+   736→
+   737→/// Triangulate a single face using a shared edge discretization cache.
+   738→///
+   739→/// The cache ensures that shared edges between adjacent faces produce
+   740→/// identical 3D point sequences, which is critical for watertight meshes.
+   741→/// This function pre-populates the cache for the face's edges, then
+   742→/// delegates to `triangulate_face_impl` which uses the immutable cache.
+   743→pub fn triangulate_face_with_cache(face: &Face, params: &TriangulationParams, cache: &mut EdgeDiscretizationCache) -> TriangleMesh {
+   744→    // Pre-populate edges for this face so the cache is complete
+   745→    // before we pass it as an immutable reference
+   746→    if let Some(ref surface) = face.surface {
+   747→        pre_populate_face_edges(cache, face, surface);
+   748→    }
+   749→    triangulate_face_impl(face, params, cache)
+   750→}
+   751→
+   752→/// Internal implementation: triangulate a face with a read-only cache.
+   753→///
+   754→/// This is used both by `triangulate_face_with_cache` (sequential path)
+   755→/// and by the parallel path (after the cache has been fully pre-populated).
+   756→fn triangulate_face_impl(face: &Face, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
+   757→    if let Some(ref surface) = face.surface {
+   758→        match surface {
+   759→            Surface::Plane(plane) => triangulate_planar_face(face, plane, params, cache),
+   760→            Surface::Cylinder(cyl) => triangulate_cylinder_face(face, cyl, params, cache),
+   761→            Surface::Sphere(sphere) => triangulate_sphere_face(face, sphere, params, cache),
+   762→            Surface::Torus(torus) => triangulate_torus_face(face, torus, params, cache),
+   763→            Surface::Cone(cone) => triangulate_cone_face(face, cone, params, cache),
+   764→            Surface::Revolution(rev) => triangulate_revolution_face(face, rev, params, cache),
+   765→            Surface::Extrusion(ext) => triangulate_extrusion_face(face, ext, params, cache),
+   766→            Surface::Nurbs(_) => {
+   767→                triangulate_nurbs_cdt(face, surface, params, cache)
+   768→            }
+   769→        }
+   770→    } else {
+   771→        TriangleMesh::new()
+   772→    }
+   773→}
+   774→
+   775→// ============================================================
+   776→// Edge curve sampling — the foundation of consistent triangulation
+   777→// ============================================================
+   778→
+   779→/// Sample points along a single edge curve.
+   780→/// Returns the sampled 3D points (not including the endpoint to avoid duplicates
+   781→/// when chaining edges into a wire).
+   782→///
+   783→/// Samples in the CANONICAL direction (from param_min to param_max) regardless
+   784→/// of the edge's stored param_range orientation. This ensures that the same
+   785→/// STEP edge_curve always produces identical 3D points when sampled, even when
+   786→/// adjacent faces have reversed Edge copies with swapped param_ranges.
+   787→/// The coedge.forward flag controls whether the result is reversed to match
+   788→/// the wire traversal direction.
+   789→pub fn sample_edge_points(edge: &Edge, n_samples: usize) -> Vec<Point3d> {
+   790→    let mut pts = Vec::with_capacity(n_samples);
+   791→    if let Some(ref curve) = edge.curve {
+   792→        let (tmin, tmax) = edge.param_range;
+   793→        // Always sample from the smaller parameter to the larger one
+   794→        // (canonical direction). This guarantees that two Edge objects
+   795→        // referencing the same STEP EDGE_CURVE produce identical point
+   796→        // sequences, even if one has a reversed param_range.
+   797→        let (pmin, pmax) = if tmin <= tmax { (tmin, tmax) } else { (tmax, tmin) };
+   798→        for i in 0..n_samples {
+   799→            let t = pmin + (i as f64 / n_samples as f64) * (pmax - pmin);
+   800→            pts.push(curve.point_at(t));
+   801→        }
+   802→    }
+   803→    // Apply deterministic rounding for consistent vertex deduplication
+   804→    for p in &mut pts {
+   805→        *p = crate::edge_cache::deterministic_round_point(*p);
+   806→    }
+   807→    pts
+   808→}
+   809→
+   810→/// Collect boundary points from a face's outer wire by sampling edge curves.
+   811→/// Each edge is sampled at consistent parameter values so that shared edges
+   812→/// between adjacent faces produce identical 3D points.
+   813→///
+   814→/// Degenerate edges (flagged `edge.degenerate`) are skipped — they contribute
+   815→/// no boundary points. This prevents zero-length edge samples from creating
+   816→/// degenerate (zero-area) triangles in the mesh.
+   817→fn collect_face_boundary_points(face: &Face) -> Vec<Point3d> {
+   818→    let mut points = Vec::new();
+   819→
+   820→    if let Some(ref wire) = face.outer_wire {
+   821→        for coedge in &wire.coedges {
+   822→            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+   823→            if let Some(edge) = edge {
+   824→                // Skip degenerate edges — they have no meaningful geometry
+   825→                if edge.degenerate {
+   826→                    continue;
+   827→                }
+   828→                let mut edge_pts = sample_edge_points(edge, EDGE_SAMPLES);
+   829→                // sample_edge_points now always samples in the canonical direction
+   830→                // (from min param to max param). We need to reverse when the
+   831→                // coedge traversal direction doesn't match the canonical direction.
+   832→                // Old rule was: reverse if !coedge.forward (relative to edge's param_range).
+   833→                // New rule: reverse if !coedge.forward XOR (param_range is reversed).
+   834→                let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+   835→                let should_reverse = !coedge.forward != edge_is_reversed;
+   836→                if should_reverse {
+   837→                    edge_pts.reverse();
+   838→                }
+   839→                points.extend(edge_pts);
+   840→            }
+   841→        }
+   842→    }
+   843→
+   844→    // Remove duplicate consecutive points (within tolerance)
+   845→    if !points.is_empty() {
+   846→        let mut unique = vec![points[0]];
+   847→        for p in &points[1..] {
+   848→            if let Some(last) = unique.last() {
+   849→                if !last.is_coincident_with(p) {
+   850→                    unique.push(*p);
+   851→                }
+   852→            }
+   853→        }
+   854→        // Also check last vs first (closed loop)
+   855→        if unique.len() > 1 {
+   856→            if let Some(last) = unique.last() {
+   857→                if last.is_coincident_with(&unique[0]) {
+   858→                    unique.pop();
+   859→                }
+   860→            }
+   861→        }
+   862→        points = unique;
+   863→    }
+   864→
+   865→    points
+   866→}
+   867→
+   868→/// Fast UV projection for a sequence of 3D points on a NURBS surface.
+   869→///
+   870→/// Uses one full `project_point()` call to bootstrap, then chains
+   871→/// Newton-Raphson re-projection from each point's predecessor.
+   872→/// This is ~8× faster than calling `project_point()` for each point.
+   873→fn nurbs_uv_fast_projection(surface: &Surface, points_3d: &[Point3d]) -> Vec<Point2d> {
+   874→    if points_3d.is_empty() {
+   875→        return Vec::new();
+   876→    }
+   877→
+   878→    if let Surface::Nurbs(ref nurbs) = surface {
+   879→        let mut uvs = Vec::with_capacity(points_3d.len());
+   880→        // First point: full project_point()
+   881→        let (u0, v0) = surface.project_point(&points_3d[0]);
+   882→        uvs.push(Point2d::new(u0, v0));
+   883→
+   884→        // Subsequent points: chain Newton-Raphson from previous UV
+   885→        for i in 1..points_3d.len() {
+   886→            let prev = uvs[i - 1];
+   887→            let (u, v) = crate::parametric_domain::reproject_nurbs_point(
+   888→                nurbs, &points_3d[i], prev.u, prev.v,
+   889→            );
+   890→            uvs.push(Point2d::new(u, v));
+   891→        }
+   892→        uvs
+   893→    } else {
+   894→        // Non-NURBS: project_point() is fast, use it directly
+   895→        points_3d.iter().map(|p| {
+   896→            let (u, v) = surface.project_point(p);
+   897→            Point2d::new(u, v)
+   898→        }).collect()
+   899→    }
+   900→}
+   901→
+   902→/// Collect boundary UV coordinates from a face's outer wire using pcurves.
+   903→///
+   904→/// When CoEdge.curve_2d or CoEdge.pcurve is available, uses them directly
+   905→/// for accurate UV coordinates (no projection error). Otherwise falls back
+   906→/// to surface.project_point().
+   907→///
+   908→/// Returns Vec<Point2d> with the same length as collect_face_boundary_points()
+   909→/// would return for the same face. IMPORTANT: The deduplication logic must
+   910→/// match exactly, so we compute 3D and UV points together.
+   911→fn collect_face_boundary_points_with_uv(
+   912→    face: &Face,
+   913→    surface: &Surface,
+   914→) -> (Vec<Point3d>, Vec<Point2d>) {
+   915→    let mut points_3d = Vec::new();
+   916→    let mut points_uv = Vec::new();
+   917→
+   918→    if let Some(ref wire) = face.outer_wire {
+   919→        for coedge in &wire.coedges {
+   920→            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+   921→            if let Some(edge) = edge {
+   922→                if edge.degenerate {
+   923→                    continue;
+   924→                }
+   925→
+   926→                // Check if this coedge has an analytical curve_2d (PCURVE from STEP)
+   927→                let has_curve_2d = coedge.curve_2d.is_some();
+   928→                let has_pcurve = coedge.pcurve.is_some();
+   929→
+   930→                if has_curve_2d || has_pcurve {
+   931→                    // Sample using pcurve for accurate UV coordinates
+   932→                    let mut edge_pts_3d = sample_edge_points(edge, EDGE_SAMPLES);
+   933→                    let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+   934→                    let should_reverse = !coedge.forward != edge_is_reversed;
+   935→
+   936→                    // Sample UV from the pcurve at the same parameter values
+   937→                    let (tmin, tmax) = edge.param_range;
+   938→                    let (pmin, pmax) = if tmin <= tmax { (tmin, tmax) } else { (tmax, tmin) };
+   939→
+   940→                    let mut edge_pts_uv: Vec<Point2d> = if let Some(ref curve_2d) = coedge.curve_2d {
+   941→                        // Use analytical curve_2d (most accurate)
+   942→                        let (c2d_t_min, c2d_t_max) = curve_2d.param_range();
+   943→                        (0..EDGE_SAMPLES).map(|i| {
+   944→                            let t_frac = i as f64 / EDGE_SAMPLES as f64;
+   945→                            let edge_t = pmin + t_frac * (pmax - pmin);
+   946→                            // Map edge parameter fraction to curve_2d parameter
+   947→                            let norm_t = (edge_t - pmin) / (pmax - pmin).max(1e-15);
+   948→                            let curve_t = c2d_t_min + norm_t * (c2d_t_max - c2d_t_min);
+   949→                            curve_2d.point_at(curve_t)
+   950→                        }).collect()
+   951→                    } else if let Some(ref pcurve) = coedge.pcurve {
+   952→                        // Use pcurve polyline (interpolate)
+   953→                        let n_pcurve = pcurve.polyline_2d.len();
+   954→                        if n_pcurve == 0 {
+   955→                            // NURBS optimization: bootstrap + chain Newton-Raphson
+   956→                            nurbs_uv_fast_projection(surface, &edge_pts_3d)
+   957→                        } else if n_pcurve == 1 {
+   958→                            vec![pcurve.polyline_2d[0]; edge_pts_3d.len()]
+   959→                        } else {
+   960→                            (0..EDGE_SAMPLES).map(|i| {
+   961→                                let t_frac = i as f64 / EDGE_SAMPLES as f64;
+   962→                                let idx_f = t_frac * (n_pcurve - 1) as f64;
+   963→                                let idx_lo = idx_f.floor() as usize;
+   964→                                let idx_hi = (idx_lo + 1).min(n_pcurve - 1);
+   965→                                let frac = idx_f - idx_lo as f64;
+   966→                                let lo = pcurve.polyline_2d[idx_lo];
+   967→                                let hi = pcurve.polyline_2d[idx_hi];
+   968→                                Point2d::new(
+   969→                                    lo.u + frac * (hi.u - lo.u),
+   970→                                    lo.v + frac * (hi.v - lo.v),
+   971→                                )
+   972→                            }).collect()
+   973→                        }
+   974→                    } else {
+   975→                        // Unreachable (both checked above), but fallback
+   976→                        nurbs_uv_fast_projection(surface, &edge_pts_3d)
+   977→                    };
+   978→
+   979→                    // CRITICAL: Both 3D and UV must be reversed together!
+   980→                    // Previously only UV was reversed, causing a complete mismatch
+   981→                    // between 3D positions and UV coordinates for ~50% of edges.
+   982→                    if should_reverse {
+   983→                        edge_pts_3d.reverse();
+   984→                        edge_pts_uv.reverse();
+   985→                    }
+   986→
+   987→                    points_3d.extend(edge_pts_3d);
+   988→                    points_uv.extend(edge_pts_uv);
+   989→                } else {
+   990→                    // No pcurve — fall back to projecting 3D points to UV.
+   991→                    //
+   992→                    // CRITICAL OPTIMIZATION for NURBS: surface.project_point()
+   993→                    // does 11×11 + 5×5 grid search + Newton-Raphson per point,
+   994→                    // which is ~146 evaluations each. With 48 EDGE_SAMPLES × N edges,
+   995→                    // this is catastrophically slow.
+   996→                    //
+   997→                    // Strategy for NURBS: Do ONE project_point() for the first point
+   998→                    // on the edge, then use Newton-Raphson from the previous UV
+   999→                    // for subsequent points (they're along a curve, so sequential
+  1000→                    // parameter values map to nearby UVs). This reduces cost from
+  1001→                    // 146 × 48 = 7008 to ~146 + 47 × 15 = 851 evaluations per edge.
+  1002→                    let mut edge_pts_3d = sample_edge_points(edge, EDGE_SAMPLES);
+  1003→                    let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+  1004→                    let should_reverse = !coedge.forward != edge_is_reversed;
+  1005→
+  1006→                    let edge_pts_uv: Vec<Point2d> = if let Surface::Nurbs(ref nurbs) = surface {
+  1007→                        // NURBS fast path: bootstrap from first projection, then chain Newton-Raphson
+  1008→                        let mut uvs = Vec::with_capacity(edge_pts_3d.len());
+  1009→                        if !edge_pts_3d.is_empty() {
+  1010→                            // First point: use full project_point()
+  1011→                            let (u0, v0) = surface.project_point(&edge_pts_3d[0]);
+  1012→                            uvs.push(Point2d::new(u0, v0));
+  1013→
+  1014→                            // Subsequent points: Newton-Raphson from previous UV
+  1015→                            for i in 1..edge_pts_3d.len() {
+  1016→                                let prev_uv = uvs[i - 1];
+  1017→                                let (u, v) = crate::parametric_domain::reproject_nurbs_point(
+  1018→                                    nurbs, &edge_pts_3d[i], prev_uv.u, prev_uv.v,
+  1019→                                );
+  1020→                                uvs.push(Point2d::new(u, v));
+  1021→                            }
+  1022→                        }
+  1023→                        uvs
+  1024→                    } else {
+  1025→                        // Non-NURBS surfaces: project_point() is fast (O(1) to O(64))
+  1026→                        edge_pts_3d.iter().map(|p| {
+  1027→                            let (u, v) = surface.project_point(p);
+  1028→                            Point2d::new(u, v)
+  1029→                        }).collect()
+  1030→                    };
+  1031→
+  1032→                    // Reverse both 3D and UV together when the coedge direction
+  1033→                    // doesn't match the canonical sampling direction
+  1034→                    let mut edge_pts_3d = edge_pts_3d;
+  1035→                    let mut edge_pts_uv = edge_pts_uv;
+  1036→                    if should_reverse {
+  1037→                        edge_pts_3d.reverse();
+  1038→                        edge_pts_uv.reverse();
+  1039→                    }
+  1040→                    points_3d.extend(edge_pts_3d);
+  1041→                    points_uv.extend(edge_pts_uv);
+  1042→                }
+  1043→            }
+  1044→        }
+  1045→    }
+  1046→
+  1047→    // Remove duplicate consecutive points (within tolerance) — keep 3D and UV in sync
+  1048→    if !points_3d.is_empty() {
+  1049→        let mut unique_3d = vec![points_3d[0]];
+  1050→        let mut unique_uv = vec![points_uv[0]];
+  1051→        for i in 1..points_3d.len() {
+  1052→            if let Some(last) = unique_3d.last() {
+  1053→                if !last.is_coincident_with(&points_3d[i]) {
+  1054→                    unique_3d.push(points_3d[i]);
+  1055→                    unique_uv.push(points_uv[i]);
+  1056→                }
+  1057→            }
+  1058→        }
+  1059→        // Also check last vs first (closed loop)
+  1060→        if unique_3d.len() > 1 {
+  1061→            if let Some(last) = unique_3d.last() {
+  1062→                if last.is_coincident_with(&unique_3d[0]) {
+  1063→                    unique_3d.pop();
+  1064→                    unique_uv.pop();
+  1065→                }
+  1066→            }
+  1067→        }
+  1068→        points_3d = unique_3d;
+  1069→        points_uv = unique_uv;
+  1070→    }
+  1071→
+  1072→    (points_3d, points_uv)
+  1073→}
+  1074→
+  1075→/// Collect hole UV coordinates from a face's inner wires using pcurves.
+  1076→fn collect_face_hole_points_with_uv(
+  1077→    face: &Face,
+  1078→    surface: &Surface,
+  1079→) -> (Vec<Vec<Point3d>>, Vec<Vec<Point2d>>) {
+  1080→    let mut holes_3d = Vec::new();
+  1081→    let mut holes_uv = Vec::new();
+  1082→
+  1083→    for wire in &face.inner_wires {
+  1084→        let mut pts_3d = Vec::new();
+  1085→        let mut pts_uv = Vec::new();
+  1086→
+  1087→        for coedge in &wire.coedges {
+  1088→            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+  1089→            if let Some(edge) = edge {
+  1090→                if edge.degenerate {
+  1091→                    continue;
+  1092→                }
+  1093→
+  1094→                let edge_pts_3d = sample_edge_points(edge, EDGE_SAMPLES);
+  1095→                let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+  1096→                let should_reverse = !coedge.forward != edge_is_reversed;
+  1097→
+  1098→                let edge_pts_uv: Vec<Point2d> = if let Some(ref curve_2d) = coedge.curve_2d {
+  1099→                    let (tmin, tmax) = edge.param_range;
+  1100→                    let (pmin, pmax) = if tmin <= tmax { (tmin, tmax) } else { (tmax, tmin) };
+  1101→                    let (c2d_t_min, c2d_t_max) = curve_2d.param_range();
+  1102→                    (0..EDGE_SAMPLES).map(|i| {
+  1103→                        let t_frac = i as f64 / EDGE_SAMPLES as f64;
+  1104→                        let norm_t = t_frac;
+  1105→                        let curve_t = c2d_t_min + norm_t * (c2d_t_max - c2d_t_min);
+  1106→                        curve_2d.point_at(curve_t)
+  1107→                    }).collect()
+  1108→                } else if let Some(ref pcurve) = coedge.pcurve {
+  1109→                    let n_pcurve = pcurve.polyline_2d.len();
+  1110→                    if n_pcurve <= 1 {
+  1111→                        // NURBS optimization: bootstrap + chain Newton-Raphson
+  1112→                        nurbs_uv_fast_projection(surface, &edge_pts_3d)
+  1113→                    } else {
+  1114→                        (0..EDGE_SAMPLES).map(|i| {
+  1115→                            let t_frac = i as f64 / EDGE_SAMPLES as f64;
+  1116→                            let idx_f = t_frac * (n_pcurve - 1) as f64;
+  1117→                            let idx_lo = idx_f.floor() as usize;
+  1118→                            let idx_hi = (idx_lo + 1).min(n_pcurve - 1);
+  1119→                            let frac = idx_f - idx_lo as f64;
+  1120→                            let lo = pcurve.polyline_2d[idx_lo];
+  1121→                            let hi = pcurve.polyline_2d[idx_hi];
+  1122→                            Point2d::new(
+  1123→                                lo.u + frac * (hi.u - lo.u),
+  1124→                                lo.v + frac * (hi.v - lo.v),
+  1125→                            )
+  1126→                        }).collect()
+  1127→                    }
+  1128→                } else {
+  1129→                    // No pcurve — use fast NURBS projection
+  1130→                    nurbs_uv_fast_projection(surface, &edge_pts_3d)
+  1131→                };
+  1132→
+  1133→                let mut edge_pts_3d = edge_pts_3d;
+  1134→                let mut edge_pts_uv = edge_pts_uv;
+  1135→                if should_reverse {
+  1136→                    edge_pts_3d.reverse();
+  1137→                    edge_pts_uv.reverse();
+  1138→                }
+  1139→                pts_3d.extend(edge_pts_3d);
+  1140→                pts_uv.extend(edge_pts_uv);
+  1141→            }
+  1142→        }
+  1143→
+  1144→        // Deduplicate — keep 3D and UV in sync
+  1145→        if !pts_3d.is_empty() {
+  1146→            let mut unique_3d = vec![pts_3d[0]];
+  1147→            let mut unique_uv = vec![pts_uv[0]];
+  1148→            for i in 1..pts_3d.len() {
+  1149→                if let Some(last) = unique_3d.last() {
+  1150→                    if !last.is_coincident_with(&pts_3d[i]) {
+  1151→                        unique_3d.push(pts_3d[i]);
+  1152→                        unique_uv.push(pts_uv[i]);
+  1153→                    }
+  1154→                }
+  1155→            }
+  1156→            if unique_3d.len() > 1 {
+  1157→                if let Some(last) = unique_3d.last() {
+  1158→                    if last.is_coincident_with(&unique_3d[0]) {
+  1159→                        unique_3d.pop();
+  1160→                        unique_uv.pop();
+  1161→                    }
+  1162→                }
+  1163→            }
+  1164→            holes_3d.push(unique_3d);
+  1165→            holes_uv.push(unique_uv);
+  1166→        }
+  1167→    }
+  1168→
+  1169→    (holes_3d, holes_uv)
+  1170→}
+  1171→
+  1172→/// Collect boundary points from a face's inner wires (holes).
+  1173→fn collect_face_hole_points(face: &Face) -> Vec<Vec<Point3d>> {
+  1174→    let mut holes = Vec::new();
+  1175→    for wire in &face.inner_wires {
+  1176→        let mut points = Vec::new();
+  1177→        for coedge in &wire.coedges {
+  1178→            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+  1179→            if let Some(edge) = edge {
+  1180→                let mut edge_pts = sample_edge_points(edge, EDGE_SAMPLES);
+  1181→                // Same canonical-direction logic as collect_face_boundary_points
+  1182→                let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+  1183→                let should_reverse = !coedge.forward != edge_is_reversed;
+  1184→                if should_reverse {
+  1185→                    edge_pts.reverse();
+  1186→                }
+  1187→                points.extend(edge_pts);
+  1188→            }
+  1189→        }
+  1190→        // Deduplicate
+  1191→        if !points.is_empty() {
+  1192→            let mut unique = vec![points[0]];
+  1193→            for p in &points[1..] {
+  1194→                if let Some(last) = unique.last() {
+  1195→                    if !last.is_coincident_with(p) {
+  1196→                        unique.push(*p);
+  1197→                    }
+  1198→                }
+  1199→            }
+  1200→            if unique.len() > 1 {
+  1201→                if let Some(last) = unique.last() {
+  1202→                    if last.is_coincident_with(&unique[0]) {
+  1203→                        unique.pop();
+  1204→                    }
+  1205→                }
+  1206→            }
+  1207→            holes.push(unique);
+  1208→        }
+  1209→    }
+  1210→    holes
+  1211→}
+  1212→
+  1213→// ============================================================
+  1214→// Cached boundary collection — uses EdgeDiscretizationCache
+  1215→// ============================================================
+  1216→
+  1217→/// Pre-populate the cache with all edge discretizations for a single face.
+  1218→///
+  1219→/// This is used in the sequential path where each face's edges are
+  1220→/// lazily populated into the cache. After calling this, the cache
+  1221→/// contains entries for all non-degenerate edges of this face,
+  1222→/// and the face can be triangulated using only `&EdgeDiscretizationCache`.
+  1223→fn pre_populate_face_edges(cache: &mut EdgeDiscretizationCache, face: &Face, surface: &Surface) {
+  1224→    // Outer wire
+  1225→    if let Some(ref wire) = face.outer_wire {
+  1226→        for coedge in &wire.coedges {
+  1227→            if let Some(edge) = face.edges.iter().find(|e| e.id == coedge.edge) {
+  1228→                if edge.degenerate { continue; }
+  1229→                cache.discretize_edge(edge, face.id, surface, EDGE_SAMPLES, coedge.curve_2d.as_ref());
+  1230→            }
+  1231→        }
+  1232→    }
+  1233→    // Inner wires
+  1234→    for wire in &face.inner_wires {
+  1235→        for coedge in &wire.coedges {
+  1236→            if let Some(edge) = face.edges.iter().find(|e| e.id == coedge.edge) {
+  1237→                if edge.degenerate { continue; }
+  1238→                cache.discretize_edge(edge, face.id, surface, EDGE_SAMPLES, coedge.curve_2d.as_ref());
+  1239→            }
+  1240→        }
+  1241→    }
+  1242→}
+  1243→
+  1244→/// Collect boundary points from a face's outer wire using the edge discretization cache.
+  1245→///
+  1246→/// This replaces `collect_face_boundary_points` in the main pipeline.
+  1247→/// The cache ensures that shared edges between adjacent faces produce
+  1248→/// identical 3D point sequences, which is critical for watertight meshes.
+  1249→///
+  1250→/// NOTE: This function requires that the cache has been pre-populated for
+  1251→/// this face (via `pre_populate_face_edges` or `pre_populate_for_solid_full`).
+  1252→fn collect_face_boundary_from_cache(
+  1253→    face: &Face,
+  1254→    cache: &EdgeDiscretizationCache,
+  1255→    surface: &Surface,
+  1256→) -> Vec<Point3d> {
+  1257→    let mut points = Vec::new();
+  1258→
+  1259→    if let Some(ref wire) = face.outer_wire {
+  1260→        for coedge in &wire.coedges {
+  1261→            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+  1262→            if let Some(edge) = edge {
+  1263→                if edge.degenerate { continue; }
+  1264→
+  1265→                // Get cached discretization
+  1266→                if let Some(disc) = cache.get(edge.id) {
+  1267→                    let mut edge_pts = disc.points_3d.clone();
+  1268→
+  1269→                    // Same reversal logic as collect_face_boundary_points
+  1270→                    let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+  1271→                    let should_reverse = !coedge.forward != edge_is_reversed;
+  1272→                    if should_reverse {
+  1273→                        edge_pts.reverse();
+  1274→                    }
+  1275→                    points.extend(edge_pts);
+  1276→                } else {
+  1277→                    // Fallback: should not happen if cache was pre-populated
+  1278→                    log::warn!("Edge {} not found in cache for face {}, falling back to sample_edge_points", edge.id, face.id);
+  1279→                    let mut edge_pts = sample_edge_points(edge, EDGE_SAMPLES);
+  1280→                    let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+  1281→                    let should_reverse = !coedge.forward != edge_is_reversed;
+  1282→                    if should_reverse {
+  1283→                        edge_pts.reverse();
+  1284→                    }
+  1285→                    points.extend(edge_pts);
+  1286→                }
+  1287→            }
+  1288→        }
+  1289→    }
+  1290→
+  1291→    // Remove duplicate consecutive points (within tolerance)
+  1292→    if !points.is_empty() {
+  1293→        let mut unique = vec![points[0]];
+  1294→        for p in &points[1..] {
+  1295→            if let Some(last) = unique.last() {
+  1296→                if !last.is_coincident_with(p) {
+  1297→                    unique.push(*p);
+  1298→                }
+  1299→            }
+  1300→        }
+  1301→        // Also check last vs first (closed loop)
+  1302→        if unique.len() > 1 {
+  1303→            if let Some(last) = unique.last() {
+  1304→                if last.is_coincident_with(&unique[0]) {
+  1305→                    unique.pop();
+  1306→                }
+  1307→            }
+  1308→        }
+  1309→        points = unique;
+  1310→    }
+  1311→
+  1312→    points
+  1313→}
+  1314→
+  1315→/// Collect boundary points AND UV coordinates from a face's outer wire using the cache.
+  1316→///
+  1317→/// This replaces `collect_face_boundary_points_with_uv` in the main pipeline.
+  1318→/// UV coordinates are retrieved from the cache's per-face UV map.
+  1319→fn collect_face_boundary_with_uv_from_cache(
+  1320→    face: &Face,
+  1321→    cache: &EdgeDiscretizationCache,
+  1322→    surface: &Surface,
+  1323→) -> (Vec<Point3d>, Vec<Point2d>) {
+  1324→    let mut points_3d = Vec::new();
+  1325→    let mut points_uv = Vec::new();
+  1326→
+  1327→    if let Some(ref wire) = face.outer_wire {
+  1328→        for coedge in &wire.coedges {
+  1329→            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+  1330→            if let Some(edge) = edge {
+  1331→                if edge.degenerate { continue; }
+  1332→
+  1333→                if let Some(disc) = cache.get(edge.id) {
+  1334→                    let mut edge_pts_3d = disc.points_3d.clone();
+  1335→
+  1336→                    // Get UV for this face; if missing, compute as fallback
+  1337→                    let mut edge_pts_uv = if let Some(uvs) = disc.uv_per_face.get(&face.id) {
+  1338→                        uvs.clone()
+  1339→                    } else {
+  1340→                        // Fallback: compute UVs from the surface projection
+  1341→                        log::debug!("Computing UV fallback for edge {} face {}", edge.id, face.id);
+  1342→                        EdgeDiscretizationCache::compute_uvs(
+  1343→                            &disc.points_3d, &disc.params, surface, coedge.curve_2d.as_ref(),
+  1344→                        )
+  1345→                    };
+  1346→
+  1347→                    // Same reversal logic — both 3D and UV must be reversed together
+  1348→                    let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+  1349→                    let should_reverse = !coedge.forward != edge_is_reversed;
+  1350→                    if should_reverse {
+  1351→                        edge_pts_3d.reverse();
+  1352→                        edge_pts_uv.reverse();
+  1353→                    }
+  1354→
+  1355→                    points_3d.extend(edge_pts_3d);
+  1356→                    points_uv.extend(edge_pts_uv);
+  1357→                } else {
+  1358→                    // Fallback: should not happen if cache was pre-populated
+  1359→                    log::warn!("Edge {} not found in cache for face {}, falling back to uncached collection", edge.id, face.id);
+  1360→                    // Use the old uncached path for this edge
+  1361→                    let mut edge_pts_3d = sample_edge_points(edge, EDGE_SAMPLES);
+  1362→                    let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+  1363→                    let should_reverse = !coedge.forward != edge_is_reversed;
+  1364→
+  1365→                    let edge_pts_uv = nurbs_uv_fast_projection(surface, &edge_pts_3d);
+  1366→
+  1367→                    if should_reverse {
+  1368→                        edge_pts_3d.reverse();
+  1369→                    }
+  1370→                    let mut edge_pts_uv = edge_pts_uv;
+  1371→                    if should_reverse {
+  1372→                        edge_pts_uv.reverse();
+  1373→                    }
+  1374→
+  1375→                    points_3d.extend(edge_pts_3d);
+  1376→                    points_uv.extend(edge_pts_uv);
+  1377→                }
+  1378→            }
+  1379→        }
+  1380→    }
+  1381→
+  1382→    // Remove duplicate consecutive points (within tolerance) — keep 3D and UV in sync
+  1383→    if !points_3d.is_empty() {
+  1384→        let mut unique_3d = vec![points_3d[0]];
+  1385→        let mut unique_uv = vec![points_uv[0]];
+  1386→        for i in 1..points_3d.len() {
+  1387→            if let Some(last) = unique_3d.last() {
+  1388→                if !last.is_coincident_with(&points_3d[i]) {
+  1389→                    unique_3d.push(points_3d[i]);
+  1390→                    unique_uv.push(points_uv[i]);
+  1391→                }
+  1392→            }
+  1393→        }
+  1394→        // Also check last vs first (closed loop)
+  1395→        if unique_3d.len() > 1 {
+  1396→            if let Some(last) = unique_3d.last() {
+  1397→                if last.is_coincident_with(&unique_3d[0]) {
+  1398→                    unique_3d.pop();
+  1399→                    unique_uv.pop();
+  1400→                }
+  1401→            }
+  1402→        }
+  1403→        points_3d = unique_3d;
+  1404→        points_uv = unique_uv;
+  1405→    }
+  1406→
+  1407→    (points_3d, points_uv)
+  1408→}
+  1409→
+  1410→/// Collect hole boundary points from a face's inner wires using the cache.
+  1411→///
+  1412→/// This replaces `collect_face_hole_points` in the main pipeline.
+  1413→fn collect_face_holes_from_cache(
+  1414→    face: &Face,
+  1415→    cache: &EdgeDiscretizationCache,
+  1416→    surface: &Surface,
+  1417→) -> Vec<Vec<Point3d>> {
+  1418→    let mut holes = Vec::new();
+  1419→    for wire in &face.inner_wires {
+  1420→        let mut points = Vec::new();
+  1421→        for coedge in &wire.coedges {
+  1422→            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+  1423→            if let Some(edge) = edge {
+  1424→                if edge.degenerate { continue; }
+  1425→
+  1426→                if let Some(disc) = cache.get(edge.id) {
+  1427→                    let mut edge_pts = disc.points_3d.clone();
+  1428→                    let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+  1429→                    let should_reverse = !coedge.forward != edge_is_reversed;
+  1430→                    if should_reverse {
+  1431→                        edge_pts.reverse();
+  1432→                    }
+  1433→                    points.extend(edge_pts);
+  1434→                } else {
+  1435→                    let mut edge_pts = sample_edge_points(edge, EDGE_SAMPLES);
+  1436→                    let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+  1437→                    let should_reverse = !coedge.forward != edge_is_reversed;
+  1438→                    if should_reverse {
+  1439→                        edge_pts.reverse();
+  1440→                    }
+  1441→                    points.extend(edge_pts);
+  1442→                }
+  1443→            }
+  1444→        }
+  1445→        // Deduplicate
+  1446→        if !points.is_empty() {
+  1447→            let mut unique = vec![points[0]];
+  1448→            for p in &points[1..] {
+  1449→                if let Some(last) = unique.last() {
+  1450→                    if !last.is_coincident_with(p) {
+  1451→                        unique.push(*p);
+  1452→                    }
+  1453→                }
+  1454→            }
+  1455→            if unique.len() > 1 {
+  1456→                if let Some(last) = unique.last() {
+  1457→                    if last.is_coincident_with(&unique[0]) {
+  1458→                        unique.pop();
+  1459→                    }
+  1460→                }
+  1461→            }
+  1462→            holes.push(unique);
+  1463→        }
+  1464→    }
+  1465→    holes
+  1466→}
+  1467→
+  1468→/// Collect hole boundary points AND UV coordinates from a face's inner wires using the cache.
+  1469→///
+  1470→/// This replaces `collect_face_hole_points_with_uv` in the main pipeline.
+  1471→fn collect_face_holes_with_uv_from_cache(
+  1472→    face: &Face,
+  1473→    cache: &EdgeDiscretizationCache,
+  1474→    surface: &Surface,
+  1475→) -> (Vec<Vec<Point3d>>, Vec<Vec<Point2d>>) {
+  1476→    let mut holes_3d = Vec::new();
+  1477→    let mut holes_uv = Vec::new();
+  1478→
+  1479→    for wire in &face.inner_wires {
+  1480→        let mut pts_3d = Vec::new();
+  1481→        let mut pts_uv = Vec::new();
+  1482→
+  1483→        for coedge in &wire.coedges {
+  1484→            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+  1485→            if let Some(edge) = edge {
+  1486→                if edge.degenerate { continue; }
+  1487→
+  1488→                if let Some(disc) = cache.get(edge.id) {
+  1489→                    let mut edge_pts_3d = disc.points_3d.clone();
+  1490→
+  1491→                    let mut edge_pts_uv = if let Some(uvs) = disc.uv_per_face.get(&face.id) {
+  1492→                        uvs.clone()
+  1493→                    } else {
+  1494→                        EdgeDiscretizationCache::compute_uvs(
+  1495→                            &disc.points_3d, &disc.params, surface, coedge.curve_2d.as_ref(),
+  1496→                        )
+  1497→                    };
+  1498→
+  1499→                    let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+  1500→                    let should_reverse = !coedge.forward != edge_is_reversed;
+  1501→                    if should_reverse {
+  1502→                        edge_pts_3d.reverse();
+  1503→                        edge_pts_uv.reverse();
+  1504→                    }
+  1505→
+  1506→                    pts_3d.extend(edge_pts_3d);
+  1507→                    pts_uv.extend(edge_pts_uv);
+  1508→                } else {
+  1509→                    // Fallback
+  1510→                    let mut edge_pts_3d = sample_edge_points(edge, EDGE_SAMPLES);
+  1511→                    let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+  1512→                    let should_reverse = !coedge.forward != edge_is_reversed;
+  1513→                    let edge_pts_uv = nurbs_uv_fast_projection(surface, &edge_pts_3d);
+  1514→                    if should_reverse {
+  1515→                        edge_pts_3d.reverse();
+  1516→                    }
+  1517→                    let mut edge_pts_uv = edge_pts_uv;
+  1518→                    if should_reverse {
+  1519→                        edge_pts_uv.reverse();
+  1520→                    }
+  1521→                    pts_3d.extend(edge_pts_3d);
+  1522→                    pts_uv.extend(edge_pts_uv);
+  1523→                }
+  1524→            }
+  1525→        }
+  1526→
+  1527→        // Deduplicate — keep 3D and UV in sync
+  1528→        if !pts_3d.is_empty() {
+  1529→            let mut unique_3d = vec![pts_3d[0]];
+  1530→            let mut unique_uv = vec![pts_uv[0]];
+  1531→            for i in 1..pts_3d.len() {
+  1532→                if let Some(last) = unique_3d.last() {
+  1533→                    if !last.is_coincident_with(&pts_3d[i]) {
+  1534→                        unique_3d.push(pts_3d[i]);
+  1535→                        unique_uv.push(pts_uv[i]);
+  1536→                    }
+  1537→                }
+  1538→            }
+  1539→            if unique_3d.len() > 1 {
+  1540→                if let Some(last) = unique_3d.last() {
+  1541→                    if last.is_coincident_with(&unique_3d[0]) {
+  1542→                        unique_3d.pop();
+  1543→                        unique_uv.pop();
+  1544→                    }
+  1545→                }
+  1546→            }
+  1547→            holes_3d.push(unique_3d);
+  1548→            holes_uv.push(unique_uv);
+  1549→        }
+  1550→    }
+  1551→
+  1552→    (holes_3d, holes_uv)
+  1553→}
+  1554→
+  1555→// ============================================================
+  1556→// Planar face triangulation — minimum triangle count
+  1557→// ============================================================
+  1558→
+  1559→/// Triangulate a planar face.
+  1560→/// Uses ear-clipping on the boundary polygon — this produces the minimum
+  1561→/// number of triangles for a given boundary polygon (N-2 for convex).
+  1562→/// Supports holes via bridge-edge technique.
+  1563→fn triangulate_planar_face(face: &Face, plane: &Plane, _params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
+  1564→    let mut mesh = TriangleMesh::new();
+  1565→
+  1566→    // Use cached boundary collection for watertight meshes
+  1567→    let surface = Surface::Plane(plane.clone());
+  1568→    let boundary_3d = collect_face_boundary_from_cache(face, cache, &surface);
+  1569→    if boundary_3d.is_empty() {
+  1570→        return mesh;
+  1571→    }
+  1572→
+  1573→    let holes_3d = collect_face_holes_from_cache(face, cache, &surface);
+  1574→    let forward = face.forward;
+  1575→
+  1576→    // NOTE: We intentionally do NOT snap boundary points to the plane here.
+  1577→    // Snapping was previously done to eliminate numerical drift, but it
+  1578→    // causes boundary vertices on shared edges to have DIFFERENT 3D positions
+  1579→    // between adjacent faces. The boundary points come from edge curve sampling
+  1580→    // (potentially via StepEdgeCache), and snapping breaks the guarantee that
+  1581→    // shared edges produce identical 3D points.
+  1582→
+  1583→    // Project 3D boundary points onto the plane's 2D coordinate system
+  1584→    let project = |p: &Point3d| -> Point2d {
+  1585→        let dx = p.x - plane.origin.x;
+  1586→        let dy = p.y - plane.origin.y;
+  1587→        let dz = p.z - plane.origin.z;
+  1588→        Point2d::new(
+  1589→            dx * plane.u_dir.x + dy * plane.u_dir.y + dz * plane.u_dir.z,
+  1590→            dx * plane.v_dir.x + dy * plane.v_dir.y + dz * plane.v_dir.z,
+  1591→        )
+  1592→    };
+  1593→
+  1594→    let points_2d: Vec<Point2d> = boundary_3d.iter().map(|p| project(p)).collect();
+  1595→
+  1596→    if holes_3d.is_empty() {
+  1597→        // No holes — simple polygon triangulation
+  1598→        let is_convex = is_convex_polygon(&points_2d);
+  1599→
+  1600→        if is_convex && boundary_3d.len() >= 3 {
+  1601→            // Fan triangulation — N-2 triangles for N boundary vertices (minimum)
+  1602→            for p in &boundary_3d {
+  1603→                mesh.add_vertex(*p);
+  1604→            }
+  1605→            let n = boundary_3d.len() as u32;
+  1606→            for i in 1..n - 1 {
+  1607→                if forward {
+  1608→                    mesh.add_triangle(0, i, i + 1);
+  1609→                } else {
+  1610→                    mesh.add_triangle(0, i + 1, i);
+  1611→                }
+  1612→            }
+  1613→        } else {
+  1614→            // Ear clipping for non-convex polygons
+  1615→            let triangles = ear_clip(&points_2d);
+  1616→            for p in &boundary_3d {
+  1617→                mesh.add_vertex(*p);
+  1618→            }
+  1619→            for tri in &triangles {
+  1620→                if forward {
+  1621→                    mesh.add_triangle(tri[0], tri[1], tri[2]);
+  1622→                } else {
+  1623→                    mesh.add_triangle(tri[0], tri[2], tri[1]);
+  1624→                }
+  1625→            }
+  1626→        }
+  1627→    } else {
+  1628→        // Has holes — use earcutr (mapbox/earcut algorithm) which natively
+  1629→        // supports holes without bridge-edge tricks. The bridge-edge approach
+  1630→        // fails for circular bolt holes because ear-clipping can produce
+  1631→        // triangles that span across the thin bridge-edge passage.
+  1632→        let holes_2d: Vec<Vec<Point2d>> = holes_3d.iter()
+  1633→            .map(|h| h.iter().map(|p| project(p)).collect())
+  1634→            .collect();
+  1635→
+  1636→        match earcutr_triangulate_planar(&points_2d, &boundary_3d, &holes_2d, &holes_3d, forward, plane.normal) {
+  1637→            Some(m) => return m,
+  1638→            None => {
+  1639→                // Fallback to bridge-edge + ear-clip if earcutr fails
+  1640→                log::warn!("earcutr failed for planar face, falling back to bridge-edge ear-clip");
+  1641→                let (merged_2d, merged_3d) = merge_holes_into_polygon_planar(
+  1642→                    &points_2d, &boundary_3d, &holes_2d, &holes_3d,
+  1643→                );
+  1644→                let triangles = ear_clip(&merged_2d);
+  1645→                let filtered_triangles: Vec<[u32; 3]> = triangles.iter()
+  1646→                    .filter(|tri| {
+  1647→                        let a = merged_2d[tri[0] as usize];
+  1648→                        let b = merged_2d[tri[1] as usize];
+  1649→                        let c = merged_2d[tri[2] as usize];
+  1650→                        let centroid_u = (a.u + b.u + c.u) / 3.0;
+  1651→                        let centroid_v = (a.v + b.v + c.v) / 3.0;
+  1652→                        for hole in &holes_2d {
+  1653→                            if point_in_polygon_check(&Point2d::new(centroid_u, centroid_v), hole) {
+  1654→                                return false;
+  1655→                            }
+  1656→                        }
+  1657→                        point_in_polygon_check(&Point2d::new(centroid_u, centroid_v), &points_2d)
+  1658→                    })
+  1659→                    .cloned()
+  1660→                    .collect();
+  1661→                for p in &merged_3d {
+  1662→                    mesh.add_vertex(*p);
+  1663→                }
+  1664→                for tri in &filtered_triangles {
+  1665→                    if forward {
+  1666→                        mesh.add_triangle(tri[0], tri[1], tri[2]);
+  1667→                    } else {
+  1668→                        mesh.add_triangle(tri[0], tri[2], tri[1]);
+  1669→                    }
+  1670→                }
+  1671→            }
+  1672→        }
+  1673→    }
+  1674→
+  1675→    // Compute face normals for the planar face
+  1676→    let normal = if forward {
+  1677→        plane.normal
+  1678→    } else {
+  1679→        Direction3d::new(-plane.normal.x, -plane.normal.y, -plane.normal.z).unwrap_or(Direction3d::Z)
+  1680→    };
+  1681→    mesh.face_normals = Some(vec![[normal.x, normal.y, normal.z]; mesh.triangles.len()]);
+  1682→
+  1683→    mesh
+  1684→}
+  1685→
+  1686→/// Triangulate a planar face with holes using the earcutr (mapbox/earcut) algorithm.
+  1687→///
+  1688→/// Unlike the bridge-edge + ear-clip approach, earcutr natively handles holes
+  1689→/// by connecting them to the outer boundary using an optimal Z-order curve strategy.
+  1690→/// This produces correct triangulations for circular bolt holes and other complex
+  1691→/// hole shapes where bridge edges fail.
+  1692→///
+  1693→/// Returns None if the input is degenerate (too few points, zero-area polygon, etc.),
+  1694→/// in which case the caller should fall back to bridge-edge ear-clip.
+  1695→fn earcutr_triangulate_planar(
+  1696→    outer_2d: &[Point2d],
+  1697→    outer_3d: &[Point3d],
+  1698→    holes_2d: &[Vec<Point2d>],
+  1699→    holes_3d: &[Vec<Point3d>],
+  1700→    forward: bool,
+  1701→    plane_normal: Direction3d,
+  1702→) -> Option<TriangleMesh> {
+  1703→    if outer_2d.len() < 3 {
+  1704→        return None;
+  1705→    }
+  1706→
+  1707→    let mut mesh = TriangleMesh::new();
+  1708→
+  1709→    // Build the flat coordinate array for earcutr.
+  1710→    // Layout: [outer_pts...][hole0_pts...][hole1_pts...]
+  1711→    // earcutr expects coordinates as [x0,y0, x1,y1, ...] (2D flat)
+  1712→    let mut coords: Vec<f64> = Vec::with_capacity((outer_2d.len() + holes_2d.iter().map(|h| h.len()).sum::<usize>()) * 2);
+  1713→    let mut hole_indices: Vec<usize> = Vec::with_capacity(holes_2d.len());
+  1714→
+  1715→    // Outer boundary points
+  1716→    for p in outer_2d {
+  1717→        coords.push(p.u);
+  1718→        coords.push(p.v);
+  1719→    }
+  1720→
+  1721→    // Hole points — each hole starts at the current vertex count
+  1722→    // Track which holes are included so the 3D vertex array stays in sync
+  1723→    let mut valid_hole_indices: Vec<usize> = Vec::new();
+  1724→    for (hi, hole) in holes_2d.iter().enumerate() {
+  1725→        if hole.len() < 3 {
+  1726→            continue;
+  1727→        }
+  1728→        valid_hole_indices.push(hi);
+  1729→        hole_indices.push(coords.len() / 2);
+  1730→        for p in hole {
+  1731→            coords.push(p.u);
+  1732→            coords.push(p.v);
+  1733→        }
+  1734→    }
+  1735→
+  1736→    // Run earcutr triangulation
+  1737→    let triangle_indices = earcutr::earcut(&coords, &hole_indices, 2);
+  1738→
+  1739→    if triangle_indices.is_empty() {
+  1740→        return None;
+  1741→    }
+  1742→
+  1743→    // Build combined 3D vertex array: outer vertices first, then valid hole vertices
+  1744→    // CRITICAL: Only include holes that were also added to coords, so 3D indices
+  1745→    // match earcutr's 2D indices exactly.
+  1746→    let mut all_3d: Vec<Point3d> = outer_3d.to_vec();
+  1747→    for &hi in &valid_hole_indices {
+  1748→        all_3d.extend_from_slice(&holes_3d[hi]);
+  1749→    }
+  1750→
+  1751→    // Verify that all triangle indices are within bounds
+  1752→    let n_verts = coords.len() / 2;
+  1753→    for &idx in &triangle_indices {
+  1754→        if idx as usize >= n_verts {
+  1755→            log::warn!("earcutr produced out-of-bounds index {} (max {})", idx, n_verts - 1);
+  1756→            return None;
+  1757→        }
+  1758→    }
+  1759→
+  1760→    // Add vertices and triangles to the mesh
+  1761→    for p in &all_3d {
+  1762→        mesh.add_vertex(*p);
+  1763→    }
+  1764→
+  1765→    // earcutr produces triangles as [i0, i1, i2, i0, i1, i2, ...]
+  1766→    for chunk in triangle_indices.chunks(3) {
+  1767→        if chunk.len() < 3 {
+  1768→            break;
+  1769→        }
+  1770→        let a = chunk[0] as u32;
+  1771→        let b = chunk[1] as u32;
+  1772→        let c = chunk[2] as u32;
+  1773→
+  1774→        // Skip degenerate triangles
+  1775→        if a == b || b == c || a == c {
+  1776→            continue;
+  1777→        }
+  1778→
+  1779→        // Verify vertices are valid
+  1780→        if (a as usize) < all_3d.len() && (b as usize) < all_3d.len() && (c as usize) < all_3d.len() {
+  1781→            if forward {
+  1782→                mesh.add_triangle(a, b, c);
+  1783→            } else {
+  1784→                mesh.add_triangle(a, c, b);
+  1785→            }
+  1786→        }
+  1787→    }
+  1788→
+  1789→    // Compute face normals for the planar face using the analytical plane normal
+  1790→    if mesh.triangles.is_empty() {
+  1791→        return None;
+  1792→    }
+  1793→
+  1794→    let normal = if forward {
+  1795→        plane_normal
+  1796→    } else {
+  1797→        Direction3d::new(-plane_normal.x, -plane_normal.y, -plane_normal.z).unwrap_or(Direction3d::Z)
+  1798→    };
+  1799→
+  1800→    mesh.face_normals = Some(vec![[normal.x, normal.y, normal.z]; mesh.triangles.len()]);
+  1801→
+  1802→    Some(mesh)
+  1803→}
+  1804→
+  1805→/// Result of finding a bridge edge between outer polygon and a hole.
+  1806→struct BridgeResult {
+  1807→    outer_idx: usize,
+  1808→    hole_idx: usize,
+  1809→}
+  1810→
+  1811→/// Merge holes into the outer polygon using the bridge-edge technique.
+  1812→/// Returns the merged polygon as flat (2D, 3D) arrays suitable for ear-clipping.
+  1813→///
+  1814→/// This function rebuilds the polygon as a flat array after each hole insertion,
+  1815→/// ensuring that bridge-edge search always operates on the current polygon and
+  1816→/// indices remain consistent across multiple holes.
+  1817→fn merge_holes_into_polygon_planar(
+  1818→    outer_2d: &[Point2d],
+  1819→    outer_3d: &[Point3d],
+  1820→    holes_2d: &[Vec<Point2d>],
+  1821→    holes_3d: &[Vec<Point3d>],
+  1822→) -> (Vec<Point2d>, Vec<Point3d>) {
+  1823→    if outer_2d.is_empty() {
+  1824→        return (Vec::new(), Vec::new());
+  1825→    }
+  1826→    if holes_2d.is_empty() {
+  1827→        return (outer_2d.to_vec(), outer_3d.to_vec());
+  1828→    }
+  1829→
+  1830→    let mut poly_2d: Vec<Point2d> = outer_2d.to_vec();
+  1831→    let mut poly_3d: Vec<Point3d> = outer_3d.to_vec();
+  1832→
+  1833→    // Sort holes by rightmost point (u-coordinate) descending
+  1834→    let mut hole_indices: Vec<usize> = (0..holes_2d.len()).collect();
+  1835→    hole_indices.sort_by(|&a, &b| {
+  1836→        let max_u_a = holes_2d[a].iter().map(|p| p.u).fold(f64::NEG_INFINITY, f64::max);
+  1837→        let max_u_b = holes_2d[b].iter().map(|p| p.u).fold(f64::NEG_INFINITY, f64::max);
+  1838→        max_u_b.partial_cmp(&max_u_a).unwrap_or(std::cmp::Ordering::Equal)
+  1839→    });
+  1840→
+  1841→    for hole_idx in hole_indices {
+  1842→        let hole_2d = &holes_2d[hole_idx];
+  1843→        let hole_3d = &holes_3d[hole_idx];
+  1844→        if hole_2d.is_empty() { continue; }
+  1845→
+  1846→        let bridge_result = find_bridge_edge(&poly_2d, hole_2d);
+  1847→
+  1848→        // Rotate hole to start at bridge point
+  1849→        let n_hole = hole_2d.len();
+  1850→        let mut rotated_hole_2d = Vec::with_capacity(n_hole + 1);
+  1851→        let mut rotated_hole_3d = Vec::with_capacity(n_hole + 1);
+  1852→        for i in 0..=n_hole {
+  1853→            let idx = (bridge_result.hole_idx + i) % n_hole;
+  1854→            rotated_hole_2d.push(hole_2d[idx]);
+  1855→            rotated_hole_3d.push(hole_3d[idx]);
+  1856→        }
+  1857→
+  1858→        // Insert hole into polygon at the bridge point
+  1859→        let mut new_poly_2d = Vec::new();
+  1860→        let mut new_poly_3d = Vec::new();
+  1861→
+  1862→        // Part 1: outer polygon up to and including the bridge point
+  1863→        for i in 0..=bridge_result.outer_idx {
+  1864→            new_poly_2d.push(poly_2d[i]);
+  1865→            new_poly_3d.push(poly_3d[i]);
+  1866→        }
+  1867→
+  1868→        // Part 2: bridge to hole (rightmost point)
+  1869→        new_poly_2d.push(hole_2d[bridge_result.hole_idx]);
+  1870→        new_poly_3d.push(hole_3d[bridge_result.hole_idx]);
+  1871→
+  1872→        // Part 3: hole vertices starting from rightmost+1 going around back to rightmost
+  1873→        for i in 1..rotated_hole_2d.len() {
+  1874→            new_poly_2d.push(rotated_hole_2d[i]);
+  1875→            new_poly_3d.push(rotated_hole_3d[i]);
+  1876→        }
+  1877→
+  1878→        // Part 4: bridge back to the same outer polygon point
+  1879→        new_poly_2d.push(poly_2d[bridge_result.outer_idx]);
+  1880→        new_poly_3d.push(poly_3d[bridge_result.outer_idx]);
+  1881→
+  1882→        // Part 5: rest of outer polygon after bridge point
+  1883→        for i in (bridge_result.outer_idx + 1)..poly_2d.len() {
+  1884→            new_poly_2d.push(poly_2d[i]);
+  1885→            new_poly_3d.push(poly_3d[i]);
+  1886→        }
+  1887→
+  1888→        poly_2d = new_poly_2d;
+  1889→        poly_3d = new_poly_3d;
+  1890→    }
+  1891→
+  1892→    (poly_2d, poly_3d)
+  1893→}
+  1894→
+  1895→/// Find the best bridge edge between an outer polygon and a hole.
+  1896→/// Uses the rightmost-hole-point / closest-visible-outer-point technique.
+  1897→///
+  1898→/// For non-convex polygons (like L-shapes), the simple "closest point" approach
+  1899→/// can produce bridge edges that cross through the concave part of the polygon,
+  1900→/// creating self-intersecting merged polygons. This function verifies that the
+  1901→/// bridge edge doesn't cross any polygon edges before accepting it.
+  1902→fn find_bridge_edge(outer_2d: &[Point2d], hole_2d: &[Point2d]) -> BridgeResult {
+  1903→    // Guard against empty inputs
+  1904→    if hole_2d.is_empty() || outer_2d.is_empty() {
+  1905→        return BridgeResult { outer_idx: 0, hole_idx: 0 };
+  1906→    }
+  1907→    // Find rightmost point of the hole
+  1908→    let mut hole_idx = 0;
+  1909→    let mut max_u = hole_2d[0].u;
+  1910→    for (i, p) in hole_2d.iter().enumerate() {
+  1911→        if p.u > max_u {
+  1912→            max_u = p.u;
+  1913→            hole_idx = i;
+  1914→        }
+  1915→    }
+  1916→
+  1917→    let hole_pt = hole_2d[hole_idx];
+  1918→
+  1919→    // Sort outer polygon vertices by distance to the rightmost hole point (closest first)
+  1920→    let mut candidates: Vec<(usize, f64)> = outer_2d.iter().enumerate()
+  1921→        .map(|(i, p)| {
+  1922→            let dx = p.u - hole_pt.u;
+  1923→            let dy = p.v - hole_pt.v;
+  1924→            (i, dx * dx + dy * dy)
+  1925→        })
+  1926→        .collect();
+  1927→    candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+  1928→
+  1929→    if candidates.is_empty() {
+  1930→        return BridgeResult { outer_idx: 0, hole_idx };
+  1931→    }
+  1932→
+  1933→    // Try each candidate in order of distance — accept the first visible one
+  1934→    let fallback_idx = candidates[0].0;
+  1935→    let bridge = candidates.into_iter().find(|(outer_idx, _)| {
+  1936→        let outer_pt = outer_2d[*outer_idx];
+  1937→        is_bridge_visible(outer_2d, hole_pt, outer_pt, *outer_idx)
+  1938→    });
+  1939→
+  1940→    let outer_idx = bridge.map(|(idx, _)| idx).unwrap_or(fallback_idx);
+  1941→
+  1942→    BridgeResult { outer_idx, hole_idx }
+  1943→}
+  1944→
+  1945→/// Check if a bridge edge from `hole_pt` to `outer_pt` (at `outer_idx`) is visible,
+  1946→/// meaning it doesn't cross any edge of the outer polygon.
+  1947→fn is_bridge_visible(
+  1948→    outer_2d: &[Point2d],
+  1949→    hole_pt: Point2d,
+  1950→    outer_pt: Point2d,
+  1951→    outer_idx: usize,
+  1952→) -> bool {
+  1953→    let n = outer_2d.len();
+  1954→
+  1955→    // Check if the bridge edge intersects any edge of the outer polygon.
+  1956→    // We skip the two edges adjacent to outer_idx since they share the endpoint.
+  1957→    for i in 0..n {
+  1958→        let j = (i + 1) % n;
+  1959→
+  1960→        // Skip edges adjacent to the bridge endpoint
+  1961→        if i == outer_idx || j == outer_idx {
+  1962→            continue;
+  1963→        }
+  1964→
+  1965→        let a = outer_2d[i];
+  1966→        let b = outer_2d[j];
+  1967→
+  1968→        if segments_intersect(hole_pt, outer_pt, a, b) {
+  1969→            return false;
+  1970→        }
+  1971→    }
+  1972→
+  1973→    // Also check that the bridge edge doesn't go outside the polygon
+  1974→    // by verifying the midpoint is inside the outer polygon
+  1975→    let mid_u = (hole_pt.u + outer_pt.u) / 2.0;
+  1976→    let mid_v = (hole_pt.v + outer_pt.v) / 2.0;
+  1977→    let mid = Point2d::new(mid_u, mid_v);
+  1978→    if !point_in_polygon_check(&mid, outer_2d) {
+  1979→        return false;
+  1980→    }
+  1981→
+  1982→    true
+  1983→}
+  1984→
+  1985→/// Check if two line segments (p1→p2 and p3→p4) properly intersect.
+  1986→/// Uses the orientation test approach.
+  1987→fn segments_intersect(p1: Point2d, p2: Point2d, p3: Point2d, p4: Point2d) -> bool {
+  1988→    let d1 = cross_2d(p3, p4, p1);
+  1989→    let d2 = cross_2d(p3, p4, p2);
+  1990→    let d3 = cross_2d(p1, p2, p3);
+  1991→    let d4 = cross_2d(p1, p2, p4);
+  1992→
+  1993→    if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
+  1994→        && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
+  1995→    {
+  1996→        return true;
+  1997→    }
+  1998→
+  1999→    // Check collinear cases (degenerate — treat as non-intersecting for robustness)
+  2000→    false
+
+[showing lines 1-2000 of 6720; use offset=2001 with limit to continue reading]
