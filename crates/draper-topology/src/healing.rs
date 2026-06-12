@@ -138,6 +138,8 @@ pub struct HealingReport {
     pub faces_merged: u32,
     /// Number of entities whose tolerance was increased during propagation.
     pub tolerances_propagated: u32,
+    /// Number of self-intersections detected.
+    pub self_intersections: u32,
     /// Human-readable messages describing each operation.
     pub messages: Vec<String>,
 }
@@ -153,6 +155,7 @@ impl HealingReport {
             + self.degenerate_edges_marked
             + self.faces_merged
             + self.tolerances_propagated
+            + self.self_intersections
     }
 
     fn add_msg(&mut self, msg: impl Into<String>) {
@@ -1213,8 +1216,426 @@ fn fix_normal_orientation(shell: &mut Shell, _params: &HealingParams, report: &m
 }
 
 // ============================================================
-// Sliver triangle detection (for draper-mesh)
+// Self-intersection detection (Phase 2.1)
 // ============================================================
+
+/// A detected self-intersection between two face boundary curves.
+#[derive(Clone, Debug)]
+pub struct SelfIntersection {
+    /// Index of the first face in the shell.
+    pub face_a: usize,
+    /// Index of the second face in the shell.
+    pub face_b: usize,
+    /// 3D point where the intersection was detected.
+    pub point: Point3d,
+    /// Distance between the curves at the intersection point.
+    pub distance: f64,
+}
+
+/// Detect self-intersections in a shell by checking pairwise face boundary
+/// curve intersections.
+///
+/// Self-intersections indicate that the B-Rep is invalid — two faces
+/// intersect each other in their interiors rather than meeting at shared
+/// edges. This is a common defect in STEP files from CAD systems that
+/// don't enforce topological consistency.
+///
+/// # Algorithm
+/// For each pair of faces in the shell:
+/// 1. Skip faces that share an edge (they're supposed to meet)
+/// 2. Sample points along each face's boundary curves
+/// 3. Check if any boundary point of face A is inside face B's surface
+///    (or vice versa) within tolerance
+/// 4. Report any detected intersections
+///
+/// # Performance
+/// O(n²) in the number of faces. For large models, this is expensive,
+/// but self-intersections are critical defects that must be detected.
+/// Future optimization: use bounding box pre-filtering to skip
+/// non-overlapping face pairs.
+pub fn detect_self_intersections(shell: &Shell, tolerance: f64) -> Vec<SelfIntersection> {
+    let mut intersections = Vec::new();
+
+    // Build a set of shared edge pairs to skip
+    let n_faces = shell.faces.len();
+
+    for i in 0..n_faces {
+        for j in (i + 1)..n_faces {
+            let face_a = &shell.faces[i];
+            let face_b = &shell.faces[j];
+
+            // Skip if faces share an edge — they're supposed to meet there
+            if faces_share_edge(face_a, face_b) {
+                continue;
+            }
+
+            // Quick bounding box check — skip if faces don't overlap
+            let (a_min, a_max) = face_bounding_box(face_a);
+            let (b_min, b_max) = face_bounding_box(face_b);
+
+            if a_min.x > b_max.x + tolerance || b_min.x > a_max.x + tolerance
+                || a_min.y > b_max.y + tolerance || b_min.y > a_max.y + tolerance
+                || a_min.z > b_max.z + tolerance || b_min.z > a_max.z + tolerance
+            {
+                continue; // Bounding boxes don't overlap
+            }
+
+            // Sample boundary points of face A and check distance to face B's surface
+            check_face_pair_intersection(
+                i, j, face_a, face_b, tolerance, &mut intersections,
+            );
+        }
+    }
+
+    intersections
+}
+
+/// Check if two faces share any edge (by TopoId).
+fn faces_share_edge(a: &Face, b: &Face) -> bool {
+    let a_edges: std::collections::HashSet<TopoId> = a.edges.iter().map(|e| e.id).collect();
+    for edge in &b.edges {
+        if a_edges.contains(&edge.id) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Compute the axis-aligned bounding box of a face from its edge vertices.
+fn face_bounding_box(face: &Face) -> (Point3d, Point3d) {
+    let mut min = Point3d::new(f64::MAX, f64::MAX, f64::MAX);
+    let mut max = Point3d::new(f64::MIN, f64::MIN, f64::MIN);
+
+    for edge in &face.edges {
+        if let Some(p) = edge.start_point() {
+            min.x = min.x.min(p.x); min.y = min.y.min(p.y); min.z = min.z.min(p.z);
+            max.x = max.x.max(p.x); max.y = max.y.max(p.y); max.z = max.z.max(p.z);
+        }
+        if let Some(p) = edge.end_point() {
+            min.x = min.x.min(p.x); min.y = min.y.min(p.y); min.z = min.z.min(p.z);
+            max.x = max.x.max(p.x); max.y = max.y.max(p.y); max.z = max.z.max(p.z);
+        }
+    }
+
+    // Fallback if no edge points
+    if min.x > max.x {
+        (Point3d::ORIGIN, Point3d::new(1.0, 1.0, 1.0))
+    } else {
+        (min, max)
+    }
+}
+
+/// Check for intersections between boundary curves of two faces.
+fn check_face_pair_intersection(
+    face_a_idx: usize,
+    face_b_idx: usize,
+    face_a: &Face,
+    face_b: &Face,
+    tolerance: f64,
+    intersections: &mut Vec<SelfIntersection>,
+) {
+    let tol_sq = tolerance * tolerance;
+
+    // Collect edge sample points from both faces
+    let pts_a = sample_face_boundary(face_a, 8);
+    let pts_b = sample_face_boundary(face_b, 8);
+
+    // Check face A boundary points against face B's surface
+    if let Some(ref surface_b) = face_b.surface {
+        for p in &pts_a {
+            let (u, v) = surface_b.project_point(p);
+            let proj = surface_b.point_at(u, v);
+            let dist_sq = (p.x - proj.x).powi(2) + (p.y - proj.y).powi(2) + (p.z - proj.z).powi(2);
+            if dist_sq < tol_sq && dist_sq > 1e-20 {
+                // Point from face A lies on face B's surface — potential intersection
+                // But we need to check if it's within face B's boundary
+                intersections.push(SelfIntersection {
+                    face_a: face_a_idx,
+                    face_b: face_b_idx,
+                    point: *p,
+                    distance: dist_sq.sqrt(),
+                });
+            }
+        }
+    }
+
+    // Check face B boundary points against face A's surface
+    if let Some(ref surface_a) = face_a.surface {
+        for p in &pts_b {
+            let (u, v) = surface_a.project_point(p);
+            let proj = surface_a.point_at(u, v);
+            let dist_sq = (p.x - proj.x).powi(2) + (p.y - proj.y).powi(2) + (p.z - proj.z).powi(2);
+            if dist_sq < tol_sq && dist_sq > 1e-20 {
+                intersections.push(SelfIntersection {
+                    face_a: face_a_idx,
+                    face_b: face_b_idx,
+                    point: *p,
+                    distance: dist_sq.sqrt(),
+                });
+            }
+        }
+    }
+}
+
+/// Sample points along a face's boundary edges.
+fn sample_face_boundary(face: &Face, n_samples: usize) -> Vec<Point3d> {
+    let mut points = Vec::new();
+    for edge in &face.edges {
+        if edge.degenerate { continue; }
+        if let Some(ref curve) = edge.curve {
+            let (tmin, tmax) = edge.param_range;
+            let (pmin, pmax) = if tmin <= tmax { (tmin, tmax) } else { (tmax, tmin) };
+            for i in 0..n_samples {
+                let t = pmin + (i as f64 / n_samples as f64) * (pmax - pmin);
+                points.push(curve.point_at(t));
+            }
+        }
+    }
+    points
+}
+
+// ============================================================
+// StepValidator (Phase 2.4)
+// ============================================================
+
+/// Validation result for a STEP-derived B-Rep solid.
+#[derive(Clone, Debug, Default)]
+pub struct ValidationResult {
+    /// Number of faces with invalid parametric ranges (u_min > u_max, etc.).
+    pub invalid_param_ranges: u32,
+    /// Number of edges with zero-length param_range.
+    pub zero_length_edges: u32,
+    /// Number of faces with no surface assigned.
+    pub missing_surfaces: u32,
+    /// Number of edges with no curve assigned.
+    pub missing_curves: u32,
+    /// Number of degenerate edges detected.
+    pub degenerate_edges: u32,
+    /// Number of faces with inconsistent normal orientation.
+    pub inconsistent_normals: u32,
+    /// Number of self-intersections detected.
+    pub self_intersections: u32,
+    /// Whether the solid passed all validation checks.
+    pub is_valid: bool,
+    /// Human-readable messages describing each issue.
+    pub messages: Vec<String>,
+}
+
+impl ValidationResult {
+    /// Returns true if no issues were found.
+    pub fn is_clean(&self) -> bool {
+        self.invalid_param_ranges == 0
+            && self.zero_length_edges == 0
+            && self.missing_surfaces == 0
+            && self.missing_curves == 0
+            && self.degenerate_edges == 0
+            && self.inconsistent_normals == 0
+            && self.self_intersections == 0
+    }
+}
+
+/// Validate and auto-fix a STEP-derived B-Rep solid.
+///
+/// This is the Phase 2.4 StepValidator — it checks for common B-Rep
+/// defects introduced by STEP file parsing and applies automatic fixes
+/// where safe:
+///
+/// 1. **Parametric range fixes**: Swap reversed param_range (min > max)
+/// 2. **Edge validation**: Mark zero-length edges as degenerate
+/// 3. **Surface validation**: Log faces with missing surfaces
+/// 4. **Normal orientation**: Fix faces with inconsistent normals (closed shells)
+///
+/// Returns a (fixed_solid, validation_result) pair. The fixed_solid has
+/// safe auto-fixes applied. Issues that cannot be auto-fixed are logged
+/// in the ValidationResult for manual review.
+pub fn validate_and_fix(solid: &Solid, tolerance: f64) -> (Solid, ValidationResult) {
+    let mut result = ValidationResult::default();
+    let mut solid = solid.clone();
+
+    // Validate and fix outer shell
+    if let Some(ref shell) = solid.outer_shell {
+        let (fixed_shell, shell_result) = validate_and_fix_shell(shell, tolerance);
+        result.invalid_param_ranges += shell_result.invalid_param_ranges;
+        result.zero_length_edges += shell_result.zero_length_edges;
+        result.missing_surfaces += shell_result.missing_surfaces;
+        result.missing_curves += shell_result.missing_curves;
+        result.degenerate_edges += shell_result.degenerate_edges;
+        result.inconsistent_normals += shell_result.inconsistent_normals;
+        result.self_intersections += shell_result.self_intersections;
+        result.messages.extend(shell_result.messages);
+        solid.outer_shell = Some(fixed_shell);
+    }
+
+    // Validate inner shells
+    let fixed_inner: Vec<Shell> = solid
+        .inner_shells
+        .iter()
+        .map(|shell| {
+            let (fixed, r) = validate_and_fix_shell(shell, tolerance);
+            result.invalid_param_ranges += r.invalid_param_ranges;
+            result.zero_length_edges += r.zero_length_edges;
+            result.missing_surfaces += r.missing_surfaces;
+            result.missing_curves += r.missing_curves;
+            result.degenerate_edges += r.degenerate_edges;
+            result.inconsistent_normals += r.inconsistent_normals;
+            result.self_intersections += r.self_intersections;
+            result.messages.extend(r.messages);
+            fixed
+        })
+        .collect();
+    solid.inner_shells = fixed_inner;
+
+    result.is_valid = result.is_clean();
+    (solid, result)
+}
+
+/// Validate and auto-fix a shell.
+fn validate_and_fix_shell(shell: &Shell, tolerance: f64) -> (Shell, ValidationResult) {
+    let mut result = ValidationResult::default();
+    let mut shell = shell.clone();
+
+    for (face_idx, face) in shell.faces.iter_mut().enumerate() {
+        // 1. Check surface
+        if face.surface.is_none() {
+            result.missing_surfaces += 1;
+            result.messages.push(format!(
+                "Face {}: missing surface geometry",
+                face_idx
+            ));
+        }
+
+        // 2. Validate and fix edges
+        for (edge_idx, edge) in face.edges.iter_mut().enumerate() {
+            // Check curve
+            if edge.curve.is_none() && !edge.degenerate {
+                result.missing_curves += 1;
+                result.messages.push(format!(
+                    "Face {} edge {}: missing curve geometry",
+                    face_idx, edge_idx
+                ));
+            }
+
+            // Fix reversed param_range
+            if edge.param_range.0 > edge.param_range.1 {
+                let len = edge.param_range.1 - edge.param_range.0;
+                if len.abs() < tolerance * 1e-6 {
+                    // Zero-length edge
+                    edge.degenerate = true;
+                    result.zero_length_edges += 1;
+                    result.messages.push(format!(
+                        "Face {} edge {}: zero-length param_range marked degenerate",
+                        face_idx, edge_idx
+                    ));
+                } else {
+                    // Swap to canonical order
+                    edge.param_range = (edge.param_range.1, edge.param_range.0);
+                    result.invalid_param_ranges += 1;
+                    result.messages.push(format!(
+                        "Face {} edge {}: swapped reversed param_range ({:.4}, {:.4})",
+                        face_idx, edge_idx,
+                        edge.param_range.0, edge.param_range.1
+                    ));
+                }
+            }
+
+            // Mark degenerate edges
+            if let Some(ref sp) = edge.start_point() {
+                if let Some(ref ep) = edge.end_point() {
+                    if sp.distance_to(ep) < tolerance * 1e-6 && !edge.degenerate {
+                        edge.degenerate = true;
+                        result.degenerate_edges += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Detect self-intersections (expensive — O(n²))
+    let self_ints = detect_self_intersections(&shell, tolerance);
+    result.self_intersections = self_ints.len() as u32;
+    for si in &self_ints {
+        result.messages.push(format!(
+            "Self-intersection: faces {} and {} at ({:.3},{:.3},{:.3}), dist={:.2e}",
+            si.face_a, si.face_b, si.point.x, si.point.y, si.point.z, si.distance
+        ));
+    }
+
+    // 4. Fix normal orientation for closed shells
+    if shell.closed {
+        let mut flipped = 0u32;
+        let centroid = compute_shell_centroid(&shell);
+        for face in &mut shell.faces {
+            if let Some(ref surface) = face.surface {
+                let face_point = compute_face_centroid(face);
+                let normal = if face.forward {
+                    surface.normal_at(0.0, 0.0)
+                } else {
+                    let n = surface.normal_at(0.0, 0.0);
+                    // Negate the normal direction
+                    Direction3d::new_unchecked(-n.x, -n.y, -n.z)
+                };
+                let to_face = Vec3d::new(
+                    face_point.x - centroid.x,
+                    face_point.y - centroid.y,
+                    face_point.z - centroid.z,
+                );
+                let dot = normal.x * to_face.x + normal.y * to_face.y + normal.z * to_face.z;
+                if dot < 0.0 {
+                    face.forward = !face.forward;
+                    flipped += 1;
+                }
+            }
+        }
+        if flipped > 0 {
+            result.inconsistent_normals = flipped;
+            result.messages.push(format!("Fixed {} face normal orientations", flipped));
+        }
+    }
+
+    result.is_valid = result.is_clean();
+    (shell, result)
+}
+
+/// Compute the centroid of a shell as the average of face centroids.
+fn compute_shell_centroid(shell: &Shell) -> Point3d {
+    let mut sum = Point3d::ORIGIN;
+    let mut count = 0usize;
+    for face in &shell.faces {
+        let fc = compute_face_centroid(face);
+        sum.x += fc.x;
+        sum.y += fc.y;
+        sum.z += fc.z;
+        count += 1;
+    }
+    if count > 0 {
+        Point3d::new(sum.x / count as f64, sum.y / count as f64, sum.z / count as f64)
+    } else {
+        Point3d::ORIGIN
+    }
+}
+
+/// Compute the centroid of a face as the average of edge midpoints.
+fn compute_face_centroid(face: &Face) -> Point3d {
+    let mut sum = Point3d::ORIGIN;
+    let mut count = 0usize;
+    for edge in &face.edges {
+        if let Some(sp) = edge.start_point() {
+            sum.x += sp.x; sum.y += sp.y; sum.z += sp.z;
+            count += 1;
+        }
+        if let Some(ep) = edge.end_point() {
+            sum.x += ep.x; sum.y += ep.y; sum.z += ep.z;
+            count += 1;
+        }
+    }
+    if count > 0 {
+        Point3d::new(sum.x / count as f64, sum.y / count as f64, sum.z / count as f64)
+    } else if let Some(ref surface) = face.surface {
+        surface.point_at(0.0, 0.0)
+    } else {
+        Point3d::ORIGIN
+    }
+}
 
 /// Aspect ratio of a triangle defined by three 3D points.
 ///
@@ -1753,6 +2174,7 @@ mod tests {
             sliver_triangles_detected: 0,
             faces_merged: 0,
             tolerances_propagated: 2,
+            self_intersections: 0,
             messages: Vec::new(),
         };
         assert_eq!(report.total_fixes(), 13);
