@@ -496,7 +496,7 @@ impl TriangleMesh {
         }
     }
 
-    /// Snap boundary vertices to nearby non-boundary vertices.
+    /// Snap boundary vertices to nearby vertices (shared or boundary).
     ///
     /// After merging face meshes with bit-exact deduplication, some vertices
     /// from different faces may be geometrically close but not bit-identical
@@ -508,20 +508,33 @@ impl TriangleMesh {
     /// # Algorithm
     /// 1. Build a spatial hash of ALL vertices
     /// 2. Find boundary edges (edges appearing in only one triangle)
-    /// 3. For each boundary vertex, check if there's a nearby non-boundary
-    ///    vertex within `snap_tolerance`
+    /// 3. For each boundary vertex, check if there's a nearby vertex
+    ///    within `snap_tolerance`
     /// 4. If found, remap the boundary vertex to the nearby one
     ///
-    /// # Safety
-    /// - Only snaps to vertices that are ALREADY shared by 2+ triangles
-    ///   (non-manifold-safe)
-    /// - Uses a spatial hash for O(1) lookups
-    /// - Does NOT create new vertices, only remaps existing ones
+    /// Runs multiple iterations because snapping boundary vertices can
+    /// create new shared vertices that enable further snapping.
     pub fn snap_boundary_vertices(&mut self, snap_tolerance: f64) -> usize {
         if snap_tolerance <= 0.0 || self.vertices.is_empty() || self.triangles.is_empty() {
             return 0;
         }
 
+        let mut total_snapped = 0usize;
+        // Iterate: each round may create new shared vertices that enable
+        // further snapping in the next round.
+        for iteration in 0..5 {
+            let snapped = self.snap_boundary_vertices_once(snap_tolerance);
+            total_snapped += snapped;
+            if snapped == 0 {
+                break;
+            }
+            log::debug!("snap_boundary_vertices iteration {}: snapped {} vertices", iteration, snapped);
+        }
+        total_snapped
+    }
+
+    /// Single iteration of boundary vertex snapping.
+    fn snap_boundary_vertices_once(&mut self, snap_tolerance: f64) -> usize {
         // Step 1: Count edge occurrences to find boundary vertices
         let mut edge_count: HashMap<(u32, u32), u32> = HashMap::new();
         for tri in &self.triangles {
@@ -536,7 +549,6 @@ impl TriangleMesh {
         let mut boundary_vertex_set: HashMap<u32, u32> = HashMap::new();
         for (&(a, b), &count) in &edge_count {
             if count == 1 {
-                // This is a boundary edge
                 boundary_vertex_set.entry(a).or_insert(0);
                 boundary_vertex_set.entry(b).or_insert(0);
             }
@@ -546,8 +558,10 @@ impl TriangleMesh {
             return 0;
         }
 
-        // Step 2: Build spatial hash of non-boundary vertices
-        // (vertices that are already shared by 2+ triangles)
+        // Step 2: Build spatial hash of ALL vertices (both boundary and shared)
+        // We allow snapping boundary→boundary as well as boundary→shared,
+        // because two boundary vertices from adjacent faces at the same
+        // geometric position should be merged.
         let cell_size = snap_tolerance;
         let mut spatial: HashMap<(i64, i64, i64), Vec<(u32, Point3d)>> = HashMap::new();
 
@@ -560,10 +574,12 @@ impl TriangleMesh {
         }
 
         for (idx, p) in self.vertices.iter().enumerate() {
-            // Only index vertices that are shared (2+ triangles) — these
-            // are "interior" or "shared boundary" vertices that are safe
-            // snap targets.
-            if vert_tri_count[idx] >= 2 {
+            // Index all vertices EXCEPT boundary-only vertices (those in
+            // only 1 triangle) — we don't want to snap TO those.
+            // Shared vertices (2+ triangles) are always safe targets.
+            // Other boundary vertices (also in 1 triangle) are targets
+            // only if they have a different 3D position.
+            if vert_tri_count[idx] >= 2 || !boundary_vertex_set.contains_key(&(idx as u32)) {
                 let cell = (
                     (p.x / cell_size).floor() as i64,
                     (p.y / cell_size).floor() as i64,
@@ -573,7 +589,7 @@ impl TriangleMesh {
             }
         }
 
-        // Step 3: For each boundary vertex, find nearby shared vertices
+        // Step 3: For each boundary vertex, find nearby vertices
         let mut remap: Vec<u32> = (0..self.vertices.len() as u32).collect();
         let mut snap_count = 0usize;
         let tol_sq = snap_tolerance * snap_tolerance;
@@ -612,6 +628,8 @@ impl TriangleMesh {
             }
 
             if let Some(target) = best_target {
+                // Prefer snapping to shared vertices (higher tri count)
+                // over other boundary vertices
                 remap[bv as usize] = target;
                 snap_count += 1;
             }
