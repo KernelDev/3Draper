@@ -2628,6 +2628,51 @@ impl<'a> StepConverter<'a> {
         // shared edges produce identical 3D points (watertightness).
         let mut edge_cache = EdgeDiscretizationCache::with_tolerance(tol_ctx.clone(), 64);
 
+        // ─── Build vertex-pair → canonical step_id aliases ──────────────
+        // In STEP B-Rep, two faces sharing a geometric boundary may use
+        // DIFFERENT EDGE_CURVE entities (e.g., a Plane face uses a LINE
+        // while a NURBS face uses a NURBS curve). They share the same
+        // VERTEX_POINT endpoints. By aliasing all step_ids with the same
+        // vertex pair to a single canonical step_id, we ensure the edge
+        // cache returns identical 3D points for all of them — guaranteeing
+        // watertightness by construction.
+        //
+        // CRITICAL: The canonical step_id must be the one with the DENSEST
+        // sampling. If a Plane face uses a LINE (2 pts) and a NURBS face
+        // uses a NURBS curve (55 pts) on the same boundary, we MUST use
+        // the NURBS step_id as canonical. Otherwise the NURBS face gets
+        // only 2 boundary points, producing a degenerate triangulation.
+        {
+            let mut vertex_pair_to_step_ids: HashMap<(i64, i64), Vec<i64>> = HashMap::new();
+            for face_data in &face_data_list {
+                for &step_id in &face_data.edge_step_ids {
+                    if step_id == 0 { continue; }
+                    if let Some(vp) = self.get_edge_curve_vertex_pair(step_id) {
+                        vertex_pair_to_step_ids.entry(vp).or_default().push(step_id);
+                    }
+                }
+            }
+            let mut alias_count = 0usize;
+            for (vp, step_ids) in &vertex_pair_to_step_ids {
+                if step_ids.len() < 2 { continue; }
+                let canonical = *step_ids.iter().max_by_key(|&&sid| {
+                    self.edge_curve_complexity_score(sid)
+                }).unwrap();
+                for &sid in step_ids {
+                    if sid != canonical {
+                        edge_cache.register_step_id_alias(sid, canonical);
+                        alias_count += 1;
+                    }
+                }
+            }
+            if alias_count > 0 {
+                log::info!(
+                    "BREP #{}: registered {} step_id aliases from vertex-pair matching",
+                    brep_id, alias_count
+                );
+            }
+        }
+
         let mut mesh = TriangleMesh::new();
         // Use tolerance-based dedup: adjacent faces may use different STEP EDGE_CURVE
         // entities on their common geometric boundary, producing near-identical (but
@@ -2787,6 +2832,42 @@ impl<'a> StepConverter<'a> {
 
         // Create edge discretization cache for this BREP
         let mut edge_cache = EdgeDiscretizationCache::with_tolerance(tol_ctx.clone(), 64);
+
+        // ─── Build vertex-pair → canonical step_id aliases ──────────────
+        {
+            let mut vertex_pair_to_step_ids: HashMap<(i64, i64), Vec<i64>> = HashMap::new();
+            for face_data in &face_data_list {
+                for &step_id in &face_data.edge_step_ids {
+                    if step_id == 0 { continue; }
+                    if let Some(vp) = self.get_edge_curve_vertex_pair(step_id) {
+                        vertex_pair_to_step_ids.entry(vp).or_default().push(step_id);
+                    }
+                }
+            }
+            let mut alias_count = 0usize;
+            for (vp, step_ids) in &vertex_pair_to_step_ids {
+                if step_ids.len() < 2 { continue; }
+                let canonical = *step_ids.iter().max_by_key(|&&sid| {
+                    self.edge_curve_complexity_score(sid)
+                }).unwrap();
+                for &sid in step_ids {
+                    if sid != canonical {
+                        edge_cache.register_step_id_alias(sid, canonical);
+                        alias_count += 1;
+                    }
+                }
+                log::debug!(
+                    "BREP #{}: vertex pair {:?} → canonical step_id={}, aliases={:?} (detailed path)",
+                    brep_id, vp, canonical, step_ids.iter().filter(|&&s| s != canonical).collect::<Vec<_>>()
+                );
+            }
+            if alias_count > 0 {
+                log::info!(
+                    "BREP #{}: registered {} step_id aliases from vertex-pair matching (detailed path)",
+                    brep_id, alias_count
+                );
+            }
+        }
 
         // Time guard: limit per-BREP triangulation time.
         // WASM uses a moderate limit to avoid browser freezes;
@@ -4596,6 +4677,83 @@ impl<'a> StepConverter<'a> {
                 None
             }
         }
+    }
+
+    /// Get the canonical VERTEX_POINT entity ID pair for an EDGE_CURVE.
+    ///
+    /// Each EDGE_CURVE references exactly two VERTEX_POINT entities (start and end).
+    /// When two different EDGE_CURVEs share the same pair of VERTEX_POINT entities,
+    /// they represent the same geometric boundary (different curve representations
+    /// of the same edge). Returns the vertex IDs in canonical order (min, max)
+    /// for consistent hashing.
+    fn get_edge_curve_vertex_pair(&self, edge_curve_id: i64) -> Option<(i64, i64)> {
+        let ec_entity = self.step.find_entity(edge_curve_id)?;
+        let mut vertex_ids: Vec<i64> = Vec::new();
+        for param in &ec_entity.params {
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(entity) = self.step.find_entity(ref_id) {
+                    if entity.type_name == "VERTEX_POINT" {
+                        vertex_ids.push(ref_id);
+                    }
+                }
+            }
+        }
+        if vertex_ids.len() >= 2 {
+            let (v1, v2) = (vertex_ids[0], vertex_ids[1]);
+            Some(if v1 < v2 { (v1, v2) } else { (v2, v1) })
+        } else {
+            None
+        }
+    }
+
+    /// Estimate the "complexity" of an EDGE_CURVE's underlying curve geometry.
+    ///
+    /// Higher scores indicate curves that require more sample points for
+    /// accurate representation. This is used to choose the canonical step_id
+    /// when multiple EDGE_CURVEs share the same vertex pair: the most complex
+    /// curve should be canonical so its denser sampling is used for all
+    /// aliased edges.
+    ///
+    /// Score assignment:
+    /// - NURBS curves: 1000 (highest — need many control points)
+    /// - Circle/Arc/Ellipse: 100 (moderate — need angular samples)
+    /// - Line: 1 (lowest — only needs 2 points)
+    /// - Unknown/none: 0
+    fn edge_curve_complexity_score(&self, edge_curve_id: i64) -> i32 {
+        let ec_entity = match self.step.find_entity(edge_curve_id) {
+            Some(e) => e,
+            None => return 0,
+        };
+
+        // Find the curve reference in the EDGE_CURVE params
+        for param in &ec_entity.params {
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(entity) = self.step.find_entity(ref_id) {
+                    match entity.type_name.as_str() {
+                        "NURBS_CURVE" | "BSPLINE_CURVE_WITH_KNOTS" | "BSPLINE_CURVE" |
+                        "RATIONAL_BSPLINE_CURVE" | "SURFACE_CURVE" => return 1000,
+                        "CIRCLE" | "ARC" | "ELLIPSE" | "TRIMMED_CURVE" => return 100,
+                        "LINE" => return 1,
+                        _ => {}
+                    }
+                    // SURFACE_CURVE wraps a 3D curve — recurse to find its type
+                    if entity.type_name == "SURFACE_CURVE" {
+                        if let Some(inner_id) = self.resolve_3d_curve_ref(ref_id) {
+                            if let Some(inner_entity) = self.step.find_entity(inner_id) {
+                                match inner_entity.type_name.as_str() {
+                                    "NURBS_CURVE" | "BSPLINE_CURVE_WITH_KNOTS" | "BSPLINE_CURVE" |
+                                    "RATIONAL_BSPLINE_CURVE" => return 1000,
+                                    "CIRCLE" | "ARC" | "ELLIPSE" => return 100,
+                                    "LINE" => return 1,
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        0
     }
 
     /// Resolve a SURFACE_CURVE entity to get the 3D curve reference.

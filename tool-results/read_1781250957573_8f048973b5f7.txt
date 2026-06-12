@@ -1,0 +1,966 @@
+     1→// SPDX-License-Identifier: GPL-3.0-or-later
+     2→// Copyright (c) 2026 KernelDev
+     3→//! Unified edge discretization cache for consistent triangulation.
+     4→//!
+     5→//! Ensures that shared edges between faces produce **bit-identical** 3D point
+     6→//! sequences. This is critical for watertight (gap-free) meshes where adjacent
+     7→//! faces must have exactly the same vertices on their common edges.
+     8→//!
+     9→//! # Architecture: Topology-First Meshing
+    10→//!
+    11→//! The cache is the cornerstone of the "topology-first" approach:
+    12→//! 1. The first face that references an edge triggers its discretization.
+    13→//! 2. The resulting 3D points and curve parameters are cached by a **canonical key**
+    14→//!    derived from the edge's geometry identity (step_entity_id or TopoId).
+    15→//! 3. Subsequent faces that share the same edge receive the *identical* 3D
+    16→//!    point sequence, plus UV coordinates computed for their own surface.
+    17→//!
+    18→//! This eliminates the need for post-hoc `merge_coincident_vertices` and
+    19→//! `stitch_boundary_edges`, which were symptoms of inconsistent discretization.
+    20→//!
+    21→//! # Dual-Key System
+    22→//!
+    23→//! STEP files identify edges by entity ID (`i64`), while native topology
+    24→//! uses `TopoId` (`u64`). The unified cache supports BOTH:
+    25→//! - STEP path: key via `step_entity_id` → guarantees identical points for
+    26→//!   two ORIENTED_EDGEs sharing the same EDGE_CURVE
+    27→//! - Native path: key via `TopoId` → guarantees identical points when the
+    28→//!   same Edge object is shared between faces
+    29→//!
+    30→//! # Deterministic Rounding
+    31→//!
+    32→//! All 3D points are rounded to a fixed number of significant bits before
+    33→//! storage. This ensures that floating-point arithmetic produces the same
+    34→//! bit pattern regardless of evaluation order, preventing micro-gaps from
+    35→//! accumulating at shared boundaries.
+    36→
+    37→use draper_geometry::{Point3d, Point2d, Curve3d, Curve2d, Surface, tolerance::ToleranceContext};
+    38→use draper_topology::{Edge, Solid, TopoId};
+    39→use std::collections::HashMap;
+    40→
+    41→/// Number of mantissa bits to preserve during deterministic rounding.
+    42→/// 52 bits = full f64 precision (no rounding).
+    43→/// 48 bits = discard lowest 4 bits (~1e-14 relative precision).
+    44→/// 40 bits = discard lowest 12 bits (~1e-12 relative precision).
+    45→const PRECISION_BITS: u32 = 48;
+    46→
+    47→/// Round an f64 value by truncating low mantissa bits for deterministic results.
+    48→/// This ensures that values computed via different floating-point paths
+    49→/// (e.g., different parameter orders) produce bit-identical results.
+    50→#[inline]
+    51→fn deterministic_round(value: f64) -> f64 {
+    52→    let bits = value.to_bits();
+    53→    let truncate = 52 - PRECISION_BITS;
+    54→    if truncate == 0 {
+    55→        return value; // Full precision, no rounding
+    56→    }
+    57→    // Mask off the lowest `truncate` mantissa bits
+    58→    let mask = !((1u64 << truncate) - 1);
+    59→    f64::from_bits(bits & mask)
+    60→}
+    61→
+    62→/// Round a 3D point deterministically.
+    63→#[inline]
+    64→pub fn deterministic_round_point(p: Point3d) -> Point3d {
+    65→    Point3d::new(
+    66→        deterministic_round(p.x),
+    67→        deterministic_round(p.y),
+    68→        deterministic_round(p.z),
+    69→    )
+    70→}
+    71→
+    72→/// Canonical key for edge cache lookup.
+    73→///
+    74→/// Uses step_entity_id when available (STEP path), falling back to TopoId
+    75→/// (native path). This ensures that two ORIENTED_EDGEs sharing the same
+    76→/// EDGE_CURVE resolve to the same cache entry.
+    77→#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    78→pub enum EdgeCacheKey {
+    79→    /// STEP entity ID of the EDGE_CURVE — stable across ORIENTED_EDGE instances.
+    80→    StepEntityId(i64),
+    81→    /// TopoId of the edge — for native topology where edges are properly shared.
+    82→    TopoId(TopoId),
+    83→}
+    84→
+    85→impl EdgeCacheKey {
+    86→    /// Derive the canonical key for an edge.
+    87→    /// Prefers step_entity_id (when available) for maximum stability.
+    88→    pub fn from_edge(edge: &Edge) -> Self {
+    89→        if let Some(step_id) = edge.step_entity_id {
+    90→            EdgeCacheKey::StepEntityId(step_id)
+    91→        } else {
+    92→            EdgeCacheKey::TopoId(edge.id)
+    93→        }
+    94→    }
+    95→}
+    96→
+    97→/// Cached discretization of a single edge.
+    98→#[derive(Clone, Debug)]
+    99→pub struct EdgeDiscretization {
+   100→    /// 3D points along the edge curve (deterministically rounded).
+   101→    pub points_3d: Vec<Point3d>,
+   102→    /// UV coordinates for each incident face.
+   103→    /// Maps face TopoId → Vec<Point2d> (same length as points_3d).
+   104→    pub uv_per_face: HashMap<TopoId, Vec<Point2d>>,
+   105→    /// Curve parameters for each sample point (normalized to [0, 1]).
+   106→    pub params: Vec<f64>,
+   107→}
+   108→
+   109→/// Adaptive tolerance based on model bounding box.
+   110→///
+   111→/// Replaces hardcoded 1e-6 tolerance with a scale-aware value.
+   112→/// For a 1mm model, tolerance ≈ 1e-6 (nanometer precision).
+   113→/// For a 1m model, tolerance ≈ 1e-5.
+   114→/// For a 1km model, tolerance ≈ 1e-3.
+   115→#[derive(Clone, Debug)]
+   116→pub struct AdaptiveTolerance {
+   117→    /// Bounding box diagonal (characteristic model size).
+   118→    model_scale: f64,
+   119→    /// Relative tolerance (e.g., 1e-6 means 1 PPM of model scale).
+   120→    relative: f64,
+   121→    /// Tolerance context for reuse.
+   122→    tol_ctx: ToleranceContext,
+   123→}
+   124→
+   125→impl AdaptiveTolerance {
+   126→    /// Create adaptive tolerance from a bounding box.
+   127→    pub fn from_bounding_box(min: &Point3d, max: &Point3d) -> Self {
+   128→        let dx = max.x - min.x;
+   129→        let dy = max.y - min.y;
+   130→        let dz = max.z - min.z;
+   131→        let model_scale = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-10);
+   132→        Self {
+   133→            model_scale,
+   134→            relative: 1e-6,
+   135→            tol_ctx: ToleranceContext::from_bounding_box(min, max),
+   136→        }
+   137→    }
+   138→
+   139→    /// Create adaptive tolerance with a specific model scale.
+   140→    pub fn from_model_scale(model_scale: f64) -> Self {
+   141→        Self {
+   142→            model_scale: model_scale.max(1e-10),
+   143→            relative: 1e-6,
+   144→            tol_ctx: ToleranceContext::from_model_scale(model_scale),
+   145→        }
+   146→    }
+   147→
+   148→    /// Create with default values (model scale = 1.0).
+   149→    pub fn new() -> Self {
+   150→        Self {
+   151→            model_scale: 1.0,
+   152→            relative: 1e-6,
+   153→            tol_ctx: ToleranceContext::new(),
+   154→        }
+   155→    }
+   156→
+   157→    /// Get the absolute merge tolerance (model_scale × relative).
+   158→    /// This is the tolerance for vertex merging operations.
+   159→    pub fn merge_tolerance(&self) -> f64 {
+   160→        self.model_scale * self.relative
+   161→    }
+   162→
+   163→    /// Get the absolute chord deviation tolerance (10× merge tolerance).
+   164→    /// Used for adaptive edge subdivision.
+   165→    pub fn chord_tolerance(&self) -> f64 {
+   166→        self.model_scale * self.relative * 10.0
+   167→    }
+   168→
+   169→    /// Get the stitch tolerance (100× merge tolerance, for extreme cases only).
+   170→    pub fn stitch_tolerance(&self) -> f64 {
+   171→        self.model_scale * self.relative * 100.0
+   172→    }
+   173→
+   174→    /// Check if two points are coincident within tolerance.
+   175→    pub fn is_coincident(&self, a: &Point3d, b: &Point3d) -> bool {
+   176→        self.tol_ctx.is_coincident_3d(a, b)
+   177→    }
+   178→
+   179→    /// Get the tolerance context.
+   180→    pub fn tol_ctx(&self) -> &ToleranceContext {
+   181→        &self.tol_ctx
+   182→    }
+   183→
+   184→    /// Get the model scale.
+   185→    pub fn model_scale(&self) -> f64 {
+   186→        self.model_scale
+   187→    }
+   188→}
+   189→
+   190→impl Default for AdaptiveTolerance {
+   191→    fn default() -> Self {
+   192→        Self::new()
+   193→    }
+   194→}
+   195→
+   196→/// Cache that ensures each edge is discretized exactly once.
+   197→/// When multiple faces share the same edge, they receive identical
+   198→/// 3D point sequences and computed UV coordinates.
+   199→///
+   200→/// # Topology-First Architecture
+   201→///
+   202→/// This cache implements the "topology-first" meshing approach:
+   203→/// - Edges are discretized ONCE with deterministic rounding
+   204→/// - Faces use the cached boundary data for triangulation
+   205→/// - No post-hoc vertex merging or stitching is needed
+   206→#[derive(Clone, Debug)]
+   207→pub struct EdgeDiscretizationCache {
+   208→    /// Maps canonical key → edge discretization.
+   209→    entries: HashMap<EdgeCacheKey, EdgeDiscretization>,
+   210→    /// Secondary index: TopoId → canonical key (for reverse lookup).
+   211→    topo_id_to_key: HashMap<TopoId, EdgeCacheKey>,
+   212→    /// Adaptive tolerance for sampling and coincidence checks.
+   213→    adaptive_tol: AdaptiveTolerance,
+   214→    /// Maximum number of sample points per edge.
+   215→    max_samples: usize,
+   216→    /// ── Instrumentation counters ──
+   217→    /// Number of cache hits (edge already discretized).
+   218→    cache_hits: usize,
+   219→    /// Number of cache misses (edge needed discretization).
+   220→    cache_misses: usize,
+   221→    /// Number of edges that are shared by 2+ faces (computed on demand).
+   222→    shared_edges: usize,
+   223→}
+   224→
+   225→/// Statistics from the edge discretization cache, used for debugging
+   226→/// and validation. If cache_misses is too high relative to cache_hits,
+   227→/// edges are being re-discretized, which defeats the topology-first approach.
+   228→#[derive(Clone, Debug, Default)]
+   229→pub struct EdgeCacheStats {
+   230→    /// Total number of cached edge discretizations.
+   231→    pub total_edges: usize,
+   232→    /// Number of cache hits (edge was already cached).
+   233→    pub cache_hits: usize,
+   234→    /// Number of cache misses (edge needed fresh discretization).
+   235→    pub cache_misses: usize,
+   236→    /// Number of edges shared by 2+ faces (approximation from uv_per_face).
+   237→    pub shared_edges: usize,
+   238→}
+   239→
+   240→impl EdgeDiscretizationCache {
+   241→    /// Create a new cache with default tolerance.
+   242→    pub fn new() -> Self {
+   243→        Self {
+   244→            entries: HashMap::new(),
+   245→            topo_id_to_key: HashMap::new(),
+   246→            adaptive_tol: AdaptiveTolerance::new(),
+   247→            max_samples: 64,
+   248→            cache_hits: 0,
+   249→            cache_misses: 0,
+   250→            shared_edges: 0,
+   251→        }
+   252→    }
+   253→
+   254→    /// Create a new cache with custom tolerance and max samples.
+   255→    pub fn with_tolerance(tol_ctx: ToleranceContext, max_samples: usize) -> Self {
+   256→        Self {
+   257→            entries: HashMap::new(),
+   258→            topo_id_to_key: HashMap::new(),
+   259→            adaptive_tol: AdaptiveTolerance::from_model_scale(tol_ctx.model_scale),
+   260→            max_samples: max_samples.max(4),
+   261→            cache_hits: 0,
+   262→            cache_misses: 0,
+   263→            shared_edges: 0,
+   264→        }
+   265→    }
+   266→
+   267→    /// Create a new cache with adaptive tolerance from a bounding box.
+   268→    pub fn with_adaptive_tolerance(min: &Point3d, max: &Point3d, max_samples: usize) -> Self {
+   269→        Self {
+   270→            entries: HashMap::new(),
+   271→            topo_id_to_key: HashMap::new(),
+   272→            adaptive_tol: AdaptiveTolerance::from_bounding_box(min, max),
+   273→            max_samples: max_samples.max(4),
+   274→            cache_hits: 0,
+   275→            cache_misses: 0,
+   276→            shared_edges: 0,
+   277→        }
+   278→    }
+   279→
+   280→    /// Get or compute the discretization for an edge.
+   281→    ///
+   282→    /// If the edge has already been discretized (identified by its canonical key),
+   283→    /// returns the cached result and computes UV coordinates for the given
+   284→    /// face/surface if not already present.
+   285→    ///
+   286→    /// # Arguments
+   287→    /// * `edge` - The edge to discretize
+   288→    /// * `face_id` - The TopoId of the face that needs this edge
+   289→    /// * `surface` - The surface of the face (for UV computation)
+   290→    /// * `n_samples_hint` - Suggested number of samples (ignored if edge is already cached)
+   291→    /// * `curve_2d` - Optional analytical PCURVE in UV space
+   292→    pub fn discretize_edge(
+   293→        &mut self,
+   294→        edge: &Edge,
+   295→        face_id: TopoId,
+   296→        surface: &Surface,
+   297→        n_samples_hint: usize,
+   298→        curve_2d: Option<&Curve2d>,
+   299→    ) -> &EdgeDiscretization {
+   300→        let key = EdgeCacheKey::from_edge(edge);
+   301→
+   302→        // Register TopoId → canonical key mapping
+   303→        self.topo_id_to_key.insert(edge.id, key);
+   304→
+   305→        // If not yet cached, compute and insert the discretization
+   306→        if !self.entries.contains_key(&key) {
+   307→            self.cache_misses += 1;
+   308→
+   309→            let (mut points_3d, params) = self.adaptive_discretize(edge, n_samples_hint);
+   310→
+   311→            // Apply deterministic rounding to all 3D points
+   312→            for p in &mut points_3d {
+   313→                *p = deterministic_round_point(*p);
+   314→            }
+   315→
+   316→            let uvs = Self::compute_uvs(&points_3d, &params, surface, curve_2d);
+   317→
+   318→            let mut uv_per_face = HashMap::new();
+   319→            uv_per_face.insert(face_id, uvs);
+   320→
+   321→            self.entries.insert(key, EdgeDiscretization {
+   322→                points_3d,
+   323→                uv_per_face,
+   324→                params,
+   325→            });
+   326→        } else {
+   327→            self.cache_hits += 1;
+   328→            // Track shared edges: if this edge already has UV for a different face
+   329→            if let Some(entry) = self.entries.get(&key) {
+   330→                if !entry.uv_per_face.contains_key(&face_id) && entry.uv_per_face.len() >= 1 {
+   331→                    self.shared_edges += 1;
+   332→                }
+   333→            }
+   334→        }
+   335→
+   336→        // Entry is guaranteed to exist now — add UV for this face if missing
+   337→        if let Some(entry) = self.entries.get_mut(&key) {
+   338→            if !entry.uv_per_face.contains_key(&face_id) {
+   339→                let uvs = Self::compute_uvs(&entry.points_3d, &entry.params, surface, curve_2d);
+   340→                entry.uv_per_face.insert(face_id, uvs);
+   341→            }
+   342→        }
+   343→
+   344→        // Return the entry — guaranteed to exist at this point
+   345→        &self.entries[&key]
+   346→    }
+   347→
+   348→    /// Discretize an edge using a STEP entity ID as the key.
+   349→    ///
+   350→    /// This is the STEP-path API that replaces the old `StepEdgeCache::discretize()`.
+   351→    /// It creates a canonical key from the STEP entity ID, ensuring that two
+   352→    /// ORIENTED_EDGEs sharing the same EDGE_CURVE resolve to the same cache entry.
+   353→    ///
+   354→    /// # Arguments
+   355→    /// * `step_entity_id` - STEP entity ID of the EDGE_CURVE
+   356→    /// * `edge` - The topological edge (for curve geometry and param_range)
+   357→    /// * `n_samples` - Number of samples
+   358→    ///
+   359→    /// # Returns
+   360→    /// (3D points, normalized parameters) — reversed if the edge's param_range
+   361→    /// is reversed relative to the canonical direction.
+   362→    pub fn discretize_step_edge(
+   363→        &mut self,
+   364→        step_entity_id: i64,
+   365→        edge: &Edge,
+   366→        n_samples: usize,
+   367→    ) -> (Vec<Point3d>, Vec<f64>) {
+   368→        let key = EdgeCacheKey::StepEntityId(step_entity_id);
+   369→
+   370→        // Register TopoId → canonical key mapping
+   371→        self.topo_id_to_key.insert(edge.id, key);
+   372→
+   373→        if !self.entries.contains_key(&key) {
+   374→            self.cache_misses += 1;
+   375→
+   376→            // Cache miss: discretize in forward direction (canonical)
+   377→            let forward_edge = if edge.param_range.0 > edge.param_range.1 {
+   378→                edge.reversed()
+   379→            } else {
+   380→                edge.clone()
+   381→            };
+   382→
+   383→            let (mut points_3d, params) = self.adaptive_discretize(&forward_edge, n_samples.max(2));
+   384→
+   385→            // Apply deterministic rounding
+   386→            for p in &mut points_3d {
+   387→                *p = deterministic_round_point(*p);
+   388→            }
+   389→
+   390→            self.entries.insert(key, EdgeDiscretization {
+   391→                points_3d,
+   392→                uv_per_face: HashMap::new(),
+   393→                params,
+   394→            });
+   395→        } else {
+   396→            self.cache_hits += 1;
+   397→        }
+   398→
+   399→        // Retrieve the cached entry
+   400→        let entry = &self.entries[&key];
+   401→
+   402→        // If the original edge was reversed, reverse the result for the caller
+   403→        if edge.param_range.0 > edge.param_range.1 {
+   404→            let mut pts = entry.points_3d.clone();
+   405→            let mut params = entry.params.clone();
+   406→            pts.reverse();
+   407→            params = params.into_iter().map(|p| 1.0 - p).collect();
+   408→            (pts, params)
+   409→        } else {
+   410→            (entry.points_3d.clone(), entry.params.clone())
+   411→        }
+   412→    }
+   413→
+   414→    /// Get the cached discretization for an edge by TopoId (if it exists).
+   415→    pub fn get(&self, edge_id: TopoId) -> Option<&EdgeDiscretization> {
+   416→        // Try direct lookup first
+   417→        if let Some(entry) = self.entries.get(&EdgeCacheKey::TopoId(edge_id)) {
+   418→            return Some(entry);
+   419→        }
+   420→        // Try via secondary index (TopoId → canonical key)
+   421→        if let Some(key) = self.topo_id_to_key.get(&edge_id) {
+   422→            return self.entries.get(key);
+   423→        }
+   424→        None
+   425→    }
+   426→
+   427→    /// Get the cached discretization for an edge mutably (if it exists).
+   428→    pub fn get_mut(&mut self, edge_id: TopoId) -> Option<&mut EdgeDiscretization> {
+   429→        // Try direct lookup first
+   430→        if self.entries.contains_key(&EdgeCacheKey::TopoId(edge_id)) {
+   431→            return self.entries.get_mut(&EdgeCacheKey::TopoId(edge_id));
+   432→        }
+   433→        // Try via secondary index
+   434→        if let Some(key) = self.topo_id_to_key.get(&edge_id).copied() {
+   435→            return self.entries.get_mut(&key);
+   436→        }
+   437→        None
+   438→    }
+   439→
+   440→    /// Get the cached discretization by STEP entity ID.
+   441→    pub fn get_by_step_id(&self, step_id: i64) -> Option<&EdgeDiscretization> {
+   442→        self.entries.get(&EdgeCacheKey::StepEntityId(step_id))
+   443→    }
+   444→
+   445→    /// Check if an edge is already in the cache.
+   446→    pub fn contains(&self, edge_id: TopoId) -> bool {
+   447→        self.entries.contains_key(&EdgeCacheKey::TopoId(edge_id))
+   448→            || self.topo_id_to_key.contains_key(&edge_id)
+   449→    }
+   450→
+   451→    /// Check if a STEP edge is already in the cache.
+   452→    pub fn contains_step_id(&self, step_id: i64) -> bool {
+   453→        self.entries.contains_key(&EdgeCacheKey::StepEntityId(step_id))
+   454→    }
+   455→
+   456→    /// Number of cached edges.
+   457→    pub fn len(&self) -> usize {
+   458→        self.entries.len()
+   459→    }
+   460→
+   461→    /// Whether the cache is empty.
+   462→    pub fn is_empty(&self) -> bool {
+   463→        self.entries.is_empty()
+   464→    }
+   465→
+   466→    /// Get cache statistics for debugging and validation.
+   467→    ///
+   468→    /// Key metrics:
+   469→    /// - `cache_hits` / (`cache_hits` + `cache_misses`) = hit rate.
+   470→    ///   Should be >50% for well-structured B-Rep data.
+   471→    /// - `shared_edges` should equal the number of edges shared by 2+ faces.
+   472→    /// - `cache_misses` should equal `total_edges` (each edge is discretized once).
+   473→    pub fn stats(&self) -> EdgeCacheStats {
+   474→        // Recompute shared_edges from uv_per_face (more accurate than counter)
+   475→        let shared = self.entries.values()
+   476→            .filter(|e| e.uv_per_face.len() >= 2)
+   477→            .count();
+   478→        EdgeCacheStats {
+   479→            total_edges: self.entries.len(),
+   480→            cache_hits: self.cache_hits,
+   481→            cache_misses: self.cache_misses,
+   482→            shared_edges: shared,
+   483→        }
+   484→    }
+   485→
+   486→    /// Get the adaptive tolerance.
+   487→    pub fn adaptive_tolerance(&self) -> &AdaptiveTolerance {
+   488→        &self.adaptive_tol
+   489→    }
+   490→
+   491→    /// Update the adaptive tolerance from a bounding box.
+   492→    pub fn set_adaptive_tolerance(&mut self, min: &Point3d, max: &Point3d) {
+   493→        self.adaptive_tol = AdaptiveTolerance::from_bounding_box(min, max);
+   494→    }
+   495→
+   496→    /// Adaptively discretize an edge based on curve curvature.
+   497→    ///
+   498→    /// Starts with uniformly-spaced points based on the hint, then recursively
+   499→    /// subdivides where the chord deviation exceeds the adaptive threshold.
+   500→    fn adaptive_discretize(&self, edge: &Edge, n_samples_hint: usize) -> (Vec<Point3d>, Vec<f64>) {
+   501→        let curve = match &edge.curve {
+   502→            Some(c) => c,
+   503→            None => {
+   504→                // No curve geometry — just use start/end points
+   505→                let (p0, p1) = match (edge.start_point(), edge.end_point()) {
+   506→                    (Some(a), Some(b)) => (a, b),
+   507→                    _ => return (vec![], vec![]),
+   508→                };
+   509→                return (vec![p0, p1], vec![0.0, 1.0]);
+   510→            }
+   511→        };
+   512→
+   513→        let (t_min, t_max) = edge.param_range;
+   514→
+   515→        // For line edges, just return endpoints
+   516→        if matches!(curve, Curve3d::Line(_)) {
+   517→            return (
+   518→                vec![curve.point_at(t_min), curve.point_at(t_max)],
+   519→                vec![0.0, 1.0],
+   520→            );
+   521→        }
+   522→
+   523→        // Adaptive subdivision threshold: use adaptive chord tolerance
+   524→        let max_deviation = self.adaptive_tol.chord_tolerance();
+   525→
+   526→        // Start with uniformly spaced points based on hint
+   527→        let n_initial = n_samples_hint.min(self.max_samples).max(2);
+   528→        let mut t_params: Vec<f64> = vec![0.0]; // Normalized parameter [0, 1]
+   529→        let mut points: Vec<Point3d> = vec![curve.point_at(t_min)];
+   530→
+   531→        for i in 1..n_initial {
+   532→            let t_norm = i as f64 / (n_initial - 1) as f64;
+   533→            let t = t_min + t_norm * (t_max - t_min);
+   534→            points.push(curve.point_at(t));
+   535→            t_params.push(t_norm);
+   536→        }
+   537→
+   538→        // Refine: check chord deviation and subdivide where needed
+   539→        let mut refined = true;
+   540→        let mut refinement_passes = 0;
+   541→        let max_refinement_passes = 5;
+   542→
+   543→        while refined && refinement_passes < max_refinement_passes && points.len() < self.max_samples {
+   544→            refined = false;
+   545→            refinement_passes += 1;
+   546→
+   547→            let mut i = 0;
+   548→            while i < points.len() - 1 && points.len() < self.max_samples {
+   549→                let p0 = points[i];
+   550→                let p2 = points[i + 1];
+   551→
+   552→                // Compute midpoint parameter
+   553→                let t_mid = (t_params[i] + t_params[i + 1]) * 0.5;
+   554→                let t_actual = t_min + t_mid * (t_max - t_min);
+   555→                let p_mid = curve.point_at(t_actual);
+   556→
+   557→                // Check chord deviation: distance from midpoint to the chord
+   558→                let deviation = point_to_chord_distance(&p_mid, &p0, &p2);
+   559→
+   560→                if deviation > max_deviation {
+   561→                    // Subdivide: insert midpoint
+   562→                    points.insert(i + 1, p_mid);
+   563→                    t_params.insert(i + 1, t_mid);
+   564→                    refined = true;
+   565→                    i += 2; // Skip the newly inserted point
+   566→                } else {
+   567→                    i += 1;
+   568→                }
+   569→            }
+   570→        }
+   571→
+   572→        (points, t_params)
+   573→    }
+   574→
+   575→    /// Compute UV coordinates for a set of 3D points on a surface.
+   576→    ///
+   577→    /// If a Curve2d (analytical PCURVE) is provided, UV coordinates are computed
+   578→    /// by evaluating the curve at the corresponding parameter values. This is more
+   579→    /// accurate and faster than surface.project_point().
+   580→    ///
+   581→    /// If no Curve2d is available, falls back to surface projection.
+   582→    /// For NURBS surfaces, uses chain Newton-Raphson (bootstrap from first point,
+   583→    /// then use previous UV as initial guess for next point). This is both faster
+   584→    /// and more accurate than calling surface.project_point() for each point
+   585→    /// independently (which does a 32×32 grid search per call).
+   586→    pub(crate) fn compute_uvs(points_3d: &[Point3d], params: &[f64], surface: &Surface, curve_2d: Option<&Curve2d>) -> Vec<Point2d> {
+   587→        if let Some(c2d) = curve_2d {
+   588→            // Use analytical PCURVE — evaluate the 2D curve at each parameter value
+   589→            let (t_min, t_max) = c2d.param_range();
+   590→            params.iter().map(|&t| {
+   591→                // Map normalized parameter t ∈ [0, 1] to curve's parameter range
+   592→                let curve_t = t_min + t * (t_max - t_min);
+   593→                c2d.point_at(curve_t)
+   594→            }).collect()
+   595→        } else if let Surface::Nurbs(ref nurbs) = surface {
+   596→            // NURBS fast path: bootstrap + chain Newton-Raphson.
+   597→            // This avoids the expensive 32×32 grid search that surface.project_point()
+   598→            // performs for each point independently. Instead, we:
+   599→            // 1. Use project_point() for the first point (bootstrap)
+   600→            // 2. Use reproject_nurbs_point() with the previous UV as initial guess
+   601→            //    for subsequent points — Newton-Raphson converges in ~3-5 iterations
+   602→            //    when starting from a nearby UV, vs ~146 iterations from scratch.
+   603→            let mut uvs = Vec::with_capacity(points_3d.len());
+   604→            if !points_3d.is_empty() {
+   605→                let (u0, v0) = surface.project_point(&points_3d[0]);
+   606→                uvs.push(Point2d::new(u0, v0));
+   607→                for i in 1..points_3d.len() {
+   608→                    let prev = uvs[i - 1];
+   609→                    let (u, v) = crate::parametric_domain::reproject_nurbs_point(
+   610→                        nurbs, &points_3d[i], prev.u, prev.v,
+   611→                    );
+   612→                    uvs.push(Point2d::new(u, v));
+   613→                }
+   614→            }
+   615→            uvs
+   616→        } else {
+   617→            // Non-NURBS surfaces: project_point() is fast, use it directly
+   618→            points_3d
+   619→                .iter()
+   620→                .map(|p| {
+   621→                    let (u, v) = surface.project_point(p);
+   622→                    Point2d::new(u, v)
+   623→                })
+   624→                .collect()
+   625→        }
+   626→    }
+   627→
+   628→    /// Get the UV coordinates for a specific face-edge pair.
+   629→    ///
+   630→    /// Returns `None` if the edge is not in the cache, or if UV coordinates
+   631→    /// haven't been computed for the given face yet.
+   632→    pub fn get_uv_for_face(&self, edge_id: TopoId, face_id: TopoId) -> Option<&Vec<Point2d>> {
+   633→        self.get(edge_id).and_then(|e| e.uv_per_face.get(&face_id))
+   634→    }
+   635→
+   636→    /// Pre-populate the cache with all edge discretizations for a solid.
+   637→    ///
+   638→    /// Uses topology-first approach:
+   639→    /// 1. Discretize all edges ONCE (3D points with deterministic rounding)
+   640→    /// 2. UV coordinates are computed lazily per face (not eagerly)
+   641→    ///
+   642→    /// This replaces the old two-pass `pre_populate_for_solid_full` which
+   643→    /// computed all UVs eagerly. Lazy UV computation saves ~30% of time for
+   644→    /// models with many faces per edge.
+   645→    pub fn pre_populate_for_solid(&mut self, solid: &Solid, default_n_samples: usize) {
+   646→        // Single pass: discretize all edges (3D points only)
+   647→        for face in solid.faces() {
+   648→            for edge in &face.edges {
+   649→                if edge.degenerate { continue; }
+   650→                let key = EdgeCacheKey::from_edge(edge);
+   651→                self.topo_id_to_key.insert(edge.id, key);
+   652→                if !self.entries.contains_key(&key) {
+   653→                    let (mut points_3d, params) = self.adaptive_discretize(edge, default_n_samples);
+   654→                    // Apply deterministic rounding
+   655→                    for p in &mut points_3d {
+   656→                        *p = deterministic_round_point(*p);
+   657→                    }
+   658→                    self.entries.insert(key, EdgeDiscretization {
+   659→                        points_3d,
+   660→                        uv_per_face: HashMap::new(),
+   661→                        params,
+   662→                    });
+   663→                }
+   664→            }
+   665→        }
+   666→    }
+   667→
+   668→    /// Pre-populate the cache with all edge discretizations AND UV coordinates
+   669→    /// for every face-edge pair in the solid.
+   670→    ///
+   671→    /// After calling this method, the cache is fully read-only and can be
+   672→    /// shared as `&EdgeDiscretizationCache` across threads (for parallel
+   673→    /// triangulation). No further calls to `discretize_edge` are needed.
+   674→    ///
+   675→    /// Use `pre_populate_for_solid` instead for sequential triangulation
+   676→    /// where UV can be computed lazily.
+   677→    pub fn pre_populate_for_solid_full(&mut self, solid: &Solid, default_n_samples: usize) {
+   678→        // First pass: discretize all edges (3D points only)
+   679→        for face in solid.faces() {
+   680→            if let Some(ref surface) = face.surface {
+   681→                for edge in &face.edges {
+   682→                    if edge.degenerate { continue; }
+   683→                    let key = EdgeCacheKey::from_edge(edge);
+   684→                    self.topo_id_to_key.insert(edge.id, key);
+   685→                    if !self.entries.contains_key(&key) {
+   686→                        let (mut points_3d, params) = self.adaptive_discretize(edge, default_n_samples);
+   687→                        // Apply deterministic rounding
+   688→                        for p in &mut points_3d {
+   689→                            *p = deterministic_round_point(*p);
+   690→                        }
+   691→                        self.entries.insert(key, EdgeDiscretization {
+   692→                            points_3d,
+   693→                            uv_per_face: HashMap::new(),
+   694→                            params,
+   695→                        });
+   696→                    }
+   697→                }
+   698→            }
+   699→        }
+   700→        // Second pass: compute UVs for each face-edge pair (needed for parallel)
+   701→        for face in solid.faces() {
+   702→            if let Some(ref surface) = face.surface {
+   703→                // Outer wire
+   704→                if let Some(ref wire) = face.outer_wire {
+   705→                    for coedge in &wire.coedges {
+   706→                        let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+   707→                        if let Some(edge) = edge {
+   708→                            if edge.degenerate { continue; }
+   709→                            let key = EdgeCacheKey::from_edge(edge);
+   710→                            if let Some(entry) = self.entries.get_mut(&key) {
+   711→                                if !entry.uv_per_face.contains_key(&face.id) {
+   712→                                    let uvs = Self::compute_uvs(
+   713→                                        &entry.points_3d, &entry.params,
+   714→                                        surface, coedge.curve_2d.as_ref(),
+   715→                                    );
+   716→                                    entry.uv_per_face.insert(face.id, uvs);
+   717→                                }
+   718→                            }
+   719→                        }
+   720→                    }
+   721→                }
+   722→                // Inner wires
+   723→                for wire in &face.inner_wires {
+   724→                    for coedge in &wire.coedges {
+   725→                        let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+   726→                        if let Some(edge) = edge {
+   727→                            if edge.degenerate { continue; }
+   728→                            let key = EdgeCacheKey::from_edge(edge);
+   729→                            if let Some(entry) = self.entries.get_mut(&key) {
+   730→                                if !entry.uv_per_face.contains_key(&face.id) {
+   731→                                    let uvs = Self::compute_uvs(
+   732→                                        &entry.points_3d, &entry.params,
+   733→                                        surface, coedge.curve_2d.as_ref(),
+   734→                                    );
+   735→                                    entry.uv_per_face.insert(face.id, uvs);
+   736→                                }
+   737→                            }
+   738→                        }
+   739→                    }
+   740→                }
+   741→            }
+   742→        }
+   743→    }
+   744→
+   745→    /// Clear the cache.
+   746→    pub fn clear(&mut self) {
+   747→        self.entries.clear();
+   748→        self.topo_id_to_key.clear();
+   749→    }
+   750→}
+   751→
+   752→impl Default for EdgeDiscretizationCache {
+   753→    fn default() -> Self {
+   754→        Self::new()
+   755→    }
+   756→}
+   757→
+   758→/// Compute the distance from a point to a line segment (chord).
+   759→fn point_to_chord_distance(point: &Point3d, a: &Point3d, b: &Point3d) -> f64 {
+   760→    let abx = b.x - a.x;
+   761→    let aby = b.y - a.y;
+   762→    let abz = b.z - a.z;
+   763→    let apx = point.x - a.x;
+   764→    let apy = point.y - a.y;
+   765→    let apz = point.z - a.z;
+   766→
+   767→    let ab_len_sq = abx * abx + aby * aby + abz * abz;
+   768→    if ab_len_sq < 1e-30 {
+   769→        return (apx * apx + apy * apy + apz * apz).sqrt();
+   770→    }
+   771→
+   772→    let t = (apx * abx + apy * aby + apz * abz) / ab_len_sq;
+   773→    let t = t.clamp(0.0, 1.0);
+   774→
+   775→    let cx = a.x + t * abx - point.x;
+   776→    let cy = a.y + t * aby - point.y;
+   777→    let cz = a.z + t * abz - point.z;
+   778→    (cx * cx + cy * cy + cz * cz).sqrt()
+   779→}
+   780→
+   781→/// Compute an adaptive crease angle for normal smoothing based on surface type.
+   782→///
+   783→/// Instead of using a fixed 30° crease angle for all surfaces, this function
+   784→/// returns a surface-type-appropriate angle:
+   785→/// - Planes: 0° (sharp edges, no smoothing across face boundaries)
+   786→/// - Cylinders/Cones/Spheres/Tori: 180° (smooth everything)
+   787→/// - NURBS: based on max curvature (adaptive)
+   788→/// - Revolution/Extrusion: 90° (moderate smoothing)
+   789→pub fn compute_adaptive_crease_angle(surface: &Surface) -> f64 {
+   790→    match surface {
+   791→        Surface::Plane(_) => 0.0, // Sharp edges at face boundaries
+   792→        Surface::Cylinder(_) | Surface::Cone(_) | Surface::Sphere(_) | Surface::Torus(_) => {
+   793→            std::f64::consts::PI // 180°: smooth everything
+   794→        }
+   795→        Surface::Revolution(_) | Surface::Extrusion(_) => {
+   796→            std::f64::consts::FRAC_PI_2 // 90°: moderate smoothing
+   797→        }
+   798→        Surface::Nurbs(_) => {
+   799→            // For NURBS, use a moderate angle — the exact curvature would
+   800→            // require evaluating the surface, which is expensive.
+   801→            // 60° is a good compromise.
+   802→            std::f64::consts::PI / 3.0
+   803→        }
+   804→    }
+   805→}
+   806→
+   807→#[cfg(test)]
+   808→mod tests {
+   809→    use super::*;
+   810→    use draper_geometry::{Plane, Direction3d, Line2d};
+   811→    use draper_topology::Edge;
+   812→
+   813→    #[test]
+   814→    fn test_deterministic_round_consistency() {
+   815→        // Two values that differ only in the lowest mantissa bits
+   816→        // should round to the same value
+   817→        let v1 = 1.0000000000000002_f64; // differs in lowest bit
+   818→        let v2 = 1.0000000000000004_f64;
+   819→        let r1 = deterministic_round(v1);
+   820→        let r2 = deterministic_round(v2);
+   821→        assert_eq!(r1, r2, "Deterministic rounding should produce identical results for near-equal values");
+   822→    }
+   823→
+   824→    #[test]
+   825→    fn test_deterministic_round_point() {
+   826→        let p = Point3d::new(1.0000000000000002, 2.0000000000000004, 3.0);
+   827→        let rounded = deterministic_round_point(p);
+   828→        // Should be deterministic
+   829→        let rounded2 = deterministic_round_point(p);
+   830→        assert_eq!(rounded.x.to_bits(), rounded2.x.to_bits());
+   831→        assert_eq!(rounded.y.to_bits(), rounded2.y.to_bits());
+   832→        assert_eq!(rounded.z.to_bits(), rounded2.z.to_bits());
+   833→    }
+   834→
+   835→    #[test]
+   836→    fn test_line_edge_cached_once() {
+   837→        let mut cache = EdgeDiscretizationCache::new();
+   838→        let p1 = Point3d::new(0.0, 0.0, 0.0);
+   839→        let p2 = Point3d::new(1.0, 0.0, 0.0);
+   840→        let edge = Edge::new_line(p1, p2);
+   841→
+   842→        let surface = Surface::Plane(Plane::xy());
+   843→        let face_id = TopoId::new();
+   844→
+   845→        {
+   846→            let disc = cache.discretize_edge(&edge, face_id, &surface, 32, None);
+   847→            // Line edges should have exactly 2 points (endpoints)
+   848→            assert_eq!(disc.points_3d.len(), 2);
+   849→        }
+   850→
+   851→        // Verify cache count after the borrow is released
+   852→        assert_eq!(cache.len(), 1);
+   853→    }
+   854→
+   855→    #[test]
+   856→    fn test_shared_edge_same_points() {
+   857→        let mut cache = EdgeDiscretizationCache::new();
+   858→        let p1 = Point3d::new(0.0, 0.0, 0.0);
+   859→        let p2 = Point3d::new(1.0, 0.0, 0.0);
+   860→        let edge = Edge::new_line(p1, p2);
+   861→
+   862→        let surface1 = Surface::Plane(Plane::xy());
+   863→        let surface2 = Surface::Plane(Plane::xy());
+   864→        let face1_id = TopoId::new();
+   865→        let face2_id = TopoId::new();
+   866→
+   867→        // Discretize for face1 — clone the points to release the borrow
+   868→        let points_face1 = cache.discretize_edge(&edge, face1_id, &surface1, 32, None).points_3d.clone();
+   869→
+   870→        // Discretize for face2 — should return same 3D points
+   871→        let (points_face2, has_face1_uv, has_face2_uv) = {
+   872→            let disc2 = cache.discretize_edge(&edge, face2_id, &surface2, 32, None);
+   873→            let pts = disc2.points_3d.clone();
+   874→            let h1 = disc2.uv_per_face.contains_key(&face1_id);
+   875→            let h2 = disc2.uv_per_face.contains_key(&face2_id);
+   876→            (pts, h1, h2)
+   877→        };
+   878→
+   879→        assert_eq!(points_face1, points_face2, "Shared edges must produce identical 3D points");
+   880→        assert!(has_face1_uv, "UV for face1 should be present");
+   881→        assert!(has_face2_uv, "UV for face2 should be present");
+   882→
+   883→        // Verify cache count after borrows are released
+   884→        assert_eq!(cache.len(), 1, "Edge should only be cached once");
+   885→    }
+   886→
+   887→    #[test]
+   888→    fn test_step_entity_id_key_deduplication() {
+   889→        // Two edges with different TopoIds but same step_entity_id
+   890→        // should resolve to the same cache entry
+   891→        let mut cache = EdgeDiscretizationCache::new();
+   892→        let p1 = Point3d::new(0.0, 0.0, 0.0);
+   893→        let p2 = Point3d::new(1.0, 0.0, 0.0);
+   894→
+   895→        let mut edge1 = Edge::new_line(p1, p2);
+   896→        edge1.step_entity_id = Some(42); // Same STEP entity ID
+   897→
+   898→        let mut edge2 = Edge::new_line(p1, p2);
+   899→        edge2.step_entity_id = Some(42); // Same STEP entity ID, different TopoId
+   900→
+   901→        // Discretize via STEP API
+   902→        let (pts1, _) = cache.discretize_step_edge(42, &edge1, 32);
+   903→        let (pts2, _) = cache.discretize_step_edge(42, &edge2, 32);
+   904→
+   905→        assert_eq!(pts1, pts2, "Edges with same step_entity_id must produce identical points");
+   906→        assert_eq!(cache.len(), 1, "Should only have one cache entry");
+   907→    }
+   908→
+   909→    #[test]
+   910→    fn test_curve2d_analytical_uv() {
+   911→        let mut cache = EdgeDiscretizationCache::new();
+   912→        let p1 = Point3d::new(0.0, 0.0, 0.0);
+   913→        let p2 = Point3d::new(1.0, 0.0, 0.0);
+   914→        let edge = Edge::new_line(p1, p2);
+   915→
+   916→        let surface = Surface::Plane(Plane::xy());
+   917→        let face_id = TopoId::new();
+   918→
+   919→        let curve_2d = Curve2d::Line(Line2d::new(
+   920→            Point2d::new(0.5, 0.5),
+   921→            Point2d::new(1.5, 0.5),
+   922→        ));
+   923→
+   924→        let disc = cache.discretize_edge(&edge, face_id, &surface, 32, Some(&curve_2d));
+   925→
+   926→        let uvs = disc.uv_per_face.get(&face_id).unwrap();
+   927→        assert!((uvs[0].u - 0.5).abs() < 1e-10, "Expected u=0.5, got {}", uvs[0].u);
+   928→        assert!((uvs[0].v - 0.5).abs() < 1e-10, "Expected v=0.5, got {}", uvs[0].v);
+   929→        assert!((uvs[1].u - 1.5).abs() < 1e-10, "Expected u=1.5, got {}", uvs[1].u);
+   930→        assert!((uvs[1].v - 0.5).abs() < 1e-10, "Expected v=0.5, got {}", uvs[1].v);
+   931→    }
+   932→
+   933→    #[test]
+   934→    fn test_adaptive_tolerance() {
+   935→        let tol = AdaptiveTolerance::from_model_scale(1.0);
+   936→        assert!((tol.merge_tolerance() - 1e-6).abs() < 1e-12);
+   937→        assert!((tol.chord_tolerance() - 1e-5).abs() < 1e-12);
+   938→
+   939→        let tol_big = AdaptiveTolerance::from_model_scale(1000.0);
+   940→        assert!(tol_big.merge_tolerance() > 1e-6, "Large model should have larger tolerance");
+   941→        assert!(tol_big.merge_tolerance() < 1e-2, "But not too large");
+   942→    }
+   943→
+   944→    #[test]
+   945→    fn test_adaptive_crease_angle() {
+   946→        let plane = Surface::Plane(Plane::xy());
+   947→        assert_eq!(compute_adaptive_crease_angle(&plane), 0.0);
+   948→
+   949→        let cyl = Surface::Cylinder(draper_geometry::CylinderSurface::new_z(5.0));
+   950→        assert!((compute_adaptive_crease_angle(&cyl) - std::f64::consts::PI).abs() < 1e-10);
+   951→    }
+   952→
+   953→    #[test]
+   954→    fn test_point_to_chord_distance() {
+   955→        let a = Point3d::new(0.0, 0.0, 0.0);
+   956→        let b = Point3d::new(1.0, 0.0, 0.0);
+   957→
+   958→        let on_chord = Point3d::new(0.5, 0.0, 0.0);
+   959→        assert!(point_to_chord_distance(&on_chord, &a, &b) < 1e-10);
+   960→
+   961→        let perp = Point3d::new(0.5, 1.0, 0.0);
+   962→        let dist = point_to_chord_distance(&perp, &a, &b);
+   963→        assert!((dist - 1.0).abs() < 1e-10);
+   964→    }
+   965→}
+   966→

@@ -993,13 +993,67 @@ pub fn triangulate_surface_consistent(
     let margin_u = (u_max - u_min) * 0.01;
     let margin_v = (v_max - v_min) * 0.01;
 
-    // Check for degenerate UV range (zero-area polygon)
-    if (u_max - u_min) < 1e-12 || (v_max - v_min) < 1e-12 {
+    // Check for degenerate UV range (zero-area polygon).
+    // When the boundary collapses to a line in UV space (constant u or v),
+    // earcutr cannot triangulate it. Fall back to a simple strip triangulation
+    // that connects the two boundary curves directly in 3D space.
+    // This happens for faces like the flat side of a hex nut, where the
+    // boundary lies at a constant angular position on a NURBS surface.
+    let u_range = u_max - u_min;
+    let v_range = v_max - v_min;
+    let u_degenerate = u_range < 1e-6;
+    let v_degenerate = v_range < 1e-6;
+
+    if u_degenerate && v_degenerate {
         log::warn!(
-            "triangulate_surface_consistent: degenerate UV range u=[{:.6}, {:.6}] v=[{:.6}, {:.6}], {} boundary pts — returning empty mesh",
+            "triangulate_surface_consistent: fully degenerate UV range u=[{:.6}, {:.6}] v=[{:.6}, {:.6}], {} boundary pts — returning empty mesh",
             u_min, u_max, v_min, v_max, outer_uv.len()
         );
         return TriangleMesh::new();
+    }
+
+    if u_degenerate || v_degenerate {
+        // Degenerate UV polygon: boundary is a line in UV space.
+        // Create a simple strip triangulation from the 3D boundary points.
+        // The boundary forms a closed loop, so we triangulate it as a
+        // fan from the centroid (like ear-clipping a convex polygon).
+        log::info!(
+            "triangulate_surface_consistent: degenerate UV ({}) with {} boundary pts — using fan triangulation",
+            if u_degenerate { "constant-u" } else { "constant-v" },
+            outer_uv.len()
+        );
+        let mut mesh = TriangleMesh::new();
+        let n = boundary_points_3d.len();
+        if n < 3 {
+            return mesh;
+        }
+        // Compute centroid for fan triangulation
+        let mut cx = 0.0_f64; let mut cy = 0.0_f64; let mut cz = 0.0_f64;
+        for p in boundary_points_3d {
+            cx += p.x; cy += p.y; cz += p.z;
+        }
+        let inv_n = 1.0 / n as f64;
+        let centroid = draper_geometry::Point3d::new(cx * inv_n, cy * inv_n, cz * inv_n);
+
+        // Add centroid as vertex 0, then boundary points
+        let c_idx = mesh.add_vertex(centroid);
+        mesh.add_vertex_normal(c_idx, [0.0, 0.0, 1.0]); // approximate
+
+        for p in boundary_points_3d {
+            let idx = mesh.add_vertex(*p);
+            mesh.add_vertex_normal(idx, [0.0, 0.0, 1.0]); // approximate
+        }
+
+        // Triangulate as a fan from the centroid
+        for i in 0..n {
+            let i_next = (i + 1) % n;
+            if forward {
+                mesh.add_triangle(0, (i + 1) as u32, (i_next + 1) as u32);
+            } else {
+                mesh.add_triangle(0, (i_next + 1) as u32, (i + 1) as u32);
+            }
+        }
+        return mesh;
     }
 
     let mut domain = ParametricDomain::new(

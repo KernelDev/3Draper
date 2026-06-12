@@ -209,6 +209,15 @@ pub struct EdgeDiscretizationCache {
     entries: HashMap<EdgeCacheKey, EdgeDiscretization>,
     /// Secondary index: TopoId → canonical key (for reverse lookup).
     topo_id_to_key: HashMap<TopoId, EdgeCacheKey>,
+    /// Step-entity ID aliases: maps a non-canonical step_id to the canonical one.
+    ///
+    /// When two different STEP EDGE_CURVE entities share the same VERTEX_POINT
+    /// endpoints (i.e., they represent the same geometric boundary but with
+    /// different curve representations), the first-seen step_id becomes the
+    /// canonical key. Subsequent step_ids are registered as aliases, so that
+    /// `discretize_step_edge()` returns the same cached 3D points for all
+    /// edges sharing that boundary — ensuring watertightness by construction.
+    step_id_aliases: HashMap<i64, i64>,
     /// Adaptive tolerance for sampling and coincidence checks.
     adaptive_tol: AdaptiveTolerance,
     /// Maximum number of sample points per edge.
@@ -220,6 +229,8 @@ pub struct EdgeDiscretizationCache {
     cache_misses: usize,
     /// Number of edges that are shared by 2+ faces (computed on demand).
     shared_edges: usize,
+    /// Number of step_id alias lookups that resulted in a cache hit.
+    alias_hits: usize,
 }
 
 /// Statistics from the edge discretization cache, used for debugging
@@ -243,11 +254,13 @@ impl EdgeDiscretizationCache {
         Self {
             entries: HashMap::new(),
             topo_id_to_key: HashMap::new(),
+            step_id_aliases: HashMap::new(),
             adaptive_tol: AdaptiveTolerance::new(),
             max_samples: 64,
             cache_hits: 0,
             cache_misses: 0,
             shared_edges: 0,
+            alias_hits: 0,
         }
     }
 
@@ -256,11 +269,13 @@ impl EdgeDiscretizationCache {
         Self {
             entries: HashMap::new(),
             topo_id_to_key: HashMap::new(),
+            step_id_aliases: HashMap::new(),
             adaptive_tol: AdaptiveTolerance::from_model_scale(tol_ctx.model_scale),
             max_samples: max_samples.max(4),
             cache_hits: 0,
             cache_misses: 0,
             shared_edges: 0,
+            alias_hits: 0,
         }
     }
 
@@ -269,11 +284,13 @@ impl EdgeDiscretizationCache {
         Self {
             entries: HashMap::new(),
             topo_id_to_key: HashMap::new(),
+            step_id_aliases: HashMap::new(),
             adaptive_tol: AdaptiveTolerance::from_bounding_box(min, max),
             max_samples: max_samples.max(4),
             cache_hits: 0,
             cache_misses: 0,
             shared_edges: 0,
+            alias_hits: 0,
         }
     }
 
@@ -345,11 +362,52 @@ impl EdgeDiscretizationCache {
         &self.entries[&key]
     }
 
+    /// Register a step_id alias: when `from_id` is used as a cache key,
+    /// redirect to `to_id` instead. This ensures that two different STEP
+    /// EDGE_CURVE entities sharing the same VERTEX_POINT endpoints produce
+    /// identical 3D boundary points — the foundation of watertight meshes.
+    ///
+    /// The `to_id` should be the "canonical" step_id (typically the first
+    /// one encountered for a given vertex pair). All aliases resolve to it.
+    pub fn register_step_id_alias(&mut self, from_id: i64, to_id: i64) {
+        if from_id != to_id {
+            // Resolve transitive aliases: if to_id is itself an alias,
+            // follow the chain to the true canonical id.
+            let canonical = self.resolve_canonical_step_id(to_id);
+            self.step_id_aliases.insert(from_id, canonical);
+        }
+    }
+
+    /// Resolve a step_id through the alias chain to its canonical form.
+    /// If `step_id` has been registered as an alias, returns the canonical id.
+    /// Otherwise returns `step_id` itself.
+    pub fn resolve_canonical_step_id(&self, step_id: i64) -> i64 {
+        let mut current = step_id;
+        let mut seen = std::collections::HashSet::new();
+        while let Some(&alias_target) = self.step_id_aliases.get(&current) {
+            if !seen.insert(current) {
+                // Cycle detected — shouldn't happen, but break to avoid infinite loop
+                log::warn!("Step ID alias cycle detected for step_id={}", step_id);
+                break;
+            }
+            current = alias_target;
+        }
+        current
+    }
+
     /// Discretize an edge using a STEP entity ID as the key.
     ///
     /// This is the STEP-path API that replaces the old `StepEdgeCache::discretize()`.
     /// It creates a canonical key from the STEP entity ID, ensuring that two
     /// ORIENTED_EDGEs sharing the same EDGE_CURVE resolve to the same cache entry.
+    ///
+    /// # Vertex-pair aliasing
+    ///
+    /// When two different STEP EDGE_CURVE entities share the same VERTEX_POINT
+    /// endpoints (same geometric boundary, different curve representation),
+    /// `register_step_id_alias()` maps the non-canonical step_id to the canonical
+    /// one. This method resolves aliases before looking up the cache, so both
+    /// edges produce identical 3D boundary points.
     ///
     /// # Arguments
     /// * `step_entity_id` - STEP entity ID of the EDGE_CURVE
@@ -365,7 +423,9 @@ impl EdgeDiscretizationCache {
         edge: &Edge,
         n_samples: usize,
     ) -> (Vec<Point3d>, Vec<f64>) {
-        let key = EdgeCacheKey::StepEntityId(step_entity_id);
+        // Resolve aliases: if this step_id was aliased to a canonical one, use it
+        let canonical_id = self.resolve_canonical_step_id(step_entity_id);
+        let key = EdgeCacheKey::StepEntityId(canonical_id);
 
         // Register TopoId → canonical key mapping
         self.topo_id_to_key.insert(edge.id, key);
@@ -394,6 +454,9 @@ impl EdgeDiscretizationCache {
             });
         } else {
             self.cache_hits += 1;
+            if canonical_id != step_entity_id {
+                self.alias_hits += 1;
+            }
         }
 
         // Retrieve the cached entry

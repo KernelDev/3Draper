@@ -1,0 +1,2002 @@
+     1→// SPDX-License-Identifier: GPL-3.0-or-later
+     2→// Copyright (c) 2026 KernelDev
+     3→//! STEP-to-mesh converter.
+     4→//!
+     5→//! Converts parsed STEP entities into a triangle mesh by:
+     6→//! 1. Resolving entity references to build geometry
+     7→//! 2. Creating B-Rep faces from STEP surface entities with boundary edges
+     8→//! 3. Triangulating using the existing mesh pipeline (ear-clipping for planar faces)
+     9→//!
+    10→//! Supported surface types:
+    11→//! - PLANE
+    12→//! - CYLINDRICAL_SURFACE
+    13→//! - SPHERICAL_SURFACE
+    14→//! - CONICAL_SURFACE
+    15→//! - TOROIDAL_SURFACE
+    16→//! - SURFACE_OF_REVOLUTION
+    17→//! - SURFACE_OF_LINEAR_EXTRUSION
+    18→//! - B_SPLINE_SURFACE_WITH_KNOTS / B_SPLINE_SURFACE / BEZIER_SURFACE
+    19→//!
+    20→//! Boundary extraction:
+    21→//! - ADVANCED_FACE → FACE_BOUND → EDGE_LOOP → ORIENTED_EDGE → EDGE_CURVE
+    22→//! - EDGE_CURVE → SURFACE_CURVE → 3D curve + vertex endpoints
+    23→//! - Boundary edges enable proper ear-clipping triangulation of planar faces
+    24→
+    25→use crate::schema::{StepFile, StepValue};
+    26→use draper_geometry::{
+    27→    Point3d, Point2d, Direction3d, Vec3d, Surface, Plane, CylinderSurface, SphereSurface,
+    28→    ConeSurface, TorusSurface, RevolutionSurface, ExtrusionSurface,
+    29→    NurbsSurface, Curve3d, Curve2d, Line, Circle, Ellipse, Arc, NurbsCurve,
+    30→    Line2d, Circle2d, Ellipse2d, Nurbs2d,
+    31→};
+    32→use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary_and_holes_uv, ear_clip, validate_watertight, validate_edge_consistency, smooth_normals, smooth_normals_adaptive};
+    33→use draper_topology::{Face, Wire, CoEdge, Edge as TopoEdge, Shell, Solid};
+    34→use draper_topology::healing::{heal_solid, HealingParams, HealingReport};
+    35→use draper_geometry::tolerance::ToleranceContext;
+    36→use draper_mesh::edge_cache::{EdgeDiscretizationCache, AdaptiveTolerance, deterministic_round_point};
+    37→use std::collections::HashMap;
+    38→
+    39→// WASM-compatible Instant: on native uses std::time::Instant,
+    40→// on wasm32 uses web_time::Instant (backed by performance.now()).
+    41→#[cfg(not(target_arch = "wasm32"))]
+    42→use std::time::Instant as StdInstant;
+    43→#[cfg(target_arch = "wasm32")]
+    44→use web_time::Instant as StdInstant;
+    45→use log::{info, warn};
+    46→
+    47→// ============================================================
+    48→// STEP Conversion Configuration
+    49→// ============================================================
+    50→
+    51→/// Configuration for STEP-to-mesh conversion.
+    52→///
+    53→/// Controls optional pipeline stages like healing.
+    54→#[derive(Clone, Debug)]
+    55→pub struct StepConversionConfig {
+    56→    /// Whether to apply the healing pipeline between BRep extraction and
+    57→    /// triangulation. Healing fixes common B-Rep defects such as gaps,
+    58→    /// holes, flipped normals, degenerate edges, and small features.
+    59→    ///
+    60→    /// Default: `true` — healing is applied automatically.
+    61→    pub heal: bool,
+    62→}
+    63→
+    64→impl Default for StepConversionConfig {
+    65→    fn default() -> Self {
+    66→        Self { heal: true }
+    67→    }
+    68→}
+    69→
+    70→impl StepConversionConfig {
+    71→    /// Create a config with healing disabled.
+    72→    pub fn no_healing() -> Self {
+    73→        Self { heal: false }
+    74→    }
+    75→}
+    76→
+    77→// ============================================================
+    78→// FaceData — extracted face data with surface and boundary edges
+    79→// ============================================================
+    80→
+    81→/// Extracted face data with surface and boundary edges.
+    82→#[derive(Clone)]
+    83→struct FaceData {
+    84→    surface: Surface,
+    85→    /// Edges from the outer boundary loop (FACE_OUTER_BOUND)
+    86→    outer_edges: Vec<TopoEdge>,
+    87→    /// Edges from inner boundary loops (FACE_BOUND = holes)
+    88→    inner_edges: Vec<Vec<TopoEdge>>,
+    89→    /// All edges combined (for backward compat with surface_to_mesh)
+    90→    edges: Vec<TopoEdge>,
+    91→    forward: bool,
+    92→    /// STEP entity ID of the ADVANCED_FACE this data was extracted from.
+    93→    step_face_id: i64,
+    94→    /// STEP entity ID of the face's surface (for PCURVE matching).
+    95→    surface_step_id: Option<i64>,
+    96→    /// Analytical PCURVEs in UV space for each edge in `edges`.
+    97→    /// Same length as `edges`. When present, used instead of surface.project_point().
+    98→    edge_curves_2d: Vec<Option<Curve2d>>,
+    99→    /// STEP entity IDs of EDGE_CURVE entities for each edge in `edges`.
+   100→    /// Same length as `edges`. Used for edge discretization caching —
+   101→    /// when two faces share the same STEP EDGE_CURVE, they must produce
+   102→    /// identical 3D boundary points to ensure mesh watertightness.
+   103→    edge_step_ids: Vec<i64>,
+   104→    /// STEP entity IDs of EDGE_CURVE entities for outer edges.
+   105→    /// Same length as `outer_edges`.
+   106→    outer_edge_step_ids: Vec<i64>,
+   107→    /// STEP entity IDs of EDGE_CURVE entities for inner edges.
+   108→    /// Same structure as `inner_edges`.
+   109→    inner_edge_step_ids: Vec<Vec<i64>>,
+   110→}
+   111→
+   112→// ============================================================
+   113→// FaceData ↔ Solid conversion (for healing pipeline)
+   114→// ============================================================
+   115→
+   116→/// Build a `Solid` from a list of `FaceData` so that the healing
+   117→/// pipeline can operate on the topology.
+   118→///
+   119→/// Returns the Solid and a mapping from each Face's `TopoId` to its
+   120→/// index in the original `face_data_list`. This mapping allows us to
+   121→/// recover STEP-specific metadata after healing.
+   122→fn face_data_list_to_solid(face_data_list: &[FaceData]) -> (Solid, HashMap<draper_topology::TopoId, usize>) {
+   123→    let mut topo_faces = Vec::with_capacity(face_data_list.len());
+   124→    let mut face_id_to_index = HashMap::new();
+   125→
+   126→    for (fd_idx, fd) in face_data_list.iter().enumerate() {
+   127→        // Build outer wire from outer edges — attach curve_2d (PCURVE) data
+   128→        // so that triangulate_face can use it for accurate UV coordinates.
+   129→        let outer_wire = if fd.outer_edges.is_empty() {
+   130→            None
+   131→        } else {
+   132→            let coedges: Vec<CoEdge> = fd.outer_edges.iter()
+   133→                .map(|edge| {
+   134→                    // Try to find the curve_2d for this edge
+   135→                    let curve_2d = fd.edges.iter().position(|e| e.id == edge.id)
+   136→                        .and_then(|idx| fd.edge_curves_2d.get(idx).and_then(|c| c.clone()));
+   137→                    let mut coedge = CoEdge::new(edge.id, true);
+   138→                    coedge.curve_2d = curve_2d;
+   139→                    coedge
+   140→                })
+   141→                .collect();
+   142→            Some(Wire::new(coedges))
+   143→        };
+   144→
+   145→        // Build inner wires from inner edges (holes) — also with curve_2d
+   146→        let inner_wires: Vec<Wire> = fd.inner_edges.iter()
+   147→            .map(|inner_edge_list| {
+   148→                let coedges: Vec<CoEdge> = inner_edge_list.iter()
+   149→                    .map(|edge| {
+   150→                        let curve_2d = fd.edges.iter().position(|e| e.id == edge.id)
+   151→                            .and_then(|idx| fd.edge_curves_2d.get(idx).and_then(|c| c.clone()));
+   152→                        let mut coedge = CoEdge::new(edge.id, true);
+   153→                        coedge.curve_2d = curve_2d;
+   154→                        coedge
+   155→                    })
+   156→                    .collect();
+   157→                Wire::new(coedges)
+   158→            })
+   159→            .collect();
+   160→
+   161→        let mut face = Face::new(fd.surface.clone(), outer_wire.unwrap_or_else(|| Wire::new(vec![])));
+   162→        face.forward = fd.forward;
+   163→        face.edges = fd.edges.clone();
+   164→
+   165→        // Record the mapping before we add holes (which doesn't change the ID)
+   166→        face_id_to_index.insert(face.id, fd_idx);
+   167→
+   168→        // Add inner wires as holes
+   169→        for wire in inner_wires {
+   170→            face.add_hole(wire);
+   171→        }
+   172→
+   173→        topo_faces.push(face);
+   174→    }
+   175→
+   176→    let shell = Shell::new_closed(topo_faces);
+   177→    (Solid::new(shell), face_id_to_index)
+   178→}
+   179→
+   180→/// Apply healing results back to the original `FaceData` list.
+   181→///
+   182→/// This function takes the original `FaceData` list, the healed `Solid`,
+   183→/// and a mapping from face TopoId → original FaceData index. It produces
+   184→/// a new `FaceData` list that:
+   185→///
+   186→/// - **Preserves** STEP-specific metadata (step_face_id, edge_step_ids,
+   187→///   edge_curves_2d, etc.) for faces that originated from the STEP file.
+   188→///   The original edge data and STEP IDs are kept intact because the
+   189→///   EdgeDiscretizationCache already handles watertightness at the mesh level.
+   190→/// - **Updates** the `forward` flag if the healing pipeline flipped a face
+   191→///   normal.
+   192→/// - **Removes** faces that were removed by the healing pipeline (small
+   193→///   feature removal).
+   194→/// - **Adds** new faces that were created by the healing pipeline (hole
+   195→///   filling), with default (0) STEP IDs.
+   196→fn apply_healing_to_face_data(
+   197→    original_face_data: &[FaceData],
+   198→    healed_solid: &Solid,
+   199→    face_id_to_index: &HashMap<draper_topology::TopoId, usize>,
+   200→) -> Vec<FaceData> {
+   201→    let mut result = Vec::new();
+   202→    let mut used_original_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
+   203→
+   204→    let faces = healed_solid.faces();
+   205→    for face in faces {
+   206→        if let Some(&orig_idx) = face_id_to_index.get(&face.id) {
+   207→            // This face existed in the original FaceData — reuse it with updates.
+   208→            // We preserve the original FaceData's STEP-specific metadata (step IDs,
+   209→            // 2D curves, etc.) and only apply structural changes from healing.
+   210→            used_original_indices.insert(orig_idx);
+   211→            let mut fd = original_face_data[orig_idx].clone();
+   212→
+   213→            // Apply forward flag change (normal repair)
+   214→            fd.forward = face.forward;
+   215→
+   216→            result.push(fd);
+   217→        } else {
+   218→            // This is a new face added by the healing pipeline (e.g., hole fill).
+   219→            // Create a FaceData with default STEP IDs.
+   220→            let outer_edges: Vec<TopoEdge> = if let Some(ref wire) = face.outer_wire {
+   221→                wire.coedges.iter()
+   222→                    .filter_map(|coedge| {
+   223→                        face.edges.iter().find(|e| e.id == coedge.edge).cloned()
+   224→                    })
+   225→                    .collect()
+   226→            } else {
+   227→                vec![]
+   228→            };
+   229→
+   230→            let inner_edges: Vec<Vec<TopoEdge>> = face.inner_wires.iter()
+   231→                .map(|wire| {
+   232→                    wire.coedges.iter()
+   233→                        .filter_map(|coedge| {
+   234→                            face.edges.iter().find(|e| e.id == coedge.edge).cloned()
+   235→                        })
+   236→                        .collect()
+   237→                })
+   238→                .collect();
+   239→
+   240→            let n_outer = outer_edges.len();
+   241→            let n_inner: Vec<usize> = inner_edges.iter().map(|ie| ie.len()).collect();
+   242→
+   243→            let mut all_edges = outer_edges.clone();
+   244→            for inner in &inner_edges {
+   245→                all_edges.extend(inner.clone());
+   246→            }
+   247→
+   248→            let n_edges = all_edges.len();
+   249→
+   250→            result.push(FaceData {
+   251→                surface: face.surface.clone().unwrap_or(Surface::Plane(Plane::from_origin_and_normal(
+   252→                    Point3d::ORIGIN, Direction3d::Z))),
+   253→                outer_edges,
+   254→                inner_edges,
+   255→                edges: all_edges,
+   256→                forward: face.forward,
+   257→                step_face_id: 0, // Synthetic face — no STEP ID
+   258→                surface_step_id: None,
+   259→                edge_curves_2d: vec![None; n_edges],
+   260→                edge_step_ids: vec![0; n_edges],
+   261→                outer_edge_step_ids: vec![0; n_outer],
+   262→                inner_edge_step_ids: n_inner.iter().map(|&n| vec![0; n]).collect(),
+   263→            });
+   264→        }
+   265→    }
+   266→
+   267→    result
+   268→}
+   269→
+   270→/// Log a summary of the healing report.
+   271→fn log_healing_report(brep_id: i64, report: &HealingReport) {
+   272→    if report.total_fixes() == 0 {
+   273→        info!("BREP #{}: healing complete — no fixes needed", brep_id);
+   274→        return;
+   275→    }
+   276→
+   277→    info!("BREP #{}: healing report — {} total fixes applied:", brep_id, report.total_fixes());
+   278→    if report.degenerate_edges_marked > 0 {
+   279→        info!("  • {} degenerate edges marked", report.degenerate_edges_marked);
+   280→    }
+   281→    if report.gaps_closed > 0 {
+   282→        info!("  • {} gaps closed", report.gaps_closed);
+   283→    }
+   284→    if report.holes_filled > 0 {
+   285→        info!("  • {} holes filled", report.holes_filled);
+   286→    }
+   287→    if report.edges_stitched > 0 {
+   288→        info!("  • {} edge pairs stitched", report.edges_stitched);
+   289→    }
+   290→    if report.normals_fixed > 0 {
+   291→        info!("  • {} face normals fixed", report.normals_fixed);
+   292→    }
+   293→    if report.small_faces_removed > 0 {
+   294→        info!("  • {} small-feature faces removed", report.small_faces_removed);
+   295→    }
+   296→    if report.sliver_triangles_detected > 0 {
+   297→        info!("  • {} sliver triangles detected", report.sliver_triangles_detected);
+   298→    }
+   299→    // Log individual messages at debug level
+   300→    for msg in &report.messages {
+   301→        log::debug!("  → {}", msg);
+   302→    }
+   303→}
+   304→
+   305→/// Information about a single face within a BREP, for structure display and UV visualization.
+   306→#[derive(Clone, Debug)]
+   307→#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+   308→pub struct FaceInfo {
+   309→    /// Unique face identifier (for selection and tracking).
+   310→    pub face_id: u64,
+   311→    /// STEP entity ID of the ADVANCED_FACE.
+   312→    pub step_face_id: i64,
+   313→    /// Human-readable surface type name (e.g., "Plane", "Cylinder", "Nurbs").
+   314→    pub surface_type: String,
+   315→    /// The surface geometry (for UV grid generation).
+   316→    pub surface: Surface,
+   317→    /// 3D boundary edge polylines (outer boundary).
+   318→    pub outer_boundary: Vec<Vec<Point3d>>,
+   319→    /// 3D boundary edge polylines (inner boundaries = holes).
+   320→    pub inner_boundaries: Vec<Vec<Point3d>>,
+   321→    /// UV-space boundary polylines (outer boundary).
+   322→    pub outer_uv_boundary: Vec<Vec<Point2d>>,
+   323→    /// UV-space boundary polylines (inner boundaries = holes).
+   324→    pub inner_uv_boundaries: Vec<Vec<Vec<Point2d>>>,
+   325→    /// Triangle index range [start, end) in the merged mesh for this face.
+   326→    pub triangle_range: (usize, usize),
+   327→    /// Whether the face normal matches the surface normal.
+   328→    pub forward: bool,
+   329→    /// UV-space triangles for visualization: each triangle is 3 UV points.
+   330→    /// Used to display the actual triangulation in the UV grid SVG.
+   331→    pub uv_triangles: Vec<[Point2d; 3]>,
+   332→}
+   333→/// A mesh instance to be rendered — the mesh geometry is transformed by the given matrix
+   334→/// and painted with the given color. Multiple instances can reference the same BREP geometry
+   335→/// but with different transforms (e.g., a bolt inserted 6 times at different positions).
+   336→#[derive(Clone, Debug)]
+   337→#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+   338→pub struct MeshInstance {
+   339→    /// Human-readable name (from STEP PRODUCT or NAUO).
+   340→    pub name: String,
+   341→    /// The triangulated mesh (already transformed to world space).
+   342→    pub mesh: TriangleMesh,
+   343→    /// Optional RGBA color (0..1 range).
+   344→    pub color: Option<[f32; 4]>,
+   345→    /// The 4×4 transform that was applied to get this instance into world space.
+   346→    pub transform: Option<[[f64; 4]; 4]>,
+   347→    /// The STEP entity ID of the source MANIFOLD_SOLID_BREP.
+   348→    pub brep_id: i64,
+   349→}
+   350→
+   351→/// A detailed mesh instance with per-face information for structure display,
+   352→/// selection, UV grid visualization, and debugging.
+   353→#[derive(Clone, Debug)]
+   354→#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+   355→pub struct DetailedMeshInstance {
+   356→    /// Human-readable name (from STEP PRODUCT or NAUO).
+   357→    pub name: String,
+   358→    /// The triangulated mesh (already transformed to world space) with per-triangle face IDs.
+   359→    pub mesh: TriangleMesh,
+   360→    /// Optional RGBA color (0..1 range).
+   361→    pub color: Option<[f32; 4]>,
+   362→    /// The 4×4 transform that was applied to get this instance into world space.
+   363→    pub transform: Option<[[f64; 4]; 4]>,
+   364→    /// The STEP entity ID of the source MANIFOLD_SOLID_BREP.
+   365→    pub brep_id: i64,
+   366→    /// Per-face information for structure display and UV visualization.
+   367→    pub faces: Vec<FaceInfo>,
+   368→}
+   369→
+   370→/// A node in the STEP assembly tree (for structure display).
+   371→#[derive(Clone, Debug)]
+   372→#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+   373→pub struct AssemblyNode {
+   374→    /// Name of this assembly node.
+   375→    pub name: String,
+   376→    /// STEP entity ID of the PRODUCT_DEFINITION.
+   377→    pub pd_id: i64,
+   378→    /// STEP entity ID of the MANIFOLD_SOLID_BREP (if leaf).
+   379→    pub brep_id: Option<i64>,
+   380→    /// Index into the detailed_instances Vec that this leaf node corresponds to.
+   381→    /// Set only for leaf nodes. Multiple leaf nodes may share the same brep_id
+   382→    /// but each will have a unique instance_index (e.g., bolt at different positions).
+   383→    pub instance_index: Option<usize>,
+   384→    /// Transform from parent to this node.
+   385→    pub transform: Option<[[f64; 4]; 4]>,
+   386→    /// Color for this node.
+   387→    pub color: Option<[f32; 4]>,
+   388→    /// Child nodes.
+   389→    pub children: Vec<AssemblyNode>,
+   390→}
+   391→
+   392→/// Convert a parsed STEP file to a single merged triangle mesh.
+   393→pub fn step_to_mesh(step_file: &StepFile) -> Result<TriangleMesh, String> {
+   394→    step_to_mesh_with_config(step_file, &StepConversionConfig::default())
+   395→}
+   396→
+   397→/// Convert a parsed STEP file to a single merged triangle mesh with custom configuration.
+   398→pub fn step_to_mesh_with_config(step_file: &StepFile, config: &StepConversionConfig) -> Result<TriangleMesh, String> {
+   399→    let converter = StepConverter::with_config(step_file, config.clone());
+   400→    converter.convert()
+   401→}
+   402→
+   403→/// Convert a parsed STEP file to mesh instances (one per assembly leaf occurrence).
+   404→/// Each instance has its own transform and color — the same BREP can appear
+   405→/// multiple times with different transforms (e.g., bolt inserted 6 times).
+   406→pub fn step_to_mesh_instances(step_file: &StepFile) -> Result<Vec<MeshInstance>, String> {
+   407→    step_to_mesh_instances_with_config(step_file, &StepConversionConfig::default())
+   408→}
+   409→
+   410→/// Convert a parsed STEP file to mesh instances with custom configuration.
+   411→pub fn step_to_mesh_instances_with_config(step_file: &StepFile, config: &StepConversionConfig) -> Result<Vec<MeshInstance>, String> {
+   412→    let converter = StepConverter::with_config(step_file, config.clone());
+   413→    converter.convert_instances()
+   414→}
+   415→
+   416→/// Convert a parsed STEP file to detailed mesh instances with per-face information.
+   417→/// Includes face IDs, surface types, boundary polylines, and UV-space data
+   418→/// for structure display, selection, UV grid visualization, and debugging.
+   419→pub fn step_to_detailed_instances(step_file: &StepFile) -> Result<Vec<DetailedMeshInstance>, String> {
+   420→    step_to_detailed_instances_with_config(step_file, &StepConversionConfig::default())
+   421→}
+   422→
+   423→/// Convert a parsed STEP file to detailed mesh instances with custom configuration.
+   424→pub fn step_to_detailed_instances_with_config(step_file: &StepFile, config: &StepConversionConfig) -> Result<Vec<DetailedMeshInstance>, String> {
+   425→    let converter = StepConverter::with_config(step_file, config.clone());
+   426→    converter.convert_detailed_instances()
+   427→}
+   428→
+   429→/// Get the assembly tree structure of a STEP file for display/debugging.
+   430→pub fn step_structure(step_file: &StepFile) -> AssemblyNode {
+   431→    let converter = StepConverter::new(step_file);
+   432→    converter.build_assembly_tree()
+   433→}
+   434→
+   435→/// Build the assembly tree AND detailed instances together, so that each leaf
+   436→/// AssemblyNode gets its `instance_index` populated (mapping it to the correct
+   437→/// entry in the returned instances Vec). This solves the problem of multiple
+   438→/// assembly nodes sharing the same brep_id (e.g., same bolt at different positions).
+   439→pub fn step_structure_with_instances(step_file: &StepFile) -> (AssemblyNode, Vec<DetailedMeshInstance>) {
+   440→    let converter = StepConverter::new(step_file);
+   441→    let mut tree = converter.build_assembly_tree();
+   442→    let instances = converter.convert_detailed_instances().unwrap_or_default();
+   443→
+   444→    // Walk the assembly tree leaf nodes in the same order as the NAUO tree walk
+   445→    // that generated the instances, and assign instance_index to each leaf.
+   446→    // The instances are created by walk_assembly_tree_detailed which visits
+   447→    // leaf nodes in the same DFS order as build_assembly_tree.
+   448→    let mut next_index: usize = 0;
+   449→    assign_instance_indices(&mut tree, &instances, &mut next_index);
+   450→
+   451→    (tree, instances)
+   452→}
+   453→
+   454→// ============================================================
+   455→// Lazy (progressive) conversion — no triangulation in the initial call
+   456→// ============================================================
+   457→
+   458→/// A pending BREP instance that has NOT been triangulated yet.
+   459→///
+   460→/// Contains all the metadata needed to produce a `DetailedMeshInstance`
+   461→/// (name, transform, color, brep_id), but the expensive triangulation
+   462→/// is deferred to a separate call to `triangulate_pending_instance()`.
+   463→///
+   464→/// This is used by `step_structure_lazy()` to return the assembly tree
+   465→/// and instance descriptors quickly, then triangulate them one-by-one
+   466→/// in a progressive frame loop (e.g., the wasm web viewer).
+   467→#[derive(Clone, Debug)]
+   468→#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+   469→pub struct PendingBrepInstance {
+   470→    /// Human-readable name (from STEP PRODUCT or NAUO).
+   471→    pub name: String,
+   472→    /// The STEP entity ID of the source MANIFOLD_SOLID_BREP.
+   473→    pub brep_id: i64,
+   474→    /// The 4×4 transform to apply to get this instance into world space.
+   475→    pub transform: Option<[[f64; 4]; 4]>,
+   476→    /// Optional RGBA color (0..1 range).
+   477→    pub color: Option<[f32; 4]>,
+   478→}
+   479→
+   480→/// Build the assembly tree and collect BREP instance descriptors — **without**
+   481→/// triangulating any geometry.
+   482→///
+   483→/// Returns the assembly tree (for immediate structure display) and a list of
+   484→/// `PendingBrepInstance` descriptors. Each descriptor can later be triangulated
+   485→/// individually via `triangulate_pending_instance()`.
+   486→///
+   487→/// This function is fast (O(n) in STEP entity count) because it only resolves
+   488→/// references and collects metadata — no mesh computation is performed.
+   489→pub fn step_structure_lazy(step_file: &StepFile) -> (AssemblyNode, Vec<PendingBrepInstance>) {
+   490→    let converter = StepConverter::new(step_file);
+   491→    let mut tree = converter.build_assembly_tree();
+   492→    let pending = converter.collect_pending_instances();
+   493→
+   494→    // Assign instance_index to tree leaves based on pending list
+   495→    let mut next_index: usize = 0;
+   496→    assign_instance_indices_pending(&mut tree, &pending, &mut next_index);
+   497→
+   498→    (tree, pending)
+   499→}
+   500→
+   501→/// Triangulate a single pending BREP instance on demand.
+   502→///
+   503→/// This is the progressive counterpart to `step_structure_lazy()`: instead of
+   504→/// triangulating all BREPs at once (which blocks the main thread on wasm),
+   505→/// call this function once per frame for each pending instance.
+   506→///
+   507→/// Returns `None` if the BREP cannot be triangulated (missing geometry,
+   508→/// unsupported surface types, etc.).
+   509→///
+   510→/// # Timeout
+   511→/// On wasm32, a per-BREP time limit of 3 seconds is enforced via
+   512→/// `TriangulationGuard`. Faces that exceed the limit are skipped,
+   513→/// producing a partial mesh instead of hanging the browser.
+   514→/// A reusable conversion context for progressive BREP triangulation.
+   515→///
+   516→/// Instead of creating a new `StepConverter` for every BREP instance (which
+   517→/// rebuilds entity maps and recomputes bounding boxes), this context keeps
+   518→/// a single converter alive across all triangulation calls.
+   519→///
+   520→/// Usage:
+   521→/// ```ignore
+   522→/// let ctx = StepConversionContext::new(&step_file);
+   523→/// for pending in &pending_instances {
+   524→///     if let Some(instance) = ctx.triangulate_pending(pending) {
+   525→///         // use instance
+   526→///     }
+   527→/// }
+   528→/// ```
+   529→pub struct StepConversionContext<'a> {
+   530→    converter: StepConverter<'a>,
+   531→    bbox: Option<(Point3d, Point3d)>,
+   532→    params: TriangulationParams,
+   533→}
+   534→
+   535→impl<'a> StepConversionContext<'a> {
+   536→    /// Create a new conversion context for the given STEP file reference.
+   537→    /// Computes bounding box once and prepares adaptive triangulation parameters.
+   538→    /// The StepFile's internal type index (lazy) will be reused across calls.
+   539→    pub fn new(step_file: &'a StepFile) -> Self {
+   540→        // On WASM, disable healing — it's O(n²) and freezes the browser.
+   541→        // On native, also disable healing — it can silently remove valid small faces,
+   542→        // causing missing geometry in complex assemblies.
+   543→        let config = StepConversionConfig::no_healing();
+   544→
+   545→        let converter = StepConverter::with_config(step_file, config);
+   546→        let bbox = converter.compute_bounding_box();
+   547→
+   548→        let mut params = TriangulationParams::default();
+   549→        if let Some((bmin, bmax)) = &bbox {
+   550→            let dx = bmax.x - bmin.x;
+   551→            let dy = bmax.y - bmin.y;
+   552→            let dz = bmax.z - bmin.z;
+   553→            let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
+   554→            if diagonal > 1.0 {
+   555→                params.max_deviation = params.max_deviation.max(diagonal * 0.0002);
+   556→            }
+   557→        }
+   558→
+   559→        Self { converter, bbox, params }
+   560→    }
+   561→
+   562→    /// Triangulate a single pending BREP instance.
+   563→    ///
+   564→    /// Returns `None` if the BREP cannot be triangulated (missing geometry,
+   565→    /// unsupported surface types, etc.).
+   566→    ///
+   567→    /// # Timeout
+   568→    /// On wasm32, a per-BREP time limit of 10 seconds is enforced.
+   569→    /// Faces that exceed the limit are skipped, producing a partial mesh
+   570→    /// instead of hanging the browser.
+   571→    pub fn triangulate_pending(&self, pending: &PendingBrepInstance) -> Option<DetailedMeshInstance> {
+   572→        let (mesh, faces) = self.converter.triangulate_brep_detailed(pending.brep_id, &self.params, &self.bbox)?;
+   573→
+   574→        // Apply the instance transform
+   575→        let mut instance_mesh = mesh;
+   576→        if let Some(ref tf) = pending.transform {
+   577→            instance_mesh.transform(tf);
+   578→        }
+   579→
+   580→        Some(DetailedMeshInstance {
+   581→            name: pending.name.clone(),
+   582→            mesh: instance_mesh,
+   583→            color: pending.color,
+   584→            transform: pending.transform,
+   585→            brep_id: pending.brep_id,
+   586→            faces,
+   587→        })
+   588→    }
+   589→}
+   590→
+   591→// ============================================================
+   592→// Owned conversion context (for caching across frames)
+   593→// ============================================================
+   594→
+   595→/// An **owning** conversion context that takes ownership of the `StepFile`.
+   596→///
+   597→/// This is designed for progressive triangulation where the context must be
+   598→/// cached across multiple animation frames (e.g., in a WASM web viewer).
+   599→/// Unlike `StepConversionContext<'a>` which borrows the `StepFile`, this
+   600→/// struct owns it — so it can be stored as a field in a viewer struct without
+   601→/// lifetime issues.
+   602→///
+   603→/// Usage:
+   604→/// ```ignore
+   605→/// let ctx = OwnedStepConversionContext::new(step_file);
+   606→/// for pending in &pending_instances {
+   607→///     if let Some(instance) = ctx.triangulate_pending(pending) { ... }
+   608→/// }
+   609→/// ```
+   610→pub struct OwnedStepConversionContext {
+   611→    step_file: StepFile,
+   612→    bbox: Option<(Point3d, Point3d)>,
+   613→    params: TriangulationParams,
+   614→    /// Pre-built index: pd_id → brep_id. Cached here to avoid re-cloning
+   615→    /// from StepFile's RefCell on every triangulate_pending() call.
+   616→    pd_brep_map: HashMap<i64, Option<i64>>,
+   617→    /// Pre-built index: nauo_id → transform. Cached here for the same reason.
+   618→    nauo_transform_map: HashMap<i64, Option<[[f64; 4]; 4]>>,
+   619→    /// Pre-built entity map: step_entity_id → index in entities vec.
+   620→    entity_map: HashMap<i64, usize>,
+   621→    /// Conversion configuration (healing on/off).
+   622→    config: StepConversionConfig,
+   623→    /// Whether the bounding box has been computed (for lazy init on WASM).
+   624→    bbox_computed: bool,
+   625→}
+   626→
+   627→impl OwnedStepConversionContext {
+   628→    /// Create a new owning conversion context.
+   629→    /// Pre-builds and caches all index maps to avoid per-BREP recomputation.
+   630→    ///
+   631→    /// On WASM, the bounding box computation is deferred to the first
+   632→    /// `triangulate_pending()` call to avoid blocking the main thread
+   633→    /// during construction. This makes `new()` return quickly, keeping
+   634→    /// the browser responsive.
+   635→    pub fn new(step_file: StepFile) -> Self {
+   636→        // Disable healing on all platforms — it can silently remove valid small faces,
+   637→        // causing missing geometry in complex assemblies.
+   638→        let config = StepConversionConfig::no_healing();
+   639→
+   640→        // Cache the index maps — after this, creating a lightweight StepConverter
+   641→        // is nearly free (just clones of already-built maps).
+   642→        let pd_brep_map = step_file.pd_brep_index().clone();
+   643→        let nauo_transform_map = step_file.nauo_transform_index().clone();
+   644→        // Reuse the StepFile's entity_index instead of rebuilding it from scratch
+   645→        let entity_map = step_file.entity_index_ref().clone();
+   646→
+   647→        // Compute bounding box eagerly on all platforms for consistent results.
+   648→        // The cost is negligible compared to the triangulation that follows.
+   649→        let bbox = {
+   650→            let converter = StepConverter::with_config(&step_file, config.clone());
+   651→            converter.compute_bounding_box()
+   652→        };
+   653→
+   654→        let mut params = TriangulationParams::default();
+   655→        if let Some((bmin, bmax)) = &bbox {
+   656→            let dx = bmax.x - bmin.x;
+   657→            let dy = bmax.y - bmin.y;
+   658→            let dz = bmax.z - bmin.z;
+   659→            let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
+   660→            if diagonal > 1.0 {
+   661→                params.max_deviation = params.max_deviation.max(diagonal * 0.0002);
+   662→            }
+   663→        }
+   664→
+   665→        // Enable parallel face triangulation on native (uses rayon internally).
+   666→        // On WASM, threads are not available, so keep sequential.
+   667→        #[cfg(not(target_arch = "wasm32"))]
+   668→        {
+   669→            params.parallel = true;
+   670→        }
+   671→
+   672→        // Use consistent max_face_triangles on all platforms
+   673→        // (no WASM-specific cap — quality should match native)
+   674→
+   675→        Self { step_file, bbox, params, pd_brep_map, nauo_transform_map, entity_map, config, bbox_computed: false }
+   676→    }
+   677→
+   678→    /// Triangulate a single pending BREP instance.
+   679→    ///
+   680→    /// Returns `None` if the BREP cannot be triangulated.
+   681→    ///
+   682→    /// On WASM, the bounding box is computed lazily on the first call
+   683→    /// to avoid blocking the main thread during `new()`.
+   684→    pub fn triangulate_pending(&mut self, pending: &PendingBrepInstance) -> Option<DetailedMeshInstance> {
+   685→        // Lazy bounding box computation on WASM (deferred from new())
+   686→        if !self.bbox_computed && self.bbox.is_none() {
+   687→            let converter = StepConverter::with_config(&self.step_file, self.config.clone());
+   688→            self.bbox = converter.compute_bounding_box();
+   689→            self.bbox_computed = true;
+   690→
+   691→            // Update params based on actual bounding box
+   692→            if let Some((bmin, bmax)) = &self.bbox {
+   693→                let dx = bmax.x - bmin.x;
+   694→                let dy = bmax.y - bmin.y;
+   695→                let dz = bmax.z - bmin.z;
+   696→                let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
+   697→                if diagonal > 1.0 {
+   698→                    self.params.max_deviation = self.params.max_deviation.max(diagonal * 0.0002);
+   699→                }
+   700→            }
+   701→        }
+   702→
+   703→        // Build a lightweight StepConverter using cached maps.
+   704→        // This avoids the O(n) entity_map rebuild and O(n) pd_brep/nauo
+   705→        // re-cloning that was happening on every call.
+   706→        let converter = StepConverter::from_cached_maps(
+   707→            &self.step_file,
+   708→            self.config.clone(),
+   709→            self.entity_map.clone(),
+   710→            self.pd_brep_map.clone(),
+   711→            self.nauo_transform_map.clone(),
+   712→        );
+   713→        let (mesh, faces) = converter.triangulate_brep_detailed(pending.brep_id, &self.params, &self.bbox)?;
+   714→
+   715→        // Apply the instance transform
+   716→        let mut instance_mesh = mesh;
+   717→        if let Some(ref tf) = pending.transform {
+   718→            instance_mesh.transform(tf);
+   719→        }
+   720→
+   721→        Some(DetailedMeshInstance {
+   722→            name: pending.name.clone(),
+   723→            mesh: instance_mesh,
+   724→            color: pending.color,
+   725→            transform: pending.transform,
+   726→            brep_id: pending.brep_id,
+   727→            faces,
+   728→        })
+   729→    }
+   730→
+   731→    /// Get a reference to the owned StepFile.
+   732→    pub fn step_file(&self) -> &StepFile {
+   733→        &self.step_file
+   734→    }
+   735→}
+   736→
+   737→pub fn triangulate_pending_instance(
+   738→    step_file: &StepFile,
+   739→    pending: &PendingBrepInstance,
+   740→) -> Option<DetailedMeshInstance> {
+   741→    let ctx = StepConversionContext::new(step_file);
+   742→    ctx.triangulate_pending(pending)
+   743→}
+   744→
+   745→/// Assign instance_index to leaf AssemblyNodes for pending instances.
+   746→/// Uses simple sequential matching since both tree leaves and instances
+   747→/// are produced in the same DFS order.
+   748→fn assign_instance_indices_pending(root: &mut AssemblyNode, instances: &[PendingBrepInstance], _next_index: &mut usize) {
+   749→    let mut leaves: Vec<*mut AssemblyNode> = Vec::new();
+   750→    {
+   751→        let mut stack: Vec<*mut AssemblyNode> = vec![root as *mut AssemblyNode];
+   752→        while let Some(node_ptr) = stack.pop() {
+   753→            let node = unsafe { &mut *node_ptr };
+   754→            if node.children.is_empty() {
+   755→                leaves.push(node_ptr);
+   756→            } else {
+   757→                for child in node.children.iter_mut().rev() {
+   758→                    stack.push(child as *mut AssemblyNode);
+   759→                }
+   760→            }
+   761→        }
+   762→    }
+   763→
+   764→    // Simple 1:1 sequential assignment — both leaves and instances are in DFS order
+   765→    for (i, leaf_ptr) in leaves.iter().enumerate() {
+   766→        let leaf = unsafe { &mut **leaf_ptr };
+   767→        if leaf.brep_id.is_some() && i < instances.len() {
+   768→            leaf.instance_index = Some(i);
+   769→        }
+   770→    }
+   771→}
+   772→
+   773→/// Assign instance_index to leaf AssemblyNodes by sequential DFS position.
+   774→///
+   775→/// Both tree leaves (from `build_assembly_node_iterative`) and instances
+   776→/// (from `walk_assembly_tree_detailed`) are produced in the same DFS order,
+   777→/// so we can use simple 1:1 sequential matching instead of brep_id matching.
+   778→fn assign_instance_indices(root: &mut AssemblyNode, instances: &[DetailedMeshInstance], _next_index: &mut usize) {
+   779→    // Collect tree leaves in DFS order (leftmost child first)
+   780→    let mut leaves: Vec<*mut AssemblyNode> = Vec::new();
+   781→    {
+   782→        let mut stack: Vec<*mut AssemblyNode> = vec![root as *mut AssemblyNode];
+   783→        while let Some(node_ptr) = stack.pop() {
+   784→            let node = unsafe { &mut *node_ptr };
+   785→            if node.children.is_empty() {
+   786→                leaves.push(node_ptr);
+   787→            } else {
+   788→                // Push children in reverse order so leftmost is processed first
+   789→                for child in node.children.iter_mut().rev() {
+   790→                    stack.push(child as *mut AssemblyNode);
+   791→                }
+   792→            }
+   793→        }
+   794→    }
+   795→
+   796→    // Simple 1:1 sequential assignment — both leaves and instances are in DFS order
+   797→    for (i, leaf_ptr) in leaves.iter().enumerate() {
+   798→        let leaf = unsafe { &mut **leaf_ptr };
+   799→        if leaf.brep_id.is_some() && i < instances.len() {
+   800→            leaf.instance_index = Some(i);
+   801→        }
+   802→    }
+   803→}
+   804→
+   805→/// Get a detailed text dump of the STEP file structure, including:
+   806→/// - All NAUO (assembly) relationships with transforms
+   807→/// - All PD -> BREP mappings
+   808→/// - The full assembly tree
+   809→/// - The mesh rendering tree (which BREPs are drawn how many times with which transforms)
+   810→pub fn step_structure_detailed(step_file: &StepFile) -> String {
+   811→    let converter = StepConverter::new(step_file);
+   812→    converter.build_detailed_structure()
+   813→}
+   814→
+   815→/// Extract tolerance values from STEP file entities.
+   816→///
+   817→/// STEP files can contain explicit tolerance information via:
+   818→/// - `UNCERTAINTY_MEASURE_WITH_UNIT` — overall model uncertainty
+   819→/// - `GEOMETRIC_TOLERANCE` / `GEOMETRIC_TOLERANCE_WITH_DATUM_REFERENCE` — GD&T tolerances
+   820→/// - `SHAPE_TOLERANCE` / `SHAPE_TOLERANCE_WITH_DATUM_REFERENCE` — shape-level tolerances
+   821→///
+   822→/// Returns an `Option<f64>` with the best available tolerance value.
+   823→/// If multiple tolerance values are found, the smallest (tightest) is returned.
+   824→/// If no tolerance information is found, returns `None`.
+   825→pub fn extract_step_tolerance(step_file: &StepFile) -> Option<f64> {
+   826→    let mut best_tolerance: Option<f64> = None;
+   827→
+   828→    for entity in &step_file.entities {
+   829→        let type_name = entity.type_name.to_uppercase();
+   830→
+   831→        if type_name == "UNCERTAINTY_MEASURE_WITH_UNIT" {
+   832→            // Format: UNCERTAINTY_MEASURE_WITH_UNIT(name, measure_with_unit)
+   833→            // The first parameter is typically the uncertainty value
+   834→            if let Some(StepValue::List(params)) = entity.params.get(0) {
+   835→                if let Some(StepValue::Float(val)) = params.first() {
+   836→                    let tol = val.abs();
+   837→                    best_tolerance = Some(match best_tolerance {
+   838→                        Some(existing) => existing.min(tol),
+   839→                        None => tol,
+   840→                    });
+   841→                }
+   842→            }
+   843→            // Also try the second parameter pattern
+   844→            if let Some(StepValue::Float(val)) = entity.params.get(0) {
+   845→                let tol = val.abs();
+   846→                best_tolerance = Some(match best_tolerance {
+   847→                    Some(existing) => existing.min(tol),
+   848→                    None => tol,
+   849→                });
+   850→            }
+   851→        }
+   852→
+   853→        if type_name.starts_with("GEOMETRIC_TOLERANCE") || type_name.starts_with("SHAPE_TOLERANCE") {
+   854→            // Geometric tolerances have the tolerance value as one of the parameters
+   855→            // The exact position depends on the specific subtype, but typically
+   856→            // the first numeric parameter is the tolerance value
+   857→            for param in &entity.params {
+   858→                if let StepValue::Float(val) = param {
+   859→                    let tol = val.abs();
+   860→                    if tol > 1e-15 && tol < 1000.0 {
+   861→                        // Sanity check: tolerance should be small positive number
+   862→                        best_tolerance = Some(match best_tolerance {
+   863→                            Some(existing) => existing.min(tol),
+   864→                            None => tol,
+   865→                        });
+   866→                    }
+   867→                    break; // Only use the first numeric parameter
+   868→                }
+   869→            }
+   870→        }
+   871→    }
+   872→
+   873→    best_tolerance
+   874→}
+   875→
+   876→/// Get a text representation of the STEP file structure.
+   877→pub fn step_structure_text(step_file: &StepFile) -> String {
+   878→    let converter = StepConverter::new(step_file);
+   879→    let tree = converter.build_assembly_tree();
+   880→    let mut text = String::new();
+   881→    format_assembly_node(&tree, 0, &mut text);
+   882→    text
+   883→}
+   884→
+   885→fn format_assembly_node(node: &AssemblyNode, depth: usize, out: &mut String) {
+   886→    let indent = "  ".repeat(depth);
+   887→    let brep_str = match node.brep_id {
+   888→        Some(id) => format!(" BREP=#{}", id),
+   889→        None => String::new(),
+   890→    };
+   891→    let color_str = match node.color {
+   892→        Some(c) => format!(" color=({:.2},{:.2},{:.2})", c[0], c[1], c[2]),
+   893→        None => String::new(),
+   894→    };
+   895→    let tf_str = match node.transform {
+   896→        Some(_) => " [T]".to_string(),
+   897→        None => String::new(),
+   898→    };
+   899→    out.push_str(&format!("{}{} (PD=#{}){}{}{}\n", indent, node.name, node.pd_id, brep_str, color_str, tf_str));
+   900→    for child in &node.children {
+   901→        format_assembly_node(child, depth + 1, out);
+   902→    }
+   903→}
+   904→
+   905→/// Format assembly node with detailed transform information.
+   906→fn format_assembly_node_detailed(node: &AssemblyNode, depth: usize, out: &mut String) {
+   907→    let indent = "  ".repeat(depth);
+   908→    let node_type = if node.brep_id.is_some() { "part" } else if !node.children.is_empty() { "assembly" } else { "empty" };
+   909→    let brep_str = match node.brep_id {
+   910→        Some(id) => format!(" BREP=#{}", id),
+   911→        None => String::new(),
+   912→    };
+   913→    let color_str = match node.color {
+   914→        Some(c) => format!(" color=({:.2},{:.2},{:.2})", c[0], c[1], c[2]),
+   915→        None => String::new(),
+   916→    };
+   917→    let tf_str = match node.transform {
+   918→        Some(tf) => {
+   919→            let tx = tf[0][3]; let ty = tf[1][3]; let tz = tf[2][3];
+   920→            if tx.abs() < 1e-10 && ty.abs() < 1e-10 && tz.abs() < 1e-10 {
+   921→                " [rotation]".to_string()
+   922→            } else {
+   923→                format!(" [T:({:.1},{:.1},{:.1})]", tx, ty, tz)
+   924→            }
+   925→        }
+   926→        None => String::new(),
+   927→    };
+   928→    out.push_str(&format!(
+   929→        "{}{} [{}] (PD=#{}){}{}{}\n",
+   930→        indent, node.name, node_type, node.pd_id, brep_str, color_str, tf_str
+   931→    ));
+   932→    for child in &node.children {
+   933→        format_assembly_node_detailed(child, depth + 1, out);
+   934→    }
+   935→}
+   936→
+   937→struct StepConverter<'a> {
+   938→    step: &'a StepFile,
+   939→    _entity_map: HashMap<i64, usize>,
+   940→    config: StepConversionConfig,
+   941→    /// Pre-built index: pd_id → brep_id (resolved eagerly in new() — O(n) instead of O(n³) per-call)
+   942→    pd_brep_map: HashMap<i64, Option<i64>>,
+   943→    /// Pre-built index: nauo_id → transform (resolved eagerly in new() — O(n) instead of O(n²) per-call)
+   944→    nauo_transform_map: HashMap<i64, Option<[[f64; 4]; 4]>>,
+   945→    /// Cache: bounding box (computed once, reused across all BREP triangulations)
+   946→    bbox_cache: std::cell::RefCell<Option<Option<(Point3d, Point3d)>>>,
+   947→}
+   948→
+   949→impl<'a> StepConverter<'a> {
+   950→    fn new(step: &'a StepFile) -> Self {
+   951→        Self::with_config(step, StepConversionConfig::default())
+   952→    }
+   953→
+   954→    fn with_config(step: &'a StepFile, config: StepConversionConfig) -> Self {
+   955→        // Reuse the StepFile's entity_index instead of rebuilding from scratch
+   956→        let entity_map = step.entity_index_ref().clone();
+   957→
+   958→        // ─── Use or build reverse-index maps ───
+   959→        // These are cached on the StepFile so that multiple StepConverter instances
+   960→        // (created per-BREP in progressive triangulation) don't rebuild them.
+   961→        // First call builds and caches; subsequent calls reuse the cache.
+   962→
+   963→        // Build pd_brep_map if not cached
+   964→        if step.pd_brep_index().is_empty() || (!step.pd_brep_index().is_empty() && step.pd_brep_index().values().all(|v| v.is_none())) {
+   965→            let pd_brep_map = Self::build_pd_brep_index(step);
+   966→            step.set_pd_brep_index(pd_brep_map);
+   967→        }
+   968→        let pd_brep_map = step.pd_brep_index().clone();
+   969→
+   970→        // Build nauo_transform_map if not cached
+   971→        if step.nauo_transform_index().is_empty() {
+   972→            let nauo_transform_map = Self::build_nauo_transform_index(step);
+   973→            step.set_nauo_transform_index(nauo_transform_map);
+   974→        }
+   975→        let nauo_transform_map = step.nauo_transform_index().clone();
+   976→
+   977→        Self {
+   978→            step,
+   979→            _entity_map: entity_map,
+   980→            config,
+   981→            pd_brep_map,
+   982→            nauo_transform_map,
+   983→            bbox_cache: std::cell::RefCell::new(None),
+   984→        }
+   985→    }
+   986→
+   987→    /// Create a StepConverter from pre-built index maps.
+   988→    ///
+   989→    /// This is used by `OwnedStepConversionContext::triangulate_pending()` to
+   990→    /// avoid rebuilding the entity_map, pd_brep_map, and nauo_transform_map
+   991→    /// on every BREP instance. The maps are cached once in the context and
+   992→    /// cloned here (which is much cheaper than rebuilding from scratch).
+   993→    fn from_cached_maps(
+   994→        step: &'a StepFile,
+   995→        config: StepConversionConfig,
+   996→        entity_map: HashMap<i64, usize>,
+   997→        pd_brep_map: HashMap<i64, Option<i64>>,
+   998→        nauo_transform_map: HashMap<i64, Option<[[f64; 4]; 4]>>,
+   999→    ) -> Self {
+  1000→        Self {
+  1001→            step,
+  1002→            _entity_map: entity_map,
+  1003→            config,
+  1004→            pd_brep_map,
+  1005→            nauo_transform_map,
+  1006→            bbox_cache: std::cell::RefCell::new(None),
+  1007→        }
+  1008→    }
+  1009→
+  1010→    /// Build a complete pd_id → brep_id index in a single O(n) pass.
+  1011→    ///
+  1012→    /// This replaces the per-call `find_pd_brep_uncached()` which was O(n³)
+  1013→    /// (triple-nested loop: PDS × SDR × params). By pre-building the
+  1014→    /// reverse indices (pds_id → pd_id, pds_id → sdr_ids, sdr_id → sr_ids)
+  1015→    /// and resolving all BREP lookups upfront, we turn O(n³ × m) into O(n).
+  1016→    fn build_pd_brep_index(step: &StepFile) -> HashMap<i64, Option<i64>> {
+  1017→        // Phase 1: Build reverse index: pd_id → pds_ids
+  1018→        let mut pd_to_pds: HashMap<i64, Vec<i64>> = HashMap::new();
+  1019→        for pds in step.find_entities_by_type("PRODUCT_DEFINITION_SHAPE") {
+  1020→            for param in &pds.params {
+  1021→                if let Some(pd_id) = get_ref_standalone(param) {
+  1022→                    pd_to_pds.entry(pd_id).or_default().push(pds.id);
+  1023→                }
+  1024→            }
+  1025→        }
+  1026→
+  1027→        // Phase 2: Build reverse index: pds_id → sdr_ids
+  1028→        let mut pds_to_sdrs: HashMap<i64, Vec<i64>> = HashMap::new();
+  1029→        for sdr in step.find_entities_by_type("SHAPE_DEFINITION_REPRESENTATION") {
+  1030→            if let Some(pds_id) = sdr.params.first().and_then(|p| get_ref_standalone(p)) {
+  1031→                pds_to_sdrs.entry(pds_id).or_default().push(sdr.id);
+  1032→            }
+  1033→        }
+  1034→
+  1035→        // Phase 3: For each SDR, extract SR IDs and resolve BREP
+  1036→        let mut sdr_to_brep: HashMap<i64, Option<i64>> = HashMap::new();
+  1037→        for sdr in step.find_entities_by_type("SHAPE_DEFINITION_REPRESENTATION") {
+  1038→            let mut brep_id: Option<i64> = None;
+  1039→            for param in &sdr.params {
+  1040→                if let Some(sr_id) = get_ref_standalone(param) {
+  1041→                    // Direct: check if SR contains a BREP
+  1042→                    if let Some(bid) = Self::find_brep_in_representation_static(step, sr_id) {
+  1043→                        brep_id = Some(bid);
+  1044→                        break;
+  1045→                    }
+  1046→                    // Indirect: follow SRR chain
+  1047→                    if let Some(bid) = Self::find_brep_via_srr_static(step, sr_id, 0) {
+  1048→                        brep_id = Some(bid);
+  1049→                        break;
+  1050→                    }
+  1051→                }
+  1052→            }
+  1053→            sdr_to_brep.insert(sdr.id, brep_id);
+  1054→        }
+  1055→
+  1056→        // Phase 4: Combine: for each PD, find its PDS → SDR → BREP chain
+  1057→        let mut result: HashMap<i64, Option<i64>> = HashMap::new();
+  1058→        for (pd_id, pds_ids) in &pd_to_pds {
+  1059→            let mut found_brep: Option<i64> = None;
+  1060→            for pds_id in pds_ids {
+  1061→                if let Some(sdr_ids) = pds_to_sdrs.get(pds_id) {
+  1062→                    for sdr_id in sdr_ids {
+  1063→                        if let Some(bid) = sdr_to_brep.get(sdr_id).copied().flatten() {
+  1064→                            found_brep = Some(bid);
+  1065→                            break;
+  1066→                        }
+  1067→                    }
+  1068→                }
+  1069→                if found_brep.is_some() { break; }
+  1070→            }
+  1071→            result.insert(*pd_id, found_brep);
+  1072→        }
+  1073→
+  1074→        result
+  1075→    }
+  1076→
+  1077→    /// Static version of find_brep_in_representation (doesn't need &self).
+  1078→    fn find_brep_in_representation_static(step: &StepFile, sr_id: i64) -> Option<i64> {
+  1079→        let sr = step.find_entity(sr_id)?;
+  1080→        if sr.type_name.contains("ADVANCED_BREP_SHAPE_REPRESENTATION") {
+  1081→            for sp in &sr.params {
+  1082→                if let Some(brep_id) = get_ref_standalone(sp) {
+  1083→                    if let Some(brep) = step.find_entity(brep_id) {
+  1084→                        if brep.type_name == "MANIFOLD_SOLID_BREP" {
+  1085→                            return Some(brep_id);
+  1086→                        }
+  1087→                    }
+  1088→                }
+  1089→                if let StepValue::List(items) = sp {
+  1090→                    for item in items {
+  1091→                        if let Some(brep_id) = get_ref_standalone(item) {
+  1092→                            if let Some(brep) = step.find_entity(brep_id) {
+  1093→                                if brep.type_name == "MANIFOLD_SOLID_BREP" {
+  1094→                                    return Some(brep_id);
+  1095→                                }
+  1096→                            }
+  1097→                        }
+  1098→                    }
+  1099→                }
+  1100→            }
+  1101→        }
+  1102→        // Also check FACETED_BREP
+  1103→        if sr.type_name.contains("FACETED_BREP_SHAPE_REPRESENTATION") {
+  1104→            for sp in &sr.params {
+  1105→                if let Some(brep_id) = get_ref_standalone(sp) {
+  1106→                    if let Some(brep) = step.find_entity(brep_id) {
+  1107→                        if brep.type_name == "FACETED_BREP" {
+  1108→                            return Some(brep_id);
+  1109→                        }
+  1110→                    }
+  1111→                }
+  1112→            }
+  1113→        }
+  1114→        None
+  1115→    }
+  1116→
+  1117→    /// Static version of find_brep_via_srr (doesn't need &self).
+  1118→    /// Uses the same priority-based strategy as the instance method:
+  1119→    /// 1. SRRs whose other end is an ADVANCED_BREP_SHAPE_REPRESENTATION (direct link to BREP)
+  1120→    /// 2. SRRs whose other end is a plain SHAPE_REPRESENTATION (indirect, recurse)
+  1121→    ///
+  1122→    /// This avoids the bug where assembly-placement SRRs (complex entities with transforms)
+  1123→    /// are followed instead of the direct SR→ABSR link, causing all parts to map to the same BREP.
+  1124→    fn find_brep_via_srr_static(step: &StepFile, sr_id: i64, _depth: usize) -> Option<i64> {
+  1125→        let mut visited: std::collections::HashSet<i64> = std::collections::HashSet::new();
+  1126→        let mut stack = vec![(sr_id, 0usize)]; // (sr_id, depth)
+  1127→
+  1128→        while let Some((current_sr_id, depth)) = stack.pop() {
+  1129→            if depth > 20 { continue; }
+  1130→            if !visited.insert(current_sr_id) { continue; }
+  1131→
+  1132→            let sr = match step.find_entity(current_sr_id) {
+  1133→                Some(s) => s,
+  1134→                None => continue,
+  1135→            };
+  1136→            if !sr.type_name.contains("SHAPE_REPRESENTATION") { continue; }
+  1137→
+  1138→            // Collect SRR relationships into priority buckets
+  1139→            let mut direct_absr_links: Vec<i64> = Vec::new();  // other SR is an ABSR/FBSR
+  1140→            let mut indirect_sr_links: Vec<i64> = Vec::new();   // other SR is a plain SR
+  1141→
+  1142→            // Helper closure to classify SRRs
+  1143→            let mut classify_srr = |srr: &crate::schema::StepEntity| {
+  1144→                let mut refs_our_sr = false;
+  1145→                let mut other_sr_id: Option<i64> = None;
+  1146→                for (i, param) in srr.params.iter().enumerate() {
+  1147→                    if let Some(ref_id) = get_ref_standalone(param) {
+  1148→                        if ref_id == current_sr_id {
+  1149→                            refs_our_sr = true;
+  1150→                        } else if i >= 2 {
+  1151→                            if let Some(entity) = step.find_entity(ref_id) {
+  1152→                                if entity.type_name.contains("SHAPE_REPRESENTATION") {
+  1153→                                    other_sr_id = Some(ref_id);
+  1154→                                }
+  1155→                            }
+  1156→                        }
+  1157→                    }
+  1158→                }
+  1159→                if !refs_our_sr { return; }
+  1160→                if let Some(other_id) = other_sr_id {
+  1161→                    if let Some(other_entity) = step.find_entity(other_id) {
+  1162→                        if other_entity.type_name.contains("ADVANCED_BREP_SHAPE_REPRESENTATION")
+  1163→                            || other_entity.type_name.contains("FACETED_BREP_SHAPE_REPRESENTATION") {
+  1164→                            direct_absr_links.push(other_id);
+  1165→                        } else {
+  1166→                            indirect_sr_links.push(other_id);
+  1167→                        }
+  1168→                    }
+  1169→                }
+  1170→            };
+  1171→
+  1172→            // Check SHAPE_REPRESENTATION_RELATIONSHIP entities
+  1173→            for srr in step.find_entities_by_type("SHAPE_REPRESENTATION_RELATIONSHIP") {
+  1174→                classify_srr(srr);
+  1175→            }
+  1176→
+  1177→            // Also check REPRESENTATION_RELATIONSHIP entities (may catch additional complex entities)
+  1178→            for srr in step.find_entities_by_type("REPRESENTATION_RELATIONSHIP") {
+  1179→                if srr.type_name.contains("SHAPE_REPRESENTATION_RELATIONSHIP") { continue; }
+  1180→                classify_srr(srr);
+  1181→            }
+  1182→
+  1183→            // Priority 1: try direct ABSR links
+  1184→            for absr_id in &direct_absr_links {
+  1185→                if let Some(brep_id) = Self::find_brep_in_representation_static(step, *absr_id) {
+  1186→                    return Some(brep_id);
+  1187→                }
+  1188→            }
+  1189→
+  1190→            // Priority 2: add indirect SR links to stack (process in next iterations)
+  1191→            for other_id in indirect_sr_links {
+  1192→                stack.push((other_id, depth + 1));
+  1193→            }
+  1194→        }
+  1195→        None
+  1196→    }
+  1197→
+  1198→    /// Build a complete nauo_id → transform index in a single pass.
+  1199→    ///
+  1200→    /// This replaces `find_nauo_transform_uncached()` which was O(n²) per NAUO.
+  1201→    fn build_nauo_transform_index(step: &StepFile) -> HashMap<i64, Option<[[f64; 4]; 4]>> {
+  1202→        let mut result: HashMap<i64, Option<[[f64; 4]; 4]>> = HashMap::new();
+  1203→
+  1204→        // Build a reverse index: pds_id → nauo_id (which PDS belongs to which NAUO)
+  1205→        let nauos = step.find_entities_by_type("NEXT_ASSEMBLY_USAGE_OCCURRENCE");
+  1206→        if nauos.is_empty() { return result; }
+  1207→
+  1208→        // Build: nauo_id → the NAUO entity itself is already accessible via find_entity
+  1209→        // Build: pds_id → set of nauo_ids that this PDS references
+  1210→        //
+  1211→        // Two strategies:
+  1212→        //   1) Some NAUOs explicitly reference a PDS in their 6th parameter
+  1213→        //      (NAUO params: id, name, description, #relating_pd, #related_pd, #pds_or_$).
+  1214→        //   2) More commonly, the PDS's definition (3rd param) references the NAUO.
+  1215→        //      E.g. PRODUCT_DEFINITION_SHAPE('Placement','Placement of an item',#751)
+  1216→        //      where #751 is a NEXT_ASSEMBLY_USAGE_OCCURRENCE.
+  1217→        // We must use strategy 2 because many STEP files (including the CAx-IF
+  1218→        // as1-oc-214 reference file) use $ for the NAUO's 6th param.
+  1219→        let nauo_id_set: std::collections::HashSet<i64> = nauos.iter().map(|n| n.id).collect();
+  1220→        let mut pds_to_nauos: HashMap<i64, Vec<i64>> = HashMap::new();
+  1221→
+  1222→        // Strategy 1: NAUO → PDS (works when NAUO's 6th param is not $)
+  1223→        for nauo in &nauos {
+  1224→            for param in nauo.params.iter().skip(5) {
+  1225→                if let Some(pds_id) = get_ref_standalone(param) {
+  1226→                    pds_to_nauos.entry(pds_id).or_default().push(nauo.id);
+  1227→                }
+  1228→            }
+  1229→        }
+  1230→
+  1231→        // Strategy 2: PDS → NAUO (works when PDS's definition references a NAUO)
+  1232→        for pds in step.find_entities_by_type("PRODUCT_DEFINITION_SHAPE") {
+  1233→            for param in &pds.params {
+  1234→                if let Some(ref_id) = get_ref_standalone(param) {
+  1235→                    if nauo_id_set.contains(&ref_id) {
+  1236→                        pds_to_nauos.entry(pds.id).or_default().push(ref_id);
+  1237→                    }
+  1238→                }
+  1239→            }
+  1240→        }
+  1241→
+  1242→        // Build index: PD → representation_id via SHAPE_DEFINITION_REPRESENTATION
+  1243→        // This is needed to determine which representation in the SRR belongs to
+  1244→        // the parent (relating) PD vs the child (related) PD.
+  1245→        let pd_to_repr = Self::build_pd_to_representation_index(step);
+  1246→
+  1247→        // Build index: nauo_id → (relating_pd, related_pd)
+  1248→        let mut nauo_to_pd_refs: HashMap<i64, (i64, i64)> = HashMap::new();
+  1249→        for nauo in &nauos {
+  1250→            let (relating_pd, related_pd) = extract_nauo_pd_refs_static(step, nauo);
+  1251→            if let (Some(rp), Some(rd)) = (relating_pd, related_pd) {
+  1252→                nauo_to_pd_refs.insert(nauo.id, (rp, rd));
+  1253→            }
+  1254→        }
+  1255→
+  1256→        // Now walk CDSR entities and match them to NAUOs
+  1257→        for cdsr in step.find_entities_by_type("CONTEXT_DEPENDENT_SHAPE_REPRESENTATION") {
+  1258→            // CDSR params: #srr_or_repr_rel, #pds
+  1259→            // The PDS param links to the NAUO
+  1260→            let mut srr_id: Option<i64> = None;
+  1261→            let mut pds_id: Option<i64> = None;
+  1262→
+  1263→            for (i, param) in cdsr.params.iter().enumerate() {
+  1264→                if let Some(ref_id) = get_ref_standalone(param) {
+  1265→                    if i == 0 {
+  1266→                        srr_id = Some(ref_id);
+  1267→                    } else {
+  1268→                        pds_id = Some(ref_id);
+  1269→                    }
+  1270→                }
+  1271→            }
+  1272→
+  1273→            let srr_id = match srr_id {
+  1274→                Some(id) => id,
+  1275→                None => continue,
+  1276→            };
+  1277→            let pds_id = match pds_id {
+  1278→                Some(id) => id,
+  1279→                None => continue,
+  1280→            };
+  1281→
+  1282→            // Which NAUO(s) does this CDSR's PDS belong to?
+  1283→            let matched_nauo_ids = match pds_to_nauos.get(&pds_id) {
+  1284→                Some(ids) => ids,
+  1285→                None => continue,
+  1286→            };
+  1287→
+  1288→            // Extract transform from SRR
+  1289→            let srr_entity = match step.find_entity(srr_id) {
+  1290→                Some(e) => e,
+  1291→                None => continue,
+  1292→            };
+  1293→
+  1294→            // Determine the transform direction by checking which SRR representation
+  1295→            // belongs to the parent (relating) PD.
+  1296→            //
+  1297→            // The ITEM_DEFINED_TRANSFORMATION defines:
+  1298→            //   transform_item_1 (o) is in rep_1's coordinate space
+  1299→            //   transform_item_2 (t) is in rep_2's coordinate space
+  1300→            //
+  1301→            // The formula M = o * t⁻¹ maps from rep_2 → rep_1.
+  1302→            //
+  1303→            // For assembly placement, we need the transform that maps from
+  1304→            // the CHILD's coordinate space to the PARENT's coordinate space.
+  1305→            //
+  1306→            // CAx-IF convention (most STEP files):
+  1307→            //   rep_1 = child component, rep_2 = parent assembly
+  1308→            //   M = o * t⁻¹ maps parent → child (WRONG direction)
+  1309→            //   We need M⁻¹ = t * o⁻¹ (child → parent)
+  1310→            //
+  1311→            // Opposite convention (some STEP exporters):
+  1312→            //   rep_1 = parent assembly, rep_2 = child component
+  1313→            //   M = o * t⁻¹ maps child → parent (CORRECT direction)
+  1314→            //
+  1315→            // We detect which convention is used by checking which representation
+  1316→            // in the SRR belongs to the parent PD.
+  1317→            let needs_inversion = Self::srr_needs_transform_inversion(
+  1318→                step, &srr_entity, matched_nauo_ids, &nauo_to_pd_refs, &pd_to_repr,
+  1319→            );
+  1320→
+  1321→            let raw_transform = Self::extract_transform_from_srr_static(step, &srr_entity);
+  1322→
+  1323→            let transform = match (raw_transform, needs_inversion) {
+  1324→                (Some(tf), true) => mat4_inverse(&tf),
+  1325→                (Some(tf), false) => Some(tf),
+  1326→                (None, _) => None,
+  1327→            };
+  1328→
+  1329→            // Assign to all NAUOs that reference this PDS
+  1330→            for nauo_id in matched_nauo_ids {
+  1331→                result.insert(*nauo_id, transform);
+  1332→            }
+  1333→        }
+  1334→
+  1335→        // Ensure all NAUOs have an entry (even if no CDSR found → None transform)
+  1336→        for nauo in &nauos {
+  1337→            result.entry(nauo.id).or_insert(None);
+  1338→        }
+  1339→
+  1340→        // Debug logging
+  1341→        let with_transform = result.values().filter(|v| v.is_some()).count();
+  1342→        let total = result.len();
+  1343→        log::info!("NAUO transform index: {}/{} NAUOs have transforms, pds_to_nauos has {} entries",
+  1344→            with_transform, total, pds_to_nauos.len());
+  1345→
+  1346→        result
+  1347→    }
+  1348→
+  1349→    /// Build an index: PD_id → representation_id via SHAPE_DEFINITION_REPRESENTATION.
+  1350→    ///
+  1351→    /// Each PRODUCT_DEFINITION links to a PRODUCT_DEFINITION_SHAPE, which links to
+  1352→    /// a SHAPE_DEFINITION_REPRESENTATION, which references a SHAPE_REPRESENTATION.
+  1353→    /// This index allows us to determine which representation belongs to which PD.
+  1354→    fn build_pd_to_representation_index(step: &StepFile) -> HashMap<i64, i64> {
+  1355→        let mut pd_to_pds: HashMap<i64, Vec<i64>> = HashMap::new();
+  1356→        for pds in step.find_entities_by_type("PRODUCT_DEFINITION_SHAPE") {
+  1357→            for param in &pds.params {
+  1358→                if let Some(pd_id) = get_ref_standalone(param) {
+  1359→                    if let Some(entity) = step.find_entity(pd_id) {
+  1360→                        if entity.type_name == "PRODUCT_DEFINITION" {
+  1361→                            pd_to_pds.entry(pd_id).or_default().push(pds.id);
+  1362→                        }
+  1363→                    }
+  1364→                }
+  1365→            }
+  1366→        }
+  1367→
+  1368→        let mut pds_to_repr: HashMap<i64, i64> = HashMap::new();
+  1369→        for sdr in step.find_entities_by_type("SHAPE_DEFINITION_REPRESENTATION") {
+  1370→            if let Some(pds_id) = sdr.params.first().and_then(|p| get_ref_standalone(p)) {
+  1371→                // The second parameter of SDR is the representation
+  1372→                if let Some(repr_id) = sdr.params.get(1).and_then(|p| get_ref_standalone(p)) {
+  1373→                    pds_to_repr.insert(pds_id, repr_id);
+  1374→                }
+  1375→            }
+  1376→        }
+  1377→
+  1378→        let mut result: HashMap<i64, i64> = HashMap::new();
+  1379→        for (pd_id, pds_ids) in &pd_to_pds {
+  1380→            for pds_id in pds_ids {
+  1381→                if let Some(repr_id) = pds_to_repr.get(pds_id) {
+  1382→                    result.insert(*pd_id, *repr_id);
+  1383→                    break;
+  1384→                }
+  1385→            }
+  1386→        }
+  1387→        result
+  1388→    }
+  1389→
+  1390→    /// Determine whether the computed transform from the SRR needs to be inverted.
+  1391→    ///
+  1392→    /// Returns `true` if rep_2 of the SRR belongs to the parent PD (CAx-IF convention),
+  1393→    /// meaning M = o * t⁻¹ maps in the wrong direction and must be inverted.
+  1394→    /// Returns `false` if rep_1 belongs to the parent PD, meaning M = o * t⁻¹
+  1395→    /// already maps child → parent.
+  1396→    ///
+  1397→    /// If the direction cannot be determined, defaults to `true` (CAx-IF convention),
+  1398→    /// which is the most common case.
+  1399→    fn srr_needs_transform_inversion(
+  1400→        step: &StepFile,
+  1401→        srr: &crate::schema::StepEntity,
+  1402→        nauo_ids: &[i64],
+  1403→        nauo_to_pd_refs: &HashMap<i64, (i64, i64)>,
+  1404→        pd_to_repr: &HashMap<i64, i64>,
+  1405→    ) -> bool {
+  1406→        // Extract rep_1 and rep_2 from the SRR
+  1407→        // For a complex entity, the REPRESENTATION_RELATIONSHIP sub-entity has the rep refs.
+  1408→        // For a simple entity, params are: name, description, rep_1, rep_2
+  1409→        let rr_sub = if srr.is_complex() {
+  1410→            srr.find_sub_entity("REPRESENTATION_RELATIONSHIP")
+  1411→        } else {
+  1412→            Some(srr)
+  1413→        };
+  1414→
+  1415→        let rr = match rr_sub {
+  1416→            Some(s) => s,
+  1417→            None => return true, // Default: assume CAx-IF convention
+  1418→        };
+  1419→
+  1420→        // Extract representation references (params 2 and 3 of RR: name, desc, rep_1, rep_2)
+  1421→        let mut repr_refs: Vec<i64> = Vec::new();
+  1422→        for (i, param) in rr.params.iter().enumerate() {
+  1423→            if i >= 2 { // Skip name (0) and description (1)
+  1424→                if let Some(ref_id) = get_ref_standalone(param) {
+  1425→                    if step.find_entity(ref_id).is_some() {
+  1426→                        repr_refs.push(ref_id);
+  1427→                    }
+  1428→                }
+  1429→            }
+  1430→        }
+  1431→
+  1432→        let rep1_id = match repr_refs.get(0) {
+  1433→            Some(&id) => id,
+  1434→            None => return true, // Can't determine direction, assume CAx-IF
+  1435→        };
+  1436→        let rep2_id = match repr_refs.get(1) {
+  1437→            Some(&id) => id,
+  1438→            None => return true,
+  1439→        };
+  1440→
+  1441→        // Get the parent (relating) PD from any of the NAUOs
+  1442→        let relating_pd = nauo_ids.iter()
+  1443→            .filter_map(|nid| nauo_to_pd_refs.get(nid).map(|(rp, _)| *rp))
+  1444→            .next();
+  1445→
+  1446→        let relating_pd = match relating_pd {
+  1447→            Some(pd) => pd,
+  1448→            None => return true, // Can't determine, assume CAx-IF
+  1449→        };
+  1450→
+  1451→        // Check which representation belongs to the relating (parent) PD
+  1452→        if let Some(&parent_repr_id) = pd_to_repr.get(&relating_pd) {
+  1453→            if parent_repr_id == rep1_id {
+  1454→                // rep_1 = parent → M = o * t⁻¹ maps child → parent (correct)
+  1455→                log::debug!("SRR #{}: rep_1 is parent → no inversion needed", srr.id);
+  1456→                return false;
+  1457→            } else if parent_repr_id == rep2_id {
+  1458→                // rep_2 = parent → M = o * t⁻¹ maps parent → child (wrong, needs inversion)
+  1459→                log::debug!("SRR #{}: rep_2 is parent → inversion needed (CAx-IF convention)", srr.id);
+  1460→                return true;
+  1461→            }
+  1462→        }
+  1463→
+  1464→        // Default: assume CAx-IF convention (rep_1 = child, rep_2 = parent)
+  1465→        log::debug!("SRR #{}: cannot determine parent repr, assuming CAx-IF (inversion needed)", srr.id);
+  1466→        true
+  1467→    }
+  1468→
+  1469→    /// Static version of extract_transform_from_srr.
+  1470→    fn extract_transform_from_srr_static(step: &StepFile, srr: &crate::schema::StepEntity) -> Option<[[f64; 4]; 4]> {
+  1471→        // Check complex entity with RRWT sub-entity
+  1472→        if srr.is_complex() {
+  1473→            if let Some(rrwt_sub) = srr.find_sub_entity("REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION") {
+  1474→                for param in &rrwt_sub.params {
+  1475→                    if let Some(ref_id) = get_ref_standalone(param) {
+  1476→                        if let Some(entity) = step.find_entity(ref_id) {
+  1477→                            if entity.type_name == "ITEM_DEFINED_TRANSFORMATION" {
+  1478→                                return Self::compute_item_defined_transform_static(step, &entity);
+  1479→                            }
+  1480→                            // Support CARTESIAN_TRANSFORMATION_OPERATOR_3D
+  1481→                            if entity.type_name == "CARTESIAN_TRANSFORMATION_OPERATOR_3D" {
+  1482→                                return Self::compute_cartesian_transform_static(step, &entity);
+  1483→                            }
+  1484→                        }
+  1485→                    }
+  1486→                }
+  1487→            }
+  1488→        }
+  1489→
+  1490→        // Fallback: search params for IDT or CTO3D reference
+  1491→        for param in &srr.params {
+  1492→            if let Some(ref_id) = get_ref_standalone(param) {
+  1493→                if let Some(entity) = step.find_entity(ref_id) {
+  1494→                    if entity.type_name == "ITEM_DEFINED_TRANSFORMATION" {
+  1495→                        return Self::compute_item_defined_transform_static(step, &entity);
+  1496→                    }
+  1497→                    if entity.type_name == "CARTESIAN_TRANSFORMATION_OPERATOR_3D" {
+  1498→                        return Self::compute_cartesian_transform_static(step, &entity);
+  1499→                    }
+  1500→                    for inner_param in &entity.params {
+  1501→                        if let Some(inner_id) = get_ref_standalone(inner_param) {
+  1502→                            if let Some(inner_entity) = step.find_entity(inner_id) {
+  1503→                                if inner_entity.type_name == "ITEM_DEFINED_TRANSFORMATION" {
+  1504→                                    return Self::compute_item_defined_transform_static(step, &inner_entity);
+  1505→                                }
+  1506→                                if inner_entity.type_name == "CARTESIAN_TRANSFORMATION_OPERATOR_3D" {
+  1507→                                    return Self::compute_cartesian_transform_static(step, &inner_entity);
+  1508→                                }
+  1509→                            }
+  1510→                        }
+  1511→                    }
+  1512→                }
+  1513→            }
+  1514→        }
+  1515→        None
+  1516→    }
+  1517→
+  1518→    /// Static version of compute_item_defined_transform.
+  1519→    ///
+  1520→    /// Computes the "raw" transform from an ITEM_DEFINED_TRANSFORMATION entity.
+  1521→    /// Returns M = o * t⁻¹, which maps from rep_2 → rep_1 (i.e., from the
+  1522→    /// "related" representation to the "relating" representation).
+  1523→    ///
+  1524→    /// IMPORTANT: The caller must determine whether this raw transform maps
+  1525→    /// from child → parent or from parent → child, depending on which
+  1526→    /// representation in the SRR corresponds to the parent PD. The
+  1527→    /// `build_nauo_transform_index` function handles this by inverting
+  1528→    /// the result when rep_2 is the parent (CAx-IF convention).
+  1529→    fn compute_item_defined_transform_static(step: &StepFile, idt: &crate::schema::StepEntity) -> Option<[[f64; 4]; 4]> {
+  1530→        let mut axis2_ids: Vec<i64> = Vec::new();
+  1531→        for (i, param) in idt.params.iter().enumerate() {
+  1532→            if i < 2 { continue; }
+  1533→            if let Some(ref_id) = get_ref_standalone(param) {
+  1534→                if let Some(entity) = step.find_entity(ref_id) {
+  1535→                    if entity.type_name == "AXIS2_PLACEMENT_3D" {
+  1536→                        axis2_ids.push(ref_id);
+  1537→                    }
+  1538→                }
+  1539→            }
+  1540→        }
+  1541→
+  1542→        if axis2_ids.len() < 2 {
+  1543→            return None;
+  1544→        }
+  1545→
+  1546→        let (origin_pt, origin_z, origin_x) = resolve_axis2_standalone(step, axis2_ids[0])?;
+  1547→        let (target_pt, target_z, target_x) = resolve_axis2_standalone(step, axis2_ids[1])?;
+  1548→
+  1549→        let origin_y = origin_z.cross(&origin_x);
+  1550→        let target_y = target_z.cross(&target_x);
+  1551→
+  1552→        let o = [
+  1553→            [origin_x.x, origin_y.x, origin_z.x, origin_pt.x],
+  1554→            [origin_x.y, origin_y.y, origin_z.y, origin_pt.y],
+  1555→            [origin_x.z, origin_y.z, origin_z.z, origin_pt.z],
+  1556→            [0.0, 0.0, 0.0, 1.0],
+  1557→        ];
+  1558→
+  1559→        let t = [
+  1560→            [target_x.x, target_y.x, target_z.x, target_pt.x],
+  1561→            [target_x.y, target_y.y, target_z.y, target_pt.y],
+  1562→            [target_x.z, target_y.z, target_z.z, target_pt.z],
+  1563→            [0.0, 0.0, 0.0, 1.0],
+  1564→        ];
+  1565→
+  1566→        // The IDT defines: the coordinate system described by transform_item_1 (o)
+  1567→        // in rep_1's space is IDENTICAL to the coordinate system described by
+  1568→        // transform_item_2 (t) in rep_2's space.
+  1569→        //
+  1570→        // This formula computes M = o * t⁻¹, which maps from rep_2 → rep_1.
+  1571→        // The caller (build_nauo_transform_index) determines whether this is
+  1572→        // child → parent or parent → child based on the SRR/NAUO relationship,
+  1573→        // and inverts if necessary.
+  1574→        let t_inv = mat4_inverse(&t)?;
+  1575→        Some(mat4_mul(&o, &t_inv))
+  1576→    }
+  1577→
+  1578→    /// Static version: compute a 4×4 transform from CARTESIAN_TRANSFORMATION_OPERATOR_3D.
+  1579→    ///
+  1580→    /// CTO3D directly specifies a coordinate system (origin + local axes) with an
+  1581→    /// optional scale factor. This is an alternative to ITEM_DEFINED_TRANSFORMATION
+  1582→    /// used by some STEP exporters.
+  1583→    ///
+  1584→    /// STEP definition:
+  1585→    ///   CARTESIAN_TRANSFORMATION_OPERATOR_3D(
+  1586→    ///     name,                           -- optional
+  1587→    ///     origin,                         -- CARTESIAN_POINT
+  1588→    ///     axis1 : OPTIONAL DIRECTION,     -- local X (u axis)
+  1589→    ///     axis2 : OPTIONAL DIRECTION,     -- local Y (v axis, in 3D variant)
+  1590→    ///     scale,                          -- scale factor (default 1.0)
+  1591→    ///     axis3 : OPTIONAL DIRECTION      -- local Z
+  1592→    ///   )
+  1593→    fn compute_cartesian_transform_static(step: &StepFile, cto: &crate::schema::StepEntity) -> Option<[[f64; 4]; 4]> {
+  1594→        let mut origin = [0.0_f64; 3];
+  1595→        let mut axis1: Option<[f64; 3]> = None;
+  1596→        let mut axis2: Option<[f64; 3]> = None;
+  1597→        let mut axis3: Option<[f64; 3]> = None;
+  1598→        let mut scale = 1.0_f64;
+  1599→
+  1600→        for (i, param) in cto.params.iter().enumerate() {
+  1601→            match i {
+  1602→                0 => { /* name — skip */ }
+  1603→                1 => {
+  1604→                    // origin — CARTESIAN_POINT reference
+  1605→                    if let Some(ref_id) = get_ref_standalone(param) {
+  1606→                        if let Some(cp) = step.find_entity(ref_id) {
+  1607→                            if let Some(pt) = get_cartesian_point_coords_standalone(&cp) {
+  1608→                                origin = pt;
+  1609→                            }
+  1610→                        }
+  1611→                    }
+  1612→                }
+  1613→                2 => { /* axis1 (u direction) */ axis1 = get_direction_from_param_standalone(step, param); }
+  1614→                3 => { /* axis2 (v direction) */ axis2 = get_direction_from_param_standalone(step, param); }
+  1615→                4 => {
+  1616→                    // scale
+  1617→                    if let Some(s) = get_float_standalone(param) {
+  1618→                        scale = s;
+  1619→                    }
+  1620→                }
+  1621→                5 => { /* axis3 (w direction / Z) */ axis3 = get_direction_from_param_standalone(step, param); }
+  1622→                _ => {}
+  1623→            }
+  1624→        }
+  1625→
+  1626→        // Build orthogonal coordinate frame
+  1627→        // Z = axis3 (if provided), else [0,0,1]
+  1628→        let z = axis3.unwrap_or([0.0, 0.0, 1.0]);
+  1629→        // X = axis1 (if provided), else default perpendicular to Z
+  1630→        let x_raw = axis1.unwrap_or_else(|| {
+  1631→            if z[2].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] }
+  1632→        });
+  1633→        // Y = axis2 (if provided), else Z × X
+  1634→        let y_raw = axis2.unwrap_or_else(|| {
+  1635→            let y = [
+  1636→                z[1] * x_raw[2] - z[2] * x_raw[1],
+  1637→                z[2] * x_raw[0] - z[0] * x_raw[2],
+  1638→                z[0] * x_raw[1] - z[1] * x_raw[0],
+  1639→            ];
+  1640→            let len = (y[0]*y[0] + y[1]*y[1] + y[2]*y[2]).sqrt();
+  1641→            if len > 1e-10 { [y[0]/len, y[1]/len, y[2]/len] } else { [0.0, 1.0, 0.0] }
+  1642→        });
+  1643→
+  1644→        // Project X onto plane perpendicular to Z (STEP spec requirement)
+  1645→        let dot_xz = x_raw[0]*z[0] + x_raw[1]*z[1] + x_raw[2]*z[2];
+  1646→        let x_proj = [x_raw[0] - dot_xz*z[0], x_raw[1] - dot_xz*z[1], x_raw[2] - dot_xz*z[2]];
+  1647→        let x_len = (x_proj[0]*x_proj[0] + x_proj[1]*x_proj[1] + x_proj[2]*x_proj[2]).sqrt();
+  1648→        let x = if x_len > 1e-10 { [x_proj[0]/x_len, x_proj[1]/x_len, x_proj[2]/x_len] } else { x_raw };
+  1649→
+  1650→        // Recompute Y = Z × X to ensure orthogonality
+  1651→        let y = [
+  1652→            z[1]*x[2] - z[2]*x[1],
+  1653→            z[2]*x[0] - z[0]*x[2],
+  1654→            z[0]*x[1] - z[1]*x[0],
+  1655→        ];
+  1656→        let y_len = (y[0]*y[0] + y[1]*y[1] + y[2]*y[2]).sqrt();
+  1657→        let y = if y_len > 1e-10 { [y[0]/y_len, y[1]/y_len, y[2]/y_len] } else { y_raw };
+  1658→
+  1659→        // Normalize Z
+  1660→        let z_len = (z[0]*z[0] + z[1]*z[1] + z[2]*z[2]).sqrt();
+  1661→        let z = if z_len > 1e-10 { [z[0]/z_len, z[1]/z_len, z[2]/z_len] } else { z };
+  1662→
+  1663→        // Build 4×4 matrix with scale
+  1664→        Some([
+  1665→            [x[0] * scale, y[0] * scale, z[0] * scale, origin[0]],
+  1666→            [x[1] * scale, y[1] * scale, z[1] * scale, origin[1]],
+  1667→            [x[2] * scale, y[2] * scale, z[2] * scale, origin[2]],
+  1668→            [0.0, 0.0, 0.0, 1.0],
+  1669→        ])
+  1670→    }
+  1671→
+  1672→    fn convert(&self) -> Result<TriangleMesh, String> {
+  1673→        let instances = self.convert_instances()?;
+  1674→        let mut mesh = TriangleMesh::new();
+  1675→        for inst in &instances {
+  1676→            if let Some(color) = inst.color {
+  1677→                mesh.merge_with_color(&inst.mesh, color);
+  1678→            } else {
+  1679→                mesh.merge_with_color(&inst.mesh, [0.48, 0.52, 0.58, 1.0]);
+  1680→            }
+  1681→        }
+  1682→        Ok(mesh)
+  1683→    }
+  1684→
+  1685→    /// Convert STEP to mesh instances, walking the assembly tree from root.
+  1686→    /// Each leaf BREP produces one mesh instance per assembly occurrence,
+  1687→    /// with the composed transform from root → leaf applied.
+  1688→    fn convert_instances(&self) -> Result<Vec<MeshInstance>, String> {
+  1689→        let bbox = self.compute_bounding_box();
+  1690→        let mut params = TriangulationParams::default();
+  1691→        // Scale max_deviation based on bounding box
+  1692→        if let Some((bmin, bmax)) = &bbox {
+  1693→            let dx = bmax.x - bmin.x;
+  1694→            let dy = bmax.y - bmin.y;
+  1695→            let dz = bmax.z - bmin.z;
+  1696→            let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
+  1697→            if diagonal > 1.0 {
+  1698→                params.max_deviation = params.max_deviation.max(diagonal * 0.0002);
+  1699→            }
+  1700→        }
+  1701→        let color_map = self.extract_color_map();
+  1702→        let mut brep_mesh_cache: HashMap<i64, TriangleMesh> = HashMap::new();
+  1703→        let mut results: Vec<MeshInstance> = Vec::new();
+  1704→
+  1705→        // ─── Phase 1: Assembly-based conversion via NAUO tree walk ────────
+  1706→        let nauos = self.step.find_entities_by_type("NEXT_ASSEMBLY_USAGE_OCCURRENCE");
+  1707→        if !nauos.is_empty() {
+  1708→            info!("Found {} NAUO assembly instances — walking assembly tree", nauos.len());
+  1709→
+  1710→            // Build: parent_pd_id → Vec<(nauo_id, child_pd_id, nauo_name)>
+  1711→            let mut parent_pd_to_children: HashMap<i64, Vec<(i64, i64, String)>> = HashMap::new();
+  1712→            for nauo in &nauos {
+  1713→                let (relating_pd, related_pd) = self.extract_nauo_pd_refs(nauo);
+  1714→                if let (Some(parent_pd), Some(child_pd)) = (relating_pd, related_pd) {
+  1715→                    let name = self.extract_nauo_name(nauo);
+  1716→                    parent_pd_to_children.entry(parent_pd).or_default().push((nauo.id, child_pd, name));
+  1717→                }
+  1718→            }
+  1719→
+  1720→            // Find root PD(s): PDs that are parents but are never children
+  1721→            let parent_pds: std::collections::HashSet<i64> = parent_pd_to_children.keys().copied().collect();
+  1722→            let child_pds: std::collections::HashSet<i64> = nauos.iter()
+  1723→                .filter_map(|n| self.extract_nauo_pd_refs(n).1)
+  1724→                .collect();
+  1725→            let roots: Vec<i64> = parent_pds.difference(&child_pds).copied().collect();
+  1726→
+  1727→            if roots.is_empty() {
+  1728→                info!("No root assembly found, falling back to direct BREP conversion");
+  1729→            } else {
+  1730→                for root_pd in &roots {
+  1731→                    let root_name = self.get_product_name(*root_pd);
+  1732→                    info!("Root assembly: PD=#{} name='{}'", root_pd, root_name);
+  1733→                    self.walk_assembly_tree(
+  1734→                        *root_pd,
+  1735→                        &root_name,
+  1736→                        &None,
+  1737→                        &color_map,
+  1738→                        &mut brep_mesh_cache,
+  1739→                        &params,
+  1740→                        &bbox,
+  1741→                        &parent_pd_to_children,
+  1742→                        &mut results,
+  1743→                        &mut std::collections::HashSet::new(),
+  1744→                    );
+  1745→                }
+  1746→            }
+  1747→
+  1748→            if !results.is_empty() {
+  1749→                info!("Assembly conversion: {} mesh instances", results.len());
+  1750→                return Ok(results);
+  1751→            }
+  1752→        }
+  1753→
+  1754→        // ─── Phase 2: No assembly structure — try direct BREP conversion ───
+  1755→        let breps = self.step.find_entities_by_type("MANIFOLD_SOLID_BREP");
+  1756→        if !breps.is_empty() {
+  1757→            for brep in &breps {
+  1758→                let name = self.get_brep_name(brep.id);
+  1759→                if let Some(mesh) = self.triangulate_brep_cached(brep.id, &mut brep_mesh_cache, &params, &bbox) {
+  1760→                    let color = color_map.get(&brep.id).copied();
+  1761→                    results.push(MeshInstance {
+  1762→                        name,
+  1763→                        mesh,
+  1764→                        color,
+  1765→                        transform: None,
+  1766→                        brep_id: brep.id,
+  1767→                    });
+  1768→                }
+  1769→            }
+  1770→        }
+  1771→
+  1772→        if !results.is_empty() {
+  1773→            return Ok(results);
+  1774→        }
+  1775→
+  1776→        // FACETED_BREP
+  1777→        let faceted = self.step.find_entities_by_type("FACETED_BREP");
+  1778→        if !faceted.is_empty() {
+  1779→            for fb in &faceted {
+  1780→                let name = self.get_brep_name(fb.id);
+  1781→                if let Some(mesh) = self.triangulate_brep_cached(fb.id, &mut brep_mesh_cache, &params, &bbox) {
+  1782→                    let color = color_map.get(&fb.id).copied();
+  1783→                    results.push(MeshInstance {
+  1784→                        name,
+  1785→                        mesh,
+  1786→                        color,
+  1787→                        transform: None,
+  1788→                        brep_id: fb.id,
+  1789→                    });
+  1790→                }
+  1791→            }
+  1792→        }
+  1793→
+  1794→        if !results.is_empty() {
+  1795→            return Ok(results);
+  1796→        }
+  1797→
+  1798→        // ADVANCED_BREP_SHAPE_REPRESENTATION
+  1799→        let abrep = self.step.find_entities_by_type("ADVANCED_BREP_SHAPE_REPRESENTATION");
+  1800→        for ab in &abrep {
+  1801→            for param in &ab.params {
+  1802→                if let Some(ref_id) = self.get_ref(param) {
+  1803→                    if let Some(entity) = self.step.find_entity(ref_id) {
+  1804→                        if entity.type_name == "MANIFOLD_SOLID_BREP" {
+  1805→                            let name = self.get_brep_name(entity.id);
+  1806→                            if let Some(mesh) = self.triangulate_brep_cached(entity.id, &mut brep_mesh_cache, &params, &bbox) {
+  1807→                                let color = color_map.get(&entity.id).copied();
+  1808→                                results.push(MeshInstance {
+  1809→                                    name,
+  1810→                                    mesh,
+  1811→                                    color,
+  1812→                                    transform: None,
+  1813→                                    brep_id: entity.id,
+  1814→                                });
+  1815→                            }
+  1816→                        }
+  1817→                    }
+  1818→                }
+  1819→                if let StepValue::List(items) = param {
+  1820→                    for item in items {
+  1821→                        if let Some(ref_id) = self.get_ref(item) {
+  1822→                            if let Some(entity) = self.step.find_entity(ref_id) {
+  1823→                                if entity.type_name == "MANIFOLD_SOLID_BREP" {
+  1824→                                    let name = self.get_brep_name(entity.id);
+  1825→                                    if let Some(mesh) = self.triangulate_brep_cached(entity.id, &mut brep_mesh_cache, &params, &bbox) {
+  1826→                                        let color = color_map.get(&entity.id).copied();
+  1827→                                        results.push(MeshInstance {
+  1828→                                            name,
+  1829→                                            mesh,
+  1830→                                            color,
+  1831→                                            transform: None,
+  1832→                                            brep_id: entity.id,
+  1833→                                        });
+  1834→                                    }
+  1835→                                }
+  1836→                            }
+  1837→                        }
+  1838→                    }
+  1839→                }
+  1840→            }
+  1841→        }
+  1842→
+  1843→        if !results.is_empty() {
+  1844→            return Ok(results);
+  1845→        }
+  1846→
+  1847→        // ─── Phase 3: SHELL_BASED_SURFACE_MODEL / MANIFOLD_SURFACE_SHAPE_REPRESENTATION ──
+  1848→        // Some STEP files use surface models instead of solid BREP models
+  1849→        let shell_models = self.step.find_entities_by_type("SHELL_BASED_SURFACE_MODEL");
+  1850→        for sm in &shell_models {
+  1851→            for param in &sm.params {
+  1852→                // Look for shell references (OPEN_SHELL, CLOSED_SHELL)
+  1853→                if let Some(shell_id) = self.get_ref(param) {
+  1854→                    if let Some(mesh) = self.triangulate_shell_by_id(shell_id, &params, &bbox) {
+  1855→                        results.push(MeshInstance {
+  1856→                            name: format!("ShellModel#{}", sm.id),
+  1857→                            mesh,
+  1858→                            color: None,
+  1859→                            transform: None,
+  1860→                            brep_id: sm.id,
+  1861→                        });
+  1862→                    }
+  1863→                }
+  1864→                if let StepValue::List(items) = param {
+  1865→                    for item in items {
+  1866→                        if let Some(shell_id) = self.get_ref(item) {
+  1867→                            if let Some(mesh) = self.triangulate_shell_by_id(shell_id, &params, &bbox) {
+  1868→                                results.push(MeshInstance {
+  1869→                                    name: format!("ShellModel#{}", sm.id),
+  1870→                                    mesh,
+  1871→                                    color: None,
+  1872→                                    transform: None,
+  1873→                                    brep_id: sm.id,
+  1874→                                });
+  1875→                            }
+  1876→                        }
+  1877→                    }
+  1878→                }
+  1879→            }
+  1880→        }
+  1881→
+  1882→        // Also try MANIFOLD_SURFACE_SHAPE_REPRESENTATION
+  1883→        let msr = self.step.find_entities_by_type("MANIFOLD_SURFACE_SHAPE_REPRESENTATION");
+  1884→        for ms in &msr {
+  1885→            for param in &ms.params {
+  1886→                if let Some(ref_id) = self.get_ref(param) {
+  1887→                    if let Some(entity) = self.step.find_entity(ref_id) {
+  1888→                        if entity.type_name.contains("SHELL") {
+  1889→                            if let Some(mesh) = self.triangulate_shell_by_id(ref_id, &params, &bbox) {
+  1890→                                results.push(MeshInstance {
+  1891→                                    name: format!("SurfaceModel#{}", ms.id),
+  1892→                                    mesh,
+  1893→                                    color: None,
+  1894→                                    transform: None,
+  1895→                                    brep_id: ms.id,
+  1896→                                });
+  1897→                            }
+  1898→                        }
+  1899→                    }
+  1900→                }
+  1901→                if let StepValue::List(items) = param {
+  1902→                    for item in items {
+  1903→                        if let Some(ref_id) = self.get_ref(item) {
+  1904→                            if let Some(entity) = self.step.find_entity(ref_id) {
+  1905→                                if entity.type_name.contains("SHELL") {
+  1906→                                    if let Some(mesh) = self.triangulate_shell_by_id(ref_id, &params, &bbox) {
+  1907→                                        results.push(MeshInstance {
+  1908→                                            name: format!("SurfaceModel#{}", ms.id),
+  1909→                                            mesh,
+  1910→                                            color: None,
+  1911→                                            transform: None,
+  1912→                                            brep_id: ms.id,
+  1913→                                        });
+  1914→                                    }
+  1915→                                } else if entity.type_name.contains("SHELL_BASED_SURFACE_MODEL") {
+  1916→                                    // Follow the reference chain
+  1917→                                    for sp in &entity.params {
+  1918→                                        if let Some(shell_id) = self.get_ref(sp) {
+  1919→                                            if let Some(mesh) = self.triangulate_shell_by_id(shell_id, &params, &bbox) {
+  1920→                                                results.push(MeshInstance {
+  1921→                                                    name: format!("SurfaceModel#{}", ms.id),
+  1922→                                                    mesh,
+  1923→                                                    color: None,
+  1924→                                                    transform: None,
+  1925→                                                    brep_id: ms.id,
+  1926→                                                });
+  1927→                                            }
+  1928→                                        }
+  1929→                                        if let StepValue::List(inner) = sp {
+  1930→                                            for inner_item in inner {
+  1931→                                                if let Some(shell_id) = self.get_ref(inner_item) {
+  1932→                                                    if let Some(mesh) = self.triangulate_shell_by_id(shell_id, &params, &bbox) {
+  1933→                                                        results.push(MeshInstance {
+  1934→                                                            name: format!("SurfaceModel#{}", ms.id),
+  1935→                                                            mesh,
+  1936→                                                            color: None,
+  1937→                                                            transform: None,
+  1938→                                                            brep_id: ms.id,
+  1939→                                                        });
+  1940→                                                    }
+  1941→                                                }
+  1942→                                            }
+  1943→                                        }
+  1944→                                    }
+  1945→                                }
+  1946→                            }
+  1947→                        }
+  1948→                    }
+  1949→                }
+  1950→            }
+  1951→        }
+  1952→
+  1953→        if !results.is_empty() {
+  1954→            return Ok(results);
+  1955→        }
+  1956→
+  1957→        // Direct surface extraction fallback
+  1958→        let surface_types = [
+  1959→            "PLANE", "CYLINDRICAL_SURFACE", "SPHERICAL_SURFACE",
+  1960→            "CONICAL_SURFACE", "TOROIDAL_SURFACE", "SURFACE_OF_REVOLUTION",
+  1961→            "SURFACE_OF_LINEAR_EXTRUSION", "B_SPLINE_SURFACE_WITH_KNOTS",
+  1962→            "B_SPLINE_SURFACE", "BEZIER_SURFACE",
+  1963→        ];
+  1964→        for type_name in &surface_types {
+  1965→            for entity in self.step.find_entities_by_type(type_name) {
+  1966→                if let Some(surface) = self.extract_surface(entity.id, 0) {
+  1967→                    let face_data = FaceData { surface, outer_edges: vec![], inner_edges: vec![], edges: vec![], forward: true, step_face_id: entity.id, surface_step_id: None, edge_curves_2d: vec![], edge_step_ids: vec![], outer_edge_step_ids: vec![], inner_edge_step_ids: vec![] };
+  1968→                    let mesh = self.surface_to_mesh(&face_data, &params, &bbox);
+  1969→                    results.push(MeshInstance {
+  1970→                        name: entity.type_name.clone(),
+  1971→                        mesh,
+  1972→                        color: None,
+  1973→                        transform: None,
+  1974→                        brep_id: entity.id,
+  1975→                    });
+  1976→                }
+  1977→            }
+  1978→        }
+  1979→
+  1980→        if !results.is_empty() {
+  1981→            return Ok(results);
+  1982→        }
+  1983→
+  1984→        // Point cloud fallback
+  1985→        let points: Vec<Point3d> = self.step.find_entities_by_type("CARTESIAN_POINT")
+  1986→            .iter()
+  1987→            .filter_map(|e| self.resolve_cartesian_point(e.id))
+  1988→            .collect();
+  1989→        if points.len() >= 3 {
+  1990→            let mut mesh = TriangleMesh::new();
+  1991→            for p in &points { mesh.add_vertex(*p); }
+  1992→            for i in 1..points.len().saturating_sub(1) {
+  1993→                mesh.add_triangle(0, i as u32, (i + 1) as u32);
+  1994→            }
+  1995→            if mesh.triangle_count() > 0 {
+  1996→                results.push(MeshInstance {
+  1997→                    name: "Point Cloud".to_string(),
+  1998→                    mesh,
+  1999→                    color: None,
+  2000→                    transform: None,
+
+[showing lines 1-2000 of 10123; use offset=2001 with limit to continue reading]
