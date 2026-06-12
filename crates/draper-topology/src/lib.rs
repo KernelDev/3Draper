@@ -32,6 +32,6 @@ pub use boolean::*;
 pub use queries::{
     solid_volume, solid_surface_area, solid_center_of_mass, point_in_solid,
     solid_moments_of_inertia, InertiaTensor,
-    Bvh, BvhNode,
+    Bvh, BvhNode, Frustum,
 };
 pub use operations::*;
