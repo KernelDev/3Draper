@@ -226,22 +226,50 @@ pub struct IncrementalMeshUpdate {
 }
 
 impl IncrementalMeshUpdate {
-    /// Create an incremental update from a `ChunkResult` and mesh.
+    /// Create an incremental update from a `ChunkResult` and the triangulator.
     ///
     /// This converts the internal mesh representation to a JS-friendly
     /// flat format suitable for transfer to the main thread or upload
     /// to a WebGL/WebGPU buffer.
+    ///
+    /// # Arguments
+    /// * `result` — The `ChunkResult` from `ChunkedBrepTriangulator::process_frame()`
+    /// * `mesh` — The partial mesh from the triangulator
+    /// * `progress_fraction` — Progress as a fraction in [0.0, 1.0] from `progress_fraction()`
     pub fn from_chunk_result(
         result: &crate::triangulate::ChunkResult,
         mesh: &TriangleMesh,
+        progress_fraction: f64,
     ) -> Self {
-        // Note: result.faces_processed is only the faces from THIS tick.
-        // The caller should track cumulative progress separately.
-        // Here we report whether the full triangulation is complete.
-        let progress = if result.is_complete { 1.0 } else { 0.5 };
+        let (is_complete, progress) = match result {
+            crate::triangulate::ChunkResult::Complete(_) => (true, 1.0),
+            crate::triangulate::ChunkResult::InProgress { faces_completed, faces_total } => {
+                let p = if *faces_total > 0 {
+                    *faces_completed as f64 / *faces_total as f64
+                } else {
+                    progress_fraction
+                };
+                (false, p)
+            }
+        };
 
         Self {
-            is_complete: result.is_complete,
+            is_complete,
+            progress,
+            mesh_data: MeshData::from_mesh(mesh),
+        }
+    }
+
+    /// Create an update from raw progress data (simpler API).
+    ///
+    /// Use this when you track progress externally rather than from `ChunkResult`.
+    pub fn from_progress(
+        is_complete: bool,
+        progress: f64,
+        mesh: &TriangleMesh,
+    ) -> Self {
+        Self {
+            is_complete,
             progress,
             mesh_data: MeshData::from_mesh(mesh),
         }
@@ -398,15 +426,35 @@ mod tests {
         let v2 = mesh.add_vertex(Point3d::new(0.0, 1.0, 0.0));
         mesh.add_triangle(v0, v1, v2);
 
-        let result = crate::triangulate::ChunkResult {
-            faces_processed: 1,
-            total_faces: 10,
-            elapsed: std::time::Duration::from_millis(2),
-            is_complete: false,
+        // Test with InProgress variant
+        let result = crate::triangulate::ChunkResult::InProgress {
+            faces_completed: 3,
+            faces_total: 10,
         };
-
-        let update = IncrementalMeshUpdate::from_chunk_result(&result, &mesh);
+        let update = IncrementalMeshUpdate::from_chunk_result(&result, &mesh, 0.3);
         assert!(!update.is_complete);
+        assert!((update.progress - 0.3).abs() < 0.01);
+        assert_eq!(update.mesh_data.vertex_count, 3);
+
+        // Test with Complete variant
+        let complete_mesh = mesh.clone();
+        let result = crate::triangulate::ChunkResult::Complete(complete_mesh);
+        let update = IncrementalMeshUpdate::from_chunk_result(&result, &mesh, 1.0);
+        assert!(update.is_complete);
+        assert!((update.progress - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_incremental_mesh_update_from_progress() {
+        let mut mesh = TriangleMesh::new();
+        let v0 = mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0));
+        let v1 = mesh.add_vertex(Point3d::new(1.0, 0.0, 0.0));
+        let v2 = mesh.add_vertex(Point3d::new(0.0, 1.0, 0.0));
+        mesh.add_triangle(v0, v1, v2);
+
+        let update = IncrementalMeshUpdate::from_progress(false, 0.5, &mesh);
+        assert!(!update.is_complete);
+        assert!((update.progress - 0.5).abs() < 0.01);
         assert_eq!(update.mesh_data.vertex_count, 3);
     }
 

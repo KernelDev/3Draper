@@ -6444,6 +6444,55 @@ impl ChunkedBrepTriangulator {
     pub fn detail_level(&self) -> f64 {
         self.params.detail_level
     }
+
+    /// Progress as a fraction in [0.0, 1.0].
+    ///
+    /// Useful for progress bars and adaptive quality decisions.
+    /// Returns 1.0 when the triangulation is complete.
+    pub fn progress_fraction(&self) -> f64 {
+        if self.total_faces == 0 {
+            1.0
+        } else {
+            self.next_face_idx as f64 / self.total_faces as f64
+        }
+    }
+
+    /// Take ownership of the final mesh, consuming the triangulator.
+    ///
+    /// # Panics
+    /// Panics if the triangulation is not yet complete.
+    pub fn into_mesh(self) -> TriangleMesh {
+        assert!(self.is_complete, "Triangulation not yet complete — call process_frame() until it returns ChunkResult::Complete");
+        self.partial_mesh
+    }
+
+    /// Get the current time budget per frame.
+    pub fn time_budget(&self) -> std::time::Duration {
+        self.time_budget
+    }
+
+    /// Set a new time budget per frame.
+    ///
+    /// Can be called between frames to adapt to changing frame rates.
+    /// For example, if the frame rate drops from 120fps to 60fps,
+    /// increase the budget from 8ms to 16ms.
+    pub fn set_time_budget(&mut self, budget: std::time::Duration) {
+        self.time_budget = budget;
+    }
+
+    /// Get the current triangulation parameters.
+    pub fn params(&self) -> &TriangulationParams {
+        &self.params
+    }
+
+    /// Set new triangulation parameters for remaining faces.
+    ///
+    /// This is a general-purpose alternative to `set_lod()` and
+    /// `set_detail_level()`. Allows changing any parameter (e.g.,
+    /// `max_deviation`, `max_face_triangles`) for subsequent faces.
+    pub fn set_params(&mut self, params: TriangulationParams) {
+        self.params = params;
+    }
 }
 
 /// Estimate the complexity of a face for sorting purposes.
@@ -6936,370 +6985,5 @@ impl FallbackStats {
     /// Create zero-initialized stats.
     pub fn new() -> Self {
         Self::default()
-    }
-}
-
-// ============================================================
-// Phase 1.2: ChunkedBrepTriangulator — incremental triangulation
-// for 120fps interactive rendering (8ms frame budget)
-// ============================================================
-
-/// Result of a single `tick()` call on a `ChunkedBrepTriangulator`.
-///
-/// Indicates how many faces were processed in this frame and whether
-/// the entire solid has been fully triangulated.
-#[derive(Clone, Debug)]
-pub struct ChunkResult {
-    /// Number of faces triangulated in this tick.
-    pub faces_processed: usize,
-    /// Total number of faces in the solid.
-    pub total_faces: usize,
-    /// Elapsed wall-clock time for this tick.
-    pub elapsed: std::time::Duration,
-    /// Whether the entire solid is now fully triangulated.
-    pub is_complete: bool,
-}
-
-impl ChunkResult {
-    /// Progress as a fraction in [0.0, 1.0].
-    pub fn progress(&self) -> f64 {
-        if self.total_faces == 0 {
-            1.0
-        } else {
-            self.faces_processed as f64 / self.total_faces as f64
-        }
-    }
-}
-
-/// Incremental (chunked) B-Rep solid triangulator for interactive rendering.
-///
-/// Traditional `triangulate_solid` blocks until all faces are processed,
-/// which can take seconds or minutes for complex models. This is unacceptable
-/// for interactive viewers that must maintain 60-120fps — each frame has
-/// a budget of ~8ms (120fps) or ~16ms (60fps), and the UI thread cannot
-/// be blocked for longer than that.
-///
-/// `ChunkedBrepTriangulator` solves this by spreading the triangulation
-/// work across multiple frames. Each call to `tick()` processes as many
-/// faces as fit within the time budget (default 8ms) and returns control
-/// to the caller. The accumulated mesh grows incrementally, and the viewer
-/// can render the partial mesh while the rest is being computed.
-///
-/// # Architecture
-///
-/// ```text
-/// ┌─────────────────────────────────────────────────────┐
-/// │  ChunkedBrepTriangulator                            │
-/// │                                                     │
-/// │  Solid ──► Edge Cache (pre-populated)               │
-/// │              │                                      │
-/// │              ▼                                      │
-/// │  ┌──── tick() ◄──── 8ms budget ────┐               │
-/// │  │  Face N   → triangulate → merge │               │
-/// │  │  Face N+1 → triangulate → merge │               │
-/// │  │  ... (until budget exhausted)   │               │
-/// │  └─────────────────────────────────┘               │
-/// │              │                                      │
-/// │              ▼                                      │
-/// │  TriangleMesh (incremental, grows each tick)        │
-/// └─────────────────────────────────────────────────────┘
-/// ```
-///
-/// # Usage
-///
-/// ```ignore
-/// let mut triangulator = ChunkedBrepTriangulator::new(solid, params);
-/// while !triangulator.is_complete() {
-///     let result = triangulator.tick();
-///     // Render triangulator.mesh() while triangulation is in progress
-///     viewer.update_mesh(triangulator.mesh());
-///     if result.elapsed < triangulator.time_budget() {
-///         // Budget not exhausted — triangulation is complete
-///         break;
-///     }
-/// }
-/// ```
-///
-/// # Time Budget
-///
-/// The default budget is 8ms (for 120fps), but can be customized:
-/// - **8ms** (120fps): Smooth animation, faces trickle in
-/// - **16ms** (60fps): Standard interactive, more faces per tick
-/// - **33ms** (30fps): Acceptable for large models, fewer ticks needed
-///
-/// # Thread Safety
-///
-/// `ChunkedBrepTriangulator` is NOT `Sync` — it borrows the edge cache
-/// mutably. It is designed to be used from a single thread (the render
-/// loop or a dedicated worker). For multi-threaded triangulation, use
-/// `triangulate_solid_parallel_arc` instead.
-pub struct ChunkedBrepTriangulator {
-    /// Edge discretization cache (pre-populated for all faces).
-    cache: EdgeDiscretizationCache,
-    /// Triangulation parameters (can be LOD-adjusted).
-    params: TriangulationParams,
-    /// Faces to triangulate, in order.
-    faces: Vec<Face>,
-    /// Index of the next face to triangulate.
-    next_face_idx: usize,
-    /// Accumulated mesh from completed faces.
-    mesh: TriangleMesh,
-    /// Bit-exact dedup map for merging face meshes.
-    dedup_map: crate::mesh::VertexDedupMap,
-    /// Time budget per tick (default 8ms for 120fps).
-    time_budget: std::time::Duration,
-    /// Whether the triangulation is complete.
-    is_complete: bool,
-    /// Cumulative triangulation time across all ticks.
-    total_time: std::time::Duration,
-    /// Cumulative vertex count before dedup (for stats).
-    total_face_vertices: usize,
-    /// Fallback statistics across all faces.
-    fallback_stats: FallbackStats,
-}
-
-impl ChunkedBrepTriangulator {
-    /// Create a new chunked triangulator for a solid.
-    ///
-    /// Pre-populates the edge cache for all faces, then the caller
-    /// can call `tick()` repeatedly to incrementally build the mesh.
-    pub fn new(solid: &Solid, params: TriangulationParams) -> Self {
-        Self::with_budget(solid, params, std::time::Duration::from_millis(8))
-    }
-
-    /// Create a new chunked triangulator with a custom time budget per tick.
-    ///
-    /// Use this when you need a different frame budget:
-    /// - `Duration::from_millis(8)` for 120fps
-    /// - `Duration::from_millis(16)` for 60fps
-    /// - `Duration::from_millis(33)` for 30fps
-    pub fn with_budget(
-        solid: &Solid,
-        params: TriangulationParams,
-        time_budget: std::time::Duration,
-    ) -> Self {
-        let mut cache = EdgeDiscretizationCache::new();
-        cache.pre_populate_for_solid(solid, EDGE_SAMPLES);
-
-        let faces: Vec<Face> = solid.faces().into_iter().cloned().collect();
-        let total_faces = faces.len();
-
-        Self {
-            cache,
-            params,
-            faces,
-            next_face_idx: 0,
-            mesh: TriangleMesh::new(),
-            dedup_map: crate::mesh::VertexDedupMap::bit_exact(),
-            time_budget,
-            is_complete: total_faces == 0,
-            total_time: std::time::Duration::ZERO,
-            total_face_vertices: 0,
-            fallback_stats: FallbackStats::new(),
-        }
-    }
-
-    /// Process as many faces as fit within the time budget.
-    ///
-    /// Returns a `ChunkResult` indicating how many faces were processed
-    /// and whether the triangulation is now complete. The partial mesh
-    /// is accessible via `mesh()` at any time.
-    ///
-    /// If the triangulation is already complete, this is a no-op.
-    pub fn tick(&mut self) -> ChunkResult {
-        if self.is_complete {
-            return ChunkResult {
-                faces_processed: 0,
-                total_faces: self.faces.len(),
-                elapsed: std::time::Duration::ZERO,
-                is_complete: true,
-            };
-        }
-
-        let tick_start = Instant::now();
-        let mut faces_processed = 0;
-        let total_faces = self.faces.len();
-
-        while self.next_face_idx < total_faces {
-            // Check time budget BEFORE starting a new face.
-            // This ensures we don't exceed the budget by starting
-            // an expensive NURBS face when only 0.5ms remains.
-            if tick_start.elapsed() >= self.time_budget && faces_processed > 0 {
-                break;
-            }
-
-            let face = &self.faces[self.next_face_idx];
-
-            // Triangulate the face using the pre-populated cache.
-            // The cache already has all edge discretizations, so
-            // this is read-only and fast (O(boundary_points + interior)).
-            let face_mesh = triangulate_face_with_cache(
-                face, &self.params, &mut self.cache,
-            );
-
-            self.total_face_vertices += face_mesh.vertices.len();
-            self.mesh.merge_deduplicating(&face_mesh, &mut self.dedup_map);
-
-            self.next_face_idx += 1;
-            faces_processed += 1;
-
-            // If this was the last face, mark as complete
-            if self.next_face_idx >= total_faces {
-                self.is_complete = true;
-                break;
-            }
-        }
-
-        let elapsed = tick_start.elapsed();
-        self.total_time += elapsed;
-
-        // Log progress at 10% milestones or on completion
-        let progress_pct = self.next_face_idx as f64 / total_faces as f64 * 100.0;
-        let prev_pct = (self.next_face_idx - faces_processed) as f64 / total_faces as f64 * 100.0;
-        let crossed_milestone = (progress_pct / 10.0).floor() > (prev_pct / 10.0).floor();
-        if crossed_milestone || self.is_complete {
-            log::info!(
-                "ChunkedBrepTriangulator: {}/{} faces ({:.0}%), {}ms elapsed, V={} T={}",
-                self.next_face_idx, total_faces, progress_pct,
-                self.total_time.as_secs_f64() * 1000.0,
-                self.mesh.vertices.len(),
-                self.mesh.triangles.len(),
-            );
-        }
-
-        if self.is_complete {
-            self.finalize();
-        }
-
-        ChunkResult {
-            faces_processed,
-            total_faces,
-            elapsed,
-            is_complete: self.is_complete,
-        }
-    }
-
-    /// Finalize the mesh after all faces are processed.
-    ///
-    /// Applies degenerate triangle filtering and logs dedup/watertight stats.
-    fn finalize(&mut self) {
-        // Filter degenerate triangles
-        filter_degenerate_triangles(&mut self.mesh, 1e-10);
-
-        // Log dedup stats
-        let (exact_hits, tolerance_hits, misses) = self.dedup_map.stats();
-        let deduped = self.total_face_vertices - self.mesh.vertices.len();
-        if deduped > 0 {
-            let total_lookups = exact_hits + misses;
-            let exact_pct = if total_lookups > 0 {
-                exact_hits as f64 / total_lookups as f64 * 100.0
-            } else {
-                0.0
-            };
-            log::info!(
-                "ChunkedBrepTriangulator dedup: {} face vertices → {} unique \
-                 ({} shared via bit-exact [{:.1}%], tol_hits={})",
-                self.total_face_vertices, self.mesh.vertices.len(), deduped,
-                exact_pct, tolerance_hits,
-            );
-        }
-
-        // Watertight validation
-        let report = crate::watertight::validate_watertight(&self.mesh, false);
-        if !report.is_watertight() {
-            let boundary_pct = if report.edge_count > 0 {
-                report.boundary_edge_count as f64 / report.edge_count as f64 * 100.0
-            } else {
-                0.0
-            };
-            log::error!(
-                "BUG: ChunkedBrepTriangulator not watertight: {} boundary edges ({:.2}%), \
-                 {} non-manifold, V={} T={} χ={}",
-                report.boundary_edge_count, boundary_pct,
-                report.non_manifold_edge_count,
-                report.vertex_count, report.triangle_count,
-                report.euler_characteristic,
-            );
-        } else {
-            log::info!(
-                "ChunkedBrepTriangulator watertight ✓ ({} interior edges, {} triangles, χ={})",
-                report.interior_edge_count, report.triangle_count,
-                report.euler_characteristic,
-            );
-        }
-    }
-
-    /// Whether the triangulation is complete.
-    pub fn is_complete(&self) -> bool {
-        self.is_complete
-    }
-
-    /// Get a reference to the accumulated mesh (partial or complete).
-    ///
-    /// The mesh grows with each `tick()` call. Even when incomplete,
-    /// it is a valid mesh that can be rendered — it just has fewer
-    /// faces than the final result.
-    pub fn mesh(&self) -> &TriangleMesh {
-        &self.mesh
-    }
-
-    /// Take ownership of the mesh, consuming the triangulator.
-    ///
-    /// Useful when you know the triangulation is complete and want
-    /// to avoid cloning.
-    pub fn into_mesh(self) -> TriangleMesh {
-        self.mesh
-    }
-
-    /// Progress as (faces_completed, total_faces).
-    pub fn progress(&self) -> (usize, usize) {
-        (self.next_face_idx, self.faces.len())
-    }
-
-    /// Progress as a fraction in [0.0, 1.0].
-    pub fn progress_fraction(&self) -> f64 {
-        if self.faces.is_empty() {
-            1.0
-        } else {
-            self.next_face_idx as f64 / self.faces.len() as f64
-        }
-    }
-
-    /// Get the time budget per tick.
-    pub fn time_budget(&self) -> std::time::Duration {
-        self.time_budget
-    }
-
-    /// Set a new time budget per tick.
-    ///
-    /// Can be called between ticks to adapt to changing frame rates.
-    /// For example, if the frame rate drops from 120fps to 60fps,
-    /// increase the budget from 8ms to 16ms.
-    pub fn set_time_budget(&mut self, budget: std::time::Duration) {
-        self.time_budget = budget;
-    }
-
-    /// Get the total elapsed triangulation time across all ticks.
-    pub fn total_time(&self) -> std::time::Duration {
-        self.total_time
-    }
-
-    /// Get the current LOD parameters.
-    pub fn params(&self) -> &TriangulationParams {
-        &self.params
-    }
-
-    /// Adjust the LOD parameters for remaining faces.
-    ///
-    /// This is useful for adaptive quality: start with coarse LOD
-    /// for fast initial display, then refine with finer LOD in
-    /// subsequent passes. Only affects faces not yet triangulated.
-    pub fn set_params(&mut self, params: TriangulationParams) {
-        self.params = params;
-    }
-
-    /// Get fallback statistics across all processed faces.
-    pub fn fallback_stats(&self) -> &FallbackStats {
-        &self.fallback_stats
     }
 }
