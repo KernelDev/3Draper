@@ -171,6 +171,113 @@ impl Default for TriangulationParams {
     }
 }
 
+impl TriangulationParams {
+    /// Create parameters for a specific Level of Detail (LOD).
+    ///
+    /// LOD is a value in [0.0, 1.0] where:
+    /// - `0.0` = coarsest (minimum triangles, for distant/preview)
+    /// - `0.5` = medium (balanced quality/performance)
+    /// - `1.0` = full quality (default parameters)
+    ///
+    /// The LOD value scales `max_deviation`, `angular_samples`,
+    /// `height_samples`, and `max_face_triangles` accordingly.
+    /// Lower LOD means fewer triangles (coarser mesh) and larger
+    /// allowed deviation from the true surface.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Preview quality (very coarse, fast)
+    /// let preview = TriangulationParams::for_lod(0.1);
+    /// // Medium quality (interactive)
+    /// let medium = TriangulationParams::for_lod(0.5);
+    /// // Full quality
+    /// let full = TriangulationParams::for_lod(1.0);
+    /// ```
+    pub fn for_lod(lod: f64) -> Self {
+        let lod = lod.clamp(0.0, 1.0);
+
+        // Scale max_deviation: at LOD 0.0, allow 100× more deviation;
+        // at LOD 1.0, use the default 0.01.
+        // The relationship is exponential: deviation = 0.01 / lod^2
+        // (capped at 1.0 for very low LOD).
+        let max_deviation = if lod < 0.01 {
+            1.0 // Very coarse — large deviation allowed
+        } else {
+            0.01 / (lod * lod).min(1.0)
+        };
+
+        // Scale angular samples: at LOD 0.0 → 6 (hexagonal), at 1.0 → 32
+        let angular_samples = (6.0 + 26.0 * lod).round() as usize;
+
+        // Scale height samples: at LOD 0.0 → 2 (minimum), at 1.0 → 8
+        let height_samples = (2.0 + 6.0 * lod).round() as usize;
+
+        // Scale max_face_triangles: at LOD 0.0 → 100, at 1.0 → 8000
+        let max_face_triangles = (100.0 + 7900.0 * lod).round() as usize;
+
+        // Scale detail_level: at LOD 0.0 → 0.25, at 1.0 → 1.0
+        let detail_level = 0.25 + 0.75 * lod;
+
+        Self {
+            max_edge_length: 1.0 / lod.max(0.1), // Longer edges at lower LOD
+            max_deviation,
+            angular_samples,
+            height_samples,
+            max_angular_deviation: 0.1 / lod.max(0.1), // More angular deviation at lower LOD
+            detail_level,
+            adaptive: true,
+            parallel: false,
+            progress_callback: None,
+            max_face_triangles,
+        }
+    }
+
+    /// Create parameters optimized for preview (LOD ≈ 0.15).
+    ///
+    /// Very coarse mesh suitable for:
+    /// - Thumbnail generation
+    /// - Distant objects in a scene
+    /// - First-pass progressive loading
+    pub fn preview() -> Self {
+        Self::for_lod(0.15)
+    }
+
+    /// Create parameters for interactive editing (LOD ≈ 0.5).
+    ///
+    /// Balanced quality/performance suitable for:
+    /// - Real-time rotation/pan/zoom
+    /// - Model inspection at medium distance
+    pub fn interactive() -> Self {
+        Self::for_lod(0.5)
+    }
+
+    /// Create parameters for high-quality rendering (LOD = 1.0).
+    ///
+    /// Full quality suitable for:
+    /// - Close-up inspection
+    /// - Export to manufacturing formats
+    /// - Final rendering / screenshots
+    pub fn high_quality() -> Self {
+        Self::for_lod(1.0)
+    }
+
+    /// Derive a coarser set of params from this one by the given LOD factor.
+    ///
+    /// Returns a new `TriangulationParams` with the same settings except
+    /// `detail_level` scaled by `factor`. This is useful for generating
+    /// multiple LOD levels from a base configuration.
+    pub fn with_detail_level(&self, detail_level: f64) -> Self {
+        let mut params = self.clone();
+        params.detail_level = detail_level;
+        // Also scale angular/height samples proportionally
+        let scale = (detail_level / self.detail_level).max(0.25);
+        params.angular_samples = (self.angular_samples as f64 * scale).round() as usize;
+        params.height_samples = (self.height_samples as f64 * scale).round() as usize;
+        params.max_face_triangles = (self.max_face_triangles as f64 * scale).round() as usize;
+        params
+    }
+}
+
 /// Number of samples per edge curve for boundary discretization.
 /// Reduced from 48 to 20 for performance — each boundary point on a NURBS
 /// face requires expensive project_point() or reproject_nurbs_point() calls.
@@ -179,6 +286,78 @@ impl Default for TriangulationParams {
 /// boundary resolution for accurate triangulation while being ~2.4x faster
 /// than 48 samples.
 const EDGE_SAMPLES: usize = 20;
+
+/// Named Level-of-Detail presets for triangulation.
+///
+/// These provide a convenient, typed way to select LOD levels without
+/// remembering the exact float values. Each variant maps to a specific
+/// LOD factor that controls triangle density and surface accuracy.
+///
+/// # Usage
+/// ```ignore
+/// let params = TriangulationParams::for_lod(LodLevel::Preview.lod_factor());
+/// // or directly:
+/// let params = LodLevel::Interactive.params();
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LodLevel {
+    /// Coarsest mesh (LOD ≈ 0.1). Suitable for thumbnails, distant objects,
+    /// and initial progressive loading. Produces ~6-10 angular samples
+    /// per curved face and allows 1.0 max deviation.
+    Preview,
+    /// Low-detail mesh (LOD ≈ 0.3). Suitable for medium-distance viewing.
+    /// Better shape than Preview but still fast to compute.
+    Low,
+    /// Medium-detail mesh (LOD ≈ 0.5). Balanced quality/performance for
+    /// interactive rotation and inspection.
+    Interactive,
+    /// High-detail mesh (LOD ≈ 0.75). Close inspection with good surface
+    /// accuracy. Suitable for most engineering visualization.
+    High,
+    /// Maximum quality (LOD = 1.0). Full resolution for manufacturing
+    /// export, close-up rendering, and analysis.
+    Ultra,
+}
+
+impl LodLevel {
+    /// Return the LOD factor as a float in [0.0, 1.0].
+    pub fn lod_factor(self) -> f64 {
+        match self {
+            LodLevel::Preview => 0.10,
+            LodLevel::Low => 0.30,
+            LodLevel::Interactive => 0.50,
+            LodLevel::High => 0.75,
+            LodLevel::Ultra => 1.00,
+        }
+    }
+
+    /// Create triangulation parameters for this LOD level.
+    pub fn params(self) -> TriangulationParams {
+        TriangulationParams::for_lod(self.lod_factor())
+    }
+
+    /// Get the next coarser LOD level, or `None` if already at Preview.
+    pub fn coarser(self) -> Option<LodLevel> {
+        match self {
+            LodLevel::Preview => None,
+            LodLevel::Low => Some(LodLevel::Preview),
+            LodLevel::Interactive => Some(LodLevel::Low),
+            LodLevel::High => Some(LodLevel::Interactive),
+            LodLevel::Ultra => Some(LodLevel::High),
+        }
+    }
+
+    /// Get the next finer LOD level, or `None` if already at Ultra.
+    pub fn finer(self) -> Option<LodLevel> {
+        match self {
+            LodLevel::Preview => Some(LodLevel::Low),
+            LodLevel::Low => Some(LodLevel::Interactive),
+            LodLevel::Interactive => Some(LodLevel::High),
+            LodLevel::High => Some(LodLevel::Ultra),
+            LodLevel::Ultra => None,
+        }
+    }
+}
 
 /// Project a sequence of 3D points onto a NURBS surface efficiently.
 ///
@@ -6237,6 +6416,33 @@ impl ChunkedBrepTriangulator {
     /// well below the budget, you can reduce the budget or process more aggressively.
     pub fn last_frame_time_ms(&self) -> f64 {
         self.last_frame_time_ms
+    }
+
+    /// Change the LOD (Level of Detail) for remaining unprocessed faces.
+    ///
+    /// This is useful for progressive rendering where the viewer starts at a
+    /// distance (low LOD) and zooms in (high LOD). The already-processed
+    /// faces keep their original LOD; only subsequent faces use the new params.
+    ///
+    /// # Arguments
+    /// * `lod` — LOD value in [0.0, 1.0]. See [`TriangulationParams::for_lod`].
+    pub fn set_lod(&mut self, lod: f64) {
+        self.params = TriangulationParams::for_lod(lod);
+    }
+
+    /// Change the detail level for remaining unprocessed faces.
+    ///
+    /// Unlike `set_lod`, this preserves the current base parameters and only
+    /// scales the `detail_level`, `angular_samples`, `height_samples`, and
+    /// `max_face_triangles` proportionally. Use this when you want to keep
+    /// custom `max_deviation` or other settings while adjusting detail.
+    pub fn set_detail_level(&mut self, detail_level: f64) {
+        self.params = self.params.with_detail_level(detail_level);
+    }
+
+    /// Get the current detail level.
+    pub fn detail_level(&self) -> f64 {
+        self.params.detail_level
     }
 }
 
