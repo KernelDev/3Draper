@@ -20,6 +20,7 @@ pub mod text3d;
 pub mod watertight;
 pub mod cdt_triangulate;
 pub mod custom_cdt;
+pub mod pmi_display;
 
 #[cfg(feature = "export-3mf")]
 pub mod export;
@@ -35,6 +36,7 @@ pub use export::*;
 pub use certification::*;
 pub use watertight::*;
 pub use cdt_triangulate::*;
+pub use pmi_display::*;
 pub use parametric_domain::reproject_nurbs_point;
 
 // ============================================================
