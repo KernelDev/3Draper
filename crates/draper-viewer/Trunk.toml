@@ -16,3 +16,21 @@ ignore = ["../../target"]
 # Local development server (not used in CI)
 address = "127.0.0.1"
 port = 8080
+
+# Cross-Origin Isolation headers for SharedArrayBuffer support.
+# Required for WASM parallel threading (wasm-bindgen-rayon).
+# Without these headers, the browser will not expose SharedArrayBuffer,
+# and the triangulation will fall back to single-threaded mode.
+[[serve.headers]]
+source = "**"
+headers = [
+    { key = "Cross-Origin-Opener-Policy", value = "same-origin" },
+    { key = "Cross-Origin-Embedder-Policy", value = "require-corp" },
+]
+
+# Additional headers for security and WASM support
+[[serve.headers]]
+source = "**/*.wasm"
+headers = [
+    { key = "Content-Type", value = "application/wasm" },
+]

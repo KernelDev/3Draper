@@ -107,6 +107,42 @@ impl HealingParams {
         }
     }
 
+    /// Create conservative healing parameters that only fix defects
+    /// without removing any geometry. This is the recommended preset
+    /// for production use where losing valid geometry is unacceptable.
+    ///
+    /// Compared to `default()`, conservative mode:
+    /// - Disables `merge_faces` (won't remove valid small faces)
+    /// - Sets `min_face_area` to 0 (no face removal)
+    /// - Keeps `fix_normals`, `stitch_edges`, and `propagate_tolerances` enabled
+    ///   (these are safe operations that improve quality without data loss)
+    ///
+    /// Use `default()` for aggressive healing that may remove tiny features
+    /// (e.g., for visualization-only workflows where geometry simplification is OK).
+    pub fn conservative() -> Self {
+        Self {
+            gap_factor: 10.0,
+            max_hole_edges: 8,
+            min_face_area: 0.0,       // Never remove faces by area
+            max_aspect_ratio: 1e18,    // Never remove sliver triangles
+            fix_normals: true,         // Safe: corrects orientation
+            stitch_edges: true,        // Safe: merges collinear edges
+            merge_faces: false,        // Conservative: don't remove faces
+            propagate_tolerances: true, // Safe: ensures consistency
+            tolerance_context: None,
+            tolerance: 1e-6,
+        }
+    }
+
+    /// Create conservative healing parameters with a tolerance context.
+    pub fn conservative_with_context(ctx: &ToleranceContext) -> Self {
+        Self {
+            tolerance: ctx.coincidence_tolerance(),
+            tolerance_context: Some(ctx.clone()),
+            ..Self::conservative()
+        }
+    }
+
     /// Effective gap tolerance: `tolerance * gap_factor`.
     pub fn gap_tolerance(&self) -> f64 {
         self.tolerance * self.gap_factor

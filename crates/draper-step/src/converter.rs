@@ -2616,7 +2616,9 @@ impl<'a> StepConverter<'a> {
         // ─── Healing pipeline: heal the solid before triangulation ────────
         let face_data_list = if self.config.heal {
             let (solid, face_id_map) = face_data_list_to_solid(&face_data_list);
-            let healing_params = HealingParams::from_tolerance_context(&tol_ctx);
+            // Use conservative healing: fix normals, stitch edges, propagate
+            // tolerances — but do NOT merge/remove faces (avoids losing valid geometry).
+            let healing_params = HealingParams::conservative_with_context(&tol_ctx);
             let (healed, report) = heal_solid(&solid, &healing_params);
             log_healing_report(brep_id, &report);
             apply_healing_to_face_data(&face_data_list, &healed, &face_id_map)
@@ -2932,7 +2934,9 @@ impl<'a> StepConverter<'a> {
         // ─── Healing pipeline: heal the solid before triangulation ────────
         let face_data_list = if self.config.heal {
             let (solid, face_id_map) = face_data_list_to_solid(&face_data_list);
-            let healing_params = HealingParams::from_tolerance_context(&tol_ctx);
+            // Use conservative healing: fix normals, stitch edges, propagate
+            // tolerances — but do NOT merge/remove faces (avoids losing valid geometry).
+            let healing_params = HealingParams::conservative_with_context(&tol_ctx);
             let (healed, report) = heal_solid(&solid, &healing_params);
             log_healing_report(brep_id, &report);
             apply_healing_to_face_data(&face_data_list, &healed, &face_id_map)
@@ -3328,7 +3332,7 @@ impl<'a> StepConverter<'a> {
         // ─── Healing pipeline ────────
         let face_data_list = if self.config.heal {
             let (solid, face_id_map) = face_data_list_to_solid(&face_data_list);
-            let healing_params = HealingParams::from_tolerance_context(&tol_ctx);
+            let healing_params = HealingParams::conservative_with_context(&tol_ctx);
             let (healed, report) = heal_solid(&solid, &healing_params);
             log_healing_report(shell_id, &report);
             apply_healing_to_face_data(&face_data_list, &healed, &face_id_map)

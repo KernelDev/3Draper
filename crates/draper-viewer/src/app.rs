@@ -21,11 +21,10 @@ use eframe::egui;
 
 /// Unified triangulation parameters for all platforms.
 ///
-/// Use same quality parameters on all platforms for consistent results.
-/// Previously WASM used reduced quality to avoid browser freezes,
-/// but this caused significant visual differences from the native version.
-fn wasm_tri_params() -> TriangulationParams {
-    TriangulationParams::default()
+/// Uses the current LOD level to control quality/performance trade-off.
+/// The LOD level can be changed via the UI before loading a model.
+fn tri_params_for_lod(lod: LodLevel) -> TriangulationParams {
+    lod.params()
 }
 
 /// Convert TriangleMesh to GPU vertex/index data.
@@ -506,6 +505,26 @@ pub struct ViewerApp {
     // ─── Chunked triangulation ──────────────────────────────────────────────
     /// Time-budgeted BREP triangulation processor.
     chunked_triangulator: ChunkedBrepTriangulator,
+
+    // ─── Level of Detail ────────────────────────────────────────────────────
+    /// Current LOD level for triangulation quality.
+    /// Affects `max_deviation`, `angular_samples`, `height_samples`, etc.
+    /// Users can change this before loading a STEP file to trade quality for speed.
+    lod_level: LodLevel,
+
+    // ─── Web Worker mode (WASM only) ────────────────────────────────────────
+    /// Whether to use a Web Worker for STEP parsing + triangulation.
+    /// When enabled, heavy computation runs in a background thread,
+    /// keeping the main thread free for UI rendering at 60+ FPS.
+    /// Falls back to main-thread chunked processing if the worker is unavailable.
+    #[cfg(target_arch = "wasm32")]
+    use_worker: bool,
+    /// Whether the Web Worker is available and initialized.
+    #[cfg(target_arch = "wasm32")]
+    worker_ready: bool,
+    /// Pending mesh data received from the worker, waiting to be merged.
+    #[cfg(target_arch = "wasm32")]
+    worker_pending_meshes: Vec<WorkerMeshResult>,
 }
 
 /// Mobile overlay panel type.
@@ -515,6 +534,84 @@ enum MobilePanel {
     Controls,
     /// Right structure panel (tree, faces, UV, face info)
     Structure,
+}
+
+/// Level of Detail for triangulation quality.
+///
+/// Controls the trade-off between mesh quality and performance.
+/// Lower LOD = fewer triangles, faster loading, coarser appearance.
+/// Higher LOD = more triangles, slower loading, smoother appearance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum LodLevel {
+    /// Very coarse mesh — fastest loading, suitable for preview/thumbnails.
+    Preview,
+    /// Low quality — good for distant objects, fast interactive rotation.
+    Low,
+    /// Medium quality — balanced for general use.
+    Medium,
+    /// High quality — default, good for most engineering workflows.
+    High,
+    /// Ultra quality — maximum detail, slowest loading.
+    Ultra,
+}
+
+impl LodLevel {
+    /// Convert to a numeric LOD value for `TriangulationParams::for_lod()`.
+    fn lod_value(self) -> f64 {
+        match self {
+            LodLevel::Preview => 0.1,
+            LodLevel::Low => 0.3,
+            LodLevel::Medium => 0.5,
+            LodLevel::High => 0.75,
+            LodLevel::Ultra => 1.0,
+        }
+    }
+
+    /// Convert to `TriangulationParams` for this LOD level.
+    fn params(self) -> TriangulationParams {
+        TriangulationParams::for_lod(self.lod_value())
+    }
+
+    /// Human-readable label.
+    fn label(self) -> &'static str {
+        match self {
+            LodLevel::Preview => "Preview",
+            LodLevel::Low => "Low",
+            LodLevel::Medium => "Medium",
+            LodLevel::High => "High",
+            LodLevel::Ultra => "Ultra",
+        }
+    }
+
+    /// All LOD levels in order from coarsest to finest.
+    fn all() -> &'static [LodLevel] {
+        &[LodLevel::Preview, LodLevel::Low, LodLevel::Medium, LodLevel::High, LodLevel::Ultra]
+    }
+}
+
+/// Result of a worker-based triangulation (WASM only).
+///
+/// Contains the flat mesh data (TypedArray-compatible) received from
+/// the Web Worker, which needs to be converted back to a TriangleMesh
+/// for merging into the scene.
+#[cfg(target_arch = "wasm32")]
+struct WorkerMeshResult {
+    /// Name of the BREP instance.
+    name: String,
+    /// BREP ID.
+    brep_id: usize,
+    /// Per-instance color (if specified in the STEP file).
+    color: Option<[f32; 4]>,
+    /// Flat vertex positions [x0,y0,z0, x1,y1,z1, ...] as f32.
+    vertices: Vec<f32>,
+    /// Flat triangle indices [i0,j0,k0, i1,j1,k1, ...] as u32.
+    indices: Vec<u32>,
+    /// Flat vertex normals [nx0,ny0,nz0, ...] as f32 (if available).
+    normals: Option<Vec<f32>>,
+    /// Flat face normals [nx0,ny0,nz0, ...] as f32 (if available).
+    face_normals: Option<Vec<f32>>,
+    /// Flat per-triangle colors [r0,g0,b0,a0, ...] as f32 (if available).
+    colors: Option<Vec<f32>>,
 }
 
 /// Result of processing a single chunk of BREP triangulation.
@@ -768,6 +865,13 @@ impl ViewerApp {
             mobile_panel: None,
             mobile_log_open: false,
             chunked_triangulator: ChunkedBrepTriangulator::new(),
+            lod_level: LodLevel::High,
+            #[cfg(target_arch = "wasm32")]
+            use_worker: false, // Disabled until wasm-bindgen exports are complete (Phase 1.3 WIP)
+            #[cfg(target_arch = "wasm32")]
+            worker_ready: false,
+            #[cfg(target_arch = "wasm32")]
+            worker_pending_meshes: Vec::new(),
         };
         app.log("3Draper Viewer started");
         app.log(&format!("Default model: Box 100x100x100 ({} vertices, {} triangles)",
@@ -839,7 +943,7 @@ impl ViewerApp {
 
     fn load_box(&mut self) {
         let solid = ShapeBuilder::make_box(100.0, 80.0, 60.0);
-        let mesh = triangulate_solid(&solid, &wasm_tri_params());
+        let mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -848,7 +952,7 @@ impl ViewerApp {
 
     fn load_cylinder(&mut self) {
         let solid = ShapeBuilder::make_cylinder(40.0, 100.0);
-        let mesh = triangulate_solid(&solid, &wasm_tri_params());
+        let mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -857,7 +961,7 @@ impl ViewerApp {
 
     fn load_sphere(&mut self) {
         let solid = ShapeBuilder::make_sphere(50.0);
-        let mesh = triangulate_solid(&solid, &wasm_tri_params());
+        let mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -869,7 +973,7 @@ impl ViewerApp {
         let height: f64 = 80.0;
         let half_angle = (radius / height).atan();
         let solid = ShapeBuilder::make_cone(radius, height, half_angle);
-        let mesh = triangulate_solid(&solid, &wasm_tri_params());
+        let mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -878,7 +982,7 @@ impl ViewerApp {
 
     fn load_torus(&mut self) {
         let solid = ShapeBuilder::make_torus(40.0, 12.0);
-        let mesh = triangulate_solid(&solid, &wasm_tri_params());
+        let mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -912,7 +1016,7 @@ impl ViewerApp {
             knots: vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0],
         });
         let solid = ShapeBuilder::make_revolution(profile, std::f64::consts::PI * 2.0);
-        let mesh = triangulate_solid(&solid, &wasm_tri_params());
+        let mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -932,7 +1036,7 @@ impl ViewerApp {
             draper_geometry::Direction3d::Y,
             80.0,
         );
-        let mesh = triangulate_solid(&solid, &wasm_tri_params());
+        let mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -1008,7 +1112,7 @@ impl ViewerApp {
     /// Load Box with "3" hole CUT OUT on the top face.
     fn load_box_text(&mut self) {
         let solid = ShapeBuilder::make_box(100.0, 80.0, 60.0);
-        let base_mesh = triangulate_solid(&solid, &wasm_tri_params());
+        let base_mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
         let mesh = cut_text_holes_in_mesh(
             &base_mesh,
             "3",
@@ -1026,7 +1130,7 @@ impl ViewerApp {
     /// Load Cylinder with "3" hole CUT OUT on the lateral surface.
     fn load_cylinder_text(&mut self) {
         let solid = ShapeBuilder::make_cylinder(40.0, 100.0);
-        let base_mesh = triangulate_solid(&solid, &wasm_tri_params());
+        let base_mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
         let mesh = cut_text_holes_in_mesh(
             &base_mesh,
             "3",
@@ -1044,7 +1148,7 @@ impl ViewerApp {
     /// Load Sphere with "3" hole CUT OUT on the surface.
     fn load_sphere_text(&mut self) {
         let solid = ShapeBuilder::make_sphere(50.0);
-        let base_mesh = triangulate_solid(&solid, &wasm_tri_params());
+        let base_mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
         let mesh = cut_text_holes_in_mesh(
             &base_mesh,
             "3",
@@ -1065,7 +1169,7 @@ impl ViewerApp {
         let height: f64 = 80.0;
         let half_angle = (radius / height).atan();
         let solid = ShapeBuilder::make_cone(radius, height, half_angle);
-        let base_mesh = triangulate_solid(&solid, &wasm_tri_params());
+        let base_mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
         let mesh = cut_text_holes_in_mesh(
             &base_mesh,
             "3",
@@ -1083,7 +1187,7 @@ impl ViewerApp {
     /// Load Torus with "3" hole CUT OUT on the outer surface.
     fn load_torus_text(&mut self) {
         let solid = ShapeBuilder::make_torus(40.0, 12.0);
-        let base_mesh = triangulate_solid(&solid, &wasm_tri_params());
+        let base_mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
         let mesh = cut_text_holes_in_mesh(
             &base_mesh,
             "3",
@@ -1114,7 +1218,7 @@ impl ViewerApp {
             knots: vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0],
         });
         let solid = ShapeBuilder::make_revolution(profile, std::f64::consts::PI * 2.0);
-        let base_mesh = triangulate_solid(&solid, &wasm_tri_params());
+        let base_mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
         // Approximate revolution as cylinder for text projection
         let mesh = cut_text_holes_in_mesh(
             &base_mesh,
@@ -1204,7 +1308,7 @@ impl ViewerApp {
             draper_geometry::Direction3d::Y,
             80.0,
         );
-        let base_mesh = triangulate_solid(&solid, &wasm_tri_params());
+        let base_mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
         let mesh = cut_text_holes_in_mesh(
             &base_mesh,
             "3",
@@ -1731,6 +1835,125 @@ impl ViewerApp {
         self.pending_step_file = None;
         self.triangulated_count = 0;
         self.total_instance_count = 0;
+        #[cfg(target_arch = "wasm32")]
+        self.worker_pending_meshes.clear();
+    }
+
+    /// Convert a WorkerMeshResult (flat f32 arrays from Web Worker) to a TriangleMesh.
+    ///
+    /// This is the reverse of `MeshData::from_mesh()` — it unpacks the flat
+    /// TypedArray-compatible format back into the structured TriangleMesh
+    /// that the renderer expects.
+    #[cfg(target_arch = "wasm32")]
+    fn worker_mesh_to_triangle_mesh(result: &WorkerMeshResult) -> TriangleMesh {
+        let vertex_count = result.vertices.len() / 3;
+        let triangle_count = result.indices.len() / 3;
+
+        // Reconstruct Point3d vertices from flat f32 array
+        let mut vertices = Vec::with_capacity(vertex_count);
+        for i in 0..vertex_count {
+            let x = result.vertices[i * 3] as f64;
+            let y = result.vertices[i * 3 + 1] as f64;
+            let z = result.vertices[i * 3 + 2] as f64;
+            vertices.push(draper_geometry::Point3d::new(x, y, z));
+        }
+
+        // Reconstruct triangle indices from flat u32 array
+        let mut triangles = Vec::with_capacity(triangle_count);
+        for i in 0..triangle_count {
+            triangles.push([
+                result.indices[i * 3],
+                result.indices[i * 3 + 1],
+                result.indices[i * 3 + 2],
+            ]);
+        }
+
+        // Reconstruct vertex normals (if present)
+        let normals = result.normals.as_ref().map(|flat| {
+            let count = flat.len() / 3;
+            let mut ns = Vec::with_capacity(count);
+            for i in 0..count {
+                ns.push([flat[i * 3] as f64, flat[i * 3 + 1] as f64, flat[i * 3 + 2] as f64]);
+            }
+            ns
+        });
+
+        // Reconstruct face normals (if present)
+        let face_normals = result.face_normals.as_ref().map(|flat| {
+            let count = flat.len() / 3;
+            let mut ns = Vec::with_capacity(count);
+            for i in 0..count {
+                ns.push([flat[i * 3] as f64, flat[i * 3 + 1] as f64, flat[i * 3 + 2] as f64]);
+            }
+            ns
+        });
+
+        // Reconstruct per-triangle colors (if present)
+        let triangle_colors = result.colors.as_ref().map(|flat| {
+            let count = flat.len() / 4;
+            let mut cs = Vec::with_capacity(count);
+            for i in 0..count {
+                cs.push([flat[i * 4], flat[i * 4 + 1], flat[i * 4 + 2], flat[i * 4 + 3]]);
+            }
+            cs
+        });
+
+        TriangleMesh {
+            vertices,
+            triangles,
+            normals,
+            face_normals,
+            triangle_colors,
+            triangle_face_ids: None,
+        }
+    }
+
+    /// Process pending worker mesh results (WASM only).
+    ///
+    /// When the Web Worker completes a BREP triangulation, it sends back
+    /// flat mesh data (Float32Array/Uint32Array). This method converts
+    /// the data back to TriangleMesh and merges it into the scene.
+    ///
+    /// Returns true if there are still more results to process.
+    #[cfg(target_arch = "wasm32")]
+    fn process_worker_results(&mut self) -> bool {
+        if self.worker_pending_meshes.is_empty() {
+            return false;
+        }
+
+        // Process all pending worker results (they're already computed, just need conversion)
+        while let Some(result) = self.worker_pending_meshes.pop() {
+            let mesh = Self::worker_mesh_to_triangle_mesh(&result);
+            let vcount = mesh.vertex_count();
+            let tcount = mesh.triangle_count();
+
+            if tcount == 0 {
+                self.log_warning(&format!(
+                    "Worker: Instance '{}' (BREP #{}) produced empty mesh — skipping",
+                    result.name, result.brep_id
+                ));
+                self.failed_face_count += 1;
+                continue;
+            }
+
+            let tri_start = self.mesh.triangle_count();
+            let color = result.color.unwrap_or_else(|| Self::instance_color(self.triangulated_count));
+            self.mesh.merge_with_color(&mesh, color);
+            let tri_end = self.mesh.triangle_count();
+            self.instance_triangle_ranges.push((tri_start, tri_end));
+
+            self.triangulated_count += 1;
+            self.log(&format!(
+                "Worker: '{}' — {} vertices, {} triangles ({:.1}ms)",
+                result.name, vcount, tcount, 0.0 // timing tracked on worker side
+            ));
+        }
+
+        self.mesh_dirty = true;
+        self.edge_dirty = true;
+        self.wireframe_overlay_dirty = true;
+
+        self.is_loading || !self.worker_pending_meshes.is_empty()
     }
 
     /// Process pending BREPs with time budget (called from update()).
@@ -2319,6 +2542,14 @@ impl eframe::App for ViewerApp {
                     ui.checkbox(&mut self.show_axes, "Show axes");
                     ui.checkbox(&mut self.show_grid, "Show grid");
                     ui.checkbox(&mut self.show_structure, "Structure Panel");
+                    ui.separator();
+                    // LOD selector — affects quality of future STEP loads
+                    ui.label(egui::RichText::new("Triangulation Quality:").small());
+                    for &lod in LodLevel::all() {
+                        if ui.radio_value(&mut self.lod_level, lod, lod.label()).clicked() {
+                            self.log(&format!("LOD changed to {} (applies to next file load)", lod.label()));
+                        }
+                    }
                     ui.separator();
                     ui.checkbox(&mut self.validate_consistency, "Validate Edge Consistency");
                     if let Some(ref report) = self.last_consistency_report {
@@ -3149,6 +3380,16 @@ impl eframe::App for ViewerApp {
                 ui.checkbox(&mut self.show_structure, "Structure Panel");
                 ui.checkbox(&mut self.show_json_api, "JSON API");
 
+                // LOD selector for mobile
+                ui.add_space(4.0);
+                egui::ComboBox::from_id_salt("lod_mobile")
+                    .selected_text(format!("Quality: {}", self.lod_level.label()))
+                    .show_ui(ui, |ui| {
+                        for &lod in LodLevel::all() {
+                            ui.selectable_value(&mut self.lod_level, lod, lod.label());
+                        }
+                    });
+
                 if ui.button("Reset Camera").clicked() {
                     let (bbox_min, bbox_max) = self.mesh.bounding_box();
                     self.camera.fit_to_bounding_box(
@@ -3824,6 +4065,17 @@ impl ViewerApp {
                         ui.checkbox(&mut self.show_edges, "Show Edges");
                         ui.checkbox(&mut self.show_wireframe_overlay, "Mesh Overlay");
                         ui.checkbox(&mut self.show_axes, "Show axes");
+
+                        // LOD selector
+                        ui.add_space(4.0);
+                        egui::ComboBox::from_id_salt("lod_mobile2")
+                            .selected_text(format!("Quality: {}", self.lod_level.label()))
+                            .show_ui(ui, |ui| {
+                                for &lod in LodLevel::all() {
+                                    ui.selectable_value(&mut self.lod_level, lod, lod.label());
+                                }
+                            });
+
                         ui.separator();
 
                         // Camera

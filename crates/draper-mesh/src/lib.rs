@@ -21,6 +21,7 @@ pub mod watertight;
 pub mod cdt_triangulate;
 pub mod custom_cdt;
 pub mod pmi_display;
+pub mod wasm_api;
 
 #[cfg(feature = "export-3mf")]
 pub mod export;
@@ -37,6 +38,7 @@ pub use certification::*;
 pub use watertight::*;
 pub use cdt_triangulate::*;
 pub use pmi_display::*;
+pub use wasm_api::*;
 pub use parametric_domain::reproject_nurbs_point;
 
 // ============================================================
@@ -75,8 +77,10 @@ pub use parametric_domain::reproject_nurbs_point;
 /// 3. A web worker script that re-exports the wasm-bindgen-rayon builder
 #[cfg(all(target_arch = "wasm32", feature = "wasm-parallel"))]
 pub fn init_wasm_thread_pool() -> Result<(), String> {
+    // Use navigator.hardwareConcurrency (via wasm-bindgen-rayon's default)
+    // if num_threads is not explicitly set. The builder defaults to
+    // the number of available logical cores, which is optimal for most workloads.
     wasm_bindgen_rayon::thread_pool_builder()
-        .num_threads(num_cpus::get())
         .build_global()
         .map_err(|e| format!("Failed to initialize WASM thread pool: {:?}", e))
 }
