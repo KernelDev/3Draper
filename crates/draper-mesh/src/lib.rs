@@ -22,6 +22,7 @@ pub mod cdt_triangulate;
 pub mod custom_cdt;
 pub mod pmi_display;
 pub mod wasm_api;
+pub mod gdt_check;
 
 #[cfg(feature = "export-3mf")]
 pub mod export;
@@ -39,6 +40,7 @@ pub use watertight::*;
 pub use cdt_triangulate::*;
 pub use pmi_display::*;
 pub use wasm_api::*;
+pub use gdt_check::*;
 pub use parametric_domain::reproject_nurbs_point;
 
 // ============================================================

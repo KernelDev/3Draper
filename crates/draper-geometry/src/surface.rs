@@ -617,6 +617,13 @@ pub struct NurbsSurface {
     pub weights: Vec<Vec<f64>>,
     pub u_knots: Vec<f64>,
     pub v_knots: Vec<f64>,
+    /// Whether the surface is closed/periodic in the u direction.
+    /// A NURBS surface is u-closed when the first and last rows of
+    /// control points coincide (within tolerance), or when the STEP
+    /// entity specifies CLOSED_B_SPLINE_SURFACE.
+    pub u_closed: bool,
+    /// Whether the surface is closed/periodic in the v direction.
+    pub v_closed: bool,
 }
 
 /// Surface derivatives at a parametric point (u, v).
@@ -1279,12 +1286,20 @@ impl Surface {
 
     /// Check if the surface is periodic in u.
     pub fn is_u_periodic(&self) -> bool {
-        matches!(self, Surface::Cylinder(_) | Surface::Cone(_) | Surface::Sphere(_) | Surface::Torus(_) | Surface::Revolution(_))
+        match self {
+            Surface::Cylinder(_) | Surface::Cone(_) | Surface::Sphere(_) | Surface::Torus(_) | Surface::Revolution(_) => true,
+            Surface::Nurbs(n) => n.u_closed,
+            _ => false,
+        }
     }
 
     /// Check if the surface is periodic in v.
     pub fn is_v_periodic(&self) -> bool {
-        matches!(self, Surface::Sphere(_) | Surface::Torus(_))
+        match self {
+            Surface::Sphere(_) | Surface::Torus(_) => true,
+            Surface::Nurbs(n) => n.v_closed,
+            _ => false,
+        }
     }
 
     /// Compute the curvature at a point on the surface.
@@ -1891,6 +1906,8 @@ impl Surface {
                 weights: n.weights.clone(),
                 u_knots: n.u_knots.clone(),
                 v_knots: n.v_knots.clone(),
+                u_closed: n.u_closed,
+                v_closed: n.v_closed,
             }),
         }
     }
@@ -2204,6 +2221,8 @@ mod curvature_tests {
             ],
             u_knots: vec![0.0, 0.0, 1.0, 1.0],
             v_knots: vec![0.0, 0.0, 1.0, 1.0],
+            u_closed: false,
+            v_closed: false,
         };
 
         let surface = Surface::Nurbs(nurbs);

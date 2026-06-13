@@ -374,9 +374,23 @@ fn triangle_area_2d(x0: f64, y0: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64
     ((x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)).abs() * 0.5
 }
 
-/// Compute the signed area of a 2D polygon using the shoelace formula.
-/// Returns a positive value for counter-clockwise, negative for clockwise.
+/// Compute the unsigned area of a 2D polygon using the shoelace formula.
+/// Always returns a non-negative value.
 fn polygon_area_2d(polygon: &[Point2d]) -> f64 {
+    polygon_signed_area_2d(polygon).abs()
+}
+
+/// Compute the signed area of a 2D polygon using the shoelace formula.
+/// Returns a positive value for counter-clockwise winding,
+/// negative for clockwise winding, and near-zero for degenerate/self-intersecting
+/// polygons.
+///
+/// For a simple (non-self-intersecting) polygon, the signed area indicates
+/// orientation. For a self-intersecting polygon, the signed area can be
+/// **near zero** even when the geometric area is large — the positive and
+/// negative lobes cancel out. This property is used to detect self-intersecting
+/// UV polygons in NURBS triangulation.
+fn polygon_signed_area_2d(polygon: &[Point2d]) -> f64 {
     if polygon.len() < 3 {
         return 0.0;
     }
@@ -387,7 +401,63 @@ fn polygon_area_2d(polygon: &[Point2d]) -> f64 {
         area += polygon[i].u * polygon[j].v;
         area -= polygon[j].u * polygon[i].v;
     }
-    area.abs() * 0.5
+    area * 0.5 // NO .abs() — preserve the sign
+}
+
+/// Check if a 2D UV polygon has self-intersecting edges (edge crossings).
+///
+/// Uses a brute-force O(n²) check on all non-adjacent edge pairs.
+/// For typical boundary loops (< 200 points), this is fast enough.
+/// Returns `true` if any pair of non-adjacent edges intersect.
+fn check_uv_polygon_self_intersection(polygon: &[Point2d]) -> bool {
+    let n = polygon.len();
+    if n < 4 {
+        return false; // Need at least 4 points for a self-intersection
+    }
+
+    for i in 0..n {
+        let i_next = (i + 1) % n;
+        let a0 = &polygon[i];
+        let a1 = &polygon[i_next];
+
+        // Check against non-adjacent edges only (skip i-1, i, i+1)
+        for j in (i + 2)..n {
+            // Skip the edge that wraps around and is adjacent to edge i
+            if i == 0 && j == n - 1 {
+                continue;
+            }
+            let j_next = (j + 1) % n;
+            let b0 = &polygon[j];
+            let b1 = &polygon[j_next];
+
+            if segments_intersect_2d(a0, a1, b0, b1) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check if two 2D line segments intersect (excluding shared endpoints).
+fn segments_intersect_2d(a0: &Point2d, a1: &Point2d, b0: &Point2d, b1: &Point2d) -> bool {
+    let d1x = a1.u - a0.u;
+    let d1y = a1.v - a0.v;
+    let d2x = b1.u - b0.u;
+    let d2y = b1.v - b0.v;
+
+    let denom = d1x * d2y - d1y * d2x;
+    if denom.abs() < 1e-15 {
+        return false; // Parallel or collinear
+    }
+
+    let dx = b0.u - a0.u;
+    let dy = b0.v - a0.v;
+
+    let t = (dx * d2y - dy * d2x) / denom;
+    let u = (dx * d1y - dy * d1x) / denom;
+
+    // Strict interior intersection (exclude endpoints)
+    t > 1e-10 && t < 1.0 - 1e-10 && u > 1e-10 && u < 1.0 - 1e-10
 }
 
 /// Compute the approximate area of a 3D polygon using the Newell's method.
@@ -968,7 +1038,8 @@ pub fn triangulate_surface_consistent(
     // This is slow (~146 evaluations per point) but more robust.
     // ============================================================
     if let Surface::Nurbs(ref nurbs) = surface {
-        let uv_area = polygon_area_2d(&outer_uv);
+        let uv_signed_area = polygon_signed_area_2d(&outer_uv);
+        let uv_unsigned_area = uv_signed_area.abs();
         // Log per-edge UV ranges to diagnose degenerate polygons
         {
             let (nu_min, nu_max) = nurbs.u_range();
@@ -978,36 +1049,51 @@ pub fn triangulate_surface_consistent(
             let v_min_all = outer_uv.iter().map(|p| p.v).fold(f64::MAX, f64::min);
             let v_max_all = outer_uv.iter().map(|p| p.v).fold(f64::MIN, f64::max);
             log::info!(
-                "NURBS UV polygon: area={:.6}, {} points, u_range=[{:.4},{:.4}] v_range=[{:.4},{:.4}], nurbs_range=u[{:.4},{:.4}]v[{:.4},{:.4}]",
-                uv_area, outer_uv.len(),
+                "NURBS UV polygon: signed_area={:.6}, unsigned_area={:.6}, {} points, u_range=[{:.4},{:.4}] v_range=[{:.4},{:.4}], nurbs_range=u[{:.4},{:.4}]v[{:.4},{:.4}]",
+                uv_signed_area, uv_unsigned_area, outer_uv.len(),
                 u_min_all, u_max_all, v_min_all, v_max_all,
                 nu_min, nu_max, nv_min, nv_max,
             );
-            // Log first 5 and last 5 UVs for debugging
-            if outer_uv.len() <= 20 {
-                for (i, uv) in outer_uv.iter().enumerate() {
-                    log::info!("  UV[{}] = ({:.4}, {:.4})", i, uv.u, uv.v);
-                }
-            } else {
-                for i in 0..5 {
-                    log::info!("  UV[{}] = ({:.4}, {:.4})", i, outer_uv[i].u, outer_uv[i].v);
-                }
-                log::info!("  ... ({} points) ...", outer_uv.len() - 10);
-                for i in (outer_uv.len()-5)..outer_uv.len() {
-                    log::info!("  UV[{}] = ({:.4}, {:.4})", i, outer_uv[i].u, outer_uv[i].v);
-                }
-            }
         }
-        // A negative or zero UV area means the polygon is self-intersecting
-        // or degenerate (collapsed to a line/point).
-        if uv_area <= 0.0 && outer_uv.len() >= 3 {
+
+        // ============================================================
+        // Self-intersection detection for NURBS UV polygons.
+        //
+        // A self-intersecting UV polygon has a signed area that is
+        // **near zero** relative to its unsigned area, because the
+        // positive and negative lobes cancel out in the shoelace
+        // formula. We detect this by comparing |signed_area| to
+        // the bounding box area: if |signed_area| < 1% of the bbox
+        // area, the polygon is likely self-intersecting.
+        //
+        // We also detect degenerate polygons (zero area) and
+        // edge crossings via a sweep-line check.
+        // ============================================================
+        let is_degenerate = uv_unsigned_area < 1e-20 && outer_uv.len() >= 3;
+        let is_self_intersecting = if !is_degenerate && outer_uv.len() >= 3 {
+            // Compute the UV bounding box area for comparison
+            let u_min_uv = outer_uv.iter().map(|p| p.u).fold(f64::MAX, f64::min);
+            let u_max_uv = outer_uv.iter().map(|p| p.u).fold(f64::MIN, f64::max);
+            let v_min_uv = outer_uv.iter().map(|p| p.v).fold(f64::MAX, f64::min);
+            let v_max_uv = outer_uv.iter().map(|p| p.v).fold(f64::MIN, f64::max);
+            let bbox_area = (u_max_uv - u_min_uv) * (v_max_uv - v_min_uv);
+            // If the signed area is much smaller than the bbox area,
+            // the polygon has cancellation → self-intersection
+            if bbox_area > 1e-20 {
+                uv_unsigned_area / bbox_area < 0.01
+            } else {
+                false
+            }
+        } else {
+            is_degenerate
+        };
+        // Also check for actual edge crossings (more reliable detection)
+        let has_edge_crossings = check_uv_polygon_self_intersection(&outer_uv);
+
+        if (is_self_intersecting || has_edge_crossings) && outer_uv.len() >= 3 {
             log::warn!(
-                "NURBS UV polygon is self-intersecting/degenerate: area={:.6}, {} points, u_range=[{:.2},{:.2}] v_range=[{:.2},{:.2}] — re-projecting from scratch",
-                uv_area, outer_uv.len(),
-                outer_uv.iter().map(|p| p.u).fold(f64::MAX, f64::min),
-                outer_uv.iter().map(|p| p.u).fold(f64::MIN, f64::max),
-                outer_uv.iter().map(|p| p.v).fold(f64::MAX, f64::min),
-                outer_uv.iter().map(|p| p.v).fold(f64::MIN, f64::max),
+                "NURBS UV polygon is self-intersecting/degenerate: signed_area={:.6}, unsigned_area={:.6}, edge_crossings={}, {} points — re-projecting from scratch",
+                uv_signed_area, uv_unsigned_area, has_edge_crossings, outer_uv.len()
             );
             // Re-project all boundary UVs using full project_point()
             let (nu_min, nu_max) = nurbs.u_range();
@@ -1025,10 +1111,10 @@ pub fn triangulate_surface_consistent(
             if outer_uv.len() < 3 {
                 return TriangleMesh::new();
             }
-            let new_area = polygon_area_2d(&outer_uv);
+            let new_area = polygon_signed_area_2d(&outer_uv);
             log::info!(
-                "NURBS UV polygon re-projected: area={:.6} (was {:.6})",
-                new_area, uv_area
+                "NURBS UV polygon re-projected: signed_area={:.6}, unsigned_area={:.6} (was signed={:.6}, unsigned={:.6})",
+                new_area, new_area.abs(), uv_signed_area, uv_unsigned_area
             );
         }
     }
@@ -2509,6 +2595,7 @@ mod tests {
             u_degree: 3, v_degree: 3,
             control_points, weights,
             u_knots, v_knots,
+            u_closed: false, v_closed: false,
         };
 
         let (u_min, u_max) = nurbs.u_range();

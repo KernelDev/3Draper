@@ -1061,6 +1061,7 @@ impl ViewerApp {
             u_degree: 3, v_degree: 3,
             control_points, weights,
             u_knots, v_knots,
+            u_closed: false, v_closed: false,
         };
 
         // Sample boundary points from the NURBS surface for triangulation
@@ -1250,6 +1251,7 @@ impl ViewerApp {
             u_degree: 3, v_degree: 3,
             control_points, weights,
             u_knots, v_knots,
+            u_closed: false, v_closed: false,
         };
         let (u_min, u_max) = nurbs_surface.u_range();
         let (v_min, v_max) = nurbs_surface.v_range();
