@@ -673,14 +673,10 @@ fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams, cac
     // Phase 5: Smooth normals with adaptive crease angle per surface type
     crate::watertight::smooth_normals_adaptive(&mut mesh, solid);
 
-    // TODO: Chord error refinement — check if triangle midpoints deviate
-    // from the true surface by more than max_deviation and subdivide if needed.
-    // This is a single-pass refinement for performance. Skip for planar faces
-    // (chord error is always 0 for planes). The existing adaptive interior points
-    // already handle curvature, so this is a secondary refinement.
-    // refine_chord_error(&mut mesh, params);
+    // Chord error refinement is handled internally by
+    // refine_mesh_chord_error_uv() in triangulate_surface_consistent(),
+    // so no post-hoc refinement is needed here.
 
-    // Safety check: ensure all per-triangle arrays have the same length
     debug_assert_mesh_consistency(&mesh);
     mesh
 }
@@ -689,167 +685,11 @@ fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams, cac
 // Parallel triangulation (3.5)
 // ============================================================
 
-/// Pre-computed edge discretization cache for parallel triangulation.
-///
-/// **SUPERSEDED** by `EdgeDiscretizationCache` (in `edge_cache.rs`), which
-/// stores both 3D points AND per-face UV coordinates. The old `EdgeSampleCache`
-/// only stores 3D points and does not support UV computation for NURBS faces.
-///
-/// Kept for backward compatibility but NOT used in the main pipeline anymore.
-/// The main pipeline now uses `EdgeDiscretizationCache` with `pre_populate_for_solid_full`.
-#[allow(dead_code)]
-#[derive(Clone, Debug)]
-struct EdgeSampleCache {
-    /// Maps edge TopoId → sampled 3D points.
-    #[allow(dead_code)] // Will be used when surface-specific functions are refactored to accept cache
-    entries: HashMap<TopoId, Vec<Point3d>>,
-}
-
-impl EdgeSampleCache {
-    /// Build a cache by pre-computing discretizations for all edges in a solid.
-    #[allow(dead_code)]
-    fn build_from_solid(solid: &Solid) -> Self {
-        let mut entries = HashMap::new();
-        for face in solid.faces() {
-            for edge in &face.edges {
-                if edge.degenerate {
-                    continue;
-                }
-                if !entries.contains_key(&edge.id) {
-                    let pts = sample_edge_points(edge, EDGE_SAMPLES);
-                    entries.insert(edge.id, pts);
-                }
-            }
-        }
-        Self { entries }
-    }
-
-    /// Get the pre-computed sample points for an edge.
-    #[allow(dead_code)] // Will be used when surface-specific functions are refactored to accept cache
-    fn get(&self, edge_id: TopoId) -> Option<&Vec<Point3d>> {
-        self.entries.get(&edge_id)
-    }
-}
-
-/// Collect boundary points from a face's outer wire using the pre-computed
-/// edge sample cache (read-only, safe for parallel use).
-///
-/// This function will be used when surface-specific triangulation functions
-/// are refactored to accept an optional cache parameter.
-#[allow(dead_code)]
-fn collect_face_boundary_points_cached(face: &Face, cache: &EdgeSampleCache) -> Vec<Point3d> {
-    let mut points = Vec::new();
-
-    if let Some(ref wire) = face.outer_wire {
-        for coedge in &wire.coedges {
-            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
-            if let Some(edge) = edge {
-                // Skip degenerate edges
-                if edge.degenerate {
-                    continue;
-                }
-                // Use cached edge points if available, otherwise compute inline
-                let mut edge_pts = if let Some(cached) = cache.get(edge.id) {
-                    cached.clone()
-                } else {
-                    sample_edge_points(edge, EDGE_SAMPLES)
-                };
-                // Canonical-direction reversal logic (same as collect_face_boundary_points)
-                let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
-                let should_reverse = !coedge.forward != edge_is_reversed;
-                if should_reverse {
-                    edge_pts.reverse();
-                }
-                points.extend(edge_pts);
-            }
-        }
-    }
-
-    // Remove duplicate consecutive points (within tolerance)
-    if !points.is_empty() {
-        let mut unique = vec![points[0]];
-        for p in &points[1..] {
-            if let Some(last) = unique.last() {
-                if !last.is_coincident_with(p) {
-                    unique.push(*p);
-                }
-            }
-        }
-        // Also check last vs first (closed loop)
-        if unique.len() > 1 {
-            if let Some(last) = unique.last() {
-                if last.is_coincident_with(&unique[0]) {
-                    unique.pop();
-                }
-            }
-        }
-        points = unique;
-    }
-
-    points
-}
-
-/// Collect boundary points from a face's inner wires using the cache.
-///
-/// This function will be used when surface-specific triangulation functions
-/// are refactored to accept an optional cache parameter.
-#[allow(dead_code)]
-fn collect_face_hole_points_cached(face: &Face, cache: &EdgeSampleCache) -> Vec<Vec<Point3d>> {
-    let mut holes = Vec::new();
-    for wire in &face.inner_wires {
-        let mut points = Vec::new();
-        for coedge in &wire.coedges {
-            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
-            if let Some(edge) = edge {
-                let mut edge_pts = if let Some(cached) = cache.get(edge.id) {
-                    cached.clone()
-                } else {
-                    sample_edge_points(edge, EDGE_SAMPLES)
-                };
-                // Canonical-direction reversal logic (same as collect_face_boundary_points)
-                let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
-                let should_reverse = !coedge.forward != edge_is_reversed;
-                if should_reverse {
-                    edge_pts.reverse();
-                }
-                points.extend(edge_pts);
-            }
-        }
-        // Deduplicate
-        if !points.is_empty() {
-            let mut unique = vec![points[0]];
-            for p in &points[1..] {
-                if let Some(last) = unique.last() {
-                    if !last.is_coincident_with(p) {
-                        unique.push(*p);
-                    }
-                }
-            }
-            if unique.len() > 1 {
-                if let Some(last) = unique.last() {
-                    if last.is_coincident_with(&unique[0]) {
-                        unique.pop();
-                    }
-                }
-            }
-            holes.push(unique);
-        }
-    }
-    holes
-}
-
-/// Triangulate a single face using the pre-computed edge sample cache.
-///
-/// **SUPERSEDED** by `triangulate_face_impl` which uses `EdgeDiscretizationCache`.
-/// Kept for backward compatibility but NOT used in the main pipeline anymore.
-#[allow(dead_code)]
-fn triangulate_face_cached(face: &Face, params: &TriangulationParams, cache: &EdgeSampleCache) -> TriangleMesh {
-    // This function is superseded by triangulate_face_impl which uses the
-    // full EdgeDiscretizationCache (with UV coordinates). The old EdgeSampleCache
-    // only stores 3D points and does not support UV computation for NURBS faces.
-    let _ = cache;
-    triangulate_face(face, params)
-}
+// Note: The old EdgeSampleCache and related functions (collect_face_boundary_points_cached,
+// collect_face_hole_points_cached, triangulate_face_cached) have been removed.
+// They were superseded by EdgeDiscretizationCache (in edge_cache.rs), which stores
+// both 3D points AND per-face UV coordinates. The main pipeline uses
+// EdgeDiscretizationCache with pre_populate_for_solid_full().
 
 /// Parallel solid triangulation using rayon (topology-first approach).
 ///
@@ -5563,30 +5403,10 @@ fn is_convex_polygon(points: &[Point2d]) -> bool {
 // Chord error refinement (placeholder)
 // ============================================================
 
-/// Refine mesh triangles based on chord error from the true surface.
-///
-/// For each triangle on a curved surface (has face_id info), check if the
-/// midpoint of each edge deviates more than `params.max_deviation` from the
-/// surface. If so, subdivide the triangle by inserting the midpoint.
-///
-/// This is a single-pass refinement (not iterative) for performance.
-/// Skip for planar faces (chord error is always 0 for planes).
-///
-/// TODO: This is complex to implement correctly and the existing adaptive
-/// interior points already handle curvature. For now, this is a placeholder.
-/// Future implementation should:
-/// 1. For each triangle with a known face_id, look up the surface
-/// 2. For each edge midpoint, compute the deviation from the surface
-/// 3. If deviation > max_deviation, insert the midpoint and subdivide
-/// 4. This requires access to the face-to-surface mapping (via face_id → Surface)
-#[allow(dead_code)]
-fn refine_chord_error(_mesh: &mut TriangleMesh, _params: &TriangulationParams) {
-    // Placeholder — not yet implemented
-    // The existing adaptive interior points in the surface-specific triangulation
-    // functions already handle curvature-based refinement. This function would
-    // provide an additional post-hoc refinement pass for edges that were not
-    // sufficiently sampled during initial triangulation.
-}
+// Note: Chord error refinement is implemented in parametric_domain.rs as
+// `refine_mesh_chord_error_uv()`, which operates on UV coordinates and
+// is called during `triangulate_surface_consistent()`. No separate
+// post-hoc refinement pass is needed here.
 
 // ============================================================
 // Vertex merging for watertight solids
