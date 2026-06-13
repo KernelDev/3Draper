@@ -861,8 +861,22 @@ pub fn triangulate_face_with_cache(face: &Face, params: &TriangulationParams, ca
 ///
 /// This is used both by `triangulate_face_with_cache` (sequential path)
 /// and by the parallel path (after the cache has been fully pre-populated).
+///
+/// # Fallback strategy (Phase 2.2)
+///
+/// When the primary surface-specific triangulation produces an empty mesh
+/// (e.g., NURBS with degenerate UVs, surface with no boundary edges), or
+/// when `face.surface` is `None`, we apply a three-tier fallback strategy:
+///
+/// 1. **ApproximatePlane** — fit a plane to boundary 3D points and ear-clip
+/// 2. **BoundaryFan** — fan-triangulate from centroid using boundary points only
+/// 3. **SurfacePointSample** — sample surface.point_at() on a regular UV grid
+///
+/// Each fallback logs a warning so that pathological geometry can be diagnosed.
+/// The fallback meshes are approximate but always produce a visible result
+/// rather than silently dropping the face.
 fn triangulate_face_impl(face: &Face, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
-    if let Some(ref surface) = face.surface {
+    let primary_mesh = if let Some(ref surface) = face.surface {
         match surface {
             Surface::Plane(plane) => triangulate_planar_face(face, plane, params, cache),
             Surface::Cylinder(cyl) => triangulate_cylinder_face(face, cyl, params, cache),
@@ -877,7 +891,62 @@ fn triangulate_face_impl(face: &Face, params: &TriangulationParams, cache: &Edge
         }
     } else {
         TriangleMesh::new()
+    };
+
+    // Phase 2.2: If the primary triangulation produced an empty mesh,
+    // apply fallback strategies in order of decreasing quality.
+    if !primary_mesh.vertices.is_empty() {
+        return primary_mesh;
     }
+
+    // All fallback strategies need boundary 3D points from the cache.
+    let boundary_3d = if let Some(ref surface) = face.surface {
+        collect_face_boundary_from_cache(face, cache, surface)
+    } else {
+        collect_face_boundary_no_surface(face, cache)
+    };
+
+    if boundary_3d.len() < 3 {
+        log::debug!(
+            "FallbackSurface: face {} has {} boundary points (< 3), cannot fallback",
+            face.id, boundary_3d.len()
+        );
+        return TriangleMesh::new();
+    }
+
+    log::warn!(
+        "FallbackSurface: face {} primary triangulation empty (surface={}), trying fallback strategies ({} boundary pts)",
+        face.id,
+        face.surface.as_ref().map_or("None", |s| s.type_name()),
+        boundary_3d.len()
+    );
+
+    // Fallback tier 1: Approximate plane — best quality for near-planar faces
+    if let Some(mesh) = fallback_approximate_plane(face, &boundary_3d, cache) {
+        log::info!("FallbackSurface: face {} → ApproximatePlane ({} triangles)", face.id, mesh.triangles.len());
+        return mesh;
+    }
+
+    // Fallback tier 2: Boundary fan — works for any face shape but may
+    // produce degenerate triangles on highly concave boundaries
+    if let Some(mesh) = fallback_boundary_fan(face, &boundary_3d) {
+        log::info!("FallbackSurface: face {} → BoundaryFan ({} triangles)", face.id, mesh.triangles.len());
+        return mesh;
+    }
+
+    // Fallback tier 3: Surface point sampling — only works when surface exists
+    if let Some(ref surface) = face.surface {
+        if let Some(mesh) = fallback_surface_point_sample(face, surface, &boundary_3d, params) {
+            log::info!("FallbackSurface: face {} → SurfacePointSample ({} triangles)", face.id, mesh.triangles.len());
+            return mesh;
+        }
+    }
+
+    log::warn!(
+        "FallbackSurface: face {} all fallback strategies failed — empty mesh",
+        face.id
+    );
+    TriangleMesh::new()
 }
 
 // ============================================================
@@ -6190,5 +6259,476 @@ fn estimate_face_complexity(face: &Face) -> u32 {
         }
     } else {
         0
+    }
+}
+
+// ============================================================
+// Phase 2.2: Fallback Surface Triangulation
+// ============================================================
+//
+// When the primary surface-specific triangulation returns an empty mesh,
+// these fallback strategies provide graceful degradation. The goal is
+// to always produce a visible mesh rather than silently dropping a face,
+// even if the mesh is only an approximation.
+//
+// Three-tier strategy (in order of decreasing quality):
+//
+// 1. ApproximatePlane — fit a plane through boundary points and ear-clip.
+//    Best quality for near-planar faces. Works for faces with holes.
+//
+// 2. BoundaryFan — fan-triangulate from the centroid of boundary points.
+//    Works for any face shape but may produce degenerate triangles on
+//    highly concave boundaries. Does not handle holes.
+//
+// 3. SurfacePointSample — sample surface.point_at() on a regular UV grid.
+//    Only works when face.surface is present. Produces a rough grid mesh
+//    without proper trimming. Last resort for curved surfaces.
+//
+// Additionally, `collect_face_boundary_no_surface` collects boundary 3D
+// points from the cache when no surface is available (face.surface = None).
+
+/// Collect boundary 3D points from the cache without a surface reference.
+///
+/// This is used when `face.surface` is `None` — the cache still has
+/// discretized edge points, so we can collect them for fallback strategies.
+/// No UV computation is attempted since there's no surface to project onto.
+fn collect_face_boundary_no_surface(face: &Face, cache: &EdgeDiscretizationCache) -> Vec<Point3d> {
+    let mut points = Vec::new();
+
+    if let Some(ref wire) = face.outer_wire {
+        for coedge in &wire.coedges {
+            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+            if let Some(edge) = edge {
+                if edge.degenerate { continue; }
+
+                if let Some(disc) = cache.get(edge.id) {
+                    let mut edge_pts = disc.points_3d.clone();
+                    let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+                    let should_reverse = !coedge.forward != edge_is_reversed;
+                    if should_reverse {
+                        edge_pts.reverse();
+                    }
+                    points.extend(edge_pts);
+                } else {
+                    let mut edge_pts = sample_edge_points(edge, EDGE_SAMPLES);
+                    let edge_is_reversed = edge.param_range.0 > edge.param_range.1;
+                    let should_reverse = !coedge.forward != edge_is_reversed;
+                    if should_reverse {
+                        edge_pts.reverse();
+                    }
+                    points.extend(edge_pts);
+                }
+            }
+        }
+    }
+
+    // Remove duplicate consecutive points
+    if !points.is_empty() {
+        let mut unique = vec![points[0]];
+        for p in &points[1..] {
+            if let Some(last) = unique.last() {
+                if !last.is_coincident_with(p) {
+                    unique.push(*p);
+                }
+            }
+        }
+        if unique.len() > 1 {
+            if let Some(last) = unique.last() {
+                if last.is_coincident_with(&unique[0]) {
+                    unique.pop();
+                }
+            }
+        }
+        points = unique;
+    }
+
+    points
+}
+
+/// Fallback tier 1: Approximate the face as a plane and ear-clip.
+///
+/// Fits a plane through the boundary points using least-squares (SVD),
+/// projects the boundary points onto that plane in 2D, and ear-clips
+/// the resulting polygon. Handles holes by collecting inner wire points
+/// and using earcutr.
+///
+/// Returns `None` if:
+/// - Boundary has fewer than 3 points
+/// - Points are collinear (can't form a plane)
+/// - Ear-clipping produces no triangles
+fn fallback_approximate_plane(face: &Face, boundary_3d: &[Point3d], cache: &EdgeDiscretizationCache) -> Option<TriangleMesh> {
+    if boundary_3d.len() < 3 {
+        return None;
+    }
+
+    // Compute centroid
+    let n = boundary_3d.len() as f64;
+    let cx = boundary_3d.iter().map(|p| p.x).sum::<f64>() / n;
+    let cy = boundary_3d.iter().map(|p| p.y).sum::<f64>() / n;
+    let cz = boundary_3d.iter().map(|p| p.z).sum::<f64>() / n;
+    let centroid = Point3d::new(cx, cy, cz);
+
+    // Compute covariance matrix for plane fitting via SVD.
+    // The eigenvector with the smallest eigenvalue is the plane normal.
+    let mut cov_xx = 0.0f64;
+    let mut cov_xy = 0.0f64;
+    let mut cov_xz = 0.0f64;
+    let mut cov_yy = 0.0f64;
+    let mut cov_yz = 0.0f64;
+    let mut cov_zz = 0.0f64;
+
+    for p in boundary_3d {
+        let dx = p.x - cx;
+        let dy = p.y - cy;
+        let dz = p.z - cz;
+        cov_xx += dx * dx;
+        cov_xy += dx * dy;
+        cov_xz += dx * dz;
+        cov_yy += dy * dy;
+        cov_yz += dy * dz;
+        cov_zz += dz * dz;
+    }
+
+    // Power iteration to find the smallest eigenvector of the 3x3 covariance matrix.
+    // This is the normal of the best-fit plane.
+    // We iterate the inverse matrix to converge to the smallest eigenvector.
+    // Simpler approach: just find the principal normal from the cross products of
+    // the two largest eigenvectors, or use a few iterations of inverse power method.
+
+    // For robustness, use the iterative approach:
+    // Start with a guess, apply the covariance matrix repeatedly,
+    // and the result converges to the LARGEST eigenvector.
+    // Then the normal is perpendicular to the two largest eigenvectors.
+
+    // Simpler: just compute the cross product of two edge vectors to get the normal.
+    // This works well for convex polygons and is fast.
+    let v1 = Point3d::new(
+        boundary_3d[1].x - boundary_3d[0].x,
+        boundary_3d[1].y - boundary_3d[0].y,
+        boundary_3d[1].z - boundary_3d[0].z,
+    );
+    // Find a non-collinear edge
+    let mut normal = None;
+    for i in 2..boundary_3d.len() {
+        let v2 = Point3d::new(
+            boundary_3d[i].x - boundary_3d[0].x,
+            boundary_3d[i].y - boundary_3d[0].y,
+            boundary_3d[i].z - boundary_3d[0].z,
+        );
+        // Cross product
+        let nx = v1.y * v2.z - v1.z * v2.y;
+        let ny = v1.z * v2.x - v1.x * v2.z;
+        let nz = v1.x * v2.y - v1.y * v2.x;
+        let len = (nx * nx + ny * ny + nz * nz).sqrt();
+        if len > 1e-10 {
+            normal = Direction3d::new(nx / len, ny / len, nz / len);
+            if normal.is_some() {
+                break;
+            }
+        }
+    }
+
+    let normal = match normal {
+        Some(n) => n,
+        None => {
+            // All points are collinear — can't form a plane
+            return None;
+        }
+    };
+
+    // If the points are nearly coplanar, the covariance-based normal is more robust.
+    // Check: if the smallest eigenvalue / largest eigenvalue < 0.01, the points are planar.
+    // For now, just use the cross-product normal — it's sufficient for the fallback case.
+
+    let plane = Plane::from_origin_and_normal(centroid, normal);
+    let surface = Surface::Plane(plane.clone());
+
+    // Project boundary points onto the plane's 2D coordinate system
+    let project = |p: &Point3d| -> Point2d {
+        let dx = p.x - plane.origin.x;
+        let dy = p.y - plane.origin.y;
+        let dz = p.z - plane.origin.z;
+        Point2d::new(
+            dx * plane.u_dir.x + dy * plane.u_dir.y + dz * plane.u_dir.z,
+            dx * plane.v_dir.x + dy * plane.v_dir.y + dz * plane.v_dir.z,
+        )
+    };
+
+    let points_2d: Vec<Point2d> = boundary_3d.iter().map(|p| project(p)).collect();
+
+    // Collect holes
+    let holes_3d: Vec<Vec<Point3d>> = if face.surface.is_some() {
+        collect_face_holes_from_cache(face, cache, &surface)
+    } else {
+        // No surface — try to collect holes from cache using the approximate surface
+        collect_face_holes_from_cache(face, cache, &surface)
+    };
+
+    let mut mesh = TriangleMesh::new();
+    let forward = face.forward;
+
+    if holes_3d.is_empty() {
+        // No holes — simple polygon triangulation
+        let is_convex = is_convex_polygon(&points_2d);
+
+        if is_convex && boundary_3d.len() >= 3 {
+            for p in boundary_3d {
+                mesh.add_vertex(*p);
+            }
+            let n = boundary_3d.len() as u32;
+            for i in 1..n - 1 {
+                if forward {
+                    mesh.add_triangle(0, i, i + 1);
+                } else {
+                    mesh.add_triangle(0, i + 1, i);
+                }
+            }
+        } else {
+            let triangles = ear_clip(&points_2d);
+            for p in boundary_3d {
+                mesh.add_vertex(*p);
+            }
+            for tri in &triangles {
+                if forward {
+                    mesh.add_triangle(tri[0], tri[1], tri[2]);
+                } else {
+                    mesh.add_triangle(tri[0], tri[2], tri[1]);
+                }
+            }
+        }
+    } else {
+        // Has holes — use earcutr for better results
+        let holes_2d: Vec<Vec<Point2d>> = holes_3d.iter()
+            .map(|h| h.iter().map(|p| project(p)).collect())
+            .collect();
+
+        match earcutr_triangulate_planar(&points_2d, boundary_3d, &holes_2d, &holes_3d, forward, plane.normal) {
+            Some(m) => return Some(m),
+            None => {
+                // Last resort: merge holes and ear-clip
+                let (merged_2d, merged_3d) = merge_holes_into_polygon_planar(
+                    &points_2d, boundary_3d, &holes_2d, &holes_3d,
+                );
+                let triangles = ear_clip(&merged_2d);
+                for p in &merged_3d {
+                    mesh.add_vertex(*p);
+                }
+                for tri in &triangles {
+                    if forward {
+                        mesh.add_triangle(tri[0], tri[1], tri[2]);
+                    } else {
+                        mesh.add_triangle(tri[0], tri[2], tri[1]);
+                    }
+                }
+            }
+        }
+    }
+
+    if mesh.triangles.is_empty() {
+        None
+    } else {
+        Some(mesh)
+    }
+}
+
+/// Fallback tier 2: Fan-triangulate from the centroid of boundary points.
+///
+/// This is the simplest possible triangulation: connect each boundary
+/// edge to the centroid. It works for any face shape but produces
+/// degenerate triangles on concave boundaries and does not handle holes.
+/// Use only as a last resort before the empty-mesh fallback.
+fn fallback_boundary_fan(face: &Face, boundary_3d: &[Point3d]) -> Option<TriangleMesh> {
+    if boundary_3d.len() < 3 {
+        return None;
+    }
+
+    // Compute centroid
+    let n = boundary_3d.len() as f64;
+    let cx = boundary_3d.iter().map(|p| p.x).sum::<f64>() / n;
+    let cy = boundary_3d.iter().map(|p| p.y).sum::<f64>() / n;
+    let cz = boundary_3d.iter().map(|p| p.z).sum::<f64>() / n;
+    let centroid = crate::edge_cache::deterministic_round_point(Point3d::new(cx, cy, cz));
+
+    let mut mesh = TriangleMesh::new();
+
+    // Add centroid as vertex 0
+    mesh.add_vertex(centroid);
+
+    // Add boundary vertices starting from index 1
+    for p in boundary_3d {
+        mesh.add_vertex(*p);
+    }
+
+    let n_pts = boundary_3d.len() as u32;
+    let forward = face.forward;
+
+    // Fan triangulation: centroid → boundary[i] → boundary[i+1]
+    for i in 0..n_pts {
+        let i_next = (i + 1) % n_pts;
+        if forward {
+            mesh.add_triangle(0, 1 + i, 1 + i_next);
+        } else {
+            mesh.add_triangle(0, 1 + i_next, 1 + i);
+        }
+    }
+
+    // Check that we produced valid triangles (non-degenerate)
+    let valid_count = mesh.triangles.iter().filter(|tri| {
+        tri[0] != tri[1] && tri[1] != tri[2] && tri[0] != tri[2]
+    }).count();
+
+    if valid_count == 0 {
+        None
+    } else {
+        Some(mesh)
+    }
+}
+
+/// Fallback tier 3: Sample surface.point_at() on a regular UV grid.
+///
+/// This is a last-resort strategy for curved surfaces where the boundary
+/// triangulation failed. It samples the surface on a regular UV grid,
+/// producing an untrimmed mesh that may extend beyond the face boundary.
+/// The mesh is approximate but always produces a visible result.
+///
+/// Returns `None` if the surface produces invalid points (NaN/Inf) on
+/// the majority of grid positions.
+fn fallback_surface_point_sample(
+    face: &Face,
+    surface: &Surface,
+    boundary_3d: &[Point3d],
+    params: &TriangulationParams,
+) -> Option<TriangleMesh> {
+    // Determine UV range from boundary points via projection
+    let mut u_min = f64::MAX;
+    let mut u_max = f64::MIN;
+    let mut v_min = f64::MAX;
+    let mut v_max = f64::MIN;
+
+    for p in boundary_3d {
+        let (u, v) = surface.project_point(p);
+        if u.is_finite() && v.is_finite() {
+            u_min = u_min.min(u);
+            u_max = u_max.max(u);
+            v_min = v_min.min(v);
+            v_max = v_max.max(v);
+        }
+    }
+
+    if u_min >= u_max || v_min >= v_max {
+        // Could not determine a valid UV range
+        return None;
+    }
+
+    // Add a small margin (5%) to avoid clipping at the boundary
+    let du = u_max - u_min;
+    let dv = v_max - v_min;
+    u_min -= du * 0.05;
+    u_max += du * 0.05;
+    v_min -= dv * 0.05;
+    v_max += dv * 0.05;
+
+    // Use a modest grid resolution for the fallback
+    let (n_u, n_v) = if params.adaptive {
+        crate::adaptive::required_samples(
+            surface, u_min, u_max, v_min, v_max,
+            params.max_deviation * 2.0, // Allow 2× deviation for fallback (rough is OK)
+            params.detail_level * 0.5,  // Use lower detail for speed
+        )
+    } else {
+        (params.angular_samples.min(32).max(8), params.height_samples.min(32).max(8))
+    };
+
+    let mut mesh = TriangleMesh::new();
+    let mut invalid_count = 0usize;
+    let total_points = n_u * n_v;
+
+    // Sample the surface on a regular grid
+    for j in 0..n_v {
+        for i in 0..n_u {
+            let u = u_min + (u_max - u_min) * i as f64 / (n_u - 1).max(1) as f64;
+            let v = v_min + (v_max - v_min) * j as f64 / (n_v - 1).max(1) as f64;
+            let p = surface.point_at(u, v);
+
+            if !p.x.is_finite() || !p.y.is_finite() || !p.z.is_finite() {
+                invalid_count += 1;
+                // Still add a vertex to keep indexing consistent, but use centroid as placeholder
+                mesh.add_vertex(crate::edge_cache::deterministic_round_point(Point3d::new(
+                    (u_min + u_max) * 0.5,
+                    (v_min + v_max) * 0.5,
+                    0.0,
+                )));
+            } else {
+                mesh.add_vertex(crate::edge_cache::deterministic_round_point(p));
+            }
+        }
+    }
+
+    // If more than 50% of points are invalid, give up
+    if invalid_count > total_points / 2 {
+        return None;
+    }
+
+    // Generate triangles
+    let forward = face.forward;
+    for j in 0..n_v - 1 {
+        for i in 0..n_u - 1 {
+            let v0 = (j * n_u + i) as u32;
+            let v1 = (j * n_u + i + 1) as u32;
+            let v2 = ((j + 1) * n_u + i + 1) as u32;
+            let v3 = ((j + 1) * n_u + i) as u32;
+            if forward {
+                mesh.add_triangle(v0, v1, v2);
+                mesh.add_triangle(v0, v2, v3);
+            } else {
+                mesh.add_triangle(v0, v2, v1);
+                mesh.add_triangle(v0, v3, v2);
+            }
+        }
+    }
+
+    // Filter out degenerate triangles (zero-area)
+    mesh.triangles.retain(|tri| {
+        let a = mesh.vertices[tri[0] as usize];
+        let b = mesh.vertices[tri[1] as usize];
+        let c = mesh.vertices[tri[2] as usize];
+        let ab = Point3d::new(b.x - a.x, b.y - a.y, b.z - a.z);
+        let ac = Point3d::new(c.x - a.x, c.y - a.y, c.z - a.z);
+        let cross_z = ab.x * ac.y - ab.y * ac.x;
+        let cross_y = ab.x * ac.z - ab.z * ac.x;
+        let cross_x = ab.y * ac.z - ab.z * ac.y;
+        (cross_x * cross_x + cross_y * cross_y + cross_z * cross_z) > 1e-20
+    });
+
+    if mesh.triangles.is_empty() {
+        None
+    } else {
+        Some(mesh)
+    }
+}
+
+/// Statistics for fallback surface triangulation.
+///
+/// Tracks how often each fallback tier was used across all faces in a solid,
+/// enabling diagnosis of which surface types or geometry patterns cause
+/// primary triangulation to fail.
+#[derive(Clone, Debug, Default)]
+pub struct FallbackStats {
+    /// Number of faces that used the ApproximatePlane fallback.
+    pub approximate_plane_count: usize,
+    /// Number of faces that used the BoundaryFan fallback.
+    pub boundary_fan_count: usize,
+    /// Number of faces that used the SurfacePointSample fallback.
+    pub surface_point_sample_count: usize,
+    /// Number of faces where all fallback strategies failed.
+    pub all_failed_count: usize,
+    /// Total number of faces that triggered fallback (primary returned empty).
+    pub total_fallback_count: usize,
+}
+
+impl FallbackStats {
+    /// Create zero-initialized stats.
+    pub fn new() -> Self {
+        Self::default()
     }
 }

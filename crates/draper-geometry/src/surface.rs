@@ -1223,6 +1223,20 @@ impl Surface {
         }
     }
 
+    /// Return the surface type name as a static string (for logging/diagnostics).
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Surface::Plane(_) => "Plane",
+            Surface::Cylinder(_) => "Cylinder",
+            Surface::Cone(_) => "Cone",
+            Surface::Sphere(_) => "Sphere",
+            Surface::Torus(_) => "Torus",
+            Surface::Revolution(_) => "Revolution",
+            Surface::Extrusion(_) => "Extrusion",
+            Surface::Nurbs(_) => "Nurbs",
+        }
+    }
+
     /// Evaluate the surface at (u, v).
     pub fn point_at(&self, u: f64, v: f64) -> Point3d {
         match self {
