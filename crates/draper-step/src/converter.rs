@@ -2762,11 +2762,11 @@ impl<'a> StepConverter<'a> {
         }
 
         let mut mesh = TriangleMesh::new();
-        // Two-tier dedup: bit-exact first (edge cache), tolerance fallback for
-        // non-cached edges (step_id==0) and different EDGE_CURVE entities.
-        // Strict tolerance (1 PPM) — bit-exact is the primary path.
-        let merge_tol = tol_ctx.model_scale * 1e-6; // 1 PPM — strict!
-        let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
+        // Bit-exact-only dedup: the edge cache with deterministic rounding (48-bit
+        // mantissa) guarantees bit-identical 3D coordinates on shared edges.
+        // Tolerance-based dedup contradicts this guarantee — it silently merges
+        // non-identical vertices, hiding bugs and distorting geometry.
+        let mut dedup_map = draper_mesh::mesh::VertexDedupMap::bit_exact();
         let mut total_face_vertices = 0usize;
         for (fi, face_data) in face_data_list.iter().enumerate() {
             let surface_type = match &face_data.surface {
@@ -3056,10 +3056,9 @@ impl<'a> StepConverter<'a> {
         let brep_start = StdInstant::now();
 
         let mut mesh = TriangleMesh::new();
-        // Two-tier dedup: bit-exact first, tolerance fallback for non-cached edges.
-        // Strict tolerance (1 PPM) — bit-exact is the primary path.
-        let merge_tol = tol_ctx.model_scale * 1e-6; // 1 PPM — strict!
-        let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
+        // Bit-exact-only dedup: edge cache with deterministic rounding guarantees
+        // bit-identical coordinates on shared edges. No tolerance fallback needed.
+        let mut dedup_map = draper_mesh::mesh::VertexDedupMap::bit_exact();
         let mut total_face_vertices_detailed = 0usize;
         let mut face_infos = Vec::new();
         let mut next_face_id: u64 = 1;
@@ -3341,9 +3340,8 @@ impl<'a> StepConverter<'a> {
         };
 
         let mut mesh = TriangleMesh::new();
-        // Two-tier dedup: bit-exact first, tolerance fallback for non-cached edges.
-        let merge_tol = tol_ctx.model_scale * 1e-6; // 1 PPM — strict!
-        let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
+        // Bit-exact-only dedup: edge cache guarantees bit-identical shared-edge points.
+        let mut dedup_map = draper_mesh::mesh::VertexDedupMap::bit_exact();
         for face_data in &face_data_list {
             let face_mesh = self.surface_to_mesh(face_data, params, bbox);
             mesh.merge_deduplicating(&face_mesh, &mut dedup_map);

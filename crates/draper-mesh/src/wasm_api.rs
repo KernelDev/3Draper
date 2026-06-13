@@ -164,6 +164,182 @@ impl MeshData {
     }
 }
 
+/// Incremental mesh update for OffscreenCanvas + Web Worker integration.
+///
+/// Represents a partial or complete mesh update that can be sent from a
+/// Web Worker to the main thread via `postMessage`. Contains enough
+/// information to efficiently update a WebGL/WebGPU buffer without
+/// re-uploading the entire mesh every frame.
+///
+/// # Wire Format (for `postMessage` with transferable ArrayBuffers)
+///
+/// ```js
+/// {
+///   type: 'partial' | 'complete',
+///   progress: number,           // 0.0 to 1.0
+///   vertex_count: number,
+///   triangle_count: number,
+///   vertices: Float32Array,     // transferable
+///   indices: Uint32Array,       // transferable
+///   normals: Float32Array|null, // transferable
+///   face_ids: Float64Array|null // transferable
+/// }
+/// ```
+///
+/// # Usage with OffscreenCanvas
+///
+/// ```js
+/// // main.js — main thread
+/// const worker = new Worker('triangulate-worker.js');
+/// const offscreen = canvas.transferControlToOffscreen();
+/// worker.postMessage({ type: 'init', canvas: offscreen, stepData }, [offscreen]);
+///
+/// // triangulate-worker.js — Web Worker
+/// import init, { WasmChunkedTriangulator } from './pkg/draper_mesh.js';
+///
+/// self.onmessage = async (e) => {
+///   if (e.data.type === 'init') {
+///     await init();
+///     const gl = e.data.canvas.getContext('webgl2');
+///     const triangulator = new WasmChunkedTriangulator(e.data.stepData);
+///     const renderLoop = () => {
+///       const result = triangulator.tick(8); // 8ms budget
+///       // Upload partial mesh to WebGL and render
+///       uploadMesh(gl, triangulator.getMeshData());
+///       render(gl);
+///       if (!result.is_complete) {
+///         requestAnimationFrame(renderLoop);
+///       }
+///     };
+///     requestAnimationFrame(renderLoop);
+///   }
+/// };
+/// ```
+#[derive(Debug)]
+pub struct IncrementalMeshUpdate {
+    /// Whether this is a partial update or the final complete mesh.
+    pub is_complete: bool,
+    /// Progress as a fraction in [0.0, 1.0].
+    pub progress: f64,
+    /// The mesh data (can be partial).
+    pub mesh_data: MeshData,
+}
+
+impl IncrementalMeshUpdate {
+    /// Create an incremental update from a `ChunkResult` and mesh.
+    ///
+    /// This converts the internal mesh representation to a JS-friendly
+    /// flat format suitable for transfer to the main thread or upload
+    /// to a WebGL/WebGPU buffer.
+    pub fn from_chunk_result(
+        result: &crate::triangulate::ChunkResult,
+        mesh: &TriangleMesh,
+    ) -> Self {
+        // Note: result.faces_processed is only the faces from THIS tick.
+        // The caller should track cumulative progress separately.
+        // Here we report whether the full triangulation is complete.
+        let progress = if result.is_complete { 1.0 } else { 0.5 };
+
+        Self {
+            is_complete: result.is_complete,
+            progress,
+            mesh_data: MeshData::from_mesh(mesh),
+        }
+    }
+
+    /// Estimate the memory size of this update in bytes.
+    pub fn size_bytes(&self) -> usize {
+        self.mesh_data.size_bytes()
+    }
+}
+
+/// Configuration for WASM-based incremental triangulation.
+///
+/// This struct is passed from JavaScript to configure the
+/// ChunkedBrepTriangulator's behavior in a Web Worker context.
+///
+/// # Example (JavaScript)
+///
+/// ```js
+/// const config = {
+///   time_budget_ms: 8,       // 8ms per tick (120fps)
+///   lod: 0.5,                // Interactive quality
+///   max_face_triangles: 4000, // Triangle budget per face
+///   adaptive: true,           // Use adaptive sampling
+/// };
+/// ```
+#[derive(Clone, Debug)]
+pub struct WasmTriangulationConfig {
+    /// Time budget per tick in milliseconds.
+    /// Default: 8ms (120fps target).
+    pub time_budget_ms: f64,
+    /// LOD level in [0.0, 1.0].
+    /// Default: 0.5 (interactive).
+    pub lod: f64,
+    /// Maximum triangles per face.
+    /// Default: 4000.
+    pub max_face_triangles: usize,
+    /// Whether to use adaptive sampling.
+    /// Default: true.
+    pub adaptive: bool,
+}
+
+impl Default for WasmTriangulationConfig {
+    fn default() -> Self {
+        Self {
+            time_budget_ms: 8.0,
+            lod: 0.5,
+            max_face_triangles: 4000,
+            adaptive: true,
+        }
+    }
+}
+
+impl WasmTriangulationConfig {
+    /// Create config for 120fps preview (coarse quality).
+    pub fn preview_120fps() -> Self {
+        Self {
+            time_budget_ms: 8.0,
+            lod: 0.15,
+            max_face_triangles: 500,
+            adaptive: true,
+        }
+    }
+
+    /// Create config for 60fps interactive (balanced).
+    pub fn interactive_60fps() -> Self {
+        Self {
+            time_budget_ms: 16.0,
+            lod: 0.5,
+            max_face_triangles: 4000,
+            adaptive: true,
+        }
+    }
+
+    /// Create config for 30fps high quality.
+    pub fn high_quality_30fps() -> Self {
+        Self {
+            time_budget_ms: 33.0,
+            lod: 0.75,
+            max_face_triangles: 8000,
+            adaptive: true,
+        }
+    }
+
+    /// Convert to `TriangulationParams` for use with the triangulator.
+    pub fn to_params(&self) -> crate::triangulate::TriangulationParams {
+        let mut params = crate::triangulate::TriangulationParams::for_lod(self.lod);
+        params.max_face_triangles = self.max_face_triangles;
+        params.adaptive = self.adaptive;
+        params
+    }
+
+    /// Convert time budget to `std::time::Duration`.
+    pub fn time_budget(&self) -> std::time::Duration {
+        std::time::Duration::from_micros((self.time_budget_ms * 1000.0) as u64)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,5 +388,50 @@ mod tests {
 
         // 9 floats (vertices) + 3 uint32 (indices) = 36 + 12 = 48 bytes minimum
         assert!(data.size_bytes() >= 48);
+    }
+
+    #[test]
+    fn test_incremental_mesh_update() {
+        let mut mesh = TriangleMesh::new();
+        let v0 = mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0));
+        let v1 = mesh.add_vertex(Point3d::new(1.0, 0.0, 0.0));
+        let v2 = mesh.add_vertex(Point3d::new(0.0, 1.0, 0.0));
+        mesh.add_triangle(v0, v1, v2);
+
+        let result = crate::triangulate::ChunkResult {
+            faces_processed: 1,
+            total_faces: 10,
+            elapsed: std::time::Duration::from_millis(2),
+            is_complete: false,
+        };
+
+        let update = IncrementalMeshUpdate::from_chunk_result(&result, &mesh);
+        assert!(!update.is_complete);
+        assert_eq!(update.mesh_data.vertex_count, 3);
+    }
+
+    #[test]
+    fn test_wasm_triangulation_config() {
+        let config = WasmTriangulationConfig::interactive_60fps();
+        assert_eq!(config.time_budget_ms, 16.0);
+        assert_eq!(config.lod, 0.5);
+
+        let params = config.to_params();
+        assert!(params.adaptive);
+        assert_eq!(params.max_face_triangles, 4000);
+
+        let budget = config.time_budget();
+        assert_eq!(budget.as_millis(), 16);
+    }
+
+    #[test]
+    fn test_wasm_config_presets() {
+        let preview = WasmTriangulationConfig::preview_120fps();
+        assert!(preview.time_budget_ms < 10.0);
+        assert!(preview.lod < 0.3);
+
+        let hq = WasmTriangulationConfig::high_quality_30fps();
+        assert!(hq.time_budget_ms > 20.0);
+        assert!(hq.lod > 0.5);
     }
 }
