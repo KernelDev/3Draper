@@ -444,6 +444,251 @@ pub fn build_glb(mesh: &TriangleMesh) -> Result<Vec<u8>, ExportError> {
 }
 
 // ============================================================
+// glTF Scene Export (Multi-Mesh Assembly)
+// ============================================================
+
+/// Export multiple meshes as a single glTF 2.0 (GLB) file with separate primitives.
+///
+/// Each mesh becomes a separate glTF mesh/primitive within the same scene.
+/// This is useful for assembly export where each part is a separate mesh
+/// that can be individually selected or styled in the viewer.
+///
+/// # Arguments
+/// * `meshes` — List of (name, mesh) pairs. Each name becomes the glTF mesh name.
+/// * `path` — Output file path (should end in `.glb`).
+pub fn export_gltf_scene(meshes: &[(&str, &TriangleMesh)], path: &str) -> Result<(), ExportError> {
+    if meshes.is_empty() {
+        return Err(ExportError::InvalidMesh("No meshes to export".into()));
+    }
+
+    let glb_data = build_glb_scene(meshes)?;
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(&glb_data)?;
+    Ok(())
+}
+
+/// Build a GLB binary buffer containing multiple meshes as separate primitives.
+///
+/// The structure follows the glTF 2.0 specification:
+/// - Each mesh gets its own accessor for positions, normals, and indices
+/// - All data is packed into a single binary buffer
+/// - Each mesh is a separate node in the scene hierarchy
+pub fn build_glb_scene(meshes: &[(&str, &TriangleMesh)]) -> Result<Vec<u8>, ExportError> {
+    // Collect all binary data and build the JSON scene
+    let mut bin_data = Vec::new();
+    let mut buffer_views = Vec::new();
+    let mut accessors = Vec::new();
+    let mut mesh_defs = Vec::new();
+    let mut nodes = Vec::new();
+
+    let mut bv_offset = 0u32;
+    let mut acc_idx = 0u32;
+
+    for (mesh_name, mesh) in meshes {
+        if mesh.vertices.is_empty() || mesh.triangles.is_empty() {
+            continue;
+        }
+
+        // --- Positions ---
+        let pos_offset = bin_data.len();
+        for v in &mesh.vertices {
+            bin_data.extend_from_slice(&(v.x as f32).to_le_bytes());
+            bin_data.extend_from_slice(&(v.y as f32).to_le_bytes());
+            bin_data.extend_from_slice(&(v.z as f32).to_le_bytes());
+        }
+        let pos_byte_len = (bin_data.len() - pos_offset) as u32;
+
+        buffer_views.push(serde_json::json!({
+            "buffer": 0,
+            "byteOffset": bv_offset,
+            "byteLength": pos_byte_len,
+            "target": 34962 // ARRAY_BUFFER
+        }));
+
+        let pos_acc = acc_idx;
+        accessors.push(serde_json::json!({
+            "bufferView": bv_offset / 4, // simplified index
+            "byteOffset": 0,
+            "componentType": 5126, // FLOAT
+            "count": mesh.vertices.len(),
+            "type": "VEC3",
+            "min": [mesh.vertices.iter().map(|v| v.x as f64).fold(f64::MAX, f64::min),
+                    mesh.vertices.iter().map(|v| v.y as f64).fold(f64::MAX, f64::min),
+                    mesh.vertices.iter().map(|v| v.z as f64).fold(f64::MAX, f64::min)],
+            "max": [mesh.vertices.iter().map(|v| v.x as f64).fold(f64::MIN, f64::max),
+                    mesh.vertices.iter().map(|v| v.y as f64).fold(f64::MIN, f64::max),
+                    mesh.vertices.iter().map(|v| v.z as f64).fold(f64::MIN, f64::max)]
+        }));
+        acc_idx += 1;
+        bv_offset += pos_byte_len;
+
+        // Pad to 4-byte alignment
+        while bin_data.len() % 4 != 0 {
+            bin_data.push(0);
+        }
+        bv_offset = bin_data.len() as u32;
+
+        // --- Normals (if available) ---
+        let norm_acc = if let Some(ref normals) = mesh.normals {
+            let norm_offset = bin_data.len();
+            for n in normals {
+                bin_data.extend_from_slice(&(n[0] as f32).to_le_bytes());
+                bin_data.extend_from_slice(&(n[1] as f32).to_le_bytes());
+                bin_data.extend_from_slice(&(n[2] as f32).to_le_bytes());
+            }
+            let norm_byte_len = (bin_data.len() - norm_offset) as u32;
+
+            buffer_views.push(serde_json::json!({
+                "buffer": 0,
+                "byteOffset": bv_offset,
+                "byteLength": norm_byte_len,
+                "target": 34962
+            }));
+
+            let na = acc_idx;
+            accessors.push(serde_json::json!({
+                "bufferView": buffer_views.len() - 1,
+                "byteOffset": 0,
+                "componentType": 5126,
+                "count": normals.len(),
+                "type": "VEC3"
+            }));
+            acc_idx += 1;
+            bv_offset += norm_byte_len;
+
+            while bin_data.len() % 4 != 0 {
+                bin_data.push(0);
+            }
+            bv_offset = bin_data.len() as u32;
+
+            Some(na)
+        } else {
+            None
+        };
+
+        // --- Indices ---
+        let idx_offset = bin_data.len();
+        let use_u32 = mesh.vertices.len() > 65535;
+        for tri in &mesh.triangles {
+            if use_u32 {
+                bin_data.extend_from_slice(&tri[0].to_le_bytes());
+                bin_data.extend_from_slice(&tri[1].to_le_bytes());
+                bin_data.extend_from_slice(&tri[2].to_le_bytes());
+            } else {
+                bin_data.extend_from_slice(&(tri[0] as u16).to_le_bytes());
+                bin_data.extend_from_slice(&(tri[1] as u16).to_le_bytes());
+                bin_data.extend_from_slice(&(tri[2] as u16).to_le_bytes());
+            }
+        }
+        let idx_byte_len = (bin_data.len() - idx_offset) as u32;
+        let idx_count = mesh.triangles.len() * 3;
+
+        buffer_views.push(serde_json::json!({
+            "buffer": 0,
+            "byteOffset": bv_offset,
+            "byteLength": idx_byte_len,
+            "target": 34963 // ELEMENT_ARRAY_BUFFER
+        }));
+
+        let idx_acc = acc_idx;
+        accessors.push(serde_json::json!({
+            "bufferView": buffer_views.len() - 1,
+            "byteOffset": 0,
+            "componentType": if use_u32 { 5125 } else { 5123 },
+            "count": idx_count,
+            "type": "SCALAR"
+        }));
+        acc_idx += 1;
+        bv_offset += idx_byte_len;
+
+        while bin_data.len() % 4 != 0 {
+            bin_data.push(0);
+        }
+        bv_offset = bin_data.len() as u32;
+
+        // Build mesh primitive
+        let mut attributes = serde_json::json!({
+            "POSITION": pos_acc
+        });
+        if let Some(na) = norm_acc {
+            attributes["NORMAL"] = serde_json::json!(na);
+        }
+
+        let primitive = serde_json::json!({
+            "attributes": attributes,
+            "indices": idx_acc,
+            "mode": 4 // TRIANGLES
+        });
+
+        let mesh_def = serde_json::json!({
+            "name": mesh_name,
+            "primitives": [primitive]
+        });
+
+        let mesh_idx = mesh_defs.len();
+        mesh_defs.push(mesh_def);
+
+        nodes.push(serde_json::json!({
+            "name": mesh_name,
+            "mesh": mesh_idx
+        }));
+    }
+
+    if mesh_defs.is_empty() {
+        return Err(ExportError::InvalidMesh("All meshes are empty".into()));
+    }
+
+    // Build glTF JSON
+    let scene_children: Vec<serde_json::Value> = (0..nodes.len())
+        .map(|i| serde_json::json!(i))
+        .collect();
+
+    let gltf_json = serde_json::json!({
+        "asset": { "version": "2.0", "generator": "3Draper" },
+        "scene": 0,
+        "scenes": [{ "name": "Assembly", "nodes": scene_children }],
+        "nodes": nodes,
+        "meshes": mesh_defs,
+        "accessors": accessors,
+        "bufferViews": buffer_views,
+        "buffers": [{ "byteLength": bin_data.len() }]
+    });
+
+    let json_str = serde_json::to_string_packed(&gltf_json)
+        .map_err(|e| ExportError::InvalidMesh(format!("JSON serialization failed: {}", e)))?;
+
+    // Pad JSON to 4-byte alignment
+    let mut json_bytes = json_str.into_bytes();
+    while json_bytes.len() % 4 != 0 {
+        json_bytes.push(b' ');
+    }
+
+    // Build GLB
+    let json_len = json_bytes.len() as u32;
+    let bin_len = bin_data.len() as u32;
+    let total_len = 12 + 8 + json_len + 8 + bin_len;
+
+    let mut glb = Vec::with_capacity(total_len as usize);
+
+    // GLB header
+    glb.extend_from_slice(&0x46546C67u32.to_le_bytes()); // magic: "glTF"
+    glb.extend_from_slice(&2u32.to_le_bytes());           // version
+    glb.extend_from_slice(&total_len.to_le_bytes());
+
+    // JSON chunk
+    glb.extend_from_slice(&json_len.to_le_bytes());
+    glb.extend_from_slice(&0x4E4F534Au32.to_le_bytes()); // "JSON"
+    glb.extend_from_slice(&json_bytes);
+
+    // BIN chunk
+    glb.extend_from_slice(&bin_len.to_le_bytes());
+    glb.extend_from_slice(&0x004E4942u32.to_le_bytes()); // "BIN\0"
+    glb.extend_from_slice(&bin_data);
+
+    Ok(glb)
+}
+
+// ============================================================
 // 4.4.2 USD/USDZ Export (Stub)
 // ============================================================
 
@@ -455,6 +700,92 @@ pub fn export_usd(_mesh: &TriangleMesh, _path: &str) -> Result<(), ExportError> 
     Err(ExportError::UnsupportedFormat(
         "USD export not yet implemented".into(),
     ))
+}
+
+/// Export a triangle mesh as USDA (ASCII USD) format.
+///
+/// USD (Universal Scene Description) is Pixar's scene description format.
+/// This exports a minimal valid USDA file with a single Mesh prim containing
+/// the triangulated geometry. The output can be opened in USD-compatible
+/// viewers like NVIDIA Omniverse, USD View, or Blender (via USD import).
+///
+/// # Limitations
+/// - ASCII format only (not binary USDC/USDZ)
+/// - No materials or shaders (just geometry)
+/// - No instancing or scene hierarchy
+pub fn export_usda(mesh: &TriangleMesh, path: &str) -> Result<(), ExportError> {
+    if mesh.vertices.is_empty() || mesh.triangles.is_empty() {
+        return Err(ExportError::InvalidMesh("Mesh has no vertices or triangles".into()));
+    }
+
+    let mut out = String::new();
+
+    // USDA header
+    out.push_str("#usda 1.0\n");
+    out.push_str("(\n");
+    out.push_str("    metersPerUnit = 0.001\n"); // mm → meters
+    out.push_str("    upAxis = \"Z\"\n");
+    out.push_str(")\n\n");
+    out.push_str("def Xform \"Root\"\n{\n");
+    out.push_str("    def Mesh \"Body\"\n    {\n");
+
+    // Points
+    out.push_str("        point3f[] points = [\n");
+    for (i, v) in mesh.vertices.iter().enumerate() {
+        out.push_str(&format!("            ({:.10}, {:.10}, {:.10})",
+            v.x, v.y, v.z));
+        if i < mesh.vertices.len() - 1 {
+            out.push_str(",\n");
+        } else {
+            out.push_str("\n");
+        }
+    }
+    out.push_str("        ]\n");
+
+    // Face vertex counts (all triangles = 3)
+    out.push_str("        int[] faceVertexCounts = [");
+    for (i, _) in mesh.triangles.iter().enumerate() {
+        if i > 0 { out.push_str(", "); }
+        out.push_str("3");
+    }
+    out.push_str("]\n");
+
+    // Face vertex indices
+    out.push_str("        int[] faceVertexIndices = [\n");
+    for (i, tri) in mesh.triangles.iter().enumerate() {
+        out.push_str(&format!("            {}, {}, {}",
+            tri[0], tri[1], tri[2]));
+        if i < mesh.triangles.len() - 1 {
+            out.push_str(",\n");
+        } else {
+            out.push_str("\n");
+        }
+    }
+    out.push_str("        ]\n");
+
+    // Normals (if available)
+    if let Some(ref normals) = mesh.normals {
+        out.push_str("        normal3f[] normals = [\n");
+        for (i, n) in normals.iter().enumerate() {
+            out.push_str(&format!("            ({:.10}, {:.10}, {:.10})",
+                n[0], n[1], n[2]));
+            if i < normals.len() - 1 {
+                out.push_str(",\n");
+            } else {
+                out.push_str("\n");
+            }
+        }
+        out.push_str("        ] (\n");
+        out.push_str("            interpolation = \"vertex\"\n");
+        out.push_str("        )\n");
+    }
+
+    out.push_str("    }\n");
+    out.push_str("}\n");
+
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(out.as_bytes())?;
+    Ok(())
 }
 
 // ============================================================
