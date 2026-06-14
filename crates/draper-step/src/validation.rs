@@ -1996,7 +1996,6 @@ fn fix_orphan_face_surfaces(entities: &mut Vec<StepEntity>) -> usize {
                     type_name: "PLANE".to_string(),
                     params: vec![StepValue::Ref(0)], // Placeholder — converter will handle
                     sub_entities: vec![],
-                    parent_id: None,
                 });
 
                 // Update the face to reference our new plane
