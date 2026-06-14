@@ -7804,51 +7804,70 @@ impl<'a> StepConverter<'a> {
             }).collect()
         } else {
             // No PCURVE — project 3D points to surface.
-            // For NURBS surfaces, project_point() is extremely slow (~146 surface evaluations
-            // per point) and can be inaccurate. Use a two-step approach instead:
-            // 1. Try the full project_point() on the first point to get an initial UV
-            // 2. For subsequent points, use Newton-Raphson from the previous point's UV
-            //    as a starting guess — this is ~10x faster since the initial guess is close.
+            // For NURBS surfaces, we use the same adaptive strategy as
+            // EdgeDiscretizationCache::compute_uvs():
+            // - Small UV ranges (< 10 units): chain Newton-Raphson (fast, reliable)
+            // - Large UV ranges (>= 10 units): independent project_point() per point
+            //   (deterministic — same 3D point → same UV regardless of traversal order)
+            // - Brute-force fallback if projection error is too large
             if let Surface::Nurbs(ref nurbs) = surface {
                 let (u_min, u_max) = nurbs.u_range();
                 let (v_min, v_max) = nurbs.v_range();
+                let u_range = u_max - u_min;
+                let v_range = v_max - v_min;
+                let use_chain_newton = u_range < 10.0 && v_range < 10.0;
+
                 let mut uvs = Vec::with_capacity(points_3d.len());
                 let mut prev_u = (u_min + u_max) * 0.5;
                 let mut prev_v = (v_min + v_max) * 0.5;
+                let mut newton_failures = 0usize;
 
                 for (i, p) in points_3d.iter().enumerate() {
-                    if i == 0 {
-                        // First point: use the expensive full projection
-                        let (u, v) = surface.project_point(p);
-                        uvs.push(Point2d::new(u, v));
-                        prev_u = u;
-                        prev_v = v;
+                    let (u, v) = if use_chain_newton && i > 0 {
+                        // Chain Newton for small UV ranges — fast and reliable
+                        draper_mesh::reproject_nurbs_point(nurbs, p, prev_u, prev_v)
                     } else {
-                        // Subsequent points: use Newton-Raphson from previous UV.
-                        // Since boundary points are close together, the previous UV
-                        // is an excellent starting guess (~3-5 Newton iterations instead
-                        // of 146 grid search evaluations).
-                        let (u, v) = draper_mesh::reproject_nurbs_point(
-                            nurbs, p, prev_u, prev_v,
-                        );
-                        // Verify the result — if Newton diverged, fall back
-                        let proj_p = surface.point_at(u, v);
-                        let dx = proj_p.x - p.x;
-                        let dy = proj_p.y - p.y;
-                        let dz = proj_p.z - p.z;
-                        let err = (dx*dx + dy*dy + dz*dz).sqrt();
-                        if err > 1e-3 {
-                            // Newton-Raphson diverged — use full projection
-                            let (u, v) = surface.project_point(p);
-                            uvs.push(Point2d::new(u, v));
-                            prev_u = u;
-                            prev_v = v;
+                        // Independent project_point() for large UV ranges or first point
+                        surface.project_point(p)
+                    };
+
+                    // Validate: check that the projected UV maps back close to the target
+                    let proj_p = surface.point_at(u, v);
+                    let err = p.distance_to(&proj_p);
+
+                    if err > 1e-4 {
+                        // Projection failed — try brute-force grid search
+                        let grid_size = draper_mesh::adaptive_grid_size(u_range, v_range);
+                        let (ub, vb) = draper_mesh::brute_force_project_point(nurbs, p, grid_size);
+                        let bf_p = surface.point_at(ub, vb);
+                        let bf_err = p.distance_to(&bf_p);
+
+                        if bf_err < err {
+                            uvs.push(Point2d::new(ub, vb));
+                            prev_u = ub;
+                            prev_v = vb;
                         } else {
                             uvs.push(Point2d::new(u, v));
                             prev_u = u;
                             prev_v = v;
+                            log::error!(
+                                "NURBS projection failed in converter: point={:?}, error={:.2e}, brute_force_error={:.2e}",
+                                p, err, bf_err
+                            );
                         }
+                        newton_failures += 1;
+                    } else {
+                        uvs.push(Point2d::new(u, v));
+                        prev_u = u;
+                        prev_v = v;
                     }
+                }
+
+                if newton_failures > 0 {
+                    log::warn!(
+                        "NURBS UV (converter): {}/{} projections failed (u_range={:.1}, v_range={:.1})",
+                        newton_failures, points_3d.len(), u_range, v_range,
+                    );
                 }
                 uvs
             } else {

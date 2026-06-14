@@ -893,7 +893,7 @@ impl EdgeDiscretizationCache {
 /// For a surface with U range 220 units, a 100×100 grid gives 2.2 units
 /// per cell, which is sufficient for finding the correct initial guess
 /// for Newton-Raphson refinement.
-pub(crate) fn adaptive_grid_size(u_range: f64, v_range: f64) -> usize {
+pub fn adaptive_grid_size(u_range: f64, v_range: f64) -> usize {
     let max_range = u_range.max(v_range);
     if max_range < 10.0 {
         20       // Small range — coarse grid is fine
@@ -921,7 +921,7 @@ pub(crate) fn adaptive_grid_size(u_range: f64, v_range: f64) -> usize {
 /// Grid size 100 → 10,201 evaluations per point. Only used as fallback
 /// when project_point() fails, and only for boundary points (typically
 /// < 100 per edge). Applied once and cached by the edge cache.
-pub(crate) fn brute_force_project_point(
+pub fn brute_force_project_point(
     nurbs: &draper_geometry::NurbsSurface,
     point: &Point3d,
     grid_size: usize,
