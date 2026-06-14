@@ -966,9 +966,13 @@ pub fn triangulate_surface_consistent(
             }
             // Reproject UVs from 3D points when they are out of range.
             // Simple clamping is incorrect — it snaps UVs to surface edges
-            // rather than finding the correct parameterization. Instead, we
-            // use surface.project_point() to find the true UV from the 3D
-            // point, and only clamp as a last resort for NaN/Inf cases.
+            // rather than finding the correct parameterization. We use
+            // brute_force_project_point() which has a finer grid than
+            // surface.project_point() (11×11) and is more reliable for
+            // surfaces with large UV ranges.
+            let u_range_nurbs = nurb_u_max - nurb_u_min;
+            let v_range_nurbs = nurb_v_max - nurb_v_min;
+            let grid_size = crate::edge_cache::adaptive_grid_size(u_range_nurbs, v_range_nurbs);
             let mut reprojected_count = 0usize;
             for (i, uv) in outer_uv.iter_mut().enumerate() {
                 let needs_reproject = !uv.u.is_finite() || !uv.v.is_finite()
@@ -976,26 +980,35 @@ pub fn triangulate_surface_consistent(
                     || uv.v < nurb_v_min - v_margin || uv.v > nurb_v_max + v_margin;
 
                 if needs_reproject {
-                    // UV is out of range — reproject from 3D point
+                    // UV is out of range — reproject from 3D point using brute-force
                     if let Some(p3d) = boundary_points_3d.get(i) {
-                        let (new_u, new_v) = surface.project_point(p3d);
+                        let (new_u, new_v) = crate::edge_cache::brute_force_project_point(
+                            nurbs, p3d, grid_size,
+                        );
 
                         // Check if reprojected UV is valid
                         if new_u.is_finite() && new_v.is_finite() {
                             *uv = Point2d::new(new_u, new_v);
                             reprojected_count += 1;
                         } else {
-                            // Reprojection failed — clamp as last resort
-                            uv.u = if uv.u.is_finite() {
-                                uv.u.clamp(nurb_u_min, nurb_u_max)
+                            // Brute-force also failed — try project_point() as second fallback
+                            let (pf_u, pf_v) = surface.project_point(p3d);
+                            if pf_u.is_finite() && pf_v.is_finite() {
+                                *uv = Point2d::new(pf_u, pf_v);
+                                reprojected_count += 1;
                             } else {
-                                (nurb_u_min + nurb_u_max) * 0.5
-                            };
-                            uv.v = if uv.v.is_finite() {
-                                uv.v.clamp(nurb_v_min, nurb_v_max)
-                            } else {
-                                (nurb_v_min + nurb_v_max) * 0.5
-                            };
+                                // Both failed — clamp as last resort
+                                uv.u = if uv.u.is_finite() {
+                                    uv.u.clamp(nurb_u_min, nurb_u_max)
+                                } else {
+                                    (nurb_u_min + nurb_u_max) * 0.5
+                                };
+                                uv.v = if uv.v.is_finite() {
+                                    uv.v.clamp(nurb_v_min, nurb_v_max)
+                                } else {
+                                    (nurb_v_min + nurb_v_max) * 0.5
+                                };
+                            }
                         }
                     } else {
                         // No 3D point available — clamp as last resort
@@ -1188,15 +1201,22 @@ pub fn triangulate_surface_consistent(
 
         if (is_self_intersecting || has_edge_crossings) && outer_uv.len() >= 3 {
             log::warn!(
-                "NURBS UV polygon is self-intersecting/degenerate: signed_area={:.6}, unsigned_area={:.6}, edge_crossings={}, {} points — re-projecting from scratch",
+                "NURBS UV polygon is self-intersecting/degenerate: signed_area={:.6}, unsigned_area={:.6}, edge_crossings={}, {} points — re-projecting with brute-force",
                 uv_signed_area, uv_unsigned_area, has_edge_crossings, outer_uv.len()
             );
-            // Re-project all boundary UVs using full project_point()
+            // Re-project all boundary UVs using brute-force grid search.
+            // surface.project_point() uses only an 11×11 grid, which is too coarse
+            // for surfaces with large UV ranges (e.g., U: -10..210). The brute-force
+            // method uses an adaptive grid (up to 100×100) + Newton refinement, which
+            // is more reliable for finding the correct UV.
             let (nu_min, nu_max) = nurbs.u_range();
             let (nv_min, nv_max) = nurbs.v_range();
+            let u_range = nu_max - nu_min;
+            let v_range = nv_max - nv_min;
+            let grid_size = crate::edge_cache::adaptive_grid_size(u_range, v_range);
             outer_uv = boundary_points_3d.iter().map(|p| {
-                let (u, v) = surface.project_point(p);
-                // Clamp to NURBS parameter range
+                let (u, v) = crate::edge_cache::brute_force_project_point(nurbs, p, grid_size);
+                // Clamp to NURBS parameter range as safety measure
                 Point2d::new(
                     u.clamp(nu_min, nu_max),
                     v.clamp(nv_min, nv_max),
@@ -1208,10 +1228,20 @@ pub fn triangulate_surface_consistent(
                 return TriangleMesh::new();
             }
             let new_area = polygon_signed_area_2d(&outer_uv);
+            let new_self_intersecting = check_uv_polygon_self_intersection(&outer_uv);
             log::info!(
-                "NURBS UV polygon re-projected: signed_area={:.6}, unsigned_area={:.6} (was signed={:.6}, unsigned={:.6})",
-                new_area, new_area.abs(), uv_signed_area, uv_unsigned_area
+                "NURBS UV polygon re-projected (brute-force grid={}): signed_area={:.6}, unsigned_area={:.6}, self_intersecting={} (was signed={:.6}, unsigned={:.6})",
+                grid_size, new_area, new_area.abs(), new_self_intersecting, uv_signed_area, uv_unsigned_area
             );
+
+            // If still self-intersecting after brute-force, log an error
+            // but proceed — earcutr can sometimes handle mildly self-intersecting
+            // polygons, and an empty mesh is worse than a slightly imperfect one.
+            if new_self_intersecting {
+                log::error!(
+                    "NURBS UV polygon STILL self-intersecting after brute-force re-projection — proceeding with imperfect polygon"
+                );
+            }
         }
     }
 
@@ -1470,14 +1500,51 @@ pub fn triangulate_surface_consistent(
     // Step 3.9: Validate UV polygon before triangulation
     //
     // If the outer UV polygon is self-intersecting or degenerate,
-    // earcutr will produce incorrect triangles. Catch this early
-    // and return an empty mesh rather than garbage geometry.
+    // earcutr will produce incorrect triangles. We try brute-force
+    // re-projection first, and only return empty mesh as last resort.
     // ============================================================
     if !check_uv_polygon_validity(&outer_uv) {
-        log::error!(
-            "triangulate_surface_consistent: invalid UV polygon (self-intersecting or degenerate) — returning empty mesh"
-        );
-        return TriangleMesh::new();
+        // For NURBS surfaces, try brute-force re-projection as a last resort
+        if let Surface::Nurbs(ref nurbs) = surface {
+            let (nu_min, nu_max) = nurbs.u_range();
+            let (nv_min, nv_max) = nurbs.v_range();
+            let u_range = nu_max - nu_min;
+            let v_range = nv_max - nv_min;
+            let grid_size = crate::edge_cache::adaptive_grid_size(u_range, v_range);
+
+            log::warn!(
+                "triangulate_surface_consistent: invalid UV polygon at Step 3.9 — attempting brute-force re-projection (grid={})",
+                grid_size
+            );
+
+            outer_uv = boundary_points_3d.iter().map(|p| {
+                let (u, v) = crate::edge_cache::brute_force_project_point(nurbs, p, grid_size);
+                Point2d::new(
+                    u.clamp(nu_min, nu_max),
+                    v.clamp(nv_min, nv_max),
+                )
+            }).collect();
+
+            crate::triangulate::normalize_uv_polygon(&mut outer_uv, u_period, v_period);
+
+            if outer_uv.len() < 3 {
+                return TriangleMesh::new();
+            }
+
+            // Re-check validity
+            if !check_uv_polygon_validity(&outer_uv) {
+                log::error!(
+                    "triangulate_surface_consistent: UV polygon STILL invalid after brute-force — proceeding anyway (empty mesh is worse)"
+                );
+                // Don't return empty mesh — proceed with imperfect polygon.
+                // A slightly imperfect triangulation is better than a hole in the model.
+            }
+        } else {
+            log::error!(
+                "triangulate_surface_consistent: invalid UV polygon (self-intersecting or degenerate) — returning empty mesh"
+            );
+            return TriangleMesh::new();
+        }
     }
 
     // ============================================================

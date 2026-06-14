@@ -656,68 +656,98 @@ impl EdgeDiscretizationCache {
                 c2d.point_at(curve_t)
             }).collect()
         } else if let Surface::Nurbs(ref nurbs) = surface {
-            // NURBS fast path: bootstrap + chain Newton-Raphson.
-            // This avoids the expensive 32×32 grid search that surface.project_point()
-            // performs for each point independently. Instead, we:
-            // 1. Use project_point() for the first point (bootstrap)
-            // 2. Use reproject_nurbs_point() with the previous UV as initial guess
-            //    for subsequent points — Newton-Raphson converges in ~3-5 iterations
-            //    when starting from a nearby UV, vs ~146 iterations from scratch.
-            // 3. Validate each Newton-Raphson result: if the reprojected point is
-            //    too far from the target (error > 1e-6), fall back to project_point().
+            // NURBS UV projection strategy — adaptive based on UV range size.
+            //
+            // ROOT CAUSE of NURBS triangulation artifacts:
+            // Chain Newton-Raphson (using prev UV as initial guess for next point)
+            // DIVERGES on surfaces with large UV ranges (e.g., U: -10..210 = 220 units).
+            // Newton converges to wrong local minima, producing UV coordinates that are
+            // "scrambled" — boundary points no longer follow sequential order in UV space.
+            // This causes self-intersecting UV polygons → earcutr produces chaotic triangles.
+            //
+            // FIX: For large UV ranges, skip chain Newton entirely and use independent
+            // project_point() for each point. This is slower but deterministic — the same
+            // 3D point always maps to the same UV regardless of traversal order, which is
+            // critical for edge cache consistency (shared edges must produce bit-identical UVs).
+            let (u_min, u_max) = nurbs.u_range();
+            let (v_min, v_max) = nurbs.v_range();
+            let u_range = u_max - u_min;
+            let v_range = v_max - v_min;
+            // Use chain Newton only for small UV ranges where it's reliable.
+            // For large ranges (≥ 10 units), chain Newton can diverge and produce
+            // wrong UVs that scramble the boundary polygon order.
+            let use_chain_newton = u_range < 10.0 && v_range < 10.0;
+
             let mut uvs = Vec::with_capacity(points_3d.len());
-            if !points_3d.is_empty() {
-                let (u0, v0) = surface.project_point(&points_3d[0]);
-                uvs.push(Point2d::new(u0, v0));
-                let mut newton_failures = 0usize;
-                for i in 1..points_3d.len() {
+            let mut newton_failures = 0usize;
+            let mut brute_force_failures = 0usize;
+
+            for (i, point) in points_3d.iter().enumerate() {
+                let (u, v) = if use_chain_newton && i > 0 && !uvs.is_empty() {
+                    // Chain Newton for small UV ranges — fast and reliable
                     let prev = uvs[i - 1];
-                    let (u, v) = crate::parametric_domain::reproject_nurbs_point(
-                        nurbs, &points_3d[i], prev.u, prev.v,
-                    );
-                    // Convergence check: verify the reprojected UV maps back to
-                    // a 3D point close to the target. If Newton-Raphson diverged
-                    // (e.g., due to surface inflection or bad initial guess), the
-                    // error will be large. Fall back to project_point() in that case.
-                    let reconstructed = surface.point_at(u, v);
-                    let err_x = reconstructed.x - points_3d[i].x;
-                    let err_y = reconstructed.y - points_3d[i].y;
-                    let err_z = reconstructed.z - points_3d[i].z;
-                    let error_sq = err_x * err_x + err_y * err_y + err_z * err_z;
-                    let error = error_sq.sqrt();
-                    if error > 1e-6 {
-                        // Newton-Raphson diverged — fallback to full grid search
-                        let (uf, vf) = surface.project_point(&points_3d[i]);
+                    crate::parametric_domain::reproject_nurbs_point(
+                        nurbs, point, prev.u, prev.v,
+                    )
+                } else {
+                    // Independent project_point() for large UV ranges or first point.
+                    // This is deterministic: the same 3D point always maps to the same UV,
+                    // regardless of traversal order. Critical for edge cache consistency.
+                    surface.project_point(point)
+                };
 
-                        // Double-check the fallback result
-                        let fallback_p = surface.point_at(uf, vf);
-                        let fallback_error = (fallback_p.x - points_3d[i].x).powi(2)
-                            + (fallback_p.y - points_3d[i].y).powi(2)
-                            + (fallback_p.z - points_3d[i].z).powi(2);
-                        let fallback_error = fallback_error.sqrt();
+                // Validate: check that the projected UV maps back to a 3D point
+                // close to the original point. If error is too large, try brute-force.
+                let reconstructed = surface.point_at(u, v);
+                let error = point.distance_to(&reconstructed);
 
-                        if fallback_error > 1e-4 {
-                            // Even project_point() failed — this indicates a serious
-                            // projection problem (e.g., point is far from the surface,
-                            // or the NURBS parameterization is degenerate).
-                            log::error!(
-                                "NURBS projection failed: point={:?}, newton_error={:.2e}, fallback_error={:.2e}",
-                                points_3d[i], error, fallback_error
-                            );
-                        }
+                if error > 1e-4 {
+                    // project_point() or chain Newton failed — try brute-force grid search
+                    let grid_size = adaptive_grid_size(u_range, v_range);
+                    let (ub, vb) = brute_force_project_point(nurbs, point, grid_size);
+                    let bf_reconstructed = surface.point_at(ub, vb);
+                    let bf_error = point.distance_to(&bf_reconstructed);
 
-                        newton_failures += 1;
-                        uvs.push(Point2d::new(uf, vf));
+                    if bf_error < error {
+                        uvs.push(Point2d::new(
+                            deterministic_round(ub),
+                            deterministic_round(vb),
+                        ));
+                        brute_force_failures += 1;
                     } else {
-                        uvs.push(Point2d::new(u, v));
+                        // Even brute-force didn't improve — use the best result we have
+                        uvs.push(Point2d::new(
+                            deterministic_round(u),
+                            deterministic_round(v),
+                        ));
+                        log::error!(
+                            "NURBS projection failed: point={:?}, newton_error={:.2e}, brute_force_error={:.2e}",
+                            point, error, bf_error
+                        );
                     }
+                    newton_failures += 1;
+                } else if error > 1e-6 {
+                    // Moderate error — still use project_point result but with rounding
+                    uvs.push(Point2d::new(
+                        deterministic_round(u),
+                        deterministic_round(v),
+                    ));
+                    newton_failures += 1;
+                } else {
+                    // Good projection — use with deterministic rounding for consistency
+                    uvs.push(Point2d::new(
+                        deterministic_round(u),
+                        deterministic_round(v),
+                    ));
                 }
-                if newton_failures > 0 {
-                    log::warn!(
-                        "NURBS UV: {}/{} Newton-Raphson projections diverged (>{:.0e} error), fell back to project_point()",
-                        newton_failures, points_3d.len(), 1e-6,
-                    );
-                }
+            }
+
+            if newton_failures > 0 {
+                log::warn!(
+                    "NURBS UV: {}/{} projections had error > 1e-6, {}/{} required brute-force fallback (u_range={:.1}, v_range={:.1})",
+                    newton_failures, points_3d.len(), brute_force_failures, points_3d.len(),
+                    u_range, v_range,
+                );
             }
             uvs
         } else {
@@ -739,6 +769,7 @@ impl EdgeDiscretizationCache {
     pub fn get_uv_for_face(&self, edge_id: TopoId, face_id: TopoId) -> Option<&Vec<Point2d>> {
         self.get(edge_id).and_then(|e| e.uv_per_face.get(&face_id))
     }
+
 
     /// Pre-populate the cache with all edge discretizations for a solid.
     ///
@@ -853,6 +884,116 @@ impl EdgeDiscretizationCache {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.topo_id_to_key.clear();
+    }
+}
+
+/// Compute adaptive grid size for brute-force NURBS point projection.
+///
+/// Larger UV ranges need finer grids to ensure the closest UV is found.
+/// For a surface with U range 220 units, a 100×100 grid gives 2.2 units
+/// per cell, which is sufficient for finding the correct initial guess
+/// for Newton-Raphson refinement.
+pub(crate) fn adaptive_grid_size(u_range: f64, v_range: f64) -> usize {
+    let max_range = u_range.max(v_range);
+    if max_range < 10.0 {
+        20       // Small range — coarse grid is fine
+    } else if max_range < 50.0 {
+        40       // Medium range
+    } else if max_range < 200.0 {
+        70       // Large range (e.g., U: -10..210)
+    } else {
+        100      // Very large range
+    }
+}
+
+/// Brute-force NURBS point projection using multi-resolution grid search.
+///
+/// When `surface.project_point()` and chain Newton-Raphson both fail to
+/// find a good UV (reconstructed 3D point too far from target), this
+/// function performs a more exhaustive grid search followed by Newton
+/// refinement from the best grid point.
+///
+/// This is deterministic: the same 3D point always produces the same UV
+/// regardless of traversal order, which is critical for edge cache
+/// consistency (shared edges between faces must have bit-identical UVs).
+///
+/// # Performance
+/// Grid size 100 → 10,201 evaluations per point. Only used as fallback
+/// when project_point() fails, and only for boundary points (typically
+/// < 100 per edge). Applied once and cached by the edge cache.
+pub(crate) fn brute_force_project_point(
+    nurbs: &draper_geometry::NurbsSurface,
+    point: &Point3d,
+    grid_size: usize,
+) -> (f64, f64) {
+    let (u_min, u_max) = nurbs.u_range();
+    let (v_min, v_max) = nurbs.v_range();
+    let surface = Surface::Nurbs(nurbs.clone());
+
+    let mut best_u = (u_min + u_max) * 0.5;
+    let mut best_v = (v_min + v_max) * 0.5;
+    let mut best_dist = f64::MAX;
+
+    let u_step = (u_max - u_min) / grid_size as f64;
+    let v_step = (v_max - v_min) / grid_size as f64;
+
+    // Phase 1: Uniform grid search
+    for i in 0..=grid_size {
+        let u = u_min + u_step * i as f64;
+        for j in 0..=grid_size {
+            let v = v_min + v_step * j as f64;
+            let p = surface.point_at(u, v);
+            let dist = (p.x - point.x).powi(2)
+                + (p.y - point.y).powi(2)
+                + (p.z - point.z).powi(2);
+            if dist < best_dist {
+                best_dist = dist;
+                best_u = u;
+                best_v = v;
+            }
+        }
+    }
+
+    // Phase 2: Local refinement — 7×7 grid around the best point
+    let refine = 7;
+    let refine_u_start = (best_u - u_step).max(u_min);
+    let refine_v_start = (best_v - v_step).max(v_min);
+    let refine_u_end = (best_u + u_step).min(u_max);
+    let refine_v_end = (best_v + v_step).min(v_max);
+    let refine_u_range = refine_u_end - refine_u_start;
+    let refine_v_range = refine_v_end - refine_v_start;
+
+    for i in 0..=refine {
+        let u = refine_u_start + refine_u_range * i as f64 / refine as f64;
+        for j in 0..=refine {
+            let v = refine_v_start + refine_v_range * j as f64 / refine as f64;
+            let p = surface.point_at(u, v);
+            let dist = (p.x - point.x).powi(2)
+                + (p.y - point.y).powi(2)
+                + (p.z - point.z).powi(2);
+            if dist < best_dist {
+                best_dist = dist;
+                best_u = u;
+                best_v = v;
+            }
+        }
+    }
+
+    // Phase 3: Newton-Raphson refinement from the best grid point
+    let (u_refined, v_refined) = crate::parametric_domain::reproject_nurbs_point(
+        nurbs, point, best_u, best_v,
+    );
+
+    // Validate: if Newton made it worse, fall back to grid result
+    let refined_p = surface.point_at(u_refined, v_refined);
+    let refined_dist = (refined_p.x - point.x).powi(2)
+        + (refined_p.y - point.y).powi(2)
+        + (refined_p.z - point.z).powi(2);
+
+    if refined_dist < best_dist {
+        (u_refined, v_refined)
+    } else {
+        (best_u, best_v)
     }
 }
 
