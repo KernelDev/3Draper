@@ -685,7 +685,7 @@ impl EdgeDiscretizationCache {
             for (i, point) in points_3d.iter().enumerate() {
                 let (u, v) = if use_chain_newton && i > 0 && !uvs.is_empty() {
                     // Chain Newton for small UV ranges — fast and reliable
-                    let prev = uvs[i - 1];
+                    let prev: Point2d = uvs[i - 1];
                     crate::parametric_domain::reproject_nurbs_point(
                         nurbs, point, prev.u, prev.v,
                     )

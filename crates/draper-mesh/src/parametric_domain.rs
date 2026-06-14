@@ -1357,7 +1357,7 @@ pub fn triangulate_surface_consistent(
     // count by limiting INTERIOR points only.
     // ============================================================
     let boundary_points_3d = boundary_points_3d.to_vec();
-    let outer_uv = outer_uv; // Already a Vec, no downsampling
+    let mut outer_uv = outer_uv; // Already a Vec, no downsampling
 
     // Keep all hole points too — holes define where NOT to triangulate
     let hole_polylines_3d_capped: Vec<Vec<Point3d>> = hole_polylines_3d.iter().map(|h| h.clone()).collect();
