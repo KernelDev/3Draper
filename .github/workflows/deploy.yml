@@ -26,6 +26,14 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      - name: Configure WASM build flags
+        # wasm-bindgen-rayon requires atomics and bulk-memory features.
+        # These are stable since Rust 1.87+ but need to be explicitly enabled
+        # via RUSTFLAGS. Without these, wasm-bindgen-rayon's compile_error!
+        # triggers and the build fails.
+        run: |
+          echo "RUSTFLAGS=-C target-feature=+atomics,+bulk-memory,+mutable-globals" >> $GITHUB_ENV
+
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
