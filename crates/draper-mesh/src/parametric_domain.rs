@@ -2080,6 +2080,31 @@ fn refine_mesh_chord_error_uv(
         (0.0, 1.0, 0.0, 1.0)
     };
 
+    // Compute actual surface periods for periodic surfaces.
+    // NURBS periods come from the knot range, while analytic surfaces use 2π.
+    let u_period: Option<f64> = if surface.is_u_periodic() {
+        match surface {
+            Surface::Nurbs(ref nurbs) => {
+                let (umin, umax) = nurbs.u_range();
+                Some(umax - umin)
+            }
+            _ => Some(2.0 * PI),
+        }
+    } else {
+        None
+    };
+    let v_period: Option<f64> = if surface.is_v_periodic() {
+        match surface {
+            Surface::Nurbs(ref nurbs) => {
+                let (vmin, vmax) = nurbs.v_range();
+                Some(vmax - vmin)
+            }
+            _ => Some(2.0 * PI),
+        }
+    } else {
+        None
+    };
+
     // Minimum UV distance between edge endpoints — edges shorter than this
     // are never split, preventing triangle explosion from non-convergent
     // refinement (where chord error doesn't decrease despite subdivision).
@@ -2142,11 +2167,9 @@ fn refine_mesh_chord_error_uv(
                 // Handle periodic surfaces: if UVs wrap around, averaging is wrong.
                 // For periodic u, if |uv0.u - uv1.u| > half_period, one UV is near
                 // the wrap boundary. Adjust the average accordingly.
-                let mid_u = if surface.is_u_periodic() {
-                    let period = 2.0 * PI; // Standard period for our surfaces
+                let mid_u = if let Some(period) = u_period {
                     let du = (uv1.u - uv0.u).abs();
                     if du > period * 0.5 {
-                        // UVs wrap around — adjust
                         let (lo, hi) = if uv0.u < uv1.u { (uv0.u, uv1.u) } else { (uv1.u, uv0.u) };
                         ((lo + period + hi) * 0.5) % period
                     } else {
@@ -2156,8 +2179,7 @@ fn refine_mesh_chord_error_uv(
                     mid_u
                 };
 
-                let mid_v = if surface.is_v_periodic() {
-                    let period = 2.0 * PI;
+                let mid_v = if let Some(period) = v_period {
                     let dv = (uv1.v - uv0.v).abs();
                     if dv > period * 0.5 {
                         let (lo, hi) = if uv0.v < uv1.v { (uv0.v, uv1.v) } else { (uv1.v, uv0.v) };
@@ -2214,16 +2236,14 @@ fn refine_mesh_chord_error_uv(
             let mut mid_v = (uv0.v + uv1.v) * 0.5;
 
             // Handle periodic wrapping
-            if surface.is_u_periodic() {
-                let period = 2.0 * PI;
+            if let Some(period) = u_period {
                 let du = (uv1.u - uv0.u).abs();
                 if du > period * 0.5 {
                     let (lo, hi) = if uv0.u < uv1.u { (uv0.u, uv1.u) } else { (uv1.u, uv0.u) };
                     mid_u = ((lo + period + hi) * 0.5) % period;
                 }
             }
-            if surface.is_v_periodic() {
-                let period = 2.0 * PI;
+            if let Some(period) = v_period {
                 let dv = (uv1.v - uv0.v).abs();
                 if dv > period * 0.5 {
                     let (lo, hi) = if uv0.v < uv1.v { (uv0.v, uv1.v) } else { (uv1.v, uv0.v) };
