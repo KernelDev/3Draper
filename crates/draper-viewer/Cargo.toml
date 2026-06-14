@@ -11,6 +11,13 @@ path = "src/main.rs"
 default = ["native"]
 native = ["rfd", "env_logger", "draper-mesh/export-3mf"]
 web = ["web-sys", "wasm-bindgen", "console_log", "wasm-bindgen-futures", "js-sys", "web-time", "wgpu/webgl", "wgpu/webgpu", "console_error_panic_hook", "draper-mesh/wasm-parallel"]
+# web-deploy: same as 'web' but without wasm-parallel (wasm-bindgen-rayon).
+# Used for GitHub Pages deployment where SharedArrayBuffer/COOP/COEP
+# headers are unavailable. The atomics target feature required by
+# wasm-bindgen-rayon is unstable on stable Rust, so this feature
+# avoids the compile error while still providing full WASM functionality
+# in single-threaded mode.
+web-deploy = ["web-sys", "wasm-bindgen", "console_log", "wasm-bindgen-futures", "js-sys", "web-time", "wgpu/webgl", "wgpu/webgpu", "console_error_panic_hook"]
 
 [dependencies]
 draper-geometry = { workspace = true }

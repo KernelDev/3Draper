@@ -7,7 +7,7 @@
 # which have C dependencies that don't compile on wasm32.
 target = "index.html"
 dist = "dist"
-cargo_flags = ["--package", "draper-viewer", "--no-default-features", "--features", "web"]
+cargo_flags = ["--package", "draper-viewer", "--no-default-features", "--features", "web-deploy"]
 
 [watch]
 ignore = ["../../target"]
