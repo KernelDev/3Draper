@@ -1448,7 +1448,7 @@ fn remove_inconsistent_normal_faces(shell: &mut Shell, params: &HealingParams, r
     let removed = faces_to_remove.len();
     if removed > 0 {
         // Remove in reverse order to preserve indices
-        for idx in faces_to.into_iter().rev() {
+        for idx in faces_to_remove.into_iter().rev() {
             if idx < shell.faces.len() {
                 shell.faces.remove(idx);
             }
