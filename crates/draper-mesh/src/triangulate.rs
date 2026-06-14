@@ -373,30 +373,43 @@ fn project_points_nurbs_fast(surface: &Surface, points: &[Point3d]) -> Vec<Point
     if let Surface::Nurbs(ref nurbs) = surface {
         let (u_min, u_max) = nurbs.u_range();
         let (v_min, v_max) = nurbs.v_range();
+        let u_range = u_max - u_min;
+        let v_range = v_max - v_min;
+        let use_chain_newton = u_range < 10.0 && v_range < 10.0;
+
         let mut uvs = Vec::with_capacity(points.len());
         let mut prev_u = (u_min + u_max) * 0.5;
         let mut prev_v = (v_min + v_max) * 0.5;
 
         for (i, p) in points.iter().enumerate() {
-            if i == 0 {
-                let (u, v) = surface.project_point(p);
-                uvs.push(Point2d::new(u, v));
-                prev_u = u;
-                prev_v = v;
+            let (u, v) = if use_chain_newton && i > 0 {
+                crate::parametric_domain::reproject_nurbs_point(nurbs, p, prev_u, prev_v)
             } else {
-                let (u, v) = crate::parametric_domain::reproject_nurbs_point(nurbs, p, prev_u, prev_v);
-                let proj_p = surface.point_at(u, v);
-                let err = (proj_p.x - p.x).powi(2) + (proj_p.y - p.y).powi(2) + (proj_p.z - p.z).powi(2);
-                if err.sqrt() > 1e-3 {
-                    let (u, v) = surface.project_point(p);
-                    uvs.push(Point2d::new(u, v));
-                    prev_u = u;
-                    prev_v = v;
+                surface.project_point(p)
+            };
+
+            let proj_p = surface.point_at(u, v);
+            let err = p.distance_to(&proj_p);
+
+            if err > 1e-4 {
+                let grid_size = crate::edge_cache::adaptive_grid_size(u_range, v_range);
+                let (ub, vb) = crate::edge_cache::brute_force_project_point(nurbs, p, grid_size);
+                let bf_p = surface.point_at(ub, vb);
+                let bf_err = p.distance_to(&bf_p);
+
+                if bf_err < err {
+                    uvs.push(Point2d::new(ub, vb));
+                    prev_u = ub;
+                    prev_v = vb;
                 } else {
                     uvs.push(Point2d::new(u, v));
                     prev_u = u;
                     prev_v = v;
                 }
+            } else {
+                uvs.push(Point2d::new(u, v));
+                prev_u = u;
+                prev_v = v;
             }
         }
         uvs
@@ -1014,41 +1027,48 @@ fn nurbs_uv_fast_projection(surface: &Surface, points_3d: &[Point3d]) -> Vec<Poi
     }
 
     if let Surface::Nurbs(ref nurbs) = surface {
-        let mut uvs = Vec::with_capacity(points_3d.len());
-        // First point: full project_point()
-        let (u0, v0) = surface.project_point(&points_3d[0]);
-        uvs.push(Point2d::new(u0, v0));
+        let (u_min, u_max) = nurbs.u_range();
+        let (v_min, v_max) = nurbs.v_range();
+        let u_range = u_max - u_min;
+        let v_range = v_max - v_min;
+        let use_chain_newton = u_range < 10.0 && v_range < 10.0;
 
-        // Subsequent points: chain Newton-Raphson from previous UV
-        // with convergence check. If Newton-Raphson diverges (e.g., due to
-        // surface inflection or large step between consecutive points),
-        // fall back to the slower but reliable surface.project_point().
+        let mut uvs = Vec::with_capacity(points_3d.len());
         let mut newton_failures = 0usize;
-        for i in 1..points_3d.len() {
-            let prev = uvs[i - 1];
-            let (u, v) = crate::parametric_domain::reproject_nurbs_point(
-                nurbs, &points_3d[i], prev.u, prev.v,
-            );
-            // Convergence check: verify the reprojected UV maps back to
-            // a 3D point close to the target. Error threshold 1e-6 (distance).
+
+        for (i, p) in points_3d.iter().enumerate() {
+            let (u, v) = if use_chain_newton && i > 0 && !uvs.is_empty() {
+                let prev: Point2d = uvs[i - 1];
+                crate::parametric_domain::reproject_nurbs_point(nurbs, p, prev.u, prev.v)
+            } else {
+                surface.project_point(p)
+            };
+
+            // Validate: check that the projected UV maps back close to the target
             let reconstructed = surface.point_at(u, v);
-            let err_x = reconstructed.x - points_3d[i].x;
-            let err_y = reconstructed.y - points_3d[i].y;
-            let err_z = reconstructed.z - points_3d[i].z;
-            let error_sq = err_x * err_x + err_y * err_y + err_z * err_z;
-            if error_sq > 1e-12 {
-                // Newton-Raphson diverged — fallback to full grid search
-                let (uf, vf) = surface.project_point(&points_3d[i]);
+            let error = p.distance_to(&reconstructed);
+
+            if error > 1e-4 {
+                // Projection failed — try brute-force grid search
+                let grid_size = crate::edge_cache::adaptive_grid_size(u_range, v_range);
+                let (ub, vb) = crate::edge_cache::brute_force_project_point(nurbs, p, grid_size);
+                let bf_p = surface.point_at(ub, vb);
+                let bf_err = p.distance_to(&bf_p);
+
+                if bf_err < error {
+                    uvs.push(Point2d::new(ub, vb));
+                } else {
+                    uvs.push(Point2d::new(u, v));
+                }
                 newton_failures += 1;
-                uvs.push(Point2d::new(uf, vf));
             } else {
                 uvs.push(Point2d::new(u, v));
             }
         }
         if newton_failures > 0 {
             log::warn!(
-                "NURBS fast projection: {}/{} Newton-Raphson diverged (>{:.0e} error), fell back to project_point()",
-                newton_failures, points_3d.len(), 1e-6,
+                "NURBS fast projection: {}/{} projections failed (u_range={:.1}, v_range={:.1})",
+                newton_failures, points_3d.len(), u_range, v_range,
             );
         }
         uvs

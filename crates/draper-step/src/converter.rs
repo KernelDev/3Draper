@@ -7713,35 +7713,40 @@ impl<'a> StepConverter<'a> {
             }
         } else {
             // No PCURVE — sample 3D points and project to surface
-            // For NURBS, use Newton-Raphson from previous UV as starting guess
-            // (much faster than full project_point() which does 146+ evaluations per point).
+            // For NURBS, use adaptive strategy: chain Newton for small UV ranges,
+            // independent project_point for large UV ranges, brute-force fallback.
             if let Surface::Nurbs(ref nurbs) = surface {
                 let (u_min, u_max) = nurbs.u_range();
                 let (v_min, v_max) = nurbs.v_range();
+                let u_range = u_max - u_min;
+                let v_range = v_max - v_min;
+                let use_chain_newton = u_range < 10.0 && v_range < 10.0;
                 let mut prev_u = (u_min + u_max) * 0.5;
                 let mut prev_v = (v_min + v_max) * 0.5;
-                let mut first = true;
                 for i in 0..n_samples {
                     let t = i as f64 / (n_samples - 1).max(1) as f64;
                     if let Some(p) = edge.point_at(t) {
-                        let (u, v) = if first {
-                            first = false;
-                            surface.project_point(&p)
+                        let (u, v) = if use_chain_newton && i > 0 {
+                            draper_mesh::reproject_nurbs_point(nurbs, &p, prev_u, prev_v)
                         } else {
-                            let (u, v) = draper_mesh::reproject_nurbs_point(nurbs, &p, prev_u, prev_v);
-                            // Verify Newton convergence
-                            let pp = surface.point_at(u, v);
-                            let err = (pp.x - p.x).powi(2) + (pp.y - p.y).powi(2) + (pp.z - p.z).powi(2);
-                            if err.sqrt() > 1e-3 {
-                                surface.project_point(&p)
-                            } else {
-                                (u, v)
-                            }
+                            surface.project_point(&p)
+                        };
+                        // Verify convergence
+                        let pp = surface.point_at(u, v);
+                        let err = p.distance_to(&pp);
+                        let (final_u, final_v) = if err > 1e-4 {
+                            let grid_size = draper_mesh::adaptive_grid_size(u_range, v_range);
+                            let (ub, vb) = draper_mesh::brute_force_project_point(nurbs, &p, grid_size);
+                            let bf_p = surface.point_at(ub, vb);
+                            let bf_err = p.distance_to(&bf_p);
+                            if bf_err < err { (ub, vb) } else { (u, v) }
+                        } else {
+                            (u, v)
                         };
                         pts_3d.push(p);
-                        pts_uv.push(Point2d::new(u, v));
-                        prev_u = u;
-                        prev_v = v;
+                        pts_uv.push(Point2d::new(final_u, final_v));
+                        prev_u = final_u;
+                        prev_v = final_v;
                     }
                 }
             } else {

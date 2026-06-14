@@ -748,17 +748,32 @@ pub fn triangulate_surface_uv_cdt(
         .collect();
 
     // Project 3D boundary to UV
-    // OPTIMIZATION: For NURBS surfaces, use bootstrap + chain Newton-Raphson
-    // instead of calling project_point() for each point (which does 11×11 grid
-    // search per point and is catastrophically slow).
+    // For NURBS surfaces, use adaptive strategy: chain Newton for small UV ranges,
+    // independent project_point for large UV ranges, with brute-force fallback.
     let mut outer_uv: Vec<Point2d> = if let Surface::Nurbs(ref nurbs) = surface {
+        let (nu_min, nu_max) = nurbs.u_range();
+        let (nv_min, nv_max) = nurbs.v_range();
+        let u_range = nu_max - nu_min;
+        let v_range = nv_max - nv_min;
+        let use_chain_newton = u_range < 10.0 && v_range < 10.0;
         let mut uvs = Vec::with_capacity(boundary_points.len());
-        if !boundary_points.is_empty() {
-            let (u0, v0) = surface.project_point(&boundary_points[0]);
-            uvs.push(Point2d::new(u0, v0));
-            for i in 1..boundary_points.len() {
-                let prev = uvs[i - 1];
-                let (u, v) = reproject_nurbs_point(nurbs, &boundary_points[i], prev.u, prev.v);
+        for (i, p) in boundary_points.iter().enumerate() {
+            let (u, v) = if use_chain_newton && i > 0 && !uvs.is_empty() {
+                let prev: Point2d = uvs[i - 1];
+                reproject_nurbs_point(nurbs, p, prev.u, prev.v)
+            } else {
+                surface.project_point(p)
+            };
+            // Validate
+            let proj_p = surface.point_at(u, v);
+            let err = p.distance_to(&proj_p);
+            if err > 1e-4 {
+                let grid_size = crate::edge_cache::adaptive_grid_size(u_range, v_range);
+                let (ub, vb) = crate::edge_cache::brute_force_project_point(nurbs, p, grid_size);
+                let bf_p = surface.point_at(ub, vb);
+                let bf_err = p.distance_to(&bf_p);
+                uvs.push(if bf_err < err { Point2d::new(ub, vb) } else { Point2d::new(u, v) });
+            } else {
                 uvs.push(Point2d::new(u, v));
             }
         }
@@ -797,14 +812,29 @@ pub fn triangulate_surface_uv_cdt(
         .iter()
         .map(|hole| {
             let mut huv: Vec<Point2d> = if let Surface::Nurbs(ref nurbs) = surface {
-                // NURBS fast path: bootstrap + chain Newton-Raphson
+                // NURBS: adaptive strategy for hole UV projection
+                let (nu_min, nu_max) = nurbs.u_range();
+                let (nv_min, nv_max) = nurbs.v_range();
+                let u_range = nu_max - nu_min;
+                let v_range = nv_max - nv_min;
+                let use_chain_newton = u_range < 10.0 && v_range < 10.0;
                 let mut uvs = Vec::with_capacity(hole.len());
-                if !hole.is_empty() {
-                    let (u0, v0) = surface.project_point(&hole[0]);
-                    uvs.push(Point2d::new(u0, v0));
-                    for i in 1..hole.len() {
-                        let prev = uvs[i - 1];
-                        let (u, v) = reproject_nurbs_point(nurbs, &hole[i], prev.u, prev.v);
+                for (i, p) in hole.iter().enumerate() {
+                    let (u, v) = if use_chain_newton && i > 0 && !uvs.is_empty() {
+                        let prev: Point2d = uvs[i - 1];
+                        reproject_nurbs_point(nurbs, p, prev.u, prev.v)
+                    } else {
+                        surface.project_point(p)
+                    };
+                    let proj_p = surface.point_at(u, v);
+                    let err = p.distance_to(&proj_p);
+                    if err > 1e-4 {
+                        let grid_size = crate::edge_cache::adaptive_grid_size(u_range, v_range);
+                        let (ub, vb) = crate::edge_cache::brute_force_project_point(nurbs, p, grid_size);
+                        let bf_p = surface.point_at(ub, vb);
+                        let bf_err = p.distance_to(&bf_p);
+                        uvs.push(if bf_err < err { Point2d::new(ub, vb) } else { Point2d::new(u, v) });
+                    } else {
                         uvs.push(Point2d::new(u, v));
                     }
                 }
