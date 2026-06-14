@@ -684,9 +684,28 @@ impl EdgeDiscretizationCache {
                     let err_y = reconstructed.y - points_3d[i].y;
                     let err_z = reconstructed.z - points_3d[i].z;
                     let error_sq = err_x * err_x + err_y * err_y + err_z * err_z;
-                    if error_sq > 1e-12 {
+                    let error = error_sq.sqrt();
+                    if error > 1e-6 {
                         // Newton-Raphson diverged — fallback to full grid search
                         let (uf, vf) = surface.project_point(&points_3d[i]);
+
+                        // Double-check the fallback result
+                        let fallback_p = surface.point_at(uf, vf);
+                        let fallback_error = (fallback_p.x - points_3d[i].x).powi(2)
+                            + (fallback_p.y - points_3d[i].y).powi(2)
+                            + (fallback_p.z - points_3d[i].z).powi(2);
+                        let fallback_error = fallback_error.sqrt();
+
+                        if fallback_error > 1e-4 {
+                            // Even project_point() failed — this indicates a serious
+                            // projection problem (e.g., point is far from the surface,
+                            // or the NURBS parameterization is degenerate).
+                            log::error!(
+                                "NURBS projection failed: point={:?}, newton_error={:.2e}, fallback_error={:.2e}",
+                                points_3d[i], error, fallback_error
+                            );
+                        }
+
                         newton_failures += 1;
                         uvs.push(Point2d::new(uf, vf));
                     } else {

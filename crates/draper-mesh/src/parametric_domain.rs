@@ -460,6 +460,60 @@ fn segments_intersect_2d(a0: &Point2d, a1: &Point2d, b0: &Point2d, b1: &Point2d)
     t > 1e-10 && t < 1.0 - 1e-10 && u > 1e-10 && u < 1.0 - 1e-10
 }
 
+/// Comprehensive validity check for a UV polygon before triangulation.
+///
+/// Checks:
+/// 1. Minimum 3 points
+/// 2. No self-intersections (edge crossings)
+/// 3. Non-zero area (non-degenerate)
+///
+/// Returns `true` if the polygon is valid for earcutr triangulation.
+fn check_uv_polygon_validity(uv_points: &[Point2d]) -> bool {
+    let n = uv_points.len();
+    if n < 3 {
+        log::error!("UV polygon validity: too few points ({})", n);
+        return false;
+    }
+
+    // Check for self-intersections using the existing O(n²) edge crossing check
+    if check_uv_polygon_self_intersection(uv_points) {
+        // Log which edges cross — useful for debugging NURBS projection issues
+        for i in 0..n {
+            let i_next = (i + 1) % n;
+            for j in (i + 2)..n {
+                if i == 0 && j == n - 1 {
+                    continue;
+                }
+                let j_next = (j + 1) % n;
+                if segments_intersect_2d(&uv_points[i], &uv_points[i_next], &uv_points[j], &uv_points[j_next]) {
+                    log::error!(
+                        "UV polygon self-intersection at edges {}-{} and {}-{}: \
+                         ({:.4},{:.4})->({:.4},{:.4}) crosses ({:.4},{:.4})->({:.4},{:.4})",
+                        i, i_next, j, j_next,
+                        uv_points[i].u, uv_points[i].v,
+                        uv_points[i_next].u, uv_points[i_next].v,
+                        uv_points[j].u, uv_points[j].v,
+                        uv_points[j_next].u, uv_points[j_next].v,
+                    );
+                }
+            }
+        }
+        return false;
+    }
+
+    // Check area — should be positive for a valid (non-degenerate) polygon
+    let area = polygon_area_2d(uv_points);
+    if area.abs() < 1e-12 {
+        log::error!(
+            "UV polygon validity: zero area (degenerate), area={:.2e}, n={}",
+            area, n
+        );
+        return false;
+    }
+
+    true
+}
+
 /// Compute the approximate area of a 3D polygon using the Newell's method.
 /// This gives a reasonable area estimate even for non-planar polygons.
 fn polygon_area_3d(polygon: &[Point3d]) -> f64 {
@@ -910,18 +964,60 @@ pub fn triangulate_surface_consistent(
                 );
                 return TriangleMesh::new();
             }
-            // Clamp all UVs to the NURBS parameter range
-            for uv in outer_uv.iter_mut() {
-                if uv.u.is_finite() {
-                    uv.u = uv.u.clamp(nurb_u_min, nurb_u_max);
-                } else {
-                    uv.u = (nurb_u_min + nurb_u_max) * 0.5;
+            // Reproject UVs from 3D points when they are out of range.
+            // Simple clamping is incorrect — it snaps UVs to surface edges
+            // rather than finding the correct parameterization. Instead, we
+            // use surface.project_point() to find the true UV from the 3D
+            // point, and only clamp as a last resort for NaN/Inf cases.
+            let mut reprojected_count = 0usize;
+            for (i, uv) in outer_uv.iter_mut().enumerate() {
+                let needs_reproject = !uv.u.is_finite() || !uv.v.is_finite()
+                    || uv.u < nurb_u_min - margin || uv.u > nurb_u_max + margin
+                    || uv.v < nurb_v_min - v_margin || uv.v > nurb_v_max + v_margin;
+
+                if needs_reproject {
+                    // UV is out of range — reproject from 3D point
+                    if let Some(p3d) = boundary_points_3d.get(i) {
+                        let (new_u, new_v) = surface.project_point(p3d);
+
+                        // Check if reprojected UV is valid
+                        if new_u.is_finite() && new_v.is_finite() {
+                            *uv = Point2d::new(new_u, new_v);
+                            reprojected_count += 1;
+                        } else {
+                            // Reprojection failed — clamp as last resort
+                            uv.u = if uv.u.is_finite() {
+                                uv.u.clamp(nurb_u_min, nurb_u_max)
+                            } else {
+                                (nurb_u_min + nurb_u_max) * 0.5
+                            };
+                            uv.v = if uv.v.is_finite() {
+                                uv.v.clamp(nurb_v_min, nurb_v_max)
+                            } else {
+                                (nurb_v_min + nurb_v_max) * 0.5
+                            };
+                        }
+                    } else {
+                        // No 3D point available — clamp as last resort
+                        uv.u = if uv.u.is_finite() {
+                            uv.u.clamp(nurb_u_min, nurb_u_max)
+                        } else {
+                            (nurb_u_min + nurb_u_max) * 0.5
+                        };
+                        uv.v = if uv.v.is_finite() {
+                            uv.v.clamp(nurb_v_min, nurb_v_max)
+                        } else {
+                            (nurb_v_min + nurb_v_max) * 0.5
+                        };
+                    }
                 }
-                if uv.v.is_finite() {
-                    uv.v = uv.v.clamp(nurb_v_min, nurb_v_max);
-                } else {
-                    uv.v = (nurb_v_min + nurb_v_max) * 0.5;
-                }
+            }
+            if reprojected_count > 0 {
+                log::warn!(
+                    "NURBS UV: reprojected {} of {} boundary points (were out of range u=[{:.4},{:.4}] v=[{:.4},{:.4}])",
+                    reprojected_count, outer_uv.len(),
+                    nurb_u_min, nurb_u_max, nurb_v_min, nurb_v_max,
+                );
             }
         }
     }
@@ -1369,6 +1465,20 @@ pub fn triangulate_surface_consistent(
         let pts = generate_interior_points(&domain, n_u, n_v, boundary_margin);
         downsample_interior_points(&pts, max_interior_budget)
     };
+
+    // ============================================================
+    // Step 3.9: Validate UV polygon before triangulation
+    //
+    // If the outer UV polygon is self-intersecting or degenerate,
+    // earcutr will produce incorrect triangles. Catch this early
+    // and return an empty mesh rather than garbage geometry.
+    // ============================================================
+    if !check_uv_polygon_validity(&outer_uv) {
+        log::error!(
+            "triangulate_surface_consistent: invalid UV polygon (self-intersecting or degenerate) — returning empty mesh"
+        );
+        return TriangleMesh::new();
+    }
 
     // ============================================================
     // Step 4: Build earcutr input with ALL points
