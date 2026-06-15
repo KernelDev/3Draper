@@ -3,6 +3,7 @@
 //! Parametric surfaces in 3D space.
 
 use crate::{Direction3d, Point3d, Point2d, Vec3d, Transform, curve::Curve3d};
+use std::f64::consts::PI;
 use std::fmt;
 
 /// Bitflags indicating the type of degeneracy at a surface point.
@@ -242,7 +243,7 @@ impl CylinderSurface {
     }
 
     /// Project a 3D point onto the cylinder's parametric space → (u, v).
-    /// u = angle in radians, v = height along axis.
+    /// u = angle in radians ∈ [0, 2π), v = height along axis.
     pub fn project_point(&self, point: &Point3d) -> (f64, f64) {
         let y_dir = self.axis.cross(&self.x_dir);
         let dx = point.x - self.origin.x;
@@ -250,6 +251,8 @@ impl CylinderSurface {
         let dz = point.z - self.origin.z;
         let u = (dx * y_dir.x + dy * y_dir.y + dz * y_dir.z)
             .atan2(dx * self.x_dir.x + dy * self.x_dir.y + dz * self.x_dir.z);
+        // Normalize u to [0, 2π) to match the canonical parameterization
+        let u = if u < 0.0 { u + 2.0 * PI } else { u };
         let v = dx * self.axis.x + dy * self.axis.y + dz * self.axis.z;
         (u, v)
     }
@@ -374,7 +377,7 @@ impl ConeSurface {
     }
 
     /// Project a 3D point onto the cone's parametric space → (u, v).
-    /// u = angle in radians, v = height along axis.
+    /// u = angle in radians ∈ [0, 2π), v = height along axis.
     pub fn project_point(&self, point: &Point3d) -> (f64, f64) {
         let y_dir = self.axis.cross(&self.x_dir);
         let dx = point.x - self.origin.x;
@@ -382,6 +385,8 @@ impl ConeSurface {
         let dz = point.z - self.origin.z;
         let u = (dx * y_dir.x + dy * y_dir.y + dz * y_dir.z)
             .atan2(dx * self.x_dir.x + dy * self.x_dir.y + dz * self.x_dir.z);
+        // Normalize u to [0, 2π) to match the canonical parameterization
+        let u = if u < 0.0 { u + 2.0 * PI } else { u };
         let v = dx * self.axis.x + dy * self.axis.y + dz * self.axis.z;
         (u, v)
     }
@@ -418,12 +423,14 @@ impl SphereSurface {
     }
 
     /// Project a 3D point onto the sphere's parametric space → (u, v).
-    /// u = azimuthal angle [0, 2pi], v = polar angle [0, pi].
+    /// u = azimuthal angle ∈ [0, 2π), v = polar angle ∈ [0, π].
     pub fn project_point(&self, point: &Point3d) -> (f64, f64) {
         let dx = point.x - self.center.x;
         let dy = point.y - self.center.y;
         let dz = point.z - self.center.z;
         let u = dy.atan2(dx);
+        // Normalize u to [0, 2π) to match the canonical parameterization
+        let u = if u < 0.0 { u + 2.0 * PI } else { u };
         let r = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-15);
         let v = (dz / r).clamp(-1.0, 1.0).acos();
         (u, v)
@@ -494,10 +501,11 @@ impl TorusSurface {
         let dx = point.x - self.center.x;
         let dy = point.y - self.center.y;
         let dz = point.z - self.center.z;
-        // u = angle around main ring in the x_dir/y_dir plane
+        // u = angle around main ring in the x_dir/y_dir plane ∈ [0, 2π)
         let u = (dx * y_dir.x + dy * y_dir.y + dz * y_dir.z)
             .atan2(dx * self.x_dir.x + dy * self.x_dir.y + dz * self.x_dir.z);
-        // v = angle around tube
+        let u = if u < 0.0 { u + 2.0 * PI } else { u };
+        // v = angle around tube ∈ [0, 2π)
         let radial_dist = dx * self.x_dir.x + dy * self.x_dir.y + dz * self.x_dir.z;
         let radial_y = dx * y_dir.x + dy * y_dir.y + dz * y_dir.z;
         let dist_ring = (radial_dist * radial_dist + radial_y * radial_y).sqrt();
@@ -505,6 +513,7 @@ impl TorusSurface {
         let local_x = dist_ring - self.major_radius;
         let local_y = along_axis;
         let v = local_y.atan2(local_x);
+        let v = if v < 0.0 { v + 2.0 * PI } else { v };
         (u, v)
     }
 }
@@ -1642,10 +1651,12 @@ impl Surface {
             Surface::Sphere(s) => s.project_point(point),
             Surface::Torus(t) => t.project_point(point),
             Surface::Revolution(r) => {
-                // u = revolution angle
+                // u = revolution angle ∈ [0, 2π)
                 let dx = point.x - r.origin.x;
                 let dy = point.y - r.origin.y;
                 let u = dy.atan2(dx);
+                // Normalize u to [0, 2π) to match the canonical parameterization
+                let u = if u < 0.0 { u + 2.0 * PI } else { u };
                 // v = profile curve parameter: find the closest point on the profile curve
                 let dz = point.z - r.origin.z;
                 let radial = (dx * dx + dy * dy).sqrt();

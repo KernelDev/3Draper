@@ -4,6 +4,7 @@ use draper_step::*;
 use draper_geometry::*;
 
 fn main() {
+    env_logger::init();
     let args: Vec<String> = std::env::args().collect();
     
     if args.len() > 1 && args[1] == "--holes" {

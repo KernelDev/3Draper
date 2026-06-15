@@ -438,17 +438,39 @@ fn check_uv_polygon_self_intersection(polygon: &[Point2d]) -> bool {
     false
 }
 
-/// Split a self-intersecting UV polygon at the seam of a periodic NURBS surface.
+/// A crossing point where a polygon edge intersects the seam of a periodic surface.
+struct SeamCrossing {
+    /// Index of the edge that crosses the seam (edge from polygon[edge_idx] to polygon[(edge_idx+1)%n]).
+    edge_idx: usize,
+    /// The v-coordinate at the seam crossing point.
+    v_at_seam: f64,
+    /// UV point on the "low" side of the seam: (u_min, v_at_seam).
+    cross_pt_low: Point2d,
+    /// UV point on the "high" side of the seam: (u_max, v_at_seam).
+    cross_pt_high: Point2d,
+    /// 3D point at the seam (same geometry regardless of low/high u-value).
+    cross_pt_3d: Point3d,
+}
+
+/// Split a self-intersecting UV polygon at the seam of a periodic surface.
 ///
-/// When a NURBS surface is closed in U (like a cylinder), the UV boundary polygon
-/// can wrap around the seam, creating a "bowtie" self-intersection where edges cross
-/// diagonally. For example:
-///   Edge A: (0.001, 30.0) → (6.45, 0.0)   crosses
-///   Edge B: (6.45, 30.0) → (0.001, 0.0)
+/// When a surface is closed in U (like a cylinder, torus, or closed NURBS), the UV
+/// boundary polygon can wrap around the seam, creating a "bowtie" self-intersection
+/// where edges cross diagonally. For example on a surface with u_range [0, 2π]:
+///   Edge A: (0.01, v1) → (6.27, v2)   crosses seam
+///   Edge B: (6.27, v3) → (0.01, v4)   crosses seam back
 ///
-/// The fix is to split the polygon at the seam line (u = u_min or u = u_max),
-/// creating two sub-polygons that don't self-intersect, then triangulate each
-/// separately and merge the results.
+/// The fix is to split the polygon at the two seam-crossing edges, creating two
+/// sub-polygons connected by a "seam edge" along u = u_min / u_max. Each sub-polygon
+/// is non-self-intersecting and can be triangulated correctly by earcutr.
+///
+/// The algorithm:
+/// 1. Find ALL edges that cross the seam (large u-jump > 40% of u_range)
+/// 2. For each crossing edge, compute the v-coordinate at the seam using "unwrapped"
+///    u-coordinates (treat the edge as going the short way around the periodic surface)
+/// 3. Walk the polygon between the first two crossing points to build two sub-polygons
+/// 4. Each sub-polygon has its crossing points at the correct u-value (u_min for the
+///    low side, u_max for the high side) so the polygon is valid in UV space
 ///
 /// Returns `None` if splitting is not applicable (no seam crossing detected).
 fn try_split_at_seam(
@@ -460,153 +482,392 @@ fn try_split_at_seam(
         return None;
     }
 
-    // Only NURBS surfaces need seam splitting
-    let nurbs = match surface {
-        Surface::Nurbs(ref n) => n,
-        _ => return None,
-    };
+    let is_u_periodic = surface.is_u_periodic();
+    let is_v_periodic = surface.is_v_periodic();
+    if !is_u_periodic && !is_v_periodic {
+        return None;
+    }
 
-    let (u_min, u_max) = nurbs.u_range();
-    let (v_min, v_max) = nurbs.v_range();
+    // Get parametric range for the periodic direction
+    let (u_min, u_max) = get_surface_u_range(surface);
     let u_range = u_max - u_min;
+    let (v_min, v_max) = get_surface_v_range(surface);
     let v_range = v_max - v_min;
 
-    // Detect seam crossings: look for edges that jump across a significant
-    // portion of the U or V range. A seam crossing edge has a delta > 40% of the range.
+    // ================================================================
+    // Find ALL U-seam crossings
+    // ================================================================
     let u_seam_threshold = u_range * 0.4;
-    let v_seam_threshold = v_range * 0.4;
+    let mut u_crossings: Vec<SeamCrossing> = Vec::new();
 
-    // Find the first seam crossing in U direction
-    let mut u_seam_idx: Option<usize> = None;
-    let mut u_seam_at_max = true; // which side of the seam we split at
-
-    if surface.is_u_periodic() || u_range > 5.0 {
+    if is_u_periodic {
         for i in 0..polygon.len() {
             let j = (i + 1) % polygon.len();
             let du = (polygon[j].u - polygon[i].u).abs();
             if du > u_seam_threshold {
-                u_seam_idx = Some(i);
-                // Determine which side the seam is on: if the midpoint of the edge
-                // is closer to u_max, split at u_max; otherwise split at u_min
-                let mid_u = (polygon[i].u + polygon[j].u) * 0.5;
-                u_seam_at_max = (mid_u - u_min) > u_range * 0.5;
-                break;
+                // Determine low/high endpoints
+                let (u_low, v_low, u_high, v_high) = if polygon[i].u < polygon[j].u {
+                    (polygon[i].u, polygon[i].v, polygon[j].u, polygon[j].v)
+                } else {
+                    (polygon[j].u, polygon[j].v, polygon[i].u, polygon[i].v)
+                };
+
+                // Compute v at seam using "unwrapped" u-coordinates.
+                // The edge wraps around the seam: treat the high endpoint as
+                // (u_high - u_range) so the edge goes the short way around.
+                let u_high_unwrapped = u_high - u_range;
+                let d_u = u_high_unwrapped - u_low;
+                let t = if d_u.abs() > 1e-15 {
+                    (u_min - u_low) / d_u
+                } else {
+                    0.5_f64
+                };
+                let t = t.clamp(0.0, 1.0);
+                let v_cross = v_low + t * (v_high - v_low);
+
+                // 3D point at the seam — use surface evaluation for accuracy
+                let cross_pt_3d = surface.point_at(u_min, v_cross);
+
+                u_crossings.push(SeamCrossing {
+                    edge_idx: i,
+                    v_at_seam: v_cross,
+                    cross_pt_low: Point2d::new(u_min, v_cross),
+                    cross_pt_high: Point2d::new(u_max, v_cross),
+                    cross_pt_3d,
+                });
             }
         }
     }
 
-    // Find seam crossing in V direction
-    let mut v_seam_idx: Option<usize> = None;
-    let mut v_seam_at_max = true;
+    // ================================================================
+    // Find ALL V-seam crossings (for torus, sphere, etc.)
+    // ================================================================
+    let v_seam_threshold = v_range * 0.4;
+    let mut v_crossings: Vec<VSeamCrossing> = Vec::new();
 
-    if surface.is_v_periodic() || v_range > 5.0 {
+    if is_v_periodic && v_range > 0.0 {
         for i in 0..polygon.len() {
             let j = (i + 1) % polygon.len();
             let dv = (polygon[j].v - polygon[i].v).abs();
             if dv > v_seam_threshold {
-                v_seam_idx = Some(i);
-                let mid_v = (polygon[i].v + polygon[j].v) * 0.5;
-                v_seam_at_max = (mid_v - v_min) > v_range * 0.5;
-                break;
+                let (v_low, u_low, v_high, u_high) = if polygon[i].v < polygon[j].v {
+                    (polygon[i].v, polygon[i].u, polygon[j].v, polygon[j].u)
+                } else {
+                    (polygon[j].v, polygon[j].u, polygon[i].v, polygon[i].u)
+                };
+
+                let v_high_unwrapped = v_high - v_range;
+                let d_v = v_high_unwrapped - v_low;
+                let t = if d_v.abs() > 1e-15 {
+                    (v_min - v_low) / d_v
+                } else {
+                    0.5_f64
+                };
+                let t = t.clamp(0.0, 1.0);
+                let u_cross = u_low + t * (u_high - u_low);
+
+                let cross_pt_3d = surface.point_at(u_cross, v_min);
+
+                v_crossings.push(VSeamCrossing {
+                    edge_idx: i,
+                    u_at_seam: u_cross,
+                    cross_pt_low: Point2d::new(u_cross, v_min),
+                    cross_pt_high: Point2d::new(u_cross, v_max),
+                    cross_pt_3d,
+                });
             }
         }
     }
 
-    // Prefer U seam splitting (most common for cylindrical surfaces)
-    let (seam_idx, seam_u) = if let Some(idx) = u_seam_idx {
-        let split_u = if u_seam_at_max { u_max } else { u_min };
-        (idx, split_u)
-    } else if let Some(idx) = v_seam_idx {
-        // V seam splitting (less common but possible)
-        // For now, return None — V seam splitting is more complex
-        return None;
+    // ================================================================
+    // Choose which seam to split at (prefer U, then V)
+    // ================================================================
+    if u_crossings.len() >= 2 {
+        split_at_u_seam(polygon, points_3d, surface, &u_crossings, u_min, u_max)
+    } else if v_crossings.len() >= 2 {
+        split_at_v_seam(polygon, points_3d, surface, &v_crossings, v_min, v_max)
     } else {
-        return None; // No seam crossing detected
-    };
+        log::warn!(
+            "try_split_at_seam: not enough crossings (u={}, v={}) — cannot split",
+            u_crossings.len(), v_crossings.len()
+        );
+        None
+    }
+}
 
-    log::info!(
-        "try_split_at_seam: detected seam crossing at edge {}→{}, splitting at u={:.4} (u_range=[{:.4},{:.4}])",
-        seam_idx, (seam_idx + 1) % polygon.len(), seam_u, u_min, u_max
-    );
+/// V-seam crossing (mirror of SeamCrossing with u/v swapped).
+struct VSeamCrossing {
+    edge_idx: usize,
+    u_at_seam: f64,
+    cross_pt_low: Point2d,  // (u_at_seam, v_min)
+    cross_pt_high: Point2d, // (u_at_seam, v_max)
+    cross_pt_3d: Point3d,
+}
 
-    // Build two sub-polygons by splitting at the seam line
-    let mut sub1_uv: Vec<Point2d> = Vec::new();
-    let mut sub2_uv: Vec<Point2d> = Vec::new();
-    let mut sub1_3d: Vec<Point3d> = Vec::new();
-    let mut sub2_3d: Vec<Point3d> = Vec::new();
+/// Get the U parametric range for any surface type.
+fn get_surface_u_range(surface: &Surface) -> (f64, f64) {
+    match surface {
+        Surface::Nurbs(n) => n.u_range(),
+        Surface::Cylinder(_) | Surface::Cone(_) | Surface::Revolution(_) => (0.0, 2.0 * PI),
+        Surface::Sphere(_) => (0.0, 2.0 * PI),
+        Surface::Torus(_) => (0.0, 2.0 * PI),
+        Surface::Plane(_) | Surface::Extrusion(_) => (0.0, 1.0),
+    }
+}
 
-    let n = polygon.len();
+/// Get the V parametric range for any surface type.
+fn get_surface_v_range(surface: &Surface) -> (f64, f64) {
+    match surface {
+        Surface::Nurbs(n) => n.v_range(),
+        Surface::Sphere(_) => (0.0, PI),
+        Surface::Torus(_) => (0.0, 2.0 * PI),
+        _ => (0.0, 1.0),
+    }
+}
 
-    // Classify each point as being on side 1 (u < seam_u) or side 2 (u >= seam_u)
-    // and build two sub-polygons with interpolated crossing points inserted
-    let mut crossing_count = 0usize;
-
-    for k in 0..n {
-        let k_next = (k + 1) % n;
-        let pk = polygon[k];
-        let pk_next = polygon[k_next];
-        let on_side1 = pk.u < seam_u;
-
-        let target_uv = if on_side1 { &mut sub1_uv } else { &mut sub2_uv };
-        let target_3d = if on_side1 { &mut sub1_3d } else { &mut sub2_3d };
-
-        target_uv.push(pk);
-        target_3d.push(points_3d[k]);
-
-        // Check if the next edge crosses the seam
-        let dk = pk_next.u - pk.u;
-        if dk.abs() > u_seam_threshold {
-            // This edge crosses the seam — interpolate crossing point
-            let t_cross = if dk.abs() > 1e-15 {
-                (seam_u - pk.u) / dk
-            } else {
-                0.5_f64
-            };
-            let t_cross = t_cross.clamp(0.0_f64, 1.0_f64);
-            let cv = pk.v + t_cross * (pk_next.v - pk.v);
-            let cross_pt_uv = Point2d::new(seam_u, cv);
-
-            let pk3d = points_3d[k];
-            let pn3d = points_3d[k_next % points_3d.len()];
-            let cross_pt_3d = Point3d::new(
-                pk3d.x + t_cross * (pn3d.x - pk3d.x),
-                pk3d.y + t_cross * (pn3d.y - pk3d.y),
-                pk3d.z + t_cross * (pn3d.z - pk3d.z),
-            );
-
-            // Add crossing point to BOTH sub-polygons (it's on the seam boundary)
-            sub1_uv.push(cross_pt_uv);
-            sub1_3d.push(cross_pt_3d);
-            sub2_uv.push(cross_pt_uv);
-            sub2_3d.push(cross_pt_3d);
-
-            crossing_count += 1;
-        }
+/// Split a UV polygon at the U-seam using the detected crossing points.
+///
+/// The two crossing points divide the polygon into two "walks". Each walk stays
+/// entirely on one side of the seam. We build two sub-polygons by:
+/// 1. Starting at crossing point 1 (at the correct u-value for this side)
+/// 2. Walking along polygon edges to crossing point 2
+/// 3. The polygon is implicitly closed by the "seam edge" (cross_pt2 → cross_pt1)
+fn split_at_u_seam(
+    polygon: &[Point2d],
+    points_3d: &[Point3d],
+    surface: &Surface,
+    crossings: &[SeamCrossing],
+    u_min: f64,
+    u_max: f64,
+) -> Option<(Vec<Point2d>, Vec<Point2d>, Vec<Point3d>, Vec<Point3d>)> {
+    if crossings.len() < 2 {
+        return None;
     }
 
-    if crossing_count < 2 {
+    if crossings.len() > 2 {
         log::warn!(
-            "try_split_at_seam: found {} seam crossings (need at least 2), splitting may be incomplete",
-            crossing_count
+            "split_at_u_seam: {} crossings (expected 2), using first pair",
+            crossings.len()
         );
     }
 
+    let cross1 = &crossings[0];
+    let cross2 = &crossings[1];
+    let i = cross1.edge_idx;
+    let j = cross2.edge_idx;
+    let n = polygon.len();
+
+    log::info!(
+        "split_at_u_seam: crossings at edges {}→{} and {}→{}, v_cross=[{:.4}, {:.4}], u_range=[{:.4},{:.4}]",
+        i, (i + 1) % n, j, (j + 1) % n,
+        cross1.v_at_seam, cross2.v_at_seam, u_min, u_max
+    );
+
+    // Build walk 1: from crossing 1, along polygon edges (i+1, i+2, ..., j), to crossing 2
+    let mut walk1_uv: Vec<Point2d> = Vec::new();
+    let mut walk1_3d: Vec<Point3d> = Vec::new();
+    let mut k = (i + 1) % n;
+    while k != (j + 1) % n {
+        walk1_uv.push(polygon[k]);
+        walk1_3d.push(points_3d[k]);
+        k = (k + 1) % n;
+    }
+
+    // Build walk 2: from crossing 2, along polygon edges (j+1, j+2, ..., i), to crossing 1
+    let mut walk2_uv: Vec<Point2d> = Vec::new();
+    let mut walk2_3d: Vec<Point3d> = Vec::new();
+    k = (j + 1) % n;
+    while k != (i + 1) % n {
+        walk2_uv.push(polygon[k]);
+        walk2_3d.push(points_3d[k]);
+        k = (k + 1) % n;
+    }
+
+    // Determine which walk is "high" side (u near u_max) vs "low" side (u near u_min)
+    let avg_u_walk1 = if walk1_uv.is_empty() {
+        0.5 * (u_min + u_max)
+    } else {
+        walk1_uv.iter().map(|p| p.u).sum::<f64>() / walk1_uv.len() as f64
+    };
+    let avg_u_walk2 = if walk2_uv.is_empty() {
+        0.5 * (u_min + u_max)
+    } else {
+        walk2_uv.iter().map(|p| p.u).sum::<f64>() / walk2_uv.len() as f64
+    };
+
+    // Build sub-polygons with correct crossing point u-values
+    let (sub1_uv, sub1_3d, sub2_uv, sub2_3d) = if avg_u_walk1 >= avg_u_walk2 {
+        // Walk 1 is high side, walk 2 is low side
+        let mut s1_uv = vec![cross1.cross_pt_high];
+        s1_uv.extend(walk1_uv.iter().cloned());
+        s1_uv.push(cross2.cross_pt_high);
+        let mut s1_3d = vec![cross1.cross_pt_3d];
+        s1_3d.extend(walk1_3d.iter().cloned());
+        s1_3d.push(cross2.cross_pt_3d);
+
+        let mut s2_uv = vec![cross2.cross_pt_low];
+        s2_uv.extend(walk2_uv.iter().cloned());
+        s2_uv.push(cross1.cross_pt_low);
+        let mut s2_3d = vec![cross2.cross_pt_3d];
+        s2_3d.extend(walk2_3d.iter().cloned());
+        s2_3d.push(cross1.cross_pt_3d);
+
+        (s1_uv, s1_3d, s2_uv, s2_3d)
+    } else {
+        // Walk 1 is low side, walk 2 is high side
+        let mut s1_uv = vec![cross1.cross_pt_low];
+        s1_uv.extend(walk1_uv.iter().cloned());
+        s1_uv.push(cross2.cross_pt_low);
+        let mut s1_3d = vec![cross1.cross_pt_3d];
+        s1_3d.extend(walk1_3d.iter().cloned());
+        s1_3d.push(cross2.cross_pt_3d);
+
+        let mut s2_uv = vec![cross2.cross_pt_high];
+        s2_uv.extend(walk2_uv.iter().cloned());
+        s2_uv.push(cross1.cross_pt_high);
+        let mut s2_3d = vec![cross2.cross_pt_3d];
+        s2_3d.extend(walk2_3d.iter().cloned());
+        s2_3d.push(cross1.cross_pt_3d);
+
+        (s1_uv, s1_3d, s2_uv, s2_3d)
+    };
+
     if sub1_uv.len() < 3 || sub2_uv.len() < 3 {
         log::warn!(
-            "try_split_at_seam: sub-polygons too small (sub1={}, sub2={}), falling back",
+            "split_at_u_seam: sub-polygons too small (sub1={}, sub2={}), falling back",
             sub1_uv.len(), sub2_uv.len()
         );
         return None;
     }
 
     log::info!(
-        "try_split_at_seam: split into sub1 ({} pts, u=[{:.4},{:.4}]) and sub2 ({} pts, u=[{:.4},{:.4}])",
+        "split_at_u_seam: split into sub1 ({} pts, u=[{:.4},{:.4}]) and sub2 ({} pts, u=[{:.4},{:.4}])",
         sub1_uv.len(),
         sub1_uv.iter().map(|p| p.u).fold(f64::MAX, f64::min),
         sub1_uv.iter().map(|p| p.u).fold(f64::MIN, f64::max),
         sub2_uv.len(),
         sub2_uv.iter().map(|p| p.u).fold(f64::MAX, f64::min),
         sub2_uv.iter().map(|p| p.u).fold(f64::MIN, f64::max),
+    );
+
+    Some((sub1_uv, sub2_uv, sub1_3d, sub2_3d))
+}
+
+/// Split a UV polygon at the V-seam (for V-periodic surfaces like torus).
+/// Same logic as split_at_u_seam but with u/v swapped.
+fn split_at_v_seam(
+    polygon: &[Point2d],
+    points_3d: &[Point3d],
+    surface: &Surface,
+    crossings: &[VSeamCrossing],
+    v_min: f64,
+    v_max: f64,
+) -> Option<(Vec<Point2d>, Vec<Point2d>, Vec<Point3d>, Vec<Point3d>)> {
+    if crossings.len() < 2 {
+        return None;
+    }
+
+    if crossings.len() > 2 {
+        log::warn!(
+            "split_at_v_seam: {} crossings (expected 2), using first pair",
+            crossings.len()
+        );
+    }
+
+    let cross1 = &crossings[0];
+    let cross2 = &crossings[1];
+    let i = cross1.edge_idx;
+    let j = cross2.edge_idx;
+    let n = polygon.len();
+
+    log::info!(
+        "split_at_v_seam: crossings at edges {}→{} and {}→{}, u_cross=[{:.4}, {:.4}], v_range=[{:.4},{:.4}]",
+        i, (i + 1) % n, j, (j + 1) % n,
+        cross1.u_at_seam, cross2.u_at_seam, v_min, v_max
+    );
+
+    // Build walk 1
+    let mut walk1_uv: Vec<Point2d> = Vec::new();
+    let mut walk1_3d: Vec<Point3d> = Vec::new();
+    let mut k = (i + 1) % n;
+    while k != (j + 1) % n {
+        walk1_uv.push(polygon[k]);
+        walk1_3d.push(points_3d[k]);
+        k = (k + 1) % n;
+    }
+
+    // Build walk 2
+    let mut walk2_uv: Vec<Point2d> = Vec::new();
+    let mut walk2_3d: Vec<Point3d> = Vec::new();
+    k = (j + 1) % n;
+    while k != (i + 1) % n {
+        walk2_uv.push(polygon[k]);
+        walk2_3d.push(points_3d[k]);
+        k = (k + 1) % n;
+    }
+
+    // Determine high/low side by average v
+    let avg_v_walk1 = if walk1_uv.is_empty() {
+        0.5 * (v_min + v_max)
+    } else {
+        walk1_uv.iter().map(|p| p.v).sum::<f64>() / walk1_uv.len() as f64
+    };
+    let avg_v_walk2 = if walk2_uv.is_empty() {
+        0.5 * (v_min + v_max)
+    } else {
+        walk2_uv.iter().map(|p| p.v).sum::<f64>() / walk2_uv.len() as f64
+    };
+
+    let (sub1_uv, sub1_3d, sub2_uv, sub2_3d) = if avg_v_walk1 >= avg_v_walk2 {
+        let mut s1_uv = vec![cross1.cross_pt_high];
+        s1_uv.extend(walk1_uv.iter().cloned());
+        s1_uv.push(cross2.cross_pt_high);
+        let mut s1_3d = vec![cross1.cross_pt_3d];
+        s1_3d.extend(walk1_3d.iter().cloned());
+        s1_3d.push(cross2.cross_pt_3d);
+
+        let mut s2_uv = vec![cross2.cross_pt_low];
+        s2_uv.extend(walk2_uv.iter().cloned());
+        s2_uv.push(cross1.cross_pt_low);
+        let mut s2_3d = vec![cross2.cross_pt_3d];
+        s2_3d.extend(walk2_3d.iter().cloned());
+        s2_3d.push(cross1.cross_pt_3d);
+
+        (s1_uv, s1_3d, s2_uv, s2_3d)
+    } else {
+        let mut s1_uv = vec![cross1.cross_pt_low];
+        s1_uv.extend(walk1_uv.iter().cloned());
+        s1_uv.push(cross2.cross_pt_low);
+        let mut s1_3d = vec![cross1.cross_pt_3d];
+        s1_3d.extend(walk1_3d.iter().cloned());
+        s1_3d.push(cross2.cross_pt_3d);
+
+        let mut s2_uv = vec![cross2.cross_pt_high];
+        s2_uv.extend(walk2_uv.iter().cloned());
+        s2_uv.push(cross1.cross_pt_high);
+        let mut s2_3d = vec![cross2.cross_pt_3d];
+        s2_3d.extend(walk2_3d.iter().cloned());
+        s2_3d.push(cross1.cross_pt_3d);
+
+        (s1_uv, s1_3d, s2_uv, s2_3d)
+    };
+
+    if sub1_uv.len() < 3 || sub2_uv.len() < 3 {
+        log::warn!(
+            "split_at_v_seam: sub-polygons too small (sub1={}, sub2={}), falling back",
+            sub1_uv.len(), sub2_uv.len()
+        );
+        return None;
+    }
+
+    log::info!(
+        "split_at_v_seam: split into sub1 ({} pts, v=[{:.4},{:.4}]) and sub2 ({} pts, v=[{:.4},{:.4}])",
+        sub1_uv.len(),
+        sub1_uv.iter().map(|p| p.v).fold(f64::MAX, f64::min),
+        sub1_uv.iter().map(|p| p.v).fold(f64::MIN, f64::max),
+        sub2_uv.len(),
+        sub2_uv.iter().map(|p| p.v).fold(f64::MAX, f64::min),
+        sub2_uv.iter().map(|p| p.v).fold(f64::MIN, f64::max),
     );
 
     Some((sub1_uv, sub2_uv, sub1_3d, sub2_3d))
@@ -1337,150 +1598,130 @@ pub fn triangulate_surface_consistent(
     }
 
     // ============================================================
-    // Step 1.6: NURBS UV polygon self-intersection check
+    // Step 1.6: UV polygon self-intersection check for periodic surfaces
     //
-    // For NURBS surfaces, the UV polygon can be self-intersecting
-    // when Newton-Raphson converges to a wrong UV for some boundary
-    // points (e.g., on surfaces with large UV ranges or bad
-    // parameterization). A self-intersecting UV polygon produces
-    // incorrect triangulation — triangles on the wrong side of
-    // the surface, inverted normals, etc.
+    // For periodic surfaces (NURBS, Cylinder, Torus, Sphere, Revolution),
+    // the UV polygon can be self-intersecting when it wraps around the seam,
+    // creating a "bowtie" pattern. A self-intersecting UV polygon produces
+    // incorrect triangulation — triangles on the wrong side of the surface,
+    // inverted normals, etc.
     //
-    // If the UV polygon is self-intersecting, we fall back to
-    // re-projecting all UVs from scratch using surface.project_point().
-    // This is slow (~146 evaluations per point) but more robust.
+    // Detection uses both area-ratio analysis and edge-crossing checks.
+    // Fix strategies (in order of preference):
+    //   1. Split the polygon at the seam into two non-intersecting sub-polygons
+    //   2. Re-project UVs using surface.project_point() (fallback)
     // ============================================================
-    if let Surface::Nurbs(ref nurbs) = surface {
-        let uv_signed_area = polygon_signed_area_2d(&outer_uv);
-        let uv_unsigned_area = uv_signed_area.abs();
-        // Log per-edge UV ranges to diagnose degenerate polygons
-        {
-            let (nu_min, nu_max) = nurbs.u_range();
-            let (nv_min, nv_max) = nurbs.v_range();
-            let u_min_all = outer_uv.iter().map(|p| p.u).fold(f64::MAX, f64::min);
-            let u_max_all = outer_uv.iter().map(|p| p.u).fold(f64::MIN, f64::max);
-            let v_min_all = outer_uv.iter().map(|p| p.v).fold(f64::MAX, f64::min);
-            let v_max_all = outer_uv.iter().map(|p| p.v).fold(f64::MIN, f64::max);
-            log::info!(
-                "NURBS UV polygon: signed_area={:.6}, unsigned_area={:.6}, {} points, u_range=[{:.4},{:.4}] v_range=[{:.4},{:.4}], nurbs_range=u[{:.4},{:.4}]v[{:.4},{:.4}]",
-                uv_signed_area, uv_unsigned_area, outer_uv.len(),
-                u_min_all, u_max_all, v_min_all, v_max_all,
-                nu_min, nu_max, nv_min, nv_max,
-            );
-        }
-
-        // ============================================================
-        // Self-intersection detection for NURBS UV polygons.
-        //
-        // A self-intersecting UV polygon has a signed area that is
-        // **near zero** relative to its unsigned area, because the
-        // positive and negative lobes cancel out in the shoelace
-        // formula. We detect this by comparing |signed_area| to
-        // the bounding box area: if |signed_area| < 1% of the bbox
-        // area, the polygon is likely self-intersecting.
-        //
-        // We also detect degenerate polygons (zero area) and
-        // edge crossings via a sweep-line check.
-        // ============================================================
-        let is_degenerate = uv_unsigned_area < 1e-20 && outer_uv.len() >= 3;
-        let is_self_intersecting = if !is_degenerate && outer_uv.len() >= 3 {
-            // Compute the UV bounding box area for comparison
-            let u_min_uv = outer_uv.iter().map(|p| p.u).fold(f64::MAX, f64::min);
-            let u_max_uv = outer_uv.iter().map(|p| p.u).fold(f64::MIN, f64::max);
-            let v_min_uv = outer_uv.iter().map(|p| p.v).fold(f64::MAX, f64::min);
-            let v_max_uv = outer_uv.iter().map(|p| p.v).fold(f64::MIN, f64::max);
-            let bbox_area = (u_max_uv - u_min_uv) * (v_max_uv - v_min_uv);
-            // If the signed area is much smaller than the bbox area,
-            // the polygon has cancellation → self-intersection
-            if bbox_area > 1e-20 {
-                uv_unsigned_area / bbox_area < 0.01
-            } else {
-                false
-            }
-        } else {
-            is_degenerate
-        };
-        // Also check for actual edge crossings (more reliable detection)
-        let has_edge_crossings = check_uv_polygon_self_intersection(&outer_uv);
-
-        if (is_self_intersecting || has_edge_crossings) && outer_uv.len() >= 3 {
-            log::warn!(
-                "NURBS UV polygon is self-intersecting/degenerate: signed_area={:.6}, unsigned_area={:.6}, edge_crossings={}, {} points",
-                uv_signed_area, uv_unsigned_area, has_edge_crossings, outer_uv.len()
-            );
-
-            // STRATEGY 1 (preferred): Split the polygon at the seam.
-            // For closed NURBS surfaces (cylinder-like), the self-intersection is caused
-            // by the UV polygon wrapping around the seam. Splitting at the seam creates
-            // two non-self-intersecting sub-polygons that can be triangulated correctly.
-            if let Some((sub1_uv, sub2_uv, sub1_3d, sub2_3d)) =
-                try_split_at_seam(&outer_uv, &boundary_points_3d, surface)
+    {
+        let is_periodic = surface.is_u_periodic() || surface.is_v_periodic();
+        if is_periodic || matches!(surface, Surface::Nurbs(_)) {
+            let uv_signed_area = polygon_signed_area_2d(&outer_uv);
+            let uv_unsigned_area = uv_signed_area.abs();
+            // Log UV polygon info for diagnosis
             {
+                let (su_min, su_max) = get_surface_u_range(surface);
+                let (sv_min, sv_max) = get_surface_v_range(surface);
+                let u_min_all = outer_uv.iter().map(|p| p.u).fold(f64::MAX, f64::min);
+                let u_max_all = outer_uv.iter().map(|p| p.u).fold(f64::MIN, f64::max);
+                let v_min_all = outer_uv.iter().map(|p| p.v).fold(f64::MAX, f64::min);
+                let v_max_all = outer_uv.iter().map(|p| p.v).fold(f64::MIN, f64::max);
                 log::info!(
-                    "NURBS UV self-intersection: using seam-split strategy (sub1={} pts, sub2={} pts)",
-                    sub1_uv.len(), sub2_uv.len()
+                    "Periodic UV polygon: signed_area={:.6}, unsigned_area={:.6}, {} points, uv=[{:.4},{:.4}]x[{:.4},{:.4}], surface_range=u[{:.4},{:.4}]v[{:.4},{:.4}]",
+                    uv_signed_area, uv_unsigned_area, outer_uv.len(),
+                    u_min_all, u_max_all, v_min_all, v_max_all,
+                    su_min, su_max, sv_min, sv_max,
                 );
-
-                // Triangulate each sub-polygon recursively and merge the results
-                // No holes are passed to sub-polygons — holes that belong to one side
-                // will be handled by the recursive call's own containment logic.
-                let sub1_holes_3d: Vec<Vec<Point3d>> = Vec::new();
-                let sub1_holes_uv: Vec<Vec<Point2d>> = Vec::new();
-                let sub2_holes_3d: Vec<Vec<Point3d>> = Vec::new();
-                let sub2_holes_uv: Vec<Vec<Point2d>> = Vec::new();
-
-                let mesh1 = triangulate_surface_consistent(
-                    surface, &sub1_3d, &sub1_uv,
-                    &sub1_holes_3d, &sub1_holes_uv,
-                    forward, params,
-                );
-                let mesh2 = triangulate_surface_consistent(
-                    surface, &sub2_3d, &sub2_uv,
-                    &sub2_holes_3d, &sub2_holes_uv,
-                    forward, params,
-                );
-
-                // Merge the two sub-meshes
-                let mut result = mesh1;
-                result.merge(&mesh2);
-                return result;
             }
 
-            // STRATEGY 2 (fallback): Brute-force re-projection.
-            // Only used when seam splitting is not applicable (no seam detected).
-            log::info!("NURBS UV self-intersection: seam-split not applicable, trying brute-force re-projection");
-            let (nu_min, nu_max) = nurbs.u_range();
-            let (nv_min, nv_max) = nurbs.v_range();
-            let u_range = nu_max - nu_min;
-            let v_range = nv_max - nv_min;
-            let grid_size = crate::edge_cache::adaptive_grid_size(u_range, v_range);
-            outer_uv = boundary_points_3d.iter().map(|p| {
-                let (u, v) = crate::edge_cache::brute_force_project_point(nurbs, p, grid_size);
-                // Clamp to NURBS parameter range as safety measure
-                Point2d::new(
-                    u.clamp(nu_min, nu_max),
-                    v.clamp(nv_min, nv_max),
-                )
-            }).collect();
-            // Re-normalize
-            crate::triangulate::normalize_uv_polygon(&mut outer_uv, u_period, v_period);
-            if outer_uv.len() < 3 {
-                return TriangleMesh::new();
-            }
-            let new_area = polygon_signed_area_2d(&outer_uv);
-            let new_self_intersecting = check_uv_polygon_self_intersection(&outer_uv);
-            log::info!(
-                "NURBS UV polygon re-projected (brute-force grid={}): signed_area={:.6}, unsigned_area={:.6}, self_intersecting={} (was signed={:.6}, unsigned={:.6})",
-                grid_size, new_area, new_area.abs(), new_self_intersecting, uv_signed_area, uv_unsigned_area
-            );
+            // Self-intersection detection:
+            // 1. Area-ratio: |signed_area| << bbox_area indicates cancellation (bowtie)
+            // 2. Edge-crossing: explicit check for intersecting polygon edges
+            let is_degenerate = uv_unsigned_area < 1e-20 && outer_uv.len() >= 3;
+            let is_self_intersecting = if !is_degenerate && outer_uv.len() >= 3 {
+                let u_min_uv = outer_uv.iter().map(|p| p.u).fold(f64::MAX, f64::min);
+                let u_max_uv = outer_uv.iter().map(|p| p.u).fold(f64::MIN, f64::max);
+                let v_min_uv = outer_uv.iter().map(|p| p.v).fold(f64::MAX, f64::min);
+                let v_max_uv = outer_uv.iter().map(|p| p.v).fold(f64::MIN, f64::max);
+                let bbox_area = (u_max_uv - u_min_uv) * (v_max_uv - v_min_uv);
+                if bbox_area > 1e-20 {
+                    uv_unsigned_area / bbox_area < 0.01
+                } else {
+                    false
+                }
+            } else {
+                is_degenerate
+            };
+            let has_edge_crossings = check_uv_polygon_self_intersection(&outer_uv);
 
-            // If still self-intersecting after brute-force, log an error
-            // but proceed — earcutr can sometimes handle mildly self-intersecting
-            // polygons, and an empty mesh is worse than a slightly imperfect one.
-            if new_self_intersecting {
-                log::error!(
-                    "NURBS UV polygon STILL self-intersecting after brute-force re-projection — proceeding with imperfect polygon"
+            if (is_self_intersecting || has_edge_crossings) && outer_uv.len() >= 3 {
+                log::warn!(
+                    "UV polygon is self-intersecting/degenerate: signed_area={:.6}, unsigned_area={:.6}, edge_crossings={}, {} points, surface={:?}",
+                    uv_signed_area, uv_unsigned_area, has_edge_crossings, outer_uv.len(),
+                    std::mem::discriminant(surface)
                 );
+
+                // STRATEGY 1 (preferred): Split the polygon at the seam.
+                // For periodic surfaces, the self-intersection is caused by the UV polygon
+                // wrapping around the seam. Splitting creates two non-self-intersecting
+                // sub-polygons that can be triangulated correctly.
+                if let Some((sub1_uv, sub2_uv, sub1_3d, sub2_3d)) =
+                    try_split_at_seam(&outer_uv, &boundary_points_3d, surface)
+                {
+                    log::info!(
+                        "UV self-intersection: using seam-split strategy (sub1={} pts, sub2={} pts)",
+                        sub1_uv.len(), sub2_uv.len()
+                    );
+
+                    // Triangulate each sub-polygon recursively and merge the results
+                    let sub1_holes_3d: Vec<Vec<Point3d>> = Vec::new();
+                    let sub1_holes_uv: Vec<Vec<Point2d>> = Vec::new();
+                    let sub2_holes_3d: Vec<Vec<Point3d>> = Vec::new();
+                    let sub2_holes_uv: Vec<Vec<Point2d>> = Vec::new();
+
+                    let mesh1 = triangulate_surface_consistent(
+                        surface, &sub1_3d, &sub1_uv,
+                        &sub1_holes_3d, &sub1_holes_uv,
+                        forward, params,
+                    );
+                    let mesh2 = triangulate_surface_consistent(
+                        surface, &sub2_3d, &sub2_uv,
+                        &sub2_holes_3d, &sub2_holes_uv,
+                        forward, params,
+                    );
+
+                    let mut result = mesh1;
+                    result.merge(&mesh2);
+                    return result;
+                }
+
+                // STRATEGY 2 (fallback): Re-project UVs using surface.project_point().
+                // Only used when seam splitting is not applicable (no seam detected).
+                log::info!("UV self-intersection: seam-split not applicable, trying re-projection");
+                outer_uv = boundary_points_3d.iter().map(|p| {
+                    let (u, v) = surface.project_point(p);
+                    let (su_min, su_max) = get_surface_u_range(surface);
+                    let (sv_min, sv_max) = get_surface_v_range(surface);
+                    Point2d::new(
+                        u.clamp(su_min, su_max),
+                        v.clamp(sv_min, sv_max),
+                    )
+                }).collect();
+                // Re-normalize
+                crate::triangulate::normalize_uv_polygon(&mut outer_uv, u_period, v_period);
+                if outer_uv.len() < 3 {
+                    return TriangleMesh::new();
+                }
+                let new_area = polygon_signed_area_2d(&outer_uv);
+                let new_self_intersecting = check_uv_polygon_self_intersection(&outer_uv);
+                log::info!(
+                    "UV polygon re-projected: signed_area={:.6}, unsigned_area={:.6}, self_intersecting={} (was signed={:.6}, unsigned={:.6})",
+                    new_area, new_area.abs(), new_self_intersecting, uv_signed_area, uv_unsigned_area
+                );
+
+                if new_self_intersecting {
+                    log::error!(
+                        "UV polygon STILL self-intersecting after re-projection — proceeding with imperfect polygon"
+                    );
+                }
             }
         }
     }
