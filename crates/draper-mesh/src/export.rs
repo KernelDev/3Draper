@@ -654,7 +654,7 @@ pub fn build_glb_scene(meshes: &[(&str, &TriangleMesh)]) -> Result<Vec<u8>, Expo
         "buffers": [{ "byteLength": bin_data.len() }]
     });
 
-    let json_str = serde_json::to_string_packed(&gltf_json)
+    let json_str = serde_json::to_string(&gltf_json)
         .map_err(|e| ExportError::InvalidMesh(format!("JSON serialization failed: {}", e)))?;
 
     // Pad JSON to 4-byte alignment

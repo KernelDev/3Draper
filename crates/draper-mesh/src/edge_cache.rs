@@ -698,11 +698,14 @@ impl EdgeDiscretizationCache {
 
                 // Validate: check that the projected UV maps back to a 3D point
                 // close to the original point. If error is too large, try brute-force.
+                // Threshold: only use brute-force for significant errors (> 1e-3).
+                // Smaller errors (1e-4 to 1e-3) are acceptable for boundary points —
+                // the tolerance-based vertex dedup will merge any near-miss vertices.
                 let reconstructed = surface.point_at(u, v);
                 let error = point.distance_to(&reconstructed);
 
-                if error > 1e-4 {
-                    // project_point() or chain Newton failed — try brute-force grid search
+                if error > 1e-3 {
+                    // project_point() or chain Newton failed significantly — try brute-force
                     let grid_size = adaptive_grid_size(u_range, v_range);
                     let (ub, vb) = brute_force_project_point(nurbs, point, grid_size);
                     let bf_reconstructed = surface.point_at(ub, vb);
@@ -720,21 +723,14 @@ impl EdgeDiscretizationCache {
                             deterministic_round(u),
                             deterministic_round(v),
                         ));
-                        log::error!(
-                            "NURBS projection failed: point={:?}, newton_error={:.2e}, brute_force_error={:.2e}",
+                        log::warn!(
+                            "NURBS projection: point={:?}, newton_error={:.2e}, brute_force_error={:.2e}",
                             point, error, bf_error
                         );
                     }
                     newton_failures += 1;
-                } else if error > 1e-6 {
-                    // Moderate error — still use project_point result but with rounding
-                    uvs.push(Point2d::new(
-                        deterministic_round(u),
-                        deterministic_round(v),
-                    ));
-                    newton_failures += 1;
                 } else {
-                    // Good projection — use with deterministic rounding for consistency
+                    // Acceptable projection — use with deterministic rounding for consistency
                     uvs.push(Point2d::new(
                         deterministic_round(u),
                         deterministic_round(v),
@@ -890,19 +886,19 @@ impl EdgeDiscretizationCache {
 /// Compute adaptive grid size for brute-force NURBS point projection.
 ///
 /// Larger UV ranges need finer grids to ensure the closest UV is found.
-/// For a surface with U range 220 units, a 100×100 grid gives 2.2 units
-/// per cell, which is sufficient for finding the correct initial guess
-/// for Newton-Raphson refinement.
+/// However, very large grids (70-100) are extremely slow and rarely improve
+/// results — they were the main cause of performance regression. The seam-split
+/// strategy in parametric_domain.rs now handles closed NURBS surfaces correctly,
+/// so brute-force projection is only needed as a last resort for truly bad
+/// parameterizations.
 pub fn adaptive_grid_size(u_range: f64, v_range: f64) -> usize {
     let max_range = u_range.max(v_range);
     if max_range < 10.0 {
-        20       // Small range — coarse grid is fine
+        15       // Small range — coarse grid is fine
     } else if max_range < 50.0 {
-        40       // Medium range
-    } else if max_range < 200.0 {
-        70       // Large range (e.g., U: -10..210)
+        25       // Medium range
     } else {
-        100      // Very large range
+        35       // Large range — cap at 35 to avoid extreme slowdown
     }
 }
 

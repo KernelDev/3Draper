@@ -530,6 +530,9 @@ pub struct StepConversionContext<'a> {
     converter: StepConverter<'a>,
     bbox: Option<(Point3d, Point3d)>,
     params: TriangulationParams,
+    /// BREP triangulation cache: brep_id → (mesh_in_brep_local_space, face_info).
+    /// Uses RefCell for interior mutability since triangulate_pending takes &self.
+    brep_detail_cache: std::cell::RefCell<HashMap<i64, (TriangleMesh, Vec<FaceInfo>)>>,
 }
 
 impl<'a> StepConversionContext<'a> {
@@ -557,7 +560,7 @@ impl<'a> StepConversionContext<'a> {
             }
         }
 
-        Self { converter, bbox, params }
+        Self { converter, bbox, params, brep_detail_cache: std::cell::RefCell::new(HashMap::new()) }
     }
 
     /// Triangulate a single pending BREP instance.
@@ -570,7 +573,22 @@ impl<'a> StepConversionContext<'a> {
     /// Faces that exceed the limit are skipped, producing a partial mesh
     /// instead of hanging the browser.
     pub fn triangulate_pending(&self, pending: &PendingBrepInstance) -> Option<DetailedMeshInstance> {
-        let (mesh, faces) = self.converter.triangulate_brep_detailed(pending.brep_id, &self.params, &self.bbox)?;
+        // Check BREP cache first — avoid re-triangulating the same BREP
+        let (mesh, faces) = {
+            let cache = self.brep_detail_cache.borrow();
+            if let Some(cached) = cache.get(&pending.brep_id) {
+                log::info!(
+                    "BREP #{} — using cached triangulation (instance of previously computed BREP)",
+                    pending.brep_id
+                );
+                cached.clone()
+            } else {
+                drop(cache); // Release borrow before mutating
+                let result = self.converter.triangulate_brep_detailed(pending.brep_id, &self.params, &self.bbox)?;
+                self.brep_detail_cache.borrow_mut().insert(pending.brep_id, result.clone());
+                result
+            }
+        };
 
         // Apply the instance transform
         let mut instance_mesh = mesh;
@@ -623,6 +641,11 @@ pub struct OwnedStepConversionContext {
     config: StepConversionConfig,
     /// Whether the bounding box has been computed (for lazy init on WASM).
     bbox_computed: bool,
+    /// BREP triangulation cache: brep_id → (mesh_in_brep_local_space, face_info).
+    /// When the same BREP appears via STEP mapped_item/instance, the cached
+    /// triangulation is reused with just a transform applied, eliminating
+    /// redundant re-triangulation and guaranteeing identical meshes.
+    brep_detail_cache: HashMap<i64, (TriangleMesh, Vec<FaceInfo>)>,
 }
 
 impl OwnedStepConversionContext {
@@ -675,7 +698,7 @@ impl OwnedStepConversionContext {
         // Use consistent max_face_triangles on all platforms
         // (no WASM-specific cap — quality should match native)
 
-        Self { step_file, bbox, params, pd_brep_map, nauo_transform_map, entity_map, config, bbox_computed: false }
+        Self { step_file, bbox, params, pd_brep_map, nauo_transform_map, entity_map, config, bbox_computed: false, brep_detail_cache: HashMap::new() }
     }
 
     /// Triangulate a single pending BREP instance.
@@ -703,17 +726,33 @@ impl OwnedStepConversionContext {
             }
         }
 
-        // Build a lightweight StepConverter using cached maps.
-        // This avoids the O(n) entity_map rebuild and O(n) pd_brep/nauo
-        // re-cloning that was happening on every call.
-        let converter = StepConverter::from_cached_maps(
-            &self.step_file,
-            self.config.clone(),
-            self.entity_map.clone(),
-            self.pd_brep_map.clone(),
-            self.nauo_transform_map.clone(),
-        );
-        let (mesh, faces) = converter.triangulate_brep_detailed(pending.brep_id, &self.params, &self.bbox)?;
+        // Check the BREP triangulation cache first — if the same BREP has already
+        // been triangulated (e.g., a bolt used 6 times in an assembly), reuse the
+        // cached result instead of re-triangulating from scratch. This eliminates
+        // both redundant computation and the possibility of different triangulations
+        // for the same shape (guaranteeing watertight instances).
+        let (mesh, faces) = if let Some(cached) = self.brep_detail_cache.get(&pending.brep_id) {
+            log::info!(
+                "BREP #{} — using cached triangulation (instance of previously computed BREP)",
+                pending.brep_id
+            );
+            cached.clone()
+        } else {
+            // Build a lightweight StepConverter using cached maps.
+            // This avoids the O(n) entity_map rebuild and O(n) pd_brep/nauo
+            // re-cloning that was happening on every call.
+            let converter = StepConverter::from_cached_maps(
+                &self.step_file,
+                self.config.clone(),
+                self.entity_map.clone(),
+                self.pd_brep_map.clone(),
+                self.nauo_transform_map.clone(),
+            );
+            let result = converter.triangulate_brep_detailed(pending.brep_id, &self.params, &self.bbox)?;
+            // Cache the result for future instances of the same BREP
+            self.brep_detail_cache.insert(pending.brep_id, result.clone());
+            result
+        };
 
         // Apply the instance transform
         let mut instance_mesh = mesh;

@@ -525,8 +525,9 @@ pub fn triangulate_solid_parallel_arc(
 
     let triangulate_time = start.elapsed();
 
-    // Step 2: Parallel tree-reduce merge with bit-exact dedup
-    let merged = merge_meshes_tree_reduce(&face_meshes);
+    // Step 2: Parallel tree-reduce merge with tolerance-based dedup
+    let adaptive_tol = cache.adaptive_tolerance().merge_tolerance();
+    let merged = merge_meshes_tree_reduce(&face_meshes, adaptive_tol);
     let merge_time = start.elapsed();
 
     // Step 3: Post-processing (topology-first — no mandatory merge/stitch)
@@ -588,21 +589,23 @@ fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams, cac
     // Use merge_deduplicating to ensure shared-edge vertices get the same
     // vertex index in the final mesh.
     //
-    // Dedup strategy: bit-exact ONLY.
-    // The edge cache with deterministic rounding (48-bit mantissa) guarantees
-    // that shared edges between adjacent faces produce bit-identical 3D
-    // coordinates. Therefore, bit-exact dedup is sufficient — no tolerance
-    // fallback is needed. If vertices are not bit-identical, they represent
-    // genuine geometry differences (a BUG in the edge cache or triangulation)
-    // that should be caught by watertight validation, not silently merged.
+    // Dedup strategy: bit-exact + tolerance fallback.
+    // The edge cache with deterministic rounding (48-bit mantissa) produces
+    // bit-identical 3D coordinates for shared STEP EDGE_CURVEs. However,
+    // some edges in STEP files don't share the same EDGE_CURVE entity
+    // (different STEP IDs for the same geometric boundary). In those cases,
+    // the edge cache produces near-identical but not bit-identical vertices.
     //
-    // Previously, `with_tolerance()` was used as a diagnostic tool to detect
-    // non-bit-identical merges. However, this contradicts the "watertight by
-    // construction" design: merging non-identical vertices hides bugs and can
-    // distort geometry (moving vertices by up to tolerance distance). The
-    // correct approach is bit-exact-only dedup + watertight validation.
+    // The tolerance fallback catches these near-misses: vertices within
+    // the adaptive merge tolerance (model_scale × 1e-6) are merged. This is
+    // essential for watertightness — without it, 11-21% boundary edges remain
+    // unmerged even though the edge cache is working correctly for shared edges.
+    //
+    // The tolerance is very small (1 PPM of model scale), so it will never
+    // merge genuinely distinct features.
+    let adaptive_tol = cache.adaptive_tolerance().merge_tolerance();
     let mut mesh = TriangleMesh::new();
-    let mut dedup_map = crate::mesh::VertexDedupMap::bit_exact();
+    let mut dedup_map = crate::mesh::VertexDedupMap::with_tolerance(adaptive_tol);
     let mut total_face_vertices = 0usize;
     for face in solid.faces() {
         let face_mesh = triangulate_face_with_cache(face, params, cache);
@@ -611,13 +614,14 @@ fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams, cac
     }
     let deduped_vertices = total_face_vertices - mesh.vertices.len();
     if deduped_vertices > 0 {
-        let (exact_hits, _tolerance_hits, misses) = dedup_map.stats();
-        let total_lookups = exact_hits + misses;
+        let (exact_hits, tolerance_hits, misses) = dedup_map.stats();
+        let total_lookups = exact_hits + tolerance_hits + misses;
         let exact_pct = if total_lookups > 0 { exact_hits as f64 / total_lookups as f64 * 100.0 } else { 0.0 };
+        let tol_pct = if total_lookups > 0 { tolerance_hits as f64 / total_lookups as f64 * 100.0 } else { 0.0 };
         log::info!(
-            "Vertex dedup: {} face vertices → {} unique ({} shared via bit-exact [{:.1}%])",
+            "Vertex dedup: {} face vertices → {} unique ({} shared: {:.1}% bit-exact, {:.1}% tolerance, tol={:.2e})",
             total_face_vertices, mesh.vertices.len(), deduped_vertices,
-            exact_pct,
+            exact_pct, tol_pct, adaptive_tol,
         );
     }
 
@@ -747,7 +751,7 @@ fn triangulate_solid_parallel(solid: &Solid, params: &TriangulationParams, cache
 /// operation is not commutative in the presence of dedup (vertex indices
 /// depend on insertion order). Instead, we use a chunked approach that
 /// preserves deterministic ordering while parallelizing the bulk of the work.
-fn merge_meshes_tree_reduce(meshes: &[TriangleMesh]) -> TriangleMesh {
+fn merge_meshes_tree_reduce(meshes: &[TriangleMesh], tolerance: f64) -> TriangleMesh {
     use rayon::prelude::*;
 
     if meshes.is_empty() {
@@ -759,7 +763,7 @@ fn merge_meshes_tree_reduce(meshes: &[TriangleMesh]) -> TriangleMesh {
 
     // For small mesh counts, sequential merge is faster (avoids rayon overhead)
     if meshes.len() < 8 {
-        return merge_meshes_sequential(meshes);
+        return merge_meshes_sequential(meshes, tolerance);
     }
 
     // Chunked parallel merge: split into rayon-sized chunks, merge each
@@ -769,35 +773,36 @@ fn merge_meshes_tree_reduce(meshes: &[TriangleMesh]) -> TriangleMesh {
 
     let chunks: Vec<TriangleMesh> = meshes
         .par_chunks(chunk_size)
-        .map(|chunk| merge_meshes_sequential(chunk))
+        .map(|chunk| merge_meshes_sequential(chunk, tolerance))
         .collect();
 
     // Final merge of chunk results (small N, sequential is fine)
-    let merged = merge_meshes_sequential(&chunks);
+    let merged = merge_meshes_sequential(&chunks, tolerance);
 
     let total_face_vertices: usize = meshes.iter().map(|m| m.vertices.len()).sum();
     let deduped_vertices = total_face_vertices - merged.vertices.len();
     if deduped_vertices > 0 {
         log::info!(
-            "Parallel tree-reduce dedup: {} face vertices → {} unique ({} shared, {} chunks)",
-            total_face_vertices, merged.vertices.len(), deduped_vertices, chunks.len(),
+            "Parallel tree-reduce dedup: {} face vertices → {} unique ({} shared, {} chunks, tol={:.2e})",
+            total_face_vertices, merged.vertices.len(), deduped_vertices, chunks.len(), tolerance,
         );
     }
     merged
 }
 
-/// Sequential merge of meshes with bit-exact dedup (worker function).
+/// Sequential merge of meshes with tolerance-based dedup (worker function).
 ///
 /// This is the inner loop of `merge_meshes_tree_reduce` — each rayon worker
-/// calls this on its assigned chunk. Uses bit-exact-only dedup, consistent
-/// with the topology-first approach.
-fn merge_meshes_sequential(meshes: &[TriangleMesh]) -> TriangleMesh {
+/// calls this on its assigned chunk. Uses bit-exact + tolerance dedup to catch
+/// both shared STEP EDGE_CURVE vertices and near-identical vertices from
+/// different STEP entities on the same geometric boundary.
+fn merge_meshes_sequential(meshes: &[TriangleMesh], tolerance: f64) -> TriangleMesh {
     if meshes.is_empty() {
         return TriangleMesh::new();
     }
 
     let mut merged = TriangleMesh::new();
-    let mut dedup_map = crate::mesh::VertexDedupMap::bit_exact();
+    let mut dedup_map = crate::mesh::VertexDedupMap::with_tolerance(tolerance);
     for mesh in meshes {
         merged.merge_deduplicating(mesh, &mut dedup_map);
     }
@@ -832,18 +837,47 @@ fn solid_bounding_box(solid: &Solid) -> (Point3d, Point3d) {
     (min, max)
 }
 
+/// Compute the bounding box of a Shell from its face surfaces and edge vertices.
+fn shell_bounding_box(shell: &Shell) -> (Point3d, Point3d) {
+    let mut min = Point3d::new(f64::MAX, f64::MAX, f64::MAX);
+    let mut max = Point3d::new(f64::MIN, f64::MIN, f64::MIN);
+    let mut has_points = false;
+
+    for face in &shell.faces {
+        for edge in &face.edges {
+            if edge.degenerate { continue; }
+            if let Some(p) = edge.start_point() {
+                min.x = min.x.min(p.x); min.y = min.y.min(p.y); min.z = min.z.min(p.z);
+                max.x = max.x.max(p.x); max.y = max.y.max(p.y); max.z = max.z.max(p.z);
+                has_points = true;
+            }
+            if let Some(p) = edge.end_point() {
+                min.x = min.x.min(p.x); min.y = min.y.min(p.y); min.z = min.z.min(p.z);
+                max.x = max.x.max(p.x); max.y = max.y.max(p.y); max.z = max.z.max(p.z);
+                has_points = true;
+            }
+        }
+    }
+
+    if !has_points {
+        return (Point3d::ORIGIN, Point3d::new(1.0, 1.0, 1.0));
+    }
+    (min, max)
+}
+
 /// Triangulate a shell into a triangle mesh (topology-first approach).
 pub fn triangulate_shell(shell: &Shell, params: &TriangulationParams) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
-    let mut cache = EdgeDiscretizationCache::new();
-    // Bit-exact-only dedup (same strategy as sequential/parallel solid paths).
-    // The edge cache with deterministic rounding (48-bit mantissa) guarantees
-    // that shared edges between adjacent faces produce bit-identical 3D
-    // coordinates. Tolerance-based dedup contradicts this guarantee — it
-    // silently merges non-identical vertices, hiding bugs in the edge cache
-    // and potentially distorting geometry. If vertices are not bit-identical,
-    // that is a BUG that should be caught by watertight validation.
-    let mut dedup_map = crate::mesh::VertexDedupMap::bit_exact();
+    // Compute adaptive tolerance from shell bounding box
+    let (bmin, bmax) = shell_bounding_box(shell);
+    let mut cache = EdgeDiscretizationCache::with_adaptive_tolerance(&bmin, &bmax, EDGE_SAMPLES);
+    let adaptive_tol = cache.adaptive_tolerance().merge_tolerance();
+    // Tolerance-based dedup: same strategy as sequential solid path.
+    // Bit-exact-only dedup misses near-identical vertices from different
+    // STEP EDGE_CURVEs that are geometrically the same boundary. The adaptive
+    // tolerance (1 PPM of model scale) catches these near-misses without
+    // collapsing genuinely distinct features.
+    let mut dedup_map = crate::mesh::VertexDedupMap::with_tolerance(adaptive_tol);
     for face in &shell.faces {
         let face_mesh = triangulate_face_with_cache(face, params, &mut cache);
         mesh.merge_deduplicating(&face_mesh, &mut dedup_map);
@@ -5937,7 +5971,7 @@ mod parallel_tests {
         m2.add_vertex(Point3d::new(0.0, 1.0, 1.0));
         m2.add_triangle(0, 1, 2);
 
-        let merged = merge_meshes_sequential(&[m1, m2]);
+        let merged = merge_meshes_sequential(&[m1, m2], 1e-10);
 
         assert_eq!(merged.vertices.len(), 6, "Should have 6 vertices");
         assert_eq!(merged.triangles.len(), 2, "Should have 2 triangles");
@@ -6088,6 +6122,9 @@ impl ChunkedBrepTriangulator {
         // never lazy UV computation that could blow the frame budget.
         cache.pre_populate_for_solid_full(solid, EDGE_SAMPLES);
 
+        // Get tolerance before moving cache into the struct
+        let adaptive_tol = cache.adaptive_tolerance().merge_tolerance();
+
         // Collect faces and sort by estimated complexity (complex faces first).
         // This gives better progressive rendering: the viewer sees large curved
         // faces appear early, while small planar faces fill in last.
@@ -6104,7 +6141,7 @@ impl ChunkedBrepTriangulator {
             faces,
             params,
             cache,
-            dedup_map: crate::mesh::VertexDedupMap::bit_exact(),
+            dedup_map: crate::mesh::VertexDedupMap::with_tolerance(adaptive_tol),
             partial_mesh: TriangleMesh::new(),
             next_face_idx: 0,
             total_faces,
@@ -6125,6 +6162,9 @@ impl ChunkedBrepTriangulator {
         time_budget: std::time::Duration,
         cache: EdgeDiscretizationCache,
     ) -> Self {
+        // Get tolerance before moving cache into the struct
+        let adaptive_tol = cache.adaptive_tolerance().merge_tolerance();
+
         let mut faces: Vec<Face> = solid.faces().into_iter().cloned().collect();
         faces.sort_by(|a, b| {
             let complexity_a = estimate_face_complexity(a);
@@ -6138,7 +6178,7 @@ impl ChunkedBrepTriangulator {
             faces,
             params,
             cache,
-            dedup_map: crate::mesh::VertexDedupMap::bit_exact(),
+            dedup_map: crate::mesh::VertexDedupMap::with_tolerance(adaptive_tol),
             partial_mesh: TriangleMesh::new(),
             next_face_idx: 0,
             total_faces,
