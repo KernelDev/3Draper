@@ -2424,6 +2424,37 @@ fn triangulate_torus_face(face: &Face, torus: &TorusSurface, params: &Triangulat
         return triangulate_torus_full_grid(face, torus, params);
     }
 
+    // A torus is closed in BOTH U and V directions. If the face's boundary
+    // forms a degenerate UV polygon (all u values constant or all v values
+    // constant), it means the boundary is a 1D loop wrapping around ONE
+    // parametric direction, while the OTHER direction is unbounded.
+    // In this case, we should triangulate the full torus surface (the
+    // boundary is just the "seam" of the closed surface, not a real
+    // trimming curve).
+    //
+    // Example: make_torus() creates a torus with a single edge — the minor
+    // circle at u=0, v∈[0, 2π]. The boundary UV is {(0, v) : v ∈ [0, 2π]},
+    // which has constant u=0. This is degenerate — the actual face covers
+    // the entire torus surface u∈[0, 2π] × v∈[0, 2π].
+    if !boundary_uvs.is_empty() {
+        let u_min = boundary_uvs.iter().map(|p| p.u).fold(f64::MAX, f64::min);
+        let u_max = boundary_uvs.iter().map(|p| p.u).fold(f64::MIN, f64::max);
+        let v_min = boundary_uvs.iter().map(|p| p.v).fold(f64::MAX, f64::min);
+        let v_max = boundary_uvs.iter().map(|p| p.v).fold(f64::MIN, f64::max);
+        let u_range = u_max - u_min;
+        let v_range = v_max - v_min;
+        // Torus UV range is [0, 2π] × [0, 2π]. A "real" trimmed face should
+        // have non-trivial extent in BOTH directions. If extent in either
+        // direction is < 1e-6, the boundary is degenerate (1D loop).
+        if u_range < 1e-6 || v_range < 1e-6 {
+            log::info!(
+                "torus_face: degenerate UV boundary (u=[{:.4},{:.4}], v=[{:.4},{:.4}], {} pts) — using full grid",
+                u_min, u_max, v_min, v_max, boundary_3d.len(),
+            );
+            return triangulate_torus_full_grid(face, torus, params);
+        }
+    }
+
     // Collect holes from inner loops
     let (hole_polylines, hole_uvs) = collect_face_holes_with_uv_from_cache(face, cache, &surface);
 

@@ -401,27 +401,40 @@ impl TriangleMesh {
 
         // Build index remapping: other's local vertex index → global index
         let mut index_map: Vec<u32> = Vec::with_capacity(other.vertices.len());
+        let mut reuse_count = 0usize;
+        let mut new_count = 0usize;
 
         for vertex in &other.vertices {
             if let Some(existing_idx) = dedup_map.get(vertex) {
                 // Vertex already exists — reuse its index
                 index_map.push(existing_idx);
+                reuse_count += 1;
             } else {
                 // New vertex — add to mesh and record in dedup map
                 let new_idx = self.vertices.len() as u32;
                 self.vertices.push(*vertex);
                 dedup_map.insert(vertex, new_idx);
                 index_map.push(new_idx);
+                new_count += 1;
             }
         }
 
-        // Add triangles with remapped indices
+        // Add triangles with remapped indices — count how many become degenerate
+        let mut became_degenerate = 0usize;
         for tri in &other.triangles {
-            self.triangles.push([
-                index_map[tri[0] as usize],
-                index_map[tri[1] as usize],
-                index_map[tri[2] as usize],
-            ]);
+            let a = index_map[tri[0] as usize];
+            let b = index_map[tri[1] as usize];
+            let c = index_map[tri[2] as usize];
+            if a == b || b == c || a == c {
+                became_degenerate += 1;
+            }
+            self.triangles.push([a, b, c]);
+        }
+        if became_degenerate > 0 {
+            log::warn!(
+                "MERGE_DEGEN: other has {} verts ({} new, {} reused), {} tris — {} became degenerate after merge",
+                other.vertices.len(), new_count, reuse_count, other.triangles.len(), became_degenerate,
+            );
         }
 
         // Handle vertex normals: when deduplicating, the first face's normal

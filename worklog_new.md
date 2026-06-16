@@ -179,3 +179,40 @@ Stage Summary:
 - Cylinder/cone/sphere use consistent UV-aware triangulation
 - Adaptive chord-error refinement ensures max_deviation is met
 - Deployed to GitHub Pages via GitHub Actions
+
+---
+Task ID: 12
+Agent: Main
+Task: Fix NURBS/torus triangulation and achieve watertightness for test solids
+
+Work Log:
+- Installed Rust toolchain (rustup, stable 1.96.0) to compile and test locally
+- Created diagnostic tools: face_diag, shared_edge_test, torus_test
+- Ran watertight_check on as1-oc-214.stp: 0/18 watertight, 422 degenerate triangles on l-bracket_1
+- ROOT CAUSE 1 FOUND: `snap_boundary_vertices()` was corrupting valid triangulations
+  - Snapped 584 boundary vertices with tolerance 0.443 (1e-3 of bbox diagonal)
+  - Created 422 degenerate triangles (from 0!) by snapping boundary vertices to interior vertices
+  - FIX: Disabled snap_boundary_vertices in both triangulate_brep_detailed and triangulate_brep paths
+- ROOT CAUSE 2 FOUND: `heal_solid()` was dropping valid NURBS faces
+  - BREP #63 has 8 faces (6 Plane + 2 NURBS), healing reduced to 6 faces (dropped 2 NURBS)
+  - The NURBS faces are the cylindrical walls of bolt holes — without them, mesh has boundary edges
+  - FIX: Disabled healing by default (StepConversionConfig::default() now has heal: false)
+- ROOT CAUSE 3 FOUND: Torus with degenerate UV boundary (single edge wrapping one direction)
+  - make_torus() creates a torus with 1 edge (minor circle at u=0, v∈[0,2π])
+  - The UV boundary is a 1D line (constant u=0), not a 2D polygon
+  - triangulate_surface_consistent tried to triangulate this as a 2D polygon, producing wrong results
+  - FIX: Added degenerate UV check in triangulate_torus_face — if u_range or v_range < 1e-6, use full grid
+- After fixes: 0 degenerate triangles (was 422), 0 non-manifold edges (was 68) for l-bracket_1
+- NURBS faces now included in triangulation (was dropped by healing)
+- Remaining issues: boundary edges between Plane and NURBS faces on shared bolt hole edges
+  - NURBS UV projection fails for 59/61 boundary points (error 0.415)
+  - This causes wrong UVs but 3D points are still from edge cache (bit-identical)
+  - Need to investigate why NURBS UV projection is failing
+
+Stage Summary:
+- Disabled snap_boundary_vertices (was creating 422 degenerate triangles)
+- Disabled healing by default (was dropping NURBS faces)
+- Added torus degenerate UV check (routes to full grid when boundary is 1D)
+- Watertightness improved: 0 degenerate triangles, 0 non-manifold edges
+- Still 0/18 watertight due to NURBS UV projection failures on shared edges
+- Key files modified: converter.rs, mesh.rs, triangulate.rs, parametric_domain.rs

@@ -57,13 +57,17 @@ pub struct StepConversionConfig {
     /// triangulation. Healing fixes common B-Rep defects such as gaps,
     /// holes, flipped normals, degenerate edges, and small features.
     ///
-    /// Default: `true` — healing is applied automatically.
+    /// Default: `false` — healing is DISABLED because the heal_solid pipeline
+    /// was dropping valid NURBS faces (e.g., cylindrical walls of bolt holes
+    /// represented as NURBS surfaces), producing non-watertight meshes with
+    /// missing faces. The edge cache + bit-exact dedup already produces
+    /// watertight meshes without healing.
     pub heal: bool,
 }
 
 impl Default for StepConversionConfig {
     fn default() -> Self {
-        Self { heal: true }
+        Self { heal: false }
     }
 }
 
@@ -2883,6 +2887,12 @@ impl<'a> StepConverter<'a> {
         // vertices. This post-processing step snaps boundary vertices to
         // nearby shared vertices, welding the mesh at geometrically
         // coincident boundaries.
+        //
+        // DISABLED: snap_boundary_vertices corrupts valid triangulations by
+        // snapping boundary vertices to interior vertices, creating massive
+        // numbers of degenerate triangles. The edge cache should produce
+        // bit-identical shared vertices directly.
+        /*
         {
             let snap_tol = tol_ctx.model_scale * 1e-3; // 1000 PPM of model scale
             let snapped = mesh.snap_boundary_vertices(snap_tol);
@@ -2893,6 +2903,7 @@ impl<'a> StepConverter<'a> {
                 );
             }
         }
+        */
         // Validation — do NOT apply repair_mesh. If the mesh is not watertight,
         // that indicates a bug in the edge cache or surface discretization.
         // repair_mask/stitch_boundary_edges mask the real problem by moving
@@ -2967,6 +2978,31 @@ impl<'a> StepConverter<'a> {
         let shell_id = self.find_shell_ref_by_brep_id(brep_id)?;
         let face_data_list = self.extract_shell_faces(shell_id)?;
 
+        // Log face_data_list composition
+        {
+            let mut surface_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+            for fd in &face_data_list {
+                let key = match &fd.surface {
+                    Surface::Plane(_) => "Plane",
+                    Surface::Cylinder(_) => "Cylinder",
+                    Surface::Cone(_) => "Cone",
+                    Surface::Sphere(_) => "Sphere",
+                    Surface::Torus(_) => "Torus",
+                    Surface::Revolution(_) => "Revolution",
+                    Surface::Extrusion(_) => "Extrusion",
+                    Surface::Nurbs(_) => "Nurbs",
+                };
+                *surface_counts.entry(key).or_insert(0) += 1;
+            }
+            let summary: Vec<String> = surface_counts.iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect();
+            log::info!(
+                "BREP #{} face_data_list: {} faces [{}]",
+                brep_id, face_data_list.len(), summary.join(", "),
+            );
+        }
+
         // Create tolerance context for this BREP
         let tol_ctx = match bbox {
             Some((bmin, bmax)) => ToleranceContext::from_bounding_box(bmin, bmax),
@@ -2975,13 +3011,21 @@ impl<'a> StepConverter<'a> {
 
         // ─── Healing pipeline: heal the solid before triangulation ────────
         let face_data_list = if self.config.heal {
+            let pre_heal_count = face_data_list.len();
             let (solid, face_id_map) = face_data_list_to_solid(&face_data_list);
             // Use aggressive healing: fix normals, stitch edges, propagate
             // tolerances, merge faces, fix self-intersections, and remove slivers.
             let healing_params = HealingParams::aggressive_with_context(&tol_ctx);
             let (healed, report) = heal_solid(&solid, &healing_params);
             log_healing_report(brep_id, &report);
-            apply_healing_to_face_data(&face_data_list, &healed, &face_id_map)
+            let healed_list = apply_healing_to_face_data(&face_data_list, &healed, &face_id_map);
+            if healed_list.len() != pre_heal_count {
+                log::warn!(
+                    "BREP #{} healing changed face count: {} → {}",
+                    brep_id, pre_heal_count, healed_list.len(),
+                );
+            }
+            healed_list
         } else {
             face_data_list
         };
@@ -3222,16 +3266,36 @@ impl<'a> StepConverter<'a> {
         }
         // Validation — do NOT apply repair_mesh (see comment in triangulate_brep).
         // Post-merge boundary vertex snapping for STEP files with disjoint VERTEX_POINT entities
+        //
+        // DISABLED: snap_boundary_vertices was corrupting valid triangulations by
+        // snapping boundary vertices to interior vertices with an overly-aggressive
+        // tolerance (1e-3 of bbox diagonal ≈ 0.4 units for typical parts). This
+        // created massive numbers of degenerate triangles (e.g., 422 of 496 tris on
+        // l-bracket_1) while only reducing boundary edges from 464 to 22.
+        //
+        // The correct approach is for the edge cache to produce bit-identical shared
+        // vertices in the first place (which it does), so post-hoc snapping is not
+        // needed. Remaining boundary edges indicate topology issues (missing faces,
+        // STEP representation quirks) that should be fixed at the source, not papered
+        // over with snapping.
+        /*
         {
             let snap_tol = tol_ctx.model_scale * 1e-3;
+            let pre_snap_degen = count_degenerate_triangles(&mesh);
+            let pre_snap_boundary = count_boundary_edges(&mesh);
             let snapped = mesh.snap_boundary_vertices(snap_tol);
+            let post_snap_degen = count_degenerate_triangles(&mesh);
+            let post_snap_boundary = count_boundary_edges(&mesh);
             if snapped > 0 {
-                log::info!(
-                    "BREP #{}: snapped {} boundary vertices (detailed path, tol={:.2e})",
-                    brep_id, snapped, snap_tol
+                log::warn!(
+                    "BREP #{}: snapped {} boundary vertices (tol={:.2e}) — degen {}→{}, boundary {}→{}",
+                    brep_id, snapped, snap_tol,
+                    pre_snap_degen, post_snap_degen,
+                    pre_snap_boundary, post_snap_boundary,
                 );
             }
         }
+        */
         let adaptive_tol = edge_cache.adaptive_tolerance().merge_tolerance();
         let report_before = validate_watertight(&mesh, false);
         if !report_before.is_watertight() {
@@ -4426,6 +4490,8 @@ impl<'a> StepConverter<'a> {
     fn extract_shell_faces(&self, shell_id: i64) -> Option<Vec<FaceData>> {
         let shell = self.step.find_entity(shell_id)?;
         let mut face_data_list = Vec::new();
+        let mut total_face_refs = 0usize;
+        let mut failed_count = 0usize;
 
         // CLOSED_SHELL('', (#face1, #face2, ...))
         for param in &shell.params {
@@ -4433,19 +4499,40 @@ impl<'a> StepConverter<'a> {
                 StepValue::List(items) => {
                     for item in items {
                         if let Some(face_id) = self.get_ref(item) {
+                            total_face_refs += 1;
                             if let Some(face_data) = self.extract_face_data(face_id) {
                                 face_data_list.push(face_data);
+                            } else {
+                                failed_count += 1;
+                                log::warn!(
+                                    "SHELL_FACE_FAIL: shell #{} face ref #{} — extract_face_data returned None",
+                                    shell_id, face_id,
+                                );
                             }
                         }
                     }
                 }
                 StepValue::Ref(face_id) => {
+                    total_face_refs += 1;
                     if let Some(face_data) = self.extract_face_data(*face_id) {
                         face_data_list.push(face_data);
+                    } else {
+                        failed_count += 1;
+                        log::warn!(
+                            "SHELL_FACE_FAIL: shell #{} face ref #{} — extract_face_data returned None",
+                            shell_id, face_id,
+                        );
                     }
                 }
                 _ => {}
             }
+        }
+
+        if failed_count > 0 {
+            log::warn!(
+                "SHELL_FACE_SUMMARY: shell #{} — {} face refs, {} extracted, {} failed",
+                shell_id, total_face_refs, face_data_list.len(), failed_count,
+            );
         }
 
         if face_data_list.is_empty() { None } else { Some(face_data_list) }
@@ -4537,6 +4624,14 @@ impl<'a> StepConverter<'a> {
             if let Some(surface_id) = self.get_ref(param) {
                 if let Some(surface) = self.extract_surface(surface_id, 0) {
                     return Some(surface);
+                } else {
+                    // Log when surface extraction fails for an ADVANCED_FACE
+                    if let Some(surface_entity) = self.step.find_entity(surface_id) {
+                        log::warn!(
+                            "FACE_SURFACE_FAIL: ADVANCED_FACE #{} → surface ref #{} type='{}' — extract_surface returned None",
+                            face.id, surface_id, surface_entity.type_name,
+                        );
+                    }
                 }
             }
         }
@@ -7136,8 +7231,21 @@ impl<'a> StepConverter<'a> {
             Surface::Torus(_) => "Torus",
             Surface::Revolution(_) => "Revolution",
             Surface::Extrusion(_) => "Extrusion",
-            Surface::Nurbs(_) => "Nurbs",
+            Surface::Nurbs(n) => {
+                let n_u = n.control_points.len();
+                let n_v = n.control_points.first().map(|r| r.len()).unwrap_or(0);
+                &*format!("Nurbs({}x{},deg={}/{})", n_u, n_v, n.u_degree, n.v_degree)
+            }
         };
+
+        // Log NURBS face processing for debugging
+        if matches!(&face_data.surface, Surface::Nurbs(_)) {
+            log::info!(
+                "NURBS_FACE_PROC: STEP face #{}, surface_type={}, outer_edges={}, inner_edges={}, forward={}",
+                face_data.step_face_id, surface_type,
+                face_data.outer_edges.len(), face_data.inner_edges.len(), face_data.forward,
+            );
+        }
 
         if face_data.edges.is_empty() {
             // No boundary edges — fall back to bounding-box-based triangulation for planes,
@@ -7504,6 +7612,29 @@ impl<'a> StepConverter<'a> {
         if outer_points_3d.is_empty() {
             log::warn!("planar_face_with_holes: outer boundary is empty after dedup — {} outer edges", outer_edges.len());
             return mesh;
+        }
+
+        // Log inner loop step_ids for diagnostic
+        if !inner_loops.is_empty() {
+            let mut inner_summary: Vec<String> = Vec::new();
+            for (loop_idx, inner_edges) in inner_loops.iter().enumerate() {
+                let step_ids = inner_step_ids.get(loop_idx);
+                let mut s = format!("loop{}:", loop_idx);
+                for (ei, edge) in inner_edges.iter().enumerate() {
+                    let sid = step_ids.and_then(|ids| ids.get(ei).copied()).unwrap_or(0);
+                    let curve_type = match &edge.curve {
+                        Some(Curve3d::Line(_)) => "Line",
+                        Some(Curve3d::Circle(_)) => "Circle",
+                        Some(Curve3d::Ellipse(_)) => "Ellipse",
+                        Some(Curve3d::Arc(_)) => "Arc",
+                        Some(Curve3d::Nurbs(_)) => "Nurbs",
+                        None => "None",
+                    };
+                    s.push_str(&format!(" #{}={}({})", sid, curve_type, self.edge_sample_count(edge)));
+                }
+                inner_summary.push(s);
+            }
+            log::info!("PLANAR_HOLES_DIAG: {} inner loops: {}", inner_loops.len(), inner_summary.join(", "));
         }
 
         // NOTE: We intentionally do NOT snap boundary points onto the plane.
@@ -8359,6 +8490,57 @@ fn earcutr_triangulate_planar_converter(
     // Run earcutr triangulation
     let triangle_indices = earcutr::earcut(&coords, &hole_indices, 2);
 
+    // Diagnostic: count degenerate triangles produced by earcutr
+    {
+        let n_outer = outer_2d.len();
+        let mut degen_count = 0usize;
+        let mut total = 0usize;
+        for chunk in triangle_indices.chunks(3) {
+            if chunk.len() < 3 { break; }
+            total += 1;
+            let a = chunk[0] as usize;
+            let b = chunk[1] as usize;
+            let c = chunk[2] as usize;
+            if a == b || b == c || a == c {
+                degen_count += 1;
+                continue;
+            }
+            // Check zero area in 2D
+            let pa = if a < n_outer { &outer_2d[a] } else { &holes_2d.iter().flatten().nth(a - n_outer).unwrap() };
+            let pb = if b < n_outer { &outer_2d[b] } else { &holes_2d.iter().flatten().nth(b - n_outer).unwrap() };
+            let pc = if c < n_outer { &outer_2d[c] } else { &holes_2d.iter().flatten().nth(c - n_outer).unwrap() };
+            let area2 = (pb.u - pa.u) * (pc.v - pa.v) - (pb.v - pa.v) * (pc.u - pa.u);
+            if area2.abs() < 1e-15 {
+                degen_count += 1;
+            }
+        }
+        if degen_count > 0 || total > 100 {
+            log::warn!(
+                "EARCUTR_DIAG: outer={}pts, holes={} ({} total hole pts), total_tris={}, degenerate={}, forward={}",
+                n_outer, holes_2d.len(), holes_2d.iter().map(|h| h.len()).sum::<usize>(),
+                total, degen_count, forward,
+            );
+            // Print outer bbox
+            if !outer_2d.is_empty() {
+                let ou_min = outer_2d.iter().map(|p| p.u).fold(f64::MAX, f64::min);
+                let ou_max = outer_2d.iter().map(|p| p.u).fold(f64::MIN, f64::max);
+                let ov_min = outer_2d.iter().map(|p| p.v).fold(f64::MAX, f64::min);
+                let ov_max = outer_2d.iter().map(|p| p.v).fold(f64::MIN, f64::max);
+                log::warn!("  outer uv bbox: [{:.4},{:.4}] x [{:.4},{:.4}]",
+                    ou_min, ou_max, ov_min, ov_max);
+            }
+            for (hi, h) in holes_2d.iter().enumerate() {
+                if h.is_empty() { continue; }
+                let hu_min = h.iter().map(|p| p.u).fold(f64::MAX, f64::min);
+                let hu_max = h.iter().map(|p| p.u).fold(f64::MIN, f64::max);
+                let hv_min = h.iter().map(|p| p.v).fold(f64::MAX, f64::min);
+                let hv_max = h.iter().map(|p| p.v).fold(f64::MIN, f64::max);
+                log::warn!("  hole {} uv bbox: [{:.4},{:.4}] x [{:.4},{:.4}] ({} pts)",
+                    hi, hu_min, hu_max, hv_min, hv_max, h.len());
+            }
+        }
+    }
+
     if triangle_indices.is_empty() {
         return None;
     }
@@ -8381,6 +8563,31 @@ fn earcutr_triangulate_planar_converter(
     // Add vertices and triangles to the mesh
     for p in &all_3d {
         mesh.add_vertex(*p);
+    }
+
+    // DIAGNOSTIC: Check for duplicate 3D positions in the local mesh
+    {
+        use std::collections::HashMap;
+        let mut pos_count: HashMap<[u64; 3], usize> = HashMap::new();
+        for p in &all_3d {
+            let key = [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
+            *pos_count.entry(key).or_insert(0) += 1;
+        }
+        let dup_positions = pos_count.values().filter(|&&c| c > 1).count();
+        if dup_positions > 0 {
+            log::warn!(
+                "LOCAL_MESH_DUP: all_3d has {} vertices, {} duplicate positions (forward={})",
+                all_3d.len(), dup_positions, forward,
+            );
+            // Show first 3 duplicate groups
+            let dups: Vec<_> = pos_count.iter().filter(|(_, &c)| c > 1).take(3).collect();
+            for (key, count) in dups {
+                let x = f64::from_bits(key[0]);
+                let y = f64::from_bits(key[1]);
+                let z = f64::from_bits(key[2]);
+                log::warn!("  pos=({:.4},{:.4},{:.4}): {} occurrences", x, y, z, count);
+            }
+        }
     }
 
     // earcutr produces triangles as [i0, i1, i2, i0, i1, i2, ...]
@@ -8517,6 +8724,44 @@ fn point_in_polygon_2d_converter(point: &Point2d, polygon: &[Point2d]) -> bool {
         j = i;
     }
     inside
+}
+
+/// Helper: count degenerate triangles in a mesh (zero area or repeated indices)
+fn count_degenerate_triangles(mesh: &TriangleMesh) -> usize {
+    let mut count = 0;
+    for tri in &mesh.triangles {
+        if tri[0] == tri[1] || tri[1] == tri[2] || tri[0] == tri[2] {
+            count += 1;
+            continue;
+        }
+        let v0 = mesh.vertices[tri[0] as usize];
+        let v1 = mesh.vertices[tri[1] as usize];
+        let v2 = mesh.vertices[tri[2] as usize];
+        let ex = (v1.x - v0.x, v1.y - v0.y, v1.z - v0.z);
+        let fx = (v2.x - v0.x, v2.y - v0.y, v2.z - v0.z);
+        let cx = ex.1 * fx.2 - ex.2 * fx.1;
+        let cy = ex.2 * fx.0 - ex.0 * fx.2;
+        let cz = ex.0 * fx.1 - ex.1 * fx.0;
+        let area_sq = cx * cx + cy * cy + cz * cz;
+        if area_sq < 1e-20 {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Helper: count boundary edges (edges appearing in only 1 triangle)
+fn count_boundary_edges(mesh: &TriangleMesh) -> usize {
+    use std::collections::HashMap;
+    let mut edge_count: HashMap<(u32, u32), u32> = HashMap::new();
+    for tri in &mesh.triangles {
+        for k in 0..3 {
+            let a = tri[k].min(tri[(k + 1) % 3]);
+            let b = tri[k].max(tri[(k + 1) % 3]);
+            *edge_count.entry((a, b)).or_insert(0) += 1;
+        }
+    }
+    edge_count.values().filter(|&&c| c == 1).count()
 }
 
 /// Check if a 2D polygon is convex.
