@@ -2102,8 +2102,37 @@ pub fn triangulate_surface_consistent(
                 // A slightly imperfect triangulation is better than a hole in the model.
             }
         } else {
+            // Non-NURBS surface with invalid UV polygon.
+            //
+            // This happens for faces where the boundary curve is geometrically
+            // valid in 3D but doesn't bound a 2D region on the surface
+            // (e.g., a closed loop around a cylinder at constant height —
+            // the boundary 3D points have non-zero area but all project to
+            // the same v coordinate on the cylinder, producing zero UV area).
+            //
+            // FALLBACK: Triangulate the 3D polygon directly by projecting
+            // to a best-fit plane and ear-clipping. This preserves watertightness
+            // (shared boundary edges with adjacent faces) even though the
+            // face's geometry on its surface is degenerate.
+            let boundary_3d_area = polygon_area_3d(&boundary_points_3d);
+            if boundary_3d_area > 1e-10 {
+                log::warn!(
+                    "triangulate_surface_consistent: UV polygon invalid (3D area={:.4}) — using 3D ear-clip fallback",
+                    boundary_3d_area,
+                );
+
+                // Collect hole 3D polylines (re-projected from the hole UVs)
+                let hole_polylines_3d_local: Vec<Vec<Point3d>> = hole_polylines_3d.to_vec();
+
+                return triangulate_3d_polygon_fallback(
+                    &boundary_points_3d,
+                    &hole_polylines_3d_local,
+                    forward,
+                );
+            }
+
             log::error!(
-                "triangulate_surface_consistent: invalid UV polygon (self-intersecting or degenerate) — returning empty mesh"
+                "triangulate_surface_consistent: invalid UV polygon and 3D area is zero — returning empty mesh"
             );
             return TriangleMesh::new();
         }
@@ -2278,6 +2307,14 @@ pub fn triangulate_surface_consistent(
             let va = *vertex_map.get(&(i as u32)).unwrap_or(&u32::MAX);
             let vb = *vertex_map.get(&(i_next as u32)).unwrap_or(&u32::MAX);
             if va != u32::MAX && vb != u32::MAX {
+                // Skip degenerate edges (va == vb) — these occur when two
+                // consecutive boundary UV indices map to the same mesh vertex
+                // (e.g., a seam point that appears twice with different UVs but
+                // the same 3D position). This is NOT a missing edge — it's a
+                // degenerate edge that no triangle would have anyway.
+                if va == vb {
+                    continue;
+                }
                 let key = (va.min(vb), va.max(vb));
                 if !boundary_edges_in_mesh.contains(&key) {
                     missing_boundary_edges += 1;
@@ -3444,4 +3481,202 @@ mod tests {
 
         assert!(mesh.triangles.len() >= 50, "Should have at least 50 triangles, got {}", mesh.triangles.len());
     }
+}
+
+// ============================================================
+// 3D ear-clipping fallback for degenerate UV polygons
+//
+// When a face's UV polygon is degenerate (zero area) but the 3D
+// boundary has non-zero area, the face is geometrically valid in
+// 3D but its boundary doesn't bound a 2D region on the surface
+// (e.g., a closed loop around a cylinder at constant height).
+//
+// This function projects the 3D boundary points to a best-fit
+// plane, ear-clips the 2D projection, and returns triangles
+// using the ORIGINAL 3D points. This preserves watertightness
+// (shared boundary edges with adjacent faces) even when the
+// face's geometry is degenerate on its surface.
+// ============================================================
+
+/// Triangulate a 3D polygon by projecting to a best-fit plane and ear-clipping.
+///
+/// Used as a fallback when `triangulate_surface_consistent` cannot triangulate
+/// due to a degenerate UV polygon. Returns a mesh using the original 3D boundary
+/// points (watertight with adjacent faces) even though the face's geometry on
+/// the surface is degenerate.
+fn triangulate_3d_polygon_fallback(
+    boundary_3d: &[Point3d],
+    hole_polylines_3d: &[Vec<Point3d>],
+    forward: bool,
+) -> TriangleMesh {
+    let n = boundary_3d.len();
+    if n < 3 {
+        return TriangleMesh::new();
+    }
+
+    // Step 1: Compute best-fit plane normal using Newell's method
+    let mut nx = 0.0_f64;
+    let mut ny = 0.0_f64;
+    let mut nz = 0.0_f64;
+    let mut cx = 0.0_f64;
+    let mut cy = 0.0_f64;
+    let mut cz = 0.0_f64;
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let pi = &boundary_3d[i];
+        let pj = &boundary_3d[j];
+        nx += (pi.y - pj.y) * (pi.z + pj.z);
+        ny += (pi.z - pj.z) * (pi.x + pj.x);
+        nz += (pi.x - pj.x) * (pi.y + pj.y);
+        cx += pi.x;
+        cy += pi.y;
+        cz += pi.z;
+    }
+    cx /= n as f64;
+    cy /= n as f64;
+    cz /= n as f64;
+    let n_len = (nx * nx + ny * ny + nz * nz).sqrt();
+    if n_len < 1e-12 {
+        // Polygon is truly degenerate (all points coincident)
+        return TriangleMesh::new();
+    }
+    let nx = nx / n_len;
+    let ny = ny / n_len;
+    let nz = nz / n_len;
+
+    // Step 2: Build a 2D coordinate system on the best-fit plane
+    // u_axis: any vector perpendicular to normal
+    let u_axis = if nx.abs() < 0.9 {
+        // Cross with X
+        let ux = 0.0;
+        let uy = nz;
+        let uz = -ny;
+        let ulen = (uy * uy + uz * uz).sqrt().max(1e-12);
+        (ux, uy / ulen, uz / ulen)
+    } else {
+        // Cross with Y
+        let ux = -nz;
+        let uy = 0.0;
+        let uz = nx;
+        let ulen = (ux * ux + uz * uz).sqrt().max(1e-12);
+        (ux / ulen, uy, uz / ulen)
+    };
+    // v_axis = normal × u_axis
+    let v_axis = (
+        ny * u_axis.2 - nz * u_axis.1,
+        nz * u_axis.0 - nx * u_axis.2,
+        nx * u_axis.1 - ny * u_axis.0,
+    );
+
+    // Project a 3D point to 2D using the best-fit plane's coordinate system
+    let project_to_2d = |p: &Point3d| -> (f64, f64) {
+        let dx = p.x - cx;
+        let dy = p.y - cy;
+        let dz = p.z - cz;
+        (
+            dx * u_axis.0 + dy * u_axis.1 + dz * u_axis.2,
+            dx * v_axis.0 + dy * v_axis.1 + dz * v_axis.2,
+        )
+    };
+
+    // Step 3: Build 2D points for boundary + holes
+    let mut all_2d: Vec<(f64, f64)> = Vec::with_capacity(n);
+    for p in boundary_3d {
+        all_2d.push(project_to_2d(p));
+    }
+    let n_outer = all_2d.len();
+
+    let mut hole_start_indices: Vec<usize> = Vec::new();
+    for hole in hole_polylines_3d {
+        if hole.len() < 3 {
+            continue;
+        }
+        hole_start_indices.push(all_2d.len());
+        for p in hole {
+            all_2d.push(project_to_2d(p));
+        }
+    }
+
+    // Step 4: Build flat coords array for earcutr
+    let mut coords: Vec<f64> = Vec::with_capacity(all_2d.len() * 2);
+    for &(u, v) in &all_2d {
+        coords.push(u);
+        coords.push(v);
+    }
+
+    // Step 5: Run earcutr
+    let mut triangle_indices = earcutr::earcut(&coords, &hole_start_indices, 2);
+
+    // If earcutr returned 0 triangles with holes, retry without holes.
+    // This happens when a "hole" is geometrically identical to the outer
+    // boundary (e.g., due to a topology extraction bug producing duplicate
+    // curves). In that case, the hole covers the entire outer region and
+    // there's no area to triangulate. Dropping the hole produces a valid
+    // triangulation of the outer region.
+    if triangle_indices.is_empty() && !hole_start_indices.is_empty() {
+        log::warn!(
+            "  3D fallback: earcutr returned 0 triangles with {} holes — retrying without holes",
+            hole_start_indices.len(),
+        );
+        let empty_holes: Vec<usize> = Vec::new();
+        triangle_indices = earcutr::earcut(&coords, &empty_holes, 2);
+    }
+
+    // Step 6: Build mesh using ORIGINAL 3D points (preserves watertightness)
+    let mut mesh = TriangleMesh::new();
+
+    // Compute the face normal from the best-fit plane (used for vertex normals)
+    let face_normal: [f64; 3] = [nx, ny, nz];
+
+    // Add outer boundary vertices
+    let mut vertex_map: Vec<u32> = Vec::with_capacity(all_2d.len());
+    for p in boundary_3d {
+        let vi = mesh.add_vertex(*p);
+        mesh.add_vertex_normal(vi, face_normal);
+        vertex_map.push(vi);
+    }
+    // Add hole vertices
+    for hole in hole_polylines_3d {
+        if hole.len() < 3 {
+            // Skip — but we need to advance the vertex_map index to stay in sync
+            // with all_2d. Since we didn't add these vertices to all_2d either
+            // (due to the `continue` in the previous loop), we don't need to
+            // advance here.
+            continue;
+        }
+        for p in hole {
+            let vi = mesh.add_vertex(*p);
+            mesh.add_vertex_normal(vi, face_normal);
+            vertex_map.push(vi);
+        }
+    }
+
+    // Add triangles (filter degenerate)
+    for chunk in triangle_indices.chunks(3) {
+        if chunk.len() < 3 { break; }
+        let a = chunk[0] as usize;
+        let b = chunk[1] as usize;
+        let c = chunk[2] as usize;
+        if a >= vertex_map.len() || b >= vertex_map.len() || c >= vertex_map.len() {
+            continue;
+        }
+        let va = vertex_map[a];
+        let vb = vertex_map[b];
+        let vc = vertex_map[c];
+        if va == vb || vb == vc || va == vc {
+            continue;
+        }
+        if forward {
+            mesh.add_triangle(va, vb, vc);
+        } else {
+            mesh.add_triangle(va, vc, vb);
+        }
+    }
+
+    log::info!(
+        "triangulate_3d_polygon_fallback: {} outer pts, {} holes, {} triangles (best-fit plane normal=({:.3},{:.3},{:.3}))",
+        n_outer, hole_start_indices.len(), mesh.triangles.len(), nx, ny, nz,
+    );
+
+    mesh
 }

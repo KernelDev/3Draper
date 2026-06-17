@@ -512,7 +512,12 @@ impl TriangleMesh {
                     let global_idx = index_map[i] as usize;
                     // Only add normal if this is a new vertex
                     if global_idx >= self_normals.len() {
-                        self_normals.push(other_normals[i]);
+                        // Bounds check: other_normals might be shorter than
+                        // other.vertices if a face mesh was built without
+                        // calling add_vertex_normal for every add_vertex.
+                        // Use a default normal in that case.
+                        let n = other_normals.get(i).copied().unwrap_or([0.0, 0.0, 1.0]);
+                        self_normals.push(n);
                     }
                 }
             }
@@ -524,7 +529,8 @@ impl TriangleMesh {
                 for (i, _vertex) in other.vertices.iter().enumerate() {
                     let global_idx = index_map[i] as usize;
                     if global_idx >= combined.len() {
-                        combined.push(other_normals[i]);
+                        let n = other_normals.get(i).copied().unwrap_or([0.0, 0.0, 1.0]);
+                        combined.push(n);
                     }
                 }
                 self.normals = Some(combined);
