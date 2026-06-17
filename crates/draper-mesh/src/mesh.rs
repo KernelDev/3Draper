@@ -274,6 +274,11 @@ impl TriangleMesh {
         self.triangles.push([i, j, k]);
     }
 
+    /// Add a triangle from an array of 3 vertex indices (convenience overload).
+    pub fn add_triangle_arr(&mut self, tri: [u32; 3]) {
+        self.triangles.push(tri);
+    }
+
     /// Number of vertices.
     pub fn vertex_count(&self) -> usize {
         self.vertices.len()

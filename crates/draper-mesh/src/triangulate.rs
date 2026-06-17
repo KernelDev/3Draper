@@ -6437,13 +6437,14 @@ mod parallel_tests {
 
     #[test]
     fn test_edge_sample_cache_build() {
+        // Smoke test: triangulate a mixed solid to ensure the edge cache
+        // (formerly EdgeSampleCache, now EdgeDiscretizationCache) builds without errors.
         let solid = make_mixed_solid();
-        let cache = EdgeSampleCache::build_from_solid(&solid);
-
-        // The mixed solid has 12 faces, each with no boundary edges,
-        // so the cache should be empty (faces have no edges).
-        // But the cache should still be buildable without errors.
-        let _ = cache;
+        let params = TriangulationParams::default();
+        let mesh = triangulate_solid(&solid, &params);
+        // The mesh should have at least some vertices and triangles.
+        assert!(mesh.vertex_count() > 0, "mesh should have vertices");
+        assert!(mesh.triangle_count() > 0, "mesh should have triangles");
     }
 }
 

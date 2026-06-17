@@ -555,8 +555,8 @@ mod tests {
         let v1 = mesh.add_vertex(Point3d::new(10.0, 0.0, 0.0));
         let v2 = mesh.add_vertex(Point3d::new(10.0, 10.0, 0.0));
         let v3 = mesh.add_vertex(Point3d::new(0.0, 10.0, 0.0));
-        mesh.add_triangle([v0, v1, v2]);
-        mesh.add_triangle([v0, v2, v3]);
+        mesh.add_triangle_arr([v0, v1, v2]);
+        mesh.add_triangle_arr([v0, v2, v3]);
         mesh
     }
 
@@ -568,10 +568,10 @@ mod tests {
         let v2 = mesh.add_vertex(Point3d::new(10.0, 10.0, 0.0));
         let v3 = mesh.add_vertex(Point3d::new(0.0, 10.0, 0.0));
         let v4 = mesh.add_vertex(Point3d::new(5.0, 5.0, 0.5)); // Raised center
-        mesh.add_triangle([v0, v1, v4]);
-        mesh.add_triangle([v1, v2, v4]);
-        mesh.add_triangle([v2, v3, v4]);
-        mesh.add_triangle([v3, v0, v4]);
+        mesh.add_triangle_arr([v0, v1, v4]);
+        mesh.add_triangle_arr([v1, v2, v4]);
+        mesh.add_triangle_arr([v2, v3, v4]);
+        mesh.add_triangle_arr([v3, v0, v4]);
         mesh
     }
 
@@ -635,8 +635,8 @@ mod tests {
         // Side triangles
         for i in 0..segments {
             let next = (i + 1) % segments;
-            mesh.add_triangle([bottom_verts[i], bottom_verts[next], top_verts[i]]);
-            mesh.add_triangle([bottom_verts[next], top_verts[next], top_verts[i]]);
+            mesh.add_triangle_arr([bottom_verts[i], bottom_verts[next], top_verts[i]]);
+            mesh.add_triangle_arr([bottom_verts[next], top_verts[next], top_verts[i]]);
         }
 
         let checker = GdtChecker::new(&mesh);
