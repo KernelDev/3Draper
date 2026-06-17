@@ -550,3 +550,56 @@ Stage Summary:
 - All 5 draper-step integration tests pass
 - All 18 draper-mesh triangulation tests pass
 - Committed d035d95, pushed to GitHub main
+
+---
+Task ID: 25 (Final Summary)
+Agent: Super Z (main agent)
+Task: Universal STEP file support — final status
+
+ALL TEST FILES OPEN SUCCESSFULLY:
+- 3.05.078.stp: 1 instance, 6354 triangles
+- Zentralstaender.stp: 34 instances, 11174 triangles (11/34 watertight)
+- as1-oc-214.stp: 18 instances, 23465 triangles (instance caching working)
+- brick_thin.stp: 1 instance, 11527 triangles
+- brick_thin_hole.stp: 1 instance, 3449 triangles
+- brick_thin_round.stp: 1 instance, 2367 triangles
+- compressor-13920_top.stp: 2 instances, 24055 triangles
+- drill_top.stp: 5 instances, 163440 triangles (was hanging, now opens in ~90s)
+- nist_assembly.stp: 2 instances, 24 triangles
+- nist_block_with_hole.stp: 1 instance, 396 triangles (WATERTIGHT)
+- nist_chamfer_block.stp: 1 instance, 19 triangles
+- nist_complex_surface.stp: 1 instance, 189 triangles
+- nist_cone.stp: 1 instance, 632 triangles (WATERTIGHT)
+- nist_cube.stp: 1 instance, 12 triangles (WATERTIGHT)
+- nist_cylinder.stp: 1 instance, 376 triangles (WATERTIGHT)
+- nist_sphere.stp: 1 instance, 960 triangles (WATERTIGHT)
+- transmission_top.stp: 152 instances, 765907 triangles
+- SampleCube.step: opens correctly
+
+WATERTIGHTNESS (5/7 NIST primitives):
+- nist_cube: WATERTIGHT ✓
+- nist_cylinder: WATERTIGHT ✓
+- nist_cone: WATERTIGHT ✓
+- nist_sphere: WATERTIGHT ✓
+- nist_block_with_hole: WATERTIGHT ✓
+- nist_chamfer_block: 6 boundary edges (STEP topology issue — missing edges)
+- nist_complex_surface: 50 boundary edges, 13 non-manifold (single NURBS face)
+
+KEY IMPROVEMENTS THIS SESSION:
+1. Re-enabled snap_boundary_vertices with boundary-only logic
+2. Added 3D ear-clip fallback for NURBS surfaces
+3. Bumped merge_tol from 1 PPM to 100 PPM
+4. Bumped snap_tol to 2000 PPM
+5. Fixed seam crossing detection (biggest win — 60% boundary edge reduction)
+6. Added duplicate triangle removal after snap
+7. All 23 integration + triangulation tests pass
+8. Instance caching working (bolt/nut repeat in <100µs)
+
+COMMITS PUSHED TO GITHUB:
+- 90d3c4d: smart boundary vertex snapping + 3D fallback for NURBS
+- 28b9b20: spike filter for seam crossings + aggressive snap
+- d035d95: improved seam crossing detection (only true seam wraps)
+- f458db5: remove duplicate triangles after snapping
+- efb91e4, d75d9e0: worklog updates
+
+GitHub Actions workflow will auto-build WASM viewer for GitHub Pages.
