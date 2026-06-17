@@ -8979,8 +8979,10 @@ fn reorder_edge_loop(edges: Vec<TopoEdge>, step_ids: Vec<i64>) -> (Vec<TopoEdge>
     // Build reordered vectors, reversing edges as needed
     let mut reordered_edges = Vec::with_capacity(n);
     let mut reordered_ids = Vec::with_capacity(n);
+    let mut reversed_count = 0usize;
     for (pos, &i) in order.iter().enumerate() {
         let reversed = reversed_flags[pos];
+        if reversed { reversed_count += 1; }
         let edge = if reversed {
             edges[i].reversed()
         } else {
@@ -8990,6 +8992,12 @@ fn reorder_edge_loop(edges: Vec<TopoEdge>, step_ids: Vec<i64>) -> (Vec<TopoEdge>
         if i < step_ids.len() {
             reordered_ids.push(step_ids[i]);
         }
+    }
+    if reversed_count > 0 {
+        log::info!(
+            "REORDER: {} edges, {} reversed to form connected loop",
+            n, reversed_count,
+        );
     }
 
     (reordered_edges, reordered_ids)
@@ -9068,7 +9076,10 @@ fn deduplicate_points_3d_with_uv(points: &[Point3d], uvs: &[Point2d], _tolerance
     // Solution: Only consider two consecutive points duplicates if BOTH
     // their 3D positions AND UV coordinates match. Points at the same 3D
     // location but different UVs (degenerate boundary) are preserved.
-    use draper_mesh::mesh::VertexKey;
+    //
+    // 3D comparison uses tolerance (1e-6) instead of bit-exact, because
+    // different EDGE_CURVE entities that share the same geometric vertex
+    // may produce slightly different 3D coordinates (FP drift ~1e-13).
 
     // Compute UV range for relative tolerance
     let u_min = uvs.iter().map(|p| p.u).fold(f64::MAX, f64::min);
@@ -9082,52 +9093,56 @@ fn deduplicate_points_3d_with_uv(points: &[Point3d], uvs: &[Point2d], _tolerance
     // bit-exact for normal cases but preserves degenerate-boundary points
     // that span a significant UV range.
     let uv_rel_tol = 1e-10;
+    // 3D tolerance for consecutive point dedup (catches FP drift between
+    // different EDGE_CURVE entities sharing the same geometric vertex).
+    let dist_tol = 1e-6;
+    let dist_tol_sq = dist_tol * dist_tol;
 
     let mut unique_pts = vec![points[0]];
     let mut unique_uvs = vec![uvs[0]];
-    let mut unique_keys = vec![VertexKey::from_point(&points[0])];
 
     for i in 1..points.len() {
-        let key = VertexKey::from_point(&points[i]);
-        if let Some(last_key) = unique_keys.last() {
-            if key != *last_key {
-                // 3D points differ — always keep
+        let last_pt = unique_pts.last().unwrap();
+        let dx = points[i].x - last_pt.x;
+        let dy = points[i].y - last_pt.y;
+        let dz = points[i].z - last_pt.z;
+        let dist_sq = dx * dx + dy * dy + dz * dz;
+
+        if dist_sq > dist_tol_sq {
+            // 3D points differ — always keep
+            unique_pts.push(points[i]);
+            unique_uvs.push(uvs[i]);
+        } else {
+            // 3D points are close — check UV too.
+            // For degenerate NURBS boundaries, multiple boundary points
+            // at the same 3D location have DIFFERENT UVs and must be
+            // preserved to maintain a valid UV polygon for triangulation.
+            let last_uv = unique_uvs.last().unwrap();
+            let du = (uvs[i].u - last_uv.u).abs() / u_span;
+            let dv = (uvs[i].v - last_uv.v).abs() / v_span;
+            if du > uv_rel_tol || dv > uv_rel_tol {
+                // UV differs — this is a degenerate-boundary point, KEEP it
                 unique_pts.push(points[i]);
                 unique_uvs.push(uvs[i]);
-                unique_keys.push(key);
-            } else {
-                // 3D points are bit-exact identical — check UV too.
-                // For degenerate NURBS boundaries, multiple boundary points
-                // at the same 3D location have DIFFERENT UVs and must be
-                // preserved to maintain a valid UV polygon for triangulation.
-                let last_uv = unique_uvs.last().unwrap();
-                let du = (uvs[i].u - last_uv.u).abs() / u_span;
-                let dv = (uvs[i].v - last_uv.v).abs() / v_span;
-                if du > uv_rel_tol || dv > uv_rel_tol {
-                    // UV differs — this is a degenerate-boundary point, KEEP it
-                    unique_pts.push(points[i]);
-                    unique_uvs.push(uvs[i]);
-                    unique_keys.push(key);
-                }
-                // else: Both 3D and UV match — true consecutive duplicate, skip
             }
+            // else: Both 3D and UV match — true consecutive duplicate, skip
         }
     }
-
-    // Also check last vs first (closed loop) — UV-aware
-    if unique_keys.len() > 1 {
-        let first_key = unique_keys[0];
-        if let Some(last_key) = unique_keys.last() {
-            if first_key == *last_key {
-                let first_uv = unique_uvs[0];
-                let last_uv = *unique_uvs.last().unwrap();
-                let du = (last_uv.u - first_uv.u).abs() / u_span;
-                let dv = (last_uv.v - first_uv.v).abs() / v_span;
-                if du <= uv_rel_tol && dv <= uv_rel_tol {
-                    unique_pts.pop();
-                    unique_uvs.pop();
-                    unique_keys.pop();
-                }
+    // Also check last vs first (closed loop) — UV-aware + tolerance 3D
+    if unique_pts.len() > 1 {
+        let first_pt = unique_pts[0];
+        let last_pt = *unique_pts.last().unwrap();
+        let dx = last_pt.x - first_pt.x;
+        let dy = last_pt.y - first_pt.y;
+        let dz = last_pt.z - first_pt.z;
+        if dx * dx + dy * dy + dz * dz <= dist_tol_sq {
+            let first_uv = unique_uvs[0];
+            let last_uv = *unique_uvs.last().unwrap();
+            let du = (last_uv.u - first_uv.u).abs() / u_span;
+            let dv = (last_uv.v - first_uv.v).abs() / v_span;
+            if du <= uv_rel_tol && dv <= uv_rel_tol {
+                unique_pts.pop();
+                unique_uvs.pop();
             }
         }
     }
