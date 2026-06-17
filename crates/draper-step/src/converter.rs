@@ -7296,6 +7296,12 @@ impl<'a> StepConverter<'a> {
         // Sample outer edges using the cache
         let mut edges_without_step_id = 0usize;
         let mut edge_debug_info: Vec<String> = Vec::new();
+        // Track the last UV from the previous edge to use as initial guess for
+        // NURBS chain projection. This ensures UV continuity across edges —
+        // without it, project_point() can return different UVs for the same
+        // 3D point (e.g., u=0 vs u=2π on periodic surfaces), causing the UV
+        // polygon to jump and self-intersect.
+        let mut prev_edge_last_uv: Option<Point2d> = None;
         for (edge_idx, edge) in face_data.outer_edges.iter().enumerate() {
             let step_id = face_data.outer_edge_step_ids.get(edge_idx).copied().unwrap_or(0);
             let n_samples = self.edge_sample_count(edge);
@@ -7304,7 +7310,11 @@ impl<'a> StepConverter<'a> {
             if step_id != 0 {
                 let (pts, params) = edge_cache.discretize_step_edge(step_id, edge, n_samples);
                 // Compute UV for each boundary point using actual parameter values
-                let uvs = self.compute_edge_uvs_with_points(&params, &pts, &face_data.surface, curve_2d);
+                let uvs = self.compute_edge_uvs_with_points(&params, &pts, &face_data.surface, curve_2d, prev_edge_last_uv);
+                // Track last UV for next edge's initial guess
+                if let Some(last_uv) = uvs.last() {
+                    prev_edge_last_uv = Some(*last_uv);
+                }
                 // Diagnostic: log per-edge UV range for NURBS faces
                 if matches!(&face_data.surface, Surface::Nurbs(_)) && !uvs.is_empty() {
                     let eu_min = uvs.iter().map(|p| p.u).fold(f64::MAX, f64::min);
@@ -7351,7 +7361,7 @@ impl<'a> StepConverter<'a> {
 
                         if step_id != 0 {
                             let (pts, params) = edge_cache.discretize_step_edge(step_id, edge, n_samples);
-                            let uvs = self.compute_edge_uvs_with_points(&params, &pts, &face_data.surface, curve_2d);
+                            let uvs = self.compute_edge_uvs_with_points(&params, &pts, &face_data.surface, curve_2d, None);
                             hole_pts.extend(pts);
                             hole_uvs.extend(uvs);
                         } else {
@@ -7382,7 +7392,7 @@ impl<'a> StepConverter<'a> {
 
                 if step_id != 0 {
                     let (pts, params) = edge_cache.discretize_step_edge(step_id, edge, n_samples);
-                    let uvs = self.compute_edge_uvs_with_points(&params, &pts, &face_data.surface, curve_2d);
+                    let uvs = self.compute_edge_uvs_with_points(&params, &pts, &face_data.surface, curve_2d, None);
                     boundary_points.extend(pts);
                     boundary_uvs.extend(uvs);
                 } else {
@@ -8003,6 +8013,7 @@ impl<'a> StepConverter<'a> {
         points_3d: &[Point3d],
         surface: &Surface,
         curve_2d: Option<&Curve2d>,
+        initial_uv: Option<Point2d>,
     ) -> Vec<Point2d> {
         if let Some(c2d) = curve_2d {
             let (c2d_t_min, c2d_t_max) = c2d.param_range();
@@ -8036,16 +8047,28 @@ impl<'a> StepConverter<'a> {
                 let use_chain_newton = u_range < 10.0 && v_range < 10.0;
 
                 let mut uvs = Vec::with_capacity(points_3d.len());
-                let mut prev_u = (u_min + u_max) * 0.5;
-                let mut prev_v = (v_min + v_max) * 0.5;
+                // Use the previous edge's last UV as the initial guess for the
+                // first point. This ensures UV continuity across edges — without
+                // it, project_point() can return a different UV for the same 3D
+                // point (e.g., u=0 vs u=2π on periodic surfaces), causing the UV
+                // polygon to jump and self-intersect.
+                let (mut prev_u, mut prev_v) = if let Some(iu) = initial_uv {
+                    (iu.u, iu.v)
+                } else {
+                    ((u_min + u_max) * 0.5, (v_min + v_max) * 0.5)
+                };
                 let mut newton_failures = 0usize;
 
                 for (i, p) in points_3d.iter().enumerate() {
-                    let (u, v) = if use_chain_newton && i > 0 {
-                        // Chain Newton for small UV ranges — fast and reliable
+                    let (u, v) = if use_chain_newton && (i > 0 || initial_uv.is_some()) {
+                        // Chain Newton for small UV ranges — fast and reliable.
+                        // Also use chain Newton for the first point if we have
+                        // an initial UV guess from the previous edge — this
+                        // ensures UV continuity across edges.
                         draper_mesh::reproject_nurbs_point(nurbs, p, prev_u, prev_v)
                     } else {
-                        // Independent project_point() for large UV ranges or first point
+                        // Independent project_point() for large UV ranges or
+                        // first point without initial guess
                         surface.project_point(p)
                     };
 
