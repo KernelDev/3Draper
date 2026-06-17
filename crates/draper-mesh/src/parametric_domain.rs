@@ -520,8 +520,21 @@ fn try_split_at_seam(
 
     // ================================================================
     // Find ALL U-seam crossings
+    //
+    // A TRUE seam crossing happens when an edge wraps around the seam —
+    // i.e., one endpoint is near u_min and the other is near u_max.
+    // This is detected by: du > u_range * 0.5 (more than half the range).
+    //
+    // Edges with du between 0.4 and 0.5 of u_range are "long edges" that
+    // span a large portion of the surface but DON'T wrap around the seam.
+    // Treating them as seam crossings produces incorrect splits.
+    //
+    // Additional check: a true seam wrap has one endpoint near u_min and
+    // the other near u_max. We verify this by checking that the distance
+    // from each endpoint to the nearest seam (u_min or u_max) is small.
     // ================================================================
-    let u_seam_threshold = u_range * 0.4;
+    let u_seam_threshold = u_range * 0.5;  // Must span MORE THAN HALF the range
+    let u_seam_proximity = u_range * 0.1;  // Endpoints must be within 10% of a seam
     let mut u_crossings: Vec<SeamCrossing> = Vec::new();
 
     if is_u_periodic {
@@ -529,6 +542,26 @@ fn try_split_at_seam(
             let j = (i + 1) % polygon.len();
             let du = (polygon[j].u - polygon[i].u).abs();
             if du > u_seam_threshold {
+                // Check that this is a TRUE seam wrap: one endpoint near u_min,
+                // the other near u_max. Without this check, long edges that
+                // span half the surface (e.g., u=0 to u=π) would be incorrectly
+                // flagged as seam crossings.
+                let dist_i_to_min = (polygon[i].u - u_min).abs();
+                let dist_i_to_max = (polygon[i].u - u_max).abs();
+                let dist_j_to_min = (polygon[j].u - u_min).abs();
+                let dist_j_to_max = (polygon[j].u - u_max).abs();
+                let i_near_seam = dist_i_to_min < u_seam_proximity || dist_i_to_max < u_seam_proximity;
+                let j_near_seam = dist_j_to_min < u_seam_proximity || dist_j_to_max < u_seam_proximity;
+                // One endpoint should be near u_min, the other near u_max
+                let i_near_min = dist_i_to_min < u_seam_proximity;
+                let i_near_max = dist_i_to_max < u_seam_proximity;
+                let j_near_min = dist_j_to_min < u_seam_proximity;
+                let j_near_max = dist_j_to_max < u_seam_proximity;
+                let wraps_around = (i_near_min && j_near_max) || (i_near_max && j_near_min);
+                if !i_near_seam || !j_near_seam || !wraps_around {
+                    // Long edge but not a seam wrap — skip
+                    continue;
+                }
                 // Determine low/high endpoints
                 let (u_low, v_low, u_high, v_high) = if polygon[i].u < polygon[j].u {
                     (polygon[i].u, polygon[i].v, polygon[j].u, polygon[j].v)
@@ -565,8 +598,11 @@ fn try_split_at_seam(
 
     // ================================================================
     // Find ALL V-seam crossings (for torus, sphere, etc.)
+    // Same logic as U-seam: only count TRUE seam wraps (one endpoint near
+    // v_min, the other near v_max).
     // ================================================================
-    let v_seam_threshold = v_range * 0.4;
+    let v_seam_threshold = v_range * 0.5;
+    let v_seam_proximity = v_range * 0.1;
     let mut v_crossings: Vec<VSeamCrossing> = Vec::new();
 
     if is_v_periodic && v_range > 0.0 {
@@ -574,6 +610,19 @@ fn try_split_at_seam(
             let j = (i + 1) % polygon.len();
             let dv = (polygon[j].v - polygon[i].v).abs();
             if dv > v_seam_threshold {
+                // Check for true seam wrap
+                let dist_i_to_min = (polygon[i].v - v_min).abs();
+                let dist_i_to_max = (polygon[i].v - v_max).abs();
+                let dist_j_to_min = (polygon[j].v - v_min).abs();
+                let dist_j_to_max = (polygon[j].v - v_max).abs();
+                let i_near_min = dist_i_to_min < v_seam_proximity;
+                let i_near_max = dist_i_to_max < v_seam_proximity;
+                let j_near_min = dist_j_to_min < v_seam_proximity;
+                let j_near_max = dist_j_to_max < v_seam_proximity;
+                let wraps_around = (i_near_min && j_near_max) || (i_near_max && j_near_min);
+                if !wraps_around {
+                    continue;
+                }
                 let (v_low, u_low, v_high, u_high) = if polygon[i].v < polygon[j].v {
                     (polygon[i].v, polygon[i].u, polygon[j].v, polygon[j].u)
                 } else {
@@ -638,11 +687,15 @@ fn try_split_at_seam(
                     // Check if the shared vertex is at the seam
                     let shared_idx = next.edge_idx;  // The vertex between the two edges
                     let shared_u = polygon[shared_idx].u;
-                    let at_seam = (shared_u - u_min).abs() < 1e-6 || (shared_u - u_max).abs() < 1e-6;
+                    let at_seam = (shared_u - u_min).abs() < 1e-3 || (shared_u - u_max).abs() < 1e-3;
+                    log::debug!(
+                        "filter_spike_crossings: checking edges {} and {}, shared vertex {} at u={:.6}, u_min={:.6}, u_max={:.6}, at_seam={}",
+                        c.edge_idx, next.edge_idx, shared_idx, shared_u, u_min, u_max, at_seam,
+                    );
                     if at_seam {
                         // This is a spike — skip both crossings
                         log::debug!(
-                            "filter_spike_crossings: skipping spike at vertex {} (u={:.4}), edges {} and {}",
+                            "filter_spike_crossings: SKIPPING spike at vertex {} (u={:.4}), edges {} and {}",
                             shared_idx, shared_u, c.edge_idx, next.edge_idx,
                         );
                         skip_next = true;
@@ -679,7 +732,7 @@ fn try_split_at_seam(
                 if is_adjacent {
                     let shared_idx = next.edge_idx;
                     let shared_v = polygon[shared_idx].v;
-                    let at_seam = (shared_v - v_min).abs() < 1e-6 || (shared_v - v_max).abs() < 1e-6;
+                    let at_seam = (shared_v - v_min).abs() < 1e-3 || (shared_v - v_max).abs() < 1e-3;
                     if at_seam {
                         log::debug!(
                             "filter_spike_crossings_v: skipping spike at vertex {} (v={:.4}), edges {} and {}",
