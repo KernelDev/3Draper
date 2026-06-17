@@ -3413,6 +3413,68 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
         return TriangleMesh::new();
     }
 
+    // ============================================================
+    // Decimate collinear boundary points
+    //
+    // When the edge cache discretizes shared edges, it produces many
+    // intermediate points (e.g., 21 points along a 10mm edge at 0.5mm
+    // intervals). For STRAIGHT edges in 3D, these intermediate points
+    // are collinear and don't add geometric information.
+    //
+    // However, they cause watertightness issues for PLANAR faces:
+    // - Planar face fan triangulation produces degenerate triangles
+    //   for collinear points, which are then removed, leaving the
+    //   intermediate vertices unused.
+    // - The unused vertices in one face's mesh but not the other's
+    //   create boundary edges.
+    //
+    // Solution: decimate collinear boundary points to just the "corner"
+    // vertices (where the boundary changes direction). Both faces sharing
+    // the edge will decimate the same way (because they share the edge
+    // cache), so they'll both keep the same corner vertices.
+    //
+    // IMPORTANT: Only apply decimation when the boundary is LARGE (>20 points).
+    // For small boundaries (e.g., chamfer faces with 8 points), the decimation
+    // might remove corners that are "close to collinear" but actually needed
+    // for the face topology.
+    // ============================================================
+    let (dec_3d, dec_uv) = if boundary_points.len() > 20 {
+        decimate_collinear_boundary(boundary_points, boundary_uvs)
+    } else {
+        (boundary_points.to_vec(), boundary_uvs.to_vec())
+    };
+    let boundary_points: &[Point3d] = &dec_3d;
+    let boundary_uvs: &[Point2d] = &dec_uv;
+
+    let hole_polylines_decimated: Vec<Vec<Point3d>>;
+    let hole_uvs_decimated: Vec<Vec<Point2d>>;
+    let hole_polylines: &[Vec<Point3d>] = if !hole_polylines.is_empty() {
+        let mut hps = Vec::with_capacity(hole_polylines.len());
+        let mut huvs = Vec::with_capacity(hole_uvs.len());
+        for (hp, huv) in hole_polylines.iter().zip(hole_uvs.iter()) {
+            if hp.len() > 20 {
+                let (d3d, d2d) = decimate_collinear_boundary(hp, huv);
+                hps.push(d3d);
+                huvs.push(d2d);
+            } else {
+                hps.push(hp.clone());
+                huvs.push(huv.clone());
+            }
+        }
+        hole_polylines_decimated = hps;
+        hole_uvs_decimated = huvs;
+        &hole_polylines_decimated
+    } else {
+        hole_polylines_decimated = Vec::new();
+        hole_uvs_decimated = Vec::new();
+        hole_polylines
+    };
+    let hole_uvs: &[Vec<Point2d>] = if !hole_uvs_decimated.is_empty() {
+        &hole_uvs_decimated
+    } else {
+        hole_uvs
+    };
+
     // For planar faces, we don't need UV-space triangulation —
     // the boundary 3D points are already on the plane, and ear-clipping
     // in the plane's 2D coordinate system produces consistent results
@@ -6079,6 +6141,167 @@ fn is_convex_polygon(points: &[Point2d]) -> bool {
         }
     }
     sign != 0
+}
+
+/// Decimate collinear boundary points in 3D.
+///
+/// For a closed boundary polyline, removes intermediate points that are
+/// collinear with their neighbors (within `tolerance`). This reduces
+/// the boundary to just the "corner" vertices where the polyline changes
+/// direction.
+///
+/// # Algorithm
+/// 1. For each triple of consecutive points (prev, curr, next), compute
+///    the cross product of (curr - prev) × (next - curr).
+/// 2. If the cross product magnitude is below the tolerance, `curr` is
+///    collinear with `prev` and `next` and can be removed.
+/// 3. Keep `curr` if it's a "corner" (cross product above tolerance).
+///
+/// # Why This Matters for Watertightness
+/// When the edge cache discretizes a shared edge between two faces, it
+/// produces many intermediate points. For STRAIGHT edges, these points
+/// are collinear in 3D. Both faces receive the same points (from the
+/// shared edge cache).
+///
+/// Without decimation:
+/// - Planar face fan triangulation produces degenerate triangles for
+///   collinear points, which are removed. The intermediate vertices
+///   become unused.
+/// - NURBS face earcutr may also leave intermediate points unused.
+/// - Unused vertices in one face but not the other create boundary edges.
+///
+/// With decimation:
+/// - Both faces decimate the same way (same edge cache input), keeping
+///   only the corner vertices.
+/// - Shared edges have only 2 vertices (the corners), no intermediate
+///   boundary edges.
+///
+/// # Arguments
+/// * `points_3d` — Closed boundary polyline in 3D
+/// * `uvs` — Corresponding UV coordinates (same length as points_3d)
+///
+/// # Returns
+/// Decimated (points_3d, uvs) with collinear intermediate points removed.
+fn decimate_collinear_boundary(
+    points_3d: &[Point3d],
+    uvs: &[Point2d],
+) -> (Vec<Point3d>, Vec<Point2d>) {
+    if points_3d.len() <= 3 || uvs.len() != points_3d.len() {
+        return (points_3d.to_vec(), uvs.to_vec());
+    }
+
+    // Step 1: Remove consecutive duplicate points (within tolerance).
+    // This is critical because the edge cache may produce duplicate points
+    // at edge endpoints (where two edges share a vertex). Without this step,
+    // the collinear check below would trivially pass for all points
+    // (since prev == curr or curr == next gives cross product = 0).
+    let dedup_tol_sq = 1e-12; // 1e-6 squared
+    let mut dedup_3d: Vec<Point3d> = Vec::with_capacity(points_3d.len());
+    let mut dedup_uv: Vec<Point2d> = Vec::with_capacity(uvs.len());
+    for i in 0..points_3d.len() {
+        let p = &points_3d[i];
+        let is_dup = dedup_3d.last().map_or(false, |last| {
+            let dx = p.x - last.x;
+            let dy = p.y - last.y;
+            let dz = p.z - last.z;
+            dx * dx + dy * dy + dz * dz < dedup_tol_sq
+        });
+        if !is_dup {
+            dedup_3d.push(*p);
+            dedup_uv.push(uvs[i]);
+        }
+    }
+    // Also check last vs first (closed loop)
+    if dedup_3d.len() > 1 {
+        let first = dedup_3d[0];
+        let last = dedup_3d[dedup_3d.len() - 1];
+        let dx = first.x - last.x;
+        let dy = first.y - last.y;
+        let dz = first.z - last.z;
+        if dx * dx + dy * dy + dz * dz < dedup_tol_sq {
+            dedup_3d.pop();
+            dedup_uv.pop();
+        }
+    }
+
+    if dedup_3d.len() <= 3 {
+        // After dedup, too few points — return as-is
+        return (dedup_3d, dedup_uv);
+    }
+
+    let n = dedup_3d.len();
+    // Tolerance: absolute perpendicular distance from `curr` to line (prev → next).
+    // 1e-6 = 0.001 microns — well below manufacturing tolerance but above FP noise.
+    let abs_tol = 1e-6;
+
+    // Step 2: Identify collinear points to remove.
+    let mut keep = vec![true; n];
+    let mut removed_count = 0usize;
+
+    for i in 0..n {
+        let prev_idx = (i + n - 1) % n;
+        let next_idx = (i + 1) % n;
+
+        let prev = &dedup_3d[prev_idx];
+        let curr = &dedup_3d[i];
+        let next = &dedup_3d[next_idx];
+
+        // Segment length (prev → next)
+        let seg_dx = next.x - prev.x;
+        let seg_dy = next.y - prev.y;
+        let seg_dz = next.z - prev.z;
+        let seg_len_sq = seg_dx * seg_dx + seg_dy * seg_dy + seg_dz * seg_dz;
+
+        if seg_len_sq < 1e-20 {
+            // prev and next are coincident — keep curr as a sanity check
+            continue;
+        }
+
+        // Edge vectors
+        let e1x = curr.x - prev.x;
+        let e1y = curr.y - prev.y;
+        let e1z = curr.z - prev.z;
+        let e2x = next.x - curr.x;
+        let e2y = next.y - curr.y;
+        let e2z = next.z - curr.z;
+
+        // Cross product e1 × e2 gives the area of the parallelogram.
+        // Perpendicular distance from curr to line (prev → next) = |e1 × e2| / |seg|
+        let cross_x = e1y * e2z - e1z * e2y;
+        let cross_y = e1z * e2x - e1x * e2z;
+        let cross_z = e1x * e2y - e1y * e2x;
+        let cross_mag_sq = cross_x * cross_x + cross_y * cross_y + cross_z * cross_z;
+        let perp_dist = (cross_mag_sq / seg_len_sq).sqrt();
+
+        if perp_dist < abs_tol {
+            // curr is collinear with prev and next — remove it
+            keep[i] = false;
+            removed_count += 1;
+        }
+    }
+
+    if removed_count == 0 {
+        return (dedup_3d, dedup_uv);
+    }
+
+    // Build decimated arrays
+    let mut dec_3d = Vec::with_capacity(n - removed_count);
+    let mut dec_uv = Vec::with_capacity(n - removed_count);
+    for i in 0..n {
+        if keep[i] {
+            dec_3d.push(dedup_3d[i]);
+            dec_uv.push(dedup_uv[i]);
+        }
+    }
+
+    if removed_count > 0 {
+        log::debug!(
+            "decimate_collinear_boundary: removed {} of {} collinear points ({} remain)",
+            removed_count, n, dec_3d.len(),
+        );
+    }
+
+    (dec_3d, dec_uv)
 }
 
 // ============================================================
