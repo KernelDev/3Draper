@@ -225,11 +225,41 @@ impl ShapeBuilder {
     pub fn make_torus(major_radius: f64, minor_radius: f64) -> Solid {
         let torus_surface = TorusSurface::new_z(Point3d::ORIGIN, major_radius, minor_radius);
 
-        // Simplified: single face torus
-        let circle_v = Circle::new_xy(
-            Point3d::new(major_radius, 0.0, 0.0),
-            minor_radius,
-        );
+        // The boundary edge is the MINOR circle of the torus at u=0,
+        // which lies in the XZ plane (containing the torus axis).
+        //
+        // IMPORTANT: This circle must be a constant-u curve on the torus
+        // (i.e., project_point must return u=0 for every point on it) so
+        // that the UV boundary is degenerate (u_range ≈ 0) and
+        // `triangulate_torus_face` routes to `triangulate_torus_full_grid`
+        // which generates a proper doubly-periodic grid.
+        //
+        // The previous code used Circle::new_xy which creates a circle in
+        // the XY plane — that is NOT a constant-u curve on the torus
+        // (project_point returns u varying in [-asin(r/R), +asin(r/R)]),
+        // so the UV boundary was non-degenerate and got routed to
+        // `triangulate_surface_consistent` which produced a terrible
+        // self-intersecting UV polygon.
+        //
+        // For the circle to evaluate (R + r*cos(t), 0, r*sin(t)) matching
+        // torus.point_at(0, t), we need:
+        //   center = (R, 0, 0), normal = +Y, x_axis = +X
+        //   y_axis = normal × x_axis = Y × X = -Z
+        //   point_at(t) = center + r*(cos(t)*X + sin(t)*(-Z)) = (R+r*cos(t), 0, -r*sin(t))
+        //
+        // That gives the wrong sign on z. Flip normal to -Y:
+        //   x_axis = (-Y) × Z = -X (wrong, we want +X).
+        //
+        // So we construct the Circle directly with the fields we need:
+        //   normal = -Y, x_axis = +X
+        //   y_axis = (-Y) × X = +(Y × X) wait no, (-Y)×X = -(Y×X) = -(-Z) = Z
+        //   point_at(t) = center + r*(cos(t)*X + sin(t)*Z) = (R+r*cos(t), 0, r*sin(t)) ✓
+        let circle_v = Circle {
+            center: Point3d::new(major_radius, 0.0, 0.0),
+            normal: Direction3d::new(0.0, -1.0, 0.0).unwrap_or(Direction3d::Y),
+            radius: minor_radius,
+            x_axis: Direction3d::X,
+        };
 
         let edge_v = Edge {
             id: TopoId::new(),

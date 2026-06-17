@@ -13,7 +13,19 @@
 use draper_geometry::{Point2d, Point3d, Surface};
 use crate::mesh::TriangleMesh;
 use crate::edge_cache::deterministic_round_point;
+use std::cell::Cell;
 use std::f64::consts::PI;
+
+/// RAII guard that runs a closure on drop. Used to decrement the thread-local
+/// seam-split recursion counter when triangulate_surface_consistent returns.
+struct DropGuard<F: FnOnce()>(core::mem::ManuallyDrop<F>);
+impl<F: FnOnce()> Drop for DropGuard<F> {
+    fn drop(&mut self) {
+        // SAFETY: self is being dropped, so the inner F won't be used again.
+        let f = unsafe { core::mem::ManuallyDrop::take(&mut self.0) };
+        f();
+    }
+}
 
 /// A closed polygon in UV parameter space.
 pub type UVPolygon = Vec<Point2d>;
@@ -479,6 +491,17 @@ fn try_split_at_seam(
     surface: &Surface,
 ) -> Option<(Vec<Point2d>, Vec<Point2d>, Vec<Point3d>, Vec<Point3d>)> {
     if polygon.len() < 4 {
+        return None;
+    }
+
+    // Defensive length check — the caller should always pass matched-length
+    // slices, but if they don't, the walks below would index out of bounds
+    // and crash the application. Log loudly and bail instead.
+    if polygon.len() != points_3d.len() {
+        log::error!(
+            "try_split_at_seam: polygon ({}) and points_3d ({}) length mismatch — skipping seam split",
+            polygon.len(), points_3d.len(),
+        );
         return None;
     }
 
@@ -1360,6 +1383,34 @@ pub fn triangulate_surface_consistent(
     forward: bool,
     params: &crate::triangulate::TriangulationParams,
 ) -> TriangleMesh {
+    // Track recursion depth to prevent stack overflow when the seam-split
+    // strategy produces sub-polygons that are still self-intersecting.
+    // The seam-split logic recursively calls triangulate_surface_consistent
+    // on each sub-polygon; if a sub-polygon is still self-intersecting
+    // (which can happen for badly-shaped UV polygons on periodic surfaces),
+    // the recursion would never terminate → stack overflow.
+    //
+    // We use a thread-local counter so the public API doesn't change.
+    // Max depth = 3: the original call + 2 levels of seam-split recursion.
+    // After that, we skip the seam-split path and fall back to re-projection.
+    thread_local! {
+        static SEAM_SPLIT_DEPTH: Cell<u32> = const { Cell::new(0) };
+    }
+
+    let depth = SEAM_SPLIT_DEPTH.with(|d| d.get());
+    if depth > 2 {
+        log::warn!(
+            "triangulate_surface_consistent: seam-split recursion depth {} exceeded — falling back to non-split path",
+            depth,
+        );
+        // Fall through to the non-split path by skipping the seam-split block.
+        // We do this by setting a flag that the seam-split block checks.
+    }
+    SEAM_SPLIT_DEPTH.with(|d| d.set(depth + 1));
+    let _guard = DropGuard(core::mem::ManuallyDrop::new(|| SEAM_SPLIT_DEPTH.with(|d| d.set(depth))));
+
+    let allow_seam_split = depth <= 2;
+
     if boundary_points_3d.is_empty() || boundary_uvs.len() < 3 {
         return TriangleMesh::new();
     }
@@ -1536,6 +1587,22 @@ pub fn triangulate_surface_consistent(
     };
     let boundary_uvs: &[Point2d] = &_merged_data.1;
 
+    // CRITICAL: Rebuild outer_uv from the MERGED boundary_uvs.
+    //
+    // Before this fix, `outer_uv` was created from the ORIGINAL (pre-merge)
+    // boundary_uvs at line ~1395, then the merge at Step 0.5 rebound
+    // `boundary_points_3d` and `boundary_uvs` to shorter merged data —
+    // but `outer_uv` was NOT updated, so its length still matched the
+    // pre-merge count. The subsequent seam-split logic walked `outer_uv`
+    // (longer) while indexing into `boundary_points_3d` (shorter),
+    // causing an index-out-of-bounds PANIC on closed periodic surfaces
+    // like spheres (nist_sphere.stp) and tori where multiple boundary
+    // points collapse to the same 3D location (pole degeneracy).
+    //
+    // This rebuild ensures outer_uv.len() == boundary_points_3d.len()
+    // after the merge, so the seam-split walks stay in sync.
+    outer_uv = boundary_uvs.to_vec();
+
     // ============================================================
     // Step 1: Normalize UV for periodic surfaces
     // ============================================================
@@ -1663,39 +1730,47 @@ pub fn triangulate_surface_consistent(
                 // For periodic surfaces, the self-intersection is caused by the UV polygon
                 // wrapping around the seam. Splitting creates two non-self-intersecting
                 // sub-polygons that can be triangulated correctly.
-                if let Some((sub1_uv, sub2_uv, sub1_3d, sub2_3d)) =
-                    try_split_at_seam(&outer_uv, &boundary_points_3d, surface)
-                {
-                    log::info!(
-                        "UV self-intersection: using seam-split strategy (sub1={} pts, sub2={} pts)",
-                        sub1_uv.len(), sub2_uv.len()
-                    );
+                //
+                // GUARDED by `allow_seam_split` to prevent infinite recursion when
+                // a sub-polygon is still self-intersecting after splitting. Once we've
+                // recursed 2 levels deep, we skip this strategy and fall through to
+                // re-projection (STRATEGY 2) instead.
+                if allow_seam_split {
+                    if let Some((sub1_uv, sub2_uv, sub1_3d, sub2_3d)) =
+                        try_split_at_seam(&outer_uv, &boundary_points_3d, surface)
+                    {
+                        log::info!(
+                            "UV self-intersection: using seam-split strategy (sub1={} pts, sub2={} pts, depth={})",
+                            sub1_uv.len(), sub2_uv.len(), depth + 1,
+                        );
 
-                    // Triangulate each sub-polygon recursively and merge the results
-                    let sub1_holes_3d: Vec<Vec<Point3d>> = Vec::new();
-                    let sub1_holes_uv: Vec<Vec<Point2d>> = Vec::new();
-                    let sub2_holes_3d: Vec<Vec<Point3d>> = Vec::new();
-                    let sub2_holes_uv: Vec<Vec<Point2d>> = Vec::new();
+                        // Triangulate each sub-polygon recursively and merge the results
+                        let sub1_holes_3d: Vec<Vec<Point3d>> = Vec::new();
+                        let sub1_holes_uv: Vec<Vec<Point2d>> = Vec::new();
+                        let sub2_holes_3d: Vec<Vec<Point3d>> = Vec::new();
+                        let sub2_holes_uv: Vec<Vec<Point2d>> = Vec::new();
 
-                    let mesh1 = triangulate_surface_consistent(
-                        surface, &sub1_3d, &sub1_uv,
-                        &sub1_holes_3d, &sub1_holes_uv,
-                        forward, params,
-                    );
-                    let mesh2 = triangulate_surface_consistent(
-                        surface, &sub2_3d, &sub2_uv,
-                        &sub2_holes_3d, &sub2_holes_uv,
-                        forward, params,
-                    );
+                        let mesh1 = triangulate_surface_consistent(
+                            surface, &sub1_3d, &sub1_uv,
+                            &sub1_holes_3d, &sub1_holes_uv,
+                            forward, params,
+                        );
+                        let mesh2 = triangulate_surface_consistent(
+                            surface, &sub2_3d, &sub2_uv,
+                            &sub2_holes_3d, &sub2_holes_uv,
+                            forward, params,
+                        );
 
-                    let mut result = mesh1;
-                    result.merge(&mesh2);
-                    return result;
+                        let mut result = mesh1;
+                        result.merge(&mesh2);
+                        return result;
+                    }
                 }
 
                 // STRATEGY 2 (fallback): Re-project UVs using surface.project_point().
-                // Only used when seam splitting is not applicable (no seam detected).
-                log::info!("UV self-intersection: seam-split not applicable, trying re-projection");
+                // Only used when seam splitting is not applicable (no seam detected)
+                // or when we've exceeded the seam-split recursion depth limit.
+                log::info!("UV self-intersection: seam-split not applicable (depth={}, allow={}), trying re-projection", depth, allow_seam_split);
                 outer_uv = boundary_points_3d.iter().map(|p| {
                     let (u, v) = surface.project_point(p);
                     let (su_min, su_max) = get_surface_u_range(surface);

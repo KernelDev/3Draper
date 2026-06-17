@@ -2469,8 +2469,14 @@ fn triangulate_torus_face(face: &Face, torus: &TorusSurface, params: &Triangulat
     )
 }
 
-/// Full torus triangulation (no boundary edges) using a simple grid approach.
-/// Since there are no shared edges with other faces, watertightness is not a concern.
+/// Full torus triangulation (no boundary edges) using a doubly-periodic grid.
+///
+/// A torus is closed in BOTH U and V directions (both have period 2π). We must
+/// generate a grid that wraps around in BOTH directions — n_u × n_v vertices
+/// with NO duplicate seam vertices. Using `triangulate_ring_surface` here
+/// would create n_v+1 rows (j=0..=n_v), duplicating the v=0 / v=2π seam and
+/// producing 2*n_u boundary edges. This custom generator avoids that by
+/// using modulo wrap-around in BOTH directions.
 fn triangulate_torus_full_grid(face: &Face, torus: &TorusSurface, params: &TriangulationParams) -> TriangleMesh {
     let surface = Surface::Torus(torus.clone());
     let (n_u, n_v) = if params.adaptive {
@@ -2479,23 +2485,46 @@ fn triangulate_torus_full_grid(face: &Face, torus: &TorusSurface, params: &Trian
             params.max_deviation, params.detail_level,
         )
     } else {
-        (params.angular_samples, params.angular_samples)
+        (params.angular_samples.max(8), params.angular_samples.max(8))
     };
 
-    triangulate_ring_surface(
-        n_u, n_v, true, face.forward,
-        |i, j| {
+    let mut mesh = TriangleMesh::new();
+
+    // Generate n_u × n_v vertices (NO duplicates — v wraps via modulo).
+    // Vertex index = j * n_u + i, where i ∈ [0, n_u) and j ∈ [0, n_v).
+    for j in 0..n_v {
+        let v = 2.0 * PI * j as f64 / n_v as f64;
+        for i in 0..n_u {
             let u = 2.0 * PI * i as f64 / n_u as f64;
-            let v = 2.0 * PI * j as f64 / n_v as f64;
-            crate::edge_cache::deterministic_round_point(torus.point_at(u, v))
-        },
-        |i, j| {
-            let u = 2.0 * PI * i as f64 / n_u as f64;
-            let v = 2.0 * PI * j as f64 / n_v as f64;
-            torus.normal_at(u, v)
-        },
-        |_j| false, // Torus has no degenerate rows
-    )
+            let p = crate::edge_cache::deterministic_round_point(torus.point_at(u, v));
+            let n = torus.normal_at(u, v);
+            let idx = mesh.add_vertex(p);
+            mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+        }
+    }
+
+    // Generate triangle quads with modulo wrap-around in BOTH directions.
+    // This produces n_u × n_v quads = 2 × n_u × n_v triangles, with every
+    // edge shared by exactly 2 triangles → fully watertight.
+    for j in 0..n_v {
+        let j_next = (j + 1) % n_v;
+        for i in 0..n_u {
+            let i_next = (i + 1) % n_u;
+            let v0 = (j * n_u + i) as u32;
+            let v1 = (j * n_u + i_next) as u32;
+            let v2 = (j_next * n_u + i_next) as u32;
+            let v3 = (j_next * n_u + i) as u32;
+            if face.forward {
+                mesh.add_triangle(v0, v1, v2);
+                mesh.add_triangle(v0, v2, v3);
+            } else {
+                mesh.add_triangle(v0, v2, v1);
+                mesh.add_triangle(v0, v3, v2);
+            }
+        }
+    }
+
+    mesh
 }
 
 /// Triangulate a revolution surface face.

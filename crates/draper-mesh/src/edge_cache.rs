@@ -656,93 +656,57 @@ impl EdgeDiscretizationCache {
                 c2d.point_at(curve_t)
             }).collect()
         } else if let Surface::Nurbs(ref nurbs) = surface {
-            // NURBS UV projection strategy — adaptive based on UV range size.
+            // NURBS UV projection strategy.
             //
-            // ROOT CAUSE of NURBS triangulation artifacts:
-            // Chain Newton-Raphson (using prev UV as initial guess for next point)
-            // DIVERGES on surfaces with large UV ranges (e.g., U: -10..210 = 220 units).
-            // Newton converges to wrong local minima, producing UV coordinates that are
-            // "scrambled" — boundary points no longer follow sequential order in UV space.
-            // This causes self-intersecting UV polygons → earcutr produces chaotic triangles.
+            // DESIGN: Use the analytic project_point() for every point INDEPENDENTLY.
+            // This is deterministic — the same 3D point always maps to the same UV
+            // regardless of traversal order, which is CRITICAL for edge cache
+            // consistency (shared edges between adjacent faces must produce
+            // bit-identical UVs so the seam-split logic in parametric_domain.rs
+            // can detect and handle periodic wraparound correctly).
             //
-            // FIX: For large UV ranges, skip chain Newton entirely and use independent
-            // project_point() for each point. This is slower but deterministic — the same
-            // 3D point always maps to the same UV regardless of traversal order, which is
-            // critical for edge cache consistency (shared edges must produce bit-identical UVs).
+            // The old brute-force fallback (grid_size × grid_size evaluations per
+            // point) was the #1 cause of test files hanging / "not opening":
+            // 36×36 = 1296 surface evaluations per bad point, repeated for every
+            // boundary point of every NURBS face, multiplied by the number of
+            // faces — easily 100K+ evaluations for a moderately complex model.
+            //
+            // We removed the brute-force fallback because:
+            // 1. Performance: brute-force is O(grid_size^2) per point — too slow.
+            // 2. Quality: brute-force didn't actually fix the UV scrambling issue;
+            //    the seam-split logic in parametric_domain.rs handles that now.
+            // 3. Watertightness: 3D boundary points come from the edge cache
+            //    (deterministic_round), so they are bit-identical regardless of
+            //    UV accuracy. UV only affects triangulation QUALITY, not watertightness.
             let (u_min, u_max) = nurbs.u_range();
             let (v_min, v_max) = nurbs.v_range();
-            let u_range = u_max - u_min;
-            let v_range = v_max - v_min;
-            // Use chain Newton only for small UV ranges where it's reliable.
-            // For large ranges (≥ 10 units), chain Newton can diverge and produce
-            // wrong UVs that scramble the boundary polygon order.
-            let use_chain_newton = u_range < 10.0 && v_range < 10.0;
 
             let mut uvs = Vec::with_capacity(points_3d.len());
-            let mut newton_failures = 0usize;
-            let mut brute_force_failures = 0usize;
+            let mut out_of_range_count = 0usize;
 
-            for (i, point) in points_3d.iter().enumerate() {
-                let (u, v) = if use_chain_newton && i > 0 && !uvs.is_empty() {
-                    // Chain Newton for small UV ranges — fast and reliable
-                    let prev: Point2d = uvs[i - 1];
-                    crate::parametric_domain::reproject_nurbs_point(
-                        nurbs, point, prev.u, prev.v,
-                    )
-                } else {
-                    // Independent project_point() for large UV ranges or first point.
-                    // This is deterministic: the same 3D point always maps to the same UV,
-                    // regardless of traversal order. Critical for edge cache consistency.
-                    surface.project_point(point)
-                };
+            for point in points_3d.iter() {
+                let (u, v) = surface.project_point(point);
 
-                // Validate: check that the projected UV maps back to a 3D point
-                // close to the original point. If error is too large, try brute-force.
-                // Threshold: only use brute-force for significant errors (> 1e-3).
-                // Smaller errors (1e-4 to 1e-3) are acceptable for boundary points —
-                // the tolerance-based vertex dedup will merge any near-miss vertices.
-                let reconstructed = surface.point_at(u, v);
-                let error = point.distance_to(&reconstructed);
-
-                if error > 1e-3 {
-                    // project_point() or chain Newton failed significantly — try brute-force
-                    let grid_size = adaptive_grid_size(u_range, v_range);
-                    let (ub, vb) = brute_force_project_point(nurbs, point, grid_size);
-                    let bf_reconstructed = surface.point_at(ub, vb);
-                    let bf_error = point.distance_to(&bf_reconstructed);
-
-                    if bf_error < error {
-                        uvs.push(Point2d::new(
-                            deterministic_round(ub),
-                            deterministic_round(vb),
-                        ));
-                        brute_force_failures += 1;
-                    } else {
-                        // Even brute-force didn't improve — use the best result we have
-                        uvs.push(Point2d::new(
-                            deterministic_round(u),
-                            deterministic_round(v),
-                        ));
-                        log::warn!(
-                            "NURBS projection: point={:?}, newton_error={:.2e}, brute_force_error={:.2e}",
-                            point, error, bf_error
-                        );
-                    }
-                    newton_failures += 1;
-                } else {
-                    // Acceptable projection — use with deterministic rounding for consistency
-                    uvs.push(Point2d::new(
-                        deterministic_round(u),
-                        deterministic_round(v),
-                    ));
+                // Clamp UVs to the valid NURBS parameter range. project_point()
+                // can return values slightly outside the range due to floating-point
+                // errors, especially at seam points on periodic surfaces.
+                let u_clamped = u.clamp(u_min, u_max);
+                let v_clamped = v.clamp(v_min, v_max);
+                if u_clamped != u || v_clamped != v {
+                    out_of_range_count += 1;
                 }
+
+                uvs.push(Point2d::new(
+                    deterministic_round(u_clamped),
+                    deterministic_round(v_clamped),
+                ));
             }
 
-            if newton_failures > 0 {
-                log::warn!(
-                    "NURBS UV: {}/{} projections had error > 1e-6, {}/{} required brute-force fallback (u_range={:.1}, v_range={:.1})",
-                    newton_failures, points_3d.len(), brute_force_failures, points_3d.len(),
-                    u_range, v_range,
+            if out_of_range_count > 0 {
+                log::debug!(
+                    "NURBS UV: {}/{} points clamped to range u=[{:.4},{:.4}] v=[{:.4},{:.4}]",
+                    out_of_range_count, points_3d.len(),
+                    u_min, u_max, v_min, v_max,
                 );
             }
             uvs
