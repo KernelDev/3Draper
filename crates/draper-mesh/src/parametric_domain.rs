@@ -2015,14 +2015,20 @@ pub fn triangulate_surface_consistent(
             // This is more conservative than the old formula which used up to
             // 12 subdivisions — the chord-error refinement adds more points
             // where actually needed, so we don't need excessive initial sampling.
+            //
+            // IMPORTANT: Keep n_sub LOW (2-4) to avoid earcutr producing
+            // non-manifold triangulations. earcutr can produce disconnected
+            // or overlapping triangles when given many interior points.
+            // The chord-error refinement will add more points where needed,
+            // and it properly handles shared edges (manifold output).
             let n_sub = if max_k < 0.01 {
-                3
+                2
             } else if max_k < 0.1 {
-                4
+                2
             } else if max_k < 1.0 {
-                5
+                3
             } else {
-                8
+                4
             };
             let pts = generate_nurbs_interior_points(&domain, &nurbs.u_knots, &nurbs.v_knots, n_sub);
             downsample_interior_points(&pts, max_interior_budget)
