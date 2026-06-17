@@ -8817,19 +8817,10 @@ fn deduplicate_points_3d(points: &[Point3d], tolerance: f64) -> Vec<Point3d> {
             }
         }
     }
-    // Also check for non-adjacent duplicates (bowtie detection).
-    // Scan from the end: if the last point duplicates any earlier point
-    // (except its immediate predecessor), trim the loop.
-    if unique_keys.len() > 3 {
-        let n = unique_keys.len();
-        let last_key = unique_keys[n - 1];
-        for i in 0..n - 2 {
-            if last_key == unique_keys[i] {
-                unique.truncate(i + 1);
-                break;
-            }
-        }
-    }
+    // NOTE: Bowtie detection (non-adjacent duplicate truncation) removed.
+    // It incorrectly truncates legitimate boundaries where the same 3D vertex
+    // appears multiple times (e.g., cylinder face seam endpoints). See
+    // deduplicate_points_3d_with_uv for full explanation.
     unique
 }
 
@@ -8845,6 +8836,10 @@ fn deduplicate_points_3d_with_uv(points: &[Point3d], uvs: &[Point2d], _tolerance
     }
     // If UVs don't match points length, just deduplicate 3D points
     if uvs.len() != points.len() {
+        log::debug!(
+            "DEDUP_FALLBACK_3D: points={} uvs={} (length mismatch)",
+            points.len(), uvs.len()
+        );
         return (deduplicate_points_3d(points, _tolerance), uvs.to_vec());
     }
 
@@ -8900,16 +8895,8 @@ fn deduplicate_points_3d_with_uv(points: &[Point3d], uvs: &[Point2d], _tolerance
                     unique_pts.push(points[i]);
                     unique_uvs.push(uvs[i]);
                     unique_keys.push(key);
-                } else {
-                    // Both 3D and UV match — true duplicate, skip
-                    // But log for NURBS debugging
-                    if du < 1e-6 && dv < 1e-6 && i < 5 {
-                        log::debug!(
-                            "DEDUP_SKIP: idx={} 3d=({:.4},{:.4},{:.4}) uv=({:.4},{:.4}) matches prev",
-                            i, points[i].x, points[i].y, points[i].z, uvs[i].u, uvs[i].v
-                        );
-                    }
                 }
+                // else: Both 3D and UV match — true consecutive duplicate, skip
             }
         }
     }
@@ -8932,23 +8919,22 @@ fn deduplicate_points_3d_with_uv(points: &[Point3d], uvs: &[Point2d], _tolerance
         }
     }
 
-    // Check for non-adjacent duplicates (bowtie detection) — UV-aware
-    if unique_keys.len() > 3 {
-        let n = unique_keys.len();
-        let last_key = unique_keys[n - 1];
-        let last_uv = unique_uvs[n - 1];
-        for i in 0..n - 2 {
-            if last_key == unique_keys[i] {
-                let du = (last_uv.u - unique_uvs[i].u).abs() / u_span;
-                let dv = (last_uv.v - unique_uvs[i].v).abs() / v_span;
-                if du <= uv_rel_tol && dv <= uv_rel_tol {
-                    unique_pts.truncate(i + 1);
-                    unique_uvs.truncate(i + 1);
-                    break;
-                }
-            }
-        }
-    }
+    // NOTE: Bowtie detection (non-adjacent duplicate truncation) was REMOVED.
+    //
+    // The bowtie detection was intended to handle self-intersecting UV polygons
+    // where the boundary crosses itself. However, it incorrectly truncates
+    // legitimate boundaries where the same 3D vertex appears multiple times
+    // (e.g., a cylinder face whose boundary visits the seam endpoint at the
+    // top circle start AND the seam edge end — both are the same 3D point
+    // with the same UV, but they are NOT a bowtie).
+    //
+    // For cylinder/cone/torus faces, the boundary legitimately visits shared
+    // vertices (seam endpoints) multiple times. Truncating at the first match
+    // destroys the boundary topology and produces non-watertight meshes.
+    //
+    // The consecutive dedup above is sufficient for normal cases. True bowtie
+    // detection should be handled at the UV polygon level (in parametric_domain)
+    // using proper geometric self-intersection tests, not vertex key matching.
 
     (unique_pts, unique_uvs)
 }
