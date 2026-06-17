@@ -4836,6 +4836,12 @@ impl<'a> StepConverter<'a> {
             }
         }
 
+        // Reorder edges to form a connected loop (end of one = start of next).
+        // Some STEP files (e.g., SampleCube.step) list edges in arbitrary order
+        // rather than topologically connected order. This causes the boundary
+        // point list to be scrambled, breaking dedup and triangulation.
+        let (edges, step_ids) = reorder_edge_loop(edges, step_ids);
+
         (edges, step_ids)
     }
 
@@ -8780,6 +8786,114 @@ fn is_convex_polygon_2d(points: &[Point2d]) -> bool {
         }
     }
     sign != 0
+}
+
+/// Reorder edges in a loop so that each edge's start point matches the previous
+/// edge's end point.
+///
+/// Some STEP files list edges in arbitrary order rather than topologically
+/// connected order. This causes the boundary point list to be scrambled,
+/// breaking dedup (shared endpoints not detected) and triangulation (boundary
+/// polygon is self-crossing).
+///
+/// Algorithm: greedy chain — start with edge[0], then repeatedly find an unused
+/// edge whose start_point matches the current edge's end_point (within tolerance).
+/// If no match is found, the loop has a gap; remaining edges are appended as-is.
+fn reorder_edge_loop(edges: Vec<TopoEdge>, step_ids: Vec<i64>) -> (Vec<TopoEdge>, Vec<i64>) {
+    if edges.len() <= 2 {
+        return (edges, step_ids);
+    }
+
+    // Tolerance for matching vertices: 1e-6 mm (typical STEP precision)
+    let tol = 1e-6;
+    let tol_sq = tol * tol;
+
+    // Extract start/end points for each edge
+    let points: Vec<(Option<Point3d>, Option<Point3d>)> = edges.iter()
+        .map(|e| (e.start_point(), e.end_point()))
+        .collect();
+
+    // If any edge lacks start/end points, can't reorder
+    if points.iter().any(|(s, e)| s.is_none() || e.is_none()) {
+        return (edges, step_ids);
+    }
+
+    let points: Vec<(Point3d, Point3d)> = points.into_iter()
+        .map(|(s, e)| (s.unwrap(), e.unwrap()))
+        .collect();
+
+    let n = edges.len();
+    let mut used = vec![false; n];
+    let mut order: Vec<usize> = Vec::with_capacity(n);
+
+    // Start with edge 0
+    order.push(0);
+    used[0] = true;
+
+    for _ in 1..n {
+        let last_idx = *order.last().unwrap();
+        let last_end = points[last_idx].1;
+
+        // Find an unused edge whose start matches last_end
+        let mut found: Option<usize> = None;
+        for i in 0..n {
+            if used[i] { continue; }
+            let start = points[i].0;
+            let dx = start.x - last_end.x;
+            let dy = start.y - last_end.y;
+            let dz = start.z - last_end.z;
+            if dx*dx + dy*dy + dz*dz <= tol_sq {
+                found = Some(i);
+                break;
+            }
+        }
+
+        // If no forward match, try an edge whose END matches last_end
+        // (this edge would need to be reversed, but we keep it as-is
+        // since the orientation is part of the topology)
+        if found.is_none() {
+            for i in 0..n {
+                if used[i] { continue; }
+                let end = points[i].1;
+                let dx = end.x - last_end.x;
+                let dy = end.y - last_end.y;
+                let dz = end.z - last_end.z;
+                if dx*dx + dy*dy + dz*dz <= tol_sq {
+                    found = Some(i);
+                    break;
+                }
+            }
+        }
+
+        match found {
+            Some(i) => {
+                order.push(i);
+                used[i] = true;
+            }
+            None => {
+                // No connecting edge found — append remaining edges as-is
+                for i in 0..n {
+                    if !used[i] {
+                        order.push(i);
+                        used[i] = true;
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    // Build reordered vectors
+    let mut reordered_edges = Vec::with_capacity(n);
+    let mut reordered_ids = Vec::with_capacity(n);
+    for &i in &order {
+        reordered_edges.push(edges[i].clone());
+        if i < step_ids.len() {
+            reordered_ids.push(step_ids[i]);
+        }
+    }
+
+    (reordered_edges, reordered_ids)
 }
 
 /// (closing a loop). This is essential for ear clipping algorithms which produce
