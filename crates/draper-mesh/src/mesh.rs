@@ -289,6 +289,59 @@ impl TriangleMesh {
         self.triangles.len()
     }
 
+    /// Remove duplicate triangles (triangles with the same 3 vertex indices,
+    /// regardless of order). Duplicate triangles create non-manifold edges
+    /// (each edge of the duplicate adds an extra face).
+    ///
+    /// Returns the number of duplicates removed.
+    /// Also filters degenerate triangles (where two vertex indices are equal).
+    pub fn remove_duplicate_triangles(&mut self) -> usize {
+        use std::collections::HashSet;
+        let old_len = self.triangles.len();
+        let old_triangles = std::mem::take(&mut self.triangles);
+        let old_face_ids = self.triangle_face_ids.take();
+        let old_face_normals = self.face_normals.take();
+        let old_triangle_colors = self.triangle_colors.take();
+
+        let mut seen: HashSet<[u32; 3]> = HashSet::with_capacity(old_len);
+        let mut removed = 0usize;
+
+        for (i, tri) in old_triangles.iter().enumerate() {
+            // Skip degenerate triangles (two equal indices)
+            if tri[0] == tri[1] || tri[1] == tri[2] || tri[0] == tri[2] {
+                removed += 1;
+                continue;
+            }
+            // Canonical sorted key so (a,b,c) and (c,b,a) match
+            let mut key = [tri[0], tri[1], tri[2]];
+            key.sort_unstable();
+            if seen.insert(key) {
+                self.triangles.push(*tri);
+                // Move per-triangle attributes in sync (use get() to handle
+                // any length mismatch from prior filter_degenerate_triangles)
+                if let Some(ref src) = old_face_ids {
+                    if let Some(&fid) = src.get(i) {
+                        self.triangle_face_ids.get_or_insert_with(Vec::new).push(fid);
+                    }
+                }
+                if let Some(ref src) = old_face_normals {
+                    if let Some(&n) = src.get(i) {
+                        self.face_normals.get_or_insert_with(Vec::new).push(n);
+                    }
+                }
+                if let Some(ref src) = old_triangle_colors {
+                    if let Some(&col) = src.get(i) {
+                        self.triangle_colors.get_or_insert_with(Vec::new).push(col);
+                    }
+                }
+            } else {
+                removed += 1;
+            }
+        }
+        let _ = old_len;
+        removed
+    }
+
     /// Compute face normals.
     pub fn compute_face_normals(&mut self) {
         let mut normals = Vec::with_capacity(self.triangles.len());

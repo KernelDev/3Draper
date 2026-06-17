@@ -3307,6 +3307,25 @@ impl<'a> StepConverter<'a> {
             }
         }
         */
+        // Filter degenerate triangles (zero area, NaN/Inf, or collapsed indices).
+        // These create non-manifold edges and false boundary edges. The detailed
+        // path was missing this call (only the non-detailed path had it), which
+        // is why degenerate triangles appeared in the final mesh.
+        filter_degenerate_triangles(&mut mesh, 1e-10);
+
+        // Remove duplicate triangles (same 3 vertex indices). These arise when
+        // two STEP faces overlap geometrically and share the same edges — common
+        // in parts with threaded surfaces (e.g., nuts, bolts) where the thread
+        // is represented as multiple NURBS faces covering the same region.
+        // Duplicates create non-manifold edges (3+ triangles per edge).
+        let dup_removed = mesh.remove_duplicate_triangles();
+        if dup_removed > 0 {
+            log::info!(
+                "BREP #{} detailed: removed {} duplicate/degenerate triangles ({} → {})",
+                brep_id, dup_removed, mesh.triangle_count() + dup_removed, mesh.triangle_count(),
+            );
+        }
+
         let adaptive_tol = edge_cache.adaptive_tolerance().merge_tolerance();
         let report_before = validate_watertight(&mesh, false);
         if !report_before.is_watertight() {
@@ -8890,17 +8909,25 @@ fn reorder_edge_loop(edges: Vec<TopoEdge>, step_ids: Vec<i64>) -> (Vec<TopoEdge>
     let n = edges.len();
     let mut used = vec![false; n];
     let mut order: Vec<usize> = Vec::with_capacity(n);
+    // Track whether each edge in the reordered loop was reversed
+    let mut reversed_flags: Vec<bool> = Vec::with_capacity(n);
 
-    // Start with edge 0
+    // Start with edge 0 (not reversed)
     order.push(0);
+    reversed_flags.push(false);
     used[0] = true;
 
     for _ in 1..n {
         let last_idx = *order.last().unwrap();
-        let last_end = points[last_idx].1;
+        let last_end = if *reversed_flags.last().unwrap() {
+            // If the last edge was reversed, its effective end is its original start
+            points[last_idx].0
+        } else {
+            points[last_idx].1
+        };
 
-        // Find an unused edge whose start matches last_end
-        let mut found: Option<usize> = None;
+        // Find an unused edge whose start matches last_end (forward match)
+        let mut found: Option<(usize, bool)> = None;
         for i in 0..n {
             if used[i] { continue; }
             let start = points[i].0;
@@ -8908,14 +8935,13 @@ fn reorder_edge_loop(edges: Vec<TopoEdge>, step_ids: Vec<i64>) -> (Vec<TopoEdge>
             let dy = start.y - last_end.y;
             let dz = start.z - last_end.z;
             if dx*dx + dy*dy + dz*dz <= tol_sq {
-                found = Some(i);
+                found = Some((i, false));
                 break;
             }
         }
 
         // If no forward match, try an edge whose END matches last_end
-        // (this edge would need to be reversed, but we keep it as-is
-        // since the orientation is part of the topology)
+        // (this edge needs to be REVERSED to connect)
         if found.is_none() {
             for i in 0..n {
                 if used[i] { continue; }
@@ -8924,15 +8950,16 @@ fn reorder_edge_loop(edges: Vec<TopoEdge>, step_ids: Vec<i64>) -> (Vec<TopoEdge>
                 let dy = end.y - last_end.y;
                 let dz = end.z - last_end.z;
                 if dx*dx + dy*dy + dz*dz <= tol_sq {
-                    found = Some(i);
+                    found = Some((i, true));
                     break;
                 }
             }
         }
 
         match found {
-            Some(i) => {
+            Some((i, reversed)) => {
                 order.push(i);
+                reversed_flags.push(reversed);
                 used[i] = true;
             }
             None => {
@@ -8940,6 +8967,7 @@ fn reorder_edge_loop(edges: Vec<TopoEdge>, step_ids: Vec<i64>) -> (Vec<TopoEdge>
                 for i in 0..n {
                     if !used[i] {
                         order.push(i);
+                        reversed_flags.push(false);
                         used[i] = true;
                     }
                 }
@@ -8948,11 +8976,17 @@ fn reorder_edge_loop(edges: Vec<TopoEdge>, step_ids: Vec<i64>) -> (Vec<TopoEdge>
         }
     }
 
-    // Build reordered vectors
+    // Build reordered vectors, reversing edges as needed
     let mut reordered_edges = Vec::with_capacity(n);
     let mut reordered_ids = Vec::with_capacity(n);
-    for &i in &order {
-        reordered_edges.push(edges[i].clone());
+    for (pos, &i) in order.iter().enumerate() {
+        let reversed = reversed_flags[pos];
+        let edge = if reversed {
+            edges[i].reversed()
+        } else {
+            edges[i].clone()
+        };
+        reordered_edges.push(edge);
         if i < step_ids.len() {
             reordered_ids.push(step_ids[i]);
         }
