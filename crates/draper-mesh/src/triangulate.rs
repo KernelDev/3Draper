@@ -3613,6 +3613,24 @@ fn triangulate_plane_with_boundary_and_holes_uv(
     // The boundary points come from the StepEdgeCache which ensures shared
     // edges produce identical 3D points. Snapping breaks this guarantee.
 
+    // Deduplicate boundary points — close points create degenerate triangles.
+    // The boundary points come from sampling multiple edges; consecutive edges
+    // share endpoints, but floating-point differences can leave near-duplicates
+    // (1-2 ULP apart). Without dedup, a 4-corner polygon becomes 5 vertices,
+    // producing 3 triangles instead of 2 (with 2 being degenerate).
+    //
+    // We use 1e-9 tolerance to catch ULP-level differences without removing
+    // valid vertices on small geometries. UVs are re-projected below from the
+    // deduped 3D points, so we don't need to keep them in sync here.
+    let boundary_points: Vec<Point3d> = deduplicate_points_3d(boundary_points, 1e-9);
+    if boundary_points.len() < 3 {
+        log::warn!(
+            "PLANE_UV_TRI: after dedup, only {} points (< 3) — returning empty mesh",
+            boundary_points.len()
+        );
+        return mesh;
+    }
+
     // Re-project the 3D points onto the plane's 2D coordinate system
     // (This is more accurate than using the passed-in UVs which may come from
     // a different projection method)
@@ -3633,7 +3651,7 @@ fn triangulate_plane_with_boundary_and_holes_uv(
         let is_convex = is_convex_polygon(&points_2d);
 
         if is_convex && boundary_points.len() >= 3 {
-            for p in boundary_points {
+            for p in &boundary_points {
                 mesh.add_vertex(*p);
             }
             let n = boundary_points.len() as u32;
@@ -3646,7 +3664,7 @@ fn triangulate_plane_with_boundary_and_holes_uv(
             }
         } else {
             let triangles = ear_clip(&points_2d);
-            for p in boundary_points {
+            for p in &boundary_points {
                 mesh.add_vertex(*p);
             }
             for tri in &triangles {
