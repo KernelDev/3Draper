@@ -8994,7 +8994,7 @@ fn reorder_edge_loop(edges: Vec<TopoEdge>, step_ids: Vec<i64>) -> (Vec<TopoEdge>
         }
     }
     if reversed_count > 0 {
-        log::info!(
+        log::debug!(
             "REORDER: {} edges, {} reversed to form connected loop",
             n, reversed_count,
         );
