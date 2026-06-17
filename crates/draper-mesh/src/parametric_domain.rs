@@ -451,6 +451,7 @@ fn check_uv_polygon_self_intersection(polygon: &[Point2d]) -> bool {
 }
 
 /// A crossing point where a polygon edge intersects the seam of a periodic surface.
+#[derive(Clone)]
 struct SeamCrossing {
     /// Index of the edge that crosses the seam (edge from polygon[edge_idx] to polygon[(edge_idx+1)%n]).
     edge_idx: usize,
@@ -603,6 +604,100 @@ fn try_split_at_seam(
     }
 
     // ================================================================
+    // Filter out "spike" crossings — pairs of adjacent crossings that
+    // share a vertex and go in opposite directions. These represent a
+    // polygon "spike" to the seam and back, not a true seam wrap.
+    //
+    // A spike looks like: ... → V_a (u=π) → V_b (u=2π) → V_c (u=π) → ...
+    // Both edges (a→b) and (b→c) are detected as seam crossings, but
+    // they're actually a single degenerate spike. Treating them as two
+    // separate crossings produces a 3-point "spike" sub-polygon that
+    // doesn't represent real geometry.
+    //
+    // Detection: two crossings on adjacent edges (edge i and edge i+1)
+    // where the shared vertex is at the seam (u_min or u_max).
+    // ================================================================
+    fn filter_spike_crossings(crossings: &[SeamCrossing], polygon: &[Point2d], u_min: f64, u_max: f64) -> Vec<SeamCrossing> {
+        if crossings.len() < 2 {
+            return crossings.to_vec();
+        }
+        let mut filtered = Vec::with_capacity(crossings.len());
+        let mut skip_next = false;
+        for i in 0..crossings.len() {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            let c = &crossings[i];
+            // Check if the next crossing is on the adjacent edge
+            if i + 1 < crossings.len() {
+                let next = &crossings[i + 1];
+                let is_adjacent = next.edge_idx == c.edge_idx + 1 || 
+                                  (c.edge_idx == polygon.len() - 1 && next.edge_idx == 0);
+                if is_adjacent {
+                    // Check if the shared vertex is at the seam
+                    let shared_idx = next.edge_idx;  // The vertex between the two edges
+                    let shared_u = polygon[shared_idx].u;
+                    let at_seam = (shared_u - u_min).abs() < 1e-6 || (shared_u - u_max).abs() < 1e-6;
+                    if at_seam {
+                        // This is a spike — skip both crossings
+                        log::debug!(
+                            "filter_spike_crossings: skipping spike at vertex {} (u={:.4}), edges {} and {}",
+                            shared_idx, shared_u, c.edge_idx, next.edge_idx,
+                        );
+                        skip_next = true;
+                        continue;
+                    }
+                }
+            }
+            filtered.push(c.clone());
+        }
+        filtered
+    }
+
+    let u_crossings = filter_spike_crossings(&u_crossings, polygon, u_min, u_max);
+
+    // ================================================================
+    // Same spike filter for V crossings (mirror of U)
+    // ================================================================
+    fn filter_spike_crossings_v(crossings: &[VSeamCrossing], polygon: &[Point2d], v_min: f64, v_max: f64) -> Vec<VSeamCrossing> {
+        if crossings.len() < 2 {
+            return crossings.to_vec();
+        }
+        let mut filtered = Vec::with_capacity(crossings.len());
+        let mut skip_next = false;
+        for i in 0..crossings.len() {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            let c = &crossings[i];
+            if i + 1 < crossings.len() {
+                let next = &crossings[i + 1];
+                let is_adjacent = next.edge_idx == c.edge_idx + 1 || 
+                                  (c.edge_idx == polygon.len() - 1 && next.edge_idx == 0);
+                if is_adjacent {
+                    let shared_idx = next.edge_idx;
+                    let shared_v = polygon[shared_idx].v;
+                    let at_seam = (shared_v - v_min).abs() < 1e-6 || (shared_v - v_max).abs() < 1e-6;
+                    if at_seam {
+                        log::debug!(
+                            "filter_spike_crossings_v: skipping spike at vertex {} (v={:.4}), edges {} and {}",
+                            shared_idx, shared_v, c.edge_idx, next.edge_idx,
+                        );
+                        skip_next = true;
+                        continue;
+                    }
+                }
+            }
+            filtered.push(c.clone());
+        }
+        filtered
+    }
+
+    let v_crossings = filter_spike_crossings_v(&v_crossings, polygon, v_min, v_max);
+
+    // ================================================================
     // Choose which seam to split at (prefer U, then V)
     // ================================================================
     if u_crossings.len() >= 2 {
@@ -611,7 +706,7 @@ fn try_split_at_seam(
         split_at_v_seam(polygon, points_3d, surface, &v_crossings, v_min, v_max)
     } else {
         log::warn!(
-            "try_split_at_seam: not enough crossings (u={}, v={}) — cannot split",
+            "try_split_at_seam: not enough crossings after spike filter (u={}, v={}) — cannot split",
             u_crossings.len(), v_crossings.len()
         );
         None
@@ -619,6 +714,7 @@ fn try_split_at_seam(
 }
 
 /// V-seam crossing (mirror of SeamCrossing with u/v swapped).
+#[derive(Clone)]
 struct VSeamCrossing {
     edge_idx: usize,
     u_at_seam: f64,

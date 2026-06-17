@@ -859,10 +859,16 @@ impl TriangleMesh {
 
         // Step 4: Apply remapping to all triangles
         //
-        // SMART SNAP: Skip remaps that would create degenerate triangles.
-        // A remap A → D creates a degenerate triangle if D is already in
-        // the same triangle as A. We pre-check this for each candidate
-        // remap and skip those that would cause degeneration.
+        // NOTE: We do NOT pre-check for degenerate triangles here.
+        // Aggressive snapping (snapping all near-miss boundary vertices)
+        // produces more watertight results than conservative snapping,
+        // even though some triangles become degenerate. The degenerate
+        // triangles are filtered out by `filter_degenerate_triangles`
+        // in the converter after snapping completes.
+        //
+        // Pre-checking each remap for degeneration (the "smart snap"
+        // approach) was too conservative — it skipped 98% of remaps,
+        // leaving most boundary edges unwelded.
         if snap_count > 0 {
             // Resolve chains (if A→B and B→C, then A→C)
             for i in 0..remap.len() {
@@ -875,70 +881,7 @@ impl TriangleMesh {
                 remap[i] = current;
             }
 
-            // Build vertex → triangles index for fast lookup
-            let mut vert_to_tris: HashMap<u32, Vec<usize>> = HashMap::new();
-            for (ti, tri) in self.triangles.iter().enumerate() {
-                // Skip degenerate triangles (already degenerate, no point checking)
-                if tri[0] == tri[1] || tri[1] == tri[2] || tri[0] == tri[2] {
-                    continue;
-                }
-                for &v in tri {
-                    vert_to_tris.entry(v).or_default().push(ti);
-                }
-            }
-
-            // Filter remaps: skip if applying would create a degenerate triangle.
-            // For each (bv → target), check all triangles containing bv.
-            // If any triangle already contains target, skip this remap.
-            //
-            // FALLBACK: If the shared target would cause degeneration, try
-            // the boundary target instead. Only cancel if BOTH would cause
-            // degeneration.
-            let mut skipped = 0usize;
-            let mut fallback_used = 0usize;
-            for &bv in boundary_vertex_set.iter() {
-                let target = remap[bv as usize];
-                if target == bv { continue; } // No remap
-
-                // Check if any triangle containing bv also contains target
-                let would_degenerate = if let Some(tri_indices) = vert_to_tris.get(&bv) {
-                    let mut degenerate = false;
-                    for &ti in tri_indices {
-                        let tri = &self.triangles[ti];
-                        // Skip already-degenerate triangles
-                        if tri[0] == tri[1] || tri[1] == tri[2] || tri[0] == tri[2] {
-                            continue;
-                        }
-                        if tri[0] == target || tri[1] == target || tri[2] == target {
-                            degenerate = true;
-                            break;
-                        }
-                    }
-                    degenerate
-                } else {
-                    false
-                };
-
-                if would_degenerate {
-                    // Try to find a non-degenerate fallback in the original
-                    // candidates. We don't have access to the spatial hash
-                    // anymore, so we look for ANY boundary/shared vertex
-                    // within snap_tol that's not in bv's triangles.
-                    //
-                    // Simple fallback: leave the remap as identity (no snap).
-                    remap[bv as usize] = bv; // Cancel this remap
-                    skipped += 1;
-                }
-            }
-            if skipped > 0 {
-                log::debug!(
-                    "snap_boundary_vertices_once: skipped {} remaps that would create degenerate triangles (of {} candidates, {} fallbacks)",
-                    skipped, snap_count, fallback_used,
-                );
-                snap_count -= skipped;
-            }
-
-            // Apply the filtered remap
+            // Apply remap and track which triangles become degenerate
             let mut degen_count = 0;
             for tri in &mut self.triangles {
                 tri[0] = remap[tri[0] as usize];
@@ -950,7 +893,7 @@ impl TriangleMesh {
             }
             if degen_count > 0 {
                 log::debug!(
-                    "snap_boundary_vertices_once: {} triangles became degenerate after snapping {} vertices",
+                    "snap_boundary_vertices_once: {} triangles became degenerate after snapping {} vertices (will be filtered later)",
                     degen_count, snap_count,
                 );
             }
