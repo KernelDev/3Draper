@@ -390,6 +390,22 @@ pub fn validate_watertight(mesh: &TriangleMesh, verbose: bool) -> WatertightRepo
             continue;
         }
 
+        // Also skip POSITION-degenerate triangles (different vertex indices
+        // but same 3D position). These occur when merge_deduplicating maps
+        // two distinct face-mesh vertices to the same BREP-mesh vertex
+        // (because they have the same 3D position). The resulting triangle
+        // has zero area and its edges are phantom (e.g., an edge between
+        // two coincident points) — they shouldn't be counted.
+        let p0 = mesh.vertices[v0 as usize];
+        let p1 = mesh.vertices[v1 as usize];
+        let p2 = mesh.vertices[v2 as usize];
+        let area = ((p1.x - p0.x) * (p2.y - p0.y) - (p1.y - p0.y) * (p2.x - p0.x)).abs()
+                 + ((p1.y - p0.y) * (p2.z - p0.z) - (p1.z - p0.z) * (p2.y - p0.y)).abs()
+                 + ((p1.z - p0.z) * (p2.x - p0.x) - (p1.x - p0.x) * (p2.z - p0.z)).abs();
+        if area < 1e-20 {
+            continue;
+        }
+
         let edges = [
             (v0.min(v1), v0.max(v1)),
             (v1.min(v2), v1.max(v2)),
