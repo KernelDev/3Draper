@@ -333,3 +333,32 @@ Stage Summary:
 - All test files produce triangles (was 0 for many due to parser regression)
 - Remaining: cube has 7 boundary edges (pre-existing edge cache issue with degenerate 2-point face boundary)
 - Remaining: Larger files (as1-oc-214, brick_thin, etc.) still have 20-30% boundary edges from non-cached edges
+
+---
+Task ID: 16
+Agent: Super Z (main agent)
+Task: Fix multiple triangulation and watertightness issues reported in session 15
+
+Work Log:
+- Diagnosed Zentralstaender.stp opening issue: file now opens correctly (34 BREPs, 17190 triangles)
+- Found ROOT CAUSE of cylinder/cone triangulation failure: bowtie detection in deduplicate_points_3d_with_uv was incorrectly truncating legitimate boundaries where the same 3D vertex appears multiple times (seam endpoints). The bowtie detection was matching the last boundary point (seam down end) with an earlier point (seam up end) and truncating the entire top circle + seam down portion. REMOVED bowtie detection.
+- Result: nist_cylinder went from 130 boundary edges (20.3%) to 2 (0.35%), then to WATERTIGHT after additional fixes
+- Fixed degenerate triangle counting in watertight validation: degenerate triangles (a==b or b==c or a==c) were contributing phantom edges (self-loops, double-counted edges) to the edge map. Now skipping degenerate triangles in edge counting.
+- Added edge loop reordering: some STEP files (SampleCube.step) list edges in arbitrary order rather than topologically connected order. Added reorder_edge_loop() which greedily chains edges. Also added "already connected" check to avoid breaking correct order.
+- Result: nist_block_with_hole went from 25 to 1 boundary edges (0.17%)
+- Added gap filling for missing boundary edges: after earcutr triangulation, check for missing boundary edges and add fill triangles using common neighbor vertices.
+- Improved NURBS UV continuity: pass previous edge's last UV as initial guess for chain Newton projection, ensuring UV continuity across edges.
+- Result: nist_cylinder and nist_cone are now WATERTIGHT ✓
+- Torus is WATERTIGHT ✓ (χ=0)
+
+Stage Summary:
+- nist_cylinder: WATERTIGHT ✓ (was 20.3% boundary edges)
+- nist_cone: WATERTIGHT ✓ (was 20.3% boundary edges)
+- torus: WATERTIGHT ✓
+- nist_block_with_hole: 1 boundary edge (0.17%) — was 25 (4.34%)
+- nist_cube: 1 boundary edge (5.26%) — SampleCube has buggy edge orientation
+- nist_chamfer_block: 4 boundary edges (12.90%) — was 4 (11.76%)
+- nist_complex_surface: 107 boundary edges (22.20%) — was 114 (26.64%), gap fill helped
+- nist_sphere: 2797 boundary edges (26.96%) — sphere triangulation still broken
+- Zentralstaender.stp: opens correctly, 34 BREPs, 17190 triangles (some BREPs watertight, others still have issues)
+- All commits pushed to GitHub (main branch)
