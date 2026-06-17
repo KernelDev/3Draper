@@ -2906,8 +2906,15 @@ impl<'a> StepConverter<'a> {
                     "BREP #{}: snapped {} boundary vertices (tol={:.2e})",
                     brep_id, snapped, snap_tol
                 );
-                // After snapping, filter any new degenerate triangles
+                // After snapping, filter degenerate triangles and remove duplicates
                 filter_degenerate_triangles(&mut mesh, 1e-10);
+                let dup_after_snap = mesh.remove_duplicate_triangles();
+                if dup_after_snap > 0 {
+                    log::info!(
+                        "BREP #{}: removed {} duplicate triangles after snapping",
+                        brep_id, dup_after_snap,
+                    );
+                }
             }
         }
         // Validation — do NOT apply repair_mesh. If the mesh is not watertight,
@@ -3344,7 +3351,18 @@ impl<'a> StepConverter<'a> {
                     "BREP #{} detailed: snapped {} boundary vertices (tol={:.2e})",
                     brep_id, snapped, snap_tol
                 );
+                // After snapping, some triangles may have become degenerate
+                // (two vertices snapped to the same target) or duplicate
+                // (two different triangles became the same after remapping).
+                // Filter both to prevent non-manifold edges.
                 filter_degenerate_triangles(&mut mesh, 1e-10);
+                let dup_after_snap = mesh.remove_duplicate_triangles();
+                if dup_after_snap > 0 {
+                    log::info!(
+                        "BREP #{} detailed: removed {} duplicate triangles after snapping",
+                        brep_id, dup_after_snap,
+                    );
+                }
             }
         }
 
