@@ -3677,7 +3677,63 @@ fn triangulate_sphere_face_with_boundary_uv(
     forward: bool,
     params: &TriangulationParams,
 ) -> TriangleMesh {
-    // Use the consistent UV-aware triangulation path for spheres.
+    // Detect full-sphere case: the boundary UVs cover approximately the full
+    // U range [0, 2π] AND the full V range [0, π]. This happens for spheres
+    // defined by a degenerate boundary (equator traversed twice + meridian
+    // forward + meridian backward) that traces the entire sphere.
+    //
+    // In this case, the boundary polygon is self-intersecting in UV space
+    // (the equator traversed forward and backward creates a "fold"), and
+    // earcutr cannot triangulate it correctly. We fall back to a grid-based
+    // triangulation that produces a proper watertight sphere with pole
+    // degeneracy handling.
+    let is_full_sphere = !boundary_uvs.is_empty()
+        && hole_polylines.is_empty()
+        && {
+            let u_min = boundary_uvs.iter().map(|p| p.u).fold(f64::MAX, f64::min);
+            let u_max = boundary_uvs.iter().map(|p| p.u).fold(f64::MIN, f64::max);
+            let v_min = boundary_uvs.iter().map(|p| p.v).fold(f64::MAX, f64::min);
+            let v_max = boundary_uvs.iter().map(|p| p.v).fold(f64::MIN, f64::max);
+            let u_range = u_max - u_min;
+            let v_range = v_max - v_min;
+            // Full sphere: u covers ~2π AND v covers ~π
+            u_range > 1.9 * PI && v_range > 0.9 * PI
+        };
+
+    if is_full_sphere {
+        log::info!(
+            "Sphere face: full-sphere boundary detected ({} bnd pts) — using grid triangulation with pole handling",
+            boundary_points.len()
+        );
+        return triangulate_sphere_full_grid_from_boundary(sphere, params, forward);
+    }
+
+    // Detect partial-sphere case where the boundary covers full U but only
+    // a band of V (e.g., a sphere band between two latitudes). In this case,
+    // the boundary has two ring loops at v_min and v_max connected by seam
+    // edges at u=0 and u=2π. We use a tube-like grid triangulation.
+    let is_full_u_band = !boundary_uvs.is_empty()
+        && hole_polylines.is_empty()
+        && {
+            let u_min = boundary_uvs.iter().map(|p| p.u).fold(f64::MAX, f64::min);
+            let u_max = boundary_uvs.iter().map(|p| p.u).fold(f64::MIN, f64::max);
+            let v_min = boundary_uvs.iter().map(|p| p.v).fold(f64::MAX, f64::min);
+            let v_max = boundary_uvs.iter().map(|p| p.v).fold(f64::MIN, f64::max);
+            let u_range = u_max - u_min;
+            let v_range = v_max - v_min;
+            // Full U band: u covers ~2π, v is a small range not at the poles
+            u_range > 1.9 * PI && v_range < 0.9 * PI && v_min > 0.05 && v_max < PI - 0.05
+        };
+
+    if is_full_u_band {
+        log::info!(
+            "Sphere face: full-U band boundary detected ({} bnd pts) — using band grid triangulation",
+            boundary_points.len()
+        );
+        return triangulate_sphere_band_from_boundary(sphere, boundary_points, params, forward);
+    }
+
+    // Default path: use the consistent UV-aware triangulation.
     // This properly handles pole degeneracy, hole support, and
     // uses the boundary_uvs from STEP PCURVE data for accuracy.
     let surface = Surface::Sphere(sphere.clone());
@@ -3690,6 +3746,152 @@ fn triangulate_sphere_face_with_boundary_uv(
         forward,
         params,
     )
+}
+
+/// Full sphere triangulation using a grid approach with pole degeneracy handling.
+/// This is used when the boundary represents the entire sphere (full U and V range).
+/// Produces a watertight mesh: 1 north pole vertex, 1 south pole vertex, and
+/// (n_v - 1) rings of n_u vertices each. Triangle count = 2 * n_u * (n_v - 1).
+fn triangulate_sphere_full_grid_from_boundary(
+    sphere: &SphereSurface,
+    params: &TriangulationParams,
+    forward: bool,
+) -> TriangleMesh {
+    let mut mesh = TriangleMesh::new();
+
+    let n_u = params.angular_samples.max(8);
+    let n_v = (params.angular_samples / 2).max(6);
+
+    // North pole vertex
+    let p_north = sphere.point_at(0.0, 0.0);
+    let n_north = sphere.normal_at(0.0, 0.0);
+    let north_idx = mesh.add_vertex(p_north);
+    mesh.add_vertex_normal(north_idx, [n_north.x, n_north.y, n_north.z]);
+
+    // Ring vertices (rows 1..n_v-1) — exclude the poles
+    for j in 1..n_v {
+        let v = PI * j as f64 / n_v as f64;
+        for i in 0..n_u {
+            let u = 2.0 * PI * i as f64 / n_u as f64;
+            let p = sphere.point_at(u, v);
+            let n = sphere.normal_at(u, v);
+            let idx = mesh.add_vertex(p);
+            mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+        }
+    }
+
+    // South pole vertex
+    let p_south = sphere.point_at(0.0, PI);
+    let n_south = sphere.normal_at(0.0, PI);
+    let south_idx = mesh.add_vertex(p_south);
+    mesh.add_vertex_normal(south_idx, [n_south.x, n_south.y, n_south.z]);
+
+    // North pole fan: north → ring[i] → ring[i+1]
+    let first_ring_base = 1u32;  // After north pole (idx 0)
+    for i in 0..n_u {
+        let i_next = (i + 1) % n_u;
+        let v1 = first_ring_base + i as u32;
+        let v2 = first_ring_base + i_next as u32;
+        if forward {
+            mesh.add_triangle(north_idx, v1, v2);
+        } else {
+            mesh.add_triangle(north_idx, v2, v1);
+        }
+    }
+
+    // Ring strips: between rows j and j+1 (j from 1 to n_v-2)
+    for j in 1..(n_v - 1) {
+        let row_base = first_ring_base + ((j - 1) * n_u) as u32;
+        let next_row_base = row_base + n_u as u32;
+        for i in 0..n_u {
+            let i_next = (i + 1) % n_u;
+            let v0 = row_base + i as u32;
+            let v1 = row_base + i_next as u32;
+            let v2 = next_row_base + i_next as u32;
+            let v3 = next_row_base + i as u32;
+            if forward {
+                mesh.add_triangle(v0, v1, v2);
+                mesh.add_triangle(v0, v2, v3);
+            } else {
+                mesh.add_triangle(v0, v2, v1);
+                mesh.add_triangle(v0, v3, v2);
+            }
+        }
+    }
+
+    // South pole fan: ring[i] → ring[i+1] → south
+    let last_ring_base = south_idx - n_u as u32;
+    for i in 0..n_u {
+        let i_next = (i + 1) % n_u;
+        let v0 = last_ring_base + i as u32;
+        let v1 = last_ring_base + i_next as u32;
+        if forward {
+            mesh.add_triangle(v0, v1, south_idx);
+        } else {
+            mesh.add_triangle(v1, v0, south_idx);
+        }
+    }
+
+    mesh
+}
+
+/// Sphere band triangulation: full U range, V range is a band not at the poles.
+/// Used for sphere bands / strips between two latitudes.
+/// Produces a watertight mesh: n_u vertices per ring × (n_v + 1) rings.
+fn triangulate_sphere_band_from_boundary(
+    sphere: &SphereSurface,
+    boundary_points: &[Point3d],
+    params: &TriangulationParams,
+    forward: bool,
+) -> TriangleMesh {
+    let mut mesh = TriangleMesh::new();
+
+    // Compute V range from boundary points
+    let v_min = boundary_points.iter()
+        .map(|p| sphere.project_point(p).1)
+        .fold(f64::MAX, f64::min)
+        .max(0.0);
+    let v_max = boundary_points.iter()
+        .map(|p| sphere.project_point(p).1)
+        .fold(f64::MIN, f64::min)
+        .min(PI);
+
+    let n_u = params.angular_samples.max(8);
+    let n_v = (params.angular_samples / 4).max(4);
+
+    // Generate grid: (n_v + 1) rows × n_u vertices
+    for j in 0..=n_v {
+        let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
+        for i in 0..n_u {
+            let u = 2.0 * PI * i as f64 / n_u as f64;
+            let p = sphere.point_at(u, v);
+            let n = sphere.normal_at(u, v);
+            let idx = mesh.add_vertex(p);
+            mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+        }
+    }
+
+    // Generate triangles between rows
+    for j in 0..n_v {
+        let row_base = (j * n_u) as u32;
+        let next_row_base = ((j + 1) * n_u) as u32;
+        for i in 0..n_u {
+            let i_next = (i + 1) % n_u;  // Wrap around for full U
+            let v0 = row_base + i as u32;
+            let v1 = row_base + i_next as u32;
+            let v2 = next_row_base + i_next as u32;
+            let v3 = next_row_base + i as u32;
+            if forward {
+                mesh.add_triangle(v0, v1, v2);
+                mesh.add_triangle(v0, v2, v3);
+            } else {
+                mesh.add_triangle(v0, v2, v1);
+                mesh.add_triangle(v0, v3, v2);
+            }
+        }
+    }
+
+    mesh
 }
 
 // ============================================================

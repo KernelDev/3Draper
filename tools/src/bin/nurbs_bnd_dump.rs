@@ -1,0 +1,61 @@
+// Diagnostic: dump face 2 (NURBS) boundary details for complex_surface
+// Run with: cargo run --bin nurbs_bnd_dump -- test/nist_complex_surface.stp
+
+use draper_step::{parse_step, step_structure_lazy, StepConversionContext};
+
+fn main() {
+    env_logger::builder()
+        .filter_level(log::LevelFilter::Warn)
+        .init();
+
+    let path = std::env::args().nth(1).unwrap_or("test/nist_complex_surface.stp".to_string());
+    println!("Loading: {}", path);
+    let data = std::fs::read_to_string(&path).expect("read");
+    let step = parse_step(&data).expect("parse");
+    let (_tree, pending) = step_structure_lazy(&step);
+    println!("Total BREP instances: {}", pending.len());
+
+    let ctx = StepConversionContext::new(&step);
+    let p = &pending[0];
+    let result = ctx.triangulate_pending(p);
+    let inst = match result {
+        Some(i) => i,
+        None => { eprintln!("Triangulation failed"); std::process::exit(2); }
+    };
+
+    println!("\n=== Instance: {} ===", inst.name);
+    println!("Vertices: {}, Triangles: {}", inst.mesh.vertex_count(), inst.mesh.triangle_count());
+
+    for (fi, face) in inst.faces.iter().enumerate() {
+        let tris = face.triangle_range.1 - face.triangle_range.0;
+        println!("\nFace #{}: {} tris, surface={}, forward={}",
+            fi, tris, face.surface_type, face.forward);
+
+        println!("  Outer boundary polylines: {}", face.outer_boundary.len());
+        for (li, line) in face.outer_boundary.iter().enumerate() {
+            println!("    Line {}: {} points", li, line.len());
+            if line.len() <= 30 {
+                for (i, p) in line.iter().enumerate() {
+                    println!("      [{}] ({:.4}, {:.4}, {:.4})", i, p.x, p.y, p.z);
+                }
+            } else {
+                for i in 0..10 {
+                    let p = &line[i];
+                    println!("      [{}] ({:.4}, {:.4}, {:.4})", i, p.x, p.y, p.z);
+                }
+                println!("      ... ({} more)", line.len() - 20);
+                for i in (line.len()-10)..line.len() {
+                    let p = &line[i];
+                    println!("      [{}] ({:.4}, {:.4}, {:.4})", i, p.x, p.y, p.z);
+                }
+            }
+        }
+        println!("  Outer UV boundary polylines: {}", face.outer_uv_boundary.len());
+        for (li, line) in face.outer_uv_boundary.iter().enumerate() {
+            println!("    Line {}: {} points", li, line.len());
+            let (umin, umax) = line.iter().fold((f64::MAX, f64::MIN), |(mn,mx), p| (mn.min(p.u), mx.max(p.u)));
+            let (vmin, vmax) = line.iter().fold((f64::MAX, f64::MIN), |(mn,mx), p| (mn.min(p.v), mx.max(p.v)));
+            println!("      UV bbox: u=[{:.4},{:.4}] v=[{:.4},{:.4}]", umin, umax, vmin, vmax);
+        }
+    }
+}
