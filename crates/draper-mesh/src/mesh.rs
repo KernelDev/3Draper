@@ -478,25 +478,52 @@ impl TriangleMesh {
             }
         }
 
-        // Add triangles with remapped indices — keep degenerate ones for
-        // attribute alignment (face_normals, triangle_colors, face_ids are
-        // per-triangle and must stay in sync with self.triangles).
-        // Degenerate triangles (a==b or b==c or a==c) are filtered out
-        // later during edge counting and rendering.
+        // Add triangles with remapped indices, filtering out:
+        // - Degenerate triangles (a==b or b==c or a==c) — they contribute
+        //   phantom edges to the edge map.
+        // - Duplicate triangles (same 3 vertex indices as an existing triangle,
+        //   in any order) — they create non-manifold edges (count=3+).
+        //
+        // We track which source triangles are kept (via kept_src_indices) so
+        // that the per-triangle attribute arrays (face_normals, triangle_colors,
+        // triangle_face_ids) stay aligned with self.triangles.
         let mut became_degenerate = 0usize;
-        for tri in &other.triangles {
-            let a = index_map[tri[0] as usize];
-            let b = index_map[tri[1] as usize];
-            let c = index_map[tri[2] as usize];
-            if a == b || b == c || a == c {
-                became_degenerate += 1;
+        let mut duplicate_count = 0usize;
+        let mut kept_src_indices: Vec<usize> = Vec::with_capacity(other.triangles.len());
+        {
+            // Build a set of existing triangles for O(1) lookup.
+            // Key: sorted [a, b, c] tuple (canonical form).
+            let mut existing_tris: std::collections::HashSet<[u32; 3]> = std::collections::HashSet::with_capacity(self.triangles.len());
+            for tri in &self.triangles {
+                let mut sorted = [tri[0], tri[1], tri[2]];
+                sorted.sort();
+                existing_tris.insert(sorted);
             }
-            self.triangles.push([a, b, c]);
+
+            for (src_idx, tri) in other.triangles.iter().enumerate() {
+                let a = index_map[tri[0] as usize];
+                let b = index_map[tri[1] as usize];
+                let c = index_map[tri[2] as usize];
+                if a == b || b == c || a == c {
+                    became_degenerate += 1;
+                    continue;
+                }
+                // Check for duplicate (same 3 indices in any order)
+                let mut sorted = [a, b, c];
+                sorted.sort();
+                if existing_tris.contains(&sorted) {
+                    duplicate_count += 1;
+                    continue;
+                }
+                existing_tris.insert(sorted);
+                self.triangles.push([a, b, c]);
+                kept_src_indices.push(src_idx);
+            }
         }
-        if became_degenerate > 0 {
+        if became_degenerate > 0 || duplicate_count > 0 {
             log::warn!(
-                "MERGE_DEGEN: other has {} verts ({} new, {} reused), {} tris — {} became degenerate after merge",
-                other.vertices.len(), new_count, reuse_count, other.triangles.len(), became_degenerate,
+                "MERGE_DEGEN: other has {} verts ({} new, {} reused), {} tris — {} degenerate, {} duplicates skipped",
+                other.vertices.len(), new_count, reuse_count, other.triangles.len(), became_degenerate, duplicate_count,
             );
         }
 
@@ -538,38 +565,44 @@ impl TriangleMesh {
             _ => {}
         }
 
-        // Merge face normals (per-triangle, no deduplication needed)
+        // Merge face normals (per-triangle, only for kept triangles)
         if self.face_normals.is_none() && other.face_normals.is_some() {
-            let existing_count = self.triangles.len() - other.triangles.len();
+            let existing_count = self.triangles.len() - kept_src_indices.len();
             self.face_normals = Some(vec![[0.0, 0.0, 1.0]; existing_count]);
         }
         match (&mut self.face_normals, &other.face_normals) {
             (Some(ref mut dest), Some(ref src)) => {
-                dest.extend(src.iter().cloned());
+                for &src_idx in &kept_src_indices {
+                    dest.push(src[src_idx]);
+                }
             }
             _ => {}
         }
 
-        // Merge triangle colors (per-triangle, no deduplication needed)
+        // Merge triangle colors (per-triangle, only for kept triangles)
         if self.triangle_colors.is_none() && other.triangle_colors.is_some() {
-            let existing_count = self.triangles.len() - other.triangles.len();
+            let existing_count = self.triangles.len() - kept_src_indices.len();
             self.triangle_colors = Some(vec![[0.62, 0.65, 0.70, 1.0]; existing_count]);
         }
         match (&mut self.triangle_colors, &other.triangle_colors) {
             (Some(ref mut dest), Some(ref src)) => {
-                dest.extend(src.iter().cloned());
+                for &src_idx in &kept_src_indices {
+                    dest.push(src[src_idx]);
+                }
             }
             _ => {}
         }
 
-        // Merge face IDs (per-triangle, no deduplication needed)
+        // Merge face IDs (per-triangle, only for kept triangles)
         if self.triangle_face_ids.is_none() && other.triangle_face_ids.is_some() {
-            let existing_count = self.triangles.len() - other.triangles.len();
+            let existing_count = self.triangles.len() - kept_src_indices.len();
             self.triangle_face_ids = Some(vec![0; existing_count]);
         }
         match (&mut self.triangle_face_ids, &other.triangle_face_ids) {
             (Some(ref mut ids), Some(ref other_ids)) => {
-                ids.extend(other_ids.iter().cloned());
+                for &src_idx in &kept_src_indices {
+                    ids.push(other_ids[src_idx]);
+                }
             }
             _ => {}
         }

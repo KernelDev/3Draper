@@ -8674,6 +8674,20 @@ fn earcutr_triangulate_planar_converter(
             continue;
         }
 
+        // Skip position-degenerate triangles (different indices but same 3D
+        // position). These occur when the boundary has duplicate positions
+        // (e.g., seam points). Adding such triangles creates phantom edges
+        // that break watertightness after merge.
+        let pa = all_3d[a as usize];
+        let pb = all_3d[b as usize];
+        let pc = all_3d[c as usize];
+        let ab = (pa.x - pb.x).powi(2) + (pa.y - pb.y).powi(2) + (pa.z - pb.z).powi(2);
+        let bc = (pb.x - pc.x).powi(2) + (pb.y - pc.y).powi(2) + (pb.z - pc.z).powi(2);
+        let ac = (pa.x - pc.x).powi(2) + (pa.y - pc.y).powi(2) + (pa.z - pc.z).powi(2);
+        if ab < 1e-20 || bc < 1e-20 || ac < 1e-20 {
+            continue;
+        }
+
         // Verify vertices are valid
         if (a as usize) < all_3d.len() && (b as usize) < all_3d.len() && (c as usize) < all_3d.len() {
             if forward {

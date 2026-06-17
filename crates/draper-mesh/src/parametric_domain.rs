@@ -2214,6 +2214,10 @@ pub fn triangulate_surface_consistent(
     // Build mesh — use cached 3D points for boundary/hole vertices
     let mut mesh = TriangleMesh::new();
     let mut vertex_map: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    // Position-based dedup map: maps 3D position (rounded) → mesh vertex index.
+    // This ensures that two UV indices mapping to the same 3D position get the
+    // same mesh vertex, preventing position-degenerate triangles.
+    let mut position_map: std::collections::HashMap<[u64; 3], u32> = std::collections::HashMap::new();
 
     for tri in &result_triangles {
         // Bounds check
@@ -2229,7 +2233,7 @@ pub fn triangulate_surface_consistent(
         for (k, &idx) in tri.iter().enumerate() {
             let idx_usize = idx as usize;
             let entry = vertex_map.entry(idx).or_insert_with(|| {
-                if idx_usize < n_boundary_and_holes_actual && idx_usize < all_boundary_3d.len() {
+                let (p3d, n) = if idx_usize < n_boundary_and_holes_actual && idx_usize < all_boundary_3d.len() {
                     // Boundary/hole vertex: use cached 3D point directly
                     // This is what makes the mesh watertight — shared edge
                     // vertices have bit-identical 3D positions
@@ -2244,9 +2248,7 @@ pub fn triangulate_surface_consistent(
                     } else {
                         surface.normal_at(uv.u, uv.v)
                     };
-                    let vi = mesh.add_vertex(p3d);
-                    mesh.add_vertex_normal(vi, [n.x, n.y, n.z]);
-                    vi
+                    (p3d, n)
                 } else {
                     // Interior vertex: compute 3D point and normal from UV.
                     // For NURBS, use derivatives_at once to get both point and
@@ -2255,18 +2257,43 @@ pub fn triangulate_surface_consistent(
                     // Apply deterministic rounding to ensure consistent vertex positions
                     // across faces (matches edge cache's rounding for boundary vertices).
                     let uv = all_uv[idx_usize];
-                    let (p3d, n) = if let Surface::Nurbs(ref nurbs) = surface {
+                    if let Surface::Nurbs(ref nurbs) = surface {
                         let derivs = nurbs.derivatives_at(uv.u, uv.v);
                         (deterministic_round_point(derivs.point), derivs.normal())
                     } else {
                         (deterministic_round_point(surface.point_at(uv.u, uv.v)), surface.normal_at(uv.u, uv.v))
-                    };
-                    let vi = mesh.add_vertex(p3d);
-                    mesh.add_vertex_normal(vi, [n.x, n.y, n.z]);
-                    vi
+                    }
+                };
+                // Position-based dedup: if a vertex with the same 3D position
+                // already exists in the face mesh, reuse it. This prevents
+                // position-degenerate triangles when two UV indices map to the
+                // same 3D position (e.g., seam points, or interior points that
+                // happen to coincide with boundary points).
+                let pos_key = [p3d.x.to_bits(), p3d.y.to_bits(), p3d.z.to_bits()];
+                if let Some(&existing_vi) = position_map.get(&pos_key) {
+                    return existing_vi;
                 }
+                let vi = mesh.add_vertex(p3d);
+                mesh.add_vertex_normal(vi, [n.x, n.y, n.z]);
+                position_map.insert(pos_key, vi);
+                vi
             });
             tri_indices[k] = *entry;
+        }
+
+        // Skip position-degenerate triangles (different vertex indices but
+        // same 3D position). These occur when two UV indices map to the same
+        // 3D position (e.g., on a seam or degenerate curve). Adding such
+        // triangles would create phantom edges that break watertightness
+        // when the face mesh is merged into the BREP mesh.
+        let p_a = mesh.vertices[tri_indices[0] as usize];
+        let p_b = mesh.vertices[tri_indices[1] as usize];
+        let p_c = mesh.vertices[tri_indices[2] as usize];
+        let ab = (p_a.x - p_b.x).powi(2) + (p_a.y - p_b.y).powi(2) + (p_a.z - p_b.z).powi(2);
+        let bc = (p_b.x - p_c.x).powi(2) + (p_b.y - p_c.y).powi(2) + (p_b.z - p_c.z).powi(2);
+        let ac = (p_a.x - p_c.x).powi(2) + (p_a.y - p_c.y).powi(2) + (p_a.z - p_c.z).powi(2);
+        if ab < 1e-20 || bc < 1e-20 || ac < 1e-20 {
+            continue;
         }
 
         if forward {
