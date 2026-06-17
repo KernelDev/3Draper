@@ -396,8 +396,9 @@ impl TriangleMesh {
     /// With deduplication, shared vertices get the same index, making the
     /// mesh watertight **by construction** — no post-hoc repair needed.
     pub fn merge_deduplicating(&mut self, other: &TriangleMesh, dedup_map: &mut VertexDedupMap) {
-        // Save pre-merge vertex count for correct normals sizing
+        // Save pre-merge counts for correct normals/triangle-attribute sizing
         let old_vertex_count = self.vertices.len();
+        let old_triangle_count = self.triangles.len();
 
         // Build index remapping: other's local vertex index → global index
         let mut index_map: Vec<u32> = Vec::with_capacity(other.vertices.len());
@@ -419,7 +420,11 @@ impl TriangleMesh {
             }
         }
 
-        // Add triangles with remapped indices — count how many become degenerate
+        // Add triangles with remapped indices — keep degenerate ones for
+        // attribute alignment (face_normals, triangle_colors, face_ids are
+        // per-triangle and must stay in sync with self.triangles).
+        // Degenerate triangles (a==b or b==c or a==c) are filtered out
+        // later during edge counting and rendering.
         let mut became_degenerate = 0usize;
         for tri in &other.triangles {
             let a = index_map[tri[0] as usize];

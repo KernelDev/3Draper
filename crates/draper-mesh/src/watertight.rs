@@ -180,6 +180,10 @@ pub fn validate_edge_consistency(mesh: &TriangleMesh, tolerance: f64) -> EdgeCon
     // for the same edge at different parametric locations.
     let mut edge_map: HashMap<(u32, u32), Vec<(usize, u32, u32)>> = HashMap::new();
     for (ti, tri) in mesh.triangles.iter().enumerate() {
+        // Skip degenerate triangles — they contribute phantom edges
+        if tri[0] == tri[1] || tri[1] == tri[2] || tri[0] == tri[2] {
+            continue;
+        }
         let edges = [
             (tri[0].min(tri[1]), tri[0].max(tri[1]), tri[0], tri[1]),
             (tri[1].min(tri[2]), tri[1].max(tri[2]), tri[1], tri[2]),
@@ -378,6 +382,13 @@ pub fn validate_watertight(mesh: &TriangleMesh, verbose: bool) -> WatertightRepo
         let v0 = tri[0];
         let v1 = tri[1];
         let v2 = tri[2];
+
+        // Skip degenerate triangles — they contribute phantom edges
+        // (e.g., self-loop (a,a) and double-counted (a,c)) that inflate
+        // boundary/non-manifold edge counts and break watertight validation.
+        if v0 == v1 || v1 == v2 || v0 == v2 {
+            continue;
+        }
 
         let edges = [
             (v0.min(v1), v0.max(v1)),
