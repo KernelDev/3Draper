@@ -362,3 +362,64 @@ Stage Summary:
 - nist_sphere: 2797 boundary edges (26.96%) — sphere triangulation still broken
 - Zentralstaender.stp: opens correctly, 34 BREPs, 17190 triangles (some BREPs watertight, others still have issues)
 - All commits pushed to GitHub (main branch)
+
+---
+Task ID: 21
+Agent: Main
+Task: Fix P0 file opening regression, seam-split crashes, and degenerate triangle handling
+
+Work Log:
+- Installed Rust toolchain (stable 1.96.0) and built the project
+- ROOT CAUSE 1 FOUND: Parser was dropping all entities after multi-line STEP strings
+  - update_paren_depth() used LOCAL in_string flag, reset to false at start of each line
+  - When a STEP string literal spanned multiple lines (common in SolidWorks/CATIA exports),
+    the closing ' on a continuation line was misinterpreted as opening a new string
+  - This caused ) characters to be ignored, paren_depth never returned to 0, and the
+    parser never detected entity completion. All subsequent entities were silently dropped.
+  - FIX: Added update_paren_depth_stateful() that carries in_string across lines
+  - Result: Zentralstaender.stp went from 0 BREPs to 34 instances, 16077 triangles
+
+- ROOT CAUSE 2 FOUND: Index-out-of-bounds panic in split_at_u_seam/split_at_v_seam
+  - polygon and points_3d had different lengths after DegeneracyHandler merge
+  - FIX: Use min(len) for iteration, bounds-check edge indices, add iteration limit
+  - Also restructured to do merge BEFORE NURBS UV clamping so lengths stay in sync
+
+- ROOT CAUSE 3 FOUND: Stack overflow in triangulate_surface_consistent recursion
+  - Seam-split produced sub-polygons that were still self-intersecting, causing
+    infinite recursion
+  - FIX: Added MAX_RECURSION_DEPTH=4 guard with recursion_depth parameter
+
+- ROOT CAUSE 4 FOUND: Degenerate triangles in merge_deduplicating
+  - merge_deduplicating() detected degenerate triangles (a==b || b==c || a==c) but
+    still ADDED them to the mesh, causing non-manifold edges and watertightness failures
+  - FIX: Skip degenerate triangles instead of adding them, keep per-triangle arrays in sync
+
+- ROOT CAUSE 5 FOUND: earcutr producing degenerate triangles from duplicate 3D points
+  - earcutr_triangulate_planar_converter() only checked index-based degeneracy (a==b),
+    not 3D-area-based degeneracy (two different indices pointing to same 3D position)
+  - FIX: Added 3D area check (cross product magnitude squared < 1e-30)
+
+- ROOT CAUSE 6 FOUND: Over-aggressive non-adjacent bowtie check in dedup
+  - deduplicate_points_3d_with_uv() and deduplicate_points_3d() had a check that
+    truncated the polygon when the last vertex matched ANY earlier vertex
+  - For cube face 6 with wrong edge order, polygon was [V0,V1,V2,V0,V2,V3,V1]
+  - Last V1 matched V1 at index 1, so check truncated to [V0,V1] (2 vertices!)
+  - FIX: Removed the non-adjacent check entirely; consecutive dedup + last-vs-first
+    is sufficient for normal closed-loop polygons
+
+- Added tolerance-based dedup pass (1e-9) to catch ULP-level differences that
+  bit-exact comparison misses
+- Added deduplication to triangulate_plane_with_boundary_and_holes_uv() which
+  was missing it entirely
+
+- Committed 3 fixes, rebased on remote (which had equivalent parser fix using
+  in_string instead of in_string_state), pushed to GitHub commit 3f3b96b
+
+Stage Summary:
+- Zentralstaender.stp: 0 BREPs → 34 instances, 16077 triangles (FIXED)
+- All 15 test files now open correctly (was many failing)
+- nist_cube: 8 → 19 triangles, 0 degenerate, 0 non-manifold (was 4 degenerate)
+- No more stack overflow on drill_top.stp (recursion guard)
+- No more index-out-of-bounds panic (seam-split safety)
+- Watertightness still needs work (edge ordering issue is the root cause)
+- All 73 draper-step tests pass
