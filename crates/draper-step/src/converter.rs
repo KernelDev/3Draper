@@ -3340,10 +3340,12 @@ impl<'a> StepConverter<'a> {
                 report_before.non_manifold_edge_count, adaptive_tol
             );
             let deduped = total_face_vertices_detailed - mesh.vertices.len();
+            let (exact_hits, tolerance_hits, misses) = dedup_map.stats();
             log::error!(
-                "  Dedup stats: {} face vertices → {} unique ({} shared), dedup_rate={:.1}%",
+                "  Dedup stats: {} face vertices → {} unique ({} shared), dedup_rate={:.1}%, exact_hits={}, tolerance_hits={}, misses={}",
                 total_face_vertices_detailed, mesh.vertices.len(), deduped,
                 if total_face_vertices_detailed > 0 { deduped as f64 / total_face_vertices_detailed as f64 * 100.0 } else { 0.0 },
+                exact_hits, tolerance_hits, misses,
             );
             if boundary_pct > 1.0 {
                 log::error!("More than 1% boundary edges — edge cache is NOT working correctly!");
