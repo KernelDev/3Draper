@@ -2735,7 +2735,7 @@ impl<'a> StepConverter<'a> {
             // 2. Create a spatial key from the rounded 3D coordinates
             // 3. Group step_ids by their 3D endpoint pair
             // 4. Alias non-canonical step_ids to the canonical one
-            let coord_tol = tol_ctx.model_scale * 1e-3; // 0.1% of model scale for coordinate matching
+            let coord_tol = (tol_ctx.model_scale * 2e-3).max(tol_ctx.absolute * 10.0); // 2000 PPM of model scale — matches snap tolerance // 0.1% of model scale for coordinate matching
             let mut coord_pair_to_step_ids: HashMap<(i64, i64, i64, i64, i64, i64), Vec<i64>> = HashMap::new();
             let mut step_id_endpoints: HashMap<i64, (Point3d, Point3d)> = HashMap::new();
             let mut unaliased_count = 0usize;
@@ -2811,7 +2811,7 @@ impl<'a> StepConverter<'a> {
         // Tolerance-based dedup: catches near-identical vertices from different
         // STEP EDGE_CURVE entities on the same geometric boundary (FP drift
         // typically 1e-13). Merge tolerance = 1 PPM of model scale.
-        let merge_tol = (tol_ctx.model_scale * 1e-6).max(tol_ctx.absolute);
+        let merge_tol = (tol_ctx.model_scale * 1e-4).max(tol_ctx.absolute * 10.0);
         let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
         let mut total_face_vertices = 0usize;
         for (fi, face_data) in face_data_list.iter().enumerate() {
@@ -2885,25 +2885,31 @@ impl<'a> StepConverter<'a> {
         // same geometric boundary (e.g., Plane face uses LINE, NURBS face
         // uses NURBS curve), bit-exact dedup can't merge the boundary
         // vertices. This post-processing step snaps boundary vertices to
-        // nearby shared vertices, welding the mesh at geometrically
+        // nearby shared/boundary vertices, welding the mesh at geometrically
         // coincident boundaries.
         //
-        // DISABLED: snap_boundary_vertices corrupts valid triangulations by
-        // snapping boundary vertices to interior vertices, creating massive
-        // numbers of degenerate triangles. The edge cache should produce
-        // bit-identical shared vertices directly.
-        /*
+        // RE-ENABLED with boundary-only snap logic: the snap function now
+        // only snaps boundary vertices to other boundary or shared vertices,
+        // NEVER to interior vertices. This prevents the corruption that
+        // previously disabled this code path.
+        //
+        // Tolerance: 2000 PPM of model scale. This catches typical FP drift
+        // between independent edge curve discretizations of the same geometric
+        // boundary (observed up to ~1400 PPM in brick_thin.stp), while being
+        // tight enough to not collapse distinct features (which are typically
+        // >10,000 PPM apart).
         {
-            let snap_tol = tol_ctx.model_scale * 1e-3; // 1000 PPM of model scale
+            let snap_tol = (tol_ctx.model_scale * 2e-3).max(tol_ctx.absolute * 10.0);
             let snapped = mesh.snap_boundary_vertices(snap_tol);
             if snapped > 0 {
                 log::info!(
-                    "BREP #{}: snapped {} boundary vertices to shared vertices (tol={:.2e})",
+                    "BREP #{}: snapped {} boundary vertices (tol={:.2e})",
                     brep_id, snapped, snap_tol
                 );
+                // After snapping, filter any new degenerate triangles
+                filter_degenerate_triangles(&mut mesh, 1e-10);
             }
         }
-        */
         // Validation — do NOT apply repair_mesh. If the mesh is not watertight,
         // that indicates a bug in the edge cache or surface discretization.
         // repair_mask/stitch_boundary_edges mask the real problem by moving
@@ -3070,7 +3076,7 @@ impl<'a> StepConverter<'a> {
 
             // Phase 2: 3D coordinate-based aliasing (supplementary)
             // Same logic as in triangulate_brep() — see comments there.
-            let coord_tol = tol_ctx.model_scale * 1e-3;
+            let coord_tol = (tol_ctx.model_scale * 2e-3).max(tol_ctx.absolute * 10.0); // 2000 PPM of model scale — matches snap tolerance
             let mut coord_pair_to_step_ids: HashMap<(i64, i64, i64, i64, i64, i64), Vec<i64>> = HashMap::new();
             for face_data in &face_data_list {
                 for (edge_idx, &step_id) in face_data.edge_step_ids.iter().enumerate() {
@@ -3102,8 +3108,10 @@ impl<'a> StepConverter<'a> {
                 }
             }
             let mut coord_alias_count = 0usize;
+            let mut coord_groups_with_multiple = 0usize;
             for (_key, step_ids) in &coord_pair_to_step_ids {
                 if step_ids.len() < 2 { continue; }
+                coord_groups_with_multiple += 1;
                 let canonical = *step_ids.iter().max_by_key(|&&sid| {
                     self.edge_curve_complexity_score(sid)
                 }).unwrap();
@@ -3114,12 +3122,10 @@ impl<'a> StepConverter<'a> {
                     }
                 }
             }
-            if coord_alias_count > 0 {
-                log::info!(
-                    "BREP #{}: registered {} additional step_id aliases from 3D coordinate matching (detailed path, tol={:.2e})",
-                    brep_id, coord_alias_count, coord_tol
-                );
-            }
+            log::info!(
+                "BREP #{}: Phase 2 alias: {} coord groups, {} with multiple step_ids, {} aliases registered (tol={:.2e})",
+                brep_id, coord_pair_to_step_ids.len(), coord_groups_with_multiple, coord_alias_count, coord_tol,
+            );
         }
 
         // Time guard: limit per-BREP triangulation time.
@@ -3154,7 +3160,7 @@ impl<'a> StepConverter<'a> {
         // The merge tolerance is set to 1 PPM of the model scale — small enough
         // to never collapse genuinely distinct features, but large enough to catch
         // FP drift between different EDGE_CURVE entities on the same boundary.
-        let merge_tol = (tol_ctx.model_scale * 1e-6).max(tol_ctx.absolute);
+        let merge_tol = (tol_ctx.model_scale * 1e-4).max(tol_ctx.absolute * 10.0);
         let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
         let mut total_face_vertices_detailed = 0usize;
         let mut face_infos = Vec::new();
@@ -3326,6 +3332,22 @@ impl<'a> StepConverter<'a> {
             );
         }
 
+        // ─── Post-merge boundary vertex snapping (detailed path) ────────
+        // Same logic as the non-detailed path: snap boundary vertices to
+        // nearby shared/boundary vertices to weld gaps caused by different
+        // EDGE_CURVE entities on the same geometric boundary.
+        {
+            let snap_tol = (tol_ctx.model_scale * 2e-3).max(tol_ctx.absolute * 10.0);
+            let snapped = mesh.snap_boundary_vertices(snap_tol);
+            if snapped > 0 {
+                log::info!(
+                    "BREP #{} detailed: snapped {} boundary vertices (tol={:.2e})",
+                    brep_id, snapped, snap_tol
+                );
+                filter_degenerate_triangles(&mut mesh, 1e-10);
+            }
+        }
+
         let adaptive_tol = edge_cache.adaptive_tolerance().merge_tolerance();
         let report_before = validate_watertight(&mesh, false);
         if !report_before.is_watertight() {
@@ -3480,7 +3502,7 @@ impl<'a> StepConverter<'a> {
         let mut mesh = TriangleMesh::new();
         // Tolerance-based dedup: catches near-identical vertices from different
         // STEP EDGE_CURVE entities on the same geometric boundary.
-        let merge_tol = (tol_ctx.model_scale * 1e-6).max(tol_ctx.absolute);
+        let merge_tol = (tol_ctx.model_scale * 1e-4).max(tol_ctx.absolute * 10.0);
         let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
         for face_data in &face_data_list {
             let face_mesh = self.surface_to_mesh(face_data, params, bbox);

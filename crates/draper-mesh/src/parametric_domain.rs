@@ -1793,8 +1793,24 @@ pub fn triangulate_surface_consistent(
                 );
 
                 if new_self_intersecting {
+                    log::warn!(
+                        "UV polygon STILL self-intersecting after re-projection — using 3D ear-clip fallback"
+                    );
+                    // FALLBACK: Triangulate the 3D polygon directly by projecting
+                    // to a best-fit plane and ear-clipping. This preserves watertightness
+                    // (shared boundary edges with adjacent faces) even though the UV
+                    // triangulation would produce inverted/wrong triangles.
+                    let boundary_3d_area = polygon_area_3d(&boundary_points_3d);
+                    if boundary_3d_area > 1e-10 {
+                        let hole_polylines_3d_local: Vec<Vec<Point3d>> = hole_polylines_3d.to_vec();
+                        return triangulate_3d_polygon_fallback(
+                            &boundary_points_3d,
+                            &hole_polylines_3d_local,
+                            forward,
+                        );
+                    }
                     log::error!(
-                        "UV polygon STILL self-intersecting after re-projection — proceeding with imperfect polygon"
+                        "UV polygon STILL self-intersecting AND 3D area is zero — proceeding with imperfect polygon"
                     );
                 }
             }
@@ -2095,11 +2111,27 @@ pub fn triangulate_surface_consistent(
 
             // Re-check validity
             if !check_uv_polygon_validity(&outer_uv) {
-                log::error!(
-                    "triangulate_surface_consistent: UV polygon STILL invalid after brute-force — proceeding anyway (empty mesh is worse)"
+                log::warn!(
+                    "triangulate_surface_consistent: NURBS UV polygon STILL invalid after brute-force — using 3D ear-clip fallback"
                 );
-                // Don't return empty mesh — proceed with imperfect polygon.
+                // FALLBACK: Triangulate the 3D polygon directly by projecting
+                // to a best-fit plane and ear-clipping. This preserves watertightness
+                // (shared boundary edges with adjacent faces) even though the UV
+                // triangulation failed.
+                let boundary_3d_area = polygon_area_3d(&boundary_points_3d);
+                if boundary_3d_area > 1e-10 {
+                    let hole_polylines_3d_local: Vec<Vec<Point3d>> = hole_polylines_3d.to_vec();
+                    return triangulate_3d_polygon_fallback(
+                        &boundary_points_3d,
+                        &hole_polylines_3d_local,
+                        forward,
+                    );
+                }
+                // Last resort: proceed with imperfect polygon.
                 // A slightly imperfect triangulation is better than a hole in the model.
+                log::error!(
+                    "triangulate_surface_consistent: NURBS UV invalid AND 3D area zero — proceeding with imperfect polygon"
+                );
             }
         } else {
             // Non-NURBS surface with invalid UV polygon.
