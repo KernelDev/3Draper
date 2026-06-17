@@ -2242,12 +2242,16 @@ pub fn triangulate_surface_consistent(
     }
 
     // ============================================================
-    // Step 5.5: DIAGNOSTIC — Verify that earcutr preserved all boundary edges
+    // Step 5.5: DIAGNOSTIC + GAP FILLING — Verify and repair boundary edges
     //
     // After earcutr triangulation, every consecutive pair of boundary vertices
     // should be connected by an edge in at least one triangle. If earcutr
     // skips a boundary edge, the mesh will have a boundary edge that should
     // be shared with an adjacent face — breaking watertightness.
+    //
+    // GAP FILLING: For each missing boundary edge (va, vb), find a vertex vc
+    // that is close to both va and vb and forms a valid (non-degenerate)
+    // triangle. Add the triangle (va, vb, vc) to fill the gap.
     // ============================================================
     {
         let n_bnd = n_boundary_and_holes_actual;
@@ -2262,6 +2266,7 @@ pub fn triangulate_surface_consistent(
         }
         // Check: for each consecutive pair of boundary vertices, is there an edge?
         let mut missing_boundary_edges = 0usize;
+        let mut missing_edges_list: Vec<(u32, u32)> = Vec::new();
         for i in 0..n_bnd {
             let i_next = (i + 1) % n_bnd;
             let va = *vertex_map.get(&(i as u32)).unwrap_or(&u32::MAX);
@@ -2270,37 +2275,69 @@ pub fn triangulate_surface_consistent(
                 let key = (va.min(vb), va.max(vb));
                 if !boundary_edges_in_mesh.contains(&key) {
                     missing_boundary_edges += 1;
+                    missing_edges_list.push((va, vb));
                 }
             }
         }
         if missing_boundary_edges > 0 {
             // Log details about the first few missing edges
             let mut logged = 0;
-            for i in 0..n_bnd {
-                let i_next = (i + 1) % n_bnd;
-                let va = *vertex_map.get(&(i as u32)).unwrap_or(&u32::MAX);
-                let vb = *vertex_map.get(&(i_next as u32)).unwrap_or(&u32::MAX);
-                if va != u32::MAX && vb != u32::MAX {
-                    let key = (va.min(vb), va.max(vb));
-                    if !boundary_edges_in_mesh.contains(&key) {
-                        let pa = mesh.vertices[va as usize];
-                        let pb = mesh.vertices[vb as usize];
-                        let dist = ((pa.x - pb.x).powi(2) + (pa.y - pb.y).powi(2) + (pa.z - pb.z).powi(2)).sqrt();
-                        log::warn!(
-                            "  MISSING boundary edge: bnd_idx {}→{} mesh_idx {}→{} dist={:.6}",
-                            i, i_next, va, vb, dist
-                        );
-                        logged += 1;
-                        if logged >= 5 { break; }
+            for &(va, vb) in &missing_edges_list {
+                let pa = mesh.vertices[va as usize];
+                let pb = mesh.vertices[vb as usize];
+                let dist = ((pa.x - pb.x).powi(2) + (pa.y - pb.y).powi(2) + (pa.z - pb.z).powi(2)).sqrt();
+                log::warn!(
+                    "  MISSING boundary edge: mesh_idx {}→{} dist={:.6}",
+                    va, vb, dist
+                );
+                logged += 1;
+                if logged >= 5 { break; }
+            }
+
+            // GAP FILLING: for each missing edge (va, vb), find the best vertex
+            // vc to form a fill triangle. The best vc is the one that:
+            // 1. Is already connected to both va and vb (forms an existing edge)
+            // 2. Minimizes the triangle area (to avoid overlapping existing triangles)
+            let mut filled = 0usize;
+            for &(va, vb) in &missing_edges_list {
+                // Find vertices connected to both va and vb
+                let mut connected_to_a: std::collections::HashSet<u32> = std::collections::HashSet::new();
+                let mut connected_to_b: std::collections::HashSet<u32> = std::collections::HashSet::new();
+                for tri in &mesh.triangles {
+                    for k in 0..3 {
+                        let a = tri[k];
+                        let b = tri[(k + 1) % 3];
+                        if a == va || b == va { connected_to_a.insert(if a == va { b } else { a }); }
+                        if a == vb || b == vb { connected_to_b.insert(if a == vb { b } else { a }); }
                     }
                 }
+                // Find common neighbors (connected to both va and vb)
+                let common: Vec<u32> = connected_to_a.intersection(&connected_to_b).copied().collect();
+
+                if let Some(&best_vc) = common.first() {
+                    // Add the fill triangle — use the orientation that matches
+                    // the face's forward flag
+                    if forward {
+                        mesh.add_triangle(va, vb, best_vc);
+                    } else {
+                        mesh.add_triangle(va, best_vc, vb);
+                    }
+                    filled += 1;
+                }
+            }
+            if filled > 0 {
+                log::info!(
+                    "GAP_FILL: filled {}/{} missing boundary edges for surface {:?}",
+                    filled, missing_boundary_edges,
+                    std::mem::discriminant(surface),
+                );
             }
             log::warn!(
-                "DIAG: earcutr missing {}/{} boundary edges for surface {:?} (n_bnd={}, n_holes={}, verts={}, tris={})",
+                "DIAG: earcutr missing {}/{} boundary edges for surface {:?} (n_bnd={}, n_holes={}, verts={}, tris={}, filled={})",
                 missing_boundary_edges, n_bnd,
                 std::mem::discriminant(surface),
                 n_bnd, hole_polylines_3d.len(),
-                mesh.vertices.len(), mesh.triangles.len(),
+                mesh.vertices.len(), mesh.triangles.len(), filled,
             );
         }
     }

@@ -4949,7 +4949,14 @@ impl<'a> StepConverter<'a> {
                     Curve3d::Nurbs(_) => "Nurbs",
                 };
                 let edge = if let Curve3d::Line(ref line) = curve {
-                    // For lines, compute param range from vertex projections
+                    // For lines, compute param range from vertex projections.
+                    // NOTE: We use the STEP LINE's own geometry (origin, direction)
+                    // rather than creating a new line from p1→p2, because some
+                    // STEP files have vertex points that don't lie on the curve
+                    // (e.g., nist_cylinder.stp has the top circle's vertex at
+                    // the circle center, not on the circle). The LINE's geometry
+                    // is authoritative; the vertex points are just hints for
+                    // computing the param_range.
                     let t1 = project_point_on_line(line, p1);
                     let t2 = project_point_on_line(line, p2);
                     log::debug!("    EDGE_CURVE #{}: {} p1=({:.4},{:.4},{:.4}) p2=({:.4},{:.4},{:.4}) param=({:.6},{:.6})",
@@ -8844,6 +8851,28 @@ fn reorder_edge_loop(edges: Vec<TopoEdge>, step_ids: Vec<i64>) -> (Vec<TopoEdge>
     let points: Vec<(Point3d, Point3d)> = points.into_iter()
         .map(|(s, e)| (s.unwrap(), e.unwrap()))
         .collect();
+
+    // Check if the original order is already a connected loop.
+    // If so, don't reorder — the greedy chain below might pick a different
+    // edge when multiple edges share an endpoint (e.g., cylinder seam),
+    // breaking the correct order.
+    let n = edges.len();
+    let mut already_connected = true;
+    for i in 0..n {
+        let next_i = (i + 1) % n;
+        let end_cur = points[i].1;
+        let start_next = points[next_i].0;
+        let dx = end_cur.x - start_next.x;
+        let dy = end_cur.y - start_next.y;
+        let dz = end_cur.z - start_next.z;
+        if dx * dx + dy * dy + dz * dz > tol_sq {
+            already_connected = false;
+            break;
+        }
+    }
+    if already_connected {
+        return (edges, step_ids);
+    }
 
     let n = edges.len();
     let mut used = vec![false; n];
