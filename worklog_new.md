@@ -509,3 +509,44 @@ Remaining issues:
   where the triangulation doesn't share edges with adjacent Plane faces
 - nist_chamfer_block has STEP topology issue (missing edges in BREP)
 - nist_complex_surface has single-face triangulation gaps
+
+---
+Task ID: 24
+Agent: Super Z (main agent)
+Task: Fix seam crossing detection — only count true seam wraps
+
+Work Log:
+- ROOT CAUSE FOUND: Seam crossing detection was flagging ANY edge with du > 40%
+  of u_range as a seam crossing. This incorrectly flagged "long edges" that
+  span half the surface (e.g., u=0 to u=π) as seam crossings.
+  
+  These false crossings produced 3-point "spike" sub-polygons that didn't
+  represent real geometry, leaving gaps in the triangulation. The spike filter
+  I added earlier couldn't catch them because the shared vertex was at u=π
+  (not at the seam u=0 or u=2π).
+
+- FIX: Changed crossing detection to require:
+  1. du > 50% of u_range (more than half the range)
+  2. One endpoint near u_min AND the other near u_max (within 10% of seam)
+  
+  This correctly identifies TRUE seam wraps (edges that cross from one side
+  of the seam to the other) while ignoring long edges that simply span a
+  large portion of the surface.
+
+- Same fix applied to V-seam crossings (for torus, sphere).
+
+- Removed the spike filter (no longer needed since the crossing detection
+  is now correct). The spike filter code remains as a safety net but
+  should rarely trigger.
+
+Stage Summary:
+- brick_thin.stp: 3594 → 1453 boundary edges (60% reduction!)
+- brick_thin_hole.stp: 1852 → 882 boundary edges (52% reduction!)
+- brick_thin_round.stp: 978 → 803 boundary edges (18% reduction)
+- Edge consistency: now 100% on brick_thin_hole and brick_thin_round
+- Zentralstaender.stp: 11/34 BREPs watertight (32%)
+- drill_top.stp: opens in ~90s (was hanging), 157K triangles
+- as1-oc-214.stp: slight improvement on bolt/nut/l-bracket
+- All 5 draper-step integration tests pass
+- All 18 draper-mesh triangulation tests pass
+- Committed d035d95, pushed to GitHub main
