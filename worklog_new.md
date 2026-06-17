@@ -216,3 +216,65 @@ Stage Summary:
 - Watertightness improved: 0 degenerate triangles, 0 non-manifold edges
 - Still 0/18 watertight due to NURBS UV projection failures on shared edges
 - Key files modified: converter.rs, mesh.rs, triangulate.rs, parametric_domain.rs
+
+---
+Task ID: 13
+Agent: main
+Task: Fix NURBS UV triangulation (torus), test files failing to open
+
+Work Log:
+- Installed Rust toolchain (stable 1.96.0) for local build/test
+- Diagnosed root causes via runtime testing:
+  - Root cause #1: brute_force_project_point in compute_uvs (edge_cache.rs)
+    was O(grid_size^2) per bad point = 1296 evaluations per point, repeated
+    for every boundary point of every NURBS face. This caused test files
+    to hang (especially as1-oc-214.stp, drill_top.stp, transmission_top.stp).
+  - Root cause #2: index-out-of-bounds PANIC in seam-split (parametric_domain.rs).
+    outer_uv was created from PRE-merge boundary_uvs, but merge_coincident_boundary_points
+    rebound boundary_points_3d to shorter merged data. outer_uv was NOT updated,
+    so outer_uv.len() != boundary_points_3d.len() when seam-split was called.
+    This caused nist_sphere.stp to panic instead of opening.
+  - Root cause #3: infinite recursion in seam-split. If a sub-polygon was still
+    self-intersecting after splitting, triangulate_surface_consistent would
+    recurse infinitely -> stack overflow. Caused drill_top.stp to crash.
+  - Root cause #4: triangulate_torus_full_grid used triangulate_ring_surface
+    which creates n_v+1 rows, duplicating the v=0/v=2π seam. Torus had 462
+    boundary edges, 99.4% volume error.
+  - Root cause #5: make_torus used Circle::new_xy (XY-plane circle) for the
+    boundary edge. This is NOT a constant-u curve on the torus, so UV projection
+    gave a self-intersecting polygon that bypassed the degenerate-UV check.
+
+Fixes applied:
+- edge_cache.rs: Removed brute_force_project_point fallback. Now uses simple
+  analytic project_point() + clamp to NURBS range. as1-oc-214.stp: 1.15s for 18 BREPs.
+- parametric_domain.rs: Rebuild outer_uv from merged boundary_uvs after Step 0.5.
+  Added defensive length check in try_split_at_seam. Added thread-local
+  recursion depth counter (max 2) to prevent infinite seam-split recursion.
+- triangulate.rs: Rewrote triangulate_torus_full_grid with custom doubly-periodic
+  grid generator (n_u × n_v vertices, modulo wrap in BOTH directions).
+- builder.rs: Fixed make_torus to use a circle in the XZ plane (containing
+  the torus axis) so project_point returns constant u=0, triggering the
+  degenerate-UV check and routing to the full-grid path.
+
+Verification:
+- Torus test: 0 boundary edges (was 462), volume error 0.81% (was 99.4%),
+  surface area error 0.26% (was 88.7%), WATERTIGHT YES (was NO)
+- nist_sphere.stp: Opens cleanly (was panicking)
+- as1-oc-214.stp: 1.15s for 18 BREPs (was hanging)
+- nist_cube.stp, nist_cylinder.stp, nist_cone.stp, nist_block_with_hole.stp,
+  nist_chamfer_block.stp, nist_complex_surface.stp, brick_thin*.stp,
+  3.05.078.stp, compressor-13920_top.stp, nist_assembly.stp: All open in <1s
+- drill_top.stp: Completes without stack overflow (large file, ~120s for full BREP)
+- All 100 draper-topology tests pass
+- All 38 draper-geometry tests pass
+- Pre-existing test compilation errors in draper-testing/draper-mesh (gdt_check.rs,
+  normals.rs) are unrelated to these changes — they use old add_triangle([u32;3]) API
+
+Committed as 162fbcb, pushed to GitHub main.
+
+Stage Summary:
+- Test files now open: previously hanging/crashing files (nist_sphere.stp, as1-oc-214.stp,
+  drill_top.stp) all open in reasonable time without crashes
+- Torus triangulation is now correct: watertight, <1% volume error, proper grid
+- NURBS UV projection is fast: simple analytic project_point + clamp, no brute-force
+- Seam-split is robust: handles length mismatches gracefully, recursion-bounded
