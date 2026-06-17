@@ -461,3 +461,51 @@ Remaining P0 issues:
 - drill_top.stp hangs on slow NURBS projection (brute-force grid search)
 - nist_chamfer_block has 6 boundary edges (small case)
 - nist_complex_surface has 50 boundary edges
+
+---
+Task ID: 23
+Agent: Super Z (main agent)
+Task: Continue P0 fixes — universal STEP file support, watertightness improvements
+
+Work Log:
+- Analyzed current state: 5/10 NIST primitives watertight, industrial files open but not watertight
+- ROOT CAUSE 1 FOUND: snap_boundary_vertices was disabled in both triangulate_brep and triangulate_brep_detailed paths due to "corrupts valid triangulations" concern
+  - The corruption was caused by snapping boundary vertices to INTERIOR vertices
+  - FIX: Rewrote snap_boundary_vertices_once to only snap to BOUNDARY or SHARED vertices (never pure interior)
+  - Re-enabled snap in both code paths with snap_tol = 2000 PPM of model_scale
+- ROOT CAUSE 2 FOUND: NURBS surfaces with self-intersecting UV polygons had no fallback when brute-force re-projection failed
+  - FIX: Added 3D ear-clip fallback for NURBS surfaces (was only for non-NURBS)
+  - The fallback uses original 3D boundary points, preserving watertightness with adjacent faces
+- ROOT CAUSE 3 FOUND: merge_tol was 1 PPM of model_scale (too tight — typical FP drift is 100-1400 PPM)
+  - FIX: Bumped merge_tol from 1 PPM to 100 PPM of model_scale
+  - This catches typical floating-point drift between independent edge curve discretizations
+- ROOT CAUSE 4 FOUND: Phase 2 alias coord_tol was 1000 PPM, missing inconsistencies up to 1400 PPM
+  - FIX: Bumped coord_tol to 2000 PPM (matches snap_tol)
+- ROOT CAUSE 5 FOUND: Seam-split producing 3-point "spike" sub-polygons from adjacent seam crossings
+  - FIX: Added filter_spike_crossings() to detect and skip pairs of adjacent seam crossings that share a vertex at the seam
+  - Same filter for V-seam crossings (filter_spike_crossings_v)
+- ROOT CAUSE 6 FOUND: Smart snap (pre-checking degenerate triangles) was too conservative — skipped 98% of remaps
+  - FIX: Reverted to aggressive snap (snaps all near-miss boundary vertices)
+  - Degenerate triangles are filtered by filter_degenerate_triangles after snapping
+  - Aggressive snap reduces total bad edges (boundary + non-manifold) from 6725 to 4972 on brick_thin.stp
+- Added diagnostic logging: snap entry/iteration counts, Phase 2 alias summary
+
+Stage Summary:
+- All test files OPEN without crashes or hangs (drill_top.stp was previously hanging)
+- NIST primitives watertight: cube, cylinder, cone, sphere, block_with_hole (5/7)
+- nist_chamfer_block: 6 boundary edges (STEP topology issue — missing edges, not triangulation)
+- nist_complex_surface: 49 boundary edges (single NURBS face with internal triangulation gaps)
+- brick_thin.stp: 3594 boundary edges (was 6089 before snap, 5855 with smart snap)
+- drill_top.stp: opens in 37s with 3D ear-clip fallback for self-intersecting NURBS UV polygons
+- as1-oc-214.stp: 18 instances, instance caching working (bolt/nut repeat in <100µs)
+- Edge consistency 100% on all tested files (edge cache producing bit-identical 3D points)
+- All 5 draper-step integration tests pass
+- All 18 draper-mesh triangulation tests pass
+- Committed 2 commits (90d3c4d, 28b9b20), pushed to GitHub main
+- GitHub Actions workflow will auto-build WASM viewer for GitHub Pages
+
+Remaining issues:
+- Industrial files (brick_thin, as1-oc-214, drill_top) have many boundary edges from NURBS thread/fillet faces
+  where the triangulation doesn't share edges with adjacent Plane faces
+- nist_chamfer_block has STEP topology issue (missing edges in BREP)
+- nist_complex_surface has single-face triangulation gaps
