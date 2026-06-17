@@ -423,3 +423,41 @@ Stage Summary:
 - No more index-out-of-bounds panic (seam-split safety)
 - Watertightness still needs work (edge ordering issue is the root cause)
 - All 73 draper-step tests pass
+
+---
+Task ID: 22
+Agent: Super Z (main agent)
+Task: Continue P0 fixes - 3D fallback for degenerate UV polygons, position-degenerate triangle filtering, duplicate triangle filtering
+
+Work Log:
+- ROOT CAUSE 1 FOUND: Cylinder faces in Zentralstaender.stp (and similar files) had boundary curves that form closed loops around the cylinder at constant height. These curves are 1D in UV space (zero area) but 2D in 3D space, causing triangulate_surface_consistent to return empty mesh — 0 triangles and broken watertightness.
+- FIX 1: Added triangulate_3d_polygon_fallback() — when UV polygon is invalid for non-NURBS surfaces, projects 3D boundary to best-fit plane, ear-clips in 2D, builds triangles using ORIGINAL 3D points (preserves watertightness with adjacent faces).
+- FIX 2: Retry earcutr without holes when 0 triangles produced (handles duplicate outer/hole curves from topology extraction bugs).
+- FIX 3: Skip false 'missing boundary edge' reports when va == vb (degenerate edge from vertex dedup).
+- FIX 4: Bounds-check other_normals in merge_deduplicating to prevent index-out-of-bounds panic.
+- FIX 5: Skip position-degenerate triangles in watertight edge counting (different vertex indices but same 3D position).
+- FIX 6: Position-based vertex dedup in triangulate_surface_consistent — two UV indices mapping to same 3D position get same mesh vertex, preventing position-degenerate triangles at creation time.
+- FIX 7: Duplicate triangle filtering in merge_deduplicating — skip triangles that are duplicates of existing triangles (same 3 vertex indices, any order). kept_src_indices list ensures per-triangle attributes stay aligned.
+- FIX 8: Position-degeneracy check in earcutr_triangulate_planar_converter — skip triangles whose 3D vertices include coincident pairs.
+
+Stage Summary:
+- Zentralstaender.stp: 0 BREPs opened → 34 BREPs, 11/34 (32%) WATERTIGHT, 24.8% boundary edges (was 30.4%)
+- nist_cube: WATERTIGHT ✓
+- nist_cylinder: WATERTIGHT ✓
+- nist_cone: WATERTIGHT ✓
+- nist_sphere: WATERTIGHT ✓
+- nist_block_with_hole: WATERTIGHT ✓
+- nist_chamfer_block: 6 boundary edges (19.35%) — small case, position-dedup didn't help
+- nist_complex_surface: 50 boundary edges (was 49) — slight regression but non-manifold reduced from 29 to 13
+- SampleCube: WATERTIGHT ✓
+- as1-oc-214.stp: 31.8% boundary edges (was 31.7%) — NURBS thread surfaces still producing boundary edges
+- Committed 3 commits (452d1e5, 9c2f28b, 3a5238b), pushed to GitHub main
+- Instance caching: VERIFIED WORKING (BREP#1068 second call took 5.8µs vs 311µs first call)
+- All 8 draper-mesh watertight tests pass
+- All 9 draper-mesh parametric_domain tests pass
+
+Remaining P0 issues:
+- NURBS thread surfaces (nut, bolt, rod in as1-oc-214) still produce many boundary edges
+- drill_top.stp hangs on slow NURBS projection (brute-force grid search)
+- nist_chamfer_block has 6 boundary edges (small case)
+- nist_complex_surface has 50 boundary edges
