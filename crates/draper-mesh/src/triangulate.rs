@@ -2079,6 +2079,18 @@ fn triangulate_cylinder_face(face: &Face, cyl: &CylinderSurface, params: &Triang
         return triangulate_cylinder_full(face, cyl, params);
     }
 
+    // Detect "full U-period wrap" tube face and use grid triangulation for watertightness.
+    if boundary_uvs.len() >= 4 && is_full_u_period_wrap(&boundary_uvs, 2.0 * PI) {
+        let (hole_polylines, _hole_uvs) = collect_face_holes_with_uv_from_cache(face, cache, &surface);
+        if hole_polylines.is_empty() {
+            log::info!(
+                "Cylinder face #{}: full U-period wrap detected ({} bnd pts, u-range≈2π) — using tube grid triangulation",
+                face.id, boundary_3d.len()
+            );
+            return triangulate_cylinder_tube_from_boundary(cyl, params, &boundary_3d, face.forward);
+        }
+    }
+
     // Collect holes from inner loops — critical for faces with through-holes,
     // keyways, and other internal boundaries. Without holes, earcutr fills
     // the entire outer boundary, producing triangles where there should be voids.
@@ -2093,6 +2105,325 @@ fn triangulate_cylinder_face(face: &Face, cyl: &CylinderSurface, params: &Triang
         face.forward,
         params,
     )
+}
+
+/// Detect whether boundary UVs wrap around the full U period of a periodic surface.
+///
+/// A "full U-period wrap" face is one whose boundary traverses the entire U range
+/// of the surface (e.g., a cylindrical tube face with bottom circle + top circle +
+/// 2 seam edges at u=0 and u=2π). In UV space, the boundary's U span is close to
+/// the U period (within 5% tolerance).
+///
+/// Such faces confuse earcutr because the boundary polygon "wraps around" the seam
+/// — points near u=0 and u=2π are at the same 3D location but may have different
+/// u values in UV. The earcutr triangulation collapses these into too few vertices.
+///
+/// For these faces, a dedicated grid triangulation (e.g., `triangulate_cylinder_tube`)
+/// produces a proper watertight mesh.
+fn is_full_u_period_wrap(boundary_uvs: &[draper_geometry::Point2d], u_period: f64) -> bool {
+    if boundary_uvs.is_empty() || u_period <= 0.0 {
+        return false;
+    }
+    // Normalize all u values to [0, u_period) first.
+    let mut us: Vec<f64> = boundary_uvs.iter().map(|p| {
+        let mut u = p.u % u_period;
+        if u < 0.0 { u += u_period; }
+        u
+    }).collect();
+    us.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    // The "wrapped range" is the total U span accounting for periodicity.
+    // If the points wrap around, the largest gap between consecutive sorted
+    // u values (including wrap from last to first+period) represents the
+    // "missing" portion. The wrapped range is period - max_gap.
+    let n = us.len();
+    if n < 2 { return false; }
+    let mut max_gap = 0.0f64;
+    for i in 0..n {
+        let next = if i + 1 < n { us[i + 1] } else { us[0] + u_period };
+        let gap = next - us[i];
+        if gap > max_gap { max_gap = gap; }
+    }
+    let wrapped_range = u_period - max_gap;
+    let is_full = wrapped_range >= u_period * 0.95;
+    log::debug!(
+        "is_full_u_period_wrap: n={}, u_period={:.4}, u_min={:.4}, u_max={:.4}, max_gap={:.4}, wrapped_range={:.4} ({:.1}% of period), is_full={}",
+        n, u_period, us[0], us[n - 1], max_gap, wrapped_range,
+        100.0 * wrapped_range / u_period, is_full
+    );
+    is_full
+}
+
+/// Triangulate a cylinder face whose boundary forms a closed tube
+/// (bottom circle + top circle + 2 seam edges wrapping the full U period).
+///
+/// This produces a watertight grid mesh using the cylinder's analytic
+/// surface. The v range is computed from the boundary 3D points (which
+/// include the bottom and top circles at specific axis heights).
+///
+/// CRITICAL for watertightness: The bottom and top ring vertices are taken
+/// DIRECTLY from the cached boundary 3D points (shared with adjacent plane
+/// faces via the edge cache), so the resulting mesh has bit-identical
+/// vertices on shared edges.
+fn triangulate_cylinder_tube_from_boundary(
+    cyl: &CylinderSurface,
+    params: &TriangulationParams,
+    boundary_3d: &[draper_geometry::Point3d],
+    forward: bool,
+) -> TriangleMesh {
+    let mut mesh = TriangleMesh::new();
+
+    // Compute v range from boundary 3D points projected onto cylinder axis.
+    let mut v_min = f64::MAX;
+    let mut v_max = f64::MIN;
+    for p in boundary_3d {
+        let v = (p.x - cyl.origin.x) * cyl.axis.x
+              + (p.y - cyl.origin.y) * cyl.axis.y
+              + (p.z - cyl.origin.z) * cyl.axis.z;
+        v_min = v_min.min(v);
+        v_max = v_max.max(v);
+    }
+    if v_min >= v_max {
+        v_min = 0.0;
+        v_max = 1.0;
+    }
+
+    // Split boundary 3D points into bottom ring (v=v_min) and top ring (v=v_max),
+    // using axis projection. Each ring is then sorted by angle around the axis
+    // so we can use them directly as the grid's boundary rows.
+    let (bottom_ring, top_ring) = split_boundary_into_rings(
+        boundary_3d, &cyl.origin, &cyl.axis, &cyl.x_dir, v_min, v_max,
+    );
+
+    let (n_u, n_v) = if params.adaptive {
+        crate::adaptive::required_samples(
+            &Surface::Cylinder(cyl.clone()), 0.0, 2.0 * PI, v_min, v_max,
+            params.max_deviation, params.detail_level,
+        )
+    } else {
+        (params.angular_samples.max(8), params.height_samples.max(2))
+    };
+    // Use the boundary ring point count as n_u so we can use cached points directly.
+    // If the rings are too small, fall back to the requested n_u.
+    let n_u = n_u.max(bottom_ring.len()).max(top_ring.len());
+
+    // Generate vertices: n_v+1 rows (from v_min to v_max inclusive)
+    for j in 0..=n_v {
+        let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
+        for i in 0..n_u {
+            let u = 2.0 * PI * i as f64 / n_u as f64;
+            // For boundary rows (j=0 and j=n_v), prefer cached boundary points
+            // when available (for watertightness with adjacent plane faces).
+            let p = if j == 0 && i < bottom_ring.len() {
+                bottom_ring[i]
+            } else if j == n_v && i < top_ring.len() {
+                top_ring[i]
+            } else {
+                crate::edge_cache::deterministic_round_point(cyl.point_at(u, v))
+            };
+            let n = cyl.normal_at(u, v);
+            let idx = mesh.add_vertex(p);
+            mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+        }
+    }
+
+    // Generate triangles with U wrap-around (mod n_u)
+    for j in 0..n_v {
+        for i in 0..n_u {
+            let i_next = (i + 1) % n_u;
+            let v0 = (j * n_u + i) as u32;
+            let v1 = (j * n_u + i_next) as u32;
+            let v2 = ((j + 1) * n_u + i_next) as u32;
+            let v3 = ((j + 1) * n_u + i) as u32;
+            if forward {
+                mesh.add_triangle(v0, v1, v2);
+                mesh.add_triangle(v0, v2, v3);
+            } else {
+                mesh.add_triangle(v0, v2, v1);
+                mesh.add_triangle(v0, v3, v2);
+            }
+        }
+    }
+
+    mesh
+}
+
+/// Split a closed-tube boundary 3D point list into two sorted rings:
+/// bottom (v=v_min) and top (v=v_max).
+///
+/// Points are classified by axis projection: those close to v_min go to
+/// the bottom ring, those close to v_max go to the top ring. Points in
+/// between (e.g., seam endpoints at intermediate v) are dropped.
+///
+/// Each ring is then sorted by angle around the axis (using x_dir as the
+/// reference direction for u=0), so the resulting ring order matches the
+/// cylinder's U parameterization (counter-clockwise looking down the axis).
+fn split_boundary_into_rings(
+    boundary_3d: &[draper_geometry::Point3d],
+    origin: &draper_geometry::Point3d,
+    axis: &draper_geometry::Direction3d,
+    x_dir: &draper_geometry::Direction3d,
+    v_min: f64,
+    v_max: f64,
+) -> (Vec<draper_geometry::Point3d>, Vec<draper_geometry::Point3d>) {
+    let y_dir = axis.cross(x_dir);
+    let v_tol = (v_max - v_min).abs() * 0.05 + 1e-9;
+
+    let mut bottom: Vec<(f64, draper_geometry::Point3d)> = Vec::new();
+    let mut top: Vec<(f64, draper_geometry::Point3d)> = Vec::new();
+
+    for p in boundary_3d {
+        let dx = p.x - origin.x;
+        let dy = p.y - origin.y;
+        let dz = p.z - origin.z;
+        let v = dx * axis.x + dy * axis.y + dz * axis.z;
+        // Compute angle around the axis (using x_dir as reference)
+        let x_comp = dx * x_dir.x + dy * x_dir.y + dz * x_dir.z;
+        let y_comp = dx * y_dir.x + dy * y_dir.y + dz * y_dir.z;
+        let angle = y_comp.atan2(x_comp);
+
+        if (v - v_min).abs() <= v_tol {
+            bottom.push((angle, *p));
+        } else if (v - v_max).abs() <= v_tol {
+            top.push((angle, *p));
+        }
+        // else: point is at intermediate v (e.g. seam midpoint) — skip
+    }
+
+    // Sort by angle
+    bottom.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    top.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Strip angles, return just points
+    let bottom_pts: Vec<draper_geometry::Point3d> = bottom.into_iter().map(|(_, p)| p).collect();
+    let top_pts: Vec<draper_geometry::Point3d> = top.into_iter().map(|(_, p)| p).collect();
+
+    (bottom_pts, top_pts)
+}
+
+/// Triangulate a cone face whose boundary forms a closed tube
+/// (bottom circle + top circle/apex + 2 seam edges wrapping the full U period).
+fn triangulate_cone_tube_from_boundary(
+    cone: &ConeSurface,
+    params: &TriangulationParams,
+    boundary_3d: &[draper_geometry::Point3d],
+    forward: bool,
+) -> TriangleMesh {
+    let mut mesh = TriangleMesh::new();
+
+    // Compute v range from boundary 3D points projected onto cone axis.
+    let mut v_min = f64::MAX;
+    let mut v_max = f64::MIN;
+    for p in boundary_3d {
+        let v = (p.x - cone.origin.x) * cone.axis.x
+              + (p.y - cone.origin.y) * cone.axis.y
+              + (p.z - cone.origin.z) * cone.axis.z;
+        v_min = v_min.min(v);
+        v_max = v_max.max(v);
+    }
+    if v_min >= v_max {
+        v_min = 0.0;
+        v_max = cone.height().min(100.0);
+    }
+
+    let apex_v = cone.height();
+    let v_max = v_max.min(apex_v);
+    let top_row_at_apex = apex_v.is_finite() && (v_max - apex_v).abs() < apex_v * 0.01 + 1e-6;
+
+    // Split boundary 3D points into bottom and top rings (similar to cylinder).
+    let (bottom_ring, top_ring) = split_boundary_into_rings(
+        boundary_3d, &cone.origin, &cone.axis, &cone.x_dir, v_min, v_max,
+    );
+
+    let (n_u, n_v) = if params.adaptive {
+        crate::adaptive::required_samples(
+            &Surface::Cone(cone.clone()), 0.0, 2.0 * PI, v_min, v_max,
+            params.max_deviation, params.detail_level,
+        )
+    } else {
+        (params.angular_samples.max(8), params.height_samples.max(2))
+    };
+    let n_u = n_u.max(bottom_ring.len()).max(top_ring.len());
+
+    // Generate vertex grid with apex degeneracy handling
+    let mut row_vertex_offset: Vec<u32> = Vec::with_capacity(n_v + 1);
+    let mut row_vertex_count: Vec<usize> = Vec::with_capacity(n_v + 1);
+    let mut total_vertices = 0u32;
+
+    for j in 0..=n_v {
+        let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
+
+        if top_row_at_apex && j == n_v {
+            // Apex row — single vertex
+            let p = cone.point_at(0.0, apex_v);
+            let n = cone.normal_at(0.0, apex_v);
+            let idx = mesh.add_vertex(p);
+            mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+            row_vertex_offset.push(idx);
+            row_vertex_count.push(1);
+            total_vertices += 1;
+        } else {
+            let base = total_vertices;
+            row_vertex_offset.push(base);
+            row_vertex_count.push(n_u);
+            for i in 0..n_u {
+                let u = 2.0 * PI * i as f64 / n_u as f64;
+                // For boundary rows, prefer cached boundary points
+                let p = if j == 0 && i < bottom_ring.len() {
+                    bottom_ring[i]
+                } else if j == n_v && i < top_ring.len() && !top_row_at_apex {
+                    top_ring[i]
+                } else {
+                    cone.point_at(u, v)
+                };
+                let n = cone.normal_at(u, v);
+                let idx = mesh.add_vertex(p);
+                mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+            }
+            total_vertices += n_u as u32;
+        }
+    }
+
+    // Generate triangles with U wrap-around (mod n_u)
+    for j in 0..n_v {
+        let j_next = j + 1;
+        let row_count = row_vertex_count[j];
+        let next_row_count = row_vertex_count[j_next];
+        let row_base = row_vertex_offset[j];
+        let next_row_base = row_vertex_offset[j_next];
+
+        if next_row_count == 1 {
+            // Next row is apex — fan from current row ring to apex
+            let apex = next_row_base;
+            for i in 0..row_count {
+                let i_next = (i + 1) % row_count;
+                let v0 = row_base + i as u32;
+                let v1 = row_base + i_next as u32;
+                if forward {
+                    mesh.add_triangle(v0, v1, apex);
+                } else {
+                    mesh.add_triangle(v0, apex, v1);
+                }
+            }
+        } else {
+            for i in 0..row_count {
+                let i_next = (i + 1) % row_count;
+                let v0 = row_base + i as u32;
+                let v1 = row_base + i_next as u32;
+                let v2 = next_row_base + i_next as u32;
+                let v3 = next_row_base + i as u32;
+                if forward {
+                    mesh.add_triangle(v0, v1, v2);
+                    mesh.add_triangle(v0, v2, v3);
+                } else {
+                    mesh.add_triangle(v0, v2, v1);
+                    mesh.add_triangle(v0, v3, v2);
+                }
+            }
+        }
+    }
+
+    mesh
 }
 
 /// Full cylinder triangulation (no boundary edges).
@@ -2158,6 +2489,18 @@ fn triangulate_cone_face(face: &Face, cone: &ConeSurface, params: &Triangulation
 
     if boundary_3d.is_empty() {
         return triangulate_cone_full(face, cone, params);
+    }
+
+    // Detect "full U-period wrap" tube face and use grid triangulation.
+    if boundary_uvs.len() >= 4 && is_full_u_period_wrap(&boundary_uvs, 2.0 * PI) {
+        let (hole_polylines, _hole_uvs) = collect_face_holes_with_uv_from_cache(face, cache, &surface);
+        if hole_polylines.is_empty() {
+            log::info!(
+                "Cone face #{}: full U-period wrap detected ({} bnd pts, u-range≈2π) — using tube grid triangulation",
+                face.id, boundary_3d.len()
+            );
+            return triangulate_cone_tube_from_boundary(cone, params, &boundary_3d, face.forward);
+        }
     }
 
     // Collect holes from inner loops
@@ -3088,7 +3431,19 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
                 )
             }
         }
-        Surface::Cylinder(_) => {
+        Surface::Cylinder(cyl) => {
+            // Cylinder: detect full U-period wrap (tube face) and use grid
+            // triangulation for watertightness. Otherwise use earcutr.
+            if boundary_uvs.len() >= 4
+                && hole_polylines.is_empty()
+                && is_full_u_period_wrap(boundary_uvs, 2.0 * PI)
+            {
+                log::info!(
+                    "Cylinder face: full U-period wrap detected ({} bnd pts, u-range≈2π) — using tube grid triangulation",
+                    boundary_points.len()
+                );
+                return triangulate_cylinder_tube_from_boundary(cyl, params, boundary_points, forward);
+            }
             // Cylinder: use earcutr-based consistent triangulation.
             // The grid-based approach with boundary snapping only approximates
             // boundary vertex positions (nearest grid cell), which can produce
@@ -3105,6 +3460,17 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
             )
         }
         Surface::Cone(cone) => {
+            // Cone: detect full U-period wrap (tube face) similarly
+            if boundary_uvs.len() >= 4
+                && hole_polylines.is_empty()
+                && is_full_u_period_wrap(boundary_uvs, 2.0 * PI)
+            {
+                log::info!(
+                    "Cone face: full U-period wrap detected ({} bnd pts, u-range≈2π) — using tube grid triangulation",
+                    boundary_points.len()
+                );
+                return triangulate_cone_tube_from_boundary(cone, params, boundary_points, forward);
+            }
             // Cone: must handle apex degeneracy
             triangulate_cone_face_with_boundary_uv(
                 cone, boundary_points, boundary_uvs, hole_polylines, hole_uvs, forward, params,

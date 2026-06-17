@@ -159,6 +159,10 @@ fn parse_step_inner<R: BufRead, C: EntityCallback>(
     let mut collecting_entity = false;
     // Incremental parenthesis depth tracker — avoids O(n²) re-scanning
     let mut paren_depth: i32 = 0;
+    // Tracks whether we're currently inside a `'...'` string literal.
+    // PERSISTED across lines so that multi-line strings (common in NX STEP
+    // exports) don't cause paren depth to be miscounted on continuation lines.
+    let mut in_string: bool = false;
 
     // Line number tracking
     let mut line_number: usize = 0;
@@ -211,6 +215,7 @@ fn parse_step_inner<R: BufRead, C: EntityCallback>(
                     &mut entity_buffer,
                     &mut collecting_entity,
                     &mut paren_depth,
+                    &mut in_string,
                     line_number,
                     callback,
                     &mut should_continue,
@@ -240,6 +245,7 @@ fn parse_step_inner<R: BufRead, C: EntityCallback>(
                         &mut entity_buffer,
                         &mut collecting_entity,
                         &mut paren_depth,
+                        &mut in_string,
                         line_number,
                         callback,
                         &mut should_continue,
@@ -262,6 +268,7 @@ fn parse_step_inner<R: BufRead, C: EntityCallback>(
                         &mut entity_buffer,
                         &mut collecting_entity,
                         &mut paren_depth,
+                        &mut in_string,
                         line_number,
                         callback,
                         &mut should_continue,
@@ -284,6 +291,7 @@ fn parse_step_inner<R: BufRead, C: EntityCallback>(
             &mut entity_buffer,
             &mut collecting_entity,
             &mut paren_depth,
+            &mut in_string,
             line_number,
             callback,
             &mut should_continue,
@@ -316,6 +324,7 @@ fn process_line<C: EntityCallback>(
     entity_buffer: &mut String,
     collecting_entity: &mut bool,
     paren_depth: &mut i32,
+    in_string: &mut bool,
     line_number: usize,
     callback: &mut C,
     should_continue: &mut bool,
@@ -347,6 +356,7 @@ fn process_line<C: EntityCallback>(
             entity_buffer.clear();
             *collecting_entity = false;
             *paren_depth = 0;
+            *in_string = false;
         }
         *in_data = false;
         return Ok(());
@@ -371,13 +381,13 @@ fn process_line<C: EntityCallback>(
             entity_buffer.push(' ');
             entity_buffer.push_str(line);
 
-            // Update paren depth incrementally — O(1) per line
-            // Note: simplified — doesn't skip parens inside strings.
-            // Most STEP entities don't have unbalanced parens in strings.
-            update_paren_depth(line, paren_depth);
+            // Update paren depth incrementally — O(1) per line.
+            // `in_string` is threaded through so multi-line strings are
+            // correctly tracked across line boundaries.
+            update_paren_depth(line, paren_depth, in_string);
 
             // Check if entity is complete
-            if line.ends_with(';') && *paren_depth <= 0 {
+            if line.ends_with(';') && *paren_depth <= 0 && !*in_string {
                 if let Some(entity) = parse_entity_line_with_lineno(entity_buffer, line_number)? {
                     if !callback.call(&entity, line_number) {
                         *should_continue = false;
@@ -387,6 +397,7 @@ fn process_line<C: EntityCallback>(
                 entity_buffer.clear();
                 *collecting_entity = false;
                 *paren_depth = 0;
+                *in_string = false;
             }
             return Ok(());
         }
@@ -403,14 +414,15 @@ fn process_line<C: EntityCallback>(
             }
             entity_buffer.clear();
             *paren_depth = 0;
+            *in_string = false;
             entity_buffer.push_str(line);
             *collecting_entity = true;
 
             // Count parens on this first line — O(line_length)
-            update_paren_depth(line, paren_depth);
+            update_paren_depth(line, paren_depth, in_string);
 
             // Check if this line is a complete entity (ends with ; and balanced parens)
-            if line.ends_with(';') && *paren_depth <= 0 {
+            if line.ends_with(';') && *paren_depth <= 0 && !*in_string {
                 if let Some(entity) = parse_entity_line_with_lineno(entity_buffer, line_number)? {
                     if !callback.call(&entity, line_number) {
                         *should_continue = false;
@@ -420,6 +432,7 @@ fn process_line<C: EntityCallback>(
                 entity_buffer.clear();
                 *collecting_entity = false;
                 *paren_depth = 0;
+                *in_string = false;
             }
         } else if *collecting_entity {
             // Continuation of a multi-line entity (paren_depth was already 0,
@@ -428,10 +441,10 @@ fn process_line<C: EntityCallback>(
             entity_buffer.push_str(line);
 
             // Update paren depth incrementally
-            update_paren_depth(line, paren_depth);
+            update_paren_depth(line, paren_depth, in_string);
 
             // Check if entity is complete
-            if line.ends_with(';') && *paren_depth <= 0 {
+            if line.ends_with(';') && *paren_depth <= 0 && !*in_string {
                 if let Some(entity) = parse_entity_line_with_lineno(entity_buffer, line_number)? {
                     if !callback.call(&entity, line_number) {
                         *should_continue = false;
@@ -441,6 +454,7 @@ fn process_line<C: EntityCallback>(
                 entity_buffer.clear();
                 *collecting_entity = false;
                 *paren_depth = 0;
+                *in_string = false;
             }
         }
     }
@@ -452,23 +466,30 @@ fn process_line<C: EntityCallback>(
 ///
 /// Parentheses inside STEP strings (delimited by `'`) are not counted,
 /// preventing false balance detection when strings contain `(` or `)`.
+///
+/// CRITICAL: `in_string` is threaded through from caller so that a string
+/// literal opened on a previous line (multi-line string) is correctly
+/// continued on this line. Without this, STEP files where strings wrap
+/// across lines (e.g. NX-exported assemblies) cause the closing `'` on the
+/// next line to be misinterpreted as OPENING a new string, which makes
+/// `)` on that line ignored and leaves `paren_depth` permanently > 0,
+/// merging all subsequent entities into one giant blob that gets dropped.
 #[inline]
-fn update_paren_depth(line: &str, depth: &mut i32) {
-    let mut in_string = false;
+fn update_paren_depth(line: &str, depth: &mut i32, in_string: &mut bool) {
     let bytes = line.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
             b'\'' => {
                 // Check for escaped quote ('')
-                if in_string && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                if *in_string && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
                     i += 2; // Skip escaped quote
                     continue;
                 }
-                in_string = !in_string;
+                *in_string = !*in_string;
             }
-            b'(' if !in_string => *depth += 1,
-            b')' if !in_string => *depth -= 1,
+            b'(' if !*in_string => *depth += 1,
+            b')' if !*in_string => *depth -= 1,
             _ => {}
         }
         i += 1;
