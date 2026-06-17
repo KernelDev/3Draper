@@ -278,3 +278,58 @@ Stage Summary:
 - Torus triangulation is now correct: watertight, <1% volume error, proper grid
 - NURBS UV projection is fast: simple analytic project_point + clamp, no brute-force
 - Seam-split is robust: handles length mismatches gracefully, recursion-bounded
+
+---
+Task ID: 14
+Agent: Main Agent (Sonnet 4.5)
+Task: Fix NURBS UV triangulation + investigate 'Zentralstaender.stp перестал открываться' regression
+
+Work Log:
+- Created parser_diag.rs to check what parser captures from Zentralstaender.stp
+- Found parser captured only 140 entities out of 11320 in the file
+- Inspected file: NX-exported with multi-line string literals (e.g. relationship descriptions wrap across lines)
+- Traced bug to update_paren_depth() in parser.rs:
+  * Function reset in_string=false at start of each line
+  * When a STEP string opened on line N and closed on line N+1, the closing ' on line N+1 was misinterpreted as OPENING a new string
+  * This caused ) characters to be ignored, leaving paren_depth > 0 forever
+  * All entities after the first multi-line string were merged into one giant blob and silently dropped
+- Fix: threaded &mut in_string through update_paren_depth and process_line, reset only when entity completes
+- Added !*in_string check to entity completion condition (lines ending with ; inside a string are NOT entity endings)
+- After fix: Zentralstaender.stp parses 11320 entities, detects 34 BREP instances (was 0)
+
+- Created cylinder_cone_diag.rs to test nist_cylinder.stp and nist_cone.stp
+- Found cylinder face produced only 4 triangles (should be 100+); cone produced 16
+- Root cause: cylinder/cone face with closed tube boundary (bottom circle + top circle + 2 seam edges at u=0/u=2π)
+  was routed to earcutr, which can't handle the seam wrap-around. earcutr collapsed 64-point boundary
+  into 4 vertices.
+- Created is_full_u_period_wrap() detection function:
+  * Normalizes all boundary UVs to [0, 2π), sorts them
+  * Computes wrapped_range = period - max_gap
+  * Returns true if wrapped_range >= 95% of period
+- Created triangulate_cylinder_tube_from_boundary() and triangulate_cone_tube_from_boundary():
+  * Generate proper watertight grid mesh using analytic surface
+  * U wrap-around (mod n_u) for every row pair
+  * Cached boundary 3D points used DIRECTLY for bottom/top rings (via split_boundary_into_rings
+    which sorts by angle around the axis) — preserves bit-identical vertices with adjacent cap faces
+- Hooked into triangulate_face_with_boundary_and_holes_uv() (the main entry point from converter.rs)
+- Result: nist_cylinder.stp: 4 → 260 triangles; nist_cone.stp: 16 → 520 triangles
+- Edge consistency now 100% (was 99.2%)
+
+- Created all_files_test.rs to verify all test files open and produce triangles
+- All test files now detect BREP instances and produce triangles (was 0 for many)
+
+Verification:
+- Zentralstaender.stp: 11320 entities parsed (was 140), 34 BREP instances (was 0), 16976 triangles
+- nist_cylinder.stp: 260 triangles (was 4), 100% edge consistency
+- nist_cone.stp: 520 triangles (was 16), 100% edge consistency
+- nist_cube.stp: 12 triangles, 7 boundary edges (pre-existing edge cache issue with degenerate face #6)
+- All small NIST files open and produce triangles in <1s
+
+Committed as cda5506, pushed to GitHub main. GitHub Actions will auto-build wasm and deploy to Pages.
+
+Stage Summary:
+- CRITICAL: Zentralstaender.stp and all other multi-line-string STEP files now open correctly
+- Cylinder/cone tube faces now produce proper watertight grid triangulation (was 4/16 triangles)
+- All test files produce triangles (was 0 for many due to parser regression)
+- Remaining: cube has 7 boundary edges (pre-existing edge cache issue with degenerate 2-point face boundary)
+- Remaining: Larger files (as1-oc-214, brick_thin, etc.) still have 20-30% boundary edges from non-cached edges
