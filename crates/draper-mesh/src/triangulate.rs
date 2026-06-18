@@ -3438,11 +3438,18 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
     // might remove corners that are "close to collinear" but actually needed
     // for the face topology.
     // ============================================================
-    let (dec_3d, dec_uv) = if boundary_points.len() > 20 {
-        decimate_collinear_boundary(boundary_points, boundary_uvs)
-    } else {
-        (boundary_points.to_vec(), boundary_uvs.to_vec())
-    };
+    // DISABLED: decimate_collinear_boundary was removing boundary points that
+    // are needed for watertightness. When two faces share an edge, both must
+    // use the SAME boundary points. If one face decimates (removes intermediate
+    // collinear points) and the other doesn't, the shared edge will have
+    // different vertex counts, producing boundary edges.
+    //
+    // The decimation was originally added to reduce triangle count on planar
+    // faces with many collinear boundary points. But the edge cache already
+    // produces the minimum necessary points (via adaptive_discretize), so
+    // decimation is not needed.
+    let dec_3d = boundary_points.to_vec();
+    let dec_uv = boundary_uvs.to_vec();
     let boundary_points: &[Point3d] = &dec_3d;
     let boundary_uvs: &[Point2d] = &dec_uv;
 
@@ -3452,14 +3459,9 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
         let mut hps = Vec::with_capacity(hole_polylines.len());
         let mut huvs = Vec::with_capacity(hole_uvs.len());
         for (hp, huv) in hole_polylines.iter().zip(hole_uvs.iter()) {
-            if hp.len() > 20 {
-                let (d3d, d2d) = decimate_collinear_boundary(hp, huv);
-                hps.push(d3d);
-                huvs.push(d2d);
-            } else {
-                hps.push(hp.clone());
-                huvs.push(huv.clone());
-            }
+            // No decimation — keep all boundary points for watertightness
+            hps.push(hp.clone());
+            huvs.push(huv.clone());
         }
         hole_polylines_decimated = hps;
         hole_uvs_decimated = huvs;

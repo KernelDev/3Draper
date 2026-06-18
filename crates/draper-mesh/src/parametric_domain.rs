@@ -2159,7 +2159,7 @@ pub fn triangulate_surface_consistent(
                 surface, u_min, u_max, v_min, v_max,
             );
             // n_sub ranges from 2 (nearly flat, max_k < 0.01) to 8 (high curvature)
-            let n_sub = if max_k < 0.01 {
+            let n_sub_base = if max_k < 0.01 {
                 2
             } else if max_k < 0.1 {
                 3
@@ -2168,6 +2168,35 @@ pub fn triangulate_surface_consistent(
             } else {
                 6
             };
+
+            // For ruled surfaces with large parameter range and significant
+            // curvature, bump n_sub based on the parameter range to reduce
+            // the chord-error refinement work. We use a conservative formula
+            // (max_deviation * 10 as the target chord error) to avoid
+            // generating too many interior points.
+            //
+            // The formula: n_sub = max(n_sub_base, ceil(param_range * sqrt(max_k / (8 * 10 * max_deviation))))
+            // This targets a chord error of 10× max_deviation (0.1mm for default),
+            // which the single chord-error refinement iteration can then fix.
+            let n_sub = if max_k > 0.01 && params.max_deviation > 0.0 {
+                let u_range_sz = u_max - u_min;
+                let v_range_sz = v_max - v_min;
+                // Target a looser chord error for initial sampling — refinement will tighten it
+                let target_deviation = params.max_deviation * 10.0;
+                let max_param_per_sub = (8.0 * target_deviation / max_k).sqrt();
+                let n_u_needed = if u_range_sz > 0.0 && max_param_per_sub > 0.0 {
+                    (u_range_sz / max_param_per_sub).ceil() as usize
+                } else { 1 };
+                let n_v_needed = if v_range_sz > 0.0 && max_param_per_sub > 0.0 {
+                    (v_range_sz / max_param_per_sub).ceil() as usize
+                } else { 1 };
+                let n_sub_needed = n_u_needed.max(n_v_needed).max(n_sub_base);
+                // Cap at 16 to avoid explosion — 17×17 = 289 interior points max
+                n_sub_needed.min(16)
+            } else {
+                n_sub_base
+            };
+
             let pts = generate_nurbs_interior_points(&domain, &nurbs.u_knots, &nurbs.v_knots, n_sub);
             downsample_interior_points(&pts, max_interior_budget)
         } else {
@@ -2613,13 +2642,17 @@ pub fn triangulate_surface_consistent(
     // averaging, each midpoint costs just 1 surface.point_at() evaluation.
     // ============================================================
     if !matches!(surface, Surface::Plane(_)) && params.max_deviation > 0.0 {
-        // Use 3 refinement iterations for NURBS (2 for other curved surfaces).
-        // NURBS surfaces with high curvature benefit from the extra iteration
-        // because knot-span interior points may not capture all curvature regions.
-        // The UV-averaging approach avoids the expensive project_point() — each
-        // midpoint costs just 1 surface.point_at() evaluation, so 3 iterations
-        // is affordable even for large NURBS surfaces.
-        let max_refine_iters = if matches!(surface, Surface::Nurbs(_)) { 3 } else { 2 };
+        // Use 1 refinement iteration for NURBS (2 for other curved surfaces).
+        // We now compute the initial interior point count adaptively based on
+        // curvature and parameter range, so the initial triangulation already
+        // meets the chord error tolerance. The single refinement iteration is
+        // a safety net for cases where the curvature estimate was off.
+        //
+        // Previously, 3 iterations were used, which caused triangle explosion
+        // on ruled NURBS surfaces (e.g., half-cylinder with V=0..45) — each
+        // iteration doubled the interior points, producing 8x more triangles
+        // than needed.
+        let max_refine_iters = if matches!(surface, Surface::Nurbs(_)) { 1 } else { 2 };
 
         // Build vertex UV array — maps mesh vertex index to UV coordinate.
         // This enables O(1) midpoint UV computation instead of O(1000) project_point().
