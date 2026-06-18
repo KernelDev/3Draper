@@ -3870,6 +3870,41 @@ fn triangulate_3d_polygon_fallback(
         return TriangleMesh::new();
     }
 
+    // Pre-process: remove consecutive duplicate points (within 1e-10 tolerance).
+    // Some STEP files have boundary curves that produce duplicate points at
+    // parametric transitions (e.g., where a NURBS knot span ends). These
+    // duplicates create zero-length edges in the polygon, which can confuse
+    // earcutr into returning 0 triangles.
+    let dedup_tol_sq = 1e-20_f64; // 1e-10 squared
+    let mut cleaned: Vec<Point3d> = Vec::with_capacity(n);
+    for p in boundary_3d {
+        if let Some(last) = cleaned.last() {
+            let dx = p.x - last.x;
+            let dy = p.y - last.y;
+            let dz = p.z - last.z;
+            if dx * dx + dy * dy + dz * dz <= dedup_tol_sq {
+                continue; // Skip duplicate
+            }
+        }
+        cleaned.push(*p);
+    }
+    // Also remove last point if it coincides with the first (closing the loop)
+    if cleaned.len() > 1 {
+        let last = cleaned[cleaned.len() - 1];
+        let first = cleaned[0];
+        let dx = last.x - first.x;
+        let dy = last.y - first.y;
+        let dz = last.z - first.z;
+        if dx * dx + dy * dy + dz * dz <= dedup_tol_sq {
+            cleaned.pop();
+        }
+    }
+    let boundary_3d = &cleaned[..];
+    let n = boundary_3d.len();
+    if n < 3 {
+        return TriangleMesh::new();
+    }
+
     // Step 1: Compute best-fit plane normal using Newell's method
     let mut nx = 0.0_f64;
     let mut ny = 0.0_f64;
