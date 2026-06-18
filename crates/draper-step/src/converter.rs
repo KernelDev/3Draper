@@ -2943,11 +2943,13 @@ impl<'a> StepConverter<'a> {
         // edges, fixing the seam mismatch without affecting interior
         // vertices.
         //
-        // Tolerance: 1% of model scale, capped at 1mm. This catches the
-        // typical seam mismatch (0.1-0.5mm) while being tight enough to
-        // not collapse distinct features.
+        // Tolerance: 2% of model scale, capped at 5mm. This catches the
+        // typical seam mismatch (0.1-0.5mm) AND the larger mismatches from
+        // different EDGE_CURVE entities on the same geometric boundary
+        // (up to ~3mm observed in 3.05.078.stp), while being tight enough
+        // to not collapse distinct features.
         {
-            let weld_tol = (tol_ctx.model_scale * 1e-2).min(1.0).max(1e-4);
+            let weld_tol = (tol_ctx.model_scale * 2e-2).min(5.0).max(1e-4);
             weld_boundary_edge_vertices(&mut mesh, weld_tol);
         }
 
@@ -3500,7 +3502,7 @@ impl<'a> StepConverter<'a> {
         // Weld boundary edge vertices to fix seam mismatches between
         // adjacent faces using different EDGE_CURVE entities.
         {
-            let weld_tol = (tol_ctx.model_scale * 1e-2).min(1.0).max(1e-4);
+            let weld_tol = (tol_ctx.model_scale * 2e-2).min(5.0).max(1e-4);
             weld_boundary_edge_vertices(&mut mesh, weld_tol);
         }
 
