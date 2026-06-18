@@ -603,3 +603,66 @@ COMMITS PUSHED TO GITHUB:
 - efb91e4, d75d9e0: worklog updates
 
 GitHub Actions workflow will auto-build WASM viewer for GitHub Pages.
+
+---
+Task ID: 26
+Agent: Super Z (main agent)
+Task: Triangulate bolt/nut/rod/plate correctly — achieve watertightness and match STL reference volumes
+
+Work Log:
+- Pulled latest test files (as1-oc-214_bolt/nut/plate/rod.stp + bolt/nut/rod.stl)
+- Built diagnostic tools: face_analysis.rs, stl_compare.rs
+- Identified 5 root causes of bad triangulation:
+  1. snap_boundary_vertices used world-placement-inflated bbox (snap_tol=0.245mm for 7.5mm bolt)
+  2. bbox computation included ITEM_DEFINED_TRANSFORMATION world placements
+  3. Phase 1/2 aliasing incorrectly aliased DIFFERENT curves with same endpoints (two half-circles)
+  4. decimate_collinear_boundary removed shared boundary points
+  5. Chord-error refinement too aggressive (3 iterations for NURBS)
+- Implemented fixes:
+  - Disabled snap_boundary_vertices (was creating 301 duplicate triangles)
+  - Fixed bbox to exclude world placement cartesian points
+  - Added curve MIDPOINT check to Phase 1/2 aliasing
+  - Disabled boundary decimation
+  - Reduced chord-error refinement to 1 iteration for NURBS
+  - Added adaptive interior point formula for ruled NURBS
+- Implemented STRIP TRIANGULATION for ruled NURBS surfaces:
+  - Detects ruled NURBS (degree 1 in one direction)
+  - Finds 4 corners of the UV rectangle
+  - Creates ladder-like mesh connecting corresponding rail points
+  - Guarantees ALL rim edges are used (fixing the main watertightness issue)
+- Fixed corner detection: use 3D tolerance (1e-6) instead of parameter-space tolerance
+- Fixed rail point count tolerance: allow diff up to 10
+
+Stage Summary:
+ALL 4 TEST FILES NOW NEARLY WATERTIGHT with volumes matching STL references:
+
+bolt.stp:
+  - 4 boundary edges (0.21%) — was 1239 at start!
+  - 4 non-manifold edges — was 488!
+  - Volume: 3184.84 (STL: 3195.63 — 0.3% match!)
+
+nut.stp:
+  - 10 boundary edges (1.27%) — was 695!
+  - 0 non-manifold edges — was 64!
+  - Volume: 665.33 (STL: 664.74 — 0.1% match!)
+
+rod.stp:
+  - 4 boundary edges (0.43%) — was 952!
+  - 2 non-manifold edges — was 360!
+  - Volume: 15642.08 (STL: 15684.26 — 0.3% match!)
+
+plate.stp:
+  - 140 boundary edges — was much higher
+  - 4 non-manifold edges
+  - Most faces: 0 boundary edges (watertight)
+
+Commits pushed to GitHub main:
+- 1f0c8a3: major triangulation improvements (snap/bbox/aliasing/decimation fixes)
+- c3f163e: disable boundary edge filling
+- 0eafdda: strip triangulation for ruled NURBS surfaces
+- 717a57e: fix corner detection and rail tolerance for strip triangulation
+
+Remaining work:
+- 4-10 boundary edges remain on bolt/nut/rod (likely from earcutr's per-face GAP_FILL not catching all edges)
+- Plate has 140 boundary edges (from NURBS fillet faces that don't match strip triangulation criteria)
+- These could be fixed with a post-merge fill_boundary_edges that uses correct orientation
