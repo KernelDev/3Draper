@@ -925,3 +925,33 @@ Remaining work:
   these because the chord midpoint is the same for different arcs.
 - A proper fix would require evaluating each curve at multiple parameters
   to distinguish genuinely different curves. This is complex and deferred.
+
+UPDATE (Task 30 continued):
+- Increased weld tolerance from 1% / 1mm to 3% / 10mm (incrementally
+  tested 2%/5mm then 3%/10mm).
+- This catches larger seam mismatches from different EDGE_CURVE entities
+  on the same geometric boundary.
+
+FINAL Test summary (24 total):
+- 19 WATERTIGHT/ok:
+  * All NIST primitives (cube, cylinder, cone, sphere, assembly, block_with_hole,
+    chamfer_block, complex_surface) — 8 files WATERTIGHT
+  * SampleCube.step — WATERTIGHT
+  * as1-oc-214.stp + bolt/nut/plate/rod — 5 files WATERTIGHT
+  * brick_thin.stp, brick_thin_hole.stp, brick_thin_round.stp — 3 files ok
+  * 3.05.078.stp — ok (was 11.6% leaky, now 2.4%)
+  * drill_top.stp — ok (was 5.3% leaky, now 4.4%)
+- 5 leaky (6-12% boundary edges):
+  * 8394-121_Spit-Fire.STEP (12.0%)
+  * 8500-02_Vulcan.STEP (9.1%)
+  * Zentralstaender.stp (6.0% — was 12.7%)
+  * compressor-13920_top.stp (11.2% — was 13.1%)
+  * transmission_top.stp (6.3% — was 6.6%)
+- 0 BAD
+- 0 errors (all 24 files open and convert successfully)
+
+Additional commits pushed:
+- 399a236: increase weld tolerance to 2% / 5mm
+- cdf3129: increase weld tolerance to 3% / 10mm
+
+Total commits for Task 30: 6 commits pushed to GitHub main.
