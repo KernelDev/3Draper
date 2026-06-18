@@ -15,7 +15,7 @@ use crate::edge_cache::EdgeDiscretizationCache;
 use draper_geometry::{
     Point3d, Point2d, Direction3d,
     Surface, Plane, CylinderSurface, SphereSurface, TorusSurface,
-    ConeSurface, Curve3d,
+    ConeSurface, Curve3d, NurbsSurface,
 };
 use draper_topology::{Face, Wire, CoEdge, Edge, Solid, Shell, Compound, TopoId};
 // WASM-compatible Instant: on native uses std::time::Instant,
@@ -3017,6 +3017,289 @@ fn triangulate_extrusion_full(face: &Face, ext: &draper_geometry::ExtrusionSurfa
 ///
 /// This function produces high-quality NURBS triangulation by delegating to
 /// `parametric_domain::triangulate_surface_consistent()`, which provides:
+/// Try strip triangulation for a ruled NURBS surface.
+///
+/// A ruled NURBS surface (degree 1 in one direction) has two "rails" —
+/// the two boundary edges that run along the linear direction. A strip
+/// triangulation connects corresponding points on the two rails, creating
+/// a ladder-like mesh that uses ALL rim edges.
+///
+/// This is critical for watertightness: earcutr's generic triangulation
+/// often skips rim edges, creating boundary edges in the merged mesh.
+/// The strip triangulation guarantees all rim edges are used.
+///
+/// # Requirements
+/// - The boundary must have exactly 4 edges (a quadrilateral UV domain)
+/// - The two rails must have the same number of points
+/// - No holes
+///
+/// # Returns
+/// Some(mesh) if strip triangulation was applied, None if not applicable.
+fn try_strip_triangulation_ruled_nurbs(
+    nurbs: &NurbsSurface,
+    boundary_points: &[Point3d],
+    boundary_uvs: &[Point2d],
+    forward: bool,
+) -> Option<TriangleMesh> {
+    use draper_geometry::{Point3d, Point2d};
+
+    if boundary_points.is_empty() || boundary_uvs.len() != boundary_points.len() {
+        return None;
+    }
+
+    // Identify the 4 edges of the boundary by finding "corners" — points where
+    // the UV direction changes significantly.
+    //
+    // For a ruled NURBS with u_degree=1, the two rails are at constant u
+    // (u_min and u_max), running along v. The other two edges are at constant
+    // v (v_min and v_max), running along u.
+    //
+    // For v_degree=1, the rails are at constant v, running along u.
+    let (u_min, u_max) = nurbs.u_range();
+    let (v_min, v_max) = nurbs.v_range();
+    let u_range = u_max - u_min;
+    let v_range = v_max - v_min;
+
+    if u_range < 1e-10 || v_range < 1e-10 {
+        return None; // Degenerate surface
+    }
+
+    // Classify each boundary point by which edge it's on:
+    // 0 = u_min edge (rail 0 if u_degree=1)
+    // 1 = u_max edge (rail 1 if u_degree=1)
+    // 2 = v_min edge
+    // 3 = v_max edge
+    let u_tol = u_range * 0.01; // 1% of u_range
+    let v_tol = v_range * 0.01;
+
+    let is_u_ruled = nurbs.u_degree == 1 && nurbs.v_degree > 1;
+    let is_v_ruled = nurbs.v_degree == 1 && nurbs.u_degree > 1;
+
+    if !is_u_ruled && !is_v_ruled {
+        return None; // Not a ruled surface
+    }
+
+    // Find corners: points where BOTH u and v are at extremes
+    let mut corner_indices: Vec<usize> = Vec::new();
+    for (i, uv) in boundary_uvs.iter().enumerate() {
+        let at_u_min = (uv.u - u_min).abs() < u_tol;
+        let at_u_max = (uv.u - u_max).abs() < u_tol;
+        let at_v_min = (uv.v - v_min).abs() < v_tol;
+        let at_v_max = (uv.v - v_max).abs() < v_tol;
+        if (at_u_min || at_u_max) && (at_v_min || at_v_max) {
+            // Check if this point is too close to ANY existing corner
+            let mut is_duplicate = false;
+            let corner_dist_tol = u_tol.max(v_tol) * 10.0; // 10% of param range
+            for &prev in &corner_indices {
+                let dist = ((boundary_points[i].x - boundary_points[prev].x).powi(2)
+                    + (boundary_points[i].y - boundary_points[prev].y).powi(2)
+                    + (boundary_points[i].z - boundary_points[prev].z).powi(2)).sqrt();
+                if dist < corner_dist_tol {
+                    is_duplicate = true;
+                    break;
+                }
+            }
+            if !is_duplicate {
+                corner_indices.push(i);
+            }
+        }
+    }
+
+    if corner_indices.len() != 4 {
+        log::debug!(
+            "strip_triangulation: need 4 corners, found {} (u_range={:.3}, v_range={:.3}, u_tol={:.4}, v_tol={:.4}) — skipping",
+            corner_indices.len(), u_range, v_range, u_tol, v_tol
+        );
+        return None;
+    }
+
+    // Split the boundary into 4 edges using the corners
+    // The edges are: corner[0]→corner[1], corner[1]→corner[2], corner[2]→corner[3], corner[3]→corner[0]
+    let n = boundary_points.len();
+    let mut edges: Vec<Vec<usize>> = Vec::with_capacity(4);
+    for i in 0..4 {
+        let start = corner_indices[i];
+        let end = corner_indices[(i + 1) % 4];
+        let mut edge: Vec<usize> = Vec::new();
+        let mut j = start;
+        edge.push(j);
+        while j != end {
+            j = (j + 1) % n;
+            edge.push(j);
+        }
+        edges.push(edge);
+    }
+
+    // Identify which edges are the rails
+    // For u_ruled: rails are the edges at u_min and u_max (constant u, varying v)
+    // For v_ruled: rails are the edges at v_min and v_max (constant v, varying u)
+    let mut rail_a_idx: Option<usize> = None;
+    let mut rail_b_idx: Option<usize> = None;
+    let mut side_a_idx: Option<usize> = None;
+    let mut side_b_idx: Option<usize> = None;
+
+    for (ei, edge) in edges.iter().enumerate() {
+        // Check the midpoint of this edge to classify it
+        let mid_idx = edge[edge.len() / 2];
+        let mid_uv = boundary_uvs[mid_idx];
+        let at_u_min = (mid_uv.u - u_min).abs() < u_tol;
+        let at_u_max = (mid_uv.u - u_max).abs() < u_tol;
+        let at_v_min = (mid_uv.v - v_min).abs() < v_tol;
+        let at_v_max = (mid_uv.v - v_max).abs() < v_tol;
+
+        if is_u_ruled {
+            if at_u_min {
+                rail_a_idx = Some(ei);
+            } else if at_u_max {
+                rail_b_idx = Some(ei);
+            } else if at_v_min || at_v_max {
+                if side_a_idx.is_none() {
+                    side_a_idx = Some(ei);
+                } else {
+                    side_b_idx = Some(ei);
+                }
+            }
+        } else {
+            // v_ruled
+            if at_v_min {
+                rail_a_idx = Some(ei);
+            } else if at_v_max {
+                rail_b_idx = Some(ei);
+            } else if at_u_min || at_u_max {
+                if side_a_idx.is_none() {
+                    side_a_idx = Some(ei);
+                } else {
+                    side_b_idx = Some(ei);
+                }
+            }
+        }
+    }
+
+    let rail_a_idx = rail_a_idx?;
+    let rail_b_idx = rail_b_idx?;
+    let _side_a_idx = side_a_idx?;
+    let _side_b_idx = side_b_idx?;
+
+    let rail_a = &edges[rail_a_idx];
+    let rail_b = &edges[rail_b_idx];
+
+    // Rails must have the same number of points
+    // (They might differ by 1 if one includes both endpoints and the other doesn't)
+    if rail_a.len().abs_diff(rail_b.len()) > 1 {
+        log::debug!(
+            "strip_triangulation: rail point counts differ ({} vs {}) — skipping",
+            rail_a.len(), rail_b.len()
+        );
+        return None;
+    }
+
+    // Build the strip triangulation
+    // For each pair of corresponding points (rail_a[i], rail_b[i]), create
+    // a quad (rail_a[i], rail_b[i], rail_b[i+1], rail_a[i+1]) split into 2 triangles.
+    let na = rail_a.len();
+    let nb = rail_b.len();
+    let n_quads = na.min(nb).saturating_sub(1);
+
+    if n_quads == 0 {
+        return None;
+    }
+
+    let mut mesh = TriangleMesh::new();
+
+    // Add all boundary points as vertices
+    let mut vertex_map: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
+    for (i, p) in boundary_points.iter().enumerate() {
+        let vi = mesh.add_vertex(*p);
+        // Compute normal from NURBS derivatives
+        let uv = boundary_uvs[i];
+        let derivs = nurbs.derivatives_at(uv.u, uv.v);
+        mesh.add_vertex_normal(vi, [derivs.normal().x, derivs.normal().y, derivs.normal().z]);
+        vertex_map.insert(i, vi);
+    }
+
+    // Create strip triangles
+    // Rail A goes from corner[0] to corner[1] (forward direction)
+    // Rail B goes from corner[2] to corner[3] (reversed direction relative to A)
+    // We need to reverse rail B so that rail_b[i] corresponds to rail_a[i]
+    let rail_b_reversed: Vec<usize> = rail_b.iter().rev().copied().collect();
+
+    for i in 0..n_quads {
+        let a0 = *vertex_map.get(&rail_a[i]).unwrap_or(&0);
+        let a1 = *vertex_map.get(&rail_a[i + 1]).unwrap_or(&0);
+        let b0 = *vertex_map.get(&rail_b_reversed[i]).unwrap_or(&0);
+        let b1 = *vertex_map.get(&rail_b_reversed[i + 1]).unwrap_or(&0);
+
+        // Skip degenerate triangles
+        if a0 == a1 || a0 == b0 || a0 == b1 || a1 == b0 || a1 == b1 || b0 == b1 {
+            continue;
+        }
+
+        // Two triangles per quad:
+        // (a0, a1, b1) and (a0, b1, b0)
+        // The orientation depends on the surface normal direction
+        if forward {
+            mesh.add_triangle(a0, a1, b1);
+            mesh.add_triangle(a0, b1, b0);
+        } else {
+            mesh.add_triangle(a0, b1, a1);
+            mesh.add_triangle(a0, b0, b1);
+        }
+    }
+
+    // Also triangulate the two side edges (the "caps")
+    // Side A connects rail_a[0] to rail_b[0] (or rail_b[last] in reversed)
+    // Side B connects rail_a[last] to rail_b[last] (or rail_b[0] in reversed)
+    //
+    // Each side is a 1D strip of points. We triangulate it as a fan from
+    // the first point, which uses all rim edges.
+    for side_idx in [_side_a_idx, _side_b_idx] {
+        let side = &edges[side_idx];
+        if side.len() < 3 {
+            continue;
+        }
+        // Fan triangulation from the first point
+        let v0 = *vertex_map.get(&side[0]).unwrap_or(&0);
+        for i in 1..side.len() - 1 {
+            let v1 = *vertex_map.get(&side[i]).unwrap_or(&0);
+            let v2 = *vertex_map.get(&side[i + 1]).unwrap_or(&0);
+            if v0 == v1 || v1 == v2 || v0 == v2 {
+                continue;
+            }
+            // Check for degenerate (zero area)
+            let p0 = mesh.vertices[v0 as usize];
+            let p1 = mesh.vertices[v1 as usize];
+            let p2 = mesh.vertices[v2 as usize];
+            let area = ((p1.x - p0.x) * (p2.y - p0.y) - (p1.y - p0.y) * (p2.x - p0.x)).abs()
+                     + ((p1.y - p0.y) * (p2.z - p0.z) - (p1.z - p0.z) * (p2.y - p0.y)).abs()
+                     + ((p1.z - p0.z) * (p2.x - p0.x) - (p1.x - p0.x) * (p2.z - p0.z)).abs();
+            if area < 1e-20 {
+                continue;
+            }
+            if forward {
+                mesh.add_triangle(v0, v1, v2);
+            } else {
+                mesh.add_triangle(v0, v2, v1);
+            }
+        }
+    }
+
+    log::info!(
+        "strip_triangulation: created {} triangles from {} rail points (rails: {} and {} pts, sides: {} and {} pts)",
+        mesh.triangle_count(),
+        na.min(nb),
+        na, nb,
+        edges[_side_a_idx].len(),
+        edges[_side_b_idx].len(),
+    );
+
+    Some(mesh)
+}
+
+
+/// NURBS surface triangulation using UV-space earcutr with Newton-Raphson re-projection.
+///
+/// This function produces high-quality NURBS triangulation by delegating to
+/// `parametric_domain::triangulate_surface_consistent()`, which provides:
 /// 1. Newton-Raphson re-projection for accurate UV coordinates
 /// 2. UV normalization for periodic surfaces
 /// 3. UV polygon quality validation (area ratio check)
@@ -3546,22 +3829,30 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
                 sphere, boundary_points, boundary_uvs, hole_polylines, hole_uvs, forward, params,
             )
         }
-        Surface::Nurbs(_) => {
-            // NURBS: use earcutr-based consistent triangulation.
+        Surface::Nurbs(ref nurbs) => {
+            // NURBS: try strip triangulation for ruled surfaces first.
             //
-            // The grid-based approach (triangulate_nurbs_grid_trimmed) had
-            // critical flaws for watertightness:
-            // 1. Only snaps grid vertices near boundary UVs — boundary points
-            //    that fall between grid cells are NOT used, creating gaps
-                       // 2. Creates its own grid via nurbs.derivatives_at() which
-            //    produces different 3D coordinates than cached boundary points
-            // 3. Containment check is vertex-based and can miss edge cases
+            // For ruled NURBS (degree 1 in one direction), a strip triangulation
+            // connects corresponding points on the two rails, creating a
+            // ladder-like mesh that uses ALL rim edges. This is critical for
+            // watertightness — earcutr's generic triangulation often skips
+            // rim edges, creating boundary edges in the merged mesh.
             //
-            // The earcutr approach (triangulate_surface_consistent) fixes these:
-            // 1. Boundary 3D points are used DIRECTLY — bit-identical for watertightness
-            // 2. earcutr creates triangles at every corner automatically
-            // 3. Adaptive interior points via knot-span subdivision
-            // 4. Chord-error refinement for surface accuracy
+            // If strip triangulation is not applicable (e.g., the boundary
+            // doesn't have exactly 4 edges, or the rails have different point
+            // counts), fall back to the earcutr-based approach.
+            if nurbs.u_degree == 1 || nurbs.v_degree == 1 {
+                if let Some(strip_mesh) = try_strip_triangulation_ruled_nurbs(
+                    nurbs,
+                    boundary_points,
+                    boundary_uvs,
+                    forward,
+                ) {
+                    return strip_mesh;
+                }
+            }
+
+            // Fall back to earcutr-based consistent triangulation.
             crate::parametric_domain::triangulate_surface_consistent(
                 surface,
                 boundary_points,
