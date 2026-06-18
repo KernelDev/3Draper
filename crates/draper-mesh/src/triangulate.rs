@@ -3087,9 +3087,14 @@ fn try_strip_triangulation_ruled_nurbs(
         let at_v_min = (uv.v - v_min).abs() < v_tol;
         let at_v_max = (uv.v - v_max).abs() < v_tol;
         if (at_u_min || at_u_max) && (at_v_min || at_v_max) {
-            // Check if this point is too close to ANY existing corner
+            // Check if this point is too close to ANY existing corner.
+            // Use a FIXED 3D tolerance (1e-6) instead of a parameter-space
+            // tolerance — the parameter-to-3D scaling varies across surfaces,
+            // making parameter-based tolerances unreliable.
+            // Corners that come from the same VERTEX_POINT should be at
+            // EXACTLY the same 3D position (bit-identical from edge cache).
             let mut is_duplicate = false;
-            let corner_dist_tol = u_tol.max(v_tol) * 10.0; // 10% of param range
+            let corner_dist_tol = 1e-6; // 1 micron — corners from same vertex are bit-identical
             for &prev in &corner_indices {
                 let dist = ((boundary_points[i].x - boundary_points[prev].x).powi(2)
                     + (boundary_points[i].y - boundary_points[prev].y).powi(2)
@@ -3183,11 +3188,14 @@ fn try_strip_triangulation_ruled_nurbs(
     let rail_a = &edges[rail_a_idx];
     let rail_b = &edges[rail_b_idx];
 
-    // Rails must have the same number of points
-    // (They might differ by 1 if one includes both endpoints and the other doesn't)
-    if rail_a.len().abs_diff(rail_b.len()) > 1 {
+    // Rails should have similar point counts. Allow differences up to 10
+    // (the edge cache's adaptive discretization can produce slightly different
+    // counts for curves with different parameterizations). We use the minimum
+    // count for the strip, so extra points on the longer rail are ignored
+    // (they become rim edges on the side caps).
+    if rail_a.len().abs_diff(rail_b.len()) > 10 {
         log::debug!(
-            "strip_triangulation: rail point counts differ ({} vs {}) — skipping",
+            "strip_triangulation: rail point counts differ too much ({} vs {}) — skipping",
             rail_a.len(), rail_b.len()
         );
         return None;
