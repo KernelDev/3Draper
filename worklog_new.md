@@ -807,3 +807,34 @@ Tests:
 - 93/95 draper-mesh tests pass (2 pre-existing gdt_check failures)
 
 Commit: e76510d — pushed to GitHub main
+
+---
+Task ID: 29
+Agent: Super Z (main agent)
+Task: Fix build errors and clean up compiler warnings
+
+Work Log:
+- User reported build errors when compiling locally on Windows
+- Identified critical error: tools/src/bin/edge_sharing.rs referenced FaceInfo
+  fields that no longer exist (outer_edges, outer_edge_step_ids, inner_edges,
+  inner_edge_step_ids) — these were removed in a previous refactor
+- Solution: removed the broken edge_sharing.rs diagnostic tool entirely
+- Cleaned up unused imports/variables across:
+  - crates/draper-core (operations.rs, boolean.rs, assembly.rs, engine.rs)
+  - crates/draper-ffi (lib.rs)
+  - crates/draper-viewer (app.rs, camera.rs)
+  - tools/src/bin (8 files: face_analysis, cache_diag, stl_compare,
+    boundary_dump, hang_diag, dedup_diag, torus_test, face_diag)
+- Special handling for draper-viewer app.rs File menu closure: the ui variable
+  is only used on wasm32; added `let _ = ui;` on non-wasm to silence warning
+  without breaking either build target
+
+Stage Summary:
+- Build now compiles cleanly with ZERO errors
+- Compiler warnings reduced significantly (most "unused imports" and
+  "unused variables" eliminated)
+- All tests still pass: 19 NIST + 5 integration + 9 triangulation
+- All 18 as1-oc-214 instances still WATERTIGHT (bolt vol=3191.03 vs STL 3195.63)
+- bolt.stp standalone: WATERTIGHT, vol=3196.51
+
+Commit: 9f08d7d — pushed to GitHub main
