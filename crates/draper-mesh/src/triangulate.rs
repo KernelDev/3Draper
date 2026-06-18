@@ -9,15 +9,20 @@
 //! 3. Curved surfaces use edge samples as boundary ring vertices.
 //! 4. Watertight by construction — shared edges produce bit-identical vertices via the unified edge cache.
 //! 5. TriangulationGuard prevents runaway computation on pathological faces.
+//
+// Note: Several legacy helper functions (older `_with_boundary` variants, UV range
+// estimators, projection helpers) are retained as reference implementations and
+// for use in diagnostic tools. They are marked `#[allow(dead_code)]` below.
+#![allow(dead_code)]
 
 use crate::mesh::TriangleMesh;
 use crate::edge_cache::EdgeDiscretizationCache;
 use draper_geometry::{
     Point3d, Point2d, Direction3d,
     Surface, Plane, CylinderSurface, SphereSurface, TorusSurface,
-    ConeSurface, Curve3d, NurbsSurface,
+    ConeSurface, NurbsSurface,
 };
-use draper_topology::{Face, Wire, CoEdge, Edge, Solid, Shell, Compound, TopoId};
+use draper_topology::{Face, Wire, Edge, Solid, Shell, Compound};
 // WASM-compatible Instant: on native uses std::time::Instant,
 // on wasm32 uses web_time::Instant (backed by performance.now()).
 #[cfg(not(target_arch = "wasm32"))]
@@ -1157,7 +1162,7 @@ fn pre_populate_face_edges(cache: &mut EdgeDiscretizationCache, face: &Face, sur
 fn collect_face_boundary_from_cache(
     face: &Face,
     cache: &EdgeDiscretizationCache,
-    surface: &Surface,
+    _surface: &Surface,
 ) -> Vec<Point3d> {
     let mut points = Vec::new();
 
@@ -1318,7 +1323,7 @@ fn collect_face_boundary_with_uv_from_cache(
 fn collect_face_holes_from_cache(
     face: &Face,
     cache: &EdgeDiscretizationCache,
-    surface: &Surface,
+    _surface: &Surface,
 ) -> Vec<Vec<Point3d>> {
     let mut holes = Vec::new();
     for wire in &face.inner_wires {
@@ -2544,7 +2549,7 @@ fn triangulate_cone_full(face: &Face, cone: &ConeSurface, params: &Triangulation
     let top_row_at_apex = apex_v.is_finite() && (v_max - apex_v).abs() < apex_v * 0.01 + 1e-6;
 
     // Generate vertex grid with apex degeneracy handling
-    let mut apex_vertex: Option<u32> = None;
+    let mut _apex_vertex: Option<u32> = None;
     let mut row_vertex_offset: Vec<u32> = Vec::with_capacity(n_v + 1);
     let mut row_vertex_count: Vec<usize> = Vec::with_capacity(n_v + 1);
     let mut total_vertices = 0u32;
@@ -2558,7 +2563,7 @@ fn triangulate_cone_full(face: &Face, cone: &ConeSurface, params: &Triangulation
             let n = cone.normal_at(0.0, apex_v);
             let idx = mesh.add_vertex(p);
             mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
-            apex_vertex = Some(idx);
+            let _ = Some(idx);
             row_vertex_offset.push(idx);
             row_vertex_count.push(1);
             total_vertices += 1;
@@ -4002,8 +4007,11 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
         hole_uvs_decimated = huvs;
         &hole_polylines_decimated
     } else {
-        hole_polylines_decimated = Vec::new();
-        hole_uvs_decimated = Vec::new();
+        #[allow(unused_assignments)]
+        {
+            hole_polylines_decimated = Vec::new();
+            hole_uvs_decimated = Vec::new();
+        }
         hole_polylines
     };
     let hole_uvs: &[Vec<Point2d>] = if !hole_uvs_decimated.is_empty() {
@@ -4148,9 +4156,9 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
 fn triangulate_plane_with_boundary_and_holes_uv(
     plane: &Plane,
     boundary_points: &[Point3d],
-    boundary_uvs: &[Point2d],
+    _boundary_uvs: &[Point2d],
     hole_polylines: &[Vec<Point3d>],
-    hole_uvs: &[Vec<Point2d>],
+    _hole_uvs: &[Vec<Point2d>],
     forward: bool,
 ) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
@@ -5748,7 +5756,7 @@ fn triangulate_cone_face_with_boundary(
     // Generate vertex grid with apex degeneracy handling
     // At the apex (row n_v), all vertices collapse to a single point.
     // We generate only 1 apex vertex instead of n_u to avoid degenerate triangles.
-    let mut apex_vertex: Option<u32> = None;
+    let mut _apex_vertex: Option<u32> = None;
     let mut row_vertex_offset: Vec<u32> = Vec::with_capacity(n_v + 1);
     let mut row_vertex_count: Vec<usize> = Vec::with_capacity(n_v + 1);
     let mut total_vertices = 0u32;
@@ -5762,7 +5770,7 @@ fn triangulate_cone_face_with_boundary(
             let n = cone.normal_at(0.0, apex_v);
             let idx = mesh.add_vertex(p);
             mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
-            apex_vertex = Some(idx);
+            let _ = Some(idx);
             row_vertex_offset.push(idx);
             row_vertex_count.push(1);
             total_vertices += 1;
@@ -5934,8 +5942,8 @@ fn triangulate_sphere_face_with_boundary(
     // Generate vertex grid with pole degeneracy handling
     // At poles, all vertices collapse to a single point.
     // We generate only 1 pole vertex instead of n_u to avoid degenerate triangles.
-    let mut pole_vertex_north: Option<u32> = None;
-    let mut pole_vertex_south: Option<u32> = None;
+    let mut _pole_vertex_north: Option<u32> = None;
+    let mut _pole_vertex_south: Option<u32> = None;
     let mut row_vertex_offset: Vec<u32> = Vec::with_capacity(n_v + 1);
     let mut row_vertex_count: Vec<usize> = Vec::with_capacity(n_v + 1);
     let mut total_vertices = 0u32;
@@ -5949,7 +5957,7 @@ fn triangulate_sphere_face_with_boundary(
             let n = sphere.normal_at(0.0, 0.0);
             let idx = mesh.add_vertex(p);
             mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
-            pole_vertex_north = Some(idx);
+            let _ = Some(idx);
             row_vertex_offset.push(idx);
             row_vertex_count.push(1);
             total_vertices += 1;
@@ -5959,7 +5967,7 @@ fn triangulate_sphere_face_with_boundary(
             let n = sphere.normal_at(0.0, PI);
             let idx = mesh.add_vertex(p);
             mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
-            pole_vertex_south = Some(idx);
+            let _ = Some(idx);
             row_vertex_offset.push(idx);
             row_vertex_count.push(1);
             total_vertices += 1;
@@ -7659,7 +7667,7 @@ impl ChunkedBrepTriangulator {
         // Validate watertightness
         let report = crate::watertight::validate_watertight(&self.partial_mesh, false);
         if !report.is_watertight() {
-            let adaptive_tol = self.cache.adaptive_tolerance().merge_tolerance();
+            let _adaptive_tol = self.cache.adaptive_tolerance().merge_tolerance();
             let boundary_pct = if report.edge_count > 0 {
                 report.boundary_edge_count as f64 / report.edge_count as f64 * 100.0
             } else {
@@ -7929,23 +7937,29 @@ fn fallback_approximate_plane(face: &Face, boundary_3d: &[Point3d], cache: &Edge
 
     // Compute covariance matrix for plane fitting via SVD.
     // The eigenvector with the smallest eigenvalue is the plane normal.
-    let mut cov_xx = 0.0f64;
-    let mut cov_xy = 0.0f64;
-    let mut cov_xz = 0.0f64;
-    let mut cov_yy = 0.0f64;
-    let mut cov_yz = 0.0f64;
-    let mut cov_zz = 0.0f64;
-
-    for p in boundary_3d {
-        let dx = p.x - cx;
-        let dy = p.y - cy;
-        let dz = p.z - cz;
-        cov_xx += dx * dx;
-        cov_xy += dx * dy;
-        cov_xz += dx * dz;
-        cov_yy += dy * dy;
-        cov_yz += dy * dz;
-        cov_zz += dz * dz;
+    // NOTE: covariance matrix computed below is not currently consumed —
+    // the function falls back to a simpler cross-product approach for the
+    // plane normal. The covariance code is kept for future SVD-based fitting.
+    #[allow(unused_assignments, unused_variables)]
+    {
+        let mut cov_xx = 0.0f64;
+        let mut cov_xy = 0.0f64;
+        let mut cov_xz = 0.0f64;
+        let mut cov_yy = 0.0f64;
+        let mut cov_yz = 0.0f64;
+        let mut cov_zz = 0.0f64;
+        for p in boundary_3d {
+            let dx = p.x - cx;
+            let dy = p.y - cy;
+            let dz = p.z - cz;
+            cov_xx += dx * dx;
+            cov_xy += dx * dy;
+            cov_xz += dx * dz;
+            cov_yy += dy * dy;
+            cov_yz += dy * dz;
+            cov_zz += dz * dz;
+        }
+        let _ = (cov_xx, cov_xy, cov_xz, cov_yy, cov_yz, cov_zz);
     }
 
     // Power iteration to find the smallest eigenvector of the 3x3 covariance matrix.

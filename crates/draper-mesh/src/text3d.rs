@@ -10,6 +10,7 @@
 //! "3Draper" text are cut through primitive surfaces using ear-clipping
 //! with bridge-edge hole insertion (guaranteed to terminate, unlike CDT).
 
+#![allow(dead_code)]
 use crate::mesh::TriangleMesh;
 // Note: ParametricDomain/CDT imports removed — we use ear-clipping instead
 // which is guaranteed to terminate (unlike spade CDT which can hang).
@@ -410,10 +411,10 @@ fn project_2d_to_surface(x: f64, y: f64, surface: &TextSurface) -> SurfacePoint 
             }
         }
         TextSurface::Torus { major_radius, minor_radius } => {
-            let R = *major_radius;
-            let r = *minor_radius;
-            let scale_major = 1.0 / R;
-            let scale_minor = 1.0 / r;
+            let major_r = *major_radius;
+            let minor_r = *minor_radius;
+            let scale_major = 1.0 / major_r;
+            let scale_minor = 1.0 / minor_r;
             let u = x * scale_major;
             let v = y * scale_minor;
 
@@ -422,9 +423,9 @@ fn project_2d_to_surface(x: f64, y: f64, surface: &TextSurface) -> SurfacePoint 
             let cos_v = v.cos();
             let sin_v = v.sin();
 
-            let px = (R + r * cos_v) * cos_u;
-            let py = (R + r * cos_v) * sin_u;
-            let pz = r * sin_v;
+            let px = (major_r + minor_r * cos_v) * cos_u;
+            let py = (major_r + minor_r * cos_v) * sin_u;
+            let pz = minor_r * sin_v;
 
             let nx = cos_v * cos_u;
             let ny = cos_v * sin_u;
@@ -956,17 +957,17 @@ fn project_3d_to_text_2d(px: f64, py: f64, pz: f64, surface: &TextSurface) -> (f
             // Inverse:
             //   u = atan2(py, px), v = atan2(pz, dist_from_axis - R)
             //   text_x = u * R, text_y = v * r
-            let R = *major_radius;
-            let r = *minor_radius;
+            let major_r = *major_radius;
+            let minor_r = *minor_radius;
             let dist_from_axis = (px * px + py * py).sqrt();
-            let dist_from_ring = ((dist_from_axis - R) * (dist_from_axis - R) + pz * pz).sqrt();
-            if (dist_from_ring - r).abs() > r * 0.5 {
+            let dist_from_ring = ((dist_from_axis - major_r) * (dist_from_axis - major_r) + pz * pz).sqrt();
+            if (dist_from_ring - minor_r).abs() > minor_r * 0.5 {
                 return (f64::MAX, f64::MAX);
             }
             let u = py.atan2(px);
-            let v = pz.atan2(dist_from_axis - R);
-            let text_x = u * R;
-            let text_y = v * r;
+            let v = pz.atan2(dist_from_axis - major_r);
+            let text_x = u * major_r;
+            let text_y = v * minor_r;
             (text_x, text_y)
         }
     }

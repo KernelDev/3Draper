@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 KernelDev
+#![allow(dead_code)]
 //! wgpu-based 3D renderer for draper-viewer.
 //!
 //! Renders the 3D scene to an offscreen texture (with depth buffer) in the

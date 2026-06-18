@@ -775,7 +775,7 @@ impl EdgeDiscretizationCache {
     pub fn pre_populate_for_solid_full(&mut self, solid: &Solid, default_n_samples: usize) {
         // First pass: discretize all edges (3D points only)
         for face in solid.faces() {
-            if let Some(ref surface) = face.surface {
+            if let Some(ref _surface) = face.surface {
                 for edge in &face.edges {
                     if edge.degenerate { continue; }
                     let key = EdgeCacheKey::from_edge(edge);
@@ -1015,7 +1015,7 @@ pub fn compute_adaptive_crease_angle(surface: &Surface) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use draper_geometry::{Plane, Direction3d, Line2d};
+    use draper_geometry::{Plane, Line2d};
     use draper_topology::Edge;
 
     #[test]

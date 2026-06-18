@@ -7,7 +7,6 @@
 //! 2. ManifoldChecker reports reasonable results for industrial STEP files
 //! 3. StepEdgeCache produces consistent boundary points on shared edges
 
-use std::path::Path;
 use draper_step::{parse_step, step_to_detailed_instances, step_to_mesh, step_structure_lazy, StepConversionContext};
 use draper_mesh::{check_manifold, TriangulationParams};
 
@@ -33,7 +32,7 @@ fn test_zentralstaender_loads() {
     let _ = env_logger::builder().is_test(true).try_init();
     
     let step = parse_test_step("Zentralstaender.stp");
-    let params = TriangulationParams::default();
+    let _params = TriangulationParams::default();
     
     // Convert to mesh
     let result = step_to_mesh(&step);
@@ -89,7 +88,7 @@ fn test_drill_top_manifold_report() {
     let _ = env_logger::builder().is_test(true).try_init();
     
     let step = parse_test_step("drill_top.stp");
-    let params = TriangulationParams {
+    let _params = TriangulationParams {
         adaptive: true,
         ..TriangulationParams::default()
     };

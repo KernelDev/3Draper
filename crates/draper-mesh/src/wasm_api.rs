@@ -687,7 +687,7 @@ pub fn occlusion_cull_mesh(
     let mut depth_buffer = vec![f64::MAX; resolution * resolution];
 
     let mut visible_indices = Vec::new();
-    let inv_res = 1.0 / resolution as f64;
+    let _inv_res = 1.0 / resolution as f64;
 
     for &tri_idx in &sorted_indices {
         let tri = &mesh.triangles[tri_idx];

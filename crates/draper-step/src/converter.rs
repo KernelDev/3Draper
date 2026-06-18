@@ -22,18 +22,19 @@
 //! - EDGE_CURVE → SURFACE_CURVE → 3D curve + vertex endpoints
 //! - Boundary edges enable proper ear-clipping triangulation of planar faces
 
+#![allow(dead_code)]
 use crate::schema::{StepFile, StepValue};
 use draper_geometry::{
     Point3d, Point2d, Direction3d, Vec3d, Surface, Plane, CylinderSurface, SphereSurface,
     ConeSurface, TorusSurface, RevolutionSurface, ExtrusionSurface,
-    NurbsSurface, Curve3d, Curve2d, Line, Circle, Ellipse, Arc, NurbsCurve,
+    NurbsSurface, Curve3d, Curve2d, Line, Circle,  Arc, NurbsCurve,
     Line2d, Circle2d, Ellipse2d, Nurbs2d,
 };
-use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary_and_holes_uv, ear_clip, validate_watertight, validate_edge_consistency, smooth_normals, smooth_normals_adaptive, filter_degenerate_triangles, weld_boundary_edge_vertices};
+use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary_and_holes_uv, ear_clip, validate_watertight, validate_edge_consistency, filter_degenerate_triangles, weld_boundary_edge_vertices};
 use draper_topology::{Face, Wire, CoEdge, Edge as TopoEdge, Shell, Solid};
 use draper_topology::healing::{heal_solid, HealingParams, HealingReport};
 use draper_geometry::tolerance::ToleranceContext;
-use draper_mesh::edge_cache::{EdgeDiscretizationCache, AdaptiveTolerance, deterministic_round_point};
+use draper_mesh::edge_cache::{EdgeDiscretizationCache, deterministic_round_point};
 use std::collections::HashMap;
 
 // WASM-compatible Instant: on native uses std::time::Instant,
@@ -2548,7 +2549,7 @@ impl<'a> StepConverter<'a> {
 
             // Attach already-built children (keyed by NAUO ID)
             if let Some(children) = parent_pd_to_children.get(&pd_id) {
-                for &(nauo_id, child_pd_id, _) in children {
+                for &(nauo_id, _child_pd_id, _) in children {
                     if let Some(child_node) = node_map.remove(&nauo_id) {
                         node.children.push(child_node);
                     }
@@ -2711,7 +2712,7 @@ impl<'a> StepConverter<'a> {
             }
             let mut alias_count = 0usize;
             let mut skipped_different_curves = 0usize;
-            for (vp, step_ids) in &vertex_pair_to_step_ids {
+            for (_vp, step_ids) in &vertex_pair_to_step_ids {
                 if step_ids.len() < 2 { continue; }
 
                 // Group step_ids by their curve midpoint (within tolerance).
@@ -3346,7 +3347,7 @@ impl<'a> StepConverter<'a> {
         let mut face_infos = Vec::new();
         let mut next_face_id: u64 = 1;
         let mut skipped_faces = 0;
-        let mut timed_out_faces = 0;
+        let _timed_out_faces = 0;
 
         for (fi, face_data) in face_data_list.iter().enumerate() {
             // Check BREP-level time budget — skip remaining faces if we're over limit
@@ -3371,7 +3372,7 @@ impl<'a> StepConverter<'a> {
                 break;
             }
 
-            let face_start = StdInstant::now();
+            let _face_start = StdInstant::now();
 
             let face_id = next_face_id;
             next_face_id += 1;
@@ -3659,7 +3660,7 @@ impl<'a> StepConverter<'a> {
     fn sample_edges_to_polylines(&self, edges: &[TopoEdge]) -> Vec<Point3d> {
         let mut points = Vec::new();
         for edge in edges {
-            if let Some(ref curve) = edge.curve {
+            if let Some(ref _curve) = edge.curve {
                 let steps = 20;
                 for i in 0..=steps {
                     let t = i as f64 / steps as f64;
@@ -6128,7 +6129,7 @@ impl<'a> StepConverter<'a> {
     fn resolve_trimmed_curve_2d(&self, entity: &crate::schema::StepEntity) -> Option<Curve2d> {
         // TRIMMED_CURVE(#basis_curve, #trim1, #trim2, .T., .T., .CARTESIAN., .CARTESIAN.)
         let basis_id = self.get_ref(entity.params.first()?)?;
-        let mut basis = self.resolve_curve_2d(basis_id)?;
+        let basis = self.resolve_curve_2d(basis_id)?;
 
         // Extract trim values
         let mut trim1: Option<f64> = None;
@@ -7929,12 +7930,12 @@ impl<'a> StepConverter<'a> {
                     let ev_max = uvs.iter().map(|p| p.v).fold(f64::MIN, f64::max);
                     let has_c2d = curve_2d.is_some();
                     let p0 = pts.first();
-                    let pN = pts.last();
+                    let p_n = pts.last();
                     log::info!(
                         "EDGE_UV_DIAG: edge_idx={} step_id={} n_pts={} pcurve={} u=[{:.4},{:.4}] v=[{:.4},{:.4}] 3d_first=({:.2},{:.2},{:.2}) 3d_last=({:.2},{:.2},{:.2})",
                         edge_idx, step_id, uvs.len(), has_c2d, eu_min, eu_max, ev_min, ev_max,
                         p0.map(|p| p.x).unwrap_or(0.0), p0.map(|p| p.y).unwrap_or(0.0), p0.map(|p| p.z).unwrap_or(0.0),
-                        pN.map(|p| p.x).unwrap_or(0.0), pN.map(|p| p.y).unwrap_or(0.0), pN.map(|p| p.z).unwrap_or(0.0)
+                        p_n.map(|p| p.x).unwrap_or(0.0), p_n.map(|p| p.y).unwrap_or(0.0), p_n.map(|p| p.z).unwrap_or(0.0)
                     );
                 }
                 edge_debug_info.push(format!("step_id={}→{}pts", step_id, pts.len()));
@@ -8532,7 +8533,7 @@ impl<'a> StepConverter<'a> {
             for i in 0..n_samples {
                 let t_frac = i as f64 / (n_samples - 1).max(1) as f64;
                 // Map fraction to edge parameter, then to curve_2d parameter
-                let edge_t = pmin + t_frac * e_range;
+                let _edge_t = pmin + t_frac * e_range;
                 if let Some(p) = edge.point_at(t_frac) {
                     let curve_t = t_min + t_frac * (t_max - t_min);
                     let uv = c2d.point_at(curve_t);
@@ -9586,7 +9587,7 @@ fn reorder_edge_loop(edges: Vec<TopoEdge>, step_ids: Vec<i64>) -> (Vec<TopoEdge>
 
 /// (closing a loop). This is essential for ear clipping algorithms which produce
 /// degenerate triangles on duplicate vertices.
-fn deduplicate_points_3d(points: &[Point3d], tolerance: f64) -> Vec<Point3d> {
+fn deduplicate_points_3d(points: &[Point3d], _tolerance: f64) -> Vec<Point3d> {
     if points.is_empty() {
         return Vec::new();
     }

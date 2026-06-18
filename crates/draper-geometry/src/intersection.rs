@@ -2,7 +2,7 @@
 // Copyright (c) 2026 KernelDev
 //! Geometric intersection algorithms.
 
-use crate::{Point3d, Direction3d, Vec3d, curve::*, surface::*, tolerance::TOLERANCE};
+use crate::{Point3d, Vec3d, curve::*, surface::*, tolerance::TOLERANCE};
 
 /// Result of a curve-curve intersection.
 #[derive(Clone, Debug)]

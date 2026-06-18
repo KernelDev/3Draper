@@ -1383,7 +1383,7 @@ fn fix_self_intersections_heal(shell: &mut Shell, params: &HealingParams, report
 /// This catches faces that are "inside-out" due to bad topology in the
 /// STEP file, which couldn't be fixed by the simple centroid-based
 /// orientation check.
-fn remove_inconsistent_normal_faces(shell: &mut Shell, params: &HealingParams, report: &mut HealingReport) {
+fn remove_inconsistent_normal_faces(shell: &mut Shell, _params: &HealingParams, report: &mut HealingReport) {
     if shell.faces.len() < 2 {
         return;
     }
@@ -2347,7 +2347,7 @@ mod tests {
     #[test]
     fn test_fix_flipped_normal() {
         // Create a simple closed shell with a known-flipped face
-        let mut box_solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        let box_solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
 
         // First, fix all normals so we have a known-good starting point
         let params_fix = HealingParams {
@@ -2393,7 +2393,7 @@ mod tests {
         .unwrap();
         faces.push(normal_face);
 
-        let mut shell = Shell::new(faces);
+        let shell = Shell::new(faces);
         let params = HealingParams {
             min_face_area: 1e-5,  // Threshold above the tiny face's area (5e-7)
             fix_normals: false,
@@ -2779,7 +2779,7 @@ mod tests {
 
         let e_a0 = Edge::new_line(p0, p1);
         let e_a1 = Edge::new_line(p1, p2);
-        let e_shared = Edge::new_line(p1, p2); // shared along u=π/2
+        let _e_shared = Edge::new_line(p1, p2); // shared along u=π/2
         let e_a3 = Edge::new_line(p2, p3);
         let e_a4 = Edge::new_line(p3, p0);
 

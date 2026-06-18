@@ -8,7 +8,7 @@ default = []
 # 3MF export requires the `zip` crate which has C dependencies
 # (bzip2-sys, lzma-sys, zstd-sys) that don't compile on wasm32.
 # Only enable this for native builds.
-export-3mf = ["zip"]
+export-3mf = ["zip", "serde", "dep:serde_json"]
 serde = ["dep:serde", "dep:serde_json", "draper-geometry/serde"]
 # WASM parallel: enables rayon threading on wasm32 via wasm-bindgen-rayon.
 # Requires the JS host to initialize a Web Worker pool with SharedArrayBuffer.

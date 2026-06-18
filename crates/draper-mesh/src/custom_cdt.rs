@@ -18,6 +18,7 @@
 //! 3. Delaunay improvement: After all insertions, apply Lawson flips
 //!    to improve triangle quality while respecting constraints.
 
+#![allow(dead_code)]
 use std::collections::{HashMap, HashSet};
 
 /// Tolerance for geometric comparisons.

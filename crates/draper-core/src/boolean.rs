@@ -104,7 +104,7 @@ pub fn point_in_solid(point: &Point3d, solid: &Solid) -> bool {
             if let Some(ref surface) = face.surface {
                 match surface {
                     Surface::Plane(plane) => {
-                        if draper_geometry::intersection::intersect_line_plane(&ray, plane).is_some() {
+                        if let Some(_hit) = draper_geometry::intersection::intersect_line_plane(&ray, plane) {
                             // Check if hit point is within the face boundary
                             // Simplified: just count intersections
                             intersections += 1;

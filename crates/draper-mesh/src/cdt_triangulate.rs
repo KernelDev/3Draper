@@ -9,6 +9,7 @@
 //! 4. Mapping CDT triangles back to 3D using the surface parameterization
 //! 5. Since shared edges use identical vertex indices, the result is watertight by construction
 
+#![allow(dead_code)]
 use crate::mesh::TriangleMesh;
 use crate::triangulate::{
     TriangulationParams, triangulate_face, filter_degenerate_triangles,
@@ -562,12 +563,12 @@ fn triangulate_surface_cdt_generic(
     }
 
     // Add interior grid points for better surface approximation
-    let n_interior = add_interior_grid_points(
+    let _n_interior = add_interior_grid_points(
         &boundary_2d, surface, &all_3d, &mut all_2d, &mut all_pool_indices, pool, params, face_id,
     );
 
     let n_boundary = boundary_3d.len();
-    let n_holes: usize = hole_indices.iter().map(|h| h.len()).sum();
+    let _n_holes: usize = hole_indices.iter().map(|h| h.len()).sum();
 
     // Build CDT
     let cdt_vertices: Vec<CdtVertex> = all_2d.iter().zip(all_pool_indices.iter())
@@ -657,8 +658,7 @@ fn triangulate_surface_cdt_generic(
 
         // Check if centroid is inside any hole
         let mut in_hole = false;
-        let mut hole_offset = n_boundary;
-        for (hi, hole_idx) in hole_indices.iter().enumerate() {
+        for (hi, _hole_idx) in hole_indices.iter().enumerate() {
             if hi < holes_2d.len() {
                 let hole_2d_pts: Vec<Point2d> = holes_2d[hi].iter()
                     .map(|uv| Point2d::new(uv[0], uv[1]))
@@ -668,7 +668,6 @@ fn triangulate_surface_cdt_generic(
                     break;
                 }
             }
-            hole_offset += hole_idx.len();
         }
         if in_hole {
             continue;
@@ -900,7 +899,7 @@ fn generate_interior_points(
 fn add_interior_grid_points(
     boundary_2d: &[[f64; 2]],
     surface: &Surface,
-    all_3d: &[Point3d],
+    _all_3d: &[Point3d],
     all_2d: &mut Vec<[f64; 2]>,
     all_pool_indices: &mut Vec<u32>,
     pool: &mut UnifiedVertexPool,

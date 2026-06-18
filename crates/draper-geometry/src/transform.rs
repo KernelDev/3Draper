@@ -2,7 +2,7 @@
 // Copyright (c) 2026 KernelDev
 //! 4x4 homogeneous transformation matrix.
 
-use crate::{Direction3d, Point3d, Vec3d};
+use crate::{Direction3d, Point3d};
 
 /// 4x4 homogeneous transformation matrix stored in row-major order.
 #[derive(Clone, Debug)]
@@ -158,7 +158,7 @@ impl Transform {
         inv[0][3] = -m[0][1]*m[1][2]*m[2][3] + m[0][1]*m[1][3]*m[2][2] + m[0][2]*m[1][1]*m[2][3]
             - m[0][2]*m[1][3]*m[2][1] - m[0][3]*m[1][1]*m[2][2] + m[0][3]*m[1][2]*m[2][1];
 
-        let det = m[0][0]*inv[0][0] + m[0][1]*inv[0][2+0] + m[0][2]*inv[0][2] + m[0][3]*inv[0][3]; // Fix: use proper indexing
+        let _det = m[0][0]*inv[0][0] + m[0][1]*inv[0][2+0] + m[0][2]*inv[0][2] + m[0][3]*inv[0][3]; // Fix: use proper indexing
         // Actually let me use a cleaner approach
         let det = m[0][0] * inv[0][0]
             + m[0][1] * (-(m[1][0]*m[2][2]*m[3][3] - m[1][0]*m[2][3]*m[3][2] - m[1][2]*m[2][0]*m[3][3]

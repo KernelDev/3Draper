@@ -2,8 +2,7 @@
 // Copyright (c) 2026 KernelDev
 //! Parametric curves in 3D space.
 
-use crate::{Direction3d, Point3d, Point2d, Vec3d, Transform};
-use std::fmt;
+use crate::{Direction3d, Point3d, Vec3d, Transform};
 
 /// Parametric range [u_min, u_max].
 pub type ParamRange = (f64, f64);

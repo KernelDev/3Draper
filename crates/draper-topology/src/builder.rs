@@ -4,10 +4,9 @@
 
 use crate::entity::*;
 use draper_geometry::{
-    Point3d, Point2d, Direction3d, Vec3d,
-    Curve3d, Line, Circle, Arc,
+    Point3d, Direction3d,
+    Curve3d, Circle,
     Surface, Plane, CylinderSurface, SphereSurface, ConeSurface, TorusSurface,
-    RevolutionSurface, ExtrusionSurface,
     Transform,
 };
 use std::f64::consts::PI;
@@ -283,7 +282,7 @@ impl ShapeBuilder {
     }
 
     /// Create a solid of revolution by revolving a profile curve around the Z axis.
-    pub fn make_revolution(profile: Curve3d, angle: f64) -> Solid {
+    pub fn make_revolution(profile: Curve3d, _angle: f64) -> Solid {
         let rev_surface = Surface::Revolution(draper_geometry::RevolutionSurface {
             profile,
             axis: Direction3d::Z,
@@ -298,7 +297,7 @@ impl ShapeBuilder {
     }
 
     /// Create a solid by extruding a profile curve along a direction.
-    pub fn make_extrusion(profile: Curve3d, direction: Direction3d, distance: f64) -> Solid {
+    pub fn make_extrusion(profile: Curve3d, direction: Direction3d, _distance: f64) -> Solid {
         let ext_surface = Surface::Extrusion(draper_geometry::ExtrusionSurface {
             profile,
             direction,

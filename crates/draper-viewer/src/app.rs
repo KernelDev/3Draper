@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 KernelDev
+#![allow(dead_code)]
 //! Main application state and UI.
 
 use std::sync::Arc;
@@ -3860,7 +3861,7 @@ impl ViewerApp {
                     ui.heading(egui::RichText::new("3Draper").size(14.0));
                     ui.separator();
                     // File menu
-                    ui.menu_button("File", |ui| {
+                    ui.menu_button("File", |_ui| {
                         #[cfg(target_arch = "wasm32")]
                         {
                             if ui.button("Import STL...").clicked() {

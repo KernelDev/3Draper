@@ -6,9 +6,8 @@
 //! - MANIFOLD_SOLID_BREP → CLOSED_SHELL → ADVANCED_FACE → FACE_BOUND → EDGE_LOOP → EDGE_CURVE
 //! - Geometry: PLANE, CYLINDRICAL_SURFACE, SPHERICAL_SURFACE, CONICAL_SURFACE, TOROIDAL_SURFACE
 
-use crate::schema::*;
 use draper_geometry::{Point3d, Direction3d, Surface};
-use draper_topology::{Solid, Shell, Face, Edge, Compound};
+use draper_topology::{Solid, Edge, Compound};
 use std::io::{self, Write};
 
 /// Export a solid to STEP AP203 format.
@@ -57,7 +56,7 @@ pub fn export_step(solid: &Solid, name: &str) -> String {
                 for coedge in &wire.coedges {
                     // Find the edge geometry
                     let edge = face.edges.iter().find(|e| e.id == coedge.edge);
-                    let (edge_curve_id, edge_start_vtx_id, edge_end_vtx_id) = if let Some(e) = edge {
+                    let (edge_curve_id, _edge_start_vtx_id, _edge_end_vtx_id) = if let Some(e) = edge {
                         export_edge(&mut out, e, &mut id)
                     } else {
                         // Create a dummy edge

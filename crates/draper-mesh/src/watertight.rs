@@ -22,7 +22,7 @@
 
 use crate::mesh::TriangleMesh;
 use crate::edge_cache::compute_adaptive_crease_angle;
-use draper_geometry::{Point3d, Surface};
+use draper_geometry::{Point3d};
 use draper_topology::Solid;
 use std::collections::HashMap;
 
@@ -195,10 +195,10 @@ pub fn validate_edge_consistency(mesh: &TriangleMesh, tolerance: f64) -> EdgeCon
     }
 
     // For interior edges (count >= 2), check vertex consistency
-    let tol_sq = tolerance * tolerance;
+    let _tol_sq = tolerance * tolerance;
     let face_ids = mesh.triangle_face_ids.as_deref();
 
-    for ((lo, hi), entries) in &edge_map {
+    for ((_lo, _hi), entries) in &edge_map {
         if entries.len() < 2 {
             continue; // Boundary edge — skip
         }
@@ -249,7 +249,7 @@ pub fn validate_edge_consistency(mesh: &TriangleMesh, tolerance: f64) -> EdgeCon
         // from a DIFFERENT face with close but not identical endpoints.
         // This indicates the edge cache produced slightly different positions.
         let near_miss_tol = tolerance.max(1e-6);
-        let near_miss_tol_sq = near_miss_tol * near_miss_tol;
+        let _near_miss_tol_sq = near_miss_tol * near_miss_tol;
 
         for (i, (edge_i, entries_i)) in boundary_edges.iter().enumerate() {
             let face_id_i = face_ids
@@ -328,8 +328,8 @@ pub fn validate_edge_consistency(mesh: &TriangleMesh, tolerance: f64) -> EdgeCon
         // Check pairs of boundary vertices from different faces
         for i in 0..boundary_vertex_info.len() {
             for j in (i+1)..boundary_vertex_info.len() {
-                let (vi, pi, fi) = &boundary_vertex_info[i];
-                let (vj, pj, fj) = &boundary_vertex_info[j];
+                let (_vi, pi, fi) = &boundary_vertex_info[i];
+                let (_vj, pj, fj) = &boundary_vertex_info[j];
                 if fi == fj && *fi != 0 { continue; } // Same face
                 let dx = pi.x - pj.x;
                 let dy = pi.y - pj.y;
@@ -747,7 +747,7 @@ pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64)
     log::warn!("WELD: {} vertices welded", weld_count);
 
     // Apply the welding: replace all vertex indices with their root
-    let mut root_map: Vec<u32> = (0..mesh.vertices.len() as u32)
+    let root_map: Vec<u32> = (0..mesh.vertices.len() as u32)
         .map(|i| find(&mut parent, i))
         .collect();
 

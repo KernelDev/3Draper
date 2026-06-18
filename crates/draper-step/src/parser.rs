@@ -33,7 +33,6 @@
 //! - Line number tracking: accurate error messages
 
 use crate::schema::*;
-use std::collections::HashMap;
 use std::io::BufRead;
 
 // ============================================================

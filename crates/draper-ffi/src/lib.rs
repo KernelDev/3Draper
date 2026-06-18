@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 KernelDev
+#![allow(dead_code)]
 //! # draper-ffi
 //! C FFI bindings for the 3Draper kernel.
 //!

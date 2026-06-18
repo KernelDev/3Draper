@@ -29,7 +29,6 @@
 //! ```
 
 use crate::mesh::TriangleMesh;
-use draper_geometry::Point3d;
 
 // ============================================================
 // GD&T check result types
@@ -618,8 +617,8 @@ mod tests {
         let segments = 16;
 
         // Top and bottom circles
-        let bottom_center = mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0));
-        let top_center = mesh.add_vertex(Point3d::new(0.0, 0.0, height));
+        let _bottom_center = mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0));
+        let _top_center = mesh.add_vertex(Point3d::new(0.0, 0.0, height));
 
         let mut bottom_verts = Vec::new();
         let mut top_verts = Vec::new();

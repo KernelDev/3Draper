@@ -10,6 +10,7 @@
 //! The domain is triangulated using earcutr with interior Steiner points,
 //! which is fast (O(n log n) typical) and handles holes natively.
 
+#![allow(dead_code)]
 use draper_geometry::{Point2d, Point3d, Surface};
 use crate::mesh::TriangleMesh;
 use crate::edge_cache::deterministic_round_point;
@@ -807,7 +808,7 @@ fn get_surface_v_range(surface: &Surface) -> (f64, f64) {
 fn split_at_u_seam(
     polygon: &[Point2d],
     points_3d: &[Point3d],
-    surface: &Surface,
+    _surface: &Surface,
     crossings: &[SeamCrossing],
     u_min: f64,
     u_max: f64,
@@ -930,7 +931,7 @@ fn split_at_u_seam(
 fn split_at_v_seam(
     polygon: &[Point2d],
     points_3d: &[Point3d],
-    surface: &Surface,
+    _surface: &Surface,
     crossings: &[VSeamCrossing],
     v_min: f64,
     v_max: f64,
@@ -2855,19 +2856,19 @@ fn refine_mesh_chord_error(
                 );
 
                 // Project midpoint onto the surface
-                let (u, v) = surface.project_point(&mid);
-                let p_surf = surface.point_at(u, v);
+                let (_u, _v) = surface.project_point(&mid);
+                let p_surf = surface.point_at(_u, _v);
 
                 // For NURBS surfaces, project_point can be inaccurate.
                 // Try Newton-Raphson refinement if the initial projection
                 // is far from the midpoint.
-                let (u, v, p_surf) = if let Surface::Nurbs(ref nurbs) = surface {
+                let (_u, _v, p_surf) = if let Surface::Nurbs(ref nurbs) = surface {
                     let dx0 = p_surf.x - mid.x;
                     let dy0 = p_surf.y - mid.y;
                     let dz0 = p_surf.z - mid.z;
                     let err0 = (dx0*dx0 + dy0*dy0 + dz0*dz0).sqrt();
                     if err0 > max_deviation * 0.1 {
-                        let (u2, v2) = reproject_nurbs_point(nurbs, &mid, u, v);
+                        let (u2, v2) = reproject_nurbs_point(nurbs, &mid, _u, _v);
                         let p2 = surface.point_at(u2, v2);
                         let dx2 = p2.x - mid.x;
                         let dy2 = p2.y - mid.y;
@@ -2876,13 +2877,13 @@ fn refine_mesh_chord_error(
                         if err2 < err0 {
                             (u2, v2, p2)
                         } else {
-                            (u, v, p_surf)
+                            (_u, _v, p_surf)
                         }
                     } else {
-                        (u, v, p_surf)
+                        (_u, _v, p_surf)
                     }
                 } else {
-                    (u, v, p_surf)
+                    (_u, _v, p_surf)
                 };
 
                 // Chord error: distance from line midpoint to surface point
@@ -3595,7 +3596,7 @@ mod tests {
 
     #[test]
     fn test_cylinder_with_hole() {
-        use draper_geometry::{CylinderSurface, Point3d, Surface};
+        use draper_geometry::{CylinderSurface, Surface};
 
         let cyl = CylinderSurface::new_z(5.0);
         let surface = Surface::Cylinder(cyl);
@@ -3730,7 +3731,7 @@ mod tests {
                 Point3d::new(5.0 * u.cos(), 5.0 * u.sin(), 10.0)
             })
             .collect();
-        let mut boundary_uv: Vec<Point2d> = (0..n_pts)
+        let boundary_uv: Vec<Point2d> = (0..n_pts)
             .map(|i| {
                 let u = 2.0 * PI * i as f64 / n_pts as f64;
                 Point2d::new(u, 10.0)

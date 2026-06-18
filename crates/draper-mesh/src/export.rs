@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 KernelDev
+#![allow(unused_assignments)]
 //! Export triangle meshes to modern file formats.
 //!
 //! Supports: glTF 2.0 (GLB), 3MF, OBJ, STL (ASCII & binary), and USD (stub).
@@ -755,8 +756,8 @@ fn export_usdc_binary(mesh: &TriangleMesh, path: &str) -> Result<(), ExportError
     // Then data sections
     // Then TOC (table of contents)
 
-    let magic = b"PXR-USDC";
-    let version: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 1]; // version 1
+    let _magic = b"PXR-USDC";
+    let _version: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 1]; // version 1
 
     // For simplicity, we write a minimal USDC that contains
     // the USDA as a "strings" section. This is the approach used
@@ -1307,15 +1308,11 @@ mod tests {
 
     #[test]
     fn test_usd_export_stub() {
+        // USD export is now fully implemented (USDA ASCII format).
+        // This test verifies it succeeds for a basic cube mesh.
         let mesh = make_cube();
         let result = export_usd(&mesh, "test.usda");
-        assert!(result.is_err());
-        match result {
-            Err(ExportError::UnsupportedFormat(msg)) => {
-                assert!(msg.contains("USD"));
-            }
-            _ => panic!("Expected UnsupportedFormat error"),
-        }
+        assert!(result.is_ok(), "USD export should succeed, got: {:?}", result.err());
     }
 
     #[test]

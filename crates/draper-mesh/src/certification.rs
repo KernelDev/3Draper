@@ -8,6 +8,9 @@
 //! - 5.2.3 Self-intersection check
 //! - 5.2.4 Mesh quality control (angles, aspect ratios, winding, duplicates)
 
+#![allow(unreachable_patterns)]
+
+#![allow(dead_code)]
 use crate::manifold::{check_manifold, ManifoldReport};
 use crate::mesh::TriangleMesh;
 use draper_geometry::{Point3d, Surface};

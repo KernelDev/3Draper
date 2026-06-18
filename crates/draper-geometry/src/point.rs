@@ -3,7 +3,7 @@
 //! 2D and 3D point types.
 
 use crate::tolerance::{ToleranceContext, TOLERANCE};
-use nalgebra::{Point3, Vector3};
+use nalgebra::Point3;
 use std::fmt;
 
 /// A point in 3D space.

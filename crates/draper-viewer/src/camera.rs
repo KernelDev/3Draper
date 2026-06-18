@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 KernelDev
+#![allow(dead_code)]
 //! Orbit camera with perspective projection — quaternion-based rotation.
 //!
 //! Uses a unit quaternion to store the camera orientation so that

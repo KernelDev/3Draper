@@ -41,7 +41,7 @@ repository = "https://github.com/KernelDev/3Draper"
 draper-geometry = { path = "crates/draper-geometry" }
 draper-topology = { path = "crates/draper-topology" }
 draper-step = { path = "crates/draper-step" }
-draper-mesh = { path = "crates/draper-mesh" }
+draper-mesh = { path = "crates/draper-mesh", default-features = false }
 draper-core = { path = "crates/draper-core" }
 draper-cloud = { path = "crates/draper-cloud" }
 draper-ai = { path = "crates/draper-ai" }

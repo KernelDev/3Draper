@@ -7,6 +7,7 @@
 //! and mesh output in various formats.
 
 #![warn(clippy::unwrap_used)]
+#![allow(ambiguous_glob_reexports)]
 
 pub mod mesh;
 pub mod triangulate;

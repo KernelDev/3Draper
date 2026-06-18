@@ -2,9 +2,8 @@
 // Copyright (c) 2026 KernelDev
 //! Parametric surfaces in 3D space.
 
-use crate::{Direction3d, Point3d, Point2d, Vec3d, Transform, curve::Curve3d};
+use crate::{Direction3d, Point3d, Vec3d, Transform, curve::Curve3d};
 use std::f64::consts::PI;
-use std::fmt;
 
 /// Bitflags indicating the type of degeneracy at a surface point.
 ///
@@ -1175,7 +1174,7 @@ impl Surface {
                 // NURBS surface: check for collapsed control point rows/columns
                 // A row of coincident control points indicates a degenerate edge
                 let (u_min, u_max) = nurbs.u_range();
-                let (v_min, v_max) = nurbs.v_range();
+                let (_v_min, _v_max) = nurbs.v_range();
 
                 // At the boundary of the knot domain, check if the boundary row/column
                 // is degenerate (all control points coincident)
@@ -1376,11 +1375,11 @@ impl Surface {
             },
             Surface::Torus(torus) => {
                 // Torus: k1 = cos(v)/(R + r*cos(v)), k2 = 1/r
-                let r = torus.minor_radius.max(1e-10);
-                let R = torus.major_radius;
-                let k2 = 1.0 / r;
+                let minor_r = torus.minor_radius.max(1e-10);
+                let major_r = torus.major_radius;
+                let k2 = 1.0 / major_r;
                 let k1 = {
-                    let denom = R + r * v.cos();
+                    let denom = major_r + minor_r * v.cos();
                     if denom.abs() > 1e-10 { v.cos() / denom } else { 0.0 }
                 };
                 let max_abs = k1.abs().max(k2.abs());
@@ -1390,7 +1389,7 @@ impl Surface {
                     k1, k2, max_abs,
                 }
             },
-            Surface::Nurbs(nurbs) => {
+            Surface::Nurbs(_nurbs) => {
                 // Fast NURBS curvature using only point_at (9 evaluations total)
                 // instead of 5 derivatives_at calls (5×87 = 435 de Boor iterations).
                 // Uses central-difference first and second derivatives from

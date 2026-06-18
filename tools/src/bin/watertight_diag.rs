@@ -6,7 +6,7 @@
 //! the merged mesh is not watertight.
 
 use draper_step::{parse_step, step_structure_lazy, StepConversionContext};
-use draper_mesh::{validate_watertight, TriangulationParams};
+use draper_mesh::validate_watertight;
 use std::collections::HashMap;
 
 fn main() {

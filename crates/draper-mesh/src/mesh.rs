@@ -5,7 +5,6 @@
 use draper_geometry::Point3d;
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::fmt;
 
 /// A bit-exact hash key for a 3D point, used for vertex deduplication.
 ///
@@ -736,7 +735,7 @@ impl TriangleMesh {
     pub fn merge_deduplicating(&mut self, other: &TriangleMesh, dedup_map: &mut VertexDedupMap) {
         // Save pre-merge counts for correct normals/triangle-attribute sizing
         let old_vertex_count = self.vertices.len();
-        let old_triangle_count = self.triangles.len();
+        let _old_triangle_count = self.triangles.len();
 
         // Build index remapping: other's local vertex index → global index
         let mut index_map: Vec<u32> = Vec::with_capacity(other.vertices.len());
