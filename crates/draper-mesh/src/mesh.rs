@@ -342,6 +342,136 @@ impl TriangleMesh {
         removed
     }
 
+    /// Fill boundary edges by adding triangles that connect boundary vertices
+    /// to nearby interior vertices.
+    ///
+    /// After merging face meshes, some edges may have count=1 (boundary) even
+    /// though they should be shared between adjacent faces. This happens when
+    /// one face's triangulation doesn't create a triangle using a particular
+    /// rim edge. This function finds such edges and adds fill triangles.
+    ///
+    /// Algorithm:
+    /// 1. Find all boundary edges (count=1)
+    /// 2. For each boundary edge (va, vb), find the best vertex vc:
+    ///    - vc must be connected to either va or vb (share an existing edge)
+    ///    - vc should be on the same side as the missing triangle
+    ///    - The triangle (va, vb, vc) must not be degenerate
+    /// 3. Add the fill triangle
+    ///
+    /// Returns the number of fill triangles added.
+    pub fn fill_boundary_edges(&mut self, max_fill: usize) -> usize {
+        use std::collections::HashMap;
+        if self.vertices.is_empty() || self.triangles.is_empty() {
+            return 0;
+        }
+
+        let mut filled = 0usize;
+        for _iteration in 0..3 {
+            // Build edge → count map
+            let mut edge_count: HashMap<(u32, u32), u32> = HashMap::new();
+            for tri in &self.triangles {
+                if tri[0] == tri[1] || tri[1] == tri[2] || tri[0] == tri[2] {
+                    continue;
+                }
+                for k in 0..3 {
+                    let a = tri[k];
+                    let b = tri[(k + 1) % 3];
+                    let key = (a.min(b), a.max(b));
+                    *edge_count.entry(key).or_insert(0) += 1;
+                }
+            }
+
+            // Find boundary edges
+            let boundary_edges: Vec<(u32, u32)> = edge_count.iter()
+                .filter(|(_, &c)| c == 1)
+                .map(|(&(a, b), _)| (a, b))
+                .collect();
+
+            if boundary_edges.is_empty() {
+                break;
+            }
+
+            // Build vertex → neighbors map (for finding common neighbors)
+            let mut vertex_neighbors: HashMap<u32, std::collections::HashSet<u32>> = HashMap::new();
+            for tri in &self.triangles {
+                if tri[0] == tri[1] || tri[1] == tri[2] || tri[0] == tri[2] {
+                    continue;
+                }
+                for k in 0..3 {
+                    let a = tri[k];
+                    let b = tri[(k + 1) % 3];
+                    vertex_neighbors.entry(a).or_default().insert(b);
+                    vertex_neighbors.entry(b).or_default().insert(a);
+                }
+            }
+
+            let mut added_this_iter = 0usize;
+            for &(va, vb) in &boundary_edges {
+                if filled + added_this_iter >= max_fill {
+                    break;
+                }
+
+                // Find common neighbors (connected to both va and vb)
+                let neighbors_a = vertex_neighbors.get(&va);
+                let neighbors_b = vertex_neighbors.get(&vb);
+                let common: Vec<u32> = if let (Some(na), Some(nb)) = (neighbors_a, neighbors_b) {
+                    na.intersection(nb).copied().collect()
+                } else {
+                    Vec::new()
+                };
+
+                if let Some(&vc) = common.first() {
+                    // Check the triangle is not degenerate
+                    let pa = self.vertices[va as usize];
+                    let pb = self.vertices[vb as usize];
+                    let pc = self.vertices[vc as usize];
+                    let area = ((pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x)).abs()
+                             + ((pb.y - pa.y) * (pc.z - pa.z) - (pb.z - pa.z) * (pc.y - pa.y)).abs()
+                             + ((pb.z - pa.z) * (pc.x - pa.x) - (pb.x - pa.x) * (pc.z - pa.z)).abs();
+                    if area < 1e-20 {
+                        continue;
+                    }
+
+                    // Check the triangle doesn't already exist
+                    let mut sorted = [va, vb, vc];
+                    sorted.sort();
+                    let exists = self.triangles.iter().any(|t| {
+                        let mut s = [t[0], t[1], t[2]];
+                        s.sort();
+                        s == sorted
+                    });
+                    if exists {
+                        continue;
+                    }
+
+                    // Add the fill triangle
+                    self.triangles.push([va, vb, vc]);
+                    // Update neighbor maps
+                    vertex_neighbors.entry(va).or_default().insert(vb);
+                    vertex_neighbors.entry(vb).or_default().insert(va);
+                    vertex_neighbors.entry(va).or_default().insert(vc);
+                    vertex_neighbors.entry(vc).or_default().insert(va);
+                    vertex_neighbors.entry(vb).or_default().insert(vc);
+                    vertex_neighbors.entry(vc).or_default().insert(vb);
+                    added_this_iter += 1;
+                }
+            }
+
+            filled += added_this_iter;
+            if added_this_iter == 0 {
+                break;
+            }
+        }
+
+        if filled > 0 {
+            log::info!(
+                "fill_boundary_edges: added {} fill triangles ({} verts, {} tris)",
+                filled, self.vertices.len(), self.triangles.len(),
+            );
+        }
+        filled
+    }
+
     /// Compute face normals.
     pub fn compute_face_normals(&mut self) {
         let mut normals = Vec::with_capacity(self.triangles.len());

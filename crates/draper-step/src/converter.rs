@@ -3475,6 +3475,31 @@ impl<'a> StepConverter<'a> {
             );
         }
 
+        // ─── Post-merge boundary edge filling ──────────────────────────
+        // DISABLED: The fill_boundary_edges function was adding triangles with
+        // wrong orientation, causing non-manifold edges and volume corruption.
+        // The proper fix is to ensure earcutr creates all rim edges during
+        // per-face triangulation, not to fill gaps post-merge.
+        /*
+        {
+            let max_fill = mesh.triangle_count() / 2;
+            let filled = mesh.fill_boundary_edges(max_fill);
+            if filled > 0 {
+                log::info!(
+                    "BREP #{} detailed: filled {} boundary edges ({} → {} tris)",
+                    brep_id, filled, mesh.triangle_count() - filled, mesh.triangle_count(),
+                );
+                let dup_after_fill = mesh.remove_duplicate_triangles();
+                if dup_after_fill > 0 {
+                    log::info!(
+                        "BREP #{} detailed: removed {} duplicate triangles after filling",
+                        brep_id, dup_after_fill,
+                    );
+                }
+            }
+        }
+        */
+
         // ─── Post-merge boundary vertex snapping (detailed path) ────────
         // DISABLED: snap_boundary_vertices with the world-placement-inflated
         // bbox creates massive numbers of duplicate triangles (301 on the bolt!)
