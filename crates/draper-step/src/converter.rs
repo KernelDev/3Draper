@@ -5286,21 +5286,131 @@ impl<'a> StepConverter<'a> {
                 };
                 let edge = if let Curve3d::Line(ref line) = curve {
                     // For lines, compute param range from vertex projections.
-                    // NOTE: We use the STEP LINE's own geometry (origin, direction)
-                    // rather than creating a new line from p1→p2, because some
-                    // STEP files have vertex points that don't lie on the curve
-                    // (e.g., nist_cylinder.stp has the top circle's vertex at
-                    // the circle center, not on the circle). The LINE's geometry
-                    // is authoritative; the vertex points are just hints for
-                    // computing the param_range.
-                    let t1 = project_point_on_line(line, p1);
-                    let t2 = project_point_on_line(line, p2);
-                    log::debug!("    EDGE_CURVE #{}: {} p1=({:.4},{:.4},{:.4}) p2=({:.4},{:.4},{:.4}) param=({:.6},{:.6})",
-                        edge_curve_id, curve_type_name, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, t1, t2);
-                    let mut edge = TopoEdge::new(curve, (t1, t2));
-                    edge.vertex_start = Some(draper_topology::TopoId::new());
-                    edge.vertex_end = Some(draper_topology::TopoId::new());
-                    edge
+                    //
+                    // ROBUSTNESS: First check whether both vertex points actually
+                    // lie on the STEP LINE (within a small tolerance). If they do,
+                    // we use the LINE's own geometry (origin, direction) and just
+                    // compute the param_range via projection — this is the standard
+                    // case for well-formed STEP files.
+                    //
+                    // If a vertex point does NOT lie on the LINE — which happens
+                    // in some hand-crafted or buggy STEP files where the LINE's
+                    // direction vector was set incorrectly (e.g., the test file
+                    // nist_chamfer_block.stp has chamfer edges with direction
+                    // (0,0,-1) when they should be (0,-0.7071,-0.7071)) — we
+                    // OVERRIDE the line geometry with a new line through the two
+                    // vertex points. The vertex positions are authoritative for
+                    // topology; the curve geometry is just a hint.
+                    //
+                    // DISAMBIGUATION: Some STEP files (e.g., nist_cylinder.stp)
+                    // intentionally have a vertex at the center of a circle rather
+                    // than on the circle itself — a "topologically degenerate"
+                    // vertex. For edges connecting to such a vertex, the LINE
+                    // geometry is correct and the vertex position is wrong. We
+                    // distinguish these cases by checking the ANGLE between the
+                    // line's direction and the vertex-to-vertex direction:
+                    //   - If the angle is small (< 30°), the line is mostly
+                    //     aligned with the vertices — the line is correct and
+                    //     the vertex is "off" for some other reason (degenerate).
+                    //   - If the angle is large (>= 30°), the line's direction
+                    //     is inconsistent with the vertices — the line is wrong
+                    //     and we should override.
+                    //
+                    // NOTE: This override is only for LINES. CIRCLES and other
+                    // curves retain the STEP curve's geometry (see comment above
+                    // about nist_cylinder.stp having a vertex at the circle center).
+                    let t1_proj = project_point_on_line(line, p1);
+                    let t2_proj = project_point_on_line(line, p2);
+                    let p1_on_line = line.point_at(t1_proj);
+                    let p2_on_line = line.point_at(t2_proj);
+                    let d1_sq = (p1_on_line.x - p1.x).powi(2)
+                        + (p1_on_line.y - p1.y).powi(2)
+                        + (p1_on_line.z - p1.z).powi(2);
+                    let d2_sq = (p2_on_line.x - p2.x).powi(2)
+                        + (p2_on_line.y - p2.y).powi(2)
+                        + (p2_on_line.z - p2.z).powi(2);
+                    // Tolerance: 1e-6 of the larger coordinate magnitude, with a
+                    // 1e-9 floor for tiny geometries. This is loose enough to
+                    // tolerate FP drift in CAD-exported files but tight enough
+                    // to catch genuinely wrong line directions.
+                    let coord_scale = p1.x.abs().max(p1.y.abs()).max(p1.z.abs())
+                        .max(p2.x.abs()).max(p2.y.abs()).max(p2.z.abs())
+                        .max(1.0);
+                    let tol_sq = (coord_scale * 1e-6).powi(2);
+
+                    // Decide whether to override the line.
+                    // - both_on_line: use line as-is (standard case)
+                    // - both_off_line: override (line is definitely wrong)
+                    // - one_off_line: check angle to decide
+                    let both_on_line = d1_sq <= tol_sq && d2_sq <= tol_sq;
+                    let both_off_line = d1_sq > tol_sq && d2_sq > tol_sq;
+                    let should_override = if both_on_line {
+                        false
+                    } else if both_off_line {
+                        true
+                    } else {
+                        // Exactly one vertex is off the line. Check the angle
+                        // between line direction and vertex-to-vertex direction.
+                        let v2v_x = p2.x - p1.x;
+                        let v2v_y = p2.y - p1.y;
+                        let v2v_z = p2.z - p1.z;
+                        let v2v_len = (v2v_x * v2v_x + v2v_y * v2v_y + v2v_z * v2v_z).sqrt();
+                        if v2v_len < 1e-12 {
+                            // Vertices coincide — can't compute angle, don't override
+                            false
+                        } else {
+                            // Dot product of unit vectors (line.direction is already unit)
+                            let dot = (line.direction.x * v2v_x
+                                + line.direction.y * v2v_y
+                                + line.direction.z * v2v_z) / v2v_len;
+                            // |dot| = cos(angle). If |dot| < cos(30°) ≈ 0.866,
+                            // the angle is > 30° → line direction is inconsistent.
+                            // Use abs because the line might be parametrized in
+                            // the opposite direction (which is fine).
+                            dot.abs() < 0.866
+                        }
+                    };
+
+                    if !should_override {
+                        // Use line geometry as-is
+                        log::debug!("    EDGE_CURVE #{}: {} p1=({:.4},{:.4},{:.4}) p2=({:.4},{:.4},{:.4}) param=({:.6},{:.6})",
+                            edge_curve_id, curve_type_name, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, t1_proj, t2_proj);
+                        let mut edge = TopoEdge::new(curve, (t1_proj, t2_proj));
+                        edge.vertex_start = Some(draper_topology::TopoId::new());
+                        edge.vertex_end = Some(draper_topology::TopoId::new());
+                        edge
+                    } else {
+                        // Override with line through vertices
+                        log::warn!(
+                            "    EDGE_CURVE #{}: LINE direction inconsistent with vertices (d1={:.2e}, d2={:.2e}, tol={:.2e}) — overriding with line through p1->p2",
+                            edge_curve_id, d1_sq.sqrt(), d2_sq.sqrt(), tol_sq.sqrt());
+                        if let Some(new_line) = draper_geometry::Line::through_points(*p1, *p2) {
+                            // Line::through_points normalizes the direction, so we
+                            // must use param_range = (0, |p2-p1|) to cover the full
+                            // edge. Using (0, 1) would only cover a unit-length
+                            // segment, which is shorter than the actual edge for
+                            // most geometries.
+                            let edge_len = ((p2.x - p1.x).powi(2)
+                                + (p2.y - p1.y).powi(2)
+                                + (p2.z - p1.z).powi(2)).sqrt();
+                            let mut edge = TopoEdge::new(
+                                Curve3d::Line(new_line),
+                                (0.0, edge_len),
+                            );
+                            edge.vertex_start = Some(draper_topology::TopoId::new());
+                            edge.vertex_end = Some(draper_topology::TopoId::new());
+                            edge
+                        } else {
+                            // Degenerate (vertices coincide) — fallback to original line
+                            log::warn!(
+                                "    EDGE_CURVE #{}: p1 and p2 coincide — falling back to original line",
+                                edge_curve_id);
+                            let mut edge = TopoEdge::new(curve, (t1_proj, t2_proj));
+                            edge.vertex_start = Some(draper_topology::TopoId::new());
+                            edge.vertex_end = Some(draper_topology::TopoId::new());
+                            edge
+                        }
+                    }
                 } else if let Curve3d::Circle(ref circle) = curve {
                     // For circles, compute angular range from vertex projections
                     let (t1, t2) = project_points_on_circle(circle, p1, p2);

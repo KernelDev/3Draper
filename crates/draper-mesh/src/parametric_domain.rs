@@ -1226,6 +1226,23 @@ pub fn generate_nurbs_interior_points(
     let (u_min, u_max, v_min, v_max) = domain.bounding_box();
     let mut points = Vec::new();
 
+    // STRICT INTERIOR: We must NOT generate Steiner points that lie on the
+    // boundary of the UV domain. If we do, those points become "phantom"
+    // vertices on shared edges that aren't reproduced by the adjacent
+    // planar face's triangulation, which produces boundary edges in the
+    // merged mesh (the planar face has only the corner vertices, while the
+    // NURBS face has corner + mid-edge Steiner points).
+    //
+    // We use a small tolerance relative to the UV bounding box size to
+    // exclude points within `tol` of any boundary edge.
+    let u_span = (u_max - u_min).max(1e-6);
+    let v_span = (v_max - v_min).max(1e-6);
+    let tol = (u_span.max(v_span) * 1e-6).max(1e-9);
+
+    // Build a slightly inset grid: skip the t=0 and t=1 endpoints of each
+    // knot span subdivision (those land on knot lines, which often coincide
+    // with the boundary). Use only interior t values (1/n_sub, 2/n_sub, ...,
+    // (n_sub-1)/n_sub).
     let u_knots_in_range: Vec<f64> = u_knots
         .iter()
         .filter(|&&k| k > u_min && k < u_max)
@@ -1249,34 +1266,109 @@ pub fn generate_nurbs_interior_points(
     }
     v_values.push(v_max);
 
+    // Use interior t values (1/n_sub ... (n_sub-1)/n_sub) plus knot values
+    // themselves. Knot values that are interior to the UV range are OK
+    // (they're inside the surface), but the bounding-box edges (u_min,
+    // u_max, v_min, v_max) must be skipped.
     let mut u_grid: Vec<f64> = Vec::new();
     for i in 0..u_values.len() - 1 {
-        for j in 0..n_sub {
-            let t = j as f64 / n_sub as f64;
-            u_grid.push(u_values[i] + t * (u_values[i + 1] - u_values[i]));
+        let span_lo = u_values[i];
+        let span_hi = u_values[i + 1];
+        let span_len = span_hi - span_lo;
+        if span_len <= tol {
+            continue;
         }
-    }
-    u_grid.push(u_max);
-
-    let mut v_grid: Vec<f64> = Vec::new();
-    for i in 0..v_values.len() - 1 {
-        for j in 0..n_sub {
-            let t = j as f64 / n_sub as f64;
-            v_grid.push(v_values[i] + t * (v_values[i + 1] - v_values[i]));
-        }
-    }
-    v_grid.push(v_max);
-
-    for &u in &u_grid {
-        for &v in &v_grid {
-            let pt = Point2d::new(u, v);
-            if domain.contains(&pt) {
-                points.push(pt);
+        // For each knot span, add n_sub-1 INTERIOR points (skip t=0 and t=1)
+        if n_sub <= 1 {
+            // n_sub == 1 means just the midpoint
+            u_grid.push(span_lo + 0.5 * span_len);
+        } else {
+            for j in 1..n_sub {
+                let t = j as f64 / n_sub as f64;
+                u_grid.push(span_lo + t * span_len);
             }
         }
     }
 
+    let mut v_grid: Vec<f64> = Vec::new();
+    for i in 0..v_values.len() - 1 {
+        let span_lo = v_values[i];
+        let span_hi = v_values[i + 1];
+        let span_len = span_hi - span_lo;
+        if span_len <= tol {
+            continue;
+        }
+        if n_sub <= 1 {
+            v_grid.push(span_lo + 0.5 * span_len);
+        } else {
+            for j in 1..n_sub {
+                let t = j as f64 / n_sub as f64;
+                v_grid.push(span_lo + t * span_len);
+            }
+        }
+    }
+
+    // Generate the Cartesian product of u_grid and v_grid, keeping only
+    // points that are STRICTLY INSIDE the domain (not on its boundary).
+    for &u in &u_grid {
+        for &v in &v_grid {
+            let pt = Point2d::new(u, v);
+            if !domain.contains(&pt) {
+                continue;
+            }
+            // Additional strict-interior check: skip if too close to any
+            // outer-boundary edge. This catches the case where the polygon
+            // is non-rectangular and a grid point lands exactly on a slanted
+            // boundary edge.
+            if is_point_on_boundary(&domain.outer_boundary, &pt, tol) {
+                continue;
+            }
+            let on_hole_boundary = domain.holes.iter()
+                .any(|hole| is_point_on_boundary(hole, &pt, tol));
+            if on_hole_boundary {
+                continue;
+            }
+            points.push(pt);
+        }
+    }
+
     points
+}
+
+/// Check if a 2D point lies on any edge of a polygon (within tolerance).
+fn is_point_on_boundary(polygon: &[Point2d], point: &Point2d, tol: f64) -> bool {
+    let n = polygon.len();
+    if n < 2 {
+        return false;
+    }
+    let tol_sq = tol * tol;
+    for i in 0..n {
+        let a = polygon[i];
+        let b = polygon[(i + 1) % n];
+        if distance_point_to_segment_sq(point, &a, &b) <= tol_sq {
+            return true;
+        }
+    }
+    false
+}
+
+/// Squared distance from a 2D point to a 2D line segment.
+fn distance_point_to_segment_sq(p: &Point2d, a: &Point2d, b: &Point2d) -> f64 {
+    let dx = b.u - a.u;
+    let dy = b.v - a.v;
+    let len_sq = dx * dx + dy * dy;
+    if len_sq < 1e-20 {
+        let dpx = p.u - a.u;
+        let dpy = p.v - a.v;
+        return dpx * dpx + dpy * dpy;
+    }
+    let t = ((p.u - a.u) * dx + (p.v - a.v) * dy) / len_sq;
+    let t = t.clamp(0.0, 1.0);
+    let cx = a.u + t * dx;
+    let cy = a.v + t * dy;
+    let ex = p.u - cx;
+    let ey = p.v - cy;
+    ex * ex + ey * ey
 }
 
 /// Downsample interior UV points to a budget using stride-based sampling.
