@@ -838,3 +838,90 @@ Stage Summary:
 - bolt.stp standalone: WATERTIGHT, vol=3196.51
 
 Commit: 9f08d7d — pushed to GitHub main
+
+---
+Task ID: 30
+Agent: Super Z (main agent)
+Task: Make all test STEP files open correctly (user: "Продолжай работать над тестовыми файлами. Они все должны открываться правильно.")
+
+Work Log:
+- User requested all test STEP files open correctly.
+- Built all_files_test.rs diagnostic tool that automatically enumerates all
+  .stp/.step files in test/ directory and reports watertightness status.
+- All 24 test files OPEN and CONVERT without crashes (0 errors).
+- Initial state: 15 watertight+ok, 9 leaky, 1 BAD.
+- Investigated nist_chamfer_block.stp (was BAD at 19.4%):
+  - Root cause: STEP file has buggy LINE direction vectors. The chamfer
+    edges use direction (0,0,-1) when they should be (0,-0.7071,-0.7071).
+  - Converter was using the LINE's geometry blindly, producing phantom
+    vertices at (0,0,10) instead of V8=(0,0,8).
+- Investigated nist_complex_surface.stp (was 19.2% leaky):
+  - Root cause: NURBS interior Steiner points included t=0 and t=1 of
+    each knot span, landing on the UV boundary. These became phantom
+    vertices on shared edges that adjacent planar faces didn't reproduce.
+- Fixed generate_nurbs_interior_points in parametric_domain.rs:
+  - Use only INTERIOR t values (1/n_sub ... (n_sub-1)/n_sub)
+  - Added is_point_on_boundary() check + distance_point_to_segment_sq()
+    helper to filter Steiner points too close to any boundary edge.
+- Fixed resolve_edge_curve in converter.rs for LINE handling:
+  - Added ROBUSTNESS check: if both vertices are off the line, OR if
+    exactly one is off and the angle between line direction and
+    vertex-to-vertex direction is > 30°, override the line geometry
+    with a new line through the vertices.
+  - This handles buggy test files (nist_chamfer_block) without breaking
+    nist_cylinder (which has a vertex at the circle center — a
+    "topologically degenerate" vertex that's correctly handled by
+    the 26.5° angle threshold).
+  - Override uses param_range = (0, |p2-p1|) to cover the full edge.
+- Added preprocessing to triangulate_3d_polygon_fallback:
+  - Removes consecutive duplicate points (within 1e-10 tolerance)
+  - Some STEP files have boundary curves producing duplicate points at
+    parametric transitions, which can confuse earcutr.
+- Fixed get_edge_curve_vertex_pair_3d in converter.rs:
+  - Was using entity.params.first() which returns the name string,
+    not the cartesian point ref. Now iterates through params to find
+    the first Ref.
+  - Restricted universal midpoint fallback to LINEs only (where chord
+    midpoint equals arc midpoint). For CIRCLEs, returning None is safer
+    than using chord midpoint (which would incorrectly alias different
+    arcs with the same endpoints).
+
+Stage Summary:
+Test file status (24 total):
+- 17 WATERTIGHT/ok:
+  * SampleCube.step, as1-oc-214.stp, as1-oc-214_bolt/nut/plate/rod.stp
+  * nist_assembly.stp, nist_block_with_hole.stp, nist_chamfer_block.stp (NEW)
+  * nist_complex_surface.stp (NEW), nist_cone.stp, nist_cube.stp
+  * nist_cylinder.stp, nist_sphere.stp
+  * brick_thin.stp, brick_thin_hole.stp, brick_thin_round.stp
+- 7 leaky (5-15% boundary edges):
+  * 3.05.078.stp (11.6%) - circular arc sharing issue
+  * 8394-121_Spit-Fire.STEP (13.1%) - large assembly
+  * 8500-02_Vulcan.STEP (9.1%) - large assembly
+  * Zentralstaender.stp (12.7%) - 34 BREPs, complex fillets
+  * compressor-13920_top.stp (13.1%) - complex fillets
+  * drill_top.stp (5.3%) - large assembly
+  * transmission_top.stp (6.6%) - very large (152 BREPs)
+- 0 BAD (was 1)
+- 0 errors (all files open and convert)
+
+Key improvements:
+1. NURBS interior Steiner points no longer include boundary points
+2. LINE direction override for buggy test files (with safe angle threshold)
+3. 3D polygon fallback deduplicates consecutive points
+4. Edge curve midpoint computation fixed for VERTEX_POINT parsing
+
+All 19 NIST tests pass, all 5 integration tests pass.
+All previously-watertight files remain watertight (no regressions).
+
+Commits pushed to GitHub main:
+- 6f66048: NURBS interior points exclude boundary + LINE direction override
+- b0975b9: dedup consecutive points in 3D polygon fallback
+- 4a47ffc: improve edge curve midpoint computation for LINEs
+
+Remaining work:
+- 7 leaky files have shared-curve issues (different EDGE_CURVE entities
+  for the same geometric boundary). The edge cache aliasing doesn't catch
+  these because the chord midpoint is the same for different arcs.
+- A proper fix would require evaluating each curve at multiple parameters
+  to distinguish genuinely different curves. This is complex and deferred.
