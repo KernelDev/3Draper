@@ -5541,9 +5541,20 @@ impl<'a> StepConverter<'a> {
     /// of the parameter range). For curves where we can't determine the
     /// midpoint, returns None.
     fn compute_edge_curve_midpoint(&self, edge_curve_id: i64) -> Option<Point3d> {
-        let ec_entity = self.step.find_entity(edge_curve_id)?;
+        // Use resolve_edge_curve to get a proper TopoEdge with the correct
+        // curve geometry and parameter range. This handles CIRCLEs, LINEs,
+        // and other curves correctly.
+        if let Some(edge) = self.resolve_edge_curve(edge_curve_id) {
+            // Evaluate at the parametric midpoint
+            let (t1, t2) = edge.param_range;
+            let mid_t = (t1 + t2) * 0.5;
+            if let Some(p) = edge.point_at(mid_t) {
+                return Some(p);
+            }
+        }
 
-        // Find the curve reference in the EDGE_CURVE params
+        // Fallback: try to find the curve entity and evaluate B_SPLINE midpoint
+        let ec_entity = self.step.find_entity(edge_curve_id)?;
         let mut curve_id: Option<i64> = None;
         for param in &ec_entity.params {
             if let Some(ref_id) = self.get_ref(param) {
@@ -5563,22 +5574,14 @@ impl<'a> StepConverter<'a> {
             }
         }
 
-        let curve_id = curve_id?;
-        // Resolve SURFACE_CURVE to its 3D curve
-        let curve_id = self.resolve_3d_curve_ref(curve_id).unwrap_or(curve_id);
-        let curve_entity = self.step.find_entity(curve_id)?;
-
-        // Try to extract a TopoEdge from the curve entity, then evaluate at t=0.5
-        if let Some(edge) = self.extract_edge_from_curve_entity(curve_id, &curve_entity) {
-            if let Some(p) = edge.point_at(0.5) {
-                return Some(p);
-            }
-        }
-
-        // Fallback: for B_SPLINE_CURVE, try to evaluate at the middle knot
-        if curve_entity.type_name.contains("B_SPLINE_CURVE") || curve_entity.type_name.contains("BSPLINE_CURVE") {
-            if let Some(mid) = self.evaluate_bspline_curve_at_midpoint(curve_id, &curve_entity) {
-                return Some(mid);
+        if let Some(curve_id) = curve_id {
+            let curve_id = self.resolve_3d_curve_ref(curve_id).unwrap_or(curve_id);
+            if let Some(curve_entity) = self.step.find_entity(curve_id) {
+                if curve_entity.type_name.contains("B_SPLINE_CURVE") || curve_entity.type_name.contains("BSPLINE_CURVE") {
+                    if let Some(mid) = self.evaluate_bspline_curve_at_midpoint(curve_id, &curve_entity) {
+                        return Some(mid);
+                    }
+                }
             }
         }
 
@@ -5594,13 +5597,18 @@ impl<'a> StepConverter<'a> {
         // This means some valid aliases (two STEP entities representing the
         // same CIRCLE arc) will be missed, but that's safer than incorrectly
         // aliasing different arcs.
-        if curve_entity.type_name == "LINE" {
-            if let Some((v1, v2)) = self.get_edge_curve_vertex_pair_3d(edge_curve_id) {
-                return Some(Point3d::new(
-                    (v1.x + v2.x) * 0.5,
-                    (v1.y + v2.y) * 0.5,
-                    (v1.z + v2.z) * 0.5,
-                ));
+        if let Some(curve_id) = curve_id {
+            let curve_id = self.resolve_3d_curve_ref(curve_id).unwrap_or(curve_id);
+            if let Some(curve_entity) = self.step.find_entity(curve_id) {
+                if curve_entity.type_name == "LINE" {
+                    if let Some((v1, v2)) = self.get_edge_curve_vertex_pair_3d(edge_curve_id) {
+                        return Some(Point3d::new(
+                            (v1.x + v2.x) * 0.5,
+                            (v1.y + v2.y) * 0.5,
+                            (v1.z + v2.z) * 0.5,
+                        ));
+                    }
+                }
             }
         }
 
