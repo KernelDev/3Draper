@@ -366,10 +366,12 @@ impl TriangleMesh {
         }
 
         let mut filled = 0usize;
-        for _iteration in 0..3 {
-            // Build edge → count map
-            let mut edge_count: HashMap<(u32, u32), u32> = HashMap::new();
-            for tri in &self.triangles {
+        for _iteration in 0..5 {
+            // Build edge → list of (triangle_index, edge_orientation) map
+            // edge_orientation: +1 if triangle has edge as (a, b), -1 if (b, a)
+            // This tells us which side of the edge the triangle is on.
+            let mut edge_info: HashMap<(u32, u32), Vec<(usize, i32)>> = HashMap::new();
+            for (ti, tri) in self.triangles.iter().enumerate() {
                 if tri[0] == tri[1] || tri[1] == tri[2] || tri[0] == tri[2] {
                     continue;
                 }
@@ -377,13 +379,15 @@ impl TriangleMesh {
                     let a = tri[k];
                     let b = tri[(k + 1) % 3];
                     let key = (a.min(b), a.max(b));
-                    *edge_count.entry(key).or_insert(0) += 1;
+                    // +1 if a < b (edge goes a→b in CCW order), -1 if reversed
+                    let orient = if a < b { 1 } else { -1 };
+                    edge_info.entry(key).or_default().push((ti, orient));
                 }
             }
 
-            // Find boundary edges
-            let boundary_edges: Vec<(u32, u32)> = edge_count.iter()
-                .filter(|(_, &c)| c == 1)
+            // Find boundary edges (used by exactly 1 triangle)
+            let boundary_edges: Vec<(u32, u32)> = edge_info.iter()
+                .filter(|(_, tris)| tris.len() == 1)
                 .map(|(&(a, b), _)| (a, b))
                 .collect();
 
@@ -391,7 +395,14 @@ impl TriangleMesh {
                 break;
             }
 
-            // Build vertex → neighbors map (for finding common neighbors)
+            if filled == 0 {
+                log::info!(
+                    "fill_boundary_edges: iteration starting with {} boundary edges ({} tris, {} verts)",
+                    boundary_edges.len(), self.triangles.len(), self.vertices.len(),
+                );
+            }
+
+            // Build vertex → neighbors map
             let mut vertex_neighbors: HashMap<u32, std::collections::HashSet<u32>> = HashMap::new();
             for tri in &self.triangles {
                 if tri[0] == tri[1] || tri[1] == tri[2] || tri[0] == tri[2] {
@@ -406,56 +417,195 @@ impl TriangleMesh {
             }
 
             let mut added_this_iter = 0usize;
+            let mut no_common_neighbor = 0usize;
+            let mut no_opposite_normal = 0usize;
+            let mut already_exists = 0usize;
+            let mut degenerate = 0usize;
+
+            // Build a spatial hash for efficient nearest-vertex queries.
+            // This allows the fill function to find vertices from ADJACENT faces
+            // (which don't share edges with the current face) to use as fill candidates.
+            //
+            // The cell size is based on the model's bounding box diagonal,
+            // ensuring we get a reasonable number of vertices per cell.
+            let bbox_min = self.vertices.iter().fold(
+                [f64::INFINITY; 3], |acc, v| [
+                    acc[0].min(v.x), acc[1].min(v.y), acc[2].min(v.z),
+                ]);
+            let bbox_max = self.vertices.iter().fold(
+                [f64::NEG_INFINITY; 3], |acc, v| [
+                    acc[0].max(v.x), acc[1].max(v.y), acc[2].max(v.z),
+                ]);
+            let diagonal = ((bbox_max[0] - bbox_min[0]).powi(2)
+                + (bbox_max[1] - bbox_min[1]).powi(2)
+                + (bbox_max[2] - bbox_min[2]).powi(2)).sqrt();
+            // Cell size: 5% of diagonal — small enough to find nearby vertices,
+            // large enough to keep the hash table small.
+            let cell_size = (diagonal * 0.05).max(1e-6);
+            let mut spatial: HashMap<(i64, i64, i64), Vec<u32>> = HashMap::new();
+            for (i, v) in self.vertices.iter().enumerate() {
+                let key = (
+                    (v.x / cell_size).floor() as i64,
+                    (v.y / cell_size).floor() as i64,
+                    (v.z / cell_size).floor() as i64,
+                );
+                spatial.entry(key).or_default().push(i as u32);
+            }
+
             for &(va, vb) in &boundary_edges {
                 if filled + added_this_iter >= max_fill {
                     break;
                 }
 
-                // Find common neighbors (connected to both va and vb)
-                let neighbors_a = vertex_neighbors.get(&va);
-                let neighbors_b = vertex_neighbors.get(&vb);
-                let common: Vec<u32> = if let (Some(na), Some(nb)) = (neighbors_a, neighbors_b) {
-                    na.intersection(nb).copied().collect()
-                } else {
-                    Vec::new()
+                // Get the existing triangle that uses this edge
+                let key = (va.min(vb), va.max(vb));
+                let existing = match edge_info.get(&key) {
+                    Some(v) if v.len() == 1 => v[0],
+                    _ => continue,
+                };
+                let (existing_ti, existing_orient) = existing;
+                let existing_tri = self.triangles[existing_ti];
+
+                // Find the third vertex of the existing triangle
+                let third = existing_tri.iter().copied().find(|&v| v != va && v != vb).unwrap_or(va);
+                let p_third = self.vertices[third as usize];
+
+                // Compute the normal of the existing triangle
+                let pa = self.vertices[va as usize];
+                let pb = self.vertices[vb as usize];
+                let existing_normal = {
+                    let e1 = (pb.x - pa.x, pb.y - pa.y, pb.z - pa.z);
+                    let e2 = (p_third.x - pa.x, p_third.y - pa.y, p_third.z - pa.z);
+                    (e1.1 * e2.2 - e1.2 * e2.1,
+                     e1.2 * e2.0 - e1.0 * e2.2,
+                     e1.0 * e2.1 - e1.1 * e2.0)
                 };
 
-                if let Some(&vc) = common.first() {
-                    // Check the triangle is not degenerate
-                    let pa = self.vertices[va as usize];
-                    let pb = self.vertices[vb as usize];
-                    let pc = self.vertices[vc as usize];
-                    let area = ((pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x)).abs()
-                             + ((pb.y - pa.y) * (pc.z - pa.z) - (pb.z - pa.z) * (pc.y - pa.y)).abs()
-                             + ((pb.z - pa.z) * (pc.x - pa.x) - (pb.x - pa.x) * (pc.z - pa.z)).abs();
-                    if area < 1e-20 {
-                        continue;
-                    }
+                // Find candidate fill vertices.
+                // Strategy: search the spatial hash for vertices near the midpoint
+                // of the boundary edge. These are likely from the adjacent face.
+                let mid = Point3d::new(
+                    (pa.x + pb.x) * 0.5,
+                    (pa.y + pb.y) * 0.5,
+                    (pa.z + pb.z) * 0.5,
+                );
+                let mid_key = (
+                    (mid.x / cell_size).floor() as i64,
+                    (mid.y / cell_size).floor() as i64,
+                    (mid.z / cell_size).floor() as i64,
+                );
 
-                    // Check the triangle doesn't already exist
-                    let mut sorted = [va, vb, vc];
-                    sorted.sort();
-                    let exists = self.triangles.iter().any(|t| {
-                        let mut s = [t[0], t[1], t[2]];
-                        s.sort();
-                        s == sorted
-                    });
-                    if exists {
-                        continue;
+                // Search a 5x5x5 neighborhood of cells around the midpoint
+                let mut candidates: Vec<u32> = Vec::new();
+                for dx in -2i64..=2 {
+                    for dy in -2i64..=2 {
+                        for dz in -2i64..=2 {
+                            let nk = (mid_key.0 + dx, mid_key.1 + dy, mid_key.2 + dz);
+                            if let Some(verts) = spatial.get(&nk) {
+                                candidates.extend(verts.iter().copied());
+                            }
+                        }
                     }
-
-                    // Add the fill triangle
-                    self.triangles.push([va, vb, vc]);
-                    // Update neighbor maps
-                    vertex_neighbors.entry(va).or_default().insert(vb);
-                    vertex_neighbors.entry(vb).or_default().insert(va);
-                    vertex_neighbors.entry(va).or_default().insert(vc);
-                    vertex_neighbors.entry(vc).or_default().insert(va);
-                    vertex_neighbors.entry(vb).or_default().insert(vc);
-                    vertex_neighbors.entry(vc).or_default().insert(vb);
-                    added_this_iter += 1;
                 }
+
+                // Filter candidates: exclude va, vb, and the existing third vertex
+                candidates.retain(|&v| v != va && v != vb && v != third);
+
+                if candidates.is_empty() {
+                    no_common_neighbor += 1;
+                    continue;
+                }
+
+                // Choose the vc whose triangle (va, vb, vc) has normal OPPOSITE
+                // to the existing triangle's normal AND is closest to the edge midpoint.
+                let mut best_vc: Option<u32> = None;
+                let mut best_score = f64::NEG_INFINITY; // Higher score = better
+
+                for &vc in &candidates {
+                    let pc = self.vertices[vc as usize];
+                    let fill_normal = {
+                        let e1 = (pb.x - pa.x, pb.y - pa.y, pb.z - pa.z);
+                        let e2 = (pc.x - pa.x, pc.y - pa.y, pc.z - pa.z);
+                        (e1.1 * e2.2 - e1.2 * e2.1,
+                         e1.2 * e2.0 - e1.0 * e2.2,
+                         e1.0 * e2.1 - e1.1 * e2.0)
+                    };
+                    // Dot product: if negative, normals are opposite (good)
+                    let dot = existing_normal.0 * fill_normal.0
+                            + existing_normal.1 * fill_normal.1
+                            + existing_normal.2 * fill_normal.2;
+
+                    // Only consider candidates with opposite normals
+                    if dot >= 0.0 {
+                        continue;
+                    }
+
+                    // Distance from vc to the edge midpoint (closer = better)
+                    let dist_sq = (pc.x - mid.x).powi(2)
+                        + (pc.y - mid.y).powi(2)
+                        + (pc.z - mid.z).powi(2);
+
+                    // Score: prefer opposite normals (more negative dot) and closer vertices
+                    // Use -dot (positive) - dist_sq (normalized)
+                    let score = -dot - dist_sq * 0.001; // Weight: normal direction matters more
+
+                    if score > best_score {
+                        best_score = score;
+                        best_vc = Some(vc);
+                    }
+                }
+
+                let vc = match best_vc {
+                    Some(v) => v,
+                    None => {
+                        no_opposite_normal += 1;
+                        continue;
+                    }
+                };
+
+                // Check the triangle is not degenerate
+                let pc = self.vertices[vc as usize];
+                let area = ((pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x)).abs()
+                         + ((pb.y - pa.y) * (pc.z - pa.z) - (pb.z - pa.z) * (pc.y - pa.y)).abs()
+                         + ((pb.z - pa.z) * (pc.x - pa.x) - (pb.x - pa.x) * (pc.z - pa.z)).abs();
+                if area < 1e-20 {
+                    degenerate += 1;
+                    continue;
+                }
+
+                // Check the triangle doesn't already exist
+                let mut sorted = [va, vb, vc];
+                sorted.sort();
+                let exists = self.triangles.iter().any(|t| {
+                    let mut s = [t[0], t[1], t[2]];
+                    s.sort();
+                    s == sorted
+                });
+                if exists {
+                    already_exists += 1;
+                    continue;
+                }
+
+                // Add the fill triangle with correct orientation.
+                if existing_orient > 0 {
+                    self.triangles.push([vb, va, vc]);
+                } else {
+                    self.triangles.push([va, vb, vc]);
+                }
+                // Update neighbor maps
+                vertex_neighbors.entry(va).or_default().insert(vb);
+                vertex_neighbors.entry(vb).or_default().insert(va);
+                vertex_neighbors.entry(va).or_default().insert(vc);
+                vertex_neighbors.entry(vc).or_default().insert(va);
+                vertex_neighbors.entry(vb).or_default().insert(vc);
+                vertex_neighbors.entry(vc).or_default().insert(vb);
+                added_this_iter += 1;
             }
+
+            log::info!(
+                "fill_boundary_edges: iter added {} (no_common={}, no_opposite={}, exists={}, degen={})",
+                added_this_iter, no_common_neighbor, no_opposite_normal, already_exists, degenerate,
+            );
 
             filled += added_this_iter;
             if added_this_iter == 0 {
@@ -465,7 +615,7 @@ impl TriangleMesh {
 
         if filled > 0 {
             log::info!(
-                "fill_boundary_edges: added {} fill triangles ({} verts, {} tris)",
+                "fill_boundary_edges: added {} fill triangles total ({} verts, {} tris)",
                 filled, self.vertices.len(), self.triangles.len(),
             );
         }

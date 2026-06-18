@@ -3170,6 +3170,21 @@ impl<'a> StepConverter<'a> {
 
                 if midpoint_groups.len() > 1 {
                     skipped_different_curves += step_ids.len() - midpoint_groups.iter().map(|(_, g)| g.len().min(1)).sum::<usize>();
+                    // Log details about skipped curves for diagnosis
+                    log::warn!(
+                        "BREP #{}: skipped {} step_ids at vertex_pair {:?} — {} midpoint groups (midpoint_tol={:.4})",
+                        brep_id,
+                        step_ids.len() - midpoint_groups.iter().map(|(_, g)| g.len().min(1)).sum::<usize>(),
+                        vp,
+                        midpoint_groups.len(),
+                        midpoint_tol,
+                    );
+                    for (i, (mid, group_sids)) in midpoint_groups.iter().enumerate() {
+                        log::warn!(
+                            "  group {}: mid=({:.4},{:.4},{:.4}) step_ids={:?}",
+                            i, mid.x, mid.y, mid.z, group_sids,
+                        );
+                    }
                 }
             }
             if alias_count > 0 || skipped_different_curves > 0 {
@@ -3476,13 +3491,13 @@ impl<'a> StepConverter<'a> {
         }
 
         // ─── Post-merge boundary edge filling ──────────────────────────
-        // DISABLED: The fill_boundary_edges function was adding triangles with
-        // wrong orientation, causing non-manifold edges and volume corruption.
-        // The proper fix is to ensure earcutr creates all rim edges during
-        // per-face triangulation, not to fill gaps post-merge.
+        // DISABLED: The fill function adds triangles using vertices from other
+        // faces, which creates overlapping triangles and non-manifold edges.
+        // The proper fix is to ensure the edge cache shares vertices between
+        // faces (via aliasing), not to fill gaps post-merge.
         /*
         {
-            let max_fill = mesh.triangle_count() / 2;
+            let max_fill = mesh.triangle_count();
             let filled = mesh.fill_boundary_edges(max_fill);
             if filled > 0 {
                 log::info!(
@@ -5432,16 +5447,25 @@ impl<'a> StepConverter<'a> {
             }
         }
 
-        // Fallback for LINE: midpoint = average of endpoints
-        if curve_entity.type_name == "LINE" {
-            // LINE has a point and a direction; the edge's start/end come from VERTEX_POINTs
-            if let Some((v1, v2)) = self.get_edge_curve_vertex_pair_3d(edge_curve_id) {
-                return Some(Point3d::new(
-                    (v1.x + v2.x) * 0.5,
-                    (v1.y + v2.y) * 0.5,
-                    (v1.z + v2.z) * 0.5,
-                ));
-            }
+        // UNIVERSAL FALLBACK: For ANY curve type where the above methods failed,
+        // use the average of the edge's two VERTEX_POINT endpoints.
+        //
+        // This is critical for aliasing: without a valid midpoint, the aliasing
+        // code can't group edges by midpoint, and shared edges with different
+        // STEP entity IDs won't be aliased — breaking watertightness.
+        //
+        // The vertex-point average is a rough approximation of the midpoint
+        // (it's the exact midpoint for lines, and a reasonable approximation
+        // for curves with symmetric parameterization). It's good enough for
+        // the aliasing midpoint check, which only needs to distinguish
+        // genuinely different curves (e.g., two half-circles on opposite
+        // sides of a circle).
+        if let Some((v1, v2)) = self.get_edge_curve_vertex_pair_3d(edge_curve_id) {
+            return Some(Point3d::new(
+                (v1.x + v2.x) * 0.5,
+                (v1.y + v2.y) * 0.5,
+                (v1.z + v2.z) * 0.5,
+            ));
         }
 
         None

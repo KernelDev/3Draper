@@ -2642,17 +2642,31 @@ pub fn triangulate_surface_consistent(
     // averaging, each midpoint costs just 1 surface.point_at() evaluation.
     // ============================================================
     if !matches!(surface, Surface::Plane(_)) && params.max_deviation > 0.0 {
-        // Use 1 refinement iteration for NURBS (2 for other curved surfaces).
-        // We now compute the initial interior point count adaptively based on
-        // curvature and parameter range, so the initial triangulation already
-        // meets the chord error tolerance. The single refinement iteration is
-        // a safety net for cases where the curvature estimate was off.
+        // Use 0 refinement iterations for NURBS, 2 for other curved surfaces.
         //
-        // Previously, 3 iterations were used, which caused triangle explosion
-        // on ruled NURBS surfaces (e.g., half-cylinder with V=0..45) — each
-        // iteration doubled the interior points, producing 8x more triangles
-        // than needed.
-        let max_refine_iters = if matches!(surface, Surface::Nurbs(_)) { 1 } else { 2 };
+        // NURBS chord-error refinement is DISABLED because:
+        // 1. The new vertices created by refinement (midpoint of split edges)
+        //    are computed via surface.point_at() and are NOT bit-identical
+        //    across adjacent faces, even though the boundary vertices ARE
+        //    bit-identical (via the edge cache).
+        // 2. Even though we now skip splitting any edge involving a boundary
+        //    vertex, the refinement still creates new interior vertices that
+        //    form edges with existing interior vertices. These edges are
+        //    interior to ONE face but appear as BREP boundary edges because
+        //    the adjacent face has different interior vertices.
+        // 3. The initial interior point generation is curvature-adaptive
+        //    (see Step 3 above), so it already adds enough Steiner points to
+        //    meet the chord error tolerance in most cases.
+        //
+        // For non-NURBS curved surfaces (cylinder, sphere, cone, torus,
+        // revolution, extrusion), the chord-error refinement is still useful
+        // because:
+        // 1. These surfaces are parameterized consistently (radians, distances)
+        // 2. The same UV midpoint produces bit-identical 3D points across faces
+        //    (since the surface evaluation is deterministic and the surfaces
+        //    are shared between faces via STEP's SURFACE entity)
+        // 3. The refinement creates vertices that ARE bit-identical across faces
+        let max_refine_iters = if matches!(surface, Surface::Nurbs(_)) { 0 } else { 2 };
 
         // Build vertex UV array — maps mesh vertex index to UV coordinate.
         // This enables O(1) midpoint UV computation instead of O(1000) project_point().
@@ -3076,21 +3090,30 @@ fn refine_mesh_chord_error_uv(
                     continue; // Already marked
                 }
 
-                // CRITICAL: Skip splitting edges between two boundary vertices.
-                // Boundary vertices come from the edge cache with bit-identical
-                // 3D coordinates across faces. Splitting a boundary-boundary edge
-                // creates a new midpoint vertex computed from surface.point_at(),
-                // which produces DIFFERENT f64 bits for each face. This new vertex
-                // can't be deduplicated, breaking watertightness.
+                // CRITICAL: Skip splitting ANY edge that involves a boundary vertex.
                 //
-                // The edge cache already ensures sufficient sampling on boundary
-                // edges (via adaptive_discretize). If chord error is too large
-                // on a boundary edge, the fix is to increase edge sampling, not
-                // to split the edge here.
+                // Boundary vertices come from the edge cache with bit-identical
+                // 3D coordinates across adjacent faces. If we split an edge
+                // (boundary_v, interior_v), the new midpoint vertex is computed
+                // from surface.point_at() — this produces DIFFERENT f64 bits for
+                // each face. The new vertex cannot be deduplicated across faces,
+                // and the new edges (boundary_v, new_v) and (new_v, interior_v)
+                // become BREP boundary edges, breaking watertightness.
+                //
+                // Visual quality near the boundary is preserved by:
+                // 1. The edge cache's adaptive_discretize — adds more boundary
+                //    points where curvature is high (already happens before
+                //    triangulation)
+                // 2. Curvature-adaptive interior Steiner points — add more
+                //    interior points where the surface is curved (already happens
+                //    in the initial interior point generation)
+                //
+                // The chord-error refinement here only adds density to the
+                // INTERIOR of the face, away from shared boundaries.
                 let v0_is_boundary = is_boundary_vertex.get(v0 as usize).copied().unwrap_or(false);
                 let v1_is_boundary = is_boundary_vertex.get(v1 as usize).copied().unwrap_or(false);
-                if v0_is_boundary && v1_is_boundary {
-                    continue; // Don't split boundary-boundary edges
+                if v0_is_boundary || v1_is_boundary {
+                    continue; // Don't split any edge involving a boundary vertex
                 }
 
                 // Compute midpoint UV by averaging — O(1) instead of O(1000)

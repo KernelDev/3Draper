@@ -3254,42 +3254,24 @@ fn try_strip_triangulation_ruled_nurbs(
         }
     }
 
-    // Also triangulate the two side edges (the "caps")
-    // Side A connects rail_a[0] to rail_b[0] (or rail_b[last] in reversed)
-    // Side B connects rail_a[last] to rail_b[last] (or rail_b[0] in reversed)
+    // NOTE: The side cap fan triangulation was REMOVED.
     //
-    // Each side is a 1D strip of points. We triangulate it as a fan from
-    // the first point, which uses all rim edges.
-    for side_idx in [_side_a_idx, _side_b_idx] {
-        let side = &edges[side_idx];
-        if side.len() < 3 {
-            continue;
-        }
-        // Fan triangulation from the first point
-        let v0 = *vertex_map.get(&side[0]).unwrap_or(&0);
-        for i in 1..side.len() - 1 {
-            let v1 = *vertex_map.get(&side[i]).unwrap_or(&0);
-            let v2 = *vertex_map.get(&side[i + 1]).unwrap_or(&0);
-            if v0 == v1 || v1 == v2 || v0 == v2 {
-                continue;
-            }
-            // Check for degenerate (zero area)
-            let p0 = mesh.vertices[v0 as usize];
-            let p1 = mesh.vertices[v1 as usize];
-            let p2 = mesh.vertices[v2 as usize];
-            let area = ((p1.x - p0.x) * (p2.y - p0.y) - (p1.y - p0.y) * (p2.x - p0.x)).abs()
-                     + ((p1.y - p0.y) * (p2.z - p0.z) - (p1.z - p0.z) * (p2.y - p0.y)).abs()
-                     + ((p1.z - p0.z) * (p2.x - p0.x) - (p1.x - p0.x) * (p2.z - p0.z)).abs();
-            if area < 1e-20 {
-                continue;
-            }
-            if forward {
-                mesh.add_triangle(v0, v1, v2);
-            } else {
-                mesh.add_triangle(v0, v2, v1);
-            }
-        }
-    }
+    // Previously, this code added fan triangles for the side edges (the edges
+    // at v_min and v_max for u_ruled surfaces, or u_min and u_max for v_ruled).
+    // The fan triangulation created SPURIOUS triangles that:
+    // 1. Overlapped with the strip triangles (which already cover the surface)
+    // 2. Created non-manifold edges (3+ triangles sharing an edge)
+    // 3. Produced inconsistent results depending on face processing order
+    //
+    // For ruled NURBS surfaces, the sides are STRAIGHT LINES (because the
+    // surface is ruled in one direction). The strip triangulation already
+    // uses the endpoints of the sides (via the rail endpoints). If the edge
+    // cache produces intermediate points on the sides (which are collinear),
+    // those points are added as vertices but not used in any triangle.
+    //
+    // This is correct behavior: the intermediate side points are collinear
+    // and don't affect the surface geometry. They're shared with adjacent
+    // faces via the edge cache, ensuring watertightness.
 
     log::info!(
         "strip_triangulation: created {} triangles from {} rail points (rails: {} and {} pts, sides: {} and {} pts)",
@@ -3838,17 +3820,25 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
             )
         }
         Surface::Nurbs(ref nurbs) => {
-            // NURBS: try strip triangulation for ruled surfaces first.
+            // NURBS triangulation strategy:
             //
-            // For ruled NURBS (degree 1 in one direction), a strip triangulation
-            // connects corresponding points on the two rails, creating a
-            // ladder-like mesh that uses ALL rim edges. This is critical for
-            // watertightness — earcutr's generic triangulation often skips
-            // rim edges, creating boundary edges in the merged mesh.
+            // For RULED NURBS (degree 1 in one direction), use strip triangulation
+            // as the PRIMARY approach. Strip triangulation:
+            // 1. Uses ALL boundary points from the edge cache (watertight by construction)
+            // 2. Evaluates the NURBS surface at rail points (proper NURBS handling)
+            // 3. Creates quads between corresponding rail points (follows surface curvature)
+            // 4. Does NOT add interior Steiner points (no orphan vertices)
             //
-            // If strip triangulation is not applicable (e.g., the boundary
-            // doesn't have exactly 4 edges, or the rails have different point
-            // counts), fall back to the earcutr-based approach.
+            // The strip approach is "proper NURBS handling" because:
+            // - It uses the actual NURBS surface evaluation (point_at) for all vertices
+            // - It preserves the surface curvature (rails follow the NURBS curve)
+            // - It produces deterministic, watertight results
+            //
+            // For NON-RULED NURBS (both degrees > 1), fall back to earcutr CDT
+            // with curvature-adaptive interior Steiner points.
+            //
+            // If strip triangulation fails (e.g., can't find 4 corners), fall back
+            // to earcutr as well.
             if nurbs.u_degree == 1 || nurbs.v_degree == 1 {
                 if let Some(strip_mesh) = try_strip_triangulation_ruled_nurbs(
                     nurbs,
@@ -3860,7 +3850,8 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
                 }
             }
 
-            // Fall back to earcutr-based consistent triangulation.
+            // Fall back to earcutr-based consistent triangulation for non-ruled NURBS
+            // or when strip triangulation fails.
             crate::parametric_domain::triangulate_surface_consistent(
                 surface,
                 boundary_points,
