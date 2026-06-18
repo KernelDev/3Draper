@@ -742,3 +742,68 @@ KEY IMPROVEMENTS:
 Remaining: 6 boundary edges per file (2 per face × 3 faces) — from side intermediate points
 not being used in triangles. These are collinear points that don't affect geometry.
 Volume matches STL references within 0.3%.
+
+---
+Task ID: 28
+Agent: Super Z (main agent)
+Task: Fix mesh holes in bolt — user reports visible holes when viewing bolt
+
+Work Log:
+- User feedback: "вот я нахожусь внутри bolt и явно дырки" (Session 23)
+- Built diagnostic tools: cache_diag.rs (verifies BREP cache hit/miss and mesh determinism), dump_boundary_edges.rs (dumps boundary edges to OBJ for inspection)
+- Ran cache_diag on as1-oc-214.stp: found that BREP#1190 (bolt) produced 6 instances with DIFFERENT volumes (2907, 2940, 2879, 3242, 3275, 3214) despite all having identical vertex/triangle counts (v=457, t=906)
+- Verified cache WAS being hit (logs show "using cached triangulation" for all 6 bolts)
+- Verified all transforms are rigid (det=1, bottom row identity) — volume-preserving
+- Determined volume variation was an ARTIFACT of the open-mesh volume formula
+  (the signed tetrahedra sum is only valid for closed meshes; with 12 boundary
+  edges, the formula's result depends on the mesh's position relative to origin)
+- Confirmed by comparing v0→v100 offset across instances: all matched (modulo
+  orientation flip for mirrored instances)
+- Ran dump_boundary_edges on BREP#1190: found 12 boundary edges, all clustered
+  around vertices v0, v1, v60, v61, v120, v174, v175 (the orphan vertices)
+- Inspected STRIP_BUILD log: "na=63 nb=61 n_quads=60" — rail A had 63 points,
+  rail B had 61 points, but only 60 quads were created
+- ROOT CAUSE: strip triangulation used n_quads = min(na, nb) - 1 = 60, leaving
+  the extra points on the longer rail (rail_a[61], rail_a[62]) as ORPHAN
+  VERTICES that were added to the mesh but never used in any triangle.
+- The edge cache discretizes each EDGE_CURVE independently using chord-error
+  adaptation, so two rails tracing geometrically equivalent curves can end up
+  with DIFFERENT point counts.
+
+Fix implemented (crates/draper-mesh/src/triangulate.rs):
+- RESAMPLE BOTH RAILS by arc length to a common count = max(na, nb)
+- Cumulative arc length computed in 3D, binary search for target length
+- Endpoints preserved bit-identically (corners shared with adjacent faces)
+- Interior points interpolated along rail polyline in 3D AND UV
+- For NURBS surfaces, interpolated points evaluated via nurbs.point_at(u, v)
+  — geometrically exact, no chord error
+- Added NurbsSurface::point_at() public method (was private via
+  nurbs_surface_eval) in crates/draper-geometry/src/surface.rs
+
+Stage Summary:
+ALL INSTANCES NOW WATERTIGHT with IDENTICAL volumes across instances:
+
+as1-oc-214.stp assembly:
+- bolt (BREP#1190): 6 instances, ALL WATERTIGHT, vol=3190.93 (STL=3195.63, 0.15% off)
+- nut (BREP#63): 8 instances, ALL WATERTIGHT, vol=663.32 (STL=664.74, 0.21% off)
+- rod (BREP#759): WATERTIGHT, vol=15688.98 (STL=15684.26, 0.03% off — excellent!)
+- l-bracket (BREP#1934): 2 instances, ALL WATERTIGHT, vol=96862.36
+- plate (BREP#3813): WATERTIGHT, vol=530586.92
+
+Standalone files:
+- as1-oc-214_bolt.stp: WATERTIGHT, vol=3196.47 (STL=3195.63, 0.03% off)
+- as1-oc-214_nut.stp: WATERTIGHT, vol=664.48 (STL=664.74, 0.04% off)
+- as1-oc-214_rod.stp: WATERTIGHT, vol=15691.70 (STL=15684.26, 0.05% off)
+- as1-oc-214_plate.stp: WATERTIGHT, vol=530584.96
+
+NIST primitives (still watertight):
+- nist_cube, nist_cylinder, nist_cone, nist_sphere, nist_block_with_hole: all WATERTIGHT ✓
+- nist_chamfer_block, nist_complex_surface: pre-existing topology issues (unrelated)
+
+Tests:
+- All 19 NIST tests pass
+- All 5 integration tests pass
+- All 9 triangulation tests pass
+- 93/95 draper-mesh tests pass (2 pre-existing gdt_check failures)
+
+Commit: e76510d — pushed to GitHub main
