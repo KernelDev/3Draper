@@ -5569,7 +5569,6 @@ impl<'a> StepConverter<'a> {
         let curve_entity = self.step.find_entity(curve_id)?;
 
         // Try to extract a TopoEdge from the curve entity, then evaluate at t=0.5
-        // We build a temporary edge from the curve entity.
         if let Some(edge) = self.extract_edge_from_curve_entity(curve_id, &curve_entity) {
             if let Some(p) = edge.point_at(0.5) {
                 return Some(p);
@@ -5578,31 +5577,31 @@ impl<'a> StepConverter<'a> {
 
         // Fallback: for B_SPLINE_CURVE, try to evaluate at the middle knot
         if curve_entity.type_name.contains("B_SPLINE_CURVE") || curve_entity.type_name.contains("BSPLINE_CURVE") {
-            // Extract control points and evaluate at t=0.5
             if let Some(mid) = self.evaluate_bspline_curve_at_midpoint(curve_id, &curve_entity) {
                 return Some(mid);
             }
         }
 
-        // UNIVERSAL FALLBACK: For ANY curve type where the above methods failed,
+        // UNIVERSAL FALLBACK: For LINEs (where chord midpoint == arc midpoint),
         // use the average of the edge's two VERTEX_POINT endpoints.
         //
-        // This is critical for aliasing: without a valid midpoint, the aliasing
-        // code can't group edges by midpoint, and shared edges with different
-        // STEP entity IDs won't be aliased — breaking watertightness.
+        // For CIRCLEs and other curves, the chord midpoint is NOT the arc
+        // midpoint — two different arcs with the same endpoints (e.g., two
+        // semicircles forming a full circle) would have the SAME chord
+        // midpoint and be incorrectly aliased. To avoid this, we return None
+        // for non-LINE curves when we can't compute the true arc midpoint.
         //
-        // The vertex-point average is a rough approximation of the midpoint
-        // (it's the exact midpoint for lines, and a reasonable approximation
-        // for curves with symmetric parameterization). It's good enough for
-        // the aliasing midpoint check, which only needs to distinguish
-        // genuinely different curves (e.g., two half-circles on opposite
-        // sides of a circle).
-        if let Some((v1, v2)) = self.get_edge_curve_vertex_pair_3d(edge_curve_id) {
-            return Some(Point3d::new(
-                (v1.x + v2.x) * 0.5,
-                (v1.y + v2.y) * 0.5,
-                (v1.z + v2.z) * 0.5,
-            ));
+        // This means some valid aliases (two STEP entities representing the
+        // same CIRCLE arc) will be missed, but that's safer than incorrectly
+        // aliasing different arcs.
+        if curve_entity.type_name == "LINE" {
+            if let Some((v1, v2)) = self.get_edge_curve_vertex_pair_3d(edge_curve_id) {
+                return Some(Point3d::new(
+                    (v1.x + v2.x) * 0.5,
+                    (v1.y + v2.y) * 0.5,
+                    (v1.z + v2.z) * 0.5,
+                ));
+            }
         }
 
         None
@@ -5617,9 +5616,15 @@ impl<'a> StepConverter<'a> {
                 if let Some(entity) = self.step.find_entity(ref_id) {
                     if entity.type_name == "VERTEX_POINT" {
                         // VERTEX_POINT('', #cartesian_point_ref)
-                        if let Some(cp_ref) = entity.params.first().and_then(|p| self.get_ref(p)) {
-                            if let Some(p) = self.resolve_cartesian_point(cp_ref) {
-                                points.push(p);
+                        // The cartesian_point_ref is the FIRST Ref param (not
+                        // necessarily params[0], which might be the name string).
+                        // Iterate through params to find the first Ref.
+                        for vp_param in &entity.params {
+                            if let Some(cp_ref) = self.get_ref(vp_param) {
+                                if let Some(p) = self.resolve_cartesian_point(cp_ref) {
+                                    points.push(p);
+                                    break; // Only need the first cartesian point ref
+                                }
                             }
                         }
                     }
