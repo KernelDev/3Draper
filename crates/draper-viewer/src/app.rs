@@ -13,9 +13,9 @@ use crate::renderer::{
 };
 use draper_core::engine::{EngineConfig, build_engine};
 use draper_topology::ShapeBuilder;
-use draper_mesh::{triangulate_solid, TriangleMesh, TriangulationParams, check_manifold, ManifoldReport, generate_3draper_text, cut_text_holes_in_mesh, TextSurface};
+use draper_mesh::{triangulate_solid, TriangleMesh, TriangulationParams, check_manifold, ManifoldReport, cut_text_holes_in_mesh, TextSurface};
 use draper_step::{AssemblyNode, DetailedMeshInstance, FaceInfo, PendingBrepInstance, OwnedStepConversionContext, StepFile, step_structure_lazy};
-use draper_geometry::{Surface, Point2d};
+use draper_geometry::Surface;
 use egui_wgpu::RenderState;
 use eframe::egui;
 
@@ -3871,6 +3871,10 @@ impl ViewerApp {
                                 self.trigger_step_file_input();
                                 ui.close_menu();
                             }
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            let _ = ui;
                         }
                     });
                     // View presets

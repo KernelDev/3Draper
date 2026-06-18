@@ -373,8 +373,8 @@ impl OrbitCamera {
         let (_vx, _vy, vw, vh) = viewport;
 
         // Normalized device coordinates [-1, 1]
-        let ndc_x = (2.0 * (screen_pos[0]) / vw - 1.0);
-        let ndc_y = (1.0 - 2.0 * (screen_pos[1]) / vh); // flip Y
+        let ndc_x = 2.0 * screen_pos[0] / vw - 1.0;
+        let ndc_y = 1.0 - 2.0 * screen_pos[1] / vh; // flip Y
 
         let aspect = vw / vh;
         let fov_rad = self.fov.to_radians();

@@ -205,7 +205,7 @@ impl Assembly {
                 self.root.transform = translation.multiply(&self.root.transform);
 
                 // Error is the remaining distance
-                let error_sq = dx * dx + dy * dy + dz * dz;
+                let _error_sq = dx * dx + dy * dy + dz * dz;
                 0.0 // Applied exactly
             }
 

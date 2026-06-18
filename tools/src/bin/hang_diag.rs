@@ -44,7 +44,7 @@ fn main() {
         let t2 = Instant::now();
         
         // Use a thread with timeout
-        let result = std::thread::scope(|s| {
+        let _result = std::thread::scope(|s| {
             let step_file_ref = &step_file;
             let pending_ref = p;
             let handle = s.spawn(move || {

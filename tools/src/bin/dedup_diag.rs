@@ -1,8 +1,7 @@
 //! Diagnose why vertices aren't being deduplicated across faces in a BREP.
 
 use draper_step::{parse_step, step_structure_lazy, StepConversionContext};
-use draper_mesh::{validate_watertight, mesh::VertexDedupMap};
-use draper_geometry::Point3d;
+use draper_mesh::validate_watertight;
 use std::collections::HashMap;
 
 fn main() {

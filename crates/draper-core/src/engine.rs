@@ -130,9 +130,9 @@ fn build_piston(config: &EngineConfig, cylinder_index: usize) -> Solid {
 fn build_crankshaft(config: &EngineConfig) -> Solid {
     let n = config.cylinder_count;
     let spacing = config.cylinder_spacing;
-    let crank_r = config.crank_radius;
+    let _crank_r = config.crank_radius;
     let main_journal_radius = 27.5;
-    let rod_journal_radius = 24.0;
+    let _rod_journal_radius = 24.0;
 
     let total_length = (n - 1) as f64 * spacing + spacing;
 
@@ -187,7 +187,7 @@ fn build_camshaft(config: &EngineConfig) -> Solid {
     let n = config.cylinder_count;
     let spacing = config.cylinder_spacing;
     let deck = config.deck_height;
-    let wall = config.wall_thickness;
+    let _wall = config.wall_thickness;
 
     let cam_radius = 15.0;
     let cam_length = (n - 1) as f64 * spacing + spacing;

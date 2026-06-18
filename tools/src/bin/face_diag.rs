@@ -188,7 +188,7 @@ fn main() {
 
         // Show first 5 duplicate groups
         let dups: Vec<_> = pos_to_indices.iter().filter(|(_, v)| v.len() > 1).take(5).collect();
-        for (key, indices) in dups {
+        for (_key, indices) in dups {
             let v = inst.mesh.vertices[indices[0] as usize];
             println!("  pos=({:.4},{:.4},{:.4}): indices={:?} ({} duplicates)",
                 v.x, v.y, v.z, indices, indices.len());

@@ -10,15 +10,12 @@
 //! Current implementation uses approximation for simple cases.
 
 use draper_geometry::{
-    Point3d, Direction3d, Vec3d,
-    Surface, Plane, CylinderSurface,
-    Transform,
+    Point3d, Direction3d,
+    Surface,
 };
 use draper_topology::{
-    Solid, Shell, Face, Wire, CoEdge, Edge, Vertex,
-    ShapeBuilder,
+    Solid, Shell,
 };
-use crate::operations;
 
 /// Result of a boolean operation.
 pub type BooleanResult = Result<Solid, String>;
@@ -72,7 +69,7 @@ pub fn boolean_subtract(a: &Solid, b: &Solid) -> BooleanResult {
 }
 
 /// Boolean intersection: keep only the overlap of A and B.
-pub fn boolean_intersect(a: &Solid, b: &Solid) -> BooleanResult {
+pub fn boolean_intersect(a: &Solid, _b: &Solid) -> BooleanResult {
     // Simplified: intersection is even harder than union/subtract
     // Would need full classification
 
@@ -107,7 +104,7 @@ pub fn point_in_solid(point: &Point3d, solid: &Solid) -> bool {
             if let Some(ref surface) = face.surface {
                 match surface {
                     Surface::Plane(plane) => {
-                        if let Some(hit) = draper_geometry::intersection::intersect_line_plane(&ray, plane) {
+                        if draper_geometry::intersection::intersect_line_plane(&ray, plane).is_some() {
                             // Check if hit point is within the face boundary
                             // Simplified: just count intersections
                             intersections += 1;

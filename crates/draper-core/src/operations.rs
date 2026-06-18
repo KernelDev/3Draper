@@ -3,18 +3,13 @@
 //! Modeling operations — fillet, chamfer, shell, offset, pattern.
 
 use draper_geometry::{
-    Point3d, Direction3d, Vec3d, Transform,
-    Curve3d, Line, Circle, Arc,
-    Surface, Plane, CylinderSurface,
+    Point3d, Direction3d, Transform,
 };
-use draper_topology::{
-    Solid, Shell, Face, Wire, CoEdge, Edge, Vertex,
-    ShapeBuilder,
-};
+use draper_topology::Solid;
 
 /// Fillet (round) an edge of a solid.
 /// This is a simplified implementation that creates a toroidal face.
-pub fn fillet_edge(solid: &mut Solid, _edge_index: usize, radius: f64) -> Result<(), String> {
+pub fn fillet_edge(_solid: &mut Solid, _edge_index: usize, _radius: f64) -> Result<(), String> {
     // Full fillet implementation requires:
     // 1. Finding the edge and its two adjacent faces
     // 2. Computing the rolling ball trajectory
@@ -28,13 +23,13 @@ pub fn fillet_edge(solid: &mut Solid, _edge_index: usize, radius: f64) -> Result
 }
 
 /// Chamfer an edge of a solid.
-pub fn chamfer_edge(solid: &mut Solid, _edge_index: usize, distance: f64) -> Result<(), String> {
+pub fn chamfer_edge(_solid: &mut Solid, _edge_index: usize, _distance: f64) -> Result<(), String> {
     log::warn!("Chamfer operation is simplified");
     Ok(())
 }
 
 /// Create a shell (hollow) from a solid by removing a face and offsetting.
-pub fn make_shell(solid: &mut Solid, thickness: f64) -> Result<(), String> {
+pub fn make_shell(_solid: &mut Solid, _thickness: f64) -> Result<(), String> {
     // A shell operation creates a hollow version of a solid
     // by offsetting all faces inward by `thickness`
     log::warn!("Shell operation is simplified");

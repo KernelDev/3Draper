@@ -54,10 +54,7 @@ fn main() {
             let report = validate_watertight(&inst.mesh, true);
             let (v, t, vol) = mesh_signature(&inst.mesh);
 
-            // Detect flipped triangles (inverted winding) by comparing face normal
-            // to geometric normal of triangle - if they point in opposite directions,
-            // the triangle is flipped.
-            let mut flipped_count = 0usize;
+            // Count degenerate triangles
             let mut zero_area_count = 0usize;
             let mut tiny_area_count = 0usize;
             for tri in &inst.mesh.triangles {
@@ -69,35 +66,60 @@ fn main() {
                 let nx = ey * fz - ez * fy;
                 let ny = ez * fx - ex * fz;
                 let nz = ex * fy - ey * fx;
-                let area = 0.5 * (nx*nx + ny*ny + nz*nz).sqrt();
-                if area < 1e-12 { zero_area_count += 1; continue; }
-                if area < 1e-6 { tiny_area_count += 1; }
-                // Triangle centroid
-                let cx = (v0.x + v1.x + v2.x) / 3.0;
-                let cy = (v0.y + v1.y + v2.y) / 3.0;
-                let cz = (v0.z + v1.z + v2.z) / 3.0;
-                // Vector from origin to centroid
-                let _ = (cx, cy, cz); // suppress unused
+                let area = 0.5 * (nx * nx + ny * ny + nz * nz).sqrt();
+                if area < 1e-12 {
+                    zero_area_count += 1;
+                    continue;
+                }
+                if area < 1e-6 {
+                    tiny_area_count += 1;
+                }
             }
 
-            println!("  inst #{}: name='{}' brep_id={} v={} t={} vol={:.4} bnd={} zero_a={} tiny_a={}",
-                i, inst.name.trim(), inst.brep_id, v, t, vol, report.boundary_edge_count,
-                zero_area_count, tiny_area_count);
-            let _ = flipped_count;
-            sigs_by_brep.entry(p.brep_id).or_default().push((i, v, t, vol, report.is_watertight()));
+            println!(
+                "  inst #{}: name='{}' brep_id={} v={} t={} vol={:.4} bnd={} zero_a={} tiny_a={}",
+                i,
+                inst.name.trim(),
+                inst.brep_id,
+                v,
+                t,
+                vol,
+                report.boundary_edge_count,
+                zero_area_count,
+                tiny_area_count
+            );
+            sigs_by_brep
+                .entry(p.brep_id)
+                .or_default()
+                .push((i, v, t, vol, report.is_watertight()));
         }
     }
 
     println!("\nCache determinism check (same brep_id should produce identical v/t/vol):");
     for (brep_id, sigs) in &sigs_by_brep {
-        if sigs.len() < 2 { continue; }
-        let (i0, v0, t0, vol0, wt0) = sigs[0];
-        let all_same = sigs.iter().all(|(_, v, t, vol, _)| *v == v0 && *t == t0 && (*vol - vol0).abs() < 1e-3);
+        if sigs.len() < 2 {
+            continue;
+        }
+        let (_, v0, t0, vol0, wt0) = sigs[0];
+        let all_same = sigs
+            .iter()
+            .all(|(_, v, t, vol, _)| *v == v0 && *t == t0 && (*vol - vol0).abs() < 1e-3);
         if all_same {
-            println!("  brep_id={}: {} instances, ALL IDENTICAL (v={}, t={}, vol={:.4}, wt={}) ✓",
-                brep_id, sigs.len(), v0, t0, vol0, wt0);
+            println!(
+                "  brep_id={}: {} instances, ALL IDENTICAL (v={}, t={}, vol={:.4}, wt={}) ✓",
+                brep_id,
+                sigs.len(),
+                v0,
+                t0,
+                vol0,
+                wt0
+            );
         } else {
-            println!("  brep_id={}: {} instances, NON-DETERMINISTIC:", brep_id, sigs.len());
+            println!(
+                "  brep_id={}: {} instances, NON-DETERMINISTIC:",
+                brep_id,
+                sigs.len()
+            );
             for (i, v, t, vol, wt) in sigs {
                 println!("    inst #{}: v={} t={} vol={:.4} wt={}", i, v, t, vol, wt);
             }

@@ -8,9 +8,6 @@ use draper_step::{parse_step, step_structure_lazy, StepConversionContext};
 use draper_mesh::{validate_watertight, TriangleMesh};
 use std::collections::HashMap;
 
-#[derive(Clone, Copy, Debug)]
-struct V3 { x: f64, y: f64, z: f64 }
-
 fn mesh_volume(mesh: &TriangleMesh) -> f64 {
     let mut vol = 0.0;
     for tri in &mesh.triangles {

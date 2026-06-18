@@ -198,6 +198,7 @@ pub struct DraperDocument {
 
 /// Opaque solid handle.
 pub struct DraperSolid {
+    #[allow(dead_code)]
     inner: Solid,
 }
 

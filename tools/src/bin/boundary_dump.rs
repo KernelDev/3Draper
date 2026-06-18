@@ -23,7 +23,7 @@ fn main() {
     println!("BREP #{} has {} faces, {} verts, {} tris",
         p.brep_id, inst.faces.len(), inst.mesh.vertex_count(), inst.mesh.triangle_count());
 
-    let face_ids = inst.mesh.triangle_face_ids.as_ref();
+    let _face_ids = inst.mesh.triangle_face_ids.as_ref();
     for (fi, face) in inst.faces.iter().enumerate().take(7) {
         let tris = face.triangle_range.1 - face.triangle_range.0;
         println!("\n=== Face {} (STEP #{}, surf={}) === tris={}, forward={}",

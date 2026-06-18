@@ -6,7 +6,6 @@
 
 use draper_step::{parse_step, step_structure_lazy, StepConversionContext};
 use draper_mesh::{validate_watertight, TriangleMesh};
-use std::collections::HashMap;
 
 fn mesh_volume(mesh: &TriangleMesh) -> f64 {
     let mut vol = 0.0;

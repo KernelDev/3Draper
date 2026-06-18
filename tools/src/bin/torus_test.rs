@@ -2,7 +2,6 @@
 // Copyright (c) 2026 KernelDev
 //! Test torus triangulation.
 
-use draper_geometry::{Point3d, Surface, TorusSurface};
 use draper_topology::ShapeBuilder;
 use draper_mesh::{triangulate_solid, validate_watertight};
 
