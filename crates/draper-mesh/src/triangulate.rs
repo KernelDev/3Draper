@@ -3251,33 +3251,140 @@ fn try_strip_triangulation_ruled_nurbs(
     let rail_a = &edges[rail_a_idx];
     let rail_b = &edges[rail_b_idx];
 
-    // Rails should have similar point counts. Allow differences up to 10
-    // (the edge cache's adaptive discretization can produce slightly different
-    // counts for curves with different parameterizations). We use the minimum
-    // count for the strip, so extra points on the longer rail are ignored
-    // (they become rim edges on the side caps).
-    if rail_a.len().abs_diff(rail_b.len()) > 10 {
-        log::debug!(
-            "strip_triangulation: rail point counts differ too much ({} vs {}) — skipping",
-            rail_a.len(), rail_b.len()
-        );
+    // ─── RESAMPLE RAILS TO COMMON COUNT ───────────────────────────────
+    //
+    // The edge cache discretizes each EDGE_CURVE independently using chord-error
+    // adaptation. Two rails that trace geometrically equivalent curves (e.g., the
+    // top and bottom edges of a cylinder's half-side) can therefore end up with
+    // DIFFERENT point counts (e.g., 63 vs 61). If we just take min(na, nb) - 1
+    // quads, the extra points on the longer rail become ORPHAN VERTICES that are
+    // added to the mesh but never used in any triangle. Those orphans create
+    // boundary edges (visible holes in the rendered mesh).
+    //
+    // To eliminate the orphans, we resample BOTH rails by arc length to a common
+    // count = max(na, nb). The resampled rails share endpoints with the originals
+    // (corners are preserved bit-identically), so watertightness with adjacent
+    // faces is maintained. Interior points are interpolated along the rail
+    // polyline; for NURBS surfaces the interpolation is along the surface's
+    // isoparametric curve, which is the geometrically correct thing to do.
+    let na_orig = rail_a.len();
+    let nb_orig = rail_b.len();
+
+    // Reverse rail_b so that rail_b[i] corresponds to rail_a[i] (going the same
+    // direction along the surface).
+    let rail_b_fwd: Vec<usize> = rail_b.iter().rev().copied().collect();
+
+    // Common count = max of the two rails. We always resample to this count so
+    // that quads are uniform and no vertices are orphaned.
+    let n_common = na_orig.max(nb_orig);
+    if n_common < 2 {
         return None;
     }
 
-    // Build the strip triangulation
-    // For each pair of corresponding points (rail_a[i], rail_b[i]), create
-    // a quad (rail_a[i], rail_b[i], rail_b[i+1], rail_a[i+1]) split into 2 triangles.
-    let na = rail_a.len();
-    let nb = rail_b.len();
-    let n_quads = na.min(nb).saturating_sub(1);
+    // Resample a polyline (Vec of boundary indices) to n target points by arc length.
+    // Returns a Vec of (Point3d, Point2d, original_boundary_index_or_None).
+    // If original_boundary_index is None, the point was interpolated and does not
+    // exist in the original boundary (we add it as a new mesh vertex).
+    let resample = |rail: &[usize], n: usize| -> Vec<(Point3d, Point2d, Option<usize>)> {
+        if rail.is_empty() {
+            return Vec::new();
+        }
+        if rail.len() == 1 || n == 1 {
+            let idx = rail[0];
+            return vec![(boundary_points[idx], boundary_uvs[idx], Some(idx))];
+        }
 
+        // Compute cumulative arc length along the rail (in 3D).
+        let mut cum_len = Vec::with_capacity(rail.len());
+        cum_len.push(0.0f64);
+        for i in 1..rail.len() {
+            let p_prev = boundary_points[rail[i - 1]];
+            let p_curr = boundary_points[rail[i]];
+            let dx = p_curr.x - p_prev.x;
+            let dy = p_curr.y - p_prev.y;
+            let dz = p_curr.z - p_prev.z;
+            let seg = (dx * dx + dy * dy + dz * dz).sqrt();
+            cum_len.push(cum_len[i - 1] + seg);
+        }
+        let total_len = *cum_len.last().unwrap();
+
+        let mut out: Vec<(Point3d, Point2d, Option<usize>)> = Vec::with_capacity(n);
+        for k in 0..n {
+            // Sample at evenly-spaced arc-length fractions.
+            // For k=0 → 0.0, for k=n-1 → 1.0 (exactly hits the endpoints).
+            let t = if n == 1 { 0.0 } else { k as f64 / (n - 1) as f64 };
+            let target_len = t * total_len;
+
+            // Find segment containing target_len.
+            // Use binary search on cum_len for efficiency.
+            let seg_idx = match cum_len.binary_search_by(|c| c.partial_cmp(&target_len).unwrap_or(std::cmp::Ordering::Equal)) {
+                Ok(i) => i, // Exact match — use the point directly
+                Err(i) => {
+                    if i == 0 {
+                        0
+                    } else if i >= rail.len() {
+                        rail.len() - 1
+                    } else {
+                        // target_len is between cum_len[i-1] and cum_len[i]
+                        i - 1
+                    }
+                }
+            };
+
+            // If exact match (within 1e-12), use the original point
+            if (cum_len[seg_idx] - target_len).abs() < 1e-12 {
+                let idx = rail[seg_idx];
+                out.push((boundary_points[idx], boundary_uvs[idx], Some(idx)));
+                continue;
+            }
+
+            // Interpolate within segment seg_idx → seg_idx+1
+            let seg_start_len = cum_len[seg_idx];
+            let seg_end_len = if seg_idx + 1 < cum_len.len() { cum_len[seg_idx + 1] } else { total_len };
+            let seg_len = seg_end_len - seg_start_len;
+            if seg_len < 1e-15 {
+                let idx = rail[seg_idx];
+                out.push((boundary_points[idx], boundary_uvs[idx], Some(idx)));
+                continue;
+            }
+            let local_t = (target_len - seg_start_len) / seg_len;
+            let idx_a = rail[seg_idx];
+            let idx_b = rail[(seg_idx + 1).min(rail.len() - 1)];
+            let pa = boundary_points[idx_a];
+            let pb = boundary_points[idx_b];
+            let ua = boundary_uvs[idx_a];
+            let ub = boundary_uvs[idx_b];
+            let p = Point3d::new(
+                pa.x + local_t * (pb.x - pa.x),
+                pa.y + local_t * (pb.y - pa.y),
+                pa.z + local_t * (pb.z - pa.z),
+            );
+            let uv = Point2d::new(
+                ua.u + local_t * (ub.u - ua.u),
+                ua.v + local_t * (ub.v - ua.v),
+            );
+            out.push((p, uv, None));
+        }
+        out
+    };
+
+    let rail_a_resampled = resample(rail_a, n_common);
+    let rail_b_resampled = resample(&rail_b_fwd, n_common);
+
+    log::warn!(
+        "STRIP_RESAMPLE: rail_a {}→{}, rail_b {}→{} (common={})",
+        na_orig, rail_a_resampled.len(), nb_orig, rail_b_resampled.len(), n_common
+    );
+
+    let n_quads = n_common.saturating_sub(1);
     if n_quads == 0 {
         return None;
     }
 
     let mut mesh = TriangleMesh::new();
 
-    // Add all boundary points as vertices
+    // Add all ORIGINAL boundary points as vertices (for watertightness with
+    // adjacent faces — they share these exact vertices via the edge cache).
     let mut vertex_map: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
     for (i, p) in boundary_points.iter().enumerate() {
         let vi = mesh.add_vertex(*p);
@@ -3288,22 +3395,60 @@ fn try_strip_triangulation_ruled_nurbs(
         vertex_map.insert(i, vi);
     }
 
-    // Create strip triangles
-    // Rail A goes from corner[0] to corner[1] (forward direction)
-    // Rail B goes from corner[2] to corner[3] (reversed direction relative to A)
-    // We need to reverse rail B so that rail_b[i] corresponds to rail_a[i]
-    let rail_b_reversed: Vec<usize> = rail_b.iter().rev().copied().collect();
+    // Add INTERPOLATED rail points as additional vertices.
+    // We do this so that the resampled rails can be referenced by mesh index.
+    // For NURBS-ruling this is geometrically correct: the interpolated points
+    // lie on the surface's isoparametric curve (since the rail is itself an
+    // isoparametric curve at constant u or v).
+    //
+    // IMPORTANT: For better surface fidelity, we evaluate the NURBS surface at
+    // the interpolated UV instead of just linearly interpolating the 3D point.
+    // This gives us the exact surface point (no chord error).
+    let mut rail_a_mesh_idx: Vec<u32> = Vec::with_capacity(n_common);
+    let mut rail_b_mesh_idx: Vec<u32> = Vec::with_capacity(n_common);
+
+    for k in 0..n_common {
+        // Rail A
+        let (p_a, uv_a, orig_a) = rail_a_resampled[k];
+        let vi_a = if let Some(orig) = orig_a {
+            *vertex_map.get(&orig).unwrap_or(&0)
+        } else {
+            // Evaluate the NURBS surface at the interpolated UV for exact surface point.
+            let p_exact = nurbs.point_at(uv_a.u, uv_a.v);
+            let vi = mesh.add_vertex(p_exact);
+            let derivs = nurbs.derivatives_at(uv_a.u, uv_a.v);
+            mesh.add_vertex_normal(vi, [derivs.normal().x, derivs.normal().y, derivs.normal().z]);
+            // Suppress unused-variable warning
+            let _ = p_a;
+            vi
+        };
+        rail_a_mesh_idx.push(vi_a);
+
+        // Rail B
+        let (p_b, uv_b, orig_b) = rail_b_resampled[k];
+        let vi_b = if let Some(orig) = orig_b {
+            *vertex_map.get(&orig).unwrap_or(&0)
+        } else {
+            let p_exact = nurbs.point_at(uv_b.u, uv_b.v);
+            let vi = mesh.add_vertex(p_exact);
+            let derivs = nurbs.derivatives_at(uv_b.u, uv_b.v);
+            mesh.add_vertex_normal(vi, [derivs.normal().x, derivs.normal().y, derivs.normal().z]);
+            let _ = p_b;
+            vi
+        };
+        rail_b_mesh_idx.push(vi_b);
+    }
 
     log::warn!(
-        "STRIP_BUILD: na={} nb={} n_quads={} rail_a[0..3]={:?} rail_b_rev[0..3]={:?}",
-        na, nb, n_quads, &rail_a[..3.min(rail_a.len())], &rail_b_reversed[..3.min(rail_b_reversed.len())]
+        "STRIP_BUILD: n_common={} n_quads={} rail_a_mesh[0..3]={:?} rail_b_mesh[0..3]={:?}",
+        n_common, n_quads, &rail_a_mesh_idx[..3.min(rail_a_mesh_idx.len())], &rail_b_mesh_idx[..3.min(rail_b_mesh_idx.len())]
     );
 
     for i in 0..n_quads {
-        let a0 = *vertex_map.get(&rail_a[i]).unwrap_or(&0);
-        let a1 = *vertex_map.get(&rail_a[i + 1]).unwrap_or(&0);
-        let b0 = *vertex_map.get(&rail_b_reversed[i]).unwrap_or(&0);
-        let b1 = *vertex_map.get(&rail_b_reversed[i + 1]).unwrap_or(&0);
+        let a0 = rail_a_mesh_idx[i];
+        let a1 = rail_a_mesh_idx[i + 1];
+        let b0 = rail_b_mesh_idx[i];
+        let b1 = rail_b_mesh_idx[i + 1];
 
         // Skip degenerate triangles
         if a0 == a1 || a0 == b0 || a0 == b1 || a1 == b0 || a1 == b1 || b0 == b1 {
@@ -3312,13 +3457,11 @@ fn try_strip_triangulation_ruled_nurbs(
 
         // Print first 2 and middle quad for debugging
         if i < 2 || i == n_quads / 2 {
-            let (a0_idx, a0_bpi) = (a0 as usize, rail_a[i]);
-            let (b0_idx, b0_bpi) = (b0 as usize, rail_b_reversed[i]);
-            let p_a0 = boundary_points[a0_bpi];
-            let p_b0 = boundary_points[b0_bpi];
+            let p_a0 = mesh.vertices[a0 as usize];
+            let p_b0 = mesh.vertices[b0 as usize];
             log::warn!(
-                "  quad {}: a0(mesh={}/bnd={})=({:.2},{:.2},{:.2}) b0(mesh={}/bnd={})=({:.2},{:.2},{:.2})",
-                i, a0_idx, a0_bpi, p_a0.x, p_a0.y, p_a0.z, b0_idx, b0_bpi, p_b0.x, p_b0.y, p_b0.z
+                "  quad {}: a0(mesh={})=({:.2},{:.2},{:.2}) b0(mesh={})=({:.2},{:.2},{:.2})",
+                i, a0, p_a0.x, p_a0.y, p_a0.z, b0, p_b0.x, p_b0.y, p_b0.z
             );
         }
 
@@ -3356,8 +3499,8 @@ fn try_strip_triangulation_ruled_nurbs(
     log::info!(
         "strip_triangulation: created {} triangles from {} rail points (rails: {} and {} pts, sides: {} and {} pts)",
         mesh.triangle_count(),
-        na.min(nb),
-        na, nb,
+        n_common,
+        na_orig, nb_orig,
         edges[_side_a_idx].len(),
         edges[_side_b_idx].len(),
     );

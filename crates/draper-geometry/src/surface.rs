@@ -823,6 +823,16 @@ impl NurbsSurface {
         }
     }
 
+    /// Evaluate the surface point at parameter (u, v) using de Boor's algorithm.
+    ///
+    /// This is the public entry point for `nurbs_surface_eval`. It exposes the
+    /// same tensor-product B-spline evaluation used internally by
+    /// `Surface::point_at(Surface::Nurbs(n), u, v)`, but without needing to
+    /// wrap the surface in the `Surface` enum.
+    pub fn point_at(&self, u: f64, v: f64) -> Point3d {
+        nurbs_surface_eval(self, u, v)
+    }
+
     /// Compute the surface point and first partial derivatives analytically.
     ///
     /// Uses the quotient rule for rational NURBS surfaces:
