@@ -29,7 +29,7 @@ use draper_geometry::{
     NurbsSurface, Curve3d, Curve2d, Line, Circle, Ellipse, Arc, NurbsCurve,
     Line2d, Circle2d, Ellipse2d, Nurbs2d,
 };
-use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary_and_holes_uv, ear_clip, validate_watertight, validate_edge_consistency, smooth_normals, smooth_normals_adaptive, filter_degenerate_triangles};
+use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary_and_holes_uv, ear_clip, validate_watertight, validate_edge_consistency, smooth_normals, smooth_normals_adaptive, filter_degenerate_triangles, weld_boundary_edge_vertices};
 use draper_topology::{Face, Wire, CoEdge, Edge as TopoEdge, Shell, Solid};
 use draper_topology::healing::{heal_solid, HealingParams, HealingReport};
 use draper_geometry::tolerance::ToleranceContext;
@@ -2931,6 +2931,26 @@ impl<'a> StepConverter<'a> {
         // Remove them before validation and snapping.
         filter_degenerate_triangles(&mut mesh, 1e-10);
 
+        // ─── Post-merge: weld boundary edge vertices ────────────────
+        // When two adjacent faces share a geometric edge but use different
+        // STEP EDGE_CURVE entities (e.g., a Plane face uses a full circle
+        // while a NURBS face uses a half-arc of the same circle), their
+        // discretizations produce slightly different vertex positions at
+        // the shared corners. This creates short boundary edges (holes) in
+        // the merged mesh.
+        //
+        // This step welds (merges) vertices connected by short boundary
+        // edges, fixing the seam mismatch without affecting interior
+        // vertices.
+        //
+        // Tolerance: 1% of model scale, capped at 1mm. This catches the
+        // typical seam mismatch (0.1-0.5mm) while being tight enough to
+        // not collapse distinct features.
+        {
+            let weld_tol = (tol_ctx.model_scale * 1e-2).min(1.0).max(1e-4);
+            weld_boundary_edge_vertices(&mut mesh, weld_tol);
+        }
+
         // ─── Post-merge boundary vertex snapping ────────────────────────
         // When the STEP file uses different VERTEX_POINT entities for the
         // same geometric boundary (e.g., Plane face uses LINE, NURBS face
@@ -3476,6 +3496,13 @@ impl<'a> StepConverter<'a> {
         // path was missing this call (only the non-detailed path had it), which
         // is why degenerate triangles appeared in the final mesh.
         filter_degenerate_triangles(&mut mesh, 1e-10);
+
+        // Weld boundary edge vertices to fix seam mismatches between
+        // adjacent faces using different EDGE_CURVE entities.
+        {
+            let weld_tol = (tol_ctx.model_scale * 1e-2).min(1.0).max(1e-4);
+            weld_boundary_edge_vertices(&mut mesh, weld_tol);
+        }
 
         // Remove duplicate triangles (same 3 vertex indices). These arise when
         // two STEP faces overlap geometrically and share the same edges — common

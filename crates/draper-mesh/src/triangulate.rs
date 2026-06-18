@@ -3043,9 +3043,48 @@ fn try_strip_triangulation_ruled_nurbs(
 ) -> Option<TriangleMesh> {
     use draper_geometry::{Point3d, Point2d};
 
+    log::warn!(
+        "STRIP_ENTER: bnd={} u_deg={} v_deg={} u_range=[{:.3},{:.3}] v_range=[{:.3},{:.3}]",
+        boundary_points.len(), nurbs.u_degree, nurbs.v_degree,
+        nurbs.u_knots.first().copied().unwrap_or(0.0),
+        nurbs.u_knots.last().copied().unwrap_or(0.0),
+        nurbs.v_knots.first().copied().unwrap_or(0.0),
+        nurbs.v_knots.last().copied().unwrap_or(0.0),
+    );
+
     if boundary_points.is_empty() || boundary_uvs.len() != boundary_points.len() {
+        log::warn!("STRIP_EXIT: empty boundary or length mismatch");
         return None;
     }
+
+    // Deduplicate consecutive boundary points (3D tolerance 1e-6).
+    // The converter skips dedup for NURBS, so the boundary may contain
+    // duplicate points at corners and along edges. These duplicates cause
+    // the strip to produce degenerate triangles (zero area, distinct indices)
+    // that get skipped during merging, leaving boundary edges.
+    // By deduplicating here, we ensure the strip works with unique points.
+    let mut deduped_points: Vec<Point3d> = Vec::with_capacity(boundary_points.len());
+    let mut deduped_uvs: Vec<Point2d> = Vec::with_capacity(boundary_uvs.len());
+    let mut orig_to_dedup: Vec<usize> = Vec::with_capacity(boundary_points.len());
+    for (i, p) in boundary_points.iter().enumerate() {
+        let is_dup = deduped_points.iter().rposition(|q| {
+            (q.x - p.x).abs() < 1e-6 && (q.y - p.y).abs() < 1e-6 && (q.z - p.z).abs() < 1e-6
+        });
+        match is_dup {
+            Some(idx) => orig_to_dedup.push(idx),
+            None => {
+                orig_to_dedup.push(deduped_points.len());
+                deduped_points.push(*p);
+                deduped_uvs.push(boundary_uvs[i]);
+            }
+        }
+    }
+    let boundary_points: &[Point3d] = &deduped_points;
+    let boundary_uvs: &[Point2d] = &deduped_uvs;
+    log::warn!(
+        "STRIP_DEDUP: {} → {} unique points",
+        orig_to_dedup.len(), deduped_points.len()
+    );
 
     // Identify the 4 edges of the boundary by finding "corners" — points where
     // the UV direction changes significantly.
@@ -3111,11 +3150,35 @@ fn try_strip_triangulation_ruled_nurbs(
     }
 
     if corner_indices.len() != 4 {
-        log::debug!(
-            "strip_triangulation: need 4 corners, found {} (u_range={:.3}, v_range={:.3}, u_tol={:.4}, v_tol={:.4}) — skipping",
-            corner_indices.len(), u_range, v_range, u_tol, v_tol
+        log::warn!(
+            "STRIP_FAIL: need 4 corners, found {} (u_range={:.3}, v_range={:.3}, u_tol={:.4}, v_tol={:.4}) corners={:?}",
+            corner_indices.len(), u_range, v_range, u_tol, v_tol, corner_indices
         );
         return None;
+    }
+    log::warn!("STRIP_CORNERS: found 4 corners at {:?}", corner_indices);
+    for (ci, &idx) in corner_indices.iter().enumerate() {
+        let p = &boundary_points[idx];
+        let uv = &boundary_uvs[idx];
+        log::warn!(
+            "  corner {}: idx={} pos=({:.3},{:.3},{:.3}) uv=({:.3},{:.3})",
+            ci, idx, p.x, p.y, p.z, uv.u, uv.v
+        );
+    }
+    // Print y-range of boundary points to detect cross-half contamination
+    let (y_min, y_max) = boundary_points.iter().fold((f64::MAX, f64::MIN), |(mn, mx), p| {
+        (mn.min(p.y), mx.max(p.y))
+    });
+    log::warn!("  boundary y-range: [{:.3}, {:.3}]", y_min, y_max);
+    // Print a few sample points from each rail
+    log::warn!("  rail_a samples (edge 2 = corner2→corner3):");
+    let n = boundary_points.len();
+    for offset in [0, 1, n/4, n/2, 3*n/4] {
+        let idx = corner_indices[2] + offset;
+        if idx < n {
+            let p = &boundary_points[idx];
+            log::warn!("    idx={} pos=({:.3},{:.3},{:.3})", idx, p.x, p.y, p.z);
+        }
     }
 
     // Split the boundary into 4 edges using the corners
@@ -3231,6 +3294,11 @@ fn try_strip_triangulation_ruled_nurbs(
     // We need to reverse rail B so that rail_b[i] corresponds to rail_a[i]
     let rail_b_reversed: Vec<usize> = rail_b.iter().rev().copied().collect();
 
+    log::warn!(
+        "STRIP_BUILD: na={} nb={} n_quads={} rail_a[0..3]={:?} rail_b_rev[0..3]={:?}",
+        na, nb, n_quads, &rail_a[..3.min(rail_a.len())], &rail_b_reversed[..3.min(rail_b_reversed.len())]
+    );
+
     for i in 0..n_quads {
         let a0 = *vertex_map.get(&rail_a[i]).unwrap_or(&0);
         let a1 = *vertex_map.get(&rail_a[i + 1]).unwrap_or(&0);
@@ -3240,6 +3308,18 @@ fn try_strip_triangulation_ruled_nurbs(
         // Skip degenerate triangles
         if a0 == a1 || a0 == b0 || a0 == b1 || a1 == b0 || a1 == b1 || b0 == b1 {
             continue;
+        }
+
+        // Print first 2 and middle quad for debugging
+        if i < 2 || i == n_quads / 2 {
+            let (a0_idx, a0_bpi) = (a0 as usize, rail_a[i]);
+            let (b0_idx, b0_bpi) = (b0 as usize, rail_b_reversed[i]);
+            let p_a0 = boundary_points[a0_bpi];
+            let p_b0 = boundary_points[b0_bpi];
+            log::warn!(
+                "  quad {}: a0(mesh={}/bnd={})=({:.2},{:.2},{:.2}) b0(mesh={}/bnd={})=({:.2},{:.2},{:.2})",
+                i, a0_idx, a0_bpi, p_a0.x, p_a0.y, p_a0.z, b0_idx, b0_bpi, p_b0.x, p_b0.y, p_b0.z
+            );
         }
 
         // Two triangles per quad:
@@ -3318,6 +3398,45 @@ fn triangulate_nurbs_cdt(face: &Face, surface: &Surface, params: &TriangulationP
     if holes_uvs.iter().any(|h| h.iter().any(|uv| !uv.u.is_finite() || !uv.v.is_finite())) {
         log::warn!("NURBS CDT fallback: hole UV NaN/Inf, using generic surface");
         return triangulate_generic_surface(face, surface, params, cache);
+    }
+
+    // For RULED NURBS (degree 1 in one direction) with NO holes, try strip
+    // triangulation FIRST. Strip triangulation:
+    // 1. Uses ALL boundary points from the edge cache (watertight by construction)
+    // 2. Evaluates the NURBS surface at rail points (proper NURBS handling)
+    // 3. Creates quads between corresponding rail points (follows surface curvature)
+    // 4. Does NOT add interior Steiner points (no orphan vertices, no cross-face
+    //    vertex contamination that earcutr+Steiner can cause)
+    //
+    // This is the PREFERRED path for ruled NURBS because earcutr+Steiner can
+    // produce triangles that span across the surface's intended domain when
+    // the boundary UV polygon has a specific shape (e.g., a rectangle in UV
+    // space that maps to a half-cylinder in 3D).
+    if holes_3d.is_empty() {
+        if let Surface::Nurbs(ref nurbs) = surface {
+            if nurbs.u_degree == 1 || nurbs.v_degree == 1 {
+                log::warn!(
+                    "NURBS_CDT: trying strip for face {} (u_deg={}, v_deg={}, bnd={})",
+                    face.id, nurbs.u_degree, nurbs.v_degree, boundary_3d.len()
+                );
+                if let Some(strip_mesh) = try_strip_triangulation_ruled_nurbs(
+                    nurbs,
+                    &boundary_3d,
+                    &boundary_uvs,
+                    face.forward,
+                ) {
+                    log::warn!(
+                        "NURBS_CDT: strip returned {} verts, {} tris",
+                        strip_mesh.vertices.len(), strip_mesh.triangles.len()
+                    );
+                    if !strip_mesh.vertices.is_empty() {
+                        return strip_mesh;
+                    }
+                } else {
+                    log::warn!("NURBS_CDT: strip returned None — falling back to earcutr");
+                }
+            }
+        }
     }
 
     // Use the earcutr-based consistent triangulation approach.

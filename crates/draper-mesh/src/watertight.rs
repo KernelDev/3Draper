@@ -591,6 +591,217 @@ fn triangle_area_3d(v0: &Point3d, v1: &Point3d, v2: &Point3d) -> f64 {
 // Vertex compaction — remove unused vertices after mesh surgery
 // ============================================================
 
+/// Weld (merge) vertices that are connected by short boundary edges.
+///
+/// This fixes the "seam mismatch" problem where two adjacent faces share
+/// a geometric edge but produce slightly different discretizations (e.g.,
+/// a plane face uses a full circle while a NURBS face uses a half-arc of
+/// the same circle). The resulting vertices are close but not identical,
+/// creating short boundary edges (holes) in the merged mesh.
+///
+/// Algorithm:
+/// 1. Find all boundary edges (edges used by only 1 triangle).
+/// 2. For each short boundary edge (length < weld_tolerance), find the
+///    closest vertex from another triangle that's within weld_tolerance.
+/// 3. Merge (weld) the two vertices — replace one index with the other
+///    in ALL triangles.
+/// 4. Remove degenerate triangles created by the welding.
+/// 5. Compact the vertex array.
+///
+/// This is SAFE because:
+/// - Only vertices connected by short boundary edges are candidates
+/// - The weld tolerance is small (typically 0.5mm or 0.1% of model scale)
+/// - Vertices farther apart are never merged
+pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64) {
+    use std::collections::{HashMap, HashSet};
+
+    if mesh.triangles.is_empty() || weld_tolerance <= 0.0 {
+        return;
+    }
+
+    let weld_tol_sq = weld_tolerance * weld_tolerance;
+
+    // Build edge → triangle count map
+    let mut edge_count: HashMap<(u32, u32), usize> = HashMap::new();
+    for tri in &mesh.triangles {
+        let a = tri[0];
+        let b = tri[1];
+        let c = tri[2];
+        for (v0, v1) in [(a, b), (b, c), (c, a)] {
+            let key = if v0 < v1 { (v0, v1) } else { (v1, v0) };
+            *edge_count.entry(key).or_insert(0) += 1;
+        }
+    }
+
+    // Find short boundary edges (count == 1, length < tolerance)
+    let mut short_boundary_edges: Vec<(u32, u32)> = Vec::new();
+    for (edge, &count) in &edge_count {
+        if count == 1 {
+            let v0 = mesh.vertices[edge.0 as usize];
+            let v1 = mesh.vertices[edge.1 as usize];
+            let dx = v1.x - v0.x;
+            let dy = v1.y - v0.y;
+            let dz = v1.z - v0.z;
+            let len_sq = dx * dx + dy * dy + dz * dz;
+            if len_sq < weld_tol_sq {
+                short_boundary_edges.push(*edge);
+            }
+        }
+    }
+
+    if short_boundary_edges.is_empty() {
+        return;
+    }
+
+    log::warn!(
+        "WELD: {} short boundary edges (tol={:.4}mm) — welding vertices",
+        short_boundary_edges.len(), weld_tolerance
+    );
+
+    // Build a spatial hash for vertex lookup
+    let cell_size = weld_tolerance;
+    let mut spatial: HashMap<(i64, i64, i64), Vec<u32>> = HashMap::new();
+    for (vi, v) in mesh.vertices.iter().enumerate() {
+        let cell = (
+            (v.x / cell_size).floor() as i64,
+            (v.y / cell_size).floor() as i64,
+            (v.z / cell_size).floor() as i64,
+        );
+        spatial.entry(cell).or_default().push(vi as u32);
+    }
+
+    // For each short boundary edge, find a nearby vertex to weld with
+    // Build a union-find structure for vertex merging
+    let mut parent: Vec<u32> = (0..mesh.vertices.len() as u32).collect();
+    fn find(parent: &mut Vec<u32>, x: u32) -> u32 {
+        let mut root = x;
+        while parent[root as usize] != root {
+            root = parent[root as usize];
+        }
+        // Path compression
+        let mut curr = x;
+        while parent[curr as usize] != root {
+            let next = parent[curr as usize];
+            parent[curr as usize] = root;
+            curr = next;
+        }
+        root
+    }
+
+    let mut weld_count = 0usize;
+    for (v0, v1) in &short_boundary_edges {
+        // Try to find a vertex near v1 (the "near-corner" point) that's
+        // NOT v0 or v1 itself. This would be the "exact corner" from
+        // another face's discretization.
+        let p1 = mesh.vertices[*v1 as usize];
+        let cell = (
+            (p1.x / cell_size).floor() as i64,
+            (p1.y / cell_size).floor() as i64,
+            (p1.z / cell_size).floor() as i64,
+        );
+
+        let mut best_match: Option<u32> = None;
+        let mut best_dist_sq = weld_tol_sq;
+
+        // Check current cell and 26 neighbors
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    let neighbor_cell = (cell.0 + dx, cell.1 + dy, cell.2 + dz);
+                    if let Some(candidates) = spatial.get(&neighbor_cell) {
+                        for &candidate in candidates {
+                            if candidate == *v0 || candidate == *v1 {
+                                continue;
+                            }
+                            let pc = mesh.vertices[candidate as usize];
+                            let dx = pc.x - p1.x;
+                            let dy = pc.y - p1.y;
+                            let dz = pc.z - p1.z;
+                            let dist_sq = dx * dx + dy * dy + dz * dz;
+                            if dist_sq < best_dist_sq {
+                                best_dist_sq = dist_sq;
+                                best_match = Some(candidate);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(target) = best_match {
+            // Weld v1 → target (merge v1 into target)
+            let root_v1 = find(&mut parent, *v1);
+            let root_target = find(&mut parent, target);
+            if root_v1 != root_target {
+                parent[root_v1 as usize] = root_target;
+                weld_count += 1;
+            }
+        }
+    }
+
+    if weld_count == 0 {
+        log::warn!("WELD: no vertices welded");
+        return;
+    }
+
+    log::warn!("WELD: {} vertices welded", weld_count);
+
+    // Apply the welding: replace all vertex indices with their root
+    let mut root_map: Vec<u32> = (0..mesh.vertices.len() as u32)
+        .map(|i| find(&mut parent, i))
+        .collect();
+
+    // Update all triangles
+    let mut removed_degenerate = 0usize;
+    let mut kept_tris = Vec::with_capacity(mesh.triangles.len());
+    let mut kept_face_ids = Vec::with_capacity(mesh.triangles.len());
+    let face_ids = mesh.triangle_face_ids.take();
+
+    for (ti, tri) in mesh.triangles.iter().enumerate() {
+        let a = root_map[tri[0] as usize];
+        let b = root_map[tri[1] as usize];
+        let c = root_map[tri[2] as usize];
+        if a == b || b == c || a == c {
+            removed_degenerate += 1;
+            continue;
+        }
+        kept_tris.push([a, b, c]);
+        if let Some(ref ids) = face_ids {
+            kept_face_ids.push(ids[ti]);
+        }
+    }
+
+    mesh.triangles = kept_tris;
+    mesh.triangle_face_ids = if kept_face_ids.is_empty() { None } else { Some(kept_face_ids) };
+
+    // Remove duplicate triangles (same 3 indices in any order)
+    let mut seen: HashSet<[u32; 3]> = HashSet::new();
+    let mut unique_tris = Vec::with_capacity(mesh.triangles.len());
+    let mut unique_ids = Vec::with_capacity(mesh.triangles.len());
+    let face_ids = mesh.triangle_face_ids.take();
+    for (ti, tri) in mesh.triangles.iter().enumerate() {
+        let mut sorted = [tri[0], tri[1], tri[2]];
+        sorted.sort();
+        if seen.insert(sorted) {
+            unique_tris.push(*tri);
+            if let Some(ref ids) = face_ids {
+                unique_ids.push(ids[ti]);
+            }
+        }
+    }
+    let dup_removed = mesh.triangles.len() - unique_tris.len();
+    mesh.triangles = unique_tris;
+    mesh.triangle_face_ids = if unique_ids.is_empty() { None } else { Some(unique_ids) };
+
+    log::warn!(
+        "WELD: removed {} degenerate + {} duplicate triangles after welding",
+        removed_degenerate, dup_removed
+    );
+
+    // Compact vertices
+    compact_vertices(mesh);
+}
+
 /// Remove unused vertices from the mesh and renumber indices.
 pub fn compact_vertices(mesh: &mut TriangleMesh) {
     // Find which vertices are used
