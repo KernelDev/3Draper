@@ -4709,7 +4709,7 @@ pub(crate) fn normalize_uv_polygon(boundary_uv: &mut [Point2d], u_period: Option
 }
 
 /// Get the period of the surface's u parameter, if periodic.
-fn surface_u_period(surface: &Surface) -> Option<f64> {
+pub(crate) fn surface_u_period(surface: &Surface) -> Option<f64> {
     match surface {
         Surface::Cylinder(_) | Surface::Cone(_) | Surface::Sphere(_) | Surface::Torus(_) | Surface::Revolution(_) => {
             Some(2.0 * PI)
@@ -4719,7 +4719,7 @@ fn surface_u_period(surface: &Surface) -> Option<f64> {
 }
 
 /// Get the period of the surface's v parameter, if periodic.
-fn surface_v_period(surface: &Surface) -> Option<f64> {
+pub(crate) fn surface_v_period(surface: &Surface) -> Option<f64> {
     match surface {
         Surface::Torus(_) => Some(2.0 * PI),
         _ => None,
@@ -4991,13 +4991,20 @@ fn triangulate_surface_uv_trimmed(
         }).collect()
     }).collect();
 
-    // 2. Normalize UV polygon for periodic surfaces
+    // 2. Normalize UV polygon for periodic surfaces.
+    // P3: Use PolyBoundary to bundle the polygon + periods together.
+    // This is the same normalize_uv_polygon call as before, just packaged
+    // so future callers don't have to thread u_period/v_period manually.
     let u_period = surface_u_period(surface);
     let v_period = surface_v_period(surface);
-    normalize_uv_polygon(&mut boundary_uv, u_period, v_period);
+    let mut outer_pb = crate::poly_boundary::PolyBoundary::with_periods(boundary_uv, u_period, v_period);
+    outer_pb.normalize();
+    boundary_uv = outer_pb.into_polygon();
     // Also normalize hole polygons
     for hole_uv in hole_uv_polylines.iter_mut() {
-        normalize_uv_polygon(hole_uv, u_period, v_period);
+        let mut hole_pb = crate::poly_boundary::PolyBoundary::with_periods(std::mem::take(hole_uv), u_period, v_period);
+        hole_pb.normalize();
+        *hole_uv = hole_pb.into_polygon();
     }
 
     // 3. Compute UV bounding box from BOTH outer and inner boundary points
