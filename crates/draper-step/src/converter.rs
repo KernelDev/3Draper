@@ -2715,41 +2715,15 @@ impl<'a> StepConverter<'a> {
             for (_vp, step_ids) in &vertex_pair_to_step_ids {
                 if step_ids.len() < 2 { continue; }
 
-                // Group step_ids by their curve midpoint (within tolerance).
-                // Two edges with the same vertex pair but different midpoints
-                // are DIFFERENT curves (e.g., two half-circles) and must NOT
-                // be aliased.
-                let midpoint_tol = (tol_ctx.model_scale * 1e-3).max(1e-6); // 1000 PPM of model scale
-                let mut midpoint_groups: Vec<(Point3d, Vec<i64>)> = Vec::new();
-                for &sid in step_ids {
-                    let mid = match self.compute_edge_curve_midpoint(sid) {
-                        Some(m) => m,
-                        None => {
-                            // Can't compute midpoint — treat as unique group
-                            midpoint_groups.push((Point3d::new(f64::NAN, f64::NAN, f64::NAN), vec![sid]));
-                            continue;
-                        }
-                    };
-                    // Find an existing group with a close midpoint
-                    let mut found_group = false;
-                    for (group_mid, group_sids) in midpoint_groups.iter_mut() {
-                        if group_mid.x.is_nan() { continue; }
-                        let dx = mid.x - group_mid.x;
-                        let dy = mid.y - group_mid.y;
-                        let dz = mid.z - group_mid.z;
-                        if (dx*dx + dy*dy + dz*dz).sqrt() <= midpoint_tol {
-                            group_sids.push(sid);
-                            found_group = true;
-                            break;
-                        }
-                    }
-                    if !found_group {
-                        midpoint_groups.push((mid, vec![sid]));
-                    }
-                }
+                // P2: Group by curve SHAPE using 5-point sampling (not just midpoint).
+                // Two edges with the same vertex pair but different shapes
+                // (e.g., two semicircles forming a full circle, or a LINE
+                // vs a B-spline approximating a line) must NOT be aliased.
+                let shape_tol = (tol_ctx.model_scale * 1e-3).max(1e-6); // 1000 PPM of model scale
+                let shape_groups = self.group_step_ids_by_curve_shape(step_ids, shape_tol);
 
-                // Alias within each midpoint group
-                for (_mid, group_sids) in &midpoint_groups {
+                // Alias within each shape group
+                for (_samples, group_sids) in &shape_groups {
                     if group_sids.len() < 2 { continue; }
                     let canonical = *group_sids.iter().max_by_key(|&&sid| {
                         self.edge_curve_complexity_score(sid)
@@ -2764,8 +2738,8 @@ impl<'a> StepConverter<'a> {
 
                 // Count groups with multiple step_ids that were NOT aliased
                 // (different curves sharing the same vertex pair)
-                if midpoint_groups.len() > 1 {
-                    skipped_different_curves += step_ids.len() - midpoint_groups.iter().map(|(_, g)| g.len().min(1)).sum::<usize>();
+                if shape_groups.len() > 1 {
+                    skipped_different_curves += step_ids.len() - shape_groups.iter().map(|(_, g)| g.len().min(1)).sum::<usize>();
                 }
             }
             if alias_count > 0 || skipped_different_curves > 0 {
@@ -3145,36 +3119,11 @@ impl<'a> StepConverter<'a> {
             for (vp, step_ids) in &vertex_pair_to_step_ids {
                 if step_ids.len() < 2 { continue; }
 
-                // CRITICAL: Group by curve midpoint to avoid aliasing two DIFFERENT
-                // curves that share the same endpoints (e.g., two half-circles).
-                let midpoint_tol = (tol_ctx.model_scale * 1e-3).max(1e-6);
-                let mut midpoint_groups: Vec<(Point3d, Vec<i64>)> = Vec::new();
-                for &sid in step_ids {
-                    let mid = match self.compute_edge_curve_midpoint(sid) {
-                        Some(m) => m,
-                        None => {
-                            midpoint_groups.push((Point3d::new(f64::NAN, f64::NAN, f64::NAN), vec![sid]));
-                            continue;
-                        }
-                    };
-                    let mut found_group = false;
-                    for (group_mid, group_sids) in midpoint_groups.iter_mut() {
-                        if group_mid.x.is_nan() { continue; }
-                        let dx = mid.x - group_mid.x;
-                        let dy = mid.y - group_mid.y;
-                        let dz = mid.z - group_mid.z;
-                        if (dx*dx + dy*dy + dz*dz).sqrt() <= midpoint_tol {
-                            group_sids.push(sid);
-                            found_group = true;
-                            break;
-                        }
-                    }
-                    if !found_group {
-                        midpoint_groups.push((mid, vec![sid]));
-                    }
-                }
+                // P2: Group by curve SHAPE using 5-point sampling.
+                let shape_tol = (tol_ctx.model_scale * 1e-3).max(1e-6);
+                let shape_groups = self.group_step_ids_by_curve_shape(step_ids, shape_tol);
 
-                for (_mid, group_sids) in &midpoint_groups {
+                for (_samples, group_sids) in &shape_groups {
                     if group_sids.len() < 2 { continue; }
                     let canonical = *group_sids.iter().max_by_key(|&&sid| {
                         self.edge_curve_complexity_score(sid)
@@ -3191,18 +3140,19 @@ impl<'a> StepConverter<'a> {
                     );
                 }
 
-                if midpoint_groups.len() > 1 {
-                    skipped_different_curves += step_ids.len() - midpoint_groups.iter().map(|(_, g)| g.len().min(1)).sum::<usize>();
+                if shape_groups.len() > 1 {
+                    skipped_different_curves += step_ids.len() - shape_groups.iter().map(|(_, g)| g.len().min(1)).sum::<usize>();
                     // Log details about skipped curves for diagnosis
                     log::warn!(
-                        "BREP #{}: skipped {} step_ids at vertex_pair {:?} — {} midpoint groups (midpoint_tol={:.4})",
+                        "BREP #{}: skipped {} step_ids at vertex_pair {:?} — {} shape groups (shape_tol={:.4})",
                         brep_id,
-                        step_ids.len() - midpoint_groups.iter().map(|(_, g)| g.len().min(1)).sum::<usize>(),
+                        step_ids.len() - shape_groups.iter().map(|(_, g)| g.len().min(1)).sum::<usize>(),
                         vp,
-                        midpoint_groups.len(),
-                        midpoint_tol,
+                        shape_groups.len(),
+                        shape_tol,
                     );
-                    for (i, (mid, group_sids)) in midpoint_groups.iter().enumerate() {
+                    for (i, (samples, group_sids)) in shape_groups.iter().enumerate() {
+                        let mid = samples.get(samples.len() / 2).copied().unwrap_or(Point3d::new(f64::NAN, f64::NAN, f64::NAN));
                         log::warn!(
                             "  group {}: mid=({:.4},{:.4},{:.4}) step_ids={:?}",
                             i, mid.x, mid.y, mid.z, group_sids,
@@ -3258,35 +3208,11 @@ impl<'a> StepConverter<'a> {
                 if step_ids.len() < 2 { continue; }
                 coord_groups_with_multiple += 1;
 
-                // Apply midpoint check (same as Phase 1)
-                let midpoint_tol = (tol_ctx.model_scale * 1e-3).max(1e-6);
-                let mut midpoint_groups: Vec<(Point3d, Vec<i64>)> = Vec::new();
-                for &sid in step_ids {
-                    let mid = match self.compute_edge_curve_midpoint(sid) {
-                        Some(m) => m,
-                        None => {
-                            midpoint_groups.push((Point3d::new(f64::NAN, f64::NAN, f64::NAN), vec![sid]));
-                            continue;
-                        }
-                    };
-                    let mut found_group = false;
-                    for (group_mid, group_sids) in midpoint_groups.iter_mut() {
-                        if group_mid.x.is_nan() { continue; }
-                        let dx = mid.x - group_mid.x;
-                        let dy = mid.y - group_mid.y;
-                        let dz = mid.z - group_mid.z;
-                        if (dx*dx + dy*dy + dz*dz).sqrt() <= midpoint_tol {
-                            group_sids.push(sid);
-                            found_group = true;
-                            break;
-                        }
-                    }
-                    if !found_group {
-                        midpoint_groups.push((mid, vec![sid]));
-                    }
-                }
+                // P2: Apply shape-based grouping (5-point sampling) — same as Phase 1
+                let shape_tol = (tol_ctx.model_scale * 1e-3).max(1e-6);
+                let shape_groups = self.group_step_ids_by_curve_shape(step_ids, shape_tol);
 
-                for (_mid, group_sids) in &midpoint_groups {
+                for (_samples, group_sids) in &shape_groups {
                     if group_sids.len() < 2 { continue; }
                     let canonical = *group_sids.iter().max_by_key(|&&sid| {
                         self.edge_curve_complexity_score(sid)
@@ -3299,8 +3225,8 @@ impl<'a> StepConverter<'a> {
                     }
                 }
 
-                if midpoint_groups.len() > 1 {
-                    coord_skipped_different_curves += step_ids.len() - midpoint_groups.iter().map(|(_, g)| g.len().min(1)).sum::<usize>();
+                if shape_groups.len() > 1 {
+                    coord_skipped_different_curves += step_ids.len() - shape_groups.iter().map(|(_, g)| g.len().min(1)).sum::<usize>();
                 }
             }
             log::info!(
@@ -5533,6 +5459,72 @@ impl<'a> StepConverter<'a> {
         0
     }
 
+    /// Group step_ids by curve shape using 5-point sampling along each curve.
+    ///
+    /// P2 improvement over the previous midpoint-only grouping: instead of
+    /// comparing just the parametric midpoint (1 point), we sample 5 interior
+    /// points at t = 0.1, 0.3, 0.5, 0.7, 0.9 and require ALL 5 (or as many
+    /// as we could compute) to match within tolerance.
+    ///
+    /// This catches:
+    /// - Two semicircles that share endpoints and midpoint (a single midpoint
+    ///   at t=0.5 lies on the diameter, which is the same for both arcs).
+    ///   The samples at t=0.1 and t=0.9 differ.
+    /// - Two B-spline curves that share endpoints and centroid but have
+    ///   different control polygons (different shape).
+    ///
+    /// Returns a Vec of (representative_sample_set, step_ids_in_group) pairs.
+    /// step_ids that couldn't be sampled (curve resolution failed) each get
+    /// their own group with an empty sample set — they will never be aliased.
+    fn group_step_ids_by_curve_shape(
+        &self,
+        step_ids: &[i64],
+        tol: f64,
+    ) -> Vec<(Vec<Point3d>, Vec<i64>)> {
+        let mut groups: Vec<(Vec<Point3d>, Vec<i64>)> = Vec::new();
+        for &sid in step_ids {
+            let samples = self.compute_edge_curve_sample_points(sid).unwrap_or_default();
+            // Find an existing group with matching samples.
+            // A "match" means: same number of samples AND every sample
+            // within `tol` of the corresponding group sample.
+            let mut found_group = false;
+            for (group_samples, group_sids) in groups.iter_mut() {
+                if group_samples.len() != samples.len() {
+                    continue;
+                }
+                if samples.is_empty() {
+                    // Both empty — treat as same group only if we're the
+                    // first one. Otherwise, isolated step_ids stay isolated.
+                    if group_sids.is_empty() {
+                        group_sids.push(sid);
+                        found_group = true;
+                        break;
+                    }
+                    continue;
+                }
+                let mut all_match = true;
+                for (a, b) in samples.iter().zip(group_samples.iter()) {
+                    let dx = a.x - b.x;
+                    let dy = a.y - b.y;
+                    let dz = a.z - b.z;
+                    if (dx * dx + dy * dy + dz * dz).sqrt() > tol {
+                        all_match = false;
+                        break;
+                    }
+                }
+                if all_match {
+                    group_sids.push(sid);
+                    found_group = true;
+                    break;
+                }
+            }
+            if !found_group {
+                groups.push((samples, vec![sid]));
+            }
+        }
+        groups
+    }
+
     /// Compute the 3D midpoint of an EDGE_CURVE's underlying curve.
     ///
     /// This is used to distinguish between two DIFFERENT curves that share
@@ -5616,6 +5608,142 @@ impl<'a> StepConverter<'a> {
         }
 
         None
+    }
+
+    /// Sample 5 interior points along an edge curve at t = 0.1, 0.3, 0.5, 0.7, 0.9.
+    ///
+    /// Used by Phase 1 aliasing to compare edges by their full shape, not just
+    /// the midpoint. Two CIRCLE arcs that share endpoints but go in opposite
+    /// directions (e.g., two semicircles forming a full circle) have the same
+    /// midpoint but different sample points at t=0.1, 0.3, 0.7, 0.9.
+    ///
+    /// Returns `None` if no samples can be computed (e.g., the curve entity
+    /// cannot be resolved or `point_at` fails for all 5 parameters). Returns
+    /// fewer than 5 points if some evaluations fail (callers should treat
+    /// `None` as "unknown" and `Some(vec)` of any length as a usable signature).
+    ///
+    /// For LINEs (where samples are determined by endpoints), this still works
+    /// correctly — two LINEs with the same endpoints produce identical samples.
+    fn compute_edge_curve_sample_points(&self, edge_curve_id: i64) -> Option<Vec<Point3d>> {
+        // Primary path: use resolve_edge_curve to get a proper TopoEdge.
+        if let Some(edge) = self.resolve_edge_curve(edge_curve_id) {
+            let (t1, t2) = edge.param_range;
+            // Avoid degenerate param_range (zero-length edge).
+            if (t2 - t1).abs() < 1e-15 {
+                return None;
+            }
+            let mut samples: Vec<Point3d> = Vec::with_capacity(5);
+            for &frac in &[0.1, 0.3, 0.5, 0.7, 0.9] {
+                let t = t1 + (t2 - t1) * frac;
+                if let Some(p) = edge.point_at(t) {
+                    samples.push(p);
+                }
+            }
+            if !samples.is_empty() {
+                return Some(samples);
+            }
+        }
+
+        // Fallback: B_SPLINE_CURVE — compute 5 sample points from control
+        // point polygon by interpolating at the same fractions. This is a
+        // coarse approximation but sufficient for aliasing (we just need
+        // a stable signature that distinguishes different curves).
+        let ec_entity = self.step.find_entity(edge_curve_id)?;
+        let mut curve_id: Option<i64> = None;
+        for param in &ec_entity.params {
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(entity) = self.step.find_entity(ref_id) {
+                    match entity.type_name.as_str() {
+                        "B_SPLINE_CURVE_WITH_KNOTS" | "BSPLINE_CURVE_WITH_KNOTS" |
+                        "B_SPLINE_CURVE" | "BSPLINE_CURVE" |
+                        "RATIONAL_B_SPLINE_CURVE" | "RATIONAL_BSPLINE_CURVE" |
+                        "CIRCLE" | "ARC" | "ELLIPSE" | "TRIMMED_CURVE" | "LINE" |
+                        "SURFACE_CURVE" => {
+                            curve_id = Some(ref_id);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        if let Some(curve_id) = curve_id {
+            let curve_id = self.resolve_3d_curve_ref(curve_id).unwrap_or(curve_id);
+            if let Some(curve_entity) = self.step.find_entity(curve_id) {
+                if curve_entity.type_name.contains("B_SPLINE_CURVE")
+                    || curve_entity.type_name.contains("BSPLINE_CURVE")
+                {
+                    // For B-splines, sample the control polygon at the same
+                    // fractions. Different B-splines with the same endpoints
+                    // almost always have different control polygons, so this
+                    // is a usable signature.
+                    if let Some(cps) = self.extract_bspline_control_points(curve_id, &curve_entity) {
+                        if cps.len() >= 2 {
+                            let mut samples: Vec<Point3d> = Vec::with_capacity(5);
+                            for &frac in &[0.1, 0.3, 0.5, 0.7, 0.9] {
+                                // Linear interp along control polygon indices
+                                let idx_f = frac * (cps.len() - 1) as f64;
+                                let idx0 = idx_f.floor() as usize;
+                                let idx1 = (idx0 + 1).min(cps.len() - 1);
+                                let t = idx_f - idx0 as f64;
+                                samples.push(Point3d::new(
+                                    cps[idx0].x * (1.0 - t) + cps[idx1].x * t,
+                                    cps[idx0].y * (1.0 - t) + cps[idx1].y * t,
+                                    cps[idx0].z * (1.0 - t) + cps[idx1].z * t,
+                                ));
+                            }
+                            return Some(samples);
+                        }
+                    }
+                }
+                // For LINEs, samples are determined by endpoints (degenerate
+                // case where samples match the linear interpolation between
+                // the two VERTEX_POINTs). Two LINEs with the same endpoints
+                // produce identical samples, which is correct.
+                if curve_entity.type_name == "LINE" {
+                    if let Some((v1, v2)) = self.get_edge_curve_vertex_pair_3d(edge_curve_id) {
+                        let mut samples: Vec<Point3d> = Vec::with_capacity(5);
+                        for &frac in &[0.1, 0.3, 0.5, 0.7, 0.9] {
+                            samples.push(Point3d::new(
+                                v1.x * (1.0 - frac) + v2.x * frac,
+                                v1.y * (1.0 - frac) + v2.y * frac,
+                                v1.z * (1.0 - frac) + v2.z * frac,
+                            ));
+                        }
+                        return Some(samples);
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Extract control points from a B_SPLINE_CURVE entity.
+    /// Helper for `compute_edge_curve_sample_points`.
+    fn extract_bspline_control_points(
+        &self,
+        _curve_id: i64,
+        curve_entity: &crate::schema::StepEntity,
+    ) -> Option<Vec<Point3d>> {
+        let mut control_points: Vec<Point3d> = Vec::new();
+        for param in &curve_entity.params {
+            if let crate::schema::StepValue::List(items) = param {
+                for item in items {
+                    if let Some(cp_ref) = self.get_ref(item) {
+                        if let Some(p) = self.resolve_cartesian_point(cp_ref) {
+                            control_points.push(p);
+                        }
+                    }
+                }
+            }
+        }
+        if control_points.is_empty() {
+            None
+        } else {
+            Some(control_points)
+        }
     }
 
     /// Get the 3D coordinates of an EDGE_CURVE's two VERTEX_POINT endpoints.
