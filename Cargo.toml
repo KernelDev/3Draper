@@ -54,7 +54,6 @@ num-traits = "0.2"
 approx = "0.5"
 
 # Algorithms
-spade = "2"
 earcutr = "0.2"
 earcut = "0.4"
 i_triangle = "0.45"

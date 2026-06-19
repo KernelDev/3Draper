@@ -17,7 +17,6 @@ wasm-parallel = ["wasm-bindgen-rayon"]
 [dependencies]
 draper-geometry = { workspace = true }
 draper-topology = { workspace = true }
-spade = { workspace = true }
 earcutr = { workspace = true }
 earcut = { workspace = true }
 i_triangle = { workspace = true }
