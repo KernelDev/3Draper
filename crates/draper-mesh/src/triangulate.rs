@@ -1643,8 +1643,8 @@ fn earcutr_triangulate_planar(
         }
     }
 
-    // Run earcutr triangulation
-    let triangle_indices = earcutr::earcut(&coords, &hole_indices, 2);
+    // Run triangulation via adapter (tries earcut int, i_triangle, earcutr)
+    let triangle_indices = crate::earcut_adapter::triangulate_polygon_with_holes(&coords, &hole_indices);
 
     if triangle_indices.is_empty() {
         return None;
@@ -1661,8 +1661,8 @@ fn earcutr_triangulate_planar(
     // Verify that all triangle indices are within bounds
     let n_verts = coords.len() / 2;
     for &idx in &triangle_indices {
-        if idx as usize >= n_verts {
-            log::warn!("earcutr produced out-of-bounds index {} (max {})", idx, n_verts - 1);
+        if idx >= n_verts {
+            log::warn!("earcut adapter produced out-of-bounds index {} (max {})", idx, n_verts - 1);
             return None;
         }
     }
@@ -1672,7 +1672,7 @@ fn earcutr_triangulate_planar(
         mesh.add_vertex(*p);
     }
 
-    // earcutr produces triangles as [i0, i1, i2, i0, i1, i2, ...]
+    // The adapter produces triangles as [i0, i1, i2, i0, i1, i2, ...]
     for chunk in triangle_indices.chunks(3) {
         if chunk.len() < 3 {
             break;

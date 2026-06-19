@@ -21,6 +21,7 @@ pub mod text3d;
 pub mod watertight;
 pub mod cdt_triangulate;
 pub mod custom_cdt;
+pub mod earcut_adapter;
 pub mod pmi_display;
 pub mod wasm_api;
 pub mod gdt_check;

@@ -56,6 +56,9 @@ approx = "0.5"
 # Algorithms
 spade = "2"
 earcutr = "0.2"
+earcut = "0.4"
+i_triangle = "0.45"
+delaunator = "1"
 thiserror = "2"
 anyhow = "1"
 

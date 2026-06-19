@@ -66,7 +66,7 @@ pub fn triangulate_polygon_cdt(
         earcut_hole_indices.push(start);
     }
 
-    let earcut_result = earcutr::earcut(&coords, &earcut_hole_indices, 2);
+    let earcut_result = crate::earcut_adapter::triangulate_polygon_with_holes(&coords, &earcut_hole_indices);
 
     let mut triangles: Vec<[u32; 3]> = earcut_result.chunks(3)
         .filter_map(|chunk| {

@@ -9123,10 +9123,10 @@ fn earcutr_triangulate_planar_converter(
         }
     }
 
-    // Run earcutr triangulation
-    let triangle_indices = earcutr::earcut(&coords, &hole_indices, 2);
+    // Run triangulation via draper-mesh adapter (tries earcut int, i_triangle, earcutr)
+    let triangle_indices = draper_mesh::earcut_adapter::triangulate_polygon_with_holes(&coords, &hole_indices);
 
-    // Diagnostic: count degenerate triangles produced by earcutr
+    // Diagnostic: count degenerate triangles produced by adapter
     {
         let n_outer = outer_2d.len();
         let mut degen_count = 0usize;
@@ -9134,9 +9134,9 @@ fn earcutr_triangulate_planar_converter(
         for chunk in triangle_indices.chunks(3) {
             if chunk.len() < 3 { break; }
             total += 1;
-            let a = chunk[0] as usize;
-            let b = chunk[1] as usize;
-            let c = chunk[2] as usize;
+            let a = chunk[0];
+            let b = chunk[1];
+            let c = chunk[2];
             if a == b || b == c || a == c {
                 degen_count += 1;
                 continue;

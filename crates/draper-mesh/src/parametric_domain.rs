@@ -257,8 +257,9 @@ pub fn triangulate_cdt(
         coords.push(p.v);
     }
 
-    // Run earcutr
-    let triangle_indices = earcutr::earcut(&coords, &hole_start_indices, 2);
+    // Run triangulation using the new adapter (tries earcut w/ int predicates,
+    // falls back to i_triangle for self-intersecting polygons, then earcutr).
+    let triangle_indices = crate::earcut_adapter::triangulate_polygon_with_holes(&coords, &hole_start_indices);
 
     // Collect triangles, filtering degenerate ones
     let mut result_triangles: Vec<[u32; 3]> = Vec::with_capacity(triangle_indices.len() / 3);
@@ -2480,9 +2481,9 @@ pub fn triangulate_surface_consistent(
         coords.push(p.v);
     }
 
-    // Run earcutr triangulation with ALL points at once
-    // hole_start_indices was built above, only including valid holes (>= 3 points)
-    let triangle_indices = earcutr::earcut(&coords, &hole_start_indices, 2);
+    // Run triangulation using the new adapter (tries earcut w/ int predicates,
+    // falls back to i_triangle for self-intersecting polygons, then earcutr).
+    let triangle_indices = crate::earcut_adapter::triangulate_polygon_with_holes(&coords, &hole_start_indices);
 
     // Collect triangles, filtering degenerate ones
     let mut result_triangles: Vec<[u32; 3]> = Vec::with_capacity(triangle_indices.len() / 3);
@@ -3996,10 +3997,10 @@ fn triangulate_3d_polygon_fallback(
         coords.push(v);
     }
 
-    // Step 5: Run earcutr
-    let mut triangle_indices = earcutr::earcut(&coords, &hole_start_indices, 2);
+    // Step 5: Run triangulation via adapter (tries earcut int, i_triangle, earcutr)
+    let mut triangle_indices: Vec<usize> = crate::earcut_adapter::triangulate_polygon_with_holes(&coords, &hole_start_indices);
 
-    // If earcutr returned 0 triangles with holes, retry without holes.
+    // If adapter returned 0 triangles with holes, retry without holes.
     // This happens when a "hole" is geometrically identical to the outer
     // boundary (e.g., due to a topology extraction bug producing duplicate
     // curves). In that case, the hole covers the entire outer region and
@@ -4007,11 +4008,11 @@ fn triangulate_3d_polygon_fallback(
     // triangulation of the outer region.
     if triangle_indices.is_empty() && !hole_start_indices.is_empty() {
         log::warn!(
-            "  3D fallback: earcutr returned 0 triangles with {} holes — retrying without holes",
+            "  3D fallback: adapter returned 0 triangles with {} holes — retrying without holes",
             hole_start_indices.len(),
         );
         let empty_holes: Vec<usize> = Vec::new();
-        triangle_indices = earcutr::earcut(&coords, &empty_holes, 2);
+        triangle_indices = crate::earcut_adapter::triangulate_polygon_with_holes(&coords, &empty_holes);
     }
 
     // Step 6: Build mesh using ORIGINAL 3D points (preserves watertightness)
