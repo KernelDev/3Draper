@@ -1185,3 +1185,33 @@ Files modified/added:
 - crates/draper-mesh/src/triangulate.rs: 1 earcutr → adapter call
 - crates/draper-mesh/src/custom_cdt.rs: 1 earcutr → adapter call
 - crates/draper-step/src/converter.rs: 1 earcutr → adapter call
+
+---
+Task ID: truck-p0-param-div-2d
+Agent: Main
+Task: P0 — Implement truck-inspired ParameterDivision2D adaptive quad-tree UV subdivision, integrate into triangulation pipeline.
+
+Work Log:
+- Researched truck (ricosjp/truck) CAD kernel: 16-crate Rust workspace, ~71k lines, single maintainer (Tanimura). Apache-2.0. Their tessellation = CDT in UV via `spade` + `ParameterDivision2D` (adaptive recursive quad-tree subdivision based on bilinear interpolation error).
+- Identified truck's `ParameterDivision2D` as the single highest-ROI algorithm to borrow. Located at `truck-geotrait/src/algo/surface.rs:219-281`. Replaces 4 different formulas in our code (arc-radius for analytic surfaces, knot-span for NURBS, 3×3 curvature grid, post-hoc chord refine) with one universal function.
+- Created `crates/draper-mesh/src/parametric_division_2d.rs` (~430 lines including tests). Algorithm: recursive subdivide UV rectangle; compare bilinear interp of 4 corners vs true surface point at golden-ratio-jittered interior sample (bit-stable, no `rand()`); split u, v, or both depending on edge-midpoint error concentration. 14-level depth cap, MIN_SPAN=1e-9 to avoid infinite recursion near degeneracies.
+- 6 unit tests covering plane (terminates immediately, returns endpoints), cylinder (dense in u, sparse in v), sphere (dense in both), interior filter (removes endpoints), degenerate input (no panic), max_dim cap.
+- Integrated into `parametric_domain.rs::triangulate_surface_consistent`. Replaced the previous NURBS / non-NURBS branch with single call to `parameter_division_2d` + `interior_steiner_points` + `domain.contains()` filter.
+- TOLERANCE STRATEGY: chord_tol = `max_deviation * 10.0` (matches the legacy `target_deviation`). Looser than `max_deviation` itself because earcutr produces broken triangulations when given many interior points; tighter than `max_deviation * 100` because that under-tessellates high-curvature surfaces. `refine_mesh_chord_error_uv` post-refinement tightens to `max_deviation` where needed.
+- 4-CORNER FACE SPECIAL CASE: faces with exactly 4 boundary vertices and no holes get ZERO interior Steiner points. earcutr has a known bug ("missing 1/4 boundary edges") when given a small number of interior Steiner points on a square polygon — the chord-error refiner adds points later where needed with proper safeguards.
+- Added `coarse_grid_sample` function to preserve regular grid structure when downsampling: recovers implicit u/v axes from point cloud, picks integer stride to fit budget, returns sub-grid. Falls back to `downsample_interior_points` (stride-based) if points don't form a regular grid. This prevents earcutr from breaking on quasi-random point subsets.
+- Added `tools/src/bin/single_file_test.rs` and `tools/src/bin/debug_param_div.rs` for quick iteration.
+
+Stage Summary:
+- nist_complex_surface.stp: was WATERTIGHT, stayed WATERTIGHT (12 tris). Critical: with naive adaptive subdivision it became BAD (40.8% boundary); 4-corner-face special case + tol=max_dev*10 fixes it.
+- All NIST primitives (cube, sphere, cylinder, cone, assembly, block_with_hole, chamfer_block, complex_surface): WATERTIGHT.
+- as1-oc-214 + sub-parts: WATERTIGHT.
+- brick_thin / hole / round: ok.
+- drill_top: ok.
+- SampleCube, 3.05.078: WATERTIGHT / ok.
+- 5 previously-leaky files — variable results due to existing rayon non-determinism:
+  * Single-file test runs (deterministic for that single file): Spit-Fire 1.5% ok, Vulcan 1.06% ok, compressor 0.86% ok, transmission_top 0.36% ok, Zentralstaender 5.5% leaky.
+  * Full all_files_test runs (rayon non-determinism affects results between runs): results vary; some runs show 4/5 fixed, others show only nist_complex_surface fixed.
+- 6/6 unit tests in parametric_division_2d pass. 99/101 draper-mesh lib tests pass (2 pre-existing gdt_check failures unrelated).
+- Workspace builds with 0 errors, 0 warnings.
+- Next: P1 (SearchNearestParameter fallback for NURBS projection) and P2 (direct 3D pass-through from edge_cache) will fix Zentralstaender — the last remaining leaky file. The rayon non-determinism is a pre-existing project issue (faces merged in different orders produce different vertex dedup hit patterns), not introduced by this change.

@@ -16,6 +16,7 @@ pub mod manifold;
 pub mod edge_cache;
 pub mod adaptive;
 pub mod parametric_domain;
+pub mod parametric_division_2d;
 pub mod certification;
 pub mod text3d;
 pub mod watertight;

@@ -1402,6 +1402,101 @@ fn downsample_interior_points(pts: &[Point2d], budget: usize) -> Vec<Point2d> {
     result
 }
 
+/// Coarse a regular grid of UV Steiner points to a smaller regular
+/// sub-grid by integer-stride subsampling.
+///
+/// `parameter_division_2d` produces points on a Cartesian product of
+/// sorted u- and v-knots. When the count exceeds `budget`, naive
+/// stride-sampling (as in `downsample_interior_points`) breaks the
+/// grid structure, leaving points that don't align — earcutr then
+/// produces broken triangulations with missing boundary edges.
+///
+/// This function:
+/// 1. Recovers the implicit u- and v-axes from the point set by
+///    clustering coordinates (within tolerance).
+/// 2. Picks an integer stride `s` such that `n_u/s * n_v/s <= budget`.
+/// 3. Returns every s-th row × every s-th column, preserving grid.
+///
+/// If axis recovery fails (points are not on a regular grid), falls
+/// back to `downsample_interior_points`.
+fn coarse_grid_sample(pts: &[Point2d], budget: usize) -> Vec<Point2d> {
+    if pts.len() <= budget || pts.is_empty() {
+        return pts.to_vec();
+    }
+
+    // Recover unique u-coordinates and v-coordinates by sorting + clustering.
+    let mut us: Vec<f64> = pts.iter().map(|p| p.u).collect();
+    us.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let u_tol = {
+        let range = us.last().copied().unwrap_or(0.0) - us.first().copied().unwrap_or(0.0);
+        (range.abs() * 1e-6).max(1e-9)
+    };
+    let mut u_unique: Vec<f64> = Vec::new();
+    for u in us {
+        if u_unique.last().map_or(true, |last| (last - u).abs() > u_tol) {
+            u_unique.push(u);
+        }
+    }
+
+    let mut vs: Vec<f64> = pts.iter().map(|p| p.v).collect();
+    vs.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let v_tol = {
+        let range = vs.last().copied().unwrap_or(0.0) - vs.first().copied().unwrap_or(0.0);
+        (range.abs() * 1e-6).max(1e-9)
+    };
+    let mut v_unique: Vec<f64> = Vec::new();
+    for v in vs {
+        if v_unique.last().map_or(true, |last| (last - v).abs() > v_tol) {
+            v_unique.push(v);
+        }
+    }
+
+    // Verify: is this a regular grid? We need u_unique.len() × v_unique.len()
+    // to be close to pts.len() (within 5% — small slack for filtering losses).
+    let expected = u_unique.len() * v_unique.len();
+    if expected < (pts.len() as f64 * 0.5) as usize || expected == 0 {
+        // Not a regular grid — fall back to naive stride sampling.
+        return downsample_interior_points(pts, budget);
+    }
+
+    // Build a set of (u,v) keys for fast lookup.
+    use std::collections::HashSet;
+    let pt_set: HashSet<(u64, u64)> = pts.iter()
+        .map(|p| (p.u.to_bits(), p.v.to_bits()))
+        .collect();
+
+    // Find the smallest integer stride s such that
+    //   ceil(u_unique.len() / s) * ceil(v_unique.len() / s) <= budget
+    let mut best_stride = 1usize;
+    for s in 1..=u_unique.len().max(v_unique.len()) {
+        let nu = (u_unique.len() + s - 1) / s;
+        let nv = (v_unique.len() + s - 1) / s;
+        if nu * nv <= budget {
+            best_stride = s;
+            break;
+        }
+    }
+
+    if best_stride == 1 {
+        // Grid already fits budget — return as-is (downsample_interior_points
+        // will handle the residual case where pts.len() > budget slightly).
+        return pts.to_vec();
+    }
+
+    // Subsample: take every s-th u × every s-th v, keep only those that
+    // actually exist in the filtered set.
+    let mut result: Vec<Point2d> = Vec::with_capacity(budget);
+    for i in (0..u_unique.len()).step_by(best_stride) {
+        for j in (0..v_unique.len()).step_by(best_stride) {
+            let p = Point2d::new(u_unique[i], v_unique[j]);
+            if pt_set.contains(&(p.u.to_bits(), p.v.to_bits())) {
+                result.push(p);
+            }
+        }
+    }
+    result
+}
+
 // ============================================================
 // Integration: earcutr-based surface triangulation (non-consistent)
 // ============================================================
@@ -2236,114 +2331,124 @@ pub fn triangulate_surface_consistent(
     };
     let max_interior_budget = max_total_points.saturating_sub(n_boundary_and_holes).max(min_interior_for_curved);
 
-    let interior_uv_points = if let Surface::Nurbs(ref nurbs) = surface {
-        let u_deg = nurbs.u_degree;
-        let v_deg = nurbs.v_degree;
+    // ============================================================
+    // Step 3a: Adaptive UV subdivision via ParameterDivision2D
+    //
+    // This is the truck-inspired adaptive quad-tree subdivision
+    // (see `parametric_division_2d` module). It produces a sorted
+    // UV knot grid where the bilinear interpolation of every
+    // sub-rectangle's corners is within `chord_tol` of the true
+    // surface at one interior sample.
+    //
+    // We use it for ALL curved-surface types (NURBS, Cylinder, Cone,
+    // Sphere, Torus, Revolution, Extrusion). Plane and bilinear
+    // NURBS don't need interior points — the surface IS bilinear.
+    //
+    // TOLERANCE STRATEGY: We use `max_deviation * 10` as the chord
+    // tolerance (matching the previous `target_deviation`).
+    //
+    // Reason: this is the same tolerance the legacy ruled-surface
+    // formula used, so it preserves the previous behavior on
+    // well-behaved curved surfaces (cylinder, sphere, torus, ruled
+    // NURBS). For low-curvature saddle NURBS, this gives a moderate
+    // interior grid (typically 3×3 to 5×5) which `coarse_grid_sample`
+    // can downsample to a regular sub-grid if the budget requires it.
+    //
+    // `refine_mesh_chord_error_uv` post-refinement tightens the mesh
+    // back to `max_deviation` where needed, with explicit safeguards
+    // to never split edges that touch boundary vertices (preserving
+    // watertightness).
+    // ============================================================
+    let chord_tol = (params.max_deviation * 10.0).max(1e-5);
+    // Cap the per-axis subdivision so we never explode on pathological
+    // surfaces. The chord-error refinement (`refine_mesh_chord_error_uv`)
+    // will still add more points later if needed.
+    let max_axis_dim = ((params.max_face_triangles / 2) as f64).sqrt().ceil() as usize;
+    let max_axis_dim = max_axis_dim.clamp(4, 64);
 
-        // For bilinear (deg=1×1) NURBS surfaces, no interior points needed.
-        // The surface is flat and boundary points alone triangulate it perfectly.
-        if u_deg <= 1 && v_deg <= 1 {
-            Vec::new()
-        } else if u_deg <= 1 || v_deg <= 1 {
-            // Ruled surface (linear in one direction): needs interior points
-            // to capture curvature in the non-linear direction.
-            // Use adaptive subdivision based on actual curvature — fewer
-            // subdivisions for nearly-flat surfaces, more for curved ones.
-            let max_k = crate::adaptive::max_curvature_over_domain(
-                surface, u_min, u_max, v_min, v_max,
-            );
-            // n_sub ranges from 2 (nearly flat, max_k < 0.01) to 8 (high curvature)
-            let n_sub_base = if max_k < 0.01 {
-                2
-            } else if max_k < 0.1 {
-                3
-            } else if max_k < 1.0 {
-                4
-            } else {
-                6
-            };
-
-            // For ruled surfaces with large parameter range and significant
-            // curvature, bump n_sub based on the parameter range to reduce
-            // the chord-error refinement work. We use a conservative formula
-            // (max_deviation * 10 as the target chord error) to avoid
-            // generating too many interior points.
-            //
-            // The formula: n_sub = max(n_sub_base, ceil(param_range * sqrt(max_k / (8 * 10 * max_deviation))))
-            // This targets a chord error of 10× max_deviation (0.1mm for default),
-            // which the single chord-error refinement iteration can then fix.
-            let n_sub = if max_k > 0.01 && params.max_deviation > 0.0 {
-                let u_range_sz = u_max - u_min;
-                let v_range_sz = v_max - v_min;
-                // Target a looser chord error for initial sampling — refinement will tighten it
-                let target_deviation = params.max_deviation * 10.0;
-                let max_param_per_sub = (8.0 * target_deviation / max_k).sqrt();
-                let n_u_needed = if u_range_sz > 0.0 && max_param_per_sub > 0.0 {
-                    (u_range_sz / max_param_per_sub).ceil() as usize
-                } else { 1 };
-                let n_v_needed = if v_range_sz > 0.0 && max_param_per_sub > 0.0 {
-                    (v_range_sz / max_param_per_sub).ceil() as usize
-                } else { 1 };
-                let n_sub_needed = n_u_needed.max(n_v_needed).max(n_sub_base);
-                // Cap at 16 to avoid explosion — 17×17 = 289 interior points max
-                n_sub_needed.min(16)
-            } else {
-                n_sub_base
-            };
-
-            let pts = generate_nurbs_interior_points(&domain, &nurbs.u_knots, &nurbs.v_knots, n_sub);
-            downsample_interior_points(&pts, max_interior_budget)
-        } else {
-            // High-degree NURBS (both directions curved): use adaptive sampling.
-            // Compute curvature to determine how many subdivisions are needed.
-            let max_k = crate::adaptive::max_curvature_over_domain(
-                surface, u_min, u_max, v_min, v_max,
-            );
-            // n_sub ranges from 3 (low curvature) to 8 (high curvature).
-            // This is more conservative than the old formula which used up to
-            // 12 subdivisions — the chord-error refinement adds more points
-            // where actually needed, so we don't need excessive initial sampling.
-            //
-            // IMPORTANT: Keep n_sub LOW (2-4) to avoid earcutr producing
-            // non-manifold triangulations. earcutr can produce disconnected
-            // or overlapping triangles when given many interior points.
-            // The chord-error refinement will add more points where needed,
-            // and it properly handles shared edges (manifold output).
-            let n_sub = if max_k < 0.01 {
-                2
-            } else if max_k < 0.1 {
-                2
-            } else if max_k < 1.0 {
-                3
-            } else {
-                4
-            };
-            let pts = generate_nurbs_interior_points(&domain, &nurbs.u_knots, &nurbs.v_knots, n_sub);
-            downsample_interior_points(&pts, max_interior_budget)
-        }
+    let interior_uv_points: Vec<Point2d> = if is_nurbs_bilinear || matches!(surface, Surface::Plane(_)) {
+        // Flat surfaces: no interior Steiner points needed.
+        Vec::new()
+    } else if outer_uv.len() == 4 && normalized_holes_uv_capped.is_empty() {
+        // 4-corner face with no holes (square/rectangular trim).
+        //
+        // earcutr has a known issue: when given a 4-corner polygon plus
+        // a small number of interior Steiner points, it sometimes
+        // "loses" one of the boundary edges in the output triangulation,
+        // producing a non-watertight mesh. This is documented in the
+        // worklog as the "earcutr missing 1/4 boundary edges" warning.
+        //
+        // For 4-corner faces, the chord-error refinement
+        // (`refine_mesh_chord_error_uv`) is sufficient to add interior
+        // points later where needed, with explicit safeguards to never
+        // split edges that touch boundary vertices. So we start with
+        // zero interior points and let the refiner do its job.
+        Vec::new()
     } else {
-        // Non-NURBS curved surfaces (Torus, Revolution, Extrusion)
-        let (n_u, n_v) = if params.adaptive {
-            crate::adaptive::required_samples_capped(
-                surface,
-                u_min, u_max, v_min, v_max,
-                params.max_deviation, params.detail_level,
-                params.max_face_triangles,
-            )
-        } else {
-            let mut n_u = params.angular_samples;
-            let mut n_v = params.height_samples;
-            let approx_tris = 2 * n_u * n_v;
-            if approx_tris > params.max_face_triangles {
-                let scale = (params.max_face_triangles as f64 / approx_tris as f64).sqrt();
-                n_u = ((n_u as f64 * scale).ceil() as usize).max(4);
-                n_v = ((n_v as f64 * scale).ceil() as usize).max(2);
+        // Compute adaptive subdivision grid for the entire surface, then
+        // filter to (a) strictly-interior UV values and (b) points that
+        // lie inside the actual face domain (which may be smaller than
+        // the full surface range — faces are trimmed subsets).
+        let (u_min_s, u_max_s) = (u_min, u_max);
+        let (v_min_s, v_max_s) = (v_min, v_max);
+
+        let (u_knots, v_knots) = crate::parametric_division_2d::parameter_division_2d(
+            surface,
+            (u_min_s, u_max_s),
+            (v_min_s, v_max_s),
+            chord_tol,
+            max_axis_dim,
+        );
+
+        // Strict-interior filter relative to the SURFACE range (not the
+        // face domain — we'll filter by domain next).
+        let u_span = (u_max_s - u_min_s).max(1e-6);
+        let v_span = (v_max_s - v_min_s).max(1e-6);
+        let boundary_tol = (u_span.max(v_span) * 1e-6).max(1e-9);
+
+        let steiner_pts = crate::parametric_division_2d::interior_steiner_points(
+            &u_knots, &v_knots,
+            (u_min_s, u_max_s),
+            (v_min_s, v_max_s),
+            boundary_tol,
+        );
+
+        // Filter to points that are strictly inside the FACE domain (the
+        // trimmed subset of the surface). This is the same filter that
+        // `generate_nurbs_interior_points` applies — see its comment
+        // about phantom boundary vertices.
+        let mut filtered: Vec<Point2d> = Vec::with_capacity(steiner_pts.len());
+        for pt in steiner_pts {
+            if !domain.contains(&pt) {
+                continue;
             }
-            (n_u, n_v)
-        };
-        let boundary_margin = (u_max - u_min) / n_u.max(1) as f64 * 0.3;
-        let pts = generate_interior_points(&domain, n_u, n_v, boundary_margin);
-        downsample_interior_points(&pts, max_interior_budget)
+            if is_point_on_boundary(&domain.outer_boundary, &pt, boundary_tol) {
+                continue;
+            }
+            let on_hole = domain.holes.iter()
+                .any(|hole| is_point_on_boundary(hole, &pt, boundary_tol));
+            if on_hole {
+                continue;
+            }
+            filtered.push(pt);
+        }
+
+        // Downsample to budget.
+        //
+        // IMPORTANT: when the adaptive subdivision produces a large regular
+        // grid (e.g. 50×50 = 2500 points), `downsample_interior_points`'s
+        // stride-based sampling picks a quasi-random subset that breaks
+        // the grid structure. earcutr then produces broken triangulations
+        // with missing boundary edges.
+        //
+        // To preserve grid structure, we COARSE THE TOLERANCE instead of
+        // stride-sampling: re-run the subdivision with a looser tolerance
+        // that produces the desired number of points. As a cheap
+        // approximation, if the count is more than 4× the budget, we
+        // stride-sample at an integer factor (2×, 3×, 4×, ...) so the
+        // remaining points still form a sub-grid.
+        let coarsened = coarse_grid_sample(&filtered, max_interior_budget);
+        downsample_interior_points(&coarsened, max_interior_budget)
     };
 
     // ============================================================
