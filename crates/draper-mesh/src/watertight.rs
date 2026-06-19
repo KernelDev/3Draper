@@ -649,13 +649,24 @@ pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64)
         }
     }
 
-    if short_boundary_edges.is_empty() {
+    // Collect ALL boundary vertices (not just short-edge endpoints).
+    // Long boundary edges often have endpoints that ARE close to other
+    // vertices from adjacent faces — we want to weld those too.
+    let mut boundary_vertices: HashSet<u32> = HashSet::new();
+    for (edge, &count) in &edge_count {
+        if count == 1 {
+            boundary_vertices.insert(edge.0);
+            boundary_vertices.insert(edge.1);
+        }
+    }
+
+    if boundary_vertices.is_empty() {
         return;
     }
 
     log::warn!(
-        "WELD: {} short boundary edges (tol={:.4}mm) — welding vertices",
-        short_boundary_edges.len(), weld_tolerance
+        "WELD: {} short boundary edges, {} boundary vertices (tol={:.4}mm) — welding",
+        short_boundary_edges.len(), boundary_vertices.len(), weld_tolerance
     );
 
     // Build a spatial hash for vertex lookup
@@ -689,6 +700,10 @@ pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64)
     }
 
     let mut weld_count = 0usize;
+
+    // PASS 1: For each short boundary edge, find a nearby vertex to weld with.
+    // This catches the typical seam mismatch (vertices that are CLOSE but
+    // not bit-identical, connected by a short boundary edge).
     for (v0, v1) in &short_boundary_edges {
         // Try to find a vertex near v1 (the "near-corner" point) that's
         // NOT v0 or v1 itself. This would be the "exact corner" from
@@ -737,6 +752,76 @@ pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64)
                 weld_count += 1;
             }
         }
+    }
+
+    // PASS 2: For each boundary vertex on a LONG boundary edge, also look
+    // for nearby vertices to weld with. This catches the case where a
+    // vertex V is on a long boundary edge (length > weld_tol) but is
+    // itself CLOSE to a vertex from another face (within weld_tol).
+    // Without this pass, these vertices would remain un-welded, leaving
+    // boundary edges in the mesh.
+    //
+    // We skip vertices already processed in PASS 1 (those on short edges).
+    let short_edge_vertices: HashSet<u32> = short_boundary_edges.iter()
+        .flat_map(|(a, b)| [*a, *b].into_iter())
+        .collect();
+
+    let mut pass2_count = 0usize;
+    for &v1 in &boundary_vertices {
+        if short_edge_vertices.contains(&v1) {
+            continue; // Already processed in PASS 1
+        }
+
+        let p1 = mesh.vertices[v1 as usize];
+        let cell = (
+            (p1.x / cell_size).floor() as i64,
+            (p1.y / cell_size).floor() as i64,
+            (p1.z / cell_size).floor() as i64,
+        );
+
+        let mut best_match: Option<u32> = None;
+        let mut best_dist_sq = weld_tol_sq;
+
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    let neighbor_cell = (cell.0 + dx, cell.1 + dy, cell.2 + dz);
+                    if let Some(candidates) = spatial.get(&neighbor_cell) {
+                        for &candidate in candidates {
+                            if candidate == v1 {
+                                continue;
+                            }
+                            let pc = mesh.vertices[candidate as usize];
+                            let dx = pc.x - p1.x;
+                            let dy = pc.y - p1.y;
+                            let dz = pc.z - p1.z;
+                            let dist_sq = dx * dx + dy * dy + dz * dz;
+                            if dist_sq < best_dist_sq {
+                                best_dist_sq = dist_sq;
+                                best_match = Some(candidate);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(target) = best_match {
+            let root_v1 = find(&mut parent, v1);
+            let root_target = find(&mut parent, target);
+            if root_v1 != root_target {
+                parent[root_v1 as usize] = root_target;
+                weld_count += 1;
+                pass2_count += 1;
+            }
+        }
+    }
+
+    if pass2_count > 0 {
+        log::warn!(
+            "WELD: PASS 2 welded {} additional long-edge boundary vertices",
+            pass2_count
+        );
     }
 
     if weld_count == 0 {
