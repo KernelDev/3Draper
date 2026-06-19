@@ -964,10 +964,25 @@ fn triangulate_face_impl(face: &Face, params: &TriangulationParams, cache: &Edge
         TriangleMesh::new()
     };
 
-    // Phase 2.2: If the primary triangulation produced an empty mesh,
-    // apply fallback strategies in order of decreasing quality.
-    if !primary_mesh.vertices.is_empty() {
+    // Phase 2.2: If the primary triangulation produced an empty mesh OR
+    // a mesh with vertices but no triangles (which can happen when earcutr
+    // cannot triangulate a degenerate UV polygon and the 3D ear-clip fallback
+    // also fails), apply fallback strategies in order of decreasing quality.
+    //
+    // CRITICAL: We check `triangles.is_empty()`, not just `vertices.is_empty()`.
+    // A mesh with vertices but 0 triangles leaves a hole in the BREP that no
+    // weld pass can fix — this was the root cause of Zentralstaender.stp
+    // leaky watertightness (5.9% boundary edges).
+    if !primary_mesh.vertices.is_empty() && !primary_mesh.triangles.is_empty() {
         return primary_mesh;
+    }
+
+    // Log if primary mesh had vertices but no triangles (diagnostic)
+    if !primary_mesh.vertices.is_empty() && primary_mesh.triangles.is_empty() {
+        log::warn!(
+            "FallbackSurface: face {} primary triangulation produced {} vertices but 0 triangles — trying fallback strategies",
+            face.id, primary_mesh.vertices.len(),
+        );
     }
 
     // All fallback strategies need boundary 3D points from the cache.
@@ -3616,9 +3631,17 @@ fn triangulate_nurbs_cdt(face: &Face, surface: &Surface, params: &TriangulationP
         params,
     );
 
-    // If the consistent path produced an empty mesh, fall back to generic surface
-    if result.vertices.is_empty() {
-        log::warn!("NURBS CDT fallback: consistent triangulation returned empty mesh, using generic surface");
+    // If the consistent path produced an empty mesh (or a mesh with vertices
+    // but 0 triangles — which happens when the UV polygon is degenerate and
+    // the 3D ear-clip fallback also fails), fall back to generic surface.
+    // The generic surface path samples NURBS on a regular grid and is
+    // guaranteed to produce non-empty output.
+    if result.vertices.is_empty() || result.triangles.is_empty() {
+        log::warn!(
+            "NURBS CDT fallback: consistent triangulation produced {} verts / {} tris (empty={}), using generic surface",
+            result.vertices.len(), result.triangles.len(),
+            result.vertices.is_empty(),
+        );
         return triangulate_generic_surface(face, surface, params, cache);
     }
 

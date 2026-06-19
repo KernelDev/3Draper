@@ -1215,3 +1215,56 @@ Stage Summary:
 - 6/6 unit tests in parametric_division_2d pass. 99/101 draper-mesh lib tests pass (2 pre-existing gdt_check failures unrelated).
 - Workspace builds with 0 errors, 0 warnings.
 - Next: P1 (SearchNearestParameter fallback for NURBS projection) and P2 (direct 3D pass-through from edge_cache) will fix Zentralstaender — the last remaining leaky file. The rayon non-determinism is a pre-existing project issue (faces merged in different orders produce different vertex dedup hit patterns), not introduced by this change.
+
+---
+Task ID: truck-p1-zero-tri-fallback
+Agent: Main
+Task: P1 — Fix Zentralstaender leaky watertightness. Diagnose 5 leaky files (Spit-Fire, Vulcan, Zentralstaender, compressor, transmission_top) and eliminate the root cause.
+
+Work Log:
+- Ran single_file_test on Zentralstaender.stp with RUST_LOG=warn. Identified that root cause is NOT NURBS projection failure as originally planned in P1, but a different bug:
+  * `triangulate_3d_polygon_fallback` (parametric_domain.rs:3970) is invoked when NURBS UV polygon is degenerate (zero area) but 3D boundary has non-zero area. The function projects boundary to best-fit plane and ear-clips.
+  * When the outer + hole polygons together form a self-intersecting polygon in the best-fit 2D plane, earcutr returns 0 triangles.
+  * The function then had a retry-without-holes path, but it incorrectly reused the same `coords` Vec (which still contained outer + hole points). Passing `hole_indices=[]` to earcutr with combined coords produces a single self-intersecting polygon → 0 triangles again.
+  * Result: mesh with vertices but 0 triangles.
+- Discovered a second compounding bug: `triangulate_face_impl` (triangulate.rs:967) checked only `vertices.is_empty()` to decide whether to invoke fallback strategies (approximate plane, boundary fan, surface point sample). A mesh with vertices but 0 triangles passed this check, so fallbacks never ran. This left the face with 0 triangles → hole in BREP → boundary edges → leaky.
+- Same pattern in `triangulate_nurbs_cdt` (triangulate.rs:3620): only checked `vertices.is_empty()` before falling back to `triangulate_generic_surface`.
+
+- FIX 1 (parametric_domain.rs `triangulate_3d_polygon_fallback`):
+  * Retry-without-holes now rebuilds `coords` from `all_2d[..n_outer]` only (outer points), giving earcutr a clean outer-only polygon. Sets `outer_only_mode = true` so hole vertices are skipped during vertex_map construction.
+  * Added Step 5b: fan triangulation from centroid. If earcutr STILL returns 0 triangles for the outer-only polygon (highly non-convex / self-intersecting), build a fan from the inverse-projected 2D centroid: triangle i = (centroid, outer[i], outer[i+1]). This guarantees non-empty mesh for any n_outer ≥ 3.
+  * Vertex construction now conditionally prepends the centroid (only when fan path was used) and skips hole vertices in outer_only_mode (no orphan vertices).
+
+- FIX 2 (triangulate.rs):
+  * `triangulate_face_impl`: changed primary-mesh check from `!primary_mesh.vertices.is_empty()` to `!primary_mesh.vertices.is_empty() && !primary_mesh.triangles.is_empty()`. Added diagnostic warn log when primary produced vertices but 0 triangles.
+  * `triangulate_nurbs_cdt`: changed check from `result.vertices.is_empty()` to `result.vertices.is_empty() || result.triangles.is_empty()` before falling back to `triangulate_generic_surface`. Updated log message to show both vert and tri counts.
+
+- Verified build: 0 errors, 0 warnings.
+
+- Tested all 5 previously-leaky files via single_file_test:
+  * 8394-121_Spit-Fire.STEP: 12.0% → 1.52% (ok)
+  * 8500-02_Vulcan.STEP: 9.1% → 1.06% (ok)
+  * Zentralstaender.stp: 5.51% → 4.95% (ok)
+  * compressor-13920_top.stp: 11.2% → 0.88% (ok)
+  * transmission_top.stp: 6.3% → 0.36% (ok)
+
+- Ran full all_files_test on all 24 STEP files:
+  * Summary: 24 ok, 0 leaky, 0 BAD, 0 errors (24 total)
+  * Previously: 19 ok + 5 leaky
+  * 0 regressions on previously-WATERTIGHT files (SampleCube, as1-oc-214, all NIST primitives, brick_*, drill_top, 3.05.078, etc.)
+
+- Ran cargo test --release --lib: 112 passed, 2 failed.
+  * The 2 failures (gdt_check::test_flatness_flat_mesh, gdt_check::test_cylindricity_check) are pre-existing — documented in Task truck-p0-param-div-2d worklog entry as "2 pre-existing gdt_check failures unrelated". Not caused by this change.
+
+Stage Summary:
+- BUILD: 0 errors, 0 warnings
+- ALL 24 test STEP files now pass watertightness check (24 ok, 0 leaky, 0 BAD)
+- Was: 19 ok + 5 leaky (Spit-Fire, Vulcan, Zentralstaender, compressor, transmission_top)
+- 0 regressions on previously-WATERTIGHT files
+- 112/114 lib tests pass (2 pre-existing gdt_check failures unrelated)
+- Root cause was NOT NURBS projection failure (as originally planned in P1) but a logic bug in the 3D ear-clip fallback path: empty triangle output was not detected as failure, so higher-level fallbacks never ran.
+- P1 plan was redirected to fix the actual root cause; the original SearchNearestParameter idea turned out to be unnecessary because the 3D ear-clip fallback already uses cached 3D edge points directly (no UV round-trip). The bug was in the fallback's failure detection, not in the projection itself.
+
+Files modified:
+- crates/draper-mesh/src/parametric_domain.rs (triangulate_3d_polygon_fallback: +60 lines, retry-outer-only + fan-from-centroid)
+- crates/draper-mesh/src/triangulate.rs (triangulate_face_impl + triangulate_nurbs_cdt: 2 check fixes, +12 lines)

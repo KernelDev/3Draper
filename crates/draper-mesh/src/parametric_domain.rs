@@ -4108,16 +4108,77 @@ fn triangulate_3d_polygon_fallback(
     // If adapter returned 0 triangles with holes, retry without holes.
     // This happens when a "hole" is geometrically identical to the outer
     // boundary (e.g., due to a topology extraction bug producing duplicate
-    // curves). In that case, the hole covers the entire outer region and
-    // there's no area to triangulate. Dropping the hole produces a valid
-    // triangulation of the outer region.
+    // curves), OR when the projected hole polygon self-intersects the outer
+    // polygon in the best-fit 2D plane.
+    //
+    // CRITICAL: We must rebuild `coords` from OUTER points only. If we keep
+    // the same `coords` (which contains outer + hole points) and pass an
+    // empty hole_indices, the adapter will see all points as a single polygon
+    // — but those points came from two separate rings, so the resulting
+    // polygon is almost always self-intersecting, and earcutr returns 0
+    // triangles again. By rebuilding coords from `all_2d[..n_outer]`, we
+    // give earcutr a clean outer-only polygon to triangulate.
+    //
+    // `outer_only_mode` means: vertex_map should be built from outer points
+    // only (skip hole vertices entirely). Triangle indices are in [0, n_outer).
+    let mut outer_only_mode = false;
     if triangle_indices.is_empty() && !hole_start_indices.is_empty() {
         log::warn!(
-            "  3D fallback: adapter returned 0 triangles with {} holes — retrying without holes",
+            "  3D fallback: adapter returned 0 triangles with {} holes — retrying outer-only",
             hole_start_indices.len(),
         );
+        let outer_only_coords: Vec<f64> = all_2d[..n_outer]
+            .iter()
+            .flat_map(|&(u, v)| [u, v])
+            .collect();
         let empty_holes: Vec<usize> = Vec::new();
-        triangle_indices = crate::earcut_adapter::triangulate_polygon_with_holes(&coords, &empty_holes);
+        triangle_indices = crate::earcut_adapter::triangulate_polygon_with_holes(&outer_only_coords, &empty_holes);
+        outer_only_mode = true;
+    }
+
+    // Step 5b: Final fallback — fan triangulation from centroid.
+    // If earcutr STILL returned 0 triangles (which happens for highly
+    // non-convex or self-intersecting outer polygons), use a simple fan
+    // from the centroid. This guarantees a non-empty mesh as long as we
+    // have ≥3 outer points, which preserves watertightness (shared boundary
+    // edges with adjacent faces). Without this, the face would have 0
+    // triangles, leaving a hole in the BREP that no weld pass can fix.
+    //
+    // Fan layout: vertex 0 = centroid (3D, inverse-projected from 2D centroid),
+    // vertices 1..=n_outer = outer boundary points. Triangle i = (0, 1+i, 1+i_next).
+    let mut fan_centroid_3d: Option<Point3d> = None;
+    if triangle_indices.is_empty() && n_outer >= 3 {
+        log::warn!(
+            "  3D fallback: earcutr returned 0 triangles for outer polygon ({} pts) — using fan from centroid",
+            n_outer,
+        );
+        // Compute centroid of outer points in 2D (best-fit plane projection)
+        let mut cu = 0.0_f64;
+        let mut cv = 0.0_f64;
+        for &(u, v) in &all_2d[..n_outer] {
+            cu += u;
+            cv += v;
+        }
+        cu /= n_outer as f64;
+        cv /= n_outer as f64;
+        // Inverse-project 2D centroid back to 3D using best-fit plane basis.
+        // best-fit plane passes through (cx, cy, cz) with basis (u_axis, v_axis).
+        let centroid = Point3d::new(
+            cx + cu * u_axis.0 + cv * v_axis.0,
+            cy + cu * u_axis.1 + cv * v_axis.1,
+            cz + cu * u_axis.2 + cv * v_axis.2,
+        );
+        fan_centroid_3d = Some(centroid);
+        // Build fan triangle indices: (0, 1+i, 1+i_next) for i in 0..n_outer
+        triangle_indices.clear();
+        triangle_indices.reserve(n_outer * 3);
+        for i in 0..n_outer {
+            let i_next = (i + 1) % n_outer;
+            triangle_indices.push(0);          // centroid
+            triangle_indices.push(1 + i);      // outer[i]
+            triangle_indices.push(1 + i_next); // outer[i_next]
+        }
+        outer_only_mode = true; // fan uses only outer + centroid, no hole vertices
     }
 
     // Step 6: Build mesh using ORIGINAL 3D points (preserves watertightness)
@@ -4126,26 +4187,37 @@ fn triangulate_3d_polygon_fallback(
     // Compute the face normal from the best-fit plane (used for vertex normals)
     let face_normal: [f64; 3] = [nx, ny, nz];
 
+    // If using fan-from-centroid, prepend centroid as vertex 0.
+    let mut vertex_map: Vec<u32> = Vec::with_capacity(all_2d.len() + 1);
+    if let Some(centroid) = fan_centroid_3d {
+        let vi = mesh.add_vertex(centroid);
+        mesh.add_vertex_normal(vi, face_normal);
+        vertex_map.push(vi);
+    }
+
     // Add outer boundary vertices
-    let mut vertex_map: Vec<u32> = Vec::with_capacity(all_2d.len());
     for p in boundary_3d {
         let vi = mesh.add_vertex(*p);
         mesh.add_vertex_normal(vi, face_normal);
         vertex_map.push(vi);
     }
-    // Add hole vertices
-    for hole in hole_polylines_3d {
-        if hole.len() < 3 {
-            // Skip — but we need to advance the vertex_map index to stay in sync
-            // with all_2d. Since we didn't add these vertices to all_2d either
-            // (due to the `continue` in the previous loop), we don't need to
-            // advance here.
-            continue;
-        }
-        for p in hole {
-            let vi = mesh.add_vertex(*p);
-            mesh.add_vertex_normal(vi, face_normal);
-            vertex_map.push(vi);
+    // Add hole vertices (only if not in outer-only mode — fan/retry-outer
+    // paths produce triangle indices that don't reference hole vertices, so
+    // including them would just create orphan vertices).
+    if !outer_only_mode {
+        for hole in hole_polylines_3d {
+            if hole.len() < 3 {
+                // Skip — but we need to advance the vertex_map index to stay in sync
+                // with all_2d. Since we didn't add these vertices to all_2d either
+                // (due to the `continue` in the previous loop), we don't need to
+                // advance here.
+                continue;
+            }
+            for p in hole {
+                let vi = mesh.add_vertex(*p);
+                mesh.add_vertex_normal(vi, face_normal);
+                vertex_map.push(vi);
+            }
         }
     }
 
@@ -4172,8 +4244,9 @@ fn triangulate_3d_polygon_fallback(
     }
 
     log::info!(
-        "triangulate_3d_polygon_fallback: {} outer pts, {} holes, {} triangles (best-fit plane normal=({:.3},{:.3},{:.3}))",
+        "triangulate_3d_polygon_fallback: {} outer pts, {} holes, {} triangles (best-fit plane normal=({:.3},{:.3},{:.3})), outer_only={}, fan={}",
         n_outer, hole_start_indices.len(), mesh.triangles.len(), nx, ny, nz,
+        outer_only_mode, fan_centroid_3d.is_some(),
     );
 
     mesh
