@@ -13,6 +13,7 @@ pub mod schema;
 pub mod converter;
 pub mod validation;
 pub mod pmi;
+pub mod export_validation;
 
 pub use parser::*;
 pub use exporter::*;
@@ -20,3 +21,6 @@ pub use schema::*;
 pub use converter::*;
 pub use validation::*;
 pub use pmi::*;
+pub use export_validation::{
+    validate_exported_step, ExportValidationReport, ExportValidationIssue, ExportSeverity,
+};

@@ -8,7 +8,7 @@
 //!
 //! Usage: cargo run --release --bin roundtrip_test -- <step_file>
 
-use draper_step::{parse_step_file, extract_solids, export_step};
+use draper_step::{parse_step_file, extract_solids, export_step, validate_exported_step};
 use std::env;
 use std::path::Path;
 
@@ -119,6 +119,18 @@ fn main() {
     // ── 5. Compare ──
     println!("\n[5/5] Comparison:");
     let mut pass = true;
+
+    // Run the export validator (P20) on the exported STEP
+    let validation = validate_exported_step(&combined_export);
+    println!("      Validation: {}", validation.summary());
+    if validation.has_errors() {
+        for issue in validation.errors() {
+            println!("        [{}] {} ({})", issue.severity, issue.message, issue.code);
+        }
+        pass = false;
+    } else {
+        println!("        [OK] No validation errors");
+    }
 
     if orig_breps != new_breps {
         println!("  [FAIL] BREP count: {} → {}", orig_breps, new_breps);
