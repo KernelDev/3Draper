@@ -18,14 +18,14 @@
 | **P3** | `PolyBoundary` unified seam/periodic-surface wrapper | ✅ DONE | `d917eb4` |
 | **P4** | ABC benchmark runner + baseline CSV | ✅ DONE | `86d1e5a` |
 | **P5** | Remove 2768 lines dead CDT code (`spade` removed) | ✅ DONE | `38f7155` |
-| **P6** | HYPERBOLA + PARABOLA + ARC handlers (silent STEP drops) | ⏳ TODO | — |
-| **P7** | BREP_WITH_VOIDS inner shells + VERTEX_LOOP | ⏳ TODO | — |
-| **P8** | NURBS toolkit (insert_knot, elevate_degree, bezier_decomposition) | ⏳ TODO | — |
-| **P9** | Analytical derivatives для Revolution/Extrusion (chain rule) | ⏳ TODO | — |
-| **P10** | PolyBoundary pole-degenerate (sphere/torus poles) | ⏳ TODO | — |
-| **P11** | PCurve as analytical curve-on-surface | ⏳ TODO | — |
-| **P12** | IntersectionCurve first-class (4D Newton `double_projection`) | ⏳ TODO | — |
-| **P13** | Loop subdivision + quadrangulation | ⏳ TODO | — |
+| **P6** | HYPERBOLA + PARABOLA + ARC handlers (silent STEP drops) | ✅ DONE | `afe01aa` |
+| **P7** | BREP_WITH_VOIDS inner shells + VERTEX_LOOP | ✅ DONE | `8f8cc64` |
+| **P8** | NURBS toolkit (insert_knot, elevate_degree, bezier_decomposition) | ✅ DONE | `5c7c296` |
+| **P9** | Analytical derivatives для Revolution/Extrusion (chain rule) | ✅ DONE | `e78b803` |
+| **P10** | PolyBoundary pole-degenerate (sphere/torus poles) | ✅ DONE | `cf32cf4` |
+| **P11** | PCurve as analytical curve-on-surface | ✅ DONE | `56c2042` |
+| **P12** | IntersectionCurve first-class (4D Newton `double_projection`) | ✅ DONE | `dc0d78d` |
+| **P13** | Loop subdivision + quadrangulation | ✅ DONE | `cfd5bab` |
 | **P14** | TRIMMED_CURVE proper handling (generic, not only Circle→Arc) | ⏳ TODO | — |
 
 ---

@@ -5362,6 +5362,7 @@ impl<'a> StepConverter<'a> {
                     Curve3d::Parabola(_) => "Parabola",
                     Curve3d::Nurbs(_) => "Nurbs",
                     Curve3d::PCurve { .. } => "PCurve",
+                    Curve3d::Trimmed { .. } => "Trimmed",
                 };
                 let edge = if let Curve3d::Line(ref line) = curve {
                     // For lines, compute param range from vertex projections.
@@ -7915,10 +7916,15 @@ impl<'a> StepConverter<'a> {
                 // Trim a circle by angles — create an Arc
                 return Some(Curve3d::Arc(Arc::new(circle.clone(), *t1, *t2)));
             }
-            (Some(_t1), Some(_t2), _) => {
-                // For other curves, we can't easily adjust param_range at the Curve3d level.
-                // The Edge struct handles param_range, so this is handled at edge creation time.
-                // Just return the untrimmed curve — the resolve_edge_curve will handle vertex-based trimming.
+            (Some(t1), Some(t2), _) => {
+                // P14: For other curves (Line, Ellipse, Hyperbola, Parabola, NURBS, PCurve),
+                // wrap in a Trimmed curve that maps t ∈ [0, 1] to [t1, t2] on the basis curve.
+                // This preserves the trim information instead of returning the untrimmed basis.
+                return Some(Curve3d::Trimmed {
+                    basis: Box::new(curve),
+                    start: *t1,
+                    end: *t2,
+                });
             }
             _ => {}
         }
@@ -8587,6 +8593,7 @@ impl<'a> StepConverter<'a> {
                         Some(Curve3d::Parabola(_)) => "Parabola",
                         Some(Curve3d::Nurbs(_)) => "Nurbs",
                         Some(Curve3d::PCurve { .. }) => "PCurve",
+                        Some(Curve3d::Trimmed { .. }) => "Trimmed",
                         None => "None",
                     };
                     s.push_str(&format!(" #{}={}({})", sid, curve_type, self.edge_sample_count(edge)));
@@ -8820,6 +8827,7 @@ impl<'a> StepConverter<'a> {
             Some(Curve3d::Parabola(_)) => 24,
             Some(Curve3d::Nurbs(_)) => 32,
             Some(Curve3d::PCurve { .. }) => 32,
+            Some(Curve3d::Trimmed { .. }) => 32,
             None => 2,
         }
     }
@@ -11027,6 +11035,7 @@ mod diag_tests {
                                 Curve3d::Parabola(_) => "Parabola",
                                 Curve3d::Nurbs(_) => "Nurbs",
                                 Curve3d::PCurve { .. } => "PCurve",
+                                Curve3d::Trimmed { .. } => "Trimmed",
                             };
                             *edge_type_counts.entry(tn.to_string()).or_insert(0) += 1;
                         }
@@ -11043,6 +11052,7 @@ mod diag_tests {
                                     Curve3d::Parabola(_) => "Parabola",
                                     Curve3d::Nurbs(_) => "Nurbs",
                                     Curve3d::PCurve { .. } => "PCurve",
+                                    Curve3d::Trimmed { .. } => "Trimmed",
                                 };
                                 *edge_type_counts.entry(tn.to_string()).or_insert(0) += 1;
                             }
@@ -11534,6 +11544,7 @@ mod diag_tests {
                         Some(Curve3d::Parabola(_)) => "Parabola",
                         Some(Curve3d::Nurbs(_)) => "Nurbs",
                         Some(Curve3d::PCurve { .. }) => "PCurve",
+                        Some(Curve3d::Trimmed { .. }) => "Trimmed",
                         None => "None",
                     };
                     outer_edge_types.push(tn.to_string());
@@ -11551,6 +11562,7 @@ mod diag_tests {
                             Some(Curve3d::Parabola(_)) => "Parabola",
                             Some(Curve3d::Nurbs(_)) => "Nurbs",
                             Some(Curve3d::PCurve { .. }) => "PCurve",
+                            Some(Curve3d::Trimmed { .. }) => "Trimmed",
                             None => "None",
                         };
                         inner_edge_types.push(tn.to_string());

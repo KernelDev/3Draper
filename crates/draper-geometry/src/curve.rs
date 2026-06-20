@@ -43,6 +43,24 @@ pub enum Curve3d {
         /// The surface on which the curve lies.
         surface: Box<Surface>,
     },
+    /// Trimmed curve — a portion of a basis curve restricted to [start, end].
+    ///
+    /// Used for STEP TRIMMED_CURVE entities where the basis curve is NOT a Circle
+    /// (Circle→Arc is handled by the dedicated Arc variant).
+    ///
+    /// Parametric form (t ∈ [0, 1]):
+    ///   P(t) = basis.point_at(start + t·(end - start))
+    ///   P'(t) = basis.derivative_at(start + t·(end - start)) · (end - start)
+    ///
+    /// Algorithm adapted from truck-geometry v0.6 (ricosjp/truck, Apache-2.0 OR MIT).
+    Trimmed {
+        /// The underlying basis curve.
+        basis: Box<Curve3d>,
+        /// Start parameter on the basis curve.
+        start: f64,
+        /// End parameter on the basis curve.
+        end: f64,
+    },
 }
 
 /// A line in 3D.
@@ -548,6 +566,22 @@ impl Curve3d {
                 }
                 true
             }
+            Curve3d::Trimmed { basis, start, end } => {
+                // A trimmed curve is degenerate if start == end (zero parameter range)
+                // or if the basis curve is degenerate.
+                let start = *start;
+                let end = *end;
+                if (end - start).abs() < tolerance * 1e-8 {
+                    return true;
+                }
+                // Check if the basis curve produces the same point at start, mid, and end
+                let p0 = basis.point_at(start);
+                let pmid = basis.point_at((start + end) * 0.5);
+                let p1 = basis.point_at(end);
+                let d0 = (p0.x - pmid.x).powi(2) + (p0.y - pmid.y).powi(2) + (p0.z - pmid.z).powi(2);
+                let d1 = (p1.x - pmid.x).powi(2) + (p1.y - pmid.y).powi(2) + (p1.z - pmid.z).powi(2);
+                d0 < tolerance * tolerance && d1 < tolerance * tolerance
+            }
             Curve3d::Nurbs(nurbs) => {
                 // A NURBS curve is degenerate if:
                 // 1. It has fewer than 2 control points
@@ -592,6 +626,13 @@ impl Curve3d {
                 let uv = curve_2d.point_at(t);
                 surface.point_at(uv.u, uv.v)
             }
+            Curve3d::Trimmed { basis, start, end } => {
+                // Map t ∈ [0, 1] to [start, end] on the basis curve
+                let start = *start;
+                let end = *end;
+                let basis_t = start + t * (end - start);
+                basis.point_at(basis_t)
+            }
         }
     }
 
@@ -617,6 +658,19 @@ impl Curve3d {
                     ders.du.x * du_dt + ders.dv.x * dv_dt,
                     ders.du.y * du_dt + ders.dv.y * dv_dt,
                     ders.du.z * du_dt + ders.dv.z * dv_dt,
+                )
+            }
+            Curve3d::Trimmed { basis, start, end } => {
+                // Chain rule with scaling: P'(t) = basis'(start + t·(end-start)) · (end - start)
+                let start = *start;
+                let end = *end;
+                let basis_t = start + t * (end - start);
+                let basis_der = basis.derivative_at(basis_t);
+                let scale = end - start;
+                Vec3d::new(
+                    basis_der.x * scale,
+                    basis_der.y * scale,
+                    basis_der.z * scale,
                 )
             }
             Curve3d::Nurbs(nurbs) => {
@@ -671,6 +725,7 @@ impl Curve3d {
             Curve3d::Hyperbola(_) => (-f64::MAX, f64::MAX),
             Curve3d::Parabola(_) => (-f64::MAX, f64::MAX),
             Curve3d::PCurve { curve_2d, .. } => curve_2d.param_range(),
+            Curve3d::Trimmed { .. } => (0.0, 1.0),
             Curve3d::Nurbs(nurbs) => {
                 let n = nurbs.knots.len();
                 if n > nurbs.degree {
@@ -728,6 +783,11 @@ impl Curve3d {
             Curve3d::PCurve { curve_2d, surface } => Curve3d::PCurve {
                 curve_2d: Box::new((**curve_2d).clone()),
                 surface: Box::new(surface.transform(t)),
+            },
+            Curve3d::Trimmed { basis, start, end } => Curve3d::Trimmed {
+                basis: Box::new(basis.transform(t)),
+                start: *start,
+                end: *end,
             },
             Curve3d::Nurbs(nurbs) => Curve3d::Nurbs(NurbsCurve {
                 degree: nurbs.degree,
@@ -1200,5 +1260,116 @@ mod tests {
             surface: Box::new(plane),
         };
         assert!(pcurve.is_degenerate(1e-6), "zero-length PCurve should be degenerate");
+    }
+
+    // ─── Trimmed curve tests (P14) ─────────────────────────────────────
+
+    #[test]
+    fn test_trimmed_line_point_at() {
+        // A line from (0,0,0) to (10,0,0), trimmed to [2, 8] on the line parameter.
+        // At t=0, point should be (2, 0, 0). At t=1, point should be (8, 0, 0).
+        // At t=0.5, point should be (5, 0, 0).
+        let basis = Curve3d::Line(Line::new(
+            Point3d::ORIGIN,
+            Direction3d::X,
+        ));
+        let trimmed = Curve3d::Trimmed {
+            basis: Box::new(basis),
+            start: 2.0,
+            end: 8.0,
+        };
+
+        let p0 = trimmed.point_at(0.0);
+        assert!((p0.x - 2.0).abs() < 1e-12, "p0.x should be 2, got {}", p0.x);
+        assert!(p0.y.abs() < 1e-12);
+        assert!(p0.z.abs() < 1e-12);
+
+        let p1 = trimmed.point_at(1.0);
+        assert!((p1.x - 8.0).abs() < 1e-12, "p1.x should be 8, got {}", p1.x);
+
+        let pmid = trimmed.point_at(0.5);
+        assert!((pmid.x - 5.0).abs() < 1e-12, "pmid.x should be 5, got {}", pmid.x);
+    }
+
+    #[test]
+    fn test_trimmed_line_derivative_at() {
+        // A line with direction (1, 0, 0), trimmed to [2, 8].
+        // The derivative should be (1, 0, 0) * (8-2) = (6, 0, 0) for all t.
+        let basis = Curve3d::Line(Line::new(
+            Point3d::ORIGIN,
+            Direction3d::X,
+        ));
+        let trimmed = Curve3d::Trimmed {
+            basis: Box::new(basis),
+            start: 2.0,
+            end: 8.0,
+        };
+
+        let d = trimmed.derivative_at(0.5);
+        assert!((d.x - 6.0).abs() < 1e-12, "d.x should be 6 (end-start=6), got {}", d.x);
+        assert!(d.y.abs() < 1e-12);
+        assert!(d.z.abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_trimmed_param_range() {
+        let basis = Curve3d::Line(Line::new(
+            Point3d::ORIGIN,
+            Direction3d::X,
+        ));
+        let trimmed = Curve3d::Trimmed {
+            basis: Box::new(basis),
+            start: 2.0,
+            end: 8.0,
+        };
+        let (t_min, t_max) = trimmed.param_range();
+        assert!((t_min - 0.0).abs() < 1e-12);
+        assert!((t_max - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_trimmed_degenerate_zero_range() {
+        let basis = Curve3d::Line(Line::new(
+            Point3d::ORIGIN,
+            Direction3d::X,
+        ));
+        let trimmed = Curve3d::Trimmed {
+            basis: Box::new(basis),
+            start: 5.0,
+            end: 5.0,  // zero parameter range
+        };
+        assert!(trimmed.is_degenerate(1e-6), "zero-range Trimmed should be degenerate");
+    }
+
+    #[test]
+    fn test_trimmed_circle_matches_arc() {
+        // A trimmed circle from 0 to π/2 should match an Arc from 0 to π/2.
+        use std::f64::consts::FRAC_PI_2;
+        let circle = Circle::new_xy(Point3d::ORIGIN, 1.0);
+        let arc = Curve3d::Arc(Arc::new(circle.clone(), 0.0, FRAC_PI_2));
+        let trimmed = Curve3d::Trimmed {
+            basis: Box::new(Curve3d::Circle(circle)),
+            start: 0.0,
+            end: FRAC_PI_2,
+        };
+
+        // Both should give the same point at t=0.5 (midpoint)
+        let p_arc = arc.point_at(0.5);
+        let p_trimmed = trimmed.point_at(0.5);
+        assert!((p_arc.x - p_trimmed.x).abs() < 1e-12,
+            "arc.x={} vs trimmed.x={}", p_arc.x, p_trimmed.x);
+        assert!((p_arc.y - p_trimmed.y).abs() < 1e-12,
+            "arc.y={} vs trimmed.y={}", p_arc.y, p_trimmed.y);
+        assert!((p_arc.z - p_trimmed.z).abs() < 1e-12,
+            "arc.z={} vs trimmed.z={}", p_arc.z, p_trimmed.z);
+
+        // Derivatives: arc uses dθ/dt = end-start directly, trimmed uses chain rule
+        // Both should give the same magnitude
+        let d_arc = arc.derivative_at(0.5);
+        let d_trimmed = trimmed.derivative_at(0.5);
+        let mag_arc = (d_arc.x * d_arc.x + d_arc.y * d_arc.y + d_arc.z * d_arc.z).sqrt();
+        let mag_trimmed = (d_trimmed.x * d_trimmed.x + d_trimmed.y * d_trimmed.y + d_trimmed.z * d_trimmed.z).sqrt();
+        assert!((mag_arc - mag_trimmed).abs() < 1e-12,
+            "derivative magnitudes should match: arc={} vs trimmed={}", mag_arc, mag_trimmed);
     }
 }
