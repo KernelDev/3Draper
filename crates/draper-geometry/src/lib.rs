@@ -15,6 +15,7 @@ pub mod curve;
 pub mod curve2d;
 pub mod surface;
 pub mod intersection;
+pub mod nurbs_tools;
 pub mod tolerance;
 
 pub use point::*;
@@ -25,4 +26,5 @@ pub use curve::*;
 pub use curve2d::*;
 pub use surface::*;
 pub use intersection::*;
+pub use nurbs_tools::*;
 pub use tolerance::*;
