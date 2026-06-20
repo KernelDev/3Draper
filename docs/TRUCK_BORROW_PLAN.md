@@ -26,7 +26,7 @@
 | **P11** | PCurve as analytical curve-on-surface | ✅ DONE | `56c2042` |
 | **P12** | IntersectionCurve first-class (4D Newton `double_projection`) | ✅ DONE | `dc0d78d` |
 | **P13** | Loop subdivision + quadrangulation | ✅ DONE | `cfd5bab` |
-| **P14** | TRIMMED_CURVE proper handling (generic, not only Circle→Arc) | ⏳ TODO | — |
+| **P14** | TRIMMED_CURVE proper handling (generic, not only Circle→Arc) | ✅ DONE | `1dab48f` |
 
 ---
 
