@@ -5361,6 +5361,7 @@ impl<'a> StepConverter<'a> {
                     Curve3d::Hyperbola(_) => "Hyperbola",
                     Curve3d::Parabola(_) => "Parabola",
                     Curve3d::Nurbs(_) => "Nurbs",
+                    Curve3d::PCurve { .. } => "PCurve",
                 };
                 let edge = if let Curve3d::Line(ref line) = curve {
                     // For lines, compute param range from vertex projections.
@@ -8585,6 +8586,7 @@ impl<'a> StepConverter<'a> {
                         Some(Curve3d::Hyperbola(_)) => "Hyperbola",
                         Some(Curve3d::Parabola(_)) => "Parabola",
                         Some(Curve3d::Nurbs(_)) => "Nurbs",
+                        Some(Curve3d::PCurve { .. }) => "PCurve",
                         None => "None",
                     };
                     s.push_str(&format!(" #{}={}({})", sid, curve_type, self.edge_sample_count(edge)));
@@ -8817,6 +8819,7 @@ impl<'a> StepConverter<'a> {
             Some(Curve3d::Hyperbola(_)) => 24,
             Some(Curve3d::Parabola(_)) => 24,
             Some(Curve3d::Nurbs(_)) => 32,
+            Some(Curve3d::PCurve { .. }) => 32,
             None => 2,
         }
     }
@@ -11023,6 +11026,7 @@ mod diag_tests {
                                 Curve3d::Hyperbola(_) => "Hyperbola",
                                 Curve3d::Parabola(_) => "Parabola",
                                 Curve3d::Nurbs(_) => "Nurbs",
+                                Curve3d::PCurve { .. } => "PCurve",
                             };
                             *edge_type_counts.entry(tn.to_string()).or_insert(0) += 1;
                         }
@@ -11038,6 +11042,7 @@ mod diag_tests {
                                     Curve3d::Hyperbola(_) => "Hyperbola",
                                     Curve3d::Parabola(_) => "Parabola",
                                     Curve3d::Nurbs(_) => "Nurbs",
+                                    Curve3d::PCurve { .. } => "PCurve",
                                 };
                                 *edge_type_counts.entry(tn.to_string()).or_insert(0) += 1;
                             }
@@ -11528,6 +11533,7 @@ mod diag_tests {
                         Some(Curve3d::Hyperbola(_)) => "Hyperbola",
                         Some(Curve3d::Parabola(_)) => "Parabola",
                         Some(Curve3d::Nurbs(_)) => "Nurbs",
+                        Some(Curve3d::PCurve { .. }) => "PCurve",
                         None => "None",
                     };
                     outer_edge_types.push(tn.to_string());
@@ -11544,6 +11550,7 @@ mod diag_tests {
                             Some(Curve3d::Hyperbola(_)) => "Hyperbola",
                             Some(Curve3d::Parabola(_)) => "Parabola",
                             Some(Curve3d::Nurbs(_)) => "Nurbs",
+                            Some(Curve3d::PCurve { .. }) => "PCurve",
                             None => "None",
                         };
                         inner_edge_types.push(tn.to_string());

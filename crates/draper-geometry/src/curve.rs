@@ -3,6 +3,8 @@
 //! Parametric curves in 3D space.
 
 use crate::{Direction3d, Point3d, Vec3d, Transform};
+use crate::curve2d::Curve2d;
+use crate::surface::Surface;
 
 /// Parametric range [u_min, u_max].
 pub type ParamRange = (f64, f64);
@@ -27,6 +29,20 @@ pub enum Curve3d {
     Parabola(Parabola),
     /// NURBS curve
     Nurbs(NurbsCurve),
+    /// PCurve — a 2D curve in the parametric space of a surface.
+    ///
+    /// The 3D point is computed as: surface.point_at(curve_2d.point_at(t).u, curve_2d.point_at(t).v)
+    /// The 3D derivative uses the chain rule:
+    ///   dS/dt = S_u * du/dt + S_v * dv/dt
+    /// where S_u, S_v are the surface's partial derivatives.
+    ///
+    /// Algorithm adapted from truck-geometry v0.6 (ricosjp/truck, Apache-2.0 OR MIT).
+    PCurve {
+        /// The 2D curve in UV space.
+        curve_2d: Box<Curve2d>,
+        /// The surface on which the curve lies.
+        surface: Box<Surface>,
+    },
 }
 
 /// A line in 3D.
@@ -513,6 +529,25 @@ impl Curve3d {
                 // A parabola is degenerate if focal_dist is below tolerance.
                 p.focal_dist.abs() < tolerance
             }
+            Curve3d::PCurve { curve_2d, surface } => {
+                // A PCurve is degenerate if the surface is degenerate or if the 2D curve has zero length.
+                let (u_min, u_max) = curve_2d.param_range();
+                if (u_max - u_min).abs() < tolerance * 1e-8 {
+                    return true;
+                }
+                // Sample a few points and check if they all map to the same 3D point
+                let p0 = surface.point_at(curve_2d.point_at(u_min).u, curve_2d.point_at(u_min).v);
+                for &t in &[0.25, 0.5, 0.75] {
+                    let tt = u_min + t * (u_max - u_min);
+                    let uv = curve_2d.point_at(tt);
+                    let p = surface.point_at(uv.u, uv.v);
+                    let dist_sq = (p.x - p0.x).powi(2) + (p.y - p0.y).powi(2) + (p.z - p0.z).powi(2);
+                    if dist_sq > tolerance * tolerance {
+                        return false;
+                    }
+                }
+                true
+            }
             Curve3d::Nurbs(nurbs) => {
                 // A NURBS curve is degenerate if:
                 // 1. It has fewer than 2 control points
@@ -553,6 +588,10 @@ impl Curve3d {
             Curve3d::Hyperbola(h) => h.point_at(t),
             Curve3d::Parabola(p) => p.point_at(t),
             Curve3d::Nurbs(nurbs) => nurbs_eval(nurbs, t),
+            Curve3d::PCurve { curve_2d, surface } => {
+                let uv = curve_2d.point_at(t);
+                surface.point_at(uv.u, uv.v)
+            }
         }
     }
 
@@ -569,6 +608,17 @@ impl Curve3d {
             Curve3d::Arc(arc) => arc.derivative_at(t),
             Curve3d::Hyperbola(h) => h.derivative_at(t),
             Curve3d::Parabola(p) => p.derivative_at(t),
+            Curve3d::PCurve { curve_2d, surface } => {
+                // Chain rule: dS/dt = S_u * du/dt + S_v * dv/dt
+                let uv = curve_2d.point_at(t);
+                let (du_dt, dv_dt) = curve_2d.derivative_at(t);
+                let ders = surface.derivatives_at(uv.u, uv.v);
+                Vec3d::new(
+                    ders.du.x * du_dt + ders.dv.x * dv_dt,
+                    ders.du.y * du_dt + ders.dv.y * dv_dt,
+                    ders.du.z * du_dt + ders.dv.z * dv_dt,
+                )
+            }
             Curve3d::Nurbs(nurbs) => {
                 // Use the analytical NurbsCurve::derivative_at (quotient rule).
                 // Falls back to numerical central differences only if the analytical
@@ -620,6 +670,7 @@ impl Curve3d {
             Curve3d::Arc(arc) => (arc.start_angle, arc.end_angle),
             Curve3d::Hyperbola(_) => (-f64::MAX, f64::MAX),
             Curve3d::Parabola(_) => (-f64::MAX, f64::MAX),
+            Curve3d::PCurve { curve_2d, .. } => curve_2d.param_range(),
             Curve3d::Nurbs(nurbs) => {
                 let n = nurbs.knots.len();
                 if n > nurbs.degree {
@@ -674,6 +725,10 @@ impl Curve3d {
                 x_axis: t.transform_direction(&p.x_axis),
                 focal_dist: p.focal_dist,
             }),
+            Curve3d::PCurve { curve_2d, surface } => Curve3d::PCurve {
+                curve_2d: Box::new((**curve_2d).clone()),
+                surface: Box::new(surface.transform(t)),
+            },
             Curve3d::Nurbs(nurbs) => Curve3d::Nurbs(NurbsCurve {
                 degree: nurbs.degree,
                 control_points: nurbs.control_points.iter().map(|p| t.transform_point(p)).collect(),
@@ -1045,5 +1100,105 @@ mod tests {
         } else {
             panic!("Expected Nurbs variant");
         }
+    }
+
+    // ─── PCurve tests (P11) ────────────────────────────────────────────
+
+    #[test]
+    fn test_pcurve_point_at_matches_surface_point_at() {
+        use crate::curve2d::{Circle2d, Curve2d};
+        use crate::surface::{CylinderSurface, Surface};
+        // A circular PCurve on a cylinder: circle of radius 1 in UV at v=0.5
+        let cylinder = Surface::Cylinder(CylinderSurface::new_z(1.0));
+        let circle_2d = Curve2d::Circle(Circle2d {
+            center: crate::Point2d::new(0.0, 0.5),
+            radius: 1.0,
+            start_angle: 0.0,
+            end_angle: 2.0 * std::f64::consts::PI,
+        });
+        let pcurve = Curve3d::PCurve {
+            curve_2d: Box::new(circle_2d),
+            surface: Box::new(cylinder.clone()),
+        };
+
+        // At t=0, the 2D point is (1, 0.5) (cos(0)=1, sin(0)=0, plus center (0, 0.5))
+        // Wait — Circle2d.point_at uses start_angle + t * (end_angle - start_angle)
+        // For t=0: angle = 0, point = center + (cos(0)*r, sin(0)*r) = (1, 0.5)
+        let p = pcurve.point_at(0.0);
+        // The cylinder evaluates (u=1, v=0.5) as:
+        //   point = center + r*cos(u)*x_dir + r*sin(u)*y_dir + v*axis
+        //   = (cos(1), sin(1), 0.5)
+        let expected = cylinder.point_at(1.0, 0.5);
+        assert!((p.x - expected.x).abs() < 1e-12);
+        assert!((p.y - expected.y).abs() < 1e-12);
+        assert!((p.z - expected.z).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_pcurve_derivative_matches_numerical() {
+        use crate::curve2d::{Circle2d, Curve2d};
+        use crate::surface::{CylinderSurface, Surface};
+        let cylinder = Surface::Cylinder(CylinderSurface::new_z(1.0));
+        let circle_2d = Curve2d::Circle(Circle2d {
+            center: crate::Point2d::new(0.0, 0.5),
+            radius: 1.0,
+            start_angle: 0.0,
+            end_angle: 2.0 * std::f64::consts::PI,
+        });
+        let pcurve = Curve3d::PCurve {
+            curve_2d: Box::new(circle_2d),
+            surface: Box::new(cylinder.clone()),
+        };
+
+        let dt = 1e-7;
+        for &t in &[0.1_f64, 0.5, 1.0, 2.0] {
+            let analytical = pcurve.derivative_at(t);
+            let p_plus = pcurve.point_at(t + dt);
+            let p_minus = pcurve.point_at(t - dt);
+            let num_x = (p_plus.x - p_minus.x) / (2.0 * dt);
+            let num_y = (p_plus.y - p_minus.y) / (2.0 * dt);
+            let num_z = (p_plus.z - p_minus.z) / (2.0 * dt);
+            let err = ((analytical.x - num_x).powi(2)
+                + (analytical.y - num_y).powi(2)
+                + (analytical.z - num_z).powi(2)).sqrt();
+            assert!(err < 1e-5,
+                "PCurve derivative mismatch at t={}: analytical=({:.6},{:.6},{:.6}), numerical=({:.6},{:.6},{:.6}), err={:.2e}",
+                t, analytical.x, analytical.y, analytical.z, num_x, num_y, num_z, err);
+        }
+    }
+
+    #[test]
+    fn test_pcurve_param_range_matches_curve_2d() {
+        use crate::curve2d::{Line2d, Curve2d};
+        use crate::surface::{Plane, Surface};
+        let plane = Surface::Plane(Plane::xy());
+        let line_2d = Curve2d::Line(Line2d::new(
+            crate::Point2d::new(0.0, 0.0),
+            crate::Point2d::new(1.0, 1.0),
+        ));
+        let pcurve = Curve3d::PCurve {
+            curve_2d: Box::new(line_2d.clone()),
+            surface: Box::new(plane),
+        };
+        let (t_min, t_max) = pcurve.param_range();
+        let (l_min, l_max) = line_2d.param_range();
+        assert!((t_min - l_min).abs() < 1e-12);
+        assert!((t_max - l_max).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_pcurve_degenerate_zero_length() {
+        use crate::curve2d::{Line2d, Curve2d};
+        use crate::surface::{Plane, Surface};
+        let plane = Surface::Plane(Plane::xy());
+        let line_2d = Curve2d::Line(Line2d::new(
+            crate::Point2d::new(0.5, 0.5),
+            crate::Point2d::new(0.5, 0.5),  // zero-length line
+        ));
+        let pcurve = Curve3d::PCurve {
+            curve_2d: Box::new(line_2d),
+            surface: Box::new(plane),
+        };
+        assert!(pcurve.is_degenerate(1e-6), "zero-length PCurve should be degenerate");
     }
 }
