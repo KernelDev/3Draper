@@ -53,6 +53,7 @@ fn from_homogeneous(hpts: &[HomogeneousPoint], degree: usize, knots: Vec<f64>) -
 /// Find the knot span index `k` such that `knots[k] <= t < knots[k+1]`.
 ///
 /// For `t == knots.last()`, returns `n - 1` where `n = control_points.len()`.
+#[cfg(test)]
 fn find_knot_span(knots: &[f64], degree: usize, t: f64, n: usize) -> usize {
     if t >= knots[n] {
         return n - 1;
