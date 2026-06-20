@@ -13,6 +13,7 @@ pub mod boolean;
 pub mod assembly;
 pub mod engine;
 pub mod error;
+pub mod step_to_usd;
 
 pub use document::*;
 pub use operations::*;
@@ -20,3 +21,4 @@ pub use boolean::*;
 pub use assembly::*;
 pub use engine::*;
 pub use error::*;
+pub use step_to_usd::*;

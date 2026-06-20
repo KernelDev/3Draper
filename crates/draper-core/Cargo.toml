@@ -19,3 +19,4 @@ serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
 env_logger = { workspace = true }
+tempfile = "3"

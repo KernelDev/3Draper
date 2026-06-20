@@ -30,6 +30,7 @@ pub mod gdt_check;
 
 #[cfg(feature = "export-3mf")]
 pub mod export;
+pub mod export_usd;
 
 pub use mesh::*;
 pub use triangulate::*;
