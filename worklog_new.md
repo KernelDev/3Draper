@@ -1332,3 +1332,81 @@ Stage Summary:
 - DEPENDENCIES: -1 (spade removed)
 - 0 regressions on previously-WATERTIGHT files
 - All P0-P5 items from the truck-borrow plan complete; P6 deferred by design choice
+
+---
+Task ID: 32
+Agent: Super Z (main agent)
+Task: Continue per the truck-borrow plan — verify P0-P20 completeness, fix
+remaining bugs, push to GitHub. User: "Продолжай согласно плана."
+
+Work Log:
+- Reconciled diverged local/remote main branches (file-mode-only conflict,
+  merged with `-X theirs`).
+- Pulled latest origin/main which already contains P0-P20 fully implemented
+  (commits b309243..551e3a1, 2026-06-20).
+- Installed Rust toolchain (was missing on fresh environment).
+- Verified build: `cargo check --release` → 0 errors, 0 warnings.
+- Ran `all_files_test` on 24 STEP files: 24/24 ok, 0 leaky, 0 BAD, 0 errors
+  (was 19 ok + 5 leaky before P0-P14).
+- Ran round-trip tests on representative files (cube, sphere, cone,
+  cylinder, complex_surface, bolt) — all PASS with 0 validation errors.
+- Ran full unit-test suites:
+  * draper-geometry: 81/81 pass
+  * draper-mesh: 116/118 pass (2 gdt_check failures pre-existing)
+  * draper-step: 90/92 pass (2 pmi failures pre-existing)
+  * draper-core: 9/9 pass (incl. 6 P19 editing-API tests)
+
+- Investigated the 4 pre-existing test failures — all real bugs:
+
+  Bug 1 (pmi::test_extract_gdt_tolerance): STEP files use generic
+  GEOMETRIC_TOLERANCE('position tolerance','pos',0.05,...) without a
+  subtype-specific entity name. from_step_type only matched entity type
+  name → returned Other("GEOMETRIC_TOLERANCE") instead of Position.
+  FIX: new from_step_type_and_name(type, name, desc) joins all three
+  strings for keyword matching.
+
+  Bug 2 (pmi::test_extract_ap242_combined): SI_UNIT complex-entity
+  parser produced "MILLI_METRE" (with underscore), but uses_millimetres()
+  only checked for "MILLIMETRE" (no underscore) → reported file as not
+  millimetre.
+  FIX: uses_millimetres() now also accepts MILLI_METRE, MILLIMETER,
+  MILLI_METER, bare MM.
+
+  Bug 3 (gdt_check::test_flatness_flat_mesh): smallest_eigenvector_3x3
+  used power iteration + deflation. For rank-1 input (perfectly flat
+  mesh), deflated matrix became zero, and inner largest_eigenvector_3x3
+  returned its initial guess (0,1,0) instead of true normal (0,0,1).
+  Reported flatness was 5.0 (half-extent in Y) instead of 0.
+  FIX: detect near-zero Frobenius norm of deflated matrix, return
+  orthogonal_unit_vector built via axis-of-least-component trick. Same
+  fix at rank-2 via cross product of two computed eigenvectors.
+
+  Bug 4 (gdt_check::test_cylindricity_check): test was adding
+  bottom_center and top_center vertices via mesh.add_vertex but never
+  used them in any triangle. Orphan vertices had radius 0, inflating
+  r_max - r_min to 5 (full radius), cylindricity to 2.5.
+  FIX: stop adding unused center vertices. Test tolerates <1.0 for
+  PCA-based axis estimate headroom (chord error is ~0.096).
+
+- Added --all batch mode to roundtrip_test.rs: walks ./test and runs
+  silent round-trip on every .stp/.step/.STEP file, prints summary
+  table. run_one() now returns bool for proper exit status.
+- count_curve_types() no longer counts SURFACE_CURVE/PCURVE wrapper
+  entities — exporter intentionally flattens them, including them caused
+  spurious WARN on as1-oc-214.stp (5-solid assembly).
+
+Stage Summary:
+- All 4 previously-failing unit tests now PASS:
+  * draper-step: 92/92 pass (was 90/92)
+  * draper-mesh: 118/118 pass (was 116/118)
+- Round-trip batch on all 24 files: 24/24 PASS, 0 WARN, 0 FAIL
+  (was 23 PASS + 1 WARN before curve-type comparison fix)
+- All 24 STEP files open correctly (0 errors, 0 leaky, 0 BAD)
+- Build: 0 errors, 0 warnings
+
+Commit pushed to GitHub main: b6a0fc1
+Files modified:
+- crates/draper-step/src/pmi.rs (PMI tolerance classification + units)
+- crates/draper-mesh/src/gdt_check.rs (eigenvector fix + test cleanup)
+- tools/src/bin/roundtrip_test.rs (batch mode + wrapper exclusion)
+- docs/TRUCK_BORROW_PLAN.md (post-P20 quality pass section)
