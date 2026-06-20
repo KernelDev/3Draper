@@ -399,6 +399,32 @@ pub fn step_to_mesh(step_file: &StepFile) -> Result<TriangleMesh, String> {
     step_to_mesh_with_config(step_file, &StepConversionConfig::default())
 }
 
+/// Extract all BREP solids from a parsed STEP file WITHOUT triangulating.
+///
+/// This is the foundation for editing workflows: read STEP → extract solids →
+/// edit (transform faces, add/remove holes, modify NURBS) → export back to STEP.
+///
+/// Each MANIFOLD_SOLID_BREP or BREP_WITH_VOIDS in the STEP file becomes one `Solid`.
+/// Void shells are attached as `Solid::inner_shells`.
+///
+/// Returns `(solids, brep_ids)` where `brep_ids[i]` is the STEP entity ID of
+/// the BREP that produced `solids[i]`.
+pub fn extract_solids(step_file: &StepFile) -> (Vec<Solid>, Vec<i64>) {
+    let config = StepConversionConfig::default();
+    let converter = StepConverter::with_config(step_file, config);
+    converter.extract_all_solids()
+}
+
+/// Extract solids from a STEP file using a custom conversion config
+/// (e.g., disabling healing for raw extraction).
+pub fn extract_solids_with_config(
+    step_file: &StepFile,
+    config: &StepConversionConfig,
+) -> (Vec<Solid>, Vec<i64>) {
+    let converter = StepConverter::with_config(step_file, config.clone());
+    converter.extract_all_solids()
+}
+
 /// Convert a parsed STEP file to a single merged triangle mesh with custom configuration.
 pub fn step_to_mesh_with_config(step_file: &StepFile, config: &StepConversionConfig) -> Result<TriangleMesh, String> {
     let converter = StepConverter::with_config(step_file, config.clone());
@@ -1029,6 +1055,91 @@ impl<'a> StepConverter<'a> {
             nauo_transform_map,
             bbox_cache: std::cell::RefCell::new(None),
         }
+    }
+
+    /// Extract all BREP solids from the STEP file without triangulating.
+    ///
+    /// Each MANIFOLD_SOLID_BREP or BREP_WITH_VOIDS produces one `Solid`.
+    /// For BREP_WITH_VOIDS, the void shells are attached as `Solid::inner_shells`.
+    ///
+    /// Returns `(solids, brep_ids)`. The order corresponds to the order in
+    /// which BREP entities appear in the STEP file.
+    fn extract_all_solids(&self) -> (Vec<Solid>, Vec<i64>) {
+        let mut solids = Vec::new();
+        let mut brep_ids = Vec::new();
+
+        // Collect all BREP entity IDs from the STEP file (both MANIFOLD_SOLID_BREP
+        // and BREP_WITH_VOIDS).
+        let mut all_brep_ids: Vec<i64> = Vec::new();
+        for brep in self.step.find_entities_by_type("MANIFOLD_SOLID_BREP") {
+            all_brep_ids.push(brep.id);
+        }
+        for brep in self.step.find_entities_by_type("BREP_WITH_VOIDS") {
+            all_brep_ids.push(brep.id);
+        }
+        all_brep_ids.sort_unstable();
+
+        for brep_id in all_brep_ids {
+            match self.extract_solid_from_brep(brep_id) {
+                Some(solid) => {
+                    solids.push(solid);
+                    brep_ids.push(brep_id);
+                }
+                None => {
+                    log::warn!(
+                        "extract_all_solids: failed to extract solid from BREP #{} — skipping",
+                        brep_id
+                    );
+                }
+            }
+        }
+
+        (solids, brep_ids)
+    }
+
+    /// Extract a single Solid from a BREP entity (MANIFOLD_SOLID_BREP or BREP_WITH_VOIDS).
+    ///
+    /// Extracts outer shell + void shells, converts each to FaceData list,
+    /// and assembles a `Solid` with outer_shell + inner_shells.
+    fn extract_solid_from_brep(&self, brep_id: i64) -> Option<Solid> {
+        let (outer_shell_id, void_shell_ids) = self.find_all_shell_refs_by_brep_id(brep_id);
+        let outer_shell_id = outer_shell_id?;
+
+        // Extract outer shell faces
+        let outer_face_data = self.extract_shell_faces(outer_shell_id)?;
+        if outer_face_data.is_empty() {
+            log::warn!(
+                "extract_solid_from_brep: outer shell #{} has no faces — skipping BREP #{}",
+                outer_shell_id, brep_id
+            );
+            return None;
+        }
+
+        // Convert FaceData list → Solid (outer shell only, no healing applied)
+        let (mut solid, _) = face_data_list_to_solid(&outer_face_data);
+
+        // Extract void shells (if any) and add as inner shells
+        for void_shell_id in &void_shell_ids {
+            match self.extract_shell_faces(*void_shell_id) {
+                Some(void_face_data) => {
+                    if void_face_data.is_empty() {
+                        continue;
+                    }
+                    let (void_solid, _) = face_data_list_to_solid(&void_face_data);
+                    if let Some(void_shell) = void_solid.outer_shell {
+                        solid.add_void(void_shell);
+                    }
+                }
+                None => {
+                    log::warn!(
+                        "extract_solid_from_brep: failed to extract void shell #{} — skipping",
+                        void_shell_id
+                    );
+                }
+            }
+        }
+
+        Some(solid)
     }
 
     /// Create a StepConverter from pre-built index maps.
