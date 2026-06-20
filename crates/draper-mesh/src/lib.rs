@@ -18,6 +18,7 @@ pub mod adaptive;
 pub mod parametric_domain;
 pub mod parametric_division_2d;
 pub mod poly_boundary;
+pub mod subdivision;
 pub mod certification;
 pub mod text3d;
 pub mod watertight;
