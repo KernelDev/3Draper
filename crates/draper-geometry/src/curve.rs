@@ -19,6 +19,12 @@ pub enum Curve3d {
     Ellipse(Ellipse),
     /// Arc (trimmed circle segment)
     Arc(Arc),
+    /// Hyperbola in 3D space (algorithm adapted from truck-geometry v0.6,
+    /// ricosjp/truck, Apache-2.0 OR MIT).
+    Hyperbola(Hyperbola),
+    /// Parabola in 3D space (algorithm adapted from truck-geometry v0.6,
+    /// ricosjp/truck, Apache-2.0 OR MIT).
+    Parabola(Parabola),
     /// NURBS curve
     Nurbs(NurbsCurve),
 }
@@ -213,6 +219,134 @@ impl Arc {
     }
 }
 
+/// A hyperbola in 3D space.
+///
+/// Standard form: x²/a² - y²/b² = 1, where a = semi_real, b = semi_imag.
+/// The hyperbola lies in the plane defined by `normal`, with its center at `center`,
+/// its transverse axis along `x_axis`, and conjugate axis along `y_axis = normal × x_axis`.
+///
+/// Parametric form:
+///   P(t) = center + a·cosh(t)·x_axis + b·sinh(t)·y_axis
+///   P'(t) = a·sinh(t)·x_axis + b·cosh(t)·y_axis
+///
+/// Parameter range: (-∞, +∞). In practice, STEP TRIMMED_CURVE provides bounds.
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Hyperbola {
+    /// Center of the hyperbola (midpoint between the two vertices).
+    pub center: Point3d,
+    /// Normal to the plane of the hyperbola (axis_z of the STEP AXIS2_PLACEMENT_3D).
+    pub normal: Direction3d,
+    /// Transverse axis direction (along which the two branches open).
+    /// Corresponds to ref_direction of the STEP AXIS2_PLACEMENT_3D.
+    pub x_axis: Direction3d,
+    /// Semi-axis length along x_axis (a in x²/a² - y²/b² = 1).
+    pub semi_real: f64,
+    /// Semi-imaginary axis length along y_axis (b in x²/a² - y²/b² = 1).
+    pub semi_imag: f64,
+}
+
+impl Hyperbola {
+    /// Construct a hyperbola in the XY plane centered at the given point.
+    pub fn new_xy(center: Point3d, semi_real: f64, semi_imag: f64) -> Self {
+        Self {
+            center,
+            normal: Direction3d::Z,
+            x_axis: Direction3d::X,
+            semi_real,
+            semi_imag,
+        }
+    }
+
+    /// Evaluate the point at parameter t.
+    pub fn point_at(&self, t: f64) -> Point3d {
+        let y_axis = self.normal.cross(&self.x_axis);
+        let ch = t.cosh();
+        let sh = t.sinh();
+        Point3d::new(
+            self.center.x + self.semi_real * ch * self.x_axis.x + self.semi_imag * sh * y_axis.x,
+            self.center.y + self.semi_real * ch * self.x_axis.y + self.semi_imag * sh * y_axis.y,
+            self.center.z + self.semi_real * ch * self.x_axis.z + self.semi_imag * sh * y_axis.z,
+        )
+    }
+
+    /// Evaluate the first derivative (tangent vector) at parameter t.
+    ///
+    /// dP/dt = a·sinh(t)·x_axis + b·cosh(t)·y_axis
+    pub fn derivative_at(&self, t: f64) -> Vec3d {
+        let y_axis = self.normal.cross(&self.x_axis);
+        let ch = t.cosh();
+        let sh = t.sinh();
+        Vec3d::new(
+            self.semi_real * sh * self.x_axis.x + self.semi_imag * ch * y_axis.x,
+            self.semi_real * sh * self.x_axis.y + self.semi_imag * ch * y_axis.y,
+            self.semi_real * sh * self.x_axis.z + self.semi_imag * ch * y_axis.z,
+        )
+    }
+}
+
+/// A parabola in 3D space.
+///
+/// Standard form: x = y²/(4f), where f = focal_dist. The parabola opens along +x_axis,
+/// with its vertex at `vertex` and focus at `vertex + f·x_axis`.
+///
+/// Parametric form (parameter t = y):
+///   P(t) = vertex + (t²/(4f))·x_axis + t·y_axis
+///   P'(t) = (t/(2f))·x_axis + y_axis
+///
+/// Parameter range: (-∞, +∞). In practice, STEP TRIMMED_CURVE provides bounds.
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Parabola {
+    /// Vertex of the parabola (the point of zero curvature).
+    pub vertex: Point3d,
+    /// Normal to the plane of the parabola (axis_z of the STEP AXIS2_PLACEMENT_3D).
+    pub normal: Direction3d,
+    /// Direction in which the parabola opens (toward the focus).
+    /// Corresponds to ref_direction of the STEP AXIS2_PLACEMENT_3D.
+    pub x_axis: Direction3d,
+    /// Focal distance f > 0. Focus is at vertex + f·x_axis.
+    pub focal_dist: f64,
+}
+
+impl Parabola {
+    /// Construct a parabola in the XY plane opening along +X.
+    pub fn new_xy(vertex: Point3d, focal_dist: f64) -> Self {
+        Self {
+            vertex,
+            normal: Direction3d::Z,
+            x_axis: Direction3d::X,
+            focal_dist,
+        }
+    }
+
+    /// Evaluate the point at parameter t.
+    pub fn point_at(&self, t: f64) -> Point3d {
+        let y_axis = self.normal.cross(&self.x_axis);
+        let f = if self.focal_dist.abs() < 1e-15 { 1e-15 } else { self.focal_dist };
+        let x_comp = t * t / (4.0 * f);
+        Point3d::new(
+            self.vertex.x + x_comp * self.x_axis.x + t * y_axis.x,
+            self.vertex.y + x_comp * self.x_axis.y + t * y_axis.y,
+            self.vertex.z + x_comp * self.x_axis.z + t * y_axis.z,
+        )
+    }
+
+    /// Evaluate the first derivative (tangent vector) at parameter t.
+    ///
+    /// dP/dt = (t/(2f))·x_axis + y_axis
+    pub fn derivative_at(&self, t: f64) -> Vec3d {
+        let y_axis = self.normal.cross(&self.x_axis);
+        let f = if self.focal_dist.abs() < 1e-15 { 1e-15 } else { self.focal_dist };
+        let x_comp = t / (2.0 * f);
+        Vec3d::new(
+            x_comp * self.x_axis.x + y_axis.x,
+            x_comp * self.x_axis.y + y_axis.y,
+            x_comp * self.x_axis.z + y_axis.z,
+        )
+    }
+}
+
 /// NURBS curve representation.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -369,6 +503,16 @@ impl Curve3d {
                 let dz = start.z - end.z;
                 (dx * dx + dy * dy + dz * dz) < tolerance * tolerance
             }
+            Curve3d::Hyperbola(h) => {
+                // A hyperbola is degenerate if both semi-axes are below tolerance.
+                // Hyperbolas always have non-zero extent in theory, but a STEP file
+                // may contain a malformed entity with zero axes.
+                h.semi_real.abs() < tolerance && h.semi_imag.abs() < tolerance
+            }
+            Curve3d::Parabola(p) => {
+                // A parabola is degenerate if focal_dist is below tolerance.
+                p.focal_dist.abs() < tolerance
+            }
             Curve3d::Nurbs(nurbs) => {
                 // A NURBS curve is degenerate if:
                 // 1. It has fewer than 2 control points
@@ -406,22 +550,40 @@ impl Curve3d {
             Curve3d::Circle(circle) => circle.point_at(t),
             Curve3d::Ellipse(ellipse) => ellipse.point_at(t),
             Curve3d::Arc(arc) => arc.point_at(t),
+            Curve3d::Hyperbola(h) => h.point_at(t),
+            Curve3d::Parabola(p) => p.point_at(t),
             Curve3d::Nurbs(nurbs) => nurbs_eval(nurbs, t),
         }
     }
 
     /// Evaluate the first derivative (tangent vector) at parameter t.
     ///
-    /// For NURBS curves, computes the derivative numerically using central differences.
-    /// For analytical curves (Line, Circle, Ellipse, Arc), uses exact derivatives.
+    /// For analytical curves (Line, Circle, Ellipse, Arc, Hyperbola, Parabola, NURBS),
+    /// uses exact analytical derivatives. NURBS uses the quotient rule for rational
+    /// B-splines (algorithm adapted from truck-geometry v0.6, ricosjp/truck, Apache-2.0 OR MIT).
     pub fn derivative_at(&self, t: f64) -> Vec3d {
         match self {
             Curve3d::Line(line) => line.derivative_at(t),
             Curve3d::Circle(circle) => circle.derivative_at(t),
             Curve3d::Ellipse(ellipse) => ellipse.derivative_at(t),
             Curve3d::Arc(arc) => arc.derivative_at(t),
+            Curve3d::Hyperbola(h) => h.derivative_at(t),
+            Curve3d::Parabola(p) => p.derivative_at(t),
             Curve3d::Nurbs(nurbs) => {
-                // Numerical derivative using central differences
+                // Use the analytical NurbsCurve::derivative_at (quotient rule).
+                // Falls back to numerical central differences only if the analytical
+                // result is non-finite (NaN/Inf) — this should not happen for well-formed
+                // NURBS but guards against malformed STEP data.
+                let analytical = nurbs.derivative_at(t);
+                if analytical.x.is_finite() && analytical.y.is_finite() && analytical.z.is_finite() {
+                    let len_sq = analytical.x * analytical.x
+                        + analytical.y * analytical.y
+                        + analytical.z * analytical.z;
+                    if len_sq > 1e-30 {
+                        return analytical;
+                    }
+                }
+                // Numerical fallback using central differences
                 let (t_min, t_max) = {
                     let n = nurbs.knots.len();
                     if n > nurbs.degree {
@@ -430,7 +592,7 @@ impl Curve3d {
                         (0.0, 1.0)
                     }
                 };
-                let dt = (t_max - t_min) * 1e-7;
+                let dt = (t_max - t_min).max(1e-12) * 1e-7;
                 let t_lo = (t - dt).max(t_min);
                 let t_hi = (t + dt).min(t_max);
                 let p_lo = nurbs_eval(nurbs, t_lo);
@@ -456,6 +618,8 @@ impl Curve3d {
             Curve3d::Circle(_) => (0.0, 2.0 * std::f64::consts::PI),
             Curve3d::Ellipse(_) => (0.0, 2.0 * std::f64::consts::PI),
             Curve3d::Arc(arc) => (arc.start_angle, arc.end_angle),
+            Curve3d::Hyperbola(_) => (-f64::MAX, f64::MAX),
+            Curve3d::Parabola(_) => (-f64::MAX, f64::MAX),
             Curve3d::Nurbs(nurbs) => {
                 let n = nurbs.knots.len();
                 if n > nurbs.degree {
@@ -496,6 +660,19 @@ impl Curve3d {
                 },
                 start_angle: arc.start_angle,
                 end_angle: arc.end_angle,
+            }),
+            Curve3d::Hyperbola(h) => Curve3d::Hyperbola(Hyperbola {
+                center: t.transform_point(&h.center),
+                normal: t.transform_direction(&h.normal),
+                x_axis: t.transform_direction(&h.x_axis),
+                semi_real: h.semi_real,
+                semi_imag: h.semi_imag,
+            }),
+            Curve3d::Parabola(p) => Curve3d::Parabola(Parabola {
+                vertex: t.transform_point(&p.vertex),
+                normal: t.transform_direction(&p.normal),
+                x_axis: t.transform_direction(&p.x_axis),
+                focal_dist: p.focal_dist,
             }),
             Curve3d::Nurbs(nurbs) => Curve3d::Nurbs(NurbsCurve {
                 degree: nurbs.degree,
@@ -696,5 +873,177 @@ mod tests {
         let line = Line::through_points(p, p);
         // Line::through_points returns None for coincident points
         assert!(line.is_none(), "Line through identical points should return None");
+    }
+
+    // ─── Hyperbola tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_hyperbola_point_at_origin() {
+        // At t=0, hyperbola should be at center + (a, 0, 0) in local frame.
+        let h = Hyperbola::new_xy(Point3d::ORIGIN, 2.0, 1.5);
+        let p = h.point_at(0.0);
+        assert!((p.x - 2.0).abs() < 1e-12, "x = a*cosh(0) = a, got {}", p.x);
+        assert!(p.y.abs() < 1e-12, "y = b*sinh(0) = 0, got {}", p.y);
+        assert!(p.z.abs() < 1e-12, "z = 0, got {}", p.z);
+    }
+
+    #[test]
+    fn test_hyperbola_satisfies_equation() {
+        // x²/a² - y²/b² = 1 for all t.
+        let h = Hyperbola::new_xy(Point3d::ORIGIN, 3.0, 2.0);
+        for &t in &[0.5_f64, 1.0, 1.5, 2.0, -0.7, -1.3] {
+            let p = h.point_at(t);
+            let lhs = p.x * p.x / (3.0 * 3.0) - p.y * p.y / (2.0 * 2.0);
+            assert!((lhs - 1.0).abs() < 1e-9,
+                "At t={}, x²/a² - y²/b² = {}, expected 1.0", t, lhs);
+        }
+    }
+
+    #[test]
+    fn test_hyperbola_derivative_matches_numerical() {
+        // dP/dt = a·sinh(t)·x + b·cosh(t)·y
+        let h = Hyperbola::new_xy(Point3d::ORIGIN, 2.0, 1.0);
+        let dt = 1e-7;
+        for &t in &[0.3_f64, 1.0, 2.0, -1.5] {
+            let analytical = h.derivative_at(t);
+            let p_plus = h.point_at(t + dt);
+            let p_minus = h.point_at(t - dt);
+            let numerical_x = (p_plus.x - p_minus.x) / (2.0 * dt);
+            let numerical_y = (p_plus.y - p_minus.y) / (2.0 * dt);
+            let numerical_z = (p_plus.z - p_minus.z) / (2.0 * dt);
+            assert!((analytical.x - numerical_x).abs() < 1e-6,
+                "dx/dt mismatch at t={}: analytical={}, numerical={}", t, analytical.x, numerical_x);
+            assert!((analytical.y - numerical_y).abs() < 1e-6,
+                "dy/dt mismatch at t={}: analytical={}, numerical={}", t, analytical.y, numerical_y);
+            assert!((analytical.z - numerical_z).abs() < 1e-6,
+                "dz/dt mismatch at t={}: analytical={}, numerical={}", t, analytical.z, numerical_z);
+        }
+    }
+
+    #[test]
+    fn test_hyperbola_degenerate_zero_axes() {
+        let h = Hyperbola::new_xy(Point3d::ORIGIN, 0.0, 0.0);
+        let curve = Curve3d::Hyperbola(h);
+        assert!(curve.is_degenerate(1e-6),
+            "A hyperbola with both axes below tolerance should be degenerate");
+    }
+
+    #[test]
+    fn test_hyperbola_not_degenerate() {
+        let h = Hyperbola::new_xy(Point3d::ORIGIN, 5.0, 3.0);
+        let curve = Curve3d::Hyperbola(h);
+        assert!(!curve.is_degenerate(1e-6),
+            "A hyperbola with non-zero axes should not be degenerate");
+    }
+
+    // ─── Parabola tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_parabola_point_at_vertex() {
+        // At t=0, parabola should be at vertex.
+        let p_curve = Parabola::new_xy(Point3d::new(1.0, 2.0, 3.0), 2.0);
+        let p = p_curve.point_at(0.0);
+        assert!((p.x - 1.0).abs() < 1e-12, "At t=0, x should equal vertex.x");
+        assert!((p.y - 2.0).abs() < 1e-12, "At t=0, y should equal vertex.y");
+        assert!((p.z - 3.0).abs() < 1e-12, "At t=0, z should equal vertex.z");
+    }
+
+    #[test]
+    fn test_parabola_satisfies_equation() {
+        // x = y²/(4f) → y² = 4*f*x for all t (where t = y).
+        let f = 2.5_f64;
+        let p_curve = Parabola::new_xy(Point3d::ORIGIN, f);
+        for &t in &[-2.0_f64, -1.0, 0.5, 1.5, 3.0] {
+            let p = p_curve.point_at(t);
+            // y == t (since y_axis is +Y in XY plane)
+            assert!((p.y - t).abs() < 1e-12, "At t={}, y should equal t", t);
+            // x = t²/(4f)
+            let expected_x = t * t / (4.0 * f);
+            assert!((p.x - expected_x).abs() < 1e-12,
+                "At t={}, x = {}, expected {}", t, p.x, expected_x);
+        }
+    }
+
+    #[test]
+    fn test_parabola_focus_position() {
+        // The focus should be at vertex + f·x_axis.
+        // We can verify: at t = 2f, x = f, y = 2f.
+        // The focus is at (f, 0, 0) in local frame.
+        let f = 3.0_f64;
+        let p_curve = Parabola::new_xy(Point3d::ORIGIN, f);
+        // At t=0, the tangent should be along y_axis (since dx/dt = t/(2f) = 0).
+        let d = p_curve.derivative_at(0.0);
+        // The derivative at t=0 is (0, 1, 0) in XY plane (y_axis direction).
+        assert!(d.x.abs() < 1e-12, "dx/dt at vertex should be 0, got {}", d.x);
+        assert!((d.y - 1.0).abs() < 1e-12, "dy/dt at vertex should be 1, got {}", d.y);
+        assert!(d.z.abs() < 1e-12, "dz/dt at vertex should be 0, got {}", d.z);
+    }
+
+    #[test]
+    fn test_parabola_derivative_matches_numerical() {
+        let p_curve = Parabola::new_xy(Point3d::ORIGIN, 2.0);
+        let dt = 1e-7;
+        for &t in &[0.5_f64, 1.0, 2.0, -1.5] {
+            let analytical = p_curve.derivative_at(t);
+            let p_plus = p_curve.point_at(t + dt);
+            let p_minus = p_curve.point_at(t - dt);
+            let numerical_x = (p_plus.x - p_minus.x) / (2.0 * dt);
+            let numerical_y = (p_plus.y - p_minus.y) / (2.0 * dt);
+            let numerical_z = (p_plus.z - p_minus.z) / (2.0 * dt);
+            assert!((analytical.x - numerical_x).abs() < 1e-6,
+                "dx/dt mismatch at t={}: analytical={}, numerical={}", t, analytical.x, numerical_x);
+            assert!((analytical.y - numerical_y).abs() < 1e-6,
+                "dy/dt mismatch at t={}: analytical={}, numerical={}", t, analytical.y, numerical_y);
+            assert!((analytical.z - numerical_z).abs() < 1e-6,
+                "dz/dt mismatch at t={}: analytical={}, numerical={}", t, analytical.z, numerical_z);
+        }
+    }
+
+    #[test]
+    fn test_parabola_degenerate_zero_focal() {
+        let p_curve = Parabola::new_xy(Point3d::ORIGIN, 0.0);
+        let curve = Curve3d::Parabola(p_curve);
+        assert!(curve.is_degenerate(1e-6),
+            "A parabola with zero focal distance should be degenerate");
+    }
+
+    #[test]
+    fn test_parabola_not_degenerate() {
+        let p_curve = Parabola::new_xy(Point3d::ORIGIN, 5.0);
+        let curve = Curve3d::Parabola(p_curve);
+        assert!(!curve.is_degenerate(1e-6),
+            "A parabola with non-zero focal distance should not be degenerate");
+    }
+
+    // ─── Curve3d::derivative_at dispatch test ──────────────────────────
+
+    #[test]
+    fn test_curve3d_derivative_at_uses_analytical_for_nurbs() {
+        // This is a regression test: Curve3d::derivative_at for Nurbs should
+        // now use the analytical quotient-rule implementation instead of
+        // falling back to numerical central differences.
+        let pts = vec![
+            Point3d::new(0.0, 0.0, 0.0),
+            Point3d::new(1.0, 2.0, 0.0),
+            Point3d::new(2.0, 0.0, 0.0),
+        ];
+        let nurbs = NurbsCurve {
+            degree: 2,
+            control_points: pts,
+            weights: vec![1.0, 1.0, 1.0],
+            knots: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        };
+        let curve = Curve3d::Nurbs(nurbs);
+
+        // At t=0.5 (midpoint), derivative should match NurbsCurve::derivative_at
+        let via_curve3d = curve.derivative_at(0.5);
+        if let Curve3d::Nurbs(n) = &curve {
+            let via_nurbs = n.derivative_at(0.5);
+            assert!((via_curve3d.x - via_nurbs.x).abs() < 1e-12);
+            assert!((via_curve3d.y - via_nurbs.y).abs() < 1e-12);
+            assert!((via_curve3d.z - via_nurbs.z).abs() < 1e-12);
+        } else {
+            panic!("Expected Nurbs variant");
+        }
     }
 }

@@ -5211,6 +5211,8 @@ impl<'a> StepConverter<'a> {
                     Curve3d::Circle(_) => "Circle",
                     Curve3d::Ellipse(_) => "Ellipse",
                     Curve3d::Arc(_) => "Arc",
+                    Curve3d::Hyperbola(_) => "Hyperbola",
+                    Curve3d::Parabola(_) => "Parabola",
                     Curve3d::Nurbs(_) => "Nurbs",
                 };
                 let edge = if let Curve3d::Line(ref line) = curve {
@@ -7338,6 +7340,8 @@ impl<'a> StepConverter<'a> {
             "LINE" => self.resolve_line_curve(entity),
             "CIRCLE" => self.resolve_circle_curve(entity),
             "ELLIPSE" => self.resolve_ellipse_curve(entity),
+            "HYPERBOLA" => self.resolve_hyperbola_curve(entity),
+            "PARABOLA" => self.resolve_parabola_curve(entity),
             "B_SPLINE_CURVE_WITH_KNOTS" | "B_SPLINE_CURVE" | "BEZIER_CURVE" |
             "RATIONAL_B_SPLINE_CURVE" => self.resolve_bspline_curve(entity),
             "POLYLINE" => self.resolve_polyline_curve(entity),
@@ -7420,6 +7424,57 @@ impl<'a> StepConverter<'a> {
             semi_major,
             semi_minor,
             x_axis,
+        }))
+    }
+
+    /// Resolve a HYPERBOLA curve entity.
+    /// STEP format: `#N = HYPERBOLA('', #axis2, semi_real, semi_imag);`
+    ///
+    /// The axis2 placement provides:
+    ///   - location = center of the hyperbola
+    ///   - axis (z) = normal to the plane of the hyperbola
+    ///   - ref_direction (x) = transverse axis direction
+    ///
+    /// semi_real is the semi-axis length along x (a in x²/a² - y²/b² = 1).
+    /// semi_imag is the semi-imaginary axis length along y = z × x (b).
+    ///
+    /// Parametric form:
+    ///   P(t) = center + a·cosh(t)·x + b·sinh(t)·(z × x)
+    fn resolve_hyperbola_curve(&self, entity: &crate::schema::StepEntity) -> Option<Curve3d> {
+        let axis2_id = self.find_axis2_ref(entity)?;
+        let (center, normal, x_axis) = self.resolve_axis2(axis2_id)?;
+        let semi_real = self.find_float_param(entity, 0)?;
+        let semi_imag = self.find_float_param(entity, 1)?;
+        Some(Curve3d::Hyperbola(draper_geometry::Hyperbola {
+            center,
+            normal,
+            x_axis,
+            semi_real: semi_real.abs(),
+            semi_imag: semi_imag.abs(),
+        }))
+    }
+
+    /// Resolve a PARABOLA curve entity.
+    /// STEP format: `#N = PARABOLA('', #axis2, focal_dist);`
+    ///
+    /// The axis2 placement provides:
+    ///   - location = vertex of the parabola
+    ///   - axis (z) = normal to the plane of the parabola
+    ///   - ref_direction (x) = direction the parabola opens (toward the focus)
+    ///
+    /// focal_dist is f > 0. Focus is at vertex + f·x.
+    ///
+    /// Parametric form (parameter t = y-coordinate):
+    ///   P(t) = vertex + (t²/(4f))·x + t·(z × x)
+    fn resolve_parabola_curve(&self, entity: &crate::schema::StepEntity) -> Option<Curve3d> {
+        let axis2_id = self.find_axis2_ref(entity)?;
+        let (vertex, normal, x_axis) = self.resolve_axis2(axis2_id)?;
+        let focal_dist = self.find_float_param(entity, 0)?;
+        Some(Curve3d::Parabola(draper_geometry::Parabola {
+            vertex,
+            normal,
+            x_axis,
+            focal_dist: focal_dist.abs(),
         }))
     }
 
@@ -8378,6 +8433,8 @@ impl<'a> StepConverter<'a> {
                         Some(Curve3d::Circle(_)) => "Circle",
                         Some(Curve3d::Ellipse(_)) => "Ellipse",
                         Some(Curve3d::Arc(_)) => "Arc",
+                        Some(Curve3d::Hyperbola(_)) => "Hyperbola",
+                        Some(Curve3d::Parabola(_)) => "Parabola",
                         Some(Curve3d::Nurbs(_)) => "Nurbs",
                         None => "None",
                     };
@@ -8608,6 +8665,8 @@ impl<'a> StepConverter<'a> {
             Some(Curve3d::Circle(_)) => 24,
             Some(Curve3d::Ellipse(_)) => 24,
             Some(Curve3d::Arc(_)) => 16,
+            Some(Curve3d::Hyperbola(_)) => 24,
+            Some(Curve3d::Parabola(_)) => 24,
             Some(Curve3d::Nurbs(_)) => 32,
             None => 2,
         }
@@ -10812,6 +10871,8 @@ mod diag_tests {
                                 Curve3d::Circle(_) => "Circle",
                                 Curve3d::Ellipse(_) => "Ellipse",
                                 Curve3d::Arc(_) => "Arc",
+                                Curve3d::Hyperbola(_) => "Hyperbola",
+                                Curve3d::Parabola(_) => "Parabola",
                                 Curve3d::Nurbs(_) => "Nurbs",
                             };
                             *edge_type_counts.entry(tn.to_string()).or_insert(0) += 1;
@@ -10825,6 +10886,8 @@ mod diag_tests {
                                     Curve3d::Circle(_) => "Circle",
                                     Curve3d::Ellipse(_) => "Ellipse",
                                     Curve3d::Arc(_) => "Arc",
+                                    Curve3d::Hyperbola(_) => "Hyperbola",
+                                    Curve3d::Parabola(_) => "Parabola",
                                     Curve3d::Nurbs(_) => "Nurbs",
                                 };
                                 *edge_type_counts.entry(tn.to_string()).or_insert(0) += 1;
@@ -11313,6 +11376,8 @@ mod diag_tests {
                         Some(Curve3d::Circle(_)) => "Circle",
                         Some(Curve3d::Ellipse(_)) => "Ellipse",
                         Some(Curve3d::Arc(_)) => "Arc",
+                        Some(Curve3d::Hyperbola(_)) => "Hyperbola",
+                        Some(Curve3d::Parabola(_)) => "Parabola",
                         Some(Curve3d::Nurbs(_)) => "Nurbs",
                         None => "None",
                     };
@@ -11327,6 +11392,8 @@ mod diag_tests {
                             Some(Curve3d::Circle(_)) => "Circle",
                             Some(Curve3d::Ellipse(_)) => "Ellipse",
                             Some(Curve3d::Arc(_)) => "Arc",
+                            Some(Curve3d::Hyperbola(_)) => "Hyperbola",
+                            Some(Curve3d::Parabola(_)) => "Parabola",
                             Some(Curve3d::Nurbs(_)) => "Nurbs",
                             None => "None",
                         };
