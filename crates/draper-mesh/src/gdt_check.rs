@@ -466,35 +466,112 @@ fn smallest_eigenvector_3x3(xx: f64, xy: f64, xz: f64, yy: f64, yz: f64, zz: f64
         return (0.0, 0.0, 1.0); // Fallback: Z-axis
     }
 
-    // Deflated matrix: M' = M - lambda * v * v^T
-    let dxx = xx - lambda * largest.0 * largest.0 / len_sq;
-    let dxy = xy - lambda * largest.0 * largest.1 / len_sq;
-    let dxz = xz - lambda * largest.0 * largest.2 / len_sq;
-    let dyy = yy - lambda * largest.1 * largest.1 / len_sq;
-    let dyz = yz - lambda * largest.1 * largest.2 / len_sq;
-    let dzz = zz - lambda * largest.2 * largest.2 / len_sq;
+    // Normalize the largest eigenvector so deflation is numerically clean.
+    let n_largest = (
+        largest.0 / len_sq.sqrt(),
+        largest.1 / len_sq.sqrt(),
+        largest.2 / len_sq.sqrt(),
+    );
+
+    // Deflated matrix: M' = M - lambda * v * v^T  (v is now unit length)
+    let dxx = xx - lambda * n_largest.0 * n_largest.0;
+    let dxy = xy - lambda * n_largest.0 * n_largest.1;
+    let dxz = xz - lambda * n_largest.0 * n_largest.2;
+    let dyy = yy - lambda * n_largest.1 * n_largest.1;
+    let dyz = yz - lambda * n_largest.1 * n_largest.2;
+    let dzz = zz - lambda * n_largest.2 * n_largest.2;
+
+    // Frobenius norm of the deflated matrix — if it's near-zero, the original
+    // matrix had rank 1 (only one non-zero eigenvalue). In that case, the
+    // smallest eigenvector is ANY unit vector orthogonal to `largest`. We
+    // pick one robustly using the axis-of-least-component trick.
+    let frob_sq = dxx * dxx + 2.0 * dxy * dxy + 2.0 * dxz * dxz
+                + dyy * dyy + 2.0 * dyz * dyz + dzz * dzz;
+    if frob_sq < 1e-22 {
+        return orthogonal_unit_vector(n_largest);
+    }
 
     // Find the largest eigenvector of the deflated matrix (= 2nd largest of original)
     let second = largest_eigenvector_3x3(dxx, dxy, dxz, dyy, dyz, dzz);
 
-    // Deflate again to get the smallest
-    let lambda2 = second.0 * (dxx * second.0 + dxy * second.1 + dxz * second.2)
-                + second.1 * (dxy * second.0 + dyy * second.1 + dyz * second.2)
-                + second.2 * (dxz * second.0 + dyz * second.1 + dzz * second.2);
     let len_sq2 = second.0 * second.0 + second.1 * second.1 + second.2 * second.2;
     if len_sq2 < 1e-30 {
         // Cross product of first two gives the third
         return cross_product(largest, second);
     }
 
-    let d2xx = dxx - lambda2 * second.0 * second.0 / len_sq2;
-    let d2xy = dxy - lambda2 * second.0 * second.1 / len_sq2;
-    let d2xz = dxz - lambda2 * second.0 * second.2 / len_sq2;
-    let d2yy = dyy - lambda2 * second.1 * second.1 / len_sq2;
-    let d2yz = dyz - lambda2 * second.1 * second.2 / len_sq2;
-    let d2zz = dzz - lambda2 * second.2 * second.2 / len_sq2;
+    // Normalize second eigenvector for clean second deflation.
+    let n_second = (
+        second.0 / len_sq2.sqrt(),
+        second.1 / len_sq2.sqrt(),
+        second.2 / len_sq2.sqrt(),
+    );
 
-    largest_eigenvector_3x3(d2xx, d2xy, d2xz, d2yy, d2yz, d2zz)
+    let lambda2 = second.0 * (dxx * second.0 + dxy * second.1 + dxz * second.2)
+                + second.1 * (dxy * second.0 + dyy * second.1 + dyz * second.2)
+                + second.2 * (dxz * second.0 + dyz * second.1 + dzz * second.2);
+
+    // Deflate again: M'' = M' - lambda2 * n_second * n_second^T
+    let d2xx = dxx - lambda2 * n_second.0 * n_second.0;
+    let d2xy = dxy - lambda2 * n_second.0 * n_second.1;
+    let d2xz = dxz - lambda2 * n_second.0 * n_second.2;
+    let d2yy = dyy - lambda2 * n_second.1 * n_second.1;
+    let d2yz = dyz - lambda2 * n_second.1 * n_second.2;
+    let d2zz = dzz - lambda2 * n_second.2 * n_second.2;
+
+    // If the twice-deflated matrix is essentially zero, then the original
+    // matrix had rank 2 (two non-zero eigenvalues). The smallest eigenvector
+    // is the unit vector orthogonal to both `largest` and `second`.
+    let frob_sq2 = d2xx * d2xx + 2.0 * d2xy * d2xy + 2.0 * d2xz * d2xz
+                 + d2yy * d2yy + 2.0 * d2yz * d2yz + d2zz * d2zz;
+    if frob_sq2 < 1e-22 {
+        let mut v = cross_product(n_largest, n_second);
+        let vlen = (v.0 * v.0 + v.1 * v.1 + v.2 * v.2).sqrt();
+        if vlen > 1e-30 {
+            v = (v.0 / vlen, v.1 / vlen, v.2 / vlen);
+            return v;
+        }
+        // Fallback if cross product is degenerate.
+        return orthogonal_unit_vector(n_largest);
+    }
+
+    // Otherwise do power iteration on the twice-deflated matrix; its largest
+    // eigenvector is the smallest of the original matrix.
+    let mut result = largest_eigenvector_3x3(d2xx, d2xy, d2xz, d2yy, d2yz, d2zz);
+    let rlen = (result.0 * result.0 + result.1 * result.1 + result.2 * result.2).sqrt();
+    if rlen > 1e-30 {
+        result = (result.0 / rlen, result.1 / rlen, result.2 / rlen);
+    }
+    result
+}
+
+/// Return any unit vector orthogonal to `v`.
+///
+/// Used as a fallback when a covariance matrix has repeated zero eigenvalues
+/// (e.g. a perfectly flat mesh lying in a coordinate plane). In that case
+/// `largest_eigenvector_3x3` returns the in-plane direction, and the smallest
+/// eigenvector (the surface normal) is anything orthogonal to it.
+fn orthogonal_unit_vector(v: (f64, f64, f64)) -> (f64, f64, f64) {
+    // Pick the axis least aligned with v, then take the cross product.
+    let abs_x = v.0.abs();
+    let abs_y = v.1.abs();
+    let abs_z = v.2.abs();
+    let axis = if abs_x <= abs_y && abs_x <= abs_z {
+        (1.0, 0.0, 0.0)
+    } else if abs_y <= abs_z {
+        (0.0, 1.0, 0.0)
+    } else {
+        (0.0, 0.0, 1.0)
+    };
+    let mut ortho = cross_product(v, axis);
+    let len = (ortho.0 * ortho.0 + ortho.1 * ortho.1 + ortho.2 * ortho.2).sqrt();
+    if len > 1e-30 {
+        ortho = (ortho.0 / len, ortho.1 / len, ortho.2 / len);
+    } else {
+        // v was parallel to every axis pick (degenerate input)
+        ortho = (0.0, 0.0, 1.0);
+    }
+    ortho
 }
 
 /// Compute the eigenvector corresponding to the largest eigenvalue
@@ -610,15 +687,16 @@ mod tests {
 
     #[test]
     fn test_cylindricity_check() {
-        // Create a simple cylindrical mesh (approximation)
+        // Create a simple cylindrical mesh (approximation).
+        // We build ONLY surface triangles — no cap centers — so every vertex
+        // lies on the ideal cylinder of radius `radius` and the cylindricity
+        // deviation should be small (limited by the chord error of the
+        // polygonal approximation, which for 16 segments at radius 5 is
+        // ~0.096).
         let mut mesh = TriangleMesh::new();
         let radius = 5.0;
         let height = 10.0;
         let segments = 16;
-
-        // Top and bottom circles
-        let _bottom_center = mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0));
-        let _top_center = mesh.add_vertex(Point3d::new(0.0, 0.0, height));
 
         let mut bottom_verts = Vec::new();
         let mut top_verts = Vec::new();
@@ -648,7 +726,15 @@ mod tests {
             datum_references: vec![],
         };
         let result = checker.check(&spec);
-        // A perfect cylinder should have very low cylindricity deviation
-        assert!(result.actual_deviation < 1.0, "Cylinder should have low cylindricity deviation, got {}", result.actual_deviation);
+        // A perfect 16-segment cylinder at radius 5 has chord error
+        //   5 * (1 - cos(π/16)) ≈ 0.0961,
+        // so the radial spread (max-min radius) is ~0.096 and the
+        // cylindricity zone (half the spread) is ~0.048. Allow generous
+        // headroom for the PCA-based axis estimate.
+        assert!(
+            result.actual_deviation < 1.0,
+            "Cylinder should have low cylindricity deviation, got {}",
+            result.actual_deviation
+        );
     }
 }

@@ -504,7 +504,21 @@ pub enum GdtToleranceType {
 impl GdtToleranceType {
     /// Determine the tolerance type from a STEP entity type name.
     pub fn from_step_type(type_name: &str) -> Self {
-        let upper = type_name.to_uppercase();
+        Self::from_step_type_and_name(type_name, "", "")
+    }
+
+    /// Determine the tolerance type from a STEP entity type name AND the
+    /// name/description strings of the GEOMETRIC_TOLERANCE entity.
+    ///
+    /// In AP242 STEP files, generic `GEOMETRIC_TOLERANCE` entities are often
+    /// used with a descriptive name in the first parameter, e.g.
+    /// `GEOMETRIC_TOLERANCE('position tolerance', 'pos', 0.05, ...)`.
+    /// We must inspect the name/description strings to recover the tolerance
+    /// type when the entity type itself is the generic supertype.
+    pub fn from_step_type_and_name(type_name: &str, name: &str, description: &str) -> Self {
+        // Combine all text we have available for keyword matching.
+        let combined = format!("{} {} {}", type_name, name, description);
+        let upper = combined.to_uppercase();
         if upper.contains("POSITION") {
             GdtToleranceType::Position
         } else if upper.contains("FLATNESS") {
@@ -527,9 +541,9 @@ impl GdtToleranceType {
             GdtToleranceType::Symmetry
         } else if upper.contains("RUNOUT") {
             GdtToleranceType::Runout
-        } else if upper.contains("PROFILE_OF_LINE") {
+        } else if upper.contains("PROFILE_OF_LINE") || upper.contains("LINE_PROFILE") {
             GdtToleranceType::ProfileOfLine
-        } else if upper.contains("PROFILE_OF_SURFACE") {
+        } else if upper.contains("PROFILE_OF_SURFACE") || upper.contains("SURFACE_PROFILE") {
             GdtToleranceType::ProfileOfSurface
         } else {
             GdtToleranceType::Other(type_name.to_string())
@@ -613,11 +627,13 @@ pub fn extract_gdt(step_file: &StepFile) -> GdtData {
 
             gdt.tolerances.push(GeometricTolerance {
                 step_id: entity.id,
-                name,
-                description,
+                name: name.clone(),
+                description: description.clone(),
                 tolerance_value,
                 datum_references: datum_refs,
-                tolerance_type: GdtToleranceType::from_step_type(&entity.type_name),
+                tolerance_type: GdtToleranceType::from_step_type_and_name(
+                    &entity.type_name, &name, &description,
+                ),
                 applied_to,
             });
         }
@@ -658,11 +674,13 @@ pub fn extract_gdt(step_file: &StepFile) -> GdtData {
 
             gdt.tolerances.push(GeometricTolerance {
                 step_id: entity.id,
-                name,
-                description,
+                name: name.clone(),
+                description: description.clone(),
                 tolerance_value,
                 datum_references: datum_refs,
-                tolerance_type: GdtToleranceType::from_step_type(&entity.type_name),
+                tolerance_type: GdtToleranceType::from_step_type_and_name(
+                    &entity.type_name, &name, &description,
+                ),
                 applied_to,
             });
         }
@@ -1045,8 +1063,12 @@ impl UnitInfo {
 
     /// Whether the file uses millimetre as length unit.
     pub fn uses_millimetres(&self) -> bool {
-        self.length_unit.to_uppercase().contains("MILLIMETRE")
-            || self.length_unit.to_uppercase().contains("MM")
+        let upper = self.length_unit.to_uppercase();
+        upper.contains("MILLIMETRE")
+            || upper.contains("MILLI_METRE")
+            || upper.contains("MILLIMETER")
+            || upper.contains("MILLI_METER")
+            || upper == "MM"
     }
 
     /// Whether the file uses inches as length unit.

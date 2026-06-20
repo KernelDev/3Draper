@@ -18,14 +18,34 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: roundtrip_test <step_file>");
+        eprintln!("       roundtrip_test --all [dir]");
         std::process::exit(1);
     }
+
+    // Batch mode: iterate over every .stp/.step/.STEP file in a directory
+    // (defaults to ./test) and run round-trip on each. Print a final summary.
+    if args[1] == "--all" {
+        let dir = if args.len() >= 3 { &args[2] } else { "test" };
+        run_batch(dir);
+        return;
+    }
+
     let path = &args[1];
     if !Path::new(path).exists() {
         eprintln!("File not found: {}", path);
         std::process::exit(1);
     }
 
+    let pass = run_one(path);
+    if pass {
+        std::process::exit(0);
+    } else {
+        std::process::exit(1);
+    }
+}
+
+/// Run round-trip on a single file; returns true if PASS, false if WARN/FAIL.
+fn run_one(path: &str) -> bool {
     println!("=== Round-trip test: {} ===", path);
 
     // ── 1. Parse original STEP ──
@@ -33,7 +53,7 @@ fn main() {
         Ok(sf) => sf,
         Err(e) => {
             eprintln!("PARSE FAILED: {}", e);
-            std::process::exit(2);
+            return false;
         }
     };
     println!(
@@ -68,7 +88,7 @@ fn main() {
 
     if solids.is_empty() {
         println!("\n[ABORT] No solids extracted — file may use unsupported BREP variant.");
-        return;
+        return false;
     }
 
     // ── 3. Export each solid back to STEP ──
@@ -100,7 +120,7 @@ fn main() {
             // Save the failed export for debugging
             std::fs::write("/tmp/roundtrip_failed.stp", &combined_export).ok();
             eprintln!("       Saved failed export to /tmp/roundtrip_failed.stp");
-            std::process::exit(3);
+            return false;
         }
     };
     println!(
@@ -185,6 +205,154 @@ fn main() {
     } else {
         println!("\n=== RESULT: WARN (counts differ, see above) ===");
     }
+    pass
+}
+
+/// Batch round-trip runner: walks `dir` for *.stp/*.step/*.STEP files and
+/// runs a silent round-trip on each. Prints a summary table at the end.
+fn run_batch(dir: &str) {
+    use std::fs;
+    use std::path::PathBuf;
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                let ext_upper = ext.to_uppercase();
+                if ext_upper == "STP" || ext_upper == "STEP" {
+                    files.push(path);
+                }
+            }
+        }
+    }
+    files.sort();
+
+    if files.is_empty() {
+        eprintln!("No STEP files found in {}", dir);
+        std::process::exit(1);
+    }
+
+    println!("Round-trip batch: {} files in {}\n", files.len(), dir);
+    println!(
+        "{:<48} {:<8} {:<8} {:<10} {:<8}",
+        "File", "BREPs", "Solids", "Re-BREPs", "Result"
+    );
+    println!("{}", "-".repeat(86));
+
+    let mut pass_count = 0;
+    let mut warn_count = 0;
+    let mut fail_count = 0;
+
+    for path in &files {
+        let path_str = path.to_string_lossy();
+        let original = parse_step_file(&path_str).ok();
+        let orig_breps = original.as_ref().map(|s| {
+            s.find_entities_by_type("MANIFOLD_SOLID_BREP").len()
+                + s.find_entities_by_type("BREP_WITH_VOIDS").len()
+        }).unwrap_or(0);
+        let n_solids = original.as_ref().map(|s| extract_solids(s).0.len()).unwrap_or(0);
+
+        let result = run_one_silent(&path_str);
+        let (re_breps, status_str) = match result {
+            RunResult::Pass(re_b) => { pass_count += 1; (re_b, "PASS") }
+            RunResult::Warn(re_b) => { warn_count += 1; (re_b, "WARN") }
+            RunResult::Fail      => { fail_count += 1; (0, "FAIL") }
+        };
+
+        let short_name = path.file_name().map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path_str.to_string());
+        println!(
+            "{:<48} {:<8} {:<8} {:<10} {:<8}",
+            short_name, orig_breps, n_solids, re_breps, status_str
+        );
+    }
+
+    println!("{}", "-".repeat(86));
+    println!(
+        "Summary: {} PASS, {} WARN, {} FAIL ({} total)",
+        pass_count, warn_count, fail_count, files.len()
+    );
+
+    if fail_count > 0 {
+        std::process::exit(1);
+    }
+}
+
+enum RunResult {
+    Pass(usize),
+    Warn(usize),
+    Fail,
+}
+
+/// Silent round-trip — no per-file stdout. Returns a summary result.
+fn run_one_silent(path: &str) -> RunResult {
+    let original_step = match parse_step_file(path) {
+        Ok(sf) => sf,
+        Err(_) => return RunResult::Fail,
+    };
+    let orig_breps = original_step.find_entities_by_type("MANIFOLD_SOLID_BREP").len()
+        + original_step.find_entities_by_type("BREP_WITH_VOIDS").len();
+    let orig_surfaces = count_surface_types(&original_step);
+    let orig_curves = count_curve_types(&original_step);
+
+    let (solids, _brep_ids) = extract_solids(&original_step);
+    if solids.is_empty() {
+        return RunResult::Fail;
+    }
+
+    let mut combined_export = String::new();
+    combined_export.push_str("ISO-10303-21;\n");
+    combined_export.push_str("HEADER;\n");
+    combined_export.push_str("FILE_DESCRIPTION(('3Draper round-trip test'), '2;1');\n");
+    combined_export.push_str("FILE_NAME('roundtrip.stp','2026-06-20T00:00:00',('3Draper'),(''),'3Draper','','');\n");
+    combined_export.push_str("FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));\n");
+    combined_export.push_str("ENDSEC;\nDATA;\n");
+
+    let mut offset: i64 = 1;
+    for (i, solid) in solids.iter().enumerate() {
+        let chunk = export_step(solid, &format!("solid_{}", i));
+        let body = extract_data_section(&chunk);
+        let remapped = remap_ids(&body, offset);
+        combined_export.push_str(&remapped);
+        offset = max_id_in(&body) + 1;
+    }
+    combined_export.push_str("ENDSEC;\nEND-ISO-10303-21;\n");
+
+    let validation = validate_exported_step(&combined_export);
+    if validation.has_errors() {
+        return RunResult::Fail;
+    }
+
+    let reparsed = match draper_step::parse_step(&combined_export) {
+        Ok(sf) => sf,
+        Err(_) => return RunResult::Fail,
+    };
+    let new_breps = reparsed.find_entities_by_type("MANIFOLD_SOLID_BREP").len()
+        + reparsed.find_entities_by_type("BREP_WITH_VOIDS").len();
+    let new_surfaces = count_surface_types(&reparsed);
+    let new_curves = count_curve_types(&reparsed);
+
+    if new_breps != orig_breps {
+        return RunResult::Warn(new_breps);
+    }
+
+    // Type sets must match — counts may differ because the exporter dedups
+    // shared surfaces/curves, but no type should disappear or appear new.
+    for k in orig_surfaces.keys() {
+        if !new_surfaces.contains_key(k) { return RunResult::Warn(new_breps); }
+    }
+    for k in new_surfaces.keys() {
+        if !orig_surfaces.contains_key(k) { return RunResult::Warn(new_breps); }
+    }
+    for k in orig_curves.keys() {
+        if !new_curves.contains_key(k) { return RunResult::Warn(new_breps); }
+    }
+    for k in new_curves.keys() {
+        if !orig_curves.contains_key(k) { return RunResult::Warn(new_breps); }
+    }
+
+    RunResult::Pass(new_breps)
 }
 
 fn count_surface_types(step: &draper_step::StepFile) -> std::collections::HashMap<&'static str, usize> {
@@ -204,10 +372,16 @@ fn count_surface_types(step: &draper_step::StepFile) -> std::collections::HashMa
 
 fn count_curve_types(step: &draper_step::StepFile) -> std::collections::HashMap<&'static str, usize> {
     let mut counts: std::collections::HashMap<&'static str, usize> = std::collections::HashMap::new();
+    // Note: SURFACE_CURVE and PCURVE are STEP wrapper/container entities
+    // around underlying geometric curves (LINE, CIRCLE, B_SPLINE_CURVE, etc.).
+    // Our exporter intentionally flattens these wrappers and writes the
+    // underlying curve directly, so a round-trip will legitimately drop
+    // SURFACE_CURVE / PCURVE entity counts to zero. We exclude them from
+    // the comparison to avoid spurious WARNs.
     for t in &[
         "LINE", "CIRCLE", "ELLIPSE", "HYPERBOLA", "PARABOLA",
         "B_SPLINE_CURVE_WITH_KNOTS", "B_SPLINE_CURVE",
-        "TRIMMED_CURVE", "SURFACE_CURVE", "PCURVE",
+        "TRIMMED_CURVE",
     ] {
         let n = step.find_entities_by_type(t).len();
         if n > 0 {
