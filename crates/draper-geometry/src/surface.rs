@@ -587,6 +587,89 @@ impl RevolutionSurface {
             self.origin.z + par_z + cos_u * perp_z + sin_u * cross_z,
         )
     }
+
+    /// Evaluate the surface and its first partial derivatives at (u, v).
+    ///
+    /// Uses the chain rule to compute analytical derivatives:
+    ///   S(u, v) = O + V_parallel(v) + cos(u)·V_perp(v) + sin(u)·(A × V_perp(v))
+    ///
+    /// where V(v) = P(v) - O, V_parallel = (V·A)·A, V_perp = V - V_parallel.
+    ///
+    /// Partial derivatives:
+    ///   dS/du = -sin(u)·V_perp + cos(u)·(A × V_perp)
+    ///   dS/dv = R_u(P'(v))   (rotate the profile derivative by angle u around A)
+    ///
+    /// where R_u is the rotation by angle u around axis A:
+    ///   R_u(w) = (w·A)·A + cos(u)·(w - (w·A)·A) + sin(u)·(A × w)
+    ///
+    /// Algorithm adapted from truck-geometry v0.6 (ricosjp/truck, Apache-2.0 OR MIT).
+    pub fn derivatives_at(&self, u: f64, v: f64) -> SurfaceDerivatives {
+        let p = self.profile.point_at(v);
+        let dp = self.profile.derivative_at(v); // P'(v)
+
+        // Vector from origin to profile point
+        let vx = p.x - self.origin.x;
+        let vy = p.y - self.origin.y;
+        let vz = p.z - self.origin.z;
+
+        // Parallel component (along axis): V_parallel = (V·A)·A
+        let dot = vx * self.axis.x + vy * self.axis.y + vz * self.axis.z;
+        let par_x = dot * self.axis.x;
+        let par_y = dot * self.axis.y;
+        let par_z = dot * self.axis.z;
+
+        // Perpendicular component: V_perp = V - V_parallel
+        let perp_x = vx - par_x;
+        let perp_y = vy - par_y;
+        let perp_z = vz - par_z;
+
+        // Second perpendicular direction: A × V_perp
+        // Since A ⊥ V_perp, |A × V_perp| = |V_perp|
+        let cross_x = self.axis.y * perp_z - self.axis.z * perp_y;
+        let cross_y = self.axis.z * perp_x - self.axis.x * perp_z;
+        let cross_z = self.axis.x * perp_y - self.axis.y * perp_x;
+
+        let cos_u = u.cos();
+        let sin_u = u.sin();
+
+        // S(u, v) = O + V_parallel + cos(u)·V_perp + sin(u)·(A × V_perp)
+        let point = Point3d::new(
+            self.origin.x + par_x + cos_u * perp_x + sin_u * cross_x,
+            self.origin.y + par_y + cos_u * perp_y + sin_u * cross_y,
+            self.origin.z + par_z + cos_u * perp_z + sin_u * cross_z,
+        );
+
+        // dS/du = -sin(u)·V_perp + cos(u)·(A × V_perp)
+        let du = Vec3d::new(
+            -sin_u * perp_x + cos_u * cross_x,
+            -sin_u * perp_y + cos_u * cross_y,
+            -sin_u * perp_z + cos_u * cross_z,
+        );
+
+        // dS/dv = R_u(P'(v))
+        // First, decompose P'(v) into parallel and perpendicular components w.r.t. A
+        let dp_dot_a = dp.x * self.axis.x + dp.y * self.axis.y + dp.z * self.axis.z;
+        let dp_par_x = dp_dot_a * self.axis.x;
+        let dp_par_y = dp_dot_a * self.axis.y;
+        let dp_par_z = dp_dot_a * self.axis.z;
+        let dp_perp_x = dp.x - dp_par_x;
+        let dp_perp_y = dp.y - dp_par_y;
+        let dp_perp_z = dp.z - dp_par_z;
+
+        // A × dp_perp
+        let dp_cross_x = self.axis.y * dp_perp_z - self.axis.z * dp_perp_y;
+        let dp_cross_y = self.axis.z * dp_perp_x - self.axis.x * dp_perp_z;
+        let dp_cross_z = self.axis.x * dp_perp_y - self.axis.y * dp_perp_x;
+
+        // R_u(dp) = dp_par + cos(u)·dp_perp + sin(u)·(A × dp_perp)
+        let dv = Vec3d::new(
+            dp_par_x + cos_u * dp_perp_x + sin_u * dp_cross_x,
+            dp_par_y + cos_u * dp_perp_y + sin_u * dp_cross_y,
+            dp_par_z + cos_u * dp_perp_z + sin_u * dp_cross_z,
+        );
+
+        SurfaceDerivatives { point, du, dv }
+    }
 }
 
 /// Extruded surface — a curve swept along a direction.
@@ -612,6 +695,29 @@ impl ExtrusionSurface {
             p.y + v * self.direction.y,
             p.z + v * self.direction.z,
         )
+    }
+
+    /// Evaluate the surface and its first partial derivatives at (u, v).
+    ///
+    /// S(u, v) = P(u) + v·D
+    ///
+    /// Partial derivatives:
+    ///   dS/du = P'(u)
+    ///   dS/dv = D
+    ///
+    /// Algorithm adapted from truck-geometry v0.6 (ricosjp/truck, Apache-2.0 OR MIT).
+    pub fn derivatives_at(&self, u: f64, v: f64) -> SurfaceDerivatives {
+        let p = self.profile.point_at(u);
+        let du = self.profile.derivative_at(u); // P'(u)
+        let dv = Vec3d::new(self.direction.x, self.direction.y, self.direction.z);
+
+        let point = Point3d::new(
+            p.x + v * self.direction.x,
+            p.y + v * self.direction.y,
+            p.z + v * self.direction.z,
+        );
+
+        SurfaceDerivatives { point, du, dv }
     }
 }
 
@@ -1622,7 +1728,11 @@ impl Surface {
     pub fn derivatives_at(&self, u: f64, v: f64) -> SurfaceDerivatives {
         match self {
             Surface::Nurbs(nurbs) => nurbs.derivatives_at(u, v),
+            Surface::Revolution(r) => r.derivatives_at(u, v),
+            Surface::Extrusion(e) => e.derivatives_at(u, v),
             _ => {
+                // Fallback to numerical central differences for surface types
+                // that don't yet have analytical derivatives.
                 let point = self.point_at(u, v);
                 let eps = 1e-6;
                 let pu_plus = self.point_at(u + eps, v);
@@ -2068,6 +2178,7 @@ fn de_boor_step(pts: &mut [(f64, f64, f64, f64)], knots: &[f64], degree: usize, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::curve::{Circle, Line};
     use std::f64::consts::PI;
 
     #[test]
@@ -2167,6 +2278,131 @@ mod tests {
         // The point itself should not be invalid
         assert!(!flags.contains(DegeneracyFlags::POINT_INVALID),
             "Torus inner touch point should not be NaN/Inf");
+    }
+
+    // ─── Analytical derivatives tests (P9) ──────────────────────────────
+
+    #[test]
+    fn test_revolution_analytical_derivatives_match_numerical() {
+        // Revolution of a line around the Z axis → cylinder.
+        let profile = Curve3d::Line(Line::new(
+            Point3d::new(1.0, 0.0, 0.0),
+            Direction3d::new(0.0, 0.0, 1.0).unwrap(),
+        ));
+        let axis = Direction3d::Z;
+        let origin = Point3d::ORIGIN;
+        let rev = RevolutionSurface::new(profile, axis, origin);
+        let surface = Surface::Revolution(rev);
+
+        // Test at multiple (u, v) points
+        let eps = 1e-6;
+        for &u in &[0.1_f64, 0.5, 1.0, 2.0, 3.0] {
+            for &v in &[0.0_f64, 0.5, 1.0, 2.0] {
+                let analytical = surface.derivatives_at(u, v);
+
+                // Numerical derivatives via central differences
+                let p_u_plus = surface.point_at(u + eps, v);
+                let p_u_minus = surface.point_at(u - eps, v);
+                let p_v_plus = surface.point_at(u, v + eps);
+                let p_v_minus = surface.point_at(u, v - eps);
+
+                let num_du_x = (p_u_plus.x - p_u_minus.x) / (2.0 * eps);
+                let num_du_y = (p_u_plus.y - p_u_minus.y) / (2.0 * eps);
+                let num_du_z = (p_u_plus.z - p_u_minus.z) / (2.0 * eps);
+                let num_dv_x = (p_v_plus.x - p_v_minus.x) / (2.0 * eps);
+                let num_dv_y = (p_v_plus.y - p_v_minus.y) / (2.0 * eps);
+                let num_dv_z = (p_v_plus.z - p_v_minus.z) / (2.0 * eps);
+
+                let du_err = ((analytical.du.x - num_du_x).powi(2)
+                    + (analytical.du.y - num_du_y).powi(2)
+                    + (analytical.du.z - num_du_z).powi(2)).sqrt();
+                let dv_err = ((analytical.dv.x - num_dv_x).powi(2)
+                    + (analytical.dv.y - num_dv_y).powi(2)
+                    + (analytical.dv.z - num_dv_z).powi(2)).sqrt();
+
+                assert!(du_err < 1e-6,
+                    "Revolution dS/du mismatch at ({}, {}): analytical=({:.6},{:.6},{:.6}), numerical=({:.6},{:.6},{:.6}), err={:.2e}",
+                    u, v, analytical.du.x, analytical.du.y, analytical.du.z, num_du_x, num_du_y, num_du_z, du_err);
+                assert!(dv_err < 1e-6,
+                    "Revolution dS/dv mismatch at ({}, {}): analytical=({:.6},{:.6},{:.6}), numerical=({:.6},{:.6},{:.6}), err={:.2e}",
+                    u, v, analytical.dv.x, analytical.dv.y, analytical.dv.z, num_dv_x, num_dv_y, num_dv_z, dv_err);
+            }
+        }
+    }
+
+    #[test]
+    fn test_revolution_derivatives_cylinder_orthogonal() {
+        // For a cylinder (revolution of a vertical line), dS/du should be
+        // perpendicular to dS/dv (which is along the axis).
+        let profile = Curve3d::Line(Line::new(
+            Point3d::new(2.0, 0.0, 0.0),
+            Direction3d::new(0.0, 0.0, 1.0).unwrap(),
+        ));
+        let rev = RevolutionSurface::new(profile, Direction3d::Z, Point3d::ORIGIN);
+        let surface = Surface::Revolution(rev);
+
+        let ders = surface.derivatives_at(0.5, 1.0);
+        let dot = ders.du.x * ders.dv.x + ders.du.y * ders.dv.y + ders.du.z * ders.dv.z;
+        assert!(dot.abs() < 1e-10,
+            "Cylinder dS/du and dS/dv should be orthogonal, dot product = {}", dot);
+    }
+
+    #[test]
+    fn test_extrusion_analytical_derivatives_match_numerical() {
+        // Extrusion of a circle along Z → cylinder.
+        let profile = Curve3d::Circle(Circle::new_xy(Point3d::ORIGIN, 1.0));
+        let direction = Direction3d::new(0.0, 0.0, 1.0).unwrap();
+        let ext = ExtrusionSurface::new(profile, direction);
+        let surface = Surface::Extrusion(ext);
+
+        let eps = 1e-6;
+        for &u in &[0.1_f64, 0.5, 1.0, 2.0, 3.0] {
+            for &v in &[0.0_f64, 0.5, 1.0, 2.0] {
+                let analytical = surface.derivatives_at(u, v);
+
+                let p_u_plus = surface.point_at(u + eps, v);
+                let p_u_minus = surface.point_at(u - eps, v);
+                let p_v_plus = surface.point_at(u, v + eps);
+                let p_v_minus = surface.point_at(u, v - eps);
+
+                let num_du_x = (p_u_plus.x - p_u_minus.x) / (2.0 * eps);
+                let num_du_y = (p_u_plus.y - p_u_minus.y) / (2.0 * eps);
+                let num_du_z = (p_u_plus.z - p_u_minus.z) / (2.0 * eps);
+                let num_dv_x = (p_v_plus.x - p_v_minus.x) / (2.0 * eps);
+                let num_dv_y = (p_v_plus.y - p_v_minus.y) / (2.0 * eps);
+                let num_dv_z = (p_v_plus.z - p_v_minus.z) / (2.0 * eps);
+
+                let du_err = ((analytical.du.x - num_du_x).powi(2)
+                    + (analytical.du.y - num_du_y).powi(2)
+                    + (analytical.du.z - num_du_z).powi(2)).sqrt();
+                let dv_err = ((analytical.dv.x - num_dv_x).powi(2)
+                    + (analytical.dv.y - num_dv_y).powi(2)
+                    + (analytical.dv.z - num_dv_z).powi(2)).sqrt();
+
+                assert!(du_err < 1e-6,
+                    "Extrusion dS/du mismatch at ({}, {}): err={:.2e}", u, v, du_err);
+                assert!(dv_err < 1e-6,
+                    "Extrusion dS/dv mismatch at ({}, {}): err={:.2e}", u, v, dv_err);
+            }
+        }
+    }
+
+    #[test]
+    fn test_extrusion_dv_constant() {
+        // For an extrusion surface, dS/dv should be the (constant) direction.
+        let profile = Curve3d::Circle(Circle::new_xy(Point3d::ORIGIN, 1.0));
+        let direction = Direction3d::new(0.0, 0.0, 1.0).unwrap();
+        let ext = ExtrusionSurface::new(profile, direction);
+        let surface = Surface::Extrusion(ext);
+
+        for &u in &[0.0_f64, 1.0, 2.0] {
+            for &v in &[0.0_f64, 1.0, 2.0] {
+                let ders = surface.derivatives_at(u, v);
+                assert!((ders.dv.x - 0.0).abs() < 1e-12, "dS/dv.x should be 0");
+                assert!((ders.dv.y - 0.0).abs() < 1e-12, "dS/dv.y should be 0");
+                assert!((ders.dv.z - 1.0).abs() < 1e-12, "dS/dv.z should be 1");
+            }
+        }
     }
 }
 
