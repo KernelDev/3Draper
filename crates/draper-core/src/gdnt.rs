@@ -320,6 +320,7 @@ impl GdntTolerance {
             tolerance_value: self.value,
             step_id: -1, // Not from STEP — generated from high-level API
             datum_references: self.datum_references.iter().map(|_| -1).collect(),
+            ..Default::default()
         }
     }
 }

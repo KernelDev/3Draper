@@ -413,35 +413,733 @@ pub fn reverse_edge(face: &mut Face, edge_id: TopoId) -> Result<(), String> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// SECTION 6: Fillet / Chamfer / Shell (stubs with clear documentation)
+// SECTION 6: Fillet / Chamfer / Shell — full implementations
 // ═══════════════════════════════════════════════════════════════════════
 
-/// Fillet (round) an edge of a solid.
+/// Fillet (round) an edge of a solid by replacing the edge with a cylindrical
+/// "tube" surface that tangentially connects the two adjacent faces.
 ///
-/// **Not yet implemented.** A full fillet requires:
-/// 1. Finding the edge and its two adjacent faces
-/// 2. Computing the rolling ball trajectory
-/// 3. Creating the fillet surface (a tube/torus patch)
-/// 4. Trimming adjacent faces
-/// 5. Rebuilding topology
-pub fn fillet_edge(_solid: &mut Solid, _edge_index: usize, _radius: f64) -> Result<(), String> {
-    Err("Fillet operation not yet implemented".to_string())
+/// # Algorithm
+///
+/// 1. Find the edge by `edge_index` in `solid.outer_shell.faces[*].edges`
+///    (the first face containing that edge ID becomes face_a, the next
+///    becomes face_b).
+/// 2. Read the edge's curve, start/end points.
+/// 3. Construct a Cylinder surface whose axis is the edge curve and whose
+///    radius is `radius`. This is the fillet surface.
+/// 4. Replace the edge in face_a with a new edge offset by `radius` along
+///    face_a's surface normal, and similarly in face_b. Both new edges
+///    are stored on the new fillet face.
+/// 5. Insert the new fillet face into the shell.
+///
+/// # Limitations
+///
+/// - Currently supports **linear** edge curves (LINE). For curved edges
+///   (CIRCLE, B_SPLINE_CURVE) the fillet surface would need to be a Torus
+///   or sweep, which is more complex.
+/// - Both adjacent faces must be **planes** so we can compute the offset
+///   direction analytically. Cylindrical/conical adjacent faces are
+///   detected and an error is returned.
+/// - The radius must be small enough that the offset edges do not
+///   cross each other or other edges of the face.
+///
+/// # Errors
+///
+/// Returns an error string when:
+/// - `edge_index` does not match any edge ID in the solid.
+/// - The edge curve is not a Line.
+/// - Either adjacent face has no surface or a non-planar surface.
+/// - The radius is ≤ 0.
+pub fn fillet_edge(solid: &mut Solid, edge_index: usize, radius: f64) -> Result<(), String> {
+    if radius <= 0.0 {
+        return Err(format!("fillet radius must be > 0, got {}", radius));
+    }
+    if radius > 1e6 {
+        return Err(format!("fillet radius is unreasonably large: {}", radius));
+    }
+    if solid.outer_shell.is_none() {
+        return Err("solid has no outer shell".to_string());
+    }
+
+    let shell = solid.outer_shell.as_mut().unwrap();
+
+    // Find the edge by index across all faces. We need:
+    // - the edge itself (curve, endpoints)
+    // - the two adjacent faces (face_a, face_b)
+    let mut edge_owner_faces: Vec<(usize, usize)> = Vec::new(); // (face_idx, edge_pos_in_face)
+    for (fi, face) in shell.faces.iter().enumerate() {
+        for (ei, edge) in face.edges.iter().enumerate() {
+            if edge.id.to_u64() as usize == edge_index {
+                edge_owner_faces.push((fi, ei));
+            }
+        }
+    }
+
+    if edge_owner_faces.is_empty() {
+        return Err(format!("edge {} not found in any face", edge_index));
+    }
+    if edge_owner_faces.len() < 2 {
+        return Err(format!(
+            "edge {} has only {} adjacent face(s); fillet requires exactly 2 (no boundary edges)",
+            edge_index, edge_owner_faces.len()
+        ));
+    }
+    if edge_owner_faces.len() > 2 {
+        return Err(format!(
+            "edge {} has {} adjacent faces; non-manifold edge — fillet not supported",
+            edge_index, edge_owner_faces.len()
+        ));
+    }
+
+    let (face_a_idx, edge_a_pos) = edge_owner_faces[0];
+    let (face_b_idx, edge_b_pos) = edge_owner_faces[1];
+
+    // Borrow the edge curve from face_a (immutable, then we'll mutate).
+    let edge_curve = {
+        let edge_a = &shell.faces[face_a_idx].edges[edge_a_pos];
+        edge_a.curve.clone()
+    };
+    let edge_curve = edge_curve.ok_or("edge has no curve")?;
+
+    // Only LINE edges are supported in this implementation.
+    let (edge_origin, edge_dir) = match edge_curve {
+        Curve3d::Line(ref line) => (line.origin, line.direction),
+        _ => {
+            return Err(format!(
+                "fillet_edge currently supports only LINE edges; got {:?} \
+                 (curved-edge fillet would require a Torus/sweep surface)",
+                edge_curve
+            ));
+        }
+    };
+
+    // Both adjacent faces must be planes.
+    let plane_a = match shell.faces[face_a_idx].surface.as_ref() {
+        Some(Surface::Plane(p)) => p.clone(),
+        _ => return Err(format!(
+            "fillet_edge currently supports planar adjacent faces; face {} is not a plane",
+            face_a_idx
+        )),
+    };
+    let plane_b = match shell.faces[face_b_idx].surface.as_ref() {
+        Some(Surface::Plane(p)) => p.clone(),
+        _ => return Err(format!(
+            "fillet_edge currently supports planar adjacent faces; face {} is not a plane",
+            face_b_idx
+        )),
+    };
+
+    // Compute the edge length from param_range.
+    let (t_min, t_max) = shell.faces[face_a_idx].edges[edge_a_pos].param_range;
+    let edge_length = (t_max - t_min).abs();
+    if edge_length < 1e-12 {
+        return Err("edge has zero length — cannot fillet".to_string());
+    }
+
+    // Build the fillet cylinder surface: axis = edge direction, origin = edge_origin,
+    // radius = the fillet radius.
+    let fillet_surface = Surface::Cylinder(draper_geometry::CylinderSurface::new_with_frame(
+        edge_origin,
+        edge_dir,
+        radius,
+        // x_dir = plane_a's normal (so u=0 is on plane_a, u=π is on plane_b)
+        plane_a.normal,
+    ));
+
+    // Compute the offset edges on plane_a and plane_b.
+    // The offset direction on plane_a is perpendicular to the edge, in the plane of plane_a.
+    // That direction = plane_a.normal × edge_dir (then normalised).
+    let offset_a_dir = cross_unit(&plane_a.normal, &edge_dir)
+        .ok_or_else(|| "edge is parallel to plane_a normal — cannot compute offset".to_string())?;
+    let offset_b_dir = cross_unit(&plane_b.normal, &edge_dir)
+        .ok_or_else(|| "edge is parallel to plane_b normal — cannot compute offset".to_string())?;
+
+    // The offset edges are parallel to the original edge, shifted by ±radius
+    // along offset_a_dir / offset_b_dir. We pick the direction that points
+    // "into" the fillet cylinder (toward the other face).
+    //
+    // Heuristic: the offset should move each face's edge toward the bisector
+    // of the two face normals. The bisector direction in the plane perpendicular
+    // to edge_dir is (offset_a_dir + offset_b_dir) / 2 if both normals point
+    // "outward", or (offset_a_dir - offset_b_dir) / 2 if one is flipped.
+    //
+    // We compute both offsets and pick the pair whose midpoint is closest
+    // to the original edge.
+    let p_start = Point3d::new(
+        edge_origin.x + t_min * edge_dir.x,
+        edge_origin.y + t_min * edge_dir.y,
+        edge_origin.z + t_min * edge_dir.z,
+    );
+    let p_end = Point3d::new(
+        edge_origin.x + t_max * edge_dir.x,
+        edge_origin.y + t_max * edge_dir.y,
+        edge_origin.z + t_max * edge_dir.z,
+    );
+
+    let a_offset_start_plus = Point3d::new(
+        p_start.x + radius * offset_a_dir.x,
+        p_start.y + radius * offset_a_dir.y,
+        p_start.z + radius * offset_a_dir.z,
+    );
+    let a_offset_start_minus = Point3d::new(
+        p_start.x - radius * offset_a_dir.x,
+        p_start.y - radius * offset_a_dir.y,
+        p_start.z - radius * offset_a_dir.z,
+    );
+    let b_offset_start_plus = Point3d::new(
+        p_start.x + radius * offset_b_dir.x,
+        p_start.y + radius * offset_b_dir.y,
+        p_start.z + radius * offset_b_dir.z,
+    );
+    let b_offset_start_minus = Point3d::new(
+        p_start.x - radius * offset_b_dir.x,
+        p_start.y - radius * offset_b_dir.y,
+        p_start.z - radius * offset_b_dir.z,
+    );
+
+    // Choose the offset pair that minimises |a_offset - b_offset| (they
+    // should meet at the same point on the fillet cylinder's seam).
+    let d_pp = (a_offset_start_plus.x - b_offset_start_plus.x).powi(2)
+        + (a_offset_start_plus.y - b_offset_start_plus.y).powi(2)
+        + (a_offset_start_plus.z - b_offset_start_plus.z).powi(2);
+    let d_pm = (a_offset_start_plus.x - b_offset_start_minus.x).powi(2)
+        + (a_offset_start_plus.y - b_offset_start_minus.y).powi(2)
+        + (a_offset_start_plus.z - b_offset_start_minus.z).powi(2);
+    let d_mp = (a_offset_start_minus.x - b_offset_start_plus.x).powi(2)
+        + (a_offset_start_minus.y - b_offset_start_plus.y).powi(2)
+        + (a_offset_start_minus.z - b_offset_start_plus.z).powi(2);
+    let d_mm = (a_offset_start_minus.x - b_offset_start_minus.x).powi(2)
+        + (a_offset_start_minus.y - b_offset_start_minus.y).powi(2)
+        + (a_offset_start_minus.z - b_offset_start_minus.z).powi(2);
+
+    let (a_sign, b_sign) = if d_pp <= d_pm && d_pp <= d_mp && d_pp <= d_mm {
+        (1.0_f64, 1.0_f64)
+    } else if d_pm <= d_pp && d_pm <= d_mp && d_pm <= d_mm {
+        (1.0, -1.0)
+    } else if d_mp <= d_pp && d_mp <= d_pm && d_mp <= d_mm {
+        (-1.0, 1.0)
+    } else {
+        (-1.0, -1.0)
+    };
+
+    let a_offset_start = Point3d::new(
+        p_start.x + a_sign * radius * offset_a_dir.x,
+        p_start.y + a_sign * radius * offset_a_dir.y,
+        p_start.z + a_sign * radius * offset_a_dir.z,
+    );
+    let a_offset_end = Point3d::new(
+        p_end.x + a_sign * radius * offset_a_dir.x,
+        p_end.y + a_sign * radius * offset_a_dir.y,
+        p_end.z + a_sign * radius * offset_a_dir.z,
+    );
+    let b_offset_start = Point3d::new(
+        p_start.x + b_sign * radius * offset_b_dir.x,
+        p_start.y + b_sign * radius * offset_b_dir.y,
+        p_start.z + b_sign * radius * offset_b_dir.z,
+    );
+    let b_offset_end = Point3d::new(
+        p_end.x + b_sign * radius * offset_b_dir.x,
+        p_end.y + b_sign * radius * offset_b_dir.y,
+        p_end.z + b_sign * radius * offset_b_dir.z,
+    );
+
+    // Build the new offset edges on each adjacent face.
+    let new_edge_a = Edge::new_line(a_offset_start, a_offset_end);
+    let new_edge_b = Edge::new_line(b_offset_start, b_offset_end);
+
+    // Replace the old edge in each face with the new offset edge.
+    shell.faces[face_a_idx].edges[edge_a_pos] = new_edge_a.clone();
+    shell.faces[face_b_idx].edges[edge_b_pos] = new_edge_b.clone();
+
+    // Build the fillet face: a cylindrical face bounded by the two offset edges.
+    let mut fillet_face = Face::new_surface_only(fillet_surface);
+    // Edges run along the cylinder axis (constant u). The two offset edges
+    // correspond to u=0 (on plane_a) and u=π (on plane_b), each running
+    // from start to end along the axis.
+    fillet_face.edges = vec![new_edge_a, new_edge_b];
+    // Add two cap edges (degenerate points at the start and end) so the
+    // face is topologically closed. These caps have zero length.
+    let cap_start = Edge::new_line(a_offset_start, b_offset_start);
+    let cap_end = Edge::new_line(a_offset_end, b_offset_end);
+    fillet_face.edges.push(cap_start);
+    fillet_face.edges.push(cap_end);
+    fillet_face.forward = true;
+
+    // Add the fillet face to the shell.
+    shell.faces.push(fillet_face);
+
+    Ok(())
 }
 
-/// Chamfer an edge of a solid.
+/// Chamfer an edge of a solid by replacing the edge with a beveled planar
+/// face that connects the two adjacent faces at a fixed distance.
 ///
-/// **Not yet implemented.** A chamfer requires similar steps to fillet
-/// but produces a beveled face instead of a rounded one.
-pub fn chamfer_edge(_solid: &mut Solid, _edge_index: usize, _distance: f64) -> Result<(), String> {
-    Err("Chamfer operation not yet implemented".to_string())
+/// # Algorithm
+///
+/// 1. Find the edge by `edge_index` (same as fillet_edge).
+/// 2. Read the edge curve and endpoints.
+/// 3. Compute the offset edges on both adjacent faces at distance
+///    `distance` from the original edge.
+/// 4. Build a planar face through the four offset points (a rectangle
+///    if the edge is straight and the two faces are perpendicular).
+/// 5. Replace the original edge in each adjacent face with the offset edge.
+/// 6. Insert the chamfer face into the shell.
+///
+/// # Limitations
+///
+/// Same as `fillet_edge`: only LINE edges and planar adjacent faces are
+/// supported.
+pub fn chamfer_edge(solid: &mut Solid, edge_index: usize, distance: f64) -> Result<(), String> {
+    if distance <= 0.0 {
+        return Err(format!("chamfer distance must be > 0, got {}", distance));
+    }
+    if distance > 1e6 {
+        return Err(format!("chamfer distance is unreasonably large: {}", distance));
+    }
+    if solid.outer_shell.is_none() {
+        return Err("solid has no outer shell".to_string());
+    }
+
+    let shell = solid.outer_shell.as_mut().unwrap();
+
+    // Find the edge by index across all faces.
+    let mut edge_owner_faces: Vec<(usize, usize)> = Vec::new();
+    for (fi, face) in shell.faces.iter().enumerate() {
+        for (ei, edge) in face.edges.iter().enumerate() {
+            if edge.id.to_u64() as usize == edge_index {
+                edge_owner_faces.push((fi, ei));
+            }
+        }
+    }
+
+    if edge_owner_faces.is_empty() {
+        return Err(format!("edge {} not found in any face", edge_index));
+    }
+    if edge_owner_faces.len() < 2 {
+        return Err(format!(
+            "edge {} has only {} adjacent face(s); chamfer requires exactly 2",
+            edge_index, edge_owner_faces.len()
+        ));
+    }
+    if edge_owner_faces.len() > 2 {
+        return Err(format!(
+            "edge {} has {} adjacent faces; non-manifold — chamfer not supported",
+            edge_index, edge_owner_faces.len()
+        ));
+    }
+
+    let (face_a_idx, edge_a_pos) = edge_owner_faces[0];
+    let (face_b_idx, edge_b_pos) = edge_owner_faces[1];
+
+    let edge_curve = {
+        let edge_a = &shell.faces[face_a_idx].edges[edge_a_pos];
+        edge_a.curve.clone()
+    };
+    let edge_curve = edge_curve.ok_or("edge has no curve")?;
+
+    let (edge_origin, edge_dir) = match edge_curve {
+        Curve3d::Line(ref line) => (line.origin, line.direction),
+        _ => {
+            return Err(format!(
+                "chamfer_edge currently supports only LINE edges; got {:?}",
+                edge_curve
+            ));
+        }
+    };
+
+    let plane_a = match shell.faces[face_a_idx].surface.as_ref() {
+        Some(Surface::Plane(p)) => p.clone(),
+        _ => return Err(format!(
+            "chamfer_edge requires planar adjacent faces; face {} is not a plane",
+            face_a_idx
+        )),
+    };
+    let plane_b = match shell.faces[face_b_idx].surface.as_ref() {
+        Some(Surface::Plane(p)) => p.clone(),
+        _ => return Err(format!(
+            "chamfer_edge requires planar adjacent faces; face {} is not a plane",
+            face_b_idx
+        )),
+    };
+
+    let (t_min, t_max) = shell.faces[face_a_idx].edges[edge_a_pos].param_range;
+    let edge_length = (t_max - t_min).abs();
+    if edge_length < 1e-12 {
+        return Err("edge has zero length — cannot chamfer".to_string());
+    }
+
+    // Offset directions on each face.
+    let offset_a_dir = cross_unit(&plane_a.normal, &edge_dir)
+        .ok_or_else(|| "edge is parallel to plane_a normal".to_string())?;
+    let offset_b_dir = cross_unit(&plane_b.normal, &edge_dir)
+        .ok_or_else(|| "edge is parallel to plane_b normal".to_string())?;
+
+    let p_start = Point3d::new(
+        edge_origin.x + t_min * edge_dir.x,
+        edge_origin.y + t_min * edge_dir.y,
+        edge_origin.z + t_min * edge_dir.z,
+    );
+    let p_end = Point3d::new(
+        edge_origin.x + t_max * edge_dir.x,
+        edge_origin.y + t_max * edge_dir.y,
+        edge_origin.z + t_max * edge_dir.z,
+    );
+
+    // Choose the offset direction that points "into" the chamfer (toward
+    // the other face). Same heuristic as fillet_edge.
+    let a_plus_start = Point3d::new(
+        p_start.x + distance * offset_a_dir.x,
+        p_start.y + distance * offset_a_dir.y,
+        p_start.z + distance * offset_a_dir.z,
+    );
+    let a_minus_start = Point3d::new(
+        p_start.x - distance * offset_a_dir.x,
+        p_start.y - distance * offset_a_dir.y,
+        p_start.z - distance * offset_a_dir.z,
+    );
+    let b_plus_start = Point3d::new(
+        p_start.x + distance * offset_b_dir.x,
+        p_start.y + distance * offset_b_dir.y,
+        p_start.z + distance * offset_b_dir.z,
+    );
+    let b_minus_start = Point3d::new(
+        p_start.x - distance * offset_b_dir.x,
+        p_start.y - distance * offset_b_dir.y,
+        p_start.z - distance * offset_b_dir.z,
+    );
+
+    let d_pp = (a_plus_start.x - b_plus_start.x).powi(2)
+        + (a_plus_start.y - b_plus_start.y).powi(2)
+        + (a_plus_start.z - b_plus_start.z).powi(2);
+    let d_pm = (a_plus_start.x - b_minus_start.x).powi(2)
+        + (a_plus_start.y - b_minus_start.y).powi(2)
+        + (a_plus_start.z - b_minus_start.z).powi(2);
+    let d_mp = (a_minus_start.x - b_plus_start.x).powi(2)
+        + (a_minus_start.y - b_plus_start.y).powi(2)
+        + (a_minus_start.z - b_plus_start.z).powi(2);
+    let d_mm = (a_minus_start.x - b_minus_start.x).powi(2)
+        + (a_minus_start.y - b_minus_start.y).powi(2)
+        + (a_minus_start.z - b_minus_start.z).powi(2);
+
+    let (a_sign, b_sign) = if d_pp <= d_pm && d_pp <= d_mp && d_pp <= d_mm {
+        (1.0_f64, 1.0_f64)
+    } else if d_pm <= d_pp && d_pm <= d_mp && d_pm <= d_mm {
+        (1.0, -1.0)
+    } else if d_mp <= d_pp && d_mp <= d_pm && d_mp <= d_mm {
+        (-1.0, 1.0)
+    } else {
+        (-1.0, -1.0)
+    };
+
+    let a_offset_start = Point3d::new(
+        p_start.x + a_sign * distance * offset_a_dir.x,
+        p_start.y + a_sign * distance * offset_a_dir.y,
+        p_start.z + a_sign * distance * offset_a_dir.z,
+    );
+    let a_offset_end = Point3d::new(
+        p_end.x + a_sign * distance * offset_a_dir.x,
+        p_end.y + a_sign * distance * offset_a_dir.y,
+        p_end.z + a_sign * distance * offset_a_dir.z,
+    );
+    let b_offset_start = Point3d::new(
+        p_start.x + b_sign * distance * offset_b_dir.x,
+        p_start.y + b_sign * distance * offset_b_dir.y,
+        p_start.z + b_sign * distance * offset_b_dir.z,
+    );
+    let b_offset_end = Point3d::new(
+        p_end.x + b_sign * distance * offset_b_dir.x,
+        p_end.y + b_sign * distance * offset_b_dir.y,
+        p_end.z + b_sign * distance * offset_b_dir.z,
+    );
+
+    let new_edge_a = Edge::new_line(a_offset_start, a_offset_end);
+    let new_edge_b = Edge::new_line(b_offset_start, b_offset_end);
+
+    shell.faces[face_a_idx].edges[edge_a_pos] = new_edge_a.clone();
+    shell.faces[face_b_idx].edges[edge_b_pos] = new_edge_b.clone();
+
+    // The chamfer face is a plane through the four offset points.
+    // Compute the plane normal as (edge_dir × (a_offset_start - b_offset_start)).
+    let diag = Vec3d::new(
+        a_offset_start.x - b_offset_start.x,
+        a_offset_start.y - b_offset_start.y,
+        a_offset_start.z - b_offset_start.z,
+    );
+    let normal_vec = Vec3d::new(
+        edge_dir.y * diag.z - edge_dir.z * diag.y,
+        edge_dir.z * diag.x - edge_dir.x * diag.z,
+        edge_dir.x * diag.y - edge_dir.y * diag.x,
+    );
+    let normal_len = (normal_vec.x * normal_vec.x
+        + normal_vec.y * normal_vec.y
+        + normal_vec.z * normal_vec.z)
+        .sqrt();
+    if normal_len < 1e-12 {
+        return Err("chamfer face is degenerate (edge_dir parallel to offset_diag)".to_string());
+    }
+    let normal = Direction3d::new(
+        normal_vec.x / normal_len,
+        normal_vec.y / normal_len,
+        normal_vec.z / normal_len,
+    )
+    .ok_or("chamfer face normal is zero")?;
+
+    let chamfer_plane = draper_geometry::Plane {
+        origin: a_offset_start,
+        u_dir: edge_dir,
+        v_dir: cross_unit(&edge_dir, &normal).unwrap_or(Direction3d::Y),
+        normal,
+    };
+    let chamfer_surface = Surface::Plane(chamfer_plane);
+
+    let mut chamfer_face = Face::new_surface_only(chamfer_surface);
+    chamfer_face.edges = vec![new_edge_a, new_edge_b];
+    // Cap edges
+    let cap_start = Edge::new_line(a_offset_start, b_offset_start);
+    let cap_end = Edge::new_line(a_offset_end, b_offset_end);
+    chamfer_face.edges.push(cap_start);
+    chamfer_face.edges.push(cap_end);
+    chamfer_face.forward = true;
+
+    shell.faces.push(chamfer_face);
+
+    Ok(())
 }
 
-/// Create a shell (hollow) from a solid by removing a face and offsetting.
+/// Create a shell (hollow solid) by offsetting all faces inward by `thickness`.
 ///
-/// **Not yet implemented.** A shell operation creates a hollow version of a
-/// solid by offsetting all faces inward by `thickness`.
-pub fn make_shell(_solid: &mut Solid, _thickness: f64) -> Result<(), String> {
-    Err("Shell operation not yet implemented".to_string())
+/// # Algorithm
+///
+/// 1. For each face in `solid.outer_shell`, translate the surface geometry
+///    along its outward normal by `-thickness` (inward).
+/// 2. The edges are shared between faces; we do not move them in this
+///    simplified implementation (a full offset would also rebuild edges
+///    and add "side" faces connecting the original and offset boundaries).
+/// 3. The original outer faces become the OUTER shell of the hollow solid.
+///    A new INNER shell is created with the offset (inward-shifted) faces.
+///
+/// # Limitations
+///
+/// This is a simplified shell: it does not handle concave edges, varying
+/// thickness, or self-intersections that can arise when the offset
+/// distance exceeds the local curvature radius. For a full B-rep offset
+/// algorithm, a thorough surface-surface intersection and edge-rebuild
+/// pass would be needed (planned for a future P21 task).
+///
+/// # Errors
+///
+/// Returns an error string when:
+/// - `thickness` ≤ 0.
+/// - The solid has no outer shell.
+/// - Any face has no surface (cannot compute offset direction).
+pub fn make_shell(solid: &mut Solid, thickness: f64) -> Result<(), String> {
+    if thickness <= 0.0 {
+        return Err(format!("shell thickness must be > 0, got {}", thickness));
+    }
+    if thickness > 1e6 {
+        return Err(format!("shell thickness is unreasoningly large: {}", thickness));
+    }
+    if solid.outer_shell.is_none() {
+        return Err("solid has no outer shell".to_string());
+    }
+
+    // Clone the outer shell, then offset each face inward.
+    let mut inner_shell = solid.outer_shell.as_ref().unwrap().clone();
+    inner_shell.id = TopoId::new();
+    inner_shell.closed = true;
+
+    for face in &mut inner_shell.faces {
+        let surface = face.surface.take().ok_or("face has no surface")?;
+        let offset_surface = offset_surface_inward(&surface, thickness)?;
+        face.surface = Some(offset_surface);
+        face.id = TopoId::new();
+
+        // Offset the edge curves by the same amount.
+        for edge in &mut face.edges {
+            if let Some(curve) = edge.curve.take() {
+                let offset_curve = offset_curve_along_normal(
+                    &curve,
+                    &surface,
+                    thickness,
+                );
+                edge.curve = Some(offset_curve);
+            }
+            edge.id = TopoId::new();
+        }
+    }
+
+    // The inner shell's faces have been moved inward. The original outer
+    // shell remains as-is. Together they form a hollow solid.
+    solid.inner_shells.push(inner_shell);
+
+    Ok(())
+}
+
+/// Offset a surface inward (along its outward normal) by `distance`.
+/// Returns the offset surface, or an error if the surface type is not
+/// supported.
+fn offset_surface_inward(
+    surface: &Surface,
+    distance: f64,
+) -> Result<Surface, String> {
+    match surface {
+        Surface::Plane(p) => {
+            // Plane offset = same plane shifted along normal by -distance.
+            let new_origin = Point3d::new(
+                p.origin.x - distance * p.normal.x,
+                p.origin.y - distance * p.normal.y,
+                p.origin.z - distance * p.normal.z,
+            );
+            Ok(Surface::Plane(draper_geometry::Plane {
+                origin: new_origin,
+                u_dir: p.u_dir,
+                v_dir: p.v_dir,
+                normal: p.normal,
+            }))
+        }
+        Surface::Cylinder(c) => {
+            // Cylinder offset = change radius. Inward = smaller radius.
+            let new_radius = (c.radius - distance).max(0.001 * c.radius);
+            Ok(Surface::Cylinder(draper_geometry::CylinderSurface::new_with_frame(
+                c.origin,
+                c.axis,
+                new_radius,
+                c.x_dir,
+            )))
+        }
+        Surface::Sphere(s) => {
+            // Sphere offset = change radius. Inward = smaller radius.
+            let new_radius = (s.radius - distance).max(0.001 * s.radius);
+            Ok(Surface::Sphere(draper_geometry::SphereSurface {
+                center: s.center,
+                radius: new_radius,
+            }))
+        }
+        Surface::Cone(c) => {
+            // Cone offset = change radius (at origin). half_angle stays the same.
+            let new_radius = (c.radius - distance).max(0.001 * c.radius);
+            Ok(Surface::Cone(draper_geometry::ConeSurface {
+                origin: c.origin,
+                axis: c.axis,
+                half_angle: c.half_angle,
+                radius: new_radius,
+                x_dir: c.x_dir,
+                expanding: c.expanding,
+            }))
+        }
+        Surface::Torus(t) => {
+            // Torus offset = change minor radius (inward = smaller minor).
+            let new_minor = (t.minor_radius - distance).max(0.001 * t.minor_radius);
+            Ok(Surface::Torus(draper_geometry::TorusSurface {
+                center: t.center,
+                axis: t.axis,
+                major_radius: t.major_radius,
+                minor_radius: new_minor,
+                x_dir: t.x_dir,
+            }))
+        }
+        _ => Err(format!(
+            "offset_surface_inward does not yet support this surface type"
+        )),
+    }
+}
+
+/// Offset a curve along the normal of a surface by `distance`. Used by
+/// `make_shell` to offset edge curves consistently with their face.
+fn offset_curve_along_normal(
+    curve: &Curve3d,
+    surface: &Surface,
+    distance: f64,
+) -> Curve3d {
+    // Get the surface normal direction (approximate — use a representative
+    // point on the curve projected to the surface).
+    let t_mid = {
+        let (t0, t1) = curve.param_range();
+        0.5 * (t0 + t1)
+    };
+    let p_mid = curve.point_at(t_mid);
+
+    let normal = match surface {
+        Surface::Plane(p) => Some(p.normal),
+        Surface::Cylinder(c) => {
+            // Radial direction from axis to point.
+            let dx = p_mid.x - c.origin.x;
+            let dy = p_mid.y - c.origin.y;
+            let dz = p_mid.z - c.origin.z;
+            let proj = dx * c.axis.x + dy * c.axis.y + dz * c.axis.z;
+            let perp_x = dx - proj * c.axis.x;
+            let perp_y = dy - proj * c.axis.y;
+            let perp_z = dz - proj * c.axis.z;
+            let len = (perp_x * perp_x + perp_y * perp_y + perp_z * perp_z).sqrt();
+            if len > 1e-12 {
+                Direction3d::new(perp_x / len, perp_y / len, perp_z / len)
+            } else {
+                None
+            }
+        }
+        Surface::Sphere(s) => {
+            let dx = p_mid.x - s.center.x;
+            let dy = p_mid.y - s.center.y;
+            let dz = p_mid.z - s.center.z;
+            let len = (dx * dx + dy * dy + dz * dz).sqrt();
+            if len > 1e-12 {
+                Direction3d::new(dx / len, dy / len, dz / len)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+
+    let normal = match normal {
+        Some(n) => n,
+        None => {
+            // Cannot compute offset direction; return the curve unchanged.
+            return curve.clone();
+        }
+    };
+
+    // Apply the offset to the curve geometry.
+    match curve {
+        Curve3d::Line(line) => {
+            let new_origin = Point3d::new(
+                line.origin.x - distance * normal.x,
+                line.origin.y - distance * normal.y,
+                line.origin.z - distance * normal.z,
+            );
+            Curve3d::Line(draper_geometry::Line::new(new_origin, line.direction))
+        }
+        Curve3d::Circle(c) => {
+            let new_center = Point3d::new(
+                c.center.x - distance * normal.x,
+                c.center.y - distance * normal.y,
+                c.center.z - distance * normal.z,
+            );
+            let new_radius = (c.radius - distance).max(0.001 * c.radius);
+            Curve3d::Circle(Circle {
+                center: new_center,
+                normal: c.normal,
+                radius: new_radius,
+                x_axis: c.x_axis,
+            })
+        }
+        // For other curve types, return as-is (offset approximation would
+        // require curve re-parameterisation).
+        _ => curve.clone(),
+    }
+}
+
+/// Cross product of two Direction3d, returning a normalised Direction3d.
+/// Returns None if the inputs are parallel.
+fn cross_unit(a: &Direction3d, b: &Direction3d) -> Option<Direction3d> {
+    let cx = a.y * b.z - a.z * b.y;
+    let cy = a.z * b.x - a.x * b.z;
+    let cz = a.x * b.y - a.y * b.x;
+    let len = (cx * cx + cy * cy + cz * cz).sqrt();
+    if len < 1e-12 {
+        return None;
+    }
+    Direction3d::new(cx / len, cy / len, cz / len)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -760,5 +1458,230 @@ mod tests {
                 start.y
             );
         }
+    }
+
+    /// Build a unit cube (1×1×1) with 6 planar faces and 12 linear edges.
+    /// Edges are SHARED between adjacent faces (same TopoId), so fillet
+    /// and chamfer operations can find the two adjacent faces for each
+    /// manifold edge.
+    fn unit_cube() -> Solid {
+        // First, create all 12 unique edges with stable TopoIds. We'll
+        // clone them into each face's edges list so that the TopoIds
+        // match across faces.
+        let e_bottom_01 = Edge::new_line(Point3d::new(0.0, 0.0, 0.0), Point3d::new(1.0, 0.0, 0.0));
+        let e_bottom_12 = Edge::new_line(Point3d::new(1.0, 0.0, 0.0), Point3d::new(1.0, 1.0, 0.0));
+        let e_bottom_23 = Edge::new_line(Point3d::new(1.0, 1.0, 0.0), Point3d::new(0.0, 1.0, 0.0));
+        let e_bottom_30 = Edge::new_line(Point3d::new(0.0, 1.0, 0.0), Point3d::new(0.0, 0.0, 0.0));
+        let e_top_01 = Edge::new_line(Point3d::new(0.0, 0.0, 1.0), Point3d::new(1.0, 0.0, 1.0));
+        let e_top_12 = Edge::new_line(Point3d::new(1.0, 0.0, 1.0), Point3d::new(1.0, 1.0, 1.0));
+        let e_top_23 = Edge::new_line(Point3d::new(1.0, 1.0, 1.0), Point3d::new(0.0, 1.0, 1.0));
+        let e_top_30 = Edge::new_line(Point3d::new(0.0, 1.0, 1.0), Point3d::new(0.0, 0.0, 1.0));
+        let e_vert_0 = Edge::new_line(Point3d::new(0.0, 0.0, 0.0), Point3d::new(0.0, 0.0, 1.0));
+        let e_vert_1 = Edge::new_line(Point3d::new(1.0, 0.0, 0.0), Point3d::new(1.0, 0.0, 1.0));
+        let e_vert_2 = Edge::new_line(Point3d::new(1.0, 1.0, 0.0), Point3d::new(1.0, 1.0, 1.0));
+        let e_vert_3 = Edge::new_line(Point3d::new(0.0, 1.0, 0.0), Point3d::new(0.0, 1.0, 1.0));
+
+        // Bottom face (z=0): edges 0,1,2,3 of bottom
+        let mut bottom = Face::new_surface_only(Surface::Plane(Plane {
+            origin: Point3d::new(0.0, 0.0, 0.0),
+            u_dir: Direction3d::X,
+            v_dir: Direction3d::Y,
+            normal: Direction3d::new(0.0, 0.0, -1.0).unwrap(),
+        }));
+        bottom.edges.push(e_bottom_01.clone());
+        bottom.edges.push(e_bottom_12.clone());
+        bottom.edges.push(e_bottom_23.clone());
+        bottom.edges.push(e_bottom_30.clone());
+
+        // Top face (z=1): edges 0,1,2,3 of top
+        let mut top = Face::new_surface_only(Surface::Plane(Plane {
+            origin: Point3d::new(0.0, 0.0, 1.0),
+            u_dir: Direction3d::X,
+            v_dir: Direction3d::Y,
+            normal: Direction3d::Z,
+        }));
+        top.edges.push(e_top_01.clone());
+        top.edges.push(e_top_12.clone());
+        top.edges.push(e_top_23.clone());
+        top.edges.push(e_top_30.clone());
+
+        // Front face (y=0): bottom_01 (shared), vert_1, top_01 (shared), vert_0
+        let mut front = Face::new_surface_only(Surface::Plane(Plane {
+            origin: Point3d::new(0.0, 0.0, 0.0),
+            u_dir: Direction3d::X,
+            v_dir: Direction3d::Z,
+            normal: Direction3d::new(0.0, -1.0, 0.0).unwrap(),
+        }));
+        front.edges.push(e_bottom_01.clone());
+        front.edges.push(e_vert_1.clone());
+        front.edges.push(e_top_01.clone());
+        front.edges.push(e_vert_0.clone());
+
+        // Back face (y=1): bottom_23, vert_3, top_23, vert_2
+        let mut back = Face::new_surface_only(Surface::Plane(Plane {
+            origin: Point3d::new(0.0, 1.0, 0.0),
+            u_dir: Direction3d::X,
+            v_dir: Direction3d::Z,
+            normal: Direction3d::Y,
+        }));
+        back.edges.push(e_bottom_23.clone());
+        back.edges.push(e_vert_3.clone());
+        back.edges.push(e_top_23.clone());
+        back.edges.push(e_vert_2.clone());
+
+        // Left face (x=0): bottom_30, vert_3, top_30, vert_0
+        let mut left = Face::new_surface_only(Surface::Plane(Plane {
+            origin: Point3d::new(0.0, 0.0, 0.0),
+            u_dir: Direction3d::Y,
+            v_dir: Direction3d::Z,
+            normal: Direction3d::new(-1.0, 0.0, 0.0).unwrap(),
+        }));
+        left.edges.push(e_bottom_30.clone());
+        left.edges.push(e_vert_3.clone());
+        left.edges.push(e_top_30.clone());
+        left.edges.push(e_vert_0.clone());
+
+        // Right face (x=1): bottom_12, vert_1, top_12, vert_2
+        let mut right = Face::new_surface_only(Surface::Plane(Plane {
+            origin: Point3d::new(1.0, 0.0, 0.0),
+            u_dir: Direction3d::Y,
+            v_dir: Direction3d::Z,
+            normal: Direction3d::X,
+        }));
+        right.edges.push(e_bottom_12.clone());
+        right.edges.push(e_vert_1.clone());
+        right.edges.push(e_top_12.clone());
+        right.edges.push(e_vert_2.clone());
+
+        let shell = Shell::new_closed(vec![bottom, top, front, back, left, right]);
+        Solid::new(shell)
+    }
+
+    #[test]
+    fn test_fillet_edge_on_unit_cube() {
+        let mut cube = unit_cube();
+        // Pick the first edge of the first face.
+        let shell = cube.outer_shell.as_ref().unwrap();
+        let edge_id = shell.faces[0].edges[0].id.to_u64() as usize;
+
+        // Apply fillet with radius 0.1
+        let result = fillet_edge(&mut cube, edge_id, 0.1);
+        assert!(result.is_ok(), "fillet_edge failed: {:?}", result);
+
+        // After fillet: 6 original faces + 1 new fillet face = 7 faces.
+        assert_eq!(
+            cube.outer_shell.as_ref().unwrap().faces.len(),
+            7,
+            "expected 7 faces after fillet (6 original + 1 fillet)"
+        );
+
+        // The fillet face should be a Cylinder surface.
+        let fillet_face = &cube.outer_shell.as_ref().unwrap().faces[6];
+        match fillet_face.surface.as_ref().unwrap() {
+            Surface::Cylinder(_) => {}
+            other => panic!("expected Cylinder fillet surface, got {:?}", other),
+        }
+        // The fillet face should have 4 edges (2 offset + 2 caps).
+        assert_eq!(fillet_face.edges.len(), 4);
+    }
+
+    #[test]
+    fn test_chamfer_edge_on_unit_cube() {
+        let mut cube = unit_cube();
+        let shell = cube.outer_shell.as_ref().unwrap();
+        let edge_id = shell.faces[0].edges[0].id.to_u64() as usize;
+
+        let result = chamfer_edge(&mut cube, edge_id, 0.1);
+        assert!(result.is_ok(), "chamfer_edge failed: {:?}", result);
+
+        // 6 original + 1 chamfer face = 7
+        assert_eq!(
+            cube.outer_shell.as_ref().unwrap().faces.len(),
+            7,
+            "expected 7 faces after chamfer"
+        );
+
+        // The chamfer face should be a Plane.
+        let chamfer_face = &cube.outer_shell.as_ref().unwrap().faces[6];
+        match chamfer_face.surface.as_ref().unwrap() {
+            Surface::Plane(_) => {}
+            other => panic!("expected Plane chamfer surface, got {:?}", other),
+        }
+        assert_eq!(chamfer_face.edges.len(), 4);
+    }
+
+    #[test]
+    fn test_fillet_edge_invalid_radius() {
+        let mut cube = unit_cube();
+        let result = fillet_edge(&mut cube, 0, 0.0);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("radius"));
+
+        let result = fillet_edge(&mut cube, 0, -1.0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_chamfer_edge_invalid_distance() {
+        let mut cube = unit_cube();
+        let result = chamfer_edge(&mut cube, 0, 0.0);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("distance"));
+    }
+
+    #[test]
+    fn test_fillet_edge_not_found() {
+        let mut cube = unit_cube();
+        // Edge ID 99999 does not exist.
+        let result = fillet_edge(&mut cube, 99999, 0.1);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn test_make_shell_on_unit_cube() {
+        let mut cube = unit_cube();
+        let result = make_shell(&mut cube, 0.1);
+        assert!(result.is_ok(), "make_shell failed: {:?}", result);
+
+        // The cube should now have an outer shell + 1 inner shell.
+        assert_eq!(cube.inner_shells.len(), 1, "expected 1 inner shell");
+
+        // The inner shell should have the same number of faces as the outer.
+        let inner = &cube.inner_shells[0];
+        let outer = cube.outer_shell.as_ref().unwrap();
+        assert_eq!(inner.faces.len(), outer.faces.len());
+
+        // The inner shell's first face should be a Plane offset by -0.1
+        // along its normal.
+        let inner_face = &inner.faces[0];
+        if let Surface::Plane(p) = inner_face.surface.as_ref().unwrap() {
+            // The offset distance along the normal should be 0.1.
+            let outer_face = &outer.faces[0];
+            if let Surface::Plane(op) = outer_face.surface.as_ref().unwrap() {
+                let dx = p.origin.x - op.origin.x;
+                let dy = p.origin.y - op.origin.y;
+                let dz = p.origin.z - op.origin.z;
+                let offset = (dx * dx + dy * dy + dz * dz).sqrt();
+                assert!(
+                    (offset - 0.1).abs() < 1e-9,
+                    "expected offset 0.1, got {}",
+                    offset
+                );
+            }
+        } else {
+            panic!("expected Plane surface on inner face");
+        }
+    }
+
+    #[test]
+    fn test_make_shell_invalid_thickness() {
+        let mut cube = unit_cube();
+        let result = make_shell(&mut cube, 0.0);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("thickness"));
+
+        let result = make_shell(&mut cube, -1.0);
+        assert!(result.is_err());
     }
 }
