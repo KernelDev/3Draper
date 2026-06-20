@@ -2651,8 +2651,17 @@ impl<'a> StepConverter<'a> {
         params: &TriangulationParams,
         bbox: &Option<(Point3d, Point3d)>,
     ) -> Option<TriangleMesh> {
-        let shell_id = self.find_shell_ref_by_brep_id(brep_id)?;
-        let face_data_list = self.extract_shell_faces(shell_id)?;
+        // P7: Use find_all_shell_refs to support BREP_WITH_VOIDS.
+        let (outer_shell_id, void_shell_ids) = self.find_all_shell_refs_by_brep_id(brep_id);
+        let shell_id = outer_shell_id?;
+        let mut face_data_list = self.extract_shell_faces(shell_id)?;
+
+        // Append void shell faces (already correctly oriented per STEP convention).
+        for void_shell_id in &void_shell_ids {
+            if let Some(void_faces) = self.extract_shell_faces(*void_shell_id) {
+                face_data_list.extend(void_faces);
+            }
+        }
 
         // Create tolerance context for this BREP
         let tol_ctx = match bbox {
@@ -3045,8 +3054,35 @@ impl<'a> StepConverter<'a> {
         params: &TriangulationParams,
         bbox: &Option<(Point3d, Point3d)>,
     ) -> Option<(TriangleMesh, Vec<FaceInfo>)> {
-        let shell_id = self.find_shell_ref_by_brep_id(brep_id)?;
-        let face_data_list = self.extract_shell_faces(shell_id)?;
+        // P7: Use find_all_shell_refs to support BREP_WITH_VOIDS.
+        // The outer shell provides the main solid; each void shell provides
+        // an internal cavity (face normals already point into the solid material).
+        let (outer_shell_id, void_shell_ids) = self.find_all_shell_refs_by_brep_id(brep_id);
+        let shell_id = outer_shell_id?;
+        let mut face_data_list = self.extract_shell_faces(shell_id)?;
+
+        // Extract faces from each void shell and append them to the list.
+        // The void shells have INVERTED orientation in STEP — their face normals
+        // point INTO the solid material. By including them as additional faces,
+        // the resulting mesh represents a solid with internal cavities.
+        // (Algorithm adapted from truck-step v0.4.0, ricosjp/truck, Apache-2.0 OR MIT.)
+        for void_shell_id in &void_shell_ids {
+            match self.extract_shell_faces(*void_shell_id) {
+                Some(void_faces) => {
+                    log::info!(
+                        "BREP #{}: appending {} faces from void shell #{}",
+                        brep_id, void_faces.len(), void_shell_id
+                    );
+                    face_data_list.extend(void_faces);
+                }
+                None => {
+                    log::warn!(
+                        "BREP #{}: failed to extract faces from void shell #{} — skipping",
+                        brep_id, void_shell_id
+                    );
+                }
+            }
+        }
 
         // Log face_data_list composition
         {
@@ -4459,6 +4495,99 @@ impl<'a> StepConverter<'a> {
         None
     }
 
+    /// Find ALL shell references in a BREP entity.
+    ///
+    /// For `MANIFOLD_SOLID_BREP('name', #outer_shell)`:
+    ///   returns `(Some(#outer_shell), [])`
+    ///
+    /// For `BREP_WITH_VOIDS('name', #outer_shell, (#void_shell1, #void_shell2, ...))`:
+    ///   returns `(Some(#outer_shell), [#void_shell1, #void_shell2, ...])`
+    ///
+    /// The void shells have INVERTED orientation — their face normals point INTO
+    /// the solid material (which is OUT of the void). This is the STEP convention
+    /// for representing boolean subtraction: the void shells are subtracted from
+    /// the outer shell. By including all shell faces in the face_data_list,
+    /// the resulting mesh will be a watertight solid with internal cavities.
+    ///
+    /// Algorithm adapted from truck-step v0.4.0 (ricosjp/truck, Apache-2.0 OR MIT).
+    fn find_all_shell_refs(&self, brep: &crate::schema::StepEntity) -> (Option<i64>, Vec<i64>) {
+        let mut outer: Option<i64> = None;
+        let mut voids: Vec<i64> = Vec::new();
+
+        // Determine if this is a BREP_WITH_VOIDS by checking the type_name.
+        let is_brep_with_voids = brep.type_name == "BREP_WITH_VOIDS";
+
+        // Strategy:
+        // - The first SHELL reference is the outer shell.
+        // - For BREP_WITH_VOIDS, the third parameter is a LIST of void shell refs.
+        // - For MANIFOLD_SOLID_BREP, there is only the outer shell.
+        for (i, param) in brep.params.iter().enumerate() {
+            // Skip name (index 0)
+            if i == 0 { continue; }
+
+            // Check if this parameter is a LIST of shell references
+            // (this is the BREP_WITH_VOIDS voids list)
+            if let StepValue::List(items) = param {
+                if is_brep_with_voids && outer.is_some() {
+                    // This is the voids list — collect all shell refs
+                    for item in items {
+                        if let Some(ref_id) = self.get_ref(item) {
+                            if let Some(entity) = self.step.find_entity(ref_id) {
+                                if entity.type_name.contains("SHELL") {
+                                    voids.push(ref_id);
+                                }
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // Single shell reference
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(entity) = self.step.find_entity(ref_id) {
+                    if entity.type_name.contains("SHELL") {
+                        if outer.is_none() {
+                            outer = Some(ref_id);
+                        } else if is_brep_with_voids {
+                            // Additional shell refs in BREP_WITH_VOIDS (rare, but handle it)
+                            voids.push(ref_id);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback: if outer not found, use the second parameter
+        if outer.is_none() {
+            if let Some(param) = brep.params.get(1) {
+                if let Some(ref_id) = self.get_ref(param) {
+                    outer = Some(ref_id);
+                }
+            }
+        }
+
+        if !voids.is_empty() {
+            log::info!(
+                "BREP #{} (BREP_WITH_VOIDS): outer shell #{}, {} void shell(s) {:?}",
+                brep.id,
+                outer.unwrap_or(0),
+                voids.len(),
+                voids
+            );
+        }
+
+        (outer, voids)
+    }
+
+    /// Find all shell references by BREP ID — convenience wrapper.
+    fn find_all_shell_refs_by_brep_id(&self, brep_id: i64) -> (Option<i64>, Vec<i64>) {
+        match self.step.find_entity(brep_id) {
+            Some(brep) => self.find_all_shell_refs(&brep),
+            None => (None, vec![]),
+        }
+    }
+
     /// Collect pending BREP instances without triangulating them.
     ///
     /// This mirrors `convert_detailed_instances()` but skips the expensive
@@ -5038,6 +5167,10 @@ impl<'a> StepConverter<'a> {
     /// Resolve a FACE_BOUND or FACE_OUTER_BOUND entity, returning both edges and their STEP EDGE_CURVE IDs.
     /// FACE_BOUND params: [name, loop_ref, orientation]
     /// When orientation is .F., the entire loop should be reversed (winding order flipped).
+    ///
+    /// P7: Now handles VERTEX_LOOP — a degenerate loop consisting of a single vertex
+    /// (used for the apex of a cone or pyramid). Returns an empty edge list, which
+    /// the triangulator will treat as a degenerate face (zero area, no triangles).
     fn resolve_face_bound_with_step_ids(&self, bound_entity: &crate::schema::StepEntity) -> Option<(Vec<TopoEdge>, Vec<i64>)> {
         // FACE_BOUND('', #loop_ref, .T.)
         // The loop reference is typically the 2nd parameter (index 1)
@@ -5063,6 +5196,20 @@ impl<'a> StepConverter<'a> {
                             }
                         }
                         return Some((edges, step_ids));
+                    }
+                    if loop_entity.type_name == "VERTEX_LOOP" {
+                        // P7: VERTEX_LOOP is a degenerate loop consisting of a single vertex.
+                        // It is used for the apex of a cone or pyramid, where the face
+                        // degenerates to a single point. We return an empty edge list,
+                        // which causes the triangulator to produce zero triangles for
+                        // this face (correct behavior — the apex contributes no area).
+                        //
+                        // Algorithm adapted from truck-step v0.4.0 (ricosjp/truck, Apache-2.0 OR MIT).
+                        log::debug!(
+                            "VERTEX_LOOP #{} resolved as degenerate (empty edge list) for FACE_BOUND #{}",
+                            loop_id, bound_entity.id
+                        );
+                        return Some((Vec::new(), Vec::new()));
                     }
                 }
             }
@@ -5560,7 +5707,8 @@ impl<'a> StepConverter<'a> {
                         "B_SPLINE_CURVE_WITH_KNOTS" | "BSPLINE_CURVE_WITH_KNOTS" |
                         "B_SPLINE_CURVE" | "BSPLINE_CURVE" |
                         "RATIONAL_B_SPLINE_CURVE" | "RATIONAL_BSPLINE_CURVE" |
-                        "CIRCLE" | "ARC" | "ELLIPSE" | "TRIMMED_CURVE" | "LINE" |
+                        "CIRCLE" | "ARC" | "ELLIPSE" | "HYPERBOLA" | "PARABOLA" |
+                        "TRIMMED_CURVE" | "LINE" |
                         "SURFACE_CURVE" => {
                             curve_id = Some(ref_id);
                             break;
@@ -5659,7 +5807,8 @@ impl<'a> StepConverter<'a> {
                         "B_SPLINE_CURVE_WITH_KNOTS" | "BSPLINE_CURVE_WITH_KNOTS" |
                         "B_SPLINE_CURVE" | "BSPLINE_CURVE" |
                         "RATIONAL_B_SPLINE_CURVE" | "RATIONAL_BSPLINE_CURVE" |
-                        "CIRCLE" | "ARC" | "ELLIPSE" | "TRIMMED_CURVE" | "LINE" |
+                        "CIRCLE" | "ARC" | "ELLIPSE" | "HYPERBOLA" | "PARABOLA" |
+                        "TRIMMED_CURVE" | "LINE" |
                         "SURFACE_CURVE" => {
                             curve_id = Some(ref_id);
                             break;
