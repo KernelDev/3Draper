@@ -27,6 +27,12 @@
 | **P12** | IntersectionCurve first-class (4D Newton `double_projection`) | ✅ DONE | `dc0d78d` |
 | **P13** | Loop subdivision + quadrangulation | ✅ DONE | `cfd5bab` |
 | **P14** | TRIMMED_CURVE proper handling (generic, not only Circle→Arc) | ✅ DONE | `1dab48f` |
+| **P15** | STEP exporter: full surface coverage (Revolution/Extrusion/NURBS) | ✅ DONE | `c384c07` |
+| **P16** | STEP exporter: full curve coverage (Hyperbola/Parabola/NURBS/PCurve/Trimmed) | ✅ DONE | `c384c07` |
+| **P17** | STEP exporter: BREP_WITH_VOIDS + multiple inner wires per face | ✅ DONE | `c384c07` |
+| **P18** | Round-trip integrity: extract_solids + read→save→re-read | ✅ DONE | `d3686b7` |
+| **P19** | Editing API: transform/translate/rotate/scale/mirror/pattern/hole/surface | ✅ DONE | `6cc338b` |
+| **P20** | STEP export validator (schema-compliant pre-write check) | ✅ DONE | `00f307c` |
 
 ---
 
@@ -214,6 +220,10 @@
 7. **P12** (IntersectionCurve) — ~15-20h, foundation для boolean ops
 8. **P13** (Loop subdivision) — ~5-8h, LOD и FEA-ready mesh
 9. **P14** (TRIMMED_CURVE) — ~2-4h, корректная геометрия рёбер
+10. **P15-P17** (STEP exporter completeness) — ~6h, корректное сохранение всех типов поверхностей и кривых
+11. **P18** (Round-trip integrity) — ~3h, гарантия read→save→re-read
+12. **P19** (Editing API) — ~6h, transform/hole/surface/edge editing
+13. **P20** (Export validator) — ~3h, schema-compliant pre-write check
 
 После каждой задачи:
 - `cargo check --release` — 0 errors, 0 warnings
@@ -222,6 +232,169 @@
 - `git add -A && git commit -m "feat(Pn): ..."` 
 - `git push origin main`
 - Обновить этот документ: ✅ DONE + commit hash
+
+---
+
+## P15-P17 — Комплексный экспортёр STEP (завершено в коммите c384c07)
+
+**Проблема.** Старый экспортёр поддерживал только 5 типов поверхностей (Plane/Cylinder/Cone/Sphere/Torus) и 2 типа кривых (Line/Circle). Всё остальное терялось при сохранении: NURBS-поверхности становились плоскостями, эллипсы — линиями, гиперболы/параболы вообще не сохранялись, BREP_WITH_VOIDS терял внутренние оболочки, дырки на гранях терялись.
+
+**Решение.** Полная переработка `crates/draper-step/src/exporter.rs`:
+
+### P15 — Полная поддержка поверхностей
+- Plane / Cylinder / Cone / Sphere / Torus (с дедупликацией)
+- `SURFACE_OF_REVOLUTION` (axis1_placement + profile curve)
+- `SURFACE_OF_LINEAR_EXTRUSION` (profile curve + direction)
+- `B_SPLINE_SURFACE_WITH_KNOTS` (complex entity form для rational: `B_SPLINE_SURFACE + B_SPLINE_SURFACE_WITH_KNOTS + RATIONAL_B_SPLINE_SURFACE + BOUNDED_SURFACE`)
+
+### P16 — Полная поддержка кривых
+- Line / Circle / Ellipse / Arc (с дедупликацией)
+- `HYPERBOLA(axis2, semi_real, semi_imag)`
+- `PARABOLA(axis2, focal_dist)`
+- `B_SPLINE_CURVE_WITH_KNOTS` (rational complex entity form)
+- `TRIMMED_CURVE` оборачивает arbitrary basis curve (не только Circle→Arc)
+- `PCurve` как `SURFACE_CURVE` обёртывающий 3D B-spline + `PCURVE` ссылку на surface
+
+### P17 — Топологическая полнота
+- `BREP_WITH_VOIDS` когда solid имеет inner_shells (несколько CLOSED_SHELL ссылок)
+- Несколько `FACE_BOUND` на `ADVANCED_FACE` (outer + inner_wires — дырки)
+- `VERTEX_LOOP` для degenerate single-vertex wires (apex конуса, pole сферы)
+- Shared `EDGE_CURVE` дедупликация по content hash
+- Shared `CARTESIAN_POINT` / `DIRECTION` / `AXIS2_PLACEMENT_3D` / `VERTEX_POINT` дедупликация
+
+**Архитектура:** `StepWriter` struct с mutable id-счётчиком + 7 dedup кешей (point/dir/axis2/vertex/curve/surface/edge_curve).
+
+---
+
+## P18 — Round-trip integrity + extract_solids (завершено в коммите d3686b7)
+
+**Проблема.** Не было возможности извлечь `Solid` из STEP-файла без триангуляции. Конвейер шёл напрямую: `StepFile → FaceData → TriangleMesh`, минуя промежуточный `Solid`. Это блокировало любую editing-семантику (редактирование, трансформация, экспорт обратно).
+
+**Решение:**
+1. Новый публичный API: `extract_solids(step_file) -> (Vec<Solid>, Vec<i64>)`
+   - Извлекает все BREP-сущности (MANIFOLD_SOLID_BREP и BREP_WITH_VOIDS)
+   - Возвращает STEP entity IDs вместе с solidами для traceability
+2. `StepConverter::extract_all_solids()` — итерирует все BREP-сущности
+3. `StepConverter::extract_solid_from_brep(brep_id)` — извлекает один solid с outer shell + void shells
+
+**Тест производительности round-trip** (`tools/src/bin/roundtrip_test.rs`):
+- Парсит оригинальный STEP
+- Извлекает solids через `extract_solids`
+- Экспортирует обратно через `export_step` (P15-P17)
+- Ре-парсит экспортированный STEP
+- Сравнивает BREP count, surface types, curve types
+
+**Результаты round-trip тестов:**
+| Файл | BREP | Surfaces | Curves | Результат |
+|---|---|---|---|---|
+| nist_cube.stp | 1 | 6 PLANE | 12 LINE | ✅ PASS |
+| nist_cylinder.stp | 1 | 1 CYL + 2 PLANE | 1 LINE + 2 CIRCLE | ✅ PASS |
+| nist_sphere.stp | 1 | 1 SPHERE + 1 PLANE | 2 CIRCLE | ✅ PASS |
+| nist_cone.stp | 1 | 1 CONE + 2 PLANE | 1 LINE + 2 CIRCLE | ✅ PASS |
+| nist_complex_surface.stp | 1 | 1 B_SPLINE + 5 PLANE | 12 LINE | ✅ PASS |
+| nist_assembly.stp | 2 | 12 PLANE | 24 LINE | ✅ PASS |
+| as1-oc-214.stp | 5 | 25 PLANE + 28 B_SPLINE | 42 LINE + 84 B_SPLINE | ✅ PASS |
+| Zentralstaender.stp | 27 | 232 PLANE + 69 CYL + 25 CONE + 22 TORUS + 1 B_SPLINE | 487 LINE + 36 B_SPLINE + 183 CIRCLE + 2 ELLIPSE | ✅ PASS |
+| 8394-121_Spit-Fire.STEP | 8 | 53 PLANE + 52 CYL + 10 CONE + 12 TORUS + 49 B_SPLINE | 170 LINE + 176 CIRCLE + 223 B_SPLINE | ✅ PASS |
+| compressor-13920_top.stp | 2 | 18 PLANE + 22 CYL + 1 CONE + 1 SPHERE + 8 TORUS + 4 B_SPLINE | 52 LINE + 102 CIRCLE + 18 B_SPLINE | ✅ PASS |
+
+**WARN-сообщения** на сложных файлах ожидаемы: оригинальные STEP-файлы дублируют геометрию (одна поверхность на ADVANCED_FACE), тогда как наш экспортёр дедуплицирует разделяемые сущности. BREP count и surface/curve TYPES сохраняются точно.
+
+---
+
+## P19 — Editing API (завершено в коммите 6cc338b)
+
+**Проблема.** Существующие операции `circular_pattern` / `linear_pattern` / `mirror_solid` трансформировали только поверхности, оставляя edge curves в исходных позициях — геометрия становилась несогласованной. Не хватало API для редактирования: добавление/удаление дырок, замена поверхностей (NURBS editing), замена кривых рёбер.
+
+**Решение.** Полная переработка `crates/draper-core/src/operations.rs` (~730 строк):
+
+### Section 1: Transform operations
+- `transform_solid` — propagate transform to surfaces AND edges AND wires
+- `transform_compound`, `transform_shell`, `transform_face`
+- `translate_solid(solid, dx, dy, dz)`
+- `rotate_solid(solid, axis, angle)`
+- `rotate_solid_around_point(solid, axis, angle, pivot)`
+- `scale_solid(solid, factor)`
+- `scale_solid_around_point(solid, factor, center)`
+- `mirror_solid(solid, plane_origin, plane_normal) -> Solid`
+- `mirror_transform(plane_origin, plane_normal) -> Transform`
+
+**Critical fix:** Все transform-методы теперь правильно propagate к EDGE_CURVE, не только к поверхностям.
+
+### Section 2: Pattern operations (переписаны на transform_solid)
+- `circular_pattern(solid, axis, count, total_angle) -> Vec<Solid>`
+- `linear_pattern(solid, direction, count, spacing) -> Vec<Solid>`
+
+### Section 3: Hole operations
+- `add_circular_hole_to_face(face, center_3d, radius, normal)` — создаёт inner wire с Circle edge + 32-сегментной UV polyline pcurve (аналитическая проекция для Plane/Cylinder/Cone/Sphere/Torus, grid search + Newton для Revolution/Extrusion/Nurbs)
+- `remove_hole_from_face(face, hole_index) -> Wire`
+- `clear_holes_from_face(face) -> usize`
+
+### Section 4: Face / surface editing
+- `replace_face_surface(face, new_surface)` — для NURBS editing
+- `get_face_mut(solid, face_index) -> Option<&mut Face>`
+- `get_face_in_shell_mut(solid, shell_index, face_index) -> Option<&mut Face>`
+- `reverse_face_orientation(face)` — flip normal
+- `delete_face_from_solid(solid, face_index) -> Face` (breaks watertightness!)
+
+### Section 5: Edge editing
+- `replace_edge_curve(face, edge_id, new_curve, new_param_range)`
+- `reverse_edge(face, edge_id)`
+
+### Section 6: Fillet/Chamfer/Shell
+Явные ошибки "not implemented" (раньше молча возвращали Ok с log::warn).
+
+### Section 7: Helpers
+- `perpendicular_direction(d) -> Direction3d` (с parallel-axis fallback)
+- `project_point_to_surface(surface, point) -> (u, v)`
+- `project_point_to_surface_grid` (32×32 grid + Newton refinement)
+
+**6 unit-тестов** покрывают transform_solid (проверяет, что поверхности И рёбра двигаются), rotate_solid, mirror_solid, add/remove_hole, replace_face_surface, circular_pattern.
+
+---
+
+## P20 — Export validator (завершено в коммите 00f307c)
+
+**Проблема.** Не было проверки того, что экспортируемый STEP синтаксически и семантически корректен. Если в экспортёре появлялся баг (например, dangling reference), файл сохранялся, но downstream-парсеры отвергали его с непонятными ошибками.
+
+**Решение.** Новый модуль `crates/draper-step/src/export_validation.rs` (~340 строк):
+
+### Public API
+```rust
+pub fn validate_exported_step(step_str: &str) -> ExportValidationReport;
+```
+
+### Checks
+1. **Structural integrity**: ISO-10303-21 header/footer, HEADER/DATA/ENDSEC, FILE_SCHEMA
+2. **Reference integrity**: каждый `#N` resolve-ится к определённой сущности (E_DANGLING_REF)
+3. **Topological completeness**: хотя бы один MANIFOLD_SOLID_BREP, CLOSED_SHELL, ADVANCED_FACE, VERTEX_POINT
+4. **Schema compliance**: ADVANCED_FACE ≥4 params, EDGE_CURVE ≥5 params, CLOSED_SHELL ≥2 params
+5. **Recommended entities** (warnings): APPLICATION_CONTEXT, SHAPE_DEFINITION_REPRESENTATION, PRODUCT
+
+### Report structure
+```rust
+ExportValidationReport {
+    issues: Vec<ExportValidationIssue>,
+    entity_count, brep_count, shell_count, face_count,
+    edge_curve_count, vertex_count, surface_count, curve_count,
+}
+impl ExportValidationReport {
+    fn has_errors(&self) -> bool;
+    fn has_warnings(&self) -> bool;
+    fn errors(&self) -> impl Iterator;
+    fn warnings(&self) -> impl Iterator;
+    fn summary(&self) -> String;
+}
+```
+
+### Integration
+`roundtrip_test` теперь запускает validator на экспортированном STEP и сообщает ошибки до round-trip сравнения.
+
+**4 unit-теста:** minimal valid export, missing header, dangling reference, empty STEP file.
+
+**Verification на реальных файлах:**
+- nist_cube.stp: 0 errors, 0 warnings (116 entities)
+- 8394-121_Spit-Fire.STEP: 0 errors, 0 warnings (14812 entities, 8 BREP, 280 faces, 569 edges, 883 vertices, 219 surfaces, 590 curves)
 
 ---
 
