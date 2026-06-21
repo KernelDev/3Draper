@@ -1295,3 +1295,165 @@ fn test_from_v_rows_bicubic_saddle() {
     assert!(p_mid.x.abs() < 1e-9, "p_mid.x = {}", p_mid.x);
     assert!((p_mid.y - (-50.0)).abs() < 1e-9, "p_mid.y = {}", p_mid.y);
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// NURBS exact circle / surface of revolution tests
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_nurbs_full_circle_xy_exact() {
+    // The full_circle_xy helper must produce an EXACT circle of radius R.
+    // Every point on the curve must be at distance R from the origin.
+    let r = 25.0;
+    let (pts, weights, knots) = NurbsSurface::full_circle_xy(r);
+
+    use draper_geometry::curve::{NurbsCurve, Curve3d};
+    let curve = Curve3d::Nurbs(NurbsCurve {
+        degree: 2,
+        control_points: pts,
+        weights,
+        knots,
+    });
+
+    // Sample 200 points and verify radius is exactly R
+    let n = 200;
+    let mut max_err = 0.0_f64;
+    for i in 0..=n {
+        let t = i as f64 / n as f64;
+        let p = curve.point_at(t);
+        let dist = (p.x * p.x + p.y * p.y).sqrt();
+        let err = (dist - r).abs();
+        if err > max_err {
+            max_err = err;
+        }
+    }
+    assert!(max_err < 1e-10, "full_circle_xy max radius error = {} (should be < 1e-10)", max_err);
+}
+
+#[test]
+fn test_nurbs_full_circle_xy_cardinal_points() {
+    // The full circle must pass through (R, 0), (0, R), (-R, 0), (0, -R) at u = 0, 0.25, 0.5, 0.75
+    let r = 10.0;
+    let (pts, weights, knots) = NurbsSurface::full_circle_xy(r);
+
+    use draper_geometry::curve::{NurbsCurve, Curve3d};
+    let curve = Curve3d::Nurbs(NurbsCurve {
+        degree: 2,
+        control_points: pts,
+        weights,
+        knots,
+    });
+
+    let p_0 = curve.point_at(0.0);
+    let p_q1 = curve.point_at(0.25);
+    let p_q2 = curve.point_at(0.5);
+    let p_q3 = curve.point_at(0.75);
+    let p_1 = curve.point_at(1.0);
+
+    assert!((p_0.x - r).abs() < 1e-10 && p_0.y.abs() < 1e-10, "u=0: expected (R, 0), got {:?}", p_0);
+    assert!(p_q1.x.abs() < 1e-10 && (p_q1.y - r).abs() < 1e-10, "u=0.25: expected (0, R), got {:?}", p_q1);
+    assert!((p_q2.x + r).abs() < 1e-10 && p_q2.y.abs() < 1e-10, "u=0.5: expected (-R, 0), got {:?}", p_q2);
+    assert!(p_q3.x.abs() < 1e-10 && (p_q3.y + r).abs() < 1e-10, "u=0.75: expected (0, -R), got {:?}", p_q3);
+    assert!((p_1.x - r).abs() < 1e-10 && p_1.y.abs() < 1e-10, "u=1: expected (R, 0), got {:?}", p_1);
+}
+
+#[test]
+fn test_nurbs_surface_of_revolution_exact_circle_cross_section() {
+    // The surface of revolution must produce an EXACT circle at every height
+    // (since the profile control points define the radius at each height).
+    let profile_pts = vec![
+        Point3d::new(40.0, 0.0,   0.0),
+        Point3d::new(30.0, 0.0,  33.0),
+        Point3d::new(50.0, 0.0,  66.0),
+        Point3d::new(35.0, 0.0, 100.0),
+    ];
+    let profile_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]; // clamped cubic
+    let profile_weights = vec![1.0; 4];
+
+    let nurbs = NurbsSurface::surface_of_revolution_z(
+        &profile_pts,
+        3,
+        profile_knots,
+        profile_weights,
+        0.0,
+        2.0 * std::f64::consts::PI,
+        false,
+    );
+
+    // v_range must span a full 2π
+    let (v_min, v_max) = nurbs.v_range();
+    assert!((v_min - 0.0).abs() < 1e-10, "v_min should be 0, got {}", v_min);
+    assert!((v_max - 2.0 * std::f64::consts::PI).abs() < 1e-10,
+        "v_max should be 2π = {}, got {} (the previous bug gave 4.19 = 240°)",
+        2.0 * std::f64::consts::PI, v_max);
+
+    // At u=0, the radius should be exactly 40 (profile_pts[0].x) at every v
+    let n_samples = 36;
+    let mut max_err = 0.0_f64;
+    for i in 0..=n_samples {
+        let v = v_min + (v_max - v_min) * (i as f64) / (n_samples as f64);
+        let p = nurbs.point_at(0.0, v);
+        let dist_xy = (p.x * p.x + p.y * p.y).sqrt();
+        let err = (dist_xy - 40.0).abs();
+        if err > max_err { max_err = err; }
+    }
+    assert!(max_err < 1e-10,
+        "At u=0, expected radius 40.0 at all v (exact circle). Max error = {}", max_err);
+
+    // At u=1, the radius should be exactly 35 (profile_pts[3].x)
+    let p_top = nurbs.point_at(1.0, 0.0);
+    let dist_xy = (p_top.x * p_top.x + p_top.y * p_top.y).sqrt();
+    assert!((dist_xy - 35.0).abs() < 1e-10,
+        "At u=1, expected radius 35.0, got {}", dist_xy);
+
+    // At u=1, z should be 100
+    assert!((p_top.z - 100.0).abs() < 1e-10,
+        "At u=1, expected z=100, got {}", p_top.z);
+}
+
+#[test]
+fn test_nurbs_closed_cylinder_exact_circle() {
+    // A cylinder built from full_circle_xy × linear height must be an exact
+    // cylinder — every circular cross-section is at radius R.
+    let r = 40.0;
+    let h = 100.0;
+    let (circle_pts, circle_weights, circle_knots) = NurbsSurface::full_circle_xy(r);
+
+    let mut control_points = Vec::with_capacity(2);
+    for &z in &[0.0, h] {
+        let row: Vec<Point3d> = circle_pts.iter().map(|p| Point3d::new(p.x, p.y, z)).collect();
+        control_points.push(row);
+    }
+    let weights = vec![circle_weights.clone(); 2];
+    // Scale knots from [0, 1] to [0, 2π]
+    let u_knots: Vec<f64> = circle_knots.iter().map(|&k| k * 2.0 * std::f64::consts::PI).collect();
+    let v_knots = vec![0.0, 0.0, 1.0, 1.0];
+
+    let nurbs = NurbsSurface::from_v_rows(
+        2, 1, control_points, weights, u_knots, v_knots, true, false,
+    );
+
+    // u_range must span a full 2π
+    let (u_min, u_max) = nurbs.u_range();
+    assert!((u_max - u_min - 2.0 * std::f64::consts::PI).abs() < 1e-10,
+        "u_range should span 2π = {}, got {} - {} = {}",
+        2.0 * std::f64::consts::PI, u_max, u_min, u_max - u_min);
+
+    // Sample 36 angles at v=0 and v=1, verify radius = R exactly
+    let n_samples = 36;
+    let mut max_err = 0.0_f64;
+    for i in 0..=n_samples {
+        let u = u_min + (u_max - u_min) * (i as f64) / (n_samples as f64);
+        let p_bot = nurbs.point_at(u, 0.0);
+        let p_top = nurbs.point_at(u, 1.0);
+        let dist_bot = (p_bot.x * p_bot.x + p_bot.y * p_bot.y).sqrt();
+        let dist_top = (p_top.x * p_top.x + p_top.y * p_top.y).sqrt();
+        let err = (dist_bot - r).abs().max((dist_top - r).abs());
+        if err > max_err { max_err = err; }
+        // z must be 0 at v=0 and h at v=1
+        assert!(p_bot.z.abs() < 1e-10, "At v=0, z should be 0, got {}", p_bot.z);
+        assert!((p_top.z - h).abs() < 1e-10, "At v=1, z should be h={}, got {}", h, p_top.z);
+    }
+    assert!(max_err < 1e-10,
+        "Cylinder radius error = {} (should be 0 for exact rational quadratic circle)", max_err);
+}

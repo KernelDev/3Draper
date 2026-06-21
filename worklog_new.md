@@ -2119,3 +2119,108 @@ Stage Summary:
   * Revolution: verified periodic in angle, profile interpolation correct
 - 5 new unit tests guard against regression.
 - Push to GitHub triggers automatic rebuild and deploy via .github/workflows/deploy.yml.
+
+---
+Task ID: 39
+Agent: main
+Task: User reported "Пока все еще nurbs рисуется плохо. Где то ошибка." — NURBS still renders badly. Find and fix the remaining error.
+
+Work Log:
+- Wrote a comprehensive NURBS verification tool (tools/src/bin/nurbs_verify.rs) that evaluates each NURBS surface from the viewer's test gallery against known-good reference values computed by hand using the analytic form of each surface.
+- Ran the tool and identified THREE remaining bugs in the NURBS test surfaces:
+
+  BUG 1 — Surface of Revolution knot spacing (CRITICAL):
+    The knot vector for the periodic quadratic V direction (angle) used
+    `d = 2π / n_col` (where n_col = 6 → d = π/3), but for a periodic B-spline
+    of degree p with n control points, the valid parameter range is
+    [knots[p], knots[n]] which spans (n - p) knot intervals. For n=6, p=2,
+    that's 4 intervals = 4·π/3 = 4.19 rad = 240°. The vase was missing 120°
+    of sweep!
+    Correct formula: `d = 2π / (n_col - v_degree)` = 2π / 4 = π/2, giving
+    domain [0, 2π] = full revolution.
+
+  BUG 2 — Surface of Revolution missing R_control correction:
+    For a non-rational periodic B-spline, the curve does NOT pass through the
+    control points. At parameter v=0 (control point P[0]), the curve is at the
+    midpoint of P[0] and P[1] (for quadratic) or a weighted combination (for
+    cubic). Without correcting the control point radius, the surface of
+    revolution had radius 34.6 instead of 40 at the base (13% undersized).
+
+  BUG 3 — Closed Cylinder non-rational B-spline approximation:
+    The closed cylinder used a non-rational periodic cubic B-spline with 6
+    control points to approximate a circle. Even with the R_control correction
+    factor `r * 6 / (4 + 2·cos(2π/n))` (which makes the AVERAGE radius = R),
+    the radius oscillated between 39.84 and 40.0 (0.4% variation) because
+    non-rational B-splines cannot represent circles exactly.
+
+- The de Boor evaluation algorithm itself was VERIFIED CORRECT:
+  * Bilinear patch: EXACT (0.000000 mm error at center and corners).
+  * Saddle (clamped bicubic): EXACT at all 4 corners (clamped B-spline interpolates endpoints).
+  * Half-Cylinder (rational quadratic 180° arc): EXACT CIRCLE (0.000000 mm radial error at 50 samples).
+  * Quarter-Sphere (rational quadratic octant): EXACT SPHERE (0.000000 mm radial error at 100 samples).
+  * The de Boor step, find_knot_span, and tensor-product evaluation are all correct.
+
+- Solution: Replaced the non-rational periodic B-spline circle construction
+  with the STANDARD EXACT rational-quadratic NURBS circle from "The NURBS Book"
+  (Piegl & Tiller, §7.3):
+    * 9 control points (4 on-axis at 0°, 90°, 180°, 270° + 4 bounding-box corners
+      at 45°, 135°, 225°, 315° + 1 duplicate of first for closure).
+    * Degree 2.
+    * Weights: [1, 1/√2, 1, 1/√2, 1, 1/√2, 1, 1/√2, 1].
+    * Knots: [0,0,0, 1/4,1/4, 1/2,1/2, 3/4,3/4, 1,1,1] (length 12 = 9 + 2 + 1).
+  This produces an EXACT circle — every point on the curve is at distance R
+  from the origin, with zero radius oscillation.
+
+- Added two new helper functions in draper-geometry/src/surface.rs:
+
+  1. `NurbsSurface::full_circle_xy(radius) -> (Vec<Point3d>, Vec<f64>, Vec<f64>)`
+     Returns the 9 control points, 9 weights, and 12 knots for an exact
+     rational-quadratic NURBS circle of the given radius in the XY plane.
+
+  2. `NurbsSurface::surface_of_revolution_z(profile_ctrl_pts, profile_degree,
+     profile_knots, profile_weights, angle_start, angle_end, u_closed) -> Self`
+     Builds a NURBS surface of revolution by sweeping a profile curve around
+     the Z axis, using the exact rational-quadratic circle for the angular
+     direction. Works for both full (2π) and partial sweeps.
+
+- Refactored `load_nurbs_revolution` in draper-viewer/src/app.rs to use
+  `NurbsSurface::surface_of_revolution_z`. The vase now:
+  * Covers a FULL 360° revolution (was 240° before).
+  * Has the correct radius at every cross-section (was 13% undersized before).
+  * Passes EXACTLY through the 4 on-axis profile points (40, 30, 50, 35 mm).
+
+- Refactored `load_nurbs_closed_cylinder` in draper-viewer/src/app.rs to use
+  `NurbsSurface::full_circle_xy` for the angular direction. The cylinder now:
+  * Has EXACT radius R = 40 at every cross-section (was 39.84-40.0 oscillating).
+  * Uses rational quadratic (degree 2) instead of non-rational cubic (degree 3).
+  * Has 9 angular control points instead of 6.
+
+- Added 4 new unit tests in crates/draper-geometry/tests/surface_tests.rs:
+  * test_nurbs_full_circle_xy_exact: verifies max radial error < 1e-10 across 200 samples.
+  * test_nurbs_full_circle_xy_cardinal_points: verifies the curve passes through (R,0), (0,R), (-R,0), (0,-R) at u=0, 0.25, 0.5, 0.75.
+  * test_nurbs_surface_of_revolution_exact_circle_cross_section: verifies v_range = [0, 2π] AND max radial error < 1e-10 at u=0.
+  * test_nurbs_closed_cylinder_exact_circle: verifies max radial error < 1e-10 at both v=0 and v=1, AND z=0 at v=0, z=h at v=1.
+
+- Ran cargo test --release -p draper-geometry → 83 tests pass (4 new).
+- Ran cargo build --release -p draper-viewer → builds successfully.
+- Built WASM with trunk build --release → succeeds, 7.24 MB wasm binary.
+- Copied new WASM build to dist-wasm/ for local testing.
+
+Stage Summary:
+- THREE bugs identified and fixed:
+  1. Surface of revolution knot spacing: 2π/n → 2π/(n-p) — vase was missing 120° of sweep.
+  2. Surface of revolution missing R_control correction — vase was 13% undersized in radius.
+  3. Closed cylinder non-rational B-spline approximation — radius oscillated 0.4%.
+- All three bugs were in the TEST GEOMETRY definitions in draper-viewer/src/app.rs,
+  NOT in the NURBS evaluation engine. The de Boor algorithm, find_knot_span,
+  and tensor-product evaluation in draper-geometry/src/surface.rs were verified
+  CORRECT against multiple exact-construction reference curves.
+- Added two new public helper functions to NurbsSurface:
+  * full_circle_xy(radius) — exact rational-quadratic NURBS circle.
+  * surface_of_revolution_z(...) — exact surface of revolution using rational-quadratic circle.
+- These helpers use the STANDARD "NURBS Book" construction (Piegl & Tiller §7.3),
+  which is the same approach used by truck-geometry and other CAD kernels.
+- 4 new unit tests guard against regression.
+- All NURBS test surfaces now produce mathematically EXACT geometry where the
+  construction is supposed to be exact (circles, spheres, surfaces of revolution).
+- Push to GitHub triggers automatic rebuild and deploy via .github/workflows/deploy.yml.

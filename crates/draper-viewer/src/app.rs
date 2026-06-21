@@ -1855,11 +1855,17 @@ impl ViewerApp {
     /// NURBS Surface of Revolution: a wavy profile curve revolved around
     /// the Z axis, producing a "vase" or "poker chip" shape.
     ///
-    /// Built directly as a NURBS surface (not via ShapeBuilder::make_revolution)
-    /// so it exercises the NurbsSurface triangulation path. The profile is
-    /// a 4-control-point cubic NURBS in the XZ plane, and the revolution
-    /// uses 6 control points around the Z axis with a closed (periodic)
-    /// knot vector.
+    /// Built directly as a NURBS surface using `NurbsSurface::surface_of_revolution_z`,
+    /// which uses the **exact rational-quadratic circle** construction from
+    /// "The NURBS Book" (Piegl & Tiller, §7.3) for the angular direction.
+    /// This gives a PERFECT circle in every cross-section — no radius
+    /// oscillation, no missing sweep.
+    ///
+    /// The profile is a 4-control-point cubic NURBS in the XZ plane, and the
+    /// revolution uses 9 control points around the Z axis (4 on-axis + 4
+    /// bounding-box corners + 1 duplicate for closure) with weights
+    /// `[1, 1/√2, 1, 1/√2, 1, 1/√2, 1, 1/√2, 1]` and knots
+    /// `[0,0,0, π/2,π/2, π,π, 3π/2,3π/2, 2π,2π,2π]`.
     fn load_nurbs_revolution(&mut self) {
         use draper_geometry::{NurbsSurface, Point3d as P3};
         // Profile (radius vs height): 4 control points, cubic, in XZ plane (y=0).
@@ -1870,35 +1876,18 @@ impl ViewerApp {
             P3::new(50.0, 0.0,  66.0),
             P3::new(35.0, 0.0, 100.0),
         ];
-        // 6 angular samples around Z axis (closed periodic).
-        let n_angle = 6;
-        let mut control_points = Vec::with_capacity(profile_pts.len());
-        for p in &profile_pts {
-            let mut row = Vec::with_capacity(n_angle);
-            for i in 0..n_angle {
-                let theta = 2.0 * std::f64::consts::PI * (i as f64) / (n_angle as f64);
-                let x = p.x * theta.cos();
-                let y = p.x * theta.sin();
-                row.push(P3::new(x, y, p.z));
-            }
-            control_points.push(row);
-        }
-        let n_row = control_points.len();   // 4
-        let n_col = control_points[0].len(); // 6
-        let weights = vec![vec![1.0; n_col]; n_row];
-        // Clamped cubic in U (height): [0,0,0,0, 1,1,1,1]
-        let u_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
-        // Periodic quadratic in V (angle): need n+v_degree+1 = 6+2+1 = 9 knots.
-        // Periodic knot vector for 6 control points, degree 2:
-        //   [-2,-1,0,1,2,3,4,5,6] / 6 * 2π  (normalized to [0, 2π])
-        let d = 2.0 * std::f64::consts::PI / n_col as f64;
-        let v_knots: Vec<f64> = (0..(n_col + 3)).map(|i| (i as f64 - 2.0) * d).collect();
-        let nurbs_surface = NurbsSurface {
-            u_degree: 3, v_degree: 2,
-            control_points, weights,
-            u_knots, v_knots,
-            u_closed: false, v_closed: true,
-        };
+        let profile_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]; // clamped cubic
+        let profile_weights = vec![1.0; 4];
+
+        let nurbs_surface = NurbsSurface::surface_of_revolution_z(
+            &profile_pts,
+            3, // cubic profile
+            profile_knots,
+            profile_weights,
+            0.0,                       // angle_start
+            2.0 * std::f64::consts::PI, // angle_end (full revolution)
+            false,                      // u_closed (profile is open)
+        );
         let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
@@ -2089,55 +2078,55 @@ impl ViewerApp {
         self.load_mesh(mesh, "NURBS Quarter-Sphere (rational quad octant)");
     }
 
-    /// NURBS Closed/Periodic Cylinder: a closed (periodic in U) bicubic
-    /// NURBS surface forming a full cylinder. Demonstrates periodic knot
-    /// vectors and seam handling.
+    /// NURBS Closed/Periodic Cylinder: a closed NURBS surface forming a
+    /// full cylinder, built using the **exact rational-quadratic circle**
+    /// construction for the angular direction.
+    ///
+    /// This uses 9 angular control points (4 on-axis at 0°, 90°, 180°, 270°,
+    /// 4 bounding-box corners at 45°, 135°, 225°, 315°, and 1 duplicate of
+    /// the first for closure) with weights `[1, 1/√2, 1, 1/√2, 1, 1/√2, 1, 1/√2, 1]`.
+    ///
+    /// The result is a PERFECT cylinder — every circular cross-section is
+    /// an exact circle of radius `r`, with no radius oscillation or
+    /// parameter-to-angle nonlinearity.
+    ///
+    /// Linear in the height direction (V), so the surface is a "ruled"
+    /// cylinder.
     fn load_nurbs_closed_cylinder(&mut self) {
         use draper_geometry::{NurbsSurface, Point3d as P3};
         let r = 40.0;
         let h = 100.0;
-        // 6 angular control points × 2 height control points.
-        // Periodic cubic in U (wrap-around, angle direction). Linear in V (height).
-        // NOTE: control_points is built as [height_idx][angle_idx] = [v_idx][u_idx],
-        // which matches from_v_rows's expected layout.
-        //
-        // For a uniform periodic cubic B-spline with n control points equally
-        // spaced on a circle of radius R_control, the curve at parameter value
-        // corresponding to a control point is at radius:
-        //   R_curve = R_control * (4 + 2·cos(2π/n)) / 6
-        // To make R_curve = R (the desired cylinder radius), we need:
-        //   R_control = 6R / (4 + 2·cos(2π/n))
-        // For n=6, cos(π/3)=0.5, so R_control = 6R/5 = 1.2·R = 48.
-        let n_ang = 6;
-        let r_control = r * 6.0 / (4.0 + 2.0 * (2.0 * std::f64::consts::PI / n_ang as f64).cos());
+
+        // Get the 9 angular control points, weights, and knots for an exact circle.
+        let (circle_pts, circle_weights, circle_knots) = NurbsSurface::full_circle_xy(r);
+
+        // Build the surface: linear in V (height), rational quadratic in U (angle).
+        // from_v_rows expects [v_idx][u_idx] = [height_idx][angle_idx].
         let mut control_points = Vec::with_capacity(2);
         for &z in &[0.0, h] {
-            let mut row = Vec::with_capacity(n_ang);
-            for i in 0..n_ang {
-                let theta = 2.0 * std::f64::consts::PI * (i as f64) / (n_ang as f64);
-                row.push(P3::new(r_control * theta.cos(), r_control * theta.sin(), z));
-            }
+            let row: Vec<P3> = circle_pts.iter()
+                .map(|p| P3::new(p.x, p.y, z))
+                .collect();
             control_points.push(row);
         }
-        let weights = vec![vec![1.0; n_ang]; 2];
-        // U: periodic cubic with 6 control points: need 6+3+1=10 knots.
-        // For a periodic B-spline of degree p with n control points, the
-        // valid parameter range that gives ONE FULL PERIOD is
-        //   [knots[p], knots[n]]  which spans (n - p) * knot_spacing.
-        // We want this to equal 2π (one full revolution), so:
-        //   knot_spacing = 2π / (n - p) = 2π / (6 - 3) = 2π/3.
-        let d = 2.0 * std::f64::consts::PI / (n_ang as f64 - 3.0);
-        let u_knots: Vec<f64> = (0..(n_ang + 4)).map(|i| (i as f64 - 3.0) * d).collect();
-        // V: clamped linear: [0,0,1,1]
+        let weights = vec![circle_weights.clone(); 2]; // same weights at both heights
+
+        // U (angle): rational quadratic with 9 cps, knots [0,0,0, 1/4,1/4, 1/2,1/2, 3/4,3/4, 1,1,1]
+        // We need to scale the knots from [0, 1] to [0, 2π] for the angle parameter.
+        let u_knots: Vec<f64> = circle_knots.iter()
+            .map(|&k| k * 2.0 * std::f64::consts::PI)
+            .collect();
+        // V (height): linear, 2 control points, knots [0, 0, 1, 1]
         let v_knots = vec![0.0, 0.0, 1.0, 1.0];
+
         let nurbs_surface = NurbsSurface::from_v_rows(
-            3, 1, control_points, weights, u_knots, v_knots, true, false,
+            2, 1, control_points, weights, u_knots, v_knots, true, false,
         );
         let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
-        self.load_mesh(mesh, "NURBS Closed Cylinder (periodic cubic × linear)");
+        self.load_mesh(mesh, "NURBS Closed Cylinder (rational quad × linear, exact circle)");
     }
 
     /// Load Box with "3" hole CUT OUT on the top face.
