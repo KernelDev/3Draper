@@ -71,12 +71,14 @@ pub fn has_zero_area_triangles(mesh: &TriangleMesh) -> Vec<u32> {
 }
 
 /// Find zero-area triangles with a custom tolerance.
-/// A triangle is considered zero-area if its area is less than `tolerance`.
+/// A triangle is considered zero-area if its area is less than `tolerance`
+/// OR if its area is NaN (which happens when a vertex has NaN coordinates —
+/// the cross-product magnitude becomes NaN and the area comparison fails).
 pub fn has_zero_area_triangles_with_tolerance(mesh: &TriangleMesh, tolerance: f64) -> Vec<u32> {
     let mut result = Vec::new();
     for (i, tri) in mesh.triangles.iter().enumerate() {
         let area = triangle_area(mesh, tri);
-        if area < tolerance {
+        if area.is_nan() || area < tolerance {
             result.push(i as u32);
         }
     }
@@ -173,6 +175,7 @@ pub fn filter_zero_area_triangles(mesh: &mut TriangleMesh, tolerance: f64) -> us
 #[cfg(test)]
 mod tests {
     use super::*;
+    use draper_geometry::Point3d;
 
     #[test]
     fn test_valid_mesh() {

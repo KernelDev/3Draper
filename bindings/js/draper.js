@@ -426,10 +426,24 @@ class Document {
   }
 
   /**
+   * Rotate a solid about (ax, ay, az) passing through (px, py, pz) by `angleRadians`.
+   */
+  async rotateAroundPoint(solidIndex, ax, ay, az, px, py, pz, angleRadians) {
+    await this._handle.rotate_around_point(solidIndex, ax, ay, az, px, py, pz, angleRadians);
+  }
+
+  /**
    * Uniformly scale a solid by `factor`.
    */
   async scale(solidIndex, factor) {
     await this._handle.scale(solidIndex, factor);
+  }
+
+  /**
+   * Uniformly scale a solid by `factor` about the point (cx, cy, cz).
+   */
+  async scaleAroundPoint(solidIndex, factor, cx, cy, cz) {
+    await this._handle.scale_around_point(solidIndex, factor, cx, cy, cz);
   }
 
   /**
@@ -507,6 +521,51 @@ class Document {
    */
   async addCircularHole(solidIndex, faceIndex, cx, cy, cz, radius) {
     await this._handle.add_circular_hole(solidIndex, faceIndex, cx, cy, cz, radius);
+  }
+
+  /**
+   * Remove a hole by index from a face.
+   */
+  async removeHole(solidIndex, faceIndex, holeIndex) {
+    await this._handle.remove_hole(solidIndex, faceIndex, holeIndex);
+  }
+
+  /**
+   * Remove all holes from a face. Returns the number removed.
+   * @returns {Promise<number>}
+   */
+  async clearHoles(solidIndex, faceIndex) {
+    return await this._handle.clear_holes(solidIndex, faceIndex);
+  }
+
+  /**
+   * Delete a face from a solid by index.
+   */
+  async deleteFace(solidIndex, faceIndex) {
+    await this._handle.delete_face(solidIndex, faceIndex);
+  }
+
+  /**
+   * Reverse the orientation of all edges of a face (flips face normal).
+   */
+  async reverseFace(solidIndex, faceIndex) {
+    await this._handle.reverse_face(solidIndex, faceIndex);
+  }
+
+  /**
+   * Export a single solid to STEP (AP214) text. Round-trips with loadStep.
+   * @returns {Promise<string>}
+   */
+  async exportStep(solidIndex, name) {
+    return await this._handle.export_step(solidIndex, name);
+  }
+
+  /**
+   * Export the entire document (all solids) to a single STEP text.
+   * @returns {Promise<string>}
+   */
+  async exportStepAll(name) {
+    return await this._handle.export_step_all(name);
   }
 
   // ----------------------------------------------------------

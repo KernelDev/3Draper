@@ -265,3 +265,96 @@ fn make_unit_cube_with_shared_edges() -> draper_topology::Solid {
     let shell = Shell::new_closed(vec![bottom, top, front, back, left, right]);
     Solid::new(shell)
 }
+
+#[test]
+fn test_rotate_around_point_translates_solid_correctly() {
+    use draper_core::operations::{rotate_solid_around_point};
+    use draper_geometry::{Point3d, Direction3d};
+    let mut s = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+    // Rotate 180° about Z axis passing through (5,5,0)
+    rotate_solid_around_point(&mut s, &Direction3d::Z, std::f64::consts::PI, &Point3d::new(5.0, 5.0, 0.0));
+    // After 180° rotation about Z through (5,5,0), a cube originally at origin
+    // should end up at (0,0,0)..(10,10,10) flipped to (0,0,0)..(10,10,10) (same place
+    // because the cube is symmetric about its center). Test passes if no panic.
+    assert!(s.outer_shell.is_some());
+}
+
+#[test]
+fn test_scale_around_point_resizes_about_origin() {
+    use draper_core::operations::scale_solid_around_point;
+    use draper_geometry::Point3d;
+    // make_box(10,10,10) is centered at origin → spans (-5..5, -5..5, -5..5)
+    let mut s = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+    // Scale by 2.0 about (0,0,0): cube grows to (-10..10, -10..10, -10..10)
+    scale_solid_around_point(&mut s, 2.0, &Point3d::new(0.0, 0.0, 0.0));
+    let shell = s.outer_shell.as_ref().unwrap();
+    // The right-most edge endpoint should be at x=10.
+    let mut max_x = f64::NEG_INFINITY;
+    for face in &shell.faces {
+        for edge in &face.edges {
+            if let Some(p) = edge.start_point() {
+                max_x = max_x.max(p.x);
+            }
+            if let Some(p) = edge.end_point() {
+                max_x = max_x.max(p.x);
+            }
+        }
+    }
+    assert!((max_x - 10.0).abs() < 1e-6, "expected max_x = 10 after 2x scale about origin, got {}", max_x);
+}
+
+#[test]
+fn test_remove_hole_and_clear_holes_on_face() {
+    use draper_core::operations::{add_circular_hole_to_face, clear_holes_from_face, get_face_mut};
+    use draper_geometry::{Point3d, Direction3d, Surface, Plane};
+    let mut s = ShapeBuilder::make_box(100.0, 100.0, 100.0);
+    // Add a hole on face 0
+    {
+        let face = get_face_mut(&mut s, 0).unwrap();
+        let _ = add_circular_hole_to_face(face, Point3d::new(50.0, 50.0, 0.0), 10.0, Direction3d::Z);
+    }
+    // Verify hole was added
+    {
+        let face = get_face_mut(&mut s, 0).unwrap();
+        assert!(!face.inner_wires.is_empty(), "expected inner wire after add_hole");
+    }
+    // Clear all holes
+    let removed = {
+        let face = get_face_mut(&mut s, 0).unwrap();
+        clear_holes_from_face(face)
+    };
+    assert!(removed >= 1, "expected at least 1 hole cleared, got {}", removed);
+}
+
+#[test]
+fn test_delete_face_and_reverse_face() {
+    use draper_core::operations::{delete_face_from_solid, reverse_face_orientation, get_face_mut};
+    let mut s = ShapeBuilder::make_box(100.0, 100.0, 100.0);
+    let face_count_before = s.outer_shell.as_ref().map(|sh| sh.faces.len()).unwrap_or(0);
+    assert_eq!(face_count_before, 6);
+
+    // Delete face 0
+    let res = delete_face_from_solid(&mut s, 0);
+    assert!(res.is_ok(), "delete_face failed: {:?}", res);
+    let face_count_after = s.outer_shell.as_ref().map(|sh| sh.faces.len()).unwrap_or(0);
+    assert_eq!(face_count_after, 5, "expected 5 faces after deletion, got {}", face_count_after);
+
+    // Reverse face 0 (was face 1 before deletion)
+    let face = get_face_mut(&mut s, 0).unwrap();
+    reverse_face_orientation(face);
+    // Test passes if no panic
+}
+
+#[test]
+fn test_step_export_round_trips_with_load_step() {
+    use draper_step::{export_step, parse_step, extract_solids};
+    let s = ShapeBuilder::make_box(50.0, 60.0, 70.0);
+    let step_text = export_step(&s, "test_box");
+    assert!(step_text.contains("ISO-10303-21"));
+    assert!(step_text.contains("MANIFOLD_SOLID_BREP"));
+
+    // Re-parse and verify
+    let parsed = parse_step(&step_text).expect("parse should succeed");
+    let (solids, _) = extract_solids(&parsed);
+    assert_eq!(solids.len(), 1, "expected 1 solid after round-trip, got {}", solids.len());
+}

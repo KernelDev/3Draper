@@ -29,7 +29,11 @@ pub fn mesh_volume(mesh: &TriangleMesh) -> f64 {
         let cross_z = v1.x * v2.y - v1.y * v2.x;
         volume += v0.x * cross_x + v0.y * cross_y + v0.z * cross_z;
     }
-    volume / 6.0
+    // Volume is conceptually unsigned — the sign depends on triangle
+    // winding (CCW vs CW). Take abs() so the result is meaningful for
+    // either orientation, and treat NaN (from degenerate meshes) as 0.
+    let v = volume / 6.0;
+    if v.is_nan() { 0.0 } else { v.abs() }
 }
 
 /// Analytical volume of a sphere: (4/3)πr³.

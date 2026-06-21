@@ -38,7 +38,7 @@ use draper_mesh::{
     stl::{export_stl_binary, export_stl_ascii},
     export::{build_glb, build_3mf_bytes, build_obj},
 };
-use draper_step::{parse_step, extract_solids};
+use draper_step::{parse_step, extract_solids, export_step};
 use draper_topology::{Solid, ShapeBuilder};
 use wasm_bindgen::prelude::*;
 
@@ -398,6 +398,30 @@ impl DraperDocument {
         Ok(())
     }
 
+    /// Rotate a solid about (axis_x, axis_y, axis_z) passing through
+    /// (px, py, pz) by `angle_radians`.
+    pub fn rotate_around_point(
+        &mut self,
+        solid_index: usize,
+        ax: f64, ay: f64, az: f64,
+        px: f64, py: f64, pz: f64,
+        angle_radians: f64,
+    ) -> Result<(), JsValue> {
+        if solid_index >= self.inner.root.solids.len() {
+            return Err(JsValue::from_str(&format!("solid_index {} out of range", solid_index)));
+        }
+        let axis = Direction3d::new(ax, ay, az)
+            .ok_or_else(|| JsValue::from_str("zero-length axis"))?;
+        let center = Point3d::new(px, py, pz);
+        ops::rotate_solid_around_point(
+            &mut self.inner.root.solids[solid_index],
+            &axis,
+            angle_radians,
+            &center,
+        );
+        Ok(())
+    }
+
     /// Uniformly scale a solid by `factor`.
     pub fn scale(&mut self, solid_index: usize, factor: f64) -> Result<(), JsValue> {
         if solid_index >= self.inner.root.solids.len() {
@@ -407,6 +431,28 @@ impl DraperDocument {
             return Err(JsValue::from_str(&format!("invalid scale factor {}", factor)));
         }
         ops::scale_solid(&mut self.inner.root.solids[solid_index], factor);
+        Ok(())
+    }
+
+    /// Uniformly scale a solid by `factor` about the point (cx, cy, cz).
+    pub fn scale_around_point(
+        &mut self,
+        solid_index: usize,
+        factor: f64,
+        cx: f64, cy: f64, cz: f64,
+    ) -> Result<(), JsValue> {
+        if solid_index >= self.inner.root.solids.len() {
+            return Err(JsValue::from_str(&format!("solid_index {} out of range", solid_index)));
+        }
+        if !factor.is_finite() || factor <= 0.0 {
+            return Err(JsValue::from_str(&format!("invalid scale factor {}", factor)));
+        }
+        let center = Point3d::new(cx, cy, cz);
+        ops::scale_solid_around_point(
+            &mut self.inner.root.solids[solid_index],
+            factor,
+            &center,
+        );
         Ok(())
     }
 
@@ -533,6 +579,51 @@ impl DraperDocument {
         };
         let face = ops::get_face_mut(s, face_index).unwrap();
         ops::add_circular_hole_to_face(face, center, radius, face_normal).map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// Remove a hole by index from a face of a solid.
+    pub fn remove_hole(&mut self, solid_index: usize, face_index: usize, hole_index: usize) -> Result<(), JsValue> {
+        if solid_index >= self.inner.root.solids.len() {
+            return Err(JsValue::from_str(&format!("solid_index {} out of range", solid_index)));
+        }
+        let s = &mut self.inner.root.solids[solid_index];
+        let face = ops::get_face_mut(s, face_index)
+            .ok_or_else(|| JsValue::from_str(&format!("face_index {} out of range", face_index)))?;
+        ops::remove_hole_from_face(face, hole_index).map_err(|e| JsValue::from_str(&e))?;
+        Ok(())
+    }
+
+    /// Remove all holes from a face of a solid. Returns the number removed.
+    pub fn clear_holes(&mut self, solid_index: usize, face_index: usize) -> Result<usize, JsValue> {
+        if solid_index >= self.inner.root.solids.len() {
+            return Err(JsValue::from_str(&format!("solid_index {} out of range", solid_index)));
+        }
+        let s = &mut self.inner.root.solids[solid_index];
+        let face = ops::get_face_mut(s, face_index)
+            .ok_or_else(|| JsValue::from_str(&format!("face_index {} out of range", face_index)))?;
+        Ok(ops::clear_holes_from_face(face))
+    }
+
+    /// Delete a face from a solid by index.
+    pub fn delete_face(&mut self, solid_index: usize, face_index: usize) -> Result<(), JsValue> {
+        if solid_index >= self.inner.root.solids.len() {
+            return Err(JsValue::from_str(&format!("solid_index {} out of range", solid_index)));
+        }
+        ops::delete_face_from_solid(&mut self.inner.root.solids[solid_index], face_index)
+            .map_err(|e| JsValue::from_str(&e))?;
+        Ok(())
+    }
+
+    /// Reverse the orientation of all edges of a face (flips face normal).
+    pub fn reverse_face(&mut self, solid_index: usize, face_index: usize) -> Result<(), JsValue> {
+        if solid_index >= self.inner.root.solids.len() {
+            return Err(JsValue::from_str(&format!("solid_index {} out of range", solid_index)));
+        }
+        let s = &mut self.inner.root.solids[solid_index];
+        let face = ops::get_face_mut(s, face_index)
+            .ok_or_else(|| JsValue::from_str(&format!("face_index {} out of range", face_index)))?;
+        ops::reverse_face_orientation(face);
+        Ok(())
     }
 
     // ----- GDT checks -----
@@ -704,6 +795,27 @@ impl DraperDocument {
     }
 
     // ----- STEP → USDA -----
+
+    /// Export a single solid to STEP (AP214) text. Round-trips with load_step.
+    pub fn export_step(&self, solid_index: usize, name: Option<String>) -> Result<String, JsValue> {
+        if solid_index >= self.inner.root.solids.len() {
+            return Err(JsValue::from_str(&format!("solid_index {} out of range", solid_index)));
+        }
+        let n = name.unwrap_or_else(|| format!("solid_{}", solid_index));
+        Ok(export_step(&self.inner.root.solids[solid_index], &n))
+    }
+
+    /// Export the entire document (all solids) to a single STEP text.
+    pub fn export_step_all(&self, name: Option<String>) -> String {
+        let n = name.unwrap_or_else(|| "document".to_string());
+        let mut combined = String::new();
+        for (i, s) in self.inner.root.solids.iter().enumerate() {
+            let nm = format!("{}_{}", n, i);
+            combined.push_str(&export_step(s, &nm));
+            combined.push('\n');
+        }
+        combined
+    }
 
     /// Convert STEP text content to USDA (USD ASCII) text.
     /// Writes the triangulated meshes with the given `chord_tolerance`.

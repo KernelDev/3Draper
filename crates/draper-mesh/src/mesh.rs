@@ -665,36 +665,54 @@ impl TriangleMesh {
             }
             _ => {}
         }
-        // Merge face normals (per-triangle)
+        // Merge face normals (per-triangle).
+        // Same three-case logic as merge_deduplicating: must keep
+        // face_normals.len() == triangles.len() after the merge.
+        let other_tri_count = other.triangles.len();
         if self.face_normals.is_none() && other.face_normals.is_some() {
-            let existing_count = self.triangles.len() - other.triangles.len();
+            let existing_count = self.triangles.len().saturating_sub(other_tri_count);
             self.face_normals = Some(vec![[0.0, 0.0, 1.0]; existing_count]);
         }
         match (&mut self.face_normals, &other.face_normals) {
             (Some(ref mut dest), Some(ref src)) => {
                 dest.extend(src.iter().cloned());
             }
+            (Some(ref mut dest), None) => {
+                for _ in 0..other_tri_count {
+                    dest.push([0.0, 0.0, 1.0]);
+                }
+            }
             _ => {}
         }
         // Merge triangle colors (per-triangle)
         if self.triangle_colors.is_none() && other.triangle_colors.is_some() {
-            let existing_count = self.triangles.len() - other.triangles.len();
+            let existing_count = self.triangles.len().saturating_sub(other_tri_count);
             self.triangle_colors = Some(vec![[0.62, 0.65, 0.70, 1.0]; existing_count]);
         }
         match (&mut self.triangle_colors, &other.triangle_colors) {
             (Some(ref mut dest), Some(ref src)) => {
                 dest.extend(src.iter().cloned());
             }
+            (Some(ref mut dest), None) => {
+                for _ in 0..other_tri_count {
+                    dest.push([0.62, 0.65, 0.70, 1.0]);
+                }
+            }
             _ => {}
         }
         // Merge face IDs
         if self.triangle_face_ids.is_none() && other.triangle_face_ids.is_some() {
-            let existing_count = self.triangles.len() - other.triangles.len();
+            let existing_count = self.triangles.len().saturating_sub(other_tri_count);
             self.triangle_face_ids = Some(vec![0; existing_count]);
         }
         match (&mut self.triangle_face_ids, &other.triangle_face_ids) {
             (Some(ref mut ids), Some(ref other_ids)) => {
                 ids.extend(other_ids.iter().cloned());
+            }
+            (Some(ref mut ids), None) => {
+                for _ in 0..other_tri_count {
+                    ids.push(0);
+                }
             }
             _ => {}
         }
@@ -844,9 +862,18 @@ impl TriangleMesh {
             _ => {}
         }
 
-        // Merge face normals (per-triangle, only for kept triangles)
+        // Merge face normals (per-triangle, only for kept triangles).
+        // We must keep face_normals.len() == triangles.len() after the merge.
+        // Three cases:
+        //   (None, Some) → seed self with defaults for pre-existing triangles,
+        //                  then copy other's kept triangles.
+        //   (Some, Some) → copy other's kept triangles.
+        //   (Some, None) → push defaults for the new triangles from `other`
+        //                  so the array stays in sync with self.triangles.
+        //   (None, None) → nothing to do.
+        let kept_len = kept_src_indices.len();
         if self.face_normals.is_none() && other.face_normals.is_some() {
-            let existing_count = self.triangles.len() - kept_src_indices.len();
+            let existing_count = self.triangles.len().saturating_sub(kept_len);
             self.face_normals = Some(vec![[0.0, 0.0, 1.0]; existing_count]);
         }
         match (&mut self.face_normals, &other.face_normals) {
@@ -855,12 +882,20 @@ impl TriangleMesh {
                     dest.push(src[src_idx]);
                 }
             }
+            (Some(ref mut dest), None) => {
+                // `other` has no face normals — pad with defaults for the
+                // newly-added triangles so the per-triangle arrays stay
+                // length-consistent with self.triangles.
+                for _ in 0..kept_len {
+                    dest.push([0.0, 0.0, 1.0]);
+                }
+            }
             _ => {}
         }
 
         // Merge triangle colors (per-triangle, only for kept triangles)
         if self.triangle_colors.is_none() && other.triangle_colors.is_some() {
-            let existing_count = self.triangles.len() - kept_src_indices.len();
+            let existing_count = self.triangles.len().saturating_sub(kept_len);
             self.triangle_colors = Some(vec![[0.62, 0.65, 0.70, 1.0]; existing_count]);
         }
         match (&mut self.triangle_colors, &other.triangle_colors) {
@@ -869,18 +904,28 @@ impl TriangleMesh {
                     dest.push(src[src_idx]);
                 }
             }
+            (Some(ref mut dest), None) => {
+                for _ in 0..kept_len {
+                    dest.push([0.62, 0.65, 0.70, 1.0]);
+                }
+            }
             _ => {}
         }
 
         // Merge face IDs (per-triangle, only for kept triangles)
         if self.triangle_face_ids.is_none() && other.triangle_face_ids.is_some() {
-            let existing_count = self.triangles.len() - kept_src_indices.len();
+            let existing_count = self.triangles.len().saturating_sub(kept_len);
             self.triangle_face_ids = Some(vec![0; existing_count]);
         }
         match (&mut self.triangle_face_ids, &other.triangle_face_ids) {
             (Some(ref mut ids), Some(ref other_ids)) => {
                 for &src_idx in &kept_src_indices {
                     ids.push(other_ids[src_idx]);
+                }
+            }
+            (Some(ref mut ids), None) => {
+                for _ in 0..kept_len {
+                    ids.push(0);
                 }
             }
             _ => {}
@@ -916,25 +961,36 @@ impl TriangleMesh {
             }
             _ => {}
         }
-        // Merge face normals (per-triangle)
+        // Merge face normals (per-triangle) — same three-case logic as merge()
+        let other_tri_count = other.triangles.len();
         if self.face_normals.is_none() && other.face_normals.is_some() {
-            let existing_count = self.triangles.len() - other.triangles.len();
+            let existing_count = self.triangles.len().saturating_sub(other_tri_count);
             self.face_normals = Some(vec![[0.0, 0.0, 1.0]; existing_count]);
         }
         match (&mut self.face_normals, &other.face_normals) {
             (Some(ref mut dest), Some(ref src)) => {
                 dest.extend(src.iter().cloned());
             }
+            (Some(ref mut dest), None) => {
+                for _ in 0..other_tri_count {
+                    dest.push([0.0, 0.0, 1.0]);
+                }
+            }
             _ => {}
         }
         // Merge face IDs
         if self.triangle_face_ids.is_none() && other.triangle_face_ids.is_some() {
-            let existing_count = self.triangles.len() - other.triangles.len();
+            let existing_count = self.triangles.len().saturating_sub(other_tri_count);
             self.triangle_face_ids = Some(vec![0; existing_count]);
         }
         match (&mut self.triangle_face_ids, &other.triangle_face_ids) {
             (Some(ref mut ids), Some(ref other_ids)) => {
                 ids.extend(other_ids.iter().cloned());
+            }
+            (Some(ref mut ids), None) => {
+                for _ in 0..other_tri_count {
+                    ids.push(0);
+                }
             }
             _ => {}
         }

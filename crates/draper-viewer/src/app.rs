@@ -580,6 +580,14 @@ pub struct ViewerApp {
     gdt_last_result: Option<(f64, f64, bool)>, // (tolerance, actual, passed)
     /// Show the modeling panel.
     show_modeling: bool,
+    /// Rotate-around-point center (px, py, pz).
+    rotate_pivot_x: f64, rotate_pivot_y: f64, rotate_pivot_z: f64,
+    /// Scale-around-point center (cx, cy, cz).
+    scale_pivot_x: f64, scale_pivot_y: f64, scale_pivot_z: f64,
+    /// Face index for face-level operations (delete/reverse/clear-holes).
+    face_op_index: usize,
+    /// Hole index for remove_hole.
+    hole_op_index: usize,
 }
 
 /// Mobile overlay panel type.
@@ -944,6 +952,10 @@ impl ViewerApp {
             gdt_tolerance: 0.1,
             gdt_last_result: None,
             show_modeling: false,
+            rotate_pivot_x: 0.0, rotate_pivot_y: 0.0, rotate_pivot_z: 0.0,
+            scale_pivot_x: 0.0, scale_pivot_y: 0.0, scale_pivot_z: 0.0,
+            face_op_index: 0,
+            hole_op_index: 0,
         };
         app.log("3Draper Viewer started");
         app.log(&format!("Default model: Box 100x100x100 ({} vertices, {} triangles)",
@@ -1206,6 +1218,100 @@ impl ViewerApp {
         if let Some(s) = &mut self.current_solid {
             draper_core::operations::scale_solid(s, f);
             self.refresh_from_current_solid(&format!("Scale ×{}", f));
+        }
+    }
+
+    /// Rotate the current solid about (axis) passing through (px,py,pz).
+    fn model_rotate_around_point(&mut self) {
+        let (ax, ay, az) = (self.rotate_axis_x, self.rotate_axis_y, self.rotate_axis_z);
+        let (px, py, pz) = (self.rotate_pivot_x, self.rotate_pivot_y, self.rotate_pivot_z);
+        let angle = self.rotate_angle_deg.to_radians();
+        let axis = match draper_geometry::Direction3d::new(ax, ay, az) {
+            Some(d) => d,
+            None => {
+                self.log_warning("RotateAroundPoint: zero-length axis");
+                return;
+            }
+        };
+        if let Some(s) = &mut self.current_solid {
+            let pivot = draper_geometry::Point3d::new(px, py, pz);
+            draper_core::operations::rotate_solid_around_point(s, &axis, angle, &pivot);
+            self.refresh_from_current_solid(&format!(
+                "Rotate {}° about ({},{},{}) through ({},{},{})",
+                self.rotate_angle_deg, ax, ay, az, px, py, pz,
+            ));
+        }
+    }
+
+    /// Scale the current solid uniformly about (cx, cy, cz).
+    fn model_scale_around_point(&mut self) {
+        let f = self.scale_factor;
+        if !f.is_finite() || f <= 0.0 {
+            self.log_warning(&format!("ScaleAroundPoint: invalid factor {}", f));
+            return;
+        }
+        let (cx, cy, cz) = (self.scale_pivot_x, self.scale_pivot_y, self.scale_pivot_z);
+        if let Some(s) = &mut self.current_solid {
+            let center = draper_geometry::Point3d::new(cx, cy, cz);
+            draper_core::operations::scale_solid_around_point(s, f, &center);
+            self.refresh_from_current_solid(&format!("Scale ×{} about ({},{},{})", f, cx, cy, cz));
+        }
+    }
+
+    /// Delete a face from the current solid by index.
+    fn model_delete_face(&mut self) {
+        let idx = self.face_op_index;
+        if let Some(s) = &mut self.current_solid {
+            match draper_core::operations::delete_face_from_solid(s, idx) {
+                Ok(_) => {
+                    self.refresh_from_current_solid(&format!("Delete face {}", idx));
+                }
+                Err(e) => self.log_warning(&format!("Delete face: {}", e)),
+            }
+        }
+    }
+
+    /// Reverse the orientation of a face of the current solid.
+    fn model_reverse_face(&mut self) {
+        let idx = self.face_op_index;
+        if let Some(s) = &mut self.current_solid {
+            if let Some(face) = draper_core::operations::get_face_mut(s, idx) {
+                draper_core::operations::reverse_face_orientation(face);
+                self.refresh_from_current_solid(&format!("Reverse face {}", idx));
+            } else {
+                self.log_warning(&format!("Reverse face: index {} out of range", idx));
+            }
+        }
+    }
+
+    /// Clear all holes from a face of the current solid.
+    fn model_clear_holes(&mut self) {
+        let idx = self.face_op_index;
+        if let Some(s) = &mut self.current_solid {
+            if let Some(face) = draper_core::operations::get_face_mut(s, idx) {
+                let n = draper_core::operations::clear_holes_from_face(face);
+                self.refresh_from_current_solid(&format!("Cleared {} hole(s) from face {}", n, idx));
+            } else {
+                self.log_warning(&format!("Clear holes: face index {} out of range", idx));
+            }
+        }
+    }
+
+    /// Remove a single hole from a face of the current solid.
+    fn model_remove_hole(&mut self) {
+        let face_idx = self.face_op_index;
+        let hole_idx = self.hole_op_index;
+        if let Some(s) = &mut self.current_solid {
+            if let Some(face) = draper_core::operations::get_face_mut(s, face_idx) {
+                match draper_core::operations::remove_hole_from_face(face, hole_idx) {
+                    Ok(_) => self.refresh_from_current_solid(&format!(
+                        "Removed hole {} from face {}", hole_idx, face_idx,
+                    )),
+                    Err(e) => self.log_warning(&format!("Remove hole: {}", e)),
+                }
+            } else {
+                self.log_warning(&format!("Remove hole: face index {} out of range", face_idx));
+            }
         }
     }
 
@@ -3859,11 +3965,25 @@ impl eframe::App for ViewerApp {
                             });
                             if ui.button("Rotate").clicked() { self.model_rotate(); }
                             ui.horizontal(|ui| {
+                                ui.label("pivot:");
+                                ui.add(egui::DragValue::new(&mut self.rotate_pivot_x).speed(0.5));
+                                ui.add(egui::DragValue::new(&mut self.rotate_pivot_y).speed(0.5));
+                                ui.add(egui::DragValue::new(&mut self.rotate_pivot_z).speed(0.5));
+                            });
+                            if ui.button("Rotate (around pivot)").clicked() { self.model_rotate_around_point(); }
+                            ui.horizontal(|ui| {
                                 ui.label("scale:");
                                 ui.add(egui::DragValue::new(&mut self.scale_factor)
                                     .speed(0.05).range(0.01..=100.0));
                             });
                             if ui.button("Scale").clicked() { self.model_scale(); }
+                            ui.horizontal(|ui| {
+                                ui.label("pivot:");
+                                ui.add(egui::DragValue::new(&mut self.scale_pivot_x).speed(0.5));
+                                ui.add(egui::DragValue::new(&mut self.scale_pivot_y).speed(0.5));
+                                ui.add(egui::DragValue::new(&mut self.scale_pivot_z).speed(0.5));
+                            });
+                            if ui.button("Scale (around pivot)").clicked() { self.model_scale_around_point(); }
                             ui.horizontal(|ui| {
                                 ui.label("normal:");
                                 ui.add(egui::DragValue::new(&mut self.mirror_nx).speed(0.05).range(-1.0..=1.0));
@@ -3871,6 +3991,26 @@ impl eframe::App for ViewerApp {
                                 ui.add(egui::DragValue::new(&mut self.mirror_nz).speed(0.05).range(-1.0..=1.0));
                             });
                             if ui.button("Mirror").clicked() { self.model_mirror(); }
+
+                            // Face ops
+                            ui.add_space(2.0);
+                            ui.label(egui::RichText::new("Face Ops").size(11.0).strong());
+                            ui.horizontal(|ui| {
+                                ui.label("face:");
+                                ui.add(egui::DragValue::new(&mut self.face_op_index)
+                                    .range(0..=100000));
+                                ui.label("hole:");
+                                ui.add(egui::DragValue::new(&mut self.hole_op_index)
+                                    .range(0..=100000));
+                            });
+                            ui.horizontal(|ui| {
+                                if ui.button("Delete Face").clicked() { self.model_delete_face(); }
+                                if ui.button("Reverse Face").clicked() { self.model_reverse_face(); }
+                            });
+                            ui.horizontal(|ui| {
+                                if ui.button("Clear Holes").clicked() { self.model_clear_holes(); }
+                                if ui.button("Remove Hole").clicked() { self.model_remove_hole(); }
+                            });
 
                             // Patterns
                             ui.add_space(2.0);

@@ -518,3 +518,51 @@ truck: Apache-2.0 OR MIT — можно свободно заимствоват�
 - Переписывание алгоритмов на Rust (не copy-paste)
 - Атрибуция в комментариях: `// Algorithm adapted from truck-geometry v0.6 (ricosjp/truck, Apache-2.0 OR MIT)`
 - Документация: ссылка на оригинальный source file в `docs/truck_vs_3draper_deep_comparison.md`
+
+---
+
+## Task 35 — Continued kernel improvement (2026-06-21)
+
+After Tasks 33–34 (full feature implementation + WASM exposure), a
+follow-up audit found and fixed:
+
+### Bug fixes (draper-testing crate was excluded from default-members
+so these hadn't been caught in earlier test runs):
+
+1. **`mesh_volume` returned negative for inward-oriented meshes** — the
+   divergence-theorem formula `(1/6) Σ v0·(v1×v2)` gives signed volume;
+   test meshes with CCW-from-inside winding got -1.0 for unit cube.
+   Fix: take `volume.abs()` (volume is conceptually unsigned) and
+   map NaN → 0.
+
+2. **NaN-area triangles not detected as degenerate** —
+   `has_zero_area_triangles_with_tolerance` compared `area < tolerance`,
+   but `NaN < x` is always false. Triangles with NaN vertices were
+   silently accepted. Fix: `area.is_nan() || area < tolerance`.
+
+3. **face_normals array desynced from triangles after merge** —
+   `merge`, `merge_deduplicating`, and `merge_with_color` only handled
+   the `(None, Some)` and `(Some, Some)` cases for face_normals /
+   triangle_colors / triangle_face_ids. The `(Some, None)` case (self
+   has the array, other doesn't) silently appended `other`'s triangles
+   without extending the per-triangle arrays, leaving them shorter.
+   Triggered `debug_assert_mesh_consistency` panics during fuzz testing
+   (37/100 iterations). Fix: added the missing `(Some, None)` arm to
+   all three merge methods — push default values for each newly-added
+   triangle to keep the arrays in sync.
+
+### WASM / FFI / UI parity:
+
+- Added 8 new WASM exports: `rotate_around_point`, `scale_around_point`,
+  `remove_hole`, `clear_holes`, `delete_face`, `reverse_face`,
+  `export_step`, `export_step_all`.
+- Updated `bindings/js/draper.js` with matching JS methods.
+- Updated `draper-viewer` Modeling panel: added "Rotate (around pivot)",
+  "Scale (around pivot)", and "Face Ops" section (delete face, reverse
+  face, clear holes, remove hole).
+
+### Final verification:
+- 632/632 unit tests pass across all crates.
+- 24/24 STEP round-trip PASS.
+- WASM builds clean (`draper-wasm` + `draper-viewer --features web-deploy`).
+- Native builds clean (default workspace members).

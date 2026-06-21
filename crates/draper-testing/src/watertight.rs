@@ -103,7 +103,7 @@ mod tests {
     }
 
     #[test]
-    fn test_watertight_with_genus() {
+    fn test_watertight_with_genus_check() {
         let mesh = make_cube_mesh();
         let result = test_watertight_with_genus(&mesh, 0);
         assert!(result.is_watertight);

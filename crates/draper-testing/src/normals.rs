@@ -113,6 +113,7 @@ pub fn fix_flipped_normals(mesh: &mut TriangleMesh) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use draper_geometry::Point3d;
 
     fn make_cube_mesh() -> TriangleMesh {
         let mut mesh = TriangleMesh::new();
