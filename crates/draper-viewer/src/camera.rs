@@ -169,6 +169,27 @@ impl OrbitCamera {
         self.distance = self.distance.max(max_dim * 0.5);
     }
 
+    /// Reset orientation to the default isometric view (azimuth -45°, elevation 30°)
+    /// while keeping the current target and distance.
+    ///
+    /// This is used after loading a new model so the user always sees it
+    /// from a recognizable 3/4 perspective angle, regardless of any previous
+    /// rotation they may have applied.
+    pub fn reset_orientation_to_isometric(&mut self) {
+        let azimuth = -45.0_f32.to_radians();
+        let elevation = 30.0_f32.to_radians();
+        let q_azimuth = quat_from_axis_angle([0.0, 1.0, 0.0], azimuth);
+        let q_elevation = quat_from_axis_angle([1.0, 0.0, 0.0], -elevation);
+        self.orientation = quat_normalize(&quat_mul(&q_azimuth, &q_elevation));
+    }
+
+    /// Convenience: fit to bbox AND reset orientation in one call.
+    /// Useful after loading a new model so the user sees it properly framed.
+    pub fn fit_and_reset_orientation(&mut self, bbox_min: [f32; 3], bbox_max: [f32; 3]) {
+        self.fit_to_bounding_box(bbox_min, bbox_max);
+        self.reset_orientation_to_isometric();
+    }
+
     /// Get camera position in world space.
     pub fn position(&self) -> [f32; 3] {
         let (_right, _up, fwd) = quat_basis(&self.orientation);

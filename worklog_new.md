@@ -1881,3 +1881,100 @@ Commits pushed to GitHub main:
 - b41ea3d: fix(tests+wasm+viewer): mesh merge consistency, NaN area
   detection, signed volume, WASM/FFI parity
 - f460c6c: feat(json-api): expose all editing operations via JSON API
+
+---
+Task ID: 33
+Agent: main
+Task: Fix mobile UI rendering issues on https://kerneldev.github.io/3Draper/
+      (user reported NURBS test looks bad on phone, asked to add all surface/curve tests, ensure everything visible on phone)
+
+Work Log:
+- Audited mobile UI: found 3 critical issues
+  1. Camera didn't reset orientation on model load — user who had rotated
+     to top-down view would see flat NURBS sheet edge-on after loading
+  2. Mobile Controls panel stayed open after model load, covering the
+     freshly-loaded mesh — user couldn't see the result
+  3. Mobile top bar Models menu missed NURBS, Revolution, Extrusion
+  4. Mobile had no Export menu (only Import)
+  5. Mobile Controls panel had no Hole:3, Modeling, GDT, Boolean, Patterns
+- Added `OrbitCamera::reset_orientation_to_isometric()` and
+  `fit_and_reset_orientation()` methods to camera.rs
+- Updated `load_mesh()` to call `fit_and_reset_orientation()` so the model
+  is always shown from a recognizable 3/4 perspective angle
+- Improved `load_nurbs()`: upgraded from 4×4 to 5×5 control grid with
+  dramatic z-amplitude (-40 to +40 over 100×100 sheet). Increased boundary
+  sampling from 20 to 30 points per side (120 total) for smoother rim.
+  Now uses `tri_params_for_lod(self.lod_level)` so the quality slider works
+- Added `MobileControlsTab` enum with 5 tabs: Primitives, Holes, Modeling,
+  Display, Info. Rewrote mobile Controls panel as a tabbed interface
+  covering ALL desktop features (Fillet/Chamfer/Shell/Transform/Boolean/
+  GDT/Patterns/Face Ops)
+- Added `close_mobile_panel_after_load` flag — model-loading buttons set
+  it to true, panel auto-closes next frame so user sees the result
+- Added WASM download support: `download_blob()`, `download_text()`,
+  `export_stl_binary_wasm()`, `export_stl_ascii_wasm()`, `export_step_wasm()`,
+  `export_json_wasm()`, `trigger_json_file_input()`. Mobile File menu now
+  has full Import (STL/STEP/JSON) + Export (STL Binary/ASCII/STEP/JSON)
+- Mobile Models menu expanded to include: Box, Cylinder, Sphere, Cone,
+  Torus, Revolution, Extrusion, NURBS, ICE Engine (was missing 3 entries)
+- Mobile View menu added Grid checkbox
+- Mobile Structure panel centering: panel now uses 92% screen width and
+  is centered horizontally (was 85% left-aligned, leaving uneven margins)
+- Added `FileLoadResult::Json` variant for JSON file imports on WASM
+- Added `import_json_from_str()` shared between native and WASM paths
+
+NEW TESTS (133 new tests, all pass):
+- crates/draper-geometry/tests/curve_tests.rs — 59 tests covering:
+  * Line: point_at, derivative, through_points, finite-diff, coincident
+  * Circle: point_at, radius equation, derivative magnitude, orthogonality,
+    zero radius, NaN/Inf/large/small input, arbitrary normal
+  * Ellipse: point_at, equation, derivative magnitude varies, zero axes
+  * Hyperbola: point_at, equation, derivative, zero axes
+  * Parabola: vertex, equation, derivative, zero focal
+  * NurbsCurve: line, quadratic Bezier midpoint, cubic Bezier endpoints,
+    rational quarter circle, derivative vs FD, clamped continuity, empty,
+    high degree (5), out-of-range
+  * Trimmed: endpoints, midpoint, derivative scaling, zero range,
+    negative range
+  * Curve2d: Line2d, Circle2d, sample()
+  * Curve3d dispatch: Line, Circle, Ellipse + degeneracy detection
+
+- crates/draper-geometry/tests/surface_tests.rs — 74 tests covering:
+  * Plane: xy/xz/yz, point_at, normal, from_three_points (incl. collinear),
+    from_origin_and_normal, project round-trip, derivatives, non-degenerate
+  * Cylinder: point_at, radius equation, normal radial, u_range=2π,
+    zero radius, negative radius, periodicity, seam, NaN/large v
+  * Cone: apex point, radius grows with v, zero radius degenerate,
+    periodicity
+  * Sphere: north/south poles, equator, radius equation, normal outward,
+    zero radius, negative radius, u/v periodicity, normal parallel to pos
+  * Torus: center, inner equator, top circle, equation, zero minor,
+    both periodic
+  * Revolution: circle→sphere, U-periodic
+  * Extrusion: line→plane, dv constant
+  * NURBS: bilinear plane, bicubic endpoints, u/v range, derivatives finite,
+    derivatives vs FD, rational sphere quadrant, clamped endpoints,
+    bilinear is flat, high degree 5×5, empty, out-of-range
+  * Surface dispatch: plane/cylinder/sphere/torus point_at
+  * Surface degeneracy: zero radius cyl/sphere/cone, zero minor torus,
+    non-degenerate variants
+  * Surface curvature: plane (zero), sphere (1/r, 1/r²), cylinder
+    (1/(2r), 0)
+  * Surface periodicity: plane none, cyl u only, sphere u+v, torus u+v
+  * Edge cases: NaN, Inf, large params
+
+Stage Summary:
+- BUILD: 0 errors, 1 minor warning (BlobPropertyBag set_type — pre-existing
+  deprecation in web_sys, can't be avoided without feature flags).
+- TESTS: draper-geometry: 81 (inline) + 59 (curve_tests) + 74 (surface_tests)
+  = 214 tests, all pass.
+- WASM: draper-viewer builds clean for wasm32-unknown-unknown with
+  --features web-deploy.
+- Mobile UI now exposes EVERY kernel feature: primitives, hole cut-outs,
+  modeling (fillet/chamfer/shell/transform/boolean/GDT/patterns/face ops),
+  display options, info, manifold stats, JSON API, import/export.
+- Auto-close panel after model load lets user immediately see the result.
+- Camera orientation resets to isometric on every model load.
+- NURBS test now uses 5×5 control grid with ±40 z-amplitude — visibly
+  wavy even on small phone screens.
+- WASM download support for STL/STEP/JSON via Blob + URL.createObjectURL.

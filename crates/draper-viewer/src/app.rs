@@ -350,6 +350,8 @@ struct LogEntry {
 enum FileLoadResult {
     Step { name: String, content: String },
     Stl { name: String, data: Vec<u8> },
+    /// JSON model file (text content stored as bytes for symmetry with STL).
+    Json { name: String, data: Vec<u8> },
 }
 
 /// Shared state for async file loading on wasm.
@@ -518,6 +520,14 @@ pub struct ViewerApp {
     mobile_panel: Option<MobilePanel>,
     /// Whether the mobile log panel is visible.
     mobile_log_open: bool,
+    /// When true, close the currently-open mobile panel after the next
+    /// frame. Set by model-loading buttons so the user can see the
+    /// freshly-loaded mesh instead of the panel covering it.
+    close_mobile_panel_after_load: bool,
+    /// Which mobile "tab" (category) is currently active in the Controls panel.
+    /// Lets the user switch between Primitives / Holes / Modeling / Display / Info
+    /// without scrolling through one giant list — important on phones.
+    mobile_controls_tab: MobileControlsTab,
 
     // ─── Chunked triangulation ──────────────────────────────────────────────
     /// Time-budgeted BREP triangulation processor.
@@ -597,6 +607,40 @@ enum MobilePanel {
     Controls,
     /// Right structure panel (tree, faces, UV, face info)
     Structure,
+}
+
+/// Tabs within the mobile Controls overlay.
+///
+/// The Controls panel has too many features to fit on one phone screen,
+/// so we split it into categorized tabs. The user taps a tab label at the
+/// top of the panel to switch which category is visible.
+#[derive(Clone, Debug, PartialEq, Copy)]
+enum MobileControlsTab {
+    /// Primitives: Box, Cylinder, Sphere, Cone, Torus, Revolution, Extrusion, NURBS, Engine
+    Primitives,
+    /// Hole:3 cut-outs: Box~, Cyl~, Sph~, Cone~, Tor~, Rev~, Ext~, NURBS~
+    Holes,
+    /// Modeling: Fillet, Chamfer, Shell, Transform, Boolean, GDT, Patterns, Face Ops
+    Modeling,
+    /// Display: wireframe, edges, overlay, axes, grid, quality
+    Display,
+    /// Info: model name, vertex/triangle count, manifold stats, errors
+    Info,
+}
+
+impl MobileControlsTab {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Primitives => "Models",
+            Self::Holes      => "Holes",
+            Self::Modeling   => "Edit",
+            Self::Display    => "View",
+            Self::Info       => "Info",
+        }
+    }
+    fn all() -> &'static [MobileControlsTab; 5] {
+        &[Self::Primitives, Self::Holes, Self::Modeling, Self::Display, Self::Info]
+    }
 }
 
 /// Level of Detail for triangulation quality.
@@ -928,6 +972,8 @@ impl ViewerApp {
             is_mobile: false,
             mobile_panel: None,
             mobile_log_open: false,
+            close_mobile_panel_after_load: false,
+            mobile_controls_tab: MobileControlsTab::Primitives,
             chunked_triangulator: ChunkedBrepTriangulator::new(),
             lod_level: LodLevel::High,
             #[cfg(target_arch = "wasm32")]
@@ -964,9 +1010,13 @@ impl ViewerApp {
     }
 
     fn load_mesh(&mut self, mesh: TriangleMesh, name: &str) {
-        // Auto-fit camera to new model center
+        // Auto-fit camera to new model center AND reset orientation so the
+        // user always sees the model from a recognizable 3/4 perspective.
+        // Without the orientation reset, a user who previously rotated to
+        // top-down view would see a flat sheet edge-on after loading a NURBS
+        // surface — making the model look "broken" on mobile.
         let (bbox_min, bbox_max) = mesh.bounding_box();
-        self.camera.fit_to_bounding_box(
+        self.camera.fit_and_reset_orientation(
             [bbox_min.x as f32, bbox_min.y as f32, bbox_min.z as f32],
             [bbox_max.x as f32, bbox_max.y as f32, bbox_max.z as f32],
         );
@@ -1572,18 +1622,36 @@ impl ViewerApp {
     }
 
     /// Load a NURBS surface — demonstrates NurbsSurface.
+    ///
+    /// Creates a 5×5 bicubic NURBS "wavy sheet" with dramatic z-amplitude
+    /// so the surface curvature is clearly visible even on small phone
+    /// screens. The boundary is sampled at 30 points per side (120 total)
+    /// to give the triangulator enough boundary vertices for a watertight
+    /// result, and the interior Steiner points are generated adaptively
+    /// by `triangulate_face_with_boundary_and_holes_uv` based on chord
+    /// error.
     fn load_nurbs(&mut self) {
         use draper_geometry::{NurbsSurface, Point3d as P3, Point2d};
-        // Create a bicubic NURBS surface (a wavy sheet)
+        // 5×5 control grid — produces a richer, more visually obvious wave
+        // pattern than the previous 4×4 grid. Z values range from -40 to +40
+        // (an 80 mm amplitude over a 100×100 mm sheet) so the curvature is
+        // unmistakable even at low LODs or on small screens.
         let control_points = vec![
-            vec![P3::new(-50.0, -50.0,  0.0), P3::new(-50.0, -15.0, 10.0), P3::new(-50.0,  15.0, 10.0), P3::new(-50.0,  50.0,  0.0)],
-            vec![P3::new(-15.0, -50.0, 10.0), P3::new(-15.0, -15.0, 30.0), P3::new(-15.0,  15.0, 25.0), P3::new(-15.0,  50.0,  5.0)],
-            vec![P3::new( 15.0, -50.0, 10.0), P3::new( 15.0, -15.0, 25.0), P3::new( 15.0,  15.0, 30.0), P3::new( 15.0,  50.0, 10.0)],
-            vec![P3::new( 50.0, -50.0,  0.0), P3::new( 50.0, -15.0,  5.0), P3::new( 50.0,  15.0, 10.0), P3::new( 50.0,  50.0,  0.0)],
+            // row v=0 (back edge)
+            vec![P3::new(-50.0, -50.0,  -5.0), P3::new(-25.0, -50.0,  20.0), P3::new(  0.0, -50.0, -30.0), P3::new( 25.0, -50.0,  25.0), P3::new( 50.0, -50.0,  -5.0)],
+            // row v=1
+            vec![P3::new(-50.0, -25.0,  25.0), P3::new(-25.0, -25.0, -35.0), P3::new(  0.0, -25.0,  40.0), P3::new( 25.0, -25.0, -30.0), P3::new( 50.0, -25.0,  20.0)],
+            // row v=2 (center — highest amplitude)
+            vec![P3::new(-50.0,   0.0, -30.0), P3::new(-25.0,   0.0,  40.0), P3::new(  0.0,   0.0, -40.0), P3::new( 25.0,   0.0,  35.0), P3::new( 50.0,   0.0, -25.0)],
+            // row v=3
+            vec![P3::new(-50.0,  25.0,  20.0), P3::new(-25.0,  25.0, -30.0), P3::new(  0.0,  25.0,  35.0), P3::new( 25.0,  25.0, -25.0), P3::new( 50.0,  25.0,  15.0)],
+            // row v=4 (front edge)
+            vec![P3::new(-50.0,  50.0,  -5.0), P3::new(-25.0,  50.0,  25.0), P3::new(  0.0,  50.0, -20.0), P3::new( 25.0,  50.0,  20.0), P3::new( 50.0,  50.0,  -5.0)],
         ];
-        let weights = vec![vec![1.0; 4]; 4];
-        let u_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
-        let v_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+        let weights = vec![vec![1.0; 5]; 5];
+        // Clamped bicubic knot vector for 5 control points: [0,0,0,0, 0.5, 1,1,1,1]
+        let u_knots = vec![0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0, 1.0];
+        let v_knots = vec![0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0, 1.0];
 
         let nurbs_surface = NurbsSurface {
             u_degree: 3, v_degree: 3,
@@ -1592,13 +1660,15 @@ impl ViewerApp {
             u_closed: false, v_closed: false,
         };
 
-        // Sample boundary points from the NURBS surface for triangulation
+        // Sample boundary points from the NURBS surface for triangulation.
+        // 30 samples per side (120 total) gives the triangulator enough
+        // boundary vertices to produce a smooth, watertight rim.
         let (u_min, u_max) = nurbs_surface.u_range();
         let (v_min, v_max) = nurbs_surface.v_range();
         let surface = Surface::Nurbs(nurbs_surface);
         let mut boundary = Vec::new();
         let mut boundary_uvs = Vec::new();
-        let steps = 20;
+        let steps = 30;
         // Bottom edge (v = v_min)
         for i in 0..=steps {
             let u = u_min + (u_max - u_min) * i as f64 / steps as f64;
@@ -1624,7 +1694,11 @@ impl ViewerApp {
             boundary_uvs.push(Point2d::new(u_min, v));
         }
 
-        let params = TriangulationParams::default();
+        // Use High LOD params for the wavy sheet so curvature is captured.
+        // The previous TriangulationParams::default() had max_deviation=0.01
+        // which is already good, but we explicitly use the user's current LOD
+        // so the quality slider in the UI affects this test model too.
+        let params = tri_params_for_lod(self.lod_level);
         // Use the UV-aware path for fast and correct NURBS triangulation.
         // This avoids the slow and inaccurate project_point() calls by providing
         // the exact UV coordinates directly.
@@ -2004,6 +2078,26 @@ impl ViewerApp {
                 }
             }
             Err(e) => self.log_error(&format!("JSON read error: {}", e)),
+        }
+    }
+
+    /// Import a JSON model from an in-memory string (used by WASM file input).
+    ///
+    /// Shared by both native and WASM builds — native builds can use this
+    /// when they already have the text in memory (e.g., from a drag-and-drop
+    /// event), and WASM builds use it from `process_web_file_loads`.
+    fn import_json_from_str(&mut self, text: &str, name: &str) {
+        use draper_json::JsonModel;
+        match JsonModel::from_json(text) {
+            Ok(model) => {
+                let mesh = model.to_triangle_mesh();
+                let model_name = model.metadata.name.clone();
+                self.detailed_instances = model.to_detailed_instances();
+                self.assembly_tree = Some(model.assembly);
+                self.load_mesh(mesh, &model_name);
+                self.log(&format!("Imported JSON: {} ({} instances)", name, model.metadata.instance_count));
+            }
+            Err(e) => self.log_error(&format!("JSON parse error: {}", e)),
         }
     }
 
@@ -2920,6 +3014,11 @@ impl ViewerApp {
                     log::info!("Processing loaded STL file: '{}' ({} bytes)", name, data.len());
                     self.import_stl_from_bytes(&data, &name);
                 }
+                FileLoadResult::Json { name, data } => {
+                    log::info!("Processing loaded JSON file: '{}' ({} bytes)", name, data.len());
+                    let text = String::from_utf8_lossy(&data).into_owned();
+                    self.import_json_from_str(&text, &name);
+                }
             }
         }
     }
@@ -2950,6 +3049,288 @@ impl ViewerApp {
                 ShapeBuilder::make_box(100.0, 100.0, 100.0)
             }
         }
+    }
+
+    /// Download a binary blob in the browser (WASM-only).
+    ///
+    /// Creates a temporary `<a>` element with a `download` attribute and
+    /// synthetic Blob URL, clicks it, then cleans up. Works on all modern
+    /// browsers including iOS Safari 14+.
+    #[cfg(target_arch = "wasm32")]
+    fn download_blob(&mut self, filename: &str, mime: &str, data: &[u8]) {
+        use wasm_bindgen::JsCast;
+
+        let window = match web_sys::window() {
+            Some(w) => w,
+            None => {
+                self.log_error("download_blob: no window available");
+                return;
+            }
+        };
+        let document = match window.document() {
+            Some(d) => d,
+            None => {
+                self.log_error("download_blob: no document available");
+                return;
+            }
+        };
+
+        // Build a Uint8Array view over the data slice and wrap it in a Blob.
+        let uint8 = js_sys::Uint8Array::from(data);
+        let parts = js_sys::Array::new();
+        parts.push(&uint8);
+        let blob_options = {
+            let bo = web_sys::BlobPropertyBag::new();
+            bo.set_type(mime);
+            bo
+        };
+        let blob = match web_sys::Blob::new_with_u8_array_sequence_and_options(
+            &parts,
+            &blob_options,
+        ) {
+            Ok(b) => b,
+            Err(_) => {
+                self.log_error("download_blob: Blob::new failed");
+                return;
+            }
+        };
+
+        let url = match web_sys::Url::create_object_url_with_blob(&blob) {
+            Ok(u) => u,
+            Err(_) => {
+                self.log_error("download_blob: create_object_url failed");
+                return;
+            }
+        };
+
+        let a = match document.create_element("a") {
+            Ok(el) => el,
+            Err(_) => {
+                let _ = web_sys::Url::revoke_object_url(&url);
+                self.log_error("download_blob: create_element('a') failed");
+                return;
+            }
+        };
+        let _ = a.set_attribute("href", &url);
+        let _ = a.set_attribute("download", filename);
+        let _ = a.set_attribute("style", "display:none");
+        if let Some(body) = document.body() {
+            let _ = body.append_child(&a);
+            // Cast to HtmlElement so we can call click()
+            let html_elem: web_sys::HtmlElement = match a.dyn_into() {
+                Ok(h) => h,
+                Err(_) => {
+                    self.log_error("download_blob: dyn_into(HtmlElement) failed");
+                    return;
+                }
+            };
+            html_elem.click();
+            let _ = body.remove_child(&html_elem);
+        }
+        let _ = web_sys::Url::revoke_object_url(&url);
+    }
+
+    /// Download a text file in the browser (WASM-only).
+    #[cfg(target_arch = "wasm32")]
+    fn download_text(&mut self, filename: &str, mime: &str, text: &str) {
+        self.download_blob(filename, mime, text.as_bytes());
+    }
+
+    /// Export the current mesh as binary STL via browser download (WASM).
+    #[cfg(target_arch = "wasm32")]
+    fn export_stl_binary_wasm(&mut self) {
+        // Serialize STL into memory first, then download as a blob.
+        let mut buf: Vec<u8> = Vec::with_capacity(84 + self.mesh.triangles.len() * 50);
+        // 80-byte header
+        buf.extend_from_slice(&[0u8; 80]);
+        // 4-byte triangle count (little-endian)
+        let n = self.mesh.triangles.len() as u32;
+        buf.extend_from_slice(&n.to_le_bytes());
+        for tri in &self.mesh.triangles {
+            // Compute face normal from triangle vertices
+            let v0 = self.mesh.vertices[tri[0] as usize];
+            let v1 = self.mesh.vertices[tri[1] as usize];
+            let v2 = self.mesh.vertices[tri[2] as usize];
+            let e1 = [v1.x - v0.x, v1.y - v0.y, v1.z - v0.z];
+            let e2 = [v2.x - v0.x, v2.y - v0.y, v2.z - v0.z];
+            let nx = e1[1] * e2[2] - e1[2] * e2[1];
+            let ny = e1[2] * e2[0] - e1[0] * e2[2];
+            let nz = e1[0] * e2[1] - e1[1] * e2[0];
+            let len = (nx * nx + ny * ny + nz * nz).sqrt().max(1e-12);
+            let normal = [nx / len, ny / len, nz / len];
+            for &c in &normal { buf.extend_from_slice(&(c as f32).to_le_bytes()); }
+            for &vi in &[tri[0], tri[1], tri[2]] {
+                let v = self.mesh.vertices[vi as usize];
+                for &c in &[v.x as f32, v.y as f32, v.z as f32] {
+                    buf.extend_from_slice(&c.to_le_bytes());
+                }
+            }
+            // 2-byte attribute byte count
+            buf.extend_from_slice(&0u16.to_le_bytes());
+        }
+        let name = self.current_model.name.replace(' ', "_");
+        self.download_blob(&format!("{}.stl", name), "model/stl", &buf);
+        self.log(&format!("Exported STL (binary): {} ({} bytes)", name, buf.len()));
+    }
+
+    /// Export the current mesh as ASCII STL via browser download (WASM).
+    #[cfg(target_arch = "wasm32")]
+    fn export_stl_ascii_wasm(&mut self) {
+        let mut text = String::with_capacity(self.mesh.triangles.len() * 200);
+        let name = self.current_model.name.replace(' ', "_");
+        text.push_str(&format!("solid {}\n", name));
+        for tri in &self.mesh.triangles {
+            let v0 = self.mesh.vertices[tri[0] as usize];
+            let v1 = self.mesh.vertices[tri[1] as usize];
+            let v2 = self.mesh.vertices[tri[2] as usize];
+            let e1 = [v1.x - v0.x, v1.y - v0.y, v1.z - v0.z];
+            let e2 = [v2.x - v0.x, v2.y - v0.y, v2.z - v0.z];
+            let nx = e1[1] * e2[2] - e1[2] * e2[1];
+            let ny = e1[2] * e2[0] - e1[0] * e2[2];
+            let nz = e1[0] * e2[1] - e1[1] * e2[0];
+            let len = (nx * nx + ny * ny + nz * nz).sqrt().max(1e-12);
+            text.push_str(&format!(
+                "  facet normal {} {} {}\n    outer loop\n      vertex {} {} {}\n      vertex {} {} {}\n      vertex {} {} {}\n    endloop\n  endfacet\n",
+                nx / len, ny / len, nz / len,
+                v0.x, v0.y, v0.z,
+                v1.x, v1.y, v1.z,
+                v2.x, v2.y, v2.z,
+            ));
+        }
+        text.push_str(&format!("endsolid {}\n", name));
+        self.download_text(&format!("{}.stl", name), "model/stl", &text);
+        self.log(&format!("Exported STL (ascii): {} ({} bytes)", name, text.len()));
+    }
+
+    /// Export the current solid as STEP via browser download (WASM).
+    #[cfg(target_arch = "wasm32")]
+    fn export_step_wasm(&mut self) {
+        let solid = self.rebuild_current_solid();
+        let name = self.current_model.name.replace(' ', "_");
+        let content = draper_step::export_step(&solid, &name);
+        self.download_text(&format!("{}.stp", name), "model/step", &content);
+        self.log(&format!("Exported STEP: {} ({} bytes)", name, content.len()));
+    }
+
+    /// Export the current model as JSON via browser download (WASM).
+    #[cfg(target_arch = "wasm32")]
+    fn export_json_wasm(&mut self) {
+        use draper_json::JsonModel;
+        let model = if !self.detailed_instances.is_empty() {
+            let assembly = self.assembly_tree.clone().unwrap_or_else(|| AssemblyNode {
+                name: self.current_model.name.clone(),
+                pd_id: 0,
+                brep_id: None,
+                instance_index: None,
+                transform: None,
+                color: None,
+                children: Vec::new(),
+            });
+            JsonModel::from_instances(self.detailed_instances.clone(), assembly, &self.current_model.name)
+        } else {
+            let mut instances = Vec::new();
+            if !self.mesh.vertices.is_empty() {
+                let vertices: Vec<f64> = self.mesh.vertices.iter()
+                    .flat_map(|p| [p.x, p.y, p.z]).collect();
+                let triangles: Vec<u32> = self.mesh.triangles.iter()
+                    .flat_map(|t| [t[0], t[1], t[2]]).collect();
+                let normals = self.mesh.normals.as_ref().map(|n| {
+                    n.iter().flat_map(|v| [v[0], v[1], v[2]]).collect()
+                });
+                let triangle_colors = self.mesh.triangle_colors.as_ref().map(|c| {
+                    c.iter().flat_map(|v| [v[0], v[1], v[2], v[3]]).collect()
+                });
+                use draper_json::JsonMeshInstance;
+                instances.push(JsonMeshInstance {
+                    name: self.current_model.name.clone(),
+                    brep_id: 0,
+                    vertices,
+                    triangles,
+                    normals,
+                    triangle_colors,
+                    triangle_face_ids: self.mesh.triangle_face_ids.clone(),
+                    transform: None,
+                    color: None,
+                    faces: Vec::new(),
+                });
+            }
+            let assembly = AssemblyNode {
+                name: self.current_model.name.clone(),
+                pd_id: 0,
+                brep_id: None,
+                instance_index: Some(0),
+                transform: None,
+                color: None,
+                children: Vec::new(),
+            };
+            JsonModel::from_instances(self.detailed_instances.clone(), assembly, &self.current_model.name)
+        };
+        match model.to_json_pretty() {
+            Ok(json) => {
+                let name = self.current_model.name.replace(' ', "_");
+                self.download_text(&format!("{}.json", name), "application/json", &json);
+                self.log(&format!("Exported JSON: {} ({} bytes)", name, json.len()));
+            }
+            Err(e) => self.log_error(&format!("JSON export error: {}", e)),
+        }
+    }
+
+    /// Trigger a JSON file import dialog (WASM).
+    #[cfg(target_arch = "wasm32")]
+    fn trigger_json_file_input(&mut self) {
+        use wasm_bindgen::prelude::*;
+
+        let window = web_sys::window().unwrap();
+        let document = window.document().unwrap();
+        let input = document.create_element("input").unwrap();
+        input.set_attribute("type", "file").unwrap();
+        input.set_attribute("accept", ".json").unwrap();
+        input.set_attribute("style", "display:none").unwrap();
+
+        let input_elem: web_sys::HtmlInputElement = input.clone().unchecked_into();
+        let html_elem: web_sys::HtmlElement = input.clone().unchecked_into();
+        let shared_result = self.file_result.clone();
+
+        let input_elem_for_closure = input_elem.clone();
+        let input_for_cleanup: web_sys::HtmlElement = input.clone().unchecked_into();
+
+        let onchange = Closure::wrap(Box::new(move |_: web_sys::Event| {
+            if let Some(files) = input_elem_for_closure.files() {
+                if let Some(file) = files.get(0) {
+                    let file_name = file.name();
+                    log::info!("JSON file selected: '{}'", file_name);
+
+                    let reader = web_sys::FileReader::new().unwrap();
+                    let reader_clone = reader.clone();
+                    let shared = shared_result.clone();
+
+                    let onload = Closure::wrap(Box::new(move |_: web_sys::Event| {
+                        if let Ok(result) = reader_clone.result() {
+                            let text = result.as_string().unwrap_or_default();
+                            log::info!("JSON file loaded: {} bytes", text.len());
+                            *shared.lock().unwrap() = Some(FileLoadResult::Json {
+                                name: file_name.clone(),
+                                data: text.into_bytes(),
+                            });
+                        }
+                    }) as Box<dyn FnMut(_)>);
+
+                    reader.set_onload(Some(onload.as_ref().unchecked_ref()));
+                    onload.forget();
+                    let _ = reader.read_as_text(&file);
+                }
+            }
+            if let Some(parent) = input_for_cleanup.parent_node() {
+                let _ = parent.remove_child(&input_for_cleanup);
+            }
+        }) as Box<dyn FnMut(_)>);
+
+        input_elem.set_onchange(Some(onchange.as_ref().unchecked_ref()));
+        onchange.forget();
+
+        let body = document.body().unwrap();
+        let _ = body.append_child(&input);
+        html_elem.click();
     }
 }
 
@@ -4555,29 +4936,115 @@ impl ViewerApp {
                 ui.horizontal(|ui| {
                     ui.heading(egui::RichText::new("3Draper").size(14.0));
                     ui.separator();
-                    // File menu
+                    // File menu — import + export (WASM downloads via Blob)
                     ui.menu_button("File", |ui| {
-                        #[cfg(target_arch = "wasm32")]
-                        {
-                            if ui.button("Import STL...").clicked() {
-                                self.trigger_stl_file_input();
-                                ui.close_menu();
+                        // ── Import ──
+                        if ui.button("Import STL...").clicked() {
+                            #[cfg(target_arch = "wasm32")]
+                            self.trigger_stl_file_input();
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("STL", &["stl"])
+                                    .pick_file()
+                                {
+                                    self.import_stl_file(&path.to_string_lossy());
+                                }
                             }
-                            if ui.button("Import STEP...").clicked() {
-                                self.trigger_step_file_input();
-                                ui.close_menu();
-                            }
+                            ui.close_menu();
                         }
-                        #[cfg(not(target_arch = "wasm32"))]
-                        {
-                            let _ = ui;
+                        if ui.button("Import STEP...").clicked() {
+                            #[cfg(target_arch = "wasm32")]
+                            self.trigger_step_file_input();
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("STEP", &["stp", "step"])
+                                    .pick_file()
+                                {
+                                    self.import_step_file(&path.to_string_lossy());
+                                }
+                            }
+                            ui.close_menu();
+                        }
+                        if ui.button("Import JSON...").clicked() {
+                            #[cfg(target_arch = "wasm32")]
+                            self.trigger_json_file_input();
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("JSON", &["json"])
+                                    .pick_file()
+                                {
+                                    self.import_json(&path.to_string_lossy());
+                                }
+                            }
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        // ── Export ──
+                        if ui.button("Export STL (Binary)").clicked() {
+                            #[cfg(target_arch = "wasm32")]
+                            self.export_stl_binary_wasm();
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("STL", &["stl"])
+                                    .save_file()
+                                {
+                                    self.export_stl_binary(&path.to_string_lossy());
+                                }
+                            }
+                            ui.close_menu();
+                        }
+                        if ui.button("Export STL (ASCII)").clicked() {
+                            #[cfg(target_arch = "wasm32")]
+                            self.export_stl_ascii_wasm();
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("STL", &["stl"])
+                                    .save_file()
+                                {
+                                    self.export_stl_ascii(&path.to_string_lossy());
+                                }
+                            }
+                            ui.close_menu();
+                        }
+                        if ui.button("Export STEP").clicked() {
+                            #[cfg(target_arch = "wasm32")]
+                            self.export_step_wasm();
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("STEP", &["stp", "step"])
+                                    .save_file()
+                                {
+                                    self.export_step(&path.to_string_lossy());
+                                }
+                            }
+                            ui.close_menu();
+                        }
+                        if ui.button("Export JSON").clicked() {
+                            #[cfg(target_arch = "wasm32")]
+                            self.export_json_wasm();
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("JSON", &["json"])
+                                    .save_file()
+                                {
+                                    self.export_json(&path.to_string_lossy());
+                                }
+                            }
+                            ui.close_menu();
                         }
                     });
-                    // View presets
+                    // View presets + display toggles
                     ui.menu_button("View", |ui| {
                         if ui.button("Reset Camera").clicked() {
                             let (bbox_min, bbox_max) = self.mesh.bounding_box();
-                            self.camera.fit_to_bounding_box(
+                            self.camera.fit_and_reset_orientation(
                                 [bbox_min.x as f32, bbox_min.y as f32, bbox_min.z as f32],
                                 [bbox_max.x as f32, bbox_max.y as f32, bbox_max.z as f32],
                             );
@@ -4604,19 +5071,22 @@ impl ViewerApp {
                         ui.checkbox(&mut self.show_edges, "Edges");
                         ui.checkbox(&mut self.show_wireframe_overlay, "Mesh Overlay");
                         ui.checkbox(&mut self.show_axes, "Axes");
+                        ui.checkbox(&mut self.show_grid, "Grid");
                     });
-                    // Quick primitives
+                    // Quick primitives — full list (matches desktop left panel)
                     ui.menu_button("Models", |ui| {
-                        if ui.button("Box").clicked() { self.load_box(); ui.close_menu(); }
-                        if ui.button("Cylinder").clicked() { self.load_cylinder(); ui.close_menu(); }
-                        if ui.button("Sphere").clicked() { self.load_sphere(); ui.close_menu(); }
-                        if ui.button("Cone").clicked() { self.load_cone(); ui.close_menu(); }
-                        if ui.button("Torus").clicked() { self.load_torus(); ui.close_menu(); }
-                        if ui.button("Engine").clicked() { self.load_engine(); ui.close_menu(); }
+                        if ui.button("Box").clicked()            { self.load_box();         self.close_mobile_panel_after_load = true; ui.close_menu(); }
+                        if ui.button("Cylinder").clicked()       { self.load_cylinder();    self.close_mobile_panel_after_load = true; ui.close_menu(); }
+                        if ui.button("Sphere").clicked()         { self.load_sphere();      self.close_mobile_panel_after_load = true; ui.close_menu(); }
+                        if ui.button("Cone").clicked()           { self.load_cone();        self.close_mobile_panel_after_load = true; ui.close_menu(); }
+                        if ui.button("Torus").clicked()          { self.load_torus();       self.close_mobile_panel_after_load = true; ui.close_menu(); }
+                        if ui.button("Revolution").clicked()     { self.load_revolution();  self.close_mobile_panel_after_load = true; ui.close_menu(); }
+                        if ui.button("Extrusion").clicked()      { self.load_extrusion();   self.close_mobile_panel_after_load = true; ui.close_menu(); }
+                        if ui.button("NURBS").clicked()          { self.load_nurbs();       self.close_mobile_panel_after_load = true; ui.close_menu(); }
+                        if ui.button("ICE Engine").clicked()     { self.load_engine();      self.close_mobile_panel_after_load = true; ui.close_menu(); }
                     });
-                    // Spacer
+                    // Spacer + info summary
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Info summary
                         let info_text = format!("V:{} T:{}", self.current_model.vertex_count, self.current_model.triangle_count);
                         ui.label(egui::RichText::new(info_text).size(10.0).color(egui::Color32::GRAY));
                     });
@@ -4732,154 +5202,330 @@ impl ViewerApp {
 
         // ─── Mobile overlay: Controls panel ─────────────────────────────
         if self.mobile_panel == Some(MobilePanel::Controls) {
-            let panel_width = (screen.width() * 0.85).min(320.0);
+            let panel_width = (screen.width() * 0.92).min(360.0);
             egui::Window::new("Controls")
                 .id(egui::Id::new("mobile_controls_window"))
-                .fixed_pos(egui::Pos2::new(screen.min.x, screen.min.y + 42.0))
+                .fixed_pos(egui::Pos2::new(screen.min.x + (screen.width() - panel_width) * 0.5, screen.min.y + 42.0))
                 .fixed_size(egui::vec2(panel_width, screen.height() - 50.0))
                 .resizable(false)
                 .collapsible(false)
                 .default_open(true)
                 .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        // Primitives
-                        ui.heading(egui::RichText::new("Primitives").size(13.0));
-                        ui.horizontal(|ui| {
-                            if ui.button("Box").clicked() { self.load_box(); }
-                            if ui.button("Cylinder").clicked() { self.load_cylinder(); }
-                            if ui.button("Sphere").clicked() { self.load_sphere(); }
-                        });
-                        ui.horizontal(|ui| {
-                            if ui.button("Cone").clicked() { self.load_cone(); }
-                            if ui.button("Torus").clicked() { self.load_torus(); }
-                            if ui.button("Revolution").clicked() { self.load_revolution(); }
-                        });
-                        ui.horizontal(|ui| {
-                            if ui.button("Extrusion").clicked() { self.load_extrusion(); }
-                            if ui.button("NURBS").clicked() { self.load_nurbs(); }
-                        });
-                        ui.separator();
+                    // ── Tab bar (compact, finger-friendly) ──
+                    ui.horizontal(|ui| {
+                        for &tab in MobileControlsTab::all() {
+                            let active = self.mobile_controls_tab == tab;
+                            let txt = egui::RichText::new(tab.label()).size(12.0);
+                            let btn = if active {
+                                ui.add(egui::Button::new(txt.strong()).fill(egui::Color32::from_rgb(60, 120, 200)))
+                            } else {
+                                ui.add(egui::Button::new(txt))
+                            };
+                            if btn.clicked() {
+                                self.mobile_controls_tab = tab;
+                            }
+                        }
+                    });
+                    ui.separator();
 
-                        // Display
-                        ui.heading(egui::RichText::new("Display").size(13.0));
-                        ui.checkbox(&mut self.wireframe, "Wireframe");
-                        ui.checkbox(&mut self.show_edges, "Show Edges");
-                        ui.checkbox(&mut self.show_wireframe_overlay, "Mesh Overlay");
-                        ui.checkbox(&mut self.show_axes, "Show axes");
-
-                        // LOD selector
-                        ui.add_space(4.0);
-                        egui::ComboBox::from_id_salt("lod_mobile2")
-                            .selected_text(format!("Quality: {}", self.lod_level.label()))
-                            .show_ui(ui, |ui| {
-                                for &lod in LodLevel::all() {
-                                    ui.selectable_value(&mut self.lod_level, lod, lod.label());
-                                }
+                    egui::ScrollArea::vertical().show(ui, |ui| match self.mobile_controls_tab {
+                        MobileControlsTab::Primitives => {
+                            // ── Primitives tab ──
+                            ui.heading(egui::RichText::new("Solids").size(13.0));
+                            // 3-column grid for compact, finger-friendly tap targets
+                            egui::Grid::new("mob_prim_grid").num_columns(3).spacing([6.0, 6.0]).show(ui, |ui| {
+                                if ui.add_sized([90.0, 32.0], egui::Button::new("Box")).clicked()            { self.load_box();         self.close_mobile_panel_after_load = true; }
+                                if ui.add_sized([90.0, 32.0], egui::Button::new("Cylinder")).clicked()       { self.load_cylinder();    self.close_mobile_panel_after_load = true; }
+                                if ui.add_sized([90.0, 32.0], egui::Button::new("Sphere")).clicked()         { self.load_sphere();      self.close_mobile_panel_after_load = true; }
+                                ui.end_row();
+                                if ui.add_sized([90.0, 32.0], egui::Button::new("Cone")).clicked()           { self.load_cone();        self.close_mobile_panel_after_load = true; }
+                                if ui.add_sized([90.0, 32.0], egui::Button::new("Torus")).clicked()          { self.load_torus();       self.close_mobile_panel_after_load = true; }
+                                if ui.add_sized([90.0, 32.0], egui::Button::new("Revolution")).clicked()     { self.load_revolution();  self.close_mobile_panel_after_load = true; }
+                                ui.end_row();
+                                if ui.add_sized([90.0, 32.0], egui::Button::new("Extrusion")).clicked()      { self.load_extrusion();   self.close_mobile_panel_after_load = true; }
+                                if ui.add_sized([90.0, 32.0], egui::Button::new("NURBS")).clicked()          { self.load_nurbs();       self.close_mobile_panel_after_load = true; }
+                                if ui.add_sized([90.0, 32.0], egui::Button::new("Engine")).clicked()         { self.load_engine();      self.close_mobile_panel_after_load = true; }
+                                ui.end_row();
                             });
 
-                        ui.separator();
+                            ui.add_space(6.0);
+                            ui.heading(egui::RichText::new("Quick Camera").size(13.0));
+                            egui::Grid::new("mob_cam_grid").num_columns(4).spacing([4.0, 4.0]).show(ui, |ui| {
+                                if ui.add_sized([68.0, 30.0], egui::Button::new("Reset")).clicked() {
+                                    let (bmin, bmax) = self.mesh.bounding_box();
+                                    self.camera.fit_and_reset_orientation(
+                                        [bmin.x as f32, bmin.y as f32, bmin.z as f32],
+                                        [bmax.x as f32, bmax.y as f32, bmax.z as f32],
+                                    );
+                                }
+                                if ui.add_sized([68.0, 30.0], egui::Button::new("Top")).clicked()   { self.camera.look_from_direction([0.0, -1.0, 0.0]); }
+                                if ui.add_sized([68.0, 30.0], egui::Button::new("Front")).clicked() { self.camera.look_from_direction([0.0, 0.0, 1.0]); }
+                                if ui.add_sized([68.0, 30.0], egui::Button::new("Iso")).clicked()  {
+                                    let d = 45.0_f32.to_radians();
+                                    let e = 30.0_f32.to_radians();
+                                    self.camera.look_from_direction([
+                                        -e.cos() * d.sin(), -e.sin(), e.cos() * d.cos(),
+                                    ]);
+                                }
+                                ui.end_row();
+                            });
 
-                        // Camera
-                        ui.heading(egui::RichText::new("Camera").size(13.0));
-                        if ui.button("Reset Camera").clicked() {
-                            let (bbox_min, bbox_max) = self.mesh.bounding_box();
-                            self.camera.fit_to_bounding_box(
-                                [bbox_min.x as f32, bbox_min.y as f32, bbox_min.z as f32],
-                                [bbox_max.x as f32, bbox_max.y as f32, bbox_max.z as f32],
-                            );
-                        }
-                        ui.horizontal(|ui| {
-                            if ui.button("Top").clicked() { self.camera.look_from_direction([0.0, -1.0, 0.0]); }
-                            if ui.button("Front").clicked() { self.camera.look_from_direction([0.0, 0.0, 1.0]); }
-                            if ui.button("Right").clicked() { self.camera.look_from_direction([-1.0, 0.0, 0.0]); }
-                            if ui.button("Iso").clicked() {
-                                let d = 45.0_f32.to_radians();
-                                let e = 30.0_f32.to_radians();
-                                self.camera.look_from_direction([
-                                    -e.cos() * d.sin(), -e.sin(), e.cos() * d.cos(),
-                                ]);
+                            ui.add_space(6.0);
+                            if ui.add_sized([ui.available_width(), 32.0], egui::Button::new("Clear Selection")).clicked() {
+                                self.selected_instance = None;
+                                self.selected_face = None;
+                                self.highlighted_face = None;
+                                self.highlight_dirty = true;
+                                self.uv_svg_cache = None;
+                                self.open_tree_nodes.clear();
+                                self.scroll_to_tree_node = None;
+                                self.scroll_to_face_id = None;
                             }
-                        });
-                        ui.separator();
-
-                        // Selection
-                        if ui.button("Clear Selection").clicked() {
-                            self.selected_instance = None;
-                            self.selected_face = None;
-                            self.highlighted_face = None;
-                            self.highlight_dirty = true;
-                            self.uv_svg_cache = None;
-                        }
-                        ui.separator();
-
-                        // Info
-                        ui.heading(egui::RichText::new("Info").size(13.0));
-                        ui.label(egui::RichText::new(format!("Model: {}", self.current_model.name)).size(12.0));
-                        ui.label(egui::RichText::new(format!("Vertices: {}", self.current_model.vertex_count)).size(12.0));
-                        ui.label(egui::RichText::new(format!("Triangles: {}", self.current_model.triangle_count)).size(12.0));
-                        ui.label(egui::RichText::new(format!("Instances: {}", self.detailed_instances.len())).size(12.0));
-                        if self.is_loading && self.total_instance_count > 0 {
-                            let progress = self.triangulated_count as f32 / self.total_instance_count as f32;
-                            ui.label(egui::RichText::new(format!("Loading: {}/{} ({:.0}%)", self.triangulated_count, self.total_instance_count, progress * 100.0))
-                                .size(11.0).color(egui::Color32::from_rgb(80, 180, 80)));
-                        }
-                        if let Some((inst_idx, fid)) = self.highlighted_face {
-                            ui.label(egui::RichText::new(format!("Face: #{} (inst #{})", fid, inst_idx))
-                                .size(12.0).color(egui::Color32::from_rgb(255, 220, 50)));
                         }
 
-                        // Manifold
-                        ui.separator();
-                        ui.heading(egui::RichText::new("Manifold").size(13.0));
-                        if let Some(ref report) = self.manifold_report {
-                            let watertight = report.is_watertight();
-                            let wt_color = if watertight { egui::Color32::from_rgb(80, 200, 80) } else { egui::Color32::from_rgb(255, 100, 80) };
+                        MobileControlsTab::Holes => {
+                            // ── Hole:3 cut-outs tab ──
+                            ui.label(egui::RichText::new("Cut-out \"3\" on each surface type").size(11.0).color(egui::Color32::GRAY));
+                            ui.add_space(4.0);
+                            egui::Grid::new("mob_holes_grid").num_columns(3).spacing([6.0, 6.0]).show(ui, |ui| {
+                                if ui.add_sized([90.0, 32.0], egui::Button::new("Box~")).clicked()   { self.load_box_text();         self.close_mobile_panel_after_load = true; }
+                                if ui.add_sized([90.0, 32.0], egui::Button::new("Cyl~")).clicked()  { self.load_cylinder_text();    self.close_mobile_panel_after_load = true; }
+                                if ui.add_sized([90.0, 32.0], egui::Button::new("Sph~")).clicked()  { self.load_sphere_text();      self.close_mobile_panel_after_load = true; }
+                                ui.end_row();
+                                if ui.add_sized([90.0, 32.0], egui::Button::new("Cone~")).clicked() { self.load_cone_text();        self.close_mobile_panel_after_load = true; }
+                                if ui.add_sized([90.0, 32.0], egui::Button::new("Torus~")).clicked() { self.load_torus_text();       self.close_mobile_panel_after_load = true; }
+                                if ui.add_sized([90.0, 32.0], egui::Button::new("Rev~")).clicked()  { self.load_revolution_text();  self.close_mobile_panel_after_load = true; }
+                                ui.end_row();
+                                if ui.add_sized([90.0, 32.0], egui::Button::new("Ext~")).clicked()  { self.load_extrusion_text();   self.close_mobile_panel_after_load = true; }
+                                if ui.add_sized([90.0, 32.0], egui::Button::new("NURBS~")).clicked() { self.load_nurbs_text();      self.close_mobile_panel_after_load = true; }
+                                ui.end_row();
+                            });
+                        }
+
+                        MobileControlsTab::Modeling => {
+                            // ── Modeling tab (Fillet / Chamfer / Shell / Transform / Boolean / GDT) ──
+                            ui.label(egui::RichText::new("Fillet / Chamfer / Shell").size(11.0).strong());
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("Watertight:").size(12.0));
-                                ui.label(egui::RichText::new(if watertight { "Yes" } else { "No" }).size(12.0).color(wt_color));
+                                ui.label("r:");
+                                ui.add(egui::DragValue::new(&mut self.fillet_radius).speed(0.1).range(0.01..=100.0).suffix(" mm"));
                             });
-                            ui.label(egui::RichText::new(format!("Boundary edges: {}", report.boundary_edge_count)).size(11.0));
-                            ui.label(egui::RichText::new(format!("Degenerate tris: {}", report.degenerate_triangle_count)).size(11.0));
-                        }
-
-                        // Errors
-                        if self.last_error.is_some() || self.failed_face_count > 0 {
-                            ui.separator();
-                            ui.heading(egui::RichText::new("Errors").size(13.0));
-                            if let Some(ref err) = self.last_error {
-                                ui.label(egui::RichText::new(err).size(11.0).color(egui::Color32::from_rgb(255, 120, 120)));
-                                if ui.button("Dismiss").clicked() { self.last_error = None; }
-                            }
-                            if self.failed_face_count > 0 {
-                                ui.label(egui::RichText::new(format!("{} face(s) failed triangulation", self.failed_face_count))
-                                    .size(11.0).color(egui::Color32::from_rgb(255, 220, 100)));
-                            }
-                        }
-
-                        // JSON API
-                        if self.show_json_api {
-                            ui.separator();
-                            ui.heading(egui::RichText::new("JSON API").size(13.0));
-                            ui.add(egui::TextEdit::multiline(&mut self.json_api_input)
-                                .desired_width(f32::INFINITY).desired_rows(2).font(egui::TextStyle::Monospace));
                             ui.horizontal(|ui| {
-                                if ui.button("Execute").clicked() && !self.json_api_input.is_empty() {
-                                    self.json_api_output = self.json_api.execute_json(&self.json_api_input);
-                                }
-                                if ui.button("Help").clicked() {
-                                    let r = self.json_api.execute(draper_json::ApiRequest::Help);
-                                    self.json_api_output = serde_json::to_string_pretty(&r).unwrap_or_default();
-                                }
-                                if ui.button("Clear").clicked() { self.json_api_input.clear(); self.json_api_output.clear(); }
+                                ui.label("edge:");
+                                ui.add(egui::DragValue::new(&mut self.model_edge_index).range(0..=100000));
+                                ui.label("(0=auto)");
                             });
-                            if !self.json_api_output.is_empty() {
-                                ui.add(egui::TextEdit::multiline(&mut self.json_api_output)
-                                    .desired_width(f32::INFINITY).desired_rows(4).font(egui::TextStyle::Monospace).interactive(false));
+                            ui.horizontal(|ui| {
+                                if ui.add_sized([100.0, 28.0], egui::Button::new("Fillet")).clicked()  { self.model_fillet_edge(); }
+                                if ui.add_sized([100.0, 28.0], egui::Button::new("Chamfer")).clicked() { self.model_chamfer_edge(); }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("t:");
+                                ui.add(egui::DragValue::new(&mut self.shell_thickness).speed(0.1).range(0.01..=100.0).suffix(" mm"));
+                            });
+                            if ui.add_sized([ui.available_width(), 28.0], egui::Button::new("Shell")).clicked() { self.model_make_shell(); }
+
+                            ui.add_space(4.0);
+                            ui.label(egui::RichText::new("Transform").size(11.0).strong());
+                            ui.horizontal(|ui| {
+                                ui.label("Δ:");
+                                ui.add(egui::DragValue::new(&mut self.translate_dx).speed(1.0));
+                                ui.add(egui::DragValue::new(&mut self.translate_dy).speed(1.0));
+                                ui.add(egui::DragValue::new(&mut self.translate_dz).speed(1.0));
+                            });
+                            if ui.add_sized([ui.available_width(), 28.0], egui::Button::new("Translate")).clicked() { self.model_translate(); }
+                            ui.horizontal(|ui| {
+                                ui.label("axis:");
+                                ui.add(egui::DragValue::new(&mut self.rotate_axis_x).speed(0.05).range(-1.0..=1.0));
+                                ui.add(egui::DragValue::new(&mut self.rotate_axis_y).speed(0.05).range(-1.0..=1.0));
+                                ui.add(egui::DragValue::new(&mut self.rotate_axis_z).speed(0.05).range(-1.0..=1.0));
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("angle:");
+                                ui.add(egui::DragValue::new(&mut self.rotate_angle_deg).speed(1.0).range(-360.0..=360.0).suffix("°"));
+                            });
+                            if ui.add_sized([ui.available_width(), 28.0], egui::Button::new("Rotate")).clicked() { self.model_rotate(); }
+                            ui.horizontal(|ui| {
+                                ui.label("scale:");
+                                ui.add(egui::DragValue::new(&mut self.scale_factor).speed(0.05).range(0.01..=100.0));
+                            });
+                            if ui.add_sized([ui.available_width(), 28.0], egui::Button::new("Scale")).clicked() { self.model_scale(); }
+                            ui.horizontal(|ui| {
+                                ui.label("normal:");
+                                ui.add(egui::DragValue::new(&mut self.mirror_nx).speed(0.05).range(-1.0..=1.0));
+                                ui.add(egui::DragValue::new(&mut self.mirror_ny).speed(0.05).range(-1.0..=1.0));
+                                ui.add(egui::DragValue::new(&mut self.mirror_nz).speed(0.05).range(-1.0..=1.0));
+                            });
+                            if ui.add_sized([ui.available_width(), 28.0], egui::Button::new("Mirror")).clicked() { self.model_mirror(); }
+
+                            ui.add_space(4.0);
+                            ui.label(egui::RichText::new("Boolean").size(11.0).strong());
+                            if ui.add_sized([ui.available_width(), 28.0], egui::Button::new("Set Current as B")).clicked() { self.model_capture_secondary(); }
+                            ui.horizontal(|ui| {
+                                if ui.add_sized([90.0, 28.0], egui::Button::new("A ∪ B")).clicked() { self.model_boolean_union(); }
+                                if ui.add_sized([90.0, 28.0], egui::Button::new("A − B")).clicked() { self.model_boolean_subtract(); }
+                                if ui.add_sized([90.0, 28.0], egui::Button::new("A ∩ B")).clicked() { self.model_boolean_intersect(); }
+                            });
+
+                            ui.add_space(4.0);
+                            ui.label(egui::RichText::new("Pattern").size(11.0).strong());
+                            ui.horizontal(|ui| {
+                                ui.label("count:");
+                                ui.add(egui::DragValue::new(&mut self.pattern_count).range(1..=100));
+                            });
+                            if ui.add_sized([ui.available_width(), 28.0], egui::Button::new("Circular Pattern (Z)")).clicked() { self.model_circular_pattern(); }
+
+                            ui.add_space(4.0);
+                            ui.label(egui::RichText::new("Face Ops").size(11.0).strong());
+                            ui.horizontal(|ui| {
+                                ui.label("face:");
+                                ui.add(egui::DragValue::new(&mut self.face_op_index).range(0..=100000));
+                                ui.label("hole:");
+                                ui.add(egui::DragValue::new(&mut self.hole_op_index).range(0..=100000));
+                            });
+                            ui.horizontal(|ui| {
+                                if ui.add_sized([80.0, 28.0], egui::Button::new("Delete")).clicked()  { self.model_delete_face(); }
+                                if ui.add_sized([80.0, 28.0], egui::Button::new("Reverse")).clicked() { self.model_reverse_face(); }
+                                if ui.add_sized([80.0, 28.0], egui::Button::new("RmHole")).clicked()  { self.model_remove_hole(); }
+                            });
+
+                            ui.add_space(4.0);
+                            ui.label(egui::RichText::new("GDT Check").size(11.0).strong());
+                            egui::ComboBox::from_id_salt("gdt_type_mobile")
+                                .selected_text(gdt_type_label(self.gdt_check_type))
+                                .show_ui(ui, |ui| {
+                                    for i in 0..=8u32 {
+                                        ui.selectable_value(&mut self.gdt_check_type, i, gdt_type_label(i));
+                                    }
+                                });
+                            ui.horizontal(|ui| {
+                                ui.label("tol:");
+                                ui.add(egui::DragValue::new(&mut self.gdt_tolerance).speed(0.01).range(0.001..=100.0).suffix(" mm"));
+                            });
+                            if ui.add_sized([ui.available_width(), 28.0], egui::Button::new("Run GDT Check")).clicked() { self.model_gdt_check(); }
+                            if let Some((tol, actual, passed)) = self.gdt_last_result {
+                                let color = if passed { egui::Color32::from_rgb(80, 200, 80) } else { egui::Color32::from_rgb(220, 80, 80) };
+                                ui.label(
+                                    egui::RichText::new(format!("Actual: {:.4} / Tol: {:.4} → {}", actual, tol, if passed { "PASS" } else { "FAIL" }))
+                                        .size(10.0).color(color)
+                                );
+                            }
+                        }
+
+                        MobileControlsTab::Display => {
+                            // ── Display tab ──
+                            ui.heading(egui::RichText::new("Display Options").size(13.0));
+                            ui.checkbox(&mut self.wireframe, "Wireframe");
+                            ui.checkbox(&mut self.show_edges, "Show Edges");
+                            ui.checkbox(&mut self.show_wireframe_overlay, "Mesh Overlay");
+                            ui.checkbox(&mut self.show_axes, "Show axes");
+                            ui.checkbox(&mut self.show_grid, "Show grid");
+                            ui.checkbox(&mut self.show_structure, "Structure Panel (desktop)");
+                            ui.checkbox(&mut self.show_json_api, "Show JSON API");
+
+                            ui.add_space(6.0);
+                            ui.heading(egui::RichText::new("Triangulation Quality").size(13.0));
+                            egui::ComboBox::from_id_salt("lod_mobile_panel")
+                                .selected_text(format!("Quality: {}", self.lod_level.label()))
+                                .show_ui(ui, |ui| {
+                                    for &lod in LodLevel::all() {
+                                        ui.selectable_value(&mut self.lod_level, lod, lod.label());
+                                    }
+                                });
+
+                            ui.add_space(6.0);
+                            if ui.add_sized([ui.available_width(), 32.0], egui::Button::new("Reset Camera (fit + iso)")).clicked() {
+                                let (bmin, bmax) = self.mesh.bounding_box();
+                                self.camera.fit_and_reset_orientation(
+                                    [bmin.x as f32, bmin.y as f32, bmin.z as f32],
+                                    [bmax.x as f32, bmax.y as f32, bmax.z as f32],
+                                );
+                            }
+
+                            // JSON API panel (only shown if enabled)
+                            if self.show_json_api {
+                                ui.add_space(6.0);
+                                ui.separator();
+                                ui.heading(egui::RichText::new("JSON API").size(13.0));
+                                ui.add(egui::TextEdit::multiline(&mut self.json_api_input)
+                                    .desired_width(f32::INFINITY).desired_rows(2).font(egui::TextStyle::Monospace));
+                                ui.horizontal(|ui| {
+                                    if ui.button("Execute").clicked() && !self.json_api_input.is_empty() {
+                                        self.json_api_output = self.json_api.execute_json(&self.json_api_input);
+                                    }
+                                    if ui.button("Help").clicked() {
+                                        let r = self.json_api.execute(draper_json::ApiRequest::Help);
+                                        self.json_api_output = serde_json::to_string_pretty(&r).unwrap_or_default();
+                                    }
+                                    if ui.button("Clear").clicked() { self.json_api_input.clear(); self.json_api_output.clear(); }
+                                });
+                                if !self.json_api_output.is_empty() {
+                                    ui.add(egui::TextEdit::multiline(&mut self.json_api_output)
+                                        .desired_width(f32::INFINITY).desired_rows(4).font(egui::TextStyle::Monospace).interactive(false));
+                                }
+                            }
+                        }
+
+                        MobileControlsTab::Info => {
+                            // ── Info tab ──
+                            ui.heading(egui::RichText::new("Model Info").size(13.0));
+                            ui.label(egui::RichText::new(format!("Model: {}", self.current_model.name)).size(12.0));
+                            ui.label(egui::RichText::new(format!("Vertices: {}", self.current_model.vertex_count)).size(12.0));
+                            ui.label(egui::RichText::new(format!("Triangles: {}", self.current_model.triangle_count)).size(12.0));
+                            ui.label(egui::RichText::new(format!("Instances: {}", self.detailed_instances.len())).size(12.0));
+                            if self.is_loading && self.total_instance_count > 0 {
+                                let progress = self.triangulated_count as f32 / self.total_instance_count as f32;
+                                ui.label(egui::RichText::new(format!("Loading: {}/{} ({:.0}%)", self.triangulated_count, self.total_instance_count, progress * 100.0))
+                                    .size(11.0).color(egui::Color32::from_rgb(80, 180, 80)));
+                            }
+                            if let Some((inst_idx, fid)) = self.highlighted_face {
+                                ui.label(egui::RichText::new(format!("Face: #{} (inst #{})", fid, inst_idx))
+                                    .size(12.0).color(egui::Color32::from_rgb(255, 220, 50)));
+                            }
+
+                            ui.separator();
+                            ui.heading(egui::RichText::new("Manifold").size(13.0));
+                            if let Some(ref report) = self.manifold_report {
+                                let watertight = report.is_watertight();
+                                let wt_color = if watertight { egui::Color32::from_rgb(80, 200, 80) } else { egui::Color32::from_rgb(255, 100, 80) };
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("Watertight:").size(12.0));
+                                    ui.label(egui::RichText::new(if watertight { "Yes" } else { "No" }).size(12.0).color(wt_color));
+                                });
+                                ui.label(egui::RichText::new(format!("Euler χ: {}", report.euler_characteristic)).size(11.0));
+                                ui.label(egui::RichText::new(format!("Boundary edges: {}", report.boundary_edge_count)).size(11.0));
+                                ui.label(egui::RichText::new(format!("Non-manifold edges: {}", report.non_manifold_edge_count)).size(11.0));
+                                ui.label(egui::RichText::new(format!("Degenerate tris: {}", report.degenerate_triangle_count)).size(11.0));
+                                ui.label(egui::RichText::new(format!("T-junctions: {}", report.t_junction_count)).size(11.0));
+                            } else {
+                                ui.label(egui::RichText::new("No mesh loaded").size(11.0).color(egui::Color32::GRAY));
+                            }
+
+                            if self.last_error.is_some() || self.failed_face_count > 0 {
+                                ui.separator();
+                                ui.heading(egui::RichText::new("Errors").size(13.0));
+                                if let Some(ref err) = self.last_error {
+                                    ui.label(egui::RichText::new(err).size(11.0).color(egui::Color32::from_rgb(255, 120, 120)));
+                                    if ui.button("Dismiss").clicked() { self.last_error = None; }
+                                }
+                                if self.failed_face_count > 0 {
+                                    ui.label(egui::RichText::new(format!("{} face(s) failed triangulation", self.failed_face_count))
+                                        .size(11.0).color(egui::Color32::from_rgb(255, 220, 100)));
+                                }
                             }
                         }
                     });
                 });
+        }
+
+        // ── Auto-close mobile panel after a model load was triggered ──
+        // The model-loading buttons set `close_mobile_panel_after_load = true`
+        // so the user can see the freshly-loaded mesh. We reset the flag here
+        // AFTER the panel has been drawn for this frame (so the button click
+        // was already processed), and close the panel for the NEXT frame.
+        if self.close_mobile_panel_after_load {
+            self.mobile_panel = None;
+            self.close_mobile_panel_after_load = false;
         }
 
         // ─── Mobile overlay: Structure panel ────────────────────────────
