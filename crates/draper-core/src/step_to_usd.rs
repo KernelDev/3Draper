@@ -11,7 +11,9 @@
 //!           → UsdExporter::add_mesh → write_usda.
 
 use draper_mesh::{TriangleMesh, export_usd::{UsdExporter, UsdExportOptions, UsdMaterial, UsdCamera, UsdLight}};
-use draper_step::{parse_step_file, extract_solids};
+use draper_step::{extract_solids};
+#[cfg(not(target_arch = "wasm32"))]
+use draper_step::parse_step_file;
 use draper_topology::Solid;
 use std::path::Path;
 
@@ -78,8 +80,18 @@ pub fn export_step_to_usda(
     }
 
     // 1. Parse STEP file.
+    // On native, use buffered file reading. On wasm, read the whole file
+    // into a string (wasm has no BufReader-based file API).
+    #[cfg(not(target_arch = "wasm32"))]
     let step_file = parse_step_file(&step_file_path.to_string_lossy())
         .map_err(|e| format!("STEP parse error: {}", e))?;
+    #[cfg(target_arch = "wasm32")]
+    let step_file = {
+        let content = std::fs::read_to_string(step_file_path)
+            .map_err(|e| format!("Cannot read STEP file: {}", e))?;
+        draper_step::parse_step(&content)
+            .map_err(|e| format!("STEP parse error: {}", e))?
+    };
 
     // 2. Extract solids.
     let (solids, brep_ids) = extract_solids(&step_file);

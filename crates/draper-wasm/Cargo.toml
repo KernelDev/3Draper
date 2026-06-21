@@ -1,0 +1,28 @@
+[package]
+name = "draper-wasm"
+version.workspace = true
+edition.workspace = true
+description = "WASM-bindgen bindings for the 3Draper kernel — exposes the full editing, boolean, GDT and STEP→USDA pipelines to JavaScript."
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+draper-geometry = { workspace = true }
+draper-topology = { workspace = true }
+draper-mesh = { workspace = true, default-features = false, features = ["export-3mf"] }
+draper-core = { workspace = true }
+draper-step = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+log = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_log = "1"
+console_error_panic_hook = "0.1"
+web-sys = { version = "0.3", features = ["console"] }
+
+[dev-dependencies]
+tempfile = "3"

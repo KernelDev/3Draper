@@ -9,6 +9,24 @@
 #include <stdlib.h>
 
 /**
+ * GDT tolerance type codes (must match draper_mesh::gdt_check::GdtCheckType).
+ */
+typedef enum DraperGdtType {
+  Flatness = 0,
+  Straightness = 1,
+  Circularity = 2,
+  Cylindricity = 3,
+  Position = 4,
+  Parallelism = 5,
+  Perpendicularity = 6,
+  Angularity = 7,
+  Runout = 8,
+  ProfileOfLine = 9,
+  ProfileOfSurface = 10,
+  Unsupported = 99,
+} DraperGdtType;
+
+/**
  * C-compatible result codes returned by every FFI function.
  */
 typedef enum DraperResult {
@@ -59,6 +77,16 @@ typedef struct DraperDocument DraperDocument;
  * Opaque mesh handle.
  */
 typedef struct DraperMesh DraperMesh;
+
+/**
+ * Result of a GDT check (mirrors `GdtCheckResult`).
+ */
+typedef struct DraperGdtResult {
+  double tolerance_value;
+  double actual_deviation;
+  uint8_t passed;
+  uint8_t status_code;
+} DraperGdtResult;
 
 /**
  * Retrieve the last error message.
@@ -304,5 +332,242 @@ enum DraperResult draper_export_obj(const struct DraperDocument *doc, const char
  * Returns `DraperResult::Success` on success, or an error code on failure.
  */
 enum DraperResult draper_export_3mf(const struct DraperDocument *doc, const char *path);
+
+/**
+ * Translate every solid in the document by (dx, dy, dz).
+ */
+enum DraperResult draper_document_translate(struct DraperDocument *doc,
+                                            double dx,
+                                            double dy,
+                                            double dz);
+
+/**
+ * Rotate every solid in the document about the given axis (unit vector)
+ * through the origin by `angle` radians.
+ */
+enum DraperResult draper_document_rotate(struct DraperDocument *doc,
+                                         double ax,
+                                         double ay,
+                                         double az,
+                                         double angle);
+
+/**
+ * Rotate every solid in the document about an axis through `center`
+ * (cx,cy,cz) with direction (ax,ay,az) by `angle` radians.
+ */
+enum DraperResult draper_document_rotate_around_point(struct DraperDocument *doc,
+                                                      double ax,
+                                                      double ay,
+                                                      double az,
+                                                      double cx,
+                                                      double cy,
+                                                      double cz,
+                                                      double angle);
+
+/**
+ * Uniformly scale every solid in the document by `factor` about the origin.
+ */
+enum DraperResult draper_document_scale(struct DraperDocument *doc, double factor);
+
+/**
+ * Uniformly scale every solid in the document by `factor` about `center`.
+ */
+enum DraperResult draper_document_scale_around_point(struct DraperDocument *doc,
+                                                     double factor,
+                                                     double cx,
+                                                     double cy,
+                                                     double cz);
+
+/**
+ * Mirror every solid in the document about the plane through
+ * (ox,oy,oz) with normal (nx,ny,nz). The mirrored copies REPLACE the
+ * originals.
+ */
+enum DraperResult draper_document_mirror(struct DraperDocument *doc,
+                                         double ox,
+                                         double oy,
+                                         double oz,
+                                         double nx,
+                                         double ny,
+                                         double nz);
+
+/**
+ * Fillet (round) an edge of the solid at `solid_index`.
+ * `edge_index` is the TopoId of the edge to fillet; `radius` is in mm.
+ */
+enum DraperResult draper_solid_fillet_edge(struct DraperDocument *doc,
+                                           uintptr_t solid_index,
+                                           uintptr_t edge_index,
+                                           double radius);
+
+/**
+ * Chamfer (bevel) an edge of the solid at `solid_index`.
+ * `distance` is the linear distance from the original edge to the new face.
+ */
+enum DraperResult draper_solid_chamfer_edge(struct DraperDocument *doc,
+                                            uintptr_t solid_index,
+                                            uintptr_t edge_index,
+                                            double distance);
+
+/**
+ * Shell the solid at `solid_index` — creates an inward offset by
+ * `thickness` mm.
+ */
+enum DraperResult draper_solid_make_shell(struct DraperDocument *doc,
+                                          uintptr_t solid_index,
+                                          double thickness);
+
+/**
+ * Boolean union of solids `a_index` and `b_index`. The result is APPENDED
+ * to the document as a new solid; originals are NOT removed.
+ * Returns the index of the new solid via `out_index`.
+ */
+enum DraperResult draper_document_boolean_union(struct DraperDocument *doc,
+                                                uintptr_t a_index,
+                                                uintptr_t b_index,
+                                                uint32_t *out_index);
+
+enum DraperResult draper_document_boolean_subtract(struct DraperDocument *doc,
+                                                   uintptr_t a_index,
+                                                   uintptr_t b_index,
+                                                   uint32_t *out_index);
+
+enum DraperResult draper_document_boolean_intersect(struct DraperDocument *doc,
+                                                    uintptr_t a_index,
+                                                    uintptr_t b_index,
+                                                    uint32_t *out_index);
+
+/**
+ * Delete the solid at `index` from the document.
+ */
+enum DraperResult draper_document_delete_solid(struct DraperDocument *doc, uintptr_t index);
+
+/**
+ * Run a single GDT check on the triangulated mesh of `solid_index`.
+ */
+struct DraperGdtResult draper_solid_gdt_check(const struct DraperDocument *doc,
+                                              uintptr_t solid_index,
+                                              enum DraperGdtType check_type,
+                                              double tolerance_value,
+                                              double datum_axis_x,
+                                              double datum_axis_y,
+                                              double datum_axis_z,
+                                              uint8_t use_datum_axis,
+                                              double nominal_pos_x,
+                                              double nominal_pos_y,
+                                              double nominal_pos_z,
+                                              uint8_t use_nominal_pos,
+                                              double nominal_angle_deg,
+                                              uint8_t use_nominal_angle);
+
+/**
+ * Run all GDT checks passed as a JSON array. Returns results as JSON
+ * string (caller MUST free with `draper_free_string`).
+ */
+char *draper_solid_gdt_check_all(const struct DraperDocument *doc,
+                                 uintptr_t solid_index,
+                                 const char *json_specs);
+
+/**
+ * Free a string previously returned by any draper_* function.
+ */
+void draper_free_string(char *s);
+
+/**
+ * Convert a STEP file to a USDA (USD ASCII) file.
+ */
+enum DraperResult draper_export_step_to_usda(const char *step_path,
+                                             const char *output_path,
+                                             double chord_tolerance,
+                                             uint8_t smooth_normals,
+                                             uint8_t include_camera,
+                                             uint8_t include_light);
+
+/**
+ * Load a STEP file and append all its solids to the document.
+ */
+enum DraperResult draper_document_load_step(struct DraperDocument *doc,
+                                            const char *path,
+                                            uint8_t _heal);
+
+/**
+ * Get a JSON array of all edges in the solid at `solid_index`.
+ * Each entry: `{ "id": N, "curve_type": "Line"|"Circle"|..., "face_ids": [a, b] }`.
+ */
+char *draper_solid_list_edges(const struct DraperDocument *doc, uintptr_t solid_index);
+
+/**
+ * Create a circular pattern of the solid at `solid_index`.
+ * `count` copies are placed evenly around `axis` through the origin,
+ * spanning a full 360°. Original is kept; copies are appended.
+ */
+enum DraperResult draper_document_circular_pattern(struct DraperDocument *doc,
+                                                   uintptr_t solid_index,
+                                                   uintptr_t count,
+                                                   double ax,
+                                                   double ay,
+                                                   double az);
+
+/**
+ * Create a linear pattern: `count` copies of solid `solid_index`, each
+ * translated by `step` along the unit vector (dx, dy, dz).
+ */
+enum DraperResult draper_document_linear_pattern(struct DraperDocument *doc,
+                                                 uintptr_t solid_index,
+                                                 uintptr_t count,
+                                                 double dx,
+                                                 double dy,
+                                                 double dz,
+                                                 double step);
+
+/**
+ * Add a circular hole of `radius` mm centered at (cx, cy, cz) on the
+ * face at `face_index` of solid `solid_index`.
+ */
+enum DraperResult draper_solid_add_circular_hole(struct DraperDocument *doc,
+                                                 uintptr_t solid_index,
+                                                 uintptr_t face_index,
+                                                 double cx,
+                                                 double cy,
+                                                 double cz,
+                                                 double radius);
+
+/**
+ * Remove the i-th inner wire (hole) from a face. Returns Success even
+ * if there were no holes (no-op).
+ */
+enum DraperResult draper_solid_remove_hole(struct DraperDocument *doc,
+                                           uintptr_t solid_index,
+                                           uintptr_t face_index,
+                                           uintptr_t hole_index);
+
+/**
+ * Clear all holes from a face. Returns the number of holes removed.
+ */
+uint32_t draper_solid_clear_holes(struct DraperDocument *doc,
+                                  uintptr_t solid_index,
+                                  uintptr_t face_index);
+
+/**
+ * Delete a face from a solid. **WARNING**: breaks watertightness.
+ * Use only when replacing with another operation.
+ */
+enum DraperResult draper_solid_delete_face(struct DraperDocument *doc,
+                                           uintptr_t solid_index,
+                                           uintptr_t face_index);
+
+/**
+ * Reverse the orientation of a face (swap forward flag).
+ */
+enum DraperResult draper_solid_reverse_face(struct DraperDocument *doc,
+                                            uintptr_t solid_index,
+                                            uintptr_t face_index);
+
+/**
+ * Compute the axis-aligned bounding box of the document's mesh.
+ * Writes the 6 floats (min_x, min_y, min_z, max_x, max_y, max_z) to `out_bbox`
+ * (must point to an array of at least 6 f64s).
+ */
+enum DraperResult draper_document_bbox(const struct DraperDocument *doc, double *out_bbox);
 
 #endif  /* DRAPER_H */

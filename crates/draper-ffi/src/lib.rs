@@ -28,6 +28,12 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
 
+pub mod extended;
+pub use extended::*;
+
+#[cfg(test)]
+mod tests;
+
 // ============================================================
 // C-compatible error codes
 // ============================================================

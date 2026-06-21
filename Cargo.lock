@@ -942,6 +942,8 @@ dependencies = [
  "draper-mesh",
  "draper-step",
  "draper-topology",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -1058,6 +1060,26 @@ dependencies = [
  "web-sys",
  "web-time",
  "wgpu",
+]
+
+[[package]]
+name = "draper-wasm"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "console_log",
+ "draper-core",
+ "draper-geometry",
+ "draper-mesh",
+ "draper-step",
+ "draper-topology",
+ "js-sys",
+ "log",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]

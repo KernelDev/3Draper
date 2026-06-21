@@ -211,6 +211,121 @@ namespace Draper
 
         [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
         public static extern DraperResult draper_export_3mf(IntPtr doc, [MarshalAs(UnmanagedType.LPStr)] string path);
+
+        // -- STEP load (extended) --
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern DraperResult draper_document_load_step(IntPtr doc, [MarshalAs(UnmanagedType.LPStr)] string path, byte heal);
+
+        // -- Editing ops: fillet / chamfer / shell --
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern DraperResult draper_solid_fillet_edge(IntPtr doc, UIntPtr solidIndex, UIntPtr edgeIndex, double radius);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern DraperResult draper_solid_chamfer_edge(IntPtr doc, UIntPtr solidIndex, UIntPtr edgeIndex, double distance);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern DraperResult draper_solid_make_shell(IntPtr doc, UIntPtr solidIndex, double thickness);
+
+        // -- Transform ops --
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern DraperResult draper_document_translate(IntPtr doc, double dx, double dy, double dz);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern DraperResult draper_document_rotate(IntPtr doc, double ax, double ay, double az, double angle);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern DraperResult draper_document_rotate_around_point(IntPtr doc, double ax, double ay, double az, double cx, double cy, double cz, double angle);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern DraperResult draper_document_scale(IntPtr doc, double factor);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern DraperResult draper_document_scale_around_point(IntPtr doc, double factor, double cx, double cy, double cz);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern DraperResult draper_document_mirror(IntPtr doc, double ox, double oy, double oz, double nx, double ny, double nz);
+
+        // -- Boolean ops --
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern DraperResult draper_document_boolean_union(IntPtr doc, UIntPtr aIndex, UIntPtr bIndex, ref uint outIndex);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern DraperResult draper_document_boolean_subtract(IntPtr doc, UIntPtr aIndex, UIntPtr bIndex, ref uint outIndex);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern DraperResult draper_document_boolean_intersect(IntPtr doc, UIntPtr aIndex, UIntPtr bIndex, ref uint outIndex);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern DraperResult draper_document_delete_solid(IntPtr doc, UIntPtr index);
+
+        // -- Patterns --
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern DraperResult draper_document_circular_pattern(IntPtr doc, UIntPtr solidIndex, UIntPtr count, double ax, double ay, double az);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern DraperResult draper_document_linear_pattern(IntPtr doc, UIntPtr solidIndex, UIntPtr count, double dx, double dy, double dz, double step);
+
+        // -- Holes --
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern DraperResult draper_solid_add_circular_hole(IntPtr doc, UIntPtr solidIndex, UIntPtr faceIndex, double cx, double cy, double cz, double radius);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern DraperResult draper_solid_remove_hole(IntPtr doc, UIntPtr solidIndex, UIntPtr faceIndex, UIntPtr holeIndex);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern uint draper_solid_clear_holes(IntPtr doc, UIntPtr solidIndex, UIntPtr faceIndex);
+
+        // -- Face management --
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern DraperResult draper_solid_delete_face(IntPtr doc, UIntPtr solidIndex, UIntPtr faceIndex);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern DraperResult draper_solid_reverse_face(IntPtr doc, UIntPtr solidIndex, UIntPtr faceIndex);
+
+        // -- GDT checks --
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern DraperGdtResult draper_solid_gdt_check(IntPtr doc, UIntPtr solidIndex, int checkType, double toleranceValue,
+            double datumAxisX, double datumAxisY, double datumAxisZ, byte useDatumAxis,
+            double nominalPosX, double nominalPosY, double nominalPosZ, byte useNominalPos,
+            double nominalAngleDeg, byte useNominalAngle);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr draper_solid_gdt_check_all(IntPtr doc, UIntPtr solidIndex, [MarshalAs(UnmanagedType.LPStr)] string jsonSpecs);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr draper_solid_list_edges(IntPtr doc, UIntPtr solidIndex);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void draper_free_string(IntPtr s);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern DraperResult draper_document_bbox(IntPtr doc, double[] outBuf);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern DraperResult draper_export_step_to_usda(
+            [MarshalAs(UnmanagedType.LPStr)] string stepPath,
+            [MarshalAs(UnmanagedType.LPStr)] string outputPath,
+            double chordTolerance, byte smoothNormals, byte includeCamera, byte includeLight);
+    }
+
+    /// <summary>
+    /// Result of a GDT check (mirrors draper_ffi::DraperGdtResult).
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct DraperGdtResult
+    {
+        public double ToleranceValue;
+        public double ActualDeviation;
+        public byte Passed;
+        public byte StatusCode;
     }
 
     // ================================================================
@@ -418,6 +533,144 @@ namespace Draper
         /// <summary>Export the document to 3MF (3D Manufacturing Format).</summary>
         public void Export3mf(string path) =>
             CheckResult(Native.draper_export_3mf(_handle, path));
+
+        // -- Editing operations --
+
+        public void FilletEdge(ulong solidIndex, ulong edgeIndex, double radius) =>
+            CheckResult(Native.draper_solid_fillet_edge(_handle, (UIntPtr)solidIndex, (UIntPtr)edgeIndex, radius));
+
+        public void ChamferEdge(ulong solidIndex, ulong edgeIndex, double distance) =>
+            CheckResult(Native.draper_solid_chamfer_edge(_handle, (UIntPtr)solidIndex, (UIntPtr)edgeIndex, distance));
+
+        public void MakeShell(ulong solidIndex, double thickness) =>
+            CheckResult(Native.draper_solid_make_shell(_handle, (UIntPtr)solidIndex, thickness));
+
+        // -- Transform operations --
+
+        public void Translate(double dx, double dy, double dz) =>
+            CheckResult(Native.draper_document_translate(_handle, dx, dy, dz));
+
+        public void Rotate(double ax, double ay, double az, double angleRadians) =>
+            CheckResult(Native.draper_document_rotate(_handle, ax, ay, az, angleRadians));
+
+        public void RotateAroundPoint(double ax, double ay, double az, double cx, double cy, double cz, double angleRadians) =>
+            CheckResult(Native.draper_document_rotate_around_point(_handle, ax, ay, az, cx, cy, cz, angleRadians));
+
+        public void Scale(double factor) =>
+            CheckResult(Native.draper_document_scale(_handle, factor));
+
+        public void ScaleAroundPoint(double factor, double cx, double cy, double cz) =>
+            CheckResult(Native.draper_document_scale_around_point(_handle, factor, cx, cy, cz));
+
+        public void Mirror(double ox, double oy, double oz, double nx, double ny, double nz) =>
+            CheckResult(Native.draper_document_mirror(_handle, ox, oy, oz, nx, ny, nz));
+
+        // -- Boolean operations --
+
+        public ulong BooleanUnion(ulong aIndex, ulong bIndex)
+        {
+            uint outIdx = 0;
+            CheckResult(Native.draper_document_boolean_union(_handle, (UIntPtr)aIndex, (UIntPtr)bIndex, ref outIdx));
+            return outIdx;
+        }
+
+        public ulong BooleanSubtract(ulong aIndex, ulong bIndex)
+        {
+            uint outIdx = 0;
+            CheckResult(Native.draper_document_boolean_subtract(_handle, (UIntPtr)aIndex, (UIntPtr)bIndex, ref outIdx));
+            return outIdx;
+        }
+
+        public ulong BooleanIntersect(ulong aIndex, ulong bIndex)
+        {
+            uint outIdx = 0;
+            CheckResult(Native.draper_document_boolean_intersect(_handle, (UIntPtr)aIndex, (UIntPtr)bIndex, ref outIdx));
+            return outIdx;
+        }
+
+        public void DeleteSolid(ulong index) =>
+            CheckResult(Native.draper_document_delete_solid(_handle, (UIntPtr)index));
+
+        // -- Patterns --
+
+        public void CircularPattern(ulong solidIndex, ulong count, double ax, double ay, double az) =>
+            CheckResult(Native.draper_document_circular_pattern(_handle, (UIntPtr)solidIndex, (UIntPtr)count, ax, ay, az));
+
+        public void LinearPattern(ulong solidIndex, ulong count, double dx, double dy, double dz, double step) =>
+            CheckResult(Native.draper_document_linear_pattern(_handle, (UIntPtr)solidIndex, (UIntPtr)count, dx, dy, dz, step));
+
+        // -- Holes --
+
+        public void AddCircularHole(ulong solidIndex, ulong faceIndex, double cx, double cy, double cz, double radius) =>
+            CheckResult(Native.draper_solid_add_circular_hole(_handle, (UIntPtr)solidIndex, (UIntPtr)faceIndex, cx, cy, cz, radius));
+
+        public void RemoveHole(ulong solidIndex, ulong faceIndex, ulong holeIndex) =>
+            CheckResult(Native.draper_solid_remove_hole(_handle, (UIntPtr)solidIndex, (UIntPtr)faceIndex, (UIntPtr)holeIndex));
+
+        public uint ClearHoles(ulong solidIndex, ulong faceIndex) =>
+            Native.draper_solid_clear_holes(_handle, (UIntPtr)solidIndex, (UIntPtr)faceIndex);
+
+        // -- Face management --
+
+        public void DeleteFace(ulong solidIndex, ulong faceIndex) =>
+            CheckResult(Native.draper_solid_delete_face(_handle, (UIntPtr)solidIndex, (UIntPtr)faceIndex));
+
+        public void ReverseFace(ulong solidIndex, ulong faceIndex) =>
+            CheckResult(Native.draper_solid_reverse_face(_handle, (UIntPtr)solidIndex, (UIntPtr)faceIndex));
+
+        // -- GDT checks --
+
+        public DraperGdtResult GdtCheck(ulong solidIndex, int checkType, double toleranceValue,
+            double[] datumAxis = null, double[] nominalPosition = null, double? nominalAngleDeg = null)
+        {
+            byte useDa = (byte)(datumAxis != null ? 1 : 0);
+            byte useNp = (byte)(nominalPosition != null ? 1 : 0);
+            byte useNa = (byte)(nominalAngleDeg.HasValue ? 1 : 0);
+            double daX = datumAxis != null && datumAxis.Length >= 3 ? datumAxis[0] : 0;
+            double daY = datumAxis != null && datumAxis.Length >= 3 ? datumAxis[1] : 0;
+            double daZ = datumAxis != null && datumAxis.Length >= 3 ? datumAxis[2] : 0;
+            double npX = nominalPosition != null && nominalPosition.Length >= 3 ? nominalPosition[0] : 0;
+            double npY = nominalPosition != null && nominalPosition.Length >= 3 ? nominalPosition[1] : 0;
+            double npZ = nominalPosition != null && nominalPosition.Length >= 3 ? nominalPosition[2] : 0;
+            double na = nominalAngleDeg ?? 0;
+            return Native.draper_solid_gdt_check(_handle, (UIntPtr)solidIndex, checkType, toleranceValue,
+                daX, daY, daZ, useDa, npX, npY, npZ, useNp, na, useNa);
+        }
+
+        public string GdtCheckAll(ulong solidIndex, string jsonSpecs)
+        {
+            IntPtr ptr = Native.draper_solid_gdt_check_all(_handle, (UIntPtr)solidIndex, jsonSpecs);
+            if (ptr == IntPtr.Zero) throw new DraperException(DraperResult.UnknownError, GetLastError());
+            try { return Marshal.PtrToStringUTF8(ptr) ?? ""; }
+            finally { Native.draper_free_string(ptr); }
+        }
+
+        public string ListEdges(ulong solidIndex)
+        {
+            IntPtr ptr = Native.draper_solid_list_edges(_handle, (UIntPtr)solidIndex);
+            if (ptr == IntPtr.Zero) throw new DraperException(DraperResult.UnknownError, GetLastError());
+            try { return Marshal.PtrToStringUTF8(ptr) ?? ""; }
+            finally { Native.draper_free_string(ptr); }
+        }
+
+        // -- STEP load + USDA export --
+
+        public void LoadStep(string path, bool heal = true) =>
+            CheckResult(Native.draper_document_load_step(_handle, path, (byte)(heal ? 1 : 0)));
+
+        public (double minX, double minY, double minZ, double maxX, double maxY, double maxZ) BoundingBox()
+        {
+            double[] buf = new double[6];
+            CheckResult(Native.draper_document_bbox(_handle, buf));
+            return (buf[0], buf[1], buf[2], buf[3], buf[4], buf[5]);
+        }
+
+        public static void ExportStepToUsda(string stepPath, string outputPath, double chordTolerance = 0.1,
+            bool smoothNormals = true, bool includeCamera = true, bool includeLight = true)
+        {
+            CheckResult(Native.draper_export_step_to_usda(stepPath, outputPath, chordTolerance,
+                (byte)(smoothNormals ? 1 : 0), (byte)(includeCamera ? 1 : 0), (byte)(includeLight ? 1 : 0)));
+        }
 
         // -- Internal helpers --
 

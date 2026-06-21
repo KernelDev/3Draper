@@ -225,6 +225,96 @@ def _setup_bindings() -> None:
     lib.draper_export_3mf.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
     lib.draper_export_3mf.restype = ctypes.c_int32
 
+    # STEP load (extended)
+    lib.draper_document_load_step.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint8]
+    lib.draper_document_load_step.restype = ctypes.c_int32
+
+    # Editing ops
+    lib.draper_solid_fillet_edge.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_double]
+    lib.draper_solid_fillet_edge.restype = ctypes.c_int32
+    lib.draper_solid_chamfer_edge.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_double]
+    lib.draper_solid_chamfer_edge.restype = ctypes.c_int32
+    lib.draper_solid_make_shell.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_double]
+    lib.draper_solid_make_shell.restype = ctypes.c_int32
+
+    # Transform ops
+    lib.draper_document_translate.argtypes = [ctypes.c_void_p, ctypes.c_double, ctypes.c_double, ctypes.c_double]
+    lib.draper_document_translate.restype = ctypes.c_int32
+    lib.draper_document_rotate.argtypes = [ctypes.c_void_p, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double]
+    lib.draper_document_rotate.restype = ctypes.c_int32
+    lib.draper_document_rotate_around_point.argtypes = [ctypes.c_void_p, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double]
+    lib.draper_document_rotate_around_point.restype = ctypes.c_int32
+    lib.draper_document_scale.argtypes = [ctypes.c_void_p, ctypes.c_double]
+    lib.draper_document_scale.restype = ctypes.c_int32
+    lib.draper_document_scale_around_point.argtypes = [ctypes.c_void_p, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double]
+    lib.draper_document_scale_around_point.restype = ctypes.c_int32
+    lib.draper_document_mirror.argtypes = [ctypes.c_void_p, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double]
+    lib.draper_document_mirror.restype = ctypes.c_int32
+
+    # Boolean ops
+    lib.draper_document_boolean_union.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t, ctypes.POINTER(ctypes.c_uint32)]
+    lib.draper_document_boolean_union.restype = ctypes.c_int32
+    lib.draper_document_boolean_subtract.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t, ctypes.POINTER(ctypes.c_uint32)]
+    lib.draper_document_boolean_subtract.restype = ctypes.c_int32
+    lib.draper_document_boolean_intersect.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t, ctypes.POINTER(ctypes.c_uint32)]
+    lib.draper_document_boolean_intersect.restype = ctypes.c_int32
+    lib.draper_document_delete_solid.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.draper_document_delete_solid.restype = ctypes.c_int32
+
+    # Patterns
+    lib.draper_document_circular_pattern.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_double, ctypes.c_double, ctypes.c_double]
+    lib.draper_document_circular_pattern.restype = ctypes.c_int32
+    lib.draper_document_linear_pattern.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double]
+    lib.draper_document_linear_pattern.restype = ctypes.c_int32
+
+    # Holes
+    lib.draper_solid_add_circular_hole.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double]
+    lib.draper_solid_add_circular_hole.restype = ctypes.c_int32
+    lib.draper_solid_remove_hole.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t]
+    lib.draper_solid_remove_hole.restype = ctypes.c_int32
+    lib.draper_solid_clear_holes.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t]
+    lib.draper_solid_clear_holes.restype = ctypes.c_uint32
+
+    # Face management
+    lib.draper_solid_delete_face.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t]
+    lib.draper_solid_delete_face.restype = ctypes.c_int32
+    lib.draper_solid_reverse_face.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t]
+    lib.draper_solid_reverse_face.restype = ctypes.c_int32
+
+    # GDT
+    class _GdtResult(ctypes.Structure):
+        _fields_ = [
+            ("tolerance_value", ctypes.c_double),
+            ("actual_deviation", ctypes.c_double),
+            ("passed", ctypes.c_uint8),
+            ("status_code", ctypes.c_uint8),
+        ]
+    lib._GdtResult = _GdtResult
+    lib.draper_solid_gdt_check.argtypes = [
+        ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int32, ctypes.c_double,
+        ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_uint8,
+        ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_uint8,
+        ctypes.c_double, ctypes.c_uint8,
+    ]
+    lib.draper_solid_gdt_check.restype = _GdtResult
+    lib.draper_solid_gdt_check_all.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_char_p]
+    lib.draper_solid_gdt_check_all.restype = ctypes.c_void_p
+
+    # String free + edge listing + bbox
+    lib.draper_free_string.argtypes = [ctypes.c_void_p]
+    lib.draper_free_string.restype = None
+    lib.draper_solid_list_edges.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.draper_solid_list_edges.restype = ctypes.c_void_p
+    lib.draper_document_bbox.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_double)]
+    lib.draper_document_bbox.restype = ctypes.c_int32
+
+    # STEP → USDA
+    lib.draper_export_step_to_usda.argtypes = [
+        ctypes.c_char_p, ctypes.c_char_p, ctypes.c_double,
+        ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint8,
+    ]
+    lib.draper_export_step_to_usda.restype = ctypes.c_int32
+
 
 # ============================================================
 # Public API
@@ -471,6 +561,295 @@ class Document:
         _check_result(_get_lib().draper_export_3mf(
             self._handle, path.encode("utf-8")
         ))
+
+    # ----------------------------------------------------------
+    # Editing operations (fillet / chamfer / shell)
+    # ----------------------------------------------------------
+
+    def fillet_edge(self, solid_index: int, edge_index: int, radius: float) -> None:
+        """Fillet (round) an edge of a solid.
+
+        Parameters
+        ----------
+        solid_index : int
+            Index of the solid in the document.
+        edge_index : int
+            TopoId of the edge. Pass 0 to auto-pick the first manifold edge.
+        radius : float
+            Fillet radius in mm.
+        """
+        _check_result(_get_lib().draper_solid_fillet_edge(
+            self._handle, solid_index, edge_index, radius
+        ))
+
+    def chamfer_edge(self, solid_index: int, edge_index: int, distance: float) -> None:
+        """Chamfer (bevel) an edge of a solid.
+
+        Parameters
+        ----------
+        solid_index : int
+            Index of the solid.
+        edge_index : int
+            TopoId of the edge. Pass 0 to auto-pick.
+        distance : float
+            Chamfer distance in mm.
+        """
+        _check_result(_get_lib().draper_solid_chamfer_edge(
+            self._handle, solid_index, edge_index, distance
+        ))
+
+    def make_shell(self, solid_index: int, thickness: float) -> None:
+        """Shell a solid (inward offset by `thickness` mm).
+
+        Parameters
+        ----------
+        solid_index : int
+            Index of the solid.
+        thickness : float
+            Shell thickness in mm.
+        """
+        _check_result(_get_lib().draper_solid_make_shell(
+            self._handle, solid_index, thickness
+        ))
+
+    # ----------------------------------------------------------
+    # Transform operations
+    # ----------------------------------------------------------
+
+    def translate(self, dx: float, dy: float, dz: float) -> None:
+        """Translate every solid in the document by (dx, dy, dz)."""
+        _check_result(_get_lib().draper_document_translate(
+            self._handle, dx, dy, dz
+        ))
+
+    def rotate(self, ax: float, ay: float, az: float, angle: float) -> None:
+        """Rotate every solid about axis (ax, ay, az) by `angle` radians."""
+        _check_result(_get_lib().draper_document_rotate(
+            self._handle, ax, ay, az, angle
+        ))
+
+    def rotate_around_point(self, ax: float, ay: float, az: float,
+                            cx: float, cy: float, cz: float,
+                            angle: float) -> None:
+        """Rotate every solid about an axis through (cx, cy, cz) by `angle` radians."""
+        _check_result(_get_lib().draper_document_rotate_around_point(
+            self._handle, ax, ay, az, cx, cy, cz, angle
+        ))
+
+    def scale(self, factor: float) -> None:
+        """Uniformly scale every solid by `factor` about the origin."""
+        _check_result(_get_lib().draper_document_scale(self._handle, factor))
+
+    def scale_around_point(self, factor: float,
+                           cx: float, cy: float, cz: float) -> None:
+        """Uniformly scale every solid by `factor` about (cx, cy, cz)."""
+        _check_result(_get_lib().draper_document_scale_around_point(
+            self._handle, factor, cx, cy, cz
+        ))
+
+    def mirror(self, ox: float, oy: float, oz: float,
+               nx: float, ny: float, nz: float) -> None:
+        """Mirror every solid about the plane through (ox, oy, oz) with normal (nx, ny, nz)."""
+        _check_result(_get_lib().draper_document_mirror(
+            self._handle, ox, oy, oz, nx, ny, nz
+        ))
+
+    # ----------------------------------------------------------
+    # Boolean operations
+    # ----------------------------------------------------------
+
+    def boolean_union(self, a_index: int, b_index: int) -> int:
+        """Boolean union of two solids. Returns the index of the new solid."""
+        out = ctypes.c_uint32(0)
+        _check_result(_get_lib().draper_document_boolean_union(
+            self._handle, a_index, b_index, ctypes.byref(out)
+        ))
+        return out.value
+
+    def boolean_subtract(self, a_index: int, b_index: int) -> int:
+        """Boolean subtract (A - B). Returns the index of the new solid."""
+        out = ctypes.c_uint32(0)
+        _check_result(_get_lib().draper_document_boolean_subtract(
+            self._handle, a_index, b_index, ctypes.byref(out)
+        ))
+        return out.value
+
+    def boolean_intersect(self, a_index: int, b_index: int) -> int:
+        """Boolean intersect (A ∩ B). Returns the index of the new solid."""
+        out = ctypes.c_uint32(0)
+        _check_result(_get_lib().draper_document_boolean_intersect(
+            self._handle, a_index, b_index, ctypes.byref(out)
+        ))
+        return out.value
+
+    def delete_solid(self, index: int) -> None:
+        """Delete the solid at `index`."""
+        _check_result(_get_lib().draper_document_delete_solid(self._handle, index))
+
+    # ----------------------------------------------------------
+    # Pattern operations
+    # ----------------------------------------------------------
+
+    def circular_pattern(self, solid_index: int, count: int,
+                         ax: float, ay: float, az: float) -> None:
+        """Create a circular pattern of `count` copies around axis (ax, ay, az)."""
+        _check_result(_get_lib().draper_document_circular_pattern(
+            self._handle, solid_index, count, ax, ay, az
+        ))
+
+    def linear_pattern(self, solid_index: int, count: int,
+                       dx: float, dy: float, dz: float, step: float) -> None:
+        """Create a linear pattern of `count` copies along (dx, dy, dz) with `step` mm spacing."""
+        _check_result(_get_lib().draper_document_linear_pattern(
+            self._handle, solid_index, count, dx, dy, dz, step
+        ))
+
+    # ----------------------------------------------------------
+    # Hole operations
+    # ----------------------------------------------------------
+
+    def add_circular_hole(self, solid_index: int, face_index: int,
+                          cx: float, cy: float, cz: float,
+                          radius: float) -> None:
+        """Add a circular hole of `radius` mm at (cx, cy, cz) on the face."""
+        _check_result(_get_lib().draper_solid_add_circular_hole(
+            self._handle, solid_index, face_index, cx, cy, cz, radius
+        ))
+
+    def remove_hole(self, solid_index: int, face_index: int, hole_index: int) -> None:
+        """Remove the i-th inner wire (hole) from a face."""
+        _check_result(_get_lib().draper_solid_remove_hole(
+            self._handle, solid_index, face_index, hole_index
+        ))
+
+    def clear_holes(self, solid_index: int, face_index: int) -> int:
+        """Clear all holes from a face. Returns the number of holes removed."""
+        return _get_lib().draper_solid_clear_holes(self._handle, solid_index, face_index)
+
+    # ----------------------------------------------------------
+    # Face management
+    # ----------------------------------------------------------
+
+    def delete_face(self, solid_index: int, face_index: int) -> None:
+        """Delete a face from a solid. WARNING: breaks watertightness."""
+        _check_result(_get_lib().draper_solid_delete_face(
+            self._handle, solid_index, face_index
+        ))
+
+    def reverse_face(self, solid_index: int, face_index: int) -> None:
+        """Reverse the orientation of a face."""
+        _check_result(_get_lib().draper_solid_reverse_face(
+            self._handle, solid_index, face_index
+        ))
+
+    # ----------------------------------------------------------
+    # GDT checks
+    # ----------------------------------------------------------
+
+    GDT_FLATNESS = 0
+    GDT_STRAIGHTNESS = 1
+    GDT_CIRCULARITY = 2
+    GDT_CYLINDRICITY = 3
+    GDT_POSITION = 4
+    GDT_PARALLELISM = 5
+    GDT_PERPENDICULARITY = 6
+    GDT_ANGULARITY = 7
+    GDT_RUNOUT = 8
+    GDT_PROFILE_OF_LINE = 9
+    GDT_PROFILE_OF_SURFACE = 10
+
+    def gdt_check(self, solid_index: int, check_type: int, tolerance_value: float,
+                  datum_axis=None, nominal_position=None, nominal_angle_deg=None) -> dict:
+        """Run a single GDT check on the solid's mesh.
+
+        Returns a dict with keys: tolerance_value, actual_deviation, passed, status_code.
+        """
+        use_da = 1 if datum_axis is not None else 0
+        use_np = 1 if nominal_position is not None else 0
+        use_na = 1 if nominal_angle_deg is not None else 0
+        da = datum_axis or (0.0, 0.0, 0.0)
+        np_ = nominal_position or (0.0, 0.0, 0.0)
+        na = nominal_angle_deg or 0.0
+
+        lib = _get_lib()
+        r = lib.draper_solid_gdt_check(
+            self._handle, solid_index, check_type, tolerance_value,
+            da[0], da[1], da[2], use_da,
+            np_[0], np_[1], np_[2], use_np,
+            na, use_na,
+        )
+        return {
+            "tolerance_value": r.tolerance_value,
+            "actual_deviation": r.actual_deviation,
+            "passed": bool(r.passed),
+            "status_code": r.status_code,
+        }
+
+    def gdt_check_all(self, solid_index: int, json_specs: str) -> str:
+        """Run all GDT checks from a JSON array of specs. Returns results as JSON string."""
+        ptr = _get_lib().draper_solid_gdt_check_all(
+            self._handle, solid_index, json_specs.encode("utf-8")
+        )
+        if not ptr:
+            raise DraperError(DraperResult.UNKNOWN_ERROR, _get_last_error_message())
+        try:
+            return ctypes.cast(ptr, ctypes.c_char_p).value.decode("utf-8")
+        finally:
+            _get_lib().draper_free_string(ptr)
+
+    # ----------------------------------------------------------
+    # Edge listing
+    # ----------------------------------------------------------
+
+    def list_edges(self, solid_index: int) -> str:
+        """List all edges in a solid as a JSON array string."""
+        ptr = _get_lib().draper_solid_list_edges(self._handle, solid_index)
+        if not ptr:
+            raise DraperError(DraperResult.UNKNOWN_ERROR, _get_last_error_message())
+        try:
+            return ctypes.cast(ptr, ctypes.c_char_p).value.decode("utf-8")
+        finally:
+            _get_lib().draper_free_string(ptr)
+
+    # ----------------------------------------------------------
+    # STEP I/O
+    # ----------------------------------------------------------
+
+    def load_step(self, path: str, heal: bool = True) -> None:
+        """Load a STEP file and append all its solids to the document."""
+        _check_result(_get_lib().draper_document_load_step(
+            self._handle, path.encode("utf-8"), 1 if heal else 0
+        ))
+
+    # ----------------------------------------------------------
+    # Bounding box
+    # ----------------------------------------------------------
+
+    def bounding_box(self) -> tuple:
+        """Return (min_x, min_y, min_z, max_x, max_y, max_z)."""
+        buf = (ctypes.c_double * 6)()
+        _check_result(_get_lib().draper_document_bbox(self._handle, buf))
+        return tuple(buf)
+
+
+# ============================================================
+# Module-level STEP → USDA helper
+# ============================================================
+
+def export_step_to_usda(step_path: str, output_path: str,
+                        chord_tolerance: float = 0.1,
+                        smooth_normals: bool = True,
+                        include_camera: bool = True,
+                        include_light: bool = True) -> None:
+    """Convert a STEP file to a USDA (USD ASCII) file."""
+    _check_result(_get_lib().draper_export_step_to_usda(
+        step_path.encode("utf-8"),
+        output_path.encode("utf-8"),
+        chord_tolerance,
+        1 if smooth_normals else 0,
+        1 if include_camera else 0,
+        1 if include_light else 0,
+    ))
 
 
 # ============================================================

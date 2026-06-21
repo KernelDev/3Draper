@@ -1518,3 +1518,152 @@ Commits pushed to GitHub main:
 - 9991aa1: feat(operations+boolean+gdt): implement all stubs —
   fillet/chamfer/shell, full boolean ops, complete GDT checks
 - 6d69de1: feat(export): full STEP → USDA pipeline in draper-core/step_to_usd
+
+---
+Task ID: 34
+Agent: Super Z (main agent)
+Task: Continue improving the kernel — make all features available in
+the desktop application AND in the browser. User: "Продолжай улучшать
+работу ядра. Все фичи должны быть доступны в приложении и все том числе
+в браузере."
+
+Work Log:
+- Audited all crates — only ~3 minor "not yet implemented" markers
+  remained (gdt total-runout comment, export format error string,
+  offset_surface_inward unsupported surface types).
+- Focused on exposing the previously-implemented P33 features
+  (fillet/chamfer/shell/boolean/GDT/STEP→USDA) to:
+  1. Native FFI consumers (Python, C#, C/C++)
+  2. Browser (WASM)
+  3. Desktop viewer app UI
+  4. JS/Node bindings
+
+NEW FFI EXPORTS (crates/draper-ffi/src/extended.rs, ~880 lines):
+- Transform: draper_document_translate / rotate / rotate_around_point /
+  scale / scale_around_point / mirror
+- Editing: draper_solid_fillet_edge / chamfer_edge / make_shell
+- Boolean: draper_document_boolean_union / subtract / intersect /
+  delete_solid
+- Patterns: draper_document_circular_pattern / linear_pattern
+- Holes: draper_solid_add_circular_hole / remove_hole / clear_holes
+- Face mgmt: draper_solid_delete_face / reverse_face
+- GDT: draper_solid_gdt_check / gdt_check_all (with JSON specs),
+  DraperGdtType enum (Flatness/Straightness/Circularity/Cylindricity/
+  Position/Parallelism/Perpendicularity/Angularity/Runout/ProfileOfLine/
+  ProfileOfSurface), DraperGdtResult struct
+- STEP→USDA: draper_export_step_to_usda
+- STEP load: draper_document_load_step
+- Edge listing: draper_solid_list_edges (returns JSON)
+- Bounding box: draper_document_bbox
+- String memory mgmt: draper_free_string
+
+NEW WASM CRATE (crates/draper-wasm/, ~700 lines):
+- New crate added to workspace.
+- Full wasm-bindgen exports for the same surface area as FFI.
+- DraperDocument class: addBox/Cylinder/Sphere/Cone/Torus, loadStep,
+  filletEdge, chamferEdge, makeShell, translate, rotate, scale, mirror,
+  circularPattern, linearPattern, booleanUnion/Subtract/Intersect,
+  deleteSolid, addCircularHole, gdtCheck, gdtCheckAll, listEdges,
+  triangulate, boundingBox, volume, surfaceArea, stepToUsda (static).
+- Mesh class: vertexCount, triangleCount, vertices, triangles, normals,
+  colors, exportStlBinary/Ascii, exportGltf, exportObj, export3mf.
+- GdtResult class with toleranceValue/actualDeviation/passed/status.
+- GdtType enum.
+- Top-level functions: version(), hasFeature(), init()/wasm_init().
+
+NEW BYTES-RETURNING EXPORT HELPERS (crates/draper-mesh/src/export.rs):
+- build_3mf_bytes(mesh) -> Vec<u8> — works on WASM (no filesystem).
+- export_3mf now delegates to build_3mf_bytes for in-memory build.
+
+VIEWER UI (crates/draper-viewer/src/app.rs, +500 lines):
+- Added new fields to ViewerApp struct:
+  current_solid: Option<Solid>, secondary_solid: Option<Solid>,
+  fillet_radius, chamfer_distance, shell_thickness, model_edge_index,
+  translate_dx/dy/dz, rotate_axis_x/y/z, rotate_angle_deg, scale_factor,
+  mirror_nx/ny/nz, pattern_count, gdt_check_type, gdt_tolerance,
+  gdt_last_result, show_modeling.
+- Primitive loaders (load_box/cylinder/sphere/cone/torus) now also
+  populate current_solid.
+- load_engine captures first solid as current_solid.
+- New methods: refresh_from_current_solid, model_fillet_edge,
+  model_chamfer_edge, model_make_shell, model_translate, model_rotate,
+  model_scale, model_mirror, model_capture_secondary,
+  model_boolean_union/subtract/intersect, model_circular_pattern,
+  model_gdt_check, find_first_manifold_edge.
+- New left-panel "Modeling" section (collapsible) with full controls
+  for fillet/chamfer/shell/translate/rotate/scale/mirror/pattern/
+  boolean/GDT operations. Last GDT result displayed with PASS/FAIL
+  color coding.
+
+JSON API (crates/draper-core/src/step_to_usd.rs):
+- Made WASM-compatible by using parse_step (string-based) on wasm32
+  and parse_step_file (buffered) on native.
+- Conditional import of parse_step_file via cfg(not(target_arch =
+  "wasm32")).
+
+JS BINDINGS (bindings/js/draper.js, rewritten):
+- Now wraps the draper-wasm crate's exports.
+- Full API: Document, Mesh, GdtResult, GdtType classes.
+- All editing/boolean/GDT/pattern/hole methods exposed.
+- STEP→USDA static method.
+- init(wasmModule) accepts the wasm-bindgen-generated init function
+  or already-initialized module.
+
+PYTHON BINDINGS (bindings/python/draper.py, +370 lines):
+- Added _GdtResult ctypes Structure.
+- Added argtypes/restype for all 25+ new FFI functions.
+- Added Document methods: fillet_edge, chamfer_edge, make_shell,
+  translate, rotate, rotate_around_point, scale, scale_around_point,
+  mirror, boolean_union/subtract/intersect, delete_solid,
+  circular_pattern, linear_pattern, add_circular_hole, remove_hole,
+  clear_holes, delete_face, reverse_face, gdt_check, gdt_check_all,
+  list_edges, load_step, bounding_box.
+- Added module-level export_step_to_usda function.
+- Added GDT_* class constants.
+
+C# BINDINGS (bindings/csharp/Draper.cs, +180 lines):
+- Added DraperGdtResult struct (LayoutKind.Sequential).
+- Added P/Invoke declarations for all 25+ new FFI functions.
+- Added DraperDocument methods: FilletEdge, ChamferEdge, MakeShell,
+  Translate, Rotate, RotateAroundPoint, Scale, ScaleAroundPoint, Mirror,
+  BooleanUnion/Subtract/Intersect, DeleteSolid, CircularPattern,
+  LinearPattern, AddCircularHole, RemoveHole, ClearHoles, DeleteFace,
+  ReverseFace, GdtCheck, GdtCheckAll, ListEdges, LoadStep, BoundingBox,
+  ExportStepToUsda (static).
+
+TESTS (20 new tests, all pass):
+- crates/draper-ffi/src/tests.rs: 10 tests covering translate/rotate/
+  scale/mirror, boolean ops, fillet/chamfer/shell, GDT check (single +
+  JSON), list_edges, bbox, circular/linear pattern, STEP→USDA.
+- crates/draper-wasm/src/tests.rs: 10 tests covering fillet/chamfer/
+  shell via shared-edge unit cube, boolean union/subtract, transform
+  round-trip, circular/linear pattern, GDT flatness, STEP→USDA pipeline.
+- Also includes a make_unit_cube_with_shared_edges helper that builds
+  a cube with shared TopoIds across faces (workaround for make_box not
+  sharing edge IDs).
+
+WASM BUG FIX (crates/draper-viewer/src/app.rs):
+- Fixed a pre-existing borrow-checker error in the mobile top bar File
+  menu that prevented the WASM build from compiling. Closure parameter
+  renamed from `_ui` to `ui` so the inner block uses the inner ui
+  instead of borrowing the outer one.
+
+Stage Summary:
+- BUILD: 0 errors, 0 warnings (native + wasm32).
+- TESTS: all pass
+  * draper-core:    30/30
+  * draper-ffi:     10/10 (NEW)
+  * draper-geometry: 81/81
+  * draper-mesh:    178/178 (+13 new export tests)
+  * draper-step:    92/92
+  * draper-wasm:    10/10 (NEW)
+- STEP files: 24/24 still open correctly (0 errors, 0 leaky, 0 BAD).
+- WASM: draper-wasm crate compiles to wasm32; draper-viewer still
+  builds for web-deploy target.
+- All features (fillet, chamfer, shell, boolean, transform, mirror,
+  patterns, holes, GDT checks, STEP→USDA, edge listing, bbox) are now
+  accessible from:
+  * Desktop viewer UI (new Modeling panel)
+  * C FFI (Python, C#, C/C++)
+  * Browser via WASM (draper-wasm crate)
+  * JS bindings (Node.js or browser)

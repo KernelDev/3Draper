@@ -13,7 +13,7 @@ use crate::renderer::{
     update_wireframe_overlay_buffers,
 };
 use draper_core::engine::{EngineConfig, build_engine};
-use draper_topology::ShapeBuilder;
+use draper_topology::{ShapeBuilder, Solid};
 use draper_mesh::{triangulate_solid, TriangleMesh, TriangulationParams, check_manifold, ManifoldReport, cut_text_holes_in_mesh, TextSurface};
 use draper_step::{AssemblyNode, DetailedMeshInstance, FaceInfo, PendingBrepInstance, OwnedStepConversionContext, StepFile, step_structure_lazy};
 use draper_geometry::Surface;
@@ -26,6 +26,22 @@ use eframe::egui;
 /// The LOD level can be changed via the UI before loading a model.
 fn tri_params_for_lod(lod: LodLevel) -> TriangulationParams {
     lod.params()
+}
+
+/// Human-readable label for a GDT check type ID.
+fn gdt_type_label(id: u32) -> &'static str {
+    match id {
+        0 => "Flatness",
+        1 => "Straightness",
+        2 => "Circularity",
+        3 => "Cylindricity",
+        4 => "Position",
+        5 => "Parallelism",
+        6 => "Perpendicularity",
+        7 => "Angularity",
+        8 => "Runout",
+        _ => "Unknown",
+    }
 }
 
 /// Convert TriangleMesh to GPU vertex/index data.
@@ -526,6 +542,44 @@ pub struct ViewerApp {
     /// Pending mesh data received from the worker, waiting to be merged.
     #[cfg(target_arch = "wasm32")]
     worker_pending_meshes: Vec<WorkerMeshResult>,
+
+    // ─── Modeling (editing + boolean + GDT) ────────────────────────────────
+    /// The current solid being edited (set whenever a primitive is loaded
+    /// or a STEP file with a single solid is imported). Operations like
+    /// fillet/chamfer/shell/transform work on this solid.
+    current_solid: Option<Solid>,
+    /// A second solid for boolean operations (set via "Set as Boolean B"
+    /// button which captures the current solid).
+    secondary_solid: Option<Solid>,
+    /// Fillet radius (mm) for the fillet_edge operation.
+    fillet_radius: f64,
+    /// Chamfer distance (mm) for the chamfer_edge operation.
+    chamfer_distance: f64,
+    /// Shell thickness (mm) for the make_shell operation.
+    shell_thickness: f64,
+    /// Edge ID to fillet/chamfer (0 = first manifold edge found).
+    model_edge_index: usize,
+    /// Translate delta (mm).
+    translate_dx: f64, translate_dy: f64, translate_dz: f64,
+    /// Rotation axis (will be normalized).
+    rotate_axis_x: f64, rotate_axis_y: f64, rotate_axis_z: f64,
+    /// Rotation angle in degrees.
+    rotate_angle_deg: f64,
+    /// Scale factor.
+    scale_factor: f64,
+    /// Mirror plane normal.
+    mirror_nx: f64, mirror_ny: f64, mirror_nz: f64,
+    /// Circular pattern count.
+    pattern_count: usize,
+    /// GDT check type (0=Flatness, 1=Straightness, 2=Circularity, 3=Cylindricity,
+    /// 4=Position, 5=Parallelism, 6=Perpendicularity, 7=Angularity, 8=Runout).
+    gdt_check_type: u32,
+    /// GDT tolerance value (mm).
+    gdt_tolerance: f64,
+    /// Last GDT result (actual deviation).
+    gdt_last_result: Option<(f64, f64, bool)>, // (tolerance, actual, passed)
+    /// Show the modeling panel.
+    show_modeling: bool,
 }
 
 /// Mobile overlay panel type.
@@ -767,6 +821,7 @@ impl ViewerApp {
 
         // Start with a default box
         let solid = ShapeBuilder::make_box(100.0, 100.0, 100.0);
+        let solid_clone_for_field = solid.clone();
         let params = TriangulationParams::default();
         let mut mesh = triangulate_solid(&solid, &params);
 
@@ -873,6 +928,22 @@ impl ViewerApp {
             worker_ready: false,
             #[cfg(target_arch = "wasm32")]
             worker_pending_meshes: Vec::new(),
+            current_solid: Some(solid_clone_for_field),
+            secondary_solid: None,
+            fillet_radius: 5.0,
+            chamfer_distance: 3.0,
+            shell_thickness: 2.0,
+            model_edge_index: 0,
+            translate_dx: 50.0, translate_dy: 0.0, translate_dz: 0.0,
+            rotate_axis_x: 0.0, rotate_axis_y: 0.0, rotate_axis_z: 1.0,
+            rotate_angle_deg: 45.0,
+            scale_factor: 1.5,
+            mirror_nx: 1.0, mirror_ny: 0.0, mirror_nz: 0.0,
+            pattern_count: 6,
+            gdt_check_type: 0,
+            gdt_tolerance: 0.1,
+            gdt_last_result: None,
+            show_modeling: false,
         };
         app.log("3Draper Viewer started");
         app.log(&format!("Default model: Box 100x100x100 ({} vertices, {} triangles)",
@@ -945,6 +1016,7 @@ impl ViewerApp {
     fn load_box(&mut self) {
         let solid = ShapeBuilder::make_box(100.0, 80.0, 60.0);
         let mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
+        self.current_solid = Some(solid);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -954,6 +1026,7 @@ impl ViewerApp {
     fn load_cylinder(&mut self) {
         let solid = ShapeBuilder::make_cylinder(40.0, 100.0);
         let mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
+        self.current_solid = Some(solid);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -963,6 +1036,7 @@ impl ViewerApp {
     fn load_sphere(&mut self) {
         let solid = ShapeBuilder::make_sphere(50.0);
         let mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
+        self.current_solid = Some(solid);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -975,6 +1049,7 @@ impl ViewerApp {
         let half_angle = (radius / height).atan();
         let solid = ShapeBuilder::make_cone(radius, height, half_angle);
         let mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
+        self.current_solid = Some(solid);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -984,6 +1059,7 @@ impl ViewerApp {
     fn load_torus(&mut self) {
         let solid = ShapeBuilder::make_torus(40.0, 12.0);
         let mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
+        self.current_solid = Some(solid);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -996,7 +1072,352 @@ impl ViewerApp {
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
+        self.current_solid = doc.solids().into_iter().next().cloned();
         self.load_mesh(mesh, "ICE Engine (I4)");
+    }
+
+    // ─── Modeling operations ────────────────────────────────────────────
+
+    /// Helper: re-triangulate from `current_solid` and update the viewer.
+    fn refresh_from_current_solid(&mut self, name: &str) {
+        if let Some(solid) = &self.current_solid {
+            let mesh = triangulate_solid(solid, &tri_params_for_lod(self.lod_level));
+            self.detailed_instances.clear();
+            self.instance_triangle_ranges.clear();
+            self.assembly_tree = None;
+            self.load_mesh(mesh, name);
+        } else {
+            self.log_warning("No current solid — load a primitive first");
+        }
+    }
+
+    /// Apply fillet to the edge at `model_edge_index` of the current solid.
+    fn model_fillet_edge(&mut self) {
+        let radius = self.fillet_radius;
+        let edge_index = self.model_edge_index;
+        let mut solid = match self.current_solid.take() {
+            Some(s) => s,
+            None => {
+                self.log_warning("Fillet: no current solid");
+                return;
+            }
+        };
+        // If edge_index is 0, find the first manifold edge.
+        let actual_edge_id = if edge_index == 0 {
+            self.find_first_manifold_edge(&solid)
+        } else {
+            edge_index
+        };
+        match draper_core::operations::fillet_edge(&mut solid, actual_edge_id, radius) {
+            Ok(()) => {
+                self.current_solid = Some(solid);
+                self.refresh_from_current_solid(&format!("Fillet r={} on edge {}", radius, actual_edge_id));
+            }
+            Err(e) => {
+                self.log_warning(&format!("Fillet failed: {}", e));
+                self.current_solid = Some(solid);
+            }
+        }
+    }
+
+    /// Apply chamfer to the edge at `model_edge_index` of the current solid.
+    fn model_chamfer_edge(&mut self) {
+        let distance = self.chamfer_distance;
+        let edge_index = self.model_edge_index;
+        let mut solid = match self.current_solid.take() {
+            Some(s) => s,
+            None => {
+                self.log_warning("Chamfer: no current solid");
+                return;
+            }
+        };
+        let actual_edge_id = if edge_index == 0 {
+            self.find_first_manifold_edge(&solid)
+        } else {
+            edge_index
+        };
+        match draper_core::operations::chamfer_edge(&mut solid, actual_edge_id, distance) {
+            Ok(()) => {
+                self.current_solid = Some(solid);
+                self.refresh_from_current_solid(&format!("Chamfer d={} on edge {}", distance, actual_edge_id));
+            }
+            Err(e) => {
+                self.log_warning(&format!("Chamfer failed: {}", e));
+                self.current_solid = Some(solid);
+            }
+        }
+    }
+
+    /// Apply shell to the current solid.
+    fn model_make_shell(&mut self) {
+        let thickness = self.shell_thickness;
+        let mut solid = match self.current_solid.take() {
+            Some(s) => s,
+            None => {
+                self.log_warning("Shell: no current solid");
+                return;
+            }
+        };
+        match draper_core::operations::make_shell(&mut solid, thickness) {
+            Ok(()) => {
+                self.current_solid = Some(solid);
+                self.refresh_from_current_solid(&format!("Shell thickness={}", thickness));
+            }
+            Err(e) => {
+                self.log_warning(&format!("Shell failed: {}", e));
+                self.current_solid = Some(solid);
+            }
+        }
+    }
+
+    /// Translate the current solid.
+    fn model_translate(&mut self) {
+        let (dx, dy, dz) = (self.translate_dx, self.translate_dy, self.translate_dz);
+        if let Some(s) = &mut self.current_solid {
+            draper_core::operations::translate_solid(s, dx, dy, dz);
+            self.refresh_from_current_solid(&format!("Translate ({},{},{})", dx, dy, dz));
+        }
+    }
+
+    /// Rotate the current solid about (axis) by angle (degrees).
+    fn model_rotate(&mut self) {
+        let (ax, ay, az) = (self.rotate_axis_x, self.rotate_axis_y, self.rotate_axis_z);
+        let angle = self.rotate_angle_deg.to_radians();
+        let axis = match draper_geometry::Direction3d::new(ax, ay, az) {
+            Some(d) => d,
+            None => {
+                self.log_warning("Rotate: zero-length axis");
+                return;
+            }
+        };
+        if let Some(s) = &mut self.current_solid {
+            draper_core::operations::rotate_solid(s, &axis, angle);
+            self.refresh_from_current_solid(&format!("Rotate {}° about ({},{},{})", self.rotate_angle_deg, ax, ay, az));
+        }
+    }
+
+    /// Scale the current solid uniformly.
+    fn model_scale(&mut self) {
+        let f = self.scale_factor;
+        if !f.is_finite() || f <= 0.0 {
+            self.log_warning(&format!("Scale: invalid factor {}", f));
+            return;
+        }
+        if let Some(s) = &mut self.current_solid {
+            draper_core::operations::scale_solid(s, f);
+            self.refresh_from_current_solid(&format!("Scale ×{}", f));
+        }
+    }
+
+    /// Mirror the current solid about the plane through origin with normal (nx,ny,nz).
+    fn model_mirror(&mut self) {
+        let (nx, ny, nz) = (self.mirror_nx, self.mirror_ny, self.mirror_nz);
+        let normal = match draper_geometry::Direction3d::new(nx, ny, nz) {
+            Some(d) => d,
+            None => {
+                self.log_warning("Mirror: zero-length normal");
+                return;
+            }
+        };
+        if let Some(s) = &self.current_solid {
+            let mirrored = draper_core::operations::mirror_solid(
+                s,
+                draper_geometry::Point3d::ORIGIN,
+                normal,
+            );
+            self.current_solid = Some(mirrored);
+            self.refresh_from_current_solid(&format!("Mirror about ({},{},{})", nx, ny, nz));
+        }
+    }
+
+    /// Set the current solid as the secondary solid (B) for boolean ops.
+    fn model_capture_secondary(&mut self) {
+        if let Some(s) = &self.current_solid {
+            self.secondary_solid = Some(s.clone());
+            self.log("Captured current solid as Boolean B");
+        } else {
+            self.log_warning("No current solid to capture");
+        }
+    }
+
+    /// Boolean union of current (A) and secondary (B).
+    fn model_boolean_union(&mut self) {
+        let b = match self.secondary_solid.take() {
+            Some(b) => b,
+            None => {
+                self.log_warning("Union: no secondary solid (use 'Set B' first)");
+                return;
+            }
+        };
+        let a = match self.current_solid.take() {
+            Some(a) => a,
+            None => {
+                self.log_warning("Union: no current solid");
+                self.secondary_solid = Some(b);
+                return;
+            }
+        };
+        match draper_core::boolean::boolean_union(&a, &b) {
+            Ok(result) => {
+                self.current_solid = Some(result);
+                self.refresh_from_current_solid("A ∪ B");
+            }
+            Err(e) => {
+                self.log_warning(&format!("Union failed: {}", e));
+                self.current_solid = Some(a);
+                self.secondary_solid = Some(b);
+            }
+        }
+    }
+
+    /// Boolean subtract: A - B.
+    fn model_boolean_subtract(&mut self) {
+        let b = match self.secondary_solid.take() {
+            Some(b) => b,
+            None => {
+                self.log_warning("Subtract: no secondary solid (use 'Set B' first)");
+                return;
+            }
+        };
+        let a = match self.current_solid.take() {
+            Some(a) => a,
+            None => {
+                self.log_warning("Subtract: no current solid");
+                self.secondary_solid = Some(b);
+                return;
+            }
+        };
+        match draper_core::boolean::boolean_subtract(&a, &b) {
+            Ok(result) => {
+                self.current_solid = Some(result);
+                self.refresh_from_current_solid("A − B");
+            }
+            Err(e) => {
+                self.log_warning(&format!("Subtract failed: {}", e));
+                self.current_solid = Some(a);
+                self.secondary_solid = Some(b);
+            }
+        }
+    }
+
+    /// Boolean intersect: A ∩ B.
+    fn model_boolean_intersect(&mut self) {
+        let b = match self.secondary_solid.take() {
+            Some(b) => b,
+            None => {
+                self.log_warning("Intersect: no secondary solid (use 'Set B' first)");
+                return;
+            }
+        };
+        let a = match self.current_solid.take() {
+            Some(a) => a,
+            None => {
+                self.log_warning("Intersect: no current solid");
+                self.secondary_solid = Some(b);
+                return;
+            }
+        };
+        match draper_core::boolean::boolean_intersect(&a, &b) {
+            Ok(result) => {
+                self.current_solid = Some(result);
+                self.refresh_from_current_solid("A ∩ B");
+            }
+            Err(e) => {
+                self.log_warning(&format!("Intersect failed: {}", e));
+                self.current_solid = Some(a);
+                self.secondary_solid = Some(b);
+            }
+        }
+    }
+
+    /// Create a circular pattern: `pattern_count` copies around Z axis.
+    fn model_circular_pattern(&mut self) {
+        let count = self.pattern_count;
+        if count == 0 || count > 100 {
+            self.log_warning(&format!("Pattern count {} out of range (1..100)", count));
+            return;
+        }
+        let axis = draper_geometry::Direction3d::Z;
+        if let Some(s) = &self.current_solid {
+            let copies = draper_core::operations::circular_pattern(
+                s, axis, count, 2.0 * std::f64::consts::PI,
+            );
+            if copies.is_empty() {
+                self.log_warning("Pattern produced no copies");
+                return;
+            }
+            // Merge copies into one solid by replacing current_solid with the first copy.
+            // For visualization, we'd ideally create a Compound — but our triangulate_solid
+            // works on single solids. So we triangulate each and merge meshes.
+            let mut merged_mesh = triangulate_solid(s, &tri_params_for_lod(self.lod_level));
+            for c in &copies {
+                let m = triangulate_solid(c, &tri_params_for_lod(self.lod_level));
+                merged_mesh.merge(&m);
+            }
+            self.current_solid = Some(copies.into_iter().next().unwrap_or_else(|| s.clone()));
+            self.detailed_instances.clear();
+            self.instance_triangle_ranges.clear();
+            self.assembly_tree = None;
+            self.load_mesh(merged_mesh, &format!("Circular pattern ×{}", count));
+        }
+    }
+
+    /// Run a GDT check on the current solid's mesh.
+    fn model_gdt_check(&mut self) {
+        let solid = match &self.current_solid {
+            Some(s) => s,
+            None => {
+                self.log_warning("GDT: no current solid");
+                return;
+            }
+        };
+        let mesh = triangulate_solid(solid, &tri_params_for_lod(self.lod_level));
+        let check_type = match self.gdt_check_type {
+            0 => draper_mesh::gdt_check::GdtCheckType::Flatness,
+            1 => draper_mesh::gdt_check::GdtCheckType::Straightness,
+            2 => draper_mesh::gdt_check::GdtCheckType::Circularity,
+            3 => draper_mesh::gdt_check::GdtCheckType::Cylindricity,
+            4 => draper_mesh::gdt_check::GdtCheckType::Position,
+            5 => draper_mesh::gdt_check::GdtCheckType::Parallelism,
+            6 => draper_mesh::gdt_check::GdtCheckType::Perpendicularity,
+            7 => draper_mesh::gdt_check::GdtCheckType::Angularity,
+            8 => draper_mesh::gdt_check::GdtCheckType::Runout,
+            _ => draper_mesh::gdt_check::GdtCheckType::Flatness,
+        };
+        let check_type_for_log = format!("{:?}", check_type);
+        let spec = draper_mesh::gdt_check::ToleranceSpec {
+            tolerance_type: check_type,
+            tolerance_value: self.gdt_tolerance,
+            ..Default::default()
+        };
+        let checker = draper_mesh::gdt_check::GdtChecker::new(&mesh);
+        let r = checker.check(&spec);
+        let status = if r.passed { "PASS" } else { "FAIL" };
+        self.gdt_last_result = Some((r.tolerance_value, r.actual_deviation, r.passed));
+        self.log(&format!(
+            "GDT {}: actual={:.4}mm, tolerance={:.4}mm → {}",
+            check_type_for_log, r.actual_deviation, r.tolerance_value, status
+        ));
+    }
+
+    /// Find the first edge ID that is shared by exactly 2 faces (manifold edge).
+    fn find_first_manifold_edge(&self, solid: &Solid) -> usize {
+        use std::collections::HashMap;
+        let mut edge_count: HashMap<u64, usize> = HashMap::new();
+        if let Some(shell) = solid.outer_shell.as_ref() {
+            for face in &shell.faces {
+                for edge in &face.edges {
+                    *edge_count.entry(edge.id.to_u64()).or_insert(0) += 1;
+                }
+            }
+        }
+        for (id, count) in &edge_count {
+            if *count == 2 {
+                return *id as usize;
+            }
+        }
+        // Fallback: return 1 (the first edge ID usually)
+        1
     }
 
     /// Load a revolution solid (vase-like shape) — demonstrates RevolutionSurface.
@@ -3372,6 +3793,140 @@ impl eframe::App for ViewerApp {
                         .color(egui::Color32::GRAY));
                 }
 
+                // --- Modeling ---
+                ui.separator();
+                ui.heading(egui::RichText::new("Modeling").size(12.0));
+                ui.checkbox(&mut self.show_modeling, "Show Modeling Panel");
+                if self.show_modeling {
+                    egui::Frame::group(ui.style())
+                        .inner_margin(egui::Margin::same(6))
+                        .show(ui, |ui| {
+                            // Fillet
+                            ui.label(egui::RichText::new("Fillet Edge").size(11.0).strong());
+                            ui.horizontal(|ui| {
+                                ui.label("r:");
+                                ui.add(egui::DragValue::new(&mut self.fillet_radius)
+                                    .speed(0.1).range(0.01..=100.0).suffix(" mm"));
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("edge:");
+                                ui.add(egui::DragValue::new(&mut self.model_edge_index)
+                                    .range(0..=100000));
+                                ui.label("(0=auto)");
+                            });
+                            if ui.button("Fillet").clicked() { self.model_fillet_edge(); }
+
+                            // Chamfer
+                            ui.add_space(2.0);
+                            ui.label(egui::RichText::new("Chamfer Edge").size(11.0).strong());
+                            ui.horizontal(|ui| {
+                                ui.label("d:");
+                                ui.add(egui::DragValue::new(&mut self.chamfer_distance)
+                                    .speed(0.1).range(0.01..=100.0).suffix(" mm"));
+                            });
+                            if ui.button("Chamfer").clicked() { self.model_chamfer_edge(); }
+
+                            // Shell
+                            ui.add_space(2.0);
+                            ui.label(egui::RichText::new("Shell").size(11.0).strong());
+                            ui.horizontal(|ui| {
+                                ui.label("t:");
+                                ui.add(egui::DragValue::new(&mut self.shell_thickness)
+                                    .speed(0.1).range(0.01..=100.0).suffix(" mm"));
+                            });
+                            if ui.button("Shell").clicked() { self.model_make_shell(); }
+
+                            // Transform
+                            ui.add_space(2.0);
+                            ui.label(egui::RichText::new("Transform").size(11.0).strong());
+                            ui.horizontal(|ui| {
+                                ui.label("Δ:");
+                                ui.add(egui::DragValue::new(&mut self.translate_dx).speed(1.0));
+                                ui.add(egui::DragValue::new(&mut self.translate_dy).speed(1.0));
+                                ui.add(egui::DragValue::new(&mut self.translate_dz).speed(1.0));
+                            });
+                            if ui.button("Translate").clicked() { self.model_translate(); }
+                            ui.horizontal(|ui| {
+                                ui.label("axis:");
+                                ui.add(egui::DragValue::new(&mut self.rotate_axis_x).speed(0.05).range(-1.0..=1.0));
+                                ui.add(egui::DragValue::new(&mut self.rotate_axis_y).speed(0.05).range(-1.0..=1.0));
+                                ui.add(egui::DragValue::new(&mut self.rotate_axis_z).speed(0.05).range(-1.0..=1.0));
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("angle:");
+                                ui.add(egui::DragValue::new(&mut self.rotate_angle_deg)
+                                    .speed(1.0).range(-360.0..=360.0).suffix("°"));
+                            });
+                            if ui.button("Rotate").clicked() { self.model_rotate(); }
+                            ui.horizontal(|ui| {
+                                ui.label("scale:");
+                                ui.add(egui::DragValue::new(&mut self.scale_factor)
+                                    .speed(0.05).range(0.01..=100.0));
+                            });
+                            if ui.button("Scale").clicked() { self.model_scale(); }
+                            ui.horizontal(|ui| {
+                                ui.label("normal:");
+                                ui.add(egui::DragValue::new(&mut self.mirror_nx).speed(0.05).range(-1.0..=1.0));
+                                ui.add(egui::DragValue::new(&mut self.mirror_ny).speed(0.05).range(-1.0..=1.0));
+                                ui.add(egui::DragValue::new(&mut self.mirror_nz).speed(0.05).range(-1.0..=1.0));
+                            });
+                            if ui.button("Mirror").clicked() { self.model_mirror(); }
+
+                            // Patterns
+                            ui.add_space(2.0);
+                            ui.label(egui::RichText::new("Pattern").size(11.0).strong());
+                            ui.horizontal(|ui| {
+                                ui.label("count:");
+                                ui.add(egui::DragValue::new(&mut self.pattern_count)
+                                    .range(1..=100));
+                            });
+                            if ui.button("Circular Pattern (Z)").clicked() { self.model_circular_pattern(); }
+
+                            // Boolean
+                            ui.add_space(2.0);
+                            ui.label(egui::RichText::new("Boolean").size(11.0).strong());
+                            if ui.button("Set Current as B").clicked() { self.model_capture_secondary(); }
+                            ui.horizontal(|ui| {
+                                if ui.button("A ∪ B").clicked() { self.model_boolean_union(); }
+                                if ui.button("A − B").clicked() { self.model_boolean_subtract(); }
+                                if ui.button("A ∩ B").clicked() { self.model_boolean_intersect(); }
+                            });
+
+                            // GDT
+                            ui.add_space(2.0);
+                            ui.label(egui::RichText::new("GDT Check").size(11.0).strong());
+                            egui::ComboBox::from_id_salt("gdt_type")
+                                .selected_text(gdt_type_label(self.gdt_check_type))
+                                .show_ui(ui, |ui| {
+                                    for i in 0..=8u32 {
+                                        ui.selectable_value(&mut self.gdt_check_type, i, gdt_type_label(i));
+                                    }
+                                });
+                            ui.horizontal(|ui| {
+                                ui.label("tol:");
+                                ui.add(egui::DragValue::new(&mut self.gdt_tolerance)
+                                    .speed(0.01).range(0.001..=100.0).suffix(" mm"));
+                            });
+                            if ui.button("Run GDT Check").clicked() { self.model_gdt_check(); }
+                            if let Some((tol, actual, passed)) = self.gdt_last_result {
+                                let color = if passed {
+                                    egui::Color32::from_rgb(80, 200, 80)
+                                } else {
+                                    egui::Color32::from_rgb(220, 80, 80)
+                                };
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "Actual: {:.4} / Tol: {:.4} → {}",
+                                        actual, tol,
+                                        if passed { "PASS" } else { "FAIL" }
+                                    ))
+                                    .size(10.0)
+                                    .color(color)
+                                );
+                            }
+                        });
+                }
+
                 // --- Display ---
                 ui.separator();
                 ui.heading(egui::RichText::new("Display").size(12.0));
@@ -3861,7 +4416,7 @@ impl ViewerApp {
                     ui.heading(egui::RichText::new("3Draper").size(14.0));
                     ui.separator();
                     // File menu
-                    ui.menu_button("File", |_ui| {
+                    ui.menu_button("File", |ui| {
                         #[cfg(target_arch = "wasm32")]
                         {
                             if ui.button("Import STL...").clicked() {

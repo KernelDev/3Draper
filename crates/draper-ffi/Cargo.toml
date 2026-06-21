@@ -14,6 +14,10 @@ draper-topology = { workspace = true }
 draper-mesh = { workspace = true, default-features = false, features = ["export-3mf"] }
 draper-core = { workspace = true }
 draper-step = { workspace = true }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
 
 [build-dependencies]
 cbindgen = "0.27"

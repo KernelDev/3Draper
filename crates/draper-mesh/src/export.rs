@@ -931,14 +931,24 @@ pub fn export_usda(mesh: &TriangleMesh, path: &str) -> Result<(), ExportError> {
 /// - `_rels/.rels`
 /// - `3D/3dmodel.model`
 pub fn export_3mf(mesh: &TriangleMesh, path: &str) -> Result<(), ExportError> {
+    let bytes = build_3mf_bytes(mesh)?;
+    std::fs::write(path, &bytes)?;
+    Ok(())
+}
+
+/// Build the 3MF ZIP archive in memory and return the bytes.
+///
+/// Works on all platforms including WASM (no filesystem access required).
+pub fn build_3mf_bytes(mesh: &TriangleMesh) -> Result<Vec<u8>, ExportError> {
     if mesh.vertices.is_empty() || mesh.triangles.is_empty() {
         return Err(ExportError::InvalidMesh("Mesh has no vertices or triangles".into()));
     }
 
-    let file = std::fs::File::create(path)?;
-    let mut zip = zip::ZipWriter::new(file);
-    let options = SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
+    let mut buf: std::io::Cursor<Vec<u8>> = std::io::Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut buf);
+        let options = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
 
     // [Content_Types].xml
     let content_types = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -963,7 +973,8 @@ pub fn export_3mf(mesh: &TriangleMesh, path: &str) -> Result<(), ExportError> {
     zip.write_all(model_xml.as_bytes())?;
 
     zip.finish()?;
-    Ok(())
+    } // drop zip
+    Ok(buf.into_inner())
 }
 
 /// Build the 3MF model XML content.
