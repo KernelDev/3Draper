@@ -2,9 +2,13 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <!-- Mobile-first viewport: allows user zoom (accessibility) but starts at 1.0 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#3a5a8c">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title>3Draper — 3D Geometric Kernel</title>
-    <meta name="description" content="3Draper: A 3D geometric kernel with B-Rep topology, STEP/STL I/O, and interactive 3D viewer running entirely in your browser via WebAssembly.">
+    <meta name="description" content="3Draper: A 3D geometric kernel with B-Rep topology, STEP/STL I/O, NURBS surfaces & curves, and interactive 3D viewer running entirely in your browser via WebAssembly.">
 <script type="module">
 import init, * as bindings from './draper-viewer.js';
 const wasm = await init('./draper-viewer_bg.wasm');
@@ -16,15 +20,24 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         html, body {
             width: 100%;
             height: 100%;
+            /* Use 100dvh for mobile browsers (handles URL bar hide/show).
+               Fall back to 100vh for older browsers. */
+            height: 100dvh;
             overflow: hidden;
             background: #e8e9ef;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+            /* Prevent text selection on touch — feels more app-like. */
+            -webkit-user-select: none;
+            user-select: none;
+            -webkit-tap-highlight-color: transparent;
+            /* Respect notch / safe areas on iPhone. */
+            padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
         }
         #the_canvas_id {
             width: 100%;
-            height: 100vh;
+            height: 100%;
             display: block;
-            touch-action: none;
+            touch-action: none; /* Prevent browser from intercepting touch gestures */
         }
         #loading {
             position: fixed;
@@ -36,6 +49,8 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
             background: #e8e9ef;
             z-index: 1000;
             transition: opacity 0.5s ease;
+            padding: 20px;
+            text-align: center;
         }
         #loading.fade-out {
             opacity: 0;
@@ -66,10 +81,46 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
             margin-top: 20px;
             color: #556677;
             font-size: 14px;
+            /* Allow status text to wrap on narrow phones instead of overflowing. */
+            max-width: 90vw;
+            word-wrap: break-word;
+        }
+        #loading .parallel-badge {
+            margin-top: 8px;
+            font-size: 12px;
+            color: #8a8a8a;
+        }
+        /* Mobile-only hint shown briefly after loading. */
+        #mobile-hint {
+            position: fixed;
+            bottom: max(60px, env(safe-area-inset-bottom));
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(40, 40, 50, 0.85);
+            color: white;
+            padding: 8px 14px;
+            border-radius: 18px;
+            font-size: 12px;
+            font-weight: 500;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.4s ease;
+            z-index: 999;
+            max-width: 90vw;
+            text-align: center;
+        }
+        #mobile-hint.show {
+            opacity: 1;
         }
         @keyframes spin {
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
+        }
+        /* On very small screens, shrink the loading logo. */
+        @media (max-width: 360px) {
+            #loading .logo { font-size: 24px; letter-spacing: 1px; }
+            #loading .logo span { font-size: 14px; display: block; margin-left: 0; margin-top: 4px; }
+            #loading .spinner { width: 40px; height: 40px; }
         }
     </style>
 </head>
@@ -77,21 +128,55 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
     <div id="loading">
         <div class="logo">3Draper<span>Viewer</span></div>
         <div class="spinner"></div>
-        <div class="status">Loading WebAssembly module...</div>
+        <div class="status">Loading WebAssembly module…</div>
+        <div class="parallel-badge" id="parallel-badge"></div>
     </div>
     <canvas id="the_canvas_id"></canvas>
+    <div id="mobile-hint">Tap ⚙ for Surfaces &amp; Curves</div>
     <script>
+        // Hide loading overlay once WASM application has fully started
         var loadingEl = document.getElementById("loading");
+        var hintEl = document.getElementById("mobile-hint");
         function hideLoading() {
             if (loadingEl) {
                 loadingEl.classList.add("fade-out");
                 setTimeout(function() { loadingEl.style.display = "none"; }, 600);
             }
+            // Show the mobile hint briefly after load (only on touch devices).
+            if (hintEl && ('ontouchstart' in window || navigator.maxTouchPoints > 0)) {
+                setTimeout(function() { hintEl.classList.add("show"); }, 800);
+                setTimeout(function() { hintEl.classList.remove("show"); }, 5000);
+            }
         }
+        // Listen for the TrunkApplicationStarted event (dispatched after WASM init)
         window.addEventListener("TrunkApplicationStarted", function() {
             setTimeout(hideLoading, 100);
         });
+        // Fallback: hide after 15 seconds even if WASM fails to load
         setTimeout(hideLoading, 15000);
+
+        // ── Cross-Origin Isolation Detection ──────────────────────────────
+        // Check if SharedArrayBuffer is available (required for WASM parallel threading).
+        // If not available, show a badge indicating single-threaded mode.
+        (function() {
+            var badge = document.getElementById('parallel-badge');
+            if (!badge) return;
+
+            if (typeof SharedArrayBuffer !== 'undefined' && window.crossOriginIsolated) {
+                badge.textContent = 'Multi-threaded (SharedArrayBuffer available)';
+                badge.style.color = '#4a8c4a';
+            } else {
+                badge.textContent = 'Single-threaded (add COOP/COEP headers for parallel mode)';
+                badge.style.color = '#c8a04a';
+            }
+        })();
+
+        // ── Prevent context menu on long-press (mobile) ───────────────────
+        window.addEventListener('contextmenu', function(e) {
+            if (e.target && e.target.id === 'the_canvas_id') {
+                e.preventDefault();
+            }
+        });
     </script>
 </body>
 </html>
