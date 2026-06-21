@@ -2073,3 +2073,49 @@ Stage Summary:
 - GitHub Actions will rebuild and redeploy on every push to main.
 - The chaotic "wavy sheet" NURBS test that looked bad on phone is GONE —
   replaced with the mathematically recognizable Saddle test as the default.
+
+---
+Task ID: 38
+Agent: main
+Task: Fix incorrect NURBS geometry in web demo (user reported "Тестовый nurbs, не верный" — Test NURBS is wrong). Compare with truck library reference and find correct NURBS handling.
+
+Work Log:
+- Wrote a diagnostic test (scripts/nurbs_diag_test.rs) to evaluate each NURBS surface from the viewer's test gallery against expected analytic geometry.
+- Identified root cause: ALL NURBS test cases in crates/draper-viewer/src/app.rs had U and V indices swapped relative to the NurbsSurface struct convention. The struct (and STEP parser) uses control_points[u_idx][v_idx], but the test author wrote control_points[v_idx][u_idx] (rows-of-V layout) thinking that was the convention.
+- Symptoms:
+  * Saddle: evaluating at (u=1, v=0) returned (-50, +50, 0) instead of (+50, -50, 0) — U and V swapped.
+  * Half-Cylinder: invalid dimensions (n_u=2 with u_degree=2 — impossible) → all evaluations returned (0, 0, 0).
+  * Quarter-Sphere: control points at 'on-sphere' positions instead of 'bounding-box corners' → evaluated points off sphere by up to 8.6 mm.
+  * Closed-Cylinder: knot spacing 2π/n gave only 240° instead of 360° revolution; control point radius not corrected for periodic B-spline → curve inside the cylinder by ~17%.
+- Added new constructor `NurbsSurface::from_v_rows(u_degree, v_degree, v_rows_cp, v_rows_w, u_knots, v_knots, u_closed, v_closed)` in draper-geometry/src/surface.rs that accepts the natural authoring layout ([v_idx][u_idx]) and transposes to the struct's ([u_idx][v_idx]) convention. Includes dimensional validation.
+- Refactored all 11 NURBS test cases in draper-viewer/src/app.rs to use from_v_rows(): saddle, bump, wave, ruled, revolution, coons, bilinear, half-cylinder, quarter-sphere, closed-cylinder, nurbs-text.
+- Fixed half-cylinder to use TWO 90° arc segments (5 control points) instead of an impossible single rational quadratic for a 180° arc. Used Bézier-segmented knot vector [0,0,0, 0.5,0.5, 1,1,1] with weights [1, 1/√2, 1, 1/√2, 1].
+- Fixed quarter-sphere control points to use bounding-box corners (R, R, 0), (R, R, R), etc. (the standard "NURBS Book" construction) instead of on-sphere points. The result is an EXACT sphere octant.
+- Fixed closed-cylinder knot spacing to 2π/(n-p) so the parameter domain spans a full 2π revolution. Applied B-spline circle approximation correction factor R_control = 6R / (4 + 2·cos(2π/n)).
+- Added 5 new unit tests in crates/draper-geometry/tests/surface_tests.rs:
+  * test_from_v_rows_transposes_control_points (2x2 grid corner verification)
+  * test_from_v_rows_exact_quarter_sphere (max err < 1e-6)
+  * test_from_v_rows_exact_half_cylinder_arc (max err < 1e-6)
+  * test_from_v_rows_validates_knot_count (rejects malformed inputs)
+  * test_from_v_rows_bicubic_saddle (corner + midpoint interpolation)
+- Ran cargo test --release --package draper-geometry → 79 tests pass.
+- Ran cargo test --release --package draper-step → 19 tests pass + 2 NURBS diagnostic tests pass.
+- Verified WASM build succeeds for both draper-geometry and draper-wasm crates.
+- Built WASM demo locally with trunk to verify the build pipeline still works.
+- Committed and pushed to GitHub main. The GitHub Actions workflow will rebuild and deploy to https://kerneldev.github.io/3Draper/
+
+Stage Summary:
+- ROOT CAUSE FOUND AND FIXED: All NURBS test surfaces in the viewer had U/V convention swap. The struct uses control_points[u][v] but the author wrote control_points[v][u].
+- 5 NURBS surface test cases were mathematically INCORRECT (not just display issues):
+  * Half-Cylinder: invalid dimensions → returned origin for all points
+  * Quarter-Sphere: wrong control point positions → up to 8.6mm error
+  * Closed-Cylinder: wrong knot spacing → only 240° revolution; wrong control point radius → 17% undersized
+  * Saddle/Wave/Ruled/Bilinear/Coons/Bump/Nurbs-text: U and V swapped → mirror-image geometry
+- All 11 NURBS surfaces now produce mathematically correct geometry:
+  * Saddle, Bump, Wave, Ruled, Coons, Bilinear, Nurbs-text: corners and edge midpoints at expected positions
+  * Half-Cylinder: exact rational quadratic arc (max radial error 0.000000)
+  * Quarter-Sphere: exact sphere octant (max distance error 0.0000)
+  * Closed-Cylinder: good cubic approximation (max radial error 0.16mm on R=40mm)
+  * Revolution: verified periodic in angle, profile interpolation correct
+- 5 new unit tests guard against regression.
+- Push to GitHub triggers automatic rebuild and deploy via .github/workflows/deploy.yml.
