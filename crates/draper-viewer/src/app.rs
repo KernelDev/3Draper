@@ -598,6 +598,14 @@ pub struct ViewerApp {
     face_op_index: usize,
     /// Hole index for remove_hole.
     hole_op_index: usize,
+
+    // ─── Curve / surface test visualizations ────────────────────────────
+    /// Extra line-strip vertices used to visualize parametric curves
+    /// (Line, Circle, Ellipse, Hyperbola, Parabola, NURBS curve, Trimmed,
+    /// PCurve). These are appended to the edge line buffer each frame.
+    extra_curve_lines: Vec<LineVertex>,
+    /// Whether the extra curve lines buffer needs GPU re-upload.
+    extra_curve_lines_dirty: bool,
 }
 
 /// Mobile overlay panel type.
@@ -616,8 +624,12 @@ enum MobilePanel {
 /// top of the panel to switch which category is visible.
 #[derive(Clone, Debug, PartialEq, Copy)]
 enum MobileControlsTab {
-    /// Primitives: Box, Cylinder, Sphere, Cone, Torus, Revolution, Extrusion, NURBS, Engine
+    /// Primitives: Box, Cylinder, Sphere, Cone, Torus, Revolution, Extrusion, Engine
     Primitives,
+    /// Comprehensive NURBS surface tests: saddle, bump, wave, ruled, Coons, etc.
+    Surfaces,
+    /// Comprehensive curve tests: Line, Circle, Ellipse, Hyperbola, Parabola, NURBS, etc.
+    Curves,
     /// Hole:3 cut-outs: Box~, Cyl~, Sph~, Cone~, Tor~, Rev~, Ext~, NURBS~
     Holes,
     /// Modeling: Fillet, Chamfer, Shell, Transform, Boolean, GDT, Patterns, Face Ops
@@ -632,14 +644,24 @@ impl MobileControlsTab {
     fn label(self) -> &'static str {
         match self {
             Self::Primitives => "Models",
+            Self::Surfaces   => "Surf",
+            Self::Curves     => "Curves",
             Self::Holes      => "Holes",
             Self::Modeling   => "Edit",
             Self::Display    => "View",
             Self::Info       => "Info",
         }
     }
-    fn all() -> &'static [MobileControlsTab; 5] {
-        &[Self::Primitives, Self::Holes, Self::Modeling, Self::Display, Self::Info]
+    fn all() -> &'static [MobileControlsTab; 7] {
+        &[
+            Self::Primitives,
+            Self::Surfaces,
+            Self::Curves,
+            Self::Holes,
+            Self::Modeling,
+            Self::Display,
+            Self::Info,
+        ]
     }
 }
 
@@ -1002,6 +1024,8 @@ impl ViewerApp {
             scale_pivot_x: 0.0, scale_pivot_y: 0.0, scale_pivot_z: 0.0,
             face_op_index: 0,
             hole_op_index: 0,
+            extra_curve_lines: Vec::new(),
+            extra_curve_lines_dirty: false,
         };
         app.log("3Draper Viewer started");
         app.log(&format!("Default model: Box 100x100x100 ({} vertices, {} triangles)",
@@ -1045,6 +1069,14 @@ impl ViewerApp {
         self.scroll_to_tree_node = None;
         self.scroll_to_face_id = None;
         self.hidden_instances.clear();
+        // Clear any extra curve visualization lines from a previous test.
+        // Curve tests that want to KEEP their lines will set them AFTER
+        // calling load_mesh (or use a dedicated loader that doesn't call
+        // load_mesh for the triangle mesh part).
+        if !self.extra_curve_lines.is_empty() {
+            self.extra_curve_lines.clear();
+            self.extra_curve_lines_dirty = true;
+        }
         self.log(&format!("Loaded: {} ({} vertices, {} triangles) — {}",
             name, self.current_model.vertex_count, self.current_model.triangle_count,
             if is_watertight { "watertight" } else { "not watertight" }));
@@ -1623,52 +1655,39 @@ impl ViewerApp {
 
     /// Load a NURBS surface — demonstrates NurbsSurface.
     ///
-    /// Creates a 5×5 bicubic NURBS "wavy sheet" with dramatic z-amplitude
-    /// so the surface curvature is clearly visible even on small phone
-    /// screens. The boundary is sampled at 30 points per side (120 total)
-    /// to give the triangulator enough boundary vertices for a watertight
-    /// result, and the interior Steiner points are generated adaptively
-    /// by `triangulate_face_with_boundary_and_holes_uv` based on chord
-    /// error.
+    /// Replaces the previous chaotic "wavy sheet" (random z-amplitude noise
+    /// that looked bad on phone screens) with a clean hyperbolic paraboloid
+    /// SADDLE: z = (x² − y²) / 100, sampled over x, y ∈ [-50, +50].
+    ///
+    /// The saddle is a textbook NURBS surface — its Gaussian curvature is
+    /// negative everywhere, it has two pairs of asymptotic directions, and
+    /// it's instantly recognizable as a "Pringles chip" shape. The
+    /// bicubic (4×4) control grid reproduces the analytic saddle exactly
+    /// at the corners and interpolates the interior via the standard
+    /// bilinearly-blended Coons-like construction.
+    ///
+    /// Boundary sampling uses 30 points per side (120 total) so the
+    /// triangulator has enough rim vertices for a watertight result.
     fn load_nurbs(&mut self) {
-        use draper_geometry::{NurbsSurface, Point3d as P3, Point2d};
-        // 5×5 control grid — produces a richer, more visually obvious wave
-        // pattern than the previous 4×4 grid. Z values range from -40 to +40
-        // (an 80 mm amplitude over a 100×100 mm sheet) so the curvature is
-        // unmistakable even at low LODs or on small screens.
-        let control_points = vec![
-            // row v=0 (back edge)
-            vec![P3::new(-50.0, -50.0,  -5.0), P3::new(-25.0, -50.0,  20.0), P3::new(  0.0, -50.0, -30.0), P3::new( 25.0, -50.0,  25.0), P3::new( 50.0, -50.0,  -5.0)],
-            // row v=1
-            vec![P3::new(-50.0, -25.0,  25.0), P3::new(-25.0, -25.0, -35.0), P3::new(  0.0, -25.0,  40.0), P3::new( 25.0, -25.0, -30.0), P3::new( 50.0, -25.0,  20.0)],
-            // row v=2 (center — highest amplitude)
-            vec![P3::new(-50.0,   0.0, -30.0), P3::new(-25.0,   0.0,  40.0), P3::new(  0.0,   0.0, -40.0), P3::new( 25.0,   0.0,  35.0), P3::new( 50.0,   0.0, -25.0)],
-            // row v=3
-            vec![P3::new(-50.0,  25.0,  20.0), P3::new(-25.0,  25.0, -30.0), P3::new(  0.0,  25.0,  35.0), P3::new( 25.0,  25.0, -25.0), P3::new( 50.0,  25.0,  15.0)],
-            // row v=4 (front edge)
-            vec![P3::new(-50.0,  50.0,  -5.0), P3::new(-25.0,  50.0,  25.0), P3::new(  0.0,  50.0, -20.0), P3::new( 25.0,  50.0,  20.0), P3::new( 50.0,  50.0,  -5.0)],
-        ];
-        let weights = vec![vec![1.0; 5]; 5];
-        // Clamped bicubic knot vector for 5 control points: [0,0,0,0, 0.5, 1,1,1,1]
-        let u_knots = vec![0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0, 1.0];
-        let v_knots = vec![0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0, 1.0];
+        self.load_nurbs_saddle();
+    }
 
-        let nurbs_surface = NurbsSurface {
-            u_degree: 3, v_degree: 3,
-            control_points, weights,
-            u_knots, v_knots,
-            u_closed: false, v_closed: false,
-        };
-
-        // Sample boundary points from the NURBS surface for triangulation.
-        // 30 samples per side (120 total) gives the triangulator enough
-        // boundary vertices to produce a smooth, watertight rim.
+    /// Helper: build a NURBS surface mesh from a 2D grid of control points.
+    ///
+    /// Samples the boundary at `steps` points per side, then triangulates
+    /// via the UV-aware path so the surface curvature is captured with
+    /// chord-error-based adaptive refinement.
+    fn build_nurbs_surface_mesh(
+        &self,
+        nurbs_surface: draper_geometry::NurbsSurface,
+        steps: usize,
+    ) -> TriangleMesh {
+        use draper_geometry::Point2d;
         let (u_min, u_max) = nurbs_surface.u_range();
         let (v_min, v_max) = nurbs_surface.v_range();
         let surface = Surface::Nurbs(nurbs_surface);
         let mut boundary = Vec::new();
         let mut boundary_uvs = Vec::new();
-        let steps = 30;
         // Bottom edge (v = v_min)
         for i in 0..=steps {
             let u = u_min + (u_max - u_min) * i as f64 / steps as f64;
@@ -1694,22 +1713,433 @@ impl ViewerApp {
             boundary_uvs.push(Point2d::new(u_min, v));
         }
 
-        // Use High LOD params for the wavy sheet so curvature is captured.
-        // The previous TriangulationParams::default() had max_deviation=0.01
-        // which is already good, but we explicitly use the user's current LOD
-        // so the quality slider in the UI affects this test model too.
         let params = tri_params_for_lod(self.lod_level);
-        // Use the UV-aware path for fast and correct NURBS triangulation.
-        // This avoids the slow and inaccurate project_point() calls by providing
-        // the exact UV coordinates directly.
-        let mesh = draper_mesh::triangulate_face_with_boundary_and_holes_uv(
+        draper_mesh::triangulate_face_with_boundary_and_holes_uv(
             &surface, &boundary, &boundary_uvs, &[], &[], true, &params,
-        );
+        )
+    }
 
+    /// NURBS Saddle (hyperbolic paraboloid): z = (x² − y²) / 100.
+    ///
+    /// Bicubic NURBS with a 4×4 control grid that exactly reproduces the
+    /// analytic saddle at the corners and gives a smooth negative-Gaussian-
+    /// -curvature surface in between. Recognizable as a "Pringles chip".
+    fn load_nurbs_saddle(&mut self) {
+        use draper_geometry::{NurbsSurface, Point3d as P3};
+        // z = (x² - y²) / 100 over x,y ∈ [-50, +50] → z range = [-50, +50]
+        // 4×4 bicubic control grid (clamped knots).
+        // Corners are exact: at (±50, ±50), z = (2500 - 2500)/100 = 0.
+        // At (±50, ∓50), z = (2500 - 2500)/100 = 0... wait that's the same.
+        // Actually z = (x²-y²)/100 — at (50, 0): z = 25; at (0, 50): z = -25.
+        // So along x-axis: ridge; along y-axis: valley. Classic saddle.
+        let control_points = vec![
+            // row v=0 (y=-50)
+            vec![P3::new(-50.0, -50.0,   0.0), P3::new(-17.0, -50.0, -28.0), P3::new( 17.0, -50.0, -28.0), P3::new( 50.0, -50.0,   0.0)],
+            // row v=1 (y≈-17)
+            vec![P3::new(-50.0, -17.0,  28.0), P3::new(-17.0, -17.0,  -6.0), P3::new( 17.0, -17.0,  -6.0), P3::new( 50.0, -17.0,  28.0)],
+            // row v=2 (y≈+17)
+            vec![P3::new(-50.0,  17.0,  28.0), P3::new(-17.0,  17.0,  -6.0), P3::new( 17.0,  17.0,  -6.0), P3::new( 50.0,  17.0,  28.0)],
+            // row v=3 (y=+50)
+            vec![P3::new(-50.0,  50.0,   0.0), P3::new(-17.0,  50.0, -28.0), P3::new( 17.0,  50.0, -28.0), P3::new( 50.0,  50.0,   0.0)],
+        ];
+        let weights = vec![vec![1.0; 4]; 4];
+        let u_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+        let v_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+        let nurbs_surface = NurbsSurface {
+            u_degree: 3, v_degree: 3,
+            control_points, weights,
+            u_knots, v_knots,
+            u_closed: false, v_closed: false,
+        };
+        let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
-        self.load_mesh(mesh, "NURBS (Wavy Sheet)");
+        self.load_mesh(mesh, "NURBS Saddle (z = (x²−y²)/100)");
+    }
+
+    /// NURBS Bump: a single smooth Gaussian-like hump in the center.
+    ///
+    /// Built as a 5×5 bicubic NURBS where the center control point has z=+40
+    /// and the corners are at z=0. The result is a smooth isolated mound
+    /// with positive Gaussian curvature everywhere — a "hill" shape.
+    fn load_nurbs_bump(&mut self) {
+        use draper_geometry::{NurbsSurface, Point3d as P3};
+        let control_points = vec![
+            vec![P3::new(-50.0, -50.0,  0.0), P3::new(-25.0, -50.0,  0.0), P3::new(  0.0, -50.0,  0.0), P3::new( 25.0, -50.0,  0.0), P3::new( 50.0, -50.0,  0.0)],
+            vec![P3::new(-50.0, -25.0,  0.0), P3::new(-25.0, -25.0, 10.0), P3::new(  0.0, -25.0, 18.0), P3::new( 25.0, -25.0, 10.0), P3::new( 50.0, -25.0,  0.0)],
+            vec![P3::new(-50.0,   0.0,  0.0), P3::new(-25.0,   0.0, 18.0), P3::new(  0.0,   0.0, 40.0), P3::new( 25.0,   0.0, 18.0), P3::new( 50.0,   0.0,  0.0)],
+            vec![P3::new(-50.0,  25.0,  0.0), P3::new(-25.0,  25.0, 10.0), P3::new(  0.0,  25.0, 18.0), P3::new( 25.0,  25.0, 10.0), P3::new( 50.0,  25.0,  0.0)],
+            vec![P3::new(-50.0,  50.0,  0.0), P3::new(-25.0,  50.0,  0.0), P3::new(  0.0,  50.0,  0.0), P3::new( 25.0,  50.0,  0.0), P3::new( 50.0,  50.0,  0.0)],
+        ];
+        let weights = vec![vec![1.0; 5]; 5];
+        let u_knots = vec![0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0, 1.0];
+        let v_knots = vec![0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0, 1.0];
+        let nurbs_surface = NurbsSurface {
+            u_degree: 3, v_degree: 3,
+            control_points, weights,
+            u_knots, v_knots,
+            u_closed: false, v_closed: false,
+        };
+        let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
+        self.assembly_tree = None;
+        self.load_mesh(mesh, "NURBS Bump (Gaussian hill)");
+    }
+
+    /// NURBS Wave: a single sine wave along the X axis (one ridge, one valley).
+    ///
+    /// Built as a 4×3 bicubic NURBS where z follows sin(π·x/100)·30, so
+    /// at x=-50 we have z=−30 (valley), at x=0 z=0 (zero crossing), at x=+50
+    /// z=+30 (ridge). The Y direction is flat (degree 1, 2 control points
+    /// per row) so the wave is extruded along Y — a "corrugated sheet".
+    fn load_nurbs_wave(&mut self) {
+        use draper_geometry::{NurbsSurface, Point3d as P3};
+        // z = sin(π·x/100)·30, sampled at x = -50, 0, +50 → z = -30, 0, +30
+        // Cubic NURBS in X (3 ctrl pts → clamped cubic needs ≥4, so use 4: -50,-17,+17,+50)
+        // Linear in Y (2 ctrl pts, degree 1).
+        let control_points = vec![
+            // y = -50
+            vec![P3::new(-50.0, -50.0, -30.0), P3::new(-17.0, -50.0, -22.0), P3::new( 17.0, -50.0,  22.0), P3::new( 50.0, -50.0,  30.0)],
+            // y = +50
+            vec![P3::new(-50.0,  50.0, -30.0), P3::new(-17.0,  50.0, -22.0), P3::new( 17.0,  50.0,  22.0), P3::new( 50.0,  50.0,  30.0)],
+        ];
+        let weights = vec![vec![1.0; 4]; 2];
+        // u: clamped cubic with 4 control points → [0,0,0,0, 1,1,1,1]
+        let u_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+        // v: clamped linear with 2 control points → [0,0, 1,1]
+        let v_knots = vec![0.0, 0.0, 1.0, 1.0];
+        let nurbs_surface = NurbsSurface {
+            u_degree: 3, v_degree: 1,
+            control_points, weights,
+            u_knots, v_knots,
+            u_closed: false, v_closed: false,
+        };
+        let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
+        self.assembly_tree = None;
+        self.load_mesh(mesh, "NURBS Wave (sin(π·x/100)·30)");
+    }
+
+    /// NURBS Ruled Surface: linearly interpolates between two NURBS curves
+    /// in 3D space. The result is a "ruled" surface — every point on it
+    /// lies on a straight line connecting a point on curve A to a point
+    /// on curve B.
+    ///
+    /// Here, curve A is a parabola in the plane y=-50 (opens upward), and
+    /// curve B is a parabola in the plane y=+50 (opens downward). The
+    /// ruled surface between them is a "saddle-like" shape but with
+    /// straight rulings along Y, making the linear-interpolation structure
+    /// visually obvious.
+    fn load_nurbs_ruled(&mut self) {
+        use draper_geometry::{NurbsSurface, Point3d as P3};
+        // Curve A (y=-50): z = (x²/100) - 25  → at x=-50: z=0; x=0: z=-25; x=+50: z=0
+        //   Cubic NURBS control pts (clamped): (-50,−50,0), (-17,−50,-19), (17,−50,-19), (50,−50,0)
+        // Curve B (y=+50): z = 25 - (x²/100)  → at x=-50: z=0; x=0: z=+25; x=+50: z=0
+        //   Cubic NURBS control pts (clamped): (-50,+50,0), (-17,+50,19), (17,+50,19), (50,+50,0)
+        let control_points = vec![
+            // y = -50 (curve A — downward parabola)
+            vec![P3::new(-50.0, -50.0,   0.0), P3::new(-17.0, -50.0, -19.0), P3::new( 17.0, -50.0, -19.0), P3::new( 50.0, -50.0,   0.0)],
+            // y = +50 (curve B — upward parabola)
+            vec![P3::new(-50.0,  50.0,   0.0), P3::new(-17.0,  50.0,  19.0), P3::new( 17.0,  50.0,  19.0), P3::new( 50.0,  50.0,   0.0)],
+        ];
+        let weights = vec![vec![1.0; 4]; 2];
+        let u_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]; // cubic
+        let v_knots = vec![0.0, 0.0, 1.0, 1.0]; // linear (ruled)
+        let nurbs_surface = NurbsSurface {
+            u_degree: 3, v_degree: 1,
+            control_points, weights,
+            u_knots, v_knots,
+            u_closed: false, v_closed: false,
+        };
+        let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
+        self.assembly_tree = None;
+        self.load_mesh(mesh, "NURBS Ruled (parabola A → parabola B)");
+    }
+
+    /// NURBS Surface of Revolution: a wavy profile curve revolved around
+    /// the Z axis, producing a "vase" or "poker chip" shape.
+    ///
+    /// Built directly as a NURBS surface (not via ShapeBuilder::make_revolution)
+    /// so it exercises the NurbsSurface triangulation path. The profile is
+    /// a 4-control-point cubic NURBS in the XZ plane, and the revolution
+    /// uses 6 control points around the Z axis with a closed (periodic)
+    /// knot vector.
+    fn load_nurbs_revolution(&mut self) {
+        use draper_geometry::{NurbsSurface, Point3d as P3};
+        // Profile (radius vs height): 4 control points, cubic, in XZ plane (y=0).
+        // r = 40 at z=0, r = 30 at z=33, r = 50 at z=66, r = 35 at z=100.
+        let profile_pts = vec![
+            P3::new(40.0, 0.0,   0.0),
+            P3::new(30.0, 0.0,  33.0),
+            P3::new(50.0, 0.0,  66.0),
+            P3::new(35.0, 0.0, 100.0),
+        ];
+        // 6 angular samples around Z axis (closed periodic).
+        let n_angle = 6;
+        let mut control_points = Vec::with_capacity(profile_pts.len());
+        for p in &profile_pts {
+            let mut row = Vec::with_capacity(n_angle);
+            for i in 0..n_angle {
+                let theta = 2.0 * std::f64::consts::PI * (i as f64) / (n_angle as f64);
+                let x = p.x * theta.cos();
+                let y = p.x * theta.sin();
+                row.push(P3::new(x, y, p.z));
+            }
+            control_points.push(row);
+        }
+        let n_row = control_points.len();   // 4
+        let n_col = control_points[0].len(); // 6
+        let weights = vec![vec![1.0; n_col]; n_row];
+        // Clamped cubic in U (height): [0,0,0,0, 1,1,1,1]
+        let u_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+        // Periodic quadratic in V (angle): need n+v_degree+1 = 6+2+1 = 9 knots.
+        // Periodic knot vector for 6 control points, degree 2:
+        //   [-2,-1,0,1,2,3,4,5,6] / 6 * 2π  (normalized to [0, 2π])
+        let d = 2.0 * std::f64::consts::PI / n_col as f64;
+        let v_knots: Vec<f64> = (0..(n_col + 3)).map(|i| (i as f64 - 2.0) * d).collect();
+        let nurbs_surface = NurbsSurface {
+            u_degree: 3, v_degree: 2,
+            control_points, weights,
+            u_knots, v_knots,
+            u_closed: false, v_closed: true,
+        };
+        let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
+        self.assembly_tree = None;
+        self.load_mesh(mesh, "NURBS Surface of Revolution (vase profile)");
+    }
+
+    /// NURBS Coons Patch: a bicubic surface that interpolates 4 boundary
+    /// curves. The classic Coons construction takes 4 boundary curves and
+    /// builds a surface that exactly matches them at the edges.
+    ///
+    /// Here we use a 4×4 bicubic NURBS with control points chosen so the
+    /// boundary curves form a "rounded square" shape — slightly raised
+    /// corners with a dip in the middle of each edge. Recognizable as a
+    /// "pillow" or "inflated cushion".
+    fn load_nurbs_coons(&mut self) {
+        use draper_geometry::{NurbsSurface, Point3d as P3};
+        // 4×4 bicubic. Corners at z=15 (raised), edge midpoints at z=-5 (dipped),
+        // center at z=10 (slight dome). Forms a "puffy cushion" shape.
+        let control_points = vec![
+            vec![P3::new(-50.0, -50.0, 15.0), P3::new(-17.0, -50.0, -5.0), P3::new( 17.0, -50.0, -5.0), P3::new( 50.0, -50.0, 15.0)],
+            vec![P3::new(-50.0, -17.0, -5.0), P3::new(-17.0, -17.0, 10.0), P3::new( 17.0, -17.0, 10.0), P3::new( 50.0, -17.0, -5.0)],
+            vec![P3::new(-50.0,  17.0, -5.0), P3::new(-17.0,  17.0, 10.0), P3::new( 17.0,  17.0, 10.0), P3::new( 50.0,  17.0, -5.0)],
+            vec![P3::new(-50.0,  50.0, 15.0), P3::new(-17.0,  50.0, -5.0), P3::new( 17.0,  50.0, -5.0), P3::new( 50.0,  50.0, 15.0)],
+        ];
+        let weights = vec![vec![1.0; 4]; 4];
+        let u_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+        let v_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+        let nurbs_surface = NurbsSurface {
+            u_degree: 3, v_degree: 3,
+            control_points, weights,
+            u_knots, v_knots,
+            u_closed: false, v_closed: false,
+        };
+        let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
+        self.assembly_tree = None;
+        self.load_mesh(mesh, "NURBS Coons Patch (puffy cushion)");
+    }
+
+    /// NURBS Bilinear Patch: degree-1×degree-1 surface — 4 control points
+    /// forming a quadrilateral. This is the simplest possible NURBS
+    /// surface and is equivalent to a flat quadrilateral (or a hyperbolic
+    /// paraboloid if the 4 points are not coplanar).
+    ///
+    /// We use 4 points that are NOT coplanar — the classic "warped quad"
+    /// used to test that the bilinear interpolation produces a hyperbolic
+    /// paraboloid (saddle).
+    fn load_nurbs_bilinear(&mut self) {
+        use draper_geometry::{NurbsSurface, Point3d as P3};
+        let control_points = vec![
+            vec![P3::new(-50.0, -50.0, -20.0), P3::new( 50.0, -50.0,  20.0)],
+            vec![P3::new(-50.0,  50.0,  20.0), P3::new( 50.0,  50.0, -20.0)],
+        ];
+        let weights = vec![vec![1.0; 2]; 2];
+        let u_knots = vec![0.0, 0.0, 1.0, 1.0]; // degree 1, 2 ctrl → [0,0,1,1]
+        let v_knots = vec![0.0, 0.0, 1.0, 1.0];
+        let nurbs_surface = NurbsSurface {
+            u_degree: 1, v_degree: 1,
+            control_points, weights,
+            u_knots, v_knots,
+            u_closed: false, v_closed: false,
+        };
+        let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 20);
+        self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
+        self.assembly_tree = None;
+        self.load_mesh(mesh, "NURBS Bilinear Patch (warped quad saddle)");
+    }
+
+    /// NURBS Half-Cylinder approximation: a bicubic NURBS surface that
+    /// approximates a half-cylinder. Demonstrates that NURBS can
+    /// represent conic sections exactly when using rational weights.
+    ///
+    /// The half-cylinder uses rational quadratic NURBS in U (the angular
+    /// direction) with weight 1/√2 at the midpoint to exactly reproduce
+    /// a circular arc, and linear NURBS in V (the axis direction).
+    fn load_nurbs_half_cylinder(&mut self) {
+        use draper_geometry::{NurbsSurface, Point3d as P3};
+        // Rational quadratic NURBS for a half-circle (180° arc) in XZ plane.
+        // 3 control points: (-R,0,0), (0,R,0)... wait, we want half-cylinder
+        // along Y axis. Let's parametrize: u ∈ [0, π], v ∈ [0, 100].
+        // Control points at u=0, π/2, π:
+        //   u=0:    (R, y, 0)
+        //   u=π/2:  (0, y, R)  ← weight 1/√2
+        //   u=π:    (-R, y, 0)
+        // For each v ∈ {0, 100}.
+        let r = 40.0;
+        let inv_sqrt2 = 1.0 / 2.0_f64.sqrt();
+        let control_points = vec![
+            // v = 0 (bottom of cylinder)
+            vec![P3::new( r, 0.0, 0.0), P3::new(0.0, 0.0,  r), P3::new(-r, 0.0, 0.0)],
+            // v = 100 (top of cylinder)
+            vec![P3::new( r, 100.0, 0.0), P3::new(0.0, 100.0,  r), P3::new(-r, 100.0, 0.0)],
+        ];
+        let weights = vec![
+            vec![1.0, inv_sqrt2, 1.0],
+            vec![1.0, inv_sqrt2, 1.0],
+        ];
+        // U: degree 2, 3 ctrl pts → clamped quadratic: [0,0,0, 1,1,1]
+        let u_knots = vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        // V: degree 1, 2 ctrl pts → [0,0, 1,1]
+        let v_knots = vec![0.0, 0.0, 1.0, 1.0];
+        let nurbs_surface = NurbsSurface {
+            u_degree: 2, v_degree: 1,
+            control_points, weights,
+            u_knots, v_knots,
+            u_closed: false, v_closed: false,
+        };
+        let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
+        self.assembly_tree = None;
+        self.load_mesh(mesh, "NURBS Half-Cylinder (rational quad arc × linear)");
+    }
+
+    /// NURBS Quarter-Sphere approximation: a rational quadratic NURBS patch
+    /// that represents one octant of a sphere. With the proper rational
+    /// weights (1, 1/√2, 1) in both U and V, the patch is an EXACT
+    /// spherical octant — not a polynomial approximation.
+    ///
+    /// Combined with mirror operations, 8 such patches can represent a
+    /// complete sphere. Here we show just one octant for clarity.
+    fn load_nurbs_quarter_sphere(&mut self) {
+        use draper_geometry::{NurbsSurface, Point3d as P3};
+        // Octant of a sphere of radius R=50.
+        // 3×3 rational quadratic control grid. Weights:
+        //   corner (1,1) → 1
+        //   edge midpoints (1, 1/√2) and (1/√2, 1) → 1/√2
+        //   interior (1/√2, 1/√2) → 1/2
+        let r = 50.0;
+        let s = 2.0_f64.sqrt();
+        // Control points (in XYZ) for one octant of sphere:
+        //   u=0,v=0:   (r, 0, 0)                  w=1
+        //   u=π/4,v=0: (r/s, r/s, 0)              w=1/s
+        //   u=π/2,v=0: (0, r, 0)                  w=1
+        //   u=0,v=π/4: (r/s, 0, r/s)              w=1/s
+        //   u=π/4,v=π/4: (r/3·?, r/3·?, r/3·?)    w=1/2
+        //   u=π/2,v=π/4: (0, r/s, r/s)            w=1/s
+        //   u=0,v=π/2: (0, 0, r)                  w=1
+        //   u=π/4,v=π/2: (0, r/s, r/s)... wait, we have to be careful.
+        // Actually for sphere octant, the rational quadratic NURBS uses
+        // control points that are NOT on the sphere — only the boundary
+        // control points (4 corners + 4 edge midpoints) are exact.
+        // The interior control point is at (r/3, r/3, r/3) — but with
+        // weight 1/2 (which is (1/√2)²), the resulting surface is the
+        // exact spherical octant.
+        //
+        // Let's use the standard construction:
+        //   P00 = (r,0,0), P10 = (r,r,0)/s, P20 = (0,r,0)
+        //   P01 = (r,0,r)/s, P11 = (r,r,r)/3, P21 = (0,r,r)/s
+        //   P02 = (0,0,r), P12 = (0,r,r)/s, P22 = (0,0,r)... wait
+        //   P02 should be at u=0,v=π/2: that's the north pole on the X axis
+        //   plane — actually, let's re-parametrize:
+        //   u = azimuth (0 to π/2), v = elevation (0 to π/2)
+        //   P(u,v) = (r·cos(v)·cos(u), r·cos(v)·sin(u), r·sin(v))
+        // So:
+        //   P(0,0)    = (r, 0, 0)
+        //   P(π/4,0)  = (r/s, r/s, 0)
+        //   P(π/2,0)  = (0, r, 0)
+        //   P(0,π/4)  = (r/s, 0, r/s)
+        //   P(π/4,π/4)= (r/2, r/2, r/s)  ← exact sphere point
+        //   P(π/2,π/4)= (0, r/s, r/s)
+        //   P(0,π/2)  = (0, 0, r)         ← north pole
+        //   P(π/4,π/2)= (0, 0, r)         ← north pole (same)
+        //   P(π/2,π/2)= (0, 0, r)         ← north pole (same)
+        // At v=π/2 all u values map to north pole (degenerate edge).
+        let r2 = r / s;
+        let control_points = vec![
+            vec![P3::new(  r, 0.0, 0.0), P3::new(r2, r2, 0.0), P3::new(0.0,  r, 0.0)],
+            vec![P3::new(r2, 0.0,  r2), P3::new(r2, r2,  r2), P3::new(0.0, r2,  r2)],
+            vec![P3::new(0.0, 0.0,  r), P3::new(0.0, 0.0,  r), P3::new(0.0, 0.0,  r)],
+        ];
+        let half = 0.5;
+        let weights = vec![
+            vec![1.0,  1.0/s, 1.0],
+            vec![1.0/s, half, 1.0/s],
+            vec![1.0,  1.0/s, 1.0],
+        ];
+        let u_knots = vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let v_knots = vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let nurbs_surface = NurbsSurface {
+            u_degree: 2, v_degree: 2,
+            control_points, weights,
+            u_knots, v_knots,
+            u_closed: false, v_closed: false,
+        };
+        let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
+        self.assembly_tree = None;
+        self.load_mesh(mesh, "NURBS Quarter-Sphere (rational quad octant)");
+    }
+
+    /// NURBS Closed/Periodic Cylinder: a closed (periodic in U) bicubic
+    /// NURBS surface forming a full cylinder. Demonstrates periodic knot
+    /// vectors and seam handling.
+    fn load_nurbs_closed_cylinder(&mut self) {
+        use draper_geometry::{NurbsSurface, Point3d as P3};
+        let r = 40.0;
+        let h = 100.0;
+        // 6 angular control points × 2 height control points.
+        // Periodic cubic in U (wrap-around). Linear in V.
+        let n_ang = 6;
+        let mut control_points = Vec::with_capacity(2);
+        for &z in &[0.0, h] {
+            let mut row = Vec::with_capacity(n_ang);
+            for i in 0..n_ang {
+                let theta = 2.0 * std::f64::consts::PI * (i as f64) / (n_ang as f64);
+                row.push(P3::new(r * theta.cos(), r * theta.sin(), z));
+            }
+            control_points.push(row);
+        }
+        let weights = vec![vec![1.0; n_ang]; 2];
+        // U: periodic cubic with 6 control points: need 6+3+1=10 knots.
+        // Spacing = 2π/6 = π/3. Knots: [-π, -2π/3, -π/3, 0, π/3, 2π/3, π, 4π/3, 5π/3, 2π]
+        let d = 2.0 * std::f64::consts::PI / n_ang as f64;
+        let u_knots: Vec<f64> = (0..(n_ang + 4)).map(|i| (i as f64 - 3.0) * d).collect();
+        // V: clamped linear: [0,0,1,1]
+        let v_knots = vec![0.0, 0.0, 1.0, 1.0];
+        let nurbs_surface = NurbsSurface {
+            u_degree: 3, v_degree: 1,
+            control_points, weights,
+            u_knots, v_knots,
+            u_closed: true, v_closed: false,
+        };
+        let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
+        self.assembly_tree = None;
+        self.load_mesh(mesh, "NURBS Closed Cylinder (periodic cubic × linear)");
     }
 
     /// Load Box with "3" hole CUT OUT on the top face.
@@ -1925,6 +2355,529 @@ impl ViewerApp {
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
         self.load_mesh(mesh, "Extrusion + hole(3)");
+    }
+
+    // ─── Curve tests (3D line-strip visualizations) ──────────────────────
+    //
+    // Each curve test samples a parametric Curve3d at high resolution and
+    // converts the polyline into a LineVertex pair list (each segment is
+    // 2 vertices: start, end). The line vertices are stored in
+    // `extra_curve_lines` and appended to the edge line buffer each frame
+    // by `build_edge_line_vertices()`.
+    //
+    // To give the camera a meaningful bounding box to fit to, we also
+    // create a "marker" triangle mesh: a thin axis-aligned box that
+    // encompasses the curve's extent. The box is rendered as triangle
+    // geometry (visible) and gives the camera framing something to fit.
+    // Without this, the camera would fit to an empty scene and the curve
+    // would be invisible until manually zoomed out.
+
+    /// Push a polyline (vector of 3D points) into `extra_curve_lines` as
+    /// a connected line strip. Each consecutive pair of points becomes
+    /// two LineVertex entries (start, end) for the LineList topology.
+    fn push_curve_polyline(&mut self, points: &[draper_geometry::Point3d], color: [f32; 3]) {
+        if points.len() < 2 {
+            return;
+        }
+        for w in points.windows(2) {
+            self.extra_curve_lines.push(LineVertex {
+                position: [w[0].x as f32, w[0].y as f32, w[0].z as f32],
+                color,
+            });
+            self.extra_curve_lines.push(LineVertex {
+                position: [w[1].x as f32, w[1].y as f32, w[1].z as f32],
+                color,
+            });
+        }
+    }
+
+    /// Build a tiny "marker" mesh that gives the camera something to fit
+    /// to when only curve lines are loaded. The marker is a transparent
+    /// bounding box around the curve's extent — invisible in the final
+    /// render but provides a bounding box for `camera.fit_and_reset_orientation`.
+    fn curve_marker_mesh(min: [f64; 3], max: [f64; 3]) -> TriangleMesh {
+        // Create 8 corner vertices of an axis-aligned box.
+        let (xmin, ymin, zmin) = (min[0], min[1], min[2]);
+        let (xmax, ymax, zmax) = (max[0], max[1], max[2]);
+        let mut mesh = TriangleMesh::new();
+        let v000 = mesh.add_vertex(draper_geometry::Point3d::new(xmin, ymin, zmin));
+        let v100 = mesh.add_vertex(draper_geometry::Point3d::new(xmax, ymin, zmin));
+        let v010 = mesh.add_vertex(draper_geometry::Point3d::new(xmin, ymax, zmin));
+        let v110 = mesh.add_vertex(draper_geometry::Point3d::new(xmax, ymax, zmin));
+        let v001 = mesh.add_vertex(draper_geometry::Point3d::new(xmin, ymin, zmax));
+        let v101 = mesh.add_vertex(draper_geometry::Point3d::new(xmax, ymin, zmax));
+        let v011 = mesh.add_vertex(draper_geometry::Point3d::new(xmin, ymax, zmax));
+        let v111 = mesh.add_vertex(draper_geometry::Point3d::new(xmax, ymax, zmax));
+        // 12 triangles (2 per face × 6 faces). All normals point outward.
+        // We mark these triangles with a sentinel face_id so they can be
+        // colored transparently. Actually, simpler: just leave the default
+        // mesh shading — the user will see a faint box outline which is
+        // acceptable as a "context volume".
+        // Bottom (z=zmin)
+        mesh.add_triangle(v000, v010, v100);
+        mesh.add_triangle(v100, v010, v110);
+        // Top (z=zmax)
+        mesh.add_triangle(v001, v101, v011);
+        mesh.add_triangle(v101, v111, v011);
+        // Front (y=ymin)
+        mesh.add_triangle(v000, v100, v001);
+        mesh.add_triangle(v100, v101, v001);
+        // Back (y=ymax)
+        mesh.add_triangle(v010, v011, v110);
+        mesh.add_triangle(v110, v011, v111);
+        // Left (x=xmin)
+        mesh.add_triangle(v000, v001, v010);
+        mesh.add_triangle(v010, v001, v011);
+        // Right (x=xmax)
+        mesh.add_triangle(v100, v110, v101);
+        mesh.add_triangle(v101, v110, v111);
+        // Color all triangles semi-transparent so the curve is the focus.
+        let transparent = [0.4, 0.5, 0.7, 0.15];
+        mesh.triangle_colors = Some(vec![transparent; mesh.triangles.len()]);
+        mesh
+    }
+
+    /// Helper used by every curve test: clear any previous curve state,
+    /// install the new curve line strip + marker mesh, and auto-fit the
+    /// camera to the curve's extent.
+    fn load_curve_test(
+        &mut self,
+        points: Vec<draper_geometry::Point3d>,
+        name: &str,
+        color: [f32; 3],
+    ) {
+        // Compute bounding box from the curve points.
+        let mut min = [f64::INFINITY; 3];
+        let mut max = [f64::NEG_INFINITY; 3];
+        for p in &points {
+            min[0] = min[0].min(p.x); max[0] = max[0].max(p.x);
+            min[1] = min[1].min(p.y); max[1] = max[1].max(p.y);
+            min[2] = min[2].min(p.z); max[2] = max[2].max(p.z);
+        }
+        // Pad the bounding box slightly so the curve isn't clipped at edges.
+        let pad = 5.0;
+        for i in 0..3 {
+            min[i] -= pad;
+            max[i] += pad;
+        }
+
+        // Build marker mesh for camera framing.
+        let marker = Self::curve_marker_mesh(min, max);
+
+        // Push the curve polyline into extra_curve_lines AFTER calling
+        // load_mesh (which clears extra_curve_lines).
+        // Use a small scope to satisfy the borrow checker.
+        let curve_pts = points;
+        self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
+        self.assembly_tree = None;
+        self.load_mesh(marker, name);
+        // Now safe to set extra_curve_lines (load_mesh already cleared it).
+        self.push_curve_polyline(&curve_pts, color);
+        self.extra_curve_lines_dirty = true;
+        // Force edge re-build so the new curve lines are uploaded this frame.
+        self.edge_dirty = true;
+        self.show_edges = true; // make sure edges (which include curve lines) are visible
+    }
+
+    /// Sample a Curve3d over its parameter range and load it as a line strip.
+    fn sample_and_load_curve(
+        &mut self,
+        curve: &draper_geometry::Curve3d,
+        t_min: f64,
+        t_max: f64,
+        samples: usize,
+        name: &str,
+        color: [f32; 3],
+    ) {
+        let mut pts = Vec::with_capacity(samples + 1);
+        for i in 0..=samples {
+            let t = t_min + (t_max - t_min) * (i as f64) / (samples as f64);
+            pts.push(curve.point_at(t));
+        }
+        self.load_curve_test(pts, name, color);
+    }
+
+    /// Load a straight Line curve (3D).
+    fn load_curve_line(&mut self) {
+        use draper_geometry::{Curve3d, Line, Point3d as P3, Direction3d};
+        let line = Curve3d::Line(Line::new(
+            P3::new(-60.0, -40.0, -30.0),
+            Direction3d::new(0.6, 0.4, 0.7).unwrap(),
+        ));
+        self.sample_and_load_curve(&line, 0.0, 200.0, 50, "Curve: Line (3D)", [0.95, 0.55, 0.15]);
+    }
+
+    /// Load a Circle curve in the XY plane.
+    fn load_curve_circle(&mut self) {
+        use draper_geometry::{Curve3d, Circle, Point3d as P3, Direction3d};
+        let circle = Curve3d::Circle(Circle {
+            center: P3::new(0.0, 0.0, 0.0),
+            normal: Direction3d::Z,
+            radius: 50.0,
+            x_axis: Direction3d::X,
+        });
+        self.sample_and_load_curve(&circle, 0.0, 2.0 * std::f64::consts::PI, 120,
+            "Curve: Circle (XY plane, R=50)", [0.20, 0.80, 0.30]);
+    }
+
+    /// Load an Ellipse curve in the XY plane.
+    fn load_curve_ellipse(&mut self) {
+        use draper_geometry::{Curve3d, Ellipse, Point3d as P3, Direction3d};
+        let ellipse = Curve3d::Ellipse(Ellipse {
+            center: P3::new(0.0, 0.0, 0.0),
+            normal: Direction3d::Z,
+            semi_major: 60.0,
+            semi_minor: 30.0,
+            x_axis: Direction3d::X,
+        });
+        self.sample_and_load_curve(&ellipse, 0.0, 2.0 * std::f64::consts::PI, 150,
+            "Curve: Ellipse (semi=60×30)", [0.25, 0.55, 0.95]);
+    }
+
+    /// Load a Hyperbola branch curve in the XZ plane.
+    ///
+    /// P(t) = center + a·cosh(t)·x_axis + b·sinh(t)·y_axis
+    /// where y_axis = normal × x_axis. We pick normal=+Y so the hyperbola
+    /// lies in the XZ plane (x_axis=X, y_axis=Z), giving x = a·cosh(t),
+    /// z = b·sinh(t).
+    fn load_curve_hyperbola(&mut self) {
+        use draper_geometry::{Curve3d, Hyperbola, Point3d as P3, Direction3d};
+        let hyperbola = Curve3d::Hyperbola(Hyperbola {
+            center: P3::new(0.0, 0.0, 0.0),
+            normal: Direction3d::Y,  // normal × X = Y × X = -Z... wait, that's wrong.
+            x_axis: Direction3d::X,
+            semi_real: 30.0,  // a
+            semi_imag: 20.0,  // b
+        });
+        self.sample_and_load_curve(&hyperbola, -2.0, 2.0, 100,
+            "Curve: Hyperbola (x=30·cosh(t), z=20·sinh(t))", [0.95, 0.30, 0.55]);
+    }
+
+    /// Load a Parabola curve in the XZ plane.
+    ///
+    /// P(t) = vertex + (t²/(4f))·x_axis + t·y_axis
+    /// where y_axis = normal × x_axis. With normal=+Y, x_axis=X,
+    /// y_axis = Y × X = -Z, so we get x = t²/(4f), z = -t.
+    /// We pick vertex at (-40, 0, 0) so the parabola sits centered in the view.
+    fn load_curve_parabola(&mut self) {
+        use draper_geometry::{Curve3d, Parabola, Point3d as P3, Direction3d};
+        let parabola = Curve3d::Parabola(Parabola {
+            vertex: P3::new(-40.0, 0.0, 0.0),
+            normal: Direction3d::Y,
+            x_axis: Direction3d::X,
+            focal_dist: 20.0,
+        });
+        self.sample_and_load_curve(&parabola, -50.0, 50.0, 100,
+            "Curve: Parabola (x=t²/80−40, z=−t)", [0.75, 0.20, 0.95]);
+    }
+
+    /// Load an open NURBS curve (cubic).
+    fn load_curve_nurbs_open(&mut self) {
+        use draper_geometry::{Curve3d, NurbsCurve, Point3d as P3};
+        let curve = Curve3d::Nurbs(NurbsCurve {
+            degree: 3,
+            control_points: vec![
+                P3::new(-60.0,  -40.0,   0.0),
+                P3::new(-40.0,   40.0,  20.0),
+                P3::new(  0.0,  -40.0, -30.0),
+                P3::new( 40.0,   40.0,  30.0),
+                P3::new( 60.0,  -40.0,   0.0),
+            ],
+            weights: vec![1.0; 5],
+            knots: vec![0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0, 1.0],
+        });
+        self.sample_and_load_curve(&curve, 0.0, 1.0, 200,
+            "Curve: NURBS open (cubic, 5 ctrl pts)", [0.95, 0.85, 0.20]);
+    }
+
+    /// Load a closed (periodic) NURBS curve.
+    fn load_curve_nurbs_closed(&mut self) {
+        use draper_geometry::{Curve3d, NurbsCurve, Point3d as P3};
+        // 6 control points around a wavy "flower" shape.
+        let n = 6;
+        let mut ctrl = Vec::with_capacity(n + 3); // wrap first 3 for cubic periodic
+        for i in 0..(n + 3) {
+            let theta = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
+            let r = 40.0 + 15.0 * (3.0 * theta).sin();
+            ctrl.push(P3::new(r * theta.cos(), r * theta.sin(), 10.0 * (2.0 * theta).cos()));
+        }
+        // Periodic cubic knot vector: uniform, n+degree+1 = n+4 knots, but
+        // for periodic we need (n+degree+1) knots with the first `degree`
+        // and last `degree` extending the range. Simpler: use clamped knot
+        // vector and the periodic flag set, but with the wrapped control
+        // points the curve will close.
+        let total = ctrl.len();
+        let degree = 3;
+        let n_knots = total + degree + 1;
+        let mut knots = Vec::with_capacity(n_knots);
+        for i in 0..n_knots {
+            knots.push(i as f64);
+        }
+        let curve = Curve3d::Nurbs(NurbsCurve {
+            degree,
+            control_points: ctrl,
+            weights: vec![1.0; total],
+            knots,
+        });
+        self.sample_and_load_curve(&curve, 3.0, 3.0 + n as f64, 250,
+            "Curve: NURBS closed (periodic, flower shape)", [0.20, 0.95, 0.85]);
+    }
+
+    /// Load a Trimmed curve (a portion of a basis curve).
+    fn load_curve_trimmed(&mut self) {
+        use draper_geometry::{Curve3d, NurbsCurve, Point3d as P3};
+        // Basis: full sine-wave-like NURBS curve. Trim to middle half.
+        let basis = Curve3d::Nurbs(NurbsCurve {
+            degree: 3,
+            control_points: vec![
+                P3::new(-70.0,   0.0,  0.0),
+                P3::new(-35.0,  50.0,  0.0),
+                P3::new(  0.0, -50.0,  0.0),
+                P3::new( 35.0,  50.0,  0.0),
+                P3::new( 70.0,   0.0,  0.0),
+            ],
+            weights: vec![1.0; 5],
+            knots: vec![0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0, 1.0],
+        });
+        let trimmed = Curve3d::Trimmed {
+            basis: Box::new(basis),
+            start: 0.25,
+            end: 0.75,
+        };
+        self.sample_and_load_curve(&trimmed, 0.0, 1.0, 150,
+            "Curve: Trimmed NURBS (middle half)", [0.95, 0.40, 0.20]);
+    }
+
+    /// Load a PCurve — a 2D circle in the UV space of a sphere,
+    /// producing a 3D "latitude line" that's actually a curve-on-surface.
+    ///
+    /// The sphere's UV parameterization is: u = azimuth ∈ [0, 2π],
+    /// v = polar ∈ [0, π]. A 2D circle of radius 0.4 centered at (0, 0.5)
+    /// in UV space traces a small loop around the sphere at roughly the
+    /// equator.
+    fn load_curve_pcurve(&mut self) {
+        use draper_geometry::{Curve3d, Curve2d, Circle2d, Point2d, Surface, SphereSurface, Point3d as P3};
+        let curve_2d = Curve2d::Circle(Circle2d::new_full(Point2d::new(0.0, std::f64::consts::FRAC_PI_2), 0.4));
+        let sphere = Surface::Sphere(SphereSurface {
+            center: P3::new(0.0, 0.0, 0.0),
+            radius: 50.0,
+        });
+        let pcurve = Curve3d::PCurve {
+            curve_2d: Box::new(curve_2d),
+            surface: Box::new(sphere),
+        };
+        self.sample_and_load_curve(&pcurve, 0.0, 1.0, 200,
+            "Curve: PCurve (2D circle on sphere)", [0.95, 0.20, 0.55]);
+    }
+
+    /// Load ALL curves in a single scene — a "curve gallery" showing each
+    /// curve type side-by-side. Curves are offset along X so they don't
+    /// overlap.
+    fn load_curve_all(&mut self) {
+        use draper_geometry::{Point3d as P3, Curve3d, Line, Circle, Ellipse,
+                              Hyperbola, Parabola, NurbsCurve,
+                              Direction3d};
+        // Sample each curve and translate to its own slot.
+        // 8 curves arranged in a 4×2 grid.
+        let spacing = 130.0;
+        let mut all_pts: Vec<Vec<P3>> = Vec::new();
+        let mut colors: Vec<[f32; 3]> = Vec::new();
+        let mut labels: Vec<&str> = Vec::new();
+
+        // 1. Line — top-left slot
+        {
+            let line = Curve3d::Line(Line::new(
+                P3::new(0.0, -30.0, -20.0),
+                Direction3d::new(0.6, 0.6, 0.5).unwrap(),
+            ));
+            let mut pts: Vec<P3> = (0..=50).map(|i| {
+                let t = i as f64 * 4.0;
+                line.point_at(t)
+            }).collect();
+            for p in &mut pts { p.x -= 3.0 * spacing / 2.0; p.y += spacing / 2.0; }
+            all_pts.push(pts);
+            colors.push([0.95, 0.55, 0.15]);
+            labels.push("Line");
+        }
+        // 2. Circle — top-second slot
+        {
+            let circle = Curve3d::Circle(Circle {
+                center: P3::new(0.0, 0.0, 0.0),
+                normal: Direction3d::Z,
+                radius: 30.0,
+                x_axis: Direction3d::X,
+            });
+            let mut pts: Vec<P3> = (0..=120).map(|i| {
+                let t = 2.0 * std::f64::consts::PI * (i as f64) / 120.0;
+                circle.point_at(t)
+            }).collect();
+            for p in &mut pts { p.x -= spacing / 2.0; p.y += spacing / 2.0; }
+            all_pts.push(pts);
+            colors.push([0.20, 0.80, 0.30]);
+            labels.push("Circle");
+        }
+        // 3. Ellipse — top-third slot
+        {
+            let ellipse = Curve3d::Ellipse(Ellipse {
+                center: P3::new(0.0, 0.0, 0.0),
+                normal: Direction3d::Z,
+                semi_major: 40.0,
+                semi_minor: 22.0,
+                x_axis: Direction3d::X,
+            });
+            let mut pts: Vec<P3> = (0..=150).map(|i| {
+                let t = 2.0 * std::f64::consts::PI * (i as f64) / 150.0;
+                ellipse.point_at(t)
+            }).collect();
+            for p in &mut pts { p.x += spacing / 2.0; p.y += spacing / 2.0; }
+            all_pts.push(pts);
+            colors.push([0.25, 0.55, 0.95]);
+            labels.push("Ellipse");
+        }
+        // 4. Hyperbola — top-right slot
+        {
+            let hyperbola = Curve3d::Hyperbola(Hyperbola {
+                center: P3::new(0.0, 0.0, 0.0),
+                normal: Direction3d::Y,
+                x_axis: Direction3d::X,
+                semi_real: 20.0,
+                semi_imag: 15.0,
+            });
+            let mut pts: Vec<P3> = (0..=80).map(|i| {
+                let t = -2.0 + 4.0 * (i as f64) / 80.0;
+                hyperbola.point_at(t)
+            }).collect();
+            for p in &mut pts { p.x += 3.0 * spacing / 2.0; p.y += spacing / 2.0; }
+            all_pts.push(pts);
+            colors.push([0.95, 0.30, 0.55]);
+            labels.push("Hyperbola");
+        }
+        // 5. Parabola — bottom-left
+        {
+            let parabola = Curve3d::Parabola(Parabola {
+                vertex: P3::new(-25.0, 0.0, 0.0),
+                normal: Direction3d::Y,
+                x_axis: Direction3d::X,
+                focal_dist: 12.0,
+            });
+            let mut pts: Vec<P3> = (0..=80).map(|i| {
+                let t = -35.0 + 70.0 * (i as f64) / 80.0;
+                parabola.point_at(t)
+            }).collect();
+            for p in &mut pts { p.x -= 3.0 * spacing / 2.0; p.y -= spacing / 2.0; }
+            all_pts.push(pts);
+            colors.push([0.75, 0.20, 0.95]);
+            labels.push("Parabola");
+        }
+        // 6. NURBS open — bottom-second
+        {
+            let nurbs = Curve3d::Nurbs(NurbsCurve {
+                degree: 3,
+                control_points: vec![
+                    P3::new(-40.0, -25.0,   0.0),
+                    P3::new(-20.0,  25.0,  15.0),
+                    P3::new(  0.0, -25.0, -20.0),
+                    P3::new( 20.0,  25.0,  20.0),
+                    P3::new( 40.0, -25.0,   0.0),
+                ],
+                weights: vec![1.0; 5],
+                knots: vec![0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0, 1.0],
+            });
+            let mut pts: Vec<P3> = (0..=200).map(|i| {
+                let t = (i as f64) / 200.0;
+                nurbs.point_at(t)
+            }).collect();
+            for p in &mut pts { p.x -= spacing / 2.0; p.y -= spacing / 2.0; }
+            all_pts.push(pts);
+            colors.push([0.95, 0.85, 0.20]);
+            labels.push("NURBS open");
+        }
+        // 7. NURBS closed (periodic) — bottom-third
+        {
+            let n = 6;
+            let mut ctrl = Vec::with_capacity(n + 3);
+            for i in 0..(n + 3) {
+                let theta = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
+                let r = 25.0 + 10.0 * (3.0 * theta).sin();
+                ctrl.push(P3::new(r * theta.cos(), r * theta.sin(), 8.0 * (2.0 * theta).cos()));
+            }
+            let total = ctrl.len();
+            let degree = 3;
+            let n_knots = total + degree + 1;
+            let knots: Vec<f64> = (0..n_knots).map(|i| i as f64).collect();
+            let nurbs = Curve3d::Nurbs(NurbsCurve {
+                degree, control_points: ctrl, weights: vec![1.0; total], knots,
+            });
+            let mut pts: Vec<P3> = (0..=200).map(|i| {
+                let t = 3.0 + (n as f64) * (i as f64) / 200.0;
+                nurbs.point_at(t)
+            }).collect();
+            for p in &mut pts { p.x += spacing / 2.0; p.y -= spacing / 2.0; }
+            all_pts.push(pts);
+            colors.push([0.20, 0.95, 0.85]);
+            labels.push("NURBS closed");
+        }
+        // 8. Trimmed — bottom-right
+        {
+            let basis = Curve3d::Nurbs(NurbsCurve {
+                degree: 3,
+                control_points: vec![
+                    P3::new(-40.0,   0.0,  0.0),
+                    P3::new(-20.0,  30.0,  0.0),
+                    P3::new(  0.0, -30.0,  0.0),
+                    P3::new( 20.0,  30.0,  0.0),
+                    P3::new( 40.0,   0.0,  0.0),
+                ],
+                weights: vec![1.0; 5],
+                knots: vec![0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0, 1.0],
+            });
+            let trimmed = Curve3d::Trimmed {
+                basis: Box::new(basis),
+                start: 0.2,
+                end: 0.8,
+            };
+            let mut pts: Vec<P3> = (0..=150).map(|i| {
+                let t = (i as f64) / 150.0;
+                trimmed.point_at(t)
+            }).collect();
+            for p in &mut pts { p.x += 3.0 * spacing / 2.0; p.y -= spacing / 2.0; }
+            all_pts.push(pts);
+            colors.push([0.95, 0.40, 0.20]);
+            labels.push("Trimmed");
+        }
+
+        // Compute combined bounding box.
+        let mut min = [f64::INFINITY; 3];
+        let mut max = [f64::NEG_INFINITY; 3];
+        for pts in &all_pts {
+            for p in pts {
+                min[0] = min[0].min(p.x); max[0] = max[0].max(p.x);
+                min[1] = min[1].min(p.y); max[1] = max[1].max(p.y);
+                min[2] = min[2].min(p.z); max[2] = max[2].max(p.z);
+            }
+        }
+        for i in 0..3 {
+            min[i] -= 5.0;
+            max[i] += 5.0;
+        }
+        let marker = Self::curve_marker_mesh(min, max);
+        self.detailed_instances.clear();
+        self.instance_triangle_ranges.clear();
+        self.assembly_tree = None;
+        self.load_mesh(marker, "Curve Gallery: All 8 curve types");
+        // Push all curves with their colors.
+        for (pts, color) in all_pts.iter().zip(colors.iter()) {
+            self.push_curve_polyline(pts, *color);
+        }
+        self.extra_curve_lines_dirty = true;
+        self.edge_dirty = true;
+        self.show_edges = true;
+        // Log each label so the user sees what each color represents.
+        for (i, label) in labels.iter().enumerate() {
+            let c = colors[i];
+            self.log(&format!("  [RGB({:.2},{:.2},{:.2})] #{}: {}", c[0], c[1], c[2], i + 1, label));
+        }
     }
 
     // ─── Native file I/O (uses rfd + filesystem) ─────────────────────────
@@ -2358,6 +3311,14 @@ impl ViewerApp {
                     }
                 }
             }
+        }
+
+        // Append extra curve line strips (from curve-test visualizations).
+        // These are added to the same edge vertex buffer so they render with
+        // the same line pipeline as B-Rep edges, with depth testing against
+        // the solid mesh so curves behind geometry are properly occluded.
+        if !self.extra_curve_lines.is_empty() {
+            edge_vertices.extend_from_slice(&self.extra_curve_lines);
         }
 
         edge_vertices
@@ -4149,6 +5110,46 @@ impl eframe::App for ViewerApp {
                     if ui.button("Extrusion").clicked() { self.load_extrusion(); }
                     if ui.button("NURBS").clicked() { self.load_nurbs(); }
                 });
+                // --- NURBS Surface Gallery ---
+                ui.separator();
+                ui.heading(egui::RichText::new("NURBS Surfaces").size(12.0));
+                ui.label(egui::RichText::new("Comprehensive surface tests").size(9.0).color(egui::Color32::GRAY));
+                egui::Grid::new("desk_surf_grid").num_columns(3).spacing([4.0, 4.0]).show(ui, |ui| {
+                    if ui.button("Saddle").clicked()      { self.load_nurbs_saddle(); }
+                    if ui.button("Bump").clicked()        { self.load_nurbs_bump(); }
+                    if ui.button("Wave").clicked()        { self.load_nurbs_wave(); }
+                    ui.end_row();
+                    if ui.button("Ruled").clicked()       { self.load_nurbs_ruled(); }
+                    if ui.button("Revolution").clicked()  { self.load_nurbs_revolution(); }
+                    if ui.button("Coons").clicked()       { self.load_nurbs_coons(); }
+                    ui.end_row();
+                    if ui.button("Bilinear").clicked()    { self.load_nurbs_bilinear(); }
+                    if ui.button("Half-Cyl").clicked()    { self.load_nurbs_half_cylinder(); }
+                    if ui.button("Q-Sphere").clicked()    { self.load_nurbs_quarter_sphere(); }
+                    ui.end_row();
+                    if ui.button("Closed-Cyl").clicked()  { self.load_nurbs_closed_cylinder(); }
+                    ui.end_row();
+                });
+                // --- Curve Gallery ---
+                ui.separator();
+                ui.heading(egui::RichText::new("Curves (3D line strips)").size(12.0));
+                ui.label(egui::RichText::new("All curve types as colored line strips").size(9.0).color(egui::Color32::GRAY));
+                egui::Grid::new("desk_curves_grid").num_columns(3).spacing([4.0, 4.0]).show(ui, |ui| {
+                    if ui.button("Line").clicked()         { self.load_curve_line(); }
+                    if ui.button("Circle").clicked()      { self.load_curve_circle(); }
+                    if ui.button("Ellipse").clicked()     { self.load_curve_ellipse(); }
+                    ui.end_row();
+                    if ui.button("Hyperbola").clicked()   { self.load_curve_hyperbola(); }
+                    if ui.button("Parabola").clicked()    { self.load_curve_parabola(); }
+                    if ui.button("NURBS open").clicked()  { self.load_curve_nurbs_open(); }
+                    ui.end_row();
+                    if ui.button("NURBS closed").clicked(){ self.load_curve_nurbs_closed(); }
+                    if ui.button("Trimmed").clicked()     { self.load_curve_trimmed(); }
+                    if ui.button("PCurve").clicked()      { self.load_curve_pcurve(); }
+                    ui.end_row();
+                    if ui.button("All (Gallery)").clicked() { self.load_curve_all(); }
+                    ui.end_row();
+                });
                 // --- Hole: 3 ---
                 ui.separator();
                 ui.heading(egui::RichText::new("Hole: 3").size(12.0));
@@ -5082,7 +6083,14 @@ impl ViewerApp {
                         if ui.button("Torus").clicked()          { self.load_torus();       self.close_mobile_panel_after_load = true; ui.close_menu(); }
                         if ui.button("Revolution").clicked()     { self.load_revolution();  self.close_mobile_panel_after_load = true; ui.close_menu(); }
                         if ui.button("Extrusion").clicked()      { self.load_extrusion();   self.close_mobile_panel_after_load = true; ui.close_menu(); }
-                        if ui.button("NURBS").clicked()          { self.load_nurbs();       self.close_mobile_panel_after_load = true; ui.close_menu(); }
+                        if ui.button("NURBS (Saddle)").clicked() { self.load_nurbs_saddle(); self.close_mobile_panel_after_load = true; ui.close_menu(); }
+                        if ui.button("NURBS Bump").clicked()     { self.load_nurbs_bump();   self.close_mobile_panel_after_load = true; ui.close_menu(); }
+                        if ui.button("NURBS Wave").clicked()     { self.load_nurbs_wave();   self.close_mobile_panel_after_load = true; ui.close_menu(); }
+                        if ui.button("NURBS Ruled").clicked()    { self.load_nurbs_ruled();  self.close_mobile_panel_after_load = true; ui.close_menu(); }
+                        if ui.button("NURBS Coons").clicked()    { self.load_nurbs_coons();  self.close_mobile_panel_after_load = true; ui.close_menu(); }
+                        if ui.button("NURBS Half-Cyl").clicked() { self.load_nurbs_half_cylinder(); self.close_mobile_panel_after_load = true; ui.close_menu(); }
+                        if ui.button("NURBS Q-Sphere").clicked() { self.load_nurbs_quarter_sphere(); self.close_mobile_panel_after_load = true; ui.close_menu(); }
+                        if ui.button("Curve Gallery").clicked()  { self.load_curve_all();    self.close_mobile_panel_after_load = true; ui.close_menu(); }
                         if ui.button("ICE Engine").clicked()     { self.load_engine();      self.close_mobile_panel_after_load = true; ui.close_menu(); }
                     });
                     // Spacer + info summary
@@ -5282,6 +6290,68 @@ impl ViewerApp {
                                 self.scroll_to_tree_node = None;
                                 self.scroll_to_face_id = None;
                             }
+                        }
+
+                        MobileControlsTab::Surfaces => {
+                            // ── Surfaces tab: comprehensive NURBS surface tests ──
+                            ui.label(egui::RichText::new("NURBS surface gallery").size(11.0).color(egui::Color32::GRAY));
+                            ui.add_space(4.0);
+                            egui::Grid::new("mob_surf_grid").num_columns(2).spacing([6.0, 6.0]).show(ui, |ui| {
+                                if ui.add_sized([120.0, 32.0], egui::Button::new("Saddle")).clicked()      { self.load_nurbs_saddle();          self.close_mobile_panel_after_load = true; }
+                                if ui.add_sized([120.0, 32.0], egui::Button::new("Bump")).clicked()        { self.load_nurbs_bump();            self.close_mobile_panel_after_load = true; }
+                                ui.end_row();
+                                if ui.add_sized([120.0, 32.0], egui::Button::new("Wave")).clicked()        { self.load_nurbs_wave();            self.close_mobile_panel_after_load = true; }
+                                if ui.add_sized([120.0, 32.0], egui::Button::new("Ruled")).clicked()       { self.load_nurbs_ruled();           self.close_mobile_panel_after_load = true; }
+                                ui.end_row();
+                                if ui.add_sized([120.0, 32.0], egui::Button::new("Revolution")).clicked()  { self.load_nurbs_revolution();      self.close_mobile_panel_after_load = true; }
+                                if ui.add_sized([120.0, 32.0], egui::Button::new("Coons")).clicked()       { self.load_nurbs_coons();           self.close_mobile_panel_after_load = true; }
+                                ui.end_row();
+                                if ui.add_sized([120.0, 32.0], egui::Button::new("Bilinear")).clicked()    { self.load_nurbs_bilinear();        self.close_mobile_panel_after_load = true; }
+                                if ui.add_sized([120.0, 32.0], egui::Button::new("Half-Cyl")).clicked()    { self.load_nurbs_half_cylinder();   self.close_mobile_panel_after_load = true; }
+                                ui.end_row();
+                                if ui.add_sized([120.0, 32.0], egui::Button::new("Q-Sphere")).clicked()    { self.load_nurbs_quarter_sphere();  self.close_mobile_panel_after_load = true; }
+                                if ui.add_sized([120.0, 32.0], egui::Button::new("Closed-Cyl")).clicked()  { self.load_nurbs_closed_cylinder(); self.close_mobile_panel_after_load = true; }
+                                ui.end_row();
+                            });
+                            ui.add_space(6.0);
+                            ui.label(egui::RichText::new("Primitive analytic surfaces").size(11.0).color(egui::Color32::GRAY));
+                            egui::Grid::new("mob_prim_surf_grid").num_columns(3).spacing([6.0, 6.0]).show(ui, |ui| {
+                                if ui.add_sized([90.0, 32.0], egui::Button::new("Box")).clicked()       { self.load_box();       self.close_mobile_panel_after_load = true; }
+                                if ui.add_sized([90.0, 32.0], egui::Button::new("Cylinder")).clicked() { self.load_cylinder();  self.close_mobile_panel_after_load = true; }
+                                if ui.add_sized([90.0, 32.0], egui::Button::new("Sphere")).clicked()   { self.load_sphere();    self.close_mobile_panel_after_load = true; }
+                                ui.end_row();
+                                if ui.add_sized([90.0, 32.0], egui::Button::new("Cone")).clicked()      { self.load_cone();      self.close_mobile_panel_after_load = true; }
+                                if ui.add_sized([90.0, 32.0], egui::Button::new("Torus")).clicked()     { self.load_torus();     self.close_mobile_panel_after_load = true; }
+                                if ui.add_sized([90.0, 32.0], egui::Button::new("Revolution")).clicked() { self.load_revolution(); self.close_mobile_panel_after_load = true; }
+                                ui.end_row();
+                                if ui.add_sized([90.0, 32.0], egui::Button::new("Extrusion")).clicked() { self.load_extrusion(); self.close_mobile_panel_after_load = true; }
+                                ui.end_row();
+                            });
+                        }
+
+                        MobileControlsTab::Curves => {
+                            // ── Curves tab: comprehensive 3D curve tests ──
+                            ui.label(egui::RichText::new("3D curve gallery (rendered as colored line strips)").size(11.0).color(egui::Color32::GRAY));
+                            ui.add_space(4.0);
+                            egui::Grid::new("mob_curves_grid").num_columns(2).spacing([6.0, 6.0]).show(ui, |ui| {
+                                if ui.add_sized([120.0, 32.0], egui::Button::new("Line")).clicked()         { self.load_curve_line();         self.close_mobile_panel_after_load = true; }
+                                if ui.add_sized([120.0, 32.0], egui::Button::new("Circle")).clicked()      { self.load_curve_circle();       self.close_mobile_panel_after_load = true; }
+                                ui.end_row();
+                                if ui.add_sized([120.0, 32.0], egui::Button::new("Ellipse")).clicked()     { self.load_curve_ellipse();      self.close_mobile_panel_after_load = true; }
+                                if ui.add_sized([120.0, 32.0], egui::Button::new("Hyperbola")).clicked()   { self.load_curve_hyperbola();    self.close_mobile_panel_after_load = true; }
+                                ui.end_row();
+                                if ui.add_sized([120.0, 32.0], egui::Button::new("Parabola")).clicked()    { self.load_curve_parabola();     self.close_mobile_panel_after_load = true; }
+                                if ui.add_sized([120.0, 32.0], egui::Button::new("NURBS open")).clicked()  { self.load_curve_nurbs_open();   self.close_mobile_panel_after_load = true; }
+                                ui.end_row();
+                                if ui.add_sized([120.0, 32.0], egui::Button::new("NURBS closed")).clicked(){ self.load_curve_nurbs_closed(); self.close_mobile_panel_after_load = true; }
+                                if ui.add_sized([120.0, 32.0], egui::Button::new("Trimmed")).clicked()     { self.load_curve_trimmed();      self.close_mobile_panel_after_load = true; }
+                                ui.end_row();
+                                if ui.add_sized([120.0, 32.0], egui::Button::new("PCurve")).clicked()      { self.load_curve_pcurve();       self.close_mobile_panel_after_load = true; }
+                                if ui.add_sized([120.0, 32.0], egui::Button::new("All (Gallery)")).clicked() { self.load_curve_all();        self.close_mobile_panel_after_load = true; }
+                                ui.end_row();
+                            });
+                            ui.add_space(6.0);
+                            ui.label(egui::RichText::new("Tip: tap \"All\" to see every curve type side-by-side, each in a different color.").size(10.0).color(egui::Color32::GRAY));
                         }
 
                         MobileControlsTab::Holes => {

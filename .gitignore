@@ -35,3 +35,4 @@ gh-pages/
 target/
 .gh-pages/
 tool-results/
+dist-wasm/
