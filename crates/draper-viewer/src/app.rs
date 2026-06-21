@@ -1726,12 +1726,15 @@ impl ViewerApp {
     /// -curvature surface in between. Recognizable as a "Pringles chip".
     fn load_nurbs_saddle(&mut self) {
         use draper_geometry::{NurbsSurface, Point3d as P3};
-        // z = (x² - y²) / 100 over x,y ∈ [-50, +50] → z range = [-50, +50]
+        // z = (x^2 - y^2) / 100 over x,y ∈ [-50, +50] → z range = [-50, +50]
         // 4×4 bicubic control grid (clamped knots).
         // Corners are exact: at (±50, ±50), z = (2500 - 2500)/100 = 0.
         // At (±50, ∓50), z = (2500 - 2500)/100 = 0... wait that's the same.
         // Actually z = (x²-y²)/100 — at (50, 0): z = 25; at (0, 50): z = -25.
         // So along x-axis: ridge; along y-axis: valley. Classic saddle.
+        // NOTE: control_points layout is [v_idx][u_idx] (rows-of-V), which is
+        // the natural authoring orientation. from_v_rows transposes it to the
+        // struct's [u_idx][v_idx] convention.
         let control_points = vec![
             // row v=0 (y=-50)
             vec![P3::new(-50.0, -50.0,   0.0), P3::new(-17.0, -50.0, -28.0), P3::new( 17.0, -50.0, -28.0), P3::new( 50.0, -50.0,   0.0)],
@@ -1745,12 +1748,9 @@ impl ViewerApp {
         let weights = vec![vec![1.0; 4]; 4];
         let u_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
         let v_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
-        let nurbs_surface = NurbsSurface {
-            u_degree: 3, v_degree: 3,
-            control_points, weights,
-            u_knots, v_knots,
-            u_closed: false, v_closed: false,
-        };
+        let nurbs_surface = NurbsSurface::from_v_rows(
+            3, 3, control_points, weights, u_knots, v_knots, false, false,
+        );
         let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
@@ -1775,12 +1775,9 @@ impl ViewerApp {
         let weights = vec![vec![1.0; 5]; 5];
         let u_knots = vec![0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0, 1.0];
         let v_knots = vec![0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0, 1.0];
-        let nurbs_surface = NurbsSurface {
-            u_degree: 3, v_degree: 3,
-            control_points, weights,
-            u_knots, v_knots,
-            u_closed: false, v_closed: false,
-        };
+        let nurbs_surface = NurbsSurface::from_v_rows(
+            3, 3, control_points, weights, u_knots, v_knots, false, false,
+        );
         let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
@@ -1810,12 +1807,9 @@ impl ViewerApp {
         let u_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
         // v: clamped linear with 2 control points → [0,0, 1,1]
         let v_knots = vec![0.0, 0.0, 1.0, 1.0];
-        let nurbs_surface = NurbsSurface {
-            u_degree: 3, v_degree: 1,
-            control_points, weights,
-            u_knots, v_knots,
-            u_closed: false, v_closed: false,
-        };
+        let nurbs_surface = NurbsSurface::from_v_rows(
+            3, 1, control_points, weights, u_knots, v_knots, false, false,
+        );
         let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
@@ -1848,12 +1842,9 @@ impl ViewerApp {
         let weights = vec![vec![1.0; 4]; 2];
         let u_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]; // cubic
         let v_knots = vec![0.0, 0.0, 1.0, 1.0]; // linear (ruled)
-        let nurbs_surface = NurbsSurface {
-            u_degree: 3, v_degree: 1,
-            control_points, weights,
-            u_knots, v_knots,
-            u_closed: false, v_closed: false,
-        };
+        let nurbs_surface = NurbsSurface::from_v_rows(
+            3, 1, control_points, weights, u_knots, v_knots, false, false,
+        );
         let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
@@ -1936,12 +1927,9 @@ impl ViewerApp {
         let weights = vec![vec![1.0; 4]; 4];
         let u_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
         let v_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
-        let nurbs_surface = NurbsSurface {
-            u_degree: 3, v_degree: 3,
-            control_points, weights,
-            u_knots, v_knots,
-            u_closed: false, v_closed: false,
-        };
+        let nurbs_surface = NurbsSurface::from_v_rows(
+            3, 3, control_points, weights, u_knots, v_knots, false, false,
+        );
         let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
@@ -1966,12 +1954,9 @@ impl ViewerApp {
         let weights = vec![vec![1.0; 2]; 2];
         let u_knots = vec![0.0, 0.0, 1.0, 1.0]; // degree 1, 2 ctrl → [0,0,1,1]
         let v_knots = vec![0.0, 0.0, 1.0, 1.0];
-        let nurbs_surface = NurbsSurface {
-            u_degree: 1, v_degree: 1,
-            control_points, weights,
-            u_knots, v_knots,
-            u_closed: false, v_closed: false,
-        };
+        let nurbs_surface = NurbsSurface::from_v_rows(
+            1, 1, control_points, weights, u_knots, v_knots, false, false,
+        );
         let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 20);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
@@ -1979,45 +1964,66 @@ impl ViewerApp {
         self.load_mesh(mesh, "NURBS Bilinear Patch (warped quad saddle)");
     }
 
-    /// NURBS Half-Cylinder approximation: a bicubic NURBS surface that
-    /// approximates a half-cylinder. Demonstrates that NURBS can
-    /// represent conic sections exactly when using rational weights.
+    /// NURBS Half-Cylinder: a rational quadratic NURBS surface that exactly
+    /// represents a half-cylinder (180° arc × linear height).
     ///
-    /// The half-cylinder uses rational quadratic NURBS in U (the angular
-    /// direction) with weight 1/√2 at the midpoint to exactly reproduce
-    /// a circular arc, and linear NURBS in V (the axis direction).
+    /// A 180° arc CANNOT be represented by a single rational quadratic Bézier
+    /// (the middle weight would have to be cos(90°)=0, which is degenerate).
+    /// The standard solution is to use TWO 90° arc segments joined at the
+    /// top, giving 5 control points with a C¹-continuous junction.
+    ///
+    /// Construction:
+    ///   - 5 angular control points (one full half-circle, two 90° Bézier segments)
+    ///   - 2 height control points (linear extrusion)
+    ///   - weights = [1, 1/√2, 1, 1/√2, 1] in angle, [1, 1] in height
+    ///   - knots_u = [0,0,0, 0.5,0.5, 1,1,1] (degree 2, 5 ctrl pts, with interior knot at 0.5 of multiplicity 2)
+    ///   - knots_v = [0,0, 1,1] (degree 1, 2 ctrl pts)
+    ///
+    /// The 5 angular control points alternate between "on-arc" (corner) and
+    /// "off-arc" (bounding-box corner) positions:
+    ///   P0 = (R, 0, 0)        ← on arc, angle 0°
+    ///   P1 = (R, 0, R)        ← bounding-box corner for first 90° segment
+    ///   P2 = (0, 0, R)        ← on arc, angle 90° (junction)
+    ///   P3 = (-R, 0, R)       ← bounding-box corner for second 90° segment
+    ///   P4 = (-R, 0, 0)       ← on arc, angle 180°
     fn load_nurbs_half_cylinder(&mut self) {
         use draper_geometry::{NurbsSurface, Point3d as P3};
-        // Rational quadratic NURBS for a half-circle (180° arc) in XZ plane.
-        // 3 control points: (-R,0,0), (0,R,0)... wait, we want half-cylinder
-        // along Y axis. Let's parametrize: u ∈ [0, π], v ∈ [0, 100].
-        // Control points at u=0, π/2, π:
-        //   u=0:    (R, y, 0)
-        //   u=π/2:  (0, y, R)  ← weight 1/√2
-        //   u=π:    (-R, y, 0)
-        // For each v ∈ {0, 100}.
         let r = 40.0;
         let inv_sqrt2 = 1.0 / 2.0_f64.sqrt();
+        // Control points laid out as [v_idx][u_idx] (rows of V = height, cols of U = angle).
         let control_points = vec![
-            // v = 0 (bottom of cylinder)
-            vec![P3::new( r, 0.0, 0.0), P3::new(0.0, 0.0,  r), P3::new(-r, 0.0, 0.0)],
-            // v = 100 (top of cylinder)
-            vec![P3::new( r, 100.0, 0.0), P3::new(0.0, 100.0,  r), P3::new(-r, 100.0, 0.0)],
+            // v = 0 (bottom of cylinder, y=0)
+            vec![
+                P3::new( r, 0.0, 0.0),  // u=0:    angle 0°
+                P3::new( r, 0.0,   r),  // u=0.25: bounding-box corner (1st 90° segment)
+                P3::new( 0.0, 0.0,   r),  // u=0.5:  angle 90° (junction)
+                P3::new(-r, 0.0,   r),  // u=0.75: bounding-box corner (2nd 90° segment)
+                P3::new(-r, 0.0, 0.0),  // u=1:    angle 180°
+            ],
+            // v = 1 (top of cylinder, y=100)
+            vec![
+                P3::new( r, 100.0, 0.0),
+                P3::new( r, 100.0,   r),
+                P3::new( 0.0, 100.0,   r),
+                P3::new(-r, 100.0,   r),
+                P3::new(-r, 100.0, 0.0),
+            ],
         ];
         let weights = vec![
-            vec![1.0, inv_sqrt2, 1.0],
-            vec![1.0, inv_sqrt2, 1.0],
+            vec![1.0, inv_sqrt2, 1.0, inv_sqrt2, 1.0],
+            vec![1.0, inv_sqrt2, 1.0, inv_sqrt2, 1.0],
         ];
-        // U: degree 2, 3 ctrl pts → clamped quadratic: [0,0,0, 1,1,1]
-        let u_knots = vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
-        // V: degree 1, 2 ctrl pts → [0,0, 1,1]
+        // U: degree 2, 5 ctrl pts → 8 knots = 5+2+1.
+        // Two Bézier segments: [0,0,0, 0.5,0.5, 1,1,1]
+        // (interior knot at 0.5 with multiplicity 2 → C⁰ B-spline, but the
+        // tangent direction is continuous because the Bézier control points
+        // are arranged symmetrically — so the rendered curve looks smooth.)
+        let u_knots = vec![0.0, 0.0, 0.0, 0.5, 0.5, 1.0, 1.0, 1.0];
+        // V: degree 1, 2 ctrl pts → 4 knots
         let v_knots = vec![0.0, 0.0, 1.0, 1.0];
-        let nurbs_surface = NurbsSurface {
-            u_degree: 2, v_degree: 1,
-            control_points, weights,
-            u_knots, v_knots,
-            u_closed: false, v_closed: false,
-        };
+        let nurbs_surface = NurbsSurface::from_v_rows(
+            2, 1, control_points, weights, u_knots, v_knots, false, false,
+        );
         let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
@@ -2025,77 +2031,57 @@ impl ViewerApp {
         self.load_mesh(mesh, "NURBS Half-Cylinder (rational quad arc × linear)");
     }
 
-    /// NURBS Quarter-Sphere approximation: a rational quadratic NURBS patch
-    /// that represents one octant of a sphere. With the proper rational
-    /// weights (1, 1/√2, 1) in both U and V, the patch is an EXACT
-    /// spherical octant — not a polynomial approximation.
+    /// NURBS Quarter-Sphere: a rational quadratic NURBS patch that exactly
+    /// represents one octant of a sphere (90° × 90°).
     ///
-    /// Combined with mirror operations, 8 such patches can represent a
-    /// complete sphere. Here we show just one octant for clarity.
+    /// Standard construction (see "The NURBS Book" §7.3):
+    ///   - 3×3 rational quadratic control grid
+    ///   - Weights: corner=1, edge-midpoint=1/√2, interior=1/2 (= (1/√2)²)
+    ///   - Corner control points ARE on the sphere (4 of them at radius R)
+    ///   - Edge-midpoint control points are at the CORNER of the bounding box
+    ///     (NOT on the sphere — they're at distance R√2 from origin)
+    ///   - Interior control point is at (R, R, R) — corner of the 3D bounding
+    ///     box, distance R√3 from origin
+    ///   - Top row of control points all coincide at the north pole (0, 0, R)
+    ///     — this is a degenerate edge, but the surface is still well-defined.
+    ///
+    /// With this construction, the rational quadratic NURBS reproduces the
+    /// spherical octant EXACTLY (not an approximation).
     fn load_nurbs_quarter_sphere(&mut self) {
         use draper_geometry::{NurbsSurface, Point3d as P3};
-        // Octant of a sphere of radius R=50.
-        // 3×3 rational quadratic control grid. Weights:
-        //   corner (1,1) → 1
-        //   edge midpoints (1, 1/√2) and (1/√2, 1) → 1/√2
-        //   interior (1/√2, 1/√2) → 1/2
         let r = 50.0;
-        let s = 2.0_f64.sqrt();
-        // Control points (in XYZ) for one octant of sphere:
-        //   u=0,v=0:   (r, 0, 0)                  w=1
-        //   u=π/4,v=0: (r/s, r/s, 0)              w=1/s
-        //   u=π/2,v=0: (0, r, 0)                  w=1
-        //   u=0,v=π/4: (r/s, 0, r/s)              w=1/s
-        //   u=π/4,v=π/4: (r/3·?, r/3·?, r/3·?)    w=1/2
-        //   u=π/2,v=π/4: (0, r/s, r/s)            w=1/s
-        //   u=0,v=π/2: (0, 0, r)                  w=1
-        //   u=π/4,v=π/2: (0, r/s, r/s)... wait, we have to be careful.
-        // Actually for sphere octant, the rational quadratic NURBS uses
-        // control points that are NOT on the sphere — only the boundary
-        // control points (4 corners + 4 edge midpoints) are exact.
-        // The interior control point is at (r/3, r/3, r/3) — but with
-        // weight 1/2 (which is (1/√2)²), the resulting surface is the
-        // exact spherical octant.
+        let inv_s = 1.0 / 2.0_f64.sqrt();
+        // Control points laid out as [v_idx][u_idx] (rows of V = elevation,
+        // cols of U = azimuth).
         //
-        // Let's use the standard construction:
-        //   P00 = (r,0,0), P10 = (r,r,0)/s, P20 = (0,r,0)
-        //   P01 = (r,0,r)/s, P11 = (r,r,r)/3, P21 = (0,r,r)/s
-        //   P02 = (0,0,r), P12 = (0,r,r)/s, P22 = (0,0,r)... wait
-        //   P02 should be at u=0,v=π/2: that's the north pole on the X axis
-        //   plane — actually, let's re-parametrize:
-        //   u = azimuth (0 to π/2), v = elevation (0 to π/2)
-        //   P(u,v) = (r·cos(v)·cos(u), r·cos(v)·sin(u), r·sin(v))
-        // So:
-        //   P(0,0)    = (r, 0, 0)
-        //   P(π/4,0)  = (r/s, r/s, 0)
-        //   P(π/2,0)  = (0, r, 0)
-        //   P(0,π/4)  = (r/s, 0, r/s)
-        //   P(π/4,π/4)= (r/2, r/2, r/s)  ← exact sphere point
-        //   P(π/2,π/4)= (0, r/s, r/s)
-        //   P(0,π/2)  = (0, 0, r)         ← north pole
-        //   P(π/4,π/2)= (0, 0, r)         ← north pole (same)
-        //   P(π/2,π/2)= (0, 0, r)         ← north pole (same)
-        // At v=π/2 all u values map to north pole (degenerate edge).
-        let r2 = r / s;
+        // v=0 (equator, z=0):
+        //   u=0:        (R, 0, 0)         ← on sphere, azimuth 0°
+        //   u=π/4 mid:  (R, R, 0)         ← bounding-box corner (NOT on sphere)
+        //   u=π/2:      (0, R, 0)         ← on sphere, azimuth 90°
+        // v=π/4 (mid-elevation):
+        //   u=0:        (R, 0, R)         ← bounding-box corner
+        //   u=π/4 mid:  (R, R, R)         ← 3D bounding-box corner (interior)
+        //   u=π/2:      (0, R, R)         ← bounding-box corner
+        // v=π/2 (north pole):
+        //   all u:      (0, 0, R)         ← degenerate edge (north pole)
         let control_points = vec![
-            vec![P3::new(  r, 0.0, 0.0), P3::new(r2, r2, 0.0), P3::new(0.0,  r, 0.0)],
-            vec![P3::new(r2, 0.0,  r2), P3::new(r2, r2,  r2), P3::new(0.0, r2,  r2)],
-            vec![P3::new(0.0, 0.0,  r), P3::new(0.0, 0.0,  r), P3::new(0.0, 0.0,  r)],
+            // v=0 (equator)
+            vec![P3::new( r, 0.0, 0.0), P3::new( r,  r, 0.0), P3::new(0.0,  r, 0.0)],
+            // v=π/4 (mid-elevation)
+            vec![P3::new( r, 0.0,   r), P3::new( r,  r,   r), P3::new(0.0,  r,   r)],
+            // v=π/2 (north pole — degenerate)
+            vec![P3::new(0.0, 0.0,   r), P3::new(0.0, 0.0,   r), P3::new(0.0, 0.0,   r)],
         ];
-        let half = 0.5;
         let weights = vec![
-            vec![1.0,  1.0/s, 1.0],
-            vec![1.0/s, half, 1.0/s],
-            vec![1.0,  1.0/s, 1.0],
+            vec![1.0,   inv_s, 1.0],
+            vec![inv_s, 0.5,   inv_s],
+            vec![1.0,   inv_s, 1.0],
         ];
         let u_knots = vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
         let v_knots = vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
-        let nurbs_surface = NurbsSurface {
-            u_degree: 2, v_degree: 2,
-            control_points, weights,
-            u_knots, v_knots,
-            u_closed: false, v_closed: false,
-        };
+        let nurbs_surface = NurbsSurface::from_v_rows(
+            2, 2, control_points, weights, u_knots, v_knots, false, false,
+        );
         let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
@@ -2111,30 +2097,42 @@ impl ViewerApp {
         let r = 40.0;
         let h = 100.0;
         // 6 angular control points × 2 height control points.
-        // Periodic cubic in U (wrap-around). Linear in V.
+        // Periodic cubic in U (wrap-around, angle direction). Linear in V (height).
+        // NOTE: control_points is built as [height_idx][angle_idx] = [v_idx][u_idx],
+        // which matches from_v_rows's expected layout.
+        //
+        // For a uniform periodic cubic B-spline with n control points equally
+        // spaced on a circle of radius R_control, the curve at parameter value
+        // corresponding to a control point is at radius:
+        //   R_curve = R_control * (4 + 2·cos(2π/n)) / 6
+        // To make R_curve = R (the desired cylinder radius), we need:
+        //   R_control = 6R / (4 + 2·cos(2π/n))
+        // For n=6, cos(π/3)=0.5, so R_control = 6R/5 = 1.2·R = 48.
         let n_ang = 6;
+        let r_control = r * 6.0 / (4.0 + 2.0 * (2.0 * std::f64::consts::PI / n_ang as f64).cos());
         let mut control_points = Vec::with_capacity(2);
         for &z in &[0.0, h] {
             let mut row = Vec::with_capacity(n_ang);
             for i in 0..n_ang {
                 let theta = 2.0 * std::f64::consts::PI * (i as f64) / (n_ang as f64);
-                row.push(P3::new(r * theta.cos(), r * theta.sin(), z));
+                row.push(P3::new(r_control * theta.cos(), r_control * theta.sin(), z));
             }
             control_points.push(row);
         }
         let weights = vec![vec![1.0; n_ang]; 2];
         // U: periodic cubic with 6 control points: need 6+3+1=10 knots.
-        // Spacing = 2π/6 = π/3. Knots: [-π, -2π/3, -π/3, 0, π/3, 2π/3, π, 4π/3, 5π/3, 2π]
-        let d = 2.0 * std::f64::consts::PI / n_ang as f64;
+        // For a periodic B-spline of degree p with n control points, the
+        // valid parameter range that gives ONE FULL PERIOD is
+        //   [knots[p], knots[n]]  which spans (n - p) * knot_spacing.
+        // We want this to equal 2π (one full revolution), so:
+        //   knot_spacing = 2π / (n - p) = 2π / (6 - 3) = 2π/3.
+        let d = 2.0 * std::f64::consts::PI / (n_ang as f64 - 3.0);
         let u_knots: Vec<f64> = (0..(n_ang + 4)).map(|i| (i as f64 - 3.0) * d).collect();
         // V: clamped linear: [0,0,1,1]
         let v_knots = vec![0.0, 0.0, 1.0, 1.0];
-        let nurbs_surface = NurbsSurface {
-            u_degree: 3, v_degree: 1,
-            control_points, weights,
-            u_knots, v_knots,
-            u_closed: true, v_closed: false,
-        };
+        let nurbs_surface = NurbsSurface::from_v_rows(
+            3, 1, control_points, weights, u_knots, v_knots, true, false,
+        );
         let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
@@ -2279,12 +2277,9 @@ impl ViewerApp {
         let weights = vec![vec![1.0; 4]; 4];
         let u_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
         let v_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
-        let nurbs_surface = NurbsSurface {
-            u_degree: 3, v_degree: 3,
-            control_points, weights,
-            u_knots, v_knots,
-            u_closed: false, v_closed: false,
-        };
+        let nurbs_surface = NurbsSurface::from_v_rows(
+            3, 3, control_points, weights, u_knots, v_knots, false, false,
+        );
         let (u_min, u_max) = nurbs_surface.u_range();
         let (v_min, v_max) = nurbs_surface.v_range();
         let surface = Surface::Nurbs(nurbs_surface);

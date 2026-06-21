@@ -1053,3 +1053,245 @@ fn test_sphere_normal_parallel_to_position() {
         }
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// from_v_rows constructor tests
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_from_v_rows_transposes_control_points() {
+    // Build a simple 2×2 surface where each control point has a unique x coordinate.
+    // Verify that the resulting surface, evaluated at u=0..1, v=0..1, gives the
+    // expected control point positions at the corners.
+    //
+    // Author's intent (rows-of-V layout):
+    //   v=0 row: [(0,0,0), (10,0,0)]   ← u=0, u=1 at v=0
+    //   v=1 row: [(0,10,0), (10,10,0)] ← u=0, u=1 at v=1
+    //
+    // After from_v_rows, the struct's control_points[u][v] should be:
+    //   u=0 row: [(0,0,0), (0,10,0)]
+    //   u=1 row: [(10,0,0), (10,10,0)]
+    let nurbs = NurbsSurface::from_v_rows(
+        1, 1,
+        vec![
+            vec![Point3d::new(0.0, 0.0, 0.0), Point3d::new(10.0, 0.0, 0.0)],
+            vec![Point3d::new(0.0, 10.0, 0.0), Point3d::new(10.0, 10.0, 0.0)],
+        ],
+        vec![vec![1.0; 2]; 2],
+        vec![0.0, 0.0, 1.0, 1.0],
+        vec![0.0, 0.0, 1.0, 1.0],
+        false, false,
+    );
+    let surface = Surface::Nurbs(nurbs);
+    // Corners (clamped Bézier interpolates endpoints)
+    let p_00 = surface.point_at(0.0, 0.0);  // (u=0, v=0) → (0, 0, 0)
+    let p_10 = surface.point_at(1.0, 0.0);  // (u=1, v=0) → (10, 0, 0)
+    let p_01 = surface.point_at(0.0, 1.0);  // (u=0, v=1) → (0, 10, 0)
+    let p_11 = surface.point_at(1.0, 1.0);  // (u=1, v=1) → (10, 10, 0)
+    assert!((p_00.x - 0.0).abs() < 1e-9 && (p_00.y - 0.0).abs() < 1e-9, "p_00 = {:?}", p_00);
+    assert!((p_10.x - 10.0).abs() < 1e-9 && (p_10.y - 0.0).abs() < 1e-9, "p_10 = {:?}", p_10);
+    assert!((p_01.x - 0.0).abs() < 1e-9 && (p_01.y - 10.0).abs() < 1e-9, "p_01 = {:?}", p_01);
+    assert!((p_11.x - 10.0).abs() < 1e-9 && (p_11.y - 10.0).abs() < 1e-9, "p_11 = {:?}", p_11);
+}
+
+#[test]
+fn test_from_v_rows_exact_quarter_sphere() {
+    // The standard rational quadratic NURBS sphere octant construction.
+    // With the CORRECT control points (corners of bounding box, not on sphere)
+    // and weights [1, 1/√2, 1; 1/√2, 1/2, 1/√2; 1, 1/√2, 1], the surface
+    // is an EXACT sphere octant.
+    let r = 50.0;
+    let inv_s = 1.0 / 2.0_f64.sqrt();
+    let nurbs = NurbsSurface::from_v_rows(
+        2, 2,
+        vec![
+            // v=0 (equator)
+            vec![
+                Point3d::new( r, 0.0, 0.0),  // u=0: on sphere
+                Point3d::new( r,  r, 0.0),  // u=π/4 mid: bounding-box corner (NOT on sphere)
+                Point3d::new(0.0,  r, 0.0),  // u=π/2: on sphere
+            ],
+            // v=π/4 (mid-elevation)
+            vec![
+                Point3d::new( r, 0.0,   r),  // bounding-box corner
+                Point3d::new( r,  r,   r),  // 3D bounding-box corner (interior)
+                Point3d::new(0.0,  r,   r),  // bounding-box corner
+            ],
+            // v=π/2 (north pole — degenerate edge)
+            vec![
+                Point3d::new(0.0, 0.0, r),
+                Point3d::new(0.0, 0.0, r),
+                Point3d::new(0.0, 0.0, r),
+            ],
+        ],
+        vec![
+            vec![1.0,   inv_s, 1.0],
+            vec![inv_s, 0.5,   inv_s],
+            vec![1.0,   inv_s, 1.0],
+        ],
+        vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        false, false,
+    );
+    let surface = Surface::Nurbs(nurbs);
+
+    // Sample 9×9 points and verify they're all on the sphere of radius R.
+    let mut max_err = 0.0_f64;
+    for i in 0..=8 {
+        for j in 0..=8 {
+            let u = i as f64 / 8.0;
+            let v = j as f64 / 8.0;
+            let p = surface.point_at(u, v);
+            let dist = (p.x*p.x + p.y*p.y + p.z*p.z).sqrt();
+            let err = (dist - r).abs();
+            max_err = max_err.max(err);
+        }
+    }
+    assert!(max_err < 1e-6, "sphere octant NURBS max distance error: {} (should be ~0)", max_err);
+}
+
+#[test]
+fn test_from_v_rows_exact_half_cylinder_arc() {
+    // Half-cylinder using TWO 90° rational quadratic arcs joined at the top.
+    // 5 angular control points × 2 height control points.
+    let r = 40.0;
+    let inv_sqrt2 = 1.0 / 2.0_f64.sqrt();
+    let nurbs = NurbsSurface::from_v_rows(
+        2, 1,
+        vec![
+            vec![
+                Point3d::new( r, 0.0, 0.0),
+                Point3d::new( r, 0.0,   r),
+                Point3d::new( 0.0, 0.0,   r),
+                Point3d::new(-r, 0.0,   r),
+                Point3d::new(-r, 0.0, 0.0),
+            ],
+            vec![
+                Point3d::new( r, 100.0, 0.0),
+                Point3d::new( r, 100.0,   r),
+                Point3d::new( 0.0, 100.0,   r),
+                Point3d::new(-r, 100.0,   r),
+                Point3d::new(-r, 100.0, 0.0),
+            ],
+        ],
+        vec![
+            vec![1.0, inv_sqrt2, 1.0, inv_sqrt2, 1.0],
+            vec![1.0, inv_sqrt2, 1.0, inv_sqrt2, 1.0],
+        ],
+        vec![0.0, 0.0, 0.0, 0.5, 0.5, 1.0, 1.0, 1.0],
+        vec![0.0, 0.0, 1.0, 1.0],
+        false, false,
+    );
+    let surface = Surface::Nurbs(nurbs);
+
+    // Verify all sampled points are on the cylinder of radius R (Y axis)
+    let mut max_radial_err = 0.0_f64;
+    let mut max_y_err = 0.0_f64;
+    for i in 0..=20 {
+        for j in 0..=4 {
+            let u = i as f64 / 20.0;
+            let v = j as f64 / 4.0;
+            let p = surface.point_at(u, v);
+            let radius = (p.x*p.x + p.z*p.z).sqrt();
+            let radial_err = (radius - r).abs();
+            let expected_y = v * 100.0;
+            let y_err = (p.y - expected_y).abs();
+            max_radial_err = max_radial_err.max(radial_err);
+            max_y_err = max_y_err.max(y_err);
+        }
+    }
+    assert!(max_radial_err < 1e-6, "half-cylinder radial error: {} (should be 0)", max_radial_err);
+    assert!(max_y_err < 1e-6, "half-cylinder Y error: {} (should be 0)", max_y_err);
+}
+
+#[test]
+fn test_from_v_rows_validates_knot_count() {
+    // Wrong number of u_knots should panic (assertion failure).
+    // Here we provide 3 control points in U (after transpose), but only
+    // 5 u_knots (need n_u + u_degree + 1 = 3 + 2 + 1 = 6).
+    let result = std::panic::catch_unwind(|| {
+        NurbsSurface::from_v_rows(
+            2, 1,  // u_degree=2
+            vec![
+                vec![Point3d::new(0.0, 0.0, 0.0), Point3d::new(1.0, 0.0, 0.0), Point3d::new(2.0, 0.0, 0.0)],
+                vec![Point3d::new(0.0, 1.0, 0.0), Point3d::new(1.0, 1.0, 0.0), Point3d::new(2.0, 1.0, 0.0)],
+            ],
+            vec![vec![1.0; 3]; 2],
+            vec![0.0, 0.0, 1.0, 1.0],  // 4 knots, but need 3+2+1=6
+            vec![0.0, 0.0, 1.0, 1.0],
+            false, false,
+        );
+    });
+    assert!(result.is_err(), "from_v_rows should reject wrong u_knots count");
+
+    // Wrong number of v_knots should also panic.
+    let result = std::panic::catch_unwind(|| {
+        NurbsSurface::from_v_rows(
+            1, 1,
+            vec![
+                vec![Point3d::new(0.0, 0.0, 0.0), Point3d::new(1.0, 0.0, 0.0)],
+                vec![Point3d::new(0.0, 1.0, 0.0), Point3d::new(1.0, 1.0, 0.0)],
+                vec![Point3d::new(0.0, 2.0, 0.0), Point3d::new(1.0, 2.0, 0.0)],
+            ],
+            vec![vec![1.0; 2]; 3],
+            vec![0.0, 0.0, 1.0, 1.0],
+            vec![0.0, 0.0, 1.0, 1.0],  // 4 knots, but need 3+1+1=5
+            false, false,
+        );
+    });
+    assert!(result.is_err(), "from_v_rows should reject wrong v_knots count");
+}
+
+#[test]
+fn test_from_v_rows_bicubic_saddle() {
+    // 4×4 bicubic NURBS saddle. Verify corner interpolation.
+    let nurbs = NurbsSurface::from_v_rows(
+        3, 3,
+        vec![
+            vec![
+                Point3d::new(-50.0, -50.0,   0.0),
+                Point3d::new(-17.0, -50.0, -28.0),
+                Point3d::new( 17.0, -50.0, -28.0),
+                Point3d::new( 50.0, -50.0,   0.0),
+            ],
+            vec![
+                Point3d::new(-50.0, -17.0,  28.0),
+                Point3d::new(-17.0, -17.0,  -6.0),
+                Point3d::new( 17.0, -17.0,  -6.0),
+                Point3d::new( 50.0, -17.0,  28.0),
+            ],
+            vec![
+                Point3d::new(-50.0,  17.0,  28.0),
+                Point3d::new(-17.0,  17.0,  -6.0),
+                Point3d::new( 17.0,  17.0,  -6.0),
+                Point3d::new( 50.0,  17.0,  28.0),
+            ],
+            vec![
+                Point3d::new(-50.0,  50.0,   0.0),
+                Point3d::new(-17.0,  50.0, -28.0),
+                Point3d::new( 17.0,  50.0, -28.0),
+                Point3d::new( 50.0,  50.0,   0.0),
+            ],
+        ],
+        vec![vec![1.0; 4]; 4],
+        vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+        vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+        false, false,
+    );
+    let surface = Surface::Nurbs(nurbs);
+    // Corners: clamped bicubic interpolates corner control points
+    let p_00 = surface.point_at(0.0, 0.0);
+    assert!((p_00.x - (-50.0)).abs() < 1e-9, "p_00.x = {}", p_00.x);
+    assert!((p_00.y - (-50.0)).abs() < 1e-9, "p_00.y = {}", p_00.y);
+    assert!(p_00.z.abs() < 1e-9, "p_00.z = {}", p_00.z);
+
+    let p_11 = surface.point_at(1.0, 1.0);
+    assert!((p_11.x - 50.0).abs() < 1e-9, "p_11.x = {}", p_11.x);
+    assert!((p_11.y - 50.0).abs() < 1e-9, "p_11.y = {}", p_11.y);
+    assert!(p_11.z.abs() < 1e-9, "p_11.z = {}", p_11.z);
+
+    // Midpoint of edge (u=0.5, v=0): X should be 0 (Bézier midpoint of [-50,-17,17,50])
+    let p_mid = surface.point_at(0.5, 0.0);
+    assert!(p_mid.x.abs() < 1e-9, "p_mid.x = {}", p_mid.x);
+    assert!((p_mid.y - (-50.0)).abs() < 1e-9, "p_mid.y = {}", p_mid.y);
+}

@@ -903,6 +903,93 @@ pub struct SurfaceCurvature {
 }
 
 impl NurbsSurface {
+    /// Construct a NURBS surface from a control point grid laid out as
+    /// **rows-of-V × columns-of-U** (i.e., `grid[v_idx][u_idx]`).
+    ///
+    /// This is the natural mental model when authoring surfaces by hand:
+    /// you think of building the surface row-by-row in V, with each row
+    /// varying U. The STEP standard and the `NurbsSurface` struct however
+    /// use the opposite convention (`control_points[u_idx][v_idx]`).
+    ///
+    /// This constructor takes the V-rows layout and produces a correctly
+    /// oriented `NurbsSurface` by:
+    /// 1. Transposing the control point grid (so first index = U)
+    /// 2. Transposing the weights grid (same)
+    /// 3. Swapping `u_degree` ↔ `v_degree`
+    /// 4. Swapping `u_knots` ↔ `v_knots`
+    /// 5. Swapping `u_closed` ↔ `v_closed`
+    ///
+    /// All arguments are in the **author's intent** orientation:
+    /// - `v_rows_cp[v][u]` = control point at V-index `v`, U-index `u`
+    /// - `v_rows_w[v][u]`  = weight at V-index `v`, U-index `u`
+    /// - `u_degree` = degree in the U direction (length of `u_knots` = n_u + u_degree + 1)
+    /// - `v_degree` = degree in the V direction (length of `v_knots` = n_v + v_degree + 1)
+    /// - `u_knots`  = knot vector for U (size n_u + u_degree + 1)
+    /// - `v_knots`  = knot vector for V (size n_v + v_degree + 1)
+    /// - `u_closed`, `v_closed` = closure flags
+    pub fn from_v_rows(
+        u_degree: usize,
+        v_degree: usize,
+        v_rows_cp: Vec<Vec<Point3d>>,
+        v_rows_w: Vec<Vec<f64>>,
+        u_knots: Vec<f64>,
+        v_knots: Vec<f64>,
+        u_closed: bool,
+        v_closed: bool,
+    ) -> Self {
+        // Validate dimensions
+        let n_v = v_rows_cp.len();
+        assert!(n_v > 0, "NurbsSurface::from_v_rows: empty control point grid");
+        let n_u = v_rows_cp[0].len();
+        assert!(n_u > 0, "NurbsSurface::from_v_rows: empty first row");
+        for (i, row) in v_rows_cp.iter().enumerate() {
+            assert_eq!(row.len(), n_u,
+                "NurbsSurface::from_v_rows: row {} has {} cols, expected {}", i, row.len(), n_u);
+        }
+        // Weights grid must match control points grid
+        assert_eq!(v_rows_w.len(), n_v,
+            "NurbsSurface::from_v_rows: weights has {} rows, expected {}", v_rows_w.len(), n_v);
+        for (i, row) in v_rows_w.iter().enumerate() {
+            assert_eq!(row.len(), n_u,
+                "NurbsSurface::from_v_rows: weights row {} has {} cols, expected {}", i, row.len(), n_u);
+        }
+        // Knot vector lengths must match (n + degree + 1)
+        assert_eq!(u_knots.len(), n_u + u_degree + 1,
+            "NurbsSurface::from_v_rows: u_knots has {} elements, expected {} (= n_u {} + u_degree {} + 1)",
+            u_knots.len(), n_u + u_degree + 1, n_u, u_degree);
+        assert_eq!(v_knots.len(), n_v + v_degree + 1,
+            "NurbsSurface::from_v_rows: v_knots has {} elements, expected {} (= n_v {} + v_degree {} + 1)",
+            v_knots.len(), n_v + v_degree + 1, n_v, v_degree);
+
+        // Transpose: control_points_new[u][v] = v_rows_cp[v][u]
+        let mut control_points: Vec<Vec<Point3d>> = Vec::with_capacity(n_u);
+        let mut weights: Vec<Vec<f64>> = Vec::with_capacity(n_u);
+        for u_idx in 0..n_u {
+            let mut row_cp = Vec::with_capacity(n_v);
+            let mut row_w = Vec::with_capacity(n_v);
+            for v_idx in 0..n_v {
+                row_cp.push(v_rows_cp[v_idx][u_idx]);
+                row_w.push(v_rows_w[v_idx][u_idx]);
+            }
+            control_points.push(row_cp);
+            weights.push(row_w);
+        }
+
+        // The struct convention: first index = U, second = V.
+        // u_degree applies to the first index, v_degree to the second.
+        // So we keep u_degree and v_degree as the author declared them.
+        NurbsSurface {
+            u_degree,
+            v_degree,
+            control_points,
+            weights,
+            u_knots,
+            v_knots,
+            u_closed,
+            v_closed,
+        }
+    }
+
     /// Get the valid parametric range for the u parameter.
     /// The valid domain is [u_knots[u_degree], u_knots[n_u]] where n_u = number of control points in u.
     pub fn u_range(&self) -> (f64, f64) {
