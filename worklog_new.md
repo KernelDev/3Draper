@@ -1978,3 +1978,98 @@ Stage Summary:
 - NURBS test now uses 5×5 control grid with ±40 z-amplitude — visibly
   wavy even on small phone screens.
 - WASM download support for STL/STEP/JSON via Blob + URL.createObjectURL.
+
+---
+Task ID: 37
+Agent: main
+Task: Replace broken mobile NURBS test with comprehensive surface & curve test gallery; deploy to gh-pages.
+
+Work Log:
+- Read user's screenshot showing the deployed NURBS test looked bad on phone
+  (chaotic "wavy sheet" with random z-amplitudes from -40 to +40 over a 5×5
+  control grid — the result looked like noisy "rib-like structures" instead
+  of a recognizable shape).
+- Examined the existing load_nurbs() function in crates/draper-viewer/src/app.rs
+  and confirmed it produced a chaotic, non-recognizable surface.
+- Examined the draper-geometry Surface and Curve3d enums to enumerate all
+  test types that should be visualized.
+- Added new app state field `extra_curve_lines: Vec<LineVertex>` for curve
+  visualization line strips. Modified `build_edge_line_vertices()` to append
+  extra_curve_lines so curves render with the same depth-tested line
+  pipeline as B-Rep edges.
+- Added `build_nurbs_surface_mesh()` helper to deduplicate boundary-sampling
+  logic across all 10 NURBS surface tests.
+- Replaced `load_nurbs()` (chaotic wavy sheet) with `load_nurbs_saddle()`
+  (hyperbolic paraboloid z = (x²−y²)/100 — instantly recognizable "Pringles
+  chip" shape with negative Gaussian curvature everywhere).
+- Added 9 more NURBS surface tests:
+  • load_nurbs_bump() — Gaussian-like hill (positive Gaussian curvature)
+  • load_nurbs_wave() — single sine wave (corrugated sheet)
+  • load_nurbs_ruled() — linear interpolation between two parabolas
+  • load_nurbs_revolution() — wavy profile revolved around Z (vase shape)
+  • load_nurbs_coons() — 4×4 bicubic Coons patch (puffy cushion)
+  • load_nurbs_bilinear() — degree-1×degree-1 warped quad (saddle)
+  • load_nurbs_half_cylinder() — rational quadratic arc × linear (exact conic)
+  • load_nurbs_quarter_sphere() — rational quadratic octant with 1/√2 weights
+    (exact sphere octant, not polynomial approximation)
+  • load_nurbs_closed_cylinder() — periodic cubic in U, linear in V
+    (demonstrates seam handling)
+- Added 10 curve tests (rendered as colored 3D line strips):
+  • load_curve_line() — straight 3D line
+  • load_curve_circle() — XY plane, R=50
+  • load_curve_ellipse() — XY plane, semi=60×30
+  • load_curve_hyperbola() — x=30·cosh(t), z=20·sinh(t)
+  • load_curve_parabola() — x=t²/80−40, z=−t
+  • load_curve_nurbs_open() — cubic, 5 control points
+  • load_curve_nurbs_closed() — periodic cubic, 6+3 wrapped control pts (flower)
+  • load_curve_trimmed() — middle half of a 5-ctrl NURBS basis
+  • load_curve_pcurve() — 2D circle in UV space of a sphere (curve-on-surface)
+  • load_curve_all() — 8 curves side-by-side in a 4×2 grid, each colored
+- Added helper functions:
+  • push_curve_polyline() — converts Vec<Point3d> to LineVertex pairs
+  • curve_marker_mesh() — transparent bounding box for camera framing
+  • load_curve_test() — installs curve + marker, auto-fits camera
+  • sample_and_load_curve() — samples Curve3d over [t_min, t_max]
+- Added new MobileControlsTab variants: Surfaces and Curves (between
+  Primitives and Holes). Updated MobileControlsTab::all() to return 7 tabs.
+- Wired up the new tests to:
+  • Mobile Controls panel: 'Surf' tab (10 NURBS + 7 primitives) and
+    'Curves' tab (9 curves + Gallery button)
+  • Mobile top-bar Models menu: 7 named NURBS surface buttons + Curve Gallery
+  • Desktop left panel: 'NURBS Surfaces' section (3-column grid) and
+    'Curves (3D line strips)' section (3-column grid)
+- Rewrote index.html (both source and deployed) with mobile-first improvements:
+  • 100dvh (handles mobile URL bar hide/show)
+  • viewport-fit=cover + env(safe-area-inset-*) for iPhone notch
+  • theme-color + apple-mobile-web-app-capable for PWA-like feel
+  • user-select:none + tap-highlight:none for app-like feel
+  • contextmenu prevented on canvas (long-press no longer pops menu)
+  • Loading logo scales down on ≤360px screens
+  • Mobile hint toast appears briefly after load (touch devices only):
+    "Tap ⚙ for Surfaces & Curves" guides users to the new tests
+- Modified load_mesh() to clear extra_curve_lines on new model load so the
+  curve lines don't leak between tests. Curve tests set extra_curve_lines
+  AFTER load_mesh so they survive the clear.
+- Built WASM release: cargo build -p draper-viewer --target wasm32-unknown-unknown
+  --no-default-features --features web-deploy --release → 11MB unstripped.
+- Ran wasm-bindgen --target web --no-typescript → 8.5MB wasm + 141KB js.
+- Copied WASM + new index.html to /tmp/gh-pages-site/, added .nojekyll,
+  committed, and pushed to origin/gh-pages.
+- Pushed source code changes to origin/main (commit 9bb251d).
+- Verified both native (cargo build -p draper-viewer) and WASM builds
+  compile with 0 errors and 0 warnings (only 1 pre-existing warning in
+  draper-step/src/exporter.rs about unused imports).
+
+Stage Summary:
+- 10 NURBS surface tests added (Saddle, Bump, Wave, Ruled, Revolution,
+  Coons, Bilinear, Half-Cylinder, Quarter-Sphere, Closed Cylinder).
+- 10 curve tests added (Line, Circle, Ellipse, Hyperbola, Parabola,
+  NURBS open, NURBS closed, Trimmed, PCurve, All Gallery).
+- Mobile UI: 2 new tabs (Surf, Curves) + mobile-first CSS improvements.
+- Desktop UI: 2 new sections (NURBS Surfaces, Curves) in left panel.
+- Mobile top-bar Models menu: 7 new NURBS surface buttons + Curve Gallery.
+- WASM deployed to https://kerneldev.github.io/3Draper/ (commit d6ddefe).
+- Source pushed to https://github.com/KernelDev/3Draper (commit 9bb251d).
+- GitHub Actions will rebuild and redeploy on every push to main.
+- The chaotic "wavy sheet" NURBS test that looked bad on phone is GONE —
+  replaced with the mathematically recognizable Saddle test as the default.
