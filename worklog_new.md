@@ -2420,3 +2420,48 @@ Stage Summary:
 - Zoom and pan auto-reset when the user switches faces (so the previous face's view doesn't bleed into the new one).
 - Canvas content is clipped to the canvas rect, so zoomed-in triangles never overflow into the controls area.
 - Web demo at https://kerneldev.github.io/3Draper/ is updated with the new zoom/pan controls (commit 5f2b3e5).
+
+---
+Task ID: 42
+Agent: main
+Task: UV breakdown window — zoom should pivot around the center of the real UV box (preserve aspect ratio, don't stretch to square canvas), and seam lines should be drawn for periodic surfaces in addition to edges.
+
+Work Log:
+- User observed that for the cone surface (and other periodic surfaces), the UV view looked wrong: zooming pivoted around the canvas center (a square) instead of the real UV box center (which has a different aspect ratio, e.g. 2π×1 for a cone). User also requested that seam lines (where the periodic surface wraps around) be drawn, not just edges.
+- Explored the codebase to find:
+  * `FaceUvBreakdown` struct (app.rs:644) — had no periodicity fields.
+  * `compute_solid_uv_breakdown` (app.rs:7810) — already computed u_periodic, v_periodic, u_period, v_period but discarded them after using them for triangle unwrapping.
+  * `Surface` enum (draper-geometry/src/surface.rs:71) with `is_u_periodic()`, `is_v_periodic()`, `natural_uv_domain()` methods.
+  * `generate_solid_face_uv_svg` (app.rs:8103) — also stretched UV to square.
+- Added 4 new fields to `FaceUvBreakdown`: `u_periodic: bool`, `v_periodic: bool`, `u_period: f64`, `v_period: f64`.
+- Populated them in `compute_solid_uv_breakdown` (the values were already computed at lines 7922-7930, just not stored).
+- Modified `draw_uv_window` (app.rs:6254+):
+  * After computing visible UV bounds (u_min..u_max, v_min..v_max), compute aspect ratio `ar_uv = u_range / v_range`.
+  * Derive screen dimensions: if ar_uv >= 1, width=draw_size, height=draw_size/ar_uv; else height=draw_size, width=draw_size*ar_uv.
+  * Center the UV box in the canvas with x_offset = (size - width)/2, y_offset = (size - height)/2.
+  * Updated `map_u`/`map_v` closures to use width/height and x_offset/y_offset instead of draw_size.
+  * Computed box_left_x, box_right_x, box_top_y, box_bottom_y for grid line endpoints.
+  * Updated pan delta calculation to use width_f64/height_f64 (was using draw_size_f64 for both).
+  * Added a subtle UV box border (`painter.rect_stroke` with #3c3c5a) so the real aspect ratio is visible.
+  * Updated grid lines to span the UV box (box_top_y..box_bottom_y, box_left_x..box_right_x) instead of the full canvas.
+  * Added seam line drawing after inner boundaries:
+    - If u_periodic && u_period > 0: query surface.natural_uv_domain() for nat_u0, nat_u1. Draw vertical yellow lines (2px, #ffc800) at u=nat_u0 and u=nat_u1, spanning box_top_y..box_bottom_y. Only draw if the seam U value is within the visible range.
+    - If v_periodic && v_period > 0: same logic for horizontal lines at v=nat_v0, v=nat_v1.
+- Modified `generate_solid_face_uv_svg` (app.rs:8103+):
+  * Same aspect-ratio-preserving layout (fit UV box into 520×520 draw area with real aspect ratio, centered).
+  * Added UV box border (`<rect>` with #3c3c5a).
+  * Updated grid lines to span the UV box.
+  * Added seam lines as `<line>` elements with #ffc800, stroke-width 2.0, drawn BEFORE the outer boundary so the green boundary sits on top.
+  * Added a 'seam (periodic wrap)' legend at the bottom-right of the SVG (only shown if any seam was drawn).
+- Native cargo check: ✓ (0 errors, 0 warnings).
+- WASM cargo check (`--no-default-features --features web-deploy --target wasm32-unknown-unknown`): ✓.
+- Committed source changes (commit b37a1bf) and pushed to main.
+- Built WASM release (8.9 MB wasm + 144 KB js).
+- Ran `scripts/deploy_gh_pages.sh` to clone gh-pages, swap in new wasm/js, commit, push (commit 9c940f8).
+
+Stage Summary:
+- UV Breakdown popup window now displays the UV box with its REAL aspect ratio (e.g. a 2π×1 cone UV appears as a wide rectangle, not a square). Zooming pivots around the center of the real UV box — the geometry enlarges around its own center, not an arbitrary canvas-center point.
+- Seam lines are now drawn for periodic surfaces: bright yellow (#ffc800) vertical lines at u=0 and u=2π for U-periodic surfaces (cone, cylinder, sphere, torus, revolution); horizontal lines at v=0 and v=v_period for V-periodic surfaces (sphere, torus). The seam is only drawn if it falls within the visible UV range (so panning away from the seam hides it).
+- Both the interactive viewer and the SVG export have the same aspect-ratio preservation + seam line drawing, so saved SVGs match what the user sees.
+- A subtle UV box border (#3c3c5a) makes the real aspect ratio visible even when zoomed out.
+- Web demo at https://kerneldev.github.io/3Draper/ is updated (commit 9c940f8).
