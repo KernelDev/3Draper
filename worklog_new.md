@@ -2316,3 +2316,59 @@ Stage Summary:
   holes, blue surface evaluation points) for visual consistency.
 - Push to GitHub triggers automatic rebuild and deploy via
   .github/workflows/deploy.yml.
+
+---
+Task ID: 39
+Agent: Main (continuation)
+Task: Fix UV overlay rendering in the popup window — it was painted in
+absolute screen coordinates instead of being relative to the egui::Window's
+allocated rect. As a result, when the user dragged the window, the painted
+content (boundary, dots, triangles) stayed at the original screen position.
+Also add UV triangle rendering — the popup was only showing the boundary
+polyline and surface sample dots, but NOT the actual UV tessellation
+triangles that the user explicitly asked for.
+
+Work Log:
+- Located the bug in draw_uv_window() at app.rs:6230: the closure
+  `let map_u = |u| margin_f64 + (u - u_min) / (u_max - u_min) * draw_size_f64`
+  returned a screen coordinate starting from `margin_f64` (≈32 px) regardless
+  of where the parent egui::Window was on screen. Same bug existed in the
+  right-panel UV grid (app.rs:4834) and mobile UV grid (app.rs:7169).
+- Fixed all three locations by adding `rect_left = rect.left() as f64` and
+  `rect_top = rect.top() as f64` and prepending them to the map_u/map_v
+  return values. Now the painted content stays anchored to the allocated
+  rect inside the window, so it follows the window when dragged.
+- Added a new `uv_triangles: Vec<[(f64, f64); 3]>` field to FaceUvBreakdown
+  so the popup window can render the actual surface tessellation in UV space.
+- Updated compute_solid_uv_breakdown() to triangulate each face with
+  draper_mesh::triangulate_face() and project every triangle vertex back
+  to UV space via Surface::project_point(). Triangles with non-finite UVs
+  are skipped. Up to 3000 triangles are drawn per face (with a hard cap to
+  prevent perf issues on dense meshes).
+- Updated draw_uv_window() to render the UV triangles as filled
+  convex_polygons with alternating blue tints (matching the existing
+  right-panel UV grid color scheme). Triangles inside holes or outside
+  the outer boundary are drawn in red.
+- Updated generate_solid_face_uv_svg() to also render the UV triangles in
+  the saved SVG, so the downloaded file matches what the user sees in the
+  interactive viewer. Up to 5000 triangles per face in the SVG.
+- Added `triangulate_face` to the draper_mesh use statement.
+- Native cargo check: ✓ (1m 39s)
+- WASM cargo check with --no-default-features --features web-deploy: ✓
+- WASM release build: ✓ (8.4 MB wasm + 144 KB js)
+- wasm-bindgen --target web: ✓
+- Pushed to main: commit 8d3f9cb
+- Deployed to gh-pages: commit 7629fd3 (fast-forward on top of d6ddefe)
+
+Stage Summary:
+- UV breakdown popup window now stays attached to the window when dragged —
+  no more "frozen" overlay that doesn't move with the window.
+- UV triangles of the actual surface tessellation are now rendered in the
+  popup window, matching the right-panel UV grid behavior. The user can
+  visually verify the actual UV subdivision of each face.
+- Saved SVG export now includes the UV triangles, so downloaded files match
+  the interactive viewer.
+- The same rect-relative coordinate fix was applied to the right-panel UV
+  grid and the mobile UV grid for consistency (the bug existed in all three
+  locations).
+- Web demo at https://kerneldev.github.io/3Draper/ is updated.
