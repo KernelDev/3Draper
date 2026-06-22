@@ -13,10 +13,11 @@ use crate::renderer::{
     update_wireframe_overlay_buffers,
 };
 use draper_core::engine::{EngineConfig, build_engine};
-use draper_topology::{ShapeBuilder, Solid};
+use draper_topology::{ShapeBuilder, Solid, Edge, Wire};
 use draper_mesh::{triangulate_solid, TriangleMesh, TriangulationParams, check_manifold, ManifoldReport, cut_text_holes_in_mesh, TextSurface};
 use draper_step::{AssemblyNode, DetailedMeshInstance, FaceInfo, PendingBrepInstance, OwnedStepConversionContext, StepFile, step_structure_lazy};
 use draper_geometry::Surface;
+use draper_geometry::Point3d;
 use egui_wgpu::RenderState;
 use eframe::egui;
 
@@ -606,6 +607,51 @@ pub struct ViewerApp {
     extra_curve_lines: Vec<LineVertex>,
     /// Whether the extra curve lines buffer needs GPU re-upload.
     extra_curve_lines_dirty: bool,
+
+    // ─── UV breakdown for the current solid ─────────────────────────────
+    /// Whether to show the per-face UV breakdown window.
+    show_uv_window: bool,
+    /// Index of the face currently selected in the UV window.
+    uv_window_face_idx: usize,
+    /// U subdivisions for the UV grid display.
+    uv_window_u_divs: usize,
+    /// V subdivisions for the UV grid display.
+    uv_window_v_divs: usize,
+    /// Cached UV breakdown for the current solid — recomputed whenever the
+    /// solid changes or when the user clicks "View UV" / "Save UV SVG".
+    /// Keyed by the solid's face count + a generation counter so stale
+    /// cache from a previous solid is never shown.
+    solid_uv_breakdown: Option<SolidUvBreakdown>,
+    /// Set when the user clicked "Save UV SVG" — the next frame will
+    /// trigger a file dialog (native) or browser download (WASM) of the
+    /// SVG of the currently-selected face in the UV window.
+    pending_solid_uv_svg_export: bool,
+}
+
+/// UV breakdown for a single face of a solid — the outer boundary plus
+/// any inner boundaries (holes), expressed as UV polylines. Each polyline
+/// is a sequence of (u, v) points in the surface's parametric space.
+#[derive(Clone, Debug)]
+struct FaceUvBreakdown {
+    /// 0-based face index within the solid's outer shell.
+    face_idx: usize,
+    /// Surface type label (e.g. "Plane", "Cylinder", "Nurbs").
+    surface_type: String,
+    /// Whether the face's normal matches the surface normal.
+    forward: bool,
+    /// Outer boundary as one or more UV polylines (usually just one).
+    outer_polylines: Vec<Vec<(f64, f64)>>,
+    /// Inner boundaries (holes) as a list of UV polylines.
+    inner_polylines: Vec<Vec<(f64, f64)>>,
+}
+
+/// UV breakdown for an entire solid — collects all faces' UV data.
+#[derive(Clone, Debug)]
+struct SolidUvBreakdown {
+    /// Per-face UV data, in face-index order.
+    faces: Vec<FaceUvBreakdown>,
+    /// Name of the model (for the SVG title).
+    model_name: String,
 }
 
 /// Mobile overlay panel type.
@@ -1026,6 +1072,12 @@ impl ViewerApp {
             hole_op_index: 0,
             extra_curve_lines: Vec::new(),
             extra_curve_lines_dirty: false,
+            show_uv_window: false,
+            uv_window_face_idx: 0,
+            uv_window_u_divs: 10,
+            uv_window_v_divs: 10,
+            solid_uv_breakdown: None,
+            pending_solid_uv_svg_export: false,
         };
         app.log("3Draper Viewer started");
         app.log(&format!("Default model: Box 100x100x100 ({} vertices, {} triangles)",
@@ -1065,6 +1117,10 @@ impl ViewerApp {
         self.highlighted_face = None;
         self.highlight_dirty = true;
         self.uv_svg_cache = None;
+        // Invalidate the per-solid UV breakdown cache so the next time the
+        // UV window is opened we recompute from the freshly-loaded solid.
+        self.solid_uv_breakdown = None;
+        self.uv_window_face_idx = 0;
         self.open_tree_nodes.clear();
         self.scroll_to_tree_node = None;
         self.scroll_to_face_id = None;
@@ -4599,6 +4655,15 @@ impl eframe::App for ViewerApp {
                     }
                     ui.separator();
 
+                    // Wrap all collapsing sections in a single vertical ScrollArea
+                    // so the panel never grows beyond the window — when all four
+                    // sections (Tree, Face list, UV Grid, Face Info) are expanded,
+                    // the user can scroll to reach the bottom ones instead of
+                    // having them silently clipped.
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false; 2])
+                        .show(ui, |ui| {
+
                     // ─── Assembly Tree (collapsible) ──────────────────────────────────
                     let tree_id = ui.make_persistent_id("structure_tree_section");
                     egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), tree_id, self.structure_tree_open)
@@ -4956,6 +5021,7 @@ impl eframe::App for ViewerApp {
                                 ui.label(egui::RichText::new("Select an instance").size(11.0).color(egui::Color32::GRAY));
                             }
                         });
+                    }); // close ScrollArea wrapping the four sections
                 });
             // Clear scroll/open targets after the tree has been rendered.
             // The CollapsingState::set_open calls above already persisted the open state
@@ -5067,8 +5133,16 @@ impl eframe::App for ViewerApp {
         if !self.is_mobile {
         egui::SidePanel::left("controls")
             .min_width(150.0)
-            .default_width(180.0)
+            .default_width(200.0)
+            .resizable(true)
             .show(ctx, |ui| {
+                // Wrap the entire panel body in a vertical ScrollArea so the
+                // panel never grows beyond the window height — settings at the
+                // bottom remain reachable via scroll instead of being clipped.
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .stick_to_right(false)
+                    .show(ui, |ui| {
                 ui.add_space(4.0);
                 ui.heading(egui::RichText::new("3Draper").size(14.0));
                 ui.label(
@@ -5093,6 +5167,20 @@ impl eframe::App for ViewerApp {
                 ui.horizontal(|ui| {
                     if ui.button("Extrusion").clicked() { self.load_extrusion(); }
                     if ui.button("NURBS").clicked() { self.load_nurbs(); }
+                });
+                // UV breakdown button — opens a window showing the UV
+                // parametric grid of every face of the current solid.
+                // Works for all primitives (Box, Cylinder, Sphere, Cone,
+                // Torus, Revolution, Extrusion) and NURBS surface tests.
+                ui.horizontal(|ui| {
+                    if ui.button("View UV").clicked() {
+                        self.show_uv_window = true;
+                        self.solid_uv_breakdown = None; // force recompute
+                    }
+                    if ui.button("Save UV SVG").clicked() {
+                        self.pending_solid_uv_svg_export = true;
+                        self.solid_uv_breakdown = None; // force recompute
+                    }
                 });
                 // --- NURBS Surface Gallery ---
                 ui.separator();
@@ -5623,6 +5711,7 @@ impl eframe::App for ViewerApp {
                         .size(9.0)
                         .color(egui::Color32::from_rgb(160, 160, 160))
                 );
+                    }); // close ScrollArea
             });
         } // end desktop left controls panel
 
@@ -5904,6 +5993,329 @@ impl eframe::App for ViewerApp {
         if self.is_mobile {
             self.draw_mobile_ui(ctx);
         }
+
+        // ═══ UV breakdown window (desktop + mobile) ═══════════════════════════
+        // Shows a per-face UV grid for the current solid (any primitive or
+        // NURBS surface test). Lets the user switch between faces, adjust
+        // grid resolution, and save the SVG to disk / trigger a download.
+        self.draw_uv_window(ctx);
+
+        // ═══ Pending UV SVG export ═════════════════════════════════════════════
+        if self.pending_solid_uv_svg_export {
+            self.pending_solid_uv_svg_export = false;
+            // Ensure the breakdown is computed for the current solid.
+            if self.solid_uv_breakdown.is_none() {
+                if let Some(ref solid) = self.current_solid {
+                    let name = self.current_model.name.clone();
+                    self.solid_uv_breakdown = Some(compute_solid_uv_breakdown(solid, &name));
+                }
+            }
+            if let Some(ref breakdown) = self.solid_uv_breakdown {
+                if let Some(face_uv) = breakdown.faces.get(self.uv_window_face_idx) {
+                    // Get the surface from the solid for grid-point rendering.
+                    let surface: Option<Surface> = self.current_solid.as_ref().and_then(|s| {
+                        s.outer_shell.as_ref().and_then(|sh| {
+                            sh.faces.get(self.uv_window_face_idx)
+                                .and_then(|f| f.surface.clone())
+                        })
+                    });
+                    let svg = generate_solid_face_uv_svg(
+                        face_uv,
+                        self.uv_window_u_divs,
+                        self.uv_window_v_divs,
+                        &breakdown.model_name,
+                        surface.as_ref(),
+                    );
+                    let filename = format!(
+                        "uv_face{}_{}.svg",
+                        face_uv.face_idx,
+                        breakdown.model_name.replace(' ', "_").replace('/', "_")
+                    );
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("SVG", &["svg"])
+                            .set_file_name(&filename)
+                            .save_file()
+                        {
+                            match std::fs::write(&path, &svg) {
+                                Ok(()) => self.log(&format!("Exported UV SVG: {}", path.to_string_lossy())),
+                                Err(e) => self.log(&format!("SVG export error: {}", e)),
+                            }
+                        }
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        self.download_text(&filename, "image/svg+xml", &svg);
+                        self.log(&format!("Exported UV SVG ({})", filename));
+                    }
+                } else {
+                    self.log_warning("UV export: no face selected");
+                }
+            } else {
+                self.log_warning("UV export: no solid loaded");
+            }
+        }
+    }
+}
+
+impl ViewerApp {
+
+    /// Draw the UV breakdown window for the current solid.
+    ///
+    /// Shows a face selector (combo box), U/V division sliders, the UV grid
+    /// canvas (rendered directly via painter), and Save / Close buttons.
+    /// On WASM the Save button triggers a browser SVG download; on native
+    /// it opens an rfd save-file dialog.
+    fn draw_uv_window(&mut self, ctx: &egui::Context) {
+        if !self.show_uv_window {
+            return;
+        }
+        // Compute breakdown on demand if not cached.
+        if self.solid_uv_breakdown.is_none() {
+            if let Some(ref solid) = self.current_solid {
+                let name = self.current_model.name.clone();
+                self.solid_uv_breakdown = Some(compute_solid_uv_breakdown(solid, &name));
+                // Clamp face index to valid range.
+                if let Some(ref b) = self.solid_uv_breakdown {
+                    if self.uv_window_face_idx >= b.faces.len() {
+                        self.uv_window_face_idx = 0;
+                    }
+                }
+            }
+        }
+
+        let mut window_open = self.show_uv_window;
+        // We need to clone or borrow carefully. The breakdown is in self,
+        // but we also need to mutate self inside the window. So we take
+        // the breakdown out temporarily.
+        let breakdown_taken = self.solid_uv_breakdown.take();
+        let current_solid_taken = self.current_solid.clone();
+        let model_name = self.current_model.name.clone();
+
+        egui::Window::new("UV Breakdown")
+            .id(egui::Id::new("uv_breakdown_window"))
+            .open(&mut window_open)
+            .default_width(560.0)
+            .default_height(640.0)
+            .resizable(true)
+            .collapsible(true)
+            .scroll([false, true])
+            .show(ctx, |ui| {
+                if breakdown_taken.is_none() {
+                    ui.label(egui::RichText::new(
+                        "No solid loaded. Click a primitive (Box, Cylinder, ...) first.")
+                        .color(egui::Color32::from_rgb(255, 200, 80))
+                        .size(12.0));
+                    return;
+                }
+                let breakdown = breakdown_taken.as_ref().unwrap();
+                if breakdown.faces.is_empty() {
+                    ui.label(egui::RichText::new("Solid has no faces to display.")
+                        .color(egui::Color32::GRAY)
+                        .size(12.0));
+                    return;
+                }
+
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Face:").size(12.0));
+                    let selected_label = breakdown.faces
+                        .get(self.uv_window_face_idx)
+                        .map(|f| format!("#{} {}", f.face_idx, f.surface_type))
+                        .unwrap_or_else(|| "(none)".to_string());
+                    egui::ComboBox::from_id_salt("uv_face_combo")
+                        .selected_text(selected_label)
+                        .show_ui(ui, |ui| {
+                            for f in &breakdown.faces {
+                                ui.selectable_value(
+                                    &mut self.uv_window_face_idx,
+                                    f.face_idx,
+                                    format!("#{} {} (outer pts: {}, holes: {})",
+                                        f.face_idx, f.surface_type,
+                                        f.outer_polylines.iter().map(|p| p.len()).sum::<usize>(),
+                                        f.inner_polylines.len()),
+                                );
+                            }
+                        });
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("U divs:").size(11.0));
+                    ui.add(egui::DragValue::new(&mut self.uv_window_u_divs).range(2..=50));
+                    ui.label(egui::RichText::new("V divs:").size(11.0));
+                    ui.add(egui::DragValue::new(&mut self.uv_window_v_divs).range(2..=50));
+                });
+
+                ui.horizontal(|ui| {
+                    if ui.button("Save UV as SVG...").clicked() {
+                        self.pending_solid_uv_svg_export = true;
+                    }
+                    if ui.button("Recompute").clicked() {
+                        // Force recompute on next frame
+                        self.solid_uv_breakdown = None;
+                    }
+                });
+
+                ui.separator();
+
+                if let Some(face_uv) = breakdown.faces.get(self.uv_window_face_idx) {
+                    // Get the surface for this face from the current solid.
+                    let surface: Option<Surface> = current_solid_taken.as_ref().and_then(|s| {
+                        s.outer_shell.as_ref().and_then(|sh| {
+                            sh.faces.get(self.uv_window_face_idx)
+                                .and_then(|f| f.surface.clone())
+                        })
+                    });
+                    let surface_ref = surface.as_ref();
+
+                    // Header line
+                    ui.label(egui::RichText::new(format!(
+                        "Model: {} | Face #{} {} | forward={}",
+                        model_name, face_uv.face_idx, face_uv.surface_type, face_uv.forward
+                    )).size(11.0));
+
+                    // Draw the UV grid in a square painter area
+                    let available = ui.available_size();
+                    let size = available.x.min(available.y - 20.0).min(480.0);
+                    if size > 50.0 {
+                        let (rect, _response) = ui.allocate_exact_size(
+                            egui::vec2(size, size),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgb(26, 26, 46));
+
+                        let margin = size * 0.067;
+                        let draw_size = size - 2.0 * margin;
+
+                        // Compute UV bounds
+                        let mut u_min = f64::MAX;
+                        let mut u_max = f64::MIN;
+                        let mut v_min = f64::MAX;
+                        let mut v_max = f64::MIN;
+                        for poly in &face_uv.outer_polylines {
+                            for &(u, v) in poly {
+                                u_min = u_min.min(u); u_max = u_max.max(u);
+                                v_min = v_min.min(v); v_max = v_max.max(v);
+                            }
+                        }
+                        for poly in &face_uv.inner_polylines {
+                            for &(u, v) in poly {
+                                u_min = u_min.min(u); u_max = u_max.max(u);
+                                v_min = v_min.min(v); v_max = v_max.max(v);
+                            }
+                        }
+                        if u_min >= u_max || v_min >= v_max {
+                            if let Some(s) = surface_ref {
+                                match s {
+                                    Surface::Nurbs(n) => {
+                                        let (ur0, ur1) = n.u_range();
+                                        let (vr0, vr1) = n.v_range();
+                                        u_min = ur0; u_max = ur1; v_min = vr0; v_max = vr1;
+                                    }
+                                    Surface::Cylinder(_) => {
+                                        u_min = 0.0; u_max = 2.0 * std::f64::consts::PI;
+                                        v_min = -100.0; v_max = 100.0;
+                                    }
+                                    _ => { u_min = 0.0; u_max = 1.0; v_min = 0.0; v_max = 1.0; }
+                                }
+                            } else {
+                                u_min = 0.0; u_max = 1.0; v_min = 0.0; v_max = 1.0;
+                            }
+                        }
+                        let u_range = (u_max - u_min).max(1e-6);
+                        let v_range = (v_max - v_min).max(1e-6);
+                        u_min -= u_range * 0.05; u_max += u_range * 0.05;
+                        v_min -= v_range * 0.05; v_max += v_range * 0.05;
+
+                        let margin_f64 = margin as f64;
+                        let draw_size_f64 = draw_size as f64;
+                        let map_u = |u: f64| -> f32 { (margin_f64 + (u - u_min) / (u_max - u_min) * draw_size_f64) as f32 };
+                        let map_v = |v: f64| -> f32 { (margin_f64 + (1.0 - (v - v_min) / (v_max - v_min)) * draw_size_f64) as f32 };
+
+                        // Grid lines
+                        let u_divs = self.uv_window_u_divs.min(50);
+                        let v_divs = self.uv_window_v_divs.min(50);
+                        for i in 0..=u_divs {
+                            let u = u_min + (u_max - u_min) * i as f64 / u_divs as f64;
+                            let x = map_u(u);
+                            ui.painter().line_segment(
+                                [egui::pos2(x, rect.top() + margin), egui::pos2(x, rect.bottom() - margin)],
+                                egui::Stroke::new(0.5, egui::Color32::from_rgb(51, 51, 68)),
+                            );
+                        }
+                        for j in 0..=v_divs {
+                            let v = v_min + (v_max - v_min) * j as f64 / v_divs as f64;
+                            let y = map_v(v);
+                            ui.painter().line_segment(
+                                [egui::pos2(rect.left() + margin, y), egui::pos2(rect.right() - margin, y)],
+                                egui::Stroke::new(0.5, egui::Color32::from_rgb(51, 51, 68)),
+                            );
+                        }
+
+                        // Outer boundary
+                        for poly in &face_uv.outer_polylines {
+                            if poly.len() < 2 { continue; }
+                            let points: Vec<egui::Pos2> = poly.iter()
+                                .map(|&(u, v)| egui::pos2(map_u(u), map_v(v)))
+                                .collect();
+                            ui.painter().line(points, egui::Stroke::new(1.5, egui::Color32::from_rgb(0, 255, 136)));
+                        }
+                        // Inner boundaries
+                        for poly in &face_uv.inner_polylines {
+                            if poly.len() < 2 { continue; }
+                            let points: Vec<egui::Pos2> = poly.iter()
+                                .map(|&(u, v)| egui::pos2(map_u(u), map_v(v)))
+                                .collect();
+                            ui.painter().line(points, egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 68, 68)));
+                        }
+
+                        // Surface evaluation points (inside outer boundary)
+                        let outer_uv_poly: Vec<(f64, f64)> = face_uv.outer_polylines.iter()
+                            .flat_map(|p| p.iter().copied())
+                            .collect();
+                        if let Some(s) = surface_ref {
+                            for i in 0..=u_divs {
+                                for j in 0..=v_divs {
+                                    let u = u_min + (u_max - u_min) * i as f64 / u_divs as f64;
+                                    let v = v_min + (v_max - v_min) * j as f64 / v_divs as f64;
+                                    let p = s.point_at(u, v);
+                                    if p.x.is_finite() && p.y.is_finite() && p.z.is_finite() {
+                                        let inside = !outer_uv_poly.is_empty() && point_in_polygon(u, v, &outer_uv_poly);
+                                        if inside {
+                                            ui.painter().circle_filled(
+                                                egui::pos2(map_u(u), map_v(v)), 2.0,
+                                                egui::Color32::from_rgba_premultiplied(102, 136, 255, 180),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Axis labels
+                        ui.painter().text(
+                            egui::pos2(rect.center().x, rect.bottom() - 5.0),
+                            egui::Align2::CENTER_BOTTOM,
+                            format!("U ({:.2}..{:.2})", u_min, u_max),
+                            egui::FontId::proportional(10.0),
+                            egui::Color32::from_rgb(170, 170, 170),
+                        );
+                        ui.painter().text(
+                            egui::pos2(rect.left() + 8.0, rect.center().y),
+                            egui::Align2::CENTER_CENTER,
+                            format!("V ({:.2}..{:.2})", v_min, v_max),
+                            egui::FontId::proportional(10.0),
+                            egui::Color32::from_rgb(170, 170, 170),
+                        );
+                    }
+                }
+            });
+
+        // Restore the breakdown (only if still valid — it was before).
+        if self.solid_uv_breakdown.is_none() {
+            self.solid_uv_breakdown = breakdown_taken;
+        }
+        self.show_uv_window = window_open;
     }
 }
 
@@ -6259,6 +6671,26 @@ impl ViewerApp {
                                     self.camera.look_from_direction([
                                         -e.cos() * d.sin(), -e.sin(), e.cos() * d.cos(),
                                     ]);
+                                }
+                                ui.end_row();
+                            });
+
+                            ui.add_space(6.0);
+                            ui.heading(egui::RichText::new("UV Breakdown").size(13.0));
+                            ui.label(egui::RichText::new("View / save parametric UV grid of the current solid").size(10.0).color(egui::Color32::GRAY));
+                            egui::Grid::new("mob_uv_grid").num_columns(2).spacing([6.0, 6.0]).show(ui, |ui| {
+                                if ui.add_sized([120.0, 34.0], egui::Button::new("View UV")).clicked() {
+                                    self.show_uv_window = true;
+                                    self.solid_uv_breakdown = None;
+                                    // Close the mobile controls panel so the UV
+                                    // window is visible above the 3D viewport.
+                                    self.mobile_panel = None;
+                                }
+                                if ui.add_sized([120.0, 34.0], egui::Button::new("Save UV SVG")).clicked() {
+                                    self.show_uv_window = true;
+                                    self.pending_solid_uv_svg_export = true;
+                                    self.solid_uv_breakdown = None;
+                                    self.mobile_panel = None;
                                 }
                                 ui.end_row();
                             });
@@ -7004,6 +7436,291 @@ impl ViewerApp {
                 });
         }
     }
+}
+
+/// Sample a single edge into a 3D polyline.
+///
+/// Returns None if the edge has no curve (degenerate) or is otherwise
+/// not sampleable. The polyline has `n_samples` points evenly distributed
+/// across the edge's parametric range.
+fn sample_edge_polyline(edge: &Edge, n_samples: usize) -> Vec<Point3d> {
+    let mut pts = Vec::with_capacity(n_samples);
+    let curve = match edge.curve.as_ref() {
+        Some(c) => c,
+        None => return pts,
+    };
+    let (tmin, tmax) = edge.param_range;
+    if n_samples <= 1 {
+        let mid = (tmin + tmax) * 0.5;
+        pts.push(curve.point_at(mid));
+        return pts;
+    }
+    for i in 0..n_samples {
+        let t = tmin + (tmax - tmin) * (i as f64) / ((n_samples - 1) as f64);
+        pts.push(curve.point_at(t));
+    }
+    pts
+}
+
+/// Sample a wire into a 3D polyline by concatenating each coedge's edge
+/// samples. Each edge is sampled `samples_per_edge` times. The result is
+/// a single Vec<Point3d> (no per-edge grouping) so the caller can project
+/// each point onto the surface to build a UV polyline.
+///
+/// If `forward` is false on a coedge, the edge's samples are reversed so
+/// the polyline follows the wire's logical direction.
+fn sample_wire_polyline(
+    wire: &Wire,
+    edges: &[Edge],
+    samples_per_edge: usize,
+) -> Vec<Point3d> {
+    let mut all_pts = Vec::new();
+    for coedge in &wire.coedges {
+        // Find the matching edge by TopoId.
+        let edge = edges.iter().find(|e| e.id == coedge.edge);
+        let edge = match edge {
+            Some(e) => e,
+            None => continue,
+        };
+        let mut pts = sample_edge_polyline(edge, samples_per_edge);
+        if !coedge.forward {
+            pts.reverse();
+        }
+        // Drop the last point of each segment to avoid duplicating
+        // shared vertices between consecutive edges. We'll add the
+        // final point only when the wire is closed (handled by caller).
+        if pts.len() > 1 {
+            all_pts.extend_from_slice(&pts[..pts.len() - 1]);
+        } else {
+            all_pts.extend(pts);
+        }
+    }
+    all_pts
+}
+
+/// Compute the UV breakdown for every face of a solid.
+///
+/// For each face, samples the outer wire (and any inner wires / holes)
+/// into 3D polylines, then projects each 3D point onto the face's
+/// underlying surface via `Surface::project_point` to obtain UV
+/// coordinates. The result is a per-face list of UV polylines.
+///
+/// Returns an empty `SolidUvBreakdown` if the solid has no outer shell.
+fn compute_solid_uv_breakdown(solid: &Solid, model_name: &str) -> SolidUvBreakdown {
+    let mut breakdown = SolidUvBreakdown {
+        faces: Vec::new(),
+        model_name: model_name.to_string(),
+    };
+    let shell = match solid.outer_shell.as_ref() {
+        Some(s) => s,
+        None => return breakdown,
+    };
+    let samples_per_edge = 32; // dense enough to capture curvature on cylinders/spheres
+    for (fidx, face) in shell.faces.iter().enumerate() {
+        let surface = match face.surface.as_ref() {
+            Some(s) => s,
+            None => continue,
+        };
+        let surface_type = surface.type_name().to_string();
+        let mut outer_polylines: Vec<Vec<(f64, f64)>> = Vec::new();
+        if let Some(ow) = face.outer_wire.as_ref() {
+            let pts3d = sample_wire_polyline(ow, &face.edges, samples_per_edge);
+            let uv: Vec<(f64, f64)> = pts3d
+                .iter()
+                .map(|p| surface.project_point(p))
+                .collect();
+            if uv.len() >= 2 {
+                outer_polylines.push(uv);
+            }
+        }
+        let mut inner_polylines: Vec<Vec<(f64, f64)>> = Vec::new();
+        for iw in &face.inner_wires {
+            let pts3d = sample_wire_polyline(iw, &face.edges, samples_per_edge);
+            let uv: Vec<(f64, f64)> = pts3d
+                .iter()
+                .map(|p| surface.project_point(p))
+                .collect();
+            if uv.len() >= 2 {
+                inner_polylines.push(uv);
+            }
+        }
+        breakdown.faces.push(FaceUvBreakdown {
+            face_idx: fidx,
+            surface_type,
+            forward: face.forward,
+            outer_polylines,
+            inner_polylines,
+        });
+    }
+    breakdown
+}
+
+/// Generate an SVG visualization of one face's UV breakdown.
+///
+/// Renders:
+///   - A dark background
+///   - Light grid lines at u_divs × v_divs
+///   - The outer boundary in green (solid)
+///   - Inner boundaries (holes) in red (dashed)
+///   - Surface evaluation grid points (only those inside the outer boundary)
+///   - Axis labels (U range, V range, face index, surface type, forward flag)
+///
+/// This is the solid-face analogue of `generate_uv_svg` (which works on
+/// STEP `FaceInfo`). The two functions produce visually consistent SVGs.
+fn generate_solid_face_uv_svg(
+    face_uv: &FaceUvBreakdown,
+    u_divs: usize,
+    v_divs: usize,
+    model_name: &str,
+    surface: Option<&Surface>,
+) -> String {
+    let svg_width = 600.0_f64;
+    let svg_height = 600.0_f64;
+    let margin = 40.0_f64;
+    let draw_w = svg_width - 2.0 * margin;
+    let draw_h = svg_height - 2.0 * margin;
+
+    // Compute UV bounds from outer + inner polylines.
+    let mut u_min = f64::MAX;
+    let mut u_max = f64::MIN;
+    let mut v_min = f64::MAX;
+    let mut v_max = f64::MIN;
+    for poly in &face_uv.outer_polylines {
+        for &(u, v) in poly {
+            u_min = u_min.min(u); u_max = u_max.max(u);
+            v_min = v_min.min(v); v_max = v_max.max(v);
+        }
+    }
+    for poly in &face_uv.inner_polylines {
+        for &(u, v) in poly {
+            u_min = u_min.min(u); u_max = u_max.max(u);
+            v_min = v_min.min(v); v_max = v_max.max(v);
+        }
+    }
+    if u_min >= u_max || v_min >= v_max {
+        // Fallback: use the surface's natural parametric domain if known.
+        if let Some(s) = surface {
+            match s {
+                Surface::Nurbs(n) => {
+                    let (ur0, ur1) = n.u_range();
+                    let (vr0, vr1) = n.v_range();
+                    u_min = ur0; u_max = ur1; v_min = vr0; v_max = vr1;
+                }
+                Surface::Cylinder(_) => {
+                    u_min = 0.0; u_max = 2.0 * std::f64::consts::PI;
+                    v_min = -100.0; v_max = 100.0;
+                }
+                _ => { u_min = 0.0; u_max = 1.0; v_min = 0.0; v_max = 1.0; }
+            }
+        } else {
+            u_min = 0.0; u_max = 1.0; v_min = 0.0; v_max = 1.0;
+        }
+    }
+    let u_range = (u_max - u_min).max(1e-6);
+    let v_range = (v_max - v_min).max(1e-6);
+    u_min -= u_range * 0.05; u_max += u_range * 0.05;
+    v_min -= v_range * 0.05; v_max += v_range * 0.05;
+
+    let map_u = |u: f64| -> f64 { margin + (u - u_min) / (u_max - u_min) * draw_w };
+    let map_v = |v: f64| -> f64 { margin + (1.0 - (v - v_min) / (v_max - v_min)) * draw_h };
+
+    let mut svg = String::new();
+    svg.push_str(&format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+        <svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\">\n",
+        svg_width as i32, svg_height as i32, svg_width as i32, svg_height as i32
+    ));
+    svg.push_str(&format!(
+        "  <rect width=\"{}\" height=\"{}\" fill=\"#1a1a2e\"/>\n",
+        svg_width as i32, svg_height as i32
+    ));
+
+    // Grid lines
+    for i in 0..=u_divs {
+        let u = u_min + (u_max - u_min) * i as f64 / u_divs as f64;
+        let x = map_u(u);
+        svg.push_str(&format!(
+            "  <line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"#334\" stroke-width=\"0.5\"/>\n",
+            x, margin, x, margin + draw_h
+        ));
+    }
+    for j in 0..=v_divs {
+        let v = v_min + (v_max - v_min) * j as f64 / v_divs as f64;
+        let y = map_v(v);
+        svg.push_str(&format!(
+            "  <line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"#334\" stroke-width=\"0.5\"/>\n",
+            margin, y, margin + draw_w, y
+        ));
+    }
+
+    // Outer boundary (green)
+    for poly in &face_uv.outer_polylines {
+        if poly.len() < 2 { continue; }
+        let mut d = format!("M {:.2} {:.2}", map_u(poly[0].0), map_v(poly[0].1));
+        for &(u, v) in &poly[1..] {
+            d.push_str(&format!(" L {:.2} {:.2}", map_u(u), map_v(v)));
+        }
+        d.push_str(" Z");
+        svg.push_str(&format!(
+            "  <path d=\"{}\" fill=\"none\" stroke=\"#00ff88\" stroke-width=\"1.5\"/>\n", d
+        ));
+    }
+
+    // Inner boundaries / holes (red, dashed)
+    for poly in &face_uv.inner_polylines {
+        if poly.len() < 2 { continue; }
+        let mut d = format!("M {:.2} {:.2}", map_u(poly[0].0), map_v(poly[0].1));
+        for &(u, v) in &poly[1..] {
+            d.push_str(&format!(" L {:.2} {:.2}", map_u(u), map_v(v)));
+        }
+        d.push_str(" Z");
+        svg.push_str(&format!(
+            "  <path d=\"{}\" fill=\"none\" stroke=\"#ff4444\" stroke-width=\"1.5\" stroke-dasharray=\"4,2\"/>\n", d
+        ));
+    }
+
+    // Build outer boundary polygon for point-in-polygon clipping
+    let outer_uv_poly: Vec<(f64, f64)> = face_uv.outer_polylines.iter()
+        .flat_map(|p| p.iter().copied())
+        .collect();
+
+    // Surface evaluation points (only those inside the outer boundary)
+    if let Some(s) = surface {
+        for i in 0..=u_divs {
+            for j in 0..=v_divs {
+                let u = u_min + (u_max - u_min) * i as f64 / u_divs as f64;
+                let v = v_min + (v_max - v_min) * j as f64 / v_divs as f64;
+                let p = s.point_at(u, v);
+                if p.x.is_finite() && p.y.is_finite() && p.z.is_finite() {
+                    let inside = !outer_uv_poly.is_empty() && point_in_polygon(u, v, &outer_uv_poly);
+                    if inside {
+                        let x = map_u(u);
+                        let y = map_v(v);
+                        svg.push_str(&format!(
+                            "  <circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"2\" fill=\"#6688ff\" opacity=\"0.7\"/>\n", x, y
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // Labels
+    svg.push_str(&format!(
+        "  <text x=\"{}\" y=\"{}\" fill=\"#aaa\" font-size=\"12\" text-anchor=\"middle\">U ({:.2} .. {:.2})</text>\n",
+        margin + draw_w / 2.0, svg_height - 5.0, u_min, u_max
+    ));
+    svg.push_str(&format!(
+        "  <text x=\"10\" y=\"{}\" fill=\"#aaa\" font-size=\"12\" text-anchor=\"middle\" transform=\"rotate(-90, 10, {})\">V ({:.2} .. {:.2})</text>\n",
+        margin + draw_h / 2.0, margin + draw_h / 2.0, v_min, v_max
+    ));
+    svg.push_str(&format!(
+        "  <text x=\"{}\" y=\"20\" fill=\"#fff\" font-size=\"13\" text-anchor=\"middle\">Face #{} {} forward={} [{}]</text>\n",
+        svg_width / 2.0, face_uv.face_idx, face_uv.surface_type, face_uv.forward, model_name
+    ));
+
+    svg.push_str("</svg>\n");
+    svg
 }
 
 /// Generate UV grid SVG for a face (standalone function to avoid borrow conflicts).

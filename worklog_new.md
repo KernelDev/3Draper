@@ -2224,3 +2224,95 @@ Stage Summary:
 - All NURBS test surfaces now produce mathematically EXACT geometry where the
   construction is supposed to be exact (circles, spheres, surfaces of revolution).
 - Push to GitHub triggers automatic rebuild and deploy via .github/workflows/deploy.yml.
+
+---
+Task ID: 40
+Agent: main
+Task: User reported two issues:
+  1) "добавь для всех тестовых примитивов возможность просмотреть и сохранить UV разбиение"
+     — Add the ability to view and save UV breakdown for all test primitives.
+  2) "панель которая содержит настройки - боковая - не может бесконечно расти не имея скролбара -
+     теперь отдельные элементы просто не видны" — The side panel that contains settings
+     cannot grow infinitely without a scrollbar — now individual elements are simply not visible.
+
+Work Log:
+- Identified two problems:
+  (a) The desktop left controls panel had NO ScrollArea — when content exceeded the
+      window height (Primitives + NURBS + Curves + Holes + Models + Import + Export +
+      Modeling + Display + Info + Manifold + Errors + JSON API), bottom items were
+      silently clipped. Same problem on the right Structure panel which has 4
+      collapsing sections (Tree, Face list, UV Grid, Face Info) — when all were
+      expanded, the bottom ones got cut off.
+  (b) UV breakdown visualization was only available for STEP file faces
+      (FaceInfo.outer_uv_boundary). Test primitives built via ShapeBuilder (Box,
+      Cylinder, Sphere, Cone, Torus, Revolution, Extrusion, NURBS surfaces) had no
+      UV visualization at all — the user could not inspect their parametric layout.
+
+- Fix (a): Wrapped the entire desktop left panel body in
+  `egui::ScrollArea::vertical().auto_shrink([false; 2])`. Same treatment for the
+  right Structure panel — wrapped all 4 collapsing sections in one ScrollArea.
+  Mobile panels already had ScrollAreas (verified).
+
+- Fix (b): Added a new "UV Breakdown" feature that works for ANY current solid:
+  * New state fields: show_uv_window, uv_window_face_idx, uv_window_u_divs,
+    uv_window_v_divs, solid_uv_breakdown, pending_solid_uv_svg_export.
+  * New data structures: FaceUvBreakdown (per-face UV polylines + metadata),
+    SolidUvBreakdown (per-solid collection with model_name).
+  * New helper functions:
+    - sample_edge_polyline(edge, n_samples) — samples an Edge's curve into 3D points.
+    - sample_wire_polyline(wire, edges, samples_per_edge) — concatenates edge
+      samples into a single 3D polyline per wire, respecting coedge orientation.
+    - compute_solid_uv_breakdown(solid, model_name) — iterates every face of the
+      solid's outer shell, samples outer + inner wires, projects each 3D point
+      to UV via Surface::project_point(), returns SolidUvBreakdown.
+    - generate_solid_face_uv_svg(face_uv, u_divs, v_divs, model_name, surface) —
+      produces an SVG visualization of one face's UV breakdown (grid + outer
+      boundary in green + holes in red dashed + surface evaluation points
+      inside the boundary + axis labels).
+  * New ViewerApp method draw_uv_window(ctx) — renders an egui::Window with:
+    - Face selector ComboBox (lists all faces with surface type + point counts)
+    - U/V division DragValue sliders (2..=50)
+    - "Save UV as SVG..." button — triggers rfd save dialog (native) or browser
+      download via download_text() (WASM)
+    - "Recompute" button — invalidates cache
+    - Square painter canvas drawing the UV grid using the same color scheme
+      as the STEP-file UV grid (dark navy background, light grid lines, green
+      outer boundary, red dashed holes, blue surface evaluation points)
+  * Wired into update(): draw_uv_window(ctx) is called every frame on both
+    desktop and mobile (the window renders above any side panel).
+  * Wired pending_solid_uv_svg_export handling in update(): when set, generates
+    the SVG of the currently-selected face and triggers save/download.
+
+- Added "View UV" + "Save UV SVG" buttons in two places:
+  1) Desktop left panel: under the Primitives section, right below the
+     Box/Cylinder/Sphere/Cone/Torus/Revolution/Extrusion/NURBS grid.
+  2) Mobile Controls → Primitives tab → new "UV Breakdown" heading after the
+     Quick Camera grid. Tapping either button closes the mobile panel so the
+     UV window is visible above the 3D viewport.
+
+- Invalidated solid_uv_breakdown cache in load_mesh() so loading a new primitive
+  always recompute the breakdown from the new solid (also resets face_idx to 0).
+
+- Built and verified:
+  * Native build: cargo build -p draper-viewer → 0 errors, 0 warnings
+    (only 2 pre-existing warnings in draper-mesh and draper-step about unused
+    imports — unrelated to this change).
+  * WASM build: cargo build -p draper-viewer --target wasm32-unknown-unknown
+    --no-default-features --features web-deploy --release → succeeds.
+  * wasm-bindgen --target web --no-typescript → 8.4 MB wasm + 144 KB js.
+  * All 83 existing geometry tests still pass.
+
+Stage Summary:
+- Desktop left and right panels are now scrollable — no settings are ever clipped,
+  no matter how many sections are expanded or how narrow the window is.
+- Any test primitive (Box, Cylinder, Sphere, Cone, Torus, Revolution, Extrusion,
+  NURBS surfaces) now has a "View UV" button that opens a window showing the
+  parametric UV grid for every face of the solid.
+- UV breakdown supports face switching (ComboBox), U/V resolution adjustment
+  (DragValue 2..=50), and SVG export (rfd save dialog on native, browser
+  download on WASM).
+- The UV breakdown visualization uses the SAME color scheme as the existing
+  STEP-face UV grid (dark navy background, green outer boundary, red dashed
+  holes, blue surface evaluation points) for visual consistency.
+- Push to GitHub triggers automatic rebuild and deploy via
+  .github/workflows/deploy.yml.
