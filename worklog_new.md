@@ -2465,3 +2465,42 @@ Stage Summary:
 - Both the interactive viewer and the SVG export have the same aspect-ratio preservation + seam line drawing, so saved SVGs match what the user sees.
 - A subtle UV box border (#3c3c5a) makes the real aspect ratio visible even when zoomed out.
 - Web demo at https://kerneldev.github.io/3Draper/ is updated (commit 9c940f8).
+
+---
+Task ID: 43
+Agent: main
+Task: Two fixes for the UV breakdown window: (1) wheel zoom should pivot at the mouse cursor position (zoom-to-cursor), not at the UV bbox center; (2) opening the UV window for NURBS / Extrusion / Revolution surfaces was showing stale UV data from the previously-loaded solid.
+
+Work Log:
+- User reported: "Масштабирование работает не верно. Вот у тебя есть ребра и треугольники — масштабируй за цент принимай где находится мышка." → Wheel zoom should pivot at the cursor, not at the UV bbox center. Also: "еще почему то для nurbs extrusion revolution показывает прошлые поверхности которые для которых вызывался UV окно" → NURBS/Extrusion/Revolution show stale surfaces in the UV window.
+- Investigated root cause of stale-surface bug:
+  * `solid_uv_breakdown` cache is invalidated on every "View UV" click (lines 5219, 6232, 6980) — so the cache itself is fresh.
+  * `compute_solid_uv_breakdown(solid, &name)` is called with `self.current_solid` — but `load_extrusion`, `load_revolution`, and all 10 NURBS gallery loaders (`load_nurbs_saddle`, `load_nurbs_bump`, `load_nurbs_wave`, `load_nurbs_ruled`, `load_nurbs_revolution`, `load_nurbs_coons`, `load_nurbs_bilinear`, `load_nurbs_half_cylinder`, `load_nurbs_quarter_sphere`, `load_nurbs_closed_cylinder`) NEVER assigned `self.current_solid`. So when the user loaded one of these surfaces, `current_solid` still pointed at the previously-loaded solid (e.g. Box or Cylinder), and the UV window showed that stale solid's UV data.
+- Fix 2a (load_extrusion, load_revolution): Added `self.current_solid = Some(solid);` before `self.load_mesh(...)` in both loaders. The `solid` variable is still in scope after `triangulate_solid(&solid, ...)` (which borrows it), so we just move it into `current_solid`.
+- Fix 2b (NURBS gallery loaders):
+  * Imported `Face, Shell` from `draper_topology` (was only `ShapeBuilder, Solid, Edge, Wire`).
+  * Refactored `build_nurbs_surface_mesh` to return `(TriangleMesh, Solid)` instead of just `TriangleMesh`. The new Solid is constructed by wrapping the NURBS surface in a `Face::new_surface_only` (face with no outer wire), then `Shell::new(vec![face])`, then `Solid::new(shell)`. The face's lack of an outer wire causes `compute_solid_uv_breakdown` to fall back to the surface's `natural_uv_domain()` — perfect for showing the full UV grid of the NURBS patch.
+  * Inside `build_nurbs_surface_mesh`: clone `nurbs_surface` BEFORE moving it into `Surface::Nurbs(nurbs_surface)`, so the clone can be wrapped into the returned Solid.
+  * Updated all 10 NURBS gallery loader callsites from `let mesh = self.build_nurbs_surface_mesh(...);` to `let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(...); self.current_solid = Some(nurbs_solid);`. Used `replace_all=true` for the 9 callsites with `, 30)` and a separate edit for the 1 callsite with `, 20)`.
+- Fix 1 (zoom-to-cursor for wheel zoom):
+  * Replaced the wheel-zoom block in `draw_uv_window` (app.rs:6438+). Previously: `self.uv_window_zoom = (self.uv_window_zoom * factor).clamp(0.25, 20.0);` — just changed zoom, no pan adjustment, so the visible-bounds center stayed at `base_center + pan` (pivoting around UV bbox center).
+  * New math: When zoom changes from `old_zoom` to `new_zoom`, the pan must be adjusted so that the UV point under the cursor stays at the same screen position. Derivation:
+      u_mouse = base_center_u + pan[0] + (2*tx - 1) * base_half_u / zoom
+    where tx ∈ [0,1] is the cursor's normalized X position within the UV box. Solving u_mouse_before = u_mouse_after for pan_new:
+      pan_new[0] = pan_old[0] + (2*tx - 1) * base_half_u * (1/old_zoom - 1/new_zoom)
+    Same for V axis with ty = 1 - (cursor_y_in_box / height) (Y flipped).
+  * The aspect-ratio-preserving screen layout (width_f64, height_f64, x_offset_f64, y_offset_f64) is INDEPENDENT of zoom — it depends only on the UV box's intrinsic aspect ratio (base_half_u / base_half_v), which doesn't change with zoom. So tx and ty are the same before and after the zoom change, and a single computation suffices.
+  * Implementation: When `response.hovered()` and `smooth_scroll_delta.y.abs() > 0.01`, compute `old_zoom` and `new_zoom = (old_zoom * factor).clamp(0.25, 20.0)`. If they differ, get `response.hover_pos()`, compute `tx` and `ty`, then apply the pan adjustment to `self.uv_window_pan[0]` and `[1]`. Then set `self.uv_window_zoom = new_zoom`. Consume the scroll delta as before.
+  * If the cursor is outside the UV box (in the gray margin), tx or ty can be < 0 or > 1 — the math still works, the pivot is just outside the visible area.
+- For +/- buttons and the slider: left unchanged (they pivot around the UV bbox center, since the cursor is on the button/slider, not on the canvas). Wheel zoom is the primary zoom-to-cursor use case.
+- Native `cargo check -p draper-viewer`: ✓ (0 errors, pre-existing warnings in other crates only).
+- WASM `cargo check -p draper-viewer --no-default-features --features web-deploy --target wasm32-unknown-unknown`: ✓.
+- `cargo test -p draper-topology -p draper-geometry -p draper-mesh --lib`: 100 tests pass.
+- Committed source changes (commit 3b5af27) and pushed to main.
+- Built WASM release (8.9 MB wasm + 144 KB js) and deployed via `scripts/deploy_gh_pages.sh` (commit 270539c).
+
+Stage Summary:
+- Wheel zoom in the UV breakdown window now pivots at the mouse cursor: the UV point under the cursor stays at the same screen position before and after zoom. The user can zoom into a specific triangle/edge by hovering over it and scrolling.
+- Stale-surface bug fixed: loading a NURBS / Extrusion / Revolution surface and then opening "View UV" now correctly shows that surface's UV breakdown, not the previously-loaded solid's. All 10 NURBS gallery loaders + load_extrusion + load_revolution now assign `self.current_solid`.
+- `build_nurbs_surface_mesh` now returns `(TriangleMesh, Solid)` so the Solid can be assigned to `current_solid` by every NURBS gallery loader. The Solid contains a single Face with the NURBS surface (no outer wire) — `compute_solid_uv_breakdown` handles this by falling back to the surface's `natural_uv_domain()`.
+- Web demo at https://kerneldev.github.io/3Draper/ is updated (commit 270539c).
