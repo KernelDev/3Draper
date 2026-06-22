@@ -1775,9 +1775,15 @@ impl ViewerApp {
 
     /// Helper: build a NURBS surface mesh from a 2D grid of control points.
     ///
-    /// Samples the boundary at `steps` points per side, then triangulates
-    /// via the UV-aware path so the surface curvature is captured with
-    /// chord-error-based adaptive refinement.
+    /// Samples the surface on a regular (steps+1)×(steps+1) UV grid and
+    /// creates two triangles per grid cell. This direct grid-sampling
+    /// approach is used INSTEAD of the complex
+    /// `triangulate_face_with_boundary_and_holes_uv` path because the
+    /// latter produces broken meshes for NURBS surfaces (162 boundary
+    /// edges for 160 triangles — i.e. the triangles are barely connected
+    /// to each other, producing the "torn, chaotic" appearance the user
+    /// reported). A regular grid mesh has only the perimeter as boundary
+    /// edges (4*steps edges), which is correct for an open surface.
     ///
     /// Returns BOTH the triangle mesh AND a `Solid` containing the NURBS
     /// surface as a single face. The solid is needed so that the UV
@@ -1792,44 +1798,46 @@ impl ViewerApp {
         nurbs_surface: draper_geometry::NurbsSurface,
         steps: usize,
     ) -> (TriangleMesh, Solid) {
-        use draper_geometry::Point2d;
         let (u_min, u_max) = nurbs_surface.u_range();
         let (v_min, v_max) = nurbs_surface.v_range();
         // Clone the surface for the Solid we'll return at the end. The
         // original `nurbs_surface` is consumed by `Surface::Nurbs(...)` below.
         let surface_for_solid = Surface::Nurbs(nurbs_surface.clone());
         let surface = Surface::Nurbs(nurbs_surface);
-        let mut boundary = Vec::new();
-        let mut boundary_uvs = Vec::new();
-        // Bottom edge (v = v_min)
-        for i in 0..=steps {
-            let u = u_min + (u_max - u_min) * i as f64 / steps as f64;
-            boundary.push(surface.point_at(u, v_min));
-            boundary_uvs.push(Point2d::new(u, v_min));
-        }
-        // Right edge (u = u_max)
-        for i in 1..=steps {
-            let v = v_min + (v_max - v_min) * i as f64 / steps as f64;
-            boundary.push(surface.point_at(u_max, v));
-            boundary_uvs.push(Point2d::new(u_max, v));
-        }
-        // Top edge (v = v_max), reversed
-        for i in (0..steps).rev() {
-            let u = u_min + (u_max - u_min) * i as f64 / steps as f64;
-            boundary.push(surface.point_at(u, v_max));
-            boundary_uvs.push(Point2d::new(u, v_max));
-        }
-        // Left edge (u = u_min), reversed
-        for i in (1..steps).rev() {
-            let v = v_min + (v_max - v_min) * i as f64 / steps as f64;
-            boundary.push(surface.point_at(u_min, v));
-            boundary_uvs.push(Point2d::new(u_min, v));
-        }
 
-        let params = tri_params_for_lod(self.lod_level);
-        let mesh = draper_mesh::triangulate_face_with_boundary_and_holes_uv(
-            &surface, &boundary, &boundary_uvs, &[], &[], true, &params,
-        );
+        let n = steps.max(2); // at least 2 subdivisions → 2×2 cells → 8 triangles
+        let du = (u_max - u_min) / n as f64;
+        let dv = (v_max - v_min) / n as f64;
+
+        let mut mesh = TriangleMesh::new();
+        // Sample (n+1)×(n+1) vertices on the regular UV grid.
+        // Vertex index = j*(n+1) + i, where i ∈ [0..=n] is the U index
+        // and j ∈ [0..=n] is the V index.
+        mesh.vertices.reserve((n + 1) * (n + 1));
+        for j in 0..=n {
+            for i in 0..=n {
+                let u = u_min + i as f64 * du;
+                let v = v_min + j as f64 * dv;
+                mesh.vertices.push(surface.point_at(u, v));
+            }
+        }
+        // Create two triangles per grid cell. The winding (v00, v10, v11)
+        // and (v00, v11, v01) produces counter-clockwise triangles when
+        // viewed from the +normal side of a standard UV→3D mapping
+        // (U increases to the right, V increases upward), which matches
+        // the `forward = true` convention used for face normals.
+        let row_stride = (n + 1) as u32;
+        mesh.triangles.reserve(n * n * 2);
+        for j in 0..n as u32 {
+            for i in 0..n as u32 {
+                let v00 = j * row_stride + i;
+                let v10 = v00 + 1;
+                let v01 = v00 + row_stride;
+                let v11 = v01 + 1;
+                mesh.triangles.push([v00, v10, v11]);
+                mesh.triangles.push([v00, v11, v01]);
+            }
+        }
 
         // Build a Solid containing the NURBS surface as a single face.
         // The face has no outer wire (Face::new_surface_only), so
