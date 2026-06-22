@@ -1767,6 +1767,73 @@ impl Surface {
         }
     }
 
+    /// Return the natural parametric UV domain of the surface.
+    ///
+    /// For analytically-defined surfaces (Cylinder, Cone, Sphere, Torus),
+    /// returns the canonical parameterization range used by `point_at` /
+    /// `project_point`:
+    ///   - Cylinder: u ∈ [0, 2π], v ∈ [-∞, ∞] → v clamped to [-1000, 1000]
+    ///   - Cone:     u ∈ [0, 2π], v ∈ [0, height]  (height = radius/tan(half_angle))
+    ///   - Sphere:   u ∈ [0, 2π], v ∈ [0, π]
+    ///   - Torus:    u ∈ [0, 2π], v ∈ [0, 2π]
+    ///   - Plane:    u, v ∈ [-1000, 1000] (infinite)
+    ///   - Revolution: u ∈ [0, 2π], v ∈ profile's parametric range
+    ///   - Extrusion:  u ∈ profile's parametric range, v ∈ [-1000, 1000]
+    ///   - Nurbs:    u ∈ knot range, v ∈ knot range
+    ///
+    /// This is used by the UV breakdown viewer to compute the display
+    /// bounds when a face has no explicit outer wire (e.g., the lateral
+    /// face of a cone whose only stored edge is the bottom circle).
+    pub fn natural_uv_domain(&self) -> (f64, f64, f64, f64) {
+        const LARGE: f64 = 1000.0;
+        match self {
+            Surface::Plane(_) => (-LARGE, LARGE, -LARGE, LARGE),
+            Surface::Cylinder(c) => {
+                let (u0, u1) = c.u_range();
+                // v is along the axis — there's no natural bound, but the
+                // face's outer wire usually constrains it. If the wire is
+                // empty, show a generous default window.
+                (u0, u1, -LARGE, LARGE)
+            }
+            Surface::Cone(c) => {
+                let u0 = 0.0;
+                let u1 = 2.0 * std::f64::consts::PI;
+                // v goes from 0 (base) to height() (apex) for tapering cones,
+                // or 0 to +LARGE for expanding cones.
+                let v0 = 0.0;
+                let v1 = if c.expanding {
+                    LARGE
+                } else if c.half_angle.abs() < 1e-10 {
+                    LARGE
+                } else {
+                    c.radius / c.half_angle.tan()
+                };
+                (u0, u1, v0, v1)
+            }
+            Surface::Sphere(s) => {
+                let _ = s;
+                (0.0, 2.0 * std::f64::consts::PI, 0.0, std::f64::consts::PI)
+            }
+            Surface::Torus(_) => {
+                (0.0, 2.0 * std::f64::consts::PI, 0.0, 2.0 * std::f64::consts::PI)
+            }
+            Surface::Revolution(r) => {
+                // u = revolution angle, v = profile parameter
+                let (v0, v1) = r.profile.param_range();
+                (0.0, 2.0 * std::f64::consts::PI, v0, v1)
+            }
+            Surface::Extrusion(e) => {
+                let (u0, u1) = e.profile.param_range();
+                (u0, u1, -LARGE, LARGE)
+            }
+            Surface::Nurbs(n) => {
+                let (u0, u1) = n.u_range();
+                let (v0, v1) = n.v_range();
+                (u0, u1, v0, v1)
+            }
+        }
+    }
+
     /// Compute the curvature at a point on the surface.
     ///
     /// For analytical surfaces (plane, cylinder, cone, sphere, torus),

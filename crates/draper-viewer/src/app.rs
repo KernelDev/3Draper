@@ -6215,20 +6215,20 @@ impl ViewerApp {
                                 v_min = v_min.min(v); v_max = v_max.max(v);
                             }
                         }
+                        // Also include UV triangle extents in the bounds,
+                        // because some triangles may have been unwrapped
+                        // across the periodic seam and now extend outside
+                        // the boundary polyline's nominal UV range.
+                        for tri in &face_uv.uv_triangles {
+                            for &(u, v) in tri {
+                                u_min = u_min.min(u); u_max = u_max.max(u);
+                                v_min = v_min.min(v); v_max = v_max.max(v);
+                            }
+                        }
                         if u_min >= u_max || v_min >= v_max {
                             if let Some(s) = surface_ref {
-                                match s {
-                                    Surface::Nurbs(n) => {
-                                        let (ur0, ur1) = n.u_range();
-                                        let (vr0, vr1) = n.v_range();
-                                        u_min = ur0; u_max = ur1; v_min = vr0; v_max = vr1;
-                                    }
-                                    Surface::Cylinder(_) => {
-                                        u_min = 0.0; u_max = 2.0 * std::f64::consts::PI;
-                                        v_min = -100.0; v_max = 100.0;
-                                    }
-                                    _ => { u_min = 0.0; u_max = 1.0; v_min = 0.0; v_max = 1.0; }
-                                }
+                                let (u0, u1, v0, v1) = s.natural_uv_domain();
+                                u_min = u0; u_max = u1; v_min = v0; v_max = v1;
                             } else {
                                 u_min = 0.0; u_max = 1.0; v_min = 0.0; v_max = 1.0;
                             }
@@ -6274,6 +6274,10 @@ impl ViewerApp {
                         // ─── UV triangles (the actual surface triangulation) ───────
                         // Draw filled triangles so the user can see the actual UV
                         // subdivision of the face, not just the boundary.
+                        //
+                        // Each triangle is rendered as a filled polygon with a
+                        // clearly visible edge stroke so the user can see both
+                        // the triangle shape AND its edges at the same time.
                         let outer_uv_poly: Vec<(f64, f64)> = face_uv.outer_polylines.iter()
                             .flat_map(|p| p.iter().copied())
                             .collect();
@@ -6293,25 +6297,26 @@ impl ViewerApp {
                                 let p2 = egui::pos2(map_u(tri[2].0), map_v(tri[2].1));
 
                                 if in_hole || !in_outer {
-                                    // Triangle inside a hole or outside the outer boundary — outline only.
+                                    // Triangle inside a hole or outside the outer boundary — red outline.
                                     ui.painter().add(egui::Shape::convex_polygon(
                                         vec![p0, p1, p2],
                                         egui::Color32::from_rgba_premultiplied(255, 34, 34, 30),
-                                        egui::Stroke::new(0.4, egui::Color32::from_rgba_premultiplied(255, 68, 68, 100)),
+                                        egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(255, 68, 68, 200)),
                                     ));
                                 } else {
-                                    // Valid triangle — alternating blue tints + thin outline.
+                                    // Valid triangle — alternating blue tints with a
+                                    // bright cyan edge so the triangulation is clearly
+                                    // visible even on top of the colored fill.
                                     let fill = if ti % 2 == 0 {
-                                        egui::Color32::from_rgba_premultiplied(68, 136, 255, 24)
+                                        egui::Color32::from_rgba_premultiplied(68, 136, 255, 32)
                                     } else {
-                                        egui::Color32::from_rgba_premultiplied(85, 170, 255, 24)
+                                        egui::Color32::from_rgba_premultiplied(85, 170, 255, 32)
                                     };
-                                    let stroke = if ti % 2 == 0 {
-                                        egui::Stroke::new(0.4, egui::Color32::from_rgba_premultiplied(68, 136, 255, 140))
-                                    } else {
-                                        egui::Stroke::new(0.4, egui::Color32::from_rgba_premultiplied(85, 170, 255, 140))
-                                    };
-                                    ui.painter().add(egui::Shape::convex_polygon(vec![p0, p1, p2], fill, stroke));
+                                    let edge = egui::Stroke::new(
+                                        1.0,
+                                        egui::Color32::from_rgba_premultiplied(180, 220, 255, 220),
+                                    );
+                                    ui.painter().add(egui::Shape::convex_polygon(vec![p0, p1, p2], fill, edge));
                                 }
                                 if ti >= tri_limit { break; }
                             }
@@ -7565,6 +7570,121 @@ fn sample_wire_polyline(
     all_pts
 }
 
+/// Split a UV polyline at large parameter jumps caused by periodic seams.
+///
+/// For a periodic surface (e.g., cylinder where u ∈ [0, 2π]), the boundary
+/// polyline will have a sudden jump from u ≈ 2π back to u ≈ 0 when the
+/// boundary wraps around the seam. If we draw a single polyline through
+/// these points, the renderer connects the two sides with a horizontal
+/// line across the entire UV plane, producing a wrong "X" shape.
+///
+/// This function detects such jumps (delta > π for U-periodic, delta > π/2
+/// for V-periodic — sphere's v range is only π so we use a smaller threshold)
+/// and splits the polyline into multiple sub-polylines, each contiguous in
+/// UV space. The caller can then render each sub-polyline independently.
+///
+/// Points whose U coordinate is near the seam (within a small epsilon of
+/// either 0 or 2π) are kept on the side they were sampled from, so the
+/// split correctly produces two halves: one with u ∈ [0, ~π] and another
+/// with u ∈ [~π, 2π].
+fn split_at_seam_jumps(
+    uv: Vec<(f64, f64)>,
+    u_periodic: bool,
+    v_periodic: bool,
+) -> Vec<Vec<(f64, f64)>> {
+    if !u_periodic && !v_periodic {
+        return vec![uv];
+    }
+    if uv.len() < 2 {
+        return vec![uv];
+    }
+    // Threshold for detecting a seam jump. For a periodic parameter with
+    // period 2π, a jump larger than π almost certainly means the polyline
+    // crossed the seam (the largest legitimate step in a dense sample is
+    // 2π / samples_per_edge, which for samples_per_edge=32 is ~0.2 rad).
+    const U_JUMP: f64 = std::f64::consts::PI;
+    const V_JUMP: f64 = std::f64::consts::PI / 2.0;
+
+    let mut result: Vec<Vec<(f64, f64)>> = Vec::new();
+    let mut current: Vec<(f64, f64)> = Vec::with_capacity(uv.len());
+    current.push(uv[0]);
+    for window in uv.windows(2) {
+        let (u0, v0) = window[0];
+        let (u1, v1) = window[1];
+        let du = (u1 - u0).abs();
+        let dv = (v1 - v0).abs();
+        let jumped = (u_periodic && du > U_JUMP) || (v_periodic && dv > V_JUMP);
+        if jumped {
+            if current.len() >= 2 {
+                result.push(std::mem::take(&mut current));
+            } else {
+                current.clear();
+            }
+            current.push((u1, v1));
+        } else {
+            current.push((u1, v1));
+        }
+    }
+    if current.len() >= 2 {
+        result.push(current);
+    }
+    if result.is_empty() {
+        result.push(uv);
+    }
+    result
+}
+
+/// Unwrap a UV triangle across a periodic seam if necessary.
+///
+/// If two of the triangle's U coordinates are on opposite sides of the
+/// seam (one near 0, the other near 2π), this function shifts the side
+/// near 2π down by 2π so the triangle becomes contiguous. The shifted
+/// triangle may extend outside [0, 2π], but the renderer's `point_in_polygon`
+/// test still works correctly because the polygon is now non-wrapping.
+///
+/// Returns the (possibly shifted) triangle. If no shift is needed, returns
+/// the triangle unchanged.
+fn unwrap_triangle_seam(
+    tri: [(f64, f64); 3],
+    u_periodic: bool,
+    v_periodic: bool,
+    u_period: f64,
+    v_period: f64,
+) -> [(f64, f64); 3] {
+    let mut result = tri;
+    if u_periodic && u_period > 0.0 {
+        // Check if any pair has a jump > u_period / 2
+        let half = u_period / 2.0;
+        let us = [tri[0].0, tri[1].0, tri[2].0];
+        let max_u = us.iter().cloned().fold(f64::MIN, f64::max);
+        let min_u = us.iter().cloned().fold(f64::MAX, f64::min);
+        if max_u - min_u > half {
+            // Shift the points with u > half down by u_period.
+            // After shifting, all points will be in [-u_period/2, u_period/2]
+            // roughly, which is contiguous.
+            for pt in &mut result {
+                if pt.0 > half {
+                    pt.0 -= u_period;
+                }
+            }
+        }
+    }
+    if v_periodic && v_period > 0.0 {
+        let half = v_period / 2.0;
+        let vs = [tri[0].1, tri[1].1, tri[2].1];
+        let max_v = vs.iter().cloned().fold(f64::MIN, f64::max);
+        let min_v = vs.iter().cloned().fold(f64::MAX, f64::min);
+        if max_v - min_v > half {
+            for pt in &mut result {
+                if pt.1 > half {
+                    pt.1 -= v_period;
+                }
+            }
+        }
+    }
+    result
+}
+
 /// Compute the UV breakdown for every face of a solid.
 ///
 /// For each face, samples the outer wire (and any inner wires / holes)
@@ -7589,26 +7709,86 @@ fn compute_solid_uv_breakdown(solid: &Solid, model_name: &str) -> SolidUvBreakdo
             None => continue,
         };
         let surface_type = surface.type_name().to_string();
+        let u_periodic = surface.is_u_periodic();
+        let v_periodic = surface.is_v_periodic();
         let mut outer_polylines: Vec<Vec<(f64, f64)>> = Vec::new();
         if let Some(ow) = face.outer_wire.as_ref() {
-            let pts3d = sample_wire_polyline(ow, &face.edges, samples_per_edge);
-            let uv: Vec<(f64, f64)> = pts3d
-                .iter()
-                .map(|p| surface.project_point(p))
-                .collect();
-            if uv.len() >= 2 {
-                outer_polylines.push(uv);
+            if !ow.coedges.is_empty() {
+                let pts3d = sample_wire_polyline(ow, &face.edges, samples_per_edge);
+                let uv_raw: Vec<(f64, f64)> = pts3d
+                    .iter()
+                    .map(|p| surface.project_point(p))
+                    .collect();
+                // For periodic surfaces, the boundary polyline may wrap
+                // across the seam (u jumps from 2π-ε to 0+ε, or v similarly).
+                // The renderer would otherwise draw a horizontal line across
+                // the entire UV plane. Split the polyline at large jumps.
+                let uv = split_at_seam_jumps(uv_raw, u_periodic, v_periodic);
+                for poly in uv {
+                    if poly.len() >= 2 {
+                        outer_polylines.push(poly);
+                    }
+                }
+            }
+        }
+        // If the outer wire is empty (common for the lateral face of cones
+        // and cylinders where the only edge is the bottom circle, stored
+        // in face.edges but not in the wire), generate a synthetic UV
+        // boundary rectangle using the surface's natural parametric domain.
+        // This ensures the UV breakdown window shows the actual UV space
+        // instead of falling back to the [0,1]x[0,1] default.
+        if outer_polylines.is_empty() {
+            let (u0, u1, v0, v1) = surface.natural_uv_domain();
+            if u0.is_finite() && u1.is_finite() && v0.is_finite() && v1.is_finite()
+                && u1 > u0 && v1 > v0
+            {
+                // Build a rectangle going counter-clockwise in UV space.
+                // For U-periodic surfaces (cone, cylinder, sphere, torus),
+                // the rectangle naturally represents the full periodic
+                // domain [0, 2π] x [v0, v1].
+                let n = 64; // sample density along periodic edges
+                let mut rect = Vec::new();
+                // Bottom edge: v = v0, u from u0 to u1
+                for i in 0..n {
+                    let t = i as f64 / n as f64;
+                    let u = u0 + t * (u1 - u0);
+                    rect.push((u, v0));
+                }
+                // Right edge: u = u1, v from v0 to v1
+                for i in 0..n {
+                    let t = i as f64 / n as f64;
+                    let v = v0 + t * (v1 - v0);
+                    rect.push((u1, v));
+                }
+                // Top edge: v = v1, u from u1 to u0
+                for i in 0..n {
+                    let t = i as f64 / n as f64;
+                    let u = u1 - t * (u1 - u0);
+                    rect.push((u, v1));
+                }
+                // Left edge: u = u0, v from v1 to v0
+                for i in 0..n {
+                    let t = i as f64 / n as f64;
+                    let v = v1 - t * (v1 - v0);
+                    rect.push((u0, v));
+                }
+                // Close the loop
+                rect.push((u0, v0));
+                outer_polylines.push(rect);
             }
         }
         let mut inner_polylines: Vec<Vec<(f64, f64)>> = Vec::new();
         for iw in &face.inner_wires {
             let pts3d = sample_wire_polyline(iw, &face.edges, samples_per_edge);
-            let uv: Vec<(f64, f64)> = pts3d
+            let uv_raw: Vec<(f64, f64)> = pts3d
                 .iter()
                 .map(|p| surface.project_point(p))
                 .collect();
-            if uv.len() >= 2 {
-                inner_polylines.push(uv);
+            let uv = split_at_seam_jumps(uv_raw, u_periodic, v_periodic);
+            for poly in uv {
+                if poly.len() >= 2 {
+                    inner_polylines.push(poly);
+                }
             }
         }
 
@@ -7617,9 +7797,23 @@ fn compute_solid_uv_breakdown(solid: &Solid, model_name: &str) -> SolidUvBreakdo
         // uses, then project every triangle vertex back into UV space via
         // Surface::project_point. This gives us the actual UV tessellation
         // that the user wants to see and save.
+        //
+        // For periodic surfaces, we unwrap triangles that cross the seam
+        // (e.g., one vertex at u=0.1 and another at u=2π-0.1) by shifting
+        // the high-u side down by 2π. Without this, the renderer would
+        // draw stretched triangles spanning the entire UV plane.
         let mut uv_triangles: Vec<[(f64, f64); 3]> = Vec::new();
         let tri_params = TriangulationParams::default();
         let tri_mesh = triangulate_face(face, &tri_params);
+        let u_period = if u_periodic { 2.0 * std::f64::consts::PI } else { 0.0 };
+        let v_period = if v_periodic {
+            // Sphere's v range is [0, π], so v_period = π; torus is [0, 2π].
+            match surface {
+                Surface::Sphere(_) => std::f64::consts::PI,
+                Surface::Torus(_) => 2.0 * std::f64::consts::PI,
+                _ => 2.0 * std::f64::consts::PI,
+            }
+        } else { 0.0 };
         if !tri_mesh.triangles.is_empty() {
             uv_triangles.reserve(tri_mesh.triangles.len());
             for tri in &tri_mesh.triangles {
@@ -7642,7 +7836,9 @@ fn compute_solid_uv_breakdown(solid: &Solid, model_name: &str) -> SolidUvBreakdo
                     && u1.is_finite() && vv1.is_finite()
                     && u2.is_finite() && vv2.is_finite()
                 {
-                    uv_triangles.push([(u0, vv0), (u1, vv1), (u2, vv2)]);
+                    let raw = [(u0, vv0), (u1, vv1), (u2, vv2)];
+                    let unwrapped = unwrap_triangle_seam(raw, u_periodic, v_periodic, u_period, v_period);
+                    uv_triangles.push(unwrapped);
                 }
             }
         }
@@ -7701,21 +7897,20 @@ fn generate_solid_face_uv_svg(
             v_min = v_min.min(v); v_max = v_max.max(v);
         }
     }
+    // Also include UV triangle extents in the bounds, since unwrapped
+    // triangles on periodic surfaces may extend outside the boundary's
+    // nominal UV range.
+    for tri in &face_uv.uv_triangles {
+        for &(u, v) in tri {
+            u_min = u_min.min(u); u_max = u_max.max(u);
+            v_min = v_min.min(v); v_max = v_max.max(v);
+        }
+    }
     if u_min >= u_max || v_min >= v_max {
         // Fallback: use the surface's natural parametric domain if known.
         if let Some(s) = surface {
-            match s {
-                Surface::Nurbs(n) => {
-                    let (ur0, ur1) = n.u_range();
-                    let (vr0, vr1) = n.v_range();
-                    u_min = ur0; u_max = ur1; v_min = vr0; v_max = vr1;
-                }
-                Surface::Cylinder(_) => {
-                    u_min = 0.0; u_max = 2.0 * std::f64::consts::PI;
-                    v_min = -100.0; v_max = 100.0;
-                }
-                _ => { u_min = 0.0; u_max = 1.0; v_min = 0.0; v_max = 1.0; }
-            }
+            let (u0, u1, v0, v1) = s.natural_uv_domain();
+            u_min = u0; u_max = u1; v_min = v0; v_max = v1;
         } else {
             u_min = 0.0; u_max = 1.0; v_min = 0.0; v_max = 1.0;
         }
@@ -7792,28 +7987,30 @@ fn generate_solid_face_uv_svg(
     // Render the actual UV tessellation so saved SVGs match what the
     // interactive viewer shows. Triangles inside holes or outside the
     // outer boundary are drawn in red; valid triangles use a blue tint.
+    // Each triangle has a clearly visible edge stroke so the user can
+    // see the triangulation structure, not just colored regions.
     let hole_polys: &[Vec<(f64, f64)>] = &face_uv.inner_polylines;
     if !face_uv.uv_triangles.is_empty() {
         let tri_limit = 5000.min(face_uv.uv_triangles.len());
-        svg.push_str("  <g opacity=\"0.55\">\n");
+        svg.push_str("  <g>\n");
         for (ti, tri) in face_uv.uv_triangles.iter().enumerate() {
             let cu = (tri[0].0 + tri[1].0 + tri[2].0) / 3.0;
             let cv = (tri[0].1 + tri[1].1 + tri[2].1) / 3.0;
             let in_hole = hole_polys.iter().any(|h| point_in_polygon(cu, cv, h));
             let in_outer = !outer_uv_poly.is_empty() && point_in_polygon(cu, cv, &outer_uv_poly);
-            let (fill, stroke) = if in_hole || !in_outer {
-                ("#ff2222", "#ff4444")
+            let (fill, fill_op, stroke, stroke_op, stroke_w) = if in_hole || !in_outer {
+                ("#ff2222", "0.18", "#ff4444", "0.9", "0.8")
             } else if ti % 2 == 0 {
-                ("#4488ff", "#4488ff")
+                ("#4488ff", "0.22", "#b4dcff", "0.95", "0.8")
             } else {
-                ("#55aaff", "#55aaff")
+                ("#55aaff", "0.22", "#b4dcff", "0.95", "0.8")
             };
             svg.push_str(&format!(
-                "    <polygon points=\"{:.2},{:.2} {:.2},{:.2} {:.2},{:.2}\" fill=\"{}\" fill-opacity=\"0.18\" stroke=\"{}\" stroke-width=\"0.4\" stroke-opacity=\"0.7\"/>\n",
+                "    <polygon points=\"{:.2},{:.2} {:.2},{:.2} {:.2},{:.2}\" fill=\"{}\" fill-opacity=\"{}\" stroke=\"{}\" stroke-width=\"{}\" stroke-opacity=\"{}\" stroke-linejoin=\"round\"/>\n",
                 map_u(tri[0].0), map_v(tri[0].1),
                 map_u(tri[1].0), map_v(tri[1].1),
                 map_u(tri[2].0), map_v(tri[2].1),
-                fill, stroke
+                fill, fill_op, stroke, stroke_w, stroke_op
             ));
             if ti >= tri_limit { break; }
         }
