@@ -2372,3 +2372,51 @@ Stage Summary:
   grid and the mobile UV grid for consistency (the bug existed in all three
   locations).
 - Web demo at https://kerneldev.github.io/3Draper/ is updated.
+
+---
+Task ID: 41
+Agent: main
+Task: Add zoom/pan to the UV Breakdown popup window so the user can scale the cone surface UV drawing without resizing the window.
+
+Work Log:
+- Read user's screenshot of cone UV view — requested ability to scale the drawing without changing the window size.
+- Explored `/home/z/my-project/crates/draper-viewer/src/app.rs` to locate `draw_uv_window` (lines 6097–6493), `compute_solid_uv_breakdown`, `FaceUvBreakdown` struct, and `ViewerApp` state fields. Confirmed no zoom/pan state existed.
+- Added three new fields to `ViewerApp`:
+  * `uv_window_zoom: f32` (default 1.0; range 0.25..20.0)
+  * `uv_window_pan: [f64; 2]` (default [0.0, 0.0]; in UV units)
+  * `uv_window_prev_face_idx: usize` (default 0; used to auto-reset zoom/pan when face selection changes)
+- Initialized all three in `ViewerApp::new`.
+- Modified `draw_uv_window` to:
+  1. At the top, detect face change (uv_window_prev_face_idx != uv_window_face_idx) and reset zoom=1.0, pan=[0,0].
+  2. Added a new UI row after the U/V divs row with: "Zoom:" label, "−" button, egui::Slider (0.25..20.0, step 0.05, SliderClamping::Always, fixed_decimals=2, "x" suffix), "+" button, "Reset View" button.
+  3. Added a small grey "Tip: drag the canvas to pan, use + / − or the slider to zoom." label below the controls.
+  4. Changed canvas allocation from `Sense::hover()` to `Sense::click_and_drag()` so left-drag is captured for panning.
+  5. Rewrote the UV bounds computation:
+     * Compute "base" bounds (full UV extent of the face from outer_polylines + inner_polylines + uv_triangles, padded 5%).
+     * Derive visible bounds: center = base_center + pan; half_extent = base_half / zoom.
+  6. After computing visible bounds, added drag-to-pan handler:
+     * Read `response.drag_delta()` (screen px), convert to UV units using current visible range.
+     * pan[0] -= du (X drag-right → see further-left UV)
+     * pan[1] += dv (Y drag-down → see further-up UV; v is flipped vs screen Y)
+  7. Added scroll-wheel zoom handler:
+     * When `response.hovered()`, read `ui.input(|i| i.smooth_scroll_delta.y)`.
+     * Non-zero → multiply zoom by 1.12 (or 1/1.12) and clamp to 0.25..20.0.
+     * Then `ui.input_mut(|i| i.smooth_scroll_delta = Vec2::ZERO)` to consume the delta so the parent Window's `.scroll([false, true])` doesn't also scroll the window content.
+  8. Added a clipped sub-painter `let painter = ui.painter().with_clip_rect(rect);` and routed all canvas drawing (grid lines, UV triangles, outer/inner boundaries, surface eval points) through `painter.` instead of `ui.painter().` so zoomed-in content stays inside the canvas rect.
+  9. Kept axis labels on the unclipped `ui.painter()` so they remain visible at the canvas edges regardless of zoom.
+- Replaced deprecated `Slider::clamp_to_range(true)` with `Slider::clamping(egui::SliderClamping::Always)` (egui 0.31 API).
+- Native cargo check: ✓ (0 errors, 0 warnings).
+- WASM cargo check (`--no-default-features --features web-deploy --target wasm32-unknown-unknown`): ✓.
+- Committed source changes (commit 2da1954) and pushed to main.
+- Built WASM release (8.4 MB wasm + 144 KB js).
+- Ran wasm-bindgen --target web --no-typescript.
+- Cloned gh-pages orphan branch fresh into /tmp/gh-deploy, swapped in new draper-viewer.js + draper-viewer_bg.wasm (kept existing index.html), committed, pushed (commit 5f2b3e5).
+- Added reusable `scripts/deploy_gh_pages.sh` helper (commit ef9e710) to automate the gh-pages deploy without working-tree contamination.
+
+Stage Summary:
+- UV Breakdown popup window now supports interactive zoom (0.25x..20x) and pan, so users can inspect dense UV triangulations in detail without resizing the window.
+- Three ways to zoom: slider, +/− buttons, scroll wheel (when canvas is hovered).
+- Two ways to pan: left-drag on canvas, or "Reset View" button to restore defaults.
+- Zoom and pan auto-reset when the user switches faces (so the previous face's view doesn't bleed into the new one).
+- Canvas content is clipped to the canvas rect, so zoomed-in triangles never overflow into the controls area.
+- Web demo at https://kerneldev.github.io/3Draper/ is updated with the new zoom/pan controls (commit 5f2b3e5).
