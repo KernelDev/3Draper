@@ -13,7 +13,7 @@ use crate::renderer::{
     update_wireframe_overlay_buffers,
 };
 use draper_core::engine::{EngineConfig, build_engine};
-use draper_topology::{ShapeBuilder, Solid, Edge, Wire};
+use draper_topology::{ShapeBuilder, Solid, Edge, Wire, Face, Shell};
 use draper_mesh::{triangulate_solid, triangulate_face, TriangleMesh, TriangulationParams, check_manifold, ManifoldReport, cut_text_holes_in_mesh, TextSurface};
 use draper_step::{AssemblyNode, DetailedMeshInstance, FaceInfo, PendingBrepInstance, OwnedStepConversionContext, StepFile, step_structure_lazy};
 use draper_geometry::Surface;
@@ -1717,6 +1717,11 @@ impl ViewerApp {
         });
         let solid = ShapeBuilder::make_revolution(profile, std::f64::consts::PI * 2.0);
         let mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
+        // IMPORTANT: assign current_solid BEFORE load_mesh so the UV
+        // breakdown window operates on THIS revolution surface, not the
+        // previously loaded solid. Without this, "View UV" after loading
+        // a revolution would show stale UV data from the prior solid.
+        self.current_solid = Some(solid);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -1737,6 +1742,12 @@ impl ViewerApp {
             80.0,
         );
         let mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
+        // IMPORTANT: assign current_solid BEFORE load_mesh so the UV
+        // breakdown window operates on THIS surface, not the previously
+        // loaded one. Without this assignment, opening "View UV" after
+        // loading an extrusion would show stale UV data from whatever
+        // solid was loaded before (e.g. Box or Cylinder).
+        self.current_solid = Some(solid);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -1767,14 +1778,26 @@ impl ViewerApp {
     /// Samples the boundary at `steps` points per side, then triangulates
     /// via the UV-aware path so the surface curvature is captured with
     /// chord-error-based adaptive refinement.
+    ///
+    /// Returns BOTH the triangle mesh AND a `Solid` containing the NURBS
+    /// surface as a single face. The solid is needed so that the UV
+    /// breakdown window (which reads from `self.current_solid`) shows the
+    /// correct surface — without it, the UV window would display stale
+    /// data from whatever solid was previously loaded. The face is built
+    /// with `Face::new_surface_only` (no outer wire), which causes
+    /// `compute_solid_uv_breakdown` to fall back to the surface's
+    /// `natural_uv_domain()` and render the full UV grid.
     fn build_nurbs_surface_mesh(
         &self,
         nurbs_surface: draper_geometry::NurbsSurface,
         steps: usize,
-    ) -> TriangleMesh {
+    ) -> (TriangleMesh, Solid) {
         use draper_geometry::Point2d;
         let (u_min, u_max) = nurbs_surface.u_range();
         let (v_min, v_max) = nurbs_surface.v_range();
+        // Clone the surface for the Solid we'll return at the end. The
+        // original `nurbs_surface` is consumed by `Surface::Nurbs(...)` below.
+        let surface_for_solid = Surface::Nurbs(nurbs_surface.clone());
         let surface = Surface::Nurbs(nurbs_surface);
         let mut boundary = Vec::new();
         let mut boundary_uvs = Vec::new();
@@ -1804,9 +1827,19 @@ impl ViewerApp {
         }
 
         let params = tri_params_for_lod(self.lod_level);
-        draper_mesh::triangulate_face_with_boundary_and_holes_uv(
+        let mesh = draper_mesh::triangulate_face_with_boundary_and_holes_uv(
             &surface, &boundary, &boundary_uvs, &[], &[], true, &params,
-        )
+        );
+
+        // Build a Solid containing the NURBS surface as a single face.
+        // The face has no outer wire (Face::new_surface_only), so
+        // compute_solid_uv_breakdown will use the surface's natural UV
+        // domain as the visible bounds — perfect for showing the full
+        // UV grid of the NURBS patch.
+        let face = Face::new_surface_only(surface_for_solid);
+        let shell = Shell::new(vec![face]);
+        let solid = Solid::new(shell);
+        (mesh, solid)
     }
 
     /// NURBS Saddle (hyperbolic paraboloid): z = (x² − y²) / 100.
@@ -1841,7 +1874,8 @@ impl ViewerApp {
         let nurbs_surface = NurbsSurface::from_v_rows(
             3, 3, control_points, weights, u_knots, v_knots, false, false,
         );
-        let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        self.current_solid = Some(nurbs_solid);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -1868,7 +1902,8 @@ impl ViewerApp {
         let nurbs_surface = NurbsSurface::from_v_rows(
             3, 3, control_points, weights, u_knots, v_knots, false, false,
         );
-        let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        self.current_solid = Some(nurbs_solid);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -1900,7 +1935,8 @@ impl ViewerApp {
         let nurbs_surface = NurbsSurface::from_v_rows(
             3, 1, control_points, weights, u_knots, v_knots, false, false,
         );
-        let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        self.current_solid = Some(nurbs_solid);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -1935,7 +1971,8 @@ impl ViewerApp {
         let nurbs_surface = NurbsSurface::from_v_rows(
             3, 1, control_points, weights, u_knots, v_knots, false, false,
         );
-        let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        self.current_solid = Some(nurbs_solid);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -1978,7 +2015,8 @@ impl ViewerApp {
             2.0 * std::f64::consts::PI, // angle_end (full revolution)
             false,                      // u_closed (profile is open)
         );
-        let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        self.current_solid = Some(nurbs_solid);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -2009,7 +2047,8 @@ impl ViewerApp {
         let nurbs_surface = NurbsSurface::from_v_rows(
             3, 3, control_points, weights, u_knots, v_knots, false, false,
         );
-        let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        self.current_solid = Some(nurbs_solid);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -2036,7 +2075,8 @@ impl ViewerApp {
         let nurbs_surface = NurbsSurface::from_v_rows(
             1, 1, control_points, weights, u_knots, v_knots, false, false,
         );
-        let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 20);
+        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, 20);
+        self.current_solid = Some(nurbs_solid);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -2103,7 +2143,8 @@ impl ViewerApp {
         let nurbs_surface = NurbsSurface::from_v_rows(
             2, 1, control_points, weights, u_knots, v_knots, false, false,
         );
-        let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        self.current_solid = Some(nurbs_solid);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -2161,7 +2202,8 @@ impl ViewerApp {
         let nurbs_surface = NurbsSurface::from_v_rows(
             2, 2, control_points, weights, u_knots, v_knots, false, false,
         );
-        let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        self.current_solid = Some(nurbs_solid);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -2212,7 +2254,8 @@ impl ViewerApp {
         let nurbs_surface = NurbsSurface::from_v_rows(
             2, 1, control_points, weights, u_knots, v_knots, true, false,
         );
-        let mesh = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        self.current_solid = Some(nurbs_solid);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -6392,15 +6435,59 @@ impl ViewerApp {
                             }
                         }
 
-                        // ─── Zoom via scroll wheel (when canvas is hovered) ───
-                        // Read the raw scroll delta. If non-zero and the cursor
-                        // is over the canvas, multiply zoom and consume the
-                        // delta so the parent window doesn't also scroll.
+                        // ─── Zoom via scroll wheel (zoom-to-cursor) ──────────
+                        // When the user scrolls the wheel over the canvas, we
+                        // zoom around the cursor's UV position rather than
+                        // around the UV box center. This is the standard
+                        // "zoom-to-cursor" behavior: the UV point under the
+                        // cursor stays at the same screen position before
+                        // and after the zoom.
+                        //
+                        // Math derivation:
+                        //   Before: u_mouse = base_center_u + pan_old[0] +
+                        //            (2*tx - 1) * base_half_u / zoom_old
+                        //   After:  u_mouse = base_center_u + pan_new[0] +
+                        //            (2*tx - 1) * base_half_u / zoom_new
+                        //   Solving for pan_new:
+                        //     pan_new[0] = pan_old[0] +
+                        //       (2*tx - 1) * base_half_u * (1/zoom_old - 1/zoom_new)
+                        //   where tx ∈ [0,1] is the cursor's normalized X
+                        //   position within the UV box (0 = left edge,
+                        //   1 = right edge). For the Y axis, ty is flipped
+                        //   because screen Y grows downward while UV V grows
+                        //   upward.
+                        //
+                        // Because the aspect-ratio-preserving screen layout
+                        // (width_f64, height_f64, x_offset_f64, y_offset_f64)
+                        // is INDEPENDENT of zoom (it depends only on the UV
+                        // box's intrinsic aspect ratio, which doesn't change
+                        // with zoom), tx and ty are the same before and after
+                        // the zoom change — so a single computation suffices.
                         if response.hovered() {
                             let scroll_y = ui.input(|i| i.smooth_scroll_delta.y);
                             if scroll_y.abs() > 0.01 {
                                 let factor = if scroll_y > 0.0 { 1.12 } else { 1.0 / 1.12 };
-                                self.uv_window_zoom = (self.uv_window_zoom * factor as f32).clamp(0.25, 20.0);
+                                let old_zoom_f32 = self.uv_window_zoom;
+                                let new_zoom_f32 = (old_zoom_f32 * factor).clamp(0.25, 20.0);
+                                if (new_zoom_f32 - old_zoom_f32).abs() > 1e-9 {
+                                    let old_z = old_zoom_f32 as f64;
+                                    let new_z = new_zoom_f32 as f64;
+                                    // Cursor's normalized position within the
+                                    // UV box. If the cursor is outside the UV
+                                    // box (in the gray margin), tx/ty can be
+                                    // < 0 or > 1 — the math still works, the
+                                    // pivot is just outside the visible area.
+                                    if let Some(hp) = response.hover_pos() {
+                                        let mx = (hp.x as f64) - rect_left - x_offset_f64;
+                                        let my = (hp.y as f64) - rect_top - y_offset_f64;
+                                        let tx = mx / width_f64;
+                                        let ty = 1.0 - my / height_f64;
+                                        let inv_diff = 1.0 / old_z - 1.0 / new_z;
+                                        self.uv_window_pan[0] += (2.0 * tx - 1.0) * base_half_u * inv_diff;
+                                        self.uv_window_pan[1] += (2.0 * ty - 1.0) * base_half_v * inv_diff;
+                                    }
+                                    self.uv_window_zoom = new_zoom_f32;
+                                }
                                 // Consume the scroll so the parent ScrollArea
                                 // does not also scroll the window content.
                                 ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
