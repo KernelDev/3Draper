@@ -617,6 +617,19 @@ pub struct ViewerApp {
     uv_window_u_divs: usize,
     /// V subdivisions for the UV grid display.
     uv_window_v_divs: usize,
+    /// Zoom level for the UV breakdown window canvas.
+    /// 1.0 = auto-fit (whole UV domain visible). Higher = zoomed in.
+    /// Range: 0.1 .. 50.0. User-adjustable via slider, scroll wheel, or
+    /// the "Reset View" button (which restores 1.0).
+    uv_window_zoom: f32,
+    /// Pan offset in UV space for the UV breakdown window canvas.
+    /// [0] = u-pan, [1] = v-pan (in UV units, not screen pixels).
+    /// The center of the visible region is shifted by this offset
+    /// before zoom is applied. Reset to [0.0, 0.0] on face change.
+    uv_window_pan: [f64; 2],
+    /// Last face index shown in the UV window — used to detect face
+    /// switches and reset zoom/pan automatically.
+    uv_window_prev_face_idx: usize,
     /// Cached UV breakdown for the current solid — recomputed whenever the
     /// solid changes or when the user clicks "View UV" / "Save UV SVG".
     /// Keyed by the solid's face count + a generation counter so stale
@@ -1080,6 +1093,9 @@ impl ViewerApp {
             uv_window_face_idx: 0,
             uv_window_u_divs: 10,
             uv_window_v_divs: 10,
+            uv_window_zoom: 1.0,
+            uv_window_pan: [0.0, 0.0],
+            uv_window_prev_face_idx: 0,
             solid_uv_breakdown: None,
             pending_solid_uv_svg_export: false,
         };
@@ -6082,6 +6098,13 @@ impl ViewerApp {
         if !self.show_uv_window {
             return;
         }
+        // Reset zoom/pan when the user switches faces — the new face has a
+        // different UV domain, so the previous pan/zoom would be meaningless.
+        if self.uv_window_prev_face_idx != self.uv_window_face_idx {
+            self.uv_window_zoom = 1.0;
+            self.uv_window_pan = [0.0, 0.0];
+            self.uv_window_prev_face_idx = self.uv_window_face_idx;
+        }
         // Compute breakdown on demand if not cached.
         if self.solid_uv_breakdown.is_none() {
             if let Some(ref solid) = self.current_solid {
@@ -6157,6 +6180,35 @@ impl ViewerApp {
                     ui.add(egui::DragValue::new(&mut self.uv_window_v_divs).range(2..=50));
                 });
 
+                // ─── Zoom / Pan controls ───────────────────────────────────
+                // The canvas is a fixed-size square — to let users inspect
+                // dense UV triangulations in detail, we expose a zoom slider
+                // (with + / − buttons for click-to-zoom) and a "Reset View"
+                // button. Pan is performed by left-dragging the canvas.
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Zoom:").size(11.0));
+                    if ui.button(egui::RichText::new("−").size(13.0)).clicked() {
+                        self.uv_window_zoom = (self.uv_window_zoom / 1.25_f32).max(0.25);
+                    }
+                    ui.add(
+                        egui::Slider::new(&mut self.uv_window_zoom, 0.25..=20.0)
+                            .step_by(0.05)
+                            .clamping(egui::SliderClamping::Always)
+                            .fixed_decimals(2)
+                            .text("x"),
+                    );
+                    if ui.button(egui::RichText::new("+").size(13.0)).clicked() {
+                        self.uv_window_zoom = (self.uv_window_zoom * 1.25_f32).min(20.0);
+                    }
+                    if ui.button("Reset View").clicked() {
+                        self.uv_window_zoom = 1.0;
+                        self.uv_window_pan = [0.0, 0.0];
+                    }
+                });
+                ui.label(egui::RichText::new(
+                    "Tip: drag the canvas to pan, use + / − or the slider to zoom."
+                ).size(10.0).color(egui::Color32::from_rgb(140, 140, 160)));
+
                 ui.horizontal(|ui| {
                     if ui.button("Save UV as SVG...").clicked() {
                         self.pending_solid_uv_svg_export = true;
@@ -6189,30 +6241,36 @@ impl ViewerApp {
                     let available = ui.available_size();
                     let size = available.x.min(available.y - 20.0).min(480.0);
                     if size > 50.0 {
-                        let (rect, _response) = ui.allocate_exact_size(
+                        // Use click_and_drag so the user can pan by left-dragging
+                        // the canvas. Wheel-zoom is handled separately below.
+                        let (rect, response) = ui.allocate_exact_size(
                             egui::vec2(size, size),
-                            egui::Sense::hover(),
+                            egui::Sense::click_and_drag(),
                         );
                         ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgb(26, 26, 46));
 
                         let margin = size * 0.067;
                         let draw_size = size - 2.0 * margin;
 
-                        // Compute UV bounds
-                        let mut u_min = f64::MAX;
-                        let mut u_max = f64::MIN;
-                        let mut v_min = f64::MAX;
-                        let mut v_max = f64::MIN;
+                        // ─── Compute base (auto-fit) UV bounds ────────────────
+                        // The "base" bounds are what we'd show at zoom = 1.0:
+                        // the full UV extent of the face, padded by 5% on each
+                        // side. The visible bounds (u_min..u_max / v_min..v_max)
+                        // are then derived from these by applying pan + zoom.
+                        let mut u_min_base = f64::MAX;
+                        let mut u_max_base = f64::MIN;
+                        let mut v_min_base = f64::MAX;
+                        let mut v_max_base = f64::MIN;
                         for poly in &face_uv.outer_polylines {
                             for &(u, v) in poly {
-                                u_min = u_min.min(u); u_max = u_max.max(u);
-                                v_min = v_min.min(v); v_max = v_max.max(v);
+                                u_min_base = u_min_base.min(u); u_max_base = u_max_base.max(u);
+                                v_min_base = v_min_base.min(v); v_max_base = v_max_base.max(v);
                             }
                         }
                         for poly in &face_uv.inner_polylines {
                             for &(u, v) in poly {
-                                u_min = u_min.min(u); u_max = u_max.max(u);
-                                v_min = v_min.min(v); v_max = v_max.max(v);
+                                u_min_base = u_min_base.min(u); u_max_base = u_max_base.max(u);
+                                v_min_base = v_min_base.min(v); v_max_base = v_max_base.max(v);
                             }
                         }
                         // Also include UV triangle extents in the bounds,
@@ -6221,22 +6279,38 @@ impl ViewerApp {
                         // the boundary polyline's nominal UV range.
                         for tri in &face_uv.uv_triangles {
                             for &(u, v) in tri {
-                                u_min = u_min.min(u); u_max = u_max.max(u);
-                                v_min = v_min.min(v); v_max = v_max.max(v);
+                                u_min_base = u_min_base.min(u); u_max_base = u_max_base.max(u);
+                                v_min_base = v_min_base.min(v); v_max_base = v_max_base.max(v);
                             }
                         }
-                        if u_min >= u_max || v_min >= v_max {
+                        if u_min_base >= u_max_base || v_min_base >= v_max_base {
                             if let Some(s) = surface_ref {
                                 let (u0, u1, v0, v1) = s.natural_uv_domain();
-                                u_min = u0; u_max = u1; v_min = v0; v_max = v1;
+                                u_min_base = u0; u_max_base = u1; v_min_base = v0; v_max_base = v1;
                             } else {
-                                u_min = 0.0; u_max = 1.0; v_min = 0.0; v_max = 1.0;
+                                u_min_base = 0.0; u_max_base = 1.0; v_min_base = 0.0; v_max_base = 1.0;
                             }
                         }
-                        let u_range = (u_max - u_min).max(1e-6);
-                        let v_range = (v_max - v_min).max(1e-6);
-                        u_min -= u_range * 0.05; u_max += u_range * 0.05;
-                        v_min -= v_range * 0.05; v_max += v_range * 0.05;
+                        let u_range_base = (u_max_base - u_min_base).max(1e-6);
+                        let v_range_base = (v_max_base - v_min_base).max(1e-6);
+                        u_min_base -= u_range_base * 0.05; u_max_base += u_range_base * 0.05;
+                        v_min_base -= v_range_base * 0.05; v_max_base += v_range_base * 0.05;
+
+                        // ─── Apply pan + zoom to derive visible bounds ────────
+                        // center = base_center + pan;  half_extent = base_half / zoom
+                        let base_center_u = (u_min_base + u_max_base) * 0.5;
+                        let base_center_v = (v_min_base + v_max_base) * 0.5;
+                        let base_half_u = (u_max_base - u_min_base) * 0.5;
+                        let base_half_v = (v_max_base - v_min_base) * 0.5;
+                        let zoom_f64 = (self.uv_window_zoom as f64).max(0.01);
+                        let center_u = base_center_u + self.uv_window_pan[0];
+                        let center_v = base_center_v + self.uv_window_pan[1];
+                        let half_u = (base_half_u / zoom_f64).max(1e-9);
+                        let half_v = (base_half_v / zoom_f64).max(1e-9);
+                        let u_min = center_u - half_u;
+                        let u_max = center_u + half_u;
+                        let v_min = center_v - half_v;
+                        let v_max = center_v + half_v;
 
                         let margin_f64 = margin as f64;
                         let draw_size_f64 = draw_size as f64;
@@ -6251,13 +6325,51 @@ impl ViewerApp {
                         let map_u = |u: f64| -> f32 { (rect_left + margin_f64 + (u - u_min) / (u_max - u_min) * draw_size_f64) as f32 };
                         let map_v = |v: f64| -> f32 { (rect_top + margin_f64 + (1.0 - (v - v_min) / (v_max - v_min)) * draw_size_f64) as f32 };
 
+                        // ─── Pan via left-drag ────────────────────────────────
+                        // drag_delta() is in screen pixels since last frame.
+                        // Convert to UV units using the CURRENT visible range
+                        // and shift the pan offset accordingly (so the grabbed
+                        // content follows the cursor). Y is flipped because
+                        // screen Y grows downward while UV V grows upward.
+                        if response.dragged_by(egui::PointerButton::Primary) {
+                            let delta = response.drag_delta();
+                            if delta.length_sq() > 0.25 {
+                                let du = delta.x as f64 / draw_size_f64 * (u_max - u_min);
+                                let dv = delta.y as f64 / draw_size_f64 * (v_max - v_min);
+                                self.uv_window_pan[0] -= du;
+                                self.uv_window_pan[1] += dv;
+                            }
+                        }
+
+                        // ─── Zoom via scroll wheel (when canvas is hovered) ───
+                        // Read the raw scroll delta. If non-zero and the cursor
+                        // is over the canvas, multiply zoom and consume the
+                        // delta so the parent window doesn't also scroll.
+                        if response.hovered() {
+                            let scroll_y = ui.input(|i| i.smooth_scroll_delta.y);
+                            if scroll_y.abs() > 0.01 {
+                                let factor = if scroll_y > 0.0 { 1.12 } else { 1.0 / 1.12 };
+                                self.uv_window_zoom = (self.uv_window_zoom * factor as f32).clamp(0.25, 20.0);
+                                // Consume the scroll so the parent ScrollArea
+                                // does not also scroll the window content.
+                                ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+                            }
+                        }
+
+                        // ─── Clipped painter ──────────────────────────────────
+                        // All subsequent draws are clipped to the canvas rect so
+                        // that zoomed-in content (which extends past the visible
+                        // bounds) does not paint over the controls above/below.
+                        let painter = ui.painter().with_clip_rect(rect);
+                        let painter = &painter;
+
                         // Grid lines
                         let u_divs = self.uv_window_u_divs.min(50);
                         let v_divs = self.uv_window_v_divs.min(50);
                         for i in 0..=u_divs {
                             let u = u_min + (u_max - u_min) * i as f64 / u_divs as f64;
                             let x = map_u(u);
-                            ui.painter().line_segment(
+                            painter.line_segment(
                                 [egui::pos2(x, rect.top() + margin), egui::pos2(x, rect.bottom() - margin)],
                                 egui::Stroke::new(0.5, egui::Color32::from_rgb(51, 51, 68)),
                             );
@@ -6265,7 +6377,7 @@ impl ViewerApp {
                         for j in 0..=v_divs {
                             let v = v_min + (v_max - v_min) * j as f64 / v_divs as f64;
                             let y = map_v(v);
-                            ui.painter().line_segment(
+                            painter.line_segment(
                                 [egui::pos2(rect.left() + margin, y), egui::pos2(rect.right() - margin, y)],
                                 egui::Stroke::new(0.5, egui::Color32::from_rgb(51, 51, 68)),
                             );
@@ -6298,7 +6410,7 @@ impl ViewerApp {
 
                                 if in_hole || !in_outer {
                                     // Triangle inside a hole or outside the outer boundary — red outline.
-                                    ui.painter().add(egui::Shape::convex_polygon(
+                                    painter.add(egui::Shape::convex_polygon(
                                         vec![p0, p1, p2],
                                         egui::Color32::from_rgba_premultiplied(255, 34, 34, 30),
                                         egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(255, 68, 68, 200)),
@@ -6316,7 +6428,7 @@ impl ViewerApp {
                                         1.0,
                                         egui::Color32::from_rgba_premultiplied(180, 220, 255, 220),
                                     );
-                                    ui.painter().add(egui::Shape::convex_polygon(vec![p0, p1, p2], fill, edge));
+                                    painter.add(egui::Shape::convex_polygon(vec![p0, p1, p2], fill, edge));
                                 }
                                 if ti >= tri_limit { break; }
                             }
@@ -6328,7 +6440,7 @@ impl ViewerApp {
                             let points: Vec<egui::Pos2> = poly.iter()
                                 .map(|&(u, v)| egui::pos2(map_u(u), map_v(v)))
                                 .collect();
-                            ui.painter().line(points, egui::Stroke::new(1.5, egui::Color32::from_rgb(0, 255, 136)));
+                            painter.line(points, egui::Stroke::new(1.5, egui::Color32::from_rgb(0, 255, 136)));
                         }
                         // Inner boundaries
                         for poly in &face_uv.inner_polylines {
@@ -6336,7 +6448,7 @@ impl ViewerApp {
                             let points: Vec<egui::Pos2> = poly.iter()
                                 .map(|&(u, v)| egui::pos2(map_u(u), map_v(v)))
                                 .collect();
-                            ui.painter().line(points, egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 68, 68)));
+                            painter.line(points, egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 68, 68)));
                         }
 
                         // Surface evaluation points (inside outer boundary)
@@ -6349,7 +6461,7 @@ impl ViewerApp {
                                     if p.x.is_finite() && p.y.is_finite() && p.z.is_finite() {
                                         let inside = !outer_uv_poly.is_empty() && point_in_polygon(u, v, &outer_uv_poly);
                                         if inside {
-                                            ui.painter().circle_filled(
+                                            painter.circle_filled(
                                                 egui::pos2(map_u(u), map_v(v)), 2.0,
                                                 egui::Color32::from_rgba_premultiplied(102, 136, 255, 180),
                                             );
@@ -6359,7 +6471,9 @@ impl ViewerApp {
                             }
                         }
 
-                        // Axis labels
+                        // Axis labels — drawn on the unclipped parent painter so
+                        // they are always visible at the canvas edges even when
+                        // the user has zoomed in past the boundary.
                         ui.painter().text(
                             egui::pos2(rect.center().x, rect.bottom() - 5.0),
                             egui::Align2::CENTER_BOTTOM,
