@@ -660,6 +660,20 @@ struct FaceUvBreakdown {
     /// three (u, v) points. Used to draw the UV mesh in the popup window.
     /// Empty if the face failed to triangulate.
     uv_triangles: Vec<[(f64, f64); 3]>,
+    /// Whether the surface is periodic in U (cone, cylinder, sphere, torus,
+    /// revolution, or NURBS with u_closed). When true, the U=u_min edge of
+    /// the UV domain is the same physical line as U=u_max — the "seam".
+    u_periodic: bool,
+    /// Whether the surface is periodic in V (sphere, torus, or NURBS with
+    /// v_closed). When true, the V=v_min edge is the same as V=v_max.
+    v_periodic: bool,
+    /// U period (only meaningful when u_periodic). Typically 2π.
+    /// Used to compute the seam location and to unwrap seam-crossing
+    /// triangles. Zero when not u_periodic.
+    u_period: f64,
+    /// V period (only meaningful when v_periodic). π for sphere, 2π for
+    /// torus. Zero when not v_periodic.
+    v_period: f64,
 }
 
 /// UV breakdown for an entire solid — collects all faces' UV data.
@@ -6251,6 +6265,8 @@ impl ViewerApp {
 
                         let margin = size * 0.067;
                         let draw_size = size - 2.0 * margin;
+                        let size_f64 = size as f64;
+                        let draw_size_f64 = draw_size as f64;
 
                         // ─── Compute base (auto-fit) UV bounds ────────────────
                         // The "base" bounds are what we'd show at zoom = 1.0:
@@ -6298,6 +6314,12 @@ impl ViewerApp {
 
                         // ─── Apply pan + zoom to derive visible bounds ────────
                         // center = base_center + pan;  half_extent = base_half / zoom
+                        // Zoom pivots around the center of the REAL UV box
+                        // (base_center_u, base_center_v), not the canvas center.
+                        // Because we preserve aspect ratio (see below), the UV
+                        // box is displayed with its real shape and the zoom
+                        // faithfully enlarges the geometry around its own
+                        // center — not around an arbitrary square-canvas point.
                         let base_center_u = (u_min_base + u_max_base) * 0.5;
                         let base_center_v = (v_min_base + v_max_base) * 0.5;
                         let base_half_u = (u_max_base - u_min_base) * 0.5;
@@ -6312,8 +6334,27 @@ impl ViewerApp {
                         let v_min = center_v - half_v;
                         let v_max = center_v + half_v;
 
-                        let margin_f64 = margin as f64;
-                        let draw_size_f64 = draw_size as f64;
+                        // ─── Aspect-ratio-preserving screen mapping ──────────
+                        // The UV box has its own aspect ratio (u_range / v_range).
+                        // Previously we stretched it to fill the square canvas,
+                        // which distorted the geometry (e.g. a 2π×1 cone UV
+                        // became a square). Now we fit the UV box into the
+                        // square draw_size area while preserving aspect ratio,
+                        // centering it inside the canvas. This means zooming
+                        // truly pivots around the center of the real UV box.
+                        let u_range_vis = (u_max - u_min).max(1e-12);
+                        let v_range_vis = (v_max - v_min).max(1e-12);
+                        let ar_uv = u_range_vis / v_range_vis;
+                        let (width_f64, height_f64) = if ar_uv >= 1.0 {
+                            // Wider than tall — fit width to draw_size.
+                            (draw_size_f64, draw_size_f64 / ar_uv)
+                        } else {
+                            // Taller than wide — fit height to draw_size.
+                            (draw_size_f64 * ar_uv, draw_size_f64)
+                        };
+                        let x_offset_f64 = (size_f64 - width_f64) * 0.5;
+                        let y_offset_f64 = (size_f64 - height_f64) * 0.5;
+
                         let rect_left = rect.left() as f64;
                         let rect_top = rect.top() as f64;
                         // IMPORTANT: map_u/map_v must return SCREEN coords that are
@@ -6322,20 +6363,30 @@ impl ViewerApp {
                         // the painted content would be stuck at screen position
                         // (margin, margin) regardless of where the user dragged
                         // the window.
-                        let map_u = |u: f64| -> f32 { (rect_left + margin_f64 + (u - u_min) / (u_max - u_min) * draw_size_f64) as f32 };
-                        let map_v = |v: f64| -> f32 { (rect_top + margin_f64 + (1.0 - (v - v_min) / (v_max - v_min)) * draw_size_f64) as f32 };
+                        let map_u = |u: f64| -> f32 {
+                            (rect_left + x_offset_f64 + (u - u_min) / u_range_vis * width_f64) as f32
+                        };
+                        let map_v = |v: f64| -> f32 {
+                            (rect_top + y_offset_f64 + (1.0 - (v - v_min) / v_range_vis) * height_f64) as f32
+                        };
+                        // Screen coordinates of the UV box corners (for grid
+                        // line endpoints and seam line endpoints).
+                        let box_left_x = rect_left + x_offset_f64;
+                        let box_right_x = rect_left + x_offset_f64 + width_f64;
+                        let box_top_y = rect_top + y_offset_f64;
+                        let box_bottom_y = rect_top + y_offset_f64 + height_f64;
 
                         // ─── Pan via left-drag ────────────────────────────────
                         // drag_delta() is in screen pixels since last frame.
                         // Convert to UV units using the CURRENT visible range
-                        // and shift the pan offset accordingly (so the grabbed
-                        // content follows the cursor). Y is flipped because
-                        // screen Y grows downward while UV V grows upward.
+                        // and the aspect-ratio-correct screen dimensions.
+                        // Y is flipped because screen Y grows downward while
+                        // UV V grows upward.
                         if response.dragged_by(egui::PointerButton::Primary) {
                             let delta = response.drag_delta();
                             if delta.length_sq() > 0.25 {
-                                let du = delta.x as f64 / draw_size_f64 * (u_max - u_min);
-                                let dv = delta.y as f64 / draw_size_f64 * (v_max - v_min);
+                                let du = delta.x as f64 / width_f64 * u_range_vis;
+                                let dv = delta.y as f64 / height_f64 * v_range_vis;
                                 self.uv_window_pan[0] -= du;
                                 self.uv_window_pan[1] += dv;
                             }
@@ -6363,14 +6414,29 @@ impl ViewerApp {
                         let painter = ui.painter().with_clip_rect(rect);
                         let painter = &painter;
 
-                        // Grid lines
+                        // ─── UV box background ────────────────────────────────
+                        // Subtle border around the actual UV box (the area
+                        // inside the canvas where UV content is drawn), so the
+                        // user can see the real aspect ratio of the UV domain.
+                        painter.rect_stroke(
+                            egui::Rect::from_min_max(
+                                egui::pos2(box_left_x as f32, box_top_y as f32),
+                                egui::pos2(box_right_x as f32, box_bottom_y as f32),
+                            ),
+                            0.0,
+                            egui::Stroke::new(0.5, egui::Color32::from_rgb(60, 60, 90)),
+                            egui::StrokeKind::Middle,
+                        );
+
+                        // Grid lines — span the UV box (not the full canvas),
+                        // so they respect the aspect-ratio-preserving layout.
                         let u_divs = self.uv_window_u_divs.min(50);
                         let v_divs = self.uv_window_v_divs.min(50);
                         for i in 0..=u_divs {
                             let u = u_min + (u_max - u_min) * i as f64 / u_divs as f64;
                             let x = map_u(u);
                             painter.line_segment(
-                                [egui::pos2(x, rect.top() + margin), egui::pos2(x, rect.bottom() - margin)],
+                                [egui::pos2(x, box_top_y as f32), egui::pos2(x, box_bottom_y as f32)],
                                 egui::Stroke::new(0.5, egui::Color32::from_rgb(51, 51, 68)),
                             );
                         }
@@ -6378,7 +6444,7 @@ impl ViewerApp {
                             let v = v_min + (v_max - v_min) * j as f64 / v_divs as f64;
                             let y = map_v(v);
                             painter.line_segment(
-                                [egui::pos2(rect.left() + margin, y), egui::pos2(rect.right() - margin, y)],
+                                [egui::pos2(box_left_x as f32, y), egui::pos2(box_right_x as f32, y)],
                                 egui::Stroke::new(0.5, egui::Color32::from_rgb(51, 51, 68)),
                             );
                         }
@@ -6449,6 +6515,55 @@ impl ViewerApp {
                                 .map(|&(u, v)| egui::pos2(map_u(u), map_v(v)))
                                 .collect();
                             painter.line(points, egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 68, 68)));
+                        }
+
+                        // ─── Seam lines (for periodic surfaces) ───────────────
+                        // For U-periodic surfaces (cone, cylinder, sphere,
+                        // torus, revolution), the U=u_min edge of the natural
+                        // UV domain is the same physical line as U=u_max — the
+                        // "seam" where the surface wraps around. We draw it as
+                        // a bright yellow line so the user can see where the
+                        // surface closes on itself.
+                        //
+                        // For V-periodic surfaces (sphere, torus), the same
+                        // applies in the V direction.
+                        //
+                        // We use the surface's natural_uv_domain() to find the
+                        // seam location (typically u=0 and u=2π). The seam is
+                        // only drawn if it falls within the visible UV range.
+                        let seam_stroke = egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 200, 0));
+                        if face_uv.u_periodic && face_uv.u_period > 0.0 {
+                            if let Some(s) = surface_ref {
+                                let (nat_u0, nat_u1, _nat_v0, _nat_v1) = s.natural_uv_domain();
+                                // The seam is at u = nat_u0 (equivalently nat_u1).
+                                // Draw a vertical line at this U value, spanning
+                                // the full visible V range of the UV box.
+                                for &seam_u in &[nat_u0, nat_u1] {
+                                    if seam_u.is_finite() && seam_u >= u_min && seam_u <= u_max {
+                                        let x = map_u(seam_u);
+                                        painter.line_segment(
+                                            [egui::pos2(x, box_top_y as f32),
+                                             egui::pos2(x, box_bottom_y as f32)],
+                                            seam_stroke,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        if face_uv.v_periodic && face_uv.v_period > 0.0 {
+                            if let Some(s) = surface_ref {
+                                let (_nat_u0, _nat_u1, nat_v0, nat_v1) = s.natural_uv_domain();
+                                for &seam_v in &[nat_v0, nat_v1] {
+                                    if seam_v.is_finite() && seam_v >= v_min && seam_v <= v_max {
+                                        let y = map_v(seam_v);
+                                        painter.line_segment(
+                                            [egui::pos2(box_left_x as f32, y),
+                                             egui::pos2(box_right_x as f32, y)],
+                                            seam_stroke,
+                                        );
+                                    }
+                                }
+                            }
                         }
 
                         // Surface evaluation points (inside outer boundary)
@@ -7964,6 +8079,10 @@ fn compute_solid_uv_breakdown(solid: &Solid, model_name: &str) -> SolidUvBreakdo
             outer_polylines,
             inner_polylines,
             uv_triangles,
+            u_periodic,
+            v_periodic,
+            u_period,
+            v_period,
         });
     }
     breakdown
@@ -7991,8 +8110,8 @@ fn generate_solid_face_uv_svg(
     let svg_width = 600.0_f64;
     let svg_height = 600.0_f64;
     let margin = 40.0_f64;
-    let draw_w = svg_width - 2.0 * margin;
-    let draw_h = svg_height - 2.0 * margin;
+    let draw_w_max = svg_width - 2.0 * margin;
+    let draw_h_max = svg_height - 2.0 * margin;
 
     // Compute UV bounds from outer + inner polylines.
     let mut u_min = f64::MAX;
@@ -8034,8 +8153,29 @@ fn generate_solid_face_uv_svg(
     u_min -= u_range * 0.05; u_max += u_range * 0.05;
     v_min -= v_range * 0.05; v_max += v_range * 0.05;
 
-    let map_u = |u: f64| -> f64 { margin + (u - u_min) / (u_max - u_min) * draw_w };
-    let map_v = |v: f64| -> f64 { margin + (1.0 - (v - v_min) / (v_max - v_min)) * draw_h };
+    // ─── Aspect-ratio-preserving layout ──────────────────────────────
+    // Fit the UV box into the square draw area while preserving its real
+    // aspect ratio. This matches the interactive viewer's behavior: a
+    // 2π×1 cone UV is rendered as a wide rectangle, not a square.
+    let u_range_vis = (u_max - u_min).max(1e-12);
+    let v_range_vis = (v_max - v_min).max(1e-12);
+    let ar_uv = u_range_vis / v_range_vis;
+    let (draw_w, draw_h) = if ar_uv >= 1.0 {
+        (draw_w_max, draw_w_max / ar_uv)
+    } else {
+        (draw_h_max * ar_uv, draw_h_max)
+    };
+    let x_offset = (svg_width - draw_w) * 0.5;
+    let y_offset = (svg_height - draw_h) * 0.5;
+
+    let map_u = |u: f64| -> f64 { x_offset + (u - u_min) / u_range_vis * draw_w };
+    let map_v = |v: f64| -> f64 { y_offset + (1.0 - (v - v_min) / v_range_vis) * draw_h };
+
+    // Screen coordinates of the UV box corners.
+    let box_left_x = x_offset;
+    let box_right_x = x_offset + draw_w;
+    let box_top_y = y_offset;
+    let box_bottom_y = y_offset + draw_h;
 
     let mut svg = String::new();
     svg.push_str(&format!(
@@ -8048,13 +8188,19 @@ fn generate_solid_face_uv_svg(
         svg_width as i32, svg_height as i32
     ));
 
-    // Grid lines
+    // UV box border (subtle, to show the real aspect ratio).
+    svg.push_str(&format!(
+        "  <rect x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{:.2}\" fill=\"none\" stroke=\"#3c3c5a\" stroke-width=\"0.5\"/>\n",
+        box_left_x, box_top_y, draw_w, draw_h
+    ));
+
+    // Grid lines — span the UV box (not the full draw area).
     for i in 0..=u_divs {
         let u = u_min + (u_max - u_min) * i as f64 / u_divs as f64;
         let x = map_u(u);
         svg.push_str(&format!(
             "  <line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"#334\" stroke-width=\"0.5\"/>\n",
-            x, margin, x, margin + draw_h
+            x, box_top_y, x, box_bottom_y
         ));
     }
     for j in 0..=v_divs {
@@ -8062,8 +8208,42 @@ fn generate_solid_face_uv_svg(
         let y = map_v(v);
         svg.push_str(&format!(
             "  <line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"#334\" stroke-width=\"0.5\"/>\n",
-            margin, y, margin + draw_w, y
+            box_left_x, y, box_right_x, y
         ));
+    }
+
+    // ─── Seam lines (for periodic surfaces) ──────────────────────────
+    // Draw the seam as a bright yellow line so the user can see where
+    // the surface wraps around. For U-periodic surfaces, the seam is at
+    // u = natural_u_min (equivalently natural_u_max). For V-periodic
+    // surfaces, the seam is at v = natural_v_min (equivalently v_max).
+    if face_uv.u_periodic && face_uv.u_period > 0.0 {
+        if let Some(s) = surface {
+            let (nat_u0, nat_u1, _nv0, _nv1) = s.natural_uv_domain();
+            for &seam_u in &[nat_u0, nat_u1] {
+                if seam_u.is_finite() && seam_u >= u_min && seam_u <= u_max {
+                    let x = map_u(seam_u);
+                    svg.push_str(&format!(
+                        "  <line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"#ffc800\" stroke-width=\"2.0\"/>\n",
+                        x, box_top_y, x, box_bottom_y
+                    ));
+                }
+            }
+        }
+    }
+    if face_uv.v_periodic && face_uv.v_period > 0.0 {
+        if let Some(s) = surface {
+            let (_nu0, _nu1, nat_v0, nat_v1) = s.natural_uv_domain();
+            for &seam_v in &[nat_v0, nat_v1] {
+                if seam_v.is_finite() && seam_v >= v_min && seam_v <= v_max {
+                    let y = map_v(seam_v);
+                    svg.push_str(&format!(
+                        "  <line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"#ffc800\" stroke-width=\"2.0\"/>\n",
+                        box_left_x, y, box_right_x, y
+                    ));
+                }
+            }
+        }
     }
 
     // Outer boundary (green)
@@ -8155,16 +8335,23 @@ fn generate_solid_face_uv_svg(
     // Labels
     svg.push_str(&format!(
         "  <text x=\"{}\" y=\"{}\" fill=\"#aaa\" font-size=\"12\" text-anchor=\"middle\">U ({:.2} .. {:.2})</text>\n",
-        margin + draw_w / 2.0, svg_height - 5.0, u_min, u_max
+        box_left_x + draw_w / 2.0, svg_height - 5.0, u_min, u_max
     ));
     svg.push_str(&format!(
         "  <text x=\"10\" y=\"{}\" fill=\"#aaa\" font-size=\"12\" text-anchor=\"middle\" transform=\"rotate(-90, 10, {})\">V ({:.2} .. {:.2})</text>\n",
-        margin + draw_h / 2.0, margin + draw_h / 2.0, v_min, v_max
+        box_top_y + draw_h / 2.0, box_top_y + draw_h / 2.0, v_min, v_max
     ));
     svg.push_str(&format!(
         "  <text x=\"{}\" y=\"20\" fill=\"#fff\" font-size=\"13\" text-anchor=\"middle\">Face #{} {} forward={} [{}]</text>\n",
         svg_width / 2.0, face_uv.face_idx, face_uv.surface_type, face_uv.forward, model_name
     ));
+    // Seam legend (only if any seam was drawn)
+    if (face_uv.u_periodic || face_uv.v_periodic) && (face_uv.u_period > 0.0 || face_uv.v_period > 0.0) {
+        svg.push_str(&format!(
+            "  <text x=\"{}\" y=\"{}\" fill=\"#ffc800\" font-size=\"11\" text-anchor=\"end\">━━ seam (periodic wrap)</text>\n",
+            svg_width - 10.0, svg_height - 5.0
+        ));
+    }
 
     svg.push_str("</svg>\n");
     svg
