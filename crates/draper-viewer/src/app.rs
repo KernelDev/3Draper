@@ -8159,6 +8159,43 @@ fn compute_solid_uv_breakdown(solid: &Solid, model_name: &str) -> SolidUvBreakdo
             }
         }
 
+        // ─── Fallback: synthetic UV grid triangles ─────────────────────
+        // When `triangulate_face` returns no triangles — which happens for
+        // NURBS surfaces loaded via the gallery (the face is constructed
+        // with `Face::new_surface_only`, i.e. no outer wire, so the
+        // triangulator has no boundary to triangulate) — generate UV
+        // triangles by sampling the surface's natural UV domain on a
+        // regular grid. This ensures the UV breakdown window ALWAYS shows
+        // triangles, even for wire-less NURBS faces.
+        //
+        // The grid resolution (20×20 cells → 800 triangles) is dense
+        // enough to show the UV domain structure clearly, but not so
+        // dense that it clutters the view. Each grid cell produces 2
+        // triangles (a/b split along the diagonal).
+        if uv_triangles.is_empty() {
+            let (u0, u1, v0, v1) = surface.natural_uv_domain();
+            if u0.is_finite() && u1.is_finite() && v0.is_finite() && v1.is_finite()
+                && u1 > u0 && v1 > v0
+            {
+                const GRID_N: usize = 20;
+                let du = (u1 - u0) / GRID_N as f64;
+                let dv = (v1 - v0) / GRID_N as f64;
+                uv_triangles.reserve(GRID_N * GRID_N * 2);
+                for j in 0..GRID_N {
+                    for i in 0..GRID_N {
+                        let ua = u0 + i as f64 * du;
+                        let ub = ua + du;
+                        let va = v0 + j as f64 * dv;
+                        let vb = va + dv;
+                        // Two triangles per cell (a/b split along the
+                        // diagonal from (ua,va) to (ub,vb)).
+                        uv_triangles.push([(ua, va), (ub, va), (ub, vb)]);
+                        uv_triangles.push([(ua, va), (ub, vb), (ua, vb)]);
+                    }
+                }
+            }
+        }
+
         breakdown.faces.push(FaceUvBreakdown {
             face_idx: fidx,
             surface_type,
