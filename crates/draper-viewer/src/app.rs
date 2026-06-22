@@ -14,7 +14,7 @@ use crate::renderer::{
 };
 use draper_core::engine::{EngineConfig, build_engine};
 use draper_topology::{ShapeBuilder, Solid, Edge, Wire};
-use draper_mesh::{triangulate_solid, TriangleMesh, TriangulationParams, check_manifold, ManifoldReport, cut_text_holes_in_mesh, TextSurface};
+use draper_mesh::{triangulate_solid, triangulate_face, TriangleMesh, TriangulationParams, check_manifold, ManifoldReport, cut_text_holes_in_mesh, TextSurface};
 use draper_step::{AssemblyNode, DetailedMeshInstance, FaceInfo, PendingBrepInstance, OwnedStepConversionContext, StepFile, step_structure_lazy};
 use draper_geometry::Surface;
 use draper_geometry::Point3d;
@@ -643,6 +643,10 @@ struct FaceUvBreakdown {
     outer_polylines: Vec<Vec<(f64, f64)>>,
     /// Inner boundaries (holes) as a list of UV polylines.
     inner_polylines: Vec<Vec<(f64, f64)>>,
+    /// Actual UV triangles of the face tessellation, each triangle being
+    /// three (u, v) points. Used to draw the UV mesh in the popup window.
+    /// Empty if the face failed to triangulate.
+    uv_triangles: Vec<[(f64, f64); 3]>,
 }
 
 /// UV breakdown for an entire solid — collects all faces' UV data.
@@ -4831,8 +4835,15 @@ impl eframe::App for ViewerApp {
 
                                             let margin_f64 = margin as f64;
                                             let draw_size_f64 = draw_size as f64;
-                                            let map_u = |u: f64| -> f32 { (margin_f64 + (u - u_min) / (u_max - u_min) * draw_size_f64) as f32 };
-                                            let map_v = |v: f64| -> f32 { (margin_f64 + (1.0 - (v - v_min) / (v_max - v_min)) * draw_size_f64) as f32 };
+                                            let rect_left = rect.left() as f64;
+                                            let rect_top = rect.top() as f64;
+                                            // map_u/map_v must return SCREEN coords that are relative to
+                                            // the rect (the allocated painter area). Without the
+                                            // rect.left()/rect.top() offset, the painted content would
+                                            // stay at screen position (margin, margin) regardless of
+                                            // where the parent panel is.
+                                            let map_u = |u: f64| -> f32 { (rect_left + margin_f64 + (u - u_min) / (u_max - u_min) * draw_size_f64) as f32 };
+                                            let map_v = |v: f64| -> f32 { (rect_top + margin_f64 + (1.0 - (v - v_min) / (v_max - v_min)) * draw_size_f64) as f32 };
 
                                             // Draw grid lines
                                             let u_divs = uv_grid_u.min(50);
@@ -6229,8 +6240,16 @@ impl ViewerApp {
 
                         let margin_f64 = margin as f64;
                         let draw_size_f64 = draw_size as f64;
-                        let map_u = |u: f64| -> f32 { (margin_f64 + (u - u_min) / (u_max - u_min) * draw_size_f64) as f32 };
-                        let map_v = |v: f64| -> f32 { (margin_f64 + (1.0 - (v - v_min) / (v_max - v_min)) * draw_size_f64) as f32 };
+                        let rect_left = rect.left() as f64;
+                        let rect_top = rect.top() as f64;
+                        // IMPORTANT: map_u/map_v must return SCREEN coords that are
+                        // relative to the rect (the allocated area inside the
+                        // egui::Window). Without the rect.left()/rect.top() offset
+                        // the painted content would be stuck at screen position
+                        // (margin, margin) regardless of where the user dragged
+                        // the window.
+                        let map_u = |u: f64| -> f32 { (rect_left + margin_f64 + (u - u_min) / (u_max - u_min) * draw_size_f64) as f32 };
+                        let map_v = |v: f64| -> f32 { (rect_top + margin_f64 + (1.0 - (v - v_min) / (v_max - v_min)) * draw_size_f64) as f32 };
 
                         // Grid lines
                         let u_divs = self.uv_window_u_divs.min(50);
@@ -6252,6 +6271,52 @@ impl ViewerApp {
                             );
                         }
 
+                        // ─── UV triangles (the actual surface triangulation) ───────
+                        // Draw filled triangles so the user can see the actual UV
+                        // subdivision of the face, not just the boundary.
+                        let outer_uv_poly: Vec<(f64, f64)> = face_uv.outer_polylines.iter()
+                            .flat_map(|p| p.iter().copied())
+                            .collect();
+                        let hole_polys: Vec<Vec<(f64, f64)>> = face_uv.inner_polylines.iter()
+                            .cloned()
+                            .collect();
+                        if !face_uv.uv_triangles.is_empty() {
+                            let tri_limit = 3000.min(face_uv.uv_triangles.len());
+                            for (ti, tri) in face_uv.uv_triangles.iter().enumerate() {
+                                let cu = (tri[0].0 + tri[1].0 + tri[2].0) / 3.0;
+                                let cv = (tri[0].1 + tri[1].1 + tri[2].1) / 3.0;
+                                let in_hole = hole_polys.iter().any(|h| point_in_polygon(cu, cv, h));
+                                let in_outer = !outer_uv_poly.is_empty() && point_in_polygon(cu, cv, &outer_uv_poly);
+
+                                let p0 = egui::pos2(map_u(tri[0].0), map_v(tri[0].1));
+                                let p1 = egui::pos2(map_u(tri[1].0), map_v(tri[1].1));
+                                let p2 = egui::pos2(map_u(tri[2].0), map_v(tri[2].1));
+
+                                if in_hole || !in_outer {
+                                    // Triangle inside a hole or outside the outer boundary — outline only.
+                                    ui.painter().add(egui::Shape::convex_polygon(
+                                        vec![p0, p1, p2],
+                                        egui::Color32::from_rgba_premultiplied(255, 34, 34, 30),
+                                        egui::Stroke::new(0.4, egui::Color32::from_rgba_premultiplied(255, 68, 68, 100)),
+                                    ));
+                                } else {
+                                    // Valid triangle — alternating blue tints + thin outline.
+                                    let fill = if ti % 2 == 0 {
+                                        egui::Color32::from_rgba_premultiplied(68, 136, 255, 24)
+                                    } else {
+                                        egui::Color32::from_rgba_premultiplied(85, 170, 255, 24)
+                                    };
+                                    let stroke = if ti % 2 == 0 {
+                                        egui::Stroke::new(0.4, egui::Color32::from_rgba_premultiplied(68, 136, 255, 140))
+                                    } else {
+                                        egui::Stroke::new(0.4, egui::Color32::from_rgba_premultiplied(85, 170, 255, 140))
+                                    };
+                                    ui.painter().add(egui::Shape::convex_polygon(vec![p0, p1, p2], fill, stroke));
+                                }
+                                if ti >= tri_limit { break; }
+                            }
+                        }
+
                         // Outer boundary
                         for poly in &face_uv.outer_polylines {
                             if poly.len() < 2 { continue; }
@@ -6270,9 +6335,6 @@ impl ViewerApp {
                         }
 
                         // Surface evaluation points (inside outer boundary)
-                        let outer_uv_poly: Vec<(f64, f64)> = face_uv.outer_polylines.iter()
-                            .flat_map(|p| p.iter().copied())
-                            .collect();
                         if let Some(s) = surface_ref {
                             for i in 0..=u_divs {
                                 for j in 0..=v_divs {
@@ -7166,8 +7228,13 @@ impl ViewerApp {
 
                                                 let mf = margin_f as f64;
                                                 let ds = draw_size as f64;
-                                                let map_u = |u: f64| -> f32 { (mf + (u - u_min) / (u_max - u_min) * ds) as f32 };
-                                                let map_v = |v: f64| -> f32 { (mf + (1.0 - (v - v_min) / (v_max - v_min)) * ds) as f32 };
+                                                let rect_left = rect.left() as f64;
+                                                let rect_top = rect.top() as f64;
+                                                // map_u/map_v must return SCREEN coords relative to the
+                                                // rect — otherwise the painted content sticks at screen
+                                                // position (mf, mf) when the parent window is moved.
+                                                let map_u = |u: f64| -> f32 { (rect_left + mf + (u - u_min) / (u_max - u_min) * ds) as f32 };
+                                                let map_v = |v: f64| -> f32 { (rect_top + mf + (1.0 - (v - v_min) / (v_max - v_min)) * ds) as f32 };
 
                                                 // Grid lines
                                                 for i in 0..=uv_grid_u.min(50) {
@@ -7544,12 +7611,49 @@ fn compute_solid_uv_breakdown(solid: &Solid, model_name: &str) -> SolidUvBreakdo
                 inner_polylines.push(uv);
             }
         }
+
+        // ─── Compute UV triangles for the face ─────────────────────────────
+        // We triangulate the face using the same triangulator the renderer
+        // uses, then project every triangle vertex back into UV space via
+        // Surface::project_point. This gives us the actual UV tessellation
+        // that the user wants to see and save.
+        let mut uv_triangles: Vec<[(f64, f64); 3]> = Vec::new();
+        let tri_params = TriangulationParams::default();
+        let tri_mesh = triangulate_face(face, &tri_params);
+        if !tri_mesh.triangles.is_empty() {
+            uv_triangles.reserve(tri_mesh.triangles.len());
+            for tri in &tri_mesh.triangles {
+                let i0 = tri[0] as usize;
+                let i1 = tri[1] as usize;
+                let i2 = tri[2] as usize;
+                if i0 >= tri_mesh.vertices.len()
+                    || i1 >= tri_mesh.vertices.len()
+                    || i2 >= tri_mesh.vertices.len()
+                {
+                    continue;
+                }
+                let v0 = &tri_mesh.vertices[i0];
+                let v1 = &tri_mesh.vertices[i1];
+                let v2 = &tri_mesh.vertices[i2];
+                let (u0, vv0) = surface.project_point(v0);
+                let (u1, vv1) = surface.project_point(v1);
+                let (u2, vv2) = surface.project_point(v2);
+                if u0.is_finite() && vv0.is_finite()
+                    && u1.is_finite() && vv1.is_finite()
+                    && u2.is_finite() && vv2.is_finite()
+                {
+                    uv_triangles.push([(u0, vv0), (u1, vv1), (u2, vv2)]);
+                }
+            }
+        }
+
         breakdown.faces.push(FaceUvBreakdown {
             face_idx: fidx,
             surface_type,
             forward: face.forward,
             outer_polylines,
             inner_polylines,
+            uv_triangles,
         });
     }
     breakdown
@@ -7683,6 +7787,38 @@ fn generate_solid_face_uv_svg(
     let outer_uv_poly: Vec<(f64, f64)> = face_uv.outer_polylines.iter()
         .flat_map(|p| p.iter().copied())
         .collect();
+
+    // ─── UV triangles ────────────────────────────────────────────────
+    // Render the actual UV tessellation so saved SVGs match what the
+    // interactive viewer shows. Triangles inside holes or outside the
+    // outer boundary are drawn in red; valid triangles use a blue tint.
+    let hole_polys: &[Vec<(f64, f64)>] = &face_uv.inner_polylines;
+    if !face_uv.uv_triangles.is_empty() {
+        let tri_limit = 5000.min(face_uv.uv_triangles.len());
+        svg.push_str("  <g opacity=\"0.55\">\n");
+        for (ti, tri) in face_uv.uv_triangles.iter().enumerate() {
+            let cu = (tri[0].0 + tri[1].0 + tri[2].0) / 3.0;
+            let cv = (tri[0].1 + tri[1].1 + tri[2].1) / 3.0;
+            let in_hole = hole_polys.iter().any(|h| point_in_polygon(cu, cv, h));
+            let in_outer = !outer_uv_poly.is_empty() && point_in_polygon(cu, cv, &outer_uv_poly);
+            let (fill, stroke) = if in_hole || !in_outer {
+                ("#ff2222", "#ff4444")
+            } else if ti % 2 == 0 {
+                ("#4488ff", "#4488ff")
+            } else {
+                ("#55aaff", "#55aaff")
+            };
+            svg.push_str(&format!(
+                "    <polygon points=\"{:.2},{:.2} {:.2},{:.2} {:.2},{:.2}\" fill=\"{}\" fill-opacity=\"0.18\" stroke=\"{}\" stroke-width=\"0.4\" stroke-opacity=\"0.7\"/>\n",
+                map_u(tri[0].0), map_v(tri[0].1),
+                map_u(tri[1].0), map_v(tri[1].1),
+                map_u(tri[2].0), map_v(tri[2].1),
+                fill, stroke
+            ));
+            if ti >= tri_limit { break; }
+        }
+        svg.push_str("  </g>\n");
+    }
 
     // Surface evaluation points (only those inside the outer boundary)
     if let Some(s) = surface {
