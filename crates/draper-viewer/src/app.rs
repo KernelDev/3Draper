@@ -3803,26 +3803,26 @@ impl ViewerApp {
         // LAZY: Create the conversion context on the first frame.
         if self.conversion_ctx.is_none() {
             if let Some(step_file) = self.pending_step_file.take() {
+                let lod_label = self.lod_level.label();
+                let lod_value = self.lod_level.lod_value();
                 self.log(&format!(
                     "Building conversion context (entity maps, bounding box) — LOD={} ({:.2})...",
-                    self.lod_level.label(),
-                    self.lod_level.lod_value()
+                    lod_label, lod_value
                 ));
                 // Pass the user-selected LOD so the Quality dropdown actually
                 // affects STEP triangulation. Without this, the context would
                 // use TriangulationParams::default() (LOD 1.0) regardless of
                 // the dropdown, and switching High→Low would have no effect.
-                let lod_value = self.lod_level.lod_value();
                 let ctx_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     OwnedStepConversionContext::new_with_lod(step_file, lod_value)
                 }));
                 match ctx_result {
                     Ok(ctx) => {
                         self.conversion_ctx = Some(ctx);
-                        #[cfg(not(target_arch = "wasm32"))]
-                        self.log("Conversion context ready — starting triangulation (parallel mode)...");
-                        #[cfg(target_arch = "wasm32")]
-                        self.log("Conversion context ready — starting triangulation...");
+                        self.log(&format!(
+                            "Conversion context ready (quality={}) — starting triangulation...",
+                            lod_label
+                        ));
                     }
                     Err(_) => {
                         self.log_error("Panic during conversion context creation — STEP loading aborted");

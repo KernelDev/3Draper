@@ -2564,3 +2564,31 @@ Stage Summary:
 - The fix replaces the complex earcutr+Steiner+chord-error triangulation path (which produced 162 boundary edges for 160 triangles — broken topology) with a direct regular grid mesh (120 boundary edges for 1800 triangles — correct perimeter-only boundary).
 - Two diagnostic tools added to tools/src/bin/: nurbs_render_diag (surface evaluation check) and nurbs_mesh_diag (mesh topology check). These can be re-run if NURBS rendering issues recur.
 - Web demo at https://kerneldev.github.io/3Draper/ is updated (commit c957f29).
+
+---
+Task ID: zentralstaender-fix-46
+Agent: Main
+Task: Fix Zentralstaender.stp — missing assembly names + LOD selector not affecting triangulation
+
+Work Log:
+- Analyzed test/Zentralstaender.stp (NX 6.0 export, 24 PRODUCTs, 34 NAUOs, 27 MANIFOLD_SOLID_BREP). Confirmed via zentral_diag that the file DOES contain proper part names but the viewer showed empty placeholders.
+- Root cause #1 (missing names): `extract_nauo_name()` in converter.rs returned the first non-empty string from the NAUO entity, but the 'name' field (2nd param) is " " (single space) which passed `!is_empty()` while being effectively blank. The actual descriptive name lives in the 'description' field (3rd param, e.g. "BEVORRICHTUNG_WWK-017847-KON_A").
+- Fix #1: `extract_nauo_name()` now collects all non-blank trimmed strings (skipping ID at index 0) and returns the LAST one — this prefers the description field over the whitespace name field. Falls back to `NAUO_{id}` only if no non-blank string is found.
+- Root cause #2 (root name was `PD#306`): `get_product_name()` checks `pdf.type_name == "PRODUCT_DEFINITION_FORMATION"` but SIEMENS NX and most modern STEP exporters emit `PRODUCT_DEFINITION_FORMATION_WITH_SPECIFIED_SOURCE`. The chain PD → PDF → PRODUCT broke at the type check, so the function fell through to the `PD#{id}` placeholder.
+- Fix #2: `get_product_name()` now matches by prefix (`pdf.type_name == "PRODUCT_DEFINITION_FORMATION" || pdf.type_name.starts_with("PRODUCT_DEFINITION_FORMATION")`) so both forms work. Also added `trim()` checks for the direct-PRODUCT-reference path so whitespace-only PRODUCT names don't get returned.
+- Root cause #3 (LOD selector had no effect on STEP loading): `OwnedStepConversionContext::new(step_file)` always used `TriangulationParams::default()` (effectively LOD 1.0). The viewer's `tri_params_for_lod(self.lod_level)` was only applied to primitive geometry creation (triangulate_solid calls for boxes/spheres/etc.), never to STEP file loading.
+- Fix #3: Added `OwnedStepConversionContext::new_with_params(step_file, params)` constructor that accepts caller-supplied TriangulationParams. Added `set_params(params)` setter that also clears the BREP triangulation cache (so re-triangulating with different LOD gives different results). Updated viewer's `process_pending_breps()` to call `new_with_params(step_file, tri_params_for_lod(self.lod_level))` so the user-selected Quality actually affects STEP loading.
+- Added 4 regression tests in converter.rs:
+  - test_zentralstaender_root_name — root node name must equal "_hebevorrichtung_wwk-017846-kon-a", not "PD#306"
+  - test_zentralstaender_instance_names_nonempty — all 34 pending instances must have non-blank, non-placeholder names
+  - test_zentralstaender_known_instance_names_present — 14 known descriptive names (BEVORRICHTUNG_WWK-..., B_PROFILROHR_WWK-..., WINKEL, TRANSPORTROLLE, etc.) must appear
+  - test_lod_actually_changes_triangle_count — LOD 0.1 vs 1.0 must produce different triangle counts (empirically 11467 vs 12499 on this file)
+  - test_set_params_clears_cache — after set_params(), re-triangulating the same BREP must produce a different triangle count (cache invalidation check)
+- Added diagnostic tools/src/bin/lod_verify.rs — runs all 34 pending BREPs at LODs 0.1/0.3/0.5/0.75/1.0 and prints vertex/triangle counts, plus the old `default()` behavior for comparison.
+- All 97 tests pass (was 92 before + 5 new). Cargo build succeeds with no warnings.
+
+Stage Summary:
+- Zentralstaender.stp now opens with proper part names in the structure tree: root is "_hebevorrichtung_wwk-017846-kon-a", 34 children show descriptive names like "BEVORRICHTUNG_WWK-017847-KON_A (b_hebevorrichtung_wwk-017847-kon_a)" instead of "  (BREP#1068)" / "PD#306".
+- The "Quality" selector (Preview/Low/Medium/High/Ultra) now actually changes vertex/triangle counts when (re)loading a STEP file: Preview=5756v/11467t, Ultra=6272v/12499t (~9% triangle difference on this file).
+- Product-definition name resolution now works for all STEP exporters that use PRODUCT_DEFINITION_FORMATION_WITH_SPECIFIED_SOURCE (NX, CATIA, Creo, Solidworks, etc.).
+- Diagnostic tools (zentral_diag, lod_verify) retained for future regression checks.

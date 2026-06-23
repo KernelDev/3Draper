@@ -708,6 +708,27 @@ impl OwnedStepConversionContext {
     /// is still applied on top of the LOD-scaled deviation, so very small
     /// models don't get absurdly tight tolerances at high LOD.
     pub fn new_with_lod(step_file: StepFile, lod: f64) -> Self {
+        // Start from LOD-scaled params (NOT default()) so the Quality
+        // dropdown actually changes triangle count. for_lod(lod) scales
+        // max_deviation, angular_samples, height_samples, max_face_triangles,
+        // and detail_level proportionally to `lod`.
+        Self::new_with_params(step_file, TriangulationParams::for_lod(lod.clamp(0.0, 1.0)))
+    }
+
+    /// Create a new owning conversion context with explicit triangulation params.
+    ///
+    /// This is the most flexible entry point — it accepts a fully-constructed
+    /// `TriangulationParams` rather than just an LOD value, so callers that
+    /// need fine-grained control (e.g., custom max_deviation for high-precision
+    /// manufacturing exports) can use it directly. The viewer's LOD path
+    /// typically goes through `new_with_lod` instead, which builds params from
+    /// an LOD value via `TriangulationParams::for_lod(lod)`.
+    ///
+    /// The bounding-box-aware `max_deviation` adjustment is applied on top of
+    /// whatever `params` the caller supplies, so it is safe to pass LOD-scaled
+    /// params here — they will only be made more conservative (never coarser)
+    /// if the model's diagonal is large enough to warrant it.
+    pub fn new_with_params(step_file: StepFile, mut params: TriangulationParams) -> Self {
         // Enable healing with default preset — it fixes gaps, holes,
         // flipped normals, degenerate edges, and small features.
         // The aggressive preset (fix_self_intersections) can be enabled
@@ -728,15 +749,10 @@ impl OwnedStepConversionContext {
             converter.compute_bounding_box()
         };
 
-        // Start from LOD-scaled params (NOT default()) so the Quality
-        // dropdown actually changes triangle count. for_lod(lod) scales
-        // max_deviation, angular_samples, height_samples, max_face_triangles,
-        // and detail_level proportionally to `lod`.
-        let mut params = TriangulationParams::for_lod(lod.clamp(0.0, 1.0));
-        // Apply the same bbox-based max_deviation floor that `new()` does —
-        // without it, very small models would get an absurdly tight tolerance
-        // at high LOD (max_deviation = 0.01 / 1.0² = 0.01, but the model
-        // diagonal might be 0.5mm, so 0.01 is 2% of the model — way too tight).
+        // Apply the bbox-based max_deviation floor — without it, very small
+        // models would get an absurdly tight tolerance at high LOD
+        // (max_deviation = 0.01 / 1.0² = 0.01, but the model diagonal might
+        // be 0.5mm, so 0.01 is 2% of the model — way too tight).
         if let Some((bmin, bmax)) = &bbox {
             let dx = bmax.x - bmin.x;
             let dy = bmax.y - bmin.y;
@@ -758,6 +774,36 @@ impl OwnedStepConversionContext {
         // (no WASM-specific cap — quality should match native)
 
         Self { step_file, bbox, params, pd_brep_map, nauo_transform_map, entity_map, config, bbox_computed: false, brep_detail_cache: HashMap::new() }
+    }
+
+    /// Replace the triangulation parameters used by subsequent `triangulate_pending()` calls.
+    ///
+    /// **Important:** this also clears the BREP triangulation cache, because
+    /// any previously-cached meshes were generated with the old params and must
+    /// not be reused at a different LOD.
+    ///
+    /// This is used by the viewer when the user changes the LOD selector after
+    /// a STEP file has been loaded — re-triangulating with the new params gives
+    /// visibly different vertex/triangle counts.
+    pub fn set_params(&mut self, params: TriangulationParams) {
+        // Apply the same bounding-box-aware max_deviation floor used in new_with_params().
+        let mut params = params;
+        if let Some((bmin, bmax)) = &self.bbox {
+            let dx = bmax.x - bmin.x;
+            let dy = bmax.y - bmin.y;
+            let dz = bmax.z - bmin.z;
+            let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
+            if diagonal > 1.0 {
+                params.max_deviation = params.max_deviation.max(diagonal * 0.0002);
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            params.parallel = true;
+        }
+        self.params = params;
+        // Invalidate any cached meshes — they were triangulated at the old LOD.
+        self.brep_detail_cache.clear();
     }
 
     /// Triangulate a single pending BREP instance.
@@ -3846,14 +3892,29 @@ impl<'a> StepConverter<'a> {
     /// Extract the NAUO instance name (e.g., "nut_1", "bolt_2").
     fn extract_nauo_name(&self, nauo: &crate::schema::StepEntity) -> String {
         // NEXT_ASSEMBLY_USAGE_OCCURRENCE('id','name','description',#relating,#related,$)
-        // The name is typically the 2nd parameter
+        //
+        // Many real-world STEP exporters (e.g., SIEMENS NX) leave the 'name'
+        // field (2nd param) as a single space ' ' and put the actual part
+        // identifier in the 'description' field (3rd param). Naively returning
+        // the first non-empty string returns the whitespace, which produces
+        // blank-looking node names like "  (BREP#1068)" in the structure tree.
+        //
+        // Strategy: collect every non-blank trimmed string (skipping the ID at
+        // index 0) and prefer the LAST one. The description field is the last
+        // string-typed parameter before the ref list, so it wins ties. If no
+        // non-blank string is present, fall back to a synthetic name.
+        let mut candidates: Vec<String> = Vec::new();
         for (i, param) in nauo.params.iter().enumerate() {
             if i == 0 { continue; } // Skip ID
             if let StepValue::String(s) = param {
-                if !s.is_empty() {
-                    return s.clone();
+                let trimmed = s.trim();
+                if !trimmed.is_empty() {
+                    candidates.push(trimmed.to_string());
                 }
             }
+        }
+        if let Some(name) = candidates.last() {
+            return name.clone();
         }
         format!("NAUO_{}", nauo.id)
     }
@@ -3873,28 +3934,46 @@ impl<'a> StepConverter<'a> {
         for param in &pd.params {
             if let Some(ref_id) = self.get_ref(param) {
                 if let Some(pdf) = self.step.find_entity(ref_id) {
-                    // Direct PRODUCT reference
+                    // Direct PRODUCT reference (some exporters skip the PDF layer).
                     if pdf.type_name == "PRODUCT" {
                         for p in &pdf.params {
                             if let StepValue::String(s) = p {
-                                if !s.is_empty() {
-                                    return s.clone();
+                                let t = s.trim();
+                                if !t.is_empty() {
+                                    return t.to_string();
                                 }
                             }
                         }
                     }
-                    // Follow PD → PDF → PRODUCT chain
-                    if pdf.type_name == "PRODUCT_DEFINITION_FORMATION" {
+                    // Follow PD → PDF → PRODUCT chain.
+                    // STEP defines both `PRODUCT_DEFINITION_FORMATION` and
+                    // `PRODUCT_DEFINITION_FORMATION_WITH_SPECIFIED_SOURCE`
+                    // (the latter is what SIEMENS NX and most modern exporters
+                    // emit). Match by prefix so both forms work, plus any
+                    // future `..._WITH_*` variants the standard may add.
+                    if pdf.type_name == "PRODUCT_DEFINITION_FORMATION"
+                        || pdf.type_name.starts_with("PRODUCT_DEFINITION_FORMATION")
+                    {
                         for p in &pdf.params {
                             if let Some(product_id) = self.get_ref(p) {
                                 if let Some(product) = self.step.find_entity(product_id) {
                                     if product.type_name == "PRODUCT" {
+                                        // The PRODUCT entity has the form
+                                        //   PRODUCT('id', 'name', 'description', ...)
+                                        // Prefer the first non-blank trimmed string,
+                                        // which is typically the part identifier.
+                                        let mut picked: Option<String> = None;
                                         for pp in &product.params {
                                             if let StepValue::String(s) = pp {
-                                                if !s.is_empty() {
-                                                    return s.clone();
+                                                let t = s.trim();
+                                                if !t.is_empty() {
+                                                    picked = Some(t.to_string());
+                                                    break;
                                                 }
                                             }
+                                        }
+                                        if let Some(name) = picked {
+                                            return name;
                                         }
                                     }
                                 }
@@ -12217,6 +12296,207 @@ mod step_parser_extension_tests {
         }
         for i in 1..knots.len() {
             assert!(knots[i] >= knots[i-1] - 1e-10, "Knots should be non-decreasing");
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Regression tests for the three Zentralstaender.stp bugs:
+    //   1. NAUO name extraction returned whitespace " " instead of the
+    //      descriptive name in the 3rd parameter (description field).
+    //   2. get_product_name() failed to follow PD → PDF → PRODUCT chain
+    //      when the PDF entity was PRODUCT_DEFINITION_FORMATION_WITH_SPECIFIED_SOURCE
+    //      (only the shorter PRODUCT_DEFINITION_FORMATION was recognized).
+    //   3. OwnedStepConversionContext::new() always used TriangulationParams::default(),
+    //      ignoring the user-selected LOD — so the "Quality" selector in the
+    //      viewer had no visible effect on vertex/triangle counts.
+    // ─────────────────────────────────────────────────────────────────────
+
+    fn load_zentralstaender() -> StepFile {
+        let path = "/home/z/my-project/test/Zentralstaender.stp";
+        let content = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("read {}: {}", path, e));
+        parse_step(&content).expect("parse step file")
+    }
+
+    /// Root assembly name should be the PRODUCT name (`_hebevorrichtung_wwk-017846-kon-a`),
+    /// not the placeholder `PD#306`.
+    #[test]
+    fn test_zentralstaender_root_name() {
+        let step = load_zentralstaender();
+        let (tree, _pending) = step_structure_lazy(&step);
+        assert_eq!(
+            tree.name, "_hebevorrichtung_wwk-017846-kon-a",
+            "Root node name should be the PRODUCT name, not PD#{{id}}"
+        );
+    }
+
+    /// Every pending instance should have a non-blank name (the descriptive
+    /// NAUO description field, not the whitespace-only name field).
+    #[test]
+    fn test_zentralstaender_instance_names_nonempty() {
+        let step = load_zentralstaender();
+        let (_tree, pending) = step_structure_lazy(&step);
+        assert!(pending.len() >= 30, "expected ~34 instances, got {}", pending.len());
+        for (i, p) in pending.iter().enumerate() {
+            let trimmed = p.name.trim();
+            assert!(
+                !trimmed.is_empty() && !trimmed.starts_with("BREP#") && !trimmed.starts_with("NAUO#"),
+                "instance[{}] name is blank/placeholder: {:?}",
+                i, p.name
+            );
+        }
+    }
+
+    /// Specific instance names that should appear in the tree (sampled from
+    /// the file's NAUO description fields).
+    #[test]
+    fn test_zentralstaender_known_instance_names_present() {
+        let step = load_zentralstaender();
+        let (_tree, pending) = step_structure_lazy(&step);
+        let names: Vec<String> = pending.iter().map(|p| p.name.clone()).collect();
+        let joined = names.join("\n");
+        // These are descriptive part names from the STEP file's NAUO entries.
+        for expected in [
+            "BEVORRICHTUNG_WWK-017847-KON_A",
+            "B_PROFILROHR_WWK-017849-KON-A",
+            "B_EINHAENGUNG_WWK-017851-KON-A",
+            "B_LASCHE_WWK-017852-KON-A",
+            "B_HEBEL_WWK-017854-KON-A",
+            "CHWEISSPLATTE_WWK-017855-KON-A",
+            "DAPPTERPLATTE_WWK-017856-KON-A",
+            "B_WELLE_WWK-017857-KON-A",
+            "ENTRIERSTUECK_WWK-017858-KON-A",
+            "TEIFUNGSBLECH_WWK-017860-KON-A",
+            "DISTANZBUCHSE_WWK-017864-KON-A",
+            "SPEZIALMUTTER_WWK-017873-KON-A",
+            "TRANSPORTROLLE",
+            "WINKEL",
+        ] {
+            assert!(
+                joined.contains(expected),
+                "expected instance name {:?} not found in pending list",
+                expected
+            );
+        }
+    }
+
+    /// LOD should actually affect triangulation: lower LOD → fewer triangles.
+    /// This is a regression test for the bug where `OwnedStepConversionContext::new()`
+    /// ignored the LOD selector and always used `TriangulationParams::default()`.
+    #[test]
+    fn test_lod_actually_changes_triangle_count() {
+        let step = load_zentralstaender();
+        let (_tree, pending) = step_structure_lazy(&step);
+        assert!(pending.len() >= 30);
+
+        let coarse = TriangulationParams::for_lod(0.1);
+        let fine = TriangulationParams::for_lod(1.0);
+        // Sanity: the two param sets must actually differ, otherwise the
+        // test would silently pass even if the bug regressed.
+        assert!(
+            fine.max_deviation < coarse.max_deviation,
+            "fine LOD should have smaller max_deviation (fine={}, coarse={})",
+            fine.max_deviation, coarse.max_deviation
+        );
+
+        let count_tris = |params: TriangulationParams| -> usize {
+            let mut ctx = OwnedStepConversionContext::new_with_params(step.clone(), params);
+            let mut total = 0usize;
+            for p in &pending {
+                if let Some(inst) = ctx.triangulate_pending(p) {
+                    total += inst.mesh.triangle_count();
+                }
+            }
+            total
+        };
+
+        let coarse_tris = count_tris(coarse);
+        let fine_tris = count_tris(fine);
+
+        assert!(
+            fine_tris > coarse_tris,
+            "fine LOD should produce MORE triangles than coarse (fine={}, coarse={}) \
+             — if this fails, LOD is being ignored again",
+            fine_tris, coarse_tris
+        );
+        // Empirically the difference is ~1000 triangles on this file
+        // (11467 coarse vs 12499 fine). Allow a wide margin so the test is
+        // robust to small algorithmic changes.
+        let diff = fine_tris.saturating_sub(coarse_tris);
+        assert!(
+            diff >= 500,
+            "expected at least 500 triangle difference between coarse and fine LOD, got {}",
+            diff
+        );
+    }
+
+    /// `set_params()` should clear the BREP cache so re-triangulating with
+    /// different params gives different results. We scan the pending list for
+    /// a BREP whose triangle count actually differs between LODs (some BREPs
+    /// in this file are simple boxes that produce identical counts at any LOD).
+    #[test]
+    fn test_set_params_clears_cache() {
+        let step = load_zentralstaender();
+        let (_tree, pending) = step_structure_lazy(&step);
+
+        // Find a BREP that is non-trivial enough to show LOD-dependent counts.
+        // We use a unique set of brep_ids because the cache is keyed by brep_id
+        // and a repeated instance wouldn't exercise the re-triangulation path.
+        let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        let mut target: Option<&PendingBrepInstance> = None;
+        for p in &pending {
+            if seen.insert(p.brep_id) {
+                target = Some(p);
+                // Use the first unique BREP — they all have ≥32 tris, but
+                // we verify below that the count actually differs.
+                break;
+            }
+        }
+        let target = target.expect("at least one pending instance");
+
+        let mut ctx = OwnedStepConversionContext::new_with_params(
+            step.clone(),
+            TriangulationParams::for_lod(1.0),
+        );
+        let fine_mesh = ctx.triangulate_pending(target).expect("triangulate at fine LOD");
+        let fine_tris = fine_mesh.mesh.triangle_count();
+
+        // Switch to coarse LOD and triangulate the same BREP again.
+        ctx.set_params(TriangulationParams::for_lod(0.1));
+        let coarse_mesh = ctx.triangulate_pending(target).expect("triangulate at coarse LOD");
+        let coarse_tris = coarse_mesh.mesh.triangle_count();
+
+        // The total triangle difference on this file is ~1000 across 27 unique
+        // BREPs, so on average each BREP differs by ~37 tris. Some individual
+        // BREPs (especially cylinders/cones) differ much more. If the picked
+        // BREP happens to be one of the few that doesn't differ (pure planar
+        // box), iterate to find one that does.
+        if fine_tris == coarse_tris {
+            // Find any unique BREP whose count actually differs.
+            let mut found_diff = false;
+            for p in &pending {
+                if !seen.insert(p.brep_id) {
+                    continue;
+                }
+                let mut ctx2 = OwnedStepConversionContext::new_with_params(
+                    step.clone(),
+                    TriangulationParams::for_lod(1.0),
+                );
+                let f = ctx2.triangulate_pending(p).expect("triangulate").mesh.triangle_count();
+                ctx2.set_params(TriangulationParams::for_lod(0.1));
+                let c = ctx2.triangulate_pending(p).expect("triangulate").mesh.triangle_count();
+                if f != c {
+                    found_diff = true;
+                    break;
+                }
+            }
+            assert!(
+                found_diff,
+                "set_params() did not invalidate the cache OR no BREP in Zentralstaender.stp \
+                 shows LOD-dependent triangle counts (highly unlikely — the aggregate difference \
+                 is ~1000 tris). fine={} coarse={} on BREP#{}",
+                fine_tris, coarse_tris, target.brep_id
+            );
         }
     }
 }
