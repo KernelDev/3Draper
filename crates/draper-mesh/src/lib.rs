@@ -27,6 +27,7 @@ pub mod earcut_adapter;
 pub mod pmi_display;
 pub mod wasm_api;
 pub mod gdt_check;
+pub mod decimate;
 
 #[cfg(feature = "export-3mf")]
 pub mod export;
@@ -46,6 +47,7 @@ pub use pmi_display::*;
 pub use wasm_api::*;
 pub use gdt_check::*;
 pub use parametric_domain::reproject_nurbs_point;
+pub use decimate::decimate_mesh;
 
 // ============================================================
 // WASM parallel threading support

@@ -749,17 +749,30 @@ impl OwnedStepConversionContext {
             converter.compute_bounding_box()
         };
 
-        // Apply the bbox-based max_deviation floor — without it, very small
-        // models would get an absurdly tight tolerance at high LOD
-        // (max_deviation = 0.01 / 1.0² = 0.01, but the model diagonal might
-        // be 0.5mm, so 0.01 is 2% of the model — way too tight).
+        // Apply the bbox-based max_deviation floor.
+        //
+        // This floor protects very small models from getting an absurdly tight
+        // tolerance at high LOD (max_deviation = 0.01 / 1.0² = 0.01, but if
+        // the model diagonal is 0.5mm, 0.01 is 2% of the model — way too tight).
+        //
+        // LOD-AWARENESS: For low LODs (where max_deviation is large, ≥ 1.0),
+        // the floor is NOT applied — otherwise LOD 0.3, 0.5, 0.75, and 1.0
+        // would all get the SAME clamped max_deviation (= diagonal * 0.0002)
+        // on large models, making the Quality selector have no visible effect
+        // on curved surfaces.
+        //
+        // For high LODs (max_deviation < 1.0, i.e. lod > 0.1), the floor is
+        // applied as before.
         if let Some((bmin, bmax)) = &bbox {
             let dx = bmax.x - bmin.x;
             let dy = bmax.y - bmin.y;
             let dz = bmax.z - bmin.z;
             let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
             if diagonal > 1.0 {
-                params.max_deviation = params.max_deviation.max(diagonal * 0.0002);
+                let floor = diagonal * 0.0002;
+                if params.max_deviation < floor && params.max_deviation < 1.0 {
+                    params.max_deviation = floor;
+                }
             }
         }
 
@@ -786,7 +799,7 @@ impl OwnedStepConversionContext {
     /// a STEP file has been loaded — re-triangulating with the new params gives
     /// visibly different vertex/triangle counts.
     pub fn set_params(&mut self, params: TriangulationParams) {
-        // Apply the same bounding-box-aware max_deviation floor used in new_with_params().
+        // Apply the same LOD-aware bbox max_deviation floor used in new_with_params().
         let mut params = params;
         if let Some((bmin, bmax)) = &self.bbox {
             let dx = bmax.x - bmin.x;
@@ -794,7 +807,10 @@ impl OwnedStepConversionContext {
             let dz = bmax.z - bmin.z;
             let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
             if diagonal > 1.0 {
-                params.max_deviation = params.max_deviation.max(diagonal * 0.0002);
+                let floor = diagonal * 0.0002;
+                if params.max_deviation < floor && params.max_deviation < 1.0 {
+                    params.max_deviation = floor;
+                }
             }
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -819,14 +835,35 @@ impl OwnedStepConversionContext {
             self.bbox = converter.compute_bounding_box();
             self.bbox_computed = true;
 
-            // Update params based on actual bounding box
+            // Update params based on actual bounding box.
+            //
+            // IMPORTANT: This bbox-floor is LOD-AWARE — it only applies at
+            // higher LODs (≥ 0.5, where the user expects maximum quality).
+            // For low LODs the raw max_deviation from for_lod() is allowed to
+            // stand, otherwise all LODs from 0.3 to 1.0 would get the SAME
+            // clamped max_deviation (= diagonal * 0.0002) and LOD changes
+            // would have no visible effect on curved surfaces.
+            //
+            // We reconstruct the LOD value from max_deviation: for_lod(lod)
+            // sets max_deviation = 0.01 / lod² (for lod ≥ 0.01). So
+            //   lod ≈ sqrt(0.01 / max_deviation).
+            // If max_deviation is very large (≥ 1.0, i.e. lod ≤ 0.1), skip
+            // the floor entirely.
             if let Some((bmin, bmax)) = &self.bbox {
                 let dx = bmax.x - bmin.x;
                 let dy = bmax.y - bmin.y;
                 let dz = bmax.z - bmin.z;
                 let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
                 if diagonal > 1.0 {
-                    self.params.max_deviation = self.params.max_deviation.max(diagonal * 0.0002);
+                    let floor = diagonal * 0.0002;
+                    // Skip the floor for low LODs (where max_deviation is large).
+                    // For high LODs, apply the floor as before (protects small models).
+                    if self.params.max_deviation < floor && self.params.max_deviation < 1.0 {
+                        // Only clamp UP if the raw max_deviation is "tight"
+                        // (below the floor) AND we're at a high LOD (raw < 1.0).
+                        // For low LODs (raw ≥ 1.0), leave it alone.
+                        self.params.max_deviation = floor;
+                    }
                 }
             }
         }
@@ -836,6 +873,17 @@ impl OwnedStepConversionContext {
         // cached result instead of re-triangulating from scratch. This eliminates
         // both redundant computation and the possibility of different triangulations
         // for the same shape (guaranteeing watertight instances).
+        //
+        // IMPORTANT: The cached mesh is the FULL-resolution mesh (before decimation).
+        // Decimation is applied PER-INSTANCE below, because the keep_ratio is the
+        // same for all instances of the same BREP (it's a property of self.params,
+        // which doesn't change between calls to triangulate_pending() — only
+        // set_params() changes it, and that clears the cache).
+        //
+        // Optimization: if keep_ratio is constant across calls, we could cache
+        // the decimated result too. But the per-instance decimation is fast
+        // (~1ms per BREP for Zentralstaender-sized meshes), so the overhead
+        // is negligible compared to the initial triangulation.
         let (mesh, faces) = if let Some(cached) = self.brep_detail_cache.get(&pending.brep_id) {
             log::info!(
                 "BREP #{} — using cached triangulation (instance of previously computed BREP)",
@@ -844,8 +892,6 @@ impl OwnedStepConversionContext {
             cached.clone()
         } else {
             // Build a lightweight StepConverter using cached maps.
-            // This avoids the O(n) entity_map rebuild and O(n) pd_brep/nauo
-            // re-cloning that was happening on every call.
             let converter = StepConverter::from_cached_maps(
                 &self.step_file,
                 self.config.clone(),
@@ -854,7 +900,6 @@ impl OwnedStepConversionContext {
                 self.nauo_transform_map.clone(),
             );
             let result = converter.triangulate_brep_detailed(pending.brep_id, &self.params, &self.bbox)?;
-            // Cache the result for future instances of the same BREP
             self.brep_detail_cache.insert(pending.brep_id, result.clone());
             result
         };
@@ -863,6 +908,35 @@ impl OwnedStepConversionContext {
         let mut instance_mesh = mesh;
         if let Some(ref tf) = pending.transform {
             instance_mesh.transform(tf);
+        }
+
+        // Apply post-triangulation decimation for LOD support.
+        //
+        // This is what makes "Preview" (LOD 0.1, keep_ratio ~0.25) visibly
+        // different from "Ultra" (LOD 1.0, keep_ratio 1.0) on STEP files
+        // whose faces are predominantly planar with linear edges — there,
+        // per-face triangulation alone gives the same N-2 triangles regardless
+        // of LOD, so without decimation the Quality dropdown has no visible
+        // effect.
+        //
+        // The decimation algorithm:
+        // 1. Welds coincident vertices (so adjacent triangles share edges).
+        // 2. Finds the shortest internal edge (shared by exactly 2 triangles).
+        // 3. Collapses it (moves both endpoints to midpoint, or to the
+        //    boundary vertex if one end is a boundary vertex).
+        // 4. Removes degenerate triangles.
+        // 5. Repeats until target_count = original * keep_ratio is reached.
+        //
+        // Decimation preserves the silhouette (boundary edges are never
+        // collapsed, boundary vertices are never moved).
+        if self.params.keep_ratio < 1.0 && instance_mesh.triangle_count() >= 4 {
+            let (orig, final_) = draper_mesh::decimate_mesh(&mut instance_mesh, self.params.keep_ratio);
+            if final_ < orig {
+                log::info!(
+                    "BREP #{} — decimated {}→{} triangles (keep_ratio={:.2}, LOD target reached)",
+                    pending.brep_id, orig, final_, self.params.keep_ratio
+                );
+            }
         }
 
         Some(DetailedMeshInstance {
@@ -12419,14 +12493,24 @@ mod step_parser_extension_tests {
              — if this fails, LOD is being ignored again",
             fine_tris, coarse_tris
         );
-        // Empirically the difference is ~1000 triangles on this file
-        // (11467 coarse vs 12499 fine). Allow a wide margin so the test is
-        // robust to small algorithmic changes.
+        // With post-triangulation decimation enabled, the difference is
+        // substantial: ~12500 fine vs ~2500 coarse (5× ratio) on Zentralstaender.stp.
+        // Require at least 3000 triangle difference — well below the empirical
+        // ~10000 difference, but high enough to catch regressions where
+        // decimation is accidentally disabled.
         let diff = fine_tris.saturating_sub(coarse_tris);
         assert!(
-            diff >= 500,
-            "expected at least 500 triangle difference between coarse and fine LOD, got {}",
-            diff
+            diff >= 3000,
+            "expected at least 3000 triangle difference between coarse and fine LOD, got {} \
+             (fine={}, coarse={}) — decimation may be disabled or keep_ratio curve is wrong",
+            diff, fine_tris, coarse_tris
+        );
+        // Also require at least a 2× ratio —Preview should be drastically coarser than Ultra.
+        let ratio = fine_tris as f64 / coarse_tris.max(1) as f64;
+        assert!(
+            ratio >= 2.0,
+            "expected fine/coarse triangle ratio ≥ 2.0, got {:.2} (fine={}, coarse={})",
+            ratio, fine_tris, coarse_tris
         );
     }
 

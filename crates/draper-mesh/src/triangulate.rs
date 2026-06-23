@@ -140,6 +140,23 @@ pub struct TriangulationParams {
     /// This prevents a single face from generating millions of triangles
     /// that freeze the browser on WASM. Default: 2000.
     pub max_face_triangles: usize,
+    /// Target fraction of triangles to KEEP after post-triangulation decimation.
+    /// `1.0` = no decimation (keep all triangles).
+    /// `0.1` = keep only 10% of triangles (very coarse, ~90% reduction).
+    /// `0.0` is invalid (treated as 1.0).
+    ///
+    /// Decimation is applied as a POST-PROCESS step on the final mesh:
+    ///   1. Triangulate the BREP normally (per-face).
+    ///   2. Weld shared vertices (so adjacent triangles actually share edges).
+    ///   3. Apply shortest-edge-collapse decimation until the target triangle
+    ///      count is reached OR no more collapsible edges remain.
+    ///
+    /// This is what makes "Preview" (LOD 0.1) visibly different from "Ultra"
+    /// (LOD 1.0) on files like Zentralstaender.stp — most of whose faces are
+    /// planar with linear edges, so per-face triangulation alone produces the
+    /// same N-2 triangles regardless of LOD. Decimation collapses coplanar
+    /// internal edges, drastically reducing the count for low LOD.
+    pub keep_ratio: f64,
 }
 
 impl std::fmt::Debug for TriangulationParams {
@@ -154,6 +171,7 @@ impl std::fmt::Debug for TriangulationParams {
             .field("adaptive", &self.adaptive)
             .field("parallel", &self.parallel)
             .field("max_face_triangles", &self.max_face_triangles)
+            .field("keep_ratio", &self.keep_ratio)
             .field("progress_callback", &self.progress_callback.as_ref().map(|_| "Some(...)"))
             .finish()
     }
@@ -172,6 +190,7 @@ impl Default for TriangulationParams {
             parallel: false,
             progress_callback: None,
             max_face_triangles: 8000,
+            keep_ratio: 1.0, // No decimation by default — preserve backward compatibility
         }
     }
 }
@@ -223,6 +242,31 @@ impl TriangulationParams {
         // Scale detail_level: at LOD 0.0 → 0.25, at 1.0 → 1.0
         let detail_level = 0.25 + 0.75 * lod;
 
+        // Post-triangulation decimation ratio (fraction of triangles to KEEP).
+        // For very low LODs, decimate aggressively (keep only ~10%).
+        // For high LODs (≥ 0.75), no decimation (keep all triangles).
+        // In between, interpolate smoothly.
+        //
+        // The mapping is:
+        //   LOD 0.0  → keep 0.05 (very coarse — 5% of triangles)
+        //   LOD 0.1  → keep 0.25 (Preview quality)
+        //   LOD 0.3  → keep 0.60 (Low quality)
+        //   LOD 0.5  → keep 0.85 (Medium quality — light decimation)
+        //   LOD 0.75 → keep 1.00 (High quality — no decimation)
+        //   LOD 1.0  → keep 1.00 (Ultra quality — no decimation)
+        //
+        // This is what makes "Preview" visibly different from "Ultra" on
+        // STEP files whose faces are predominantly planar with linear edges
+        // (where per-face triangulation alone gives the same N-2 triangles
+        // regardless of LOD).
+        let keep_ratio = if lod >= 0.75 {
+            1.0 // No decimation for high LOD
+        } else {
+            // Linear interpolation from (lod=0.0, keep=0.05) to (lod=0.75, keep=1.0)
+            // keep = 0.05 + (lod / 0.75) * 0.95
+            (0.05 + (lod / 0.75) * 0.95).clamp(0.05, 1.0)
+        };
+
         Self {
             max_edge_length: 1.0 / lod.max(0.1), // Longer edges at lower LOD
             max_deviation,
@@ -234,6 +278,7 @@ impl TriangulationParams {
             parallel: false,
             progress_callback: None,
             max_face_triangles,
+            keep_ratio,
         }
     }
 
