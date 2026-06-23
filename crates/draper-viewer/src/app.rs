@@ -600,7 +600,19 @@ pub struct ViewerApp {
     /// Whether to show the per-face UV breakdown window.
     show_uv_window: bool,
     /// Index of the face currently selected in the UV window.
-    uv_window_face_idx: usize,
+    ///
+    /// `None` means no face is currently active in the UV window — in that
+    /// state the canvas is hidden and a "Select a face" prompt is shown
+    /// instead. This keeps the UV Breakdown window consistent with the
+    /// structure panel: when the user switches solids or clears the
+    /// selection, the previously-shown UV grid becomes stale and would
+    /// be misleading, so we hide it until the user picks a face again.
+    ///
+    /// The face index is positional within the active solid's outer shell
+    /// faces array (for primitives/NURBS) or within the selected STEP
+    /// instance's `faces` array (for STEP files — the order matches
+    /// `solid_from_detailed_instance`).
+    uv_window_face_idx: Option<usize>,
     /// U subdivisions for the UV grid display.
     uv_window_u_divs: usize,
     /// V subdivisions for the UV grid display.
@@ -617,7 +629,7 @@ pub struct ViewerApp {
     uv_window_pan: [f64; 2],
     /// Last face index shown in the UV window — used to detect face
     /// switches and reset zoom/pan automatically.
-    uv_window_prev_face_idx: usize,
+    uv_window_prev_face_idx: Option<usize>,
     /// Cached UV breakdown for the current solid — recomputed whenever the
     /// solid changes or when the user clicks "View UV" / "Save UV SVG".
     /// Keyed by the solid's face count + a generation counter so stale
@@ -1087,12 +1099,12 @@ impl ViewerApp {
             extra_curve_lines: Vec::new(),
             extra_curve_lines_dirty: false,
             show_uv_window: false,
-            uv_window_face_idx: 0,
+            uv_window_face_idx: None,
             uv_window_u_divs: 10,
             uv_window_v_divs: 10,
             uv_window_zoom: 1.0,
             uv_window_pan: [0.0, 0.0],
-            uv_window_prev_face_idx: 0,
+            uv_window_prev_face_idx: None,
             solid_uv_breakdown: None,
             pending_solid_uv_svg_export: false,
         };
@@ -1136,7 +1148,12 @@ impl ViewerApp {
         // Invalidate the per-solid UV breakdown cache so the next time the
         // UV window is opened we recompute from the freshly-loaded solid.
         self.solid_uv_breakdown = None;
-        self.uv_window_face_idx = 0;
+        // Reset the active face in the UV window — the previous solid's
+        // face index is meaningless for the new solid, so we hide the
+        // canvas until the user picks a face again (either from the
+        // structure panel or from the UV window's own face list).
+        self.uv_window_face_idx = None;
+        self.uv_window_prev_face_idx = None;
         self.open_tree_nodes.clear();
         self.scroll_to_tree_node = None;
         self.scroll_to_face_id = None;
@@ -4876,6 +4893,13 @@ impl eframe::App for ViewerApp {
                     self.selected_instance = None;
                     self.selected_face = None;
                     self.highlighted_face = None;
+                    // The active solid for the UV window may have been
+                    // derived from this instance — clear the UV window's
+                    // face index AND invalidate the cached breakdown so
+                    // we don't keep showing UV for a hidden instance.
+                    self.uv_window_face_idx = None;
+                    self.uv_window_prev_face_idx = None;
+                    self.solid_uv_breakdown = None;
                 }
             }
             self.highlight_dirty = true;
@@ -4887,6 +4911,18 @@ impl eframe::App for ViewerApp {
             self.selected_face = None;
             self.highlighted_face = None;
             self.highlight_dirty = true;
+            // ─── Instance switch → UV window must reset ──────────────────
+            // The active solid for the UV window is derived from the
+            // selected instance (for STEP files), so when the user picks
+            // a different instance the previously-shown face index is
+            // stale. Clear it AND invalidate the cached breakdown so the
+            // next frame recomputes from the new instance. The UV window
+            // will show "Select a face" until the user picks one.
+            if self.uv_window_face_idx.is_some() {
+                self.uv_window_face_idx = None;
+                self.uv_window_prev_face_idx = None;
+                self.solid_uv_breakdown = None;
+            }
             // Find the path to this instance in the assembly tree and open it
             if let Some(ref tree) = self.assembly_tree {
                 let (path, target) = find_instance_path(tree, idx);
@@ -4901,6 +4937,34 @@ impl eframe::App for ViewerApp {
             self.highlight_dirty = true;
             self.scroll_to_face_id = Some(fid);
             self.log(&format!("Selected face #{} in instance #{}", fid, inst_idx));
+            // ─── Sync structure-panel face pick → UV Breakdown window ──────
+            // The UV window shows the UV breakdown for the active solid's
+            // faces. When the user clicks a face in the structure panel,
+            // we want the UV window to jump to that face immediately —
+            // no matter whether the active solid is a primitive/NURBS
+            // (current_solid) or a STEP instance (detailed_instances).
+            //
+            // For STEP files, the positional index in the instance's
+            // `faces` array matches the order used by
+            // `solid_from_detailed_instance` (which builds the Solid that
+            // `compute_solid_uv_breakdown` iterates), so a direct lookup
+            // is correct. For primitives/NURBS, `selected_face` carries
+            // no usable index (face IDs come from STEP, not from the
+            // primitive's shell), so we leave the UV window's face
+            // selection untouched in that case.
+            if let Some(inst) = self.detailed_instances.get(inst_idx) {
+                if let Some(pos) = inst.faces.iter().position(|f| f.face_id == fid) {
+                    if self.uv_window_face_idx != Some(pos) {
+                        self.uv_window_face_idx = Some(pos);
+                        // Reset zoom/pan so the new face's UV domain is
+                        // auto-fitted, not shown with the previous face's
+                        // pan/zoom (which would be misleading).
+                        self.uv_window_zoom = 1.0;
+                        self.uv_window_pan = [0.0, 0.0];
+                        self.uv_window_prev_face_idx = Some(pos);
+                    }
+                }
+            }
             // Find the path to this instance in the assembly tree and open it
             if let Some(ref tree) = self.assembly_tree {
                 let (path, target) = find_instance_path(tree, inst_idx);
@@ -5343,6 +5407,12 @@ impl eframe::App for ViewerApp {
                     self.open_tree_nodes.clear();
                     self.scroll_to_tree_node = None;
                     self.scroll_to_face_id = None;
+                    // Also clear the UV window's active face — the user
+                    // explicitly cleared the selection, so the previously
+                    // shown UV grid no longer corresponds to anything
+                    // highlighted in 3D / structure panel.
+                    self.uv_window_face_idx = None;
+                    self.uv_window_prev_face_idx = None;
                 }
 
                 // --- Info ---
@@ -5556,6 +5626,21 @@ impl eframe::App for ViewerApp {
                                         self.highlight_dirty = true;
                                         self.scroll_to_face_id = Some(fid);
                                         self.log(&format!("Picked face #{} (instance #{})", fid, pick.instance_idx));
+                                        // ─── Sync 3D viewport face pick → UV Breakdown ──
+                                        // Same logic as the structure-panel face
+                                        // pick: resolve face_id to positional
+                                        // index in the instance's faces array,
+                                        // then set the UV window's face index.
+                                        if let Some(inst) = self.detailed_instances.get(pick.instance_idx) {
+                                            if let Some(pos) = inst.faces.iter().position(|f| f.face_id == fid) {
+                                                if self.uv_window_face_idx != Some(pos) {
+                                                    self.uv_window_face_idx = Some(pos);
+                                                    self.uv_window_zoom = 1.0;
+                                                    self.uv_window_pan = [0.0, 0.0];
+                                                    self.uv_window_prev_face_idx = Some(pos);
+                                                }
+                                            }
+                                        }
                                         // Navigate structure tree
                                         if let Some(ref tree) = self.assembly_tree {
                                             let (path, target) = find_instance_path(tree, pick.instance_idx);
@@ -5569,6 +5654,18 @@ impl eframe::App for ViewerApp {
                                     self.selected_face = None;
                                     self.highlighted_face = None;
                                     self.highlight_dirty = true;
+                                    // ─── Switching instance → UV window must reset ──
+                                    // The active solid for the UV window changes
+                                    // when the user picks a different instance,
+                                    // so the previously-shown face index is no
+                                    // longer valid. Clear it AND invalidate the
+                                    // cached breakdown so the next frame
+                                    // recomputes from the new instance.
+                                    if self.uv_window_face_idx.is_some() {
+                                        self.uv_window_face_idx = None;
+                                        self.uv_window_prev_face_idx = None;
+                                        self.solid_uv_breakdown = None;
+                                    }
                                     self.log(&format!("Picked instance #{}", pick.instance_idx));
                                     // Navigate structure tree
                                     if let Some(ref tree) = self.assembly_tree {
@@ -5803,11 +5900,12 @@ impl eframe::App for ViewerApp {
                 }
             }
             if let Some(ref breakdown) = self.solid_uv_breakdown {
-                if let Some(face_uv) = breakdown.faces.get(self.uv_window_face_idx) {
+                if let Some(face_idx) = self.uv_window_face_idx {
+                    if let Some(face_uv) = breakdown.faces.get(face_idx) {
                     // Get the surface from the active solid for grid-point rendering.
                     let surface: Option<Surface> = active_solid.as_ref().and_then(|s| {
                         s.outer_shell.as_ref().and_then(|sh| {
-                            sh.faces.get(self.uv_window_face_idx)
+                            sh.faces.get(face_idx)
                                 .and_then(|f| f.surface.clone())
                         })
                     });
@@ -5841,6 +5939,9 @@ impl eframe::App for ViewerApp {
                         self.download_text(&filename, "image/svg+xml", &svg);
                         self.log(&format!("Exported UV SVG ({})", filename));
                     }
+                    } else {
+                        self.log_warning("UV export: face index out of range");
+                    }
                 } else {
                     self.log_warning("UV export: no face selected");
                 }
@@ -5855,18 +5956,39 @@ impl ViewerApp {
 
     /// Draw the UV breakdown window for the current solid.
     ///
-    /// Shows a face selector (combo box), U/V division sliders, the UV grid
-    /// canvas (rendered directly via painter), and Save / Close buttons.
-    /// On WASM the Save button triggers a browser SVG download; on native
-    /// it opens an rfd save-file dialog.
+    /// Shows a face list (selectable, scrollable) of the active solid,
+    /// U/V division sliders, the UV grid canvas (rendered directly via
+    /// painter), and Save / Close buttons. On WASM the Save button
+    /// triggers a browser SVG download; on native it opens an rfd
+    /// save-file dialog.
     ///
     /// Works for BOTH primitives/NURBS (uses `self.current_solid`) AND
     /// STEP files (builds a Solid on-the-fly from the selected
     /// `detailed_instances` entry, falling back to the first instance
-    /// when nothing is selected). The face selected in the structure
-    /// panel (selected_face) is automatically synced into the UV window's
-    /// face index, so the user can click a face in 3D / structure panel
-    /// and immediately see its UV breakdown.
+    /// when nothing is selected).
+    ///
+    /// # Active face
+    ///
+    /// The window's face selection (`uv_window_face_idx`) is an
+    /// `Option<usize>`:
+    ///   - `None` → no face is active. The canvas is hidden and a
+    ///     "Select a face" prompt is shown instead. This happens after
+    ///     loading a new solid, switching instances, or clicking "Clear
+    ///     Selection".
+    ///   - `Some(idx)` → the face at position `idx` in the active
+    ///     solid's outer shell faces array is shown.
+    ///
+    /// The face selection is synced bi-directionally with the structure
+    /// panel / 3D viewport:
+    ///   - When the user clicks a face in the structure panel or
+    ///     Ctrl+clicks a face in the 3D viewport, `selected_face` is
+    ///     set AND `uv_window_face_idx` is set to the corresponding
+    ///     positional index (for STEP files; primitives/NURBS don't
+    ///     have STEP face IDs so this sync is skipped there).
+    ///   - When the user clicks a face in the UV window's own face
+    ///     list, `uv_window_face_idx` is set AND, for STEP files,
+    ///     `selected_face`/`highlighted_face` are updated so the 3D
+    ///     viewport highlights the same face.
     fn draw_uv_window(&mut self, ctx: &egui::Context) {
         if !self.show_uv_window {
             return;
@@ -5891,27 +6013,6 @@ impl ViewerApp {
                 .map(solid_from_detailed_instance)
         };
 
-        // ─── Sync uv_window_face_idx with the selected face ──────────────
-        // If the user clicked a face in the structure panel or 3D view,
-        // jump the UV window to that face's index. We resolve the face_id
-        // to a positional index in the chosen instance's faces array
-        // (for STEP files) — for primitives/NURBS, selected_face's face_id
-        // doesn't correspond to shell.faces indices, so we skip the sync.
-        if let Some((inst_idx, face_id)) = self.selected_face {
-            if self.current_solid.is_none() {
-                if let Some(inst) = self.detailed_instances.get(inst_idx) {
-                    if let Some(pos) = inst.faces.iter().position(|f| f.face_id == face_id) {
-                        if self.uv_window_face_idx != pos {
-                            self.uv_window_face_idx = pos;
-                            self.uv_window_zoom = 1.0;
-                            self.uv_window_pan = [0.0, 0.0];
-                            self.uv_window_prev_face_idx = pos;
-                        }
-                    }
-                }
-            }
-        }
-
         // Reset zoom/pan when the user switches faces — the new face has a
         // different UV domain, so the previous pan/zoom would be meaningless.
         if self.uv_window_prev_face_idx != self.uv_window_face_idx {
@@ -5924,10 +6025,14 @@ impl ViewerApp {
             if let Some(ref solid) = active_solid {
                 let name = self.current_model.name.clone();
                 self.solid_uv_breakdown = Some(compute_solid_uv_breakdown(solid, &name));
-                // Clamp face index to valid range.
+                // If the active face index is now out of range (e.g. the
+                // new solid has fewer faces than the previous one), clear
+                // it — the user must pick a new face from the list.
                 if let Some(ref b) = self.solid_uv_breakdown {
-                    if self.uv_window_face_idx >= b.faces.len() {
-                        self.uv_window_face_idx = 0;
+                    if let Some(idx) = self.uv_window_face_idx {
+                        if idx >= b.faces.len() {
+                            self.uv_window_face_idx = None;
+                        }
                     }
                 }
             }
@@ -5942,6 +6047,14 @@ impl ViewerApp {
         // (which may be a synthesized STEP solid, not self.current_solid).
         let current_solid_taken = active_solid.clone();
         let model_name = self.current_model.name.clone();
+        // Track whether the user clicked a face in the UV window's own
+        // face list — used after the egui closure to sync
+        // `selected_face` / `highlighted_face` for STEP files (so the 3D
+        // viewport highlights the same face the user picked in the UV
+        // window). Captured as a local var because we can't safely borrow
+        // `self.detailed_instances` from inside the egui closure that
+        // already borrows `self` mutably.
+        let mut uv_window_face_clicked: Option<usize> = None;
 
         egui::Window::new("UV Breakdown")
             .id(egui::Id::new("uv_breakdown_window"))
@@ -5967,27 +6080,46 @@ impl ViewerApp {
                     return;
                 }
 
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Face:").size(12.0));
-                    let selected_label = breakdown.faces
-                        .get(self.uv_window_face_idx)
-                        .map(|f| format!("#{} {}", f.face_idx, f.surface_type))
-                        .unwrap_or_else(|| "(none)".to_string());
-                    egui::ComboBox::from_id_salt("uv_face_combo")
-                        .selected_text(selected_label)
-                        .show_ui(ui, |ui| {
-                            for f in &breakdown.faces {
-                                ui.selectable_value(
-                                    &mut self.uv_window_face_idx,
-                                    f.face_idx,
-                                    format!("#{} {} (outer pts: {}, holes: {})",
-                                        f.face_idx, f.surface_type,
-                                        f.outer_polylines.iter().map(|p| p.len()).sum::<usize>(),
-                                        f.inner_polylines.len()),
-                                );
+                // ─── Face list (scrollable, selectable) ──────────────────
+                // Mirrors the structure panel's Faces section: each face
+                // is a `selectable_label` showing its index, surface type,
+                // and boundary/hole summary. Clicking a face sets
+                // `uv_window_face_idx` AND (captured via
+                // `uv_window_face_clicked`) triggers a reverse sync into
+                // `selected_face` for STEP files after the closure.
+                ui.label(egui::RichText::new(
+                    format!("Faces of active solid ({}):", breakdown.faces.len())
+                ).size(11.0).color(egui::Color32::from_rgb(170, 170, 190)));
+                egui::ScrollArea::vertical()
+                    .id_salt("uv_window_face_list")
+                    .max_height(160.0)
+                    .show(ui, |ui| {
+                        for f in &breakdown.faces {
+                            let is_selected = self.uv_window_face_idx == Some(f.face_idx);
+                            let label = format!("#{} {} (outer pts: {}, holes: {})",
+                                f.face_idx, f.surface_type,
+                                f.outer_polylines.iter().map(|p| p.len()).sum::<usize>(),
+                                f.inner_polylines.len());
+                            let response = ui.selectable_label(is_selected, &label);
+                            if response.clicked() {
+                                self.uv_window_face_idx = Some(f.face_idx);
+                                // Reset zoom/pan on face change.
+                                self.uv_window_zoom = 1.0;
+                                self.uv_window_pan = [0.0, 0.0];
+                                self.uv_window_prev_face_idx = Some(f.face_idx);
+                                uv_window_face_clicked = Some(f.face_idx);
                             }
-                        });
-                });
+                            response.on_hover_text(format!(
+                                "Face #{}\nSurface: {}\nOuter pts: {}\nHoles: {}\nforward: {}",
+                                f.face_idx, f.surface_type,
+                                f.outer_polylines.iter().map(|p| p.len()).sum::<usize>(),
+                                f.inner_polylines.len(),
+                                f.forward,
+                            ));
+                        }
+                    });
+
+                ui.separator();
 
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("U divs:").size(11.0));
@@ -6001,32 +6133,38 @@ impl ViewerApp {
                 // dense UV triangulations in detail, we expose a zoom slider
                 // (with + / − buttons for click-to-zoom) and a "Reset View"
                 // button. Pan is performed by left-dragging the canvas.
+                // These controls are only useful when a face is actually
+                // selected, but we keep them visible (just dimmed) when no
+                // face is selected so the user can see what's available.
+                let controls_enabled = self.uv_window_face_idx.is_some();
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Zoom:").size(11.0));
-                    if ui.button(egui::RichText::new("−").size(13.0)).clicked() {
-                        self.uv_window_zoom = (self.uv_window_zoom / 1.25_f32).max(0.25);
-                    }
-                    ui.add(
-                        egui::Slider::new(&mut self.uv_window_zoom, 0.25..=20.0)
-                            .step_by(0.05)
-                            .clamping(egui::SliderClamping::Always)
-                            .fixed_decimals(2)
-                            .text("x"),
-                    );
-                    if ui.button(egui::RichText::new("+").size(13.0)).clicked() {
-                        self.uv_window_zoom = (self.uv_window_zoom * 1.25_f32).min(20.0);
-                    }
-                    if ui.button("Reset View").clicked() {
-                        self.uv_window_zoom = 1.0;
-                        self.uv_window_pan = [0.0, 0.0];
-                    }
+                    ui.add_enabled_ui(controls_enabled, |ui| {
+                        ui.label(egui::RichText::new("Zoom:").size(11.0));
+                        if ui.button(egui::RichText::new("−").size(13.0)).clicked() {
+                            self.uv_window_zoom = (self.uv_window_zoom / 1.25_f32).max(0.25);
+                        }
+                        ui.add(
+                            egui::Slider::new(&mut self.uv_window_zoom, 0.25..=20.0)
+                                .step_by(0.05)
+                                .clamping(egui::SliderClamping::Always)
+                                .fixed_decimals(2)
+                                .text("x"),
+                        );
+                        if ui.button(egui::RichText::new("+").size(13.0)).clicked() {
+                            self.uv_window_zoom = (self.uv_window_zoom * 1.25_f32).min(20.0);
+                        }
+                        if ui.button("Reset View").clicked() {
+                            self.uv_window_zoom = 1.0;
+                            self.uv_window_pan = [0.0, 0.0];
+                        }
+                    });
                 });
                 ui.label(egui::RichText::new(
                     "Tip: drag the canvas to pan, use + / − or the slider to zoom."
                 ).size(10.0).color(egui::Color32::from_rgb(140, 140, 160)));
 
                 ui.horizontal(|ui| {
-                    if ui.button("Save UV as SVG...").clicked() {
+                    if ui.add_enabled(controls_enabled, egui::Button::new("Save UV as SVG...")).clicked() {
                         self.pending_solid_uv_svg_export = true;
                     }
                     if ui.button("Recompute").clicked() {
@@ -6037,11 +6175,32 @@ impl ViewerApp {
 
                 ui.separator();
 
-                if let Some(face_uv) = breakdown.faces.get(self.uv_window_face_idx) {
+                // ─── Canvas — only shown when a face is selected ──────────
+                // If `uv_window_face_idx` is `None`, show a "Select a face"
+                // prompt instead of the canvas. This is the core of the
+                // "no active face → no grid" requirement: when the user
+                // switches solids, clears the selection, or hasn't yet
+                // picked a face, the canvas is hidden so no stale UV grid
+                // is displayed.
+                match self.uv_window_face_idx {
+                    None => {
+                        ui.add_space(40.0);
+                        ui.vertical_centered(|ui| {
+                            ui.label(egui::RichText::new(
+                                "Select a face from the list above to view its UV breakdown."
+                            ).size(13.0).color(egui::Color32::from_rgb(180, 180, 200)));
+                            ui.add_space(6.0);
+                            ui.label(egui::RichText::new(
+                                "Tip: clicking a face in the structure panel or 3D viewport (Ctrl+click) also selects it here."
+                            ).size(10.0).color(egui::Color32::from_rgb(120, 120, 140)));
+                        });
+                    }
+                    Some(face_idx) => {
+                        if let Some(face_uv) = breakdown.faces.get(face_idx) {
                     // Get the surface for this face from the current solid.
                     let surface: Option<Surface> = current_solid_taken.as_ref().and_then(|s| {
                         s.outer_shell.as_ref().and_then(|sh| {
-                            sh.faces.get(self.uv_window_face_idx)
+                            sh.faces.get(face_idx)
                                 .and_then(|f| f.surface.clone())
                         })
                     });
@@ -6450,8 +6609,42 @@ impl ViewerApp {
                             egui::Color32::from_rgb(170, 170, 170),
                         );
                     }
-                }
+                } // close `if let Some(face_uv) = breakdown.faces.get(face_idx)`
+                } // close `Some(face_idx) => {`
+                } // close `match self.uv_window_face_idx`
             });
+
+        // ─── Reverse sync: UV window face list click → selected_face ───────
+        // If the user just clicked a face in the UV window's own face list,
+        // propagate the selection back to `selected_face` / `highlighted_face`
+        // so the 3D viewport highlights the same face. This is the reverse
+        // direction of the sync that happens in `pending_face_select`.
+        //
+        // Only applies to STEP files (where `detailed_instances` is
+        // populated and `current_solid` is None) — for primitives/NURBS
+        // the 3D viewport doesn't support per-face highlighting anyway
+        // (the primitive's mesh is merged into one buffer without
+        // per-face IDs), so there's nothing to sync.
+        if let Some(face_pos_idx) = uv_window_face_clicked {
+            if self.current_solid.is_none() {
+                // Use the same instance the UV window derived its solid from.
+                let chosen_idx = self
+                    .selected_instance
+                    .or_else(|| if self.detailed_instances.is_empty() { None } else { Some(0) });
+                if let Some(inst_idx) = chosen_idx {
+                    if let Some(inst) = self.detailed_instances.get(inst_idx) {
+                        if let Some(face_info) = inst.faces.get(face_pos_idx) {
+                            let fid = face_info.face_id;
+                            self.selected_instance = Some(inst_idx);
+                            self.selected_face = Some((inst_idx, fid));
+                            self.highlighted_face = Some((inst_idx, fid));
+                            self.highlight_dirty = true;
+                            self.scroll_to_face_id = Some(fid);
+                        }
+                    }
+                }
+            }
+        }
 
         // Restore the breakdown (only if still valid — it was before).
         if self.solid_uv_breakdown.is_none() {
@@ -6846,6 +7039,11 @@ impl ViewerApp {
                                 self.open_tree_nodes.clear();
                                 self.scroll_to_tree_node = None;
                                 self.scroll_to_face_id = None;
+                                // Also clear the UV window's active face
+                                // — see desktop "Clear Selection" handler
+                                // for rationale.
+                                self.uv_window_face_idx = None;
+                                self.uv_window_prev_face_idx = None;
                             }
                         }
 
@@ -7278,6 +7476,10 @@ impl ViewerApp {
                         self.selected_instance = None;
                         self.selected_face = None;
                         self.highlighted_face = None;
+                        // Same UV window reset as desktop visibility toggle.
+                        self.uv_window_face_idx = None;
+                        self.uv_window_prev_face_idx = None;
+                        self.solid_uv_breakdown = None;
                     }
                 }
                 self.highlight_dirty = true;
@@ -7289,6 +7491,15 @@ impl ViewerApp {
                 self.selected_face = None;
                 self.highlighted_face = None;
                 self.highlight_dirty = true;
+                // ─── Instance switch → UV window must reset ──
+                // Same logic as desktop: clear the UV window's face
+                // index and invalidate the cached breakdown so the next
+                // frame recomputes from the new instance.
+                if self.uv_window_face_idx.is_some() {
+                    self.uv_window_face_idx = None;
+                    self.uv_window_prev_face_idx = None;
+                    self.solid_uv_breakdown = None;
+                }
                 if let Some(ref tree) = self.assembly_tree {
                     let (path, target) = find_instance_path(tree, idx);
                     self.open_tree_nodes = path.into_iter().collect();
@@ -7301,6 +7512,21 @@ impl ViewerApp {
                 self.highlighted_face = Some((inst_idx, fid));
                 self.highlight_dirty = true;
                 self.scroll_to_face_id = Some(fid);
+                // ─── Sync structure-panel face pick → UV Breakdown window ──
+                // Same logic as desktop: resolve the face_id to a positional
+                // index in the instance's faces array, then set the UV
+                // window's face index. See the desktop handler above for
+                // the full rationale.
+                if let Some(inst) = self.detailed_instances.get(inst_idx) {
+                    if let Some(pos) = inst.faces.iter().position(|f| f.face_id == fid) {
+                        if self.uv_window_face_idx != Some(pos) {
+                            self.uv_window_face_idx = Some(pos);
+                            self.uv_window_zoom = 1.0;
+                            self.uv_window_pan = [0.0, 0.0];
+                            self.uv_window_prev_face_idx = Some(pos);
+                        }
+                    }
+                }
                 if let Some(ref tree) = self.assembly_tree {
                     let (path, target) = find_instance_path(tree, inst_idx);
                     self.open_tree_nodes = path.into_iter().collect();
