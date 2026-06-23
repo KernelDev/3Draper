@@ -3146,6 +3146,14 @@ impl ViewerApp {
                     Ok(model) => {
                         let mesh = model.to_triangle_mesh();
                         let name = model.metadata.name.clone();
+                        // JSON-loaded models have no `Solid` representation —
+                        // only `detailed_instances`. Clear `current_solid`
+                        // so the UV Breakdown window uses the JSON instances
+                        // instead of leaking a stale primitive/NURBS solid.
+                        self.current_solid = None;
+                        self.solid_uv_breakdown = None;
+                        self.uv_window_face_idx = None;
+                        self.uv_window_prev_face_idx = None;
                         self.detailed_instances = model.to_detailed_instances();
                         self.assembly_tree = Some(model.assembly);
                         self.load_mesh(mesh, &name);
@@ -3169,6 +3177,14 @@ impl ViewerApp {
             Ok(model) => {
                 let mesh = model.to_triangle_mesh();
                 let model_name = model.metadata.name.clone();
+                // JSON-loaded models have no `Solid` representation —
+                // only `detailed_instances`. Clear `current_solid`
+                // so the UV Breakdown window uses the JSON instances
+                // instead of leaking a stale primitive/NURBS solid.
+                self.current_solid = None;
+                self.solid_uv_breakdown = None;
+                self.uv_window_face_idx = None;
+                self.uv_window_prev_face_idx = None;
                 self.detailed_instances = model.to_detailed_instances();
                 self.assembly_tree = Some(model.assembly);
                 self.load_mesh(mesh, &model_name);
@@ -3186,6 +3202,26 @@ impl ViewerApp {
     fn process_step_file(&mut self, step_file: &draper_step::StepFile, name: &str) {
         // Cancel any previous loading
         self.cancel_loading();
+
+        // ─── Clear `current_solid` so the UV Breakdown window falls through
+        // to the `solid_from_detailed_instance` path. Without this, a stale
+        // `current_solid` from a previously-loaded primitive/NURBS gallery
+        // shape would leak into the UV Breakdown window: the dropdown would
+        // show the old solid's faces (e.g. "#0 Revolution") instead of the
+        // STEP file's faces, and structure-panel face clicks would set
+        // `uv_window_face_idx` to a positional index that's out of range for
+        // the stale solid, leaving the canvas blank. STEP files have NO
+        // `Solid` representation in the viewer — only `detailed_instances`
+        // — so `current_solid` MUST be `None` for them.
+        self.current_solid = None;
+        // Also invalidate any cached UV breakdown + active face index —
+        // they belong to the previous solid and are meaningless for the
+        // new STEP file. (load_mesh does this too, but load_mesh is only
+        // called at the END of triangulation, so without this line the UV
+        // window would show stale content during the triangulation window.)
+        self.solid_uv_breakdown = None;
+        self.uv_window_face_idx = None;
+        self.uv_window_prev_face_idx = None;
 
         // Count relevant geometry entities (fast O(n) pass)
         let mut point_count = 0;
@@ -3893,6 +3929,14 @@ impl ViewerApp {
     fn import_stl_from_bytes(&mut self, data: &[u8], name: &str) {
         match draper_mesh::import_stl_from_bytes(data) {
             Ok(mesh) => {
+                // STL has no surfaces / faces — clear `current_solid`
+                // (and the UV window state) so the UV Breakdown window
+                // correctly shows "No solid loaded" instead of leaking
+                // a stale primitive/NURBS solid from a previous session.
+                self.current_solid = None;
+                self.solid_uv_breakdown = None;
+                self.uv_window_face_idx = None;
+                self.uv_window_prev_face_idx = None;
                 self.load_mesh(mesh, &format!("STL: {}", name));
             }
             Err(e) => {
@@ -5540,6 +5584,15 @@ impl eframe::App for ViewerApp {
                                 let model = self.json_api.model().unwrap();
                                 (model.to_triangle_mesh(), model.metadata.name.clone(), model.to_detailed_instances(), model.assembly.clone())
                             };
+                            // JSON API-loaded models have no `Solid`
+                            // representation — only `detailed_instances`.
+                            // Clear `current_solid` so the UV Breakdown
+                            // window doesn't leak a stale primitive/NURBS
+                            // solid from a previous session.
+                            self.current_solid = None;
+                            self.solid_uv_breakdown = None;
+                            self.uv_window_face_idx = None;
+                            self.uv_window_prev_face_idx = None;
                             self.detailed_instances = instances;
                             self.assembly_tree = Some(assembly);
                             self.load_mesh(mesh, &name);
@@ -5880,17 +5933,20 @@ impl eframe::App for ViewerApp {
         // ═══ Pending UV SVG export ═════════════════════════════════════════════
         if self.pending_solid_uv_svg_export {
             self.pending_solid_uv_svg_export = false;
-            // Resolve the active solid: current_solid (primitive/NURBS) or a
-            // synthesized STEP solid from detailed_instances.
-            let active_solid: Option<Solid> = if let Some(s) = self.current_solid.clone() {
-                Some(s)
-            } else {
+            // Resolve the active solid: prefer `detailed_instances` (STEP/JSON)
+            // when populated — `current_solid` may be stale from a previous
+            // primitive/NURBS session. Fall back to `current_solid` for
+            // primitive/NURBS gallery loaders (where detailed_instances is
+            // always empty). This matches `draw_uv_window`'s logic below.
+            let active_solid: Option<Solid> = if !self.detailed_instances.is_empty() {
                 let chosen_idx = self
                     .selected_instance
-                    .or_else(|| if self.detailed_instances.is_empty() { None } else { Some(0) });
+                    .or_else(|| Some(0));
                 chosen_idx
                     .and_then(|i| self.detailed_instances.get(i))
                     .map(solid_from_detailed_instance)
+            } else {
+                self.current_solid.clone()
             };
             // Ensure the breakdown is computed for the active solid.
             if self.solid_uv_breakdown.is_none() {
@@ -5995,22 +6051,36 @@ impl ViewerApp {
         }
 
         // ─── Determine the "active solid" for the UV window ───────────────
-        // For primitives/NURBS gallery, `self.current_solid` is set.
-        // For STEP files, current_solid is None — we synthesize a Solid
-        // from the selected `detailed_instances` entry (or fall back to
-        // the first instance if nothing is selected). This is what makes
-        // the UV Breakdown window work for STEP files.
-        let active_solid: Option<Solid> = if let Some(s) = self.current_solid.clone() {
-            Some(s)
-        } else {
-            // STEP file path. Pick the selected instance, or fall back to
-            // the first instance so the window always shows SOMETHING.
+        // Two sources, in priority order:
+        //   1. `detailed_instances` (STEP/JSON files) — always preferred
+        //      when non-empty, because `uv_window_face_idx` is keyed to the
+        //      positional order inside `solid_from_detailed_instance(...)`
+        //      and the structure-panel / 3D-viewport face-pick sync only
+        //      fires when `detailed_instances` is populated. If we fell
+        //      back to `current_solid` here, the indices would be off and
+        //      the canvas would silently render nothing.
+        //   2. `current_solid` (primitive/NURBS gallery loaders) — used
+        //      when `detailed_instances` is empty. Primitive loaders
+        //      explicitly clear `detailed_instances` before `load_mesh`,
+        //      so this case is unambiguous.
+        //
+        // Defensive belt-and-suspenders: even if a future regression
+        // forgets to clear `current_solid` when a STEP/JSON file is
+        // loaded, the preference for `detailed_instances` here ensures
+        // the UV Breakdown window still shows the right solid.
+        let active_solid: Option<Solid> = if !self.detailed_instances.is_empty() {
+            // STEP/JSON file path. Pick the selected instance, or fall
+            // back to the first instance so the window always shows
+            // SOMETHING.
             let chosen_idx = self
                 .selected_instance
-                .or_else(|| if self.detailed_instances.is_empty() { None } else { Some(0) });
+                .or_else(|| Some(0));
             chosen_idx
                 .and_then(|i| self.detailed_instances.get(i))
                 .map(solid_from_detailed_instance)
+        } else {
+            // Primitive / NURBS gallery path.
+            self.current_solid.clone()
         };
 
         // Reset zoom/pan when the user switches faces — the new face has a
