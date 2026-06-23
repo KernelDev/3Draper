@@ -2592,3 +2592,36 @@ Stage Summary:
 - The "Quality" selector (Preview/Low/Medium/High/Ultra) now actually changes vertex/triangle counts when (re)loading a STEP file: Preview=5756v/11467t, Ultra=6272v/12499t (~9% triangle difference on this file).
 - Product-definition name resolution now works for all STEP exporters that use PRODUCT_DEFINITION_FORMATION_WITH_SPECIFIED_SOURCE (NX, CATIA, Creo, Solidworks, etc.).
 - Diagnostic tools (zentral_diag, lod_verify) retained for future regression checks.
+
+---
+Task ID: zentralstaender-fix-46-redeploy
+Agent: Main
+Task: После потери контекста — пересборка WASM и обновление GitHub Pages https://kerneldev.github.io/3Draper/
+
+Work Log:
+- Прочитан весь worklog_new.md (2594 строки, 46+ задач) и ROADMAP.md (422 строки) для восстановления контекста.
+- Проверено, что последний коммит в origin/main — 59f2c4f "fix(step+viewer): assembly names + LOD selector for Zentralstaender.stp" (Task zentralstaender-fix-46). Локальный main синхронизирован с remote.
+- Замечено, что origin/gh-pages отставал (последний деплой 0fd670b был ДО фикса Zentralstaender) — нужно было пересобрать WASM и обновить GitHub Pages.
+- Установлены инструменты сборки: rustup + Rust 1.96.0, wasm32-unknown-unknown target, wasm-bindgen-cli v0.2.125, trunk 0.21.12.
+- Запущены регрессионные тесты draper-step --lib:
+  * test_zentralstaender_root_name — OK
+  * test_zentralstaender_instance_names_nonempty — OK
+  * test_zentralstaender_known_instance_names_present — OK
+  * test_zentralstaender_face_detail — OK
+  * test_zentralstaender_cone_detail — OK
+  * test_zentralstaender — OK
+  * test_lod_actually_changes_triangle_count — OK
+  * Все 7 релевантных тестов проходят (остальные 91 отфильтрованы).
+- WASM cargo check: ✓ (только pre-existing warnings в draper-mesh и draper-step о неиспользуемых импортах).
+- Запущен scripts/deploy_gh_pages.sh:
+  * cargo build --release --no-default-features --features web-deploy --target wasm32-unknown-unknown (1m 25s)
+  * wasm-bindgen --target web --no-typescript → draper-viewer.js (143 481 байт) + draper-viewer_bg.wasm (8 869 573 байт ≈ 8.5 MB)
+  * gh-pages обновлён: 0fd670b..6e0af71
+- Push выполнен в origin/gh-pages. GitHub Actions workflow (deploy.yml) также сработает автоматически при пуше в main, но локальный деплой быстрее — изменения уже видны на https://kerneldev.github.io/3Draper/.
+
+Stage Summary:
+- Контекст полностью восстановлен после сброса сессии: прочитаны README.md, ROADMAP.md, docs/*.md и весь worklog_new.md (46+ задач).
+- GitHub Pages https://kerneldev.github.io/3Draper/ обновлён до последнего состояния main (59f2c4f) — пользователи теперь видят фикс имён сборки Zentralstaender и рабочий LOD-селектор в веб-демо.
+- Все тесты draper-step (zentralstaender + lod) проходят.
+- Ветка main синхронизирована с origin/main (59f2c4f), история ревизий сохранена (никаких force-push или rebase).
+- Ветка gh-pages обновлена fast-forward (0fd670b → 6e0af71), история также сохранена.
