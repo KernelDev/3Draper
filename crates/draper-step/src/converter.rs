@@ -688,6 +688,26 @@ impl OwnedStepConversionContext {
     /// during construction. This makes `new()` return quickly, keeping
     /// the browser responsive.
     pub fn new(step_file: StepFile) -> Self {
+        // Delegate to new_with_lod using the default LOD (1.0 = full quality).
+        // This preserves backward compatibility for callers that don't care
+        // about LOD. The viewer's `process_pending_breps` calls `new_with_lod`
+        // directly with the user-selected LOD value so the Quality dropdown
+        // actually affects STEP triangulation.
+        Self::new_with_lod(step_file, 1.0)
+    }
+
+    /// Create a conversion context that uses `TriangulationParams::for_lod(lod)`
+    /// instead of `TriangulationParams::default()`. This is what makes the
+    /// viewer's Quality dropdown (Preview / Low / Medium / High / Ultra)
+    /// actually affect STEP file triangulation — lower LOD values produce
+    /// coarser meshes (fewer triangles, larger deviation), higher LOD values
+    /// produce finer meshes.
+    ///
+    /// `lod` is a value in `[0.0, 1.0]` where `0.0` = coarsest, `1.0` = full
+    /// quality. The bbox-based `max_deviation` floor (`diagonal * 0.0002`)
+    /// is still applied on top of the LOD-scaled deviation, so very small
+    /// models don't get absurdly tight tolerances at high LOD.
+    pub fn new_with_lod(step_file: StepFile, lod: f64) -> Self {
         // Enable healing with default preset — it fixes gaps, holes,
         // flipped normals, degenerate edges, and small features.
         // The aggressive preset (fix_self_intersections) can be enabled
@@ -708,7 +728,15 @@ impl OwnedStepConversionContext {
             converter.compute_bounding_box()
         };
 
-        let mut params = TriangulationParams::default();
+        // Start from LOD-scaled params (NOT default()) so the Quality
+        // dropdown actually changes triangle count. for_lod(lod) scales
+        // max_deviation, angular_samples, height_samples, max_face_triangles,
+        // and detail_level proportionally to `lod`.
+        let mut params = TriangulationParams::for_lod(lod.clamp(0.0, 1.0));
+        // Apply the same bbox-based max_deviation floor that `new()` does —
+        // without it, very small models would get an absurdly tight tolerance
+        // at high LOD (max_deviation = 0.01 / 1.0² = 0.01, but the model
+        // diagonal might be 0.5mm, so 0.01 is 2% of the model — way too tight).
         if let Some((bmin, bmax)) = &bbox {
             let dx = bmax.x - bmin.x;
             let dy = bmax.y - bmin.y;

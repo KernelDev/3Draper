@@ -444,6 +444,16 @@ pub struct ViewerApp {
     /// here instead of immediately creating OwnedStepConversionContext (which is expensive).
     /// The context is built on the first frame of progressive triangulation.
     pending_step_file: Option<StepFile>,
+    /// Last successfully-parsed STEP file, kept so the user can re-triangulate
+    /// at a different LOD without re-opening the file. When the user changes
+    /// the Quality dropdown, `retriangulate_for_lod()` re-runs
+    /// `process_step_file` on this saved copy. Cleared whenever a non-STEP
+    /// model is loaded (primitive, NURBS gallery, JSON, STL) so we don't
+    /// accidentally re-load a stale STEP file.
+    last_step_file: Option<StepFile>,
+    /// Display name of `last_step_file` (used in log messages and as the
+    /// `name` argument to `process_step_file` when re-triangulating).
+    last_step_name: String,
     /// Total number of instances being loaded (for progress display).
     total_instance_count: usize,
     /// Number of instances already triangulated.
@@ -1042,6 +1052,8 @@ impl ViewerApp {
             pending_breps: Vec::new(),
             conversion_ctx: None,
             pending_step_file: None,
+            last_step_file: None,
+            last_step_name: String::new(),
             total_instance_count: 0,
             triangulated_count: 0,
             is_loading: false,
@@ -1271,6 +1283,71 @@ impl ViewerApp {
             self.load_mesh(mesh, name);
         } else {
             self.log_warning("No current solid — load a primitive first");
+        }
+    }
+
+    /// Re-triangulate the currently-loaded model at the current LOD level.
+    ///
+    /// Called when the user changes the Quality dropdown. Two cases:
+    ///
+    /// 1. **Primitive / NURBS gallery** (`current_solid` is set): re-runs
+    ///    `triangulate_solid` with the new `TriangulationParams::for_lod(...)`.
+    ///    Fast (single solid, no I/O), structure is just "1 solid" so nothing
+    ///    to preserve. Selection is reset by `load_mesh` (primitives have no
+    ///    STEP face IDs anyway, so this is fine).
+    ///
+    /// 2. **STEP file** (`last_step_file` is set): re-runs `process_step_file`
+    ///    on the saved StepFile with the new LOD. This rebuilds the assembly
+    ///    tree (identical, since same file) and re-queues progressive
+    ///    triangulation. Selection state (`selected_instance`,
+    ///    `selected_face`, `highlighted_face`, `open_tree_nodes`) is saved
+    ///    before and restored after — the instance_idx and face_id are stable
+    ///    across re-triangulation because they come from the STEP file, not
+    ///    from the triangulation. The highlight won't render until each
+    ///    instance is re-triangulated, but it auto-fixes as loading
+    ///    progresses.
+    ///
+    /// If neither `current_solid` nor `last_step_file` is set, logs a warning.
+    fn retriangulate_for_lod(&mut self) {
+        if self.current_solid.is_some() {
+            // Primitive / NURBS — fast path, re-triangulate in-place.
+            let name = self.current_model.name.clone();
+            self.refresh_from_current_solid(&name);
+            self.log(&format!(
+                "Re-triangulated primitive/NURBS at LOD={} ({:.2})",
+                self.lod_level.label(),
+                self.lod_level.lod_value()
+            ));
+        } else if let Some(step_file) = self.last_step_file.clone() {
+            // STEP file — save selection, re-run process_step_file, restore.
+            let saved_selected_instance = self.selected_instance;
+            let saved_selected_face = self.selected_face;
+            let saved_highlighted_face = self.highlighted_face;
+            let saved_open_tree_nodes = self.open_tree_nodes.clone();
+            let name = self.last_step_name.clone();
+            self.log(&format!(
+                "Re-triangulating STEP file '{}' at LOD={} ({:.2}) — {} instances queued...",
+                name,
+                self.lod_level.label(),
+                self.lod_level.lod_value(),
+                self.total_instance_count
+            ));
+            self.process_step_file(&step_file, &name);
+            // Restore selection. The instance_idx and face_id are stable
+            // across re-triangulation (they come from the STEP file, not
+            // from the triangulation). `detailed_instances` is rebuilt
+            // progressively, so the highlight won't render until each
+            // instance is re-triangulated — but it auto-fixes as loading
+            // progresses.
+            self.selected_instance = saved_selected_instance;
+            self.selected_face = saved_selected_face;
+            self.highlighted_face = saved_highlighted_face;
+            self.open_tree_nodes = saved_open_tree_nodes;
+            self.highlight_dirty = true;
+        } else {
+            self.log_warning(
+                "No solid loaded — load a primitive or STEP file before changing LOD",
+            );
         }
     }
 
@@ -3223,6 +3300,12 @@ impl ViewerApp {
         self.uv_window_face_idx = None;
         self.uv_window_prev_face_idx = None;
 
+        // Keep a clone of the StepFile + name so the user can re-triangulate
+        // at a different LOD via the Quality dropdown without re-opening the
+        // file. This is consumed by `retriangulate_for_lod()`.
+        self.last_step_file = Some(step_file.clone());
+        self.last_step_name = name.to_string();
+
         // Count relevant geometry entities (fast O(n) pass)
         let mut point_count = 0;
         let mut face_count = 0;
@@ -3720,9 +3803,18 @@ impl ViewerApp {
         // LAZY: Create the conversion context on the first frame.
         if self.conversion_ctx.is_none() {
             if let Some(step_file) = self.pending_step_file.take() {
-                self.log("Building conversion context (entity maps, bounding box)...");
+                self.log(&format!(
+                    "Building conversion context (entity maps, bounding box) — LOD={} ({:.2})...",
+                    self.lod_level.label(),
+                    self.lod_level.lod_value()
+                ));
+                // Pass the user-selected LOD so the Quality dropdown actually
+                // affects STEP triangulation. Without this, the context would
+                // use TriangulationParams::default() (LOD 1.0) regardless of
+                // the dropdown, and switching High→Low would have no effect.
+                let lod_value = self.lod_level.lod_value();
                 let ctx_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    OwnedStepConversionContext::new(step_file)
+                    OwnedStepConversionContext::new_with_lod(step_file, lod_value)
                 }));
                 match ctx_result {
                     Ok(ctx) => {
@@ -4583,11 +4675,21 @@ impl eframe::App for ViewerApp {
                     ui.checkbox(&mut self.show_grid, "Show grid");
                     ui.checkbox(&mut self.show_structure, "Structure Panel");
                     ui.separator();
-                    // LOD selector — affects quality of future STEP loads
+                    // LOD selector — affects quality of future STEP loads AND
+                    // re-triangulates the current model immediately so the user
+                    // sees the change without re-opening the file.
                     ui.label(egui::RichText::new("Triangulation Quality:").small());
+                    let prev_lod = self.lod_level;
                     for &lod in LodLevel::all() {
                         if ui.radio_value(&mut self.lod_level, lod, lod.label()).clicked() {
-                            self.log(&format!("LOD changed to {} (applies to next file load)", lod.label()));
+                            if lod != prev_lod {
+                                self.log(&format!(
+                                    "LOD changed {} → {} — re-triangulating current model...",
+                                    prev_lod.label(),
+                                    lod.label()
+                                ));
+                                self.retriangulate_for_lod();
+                            }
                         }
                     }
                     ui.separator();
@@ -5426,6 +5528,7 @@ impl eframe::App for ViewerApp {
 
                 // LOD selector for mobile
                 ui.add_space(4.0);
+                let prev_lod_mobile = self.lod_level;
                 egui::ComboBox::from_id_salt("lod_mobile")
                     .selected_text(format!("Quality: {}", self.lod_level.label()))
                     .show_ui(ui, |ui| {
@@ -5433,6 +5536,14 @@ impl eframe::App for ViewerApp {
                             ui.selectable_value(&mut self.lod_level, lod, lod.label());
                         }
                     });
+                if self.lod_level != prev_lod_mobile {
+                    self.log(&format!(
+                        "LOD changed {} → {} — re-triangulating current model...",
+                        prev_lod_mobile.label(),
+                        self.lod_level.label()
+                    ));
+                    self.retriangulate_for_lod();
+                }
 
                 if ui.button("Reset Camera").clicked() {
                     let (bbox_min, bbox_max) = self.mesh.bounding_box();
@@ -7320,6 +7431,7 @@ impl ViewerApp {
 
                             ui.add_space(6.0);
                             ui.heading(egui::RichText::new("Triangulation Quality").size(13.0));
+                            let prev_lod_panel = self.lod_level;
                             egui::ComboBox::from_id_salt("lod_mobile_panel")
                                 .selected_text(format!("Quality: {}", self.lod_level.label()))
                                 .show_ui(ui, |ui| {
@@ -7327,6 +7439,14 @@ impl ViewerApp {
                                         ui.selectable_value(&mut self.lod_level, lod, lod.label());
                                     }
                                 });
+                            if self.lod_level != prev_lod_panel {
+                                self.log(&format!(
+                                    "LOD changed {} → {} — re-triangulating current model...",
+                                    prev_lod_panel.label(),
+                                    self.lod_level.label()
+                                ));
+                                self.retriangulate_for_lod();
+                            }
 
                             ui.add_space(6.0);
                             if ui.add_sized([ui.available_width(), 32.0], egui::Button::new("Reset Camera (fit + iso)")).clicked() {
