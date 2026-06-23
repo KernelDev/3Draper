@@ -15,7 +15,7 @@ use crate::renderer::{
 use draper_core::engine::{EngineConfig, build_engine};
 use draper_topology::{ShapeBuilder, Solid, Edge, Wire, Face, Shell};
 use draper_mesh::{triangulate_solid, triangulate_face, TriangleMesh, TriangulationParams, check_manifold, ManifoldReport, cut_text_holes_in_mesh, TextSurface};
-use draper_step::{AssemblyNode, DetailedMeshInstance, FaceInfo, PendingBrepInstance, OwnedStepConversionContext, StepFile, step_structure_lazy};
+use draper_step::{AssemblyNode, DetailedMeshInstance, PendingBrepInstance, OwnedStepConversionContext, StepFile, step_structure_lazy};
 use draper_geometry::Surface;
 use draper_geometry::Point3d;
 use egui_wgpu::RenderState;
@@ -407,16 +407,6 @@ pub struct ViewerApp {
     /// Whether to show the structure panel.
     show_structure: bool,
 
-    // ─── UV grid state ─────────────────────────────────────────────
-    /// Whether to show UV grid for the selected face.
-    show_uv_grid: bool,
-    /// UV grid U subdivisions.
-    uv_grid_u: usize,
-    /// UV grid V subdivisions.
-    uv_grid_v: usize,
-    /// Cached UV grid SVG string for the selected face.
-    uv_svg_cache: Option<((usize, u64), String)>, // ((instance_idx, face_id), svg_content)
-
     // ─── Face highlight state ──────────────────────────────────────
     /// Currently highlighted face: (instance_index, face_id_within_instance).
     highlighted_face: Option<(usize, u64)>,
@@ -482,8 +472,6 @@ pub struct ViewerApp {
     structure_tree_open: bool,
     /// Whether the face list section is expanded.
     face_list_open: bool,
-    /// Whether the UV grid section is expanded.
-    uv_grid_open: bool,
     /// Whether the face info section is expanded.
     face_info_open: bool,
 
@@ -1032,10 +1020,6 @@ impl ViewerApp {
             selected_instance: None,
             selected_face: None,
             show_structure: true,
-            show_uv_grid: false,
-            uv_grid_u: 10,
-            uv_grid_v: 10,
-            uv_svg_cache: None,
             highlighted_face: None,
             highlight_dirty: false,
             instance_triangle_ranges: Vec::new(),
@@ -1056,7 +1040,6 @@ impl ViewerApp {
             log_panel_open: true,
             structure_tree_open: true,
             face_list_open: true,
-            uv_grid_open: false,
             face_info_open: false,
             last_error: None,
             warning_count: 0,
@@ -1150,7 +1133,6 @@ impl ViewerApp {
         self.selected_face = None;
         self.highlighted_face = None;
         self.highlight_dirty = true;
-        self.uv_svg_cache = None;
         // Invalidate the per-solid UV breakdown cache so the next time the
         // UV window is opened we recompute from the freshly-loaded solid.
         self.solid_uv_breakdown = None;
@@ -4697,7 +4679,6 @@ impl eframe::App for ViewerApp {
         // Collect pending UI actions to avoid borrow checker conflicts
         let mut pending_instance_select: Option<usize> = None;
         let mut pending_face_select: Option<(usize, u64)> = None;
-        let mut pending_svg_export = false;
         let mut pending_copy_face_id: Option<u64> = None;
         let mut pending_visibility_toggle: Option<usize> = None;
 
@@ -4707,10 +4688,6 @@ impl eframe::App for ViewerApp {
             let detailed_instances_clone = self.detailed_instances.clone();
             let selected_instance = self.selected_instance;
             let selected_face = self.selected_face;
-            let uv_grid_u = self.uv_grid_u;
-            let uv_grid_v = self.uv_grid_v;
-            let show_uv_grid = self.show_uv_grid;
-            let uv_svg_cache_key = self.uv_svg_cache.as_ref().map(|(key, _)| *key);
             let open_tree_nodes = self.open_tree_nodes.clone();
             let scroll_to_tree_node = self.scroll_to_tree_node.clone();
             let scroll_to_face_id = self.scroll_to_face_id;
@@ -4844,243 +4821,6 @@ impl eframe::App for ViewerApp {
 
                     ui.separator();
 
-                    // ─── UV Grid Controls (collapsible) ────────────────────────────────
-                    let uv_id = ui.make_persistent_id("uv_grid_section");
-                    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), uv_id, self.uv_grid_open)
-                        .show_header(ui, |ui| {
-                            ui.heading(egui::RichText::new("▼ UV Grid").size(12.0));
-                        }).body(|ui| {
-                            ui.checkbox(&mut self.show_uv_grid, "Show UV grid");
-                            ui.horizontal(|ui| {
-                                ui.label("U divs:");
-                                ui.add(egui::DragValue::new(&mut self.uv_grid_u).range(2..=50));
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label("V divs:");
-                                ui.add(egui::DragValue::new(&mut self.uv_grid_v).range(2..=50));
-                            });
-
-                    // ─── UV Grid Display ─────────────────────────────────
-                    if show_uv_grid {
-                        if let Some(inst_idx) = selected_instance {
-                            if let Some((_, face_id)) = selected_face {
-                                if let Some(inst) = detailed_instances_clone.get(inst_idx) {
-                                    if let Some(face) = inst.faces.iter().find(|f| f.face_id == face_id) {
-                                        // Check cache
-                                        let cache_key = (inst_idx, face_id);
-                                        let needs_regen = uv_svg_cache_key != Some(cache_key);
-                                        if needs_regen {
-                                            let svg = generate_uv_svg(face, uv_grid_u, uv_grid_v);
-                                            self.uv_svg_cache = Some((cache_key, svg));
-                                        }
-
-                                        // Draw UV grid in the panel using custom painting
-                                        let available = ui.available_size();
-                                        let size = available.x.min(available.y - 30.0).min(400.0);
-                                        if size > 50.0 {
-                                            let (rect, _response) = ui.allocate_exact_size(
-                                                egui::vec2(size, size),
-                                                egui::Sense::hover(),
-                                            );
-                                            // Draw UV grid background
-                                            ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgb(26, 26, 46));
-
-                                            let margin = size * 0.067; // 40/600 ratio
-                                            let draw_size = size - 2.0 * margin;
-
-                                            // Compute UV bounds from face
-                                            let mut u_min = f64::MAX;
-                                            let mut u_max = f64::MIN;
-                                            let mut v_min = f64::MAX;
-                                            let mut v_max = f64::MIN;
-                                            for polyline in &face.outer_uv_boundary {
-                                                for pt in polyline {
-                                                    u_min = u_min.min(pt.u); u_max = u_max.max(pt.u);
-                                                    v_min = v_min.min(pt.v); v_max = v_max.max(pt.v);
-                                                }
-                                            }
-                                            if u_min >= u_max || v_min >= v_max {
-                                                match &face.surface {
-                                                    Surface::Nurbs(n) => {
-                                                        let (ur0, ur1) = n.u_range();
-                                                        let (vr0, vr1) = n.v_range();
-                                                        u_min = ur0; u_max = ur1; v_min = vr0; v_max = vr1;
-                                                    }
-                                                    _ => { u_min = 0.0; u_max = 1.0; v_min = 0.0; v_max = 1.0; }
-                                                }
-                                            }
-                                            let u_range = (u_max - u_min).max(1e-6);
-                                            let v_range = (v_max - v_min).max(1e-6);
-                                            u_min -= u_range * 0.05; u_max += u_range * 0.05;
-                                            v_min -= v_range * 0.05; v_max += v_range * 0.05;
-
-                                            let margin_f64 = margin as f64;
-                                            let draw_size_f64 = draw_size as f64;
-                                            let rect_left = rect.left() as f64;
-                                            let rect_top = rect.top() as f64;
-                                            // map_u/map_v must return SCREEN coords that are relative to
-                                            // the rect (the allocated painter area). Without the
-                                            // rect.left()/rect.top() offset, the painted content would
-                                            // stay at screen position (margin, margin) regardless of
-                                            // where the parent panel is.
-                                            let map_u = |u: f64| -> f32 { (rect_left + margin_f64 + (u - u_min) / (u_max - u_min) * draw_size_f64) as f32 };
-                                            let map_v = |v: f64| -> f32 { (rect_top + margin_f64 + (1.0 - (v - v_min) / (v_max - v_min)) * draw_size_f64) as f32 };
-
-                                            // Draw grid lines
-                                            let u_divs = uv_grid_u.min(50);
-                                            let v_divs = uv_grid_v.min(50);
-                                            for i in 0..=u_divs {
-                                                let u = u_min + (u_max - u_min) * i as f64 / u_divs as f64;
-                                                let x = map_u(u);
-                                                ui.painter().line_segment(
-                                                    [egui::pos2(x, rect.top() + margin), egui::pos2(x, rect.bottom() - margin)],
-                                                    egui::Stroke::new(0.5, egui::Color32::from_rgb(51, 51, 68)),
-                                                );
-                                            }
-                                            for j in 0..=v_divs {
-                                                let v = v_min + (v_max - v_min) * j as f64 / v_divs as f64;
-                                                let y = map_v(v);
-                                                ui.painter().line_segment(
-                                                    [egui::pos2(rect.left() + margin, y), egui::pos2(rect.right() - margin, y)],
-                                                    egui::Stroke::new(0.5, egui::Color32::from_rgb(51, 51, 68)),
-                                                );
-                                            }
-
-                                            // Draw outer boundary
-                                            for polyline in &face.outer_uv_boundary {
-                                                if polyline.len() < 2 { continue; }
-                                                let points: Vec<egui::Pos2> = polyline.iter()
-                                                    .map(|pt| egui::pos2(map_u(pt.u), map_v(pt.v)))
-                                                    .collect();
-                                                ui.painter().line(points, egui::Stroke::new(1.5, egui::Color32::from_rgb(0, 255, 136)));
-                                            }
-
-                                            // Draw inner boundaries (holes)
-                                            for boundary in &face.inner_uv_boundaries {
-                                                for polyline in boundary {
-                                                    if polyline.len() < 2 { continue; }
-                                                    let points: Vec<egui::Pos2> = polyline.iter()
-                                                        .map(|pt| egui::pos2(map_u(pt.u), map_v(pt.v)))
-                                                        .collect();
-                                                    ui.painter().line(points, egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 68, 68)));
-                                                }
-                                            }
-
-                                            // Build a combined outer boundary polygon for point-in-polygon test
-                                            let outer_uv_poly: Vec<(f64, f64)> = face.outer_uv_boundary.iter()
-                                                .flat_map(|pl| pl.iter().map(|pt| (pt.u, pt.v)))
-                                                .collect();
-
-                                            // Draw UV triangles (the actual triangulation)
-                                            if !face.uv_triangles.is_empty() {
-                                                // Build hole polygons for classification
-                                                let hole_polys: Vec<Vec<(f64, f64)>> = face.inner_uv_boundaries.iter()
-                                                    .flat_map(|boundaries| boundaries.iter().map(|poly| {
-                                                        poly.iter().map(|pt| (pt.u, pt.v)).collect()
-                                                    }))
-                                                    .collect();
-
-                                                let tri_limit = 2000.min(face.uv_triangles.len());
-                                                for (ti, tri) in face.uv_triangles.iter().enumerate() {
-                                                    let cu = (tri[0].u + tri[1].u + tri[2].u) / 3.0;
-                                                    let cv = (tri[0].v + tri[1].v + tri[2].v) / 3.0;
-                                                    let in_hole = hole_polys.iter().any(|h| point_in_polygon(cu, cv, h));
-                                                    let in_outer = !outer_uv_poly.is_empty() && point_in_polygon(cu, cv, &outer_uv_poly);
-
-                                                    let p0 = egui::pos2(map_u(tri[0].u), map_v(tri[0].v));
-                                                    let p1 = egui::pos2(map_u(tri[1].u), map_v(tri[1].v));
-                                                    let p2 = egui::pos2(map_u(tri[2].u), map_v(tri[2].v));
-
-                                                    if in_hole || !in_outer {
-                                                        // Triangle inside hole — red fill + outline
-                                                        let points = vec![p0, p1, p2];
-                                                        ui.painter().add(egui::Shape::convex_polygon(
-                                                            points,
-                                                            egui::Color32::from_rgba_premultiplied(255, 34, 34, 50),
-                                                            egui::Stroke::new(0.5, egui::Color32::from_rgba_premultiplied(255, 68, 68, 120)),
-                                                        ));
-                                                    } else {
-                                                        // Valid triangle — blue fill + outline
-                                                        let points = vec![p0, p1, p2];
-                                                        let fill = if ti % 2 == 0 {
-                                                            egui::Color32::from_rgba_premultiplied(68, 136, 255, 20)
-                                                        } else {
-                                                            egui::Color32::from_rgba_premultiplied(85, 170, 255, 20)
-                                                        };
-                                                        let stroke = if ti % 2 == 0 {
-                                                            egui::Stroke::new(0.4, egui::Color32::from_rgba_premultiplied(68, 136, 255, 160))
-                                                        } else {
-                                                            egui::Stroke::new(0.4, egui::Color32::from_rgba_premultiplied(85, 170, 255, 160))
-                                                        };
-                                                        ui.painter().add(egui::Shape::convex_polygon(points, fill, stroke));
-                                                    }
-                                                    if ti >= tri_limit { break; }
-                                                }
-                                            }
-
-                                            // Draw grid intersection points (only inside boundary)
-                                            for i in 0..=u_divs {
-                                                for j in 0..=v_divs {
-                                                    let u = u_min + (u_max - u_min) * i as f64 / u_divs as f64;
-                                                    let v = v_min + (v_max - v_min) * j as f64 / v_divs as f64;
-                                                    let pt3d = face.surface.point_at(u, v);
-                                                    if pt3d.x.is_finite() && pt3d.y.is_finite() && pt3d.z.is_finite() {
-                                                        // Only draw dot if inside the outer boundary polygon
-                                                        let inside = !outer_uv_poly.is_empty() && point_in_polygon(u, v, &outer_uv_poly);
-                                                        if inside {
-                                                            let x = map_u(u);
-                                                            let y = map_v(v);
-                                                            ui.painter().circle_filled(
-                                                                egui::pos2(x, y), 2.0,
-                                                                egui::Color32::from_rgba_premultiplied(102, 136, 255, 180),
-                                                            );
-                                                        }
-                                                    }
-                                                }
-                                            }
-
-                                            // Labels
-                                            ui.painter().text(
-                                                egui::pos2(rect.center().x, rect.bottom() - 5.0),
-                                                egui::Align2::CENTER_BOTTOM,
-                                                format!("U ({:.2}..{:.2})", u_min, u_max),
-                                                egui::FontId::proportional(10.0),
-                                                egui::Color32::from_rgb(170, 170, 170),
-                                            );
-                                        }
-
-                                        // SVG export button
-                                        ui.add_space(4.0);
-                                        #[cfg(not(target_arch = "wasm32"))]
-                                        {
-                                            ui.horizontal(|ui| {
-                                                if ui.button("Save UV as SVG...").clicked() {
-                                                    pending_svg_export = true;
-                                                }
-                                            });
-                                        }
-
-                                        // SVG export on web (download)
-                                        #[cfg(target_arch = "wasm32")]
-                                        {
-                                            ui.add_space(4.0);
-                                            if ui.button("Download UV as SVG").clicked() {
-                                                pending_svg_export = true;
-                                            }
-                                        }
-                                    }
-                                }
-                            } else {
-                                ui.label(egui::RichText::new("Select a face to see UV grid").size(11.0).color(egui::Color32::GRAY));
-                            }
-                        } else {
-                            ui.label(egui::RichText::new("Select an instance first").size(11.0).color(egui::Color32::GRAY));
-                        }
-                    }
-                        }); // close UV Grid .body()
-
-                    ui.separator();
-
                     // ─── Selected Face Info (collapsible) ───────────────────────────────
                     let info_id = ui.make_persistent_id("face_info_section");
                     egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), info_id, self.face_info_open)
@@ -5147,7 +4887,6 @@ impl eframe::App for ViewerApp {
             self.selected_face = None;
             self.highlighted_face = None;
             self.highlight_dirty = true;
-            self.uv_svg_cache = None;
             // Find the path to this instance in the assembly tree and open it
             if let Some(ref tree) = self.assembly_tree {
                 let (path, target) = find_instance_path(tree, idx);
@@ -5160,7 +4899,6 @@ impl eframe::App for ViewerApp {
             self.selected_face = Some((inst_idx, fid));
             self.highlighted_face = Some((inst_idx, fid));
             self.highlight_dirty = true;
-            self.uv_svg_cache = None;
             self.scroll_to_face_id = Some(fid);
             self.log(&format!("Selected face #{} in instance #{}", fid, inst_idx));
             // Find the path to this instance in the assembly tree and open it
@@ -5168,52 +4906,6 @@ impl eframe::App for ViewerApp {
                 let (path, target) = find_instance_path(tree, inst_idx);
                 self.open_tree_nodes = path.into_iter().collect();
                 self.scroll_to_tree_node = target;
-            }
-        }
-        if pending_svg_export {
-            if let Some((_, ref svg_content)) = self.uv_svg_cache {
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("SVG", &["svg"])
-                        .save_file()
-                    {
-                        match std::fs::write(&path, svg_content) {
-                            Ok(()) => self.log(&format!("Exported UV SVG: {}", path.to_string_lossy())),
-                            Err(e) => self.log(&format!("SVG export error: {}", e)),
-                        }
-                    }
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    // Download SVG via browser
-                    use wasm_bindgen::prelude::*;
-                    if let Some(window) = web_sys::window() {
-                        if let Some(document) = window.document() {
-                            let blob = web_sys::Blob::new_with_str_sequence(
-                                &js_sys::Array::of1(&JsValue::from_str(svg_content)),
-                            ).ok();
-                            if let Some(blob) = blob {
-                                let url = web_sys::Url::create_object_url_with_blob(&blob).ok();
-                                if let Some(url) = url {
-                                    let a = document.create_element("a").ok();
-                                    if let Some(a) = a {
-                                        let _ = a.set_attribute("href", &url);
-                                        let _ = a.set_attribute("download", "uv_grid.svg");
-                                        let _ = a.set_attribute("style", "display:none");
-                                        if let Some(body) = document.body() {
-                                            let _ = body.append_child(&a);
-                                            let html_elem: web_sys::HtmlElement = a.unchecked_into();
-                                            html_elem.click();
-                                        }
-                                    }
-                                    web_sys::Url::revoke_object_url(&url).ok();
-                                }
-                            }
-                        }
-                    }
-                    self.log("Exported UV SVG (download)");
-                }
             }
         }
         if let Some(fid) = pending_copy_face_id {
@@ -5648,7 +5340,6 @@ impl eframe::App for ViewerApp {
                     self.selected_face = None;
                     self.highlighted_face = None;
                     self.highlight_dirty = true;
-                    self.uv_svg_cache = None;
                     self.open_tree_nodes.clear();
                     self.scroll_to_tree_node = None;
                     self.scroll_to_face_id = None;
@@ -5863,7 +5554,6 @@ impl eframe::App for ViewerApp {
                                         self.selected_face = Some((pick.instance_idx, fid));
                                         self.highlighted_face = Some((pick.instance_idx, fid));
                                         self.highlight_dirty = true;
-                                        self.uv_svg_cache = None;
                                         self.scroll_to_face_id = Some(fid);
                                         self.log(&format!("Picked face #{} (instance #{})", fid, pick.instance_idx));
                                         // Navigate structure tree
@@ -5879,7 +5569,6 @@ impl eframe::App for ViewerApp {
                                     self.selected_face = None;
                                     self.highlighted_face = None;
                                     self.highlight_dirty = true;
-                                    self.uv_svg_cache = None;
                                     self.log(&format!("Picked instance #{}", pick.instance_idx));
                                     // Navigate structure tree
                                     if let Some(ref tree) = self.assembly_tree {
@@ -5894,7 +5583,6 @@ impl eframe::App for ViewerApp {
                                 self.selected_face = None;
                                 self.highlighted_face = None;
                                 self.highlight_dirty = true;
-                                self.uv_svg_cache = None;
                                 self.open_tree_nodes.clear();
                                 self.scroll_to_tree_node = None;
                                 self.scroll_to_face_id = None;
@@ -6095,17 +5783,29 @@ impl eframe::App for ViewerApp {
         // ═══ Pending UV SVG export ═════════════════════════════════════════════
         if self.pending_solid_uv_svg_export {
             self.pending_solid_uv_svg_export = false;
-            // Ensure the breakdown is computed for the current solid.
+            // Resolve the active solid: current_solid (primitive/NURBS) or a
+            // synthesized STEP solid from detailed_instances.
+            let active_solid: Option<Solid> = if let Some(s) = self.current_solid.clone() {
+                Some(s)
+            } else {
+                let chosen_idx = self
+                    .selected_instance
+                    .or_else(|| if self.detailed_instances.is_empty() { None } else { Some(0) });
+                chosen_idx
+                    .and_then(|i| self.detailed_instances.get(i))
+                    .map(solid_from_detailed_instance)
+            };
+            // Ensure the breakdown is computed for the active solid.
             if self.solid_uv_breakdown.is_none() {
-                if let Some(ref solid) = self.current_solid {
+                if let Some(ref solid) = active_solid {
                     let name = self.current_model.name.clone();
                     self.solid_uv_breakdown = Some(compute_solid_uv_breakdown(solid, &name));
                 }
             }
             if let Some(ref breakdown) = self.solid_uv_breakdown {
                 if let Some(face_uv) = breakdown.faces.get(self.uv_window_face_idx) {
-                    // Get the surface from the solid for grid-point rendering.
-                    let surface: Option<Surface> = self.current_solid.as_ref().and_then(|s| {
+                    // Get the surface from the active solid for grid-point rendering.
+                    let surface: Option<Surface> = active_solid.as_ref().and_then(|s| {
                         s.outer_shell.as_ref().and_then(|sh| {
                             sh.faces.get(self.uv_window_face_idx)
                                 .and_then(|f| f.surface.clone())
@@ -6159,10 +5859,59 @@ impl ViewerApp {
     /// canvas (rendered directly via painter), and Save / Close buttons.
     /// On WASM the Save button triggers a browser SVG download; on native
     /// it opens an rfd save-file dialog.
+    ///
+    /// Works for BOTH primitives/NURBS (uses `self.current_solid`) AND
+    /// STEP files (builds a Solid on-the-fly from the selected
+    /// `detailed_instances` entry, falling back to the first instance
+    /// when nothing is selected). The face selected in the structure
+    /// panel (selected_face) is automatically synced into the UV window's
+    /// face index, so the user can click a face in 3D / structure panel
+    /// and immediately see its UV breakdown.
     fn draw_uv_window(&mut self, ctx: &egui::Context) {
         if !self.show_uv_window {
             return;
         }
+
+        // ─── Determine the "active solid" for the UV window ───────────────
+        // For primitives/NURBS gallery, `self.current_solid` is set.
+        // For STEP files, current_solid is None — we synthesize a Solid
+        // from the selected `detailed_instances` entry (or fall back to
+        // the first instance if nothing is selected). This is what makes
+        // the UV Breakdown window work for STEP files.
+        let active_solid: Option<Solid> = if let Some(s) = self.current_solid.clone() {
+            Some(s)
+        } else {
+            // STEP file path. Pick the selected instance, or fall back to
+            // the first instance so the window always shows SOMETHING.
+            let chosen_idx = self
+                .selected_instance
+                .or_else(|| if self.detailed_instances.is_empty() { None } else { Some(0) });
+            chosen_idx
+                .and_then(|i| self.detailed_instances.get(i))
+                .map(solid_from_detailed_instance)
+        };
+
+        // ─── Sync uv_window_face_idx with the selected face ──────────────
+        // If the user clicked a face in the structure panel or 3D view,
+        // jump the UV window to that face's index. We resolve the face_id
+        // to a positional index in the chosen instance's faces array
+        // (for STEP files) — for primitives/NURBS, selected_face's face_id
+        // doesn't correspond to shell.faces indices, so we skip the sync.
+        if let Some((inst_idx, face_id)) = self.selected_face {
+            if self.current_solid.is_none() {
+                if let Some(inst) = self.detailed_instances.get(inst_idx) {
+                    if let Some(pos) = inst.faces.iter().position(|f| f.face_id == face_id) {
+                        if self.uv_window_face_idx != pos {
+                            self.uv_window_face_idx = pos;
+                            self.uv_window_zoom = 1.0;
+                            self.uv_window_pan = [0.0, 0.0];
+                            self.uv_window_prev_face_idx = pos;
+                        }
+                    }
+                }
+            }
+        }
+
         // Reset zoom/pan when the user switches faces — the new face has a
         // different UV domain, so the previous pan/zoom would be meaningless.
         if self.uv_window_prev_face_idx != self.uv_window_face_idx {
@@ -6172,7 +5921,7 @@ impl ViewerApp {
         }
         // Compute breakdown on demand if not cached.
         if self.solid_uv_breakdown.is_none() {
-            if let Some(ref solid) = self.current_solid {
+            if let Some(ref solid) = active_solid {
                 let name = self.current_model.name.clone();
                 self.solid_uv_breakdown = Some(compute_solid_uv_breakdown(solid, &name));
                 // Clamp face index to valid range.
@@ -6189,7 +5938,9 @@ impl ViewerApp {
         // but we also need to mutate self inside the window. So we take
         // the breakdown out temporarily.
         let breakdown_taken = self.solid_uv_breakdown.take();
-        let current_solid_taken = self.current_solid.clone();
+        // For surface lookup inside the window, use the active solid
+        // (which may be a synthesized STEP solid, not self.current_solid).
+        let current_solid_taken = active_solid.clone();
         let model_name = self.current_model.name.clone();
 
         egui::Window::new("UV Breakdown")
@@ -7092,7 +6843,6 @@ impl ViewerApp {
                                 self.selected_face = None;
                                 self.highlighted_face = None;
                                 self.highlight_dirty = true;
-                                self.uv_svg_cache = None;
                                 self.open_tree_nodes.clear();
                                 self.scroll_to_tree_node = None;
                                 self.scroll_to_face_id = None;
@@ -7413,7 +7163,6 @@ impl ViewerApp {
             // Collect pending UI actions
             let mut pending_instance_select: Option<usize> = None;
             let mut pending_face_select: Option<(usize, u64)> = None;
-            let mut pending_svg_export = false;
             let mut pending_copy_face_id: Option<u64> = None;
             let mut pending_visibility_toggle: Option<usize> = None;
 
@@ -7421,10 +7170,6 @@ impl ViewerApp {
             let detailed_instances_clone = self.detailed_instances.clone();
             let selected_instance = self.selected_instance;
             let selected_face = self.selected_face;
-            let uv_grid_u = self.uv_grid_u;
-            let uv_grid_v = self.uv_grid_v;
-            let show_uv_grid = self.show_uv_grid;
-            let uv_svg_cache_key = self.uv_svg_cache.as_ref().map(|(key, _)| *key);
             let open_tree_nodes = self.open_tree_nodes.clone();
             let scroll_to_tree_node = self.scroll_to_tree_node.clone();
             let scroll_to_face_id = self.scroll_to_face_id;
@@ -7498,175 +7243,6 @@ impl ViewerApp {
                         }
                         ui.separator();
 
-                        // UV Grid
-                        ui.heading(egui::RichText::new("UV Grid").size(13.0));
-                        ui.checkbox(&mut self.show_uv_grid, "Show UV grid");
-                        ui.horizontal(|ui| {
-                            ui.label("U:");
-                            ui.add(egui::DragValue::new(&mut self.uv_grid_u).range(2..=50));
-                            ui.label("V:");
-                            ui.add(egui::DragValue::new(&mut self.uv_grid_v).range(2..=50));
-                        });
-
-                        if show_uv_grid {
-                            if let Some(inst_idx) = selected_instance {
-                                if let Some((_, face_id)) = selected_face {
-                                    if let Some(inst) = detailed_instances_clone.get(inst_idx) {
-                                        if let Some(face) = inst.faces.iter().find(|f| f.face_id == face_id) {
-                                            let cache_key = (inst_idx, face_id);
-                                            let needs_regen = uv_svg_cache_key != Some(cache_key);
-                                            if needs_regen {
-                                                let svg = generate_uv_svg(face, uv_grid_u, uv_grid_v);
-                                                self.uv_svg_cache = Some((cache_key, svg));
-                                            }
-                                            let available = ui.available_size();
-                                            let size = available.x.min(available.y - 20.0).min(350.0);
-                                            if size > 50.0 {
-                                                let (rect, _response) = ui.allocate_exact_size(
-                                                    egui::vec2(size, size),
-                                                    egui::Sense::hover(),
-                                                );
-                                                ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgb(26, 26, 46));
-
-                                                let margin_f = size * 0.067;
-                                                let draw_size = size - 2.0 * margin_f;
-
-                                                // Compute UV bounds
-                                                let mut u_min = f64::MAX; let mut u_max = f64::MIN;
-                                                let mut v_min = f64::MAX; let mut v_max = f64::MIN;
-                                                for polyline in &face.outer_uv_boundary {
-                                                    for pt in polyline {
-                                                        u_min = u_min.min(pt.u); u_max = u_max.max(pt.u);
-                                                        v_min = v_min.min(pt.v); v_max = v_max.max(pt.v);
-                                                    }
-                                                }
-                                                if u_min >= u_max || v_min >= v_max {
-                                                    match &face.surface {
-                                                        Surface::Nurbs(n) => {
-                                                            let (ur0, ur1) = n.u_range();
-                                                            let (vr0, vr1) = n.v_range();
-                                                            u_min = ur0; u_max = ur1; v_min = vr0; v_max = vr1;
-                                                        }
-                                                        _ => { u_min = 0.0; u_max = 1.0; v_min = 0.0; v_max = 1.0; }
-                                                    }
-                                                }
-                                                let u_range = (u_max - u_min).max(1e-6);
-                                                let v_range = (v_max - v_min).max(1e-6);
-                                                u_min -= u_range * 0.05; u_max += u_range * 0.05;
-                                                v_min -= v_range * 0.05; v_max += v_range * 0.05;
-
-                                                let mf = margin_f as f64;
-                                                let ds = draw_size as f64;
-                                                let rect_left = rect.left() as f64;
-                                                let rect_top = rect.top() as f64;
-                                                // map_u/map_v must return SCREEN coords relative to the
-                                                // rect — otherwise the painted content sticks at screen
-                                                // position (mf, mf) when the parent window is moved.
-                                                let map_u = |u: f64| -> f32 { (rect_left + mf + (u - u_min) / (u_max - u_min) * ds) as f32 };
-                                                let map_v = |v: f64| -> f32 { (rect_top + mf + (1.0 - (v - v_min) / (v_max - v_min)) * ds) as f32 };
-
-                                                // Grid lines
-                                                for i in 0..=uv_grid_u.min(50) {
-                                                    let u = u_min + (u_max - u_min) * i as f64 / uv_grid_u.min(50) as f64;
-                                                    let x = map_u(u);
-                                                    ui.painter().line_segment(
-                                                        [egui::pos2(x, rect.top() + margin_f), egui::pos2(x, rect.bottom() - margin_f)],
-                                                        egui::Stroke::new(0.5, egui::Color32::from_rgb(51, 51, 68)),
-                                                    );
-                                                }
-                                                for j in 0..=uv_grid_v.min(50) {
-                                                    let v = v_min + (v_max - v_min) * j as f64 / uv_grid_v.min(50) as f64;
-                                                    let y = map_v(v);
-                                                    ui.painter().line_segment(
-                                                        [egui::pos2(rect.left() + margin_f, y), egui::pos2(rect.right() - margin_f, y)],
-                                                        egui::Stroke::new(0.5, egui::Color32::from_rgb(51, 51, 68)),
-                                                    );
-                                                }
-
-                                                // Outer boundary
-                                                for polyline in &face.outer_uv_boundary {
-                                                    if polyline.len() < 2 { continue; }
-                                                    let points: Vec<egui::Pos2> = polyline.iter()
-                                                        .map(|pt| egui::pos2(map_u(pt.u), map_v(pt.v)))
-                                                        .collect();
-                                                    ui.painter().line(points, egui::Stroke::new(1.5, egui::Color32::from_rgb(0, 255, 136)));
-                                                }
-                                                // Inner boundaries (holes)
-                                                for boundary in &face.inner_uv_boundaries {
-                                                    for polyline in boundary {
-                                                        if polyline.len() < 2 { continue; }
-                                                        let points: Vec<egui::Pos2> = polyline.iter()
-                                                            .map(|pt| egui::pos2(map_u(pt.u), map_v(pt.v)))
-                                                            .collect();
-                                                        ui.painter().line(points, egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 68, 68)));
-                                                    }
-                                                }
-
-                                                // UV triangles
-                                                let outer_uv_poly: Vec<(f64, f64)> = face.outer_uv_boundary.iter()
-                                                    .flat_map(|pl| pl.iter().map(|pt| (pt.u, pt.v))).collect();
-                                                if !face.uv_triangles.is_empty() {
-                                                    let hole_polys: Vec<Vec<(f64, f64)>> = face.inner_uv_boundaries.iter()
-                                                        .flat_map(|boundaries| boundaries.iter().map(|poly| {
-                                                            poly.iter().map(|pt| (pt.u, pt.v)).collect()
-                                                        })).collect();
-                                                    let tri_limit = 1500.min(face.uv_triangles.len());
-                                                    for (ti, tri) in face.uv_triangles.iter().enumerate() {
-                                                        let cu = (tri[0].u + tri[1].u + tri[2].u) / 3.0;
-                                                        let cv = (tri[0].v + tri[1].v + tri[2].v) / 3.0;
-                                                        let in_hole = hole_polys.iter().any(|h| point_in_polygon(cu, cv, h));
-                                                        let in_outer = !outer_uv_poly.is_empty() && point_in_polygon(cu, cv, &outer_uv_poly);
-                                                        let p0 = egui::pos2(map_u(tri[0].u), map_v(tri[0].v));
-                                                        let p1 = egui::pos2(map_u(tri[1].u), map_v(tri[1].v));
-                                                        let p2 = egui::pos2(map_u(tri[2].u), map_v(tri[2].v));
-                                                        if in_hole || !in_outer {
-                                                            let points = vec![p0, p1, p2];
-                                                            ui.painter().add(egui::Shape::convex_polygon(points,
-                                                                egui::Color32::from_rgba_premultiplied(255, 34, 34, 50),
-                                                                egui::Stroke::new(0.5, egui::Color32::from_rgba_premultiplied(255, 68, 68, 120)),
-                                                            ));
-                                                        } else {
-                                                            let points = vec![p0, p1, p2];
-                                                            let fill = if ti % 2 == 0 {
-                                                                egui::Color32::from_rgba_premultiplied(68, 136, 255, 20)
-                                                            } else {
-                                                                egui::Color32::from_rgba_premultiplied(85, 170, 255, 20)
-                                                            };
-                                                            let stroke = if ti % 2 == 0 {
-                                                                egui::Stroke::new(0.4, egui::Color32::from_rgba_premultiplied(68, 136, 255, 160))
-                                                            } else {
-                                                                egui::Stroke::new(0.4, egui::Color32::from_rgba_premultiplied(85, 170, 255, 160))
-                                                            };
-                                                            ui.painter().add(egui::Shape::convex_polygon(points, fill, stroke));
-                                                        }
-                                                        if ti >= tri_limit { break; }
-                                                    }
-                                                }
-                                            }
-
-                                            // SVG export
-                                            #[cfg(target_arch = "wasm32")]
-                                            {
-                                                if ui.button("Download UV as SVG").clicked() {
-                                                    pending_svg_export = true;
-                                                }
-                                            }
-                                            #[cfg(not(target_arch = "wasm32"))]
-                                            {
-                                                if ui.button("Save UV as SVG...").clicked() {
-                                                    pending_svg_export = true;
-                                                }
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    ui.label(egui::RichText::new("Select a face").size(11.0).color(egui::Color32::GRAY));
-                                }
-                            } else {
-                                ui.label(egui::RichText::new("Select an instance first").size(11.0).color(egui::Color32::GRAY));
-                            }
-                        }
-                        ui.separator();
 
                         // Face Info
                         ui.heading(egui::RichText::new("Face Info").size(13.0));
@@ -7713,7 +7289,6 @@ impl ViewerApp {
                 self.selected_face = None;
                 self.highlighted_face = None;
                 self.highlight_dirty = true;
-                self.uv_svg_cache = None;
                 if let Some(ref tree) = self.assembly_tree {
                     let (path, target) = find_instance_path(tree, idx);
                     self.open_tree_nodes = path.into_iter().collect();
@@ -7725,56 +7300,11 @@ impl ViewerApp {
                 self.selected_face = Some((inst_idx, fid));
                 self.highlighted_face = Some((inst_idx, fid));
                 self.highlight_dirty = true;
-                self.uv_svg_cache = None;
                 self.scroll_to_face_id = Some(fid);
                 if let Some(ref tree) = self.assembly_tree {
                     let (path, target) = find_instance_path(tree, inst_idx);
                     self.open_tree_nodes = path.into_iter().collect();
                     self.scroll_to_tree_node = target;
-                }
-            }
-            if pending_svg_export {
-                if let Some((_, ref svg_content)) = self.uv_svg_cache {
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        use wasm_bindgen::prelude::*;
-                        if let Some(window) = web_sys::window() {
-                            if let Some(document) = window.document() {
-                                let blob = web_sys::Blob::new_with_str_sequence(
-                                    &js_sys::Array::of1(&JsValue::from_str(svg_content)),
-                                ).ok();
-                                if let Some(blob) = blob {
-                                    let url = web_sys::Url::create_object_url_with_blob(&blob).ok();
-                                    if let Some(url) = url {
-                                        let a = document.create_element("a").ok();
-                                        if let Some(a) = a {
-                                            let _ = a.set_attribute("href", &url);
-                                            let _ = a.set_attribute("download", "uv_grid.svg");
-                                            let _ = a.set_attribute("style", "display:none");
-                                            if let Some(body) = document.body() {
-                                                let _ = body.append_child(&a);
-                                                let html_elem: web_sys::HtmlElement = a.unchecked_into();
-                                                html_elem.click();
-                                            }
-                                        }
-                                        web_sys::Url::revoke_object_url(&url).ok();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("SVG", &["svg"])
-                            .save_file()
-                        {
-                            match std::fs::write(&path, svg_content) {
-                                Ok(()) => self.log(&format!("Exported UV SVG: {}", path.to_string_lossy())),
-                                Err(e) => self.log(&format!("SVG export error: {}", e)),
-                            }
-                        }
-                    }
                 }
             }
             if let Some(fid) = pending_copy_face_id {
@@ -8009,6 +7539,27 @@ fn unwrap_triangle_seam(
     result
 }
 
+/// Build a `Solid` from a STEP `DetailedMeshInstance`'s face list.
+///
+/// STEP files store per-face surface geometry in `FaceInfo.surface` (a
+/// `Surface` enum), but the viewer's UV breakdown pipeline works on
+/// `Solid`/`Shell`/`Face` from `draper-topology`. This helper bridges the
+/// two representations: each `FaceInfo.surface` is wrapped in
+/// `Face::new_surface_only` (no outer wire, so the breakdown falls back
+/// to the surface's natural UV domain — exactly the same path used by
+/// the NURBS gallery loaders via `build_nurbs_surface_mesh`).
+///
+/// The resulting Solid is what powers the UV Breakdown window when a
+/// STEP file is loaded (no `current_solid` is set for STEP imports).
+fn solid_from_detailed_instance(inst: &DetailedMeshInstance) -> Solid {
+    let faces: Vec<Face> = inst
+        .faces
+        .iter()
+        .map(|fi| Face::new_surface_only(fi.surface.clone()))
+        .collect();
+    Solid::new(Shell::new(faces))
+}
+
 /// Compute the UV breakdown for every face of a solid.
 ///
 /// For each face, samples the outer wire (and any inner wires / holes)
@@ -8229,9 +7780,6 @@ fn compute_solid_uv_breakdown(solid: &Solid, model_name: &str) -> SolidUvBreakdo
 ///   - Inner boundaries (holes) in red (dashed)
 ///   - Surface evaluation grid points (only those inside the outer boundary)
 ///   - Axis labels (U range, V range, face index, surface type, forward flag)
-///
-/// This is the solid-face analogue of `generate_uv_svg` (which works on
-/// STEP `FaceInfo`). The two functions produce visually consistent SVGs.
 fn generate_solid_face_uv_svg(
     face_uv: &FaceUvBreakdown,
     u_divs: usize,
@@ -8484,216 +8032,6 @@ fn generate_solid_face_uv_svg(
             svg_width - 10.0, svg_height - 5.0
         ));
     }
-
-    svg.push_str("</svg>\n");
-    svg
-}
-
-/// Generate UV grid SVG for a face (standalone function to avoid borrow conflicts).
-fn generate_uv_svg(face: &FaceInfo, u_divs: usize, v_divs: usize) -> String {
-    let svg_width = 600.0;
-    let svg_height = 600.0;
-    let margin = 40.0;
-    let draw_w = svg_width - 2.0 * margin;
-    let draw_h = svg_height - 2.0 * margin;
-
-    // Compute UV bounding box from boundary polylines
-    let mut u_min = f64::MAX;
-    let mut u_max = f64::MIN;
-    let mut v_min = f64::MAX;
-    let mut v_max = f64::MIN;
-
-    for polyline in &face.outer_uv_boundary {
-        for pt in polyline {
-            u_min = u_min.min(pt.u);
-            u_max = u_max.max(pt.u);
-            v_min = v_min.min(pt.v);
-            v_max = v_max.max(pt.v);
-        }
-    }
-    for boundary in &face.inner_uv_boundaries {
-        for polyline in boundary {
-            for pt in polyline {
-                u_min = u_min.min(pt.u);
-                u_max = u_max.max(pt.u);
-                v_min = v_min.min(pt.v);
-                v_max = v_max.max(pt.v);
-            }
-        }
-    }
-
-    if u_min >= u_max || v_min >= v_max {
-        match &face.surface {
-            Surface::Nurbs(n) => {
-                let (ur0, ur1) = n.u_range();
-                let (vr0, vr1) = n.v_range();
-                u_min = ur0; u_max = ur1; v_min = vr0; v_max = vr1;
-            }
-            _ => {
-                u_min = 0.0; u_max = 1.0; v_min = 0.0; v_max = 1.0;
-            }
-        }
-    }
-
-    let u_range = (u_max - u_min).max(1e-6);
-    let v_range = (v_max - v_min).max(1e-6);
-    u_min -= u_range * 0.05;
-    u_max += u_range * 0.05;
-    v_min -= v_range * 0.05;
-    v_max += v_range * 0.05;
-
-    let map_u = |u: f64| -> f64 { margin + (u - u_min) / (u_max - u_min) * draw_w };
-    let map_v = |v: f64| -> f64 { margin + (1.0 - (v - v_min) / (v_max - v_min)) * draw_h };
-
-    let mut svg = String::new();
-    svg.push_str(&format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-        <svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\">\n",
-        svg_width as i32, svg_height as i32, svg_width as i32, svg_height as i32
-    ));
-    svg.push_str(&format!(
-        "  <rect width=\"{}\" height=\"{}\" fill=\"#1a1a2e\"/>\n",
-        svg_width as i32, svg_height as i32
-    ));
-
-    for i in 0..=u_divs {
-        let u = u_min + (u_max - u_min) * i as f64 / u_divs as f64;
-        let x = map_u(u);
-        svg.push_str(&format!(
-            "  <line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"#334\" stroke-width=\"0.5\"/>\n",
-            x, margin, x, margin + draw_h
-        ));
-    }
-    for j in 0..=v_divs {
-        let v = v_min + (v_max - v_min) * j as f64 / v_divs as f64;
-        let y = map_v(v);
-        svg.push_str(&format!(
-            "  <line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"#334\" stroke-width=\"0.5\"/>\n",
-            margin, y, margin + draw_w, y
-        ));
-    }
-
-    for polyline in &face.outer_uv_boundary {
-        if polyline.len() < 2 { continue; }
-        let mut d = format!("M {:.2} {:.2}", map_u(polyline[0].u), map_v(polyline[0].v));
-        for pt in &polyline[1..] {
-            d.push_str(&format!(" L {:.2} {:.2}", map_u(pt.u), map_v(pt.v)));
-        }
-        d.push_str(" Z");
-        svg.push_str(&format!(
-            "  <path d=\"{}\" fill=\"none\" stroke=\"#00ff88\" stroke-width=\"1.5\"/>\n", d
-        ));
-    }
-
-    for boundary in &face.inner_uv_boundaries {
-        for polyline in boundary {
-            if polyline.len() < 2 { continue; }
-            let mut d = format!("M {:.2} {:.2}", map_u(polyline[0].u), map_v(polyline[0].v));
-            for pt in &polyline[1..] {
-                d.push_str(&format!(" L {:.2} {:.2}", map_u(pt.u), map_v(pt.v)));
-            }
-            d.push_str(" Z");
-            svg.push_str(&format!(
-                "  <path d=\"{}\" fill=\"none\" stroke=\"#ff4444\" stroke-width=\"1.5\" stroke-dasharray=\"4,2\"/>\n", d
-            ));
-        }
-    }
-
-    // Build outer boundary polygon for point-in-polygon clipping
-    let outer_uv_poly: Vec<(f64, f64)> = face.outer_uv_boundary.iter()
-        .flat_map(|pl| pl.iter().map(|pt| (pt.u, pt.v)))
-        .collect();
-
-    // Draw UV triangles (the actual triangulation result)
-    if !face.uv_triangles.is_empty() {
-        // Build hole polygons for classification
-        let hole_polys: Vec<Vec<(f64, f64)>> = face.inner_uv_boundaries.iter()
-            .flat_map(|boundaries| boundaries.iter().map(|poly| {
-                poly.iter().map(|pt| (pt.u, pt.v)).collect()
-            }))
-            .collect();
-
-        let n_triangles = face.uv_triangles.len();
-        let svg_limit = 3000.min(n_triangles);
-
-        for (ti, tri) in face.uv_triangles.iter().enumerate() {
-            let x0 = map_u(tri[0].u);
-            let y0 = map_v(tri[0].v);
-            let x1 = map_u(tri[1].u);
-            let y1 = map_v(tri[1].v);
-            let x2 = map_u(tri[2].u);
-            let y2 = map_v(tri[2].v);
-
-            // Classify: check if centroid is inside any hole
-            let cu = (tri[0].u + tri[1].u + tri[2].u) / 3.0;
-            let cv = (tri[0].v + tri[1].v + tri[2].v) / 3.0;
-            let in_hole = hole_polys.iter().any(|h| point_in_polygon(cu, cv, h));
-            let in_outer = !outer_uv_poly.is_empty() && point_in_polygon(cu, cv, &outer_uv_poly);
-
-            if in_hole || !in_outer {
-                // Triangle inside a hole or outside boundary — red fill
-                svg.push_str(&format!(
-                    "  <polygon points=\"{:.2},{:.2} {:.2},{:.2} {:.2},{:.2}\" fill=\"#ff222244\" stroke=\"#ff4444\" stroke-width=\"0.5\"/>\n",
-                    x0, y0, x1, y1, x2, y2
-                ));
-            } else {
-                // Valid triangle — use alternating colors for visibility
-                let fill_color = if ti % 2 == 0 { "#4488ff22" } else { "#55aaff22" };
-                let stroke_color = if ti % 2 == 0 { "#4488ff" } else { "#55aaff" };
-                svg.push_str(&format!(
-                    "  <polygon points=\"{:.2},{:.2} {:.2},{:.2} {:.2},{:.2}\" fill=\"{}\" stroke=\"{}\" stroke-width=\"0.5\"/>\n",
-                    x0, y0, x1, y1, x2, y2, fill_color, stroke_color
-                ));
-            }
-            if ti >= svg_limit { break; }
-        }
-
-        // Add triangle count info
-        svg.push_str(&format!(
-            "  <text x=\"{}\" y=\"{}\" fill=\"#888\" font-size=\"11\" text-anchor=\"end\">Triangles: {}/{} (valid/in UV)</text>\n",
-            margin + draw_w, svg_height - 20.0,
-            face.uv_triangles.iter().take(svg_limit).filter(|tri| {
-                let cu = (tri[0].u + tri[1].u + tri[2].u) / 3.0;
-                let cv = (tri[0].v + tri[1].v + tri[2].v) / 3.0;
-                let in_hole = hole_polys.iter().any(|h| point_in_polygon(cu, cv, h));
-                let in_outer = !outer_uv_poly.is_empty() && point_in_polygon(cu, cv, &outer_uv_poly);
-                !in_hole && in_outer
-            }).count(),
-            n_triangles
-        ));
-    }
-
-    for i in 0..=u_divs {
-        for j in 0..=v_divs {
-            let u = u_min + (u_max - u_min) * i as f64 / u_divs as f64;
-            let v = v_min + (v_max - v_min) * j as f64 / v_divs as f64;
-            let pt3d = face.surface.point_at(u, v);
-            if pt3d.x.is_finite() && pt3d.y.is_finite() && pt3d.z.is_finite() {
-                // Only draw dot if inside the outer boundary polygon
-                let inside = !outer_uv_poly.is_empty() && point_in_polygon(u, v, &outer_uv_poly);
-                if inside {
-                    let x = map_u(u);
-                    let y = map_v(v);
-                    svg.push_str(&format!(
-                        "  <circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"2\" fill=\"#6688ff\" opacity=\"0.7\"/>\n", x, y
-                    ));
-                }
-            }
-        }
-    }
-
-    svg.push_str(&format!(
-        "  <text x=\"{}\" y=\"{}\" fill=\"#aaa\" font-size=\"12\" text-anchor=\"middle\">U ({:.2} .. {:.2})</text>\n",
-        margin + draw_w / 2.0, svg_height - 5.0, u_min, u_max
-    ));
-    svg.push_str(&format!(
-        "  <text x=\"10\" y=\"{}\" fill=\"#aaa\" font-size=\"12\" text-anchor=\"middle\" transform=\"rotate(-90, 10, {})\">V ({:.2} .. {:.2})</text>\n",
-        margin + draw_h / 2.0, margin + draw_h / 2.0, v_min, v_max
-    ));
-    svg.push_str(&format!(
-        "  <text x=\"{}\" y=\"20\" fill=\"#fff\" font-size=\"13\" text-anchor=\"middle\">Face #{} (STEP #{}) {} forward={}</text>\n",
-        svg_width / 2.0, face.face_id, face.step_face_id, face.surface_type, face.forward
-    ));
 
     svg.push_str("</svg>\n");
     svg
