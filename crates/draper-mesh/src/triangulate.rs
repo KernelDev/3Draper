@@ -2284,10 +2284,23 @@ fn is_full_u_period_wrap(boundary_uvs: &[draper_geometry::Point2d], u_period: f6
 /// surface. The v range is computed from the boundary 3D points (which
 /// include the bottom and top circles at specific axis heights).
 ///
-/// CRITICAL for watertightness: The bottom and top ring vertices are taken
-/// DIRECTLY from the cached boundary 3D points (shared with adjacent plane
-/// faces via the edge cache), so the resulting mesh has bit-identical
-/// vertices on shared edges.
+/// CRITICAL for watertightness AND correct visual geometry:
+/// 1. The bottom and top ring vertices are taken DIRECTLY from the cached
+///    boundary 3D points (shared with adjacent plane faces via the edge
+///    cache), so the mesh has bit-identical vertices on shared edges.
+/// 2. The intermediate grid rows are sampled at the SAME u angles as the
+///    bottom ring (using `cyl.point_at(bottom_ring.u[i], v)`), NOT at
+///    uniform `2π*i/n_u` spacing. This ensures each quad of the grid
+///    connects vertices at matching angular positions, producing a clean
+///    cylindrical tube instead of a "twisted/lobed" appearance.
+///
+/// Bug history: The previous implementation sorted the boundary ring by
+/// `atan2` (which returns values in (-π, π]) and then sampled intermediate
+/// rows at uniform `u = 2π*i/n_u` starting from u=0. The sorted ring's
+/// first element was at angle ≈ -π (i.e., u ≈ π), while the intermediate
+/// row's first element was at angle 0. This ~π angular offset caused every
+/// triangle to span ~180° of the cylinder, producing the "twisted, lobed,
+/// spiked" appearance reported by the user.
 fn triangulate_cylinder_tube_from_boundary(
     cyl: &CylinderSurface,
     params: &TriangulationParams,
@@ -2311,36 +2324,69 @@ fn triangulate_cylinder_tube_from_boundary(
         v_max = 1.0;
     }
 
-    // Split boundary 3D points into bottom ring (v=v_min) and top ring (v=v_max),
-    // using axis projection. Each ring is then sorted by angle around the axis
-    // so we can use them directly as the grid's boundary rows.
-    let (bottom_ring, top_ring) = split_boundary_into_rings(
-        boundary_3d, &cyl.origin, &cyl.axis, &cyl.x_dir, v_min, v_max,
+    // Split boundary into bottom/top rings, each as a sorted Vec<(u, Point3d)>
+    // with u in [0, 2π) and consecutive-seam duplicates removed.
+    let dedup_tol = params.max_deviation.max(1e-6) * 0.5;
+    let (bottom_ring, top_ring) = split_boundary_into_rings_with_u(
+        boundary_3d, &cyl.origin, &cyl.axis, &cyl.x_dir, v_min, v_max, dedup_tol,
     );
 
-    let (n_u, n_v) = if params.adaptive {
+    if bottom_ring.len() < 3 {
+        // Not enough points for a proper ring — fall back to analytic full
+        // triangulation. This should not happen for well-formed BREP solids
+        // but is a safety net for degenerate inputs.
+        log::warn!(
+            "Cylinder tube face has only {} bottom ring points (need ≥3) — falling back to analytic full triangulation",
+            bottom_ring.len()
+        );
+        return triangulate_cylinder_full_at_v_range(cyl, params, v_min, v_max, forward);
+    }
+
+    let n_u = bottom_ring.len();
+    let bottom_u: Vec<f64> = bottom_ring.iter().map(|(u, _)| *u).collect();
+
+    // Use cached top ring points only if its u angles match the bottom ring's.
+    // This is the normal case for cylinders (both caps have the same radius
+    // and chord tolerance → same discretization → same u angles). For
+    // frustum-like cones where top ring has different u angles, we generate
+    // top points analytically (sacrificing top-cap watertightness, but that's
+    // a separate problem outside this function's scope).
+    let use_cached_top = top_ring.len() == n_u && {
+        let ang_tol = PI / n_u as f64 * 0.5;
+        top_ring.iter().enumerate().all(|(i, (tu, _))| {
+            let mut du = (tu - bottom_u[i]).abs();
+            if du > PI { du = 2.0 * PI - du; }
+            du <= ang_tol
+        })
+    };
+
+    // Compute n_v from adaptive sampling (height direction only — u direction
+    // is determined by the cached ring point count, not adaptive sampling).
+    let n_v = if params.adaptive {
         crate::adaptive::required_samples(
             &Surface::Cylinder(cyl.clone()), 0.0, 2.0 * PI, v_min, v_max,
             params.max_deviation, params.detail_level,
-        )
+        ).1.max(2)
     } else {
-        (params.angular_samples.max(8), params.height_samples.max(2))
+        params.height_samples.max(2)
     };
-    // Use the boundary ring point count as n_u so we can use cached points directly.
-    // If the rings are too small, fall back to the requested n_u.
-    let n_u = n_u.max(bottom_ring.len()).max(top_ring.len());
 
-    // Generate vertices: n_v+1 rows (from v_min to v_max inclusive)
+    // Generate vertices: n_v+1 rows × n_u columns.
+    // - j=0 (bottom): use cached bottom_ring points (shared with bottom cap face).
+    // - j=n_v (top): use cached top_ring points (if use_cached_top) — shared
+    //   with top cap face. Otherwise, analytic cyl.point_at(bottom_u[i], v_max).
+    // - 0 < j < n_v (intermediate): analytic cyl.point_at(bottom_u[i], v_j).
+    //   Using bottom_u[i] (not uniform 2π*i/n_u) ensures each column of the
+    //   grid is at a single angular position, producing clean rectangular
+    //   quads faces instead of twisted/spiraling triangles.
     for j in 0..=n_v {
         let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
         for i in 0..n_u {
-            let u = 2.0 * PI * i as f64 / n_u as f64;
-            // For boundary rows (j=0 and j=n_v), prefer cached boundary points
-            // when available (for watertightness with adjacent plane faces).
-            let p = if j == 0 && i < bottom_ring.len() {
-                bottom_ring[i]
-            } else if j == n_v && i < top_ring.len() {
-                top_ring[i]
+            let u = bottom_u[i];
+            let p = if j == 0 {
+                bottom_ring[i].1
+            } else if j == n_v && use_cached_top {
+                top_ring[i].1
             } else {
                 crate::edge_cache::deterministic_round_point(cyl.point_at(u, v))
             };
@@ -2350,7 +2396,9 @@ fn triangulate_cylinder_tube_from_boundary(
         }
     }
 
-    // Generate triangles with U wrap-around (mod n_u)
+    // Generate triangles with U wrap-around (mod n_u).
+    // v0 = (j, i), v1 = (j, i+1), v2 = (j+1, i+1), v3 = (j+1, i).
+    // Forward winding: (v0,v1,v2)+(v0,v2,v3) → CCW from outside.
     for j in 0..n_v {
         for i in 0..n_u {
             let i_next = (i + 1) % n_u;
@@ -2372,23 +2420,31 @@ fn triangulate_cylinder_tube_from_boundary(
 }
 
 /// Split a closed-tube boundary 3D point list into two sorted rings:
-/// bottom (v=v_min) and top (v=v_max).
+/// bottom (v=v_min) and top (v=v_max), each as a `Vec<(u, Point3d)>`.
 ///
-/// Points are classified by axis projection: those close to v_min go to
-/// the bottom ring, those close to v_max go to the top ring. Points in
-/// between (e.g., seam endpoints at intermediate v) are dropped.
+/// For each point we compute:
+/// - `v` = projection onto the axis (used to classify into bottom/top ring).
+/// - `u` = angular position around the axis, in `[0, 2π)`, measured CCW from
+///   `x_dir`. This u is consistent with `Cylinder::point_at(u, v)` and
+///   `Cone::point_at(u, v)` parameterizations, so points generated by
+///   `surface.point_at(bottom_u[i], v)` align perfectly with `bottom_ring[i]`.
 ///
-/// Each ring is then sorted by angle around the axis (using x_dir as the
-/// reference direction for u=0), so the resulting ring order matches the
-/// cylinder's U parameterization (counter-clockwise looking down the axis).
-fn split_boundary_into_rings(
+/// Each ring is sorted by u ascending in [0, 2π). Consecutive coincident
+/// points (e.g., seam duplicates where the cache stores the same point at
+/// both u=0 and u=2π) are removed, as is the wraparound duplicate (last
+/// point coincident with first).
+fn split_boundary_into_rings_with_u(
     boundary_3d: &[draper_geometry::Point3d],
     origin: &draper_geometry::Point3d,
     axis: &draper_geometry::Direction3d,
     x_dir: &draper_geometry::Direction3d,
     v_min: f64,
     v_max: f64,
-) -> (Vec<draper_geometry::Point3d>, Vec<draper_geometry::Point3d>) {
+    dedup_tol: f64,
+) -> (
+    Vec<(f64, draper_geometry::Point3d)>,
+    Vec<(f64, draper_geometry::Point3d)>,
+) {
     let y_dir = axis.cross(x_dir);
     let v_tol = (v_max - v_min).abs() * 0.05 + 1e-9;
 
@@ -2400,32 +2456,113 @@ fn split_boundary_into_rings(
         let dy = p.y - origin.y;
         let dz = p.z - origin.z;
         let v = dx * axis.x + dy * axis.y + dz * axis.z;
-        // Compute angle around the axis (using x_dir as reference)
         let x_comp = dx * x_dir.x + dy * x_dir.y + dz * x_dir.z;
         let y_comp = dx * y_dir.x + dy * y_dir.y + dz * y_dir.z;
-        let angle = y_comp.atan2(x_comp);
+        // atan2 returns (-π, π]; rem_euclid(2π) maps to [0, 2π).
+        let u = y_comp.atan2(x_comp).rem_euclid(2.0 * PI);
 
         if (v - v_min).abs() <= v_tol {
-            bottom.push((angle, *p));
+            bottom.push((u, *p));
         } else if (v - v_max).abs() <= v_tol {
-            top.push((angle, *p));
+            top.push((u, *p));
         }
         // else: point is at intermediate v (e.g. seam midpoint) — skip
     }
 
-    // Sort by angle
+    // Sort by u ascending in [0, 2π).
     bottom.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     top.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Strip angles, return just points
-    let bottom_pts: Vec<draper_geometry::Point3d> = bottom.into_iter().map(|(_, p)| p).collect();
-    let top_pts: Vec<draper_geometry::Point3d> = top.into_iter().map(|(_, p)| p).collect();
+    // Remove consecutive coincident points (e.g., seam at u=0 and u=2π).
+    let dedup_consecutive = |ring: &mut Vec<(f64, draper_geometry::Point3d)>| {
+        if ring.len() < 2 {
+            return;
+        }
+        let mut i = 1;
+        while i < ring.len() {
+            if ring[i - 1].1.distance_to(&ring[i].1) <= dedup_tol {
+                ring.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        // Also check wraparound: last vs first (closed loop)
+        if ring.len() > 1 {
+            if ring[0].1.distance_to(&ring[ring.len() - 1].1) <= dedup_tol {
+                ring.pop();
+            }
+        }
+    };
+    dedup_consecutive(&mut bottom);
+    dedup_consecutive(&mut top);
 
-    (bottom_pts, top_pts)
+    (bottom, top)
+}
+
+/// Analytic fallback: triangulate a full cylinder between v_min and v_max
+/// using a uniform `2π*i/n_u` angular grid. Used when `triangulate_cylinder_tube_from_boundary`
+/// can't recover enough cached boundary points (e.g., degenerate input).
+///
+/// `n_u` is chosen as `max(params.angular_samples, 8)`; `n_v` is chosen as
+/// `max(params.height_samples, 2)` or the adaptive sample count.
+fn triangulate_cylinder_full_at_v_range(
+    cyl: &CylinderSurface,
+    params: &TriangulationParams,
+    v_min: f64,
+    v_max: f64,
+    forward: bool,
+) -> TriangleMesh {
+    let mut mesh = TriangleMesh::new();
+    let (n_u, n_v) = if params.adaptive {
+        crate::adaptive::required_samples(
+            &Surface::Cylinder(cyl.clone()), 0.0, 2.0 * PI, v_min, v_max,
+            params.max_deviation, params.detail_level,
+        )
+    } else {
+        (params.angular_samples.max(8), params.height_samples.max(2))
+    };
+
+    for j in 0..=n_v {
+        for i in 0..n_u {
+            let u = 2.0 * PI * i as f64 / n_u as f64;
+            let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
+            let p = crate::edge_cache::deterministic_round_point(cyl.point_at(u, v));
+            let n = cyl.normal_at(u, v);
+            let idx = mesh.add_vertex(p);
+            mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+        }
+    }
+    for j in 0..n_v {
+        for i in 0..n_u {
+            let i_next = (i + 1) % n_u;
+            let v0 = (j * n_u + i) as u32;
+            let v1 = (j * n_u + i_next) as u32;
+            let v2 = ((j + 1) * n_u + i_next) as u32;
+            let v3 = ((j + 1) * n_u + i) as u32;
+            if forward {
+                mesh.add_triangle(v0, v1, v2);
+                mesh.add_triangle(v0, v2, v3);
+            } else {
+                mesh.add_triangle(v0, v2, v1);
+                mesh.add_triangle(v0, v3, v2);
+            }
+        }
+    }
+    mesh
 }
 
 /// Triangulate a cone face whose boundary forms a closed tube
 /// (bottom circle + top circle/apex + 2 seam edges wrapping the full U period).
+///
+/// Same angular-alignment fix as `triangulate_cylinder_tube_from_boundary`:
+/// intermediate grid rows are sampled at the bottom ring's actual u angles
+/// (not uniform 2π*i/n_u), so each column of the grid is at a single angular
+/// position. This avoids the "twisted/lobed" bug.
+///
+/// Apex degeneracy: when v_max reaches the cone's apex height, the top row
+/// collapses to a single apex vertex (since `cone.point_at(u, apex_v)` is
+/// the apex point for any u). Triangles connecting the bottom row to the
+/// apex row are fan-triangulated.
 fn triangulate_cone_tube_from_boundary(
     cone: &ConeSurface,
     params: &TriangulationParams,
@@ -2453,22 +2590,53 @@ fn triangulate_cone_tube_from_boundary(
     let v_max = v_max.min(apex_v);
     let top_row_at_apex = apex_v.is_finite() && (v_max - apex_v).abs() < apex_v * 0.01 + 1e-6;
 
-    // Split boundary 3D points into bottom and top rings (similar to cylinder).
-    let (bottom_ring, top_ring) = split_boundary_into_rings(
-        boundary_3d, &cone.origin, &cone.axis, &cone.x_dir, v_min, v_max,
+    // Split boundary into bottom/top rings, each as a sorted Vec<(u, Point3d)>
+    // with u in [0, 2π) and seam duplicates removed.
+    let dedup_tol = params.max_deviation.max(1e-6) * 0.5;
+    let (bottom_ring, top_ring) = split_boundary_into_rings_with_u(
+        boundary_3d, &cone.origin, &cone.axis, &cone.x_dir, v_min, v_max, dedup_tol,
     );
 
-    let (n_u, n_v) = if params.adaptive {
+    if bottom_ring.len() < 3 {
+        log::warn!(
+            "Cone tube face has only {} bottom ring points (need ≥3) — falling back to analytic full triangulation",
+            bottom_ring.len()
+        );
+        return triangulate_cone_full_at_v_range(cone, params, v_min, v_max, forward);
+    }
+
+    let n_u = bottom_ring.len();
+    let bottom_u: Vec<f64> = bottom_ring.iter().map(|(u, _)| *u).collect();
+
+    // Use cached top ring points only if its u angles match the bottom ring's.
+    // For `make_cone()`, the lateral face has no top edge, so top_ring is empty
+    // → use_cached_top = false → top row (if not apex) uses analytic points.
+    // This is OK because the cone's top cap doesn't exist (apex is a single point).
+    let use_cached_top = !top_row_at_apex && top_ring.len() == n_u && {
+        let ang_tol = PI / n_u as f64 * 0.5;
+        top_ring.iter().enumerate().all(|(i, (tu, _))| {
+            let mut du = (tu - bottom_u[i]).abs();
+            if du > PI { du = 2.0 * PI - du; }
+            du <= ang_tol
+        })
+    };
+
+    // Compute n_v from adaptive sampling (height direction only).
+    let n_v = if params.adaptive {
         crate::adaptive::required_samples(
             &Surface::Cone(cone.clone()), 0.0, 2.0 * PI, v_min, v_max,
             params.max_deviation, params.detail_level,
-        )
+        ).1.max(2)
     } else {
-        (params.angular_samples.max(8), params.height_samples.max(2))
+        params.height_samples.max(2)
     };
-    let n_u = n_u.max(bottom_ring.len()).max(top_ring.len());
 
-    // Generate vertex grid with apex degeneracy handling
+    // Generate vertex grid with apex degeneracy handling.
+    // - j=0 (bottom): use cached bottom_ring points (shared with bottom cap face).
+    // - j=n_v (top, if apex): single apex vertex (cone.point_at(0, apex_v)).
+    // - j=n_v (top, if not apex & use_cached_top): cached top_ring points.
+    // - j=n_v (top, if not apex & !use_cached_top): analytic cone.point_at(bottom_u[i], v_max).
+    // - 0 < j < n_v (intermediate): analytic cone.point_at(bottom_u[i], v_j).
     let mut row_vertex_offset: Vec<u32> = Vec::with_capacity(n_v + 1);
     let mut row_vertex_count: Vec<usize> = Vec::with_capacity(n_v + 1);
     let mut total_vertices = 0u32;
@@ -2477,7 +2645,7 @@ fn triangulate_cone_tube_from_boundary(
         let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
 
         if top_row_at_apex && j == n_v {
-            // Apex row — single vertex
+            // Apex row — single vertex (all u values map to the apex point).
             let p = cone.point_at(0.0, apex_v);
             let n = cone.normal_at(0.0, apex_v);
             let idx = mesh.add_vertex(p);
@@ -2490,14 +2658,13 @@ fn triangulate_cone_tube_from_boundary(
             row_vertex_offset.push(base);
             row_vertex_count.push(n_u);
             for i in 0..n_u {
-                let u = 2.0 * PI * i as f64 / n_u as f64;
-                // For boundary rows, prefer cached boundary points
-                let p = if j == 0 && i < bottom_ring.len() {
-                    bottom_ring[i]
-                } else if j == n_v && i < top_ring.len() && !top_row_at_apex {
-                    top_ring[i]
+                let u = bottom_u[i];
+                let p = if j == 0 {
+                    bottom_ring[i].1
+                } else if j == n_v && use_cached_top {
+                    top_ring[i].1
                 } else {
-                    cone.point_at(u, v)
+                    crate::edge_cache::deterministic_round_point(cone.point_at(u, v))
                 };
                 let n = cone.normal_at(u, v);
                 let idx = mesh.add_vertex(p);
@@ -2507,7 +2674,8 @@ fn triangulate_cone_tube_from_boundary(
         }
     }
 
-    // Generate triangles with U wrap-around (mod n_u)
+    // Generate triangles with U wrap-around (mod n_u).
+    // Apex row fans from the previous row; other rows use standard quad split.
     for j in 0..n_v {
         let j_next = j + 1;
         let row_count = row_vertex_count[j];
@@ -2516,7 +2684,7 @@ fn triangulate_cone_tube_from_boundary(
         let next_row_base = row_vertex_offset[j_next];
 
         if next_row_count == 1 {
-            // Next row is apex — fan from current row ring to apex
+            // Next row is apex — fan from current row ring to apex.
             let apex = next_row_base;
             for i in 0..row_count {
                 let i_next = (i + 1) % row_count;
@@ -2546,6 +2714,95 @@ fn triangulate_cone_tube_from_boundary(
         }
     }
 
+    mesh
+}
+
+/// Analytic fallback for cone triangulation between v_min and v_max.
+/// Same role as `triangulate_cylinder_full_at_v_range` but for cones.
+fn triangulate_cone_full_at_v_range(
+    cone: &ConeSurface,
+    params: &TriangulationParams,
+    v_min: f64,
+    v_max: f64,
+    forward: bool,
+) -> TriangleMesh {
+    let mut mesh = TriangleMesh::new();
+    let apex_v = cone.height();
+    let v_max = v_max.min(apex_v);
+    let top_row_at_apex = apex_v.is_finite() && (v_max - apex_v).abs() < apex_v * 0.01 + 1e-6;
+
+    let (n_u, n_v) = if params.adaptive {
+        crate::adaptive::required_samples(
+            &Surface::Cone(cone.clone()), 0.0, 2.0 * PI, v_min, v_max,
+            params.max_deviation, params.detail_level,
+        )
+    } else {
+        (params.angular_samples.max(8), params.height_samples.max(2))
+    };
+
+    let mut row_vertex_offset: Vec<u32> = Vec::with_capacity(n_v + 1);
+    let mut row_vertex_count: Vec<usize> = Vec::with_capacity(n_v + 1);
+    let mut total_vertices = 0u32;
+
+    for j in 0..=n_v {
+        let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
+        if top_row_at_apex && j == n_v {
+            let p = cone.point_at(0.0, apex_v);
+            let n = cone.normal_at(0.0, apex_v);
+            let idx = mesh.add_vertex(p);
+            mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+            row_vertex_offset.push(idx);
+            row_vertex_count.push(1);
+            total_vertices += 1;
+        } else {
+            let base = total_vertices;
+            row_vertex_offset.push(base);
+            row_vertex_count.push(n_u);
+            for i in 0..n_u {
+                let u = 2.0 * PI * i as f64 / n_u as f64;
+                let p = crate::edge_cache::deterministic_round_point(cone.point_at(u, v));
+                let n = cone.normal_at(u, v);
+                let idx = mesh.add_vertex(p);
+                mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+            }
+            total_vertices += n_u as u32;
+        }
+    }
+    for j in 0..n_v {
+        let j_next = j + 1;
+        let row_count = row_vertex_count[j];
+        let next_row_count = row_vertex_count[j_next];
+        let row_base = row_vertex_offset[j];
+        let next_row_base = row_vertex_offset[j_next];
+        if next_row_count == 1 {
+            let apex = next_row_base;
+            for i in 0..row_count {
+                let i_next = (i + 1) % row_count;
+                let v0 = row_base + i as u32;
+                let v1 = row_base + i_next as u32;
+                if forward {
+                    mesh.add_triangle(v0, v1, apex);
+                } else {
+                    mesh.add_triangle(v0, apex, v1);
+                }
+            }
+        } else {
+            for i in 0..row_count {
+                let i_next = (i + 1) % row_count;
+                let v0 = row_base + i as u32;
+                let v1 = row_base + i_next as u32;
+                let v2 = next_row_base + i_next as u32;
+                let v3 = next_row_base + i as u32;
+                if forward {
+                    mesh.add_triangle(v0, v1, v2);
+                    mesh.add_triangle(v0, v2, v3);
+                } else {
+                    mesh.add_triangle(v0, v2, v1);
+                    mesh.add_triangle(v0, v3, v2);
+                }
+            }
+        }
+    }
     mesh
 }
 
