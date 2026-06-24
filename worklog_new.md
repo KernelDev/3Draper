@@ -2997,3 +2997,45 @@ Stage Summary:
 - origin/main now at 30a621b — contains the partial-wrap tube face fix that resolves the user-reported cylinder/cone/NURBS twisting artifacts (including test/3.05.078.stp).
 - No history lost; only the unpushed commit's message was amended before publishing (revision SHA changed from 389db3a → 30a621b because of the message amend, but the tree/diff is identical).
 - gh-pages branch was NOT touched in this task (still at origin/gh-pages 25a622e / 49aa630 — already up to date from the previous deploy). If the user wants the live demo rebuilt from this new main, run scripts/deploy_gh_pages.sh separately.
+
+---
+Task ID: push-main-52
+Agent: Main
+Task: Fix cone/cylinder partial-wrap detection + Plane UV breakdown shows square grid bug + UV U-squeeze slider
+
+Work Log:
+- User reported issues with test/3.05.078.stp faces #78 (Cone), #84 (Cone), #87 (Plane with hole):
+  - Cones had twisted UV triangles (faces #78, #84) — partial-wrap detection misclassified 351° wrap as full-wrap
+  - Plane face #87 showed synthetic square grid in UV Breakdown window instead of actual circle with hole
+  - User wanted UV U-axis scaling for cylinders (U=2π vs V=height aspect ratio makes individual triangles hard to see)
+
+- Created diagnostic binaries (face_3_05_078_diag, plane_uv_diag, cone_uv_dump, cyl_repro) to investigate
+- Discovered root causes:
+  1. split_boundary_into_rings_with_u + is_full_u_period_wrap used single-criterion max_gap ≤ π/4 threshold — too loose for 351°-wrap STEP faces (seam gap 0.157 rad ≤ π/4 = 0.785)
+  2. partial-wrap unwrap logic shifted ALL points when gap_idx == n_all-1 (gap at end of array), producing incorrect u ranges
+  3. compute_solid_uv_breakdown used triangulate_face on a Face built with Face::new_surface_only (no wires) — returned empty mesh → fell back to synthetic 20×20 square grid
+
+- Fixes applied in crates/draper-mesh/src/triangulate.rs:
+  - Replaced single-threshold with TWO criteria (both must hold for full-wrap):
+    * wrapped_range ≥ 90% of 2π (above primitive cylinder's 94.7%)
+    * max_gap / second_max_gap ≤ 1.5 (seam-to-arc-step ratio — using second_max_gap as arc step reference avoids the duplicate-u issue when bottom and top rings share u values)
+  - Fixed partial-wrap unwrap: only shift points when gap_idx < n_all-1 (gap in middle of array). For gap_idx == n_all-1 (gap at end), points are already in continuous range — no shift needed.
+  - Applied same fix to is_full_u_period_wrap (used in early-detection path)
+
+- Fixes applied in crates/draper-viewer/src/app.rs:
+  - Added compute_solid_uv_breakdown_with_detailed(solid, name, Option<&DetailedMeshInstance>) — prefers FaceInfo.outer_boundary, FaceInfo.inner_boundaries, FaceInfo.uv_triangles when available (STEP files). This bypasses the Face::new_surface_only → empty mesh → square grid fallback path.
+  - Both call sites updated to pass active_detailed.
+  - Added uv_window_aspect_override field (default 1.0) — user-adjustable slider in UV Breakdown window to squeeze/stretch U axis (range 0.1..2.0). Helps inspect cylinder/cone UVs where U=2π ≫ V=height.
+
+- Pre-existing build error fixed in crates/draper-ai/src/predictive.rs (missing keep_ratio field).
+
+- Tests: 170 mesh lib + 6 lod_chord + 7 step integration = 183 ✅.
+- Pushed to origin/main: 30a621b..73c794d.
+- Deployed to gh-pages: 4197479..40664b2.
+
+Stage Summary:
+- Cone faces #78, #84 (351° partial-wrap) now correctly detected as partial-wrap (was full-wrap) → no more twisted triangles.
+- Plane face #87 (circle with hole) now shows ACTUAL UV triangles (252 tris in circle-with-hole shape) instead of synthetic 20×20 square grid.
+- New U-squeeze slider lets user adjust aspect ratio of UV Breakdown canvas — useful for cylinder/cone inspection.
+- All cylinder/cone primitive watertight tests pass at all LODs (0.05, 0.1, 0.3, 0.5, 0.75, 1.0).
+- Live demo https://kerneldev.github.io/3Draper/ updated.
