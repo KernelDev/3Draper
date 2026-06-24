@@ -494,6 +494,15 @@ pub fn triangulate_solid(solid: &Solid, params: &TriangulationParams) -> Triangl
     let mut cache = EdgeDiscretizationCache::with_adaptive_tolerance(
         &bbox.0, &bbox.1, 64,
     );
+    // Override the chord tolerance with the LOD-driven max_deviation so that
+    // curved edges (arcs on cylinder caps, fillets, etc.) get coarser or finer
+    // subdivision depending on the user's Quality selection. Without this
+    // override, the chord tolerance is derived from the bounding box and gives
+    // a fixed, very fine subdivision regardless of LOD — making the Quality
+    // selector appear to have no effect on cylinder caps (which look perfectly
+    // circular at all LODs because their boundary arcs are always sampled
+    // with ~50+ points).
+    cache.set_chord_tolerance_override(Some(params.max_deviation));
     triangulate_solid_with_cache(solid, params, &mut cache)
 }
 

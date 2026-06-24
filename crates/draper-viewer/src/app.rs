@@ -18,6 +18,7 @@ use draper_mesh::{triangulate_solid, triangulate_face, TriangleMesh, Triangulati
 use draper_step::{AssemblyNode, DetailedMeshInstance, PendingBrepInstance, OwnedStepConversionContext, StepFile, step_structure_lazy};
 use draper_geometry::Surface;
 use draper_geometry::Point3d;
+use draper_geometry::NurbsSurface;
 use egui_wgpu::RenderState;
 use eframe::egui;
 
@@ -557,6 +558,14 @@ pub struct ViewerApp {
     /// or a STEP file with a single solid is imported). Operations like
     /// fillet/chamfer/shell/transform work on this solid.
     current_solid: Option<Solid>,
+    /// The current NURBS surface, if a NURBS gallery model is loaded.
+    /// Required so that `retriangulate_for_lod()` can rebuild the grid mesh
+    /// with LOD-aware step count. `triangulate_solid` does NOT work on a
+    /// Solid whose only face is `Face::new_surface_only(...)` (no outer wire),
+    /// which is how NURBS gallery surfaces are stored — so we MUST keep the
+    /// original surface here and re-run `build_nurbs_surface_mesh` on LOD change.
+    /// Cleared to `None` whenever a non-NURBS model is loaded.
+    current_nurbs_surface: Option<NurbsSurface>,
     /// A second solid for boolean operations (set via "Set as Boolean B"
     /// button which captures the current solid).
     secondary_solid: Option<Solid>,
@@ -1089,6 +1098,7 @@ impl ViewerApp {
             #[cfg(target_arch = "wasm32")]
             worker_pending_meshes: Vec::new(),
             current_solid: Some(solid_clone_for_field),
+            current_nurbs_surface: None,
             secondary_solid: None,
             fillet_radius: 5.0,
             chamfer_distance: 3.0,
@@ -1212,6 +1222,7 @@ impl ViewerApp {
         let solid = ShapeBuilder::make_box(100.0, 80.0, 60.0);
         let mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
         self.current_solid = Some(solid);
+        self.current_nurbs_surface = None;
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -1222,6 +1233,7 @@ impl ViewerApp {
         let solid = ShapeBuilder::make_cylinder(40.0, 100.0);
         let mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
         self.current_solid = Some(solid);
+        self.current_nurbs_surface = None;
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -1232,6 +1244,7 @@ impl ViewerApp {
         let solid = ShapeBuilder::make_sphere(50.0);
         let mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
         self.current_solid = Some(solid);
+        self.current_nurbs_surface = None;
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -1245,6 +1258,7 @@ impl ViewerApp {
         let solid = ShapeBuilder::make_cone(radius, height, half_angle);
         let mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
         self.current_solid = Some(solid);
+        self.current_nurbs_surface = None;
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -1255,6 +1269,7 @@ impl ViewerApp {
         let solid = ShapeBuilder::make_torus(40.0, 12.0);
         let mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
         self.current_solid = Some(solid);
+        self.current_nurbs_surface = None;
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -1288,15 +1303,23 @@ impl ViewerApp {
 
     /// Re-triangulate the currently-loaded model at the current LOD level.
     ///
-    /// Called when the user changes the Quality dropdown. Two cases:
+    /// Called when the user changes the Quality dropdown. Three cases:
     ///
-    /// 1. **Primitive / NURBS gallery** (`current_solid` is set): re-runs
+    /// 1. **NURBS gallery** (`current_nurbs_surface` is set): re-runs
+    ///    `build_nurbs_surface_mesh` with `steps_for_lod()`. This is needed
+    ///    because NURBS gallery surfaces are stored as a `Solid` with a single
+    ///    `Face::new_surface_only(...)` (no outer wire), and `triangulate_solid`
+    ///    returns an EMPTY mesh for such faces (no boundary for earcutr).
+    ///    Without this branch, switching LOD on a NURBS surface would log
+    ///    "0 vertices, 0 triangles" and show the old mesh.
+    ///
+    /// 2. **Primitive** (`current_solid` is set, no NURBS): re-runs
     ///    `triangulate_solid` with the new `TriangulationParams::for_lod(...)`.
     ///    Fast (single solid, no I/O), structure is just "1 solid" so nothing
     ///    to preserve. Selection is reset by `load_mesh` (primitives have no
     ///    STEP face IDs anyway, so this is fine).
     ///
-    /// 2. **STEP file** (`last_step_file` is set): re-runs `process_step_file`
+    /// 3. **STEP file** (`last_step_file` is set): re-runs `process_step_file`
     ///    on the saved StepFile with the new LOD. This rebuilds the assembly
     ///    tree (identical, since same file) and re-queues progressive
     ///    triangulation. Selection state (`selected_instance`,
@@ -1309,14 +1332,34 @@ impl ViewerApp {
     ///
     /// If neither `current_solid` nor `last_step_file` is set, logs a warning.
     fn retriangulate_for_lod(&mut self) {
-        if self.current_solid.is_some() {
-            // Primitive / NURBS — fast path, re-triangulate in-place.
+        if let Some(nurbs_surface) = self.current_nurbs_surface.clone() {
+            // NURBS gallery surface — re-build grid mesh with LOD-aware steps.
+            let name = self.current_model.name.clone();
+            let steps = self.steps_for_lod();
+            let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, steps);
+            self.current_solid = Some(nurbs_solid);
+            self.detailed_instances.clear();
+            self.instance_triangle_ranges.clear();
+            self.assembly_tree = None;
+            self.load_mesh(mesh, &name);
+            self.log(&format!(
+                "Re-triangulated NURBS surface at LOD={} ({:.2}) — {} grid steps → {} vertices, {} triangles",
+                self.lod_level.label(),
+                self.lod_level.lod_value(),
+                steps,
+                self.current_model.vertex_count,
+                self.current_model.triangle_count,
+            ));
+        } else if self.current_solid.is_some() {
+            // Primitive — fast path, re-triangulate in-place.
             let name = self.current_model.name.clone();
             self.refresh_from_current_solid(&name);
             self.log(&format!(
-                "Re-triangulated primitive/NURBS at LOD={} ({:.2})",
+                "Re-triangulated primitive at LOD={} ({:.2}) — {} vertices, {} triangles",
                 self.lod_level.label(),
-                self.lod_level.lod_value()
+                self.lod_level.lod_value(),
+                self.current_model.vertex_count,
+                self.current_model.triangle_count,
             ));
         } else if let Some(step_file) = self.last_step_file.clone() {
             // STEP file — save selection, re-run process_step_file, restore.
@@ -1371,11 +1414,13 @@ impl ViewerApp {
         match draper_core::operations::fillet_edge(&mut solid, actual_edge_id, radius) {
             Ok(()) => {
                 self.current_solid = Some(solid);
+        self.current_nurbs_surface = None;
                 self.refresh_from_current_solid(&format!("Fillet r={} on edge {}", radius, actual_edge_id));
             }
             Err(e) => {
                 self.log_warning(&format!("Fillet failed: {}", e));
                 self.current_solid = Some(solid);
+        self.current_nurbs_surface = None;
             }
         }
     }
@@ -1399,11 +1444,13 @@ impl ViewerApp {
         match draper_core::operations::chamfer_edge(&mut solid, actual_edge_id, distance) {
             Ok(()) => {
                 self.current_solid = Some(solid);
+        self.current_nurbs_surface = None;
                 self.refresh_from_current_solid(&format!("Chamfer d={} on edge {}", distance, actual_edge_id));
             }
             Err(e) => {
                 self.log_warning(&format!("Chamfer failed: {}", e));
                 self.current_solid = Some(solid);
+        self.current_nurbs_surface = None;
             }
         }
     }
@@ -1421,11 +1468,13 @@ impl ViewerApp {
         match draper_core::operations::make_shell(&mut solid, thickness) {
             Ok(()) => {
                 self.current_solid = Some(solid);
+        self.current_nurbs_surface = None;
                 self.refresh_from_current_solid(&format!("Shell thickness={}", thickness));
             }
             Err(e) => {
                 self.log_warning(&format!("Shell failed: {}", e));
                 self.current_solid = Some(solid);
+        self.current_nurbs_surface = None;
             }
         }
     }
@@ -1709,6 +1758,7 @@ impl ViewerApp {
                 merged_mesh.merge(&m);
             }
             self.current_solid = Some(copies.into_iter().next().unwrap_or_else(|| s.clone()));
+        self.current_nurbs_surface = None;
             self.detailed_instances.clear();
             self.instance_triangle_ranges.clear();
             self.assembly_tree = None;
@@ -1798,6 +1848,7 @@ impl ViewerApp {
         // previously loaded solid. Without this, "View UV" after loading
         // a revolution would show stale UV data from the prior solid.
         self.current_solid = Some(solid);
+        self.current_nurbs_surface = None;
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -1824,6 +1875,7 @@ impl ViewerApp {
         // loading an extrusion would show stale UV data from whatever
         // solid was loaded before (e.g. Box or Cylinder).
         self.current_solid = Some(solid);
+        self.current_nurbs_surface = None;
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
         self.assembly_tree = None;
@@ -1849,6 +1901,33 @@ impl ViewerApp {
         self.load_nurbs_saddle();
     }
 
+    /// Map a LOD level to a NURBS grid subdivision count.
+    ///
+    /// NURBS gallery surfaces are rendered as a regular (n+1)×(n+1) UV grid
+    /// with 2 triangles per cell. The step count scales with LOD so that:
+    /// - Preview (LOD 0.1): 6 steps → 49 vertices, 72 triangles
+    /// - Low     (LOD 0.3): 12 steps → 169 vertices, 288 triangles
+    /// - Medium  (LOD 0.5): 20 steps → 441 vertices, 800 triangles
+    /// - High    (LOD 0.75): 32 steps → 1089 vertices, 2048 triangles
+    /// - Ultra   (LOD 1.0): 48 steps → 2401 vertices, 4608 triangles
+    ///
+    /// This gives a ~64× triangle ratio between Preview and Ultra — clearly
+    /// visible to the user as a quality difference.
+    fn steps_for_lod(&self) -> usize {
+        let v = self.lod_level.lod_value();
+        if v >= 0.9 {
+            48
+        } else if v >= 0.7 {
+            32
+        } else if v >= 0.45 {
+            20
+        } else if v >= 0.2 {
+            12
+        } else {
+            6
+        }
+    }
+
     /// Helper: build a NURBS surface mesh from a 2D grid of control points.
     ///
     /// Samples the surface on a regular (steps+1)×(steps+1) UV grid and
@@ -1871,7 +1950,7 @@ impl ViewerApp {
     /// `natural_uv_domain()` and render the full UV grid.
     fn build_nurbs_surface_mesh(
         &self,
-        nurbs_surface: draper_geometry::NurbsSurface,
+        nurbs_surface: NurbsSurface,
         steps: usize,
     ) -> (TriangleMesh, Solid) {
         let (u_min, u_max) = nurbs_surface.u_range();
@@ -1958,7 +2037,11 @@ impl ViewerApp {
         let nurbs_surface = NurbsSurface::from_v_rows(
             3, 3, control_points, weights, u_knots, v_knots, false, false,
         );
-        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        // Save the surface so `retriangulate_for_lod()` can rebuild
+        // the grid mesh with a different LOD step count.
+        self.current_nurbs_surface = Some(nurbs_surface.clone());
+        let steps = self.steps_for_lod();
+        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, steps);
         self.current_solid = Some(nurbs_solid);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
@@ -1986,7 +2069,11 @@ impl ViewerApp {
         let nurbs_surface = NurbsSurface::from_v_rows(
             3, 3, control_points, weights, u_knots, v_knots, false, false,
         );
-        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        // Save the surface so `retriangulate_for_lod()` can rebuild
+        // the grid mesh with a different LOD step count.
+        self.current_nurbs_surface = Some(nurbs_surface.clone());
+        let steps = self.steps_for_lod();
+        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, steps);
         self.current_solid = Some(nurbs_solid);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
@@ -2019,7 +2106,11 @@ impl ViewerApp {
         let nurbs_surface = NurbsSurface::from_v_rows(
             3, 1, control_points, weights, u_knots, v_knots, false, false,
         );
-        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        // Save the surface so `retriangulate_for_lod()` can rebuild
+        // the grid mesh with a different LOD step count.
+        self.current_nurbs_surface = Some(nurbs_surface.clone());
+        let steps = self.steps_for_lod();
+        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, steps);
         self.current_solid = Some(nurbs_solid);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
@@ -2055,7 +2146,11 @@ impl ViewerApp {
         let nurbs_surface = NurbsSurface::from_v_rows(
             3, 1, control_points, weights, u_knots, v_knots, false, false,
         );
-        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        // Save the surface so `retriangulate_for_lod()` can rebuild
+        // the grid mesh with a different LOD step count.
+        self.current_nurbs_surface = Some(nurbs_surface.clone());
+        let steps = self.steps_for_lod();
+        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, steps);
         self.current_solid = Some(nurbs_solid);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
@@ -2099,7 +2194,11 @@ impl ViewerApp {
             2.0 * std::f64::consts::PI, // angle_end (full revolution)
             false,                      // u_closed (profile is open)
         );
-        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        // Save the surface so `retriangulate_for_lod()` can rebuild
+        // the grid mesh with a different LOD step count.
+        self.current_nurbs_surface = Some(nurbs_surface.clone());
+        let steps = self.steps_for_lod();
+        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, steps);
         self.current_solid = Some(nurbs_solid);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
@@ -2131,7 +2230,11 @@ impl ViewerApp {
         let nurbs_surface = NurbsSurface::from_v_rows(
             3, 3, control_points, weights, u_knots, v_knots, false, false,
         );
-        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        // Save the surface so `retriangulate_for_lod()` can rebuild
+        // the grid mesh with a different LOD step count.
+        self.current_nurbs_surface = Some(nurbs_surface.clone());
+        let steps = self.steps_for_lod();
+        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, steps);
         self.current_solid = Some(nurbs_solid);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
@@ -2159,7 +2262,11 @@ impl ViewerApp {
         let nurbs_surface = NurbsSurface::from_v_rows(
             1, 1, control_points, weights, u_knots, v_knots, false, false,
         );
-        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, 20);
+        // Save the surface so `retriangulate_for_lod()` can rebuild
+        // the grid mesh with a different LOD step count.
+        self.current_nurbs_surface = Some(nurbs_surface.clone());
+        let steps = self.steps_for_lod();
+        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, steps);
         self.current_solid = Some(nurbs_solid);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
@@ -2227,7 +2334,11 @@ impl ViewerApp {
         let nurbs_surface = NurbsSurface::from_v_rows(
             2, 1, control_points, weights, u_knots, v_knots, false, false,
         );
-        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        // Save the surface so `retriangulate_for_lod()` can rebuild
+        // the grid mesh with a different LOD step count.
+        self.current_nurbs_surface = Some(nurbs_surface.clone());
+        let steps = self.steps_for_lod();
+        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, steps);
         self.current_solid = Some(nurbs_solid);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
@@ -2286,7 +2397,11 @@ impl ViewerApp {
         let nurbs_surface = NurbsSurface::from_v_rows(
             2, 2, control_points, weights, u_knots, v_knots, false, false,
         );
-        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        // Save the surface so `retriangulate_for_lod()` can rebuild
+        // the grid mesh with a different LOD step count.
+        self.current_nurbs_surface = Some(nurbs_surface.clone());
+        let steps = self.steps_for_lod();
+        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, steps);
         self.current_solid = Some(nurbs_solid);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
@@ -2338,7 +2453,11 @@ impl ViewerApp {
         let nurbs_surface = NurbsSurface::from_v_rows(
             2, 1, control_points, weights, u_knots, v_knots, true, false,
         );
-        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, 30);
+        // Save the surface so `retriangulate_for_lod()` can rebuild
+        // the grid mesh with a different LOD step count.
+        self.current_nurbs_surface = Some(nurbs_surface.clone());
+        let steps = self.steps_for_lod();
+        let (mesh, nurbs_solid) = self.build_nurbs_surface_mesh(nurbs_surface, steps);
         self.current_solid = Some(nurbs_solid);
         self.detailed_instances.clear();
         self.instance_triangle_ranges.clear();
@@ -3228,6 +3347,7 @@ impl ViewerApp {
                         // so the UV Breakdown window uses the JSON instances
                         // instead of leaking a stale primitive/NURBS solid.
                         self.current_solid = None;
+                        self.current_nurbs_surface = None;
                         self.solid_uv_breakdown = None;
                         self.uv_window_face_idx = None;
                         self.uv_window_prev_face_idx = None;
@@ -3259,6 +3379,7 @@ impl ViewerApp {
                 // so the UV Breakdown window uses the JSON instances
                 // instead of leaking a stale primitive/NURBS solid.
                 self.current_solid = None;
+                self.current_nurbs_surface = None;
                 self.solid_uv_breakdown = None;
                 self.uv_window_face_idx = None;
                 self.uv_window_prev_face_idx = None;
@@ -3291,6 +3412,7 @@ impl ViewerApp {
         // `Solid` representation in the viewer — only `detailed_instances`
         // — so `current_solid` MUST be `None` for them.
         self.current_solid = None;
+        self.current_nurbs_surface = None; // STEP files are not NURBS gallery surfaces.
         // Also invalidate any cached UV breakdown + active face index —
         // they belong to the previous solid and are meaningless for the
         // new STEP file. (load_mesh does this too, but load_mesh is only
@@ -4026,6 +4148,7 @@ impl ViewerApp {
                 // correctly shows "No solid loaded" instead of leaking
                 // a stale primitive/NURBS solid from a previous session.
                 self.current_solid = None;
+                self.current_nurbs_surface = None;
                 self.solid_uv_breakdown = None;
                 self.uv_window_face_idx = None;
                 self.uv_window_prev_face_idx = None;
@@ -5701,6 +5824,7 @@ impl eframe::App for ViewerApp {
                             // window doesn't leak a stale primitive/NURBS
                             // solid from a previous session.
                             self.current_solid = None;
+                            self.current_nurbs_surface = None;
                             self.solid_uv_breakdown = None;
                             self.uv_window_face_idx = None;
                             self.uv_window_prev_face_idx = None;
@@ -7756,6 +7880,23 @@ impl ViewerApp {
                             ui.label(egui::RichText::new(format!("E:{}", self.error_count)).size(10.0).color(egui::Color32::from_rgb(255, 80, 80)));
                         }
                         if ui.button("Clear").clicked() { self.log.clear(); }
+                        // Copy All — same as desktop. On mobile this is the
+                        // ONLY way to get the log text out (no right-click →
+                        // Copy works reliably on touch devices).
+                        if ui.button("Copy All").clicked() {
+                            let all_text: String = self.log.iter()
+                                .map(|e| {
+                                    let prefix = match e.severity {
+                                        LogSeverity::Info => "INFO",
+                                        LogSeverity::Warning => "WARN",
+                                        LogSeverity::Error => "ERR",
+                                    };
+                                    format!("[{}] [{}] {}", e.time, prefix, e.message)
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            ui.ctx().copy_text(all_text);
+                        }
                         ui.checkbox(&mut self.log_auto_scroll, "Auto");
                     });
                     egui::ScrollArea::vertical()

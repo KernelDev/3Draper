@@ -222,6 +222,18 @@ pub struct EdgeDiscretizationCache {
     adaptive_tol: AdaptiveTolerance,
     /// Maximum number of sample points per edge.
     max_samples: usize,
+    /// Optional LOD-driven chord tolerance override.
+    ///
+    /// When set, this REPLACES `adaptive_tol.chord_tolerance()` as the
+    /// threshold for adaptive edge subdivision. This is what lets the
+    /// "Quality" selector change the resolution of curved edges (arcs on
+    /// the top/bottom faces of a cylinder, fillets, etc.) — without it,
+    /// `adaptive_tol` is derived solely from the model's bounding box and
+    /// gives a fixed, very fine subdivision regardless of LOD.
+    ///
+    /// Set via `set_chord_tolerance_override()` by `triangulate_solid()`
+    /// from `TriangulationParams::max_deviation`.
+    chord_tolerance_override: Option<f64>,
     /// ── Instrumentation counters ──
     /// Number of cache hits (edge already discretized).
     cache_hits: usize,
@@ -257,6 +269,7 @@ impl EdgeDiscretizationCache {
             step_id_aliases: HashMap::new(),
             adaptive_tol: AdaptiveTolerance::new(),
             max_samples: 64,
+            chord_tolerance_override: None,
             cache_hits: 0,
             cache_misses: 0,
             shared_edges: 0,
@@ -272,6 +285,7 @@ impl EdgeDiscretizationCache {
             step_id_aliases: HashMap::new(),
             adaptive_tol: AdaptiveTolerance::from_model_scale(tol_ctx.model_scale),
             max_samples: max_samples.max(4),
+            chord_tolerance_override: None,
             cache_hits: 0,
             cache_misses: 0,
             shared_edges: 0,
@@ -287,6 +301,7 @@ impl EdgeDiscretizationCache {
             step_id_aliases: HashMap::new(),
             adaptive_tol: AdaptiveTolerance::from_bounding_box(min, max),
             max_samples: max_samples.max(4),
+            chord_tolerance_override: None,
             cache_hits: 0,
             cache_misses: 0,
             shared_edges: 0,
@@ -556,6 +571,26 @@ impl EdgeDiscretizationCache {
         self.adaptive_tol = AdaptiveTolerance::from_bounding_box(min, max);
     }
 
+    /// Override the chord tolerance used for adaptive edge subdivision.
+    ///
+    /// Pass `Some(tol)` to make `adaptive_discretize` use `tol` instead of
+    /// `adaptive_tol.chord_tolerance()` as its deviation threshold. Pass
+    /// `None` to revert to the bbox-derived default.
+    ///
+    /// This is what the LOD/Quality selector uses to change the resolution
+    /// of curved edges (arcs on cylinder caps, fillets, etc.) —
+    /// `triangulate_solid()` calls `set_chord_tolerance_override(Some(params.max_deviation))`
+    /// so a coarser LOD produces fewer edge samples and a finer LOD produces more.
+    pub fn set_chord_tolerance_override(&mut self, tol: Option<f64>) {
+        self.chord_tolerance_override = tol.filter(|t| t.is_finite() && *t > 0.0);
+    }
+
+    /// Get the currently effective chord tolerance (override if set, else adaptive).
+    pub fn effective_chord_tolerance(&self) -> f64 {
+        self.chord_tolerance_override
+            .unwrap_or_else(|| self.adaptive_tol.chord_tolerance())
+    }
+
     /// Adaptively discretize an edge based on curve curvature.
     ///
     /// Starts with uniformly-spaced points based on the hint, then recursively
@@ -583,8 +618,8 @@ impl EdgeDiscretizationCache {
             );
         }
 
-        // Adaptive subdivision threshold: use adaptive chord tolerance
-        let max_deviation = self.adaptive_tol.chord_tolerance();
+        // Adaptive subdivision threshold: use LOD override if set, else adaptive.
+        let max_deviation = self.effective_chord_tolerance();
 
         // Start with uniformly spaced points based on hint
         let n_initial = n_samples_hint.min(self.max_samples).max(2);
