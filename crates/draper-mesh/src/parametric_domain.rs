@@ -181,7 +181,7 @@ impl ParametricDomain {
     }
 
     /// Check if a UV point is inside the domain using ray-casting (slow but exact).
-    fn contains_ray(&self, point: &Point2d) -> bool {
+    pub(crate) fn contains_ray(&self, point: &Point2d) -> bool {
         if !point_in_polygon(point, &self.outer_boundary) {
             return false;
         }
@@ -2793,7 +2793,41 @@ pub fn triangulate_surface_consistent(
                 // Find common neighbors (connected to both va and vb)
                 let common: Vec<u32> = connected_to_a.intersection(&connected_to_b).copied().collect();
 
-                if let Some(&best_vc) = common.first() {
+                // CRITICAL: For faces with holes, verify that the fill triangle's
+                // centroid is inside the domain (not inside a hole).
+                //
+                // The gap-filling algorithm finds a common neighbor `vc` of `va`
+                // and `vb` and adds the triangle (va, vb, vc). But if `vc` is on
+                // the opposite side of a hole, the fill triangle spans across
+                // the hole, covering it with a triangle where there should be
+                // empty space.
+                //
+                // Bug history: drill_top.stp STEP #843 (cylinder face with 2
+                // holes) showed triangles covering the holes because gap-filling
+                // added a fill triangle that spanned across a hole.
+                let mut best_vc: Option<u32> = None;
+                for &vc in &common {
+                    // Compute the fill triangle's centroid in UV space
+                    let pa = mesh.vertices[va as usize];
+                    let pb = mesh.vertices[vb as usize];
+                    let pc = mesh.vertices[vc as usize];
+                    let centroid_3d = Point3d::new(
+                        (pa.x + pb.x + pc.x) / 3.0,
+                        (pa.y + pb.y + pc.y) / 3.0,
+                        (pa.z + pb.z + pc.z) / 3.0,
+                    );
+                    let (cu, cv) = surface.project_point(&centroid_3d);
+                    let centroid_uv = Point2d::new(cu, cv);
+                    // Only accept the fill triangle if its centroid is inside
+                    // the domain (i.e., not inside a hole and not outside
+                    // the outer boundary).
+                    if domain.contains_ray(&centroid_uv) {
+                        best_vc = Some(vc);
+                        break;
+                    }
+                }
+
+                if let Some(best_vc) = best_vc {
                     // Add the fill triangle — use the orientation that matches
                     // the face's forward flag
                     if forward {
@@ -2803,6 +2837,9 @@ pub fn triangulate_surface_consistent(
                     }
                     filled += 1;
                 }
+                // If no valid vc found (all candidates span a hole), leave the
+                // edge unfilled — a small gap is better than a triangle covering
+                // a hole.
             }
             if filled > 0 {
                 log::info!(
@@ -2891,7 +2928,7 @@ pub fn triangulate_surface_consistent(
 
         refine_mesh_chord_error_uv(
             &mut mesh, surface, forward, params.max_deviation, max_refine_iters,
-            &mut vertex_uvs, &mut is_boundary_vertex,
+            &mut vertex_uvs, &mut is_boundary_vertex, &domain,
         );
     }
 
@@ -3225,6 +3262,7 @@ fn refine_mesh_chord_error_uv(
     max_iterations: usize,
     vertex_uvs: &mut Vec<Point2d>,
     is_boundary_vertex: &mut Vec<bool>,
+    domain: &ParametricDomain,
 ) {
     use std::collections::HashMap;
 
@@ -3360,6 +3398,23 @@ fn refine_mesh_chord_error_uv(
                 // Clamp to surface parameter range (important for NURBS)
                 let mid_u_clamped = if is_nurbs { mid_u.clamp(nurb_u_min, nurb_u_max) } else { mid_u };
                 let mid_v_clamped = if is_nurbs { mid_v.clamp(nurb_v_min, nurb_v_max) } else { mid_v };
+
+                // CRITICAL: Skip splitting if the midpoint UV falls inside a hole
+                // or outside the outer boundary.
+                //
+                // The chord-error refinement creates new vertices at the midpoint
+                // of edges between two interior vertices. For faces with holes
+                // (e.g., a cylinder face with through-holes), an edge spanning
+                // across a hole would have its midpoint UV land INSIDE the hole.
+                // Inserting a vertex there produces triangles covering the hole
+                // region, which is incorrect — the hole should remain empty.
+                //
+                // This bug manifested in drill_top.stp STEP #843: a half-wrap
+                // cylinder face with 2 inner holes showed triangles covering
+                // the holes because refinement midpoints landed inside them.
+                if !domain.contains(&Point2d::new(mid_u_clamped, mid_v_clamped)) {
+                    continue;
+                }
 
                 // Compute the surface point at the midpoint UV — ONE evaluation
                 let p_surf = surface.point_at(mid_u_clamped, mid_v_clamped);

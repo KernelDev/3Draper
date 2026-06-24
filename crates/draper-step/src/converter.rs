@@ -3630,7 +3630,7 @@ impl<'a> StepConverter<'a> {
             
             let mut face_mesh_with_ids = face_mesh.clone();
             face_mesh_with_ids.triangle_face_ids = Some(vec![face_id; face_tri_count]);
-            
+
             mesh.merge_deduplicating(&face_mesh_with_ids, &mut dedup_map);
             total_face_vertices_detailed += face_mesh_with_ids.vertices.len();
             let tri_end = mesh.triangle_count();

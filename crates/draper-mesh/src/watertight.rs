@@ -728,6 +728,23 @@ pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64)
                             if candidate == *v0 || candidate == *v1 {
                                 continue;
                             }
+                            // CRITICAL: Only weld to OTHER boundary vertices.
+                            //
+                            // Without this check, a boundary vertex from face A
+                            // (e.g., a hole boundary on a cylinder face) can be
+                            // welded to an INTERIOR vertex from face B (e.g., the
+                            // face that fills the hole). This corrupts face A's
+                            // triangulation because the replacement vertex is at
+                            // a different UV position — it lands INSIDE the hole
+                            // that face A's triangulation is supposed to avoid.
+                            //
+                            // Bug history: drill_top.stp STEP #843 (cylinder face
+                            // with 2 holes) showed triangles covering the holes
+                            // because the weld step replaced hole-boundary vertices
+                            // with interior vertices from the hole-filling faces.
+                            if !boundary_vertices.contains(&candidate) {
+                                continue;
+                            }
                             let pc = mesh.vertices[candidate as usize];
                             let dx = pc.x - p1.x;
                             let dy = pc.y - p1.y;
@@ -789,6 +806,15 @@ pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64)
                     if let Some(candidates) = spatial.get(&neighbor_cell) {
                         for &candidate in candidates {
                             if candidate == v1 {
+                                continue;
+                            }
+                            // CRITICAL: Only weld to OTHER boundary vertices.
+                            // See PASS 1 comment for the full rationale.
+                            // Without this check, a boundary vertex from face A
+                            // can be welded to an INTERIOR vertex from face B,
+                            // corrupting face A's triangulation (e.g., triangles
+                            // covering holes that should be empty).
+                            if !boundary_vertices.contains(&candidate) {
                                 continue;
                             }
                             let pc = mesh.vertices[candidate as usize];
