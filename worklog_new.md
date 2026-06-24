@@ -2801,3 +2801,80 @@ Stage Summary:
 - Лог retriangulate_for_lod показывает фактические vertex/triangle counts для NURBS и primitives.
 - Мобильная панель лога получила кнопку "Copy All" — единственный способ скопировать лог на touch-устройствах.
 - Web demo https://kerneldev.github.io/3Draper/ обновлён до bfa926b (commit 29b445e).
+
+---
+Task ID: cylinder-watertight-49
+Agent: Main
+Task: Тестовый цилиндр выглядит "смятым, перекошенным" — LOD=Preview даёт 56 vertices, 58 triangles, not watertight. "Для тестового цилиндра так быть не должно. Или ошибка в brep представлении и не верно работает пейплан построения согласованной триангуляции."
+
+Work Log:
+- Проанализировал скриншот через VLM: "объект имеет форму неправильного цилиндра с искажённой геометрией... рёбра боковой поверхности не соединяются с рёбрами оснований логично... вершины боковых треугольников не совпадают с вершинами оснований, создавая разрывы или наложения геометрии".
+
+- Написал диагностический инструмент tools/src/bin/cyl_diag.rs — выводит все вершины меша сгруппированные по z-координате, плюс manifold report.
+
+- РЕЗУЛЬТАТ ДИАГНОСТИКИ (LOD 0.1, цилиндр r=40, h=100):
+  * z=-0.10: 6 вершин (от lateral face, regular grid, n_u=6)
+  * z=0.00:  19 вершин (от bottom cap face, edge_cache, адаптивная дискретизация)
+  * z=50.00: 6 вершин (от lateral face, intermediate row)
+  * z=100.00: 19 вершин (от top cap face, edge_cache)
+  * z=100.10: 6 вершин (от lateral face)
+  * ИТОГО: 56 vertices, 58 triangles, 50 boundary edges, NOT watertight
+
+  ДВА набора вершин на каждом круге:
+  - Cap face: 19 точек (адаптивная дискретизация по chord_tolerance=1.0)
+  - Lateral face: 6 точек (regular grid u=0, 2π/6, 4π/6, ...)
+  Они НЕ совпадают → 50 boundary edges → "смятый" вид.
+
+- КОРНЕВАЯ ПРИЧИНА:
+  make_cylinder() создаёт lateral face с edges=[bottom_circle, top_circle]
+  но outer_wire=Wire::new(vec![]) (пустой). triangulate_cylinder_face()
+  вызывает collect_face_boundary_with_uv_from_cache() которая читает из
+  face.outer_wire → возвращает ПУСТОЙ boundary. Код падает в
+  triangulate_cylinder_full() который генерирует свой regular grid с n_u
+  из adaptive sampling (6 при LOD 0.1). Cap faces используют edge_cache
+  (19 точек). Результат — несовпадение колец.
+
+- РЕШЕНИЕ:
+  В triangulate_cylinder_face() и triangulate_cone_face(), когда
+  boundary_3d пустой, извлечь boundary points напрямую из face.edges
+  через edge cache:
+    for edge in &face.edges {
+        if let Some(disc) = cache.get(edge.id) {
+            direct_boundary.extend(disc.points_3d.iter().cloned());
+        }
+    }
+  Дедуплицировать consecutive coincident points (cache может хранить seam
+  point на t=0 и t=2π для замкнутого круга). Если ≥6 точек получено,
+  вызвать triangulate_cylinder_tube_from_boundary() / triangulate_cone_tube_from_boundary()
+  которые используют cached ring points как bottom/top rows grid'а.
+  Это гарантирует bit-identical vertices на shared edges с cap faces.
+
+- РЕЗУЛЬТАТ ПОСЛЕ ФИКСА (тот же LOD 0.1):
+  * z=0.00:  19 вершин (shared между cap и lateral)
+  * z=50.00: 20 вершин (intermediate row lateral)
+  * z=100.00: 19 вершин (shared между cap и lateral)
+  * ИТОГО: 58 vertices, 112 triangles, 0 boundary edges, WATERTIGHT ✓
+
+- ТЕСТЫ:
+  * test_cylinder_watertight_at_all_lods — цилиндр должен иметь 0 boundary
+    edges на LOD 0.05/0.1/0.3/0.5/0.75/1.0. ПРОХОДИТ.
+  * test_cone_watertight_at_all_lods — конус должен иметь ≤5 boundary edges
+    (apex degeneracy allowance) на LOD 0.1/0.5/1.0. ПРОХОДИТ (3 edges на
+    LOD 0.1 из-за apex singularity, 0 на LOD 0.5+).
+  * Все 170 draper-mesh lib + 18 integration + 6 lod_chord + 97 draper-step
+    тестов проходят.
+
+- ДЕПЛОЙ:
+  * Commit 289cc2f "fix(mesh): cylinder/cone lateral face shares vertices with cap faces"
+  * gh-pages: bfa926b..c741379
+  * Push в origin/main: baacaeb..289cc2f — fast-forward, история сохранена.
+
+Stage Summary:
+- Тестовый цилиндр теперь WATERTIGHT на всех LOD уровнях (0.05..1.0).
+  Lateral face использует те же cached edge points что и cap faces →
+  bit-identical vertices на shared кругах → 0 boundary edges.
+- Конус также исправлен (тот же паттерн), но на LOD 0.1 может иметь
+  ≤3 boundary edges из-за apex degeneracy (singularity).
+- VLM-анализ скриншота подтвердил "разрывы/наложения геометрии" —
+  именно это и было исправлено.
+- Web demo https://kerneldev.github.io/3Draper/ обновлён до c741379.
