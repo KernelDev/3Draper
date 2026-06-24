@@ -2219,6 +2219,34 @@ fn triangulate_cylinder_face(face: &Face, cyl: &CylinderSurface, params: &Triang
     // the entire outer boundary, producing triangles where there should be voids.
     let (hole_polylines, hole_uvs) = collect_face_holes_with_uv_from_cache(face, cache, &surface);
 
+    // Detect PARTIAL-wrap tube face: boundary has 2 arc edges (at v_min and
+    // v_max) + 2 seam line edges (at u_start and u_end), covering <2π of
+    // angular range. earcutr produces TWISTED triangles for these because
+    // the UV polygon self-intersects when the top arc is parameterized to
+    // go around the "long way" (e.g., from u=0 through u=3π/2 to u=π,
+    // instead of the "short way" through u=π/2).
+    //
+    // Detection: no holes, both bottom_ring and top_ring have ≥3 points.
+    // Triangulation: `triangulate_cylinder_tube_from_boundary` handles both
+    // full and partial wrap (uses `is_full_wrap` to decide wrap-around).
+    if hole_polylines.is_empty() && boundary_3d.len() >= 6 {
+        let (v_min_pw, v_max_pw) = compute_axis_v_range_pts(&boundary_3d, &cyl.origin, &cyl.axis);
+        if v_max_pw > v_min_pw {
+            let dedup_tol = params.max_deviation.max(1e-6) * 0.5;
+            let (bottom_ring, top_ring, _) = split_boundary_into_rings_with_u(
+                &boundary_3d, &cyl.origin, &cyl.axis, &cyl.x_dir,
+                v_min_pw, v_max_pw, dedup_tol,
+            );
+            if bottom_ring.len() >= 3 && top_ring.len() >= 3 {
+                log::info!(
+                    "Cylinder face #{}: PARTIAL tube face detected ({} bottom + {} top ring points, {} bnd pts) — using tube grid triangulation",
+                    face.id, bottom_ring.len(), top_ring.len(), boundary_3d.len()
+                );
+                return triangulate_cylinder_tube_from_boundary(cyl, params, &boundary_3d, face.forward);
+            }
+        }
+    }
+
     crate::parametric_domain::triangulate_surface_consistent(
         &surface,
         &boundary_3d,
@@ -2325,9 +2353,10 @@ fn triangulate_cylinder_tube_from_boundary(
     }
 
     // Split boundary into bottom/top rings, each as a sorted Vec<(u, Point3d)>
-    // with u in [0, 2π) and consecutive-seam duplicates removed.
+    // with u in [0, 2π) (full-wrap) or unwrapped to a continuous range
+    // [u_start, u_end] (partial-wrap). `is_full_wrap` indicates which.
     let dedup_tol = params.max_deviation.max(1e-6) * 0.5;
-    let (bottom_ring, top_ring) = split_boundary_into_rings_with_u(
+    let (bottom_ring, top_ring, is_full_wrap) = split_boundary_into_rings_with_u(
         boundary_3d, &cyl.origin, &cyl.axis, &cyl.x_dir, v_min, v_max, dedup_tol,
     );
 
@@ -2351,6 +2380,11 @@ fn triangulate_cylinder_tube_from_boundary(
     // frustum-like cones where top ring has different u angles, we generate
     // top points analytically (sacrificing top-cap watertightness, but that's
     // a separate problem outside this function's scope).
+    //
+    // For PARTIAL-wrap faces, both rings are unwrapped to the same range, so
+    // their u values should align if the cap arcs share the same chord
+    // tolerance. If they don't align (different EDGE_CURVEs for bottom/top
+    // arcs), we fall back to analytic top points.
     let use_cached_top = top_ring.len() == n_u && {
         let ang_tol = PI / n_u as f64 * 0.5;
         top_ring.iter().enumerate().all(|(i, (tu, _))| {
@@ -2371,6 +2405,11 @@ fn triangulate_cylinder_tube_from_boundary(
         params.height_samples.max(2)
     };
 
+    log::debug!(
+        "Cylinder tube face: n_u={}, n_v={}, full_wrap={}, use_cached_top={}, v=[{:.3},{:.3}]",
+        n_u, n_v, is_full_wrap, use_cached_top, v_min, v_max
+    );
+
     // Generate vertices: n_v+1 rows × n_u columns.
     // - j=0 (bottom): use cached bottom_ring points (shared with bottom cap face).
     // - j=n_v (top): use cached top_ring points (if use_cached_top) — shared
@@ -2379,6 +2418,10 @@ fn triangulate_cylinder_tube_from_boundary(
     //   Using bottom_u[i] (not uniform 2π*i/n_u) ensures each column of the
     //   grid is at a single angular position, producing clean rectangular
     //   quads faces instead of twisted/spiraling triangles.
+    //
+    // IMPORTANT: for partial-wrap faces, bottom_u[i] is in unwrapped range
+    // [u_start, u_end] (possibly > 2π). cyl.point_at(u, v) is periodic in u,
+    // so passing u > 2π is fine — it produces the same point as u mod 2π.
     for j in 0..=n_v {
         let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
         for i in 0..n_u {
@@ -2396,12 +2439,24 @@ fn triangulate_cylinder_tube_from_boundary(
         }
     }
 
-    // Generate triangles with U wrap-around (mod n_u).
+    // Generate triangles.
     // v0 = (j, i), v1 = (j, i+1), v2 = (j+1, i+1), v3 = (j+1, i).
     // Forward winding: (v0,v1,v2)+(v0,v2,v3) → CCW from outside.
+    //
+    // For FULL-wrap: i_next = (i+1) % n_u (wrap around to close the tube).
+    // Produces n_u quads per row.
+    //
+    // For PARTIAL-wrap: i_next = i+1, NO wrap (last column has no neighbor
+    // to the right — that's where the seam line lives, shared with the
+    // adjacent half-cylinder face). Produces n_u-1 quads per row.
     for j in 0..n_v {
         for i in 0..n_u {
-            let i_next = (i + 1) % n_u;
+            let i_next = if is_full_wrap {
+                (i + 1) % n_u
+            } else {
+                if i + 1 >= n_u { continue; }
+                i + 1
+            };
             let v0 = (j * n_u + i) as u32;
             let v1 = (j * n_u + i_next) as u32;
             let v2 = ((j + 1) * n_u + i_next) as u32;
@@ -2444,6 +2499,7 @@ fn split_boundary_into_rings_with_u(
 ) -> (
     Vec<(f64, draper_geometry::Point3d)>,
     Vec<(f64, draper_geometry::Point3d)>,
+    bool,
 ) {
     let y_dir = axis.cross(x_dir);
     let v_tol = (v_max - v_min).abs() * 0.05 + 1e-9;
@@ -2496,7 +2552,78 @@ fn split_boundary_into_rings_with_u(
     dedup_consecutive(&mut bottom);
     dedup_consecutive(&mut top);
 
-    (bottom, top)
+    // ============================================================
+    // Detect full vs partial U-period wrap and unwrap u values.
+    //
+    // For a FULL-wrap face (boundary covers ≈2π of angular range), the
+    // bottom_ring and top_ring points are roughly uniformly distributed
+    // in [0, 2π). The largest gap between consecutive sorted u values
+    // (including wraparound from last to first+2π) is small (≈2π/n_u).
+    // We keep u values in [0, 2π) and use `(i+1) % n_u` for triangle
+    // winding to close the loop.
+    //
+    // For a PARTIAL-wrap face (boundary covers <2π, e.g., a half-cylinder
+    // face from a STEP file with 2 half-circle arcs + 2 seam lines), the
+    // u values cluster in [u_start, u_end] with u_end - u_start < 2π. The
+    // largest gap is the "missing" angular range = 2π - (u_end - u_start).
+    //
+    // For partial-wrap, we must UNWRAP u values to a continuous range
+    // [u_start, u_end] (or [u_start, u_end + 2π] if the cluster wraps
+    // around the u=0 seam). This is done by shifting points on the "low"
+    // side of the largest gap by +2π, so all u values become monotonic.
+    //
+    // We then use `i+1` (no mod) for triangle winding, producing n_u-1
+    // quads per row instead of n_u (no wraparound edge — that's where
+    // the seam lines live).
+    //
+    // Threshold: full-wrap if max_gap ≤ π/4 (45°). This works for n_u≥8
+    // in full-wrap case (max_gap=2π/n_u≤π/4 ⟺ n_u≥8). For partial-wrap,
+    // max_gap is typically ≥π/2 (90°), well above π/4.
+    // ============================================================
+    let mut all_us: Vec<f64> = bottom.iter().map(|(u, _)| *u).collect();
+    all_us.extend(top.iter().map(|(u, _)| *u));
+    if all_us.is_empty() {
+        return (bottom, top, false);
+    }
+    all_us.sort_by(|a, b| a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let n_all = all_us.len();
+    let mut max_gap = 0.0f64;
+    let mut gap_idx = 0usize;
+    for i in 0..n_all {
+        let next = if i + 1 < n_all { all_us[i + 1] } else { all_us[0] + 2.0 * PI };
+        let gap = next - all_us[i];
+        if gap > max_gap {
+            max_gap = gap;
+            gap_idx = i;
+        }
+    }
+
+    // Full-wrap threshold: max_gap ≤ π/4 (45°).
+    let is_full_wrap = max_gap <= PI * 0.25;
+
+    if !is_full_wrap {
+        // Partial-wrap: unwrap u values.
+        // Points on the "low" side of the largest gap (i.e., u values
+        // ≤ all_us[gap_idx]) should be shifted by +2π, so all u values
+        // become monotonically increasing in [u_after_gap, u_before_gap + 2π].
+        let u_threshold = all_us[gap_idx];
+        for (u, _) in bottom.iter_mut() {
+            if *u <= u_threshold {
+                *u += 2.0 * PI;
+            }
+        }
+        for (u, _) in top.iter_mut() {
+            if *u <= u_threshold {
+                *u += 2.0 * PI;
+            }
+        }
+        // Re-sort by unwrapped u.
+        bottom.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        top.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    }
+
+    (bottom, top, is_full_wrap)
 }
 
 /// Analytic fallback: triangulate a full cylinder between v_min and v_max
@@ -2591,9 +2718,10 @@ fn triangulate_cone_tube_from_boundary(
     let top_row_at_apex = apex_v.is_finite() && (v_max - apex_v).abs() < apex_v * 0.01 + 1e-6;
 
     // Split boundary into bottom/top rings, each as a sorted Vec<(u, Point3d)>
-    // with u in [0, 2π) and seam duplicates removed.
+    // with u in [0, 2π) (full-wrap) or unwrapped to a continuous range
+    // [u_start, u_end] (partial-wrap). `is_full_wrap` indicates which.
     let dedup_tol = params.max_deviation.max(1e-6) * 0.5;
-    let (bottom_ring, top_ring) = split_boundary_into_rings_with_u(
+    let (bottom_ring, top_ring, is_full_wrap) = split_boundary_into_rings_with_u(
         boundary_3d, &cone.origin, &cone.axis, &cone.x_dir, v_min, v_max, dedup_tol,
     );
 
@@ -2612,6 +2740,9 @@ fn triangulate_cone_tube_from_boundary(
     // For `make_cone()`, the lateral face has no top edge, so top_ring is empty
     // → use_cached_top = false → top row (if not apex) uses analytic points.
     // This is OK because the cone's top cap doesn't exist (apex is a single point).
+    //
+    // For PARTIAL-wrap faces from STEP files, both rings are unwrapped to the
+    // same range, so u values should align if cap arcs share chord tolerance.
     let use_cached_top = !top_row_at_apex && top_ring.len() == n_u && {
         let ang_tol = PI / n_u as f64 * 0.5;
         top_ring.iter().enumerate().all(|(i, (tu, _))| {
@@ -2630,6 +2761,11 @@ fn triangulate_cone_tube_from_boundary(
     } else {
         params.height_samples.max(2)
     };
+
+    log::debug!(
+        "Cone tube face: n_u={}, n_v={}, full_wrap={}, apex={}, use_cached_top={}, v=[{:.3},{:.3}]",
+        n_u, n_v, is_full_wrap, top_row_at_apex, use_cached_top, v_min, v_max
+    );
 
     // Generate vertex grid with apex degeneracy handling.
     // - j=0 (bottom): use cached bottom_ring points (shared with bottom cap face).
@@ -2674,8 +2810,12 @@ fn triangulate_cone_tube_from_boundary(
         }
     }
 
-    // Generate triangles with U wrap-around (mod n_u).
+    // Generate triangles.
     // Apex row fans from the previous row; other rows use standard quad split.
+    //
+    // For FULL-wrap: i_next = (i+1) % row_count (wrap around).
+    // For PARTIAL-wrap: i_next = i+1, NO wrap (last column has no right
+    // neighbor — that's where the seam line lives).
     for j in 0..n_v {
         let j_next = j + 1;
         let row_count = row_vertex_count[j];
@@ -2685,9 +2825,15 @@ fn triangulate_cone_tube_from_boundary(
 
         if next_row_count == 1 {
             // Next row is apex — fan from current row ring to apex.
+            // For full-wrap, fan wraps around; for partial, no wrap.
             let apex = next_row_base;
             for i in 0..row_count {
-                let i_next = (i + 1) % row_count;
+                let i_next = if is_full_wrap {
+                    (i + 1) % row_count
+                } else {
+                    if i + 1 >= row_count { continue; }
+                    i + 1
+                };
                 let v0 = row_base + i as u32;
                 let v1 = row_base + i_next as u32;
                 if forward {
@@ -2698,7 +2844,12 @@ fn triangulate_cone_tube_from_boundary(
             }
         } else {
             for i in 0..row_count {
-                let i_next = (i + 1) % row_count;
+                let i_next = if is_full_wrap {
+                    (i + 1) % row_count
+                } else {
+                    if i + 1 >= row_count { continue; }
+                    i + 1
+                };
                 let v0 = row_base + i as u32;
                 let v1 = row_base + i_next as u32;
                 let v2 = next_row_base + i_next as u32;
@@ -2918,6 +3069,27 @@ fn triangulate_cone_face(face: &Face, cone: &ConeSurface, params: &Triangulation
 
     // Collect holes from inner loops
     let (hole_polylines, hole_uvs) = collect_face_holes_with_uv_from_cache(face, cache, &surface);
+
+    // Detect PARTIAL-wrap tube face (same logic as triangulate_cylinder_face).
+    // See triangulate_cylinder_face for detailed comments on why partial-wrap
+    // faces need this detection (earcutr produces twisted triangles for them).
+    if hole_polylines.is_empty() && boundary_3d.len() >= 6 {
+        let (v_min_pw, v_max_pw) = compute_axis_v_range_pts(&boundary_3d, &cone.origin, &cone.axis);
+        if v_max_pw > v_min_pw {
+            let dedup_tol = params.max_deviation.max(1e-6) * 0.5;
+            let (bottom_ring, top_ring, _) = split_boundary_into_rings_with_u(
+                &boundary_3d, &cone.origin, &cone.axis, &cone.x_dir,
+                v_min_pw, v_max_pw, dedup_tol,
+            );
+            if bottom_ring.len() >= 3 && top_ring.len() >= 3 {
+                log::info!(
+                    "Cone face #{}: PARTIAL tube face detected ({} bottom + {} top ring points, {} bnd pts) — using tube grid triangulation",
+                    face.id, bottom_ring.len(), top_ring.len(), boundary_3d.len()
+                );
+                return triangulate_cone_tube_from_boundary(cone, params, &boundary_3d, face.forward);
+            }
+        }
+    }
 
     crate::parametric_domain::triangulate_surface_consistent(
         &surface,
@@ -4455,17 +4627,54 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
             }
         }
         Surface::Cylinder(cyl) => {
-            // Cylinder: detect full U-period wrap (tube face) and use grid
-            // triangulation for watertightness. Otherwise use earcutr.
-            if boundary_uvs.len() >= 4
-                && hole_polylines.is_empty()
-                && is_full_u_period_wrap(boundary_uvs, 2.0 * PI)
-            {
-                log::info!(
-                    "Cylinder face: full U-period wrap detected ({} bnd pts, u-range≈2π) — using tube grid triangulation",
-                    boundary_points.len()
-                );
-                return triangulate_cylinder_tube_from_boundary(cyl, params, boundary_points, forward);
+            // Cylinder: detect tube face (full OR partial U-period wrap) and
+            // use grid triangulation for watertightness. Otherwise use earcutr.
+            //
+            // FULL-wrap: boundary covers ≈2π of angular range (e.g., a full
+            // cylinder lateral face with bottom + top full circles, no seam
+            // edges). Detected by `is_full_u_period_wrap`.
+            //
+            // PARTIAL-wrap: boundary covers <2π of angular range (e.g., a
+            // half-cylinder lateral face from a STEP file with 2 half-circle
+            // arcs + 2 seam lines, covering π of angular range). The
+            // `is_full_u_period_wrap` check FAILS for these, causing them to
+            // fall through to earcutr which produces TWISTED triangles
+            // because the UV polygon self-intersects when the top arc is
+            // parameterized to go around the "long way" (e.g., from u=0
+            // through u=3π/2 to u=π, instead of the "short way" through
+            // u=π/2).
+            //
+            // For partial-wrap, we detect via `split_boundary_into_rings_with_u`:
+            // if both bottom_ring and top_ring have ≥3 points (i.e., the face
+            // has 2 distinct v-levels with arcs at each), it's a tube face
+            // and we use `triangulate_cylinder_tube_from_boundary` which now
+            // handles both full and partial wrap.
+            if hole_polylines.is_empty() && boundary_points.len() >= 6 {
+                if is_full_u_period_wrap(boundary_uvs, 2.0 * PI) {
+                    log::info!(
+                        "Cylinder face: full U-period wrap detected ({} bnd pts, u-range≈2π) — using tube grid triangulation",
+                        boundary_points.len()
+                    );
+                    return triangulate_cylinder_tube_from_boundary(cyl, params, boundary_points, forward);
+                }
+                // Check for PARTIAL-wrap tube face: both bottom_ring and
+                // top_ring must have ≥3 points (i.e., the boundary has arcs
+                // at two distinct v-levels, plus seam lines connecting them).
+                let (v_min_pw, v_max_pw) = compute_axis_v_range_pts(boundary_points, &cyl.origin, &cyl.axis);
+                if v_max_pw > v_min_pw {
+                    let dedup_tol = params.max_deviation.max(1e-6) * 0.5;
+                    let (bottom_ring, top_ring, _) = split_boundary_into_rings_with_u(
+                        boundary_points, &cyl.origin, &cyl.axis, &cyl.x_dir,
+                        v_min_pw, v_max_pw, dedup_tol,
+                    );
+                    if bottom_ring.len() >= 3 && top_ring.len() >= 3 {
+                        log::info!(
+                            "Cylinder face: PARTIAL tube face detected ({} bottom + {} top ring points, {} bnd pts) — using tube grid triangulation",
+                            bottom_ring.len(), top_ring.len(), boundary_points.len()
+                        );
+                        return triangulate_cylinder_tube_from_boundary(cyl, params, boundary_points, forward);
+                    }
+                }
             }
             // Cylinder: use earcutr-based consistent triangulation.
             // The grid-based approach with boundary snapping only approximates
@@ -4483,16 +4692,43 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
             )
         }
         Surface::Cone(cone) => {
-            // Cone: detect full U-period wrap (tube face) similarly
-            if boundary_uvs.len() >= 4
-                && hole_polylines.is_empty()
-                && is_full_u_period_wrap(boundary_uvs, 2.0 * PI)
-            {
-                log::info!(
-                    "Cone face: full U-period wrap detected ({} bnd pts, u-range≈2π) — using tube grid triangulation",
-                    boundary_points.len()
-                );
-                return triangulate_cone_tube_from_boundary(cone, params, boundary_points, forward);
+            // Cone: detect tube face (full OR partial U-period wrap) similarly
+            // to the cylinder case. See the cylinder arm for detailed comments.
+            //
+            // PARTIAL-wrap cone faces come from STEP files where a cone
+            // surface is split into 2 half-cone faces (each covering π of
+            // angular range, with 2 half-circle arc edges + 2 seam line
+            // edges). Without this detection, they fall through to earcutr
+            // which produces twisted triangles due to UV polygon self-
+            // intersection when the top arc is parameterized the "long way".
+            //
+            // Cone apex degeneracy is handled inside
+            // `triangulate_cone_tube_from_boundary` — when v_max reaches
+            // the apex height, the top row collapses to a single apex vertex.
+            if hole_polylines.is_empty() && boundary_points.len() >= 6 {
+                if is_full_u_period_wrap(boundary_uvs, 2.0 * PI) {
+                    log::info!(
+                        "Cone face: full U-period wrap detected ({} bnd pts, u-range≈2π) — using tube grid triangulation",
+                        boundary_points.len()
+                    );
+                    return triangulate_cone_tube_from_boundary(cone, params, boundary_points, forward);
+                }
+                // Check for PARTIAL-wrap tube face.
+                let (v_min_pw, v_max_pw) = compute_axis_v_range_pts(boundary_points, &cone.origin, &cone.axis);
+                if v_max_pw > v_min_pw {
+                    let dedup_tol = params.max_deviation.max(1e-6) * 0.5;
+                    let (bottom_ring, top_ring, _) = split_boundary_into_rings_with_u(
+                        boundary_points, &cone.origin, &cone.axis, &cone.x_dir,
+                        v_min_pw, v_max_pw, dedup_tol,
+                    );
+                    if bottom_ring.len() >= 3 && top_ring.len() >= 3 {
+                        log::info!(
+                            "Cone face: PARTIAL tube face detected ({} bottom + {} top ring points, {} bnd pts) — using tube grid triangulation",
+                            bottom_ring.len(), top_ring.len(), boundary_points.len()
+                        );
+                        return triangulate_cone_tube_from_boundary(cone, params, boundary_points, forward);
+                    }
+                }
             }
             // Cone: must handle apex degeneracy
             triangulate_cone_face_with_boundary_uv(
@@ -6757,6 +6993,33 @@ fn estimate_v_range(face: &Face) -> Option<(f64, f64)> {
         }
     } else {
         None
+    }
+}
+
+/// Compute the v parameter range from a list of 3D boundary points projected
+/// onto an axis. Used by partial-tube-face detection in
+/// `triangulate_face_with_boundary_and_holes_uv` to determine v_min and v_max
+/// before calling `split_boundary_into_rings_with_u`.
+///
+/// Returns (v_min, v_max). If `points` is empty, returns (0.0, 0.0).
+fn compute_axis_v_range_pts(
+    points: &[Point3d],
+    origin: &Point3d,
+    axis: &Direction3d,
+) -> (f64, f64) {
+    let mut v_min = f64::MAX;
+    let mut v_max = f64::MIN;
+    for p in points {
+        let v = (p.x - origin.x) * axis.x
+              + (p.y - origin.y) * axis.y
+              + (p.z - origin.z) * axis.z;
+        v_min = v_min.min(v);
+        v_max = v_max.max(v);
+    }
+    if v_min > v_max {
+        (0.0, 0.0)
+    } else {
+        (v_min, v_max)
     }
 }
 
