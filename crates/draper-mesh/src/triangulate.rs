@@ -2290,13 +2290,26 @@ fn is_full_u_period_wrap(boundary_uvs: &[draper_geometry::Point2d], u_period: f6
     let n = us.len();
     if n < 2 { return false; }
     let mut max_gap = 0.0f64;
+    let mut second_max_gap = 0.0f64;
     for i in 0..n {
         let next = if i + 1 < n { us[i + 1] } else { us[0] + u_period };
         let gap = next - us[i];
-        if gap > max_gap { max_gap = gap; }
+        if gap > max_gap {
+            second_max_gap = max_gap;
+            max_gap = gap;
+        } else if gap > second_max_gap {
+            second_max_gap = gap;
+        }
     }
     let wrapped_range = u_period - max_gap;
-    let is_full = wrapped_range >= u_period * 0.95;
+    // Full-range threshold: ≥90% of u_period. See
+    // split_boundary_into_rings_with_u for the rationale.
+    let is_full_range = wrapped_range >= u_period * 0.90;
+    // Uniform-gap threshold using second-max gap as the arc-step reference.
+    // See split_boundary_into_rings_with_u for the rationale.
+    let seam_to_arc_ratio = if second_max_gap > 1e-9 { max_gap / second_max_gap } else { 1.0 };
+    let is_uniform_gap = seam_to_arc_ratio <= 1.5;
+    let is_full = is_full_range && is_uniform_gap;
     log::debug!(
         "is_full_u_period_wrap: n={}, u_period={:.4}, u_min={:.4}, u_max={:.4}, max_gap={:.4}, wrapped_range={:.4} ({:.1}% of period), is_full={}",
         n, u_period, us[0], us[n - 1], max_gap, wrapped_range,
@@ -2576,9 +2589,17 @@ fn split_boundary_into_rings_with_u(
     // quads per row instead of n_u (no wraparound edge — that's where
     // the seam lines live).
     //
-    // Threshold: full-wrap if max_gap ≤ π/4 (45°). This works for n_u≥8
-    // in full-wrap case (max_gap=2π/n_u≤π/4 ⟺ n_u≥8). For partial-wrap,
-    // max_gap is typically ≥π/2 (90°), well above π/4.
+    // Threshold: full-wrap requires BOTH:
+    //   (1) wrapped_range = 2π - max_gap >= 99% of 2π (covers ≈ entire period).
+    //   (2) max_gap ≤ 2 × mean_gap (gap uniformity — partial-wrap has a
+    //       distinctly larger seam gap than arc step gaps).
+    //
+    // The previous single-threshold `max_gap ≤ π/4 (45°)` was too loose for
+    // 351°-wrap STEP faces with n_u=64: the seam gap ≈ 0.157 rad (9°) is
+    // well below π/4, so the face was misclassified as full-wrap, causing
+    // wrap-link triangles between the two seam endpoints across the missing
+    // 9° gap — visible as twisted/spike artifacts on cone/cylinder lateral
+    // faces (test/3.05.078.stp faces #78, #84 reported by user).
     // ============================================================
     let mut all_us: Vec<f64> = bottom.iter().map(|(u, _)| *u).collect();
     all_us.extend(top.iter().map(|(u, _)| *u));
@@ -2589,38 +2610,82 @@ fn split_boundary_into_rings_with_u(
 
     let n_all = all_us.len();
     let mut max_gap = 0.0f64;
+    let mut second_max_gap = 0.0f64;
     let mut gap_idx = 0usize;
     for i in 0..n_all {
         let next = if i + 1 < n_all { all_us[i + 1] } else { all_us[0] + 2.0 * PI };
         let gap = next - all_us[i];
         if gap > max_gap {
+            second_max_gap = max_gap;
             max_gap = gap;
             gap_idx = i;
+        } else if gap > second_max_gap {
+            second_max_gap = gap;
         }
     }
-
-    // Full-wrap threshold: max_gap ≤ π/4 (45°).
-    let is_full_wrap = max_gap <= PI * 0.25;
+    let wrapped_range = 2.0 * PI - max_gap;
+    // Full-range threshold: ≥90% of 2π. Lower than 99% because arc sampling
+    // excludes the last point (sample_edge_points uses i in 0..n, so the
+    // last sample is at i=n-1, not i=n). For a primitive cylinder with
+    // n_u=19, the wrapped range is 18/19 × 2π ≈ 94.7%, which is below 99%
+    // but above 90%.
+    let is_full_range = wrapped_range >= 2.0 * PI * 0.90;
+    // Uniform-gap threshold using SECOND-MAX gap as the "arc step" reference.
+    // For full-wrap: max_gap ≈ second_max_gap (all gaps uniform), ratio ≈ 1.
+    // For partial-wrap: max_gap is the seam gap, second_max_gap is the arc
+    //   step. Seam gap > arc step, ratio > 1 (typically ≥1.5 for STEP files
+    //   with partial-wrap faces like 351°-wrap cones).
+    // We use ratio ≤ 1.5 as the full-wrap threshold.
+    //
+    // Why not use mean_gap? Because `all_us` contains BOTH bottom_ring and
+    // top_ring u values, which may be duplicated (same u for both rings).
+    // Duplicates make mean_gap smaller than the true arc step, inflating
+    // max_gap / mean_gap ratio. Using second_max_gap avoids this — the
+    // second-largest gap is the largest "non-seam" gap, which is the arc
+    // step regardless of duplicates.
+    let seam_to_arc_ratio = if second_max_gap > 1e-9 { max_gap / second_max_gap } else { 1.0 };
+    let is_uniform_gap = seam_to_arc_ratio <= 1.5;
+    let is_full_wrap = is_full_range && is_uniform_gap;
+    log::debug!(
+        "split_boundary wrap detection: n_all={}, gap_idx={}, max_gap={:.4}, second_max_gap={:.4}, ratio={:.2}, wrapped_range={:.4} ({:.1}%), is_full_range={}, is_uniform_gap={}, is_full_wrap={}",
+        n_all, gap_idx, max_gap, second_max_gap, seam_to_arc_ratio,
+        wrapped_range, 100.0 * wrapped_range / (2.0 * PI),
+        is_full_range, is_uniform_gap, is_full_wrap
+    );
 
     if !is_full_wrap {
-        // Partial-wrap: unwrap u values.
-        // Points on the "low" side of the largest gap (i.e., u values
-        // ≤ all_us[gap_idx]) should be shifted by +2π, so all u values
-        // become monotonically increasing in [u_after_gap, u_before_gap + 2π].
-        let u_threshold = all_us[gap_idx];
-        for (u, _) in bottom.iter_mut() {
-            if *u <= u_threshold {
-                *u += 2.0 * PI;
+        // Partial-wrap: unwrap u values to a continuous range.
+        //
+        // The largest gap is between `all_us[gap_idx]` and `all_us[gap_idx+1]`
+        // (or between `all_us[n-1]` and `all_us[0]+2π` when `gap_idx == n-1`).
+        //
+        // Case A — gap in the MIDDLE (gap_idx < n_all-1):
+        //   u values in [all_us[0], all_us[gap_idx]] are on the "low" side
+        //   of the gap. Shift them by +2π so all u values become
+        //   monotonically increasing in [all_us[gap_idx+1], all_us[gap_idx]+2π].
+        //
+        // Case B — gap at the END (gap_idx == n_all-1):
+        //   u values are already sorted and continuous in
+        //   [all_us[0], all_us[n_all-1]]. No unwrap needed.
+        //   (Previous code incorrectly shifted ALL points by +2π here,
+        //    producing a range like [0.083+2π, 6.283+2π] which broke
+        //    triangulation for 351°-wrap cone faces.)
+        if gap_idx < n_all - 1 {
+            let u_threshold = all_us[gap_idx];
+            for (u, _) in bottom.iter_mut() {
+                if *u <= u_threshold {
+                    *u += 2.0 * PI;
+                }
             }
-        }
-        for (u, _) in top.iter_mut() {
-            if *u <= u_threshold {
-                *u += 2.0 * PI;
+            for (u, _) in top.iter_mut() {
+                if *u <= u_threshold {
+                    *u += 2.0 * PI;
+                }
             }
+            // Re-sort by unwrapped u.
+            bottom.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            top.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         }
-        // Re-sort by unwrapped u.
-        bottom.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-        top.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     }
 
     (bottom, top, is_full_wrap)

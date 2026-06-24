@@ -646,6 +646,15 @@ pub struct ViewerApp {
     /// The center of the visible region is shifted by this offset
     /// before zoom is applied. Reset to [0.0, 0.0] on face change.
     uv_window_pan: [f64; 2],
+    /// Aspect-ratio override for the UV breakdown window canvas.
+    /// 1.0 = preserve the UV box's natural aspect ratio (default).
+    /// <1.0 = squeeze U (e.g. 0.5 makes a 2π×1 cylinder UV appear square).
+    /// >1.0 = stretch U.
+    /// Useful when the U range is much larger than V (e.g. cylinder: U=2π,
+    /// V=height) — without an override the canvas becomes wide and short,
+    /// making individual triangles hard to see. User-adjustable via slider
+    /// in the UV window controls.
+    uv_window_aspect_override: f32,
     /// Last face index shown in the UV window — used to detect face
     /// switches and reset zoom/pan automatically.
     uv_window_prev_face_idx: Option<usize>,
@@ -1126,6 +1135,7 @@ impl ViewerApp {
             uv_window_v_divs: 10,
             uv_window_zoom: 1.0,
             uv_window_pan: [0.0, 0.0],
+            uv_window_aspect_override: 1.0,
             uv_window_prev_face_idx: None,
             solid_uv_breakdown: None,
             pending_solid_uv_svg_export: false,
@@ -6173,13 +6183,17 @@ impl eframe::App for ViewerApp {
             // primitive/NURBS session. Fall back to `current_solid` for
             // primitive/NURBS gallery loaders (where detailed_instances is
             // always empty). This matches `draw_uv_window`'s logic below.
-            let active_solid: Option<Solid> = if !self.detailed_instances.is_empty() {
+            let active_detailed: Option<&DetailedMeshInstance> = if !self.detailed_instances.is_empty() {
                 let chosen_idx = self
                     .selected_instance
                     .or_else(|| Some(0));
                 chosen_idx
                     .and_then(|i| self.detailed_instances.get(i))
-                    .map(solid_from_detailed_instance)
+            } else {
+                None
+            };
+            let active_solid: Option<Solid> = if let Some(di) = active_detailed {
+                Some(solid_from_detailed_instance(di))
             } else {
                 self.current_solid.clone()
             };
@@ -6187,7 +6201,15 @@ impl eframe::App for ViewerApp {
             if self.solid_uv_breakdown.is_none() {
                 if let Some(ref solid) = active_solid {
                     let name = self.current_model.name.clone();
-                    self.solid_uv_breakdown = Some(compute_solid_uv_breakdown(solid, &name));
+                    // Pass the DetailedMeshInstance so we can use the actual
+                    // FaceInfo UV triangles + boundary polylines (the real
+                    // triangulation with holes/arcs) instead of falling back
+                    // to a synthetic square grid.
+                    self.solid_uv_breakdown = Some(compute_solid_uv_breakdown_with_detailed(
+                        solid,
+                        &name,
+                        active_detailed,
+                    ));
                 }
             }
             if let Some(ref breakdown) = self.solid_uv_breakdown {
@@ -6303,7 +6325,7 @@ impl ViewerApp {
         // forgets to clear `current_solid` when a STEP/JSON file is
         // loaded, the preference for `detailed_instances` here ensures
         // the UV Breakdown window still shows the right solid.
-        let active_solid: Option<Solid> = if !self.detailed_instances.is_empty() {
+        let active_detailed: Option<&DetailedMeshInstance> = if !self.detailed_instances.is_empty() {
             // STEP/JSON file path. Pick the selected instance, or fall
             // back to the first instance so the window always shows
             // SOMETHING.
@@ -6312,7 +6334,11 @@ impl ViewerApp {
                 .or_else(|| Some(0));
             chosen_idx
                 .and_then(|i| self.detailed_instances.get(i))
-                .map(solid_from_detailed_instance)
+        } else {
+            None
+        };
+        let active_solid: Option<Solid> = if let Some(di) = active_detailed {
+            Some(solid_from_detailed_instance(di))
         } else {
             // Primitive / NURBS gallery path.
             self.current_solid.clone()
@@ -6329,7 +6355,11 @@ impl ViewerApp {
         if self.solid_uv_breakdown.is_none() {
             if let Some(ref solid) = active_solid {
                 let name = self.current_model.name.clone();
-                self.solid_uv_breakdown = Some(compute_solid_uv_breakdown(solid, &name));
+                self.solid_uv_breakdown = Some(compute_solid_uv_breakdown_with_detailed(
+                    solid,
+                    &name,
+                    active_detailed,
+                ));
                 // If the active face index is now out of range (e.g. the
                 // new solid has fewer faces than the previous one), clear
                 // it — the user must pick a new face from the list.
@@ -6461,11 +6491,31 @@ impl ViewerApp {
                         if ui.button("Reset View").clicked() {
                             self.uv_window_zoom = 1.0;
                             self.uv_window_pan = [0.0, 0.0];
+                            self.uv_window_aspect_override = 1.0;
                         }
                     });
                 });
+                // ─── Aspect-ratio override ─────────────────────────────────
+                // Lets the user squeeze/stretch the U axis relative to V so
+                // that surfaces with U-range ≫ V-range (e.g. cylinder:
+                // U=2π ≈ 6.28, V=height) become easier to inspect — without
+                // this, the canvas becomes wide and short and individual
+                // triangles are hard to distinguish. The default 1.0 keeps
+                // the natural aspect.
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(controls_enabled, |ui| {
+                        ui.label(egui::RichText::new("U-squeeze:").size(11.0));
+                        ui.add(
+                            egui::Slider::new(&mut self.uv_window_aspect_override, 0.1..=2.0)
+                                .step_by(0.05)
+                                .clamping(egui::SliderClamping::Always)
+                                .fixed_decimals(2)
+                                .text("(1.0=natural)"),
+                        );
+                    });
+                });
                 ui.label(egui::RichText::new(
-                    "Tip: drag the canvas to pan, use + / − or the slider to zoom."
+                    "Tip: drag the canvas to pan, use + / − or the slider to zoom. U-squeeze helps inspect cylinder/cone UVs."
                 ).size(10.0).color(egui::Color32::from_rgb(140, 140, 160)));
 
                 ui.horizontal(|ui| {
@@ -6608,9 +6658,23 @@ impl ViewerApp {
                         // square draw_size area while preserving aspect ratio,
                         // centering it inside the canvas. This means zooming
                         // truly pivots around the center of the real UV box.
+                        //
+                        // The user can override the aspect ratio via the
+                        // `uv_window_aspect_override` slider (1.0 = natural).
+                        // This is useful when the U range is much larger than
+                        // V (e.g. cylinder: U=2π, V=height) — without an
+                        // override the canvas becomes wide and short, making
+                        // individual triangles hard to see. Setting the
+                        // override to 0.5 effectively "squeezes" U by 2× so
+                        // a 2π×π cylinder UV appears as a square.
                         let u_range_vis = (u_max - u_min).max(1e-12);
                         let v_range_vis = (v_max - v_min).max(1e-12);
-                        let ar_uv = u_range_vis / v_range_vis;
+                        let ar_uv_natural = u_range_vis / v_range_vis;
+                        // Effective aspect: ar_uv * override. override=1.0 keeps
+                        // the natural aspect; override=0.5 makes U appear half
+                        // as wide relative to V (i.e. squeezes U).
+                        let aspect_override = (self.uv_window_aspect_override as f64).max(0.05);
+                        let ar_uv = ar_uv_natural * aspect_override;
                         let (width_f64, height_f64) = if ar_uv >= 1.0 {
                             // Wider than tall — fit width to draw_size.
                             (draw_size_f64, draw_size_f64 / ar_uv)
@@ -8125,7 +8189,26 @@ fn solid_from_detailed_instance(inst: &DetailedMeshInstance) -> Solid {
 /// coordinates. The result is a per-face list of UV polylines.
 ///
 /// Returns an empty `SolidUvBreakdown` if the solid has no outer shell.
+///
+/// When `detailed_instance` is provided (STEP-loaded meshes), the UV
+/// triangles and boundary polylines are taken DIRECTLY from the
+/// `FaceInfo` (which contains the actual triangulation produced by the
+/// STEP converter). Without this, the UV breakdown window would fall
+/// back to a synthetic square grid because `Face::new_surface_only`
+/// (used by `solid_from_detailed_instance`) has no wires for
+/// `triangulate_face` to use — producing an empty mesh and triggering
+/// the square-grid fallback. This was the root cause of the "Plane
+/// face shows square grid instead of circle with hole" bug on
+/// test/3.05.078.stp face #87.
 fn compute_solid_uv_breakdown(solid: &Solid, model_name: &str) -> SolidUvBreakdown {
+    compute_solid_uv_breakdown_with_detailed(solid, model_name, None)
+}
+
+fn compute_solid_uv_breakdown_with_detailed(
+    solid: &Solid,
+    model_name: &str,
+    detailed_instance: Option<&DetailedMeshInstance>,
+) -> SolidUvBreakdown {
     let mut breakdown = SolidUvBreakdown {
         faces: Vec::new(),
         model_name: model_name.to_string(),
@@ -8144,6 +8227,31 @@ fn compute_solid_uv_breakdown(solid: &Solid, model_name: &str) -> SolidUvBreakdo
         let u_periodic = surface.is_u_periodic();
         let v_periodic = surface.is_v_periodic();
         let mut outer_polylines: Vec<Vec<(f64, f64)>> = Vec::new();
+
+        // ─── Prefer FaceInfo from DetailedMeshInstance when available ────
+        // The FaceInfo has the ACTUAL outer/inner boundary polylines and
+        // uv_triangles produced by the STEP converter — these reflect the
+        // real triangulation with holes, arcs, and shared-edge consistency.
+        // Without this, we'd only have `Face::new_surface_only` (no wires),
+        // and triangulate_face would return an empty mesh → square grid
+        // fallback (the user-visible "Plane shows square" bug).
+        let face_info = detailed_instance.and_then(|inst| inst.faces.get(fidx));
+        if let Some(fi) = face_info {
+            // Use FaceInfo's outer_boundary (3D points) projected to UV
+            for poly3d in &fi.outer_boundary {
+                let uv_raw: Vec<(f64, f64)> = poly3d
+                    .iter()
+                    .map(|p| surface.project_point(p))
+                    .collect();
+                let uv = split_at_seam_jumps(uv_raw, u_periodic, v_periodic);
+                for poly in uv {
+                    if poly.len() >= 2 {
+                        outer_polylines.push(poly);
+                    }
+                }
+            }
+        }
+
         if let Some(ow) = face.outer_wire.as_ref() {
             if !ow.coedges.is_empty() {
                 let pts3d = sample_wire_polyline(ow, &face.edges, samples_per_edge);
@@ -8209,7 +8317,23 @@ fn compute_solid_uv_breakdown(solid: &Solid, model_name: &str) -> SolidUvBreakdo
                 outer_polylines.push(rect);
             }
         }
+
         let mut inner_polylines: Vec<Vec<(f64, f64)>> = Vec::new();
+        // Prefer FaceInfo's inner_boundaries
+        if let Some(fi) = face_info {
+            for poly3d in &fi.inner_boundaries {
+                let uv_raw: Vec<(f64, f64)> = poly3d
+                    .iter()
+                    .map(|p| surface.project_point(p))
+                    .collect();
+                let uv = split_at_seam_jumps(uv_raw, u_periodic, v_periodic);
+                for poly in uv {
+                    if poly.len() >= 2 {
+                        inner_polylines.push(poly);
+                    }
+                }
+            }
+        }
         for iw in &face.inner_wires {
             let pts3d = sample_wire_polyline(iw, &face.edges, samples_per_edge);
             let uv_raw: Vec<(f64, f64)> = pts3d
@@ -8234,9 +8358,17 @@ fn compute_solid_uv_breakdown(solid: &Solid, model_name: &str) -> SolidUvBreakdo
         // (e.g., one vertex at u=0.1 and another at u=2π-0.1) by shifting
         // the high-u side down by 2π. Without this, the renderer would
         // draw stretched triangles spanning the entire UV plane.
+        //
+        // PREFER FaceInfo.uv_triangles when available — these are the
+        // ACTUAL UV triangles produced by the STEP converter during the
+        // real mesh build, including holes, arcs, and shared-edge
+        // consistency. The `triangulate_face` call below only works when
+        // the Face has wires (i.e. primitives), but for STEP files the
+        // Face is created with `Face::new_surface_only` (no wires), so
+        // triangulate_face would return an empty mesh and we'd fall back
+        // to a synthetic square grid (the "Plane shows square grid
+        // instead of circle with hole" bug).
         let mut uv_triangles: Vec<[(f64, f64); 3]> = Vec::new();
-        let tri_params = TriangulationParams::default();
-        let tri_mesh = triangulate_face(face, &tri_params);
         let u_period = if u_periodic { 2.0 * std::f64::consts::PI } else { 0.0 };
         let v_period = if v_periodic {
             // Sphere's v range is [0, π], so v_period = π; torus is [0, 2π].
@@ -8246,31 +8378,47 @@ fn compute_solid_uv_breakdown(solid: &Solid, model_name: &str) -> SolidUvBreakdo
                 _ => 2.0 * std::f64::consts::PI,
             }
         } else { 0.0 };
-        if !tri_mesh.triangles.is_empty() {
-            uv_triangles.reserve(tri_mesh.triangles.len());
-            for tri in &tri_mesh.triangles {
-                let i0 = tri[0] as usize;
-                let i1 = tri[1] as usize;
-                let i2 = tri[2] as usize;
-                if i0 >= tri_mesh.vertices.len()
-                    || i1 >= tri_mesh.vertices.len()
-                    || i2 >= tri_mesh.vertices.len()
-                {
-                    continue;
-                }
-                let v0 = &tri_mesh.vertices[i0];
-                let v1 = &tri_mesh.vertices[i1];
-                let v2 = &tri_mesh.vertices[i2];
-                let (u0, vv0) = surface.project_point(v0);
-                let (u1, vv1) = surface.project_point(v1);
-                let (u2, vv2) = surface.project_point(v2);
-                if u0.is_finite() && vv0.is_finite()
-                    && u1.is_finite() && vv1.is_finite()
-                    && u2.is_finite() && vv2.is_finite()
-                {
-                    let raw = [(u0, vv0), (u1, vv1), (u2, vv2)];
+
+        if let Some(fi) = face_info {
+            if !fi.uv_triangles.is_empty() {
+                uv_triangles.reserve(fi.uv_triangles.len());
+                for tri in &fi.uv_triangles {
+                    let raw = [(tri[0].u, tri[0].v), (tri[1].u, tri[1].v), (tri[2].u, tri[2].v)];
                     let unwrapped = unwrap_triangle_seam(raw, u_periodic, v_periodic, u_period, v_period);
                     uv_triangles.push(unwrapped);
+                }
+            }
+        }
+
+        if uv_triangles.is_empty() {
+            let tri_params = TriangulationParams::default();
+            let tri_mesh = triangulate_face(face, &tri_params);
+            if !tri_mesh.triangles.is_empty() {
+                uv_triangles.reserve(tri_mesh.triangles.len());
+                for tri in &tri_mesh.triangles {
+                    let i0 = tri[0] as usize;
+                    let i1 = tri[1] as usize;
+                    let i2 = tri[2] as usize;
+                    if i0 >= tri_mesh.vertices.len()
+                        || i1 >= tri_mesh.vertices.len()
+                        || i2 >= tri_mesh.vertices.len()
+                    {
+                        continue;
+                    }
+                    let v0 = &tri_mesh.vertices[i0];
+                    let v1 = &tri_mesh.vertices[i1];
+                    let v2 = &tri_mesh.vertices[i2];
+                    let (u0, vv0) = surface.project_point(v0);
+                    let (u1, vv1) = surface.project_point(v1);
+                    let (u2, vv2) = surface.project_point(v2);
+                    if u0.is_finite() && vv0.is_finite()
+                        && u1.is_finite() && vv1.is_finite()
+                        && u2.is_finite() && vv2.is_finite()
+                    {
+                        let raw = [(u0, vv0), (u1, vv1), (u2, vv2)];
+                        let unwrapped = unwrap_triangle_seam(raw, u_periodic, v_periodic, u_period, v_period);
+                        uv_triangles.push(unwrapped);
+                    }
                 }
             }
         }
