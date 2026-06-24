@@ -2149,7 +2149,56 @@ fn triangulate_cylinder_face(face: &Face, cyl: &CylinderSurface, params: &Triang
     let (boundary_3d, boundary_uvs) = collect_face_boundary_with_uv_from_cache(face, cache, &surface);
 
     if boundary_3d.is_empty() {
-        // No boundary edges — sample full cylinder
+        // No outer wire → try to recover boundary points directly from face.edges.
+        //
+        // This happens for `make_cylinder()`'s lateral face, which has
+        // `edges = [bottom_circle, top_circle]` but `outer_wire = Wire::new(vec![])`.
+        // Without this recovery, we'd fall through to `triangulate_cylinder_full`
+        // which generates its OWN regular grid (n_u points uniformly spaced in u),
+        // giving the lateral face a DIFFERENT number of ring vertices than the
+        // adjacent cap faces (which use the edge cache's adaptively-sampled points).
+        //
+        // The mismatch (e.g. 6 lateral ring pts vs 19 cap ring pts at LOD 0.1)
+        // produces a non-watertight mesh with ~50 boundary edges and a
+        // "crumpled, inconsistent" appearance.
+        //
+        // By recovering the cached edge points here, we ensure the lateral face
+        // SHARES its bottom/top ring vertices with the cap faces → watertight.
+        let mut direct_boundary: Vec<Point3d> = Vec::new();
+        for edge in &face.edges {
+            if edge.degenerate { continue; }
+            if let Some(disc) = cache.get(edge.id) {
+                direct_boundary.extend(disc.points_3d.iter().cloned());
+            }
+        }
+        if !direct_boundary.is_empty() {
+            // Deduplicate consecutive coincident points (the edge cache may
+            // store the seam point at both t=0 and t=2π for a closed circle).
+            let adaptive_tol = cache.adaptive_tolerance().merge_tolerance();
+            let mut dedup: Vec<Point3d> = Vec::with_capacity(direct_boundary.len());
+            for p in &direct_boundary {
+                if let Some(last) = dedup.last() {
+                    if last.distance_to(p) <= adaptive_tol { continue; }
+                }
+                dedup.push(*p);
+            }
+            // Also drop last if it coincides with first (closed loop)
+            if dedup.len() > 1 {
+                if let Some(last) = dedup.last() {
+                    if last.distance_to(&dedup[0]) <= adaptive_tol {
+                        dedup.pop();
+                    }
+                }
+            }
+            if dedup.len() >= 6 {
+                log::debug!(
+                    "Cylinder face #{}: no outer_wire but {} edge points recovered from cache — using tube grid triangulation",
+                    face.id, dedup.len()
+                );
+                return triangulate_cylinder_tube_from_boundary(cyl, params, &dedup, face.forward);
+            }
+        }
+        // No edges at all — sample full cylinder from analytic surface
         return triangulate_cylinder_full(face, cyl, params);
     }
 
@@ -2562,6 +2611,39 @@ fn triangulate_cone_face(face: &Face, cone: &ConeSurface, params: &Triangulation
     let (boundary_3d, boundary_uvs) = collect_face_boundary_with_uv_from_cache(face, cache, &surface);
 
     if boundary_3d.is_empty() {
+        // No outer wire → recover boundary points directly from face.edges.
+        // Same fix as triangulate_cylinder_face — see comment there for details.
+        let mut direct_boundary: Vec<Point3d> = Vec::new();
+        for edge in &face.edges {
+            if edge.degenerate { continue; }
+            if let Some(disc) = cache.get(edge.id) {
+                direct_boundary.extend(disc.points_3d.iter().cloned());
+            }
+        }
+        if !direct_boundary.is_empty() {
+            let adaptive_tol = cache.adaptive_tolerance().merge_tolerance();
+            let mut dedup: Vec<Point3d> = Vec::with_capacity(direct_boundary.len());
+            for p in &direct_boundary {
+                if let Some(last) = dedup.last() {
+                    if last.distance_to(p) <= adaptive_tol { continue; }
+                }
+                dedup.push(*p);
+            }
+            if dedup.len() > 1 {
+                if let Some(last) = dedup.last() {
+                    if last.distance_to(&dedup[0]) <= adaptive_tol {
+                        dedup.pop();
+                    }
+                }
+            }
+            if dedup.len() >= 6 {
+                log::debug!(
+                    "Cone face #{}: no outer_wire but {} edge points recovered from cache — using tube grid triangulation",
+                    face.id, dedup.len()
+                );
+                return triangulate_cone_tube_from_boundary(cone, params, &dedup, face.forward);
+            }
+        }
         return triangulate_cone_full(face, cone, params);
     }
 
