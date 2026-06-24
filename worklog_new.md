@@ -2878,3 +2878,102 @@ Stage Summary:
 - VLM-анализ скриншота подтвердил "разрывы/наложения геометрии" —
   именно это и было исправлено.
 - Web demo https://kerneldev.github.io/3Draper/ обновлён до c741379.
+
+---
+Task ID: cylinder-cone-tube-alignment-50
+Agent: Main
+Task: После фикса watertightness (задача 49) цилиндр стал визуально "смятым, перекошенным" — то же искажение что и в STEP-файлах. "Согласованность на каком-то этапе ломает триангуляцию. Что-то с индексаций наверное."
+
+Work Log:
+- Проанализировал скриншот через VLM: "multiple lobes / irregular protrusions and is twisted along its axis. Spikes and flaps of triangles sticking out at the lobed protrusions. Some triangles appear inverted (facing inward), producing the bowtie/crossed-quad look that typically comes from flipped winding or swapped indices in the index buffer."
+
+- Запустил tools/src/bin/cyl_diag.rs — вывод показал:
+  * z=0.00: 19 вершин (от cap face, sorted by atan2 in (-π, π])
+  * z=50.00: 20 вершин (от lateral face, uniform u=2π*i/20)
+  * z=100.00: 19 вершин (от cap face)
+  * Полный меш: 58 vertices, 112 triangles, watertight ✓, НО визуально сломан
+
+- КОРНЕВАЯ ПРИЧИНА (угловое смещение ~π радиан):
+  В `triangulate_cylinder_tube_from_boundary`:
+  1. `split_boundary_into_rings` сортировала ring points по `atan2` (возвращает
+     значения в (-π, π]). После сортировки bottom_ring[0] оказывался на угле
+     ~-π (=20π/19 в [0, 2π)), а bottom_ring[9] — на угле 0.
+  2. Промежуточные ряды генерировались через `cyl.point_at(2π*i/n_u, v)`,
+     начиная с u=0 (т.е. intermediate[0] на угле 0).
+  3. Треугольник (v0, v1, v2) = (bottom_ring[0], bottom_ring[1], intermediate[1])
+     соединял вершины на углах 189°, 208°, 18° — гигантский перекрученный
+     треугольник, обёрнутый почти на 180° вокруг цилиндра.
+  4. Каждый такой "twisted" треугольник создавал визуальный "lobed/spiked" вид.
+
+  Дополнительно: cache хранил seam duplicate (точку на угле 0 и на угле 2π),
+  который не удалялся dedup-логикой в `triangulate_cylinder_face` (там только
+  consecutive dedup), что давало 20-ю вершину bottom_ring с тем же XYZ что
+  у 1-й → degenerate triangle на шве (потом фильтровалась).
+
+- РЕШЕНИЕ:
+  1. Заменил `split_boundary_into_rings` на `split_boundary_into_rings_with_u`,
+     которая:
+     - Вычисляет u угол каждой точки в [0, 2π) через
+       `y_comp.atan2(x_comp).rem_euclid(2π)` (согласовано с cyl.point_at
+       параметризацией: u — угол CCW от x_dir вокруг axis).
+     - Сортирует по u ascending в [0, 2π).
+     - Удаляет consecutive coincident points (seam duplicates) и wraparound
+       duplicate (last == first).
+
+  2. Переписал `triangulate_cylinder_tube_from_boundary`:
+     - Использует bottom_ring's u angles как КАНОНИЧЕСКИЕ u значения для
+       всей сетки: intermediate[j][i] = cyl.point_at(bottom_u[i], v_j).
+       Каждый столбец сетки теперь на одном угловом положении → чистые
+       прямоугольные quad-ы вместо перекрученных треугольников.
+     - top_ring используется только если его u angles совпадают с bottom_ring's
+       (проверка через ang_tol = π/n_u * 0.5). Для цилиндра это всегда true
+       (оба круга одного радиуса → одинаковая адаптивная дискретизация →
+       одинаковые u angles). Для конуса с apex top_ring пустой → fall-through
+       к analytic cyl.point_at(bottom_u[i], v_max).
+     - n_u = bottom_ring.len() (после dedup = 19 для цилиндра R=40).
+
+  3. То же исправление применено к `triangulate_cone_tube_from_boundary`
+     (с сохранением apex degeneracy handling — top row collapses к single
+     apex vertex когда v_max достигает apex height).
+
+  4. Добавлены fallback-функции `triangulate_cylinder_full_at_v_range` и
+     `triangulate_cone_full_at_v_range` для случая когда bottom_ring < 3
+     точек (degenerate input — не должно происходить для нормальных BREP).
+
+- РЕЗУЛЬТАТ ПОСЛЕ ФИКСА (цилиндр R=40 H=100, LOD 0.1):
+  * z=0.00:  19 вершин на углах {0, ±2π/19, ±4π/19, ..., ±18π/19}
+  * z=50.00: 19 вершин на ТЕХ ЖЕ углах (intermediate row использует bottom_u)
+  * z=100.00: 19 вершин на ТЕХ ЖЕ углах
+  * ИТОГО: 57 vertices, 110 triangles, 0 boundary edges, 0 degenerate, WATERTIGHT ✓
+  * Углы совпадают между z-уровнями → треугольники соединяют соседние по
+    углу вершины → чистая цилиндрическая поверхность без перекосов.
+
+- NIST cylinder STEP file (test/nist_cylinder.stp) также работает:
+  * 189 vertices, 374 triangles, watertight (0 boundary edges)
+  * Использован path "full U-period wrap detected (130 bnd pts, u-range≈2π)
+    — using tube grid triangulation"
+
+- ТЕСТЫ:
+  * draper-mesh: 170 lib + 6 lod_chord + 18 integration = 194 ✅
+  * draper-step: 97 + 2 + 5 + 19 + 2 = 125 ✅
+  * draper-topology: 83 ✅
+  * draper-geometry: 81 ✅
+  * draper-core: 59 ✅
+  * draper-testing: 100 ✅
+  * Всего: 643 теста, 0 провалов
+
+- ДЕПЛОЙ:
+  * Commit 0def585 "fix(mesh): align cylinder/cone tube grid with cached ring u-angles"
+  * Push в origin/main: dce4500..0def585
+  * gh-pages: c741379..49aa630
+  * Web demo https://kerneldev.github.io/3Draper/ обновлён
+
+Stage Summary:
+- Цилиндр R=40 H=100 теперь правильно отображается на всех LOD уровнях:
+  watertight AND визуально правильный (нет перекрученных треугольников).
+- Корневая причина была в угловом смещении ~π между sorted-by-atan2 ring
+  points и uniform-u intermediate grid rows — фикс использует фактические
+  u angles bottom_ring как canonical для всей сетки.
+- Cone также исправлен тем же паттерном (с сохранением apex degeneracy).
+- Это также фиксит визуальные артефакты в STEP-файлах с цилиндрическими
+  гранями (NIST cylinder test confirms).
