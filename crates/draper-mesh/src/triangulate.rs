@@ -3451,14 +3451,166 @@ fn triangulate_torus_face(face: &Face, torus: &TorusSurface, params: &Triangulat
     // Collect holes from inner loops
     let (hole_polylines, hole_uvs) = collect_face_holes_with_uv_from_cache(face, cache, &surface);
 
+    // Detect "half-wrap" torus face: one axis spans >1.9π (full wrap) while
+    // the other spans a partial arc. earcutr cannot handle periodic-wrap
+    // polygons — boundary points at v=0 and v=2π (which are the SAME 3D
+    // point) appear as different UV points, producing twisted triangles.
+    //
+    // Fix: UNWRAP the periodic axis so the polygon lies in a continuous
+    // UV range. For each point with u (or v) > π, shift it by -2π. This
+    // moves the "wrapped" half of the polygon to negative coordinates,
+    // producing a continuous range like [-π, π/4] instead of [0, 2π].
+    //
+    // Example (drill_top.stp Face #4, STEP #803):
+    //   Boundary has v values 0.7854, 0.6283, ..., 0.0393, 6.2832, 0.1178, ..., 0.7069
+    //   The 6.2832 value (=2π) is the same 3D point as v=0. After unwrapping
+    //   (shift v > π to v - 2π), the polygon has v ∈ [-6.16e-7, 0.7854]
+    //   (continuous), and earcutr produces correct triangulation.
+    let (boundary_3d_eff, boundary_uvs_eff, hole_polylines_eff, hole_uvs_eff) =
+        unwrap_periodic_torus_boundary(
+            &boundary_3d, &boundary_uvs, &hole_polylines, &hole_uvs,
+        );
+
     crate::parametric_domain::triangulate_surface_consistent(
         &surface,
-        &boundary_3d,
-        &boundary_uvs,
-        &hole_polylines,
-        &hole_uvs,
+        &boundary_3d_eff,
+        &boundary_uvs_eff,
+        &hole_polylines_eff,
+        &hole_uvs_eff,
         face.forward,
         params,
+    )
+}
+
+/// Unwrap a torus face's periodic UV boundary so earcutr can triangulate it.
+///
+/// A torus is periodic in BOTH u and v (period 2π). When a face's boundary
+/// spans more than ~1.9π in one axis, the polygon "wraps around" the seam
+/// — points near v=0 and v=2π are at the same 3D location but have different
+/// UV values. earcutr treats them as distinct points and produces twisted
+/// triangulation.
+///
+/// This function detects the wrap and applies CHAIN-BASED adjustment:
+/// each UV point is adjusted to be close to the PREVIOUS point by adding
+/// or subtracting 2π. This maintains boundary continuity while unwrapping
+/// the periodic axis.
+///
+/// If no wrap is detected, returns the inputs unchanged.
+fn unwrap_periodic_torus_boundary(
+    boundary_3d: &[draper_geometry::Point3d],
+    boundary_uvs: &[draper_geometry::Point2d],
+    hole_polylines: &[Vec<draper_geometry::Point3d>],
+    hole_uvs: &[Vec<draper_geometry::Point2d>],
+) -> (
+    Vec<draper_geometry::Point3d>,
+    Vec<draper_geometry::Point2d>,
+    Vec<Vec<draper_geometry::Point3d>>,
+    Vec<Vec<draper_geometry::Point2d>>,
+) {
+    use draper_geometry::Point2d;
+
+    if boundary_uvs.is_empty() {
+        return (
+            boundary_3d.to_vec(),
+            boundary_uvs.to_vec(),
+            hole_polylines.to_vec(),
+            hole_uvs.to_vec(),
+        );
+    }
+
+    // Compute u and v ranges
+    let mut u_min = f64::MAX;
+    let mut u_max = f64::MIN;
+    let mut v_min = f64::MAX;
+    let mut v_max = f64::MIN;
+    for p in boundary_uvs {
+        u_min = u_min.min(p.u);
+        u_max = u_max.max(p.u);
+        v_min = v_min.min(p.v);
+        v_max = v_max.max(p.v);
+    }
+    let u_range = u_max - u_min;
+    let v_range = v_max - v_min;
+
+    // Detect wrap: range > 1.9π in either axis
+    let wrap_u = u_range > 1.9 * PI;
+    let wrap_v = v_range > 1.9 * PI;
+
+    log::warn!(
+        "TORUS_UNWRAP_CHECK: n_bnd={}, u=[{:.4},{:.4}] (range={:.4}), v=[{:.4},{:.4}] (range={:.4}), wrap_u={}, wrap_v={}",
+        boundary_uvs.len(), u_min, u_max, u_range, v_min, v_max, v_range, wrap_u, wrap_v,
+    );
+    eprintln!(
+        "TORUS_UNWRAP_CHECK_EPRINT: n_bnd={}, u=[{:.4},{:.4}] (range={:.4}), v=[{:.4},{:.4}] (range={:.4}), wrap_u={}, wrap_v={}",
+        boundary_uvs.len(), u_min, u_max, u_range, v_min, v_max, v_range, wrap_u, wrap_v,
+    );
+
+    if !wrap_u && !wrap_v {
+        // No wrap — return inputs unchanged
+        return (
+            boundary_3d.to_vec(),
+            boundary_uvs.to_vec(),
+            hole_polylines.to_vec(),
+            hole_uvs.to_vec(),
+        );
+    }
+
+    log::warn!(
+        "TORUS_UNWRAP: wrap_u={}, wrap_v={}, u=[{:.4},{:.4}], v=[{:.4},{:.4}], {} bnd pts, {} holes",
+        wrap_u, wrap_v, u_min, u_max, v_min, v_max,
+        boundary_uvs.len(), hole_uvs.len(),
+    );
+
+    // CHAIN-BASED adjustment: for each point, adjust u (or v) to be close to
+    // the PREVIOUS point by adding/subtracting 2π. This maintains boundary
+    // continuity.
+    //
+    // The period for both u and v on a torus is 2π.
+    let period = 2.0 * PI;
+    let half_period = period * 0.5;
+
+    let chain_adjust = |uvs: &[Point2d]| -> Vec<Point2d> {
+        if uvs.is_empty() {
+            return Vec::new();
+        }
+        let mut result = Vec::with_capacity(uvs.len());
+        result.push(uvs[0]);
+        for i in 1..uvs.len() {
+            let prev = result[i - 1];
+            let mut new_u = uvs[i].u;
+            let mut new_v = uvs[i].v;
+            if wrap_u {
+                let diff = new_u - prev.u;
+                if diff > half_period {
+                    new_u -= period;
+                } else if diff < -half_period {
+                    new_u += period;
+                }
+            }
+            if wrap_v {
+                let diff = new_v - prev.v;
+                if diff > half_period {
+                    new_v -= period;
+                } else if diff < -half_period {
+                    new_v += period;
+                }
+            }
+            result.push(Point2d::new(new_u, new_v));
+        }
+        result
+    };
+
+    let new_boundary_uvs = chain_adjust(boundary_uvs);
+    let new_hole_uvs: Vec<Vec<Point2d>> = hole_uvs.iter()
+        .map(|hole| chain_adjust(hole))
+        .collect();
+
+    // 3D points are unchanged (UV unwrap doesn't affect geometry)
+    (
+        boundary_3d.to_vec(),
+        new_boundary_uvs,
+        hole_polylines.to_vec(),
+        new_hole_uvs,
     )
 }
 
@@ -4550,12 +4702,52 @@ pub fn triangulate_face_with_boundary_and_holes(
             }
             let u_period = surface_u_period(surface);
             let v_period = surface_v_period(surface);
-            let boundary_uvs = project_boundary_to_uv_chain(
+            let mut boundary_uvs = project_boundary_to_uv_chain(
                 surface, boundary_points, u_period, v_period,
             );
-            let hole_uvs: Vec<Vec<Point2d>> = hole_polylines.iter().map(|hole| {
+            let mut hole_uvs: Vec<Vec<Point2d>> = hole_polylines.iter().map(|hole| {
                 project_boundary_to_uv_chain(surface, hole, u_period, v_period)
             }).collect();
+
+            // For torus (periodic in BOTH u and v): unwrap any remaining
+            // periodic wrap that chain projection didn't resolve.
+            // Chain projection adjusts each point to be close to the PREVIOUS
+            // point, but if the boundary crosses the seam MULTIPLE times
+            // (e.g., a half-torus face with full V wrap), the chain may
+            // still produce values spanning > 1.9π in one axis.
+            //
+            // This detects such cases and shifts values > π by -2π to
+            // produce a continuous range, allowing earcutr to triangulate
+            // correctly.
+            if let Surface::Torus(_) = surface {
+                eprintln!("TORUS_PATH: triangulate_face_with_boundary_and_holes (non-UV) _ branch, n_bnd={}", boundary_points.len());
+                let (b3d, buvs, hps, huvs) = unwrap_periodic_torus_boundary(
+                    boundary_points, &boundary_uvs, hole_polylines, &hole_uvs,
+                );
+                // Replace with unwrapped versions
+                boundary_uvs = buvs;
+                hole_uvs = huvs;
+                // b3d and hps are unchanged (3D points not affected by UV unwrap)
+                let _ = b3d;
+                let _ = hps;
+
+                // Diagnostic: print unwrapped UV range
+                let u_min = boundary_uvs.iter().map(|p| p.u).fold(f64::MAX, f64::min);
+                let u_max = boundary_uvs.iter().map(|p| p.u).fold(f64::MIN, f64::max);
+                let v_min = boundary_uvs.iter().map(|p| p.v).fold(f64::MAX, f64::min);
+                let v_max = boundary_uvs.iter().map(|p| p.v).fold(f64::MIN, f64::max);
+                eprintln!(
+                    "TORUS_UNWRAPPED UVs: n={}, u=[{:.4},{:.4}], v=[{:.4},{:.4}]",
+                    boundary_uvs.len(), u_min, u_max, v_min, v_max,
+                );
+                // Print first 10 and last 10 UVs
+                for (i, uv) in boundary_uvs.iter().enumerate() {
+                    if i < 10 || i >= boundary_uvs.len() - 10 {
+                        eprintln!("  uv[{}]: ({:.4}, {:.4})", i, uv.u, uv.v);
+                    }
+                }
+            }
+
             crate::parametric_domain::triangulate_surface_consistent(
                 surface,
                 boundary_points,
@@ -4852,12 +5044,49 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
         _ => {
             // Other curved surfaces (Torus, Revolution, Extrusion):
             // use the consistent UV-space triangulation (earcutr CDT)
+            //
+            // For torus (periodic in BOTH u and v): unwrap any periodic
+            // wrap in the pre-computed UVs. PCURVE-based UVs may have
+            // values spanning > 1.9π in one axis when the boundary crosses
+            // the seam multiple times (e.g., half-torus with full V wrap).
+            let (boundary_points_eff, boundary_uvs_eff, hole_polylines_eff, hole_uvs_eff) =
+                if let Surface::Torus(_) = surface {
+                    eprintln!("TORUS_PATH: triangulate_face_with_boundary_and_holes_uv (UV) _ branch, n_bnd={}", boundary_points.len());
+                    let result = unwrap_periodic_torus_boundary(
+                        boundary_points, boundary_uvs, hole_polylines, hole_uvs,
+                    );
+                    // Print unwrapped UV range
+                    let u_min = result.1.iter().map(|p| p.u).fold(f64::MAX, f64::min);
+                    let u_max = result.1.iter().map(|p| p.u).fold(f64::MIN, f64::max);
+                    let v_min = result.1.iter().map(|p| p.v).fold(f64::MAX, f64::min);
+                    let v_max = result.1.iter().map(|p| p.v).fold(f64::MIN, f64::max);
+                    eprintln!(
+                        "TORUS_UNWRAPPED_RESULT: n={}, u=[{:.4},{:.4}], v=[{:.4},{:.4}]",
+                        result.1.len(), u_min, u_max, v_min, v_max,
+                    );
+                    // Print first 5 UVs
+                    for (i, uv) in result.1.iter().enumerate().take(5) {
+                        eprintln!("  uv[{}]: ({:.4}, {:.4})", i, uv.u, uv.v);
+                    }
+                    // Print UVs around index 80-90 (where the wrap might occur)
+                    for i in 80..result.1.len().min(95) {
+                        eprintln!("  uv[{}]: ({:.4}, {:.4})", i, result.1[i].u, result.1[i].v);
+                    }
+                    result
+                } else {
+                    (
+                        boundary_points.to_vec(),
+                        boundary_uvs.to_vec(),
+                        hole_polylines.to_vec(),
+                        hole_uvs.to_vec(),
+                    )
+                };
             crate::parametric_domain::triangulate_surface_consistent(
                 surface,
-                boundary_points,
-                boundary_uvs,
-                hole_polylines,
-                hole_uvs,
+                &boundary_points_eff,
+                &boundary_uvs_eff,
+                &hole_polylines_eff,
+                &hole_uvs_eff,
                 forward,
                 params,
             )
