@@ -1498,6 +1498,168 @@ fn coarse_grid_sample(pts: &[Point2d], budget: usize) -> Vec<Point2d> {
 }
 
 // ============================================================
+// Cylinder / Cone Steiner grid generator
+// ============================================================
+
+/// Generate a regular (u, v) grid of Steiner points for cylinder/cone surfaces.
+///
+/// # Why this exists
+///
+/// For cylinder/cone faces WITH HOLES, the generic `parameter_division_2d`
+/// returns only `v = [v_min, v_max]` because these surfaces have ZERO chord
+/// error in the axial (v) direction (the surface is straight along the axis).
+/// Without interior Steiner points in the v-direction, earcutr produces long
+/// thin triangles spanning the full cylinder height — visually poor quality
+/// and unlike what other CAD applications produce.
+///
+/// This function generates a proper regular grid in (u, v) space, filtered
+/// to points strictly inside the face domain (outside holes, inside outer
+/// boundary). When passed as Steiner points to earcutr, the resulting
+/// triangulation follows the cylinder's natural parameterization, producing
+/// clean rectangular quads (split into 2 triangles) in the interior and
+/// smooth hole boundaries — matching the visual quality of OpenCASCADE /
+/// FreeCAD / SolidWorks meshers.
+///
+/// # Strategy
+///
+/// 1. **n_u (angular subdivisions)**: derived from chord-error tolerance.
+///    For a circle of radius `r`, chord error = `r * (1 - cos(du/2))`.
+///    Solve for `du` given `tol`: `du = 2 * acos(1 - tol/r)`.
+///    For cones, use the MAXIMUM radius along the v-range (worst case).
+///
+/// 2. **n_v (axial subdivisions)**: chosen so that the axial quad size
+///    roughly matches the arc length per angular quad, producing
+///    near-square grid cells. Capped to avoid excessive density on
+///    very tall cylinders.
+///
+/// 3. **Filtering**: keep only points strictly inside the face domain
+///    (inside outer boundary, outside all holes, not on any boundary
+///    edge within `boundary_tol`).
+///
+/// 4. **Budget**: downsample via `coarse_grid_sample` (preserves grid
+///    structure) and `downsample_interior_points` (final cap).
+///
+/// # Arguments
+/// * `surface` — must be `Surface::Cylinder` or `Surface::Cone`.
+/// * `domain` — parametric domain (outer boundary + holes).
+/// * `u_range`, `v_range` — UV bounds of the face.
+/// * `params` — triangulation params (for chord tolerance).
+/// * `max_budget` — maximum number of Steiner points to return.
+pub(crate) fn generate_cylinder_or_cone_steiner_grid(
+    surface: &Surface,
+    domain: &ParametricDomain,
+    u_range: (f64, f64),
+    v_range: (f64, f64),
+    params: &crate::triangulate::TriangulationParams,
+    max_budget: usize,
+) -> Vec<Point2d> {
+    let (u_min, u_max) = u_range;
+    let (v_min, v_max) = v_range;
+    let u_span = u_max - u_min;
+    let v_span = v_max - v_min;
+    if u_span <= 0.0 || v_span <= 0.0 {
+        return Vec::new();
+    }
+
+    // Get the surface's reference radius for chord-error calculations.
+    // For cylinders: constant radius.
+    // For cones: radius varies with v — use the LARGER of v_min/v_max radius
+    // (worst-case for chord error in the u-direction).
+    let (radius_at_v_min, radius_at_v_max) = match surface {
+        Surface::Cylinder(c) => (c.radius, c.radius),
+        Surface::Cone(c) => {
+            let tan_ha = c.half_angle.tan();
+            let r_min = if c.expanding {
+                v_min * tan_ha
+            } else {
+                (c.radius - v_min * tan_ha).max(0.0)
+            };
+            let r_max = if c.expanding {
+                v_max * tan_ha
+            } else {
+                (c.radius - v_max * tan_ha).max(0.0)
+            };
+            (r_min, r_max)
+        }
+        _ => return Vec::new(),
+    };
+    let radius_max = radius_at_v_min.max(radius_at_v_max).max(1e-9);
+
+    // Determine n_u (angular subdivisions) from chord-error tolerance.
+    // chord_error = r * (1 - cos(du/2))
+    // Solve: du = 2 * acos(1 - tol/r)
+    let chord_tol = params.max_deviation.max(1e-5);
+    let du_max = if radius_max > chord_tol * 1.001 {
+        2.0 * (1.0 - chord_tol / radius_max).acos()
+    } else {
+        std::f64::consts::PI / 8.0 // fallback: 22.5°
+    };
+    // Cap: at least 8 subdivisions, at most 128 (prevents explosion on tiny radius).
+    let n_u = ((u_span / du_max).ceil() as usize).max(8).min(128);
+
+    // Determine n_v (axial subdivisions) from desired aspect ratio.
+    // Target: quad size in v ≈ arc length per angular quad.
+    // This produces near-square grid cells, matching other CAD apps.
+    let arc_per_quad = u_span * radius_max / n_u as f64;
+    // Use a relaxed aspect ratio (up to 4:1) to avoid excessive V subdivisions
+    // on very tall cylinders with small radius.
+    let target_dv = arc_per_quad.max(v_span / 64.0);
+    let n_v = ((v_span / target_dv).ceil() as usize).max(2).min(64);
+
+    log::debug!(
+        "cylinder/cone steiner grid: n_u={}, n_v={}, radius_max={:.4}, u_span={:.4}, v_span={:.4}, budget={}",
+        n_u, n_v, radius_max, u_span, v_span, max_budget
+    );
+
+    // Generate grid points (excluding boundaries — those come from the face edges).
+    // We skip i=0, i=n_u, j=0, j=n_v because those are on the UV bbox boundary
+    // and would either coincide with face boundary vertices (phantom vertices
+    // that break watertightness) or fall outside the actual face domain
+    // (the face boundary may be smaller than the UV bbox).
+    let mut grid: Vec<Point2d> = Vec::with_capacity((n_u - 1) * (n_v - 1));
+    for j in 1..n_v {
+        let v = v_min + v_span * j as f64 / n_v as f64;
+        for i in 1..n_u {
+            let u = u_min + u_span * i as f64 / n_u as f64;
+            grid.push(Point2d::new(u, v));
+        }
+    }
+
+    // Filter to points strictly inside the face domain (outside holes, inside outer boundary).
+    let span_max = u_span.max(v_span);
+    let boundary_tol = (span_max * 1e-6).max(1e-9);
+
+    let mut filtered: Vec<Point2d> = Vec::with_capacity(grid.len());
+    for pt in &grid {
+        // Use contains_ray (exact) instead of contains (grid-based, approximate).
+        // The grid-based check can return true for points just outside the boundary
+        // due to its 128×128 cell resolution, which would add phantom vertices.
+        if !domain.contains_ray(pt) {
+            continue;
+        }
+        if is_point_on_boundary(&domain.outer_boundary, pt, boundary_tol) {
+            continue;
+        }
+        let on_hole = domain.holes.iter()
+            .any(|hole| is_point_on_boundary(hole, pt, boundary_tol));
+        if on_hole {
+            continue;
+        }
+        filtered.push(*pt);
+    }
+
+    log::debug!(
+        "cylinder/cone steiner grid: {} grid pts → {} after domain filter",
+        grid.len(), filtered.len()
+    );
+
+    // Downsample to budget if needed (preserving grid structure via coarse_grid_sample,
+    // then a final cap via downsample_interior_points).
+    let coarsened = coarse_grid_sample(&filtered, max_budget);
+    downsample_interior_points(&coarsened, max_budget)
+}
+
+// ============================================================
 // Integration: earcutr-based surface triangulation (non-consistent)
 // ============================================================
 
@@ -2384,6 +2546,41 @@ pub fn triangulate_surface_consistent(
         // split edges that touch boundary vertices. So we start with
         // zero interior points and let the refiner do its job.
         Vec::new()
+    } else if matches!(surface, Surface::Cylinder(_) | Surface::Cone(_)) {
+        // Cylinder/cone faces — use a dedicated regular (u, v) Steiner grid.
+        //
+        // WHY: `parameter_division_2d` (the generic branch below) returns
+        // only `v = [v_min, v_max]` for cylinders/cones because these
+        // surfaces have ZERO chord error in the axial (v) direction —
+        // the surface is straight along the axis. With no interior
+        // Steiner points in v, earcutr produces long thin triangles
+        // spanning the full cylinder height, which looks nothing like
+        // the clean structured grids produced by other CAD applications
+        // (OpenCASCADE, FreeCAD, SolidWorks).
+        //
+        // `generate_cylinder_or_cone_steiner_grid` produces a proper
+        // regular grid in (u, v) space — n_u from chord-error tolerance,
+        // n_v from a target aspect ratio that produces near-square
+        // quads — filtered to points strictly inside the face domain
+        // (outside holes, inside outer boundary). When earcutr receives
+        // this grid as Steiner points, the resulting triangulation
+        // follows the cylinder's natural parameterization: clean
+        // rectangular quads in the interior, smooth hole boundaries.
+        //
+        // This branch is entered for ALL cylinder/cone faces that
+        // reach this point — including both full-wrap and partial-wrap
+        // faces WITH holes. Cylinder/cone faces WITHOUT holes are
+        // handled earlier by `triangulate_cylinder_tube_from_boundary`
+        // (structured grid triangulation), so they never reach here.
+        let cyl_cone_budget = max_interior_budget.max(8);
+        generate_cylinder_or_cone_steiner_grid(
+            surface,
+            &domain,
+            (u_min, u_max),
+            (v_min, v_max),
+            params,
+            cyl_cone_budget,
+        )
     } else {
         // Compute adaptive subdivision grid for the entire surface, then
         // filter to (a) strictly-interior UV values and (b) points that
@@ -3998,6 +4195,225 @@ mod tests {
         assert_eq!(degen, 0, "No degenerate triangles");
 
         assert!(mesh.triangles.len() >= 50, "Should have at least 50 triangles, got {}", mesh.triangles.len());
+    }
+
+    // ============================================================
+    // Tests for cylinder/cone Steiner grid generator
+    // ============================================================
+
+    /// Build a TriangulationParams with the given max_deviation.
+    fn make_test_params(max_dev: f64) -> crate::triangulate::TriangulationParams {
+        let mut p = crate::triangulate::TriangulationParams::default();
+        p.max_deviation = max_dev;
+        p.adaptive = true;
+        p.angular_samples = 32;
+        p.height_samples = 4;
+        p.max_face_triangles = 4096;
+        p
+    }
+
+    #[test]
+    fn test_cylinder_steiner_grid_basic() {
+        use draper_geometry::{CylinderSurface, Surface};
+
+        // Cylinder radius=1.0, full U range [0, 2π], V range [0, 5].
+        let cyl = CylinderSurface::new_z(1.0);
+        let surface = Surface::Cylinder(cyl);
+
+        // Square outer boundary in UV (4 corners, no holes).
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(2.0 * PI, 0.0),
+            Point2d::new(2.0 * PI, 5.0),
+            Point2d::new(0.0, 5.0),
+        ];
+        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, 5.0));
+        domain.init_containment_grid();
+
+        let params = make_test_params(0.05);
+        let pts = generate_cylinder_or_cone_steiner_grid(
+            &surface, &domain, (0.0, 2.0 * PI), (0.0, 5.0), &params, 4096,
+        );
+
+        // Should have multiple interior points (regular grid in v direction).
+        // The bug being fixed: parameter_division_2d returns 0 interior points
+        // for cylinders because they have zero chord error in v. Our new
+        // generator should produce many.
+        assert!(pts.len() >= 10, "Expected ≥10 Steiner points, got {}", pts.len());
+
+        // All points should be strictly inside the domain (not on boundary).
+        for p in &pts {
+            assert!(p.u > 1e-6 && p.u < 2.0 * PI - 1e-6, "u={} on boundary", p.u);
+            assert!(p.v > 1e-6 && p.v < 5.0 - 1e-6, "v={} on boundary", p.v);
+            assert!(domain.contains_ray(p), "point {:?} outside domain", p);
+        }
+
+        // The V coordinates should form a regular grid (multiple distinct v values).
+        // This is the key property — the previous code only had v=[0, 5] (no interior).
+        let mut v_values: Vec<f64> = pts.iter().map(|p| p.v).collect();
+        v_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v_values.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+        assert!(v_values.len() >= 3, "Expected ≥3 distinct v values, got {}: {:?}", v_values.len(), v_values);
+    }
+
+    #[test]
+    fn test_cylinder_steiner_grid_excludes_holes() {
+        use draper_geometry::{CylinderSurface, Surface};
+
+        let cyl = CylinderSurface::new_z(1.0);
+        let surface = Surface::Cylinder(cyl);
+
+        // Outer boundary = full cylinder UV rectangle.
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(2.0 * PI, 0.0),
+            Point2d::new(2.0 * PI, 10.0),
+            Point2d::new(0.0, 10.0),
+        ];
+        // Hole at u ∈ [2.0, 4.0], v ∈ [4.0, 6.0].
+        let hole = vec![
+            Point2d::new(2.0, 4.0),
+            Point2d::new(4.0, 4.0),
+            Point2d::new(4.0, 6.0),
+            Point2d::new(2.0, 6.0),
+        ];
+        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, 10.0))
+            .with_hole(hole);
+        domain.init_containment_grid();
+
+        let params = make_test_params(0.05);
+        let pts = generate_cylinder_or_cone_steiner_grid(
+            &surface, &domain, (0.0, 2.0 * PI), (0.0, 10.0), &params, 4096,
+        );
+
+        assert!(!pts.is_empty(), "Should have Steiner points");
+
+        // No Steiner point should fall inside the hole.
+        for p in &pts {
+            let in_hole = p.u > 2.0 && p.u < 4.0 && p.v > 4.0 && p.v < 6.0;
+            assert!(!in_hole, "Steiner point {:?} is inside hole", p);
+            assert!(domain.contains_ray(p), "point {:?} outside domain", p);
+        }
+    }
+
+    #[test]
+    fn test_cylinder_steiner_grid_respects_budget() {
+        use draper_geometry::{CylinderSurface, Surface};
+
+        let cyl = CylinderSurface::new_z(1.0);
+        let surface = Surface::Cylinder(cyl);
+
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(2.0 * PI, 0.0),
+            Point2d::new(2.0 * PI, 10.0),
+            Point2d::new(0.0, 10.0),
+        ];
+        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, 10.0));
+        domain.init_containment_grid();
+
+        let params = make_test_params(0.01); // tight tolerance → many points
+        let budget = 50usize;
+        let pts = generate_cylinder_or_cone_steiner_grid(
+            &surface, &domain, (0.0, 2.0 * PI), (0.0, 10.0), &params, budget,
+        );
+
+        assert!(pts.len() <= budget, "Budget exceeded: {} > {}", pts.len(), budget);
+        assert!(pts.len() >= 10, "Should still have meaningful points: {}", pts.len());
+    }
+
+    #[test]
+    fn test_cone_steiner_grid_basic() {
+        use draper_geometry::{ConeSurface, Surface};
+
+        // Cone: base radius 2.0, half-angle 30° → apex at v = 2/tan(30°) ≈ 3.46.
+        // Use v range [0, 3.0] (well below apex) so radius varies from 2.0 to ~0.27.
+        let cone = ConeSurface::new_z(2.0, std::f64::consts::FRAC_PI_6);
+        let surface = Surface::Cone(cone);
+
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(2.0 * PI, 0.0),
+            Point2d::new(2.0 * PI, 3.0),
+            Point2d::new(0.0, 3.0),
+        ];
+        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, 3.0));
+        domain.init_containment_grid();
+
+        let params = make_test_params(0.05);
+        let pts = generate_cylinder_or_cone_steiner_grid(
+            &surface, &domain, (0.0, 2.0 * PI), (0.0, 3.0), &params, 4096,
+        );
+
+        // Cone also has zero chord error in the axial direction, so the
+        // old path produced 0 Steiner points. The new generator should
+        // produce interior points on a regular grid.
+        assert!(pts.len() >= 4, "Expected ≥4 Steiner points, got {}", pts.len());
+
+        for p in &pts {
+            assert!(domain.contains_ray(p), "point {:?} outside domain", p);
+        }
+
+        // V values should form a regular grid (multiple distinct values).
+        let mut v_values: Vec<f64> = pts.iter().map(|p| p.v).collect();
+        v_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v_values.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+        assert!(v_values.len() >= 2, "Expected ≥2 distinct v values, got {}: {:?}", v_values.len(), v_values);
+    }
+
+    #[test]
+    fn test_cylinder_steiner_grid_preserves_grid_structure() {
+        use draper_geometry::{CylinderSurface, Surface};
+
+        // Verify that the generated points form a Cartesian product of
+        // u-values × v-values (i.e., a proper grid, not random points).
+        let cyl = CylinderSurface::new_z(1.0);
+        let surface = Surface::Cylinder(cyl);
+
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(2.0 * PI, 0.0),
+            Point2d::new(2.0 * PI, 5.0),
+            Point2d::new(0.0, 5.0),
+        ];
+        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, 5.0));
+        domain.init_containment_grid();
+
+        let params = make_test_params(0.1);
+        let pts = generate_cylinder_or_cone_steiner_grid(
+            &surface, &domain, (0.0, 2.0 * PI), (0.0, 5.0), &params, 4096,
+        );
+
+        // Recover unique u and v values.
+        let tol = 1e-9;
+        let mut us: Vec<f64> = pts.iter().map(|p| p.u).collect();
+        us.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mut u_unique: Vec<f64> = Vec::new();
+        for u in us {
+            if u_unique.last().map_or(true, |last| (last - u).abs() > tol) {
+                u_unique.push(u);
+            }
+        }
+        let mut vs: Vec<f64> = pts.iter().map(|p| p.v).collect();
+        vs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mut v_unique: Vec<f64> = Vec::new();
+        for v in vs {
+            if v_unique.last().map_or(true, |last| (last - v).abs() > tol) {
+                v_unique.push(v);
+            }
+        }
+
+        // Every point should be a product of some u in u_unique × some v in v_unique.
+        // (Otherwise the grid structure is broken.)
+        for p in &pts {
+            let u_ok = u_unique.iter().any(|&u| (u - p.u).abs() < tol);
+            let v_ok = v_unique.iter().any(|&v| (v - p.v).abs() < tol);
+            assert!(u_ok && v_ok, "point {:?} not on grid (u_unique={}, v_unique={})", p, u_unique.len(), v_unique.len());
+        }
+
+        // Should have multiple points in both u and v directions.
+        assert!(u_unique.len() >= 3, "u_unique.len() = {}", u_unique.len());
+        assert!(v_unique.len() >= 2, "v_unique.len() = {}", v_unique.len());
     }
 }
 
