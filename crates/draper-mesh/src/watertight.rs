@@ -621,6 +621,32 @@ pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64)
 
     let weld_tol_sq = weld_tolerance * weld_tolerance;
 
+    // PASS 2 tolerance: much tighter than PASS 1.
+    //
+    // PASS 1 welds SHORT BOUNDARY EDGES (length < weld_tolerance) — these are
+    // legitimate seam mismatches where two faces' boundary vertices are close
+    // but not bit-identical. The large weld_tolerance (e.g., 3% of model scale)
+    // catches mismatches up to ~5mm observed in some STEP files.
+    //
+    // PASS 2 welds ANY boundary vertex to nearby boundary vertices — this is
+    // meant to catch cases where two faces share a long boundary edge but
+    // their vertices are at slightly different positions. However, with a
+    // large tolerance, PASS 2 can INCORRECTLY weld unrelated boundary vertices
+    // from different faces (e.g., drill_top.stp Face #803 torus vertices got
+    // welded to flute-surface vertices 0.25 units away when weld_tolerance was
+    // 0.46, corrupting the torus triangulation).
+    //
+    // Fix: PASS 2 uses a much tighter tolerance — only weld vertices that are
+    // within 0.1% of model scale (or 100x absolute tolerance). This catches
+    // legitimate seam mismatches (typically 1e-13..1e-6) without welding
+    // unrelated vertices.
+    //
+    // The PASS 2 tolerance is derived from weld_tolerance: use the SMALLER of
+    //   - weld_tolerance * 0.01 (1% of PASS 1 tolerance)
+    //   - 1e-3 (absolute cap of 1mm)
+    let pass2_tolerance = (weld_tolerance * 0.01).min(1e-3);
+    let pass2_tol_sq = pass2_tolerance * pass2_tolerance;
+
     // Build edge → triangle count map
     let mut edge_count: HashMap<(u32, u32), usize> = HashMap::new();
     for tri in &mesh.triangles {
@@ -774,14 +800,35 @@ pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64)
     // PASS 2: For each boundary vertex on a LONG boundary edge, also look
     // for nearby vertices to weld with. This catches the case where a
     // vertex V is on a long boundary edge (length > weld_tol) but is
-    // itself CLOSE to a vertex from another face (within weld_tol).
+    // itself CLOSE to a vertex from another face (within pass2_tolerance).
     // Without this pass, these vertices would remain un-welded, leaving
     // boundary edges in the mesh.
     //
     // We skip vertices already processed in PASS 1 (those on short edges).
+    //
+    // CRITICAL: PASS 2 uses a MUCH TIGHTER tolerance than PASS 1
+    // (pass2_tolerance = 1% of weld_tolerance, capped at 1e-3). This is
+    // because PASS 2 welds ANY boundary vertex to nearby boundary vertices,
+    // not just short-edge endpoints. With a large tolerance, PASS 2 can
+    // incorrectly weld unrelated boundary vertices from different faces
+    // (e.g., drill_top.stp Face #803 torus vertices got welded to flute-
+    // surface vertices 0.25 units away when weld_tolerance was 0.46).
     let short_edge_vertices: HashSet<u32> = short_boundary_edges.iter()
         .flat_map(|(a, b)| [*a, *b].into_iter())
         .collect();
+
+    // Build a SEPARATE spatial hash for PASS 2 with the tighter cell size.
+    let pass2_cell_size = pass2_tolerance;
+    let mut pass2_spatial: HashMap<(i64, i64, i64), Vec<u32>> = HashMap::new();
+    for &vi in &boundary_vertices {
+        let v = mesh.vertices[vi as usize];
+        let cell = (
+            (v.x / pass2_cell_size).floor() as i64,
+            (v.y / pass2_cell_size).floor() as i64,
+            (v.z / pass2_cell_size).floor() as i64,
+        );
+        pass2_spatial.entry(cell).or_default().push(vi);
+    }
 
     let mut pass2_count = 0usize;
     for &v1 in &boundary_vertices {
@@ -791,19 +838,19 @@ pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64)
 
         let p1 = mesh.vertices[v1 as usize];
         let cell = (
-            (p1.x / cell_size).floor() as i64,
-            (p1.y / cell_size).floor() as i64,
-            (p1.z / cell_size).floor() as i64,
+            (p1.x / pass2_cell_size).floor() as i64,
+            (p1.y / pass2_cell_size).floor() as i64,
+            (p1.z / pass2_cell_size).floor() as i64,
         );
 
         let mut best_match: Option<u32> = None;
-        let mut best_dist_sq = weld_tol_sq;
+        let mut best_dist_sq = pass2_tol_sq;
 
         for dx in -1..=1 {
             for dy in -1..=1 {
                 for dz in -1..=1 {
                     let neighbor_cell = (cell.0 + dx, cell.1 + dy, cell.2 + dz);
-                    if let Some(candidates) = spatial.get(&neighbor_cell) {
+                    if let Some(candidates) = pass2_spatial.get(&neighbor_cell) {
                         for &candidate in candidates {
                             if candidate == v1 {
                                 continue;

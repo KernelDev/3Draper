@@ -3191,6 +3191,11 @@ impl<'a> StepConverter<'a> {
         // different EDGE_CURVE entities on the same geometric boundary
         // (up to ~5mm observed in some files), while being tight enough
         // to not collapse distinct features.
+        //
+        // PASS 2 (long-edge vertex welding) uses a MUCH TIGHTER tolerance
+        // internally (1% of this value, capped at 1e-3) to avoid welding
+        // unrelated boundary vertices from different faces. See
+        // weld_boundary_edge_vertices's PASS 2 comment for details.
         {
             let weld_tol = (tol_ctx.model_scale * 3e-2).min(10.0).max(1e-4);
             weld_boundary_edge_vertices(&mut mesh, weld_tol);
@@ -3723,6 +3728,16 @@ impl<'a> StepConverter<'a> {
 
         // Weld boundary edge vertices to fix seam mismatches between
         // adjacent faces using different EDGE_CURVE entities.
+        //
+        // PASS 1 (short-edge welding) uses this tolerance — it must be large
+        // enough to catch seam mismatches from different EDGE_CURVE entities
+        // (up to ~5mm observed in some STEP files). 3% of model scale, capped
+        // at 10mm, is the historical value that works for most STEP files.
+        //
+        // PASS 2 (long-edge vertex welding) uses a MUCH TIGHTER tolerance
+        // internally (1% of this value, capped at 1e-3) to avoid welding
+        // unrelated boundary vertices from different faces. See
+        // weld_boundary_edge_vertices's PASS 2 comment for details.
         {
             let weld_tol = (tol_ctx.model_scale * 3e-2).min(10.0).max(1e-4);
             weld_boundary_edge_vertices(&mut mesh, weld_tol);
