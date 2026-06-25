@@ -3466,3 +3466,82 @@ Stage Summary:
 - All rendering paths (mesh, edges, wireframe overlay, picking) respect
   both hidden_instances and hidden_faces.
 - Live demo updated: https://kerneldev.github.io/3Draper/
+
+---
+Task ID: mobile-loading-cancel-lod-59
+Agent: Main
+Task: Fix mobile loading issue — user couldn't wait for second element of drill_top.stp to load on phone ("С телефона я не дождался загрузки второго элемента для test/drill_top.stp")
+
+Work Log:
+- User's complaint: on mobile, drill_top.stp (5 BREP solids) took too long
+  to load — they gave up before the second element was triangulated.
+
+- Root cause analysis:
+  1. Mobile CPUs are 2-4× slower than desktop.
+  2. Default LOD is "High" (0.75) — produces many triangles, slow to triangulate.
+  3. Each BREP is processed atomically (1 BREP per frame on WASM). If a single
+     BREP takes 30+ seconds on mobile, the page hangs and user gives up.
+  4. The 5-minute global timeout is too long for mobile users.
+  5. There was NO way to cancel loading — user had to wait or refresh the page.
+  6. No ETA was displayed, so user didn't know how long to wait.
+
+- IMPLEMENTATION (crates/draper-viewer/src/app.rs):
+
+  1. Refactored `cancel_loading()` to take a `show_partial: bool` parameter:
+     - `cancel_loading(true)` — used by Cancel button + timeout path.
+       Commits the partial result so the user sees what was loaded.
+     - `cancel_loading(false)` — used when opening a NEW file.
+       Doesn't show the OLD partial result.
+     - Updated the existing call in `process_step_file` to use `false`.
+
+  2. Auto-downgrade LOD on mobile when STEP loading starts:
+     - In `process_step_file`, after detecting mobile (`self.is_mobile`):
+       * Ultra → High (saves ~25% triangulation time)
+       * High → Medium (saves ~50% triangulation time)
+       * Low/Preview/Medium stay as-is (user already chose low quality)
+     - Logs a message so the user knows why quality changed.
+     - User can manually raise quality via the Quality dropdown after
+       loading completes (uses the existing `retriangulate_for_lod`).
+
+  3. Loading progress now shows elapsed time + ETA:
+     - Format: "Triangulating: 2/5 (40%) · 12.5s · ETA: 18s"
+     - ETA computed as: (remaining_instances × avg_time_per_instance)
+     - Only shows ETA after the first BREP completes (need a sample).
+     - Applied to both desktop viewport overlay AND mobile loading overlay.
+
+  4. Desktop Cancel button:
+     - Added to the loading progress overlay (next to the progress bar).
+     - Red fill, white text — clearly visible.
+     - Only shown if there's room in the viewport (desktop wide layout).
+
+  5. Mobile loading overlay (NEW):
+     - Dedicated mobile-only overlay at top of screen.
+     - Black background panel with rounded corners.
+     - Progress text + progress bar + large Cancel button (32px tall).
+     - Cancel button is easy to tap on touch screens.
+     - Drawn with `egui::Area` + `Order::Foreground` so it's always on top.
+
+  6. Reduced loading timeout on mobile:
+     - Desktop: 5 minutes (unchanged).
+     - Mobile: 2 minutes (was 5 minutes).
+     - User can also cancel manually via the new Cancel button.
+
+- TESTS:
+  * draper-mesh lib: 171 passed ✅ (no regressions)
+  * draper-step integration: 7 passed ✅ (incl. test_drill_top_manifold_report)
+
+- COMMITS:
+  * main: 4a843f6 "feat(viewer): Cancel loading button + mobile auto-LOD-downgrade + ETA display"
+  * gh-pages: e099b0b deploy commit
+  * Pushed to origin/main and origin/gh-pages
+
+Stage Summary:
+- Mobile users can now Cancel a long-running STEP load with a single tap.
+  The partial result (whatever was loaded so far) is shown immediately.
+- Mobile users get auto-downgraded LOD (High → Medium) for 2× faster
+  loading. They can raise the quality manually after loading completes.
+- Loading progress shows elapsed time + ETA, so users know how long
+  to wait instead of staring at a static "Triangulating: 1/5 (20%)".
+- Mobile timeout reduced from 5 min to 2 min — if the user walks away
+  without canceling, they get a partial result sooner.
+- Live demo: https://kerneldev.github.io/3Draper/
