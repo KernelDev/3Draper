@@ -3269,3 +3269,93 @@ Stage Summary:
 - All existing tests pass (no regressions).
 - Cylinder face #843 still has suboptimal (but correct) triangulation —
   visual quality issue, not a correctness bug.
+
+---
+Task ID: cylinder-cone-per-surface-strategy-56
+Agent: Main
+Task: Implement per-surface-type triangulation strategy for cylinder/cone faces with holes — "Для цилиндра это не правильная триангуляция. Смотри как делают ее в других приложениях... Должна быть стратегия триангуляция своя для каждой поверхности и зависить от наличия дыр тоже ведь"
+
+Work Log:
+- User reported that Face #5 (Cylinder forward=true) in drill_top.stp has wrong
+  triangulation — the image shows radial/dense patterns near 2 elliptical holes
+  instead of a clean structured grid like other CAD apps produce.
+- User explicitly asked for a per-surface-type strategy that depends on whether
+  holes are present.
+
+- Root cause investigation:
+  * Cylinder faces WITHOUT holes → already use
+    triangulate_cylinder_tube_from_boundary (structured grid) — works correctly.
+  * Cylinder faces WITH holes → fall through to triangulate_surface_consistent
+    (earcutr in UV space).
+  * The earcutr path uses parameter_division_2d to generate interior Steiner
+    points. For cylinders/cones, parameter_division_2d returns only
+    v_knots = [v_min, v_max] because these surfaces have ZERO chord error in
+    the axial (v) direction (the surface is straight along the axis).
+  * With no interior Steiner points in v, earcutr produces long thin triangles
+    spanning the full cylinder height. Chord-error refinement doesn't help
+    because axial edges have zero chord error.
+
+- Fix implemented in crates/draper-mesh/src/parametric_domain.rs:
+
+  1. New function generate_cylinder_or_cone_steiner_grid():
+     * Generates a regular (u, v) grid in UV space.
+     * n_u (angular subdivisions) derived from chord-error tolerance:
+       du = 2 * acos(1 - tol/r), capped to [8, 128].
+       For cones, uses the MAXIMUM radius along the v-range (worst case).
+     * n_v (axial subdivisions) chosen so axial quad size matches arc
+       length per angular quad → near-square grid cells, matching what
+       OpenCASCADE/FreeCAD/SolidWorks produce.
+     * Grid points filtered to be strictly inside the face domain:
+       - inside outer boundary (contains_ray, exact test)
+       - outside all holes (contains_ray)
+       - not on any boundary edge (is_point_on_boundary)
+     * Downsampled to budget via coarse_grid_sample (preserves grid
+       structure) + downsample_interior_points (final cap).
+
+  2. Dispatch added in triangulate_surface_consistent's interior_uv_points
+     computation: a new branch for Surface::Cylinder and Surface::Cone
+     that calls generate_cylinder_or_cone_steiner_grid instead of the
+     generic parameter_division_2d path.
+
+     The branch is active for ALL cylinder/cone faces that reach the
+     earcutr path — i.e. cylinder/cone faces WITH holes (faces without
+     holes are handled earlier by triangulate_cylinder_tube_from_boundary
+     and never reach this point).
+
+- Tests added (5 new unit tests in parametric_domain::tests):
+  * test_cylinder_steiner_grid_basic — verifies ≥10 Steiner points, ≥3
+    distinct v values (proving the v-grid is no longer degenerate).
+  * test_cylinder_steiner_grid_excludes_holes — verifies no Steiner
+    point falls inside a hole region.
+  * test_cylinder_steiner_grid_respects_budget — verifies budget cap
+    is respected.
+  * test_cone_steiner_grid_basic — verifies cone also gets a proper
+    v-grid (was 0 Steiner points before).
+  * test_cylinder_steiner_grid_preserves_grid_structure — verifies
+    points form a Cartesian product of u_unique × v_unique.
+
+- All tests pass:
+  * draper-mesh lib: 176 passed (171 existing + 5 new) ✅
+  * draper-step integration: 7 passed including test_drill_top_manifold_report
+    and test_3_05_078_no_twisted_triangles ✅
+  * draper-topology: 100 passed ✅
+
+- Commit: bc8406d on main, pushed to GitHub.
+- WASM rebuilt and deployed to gh-pages (cd5573c).
+- Live demo: https://kerneldev.github.io/3Draper/
+
+Stage Summary:
+- Cylinder/cone faces WITH holes now use a per-surface-type Steiner grid
+  generator that produces a regular (u, v) grid with near-square cells,
+  matching the visual quality of other CAD applications.
+- The fix implements the user's request: each surface type now has its
+  own triangulation strategy, and the strategy depends on whether holes
+  are present.
+- The generic parameter_division_2d path is still used for NURBS and
+  other curved surfaces (sphere, torus) where chord-error-based
+  subdivision in both u and v is appropriate.
+- The fix does NOT regress any existing tests. The drill_top.stp file
+  still loads and triangulates correctly (test_drill_top_manifold_report
+  passes in 83s).
+- Cone faces (which had the same bug as cylinders) also benefit from
+  this fix — they now get a proper v-grid too.
