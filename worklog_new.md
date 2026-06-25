@@ -3359,3 +3359,110 @@ Stage Summary:
   passes in 83s).
 - Cone faces (which had the same bug as cylinders) also benefit from
   this fix — they now get a proper v-grid too.
+
+---
+Task ID: face-visibility-isolate-57
+Agent: Main
+Task: Add per-face visibility toggle + isolate-instance/face buttons in structure tree (test/3.05.078.stp screenshot showed UV plane + real view; user requested "add buttons to hide all except this solid, and to hide individual faces")
+
+Work Log:
+- User wants two new capabilities in the structure panel:
+  1. "Hide all except this solid" — isolate a single instance (and toggle back)
+  2. Per-face visibility — hide individual faces independently of their instance
+
+- Implementation in crates/draper-viewer/src/app.rs:
+
+  1. NEW STATE: hidden_faces: HashSet<(usize, u64)>
+     Stores (instance_idx, face_id) pairs for individually-hidden faces.
+     Independent from hidden_instances — an instance can be visible while
+     some of its faces are hidden.
+     Initialized in ViewerApp::new() and cleared in load_mesh() reset path
+     (same place hidden_instances.clear() lives).
+
+  2. mesh_to_gpu_data() — added hidden_faces parameter.
+     For each triangle, after determining inst_idx via instance_triangle_ranges,
+     looks up face_id via mesh.triangle_face_ids[i] and skips the triangle if
+     (inst_idx, face_id) is in hidden_faces. This means hidden faces' triangles
+     are not uploaded to GPU at all.
+
+  3. pick_at() — added hidden_faces parameter.
+     Skips triangles belonging to hidden faces when ray-picking. Users cannot
+     select a hidden face by clicking on empty space where it used to be.
+
+  4. build_edge_line_vertices() — skips edges of hidden faces.
+     For each (inst_idx, face) iteration, checks if (inst_idx, face.face_id)
+     is in hidden_faces and skips the entire face's outer + inner boundary
+     polylines. Hidden faces don't draw their B-Rep edges.
+
+  5. build_wireframe_overlay_vertices() — skips triangles of hidden faces.
+     Looks up face_id via mesh.triangle_face_ids[i] and skips triangles
+     belonging to hidden faces. Hidden faces don't draw their triangulation
+     wireframe.
+
+  6. draw_assembly_node_static() — added pending_instance_isolate parameter.
+     Each leaf node now has a "◎" (isolate) button next to the eye icon.
+     Tooltip: "Isolate: hide all other instances (click again to restore)".
+     The button is rendered as a frameless Button so it sits inline with
+     the eye icon.
+
+  7. Desktop tree fallback list (no assembly_tree) — same eye + isolate buttons.
+
+  8. Desktop Face List section — each face row now has:
+     - Eye icon (per-face visibility toggle)
+     - ◎ button (per-face isolate: hide all OTHER faces of same instance)
+     - Existing selectable label with face info
+
+  9. Mobile Structure panel — exact same controls added:
+     - Tree section: eye + ◎ button per instance (with assembly tree and fallback)
+     - Faces section: eye + ◎ button per face
+
+ 10. Pending action handlers (both desktop and mobile paths):
+     - pending_instance_isolate: if the clicked instance is the ONLY visible
+       one, restore all instances (clear hidden_instances). Otherwise, hide
+       every instance except the clicked one and auto-select it so the Face
+       List shows it.
+     - pending_face_visibility_toggle: add/remove from hidden_faces. If the
+       hidden face was selected, deselect it and clear UV window if needed.
+     - pending_face_isolate: if the clicked face is the ONLY visible face in
+       its instance, restore all faces of that instance. Otherwise, hide all
+       other faces of the same instance and ensure the clicked face is visible.
+
+- All isolate buttons support toggle behavior — clicking again restores
+  visibility. This matches the convention used in CAD apps like FreeCAD /
+  SolidWorks / Fusion 360.
+
+- Tests:
+  * draper-viewer: 0 tests (lib only, no regressions)
+  * draper-mesh: 176 passed ✅
+  * draper-step: 7 passed ✅ (including integration tests)
+  * draper-topology: 100 passed ✅
+  * draper-geometry: 81 passed ✅
+  * draper-core: 30 passed ✅
+
+- Commits:
+  * main: 02492f4 "feat(viewer): per-face visibility + isolate instance/face buttons"
+  * gh-pages: 7d7d6f4 deploy commit
+  * Pushed to origin/main and origin/gh-pages
+
+- Note on the UV plane issue mentioned by the user:
+  The screenshot showed the plane with a hole in UV space. The UV
+  visualization shows the actual face triangulation (from FaceInfo.uv_triangles)
+  which is the result of earcutr on the plane-with-hole polygon. The
+  per-surface-type Steiner grid fix from task 56 applies to cylinder/cone
+  faces with holes, NOT to planes — planes use the generic earcutr path
+  because they have no curvature-driven chord error. The plane's UV
+  triangulation quality is therefore determined by earcutr's default
+  behavior. The user's request to add visibility/isolate buttons is
+  addressed in this task; the plane UV quality issue is a separate
+  concern that would require adding Steiner points for planar faces
+  with holes too (future work).
+
+Stage Summary:
+- Structure tree now has full per-instance AND per-face visibility controls.
+- Each instance row: [👁 visibility] [◎ isolate] [name label]
+- Each face row:    [👁 visibility] [◎ isolate] [face label]
+- Isolate buttons toggle — click again to restore all.
+- Mobile UI gets the exact same controls.
+- All rendering paths (mesh, edges, wireframe overlay, picking) respect
+  both hidden_instances and hidden_faces.
+- Live demo updated: https://kerneldev.github.io/3Draper/
