@@ -508,6 +508,58 @@ pub struct PendingBrepInstance {
     pub color: Option<[f32; 4]>,
 }
 
+/// Result of `triangulate_pending_chunked` — allows progressive, non-blocking
+/// BREP triangulation across multiple frames on WASM.
+#[derive(Debug)]
+pub enum TriangulatePendingResult {
+    /// The BREP is fully triangulated. `Option<DetailedMeshInstance>` is `Some`
+    /// if the mesh is non-empty, `None` if triangulation failed (zero faces/triangles).
+    Done(Option<DetailedMeshInstance>),
+    /// The BREP is partially triangulated. More faces remain — call again next frame.
+    /// `faces_done` / `faces_total` can be used for progress display.
+    InProgress { faces_done: usize, faces_total: usize },
+}
+
+/// Active intra-BREP triangulation session for chunked progressive loading.
+///
+/// Holds the setup state (healed face_data_list, edge_cache, dedup_map) and
+/// accumulated output (mesh, face_infos) between chunks. Created by
+/// `start_brep_session`, advanced by `process_chunk`, consumed by `finalize`.
+pub struct BrepSession {
+    /// BREP being triangulated.
+    brep_id: i64,
+    /// Healed face_data_list (from setup phase).
+    face_data_list: Vec<FaceData>,
+    /// Edge discretization cache (mutated as faces are processed).
+    edge_cache: EdgeDiscretizationCache,
+    /// Tolerance context (from bounding box).
+    tol_ctx: ToleranceContext,
+    /// Vertex dedup map (mutated as faces are merged).
+    dedup_map: draper_mesh::mesh::VertexDedupMap,
+    /// Accumulated mesh across all processed faces.
+    mesh: TriangleMesh,
+    /// Accumulated face info across all processed faces.
+    face_infos: Vec<FaceInfo>,
+    /// Next face ID to assign.
+    next_face_id: u64,
+    /// Index of the next face to process in face_data_list.
+    next_face_idx: usize,
+    /// Total face vertices processed (for dedup stats logging).
+    total_face_vertices: usize,
+    /// Number of faces skipped due to time limits.
+    skipped_faces: usize,
+    /// Start time of the BREP (for time limit enforcement).
+    brep_start: StdInstant,
+    /// Per-BREP time limit.
+    brep_time_limit: std::time::Duration,
+    /// Per-FACE time limit.
+    face_time_limit: std::time::Duration,
+    /// Triangulation params (cloned from context).
+    params: TriangulationParams,
+    /// Bounding box (cloned from context).
+    bbox: Option<(Point3d, Point3d)>,
+}
+
 /// Build the assembly tree and collect BREP instance descriptors — **without**
 /// triangulating any geometry.
 ///
@@ -677,6 +729,17 @@ pub struct OwnedStepConversionContext {
     /// triangulation is reused with just a transform applied, eliminating
     /// redundant re-triangulation and guaranteeing identical meshes.
     brep_detail_cache: HashMap<i64, (TriangleMesh, Vec<FaceInfo>)>,
+    /// Active intra-BREP chunked triangulation session.
+    ///
+    /// When `Some`, a BREP is being triangulated across multiple frames.
+    /// The session holds the healed face_data_list, edge_cache, dedup_map,
+    /// and accumulated mesh/face_infos between chunks. This allows the viewer
+    /// to process N faces per frame (yielding to the browser between chunks)
+    /// instead of blocking the UI for the entire BREP.
+    ///
+    /// On native, this is never used (triangulate_pending does the whole BREP
+    /// in one call). On WASM, triangulate_pending_chunked uses this.
+    active_session: Option<Box<BrepSession>>,
 }
 
 impl OwnedStepConversionContext {
@@ -786,7 +849,7 @@ impl OwnedStepConversionContext {
         // Use consistent max_face_triangles on all platforms
         // (no WASM-specific cap — quality should match native)
 
-        Self { step_file, bbox, params, pd_brep_map, nauo_transform_map, entity_map, config, bbox_computed: false, brep_detail_cache: HashMap::new() }
+        Self { step_file, bbox, params, pd_brep_map, nauo_transform_map, entity_map, config, bbox_computed: false, brep_detail_cache: HashMap::new(), active_session: None }
     }
 
     /// Replace the triangulation parameters used by subsequent `triangulate_pending()` calls.
@@ -952,6 +1015,381 @@ impl OwnedStepConversionContext {
     /// Get a reference to the owned StepFile.
     pub fn step_file(&self) -> &StepFile {
         &self.step_file
+    }
+
+    /// Progressive (chunked) BREP triangulation — processes a time-bounded
+    /// chunk of faces per call, yielding `InProgress` between chunks so the
+    /// WASM main thread can repaint and process input.
+    ///
+    /// On the first call for a given BREP, sets up the session (extract faces,
+    /// heal, build edge cache). On subsequent calls, continues processing
+    /// faces from where the previous chunk left off. When all faces are done,
+    /// runs post-processing (filter, weld, validate) and returns `Done`.
+    ///
+    /// `max_chunk_time` controls how long each chunk runs before yielding.
+    /// Recommended: 200-500ms on WASM (keeps UI responsive).
+    pub fn triangulate_pending_chunked(
+        &mut self,
+        pending: &PendingBrepInstance,
+        max_chunk_time: std::time::Duration,
+    ) -> TriangulatePendingResult {
+        // Lazy bounding box computation (same as triangulate_pending).
+        if !self.bbox_computed && self.bbox.is_none() {
+            let converter = StepConverter::with_config(&self.step_file, self.config.clone());
+            self.bbox = converter.compute_bounding_box();
+            self.bbox_computed = true;
+            if let Some((bmin, bmax)) = &self.bbox {
+                let dx = bmax.x - bmin.x;
+                let dy = bmax.y - bmin.y;
+                let dz = bmax.z - bmin.z;
+                let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
+                if diagonal > 1.0 {
+                    let floor = diagonal * 0.0002;
+                    if self.params.max_deviation < floor && self.params.max_deviation < 1.0 {
+                        self.params.max_deviation = floor;
+                    }
+                }
+            }
+        }
+
+        // Check BREP cache first — if this BREP was already fully triangulated,
+        // reuse the cached result (same logic as triangulate_pending).
+        if let Some(cached) = self.brep_detail_cache.get(&pending.brep_id) {
+            log::info!(
+                "BREP #{} — using cached triangulation (chunked path)",
+                pending.brep_id
+            );
+            let (mesh, faces) = cached.clone();
+            return TriangulatePendingResult::Done(self.build_instance(pending, mesh, faces));
+        }
+
+        // If no active session, or session is for a different BREP, start a new one.
+        let need_new_session = self.active_session.as_ref().map_or(true, |s| s.brep_id != pending.brep_id);
+        if need_new_session {
+            // Create a fresh converter for setup.
+            let converter = StepConverter::from_cached_maps(
+                &self.step_file,
+                self.config.clone(),
+                self.entity_map.clone(),
+                self.pd_brep_map.clone(),
+                self.nauo_transform_map.clone(),
+            );
+            let session = match converter.prepare_brep_session(
+                pending.brep_id,
+                &self.params,
+                &self.bbox,
+            ) {
+                Some(s) => s,
+                None => return TriangulatePendingResult::Done(None),
+            };
+            log::info!(
+                "BREP #{}: started chunked session — {} faces, max_chunk_time={:?}",
+                pending.brep_id, session.face_data_list.len(), max_chunk_time
+            );
+            self.active_session = Some(Box::new(session));
+        }
+
+        // Process a chunk of faces.
+        let converter = StepConverter::from_cached_maps(
+            &self.step_file,
+            self.config.clone(),
+            self.entity_map.clone(),
+            self.pd_brep_map.clone(),
+            self.nauo_transform_map.clone(),
+        );
+        let total_faces = self.active_session.as_ref().unwrap().face_data_list.len();
+        let chunk_start = StdInstant::now();
+        let mut _faces_this_chunk = 0usize;
+
+        loop {
+            let done = {
+                let session = self.active_session.as_mut().unwrap();
+                if session.next_face_idx >= session.face_data_list.len() {
+                    true
+                } else {
+                    // Check BREP-level time limit.
+                    if session.brep_start.elapsed() > session.brep_time_limit {
+                        let remaining = session.face_data_list.len() - session.next_face_idx;
+                        session.skipped_faces += remaining;
+                        log::warn!(
+                            "BREP #{}: time limit reached after {} faces, skipping {} remaining (chunked)",
+                            session.brep_id, session.next_face_idx, remaining
+                        );
+                        true
+                    } else {
+                        // Check per-face time budget before starting an expensive face.
+                        let elapsed = session.brep_start.elapsed();
+                        if elapsed + session.face_time_limit > session.brep_time_limit {
+                            let remaining = session.face_data_list.len() - session.next_face_idx;
+                            session.skipped_faces += remaining;
+                            log::warn!(
+                                "BREP #{}: insufficient time budget for face {} (chunked), skipping {} remaining",
+                                session.brep_id, session.next_face_idx, remaining
+                            );
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                }
+            };
+
+            if done {
+                break;
+            }
+
+            // Process one face.
+            let session = self.active_session.as_mut().unwrap();
+            session.process_one_face(&converter);
+
+            _faces_this_chunk += 1;
+
+            // Check chunk time budget.
+            if chunk_start.elapsed() >= max_chunk_time {
+                break;
+            }
+        }
+
+        let faces_done = self.active_session.as_ref().unwrap().next_face_idx;
+        let is_complete = faces_done >= total_faces
+            || self.active_session.as_ref().unwrap().brep_start.elapsed() > self.active_session.as_ref().unwrap().brep_time_limit;
+
+        if is_complete {
+            // Finalize: run post-processing and build the instance.
+            let session = *self.active_session.take().unwrap();
+            let brep_id = session.brep_id;
+            let (mesh, faces) = session.finalize(&converter);
+
+            // Cache the result (same as triangulate_pending).
+            if mesh.triangle_count() > 0 {
+                self.brep_detail_cache.insert(brep_id, (mesh.clone(), faces.clone()));
+            }
+
+            log::info!(
+                "BREP #{}: chunked triangulation complete — {} verts, {} tris, {} faces",
+                brep_id, mesh.vertex_count(), mesh.triangle_count(), faces.len()
+            );
+
+            TriangulatePendingResult::Done(self.build_instance(pending, mesh, faces))
+        } else {
+            TriangulatePendingResult::InProgress {
+                faces_done,
+                faces_total: total_faces,
+            }
+        }
+    }
+
+    /// Build a `DetailedMeshInstance` from a triangulated mesh + face infos,
+    /// applying the instance transform and decimation. Shared between
+    /// `triangulate_pending` and `triangulate_pending_chunked`.
+    fn build_instance(
+        &self,
+        pending: &PendingBrepInstance,
+        mut mesh: TriangleMesh,
+        faces: Vec<FaceInfo>,
+    ) -> Option<DetailedMeshInstance> {
+        // Apply the instance transform
+        if let Some(ref tf) = pending.transform {
+            mesh.transform(tf);
+        }
+
+        // Apply post-triangulation decimation for LOD support.
+        if self.params.keep_ratio < 1.0 && mesh.triangle_count() >= 4 {
+            let (orig, final_) = draper_mesh::decimate_mesh(&mut mesh, self.params.keep_ratio);
+            if final_ < orig {
+                log::info!(
+                    "BREP #{} — decimated {}→{} triangles (keep_ratio={:.2})",
+                    pending.brep_id, orig, final_, self.params.keep_ratio
+                );
+            }
+        }
+
+        Some(DetailedMeshInstance {
+            name: pending.name.clone(),
+            mesh,
+            color: pending.color,
+            transform: pending.transform,
+            brep_id: pending.brep_id,
+            faces,
+        })
+    }
+
+    /// Abort any active chunked session (e.g., when the user cancels loading).
+    pub fn abort_active_session(&mut self) {
+        if self.active_session.take().is_some() {
+            log::info!("Aborted active BREP chunked session");
+        }
+    }
+}
+
+impl BrepSession {
+    /// Process exactly one face. The caller is responsible for time-budget
+    /// checks between faces. This advances `next_face_idx` by 1.
+    ///
+    /// Mirrors the body of the face loop in `triangulate_brep_detailed`.
+    fn process_one_face(&mut self, converter: &StepConverter) {
+        let fi = self.next_face_idx;
+        if fi >= self.face_data_list.len() {
+            return;
+        }
+        self.next_face_idx += 1;
+
+        let face_data = &self.face_data_list[fi];
+        let brep_id = self.brep_id;
+        let face_id = self.next_face_id;
+        self.next_face_id += 1;
+        let step_face_id = face_data.step_face_id;
+
+        let surface_type = match &face_data.surface {
+            Surface::Plane(_) => "Plane".to_string(),
+            Surface::Cylinder(_) => "Cylinder".to_string(),
+            Surface::Cone(_) => "Cone".to_string(),
+            Surface::Sphere(_) => "Sphere".to_string(),
+            Surface::Torus(_) => "Torus".to_string(),
+            Surface::Revolution(_) => "Revolution".to_string(),
+            Surface::Extrusion(_) => "Extrusion".to_string(),
+            Surface::Nurbs(n) => {
+                format!("Nurbs(deg={}/{}, cps={}x{})",
+                    n.u_degree, n.v_degree, n.control_points.len(),
+                    n.control_points.first().map(|r| r.len()).unwrap_or(0))
+            }
+        };
+
+        let tri_start = self.mesh.triangle_count();
+        let face_mesh = converter.surface_to_mesh_cached(face_data, &self.params, &self.bbox, &mut self.edge_cache);
+
+        let face_tri_count = face_mesh.triangle_count();
+        if face_tri_count == 0 {
+            log::warn!(
+                "BREP #{} face #{} (STEP #{}, type={}): produced 0 triangles — triangulation may have failed",
+                brep_id, face_id, step_face_id, surface_type
+            );
+        }
+
+        let mut face_mesh_with_ids = face_mesh.clone();
+        face_mesh_with_ids.triangle_face_ids = Some(vec![face_id; face_tri_count]);
+
+        self.mesh.merge_deduplicating(&face_mesh_with_ids, &mut self.dedup_map);
+        self.total_face_vertices += face_mesh_with_ids.vertices.len();
+        let tri_end = self.mesh.triangle_count();
+
+        // Sample boundary edges into polylines (3D and UV)
+        let outer_boundary: Vec<Vec<Point3d>> = if face_data.outer_edges.is_empty() {
+            vec![]
+        } else {
+            vec![converter.sample_edges_to_polylines(&face_data.outer_edges)]
+        };
+        let inner_boundaries: Vec<Vec<Point3d>> = face_data.inner_edges.iter()
+            .map(|edges| converter.sample_edges_to_polylines(edges))
+            .collect();
+
+        let outer_uv_boundary = converter.sample_edges_to_uv_polylines(&face_data.outer_edges, &face_data.surface);
+        let inner_uv_boundaries: Vec<Vec<Vec<Point2d>>> = face_data.inner_edges.iter()
+            .map(|edges| converter.sample_edges_to_uv_polylines(edges, &face_data.surface))
+            .collect();
+
+        // Project each triangle's vertices to UV space for visualization
+        let surface_ref = &face_data.surface;
+        let uv_triangles: Vec<[Point2d; 3]> = face_mesh_with_ids.triangles.iter()
+            .map(|tri| {
+                let v0 = face_mesh_with_ids.vertices[tri[0] as usize];
+                let v1 = face_mesh_with_ids.vertices[tri[1] as usize];
+                let v2 = face_mesh_with_ids.vertices[tri[2] as usize];
+                let (u0, v0v) = surface_ref.project_point(&v0);
+                let (u1, v1v) = surface_ref.project_point(&v1);
+                let (u2, v2v) = surface_ref.project_point(&v2);
+                [
+                    Point2d::new(u0, v0v),
+                    Point2d::new(u1, v1v),
+                    Point2d::new(u2, v2v),
+                ]
+            })
+            .collect();
+
+        self.face_infos.push(FaceInfo {
+            face_id,
+            step_face_id,
+            surface_type,
+            surface: face_data.surface.clone(),
+            outer_boundary,
+            inner_boundaries,
+            outer_uv_boundary,
+            inner_uv_boundaries,
+            triangle_range: (tri_start, tri_end),
+            forward: face_data.forward,
+            uv_triangles,
+        });
+    }
+
+    /// Finalize the session: run post-processing (filter, weld, validate,
+    /// smooth normals). Mirrors the post-face-loop code in `triangulate_brep_detailed`.
+    fn finalize(mut self, _converter: &StepConverter) -> (TriangleMesh, Vec<FaceInfo>) {
+        let brep_id = self.brep_id;
+
+        // Filter degenerate triangles
+        filter_degenerate_triangles(&mut self.mesh, 1e-10);
+
+        // Weld boundary edge vertices
+        {
+            let weld_tol = (self.tol_ctx.model_scale * 3e-2).min(10.0).max(1e-4);
+            weld_boundary_edge_vertices(&mut self.mesh, weld_tol);
+        }
+
+        // Remove duplicate triangles
+        let dup_removed = self.mesh.remove_duplicate_triangles();
+        if dup_removed > 0 {
+            log::info!(
+                "BREP #{} detailed (chunked): removed {} duplicate/degenerate triangles ({} → {})",
+                brep_id, dup_removed, self.mesh.triangle_count() + dup_removed, self.mesh.triangle_count(),
+            );
+        }
+
+        // Validate watertightness (logging only)
+        let adaptive_tol = self.edge_cache.adaptive_tolerance().merge_tolerance();
+        let report_before = validate_watertight(&self.mesh, false);
+        if !report_before.is_watertight() {
+            let boundary_pct = if report_before.edge_count > 0 {
+                report_before.boundary_edge_count as f64 / report_before.edge_count as f64 * 100.0
+            } else {
+                0.0
+            };
+            log::error!(
+                "BUG: BREP #{} detailed (chunked) not watertight: {} boundary edges ({:.2}%), {} non-manifold (tol={:.2e})",
+                brep_id, report_before.boundary_edge_count, boundary_pct,
+                report_before.non_manifold_edge_count, adaptive_tol
+            );
+            let deduped = self.total_face_vertices - self.mesh.vertices.len();
+            let (exact_hits, tolerance_hits, misses) = self.dedup_map.stats();
+            log::error!(
+                "  Dedup stats: {} face vertices → {} unique ({} shared), dedup_rate={:.1}%, exact_hits={}, tolerance_hits={}, misses={}",
+                self.total_face_vertices, self.mesh.vertices.len(), deduped,
+                if self.total_face_vertices > 0 { deduped as f64 / self.total_face_vertices as f64 * 100.0 } else { 0.0 },
+                exact_hits, tolerance_hits, misses,
+            );
+        }
+
+        // Smooth vertex normals
+        draper_mesh::smooth_normals(&mut self.mesh, 0.785);
+
+        if self.skipped_faces > 0 {
+            log::warn!("BREP #{} detailed (chunked): {} faces skipped due to time limit", brep_id, self.skipped_faces);
+        }
+
+        // Final watertightness check
+        let wt_report = validate_watertight(&self.mesh, false);
+        if wt_report.is_watertight() {
+            log::info!("BREP #{} detailed (chunked): watertight ✓ ({} interior edges, Euler χ={})",
+                brep_id, wt_report.interior_edge_count, wt_report.euler_characteristic);
+        } else {
+            log::warn!("BREP #{} detailed (chunked): NOT watertight — {} boundary edges, {} non-manifold edges, χ={}",
+                brep_id, wt_report.boundary_edge_count, wt_report.non_manifold_edge_count,
+                wt_report.euler_characteristic);
+        }
+
+        log::info!("BREP #{} detailed (chunked): edge_cache={} entries, mesh v={} t={} skipped={}",
+            brep_id, self.edge_cache.len(), self.mesh.vertex_count(), self.mesh.triangle_count(), self.skipped_faces);
+
+        (self.mesh, self.face_infos)
     }
 }
 
@@ -3538,17 +3976,23 @@ impl<'a> StepConverter<'a> {
         // Time guard: limit per-BREP triangulation time.
         // WASM uses a moderate limit to avoid browser freezes;
         // native uses a generous limit for complex assemblies.
+        // WASM uses 30s (reduced from 60s for mobile responsiveness — combined
+        // with the 3s per-face limit, this ensures no single BREP blocks the UI
+        // for more than 30s. Remaining faces are skipped and the partial mesh
+        // is returned).
         #[cfg(target_arch = "wasm32")]
-        let brep_time_limit = std::time::Duration::from_secs(60);
+        let brep_time_limit = std::time::Duration::from_secs(30);
         #[cfg(not(target_arch = "wasm32"))]
         let brep_time_limit = std::time::Duration::from_secs(600); // 10 min on native
 
         // Per-FACE time limit: if a single face takes longer than this,
         // we skip it (returning an empty mesh for that face) rather than blocking.
-        // WASM uses 10s (increased from 500ms for better quality);
+        // WASM uses 3s (reduced from 10s for mobile responsiveness — a single
+        // 10s face freeze is unacceptable on mobile, and 3s is still enough
+        // for most NURBS faces at Medium LOD).
         // native uses 120s for complex NURBS faces.
         #[cfg(target_arch = "wasm32")]
-        let face_time_limit = std::time::Duration::from_secs(10);
+        let face_time_limit = std::time::Duration::from_secs(3);
         #[cfg(not(target_arch = "wasm32"))]
         let face_time_limit = std::time::Duration::from_secs(120);
 
@@ -3890,6 +4334,233 @@ impl<'a> StepConverter<'a> {
         log::info!("BREP #{} detailed: edge_cache={} entries, mesh v={} t={} skipped={}",
             brep_id, edge_cache.len(), mesh.vertex_count(), mesh.triangle_count(), skipped_faces);
         Some((mesh, face_infos))
+    }
+
+    /// Prepare a BREP triangulation session — extracts faces, heals, builds
+    /// edge cache + alias map. This is the setup phase of `triangulate_brep_detailed`,
+    /// extracted so it can run ONCE per BREP, with face processing chunked across
+    /// multiple frames via `BrepSession::process_one_face`.
+    ///
+    /// Returns `None` if the BREP has no shell or no faces.
+    fn prepare_brep_session(
+        &self,
+        brep_id: i64,
+        params: &TriangulationParams,
+        bbox: &Option<(Point3d, Point3d)>,
+    ) -> Option<BrepSession> {
+        // P7: Use find_all_shell_refs to support BREP_WITH_VOIDS.
+        let (outer_shell_id, void_shell_ids) = self.find_all_shell_refs_by_brep_id(brep_id);
+        let shell_id = outer_shell_id?;
+        let mut face_data_list = self.extract_shell_faces(shell_id)?;
+
+        // Extract faces from each void shell and append them to the list.
+        for void_shell_id in &void_shell_ids {
+            match self.extract_shell_faces(*void_shell_id) {
+                Some(void_faces) => {
+                    log::info!(
+                        "BREP #{}: appending {} faces from void shell #{}",
+                        brep_id, void_faces.len(), void_shell_id
+                    );
+                    face_data_list.extend(void_faces);
+                }
+                None => {
+                    log::warn!(
+                        "BREP #{}: failed to extract faces from void shell #{} — skipping",
+                        brep_id, void_shell_id
+                    );
+                }
+            }
+        }
+
+        // Log face_data_list composition
+        {
+            let mut surface_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+            for fd in &face_data_list {
+                let key = match &fd.surface {
+                    Surface::Plane(_) => "Plane",
+                    Surface::Cylinder(_) => "Cylinder",
+                    Surface::Cone(_) => "Cone",
+                    Surface::Sphere(_) => "Sphere",
+                    Surface::Torus(_) => "Torus",
+                    Surface::Revolution(_) => "Revolution",
+                    Surface::Extrusion(_) => "Extrusion",
+                    Surface::Nurbs(_) => "Nurbs",
+                };
+                *surface_counts.entry(key).or_insert(0) += 1;
+            }
+            let summary: Vec<String> = surface_counts.iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect();
+            log::info!(
+                "BREP #{} face_data_list: {} faces [{}]",
+                brep_id, face_data_list.len(), summary.join(", "),
+            );
+        }
+
+        // Create tolerance context for this BREP
+        let tol_ctx = match bbox {
+            Some((bmin, bmax)) => ToleranceContext::from_bounding_box(bmin, bmax),
+            None => ToleranceContext::new(),
+        };
+
+        // ─── Healing pipeline: heal the solid before triangulation ────────
+        let face_data_list = if self.config.heal {
+            let pre_heal_count = face_data_list.len();
+            let (solid, face_id_map) = face_data_list_to_solid(&face_data_list);
+            let healing_params = HealingParams::aggressive_with_context(&tol_ctx);
+            let (healed, report) = heal_solid(&solid, &healing_params);
+            log_healing_report(brep_id, &report);
+            let healed_list = apply_healing_to_face_data(&face_data_list, &healed, &face_id_map);
+            if healed_list.len() != pre_heal_count {
+                log::warn!(
+                    "BREP #{} healing changed face count: {} → {}",
+                    brep_id, pre_heal_count, healed_list.len(),
+                );
+            }
+            healed_list
+        } else {
+            face_data_list
+        };
+
+        // Create edge discretization cache for this BREP
+        let mut edge_cache = EdgeDiscretizationCache::with_tolerance(tol_ctx.clone(), 64);
+
+        // ─── Build vertex-pair → canonical step_id aliases ──────────────
+        // (Same logic as triangulate_brep_detailed — see comments there.)
+        {
+            let mut vertex_pair_to_step_ids: HashMap<(i64, i64), Vec<i64>> = HashMap::new();
+            for face_data in &face_data_list {
+                for &step_id in &face_data.edge_step_ids {
+                    if step_id == 0 { continue; }
+                    if let Some(vp) = self.get_edge_curve_vertex_pair(step_id) {
+                        vertex_pair_to_step_ids.entry(vp).or_default().push(step_id);
+                    }
+                }
+            }
+            let mut alias_count = 0usize;
+            let mut skipped_different_curves = 0usize;
+            for (vp, step_ids) in &vertex_pair_to_step_ids {
+                if step_ids.len() < 2 { continue; }
+                let shape_tol = (tol_ctx.model_scale * 1e-3).max(1e-6);
+                let shape_groups = self.group_step_ids_by_curve_shape(step_ids, shape_tol);
+                for (_samples, group_sids) in &shape_groups {
+                    if group_sids.len() < 2 { continue; }
+                    let canonical = *group_sids.iter().max_by_key(|&&sid| {
+                        self.edge_curve_complexity_score(sid)
+                    }).unwrap();
+                    for &sid in group_sids {
+                        if sid != canonical {
+                            edge_cache.register_step_id_alias(sid, canonical);
+                            alias_count += 1;
+                        }
+                    }
+                }
+                if shape_groups.len() > 1 {
+                    skipped_different_curves += step_ids.len() - shape_groups.iter().map(|(_, g)| g.len().min(1)).sum::<usize>();
+                }
+            }
+            if alias_count > 0 || skipped_different_curves > 0 {
+                log::info!(
+                    "BREP #{}: registered {} step_id aliases from vertex-pair matching (chunked, skipped {} edges with same endpoints but different curves)",
+                    brep_id, alias_count, skipped_different_curves,
+                );
+            }
+
+            // Phase 2: 3D coordinate-based aliasing (supplementary)
+            let coord_tol = (tol_ctx.model_scale * 2e-3).max(tol_ctx.absolute * 10.0);
+            let mut coord_pair_to_step_ids: HashMap<(i64, i64, i64, i64, i64, i64), Vec<i64>> = HashMap::new();
+            for face_data in &face_data_list {
+                for (edge_idx, &step_id) in face_data.edge_step_ids.iter().enumerate() {
+                    if step_id == 0 { continue; }
+                    if edge_cache.resolve_canonical_step_id(step_id) != step_id {
+                        continue;
+                    }
+                    let edge = &face_data.edges[edge_idx];
+                    let start = match edge.start_point() { Some(p) => p, None => continue };
+                    let end = match edge.end_point() { Some(p) => p, None => continue };
+                    let sk = (
+                        (start.x / coord_tol).round() as i64,
+                        (start.y / coord_tol).round() as i64,
+                        (start.z / coord_tol).round() as i64,
+                        (end.x / coord_tol).round() as i64,
+                        (end.y / coord_tol).round() as i64,
+                        (end.z / coord_tol).round() as i64,
+                    );
+                    let sk_rev = (
+                        (end.x / coord_tol).round() as i64,
+                        (end.y / coord_tol).round() as i64,
+                        (end.z / coord_tol).round() as i64,
+                        (start.x / coord_tol).round() as i64,
+                        (start.y / coord_tol).round() as i64,
+                        (start.z / coord_tol).round() as i64,
+                    );
+                    let canonical_key = if sk <= sk_rev { sk } else { sk_rev };
+                    coord_pair_to_step_ids.entry(canonical_key).or_default().push(step_id);
+                }
+            }
+            let mut coord_alias_count = 0usize;
+            let mut coord_groups_with_multiple = 0usize;
+            let mut coord_skipped_different_curves = 0usize;
+            for (_key, step_ids) in &coord_pair_to_step_ids {
+                if step_ids.len() < 2 { continue; }
+                coord_groups_with_multiple += 1;
+                let shape_tol = (tol_ctx.model_scale * 1e-3).max(1e-6);
+                let shape_groups = self.group_step_ids_by_curve_shape(step_ids, shape_tol);
+                for (_samples, group_sids) in &shape_groups {
+                    if group_sids.len() < 2 { continue; }
+                    let canonical = *group_sids.iter().max_by_key(|&&sid| {
+                        self.edge_curve_complexity_score(sid)
+                    }).unwrap();
+                    for &sid in group_sids {
+                        if sid != canonical {
+                            edge_cache.register_step_id_alias(sid, canonical);
+                            coord_alias_count += 1;
+                        }
+                    }
+                }
+                if shape_groups.len() > 1 {
+                    coord_skipped_different_curves += step_ids.len() - shape_groups.iter().map(|(_, g)| g.len().min(1)).sum::<usize>();
+                }
+            }
+            log::info!(
+                "BREP #{}: Phase 2 alias (chunked): {} coord groups, {} with multiple step_ids, {} aliases registered, {} skipped different curves (tol={:.2e})",
+                brep_id, coord_pair_to_step_ids.len(), coord_groups_with_multiple, coord_alias_count, coord_skipped_different_curves, coord_tol,
+            );
+        }
+
+        // Time guard: limit per-BREP triangulation time.
+        #[cfg(target_arch = "wasm32")]
+        let brep_time_limit = std::time::Duration::from_secs(30);
+        #[cfg(not(target_arch = "wasm32"))]
+        let brep_time_limit = std::time::Duration::from_secs(600);
+
+        #[cfg(target_arch = "wasm32")]
+        let face_time_limit = std::time::Duration::from_secs(3);
+        #[cfg(not(target_arch = "wasm32"))]
+        let face_time_limit = std::time::Duration::from_secs(120);
+
+        // Tolerance-based dedup
+        let merge_tol = (tol_ctx.model_scale * 1e-4).max(tol_ctx.absolute * 10.0);
+        let dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
+
+        Some(BrepSession {
+            brep_id,
+            face_data_list,
+            edge_cache,
+            tol_ctx,
+            dedup_map,
+            mesh: TriangleMesh::new(),
+            face_infos: Vec::new(),
+            next_face_id: 1,
+            next_face_idx: 0,
+            total_face_vertices: 0,
+            skipped_faces: 0,
+            brep_start: StdInstant::now(),
+            brep_time_limit,
+            face_time_limit,
+            params: params.clone(),
+            bbox: bbox.clone(),
+        })
     }
 
     /// Sample edges into 3D polylines for boundary visualization.

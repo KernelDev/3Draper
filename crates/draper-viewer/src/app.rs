@@ -480,6 +480,11 @@ pub struct ViewerApp {
     total_instance_count: usize,
     /// Number of instances already triangulated.
     triangulated_count: usize,
+    /// Faces triangulated in the CURRENT chunked BREP session (for progress display).
+    /// Reset to 0 when a BREP completes and the next one starts.
+    chunked_brep_faces_done: usize,
+    /// Total faces in the current chunked BREP session (for progress display).
+    chunked_brep_faces_total: usize,
     /// Whether we are currently in the progressive triangulation phase.
     is_loading: bool,
     /// Name of the file being loaded.
@@ -1096,6 +1101,8 @@ impl ViewerApp {
             last_step_name: String::new(),
             total_instance_count: 0,
             triangulated_count: 0,
+            chunked_brep_faces_done: 0,
+            chunked_brep_faces_total: 0,
             is_loading: false,
             loading_name: String::new(),
             loading_start: None,
@@ -3522,10 +3529,16 @@ impl ViewerApp {
             // The user can always raise the quality manually after loading
             // completes via the Quality dropdown.
             if self.is_mobile {
+                // Aggressive downgrade for mobile — previous Ultra→High / High→Medium
+                // was too conservative: drill_top.stp's GEAR BREP took 42s on desktop
+                // at LOD 0.5 (Medium), which is 3-7 minutes on mobile. Ultra→Medium /
+                // High→Low cuts the work by ~3-5×, bringing the GEAR BREP to under
+                // 60s on mobile (within the 120s timeout).
                 let new_lod = match self.lod_level {
-                    LodLevel::Ultra => Some(LodLevel::High),
-                    LodLevel::High => Some(LodLevel::Medium),
-                    _ => None, // Low/Preview/Medium stay as-is
+                    LodLevel::Ultra => Some(LodLevel::Medium),
+                    LodLevel::High => Some(LodLevel::Low),
+                    LodLevel::Medium => Some(LodLevel::Low),
+                    _ => None, // Low/Preview stay as-is
                 };
                 if let Some(new) = new_lod {
                     self.log(&format!(
@@ -3861,6 +3874,10 @@ impl ViewerApp {
         self.is_loading = false;
         self.loading_start = None;
         self.pending_breps.clear();
+        // Abort any active chunked BREP session before dropping the context.
+        if let Some(ref mut ctx) = self.conversion_ctx {
+            ctx.abort_active_session();
+        }
         // Drop the conversion context and step file to free WASM memory.
         // Without this, repeated file loads accumulate data in the WASM heap
         // (which has a 4GB limit in Chrome) and eventually crash the tab.
@@ -4092,153 +4109,286 @@ impl ViewerApp {
         let frame_start = web_time::Instant::now();
         let frame_budget = self.chunked_triangulator.time_budget;
 
-        let mut processed = 0;
-        // On native, process up to 8 BREPs per frame if time allows.
-        // On WASM, process just 1 BREP per frame.
-        #[cfg(not(target_arch = "wasm32"))]
-        let max_batch = std::cmp::min(self.pending_breps.len(), 8);
+        // ─── WASM path: intra-BREP chunked triangulation ───────────────────
+        // On WASM, a single BREP can take 10-60s on mobile (e.g., drill_top.stp's
+        // GEAR BREP is 12s desktop = 60s mobile). Blocking the main thread for
+        // that long freezes the browser UI. Instead, we process each BREP in
+        // time-bounded chunks (default 500ms per chunk), yielding to the browser
+        // between chunks so it can repaint and process input (including the
+        // Cancel button).
         #[cfg(target_arch = "wasm32")]
-        let max_batch = 1;
+        {
+            if !self.pending_breps.is_empty() {
+                // 500ms per chunk — long enough to make progress, short enough
+                // to keep the UI responsive (browser can repaint between chunks).
+                let max_chunk_time = std::time::Duration::from_millis(500);
 
-        while processed < max_batch && !self.pending_breps.is_empty() {
-            // Check time budget (skip check for first BREP — we always process at least one)
-            if processed > 0 && frame_start.elapsed() > frame_budget {
-                log::debug!("Frame time budget exceeded after {} BREPs ({:.1}ms), yielding",
-                    processed, frame_start.elapsed().as_secs_f64() * 1000.0);
-                break;
-            }
+                // Peek at the first pending BREP (don't remove until Done).
+                let pending = self.pending_breps[0].clone();
 
-            // Take the next pending BREP
-            let pending = self.pending_breps.remove(0);
-
-            // Log transform info for debugging positioning issues
-            if let Some(ref tf) = pending.transform {
-                let is_identity = (tf[0][0] - 1.0).abs() < 1e-10 && (tf[1][1] - 1.0).abs() < 1e-10 && (tf[2][2] - 1.0).abs() < 1e-10 && tf[0][3].abs() < 1e-10 && tf[1][3].abs() < 1e-10 && tf[2][3].abs() < 1e-10;
-                if !is_identity {
-                    let has_rotation = (tf[0][0] - 1.0).abs() > 1e-6 || (tf[1][1] - 1.0).abs() > 1e-6 || (tf[2][2] - 1.0).abs() > 1e-6
-                        || tf[0][1].abs() > 1e-6 || tf[0][2].abs() > 1e-6
-                        || tf[1][0].abs() > 1e-6 || tf[1][2].abs() > 1e-6
-                        || tf[2][0].abs() > 1e-6 || tf[2][1].abs() > 1e-6;
-                    if has_rotation {
-                        self.log(&format!(
-                            "Instance '{}' (BREP #{}): non-identity transform with ROTATION — translation=({:.3}, {:.3}, {:.3}), matrix=[[{:.4},{:.4},{:.4}],[{:.4},{:.4},{:.4}],[{:.4},{:.4},{:.4}]]",
-                            pending.name, pending.brep_id,
-                            tf[0][3], tf[1][3], tf[2][3],
-                            tf[0][0], tf[0][1], tf[0][2],
-                            tf[1][0], tf[1][1], tf[1][2],
-                            tf[2][0], tf[2][1], tf[2][2]
-                        ));
-                    } else {
-                        self.log(&format!(
-                            "Instance '{}' (BREP #{}): non-identity transform — translation=({:.3}, {:.3}, {:.3})",
-                            pending.name, pending.brep_id, tf[0][3], tf[1][3], tf[2][3]
-                        ));
+                // Log transform info on first chunk of this BREP.
+                if let Some(ref tf) = pending.transform {
+                    let is_identity = (tf[0][0] - 1.0).abs() < 1e-10 && (tf[1][1] - 1.0).abs() < 1e-10 && (tf[2][2] - 1.0).abs() < 1e-10 && tf[0][3].abs() < 1e-10 && tf[1][3].abs() < 1e-10 && tf[2][3].abs() < 1e-10;
+                    if !is_identity && self.triangulated_count == 0 {
+                        // Only log once per BREP (when it's the first chunk).
+                        // We detect "first chunk" by checking if the context has
+                        // an active session for this brep_id — but that's internal.
+                        // Simpler: log always, it's not that expensive.
+                        let has_rotation = (tf[0][0] - 1.0).abs() > 1e-6 || (tf[1][1] - 1.0).abs() > 1e-6 || (tf[2][2] - 1.0).abs() > 1e-6
+                            || tf[0][1].abs() > 1e-6 || tf[0][2].abs() > 1e-6
+                            || tf[1][0].abs() > 1e-6 || tf[1][2].abs() > 1e-6
+                            || tf[2][0].abs() > 1e-6 || tf[2][1].abs() > 1e-6;
+                        if has_rotation {
+                            self.log(&format!(
+                                "Instance '{}' (BREP #{}): non-identity transform with ROTATION — translation=({:.3}, {:.3}, {:.3})",
+                                pending.name, pending.brep_id,
+                                tf[0][3], tf[1][3], tf[2][3]
+                            ));
+                        }
                     }
                 }
+
+                let brep_start = web_time::Instant::now();
+                let result = if let Some(ref mut ctx) = self.conversion_ctx {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        ctx.triangulate_pending_chunked(&pending, max_chunk_time)
+                    })).unwrap_or_else(|_| {
+                        log::error!("Panic during chunked triangulation of '{}' (BREP #{}), aborting", pending.name, pending.brep_id);
+                        ctx.abort_active_session();
+                        draper_step::TriangulatePendingResult::Done(None)
+                    })
+                } else {
+                    draper_step::TriangulatePendingResult::Done(None)
+                };
+
+                match result {
+                    draper_step::TriangulatePendingResult::Done(instance) => {
+                        // BREP fully triangulated — remove from pending and handle.
+                        self.pending_breps.remove(0);
+                        self.chunked_brep_faces_done = 0;
+                        self.chunked_brep_faces_total = 0;
+                        let brep_elapsed_ms = brep_start.elapsed().as_secs_f64() * 1000.0;
+
+                        match instance {
+                            Some(inst) => {
+                                if inst.mesh.triangle_count() == 0 && inst.mesh.vertex_count() == 0 {
+                                    self.log_warning(&format!(
+                                        "Instance '{}' (BREP #{}) produced empty mesh — skipping ({:.1}ms)",
+                                        inst.name, inst.brep_id, brep_elapsed_ms
+                                    ));
+                                    self.failed_face_count += 1;
+                                    if let Some(ref mut tree) = self.assembly_tree {
+                                        skip_instance_in_tree(tree);
+                                    }
+                                } else {
+                                    let tri_start = self.mesh.triangle_count();
+                                    let color = inst.color.unwrap_or_else(|| {
+                                        Self::instance_color(self.triangulated_count)
+                                    });
+                                    self.mesh.merge_with_color(&inst.mesh, color);
+                                    let tri_end = self.mesh.triangle_count();
+                                    self.instance_triangle_ranges.push((tri_start, tri_end));
+
+                                    let inst_idx = self.instance_triangle_ranges.len() - 1;
+                                    if let Some(ref mut tree) = self.assembly_tree {
+                                        assign_instance_to_tree(tree, inst_idx);
+                                    }
+
+                                    self.detailed_instances.push(inst);
+                                }
+                            }
+                            None => {
+                                self.log_warning(&format!(
+                                    "Instance '{}' (BREP #{}) failed triangulation — skipping ({:.1}ms)",
+                                    pending.name, pending.brep_id, brep_elapsed_ms
+                                ));
+                                self.failed_face_count += 1;
+                                if let Some(ref mut tree) = self.assembly_tree {
+                                    skip_instance_in_tree(tree);
+                                }
+                            }
+                        }
+                        self.triangulated_count += 1;
+                    }
+                    draper_step::TriangulatePendingResult::InProgress { faces_done, faces_total } => {
+                        // BREP still has more faces to process — yield to next frame.
+                        self.chunked_brep_faces_done = faces_done;
+                        self.chunked_brep_faces_total = faces_total;
+                        log::debug!(
+                            "BREP '{}' chunk: {}/{} faces done in {:.1}ms, yielding",
+                            pending.name, faces_done, faces_total,
+                            brep_start.elapsed().as_secs_f64() * 1000.0
+                        );
+                        // Don't increment triangulated_count — this BREP isn't done yet.
+                        // Don't remove from pending_breps — we'll continue next frame.
+                    }
+                }
+
+                self.mesh_dirty = true;
+                self.edge_dirty = true;
+                self.wireframe_overlay_dirty = true;
+
+                if self.pending_breps.is_empty() {
+                    self.is_loading = false;
+                    self.conversion_ctx = None;
+                    self.loading_start = None;
+                    let vcount = self.mesh.vertex_count();
+                    let tcount = self.mesh.triangle_count();
+                    self.log(&format!(
+                        "Triangulation complete: {} instances, {} vertices, {} triangles",
+                        self.triangulated_count, vcount, tcount
+                    ));
+                    if self.failed_face_count > 0 {
+                        self.log_warning(&format!("{} instances failed triangulation", self.failed_face_count));
+                    }
+                    self.load_mesh(self.mesh.clone(), &format!("STEP: {}", self.loading_name));
+                    self.loading_name.clear();
+                    return false;
+                }
+                return true;
             }
+            return false;
+        }
 
-            // Time this BREP's triangulation
-            #[cfg(not(target_arch = "wasm32"))]
-            let brep_start = std::time::Instant::now();
-            #[cfg(target_arch = "wasm32")]
-            let brep_start = web_time::Instant::now();
+        // ─── Native path: process full BREPs per frame (fast on desktop) ───
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut processed = 0;
+            // On native, process up to 8 BREPs per frame if time allows.
+            let max_batch = std::cmp::min(self.pending_breps.len(), 8);
 
-            // Triangulate this single BREP using the CACHED conversion context.
-            let instance = if let Some(ref mut ctx) = self.conversion_ctx {
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    ctx.triangulate_pending(&pending)
-                })).unwrap_or_else(|_| {
-                    log::error!("Panic during triangulation of '{}' (BREP #{}), skipping", pending.name, pending.brep_id);
+            while processed < max_batch && !self.pending_breps.is_empty() {
+                // Check time budget (skip check for first BREP — we always process at least one)
+                if processed > 0 && frame_start.elapsed() > frame_budget {
+                    log::debug!("Frame time budget exceeded after {} BREPs ({:.1}ms), yielding",
+                        processed, frame_start.elapsed().as_secs_f64() * 1000.0);
+                    break;
+                }
+
+                // Take the next pending BREP
+                let pending = self.pending_breps.remove(0);
+
+                // Log transform info for debugging positioning issues
+                if let Some(ref tf) = pending.transform {
+                    let is_identity = (tf[0][0] - 1.0).abs() < 1e-10 && (tf[1][1] - 1.0).abs() < 1e-10 && (tf[2][2] - 1.0).abs() < 1e-10 && tf[0][3].abs() < 1e-10 && tf[1][3].abs() < 1e-10 && tf[2][3].abs() < 1e-10;
+                    if !is_identity {
+                        let has_rotation = (tf[0][0] - 1.0).abs() > 1e-6 || (tf[1][1] - 1.0).abs() > 1e-6 || (tf[2][2] - 1.0).abs() > 1e-6
+                            || tf[0][1].abs() > 1e-6 || tf[0][2].abs() > 1e-6
+                            || tf[1][0].abs() > 1e-6 || tf[1][2].abs() > 1e-6
+                            || tf[2][0].abs() > 1e-6 || tf[2][1].abs() > 1e-6;
+                        if has_rotation {
+                            self.log(&format!(
+                                "Instance '{}' (BREP #{}): non-identity transform with ROTATION — translation=({:.3}, {:.3}, {:.3}), matrix=[[{:.4},{:.4},{:.4}],[{:.4},{:.4},{:.4}],[{:.4},{:.4},{:.4}]]",
+                                pending.name, pending.brep_id,
+                                tf[0][3], tf[1][3], tf[2][3],
+                                tf[0][0], tf[0][1], tf[0][2],
+                                tf[1][0], tf[1][1], tf[1][2],
+                                tf[2][0], tf[2][1], tf[2][2]
+                            ));
+                        } else {
+                            self.log(&format!(
+                                "Instance '{}' (BREP #{}): non-identity transform — translation=({:.3}, {:.3}, {:.3})",
+                                pending.name, pending.brep_id, tf[0][3], tf[1][3], tf[2][3]
+                            ));
+                        }
+                    }
+                }
+
+                // Time this BREP's triangulation
+                let brep_start = std::time::Instant::now();
+
+                // Triangulate this single BREP using the CACHED conversion context.
+                let instance = if let Some(ref mut ctx) = self.conversion_ctx {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        ctx.triangulate_pending(&pending)
+                    })).unwrap_or_else(|_| {
+                        log::error!("Panic during triangulation of '{}' (BREP #{}), skipping", pending.name, pending.brep_id);
+                        None
+                    })
+                } else {
                     None
-                })
-            } else {
-                None
-            };
+                };
 
-            let brep_elapsed = brep_start.elapsed();
-            let brep_elapsed_ms = brep_elapsed.as_secs_f64() * 1000.0;
+                let brep_elapsed = brep_start.elapsed();
+                let brep_elapsed_ms = brep_elapsed.as_secs_f64() * 1000.0;
 
-            // Warn if this BREP exceeded the time budget (indicates a complex BREP
-            // that would benefit from intra-BREP chunked triangulation in the future)
-            if brep_elapsed > frame_budget && processed == 0 {
-                log::warn!("BREP '{}' took {:.1}ms (exceeded {:.0}ms budget) — consider intra-BREP chunking",
-                    pending.name, brep_elapsed_ms, frame_budget.as_secs_f64() * 1000.0);
-            }
+                // Warn if this BREP exceeded the time budget
+                if brep_elapsed > frame_budget && processed == 0 {
+                    log::warn!("BREP '{}' took {:.1}ms (exceeded {:.0}ms budget) — consider intra-BREP chunking",
+                        pending.name, brep_elapsed_ms, frame_budget.as_secs_f64() * 1000.0);
+                }
 
-            match instance {
-                Some(inst) => {
-                    if inst.mesh.triangle_count() == 0 && inst.mesh.vertex_count() == 0 {
+                match instance {
+                    Some(inst) => {
+                        if inst.mesh.triangle_count() == 0 && inst.mesh.vertex_count() == 0 {
+                            self.log_warning(&format!(
+                                "Instance '{}' (BREP #{}) produced empty mesh — skipping ({:.1}ms)",
+                                inst.name, inst.brep_id, brep_elapsed_ms
+                            ));
+                            self.failed_face_count += 1;
+                            if let Some(ref mut tree) = self.assembly_tree {
+                                skip_instance_in_tree(tree);
+                            }
+                        } else {
+                            let tri_start = self.mesh.triangle_count();
+                            let color = inst.color.unwrap_or_else(|| {
+                                Self::instance_color(self.triangulated_count)
+                            });
+                            self.mesh.merge_with_color(&inst.mesh, color);
+                            let tri_end = self.mesh.triangle_count();
+                            self.instance_triangle_ranges.push((tri_start, tri_end));
+
+                            let inst_idx = self.instance_triangle_ranges.len() - 1;
+                            if let Some(ref mut tree) = self.assembly_tree {
+                                assign_instance_to_tree(tree, inst_idx);
+                            }
+
+                            self.detailed_instances.push(inst);
+                        }
+                    }
+                    None => {
                         self.log_warning(&format!(
-                            "Instance '{}' (BREP #{}) produced empty mesh — skipping ({:.1}ms)",
-                            inst.name, inst.brep_id, brep_elapsed_ms
+                            "Instance '{}' (BREP #{}) failed triangulation — skipping ({:.1}ms)",
+                            pending.name, pending.brep_id, brep_elapsed_ms
                         ));
                         self.failed_face_count += 1;
-                        // Consume the tree leaf for this failed instance
                         if let Some(ref mut tree) = self.assembly_tree {
                             skip_instance_in_tree(tree);
                         }
-                    } else {
-                        let tri_start = self.mesh.triangle_count();
-                        let color = inst.color.unwrap_or_else(|| {
-                            Self::instance_color(self.triangulated_count)
-                        });
-                        self.mesh.merge_with_color(&inst.mesh, color);
-                        let tri_end = self.mesh.triangle_count();
-                        self.instance_triangle_ranges.push((tri_start, tri_end));
-
-                        let inst_idx = self.instance_triangle_ranges.len() - 1;
-                        if let Some(ref mut tree) = self.assembly_tree {
-                            assign_instance_to_tree(tree, inst_idx);
-                        }
-
-                        self.detailed_instances.push(inst);
                     }
                 }
-                None => {
-                    self.log_warning(&format!(
-                        "Instance '{}' (BREP #{}) failed triangulation — skipping ({:.1}ms)",
-                        pending.name, pending.brep_id, brep_elapsed_ms
-                    ));
-                    self.failed_face_count += 1;
-                    // Mark the corresponding tree leaf as "failed" so that
-                    // subsequent successful instances get the correct leaf.
-                    // Without this, failed instances leave their leaf nodes
-                    // with instance_index=None, and the next successful
-                    // instance gets assigned to the wrong leaf (e.g., nut's
-                    // leaf gets bolt's instance_idx, causing name mismatch).
-                    if let Some(ref mut tree) = self.assembly_tree {
-                        skip_instance_in_tree(tree);
-                    }
+
+                self.triangulated_count += 1;
+                processed += 1;
+            }
+
+            self.mesh_dirty = true;
+            self.edge_dirty = true;
+            self.wireframe_overlay_dirty = true;
+
+            if self.pending_breps.is_empty() {
+                // Loading complete — free the conversion context (and its StepFile)
+                self.is_loading = false;
+                self.conversion_ctx = None;
+                self.loading_start = None;
+                let vcount = self.mesh.vertex_count();
+                let tcount = self.mesh.triangle_count();
+                self.log(&format!(
+                    "Triangulation complete: {} instances, {} vertices, {} triangles",
+                    self.triangulated_count, vcount, tcount
+                ));
+                if self.failed_face_count > 0 {
+                    self.log_warning(&format!("{} instances failed triangulation", self.failed_face_count));
                 }
+                self.load_mesh(self.mesh.clone(), &format!("STEP: {}", self.loading_name));
+                self.loading_name.clear();
+                return false;
             }
-
-            self.triangulated_count += 1;
-            processed += 1;
+            return true;
         }
 
-        self.mesh_dirty = true;
-        self.edge_dirty = true;
-        self.wireframe_overlay_dirty = true;
-
-        if self.pending_breps.is_empty() {
-            // Loading complete — free the conversion context (and its StepFile)
-            self.is_loading = false;
-            self.conversion_ctx = None;
-            self.loading_start = None;
-            let vcount = self.mesh.vertex_count();
-            let tcount = self.mesh.triangle_count();
-            self.log(&format!(
-                "Triangulation complete: {} instances, {} vertices, {} triangles",
-                self.triangulated_count, vcount, tcount
-            ));
-            if self.failed_face_count > 0 {
-                self.log_warning(&format!("{} instances failed triangulation", self.failed_face_count));
-            }
-            self.load_mesh(self.mesh.clone(), &format!("STEP: {}", self.loading_name));
-            self.loading_name.clear();
-            return false;
-        }
-        true
+        #[allow(unreachable_code)]
+        false
     }
 
     /// Import STL from bytes (used by web file loading).
@@ -6388,7 +6538,17 @@ impl eframe::App for ViewerApp {
 
                 // ─── Loading progress overlay ───
                 if self.is_loading && self.total_instance_count > 0 {
-                    let progress = self.triangulated_count as f32 / self.total_instance_count as f32;
+                    // Progress includes partial BREP progress (chunked triangulation).
+                    // Each BREP contributes 1/total_instance_count to the total progress.
+                    // If we're mid-BREP, add the fraction of that BREP's faces done.
+                    let base_progress = self.triangulated_count as f32 / self.total_instance_count as f32;
+                    let partial_brep_progress = if self.chunked_brep_faces_total > 0 {
+                        (self.chunked_brep_faces_done as f32 / self.chunked_brep_faces_total as f32)
+                            / self.total_instance_count as f32
+                    } else {
+                        0.0
+                    };
+                    let progress = (base_progress + partial_brep_progress).min(1.0);
                     let bar_w = rect.width() * 0.6;
                     let bar_h = 20.0;
                     let bar_x = rect.center().x - bar_w / 2.0;
@@ -6418,13 +6578,18 @@ impl eframe::App for ViewerApp {
                         egui::Color32::from_rgba_premultiplied(0, 0, 0, 160),
                     );
 
-                    // Label
+                    // Label — includes intra-BREP face progress when chunking
+                    let face_info = if self.chunked_brep_faces_total > 0 {
+                        format!(" [{} faces]", self.chunked_brep_faces_done)
+                    } else {
+                        String::new()
+                    };
                     ui.painter().text(
                         egui::pos2(bar_x + bar_w / 2.0, bar_y - 8.0),
                         egui::Align2::CENTER_CENTER,
-                        format!("Triangulating: {}/{} ({:.0}%) · {:.0}s{}",
+                        format!("Triangulating: {}/{} ({:.0}%) · {:.0}s{}{}",
                             self.triangulated_count, self.total_instance_count, progress * 100.0,
-                            elapsed_secs, eta_text),
+                            elapsed_secs, eta_text, face_info),
                         egui::FontId::proportional(12.0),
                         egui::Color32::WHITE,
                     );
