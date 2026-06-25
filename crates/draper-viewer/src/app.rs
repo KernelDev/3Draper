@@ -64,6 +64,7 @@ fn mesh_to_gpu_data(
     selected_instance: Option<usize>,
     instance_triangle_ranges: &[(usize, usize)],
     hidden_instances: &std::collections::HashSet<usize>,
+    hidden_faces: &std::collections::HashSet<(usize, u64)>,
 ) -> (Vec<MeshVertex>, Vec<u32>, Vec<(usize, usize)>) {
     // NOTE: compute_face_normals() and ensure_colors() must be called on the mesh
     // BEFORE calling this function, to avoid cloning the entire mesh here.
@@ -129,6 +130,14 @@ fn mesh_to_gpu_data(
         if let Some(idx) = inst_idx {
             if hidden_instances.contains(&idx) {
                 continue;
+            }
+            // Skip triangles belonging to hidden individual faces.
+            // face_ids[i] gives the per-triangle face_id; combined with
+            // the instance index it forms the key used in hidden_faces.
+            if let Some(fid) = face_ids.and_then(|ids| ids.get(i)).copied() {
+                if hidden_faces.contains(&(idx, fid)) {
+                    continue;
+                }
             }
         }
 
@@ -263,11 +272,12 @@ fn ray_triangle_intersect(
 
 /// Pick the closest triangle under the given screen position.
 /// Returns the instance index and face ID of the hit triangle, or None if nothing was hit.
-/// Hidden instances are excluded from picking.
+/// Hidden instances and hidden individual faces are excluded from picking.
 fn pick_at(
     mesh: &TriangleMesh,
     instance_triangle_ranges: &[(usize, usize)],
     hidden_instances: &std::collections::HashSet<usize>,
+    hidden_faces: &std::collections::HashSet<(usize, u64)>,
     camera: &OrbitCamera,
     screen_pos: [f32; 2],
     viewport: (f32, f32, f32, f32),
@@ -290,6 +300,12 @@ fn pick_at(
         // Skip hidden instances — they can't be picked
         if hidden_instances.contains(&instance_idx) {
             continue;
+        }
+        // Skip triangles belonging to hidden individual faces
+        if let Some(fid) = face_ids.and_then(|ids| ids.get(i)).copied() {
+            if hidden_faces.contains(&(instance_idx, fid)) {
+                continue;
+            }
         }
 
         let v0 = mesh.vertices.get(tri[0] as usize);
@@ -421,6 +437,11 @@ pub struct ViewerApp {
     /// Set of instance indices that are currently hidden (not rendered).
     /// Users toggle visibility via checkboxes in the assembly tree.
     hidden_instances: std::collections::HashSet<usize>,
+    /// Set of (instance_idx, face_id) pairs for individual faces that are
+    /// currently hidden (not rendered). Toggled via per-face eye icon in
+    /// the Face List section. Independent from hidden_instances — an
+    /// instance can be visible while some of its faces are hidden.
+    hidden_faces: std::collections::HashSet<(usize, u64)>,
     // ─── Tree navigation state ────────────────────────────────────────
     /// Node keys ("name_pd_id") that should be forced open in the assembly tree.
     open_tree_nodes: std::collections::HashSet<String>,
@@ -1026,7 +1047,7 @@ impl ViewerApp {
                 mesh.compute_face_normals();
             }
             mesh.ensure_colors([0.62, 0.65, 0.70, 1.0]);
-            let (vertices, indices, _new_ranges) = mesh_to_gpu_data(&mesh, None, None, &[], &std::collections::HashSet::new());
+            let (vertices, indices, _new_ranges) = mesh_to_gpu_data(&mesh, None, None, &[], &std::collections::HashSet::new(), &std::collections::HashSet::new());
             let resources = create_scene_resources(rs, &vertices, &indices);
             *gpu_resources.lock().unwrap() = Some(resources);
         }
@@ -1064,6 +1085,7 @@ impl ViewerApp {
             highlight_dirty: false,
             instance_triangle_ranges: Vec::new(),
             hidden_instances: std::collections::HashSet::new(),
+            hidden_faces: std::collections::HashSet::new(),
             open_tree_nodes: std::collections::HashSet::new(),
             scroll_to_tree_node: None,
             scroll_to_face_id: None,
@@ -1190,6 +1212,7 @@ impl ViewerApp {
         self.scroll_to_tree_node = None;
         self.scroll_to_face_id = None;
         self.hidden_instances.clear();
+        self.hidden_faces.clear();
         // Clear any extra curve visualization lines from a previous test.
         // Curve tests that want to KEEP their lines will set them AFTER
         // calling load_mesh (or use a dedicated loader that doesn't call
@@ -3573,6 +3596,10 @@ impl ViewerApp {
             let tf = inst.transform.as_ref();
 
             for face in &inst.faces {
+                // Skip edges of individually-hidden faces
+                if self.hidden_faces.contains(&(inst_idx, face.face_id)) {
+                    continue;
+                }
                 // Outer boundary polylines
                 for polyline in &face.outer_boundary {
                     if polyline.len() < 2 {
@@ -3733,7 +3760,9 @@ impl ViewerApp {
 
         let mesh = &self.mesh;
         let hidden = &self.hidden_instances;
+        let hidden_faces = &self.hidden_faces;
         let ranges = &self.instance_triangle_ranges;
+        let face_ids = mesh.triangle_face_ids.as_ref();
 
         // Deduplicate edges: each shared edge between adjacent triangles is
         // drawn only once instead of twice. This cuts the vertex count by ~50%
@@ -3741,16 +3770,28 @@ impl ViewerApp {
         let mut edge_set: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
 
         for (i, tri) in mesh.triangles.iter().enumerate() {
-            // Check if this triangle belongs to a hidden instance
+            // Check if this triangle belongs to a hidden instance or hidden face
             let mut is_hidden = false;
+            let mut tri_inst_idx: Option<usize> = None;
             for (idx, &(start, end)) in ranges.iter().enumerate() {
-                if i >= start && i < end && hidden.contains(&idx) {
-                    is_hidden = true;
+                if i >= start && i < end {
+                    tri_inst_idx = Some(idx);
+                    if hidden.contains(&idx) {
+                        is_hidden = true;
+                    }
                     break;
                 }
             }
             if is_hidden {
                 continue;
+            }
+            // Skip triangles belonging to individually-hidden faces
+            if let Some(idx) = tri_inst_idx {
+                if let Some(fid) = face_ids.and_then(|ids| ids.get(i)).copied() {
+                    if hidden_faces.contains(&(idx, fid)) {
+                        continue;
+                    }
+                }
             }
 
             let v0_idx = tri[0] as usize;
@@ -4977,6 +5018,9 @@ impl eframe::App for ViewerApp {
         let mut pending_face_select: Option<(usize, u64)> = None;
         let mut pending_copy_face_id: Option<u64> = None;
         let mut pending_visibility_toggle: Option<usize> = None;
+        let mut pending_instance_isolate: Option<usize> = None;
+        let mut pending_face_visibility_toggle: Option<(usize, u64)> = None;
+        let mut pending_face_isolate: Option<(usize, u64)> = None;
 
         if self.show_structure && !self.is_mobile {
             // Clone data needed for drawing to avoid borrow conflicts
@@ -4988,6 +5032,7 @@ impl eframe::App for ViewerApp {
             let scroll_to_tree_node = self.scroll_to_tree_node.clone();
             let scroll_to_face_id = self.scroll_to_face_id;
             let hidden_instances = self.hidden_instances.clone();
+            let hidden_faces_clone = self.hidden_faces.clone();
 
             egui::SidePanel::right("structure_panel")
                 .min_width(220.0)
@@ -5032,7 +5077,7 @@ impl eframe::App for ViewerApp {
                                 .max_height(300.0)
                                 .show(ui, |ui| {
                                     if let Some(ref tree) = assembly_tree_clone {
-                                        draw_assembly_node_static(ui, tree, selected_instance, &hidden_instances, &mut pending_instance_select, &mut pending_visibility_toggle, &open_tree_nodes, &scroll_to_tree_node);
+                                        draw_assembly_node_static(ui, tree, selected_instance, &hidden_instances, &mut pending_instance_select, &mut pending_visibility_toggle, &mut pending_instance_isolate, &open_tree_nodes, &scroll_to_tree_node);
                                     } else if !detailed_instances_clone.is_empty() {
                                         for (i, inst) in detailed_instances_clone.iter().enumerate() {
                                             let is_selected = selected_instance == Some(i);
@@ -5047,6 +5092,15 @@ impl eframe::App for ViewerApp {
                                                 let eye_text = if is_visible { "👁" } else { "  " };
                                                 if ui.add(egui::Label::new(egui::RichText::new(eye_text).size(11.0).color(eye_color)).sense(egui::Sense::click())).clicked() {
                                                     pending_visibility_toggle = Some(i);
+                                                }
+                                                // Isolate button (desktop fallback list — no assembly tree)
+                                                let isolate_btn = egui::Button::new(
+                                                    egui::RichText::new("◎").size(11.0)
+                                                ).frame(false);
+                                                if ui.add(isolate_btn).on_hover_text(
+                                                    "Isolate: hide all other instances (click again to restore)"
+                                                ).clicked() {
+                                                    pending_instance_isolate = Some(i);
                                                 }
                                                 // Selectable label
                                                 let label = format!("{} (BREP#{})", inst.name, inst.brep_id);
@@ -5089,24 +5143,46 @@ impl eframe::App for ViewerApp {
                                         .show(ui, |ui| {
                                             for face in &inst.faces {
                                                 let is_selected = selected_face == Some((inst_idx, face.face_id));
-                                                let label = format!("F#{} STEP#{} {} [{}..{}]",
-                                                    face.face_id, face.step_face_id, face.surface_type,
-                                                    face.triangle_range.0, face.triangle_range.1);
-                                                let response = ui.selectable_label(is_selected, &label);
-                                                if scroll_to_face_id == Some(face.face_id) {
-                                                    response.scroll_to_me(Some(egui::Align::Center));
-                                                }
-                                                if response.clicked() {
-                                                    pending_face_select = Some((inst_idx, face.face_id));
-                                                }
-                                                response.on_hover_text(format!(
-                                                    "Face ID: {}\nSTEP ID: {}\nSurface: {}\nTriangles: [{}, {})\nBoundary loops: {} ({} pts)\nHoles: {} ({} pts)\nForward: {}",
-                                                    face.face_id, face.step_face_id, face.surface_type,
-                                                    face.triangle_range.0, face.triangle_range.1,
-                                                    face.outer_boundary.len(), face.outer_boundary.iter().map(|p| p.len()).sum::<usize>(),
-                                                    face.inner_boundaries.len(), face.inner_boundaries.iter().map(|p| p.len()).sum::<usize>(),
-                                                    face.forward
-                                                ));
+                                                let is_face_visible = !hidden_faces_clone.contains(&(inst_idx, face.face_id));
+                                                ui.horizontal(|ui| {
+                                                    // Per-face visibility eye icon
+                                                    let eye_color = if is_face_visible {
+                                                        egui::Color32::from_rgb(80, 180, 80)
+                                                    } else {
+                                                        egui::Color32::from_rgb(180, 80, 80)
+                                                    };
+                                                    let eye_text = if is_face_visible { "👁" } else { "  " };
+                                                    if ui.add(egui::Label::new(egui::RichText::new(eye_text).size(11.0).color(eye_color)).sense(egui::Sense::click())).clicked() {
+                                                        pending_face_visibility_toggle = Some((inst_idx, face.face_id));
+                                                    }
+                                                    // Per-face isolate button — hides all OTHER faces of this instance
+                                                    let isolate_btn = egui::Button::new(
+                                                        egui::RichText::new("◎").size(11.0)
+                                                    ).frame(false);
+                                                    if ui.add(isolate_btn).on_hover_text(
+                                                        "Isolate: hide all other faces of this instance (click again to restore)"
+                                                    ).clicked() {
+                                                        pending_face_isolate = Some((inst_idx, face.face_id));
+                                                    }
+                                                    let label = format!("F#{} STEP#{} {} [{}..{}]",
+                                                        face.face_id, face.step_face_id, face.surface_type,
+                                                        face.triangle_range.0, face.triangle_range.1);
+                                                    let response = ui.selectable_label(is_selected, &label);
+                                                    if scroll_to_face_id == Some(face.face_id) {
+                                                        response.scroll_to_me(Some(egui::Align::Center));
+                                                    }
+                                                    if response.clicked() {
+                                                        pending_face_select = Some((inst_idx, face.face_id));
+                                                    }
+                                                    response.on_hover_text(format!(
+                                                        "Face ID: {}\nSTEP ID: {}\nSurface: {}\nTriangles: [{}, {})\nBoundary loops: {} ({} pts)\nHoles: {} ({} pts)\nForward: {}",
+                                                        face.face_id, face.step_face_id, face.surface_type,
+                                                        face.triangle_range.0, face.triangle_range.1,
+                                                        face.outer_boundary.len(), face.outer_boundary.iter().map(|p| p.len()).sum::<usize>(),
+                                                        face.inner_boundaries.len(), face.inner_boundaries.iter().map(|p| p.len()).sum::<usize>(),
+                                                        face.forward
+                                                    ));
+                                                });
                                             }
                                         });
                                 }
@@ -5254,6 +5330,106 @@ impl eframe::App for ViewerApp {
         if let Some(fid) = pending_copy_face_id {
             ctx.copy_text(format!("{}", fid));
             self.log(&format!("Copied face ID: {}", fid));
+        }
+        // ─── Isolate instance: hide all OTHER instances ───────────────────
+        // If the clicked instance is already the only visible one, restore
+        // all instances (toggle behavior). Otherwise, hide every instance
+        // except the clicked one.
+        if let Some(idx) = pending_instance_isolate {
+            let total_instances = self.instance_triangle_ranges.len();
+            let visible_count = total_instances.saturating_sub(self.hidden_instances.len());
+            let is_only_visible = visible_count == 1 && !self.hidden_instances.contains(&idx);
+            if is_only_visible {
+                // Restore all
+                self.hidden_instances.clear();
+                self.log(&format!("Restored all instances (was isolated to #{})", idx));
+            } else {
+                // Hide all except idx
+                self.hidden_instances.clear();
+                for i in 0..total_instances {
+                    if i != idx {
+                        self.hidden_instances.insert(i);
+                    }
+                }
+                self.log(&format!("Isolated instance #{}", idx));
+                // Auto-select the isolated instance so the Face List shows it
+                if self.selected_instance != Some(idx) {
+                    self.selected_instance = Some(idx);
+                    self.selected_face = None;
+                    self.highlighted_face = None;
+                    if self.uv_window_face_idx.is_some() {
+                        self.uv_window_face_idx = None;
+                        self.uv_window_prev_face_idx = None;
+                        self.solid_uv_breakdown = None;
+                    }
+                }
+            }
+            self.highlight_dirty = true;
+            self.edge_dirty = true;
+            self.wireframe_overlay_dirty = true;
+        }
+        // ─── Toggle individual face visibility ───────────────────────────
+        if let Some((inst_idx, fid)) = pending_face_visibility_toggle {
+            if self.hidden_faces.contains(&(inst_idx, fid)) {
+                self.hidden_faces.remove(&(inst_idx, fid));
+                self.log(&format!("Face #{} in instance #{} shown", fid, inst_idx));
+            } else {
+                self.hidden_faces.insert((inst_idx, fid));
+                self.log(&format!("Face #{} in instance #{} hidden", fid, inst_idx));
+                // If the hidden face was selected, deselect it
+                if self.selected_face == Some((inst_idx, fid)) {
+                    self.selected_face = None;
+                    self.highlighted_face = None;
+                    // Also clear UV window if it was showing this face
+                    if let Some(inst) = self.detailed_instances.get(inst_idx) {
+                        if let Some(pos) = inst.faces.iter().position(|f| f.face_id == fid) {
+                            if self.uv_window_face_idx == Some(pos) {
+                                self.uv_window_face_idx = None;
+                                self.uv_window_prev_face_idx = None;
+                                self.solid_uv_breakdown = None;
+                            }
+                        }
+                    }
+                }
+            }
+            self.highlight_dirty = true;
+            self.edge_dirty = true;
+            self.wireframe_overlay_dirty = true;
+        }
+        // ─── Isolate face: hide all OTHER faces of the same instance ────
+        if let Some((inst_idx, fid)) = pending_face_isolate {
+            if let Some(inst) = self.detailed_instances.get(inst_idx) {
+                let total_faces = inst.faces.len();
+                let hidden_in_inst = inst.faces.iter()
+                    .filter(|f| self.hidden_faces.contains(&(inst_idx, f.face_id)))
+                    .count();
+                let visible_in_inst = total_faces.saturating_sub(hidden_in_inst);
+                let is_only_visible_face = visible_in_inst == 1
+                    && !self.hidden_faces.contains(&(inst_idx, fid));
+                if is_only_visible_face {
+                    // Restore all faces of this instance
+                    let face_keys: Vec<_> = inst.faces.iter()
+                        .map(|f| (inst_idx, f.face_id))
+                        .collect();
+                    for k in face_keys {
+                        self.hidden_faces.remove(&k);
+                    }
+                    self.log(&format!("Restored all faces in instance #{}", inst_idx));
+                } else {
+                    // Hide all other faces of this instance
+                    for f in &inst.faces {
+                        if f.face_id != fid {
+                            self.hidden_faces.insert((inst_idx, f.face_id));
+                        } else {
+                            self.hidden_faces.remove(&(inst_idx, f.face_id));
+                        }
+                    }
+                    self.log(&format!("Isolated face #{} in instance #{}", fid, inst_idx));
+                }
+            }
+            self.highlight_dirty = true;
+            self.edge_dirty = true;
+            self.wireframe_overlay_dirty = true;
         }
 
         // === Left side panel (controls) — desktop only ===
@@ -5911,6 +6087,7 @@ impl eframe::App for ViewerApp {
                                 &self.mesh,
                                 &self.instance_triangle_ranges,
                                 &self.hidden_instances,
+                                &self.hidden_faces,
                                 &self.camera,
                                 [local_x, local_y],
                                 viewport,
@@ -6027,7 +6204,7 @@ impl eframe::App for ViewerApp {
                     self.mesh.ensure_colors([0.62, 0.65, 0.70, 1.0]);
 
                     if let Some(ref rs) = self.render_state {
-                        let (vertices, indices, _new_ranges) = mesh_to_gpu_data(&self.mesh, self.highlighted_face, self.selected_instance, &self.instance_triangle_ranges, &self.hidden_instances);
+                        let (vertices, indices, _new_ranges) = mesh_to_gpu_data(&self.mesh, self.highlighted_face, self.selected_instance, &self.instance_triangle_ranges, &self.hidden_instances, &self.hidden_faces);
                         // NOTE: We intentionally do NOT overwrite instance_triangle_ranges with new_ranges.
                         // The new_ranges map instance indices to triangle ranges in the GPU output buffer
                         // (with hidden instances removed, so indices shift). But self.mesh.triangles still
@@ -7741,6 +7918,9 @@ impl ViewerApp {
             let mut pending_face_select: Option<(usize, u64)> = None;
             let mut pending_copy_face_id: Option<u64> = None;
             let mut pending_visibility_toggle: Option<usize> = None;
+            let mut pending_instance_isolate: Option<usize> = None;
+            let mut pending_face_visibility_toggle: Option<(usize, u64)> = None;
+            let mut pending_face_isolate: Option<(usize, u64)> = None;
 
             let assembly_tree_clone = self.assembly_tree.clone();
             let detailed_instances_clone = self.detailed_instances.clone();
@@ -7750,6 +7930,7 @@ impl ViewerApp {
             let scroll_to_tree_node = self.scroll_to_tree_node.clone();
             let scroll_to_face_id = self.scroll_to_face_id;
             let hidden_instances = self.hidden_instances.clone();
+            let hidden_faces_clone = self.hidden_faces.clone();
 
             egui::Window::new("Structure")
                 .id(egui::Id::new("mobile_structure_window"))
@@ -7771,7 +7952,7 @@ impl ViewerApp {
                         ui.heading(egui::RichText::new("Tree").size(13.0));
                         egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
                             if let Some(ref tree) = assembly_tree_clone {
-                                draw_assembly_node_static(ui, tree, selected_instance, &hidden_instances, &mut pending_instance_select, &mut pending_visibility_toggle, &open_tree_nodes, &scroll_to_tree_node);
+                                draw_assembly_node_static(ui, tree, selected_instance, &hidden_instances, &mut pending_instance_select, &mut pending_visibility_toggle, &mut pending_instance_isolate, &open_tree_nodes, &scroll_to_tree_node);
                             } else if !detailed_instances_clone.is_empty() {
                                 for (i, inst) in detailed_instances_clone.iter().enumerate() {
                                     let is_selected = selected_instance == Some(i);
@@ -7781,6 +7962,15 @@ impl ViewerApp {
                                         let eye_color = if is_visible { egui::Color32::from_rgb(80, 180, 80) } else { egui::Color32::from_rgb(180, 80, 80) };
                                         if ui.add(egui::Label::new(egui::RichText::new(eye_text).size(12.0).color(eye_color)).sense(egui::Sense::click())).clicked() {
                                             pending_visibility_toggle = Some(i);
+                                        }
+                                        // Isolate button (mobile fallback list)
+                                        let isolate_btn = egui::Button::new(
+                                            egui::RichText::new("◎").size(12.0)
+                                        ).frame(false);
+                                        if ui.add(isolate_btn).on_hover_text(
+                                            "Isolate: hide all other instances (click again to restore)"
+                                        ).clicked() {
+                                            pending_instance_isolate = Some(i);
                                         }
                                         let label = format!("{} (BREP#{})", inst.name, inst.brep_id);
                                         if ui.selectable_label(is_selected, &label).clicked() {
@@ -7803,14 +7993,36 @@ impl ViewerApp {
                                 egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
                                     for face in &inst.faces {
                                         let is_selected = selected_face == Some((inst_idx, face.face_id));
-                                        let label = format!("F#{} STEP#{} {}", face.face_id, face.step_face_id, face.surface_type);
-                                        let response = ui.selectable_label(is_selected, &label);
-                                        if scroll_to_face_id == Some(face.face_id) {
-                                            response.scroll_to_me(Some(egui::Align::Center));
-                                        }
-                                        if response.clicked() {
-                                            pending_face_select = Some((inst_idx, face.face_id));
-                                        }
+                                        let is_face_visible = !hidden_faces_clone.contains(&(inst_idx, face.face_id));
+                                        ui.horizontal(|ui| {
+                                            // Per-face visibility eye icon
+                                            let eye_color = if is_face_visible {
+                                                egui::Color32::from_rgb(80, 180, 80)
+                                            } else {
+                                                egui::Color32::from_rgb(180, 80, 80)
+                                            };
+                                            let eye_text = if is_face_visible { "👁" } else { "  " };
+                                            if ui.add(egui::Label::new(egui::RichText::new(eye_text).size(12.0).color(eye_color)).sense(egui::Sense::click())).clicked() {
+                                                pending_face_visibility_toggle = Some((inst_idx, face.face_id));
+                                            }
+                                            // Per-face isolate button
+                                            let isolate_btn = egui::Button::new(
+                                                egui::RichText::new("◎").size(12.0)
+                                            ).frame(false);
+                                            if ui.add(isolate_btn).on_hover_text(
+                                                "Isolate: hide all other faces of this instance"
+                                            ).clicked() {
+                                                pending_face_isolate = Some((inst_idx, face.face_id));
+                                            }
+                                            let label = format!("F#{} STEP#{} {}", face.face_id, face.step_face_id, face.surface_type);
+                                            let response = ui.selectable_label(is_selected, &label);
+                                            if scroll_to_face_id == Some(face.face_id) {
+                                                response.scroll_to_me(Some(egui::Align::Center));
+                                            }
+                                            if response.clicked() {
+                                                pending_face_select = Some((inst_idx, face.face_id));
+                                            }
+                                        });
                                     }
                                 });
                             }
@@ -7913,6 +8125,90 @@ impl ViewerApp {
             }
             if let Some(fid) = pending_copy_face_id {
                 ctx.copy_text(format!("{}", fid));
+            }
+            // ─── Mobile: Isolate instance ───────────────────────────────
+            if let Some(idx) = pending_instance_isolate {
+                let total_instances = self.instance_triangle_ranges.len();
+                let visible_count = total_instances.saturating_sub(self.hidden_instances.len());
+                let is_only_visible = visible_count == 1 && !self.hidden_instances.contains(&idx);
+                if is_only_visible {
+                    self.hidden_instances.clear();
+                } else {
+                    self.hidden_instances.clear();
+                    for i in 0..total_instances {
+                        if i != idx {
+                            self.hidden_instances.insert(i);
+                        }
+                    }
+                    if self.selected_instance != Some(idx) {
+                        self.selected_instance = Some(idx);
+                        self.selected_face = None;
+                        self.highlighted_face = None;
+                        if self.uv_window_face_idx.is_some() {
+                            self.uv_window_face_idx = None;
+                            self.uv_window_prev_face_idx = None;
+                            self.solid_uv_breakdown = None;
+                        }
+                    }
+                }
+                self.highlight_dirty = true;
+                self.edge_dirty = true;
+                self.wireframe_overlay_dirty = true;
+            }
+            // ─── Mobile: Toggle individual face visibility ──────────────
+            if let Some((inst_idx, fid)) = pending_face_visibility_toggle {
+                if self.hidden_faces.contains(&(inst_idx, fid)) {
+                    self.hidden_faces.remove(&(inst_idx, fid));
+                } else {
+                    self.hidden_faces.insert((inst_idx, fid));
+                    if self.selected_face == Some((inst_idx, fid)) {
+                        self.selected_face = None;
+                        self.highlighted_face = None;
+                        if let Some(inst) = self.detailed_instances.get(inst_idx) {
+                            if let Some(pos) = inst.faces.iter().position(|f| f.face_id == fid) {
+                                if self.uv_window_face_idx == Some(pos) {
+                                    self.uv_window_face_idx = None;
+                                    self.uv_window_prev_face_idx = None;
+                                    self.solid_uv_breakdown = None;
+                                }
+                            }
+                        }
+                    }
+                }
+                self.highlight_dirty = true;
+                self.edge_dirty = true;
+                self.wireframe_overlay_dirty = true;
+            }
+            // ─── Mobile: Isolate face ───────────────────────────────────
+            if let Some((inst_idx, fid)) = pending_face_isolate {
+                if let Some(inst) = self.detailed_instances.get(inst_idx) {
+                    let total_faces = inst.faces.len();
+                    let hidden_in_inst = inst.faces.iter()
+                        .filter(|f| self.hidden_faces.contains(&(inst_idx, f.face_id)))
+                        .count();
+                    let visible_in_inst = total_faces.saturating_sub(hidden_in_inst);
+                    let is_only_visible_face = visible_in_inst == 1
+                        && !self.hidden_faces.contains(&(inst_idx, fid));
+                    if is_only_visible_face {
+                        let face_keys: Vec<_> = inst.faces.iter()
+                            .map(|f| (inst_idx, f.face_id))
+                            .collect();
+                        for k in face_keys {
+                            self.hidden_faces.remove(&k);
+                        }
+                    } else {
+                        for f in &inst.faces {
+                            if f.face_id != fid {
+                                self.hidden_faces.insert((inst_idx, f.face_id));
+                            } else {
+                                self.hidden_faces.remove(&(inst_idx, f.face_id));
+                            }
+                        }
+                    }
+                }
+                self.highlight_dirty = true;
+                self.edge_dirty = true;
+                self.wireframe_overlay_dirty = true;
             }
             self.scroll_to_tree_node = None;
             self.scroll_to_face_id = None;
@@ -8750,6 +9046,7 @@ fn draw_assembly_node_static(
     hidden_instances: &std::collections::HashSet<usize>,
     pending_instance_select: &mut Option<usize>,
     pending_visibility_toggle: &mut Option<usize>,
+    pending_instance_isolate: &mut Option<usize>,
     open_tree_nodes: &std::collections::HashSet<String>,
     scroll_to_tree_node: &Option<String>,
 ) {
@@ -8793,11 +9090,11 @@ fn draw_assembly_node_static(
             ui.label(egui::RichText::new(&label).size(11.0));
         }).body(|ui| {
             for child in &node.children {
-                draw_assembly_node_static(ui, child, selected_instance, hidden_instances, pending_instance_select, pending_visibility_toggle, open_tree_nodes, scroll_to_tree_node);
+                draw_assembly_node_static(ui, child, selected_instance, hidden_instances, pending_instance_select, pending_visibility_toggle, pending_instance_isolate, open_tree_nodes, scroll_to_tree_node);
             }
         });
     } else {
-        // Leaf node: draw visibility checkbox + selectable label
+        // Leaf node: draw visibility checkbox + isolate button + selectable label
         ui.horizontal(|ui| {
             // Visibility checkbox (eye icon equivalent)
             // usize::MAX sentinel = failed instance, not selectable
@@ -8815,6 +9112,18 @@ fn draw_assembly_node_static(
                     let eye_text = if is_visible { "👁" } else { "  " };
                     if ui.add(egui::Label::new(egui::RichText::new(eye_text).size(11.0).color(checkbox_color)).sense(egui::Sense::click())).clicked() {
                         *pending_visibility_toggle = Some(idx);
+                    }
+                    // Isolate button — "solo" icon (◎). When clicked, hides all
+                    // OTHER instances so only this one remains visible. If this
+                    // instance is already the only visible one, clicking again
+                    // restores visibility of all instances (toggle behavior).
+                    let isolate_btn = egui::Button::new(
+                        egui::RichText::new("◎").size(11.0)
+                    ).frame(false);
+                    if ui.add(isolate_btn).on_hover_text(
+                        "Isolate: hide all other instances (click again to restore)"
+                    ).clicked() {
+                        *pending_instance_isolate = Some(idx);
                     }
                 }
             }
