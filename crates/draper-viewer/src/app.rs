@@ -5056,6 +5056,36 @@ impl eframe::App for ViewerApp {
                     } else {
                         ui.heading(egui::RichText::new("Structure").size(14.0));
                     }
+
+                    // ─── "Show All" button ───────────────────────────────────────────
+                    // Restores visibility of all hidden instances and hidden faces.
+                    // Disabled (greyed out) when nothing is hidden so the user gets
+                    // immediate visual feedback that there's nothing to restore.
+                    let has_hidden = !self.hidden_instances.is_empty() || !self.hidden_faces.is_empty();
+                    let show_all_btn = egui::Button::new(
+                        egui::RichText::new("Show All").size(11.0)
+                    );
+                    let show_all_resp = ui.add_enabled(has_hidden, show_all_btn);
+                    if show_all_resp.clicked() {
+                        self.hidden_instances.clear();
+                        self.hidden_faces.clear();
+                        self.highlight_dirty = true;
+                        self.edge_dirty = true;
+                        self.wireframe_overlay_dirty = true;
+                        self.log("Show All: restored visibility of all instances and faces");
+                    }
+                    if show_all_resp.hovered() {
+                        let hidden_inst_count = self.hidden_instances.len();
+                        let hidden_face_count = self.hidden_faces.len();
+                        let tooltip = if has_hidden {
+                            format!("Restore visibility of {} hidden instance(s) and {} hidden face(s)",
+                                hidden_inst_count, hidden_face_count)
+                        } else {
+                            "Nothing is hidden — all instances and faces are visible".to_string()
+                        };
+                        show_all_resp.on_hover_text(tooltip);
+                    }
+
                     ui.separator();
 
                     // Wrap all collapsing sections in a single vertical ScrollArea
@@ -6150,7 +6180,26 @@ impl eframe::App for ViewerApp {
                                     }
                                 }
                             } else {
-                                // Clicked on empty space — deselect
+                                // Clicked on empty space.
+                                //
+                                // Behavior:
+                                // 1. If any instances or faces are hidden (e.g. user
+                                //    isolated a single face), restore the full model
+                                //    visibility — clicking empty space "exits
+                                //    isolation mode".
+                                // 2. Otherwise (nothing hidden), just deselect the
+                                //    current selection.
+                                let has_hidden = !self.hidden_instances.is_empty()
+                                    || !self.hidden_faces.is_empty();
+                                if has_hidden {
+                                    self.hidden_instances.clear();
+                                    self.hidden_faces.clear();
+                                    self.highlight_dirty = true;
+                                    self.edge_dirty = true;
+                                    self.wireframe_overlay_dirty = true;
+                                    self.log("Empty click: restored visibility of all instances and faces");
+                                }
+                                // Always deselect on empty click
                                 self.selected_instance = None;
                                 self.selected_face = None;
                                 self.highlighted_face = None;
@@ -7946,6 +7995,23 @@ impl ViewerApp {
                         if self.is_loading && self.total_instance_count > 0 {
                             let progress = self.triangulated_count as f32 / self.total_instance_count as f32;
                             ui.add(egui::ProgressBar::new(progress).show_percentage());
+                        }
+
+                        // ─── "Show All" button (mobile) ─────────────────────────────
+                        // Restores visibility of all hidden instances and hidden faces.
+                        // Big enough to tap on mobile.
+                        let has_hidden = !self.hidden_instances.is_empty() || !self.hidden_faces.is_empty();
+                        let show_all_btn = egui::Button::new(
+                            egui::RichText::new("Show All").size(13.0)
+                        ).min_size(egui::vec2(ui.available_width(), 28.0));
+                        let show_all_resp = ui.add_enabled(has_hidden, show_all_btn);
+                        if show_all_resp.clicked() {
+                            self.hidden_instances.clear();
+                            self.hidden_faces.clear();
+                            self.highlight_dirty = true;
+                            self.edge_dirty = true;
+                            self.wireframe_overlay_dirty = true;
+                            self.log("Show All: restored visibility of all instances and faces");
                         }
 
                         // Tree

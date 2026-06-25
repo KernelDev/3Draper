@@ -1660,6 +1660,140 @@ pub(crate) fn generate_cylinder_or_cone_steiner_grid(
 }
 
 // ============================================================
+// Planar Steiner grid generator (for planes WITH holes)
+// ============================================================
+
+/// Generate a regular Cartesian grid of Steiner points for planar faces
+/// that contain holes.
+///
+/// # Why this exists
+///
+/// For a planar face WITHOUT holes, earcutr triangulating just the outer
+/// boundary polygon produces good results — triangles fan out from
+/// boundary vertices with reasonable aspect ratios.
+///
+/// For a planar face WITH holes, however, earcutr receives ONLY the
+/// outer polygon + hole polygons as constraints. With no interior
+/// Steiner points, earcutr's ear-clip heuristic produces long thin
+/// triangles that span the full width of the face, crossing over the
+/// hole region in visually poor patterns. This is what other CAD apps
+/// avoid by inserting a regular interior grid.
+///
+/// This function generates a uniform Cartesian grid in (u, v) space,
+/// filtered to points strictly inside the face domain (outside holes,
+/// inside outer boundary). When passed as Steiner points to earcutr,
+/// the resulting triangulation has near-square quads (split into 2
+/// triangles) in the interior, with hole boundaries cleanly resolved.
+///
+/// # Strategy
+///
+/// 1. **Target edge length**: derived from the OUTER boundary point
+///    density. Compute the average boundary edge length in UV space
+///    and use it as the target grid spacing. This ensures the grid
+///    triangles match the boundary resolution — neither too coarse
+///    (creating a mismatch at the boundary) nor too fine (wasting
+///    the triangle budget).
+///
+/// 2. **n_u, n_v**: derived from `target_edge` and the UV bbox span.
+///    Capped to [4, 64] per axis to prevent explosion.
+///
+/// 3. **Filtering**: keep only points strictly inside the face domain
+///    (inside outer boundary, outside all holes, not on any boundary
+///    edge within `boundary_tol`).
+///
+/// 4. **Budget**: downsample via `coarse_grid_sample` (preserves grid
+///    structure) and `downsample_interior_points` (final cap).
+pub(crate) fn generate_planar_steiner_grid(
+    domain: &ParametricDomain,
+    outer_uv: &[Point2d],
+    u_range: (f64, f64),
+    v_range: (f64, f64),
+    max_budget: usize,
+) -> Vec<Point2d> {
+    let (u_min, u_max) = u_range;
+    let (v_min, v_max) = v_range;
+    let u_span = u_max - u_min;
+    let v_span = v_max - v_min;
+    if u_span <= 0.0 || v_span <= 0.0 {
+        return Vec::new();
+    }
+    if outer_uv.len() < 3 {
+        return Vec::new();
+    }
+
+    // Compute target edge length from boundary point density.
+    // Sum the perimeter of the outer boundary polygon in UV space,
+    // divide by number of edges → average edge length.
+    let mut perimeter = 0.0f64;
+    let n_outer = outer_uv.len();
+    for i in 0..n_outer {
+        let a = outer_uv[i];
+        let b = outer_uv[(i + 1) % n_outer];
+        let du = b.u - a.u;
+        let dv = b.v - a.v;
+        perimeter += (du * du + dv * dv).sqrt();
+    }
+    let avg_edge = perimeter / n_outer as f64;
+
+    // Use the average edge length as target grid spacing.
+    // Fall back to span/8 if boundary has degenerate edges (avg_edge == 0).
+    let target_edge = if avg_edge > 1e-9 {
+        avg_edge
+    } else {
+        (u_span.max(v_span) / 8.0).max(1e-9)
+    };
+
+    // n_u, n_v from target edge length, capped to [4, 64].
+    let n_u = ((u_span / target_edge).ceil() as usize).max(4).min(64);
+    let n_v = ((v_span / target_edge).ceil() as usize).max(4).min(64);
+
+    log::debug!(
+        "planar steiner grid: n_u={}, n_v={}, target_edge={:.4}, u_span={:.4}, v_span={:.4}, budget={}",
+        n_u, n_v, target_edge, u_span, v_span, max_budget
+    );
+
+    // Generate grid points (excluding boundaries — those come from the face edges).
+    let mut grid: Vec<Point2d> = Vec::with_capacity((n_u - 1) * (n_v - 1));
+    for j in 1..n_v {
+        let v = v_min + v_span * j as f64 / n_v as f64;
+        for i in 1..n_u {
+            let u = u_min + u_span * i as f64 / n_u as f64;
+            grid.push(Point2d::new(u, v));
+        }
+    }
+
+    // Filter to points strictly inside the face domain (outside holes, inside outer boundary).
+    let span_max = u_span.max(v_span);
+    let boundary_tol = (span_max * 1e-6).max(1e-9);
+
+    let mut filtered: Vec<Point2d> = Vec::with_capacity(grid.len());
+    for pt in &grid {
+        if !domain.contains_ray(pt) {
+            continue;
+        }
+        if is_point_on_boundary(&domain.outer_boundary, pt, boundary_tol) {
+            continue;
+        }
+        let on_hole = domain.holes.iter()
+            .any(|hole| is_point_on_boundary(hole, pt, boundary_tol));
+        if on_hole {
+            continue;
+        }
+        filtered.push(*pt);
+    }
+
+    log::debug!(
+        "planar steiner grid: {} grid pts → {} after domain filter",
+        grid.len(), filtered.len()
+    );
+
+    // Downsample to budget if needed (preserving grid structure via coarse_grid_sample,
+    // then a final cap via downsample_interior_points).
+    let coarsened = coarse_grid_sample(&filtered, max_budget);
+    downsample_interior_points(&coarsened, max_budget)
+}
+
+// ============================================================
 // Integration: earcutr-based surface triangulation (non-consistent)
 // ============================================================
 
@@ -2528,8 +2662,16 @@ pub fn triangulate_surface_consistent(
     let max_axis_dim = ((params.max_face_triangles / 2) as f64).sqrt().ceil() as usize;
     let max_axis_dim = max_axis_dim.clamp(4, 64);
 
-    let interior_uv_points: Vec<Point2d> = if is_nurbs_bilinear || matches!(surface, Surface::Plane(_)) {
-        // Flat surfaces: no interior Steiner points needed.
+    let interior_uv_points: Vec<Point2d> = if is_nurbs_bilinear
+        || (matches!(surface, Surface::Plane(_)) && normalized_holes_uv_capped.is_empty())
+    {
+        // Flat surfaces WITHOUT holes: no interior Steiner points needed.
+        // earcutr triangulates the boundary polygon cleanly.
+        //
+        // Planar faces WITH holes are handled by the dedicated branch
+        // below (`generate_planar_steiner_grid`) because earcutr without
+        // interior Steiner points produces long thin triangles spanning
+        // the full face width over the hole region — visually poor.
         Vec::new()
     } else if outer_uv.len() == 4 && normalized_holes_uv_capped.is_empty() {
         // 4-corner face with no holes (square/rectangular trim).
@@ -2546,6 +2688,34 @@ pub fn triangulate_surface_consistent(
         // split edges that touch boundary vertices. So we start with
         // zero interior points and let the refiner do its job.
         Vec::new()
+    } else if matches!(surface, Surface::Plane(_)) {
+        // Planar face WITH holes — use a dedicated Cartesian Steiner grid.
+        //
+        // WHY: For a plane with holes, earcutr receives only the outer
+        // boundary + hole polygons as constraints. With no interior
+        // Steiner points, earcutr produces long thin triangles spanning
+        // the full face width, crossing the hole region — visually poor
+        // and unlike the clean structured grids produced by other CAD
+        // applications (OpenCASCADE, FreeCAD, SolidWorks).
+        //
+        // `generate_planar_steiner_grid` produces a regular Cartesian
+        // grid in (u, v) space, filtered to points strictly inside the
+        // face domain (outside holes, inside outer boundary). When
+        // earcutr receives this grid as Steiner points, the resulting
+        // triangulation has near-square quads in the interior, with
+        // hole boundaries cleanly resolved.
+        //
+        // This branch is ONLY entered for planar faces WITH holes —
+        // planar faces without holes are handled by the earlier branch
+        // (which returns empty Vec).
+        let planar_budget = max_interior_budget.max(8);
+        generate_planar_steiner_grid(
+            &domain,
+            &outer_uv,
+            (u_min, u_max),
+            (v_min, v_max),
+            planar_budget,
+        )
     } else if matches!(surface, Surface::Cylinder(_) | Surface::Cone(_)) {
         // Cylinder/cone faces — use a dedicated regular (u, v) Steiner grid.
         //
@@ -4413,6 +4583,159 @@ mod tests {
 
         // Should have multiple points in both u and v directions.
         assert!(u_unique.len() >= 3, "u_unique.len() = {}", u_unique.len());
+        assert!(v_unique.len() >= 2, "v_unique.len() = {}", v_unique.len());
+    }
+
+    #[test]
+    fn test_planar_steiner_grid_basic() {
+        // Planar face: a 10×10 square in UV space.
+        // Without holes, but we still want to verify the grid generator
+        // produces a regular Cartesian product of points.
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(10.0, 0.0),
+            Point2d::new(10.0, 10.0),
+            Point2d::new(0.0, 10.0),
+        ];
+        let mut domain = ParametricDomain::new(outer, (0.0, 10.0), (0.0, 10.0));
+        domain.init_containment_grid();
+
+        let outer_uv = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(10.0, 0.0),
+            Point2d::new(10.0, 10.0),
+            Point2d::new(0.0, 10.0),
+        ];
+        // Boundary has only 4 points → avg_edge = 10.0. So target_edge = 10.0.
+        // n_u = ceil(10/10) = 1 → clamped to 4. Same for n_v.
+        // Interior points: (4-1) × (4-1) = 9 points.
+        let pts = generate_planar_steiner_grid(
+            &domain, &outer_uv, (0.0, 10.0), (0.0, 10.0), 4096,
+        );
+
+        assert!(pts.len() >= 4, "Expected ≥4 interior points, got {}", pts.len());
+
+        // All points must be strictly inside (0, 10) × (0, 10).
+        for p in &pts {
+            assert!(p.u > 0.0 && p.u < 10.0, "point u out of interior: {}", p.u);
+            assert!(p.v > 0.0 && p.v < 10.0, "point v out of interior: {}", p.v);
+        }
+    }
+
+    #[test]
+    fn test_planar_steiner_grid_excludes_holes() {
+        // Planar face with a hole: 10×10 outer, 2×2 hole centered at (5, 5).
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(10.0, 0.0),
+            Point2d::new(10.0, 10.0),
+            Point2d::new(0.0, 10.0),
+        ];
+        let hole = vec![
+            Point2d::new(4.0, 4.0),
+            Point2d::new(6.0, 4.0),
+            Point2d::new(6.0, 6.0),
+            Point2d::new(4.0, 6.0),
+        ];
+        let mut domain = ParametricDomain::new(outer, (0.0, 10.0), (0.0, 10.0))
+            .with_hole(hole);
+        domain.init_containment_grid();
+
+        let outer_uv = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(10.0, 0.0),
+            Point2d::new(10.0, 10.0),
+            Point2d::new(0.0, 10.0),
+        ];
+        let pts = generate_planar_steiner_grid(
+            &domain, &outer_uv, (0.0, 10.0), (0.0, 10.0), 4096,
+        );
+
+        // No point should fall inside the hole region [4,6]×[4,6].
+        for p in &pts {
+            let in_hole = p.u > 4.0 && p.u < 6.0 && p.v > 4.0 && p.v < 6.0;
+            assert!(!in_hole, "point {:?} falls inside the hole", p);
+        }
+        // Should still produce multiple interior points.
+        assert!(pts.len() >= 4, "Expected ≥4 interior points, got {}", pts.len());
+    }
+
+    #[test]
+    fn test_planar_steiner_grid_respects_budget() {
+        // Same setup as test_planar_steiner_grid_basic, but with tight budget.
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(10.0, 0.0),
+            Point2d::new(10.0, 10.0),
+            Point2d::new(0.0, 10.0),
+        ];
+        let mut domain = ParametricDomain::new(outer, (0.0, 10.0), (0.0, 10.0));
+        domain.init_containment_grid();
+
+        let outer_uv = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(10.0, 0.0),
+            Point2d::new(10.0, 10.0),
+            Point2d::new(0.0, 10.0),
+        ];
+        let budget = 5;
+        let pts = generate_planar_steiner_grid(
+            &domain, &outer_uv, (0.0, 10.0), (0.0, 10.0), budget,
+        );
+
+        assert!(pts.len() <= budget, "Expected ≤{} points, got {}", budget, pts.len());
+    }
+
+    #[test]
+    fn test_planar_steiner_grid_preserves_grid_structure() {
+        // Verify the generated points form a Cartesian product of u-values × v-values.
+        // Use many boundary points so n_u, n_v are larger than the minimum clamp.
+        let outer_uv: Vec<Point2d> = (0..20).map(|i| {
+            let t = i as f64 / 19.0;
+            Point2d::new(t * 10.0, 0.0)
+        }).chain((0..20).map(|i| {
+            let t = i as f64 / 19.0;
+            Point2d::new(10.0, t * 10.0)
+        })).chain((0..20).map(|i| {
+            let t = i as f64 / 19.0;
+            Point2d::new(10.0 - t * 10.0, 10.0)
+        })).chain((0..20).map(|i| {
+            let t = i as f64 / 19.0;
+            Point2d::new(0.0, 10.0 - t * 10.0)
+        })).collect();
+
+        let mut domain = ParametricDomain::new(outer_uv.clone(), (0.0, 10.0), (0.0, 10.0));
+        domain.init_containment_grid();
+
+        let pts = generate_planar_steiner_grid(
+            &domain, &outer_uv, (0.0, 10.0), (0.0, 10.0), 4096,
+        );
+
+        let tol = 1e-9;
+        let mut us: Vec<f64> = pts.iter().map(|p| p.u).collect();
+        us.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mut u_unique: Vec<f64> = Vec::new();
+        for u in us {
+            if u_unique.last().map_or(true, |last| (last - u).abs() > tol) {
+                u_unique.push(u);
+            }
+        }
+        let mut vs: Vec<f64> = pts.iter().map(|p| p.v).collect();
+        vs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mut v_unique: Vec<f64> = Vec::new();
+        for v in vs {
+            if v_unique.last().map_or(true, |last| (last - v).abs() > tol) {
+                v_unique.push(v);
+            }
+        }
+
+        for p in &pts {
+            let u_ok = u_unique.iter().any(|&u| (u - p.u).abs() < tol);
+            let v_ok = v_unique.iter().any(|&v| (v - p.v).abs() < tol);
+            assert!(u_ok && v_ok, "point {:?} not on grid", p);
+        }
+
+        assert!(u_unique.len() >= 2, "u_unique.len() = {}", u_unique.len());
         assert!(v_unique.len() >= 2, "v_unique.len() = {}", v_unique.len());
     }
 }
