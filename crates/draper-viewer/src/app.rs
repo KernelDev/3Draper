@@ -3431,8 +3431,9 @@ impl ViewerApp {
     /// The tree is shown immediately. Triangulation happens progressively in update(),
     /// one BREP per frame, so the browser stays responsive.
     fn process_step_file(&mut self, step_file: &draper_step::StepFile, name: &str) {
-        // Cancel any previous loading
-        self.cancel_loading();
+        // Cancel any previous loading. Pass `false` because the user is
+        // opening a NEW file — they don't want to see the OLD partial result.
+        self.cancel_loading(false);
 
         // ─── Clear `current_solid` so the UV Breakdown window falls through
         // to the `solid_from_detailed_instance` path. Without this, a stale
@@ -3513,6 +3514,29 @@ impl ViewerApp {
         self.show_structure = true;
 
         if !pending.is_empty() {
+            // ─── Mobile: auto-downgrade LOD for faster loading ───────────────
+            // Mobile CPUs are 2-4× slower than desktop, and users have less
+            // patience for long loads. If we're on mobile and the user hasn't
+            // manually lowered the quality, drop from High → Medium
+            // (or from Ultra → High) to speed up loading by ~2-3×.
+            // The user can always raise the quality manually after loading
+            // completes via the Quality dropdown.
+            if self.is_mobile {
+                let new_lod = match self.lod_level {
+                    LodLevel::Ultra => Some(LodLevel::High),
+                    LodLevel::High => Some(LodLevel::Medium),
+                    _ => None, // Low/Preview/Medium stay as-is
+                };
+                if let Some(new) = new_lod {
+                    self.log(&format!(
+                        "Mobile detected — auto-lowering quality from {} to {} for faster loading (you can raise it manually after loading completes)",
+                        self.lod_level.label(),
+                        new.label()
+                    ));
+                    self.lod_level = new;
+                }
+            }
+
             self.log(&format!("Queued {} BREP instances for progressive triangulation...", pending.len()));
             self.total_instance_count = pending.len();
             self.triangulated_count = 0;
@@ -3825,7 +3849,15 @@ impl ViewerApp {
     }
 
     /// Cancel any in-progress loading.
-    fn cancel_loading(&mut self) {
+    ///
+    /// If `show_partial` is true and we already have some triangulated
+    /// instances, commit them to the viewer as a partial result so the
+    /// user can see what was loaded (instead of getting a blank screen).
+    /// This is critical on mobile where users often want to bail out of
+    /// a long load and still see something useful.
+    fn cancel_loading(&mut self, show_partial: bool) {
+        let had_mesh = self.mesh.vertex_count() > 0;
+        let instance_count = self.detailed_instances.len();
         self.is_loading = false;
         self.loading_start = None;
         self.pending_breps.clear();
@@ -3838,6 +3870,19 @@ impl ViewerApp {
         self.total_instance_count = 0;
         #[cfg(target_arch = "wasm32")]
         self.worker_pending_meshes.clear();
+
+        if show_partial && had_mesh && instance_count > 0 {
+            // Commit partial result so the user sees what was loaded.
+            self.log_warning(&format!(
+                "Loading canceled — showing partial result ({} of {} instances)",
+                instance_count,
+                instance_count + self.pending_breps.len()
+            ));
+            self.load_mesh(self.mesh.clone(), &format!("STEP (partial): {}", self.loading_name));
+        } else {
+            self.log("Loading canceled");
+        }
+        self.loading_name.clear();
     }
 
     /// Convert a WorkerMeshResult (flat f32 arrays from Web Worker) to a TriangleMesh.
@@ -4011,9 +4056,15 @@ impl ViewerApp {
             }
         }
 
-        // Check for global loading timeout (5 minutes)
+        // Check for global loading timeout.
+        // Desktop: 5 minutes (users have more patience, more CPU).
+        // Mobile: 2 minutes (slower CPU, less patience — user can cancel manually too).
         if let Some(start) = self.loading_start {
-            let timeout = std::time::Duration::from_secs(300);
+            let timeout = if self.is_mobile {
+                std::time::Duration::from_secs(120)
+            } else {
+                std::time::Duration::from_secs(300)
+            };
             if start.elapsed() > timeout {
                 let elapsed = start.elapsed().as_secs();
                 let remaining = self.pending_breps.len();
@@ -6347,6 +6398,16 @@ impl eframe::App for ViewerApp {
                         egui::pos2(bar_x + bar_w, bar_y + bar_h),
                     );
 
+                    // Compute elapsed time + ETA for better mobile UX
+                    let elapsed_secs = self.loading_start.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
+                    let eta_text = if self.triangulated_count > 0 && elapsed_secs > 0.5 {
+                        let per_inst = elapsed_secs / self.triangulated_count as f64;
+                        let remaining = (self.total_instance_count - self.triangulated_count) as f64 * per_inst;
+                        format!(" · ETA: {:.0}s", remaining.max(0.0))
+                    } else {
+                        String::new()
+                    };
+
                     // Background
                     ui.painter().rect_filled(
                         egui::Rect::from_min_max(
@@ -6361,7 +6422,9 @@ impl eframe::App for ViewerApp {
                     ui.painter().text(
                         egui::pos2(bar_x + bar_w / 2.0, bar_y - 8.0),
                         egui::Align2::CENTER_CENTER,
-                        format!("Triangulating: {}/{} ({:.0}%)", self.triangulated_count, self.total_instance_count, progress * 100.0),
+                        format!("Triangulating: {}/{} ({:.0}%) · {:.0}s{}",
+                            self.triangulated_count, self.total_instance_count, progress * 100.0,
+                            elapsed_secs, eta_text),
                         egui::FontId::proportional(12.0),
                         egui::Color32::WHITE,
                     );
@@ -6384,6 +6447,28 @@ impl eframe::App for ViewerApp {
                             3.0,
                             egui::Color32::from_rgb(80, 180, 80),
                         );
+                    }
+
+                    // ─── Cancel button (always visible during loading) ───
+                    // Critical for mobile users — if loading takes too long,
+                    // they can bail out and see what was loaded so far.
+                    let btn_w = 90.0;
+                    let btn_h = 24.0;
+                    let btn_x = bar_x + bar_w + 14.0;
+                    let btn_y = bar_y - 2.0;
+                    let btn_rect = egui::Rect::from_min_size(
+                        egui::pos2(btn_x, btn_y),
+                        egui::vec2(btn_w, btn_h),
+                    );
+                    // Only show the cancel button if there's room (desktop wide layout)
+                    if btn_x + btn_w < rect.right() - 10.0 {
+                        let cancel_btn = egui::Button::new(
+                            egui::RichText::new("Cancel").size(11.0).color(egui::Color32::WHITE)
+                        ).fill(egui::Color32::from_rgb(180, 60, 60));
+                        let cancel_resp = ui.put(btn_rect, cancel_btn);
+                        if cancel_resp.clicked() {
+                            self.cancel_loading(true);
+                        }
                     }
                 }
             });
@@ -7521,6 +7606,92 @@ impl ViewerApp {
                     self.mobile_log_open = !self.mobile_log_open;
                 }
             });
+
+        // ─── Mobile loading overlay: progress bar + Cancel button ────────
+        // On mobile, the user can't see the desktop-style progress overlay
+        // drawn in the viewport (it's hidden by the touch-gesture help at the
+        // bottom). We draw a dedicated mobile loading overlay on top of
+        // everything, with a large Cancel button that's easy to tap.
+        if self.is_loading && self.total_instance_count > 0 {
+            let progress = self.triangulated_count as f32 / self.total_instance_count as f32;
+            let elapsed_secs = self.loading_start.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
+            let eta_text = if self.triangulated_count > 0 && elapsed_secs > 0.5 {
+                let per_inst = elapsed_secs / self.triangulated_count as f64;
+                let remaining = (self.total_instance_count - self.triangulated_count) as f64 * per_inst;
+                format!(" · ETA: {:.0}s", remaining.max(0.0))
+            } else {
+                String::new()
+            };
+
+            let overlay_w = (screen.width() - 2.0 * margin).min(380.0);
+            let overlay_h = 84.0;
+            let overlay_x = screen.center().x - overlay_w / 2.0;
+            let overlay_y = screen.min.y + 50.0;
+            let overlay_pos = egui::Pos2::new(overlay_x, overlay_y);
+
+            egui::Area::new(egui::Id::new("mobile_loading_overlay"))
+                .fixed_pos(overlay_pos)
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    let (rect, _) = ui.allocate_exact_size(
+                        egui::vec2(overlay_w, overlay_h),
+                        egui::Sense::hover(),
+                    );
+                    // Background panel
+                    ui.painter().rect_filled(
+                        rect,
+                        10.0,
+                        egui::Color32::from_rgba_premultiplied(0, 0, 0, 200),
+                    );
+
+                    // Progress text (top line)
+                    ui.painter().text(
+                        egui::pos2(rect.center().x, rect.min.y + 14.0),
+                        egui::Align2::CENTER_CENTER,
+                        format!("Loading: {}/{} ({:.0}%) · {:.0}s{}",
+                            self.triangulated_count, self.total_instance_count,
+                            progress * 100.0, elapsed_secs, eta_text),
+                        egui::FontId::proportional(12.0),
+                        egui::Color32::WHITE,
+                    );
+
+                    // Progress bar
+                    let bar_x = rect.min.x + 14.0;
+                    let bar_y = rect.min.y + 30.0;
+                    let bar_w = rect.width() - 28.0;
+                    let bar_h = 12.0;
+                    ui.painter().rect_filled(
+                        egui::Rect::from_min_size(egui::pos2(bar_x, bar_y), egui::vec2(bar_w, bar_h)),
+                        4.0,
+                        egui::Color32::from_rgb(60, 60, 60),
+                    );
+                    let fill_w = bar_w * progress;
+                    if fill_w > 0.0 {
+                        ui.painter().rect_filled(
+                            egui::Rect::from_min_size(egui::pos2(bar_x, bar_y), egui::vec2(fill_w, bar_h)),
+                            4.0,
+                            egui::Color32::from_rgb(80, 180, 80),
+                        );
+                    }
+
+                    // Cancel button (large, easy to tap)
+                    let cancel_w = 120.0;
+                    let cancel_h = 32.0;
+                    let cancel_x = rect.center().x - cancel_w / 2.0;
+                    let cancel_y = rect.min.y + 48.0;
+                    let cancel_rect = egui::Rect::from_min_size(
+                        egui::pos2(cancel_x, cancel_y),
+                        egui::vec2(cancel_w, cancel_h),
+                    );
+                    let cancel_btn = egui::Button::new(
+                        egui::RichText::new("✕ Cancel").size(13.0).color(egui::Color32::WHITE)
+                    ).fill(egui::Color32::from_rgb(180, 60, 60));
+                    let cancel_resp = ui.put(cancel_rect, cancel_btn);
+                    if cancel_resp.clicked() {
+                        self.cancel_loading(true);
+                    }
+                });
+        }
 
         // ─── Touch gesture help (bottom center, small) ─────────────────
         egui::Area::new(egui::Id::new("mobile_touch_help"))
