@@ -9,12 +9,20 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title>3Draper — 3D Geometric Kernel</title>
     <meta name="description" content="3Draper: A 3D geometric kernel with B-Rep topology, STEP/STL I/O, NURBS surfaces & curves, and interactive 3D viewer running entirely in your browser via WebAssembly.">
-<script type="module">
+    <script type="module">
 import init, * as bindings from './draper-viewer.js';
 const wasm = await init('./draper-viewer_bg.wasm');
 window.wasmBindings = bindings;
 dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
 </script>
+    <!--
+        Cross-Origin Isolation headers for SharedArrayBuffer support.
+        Required for WASM parallel threading (wasm-bindgen-rayon).
+        Trunk's serve mode sets these automatically via the [serve.headers] config.
+        For production, configure your web server to send:
+          Cross-Origin-Opener-Policy: same-origin
+          Cross-Origin-Embedder-Policy: require-corp
+    -->
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         html, body {
@@ -128,7 +136,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
     <div id="loading">
         <div class="logo">3Draper<span>Viewer</span></div>
         <div class="spinner"></div>
-        <div class="status">Loading WebAssembly module…</div>
+        <div class="status">Loading WebAssembly module...</div>
         <div class="parallel-badge" id="parallel-badge"></div>
     </div>
     <canvas id="the_canvas_id"></canvas>
