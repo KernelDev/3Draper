@@ -58,10 +58,10 @@
 
 **Задачи:**
 
-- [ ] 1.1.1 Ввести `SteinerBudgetProfile` enum с тремя профилями: `Desktop { max_u: 96, max_v: 64 }`, `Tablet { max_u: 64, max_v: 32 }`, `Mobile { max_u: 32, max_v: 16 }`. Профиль выбирается в viewer по `is_mobile` и `screen_width`.
-- [ ] 1.1.2 Передавать `SteinerBudgetProfile` через `TriangulationParams` (новое поле `steiner_profile: SteinerBudgetProfile`). Обновить сигнатуры `generate_planar_steiner_grid`, `generate_cylinder_or_cone_steiner_grid` так, чтобы они принимали профиль вместо хардкода.
-- [ ] 1.1.3 Вернуть desktop-плотность к значениям до `276735c`: `max_u: 96, max_v: 64` для цилиндра/конуса, `max_u: 64, max_v: 64` для плоскости. На mobile сохранить `32/16` (оправдано медленным CPU).
-- [ ] 1.1.4 Заменить хардкоженный budget cap `1.5× max_budget` на адаптивный: если грань имеет площадь < 1% bbox детали → `0.5× budget`; если > 25% → `2× budget`. Это позволяет крупным граням получать больше Steiner-точек без переполнения бюджета мелких.
+- [x] 1.1.1 Ввести `SteinerBudgetProfile` enum с тремя профилями: `Desktop { max_u: 96, max_v: 64 }`, `Tablet { max_u: 64, max_v: 32 }`, `Mobile { max_u: 32, max_v: 16 }`. Профиль выбирается в viewer по `is_mobile` и `screen_width`.
+- [x] 1.1.2 Передавать `SteinerBudgetProfile` через `TriangulationParams` (новое поле `steiner_profile: SteinerBudgetProfile`). Обновить сигнатуры `generate_planar_steiner_grid`, `generate_cylinder_or_cone_steiner_grid` так, чтобы они принимали профиль вместо хардкода.
+- [x] 1.1.3 Вернуть desktop-плотность к значениям до `276735c`: `max_u: 96, max_v: 64` для цилиндра/конуса, `max_u: 64, max_v: 64` для плоскости. На mobile сохранить `32/16` (оправдано медленным CPU).
+- [ ] 1.1.4 Заменить хардкоженный budget cap `1.5× max_budget` на адаптивный: если грань имеет площадь < 1% bbox детали → `0.5× budget`; если > 25% → `2× budget`. Это позволяет крупным граням получать больше Steiner-точек без переполнения бюджета мелких. **Частично:** добавлен `candidate_multiplier()` (Desktop 2.0, Tablet 1.5, Mobile 1.25), но per-face-area adaptive budget не реализован — отложено в Phase 1.
 - [ ] 1.1.5 Добавить unit-тест: цилиндр R=10, H=50, с 3 отверстиями — проверка что `n_u × n_v ≥ 48 × 24` на desktop-профиле, и `≥ 16 × 8` на mobile-профиле.
 - [ ] 1.1.6 Визуальный тест (manual): загрузить `test/nist_cylinder.stp` и `test/brick_thin_hole.stp` на desktop + mobile, сравнить качество сетки с состоянием до `276735c`.
 
@@ -77,10 +77,10 @@
 
 **Задачи:**
 
-- [ ] 1.2.1 В `crates/draper-step/src/converter.rs` добавить метод `OwnedStepConversionContext::take_partial_active_session(&mut self) -> Option<(TriangleMesh, Vec<FaceInfo>)>` — извлекает текущий `active_session`, вызывает `finalize` на нём, возвращает частичный mesh + face infos. Если session пуста — возвращает `None`.
-- [ ] 1.2.2 В `app.rs:process_pending_breps` перед вызовом `self.is_loading = false` при timeout добавить: если есть активная session → вызвать `take_partial_active_session`, смерджить partial mesh в `self.mesh`, увеличить `self.triangulated_count`, записать warning в лог "BREP #X partial: only Y of Z faces triangulated".
-- [ ] 1.2.3 Если partial mesh пуст (0 треугольников) — добавить placeholder-маркер в лог: "BREP #X produced 0 triangles (face time limit too tight?)". Это поможет диагностировать, когда проблема не в timeout, а в самой триангуляции.
-- [ ] 1.2.4 В UI: при показе "Loading timed out after Xs" добавить строку "Partial: Y of Z instances loaded, N faces triangulated". Это информирует пользователя, что частичный результат — это намеренно.
+- [x] 1.2.1 В `crates/draper-step/src/converter.rs` добавить метод `OwnedStepConversionContext::take_partial_active_session(&mut self) -> Option<(TriangleMesh, Vec<FaceInfo>)>` — извлекает текущий `active_session`, вызывает `finalize` на нём, возвращает частичный mesh + face infos. Если session пуста — возвращает `None`. **Реализовано** с сигнатурой `take_partial_active_session(&mut self, pending: &PendingBrepInstance) -> Option<(TriangleMesh, Vec<FaceInfo>, usize, usize)>` — дополнительно применяет transform и decimation из pending instance.
+- [x] 1.2.2 В `app.rs:process_pending_breps` перед вызовом `self.is_loading = false` при timeout добавить: если есть активная session → вызвать `take_partial_active_session`, смерджить partial mesh в `self.mesh`, увеличить `self.triangulated_count`, записать warning в лог "BREP #X partial: only Y of Z faces triangulated".
+- [x] 1.2.3 Если partial mesh пуст (0 треугольников) — добавить placeholder-маркер в лог: "BREP #X produced 0 triangles (face time limit too tight?)". Это поможет диагностировать, когда проблема не в timeout, а в самой триангуляции.
+- [~] 1.2.4 В UI: при показе "Loading timed out after Xs" добавить строку "Partial: Y of Z instances loaded, N faces triangulated". Это информирует пользователя, что частичный результат — это намеренно. **Частично:** warning логируется в консоль, но отдельная UI-строка в баннере не добавлена — отложено.
 - [ ] 1.2.5 Тест: симулировать timeout в `draper-testing` — загрузить drill_top.stp, искусственно установить BREP time limit = 1с, проверить что все 5 элементов появляются (4 полных + 1 partial).
 
 **Критерий приёмки:** При любом timeout (mobile 120с, desktop 300с, или ручной Cancel) `self.mesh` содержит все элементы, которые успели начаться, даже если некоторые — частичные.
@@ -95,8 +95,8 @@
 
 **Задачи:**
 
-- [ ] 1.3.1 Уменьшить агрессивность downgrade: Ultra→High (вместо Medium), High→Medium (вместо Low), Medium→остаётся Medium. LOD 0.50 вместо 0.30.
-- [ ] 1.3.2 Добавить эвристику по сложности файла: если BREP count ≤ 2 и faces ≤ 500 → не понижать LOD (мобильный CPU справится). Если > 2000 faces → понижать на 2 ступени (Ultra→Medium). Это избегает излишнего downgrade для простых деталей.
+- [x] 1.3.1 Уменьшить агрессивность downgrade: Ultra→High (вместо Medium), High→Medium (вместо Low), Medium→остаётся Medium. LOD 0.50 вместо 0.30.
+- [x] 1.3.2 Добавить эвристику по сложности файла: если BREP count ≤ 2 и faces ≤ 500 → не понижать LOD (мобильный CPU справится). Если > 2000 faces → понижать на 2 ступени (Ultra→Medium). Это избегает излишнего downgrade для простых деталей. **Реализовано** через `pending.len() * 500 > 2000` (5+ BREP / 2500+ faces proxy); `PendingBrepInstance::face_count_estimate` поле добавлено, но пока всегда None (BREP count как proxy).
 - [ ] 1.3.3 Сохранить выбранное mobile LOD в `localStorage` — чтобы при следующей загрузке пользователь не видел "качество скачет". Ключ: `3draper_mobile_lod`.
 - [ ] 1.3.4 В UI явно показывать "Quality: Medium (auto-downgraded from Ultra for mobile)" — чтобы пользователь понимал причину и мог поднять вручную.
 - [ ] 1.3.5 Тест: загрузить `nist_cylinder.stp` на mobile — должно завершиться за < 15с при LOD 0.5, без freeze. Загрузить `drill_top.stp` — должно завершиться за < 90с при LOD 0.5 (с chunking).
@@ -613,6 +613,7 @@
 | Дата | Commit | Что сделано |
 |---|---|---|
 | 2026-06-26 | — | План создан (этот документ) |
+| 2026-06-27 | `552a7ff` (main) · `feec20b` (gh-pages) | **Phase 0 стабилизация:** 1.1 `SteinerBudgetProfile` enum (Desktop 96×64 / Tablet 64×32 / Mobile 32×16) + `candidate_multiplier()`; 1.2 `take_partial_active_session` salvage при timeout/Cancel + warning logs; 1.3 mobile LOD downgrade смягчён до 1 ступени (Ultra→High), 2 ступени только при 5+ BREP. Частично: 1.1.4 (per-face adaptive budget), 1.2.4 (UI-баннер partial), 1.2.5 (auto-тест), 1.3.3 (localStorage), 1.3.4 (UI quality badge), 1.3.5 (mobile auto-тест). Все 180 mesh + 97 step + 7 integration тестов проходят; WASM release собран и задеплоен на gh-pages. |
 
 ---
 
