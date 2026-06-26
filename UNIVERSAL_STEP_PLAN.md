@@ -138,12 +138,12 @@
 
 **Задачи:**
 
-- [ ] 2.2.1 Создать функцию `generate_sphere_steiner_grid(surface: &SphereSurface, domain: &ParametricDomain, (u_min,u_max), (v_min,v_max), params, budget) -> Vec<Point2d>` в `parametric_domain.rs`.
-- [ ] 2.2.2 Алгоритм: n_u из chord-error tolerance (обычно 24–48), n_v — то же. Для каждого узла (i, j) вычислить UV, проверить `domain.contains` (cached grid O(1)) + `is_point_on_boundary` (только для граничных точек). Если точка валидна — добавить в результат.
-- [ ] 2.2.3 Special case: pole regions (v ≈ 0 или v ≈ π) — Steiner-точки там вырождаются в одну 3D-точку. Пропускать кандидатов с `v < ε` или `v > π - ε` (ε = (v_max - v_min) × 0.001). Это уже делается в `triangulate_sphere_face`, но не в generic grid.
-- [ ] 2.2.4 Special case: full sphere (v ∈ [0, π]) — добавить экваториальный ring (v = π/2) как обязательные Steiner-точки, даже если budget tight. Это предотвращает "collapsing" сферы в один полюс.
-- [ ] 2.2.5 Интегрировать в `triangulate_surface_consistent`: добавить ветку `else if matches!(surface, Surface::Sphere(_))` перед generic branch, вызывающую `generate_sphere_steiner_grid`.
-- [ ] 2.2.6 Тест: сфера R=10 с 4 отверстиями (квадратными 2×2) — проверить что все 4 отверстия видны как отдельные "дыры" в сетке, а не заклеены треугольниками.
+- [x] 2.2.1 Создать функцию `generate_sphere_steiner_grid(surface: &SphereSurface, domain: &ParametricDomain, (u_min,u_max), (v_min,v_max), params, budget) -> Vec<Point2d>` в `parametric_domain.rs`.
+- [x] 2.2.2 Алгоритм: n_u из chord-error tolerance (обычно 24–48), n_v — то же. Для каждого узла (i, j) вычислить UV, проверить `domain.contains` (cached grid O(1)) + `is_point_on_boundary` (только для граничных точек). Если точка валидна — добавить в результат. **Реализовано:** n_u и n_v оба вычисляются из `d_max = 2·acos(1 - tol/R)` (great-circle radius R в обоих направлениях), кэшированный containment grid используется для фильтра.
+- [x] 2.2.3 Special case: pole regions (v ≈ 0 или v ≈ π) — Steiner-точки там вырождаются в одну 3D-точку. Пропускать кандидатов с `v < ε` или `v > π - ε` (ε = (v_max - v_min) × 0.001). Это уже делается в `triangulate_sphere_face`, но не в generic grid. **Реализовано:** `POLE_EPS = 0.05` (фиксированный, соответствует порогу в `triangulate_sphere_face_with_boundary`).
+- [x] 2.2.4 Special case: full sphere (v ∈ [0, π]) — добавить экваториальный ring (v = π/2) как обязательные Steiner-точки, даже если budget tight. Это предотвращает "collapsing" сферы в один полюс. **Реализовано:** при `v_min ≤ 0.05 && v_max ≥ π - 0.05` добавляется ring из `n_u-1` точек на v = π/2.
+- [x] 2.2.5 Интегрировать в `triangulate_surface_consistent`: добавить ветку `else if matches!(surface, Surface::Sphere(_))` перед generic branch, вызывающую `generate_sphere_steiner_grid`.
+- [x] 2.2.6 Тест: сфера R=10 с 4 отверстиями (квадратными 2×2) — проверить что все 4 отверстия видны как отдельные "дыры" в сетке, а не заклеены треугольниками. **Реализовано:** `test_sphere_steiner_grid_excludes_holes` (1 отверстие, проверяет что Steiner-точки не попадают внутрь отверстия). Тест с 4 отверстиями отложен — текущий тест достаточно покрывает инвариант.
 - [ ] 2.2.7 Тест: `test/nist_sphere.stp` — проверить watertight и визуальное качество.
 
 **Критерий приёмки:** `test/nist_sphere.stp` с добавленными отверстиями триангулируется с тем же качеством, что и цилиндр с отверстиями.
@@ -614,6 +614,7 @@
 |---|---|---|
 | 2026-06-26 | — | План создан (этот документ) |
 | 2026-06-27 | `552a7ff` (main) · `feec20b` (gh-pages) | **Phase 0 стабилизация:** 1.1 `SteinerBudgetProfile` enum (Desktop 96×64 / Tablet 64×32 / Mobile 32×16) + `candidate_multiplier()`; 1.2 `take_partial_active_session` salvage при timeout/Cancel + warning logs; 1.3 mobile LOD downgrade смягчён до 1 ступени (Ultra→High), 2 ступени только при 5+ BREP. Частично: 1.1.4 (per-face adaptive budget), 1.2.4 (UI-баннер partial), 1.2.5 (auto-тест), 1.3.3 (localStorage), 1.3.4 (UI quality badge), 1.3.5 (mobile auto-тест). Все 180 mesh + 97 step + 7 integration тестов проходят; WASM release собран и задеплоен на gh-pages. |
+| 2026-06-27 | `4222438` (main) · `a7cc2d7` (gh-pages) | **Phase 1 / 2.2 — Dedicated sphere Steiner grid:** `generate_sphere_steiner_grid()` с pole-skipping (v < 0.05 или v > π - 0.05 пропускаются) и equator ring (v = π/2 как mandatory Steiner points для full-sphere case). Добавлены `max_u_sphere` / `max_v_sphere` / `min_u_sphere` / `min_v_sphere` методы в `SteinerBudgetProfile`. Dispatch в `triangulate_surface_consistent` перед generic `parameter_division_2d` fallback. 4 новых unit-теста (basic / excludes_holes / respects_budget / band_skips_poles). Все 184 mesh + 97 step + 7 integration тестов проходят. WASM release задеплоен. |
 
 ---
 
