@@ -3667,3 +3667,54 @@ Stage Summary:
 - Progress bar shows intra-BREP face progress so users see activity.
 - Native (desktop) path is UNCHANGED — still uses the fast non-chunked path.
 - Live demo: https://kerneldev.github.io/3Draper/
+
+---
+Task ID: drill_top-audit-plan-61
+Agent: Main
+Task: Deep audit of drill_top.stp loading issues (disappearing element + wrong triangulation) and create plan for universal triangulation of any surface with any edges/holes combination.
+
+Work Log:
+- User reported: drill_top.stp on mobile — 1 of 5 assembly elements disappeared, "not watertight", wrong triangulation.
+- VLM-analyzed 2 screenshots (2026-06-26-05-12-03 and 05-12-25):
+  * Confirmed: maroon drill handle missing in screenshot 2
+  * Triangulation: pixelated surfaces, gaps, holes, broken mesh continuity, misaligned triangles
+  * Inconsistent geometry on maroon body and green gear
+
+- AUDIT FINDINGS:
+  * Issue 1 — Disappearing element: GEAR BREP takes ~60s on mobile, BREP time limit = 30s on WASM, global mobile timeout = 120s. 4 BREPs × 24s mobile + GEAR 60s = 156s > 120s global. GEAR gets killed.
+  * Issue 2 — "Not watertight": 3 root causes:
+    - Face skipping due to 3s face_time_limit on WASM (skips ~5% of NURBS faces)
+    - earcutr loses boundary edges (acknowledged in code: "DIAG: earcutr missing X/Y boundary edges")
+    - downsample_interior_points breaks Steiner grid structure (stride-based sampling)
+  * Issue 3 — Wrong triangulation:
+    - NURBS chord-refinement DISABLED (parametric_domain.rs:3322, max_refine_iters=0 for NURBS)
+    - At LOD 0.30, NURBS faces get only ~40 triangles (very pixelated)
+    - Plane-with-holes Steiner grid capped to 32×32, downsampled to ~15-20 points
+    - earcutr with sparse Steiner points produces wrong triangulation for complex holes
+
+- ROOT ARCHITECTURAL ISSUE:
+  * 8 surface types × 4-6 fallback paths each = ~40 edge-case combinations
+  * 5097 + 9288 + 13273 = 27658 lines of code across parametric_domain.rs, triangulate.rs, converter.rs
+  * Multiple disabled functions (snap_boundary_vertices, fill_boundary_edges, decimate_collinear_boundary) — each disabled after breaking watertightness
+
+- WROTE COMPREHENSIVE PLAN (6 stages):
+  1. Unified CDT core (1-2 weeks) — one triangulate_face_universal() for all surface types
+  2. Progressive loading with priority sorting (3-5 days) — light BREPs first, GEAR last
+  3. Adaptive per-face time budget (3-5 days) — proportional to face complexity
+  4. Robust CDT with constraint-edges (1 week) — watertightness by construction
+  5. Enable chord-error refinement for NURBS (3-5 days) — UV-midpoint back-projection
+  6. Adaptive LOD by device profile (2-3 days) — LowEnd/MidRange/HighEnd tiers
+
+- IDENTIFIED 3 QUICK FIXES (implement immediately):
+  1. Increase mobile global timeout 120s → 180s (app.rs:4080)
+  2. Decrease face_time_limit WASM 3s → 1.5s (converter.rs:3995, 4538)
+  3. Enable NURBS chord-refinement 0 → 1 iteration (parametric_domain.rs:3322)
+
+Stage Summary:
+- Audit report + plan saved to /home/z/my-project/download/triangulation_audit_and_plan.md
+- 6-stage plan covers: architecture redesign, progressive loading, adaptive budgets, robust CDT, NURBS refinement, device profiles
+- 3 quick-fixes ready to apply immediately — expected to:
+  * GEAR loads fully (180s > 156s needed)
+  * Fewer face skips (1.5s limit passes through stuck faces faster)
+  * Less pixelated NURBS (1 chord-refinement iteration = ~2× triangles)
+- Long-term plan (Stages 1-6) targets: 30-40s total load on mobile, watertight mesh, smooth NURBS surfaces, 60fps UI on all devices
