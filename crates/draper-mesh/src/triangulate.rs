@@ -178,6 +178,53 @@ impl SteinerBudgetProfile {
             Self::Mobile => 8,
         }
     }
+
+    // ── Sphere-specific profile methods ──────────────────────────────
+    //
+    // Sphere parameterization: u ∈ [0, 2π] (azimuthal), v ∈ [0, π] (polar).
+    // Both directions trace great circles of radius R, so the same
+    // chord-error formula `d_max = 2·acos(1 - tol/R)` applies to both.
+    //
+    // Caps mirror the cylinder values (same u period 2π), but v caps
+    // are slightly smaller because v_span = π is half of u_span = 2π
+    // (so v needs fewer subdivisions for the same chord error).
+
+    /// Maximum number of U subdivisions for sphere Steiner grid.
+    /// Same as cylinder (u period is 2π for both).
+    pub fn max_u_sphere(&self) -> usize {
+        match self {
+            Self::Desktop => 96,
+            Self::Tablet => 64,
+            Self::Mobile => 32,
+        }
+    }
+    /// Maximum number of V subdivisions for sphere Steiner grid.
+    /// Slightly smaller than cylinder because v_span = π (half of u_span = 2π).
+    pub fn max_v_sphere(&self) -> usize {
+        match self {
+            Self::Desktop => 64,
+            Self::Tablet => 32,
+            Self::Mobile => 16,
+        }
+    }
+    /// Minimum floor for n_u (sphere). Same as cylinder.
+    pub fn min_u_sphere(&self) -> usize {
+        match self {
+            Self::Desktop => 12,
+            Self::Tablet => 10,
+            Self::Mobile => 8,
+        }
+    }
+    /// Minimum floor for n_v (sphere). Smaller than min_u because v_span
+    /// is half of u_span — a sphere face needs at least a few polar rows
+    /// to look smooth, but not as many as azimuthal.
+    pub fn min_v_sphere(&self) -> usize {
+        match self {
+            Self::Desktop => 8,
+            Self::Tablet => 6,
+            Self::Mobile => 4,
+        }
+    }
 }
 
 impl Default for SteinerBudgetProfile {

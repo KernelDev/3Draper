@@ -1694,6 +1694,195 @@ pub(crate) fn generate_cylinder_or_cone_steiner_grid(
 }
 
 // ============================================================
+// Sphere Steiner grid generator
+// ============================================================
+
+/// Generate a regular (u, v) grid of Steiner points for spherical faces
+/// that contain holes or have non-rectangular UV bbox.
+///
+/// # Why this exists
+///
+/// Sphere surfaces are parameterized as `(u, v) ∈ [0, 2π] × [0, π]`
+/// where `u` is the azimuthal angle and `v` is the polar angle. Both
+/// directions trace great circles of the same radius `R`, so the same
+/// chord-error formula `d_max = 2·acos(1 - tol/R)` applies to both.
+///
+/// The generic fallback (`parameter_division_2d`) recursively subdivides
+/// the UV bbox by chord error. Near the poles (`v ≈ 0` or `v ≈ π`),
+/// all `u` values produce the same 3D point, so the chord error is
+/// ~0 and the recursion stops early — producing too few `u`-knots near
+/// the poles. This leads to long thin triangles spanning the full
+/// azimuthal range near the poles, visually appearing as a "pinched"
+/// sphere cap.
+///
+/// This dedicated generator produces a proper regular grid in (u, v)
+/// space — `n_u` and `n_v` both derived from chord-error tolerance,
+/// capped by the `SteinerBudgetProfile` — with two special-case
+/// adjustments:
+///
+/// 1. **Pole skipping**: interior points with `v < POLE_EPS` or
+///    `v > π - POLE_EPS` are skipped, because at the poles all `u`
+///    values collapse to a single 3D point. Including them would
+///    create duplicate vertices and zero-area triangles when earcutr
+///    processes them. `POLE_EPS = 0.05` matches the threshold used in
+///    `triangulate_sphere_face_with_boundary` for pole detection.
+///
+/// 2. **Equator ring**: for near-full-sphere faces (`v_min ≤ POLE_EPS`
+///    and `v_max ≥ π - POLE_EPS`), an explicit equator ring at
+///    `v = π/2` is added as mandatory Steiner points. This prevents
+///    "collapsing" the sphere into a single pole when the budget is
+///    very tight and `n_v` happens to be odd (so no regular grid row
+///    lands exactly on `v = π/2`).
+///
+/// # Strategy
+///
+/// 1. **Chord-error tol**: `d_max = 2·acos(1 - tol/R)` — same formula
+///    for both `u` and `v` because both trace great circles of radius `R`.
+///
+/// 2. **n_u, n_v**: `ceil(span / d_max)`, clamped to
+///    `[min_u_sphere, max_u_sphere]` / `[min_v_sphere, max_v_sphere]`.
+///
+/// 3. **Budget-aware cap**: shrink `n_u`/`n_v` until
+///    `(n_u-1)·(n_v-1) ≤ candidate_multiplier × budget`.
+///
+/// 4. **Generate interior grid**: skip `i=0, i=n_u, j=0, j=n_v`
+///    (boundary comes from face edges), skip pole rows.
+///
+/// 5. **Equator ring**: if full-sphere, add ring at `v = π/2`.
+///
+/// 6. **Filter**: keep only points strictly inside the face domain
+///    (inside outer boundary, outside all holes, not on any boundary
+///    edge within `boundary_tol`).
+///
+/// 7. **Downsample**: `coarse_grid_sample` (preserves grid structure)
+///    then `downsample_interior_points` (final cap).
+pub(crate) fn generate_sphere_steiner_grid(
+    surface: &Surface,
+    domain: &ParametricDomain,
+    u_range: (f64, f64),
+    v_range: (f64, f64),
+    params: &crate::triangulate::TriangulationParams,
+    max_budget: usize,
+) -> Vec<Point2d> {
+    let sphere = match surface {
+        Surface::Sphere(s) => s,
+        _ => return Vec::new(),
+    };
+    let (u_min, u_max) = u_range;
+    let (v_min, v_max) = v_range;
+    let u_span = u_max - u_min;
+    let v_span = v_max - v_min;
+    if u_span <= 0.0 || v_span <= 0.0 {
+        return Vec::new();
+    }
+
+    let radius = sphere.radius.max(1e-9);
+
+    // Chord error: sphere has the same great-circle radius R in both
+    // u and v directions, so we use the same formula for both.
+    //   chord_error = R · (1 - cos(d/2))
+    //   d_max = 2 · acos(1 - tol/R)
+    let chord_tol = params.max_deviation.max(1e-5);
+    let d_max = if radius > chord_tol * 1.001 {
+        2.0 * (1.0 - chord_tol / radius).acos()
+    } else {
+        std::f64::consts::PI / 8.0 // fallback: 22.5°
+    };
+
+    // Profile-aware caps.
+    let profile = params.steiner_profile;
+    let max_u_cap = profile.max_u_sphere();
+    let max_v_cap = profile.max_v_sphere();
+    let min_u_floor = profile.min_u_sphere();
+    let min_v_floor = profile.min_v_sphere();
+    let n_u_raw = ((u_span / d_max).ceil() as usize).max(min_u_floor).min(max_u_cap);
+    let n_v_raw = ((v_span / d_max).ceil() as usize).max(min_v_floor).min(max_v_cap);
+
+    // BUDGET-AWARE CAP: same as cylinder/cone grid — don't generate more
+    // candidates than profile.candidate_multiplier() × budget.
+    let max_candidates = (max_budget as f64 * profile.candidate_multiplier()).ceil() as usize;
+    let mut n_u = n_u_raw;
+    let mut n_v = n_v_raw;
+    while n_u > min_u_floor && (n_u - 1) * (n_v - 1) > max_candidates {
+        n_u -= 1;
+    }
+    while n_v > min_v_floor && (n_u - 1) * (n_v - 1) > max_candidates {
+        n_v -= 1;
+    }
+
+    log::debug!(
+        "sphere steiner grid: n_u={}, n_v={}, radius={:.4}, u_span={:.4}, v_span={:.4}, budget={}",
+        n_u, n_v, radius, u_span, v_span, max_budget
+    );
+
+    // Pole threshold: matches `at_north_pole` / `at_south_pole` in
+    // `triangulate_sphere_face_with_boundary` (triangulate.rs).
+    // At the poles, all u values collapse to a single 3D point, so
+    // interior Steiner points there are degenerate.
+    const POLE_EPS: f64 = 0.05;
+
+    // Generate grid points (excluding boundaries — those come from face edges).
+    let mut grid: Vec<Point2d> = Vec::with_capacity((n_u - 1) * (n_v - 1));
+    for j in 1..n_v {
+        let v = v_min + v_span * j as f64 / n_v as f64;
+        // Skip rows too close to the poles — points there are degenerate.
+        if v < POLE_EPS || v > std::f64::consts::PI - POLE_EPS {
+            continue;
+        }
+        for i in 1..n_u {
+            let u = u_min + u_span * i as f64 / n_u as f64;
+            grid.push(Point2d::new(u, v));
+        }
+    }
+
+    // Equator ring (special case: full sphere).
+    // If the face covers near-full v range, ensure the equator (v = π/2)
+    // is always sampled, regardless of n_v parity. This prevents
+    // "collapsing" the sphere into a single pole when budget is very
+    // tight and n_v is odd (so no regular grid row lands exactly on
+    // v = π/2).
+    let is_full_sphere = v_min <= POLE_EPS && v_max >= std::f64::consts::PI - POLE_EPS;
+    if is_full_sphere {
+        let v_eq = std::f64::consts::PI / 2.0;
+        for i in 1..n_u {
+            let u = u_min + u_span * i as f64 / n_u as f64;
+            grid.push(Point2d::new(u, v_eq));
+        }
+    }
+
+    // Filter to points strictly inside the face domain (outside holes, inside outer boundary).
+    let span_max = u_span.max(v_span);
+    let boundary_tol = (span_max * 1e-6).max(1e-9);
+
+    let mut filtered: Vec<Point2d> = Vec::with_capacity(grid.len());
+    for pt in &grid {
+        // Use cached containment grid (O(1)) — see cylinder grid for full rationale.
+        if !domain.contains(pt) {
+            continue;
+        }
+        if is_point_on_boundary(&domain.outer_boundary, pt, boundary_tol) {
+            continue;
+        }
+        let on_hole = domain.holes.iter()
+            .any(|hole| is_point_on_boundary(hole, pt, boundary_tol));
+        if on_hole {
+            continue;
+        }
+        filtered.push(*pt);
+    }
+
+    log::debug!(
+        "sphere steiner grid: {} grid pts → {} after domain filter",
+        grid.len(), filtered.len()
+    );
+
+    // Downsample to budget if needed (preserving grid structure via coarse_grid_sample,
+    // then a final cap via downsample_interior_points).
+    let coarsened = coarse_grid_sample(&filtered, max_budget);
+    downsample_interior_points(&coarsened, max_budget)
+}
+
+// ============================================================
 // Planar Steiner grid generator (for planes WITH holes)
 // ============================================================
 
@@ -2805,6 +2994,46 @@ pub fn triangulate_surface_consistent(
             (v_min, v_max),
             params,
             cyl_cone_budget,
+        )
+    } else if matches!(surface, Surface::Sphere(_)) {
+        // Sphere faces — use a dedicated regular (u, v) Steiner grid.
+        //
+        // WHY: `parameter_division_2d` (the generic branch below)
+        // recursively subdivides the UV bbox by chord error. Near the
+        // poles (v ≈ 0 or v ≈ π), all u values produce the same 3D
+        // point, so the chord error is ~0 and the recursion stops
+        // early — producing too few u-knots near the poles. This
+        // leads to long thin triangles spanning the full azimuthal
+        // range near the poles, visually appearing as a "pinched"
+        // sphere cap.
+        //
+        // `generate_sphere_steiner_grid` produces a proper regular
+        // grid in (u, v) space — n_u and n_v both derived from
+        // chord-error tolerance (great-circle radius R in both
+        // directions), capped by SteinerBudgetProfile — with two
+        // special-case adjustments:
+        //   1. Pole skipping: interior points with v < 0.05 or
+        //      v > π - 0.05 are skipped (matches `at_north_pole` /
+        //      `at_south_pole` threshold in `triangulate_sphere_face_with_boundary`).
+        //   2. Equator ring: for near-full-sphere faces, an explicit
+        //      equator ring at v = π/2 is added as mandatory Steiner
+        //      points (prevents "collapsing" the sphere into a single
+        //      pole when budget is very tight and n_v is odd).
+        //
+        // This branch is entered for sphere faces WITH holes or with
+        // non-rectangular UV bbox. Sphere faces WITHOUT holes and with
+        // 4-corner UV bbox are handled by the earlier branch (returns
+        // empty Vec, lets chord-error refiner do its job). Full-sphere
+        // faces (no boundary at all) are handled by
+        // `triangulate_sphere_full_grid` before reaching here.
+        let sphere_budget = max_interior_budget.max(8);
+        generate_sphere_steiner_grid(
+            surface,
+            &domain,
+            (u_min, u_max),
+            (v_min, v_max),
+            params,
+            sphere_budget,
         )
     } else {
         // Compute adaptive subdivision grid for the entire surface, then
@@ -4796,6 +5025,165 @@ mod tests {
 
         assert!(u_unique.len() >= 2, "u_unique.len() = {}", u_unique.len());
         assert!(v_unique.len() >= 2, "v_unique.len() = {}", v_unique.len());
+    }
+
+    // ============================================================
+    // Sphere Steiner grid tests
+    // (mirrors the cylinder tests above)
+    // ============================================================
+
+    #[test]
+    fn test_sphere_steiner_grid_basic() {
+        use draper_geometry::{SphereSurface, Surface, Point3d};
+
+        // Sphere radius=10, full U range [0, 2π], V range [0, π] (full sphere).
+        let sph = SphereSurface::new(Point3d::new(0.0, 0.0, 0.0), 10.0);
+        let surface = Surface::Sphere(sph);
+
+        // Square outer boundary in UV (4 corners, no holes).
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(2.0 * PI, 0.0),
+            Point2d::new(2.0 * PI, PI),
+            Point2d::new(0.0, PI),
+        ];
+        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, PI));
+        domain.init_containment_grid();
+
+        let params = make_test_params(0.05);
+        let pts = generate_sphere_steiner_grid(
+            &surface, &domain, (0.0, 2.0 * PI), (0.0, PI), &params, 4096,
+        );
+
+        // Should have multiple interior points (regular grid in both u and v).
+        assert!(pts.len() >= 10, "Expected ≥10 Steiner points, got {}", pts.len());
+
+        // All points should be strictly inside the domain (not on boundary).
+        for p in &pts {
+            assert!(p.u > 1e-6 && p.u < 2.0 * PI - 1e-6, "u={} on boundary", p.u);
+            assert!(p.v > 1e-6 && p.v < PI - 1e-6, "v={} on boundary", p.v);
+            assert!(domain.contains_ray(p), "point {:?} outside domain", p);
+        }
+
+        // No points should be within POLE_EPS of either pole.
+        const POLE_EPS: f64 = 0.05;
+        for p in &pts {
+            assert!(p.v > POLE_EPS, "v={} too close to north pole", p.v);
+            assert!(p.v < PI - POLE_EPS, "v={} too close to south pole", p.v);
+        }
+
+        // Equator (v = π/2) should be present (full-sphere case).
+        let has_equator = pts.iter().any(|p| (p.v - PI / 2.0).abs() < 1e-6);
+        assert!(has_equator, "Equator ring missing in full-sphere Steiner grid");
+
+        // The V coordinates should form a regular grid (multiple distinct v values).
+        let mut v_values: Vec<f64> = pts.iter().map(|p| p.v).collect();
+        v_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v_values.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+        assert!(v_values.len() >= 3, "Expected ≥3 distinct v values, got {}: {:?}", v_values.len(), v_values);
+    }
+
+    #[test]
+    fn test_sphere_steiner_grid_excludes_holes() {
+        use draper_geometry::{SphereSurface, Surface, Point3d};
+
+        let sph = SphereSurface::new(Point3d::new(0.0, 0.0, 0.0), 10.0);
+        let surface = Surface::Sphere(sph);
+
+        // Outer boundary = full sphere UV rectangle.
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(2.0 * PI, 0.0),
+            Point2d::new(2.0 * PI, PI),
+            Point2d::new(0.0, PI),
+        ];
+        // Hole at u ∈ [2.0, 4.0], v ∈ [1.0, 2.0] (well away from poles).
+        let hole = vec![
+            Point2d::new(2.0, 1.0),
+            Point2d::new(4.0, 1.0),
+            Point2d::new(4.0, 2.0),
+            Point2d::new(2.0, 2.0),
+        ];
+        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, PI))
+            .with_hole(hole);
+        domain.init_containment_grid();
+
+        let params = make_test_params(0.05);
+        let pts = generate_sphere_steiner_grid(
+            &surface, &domain, (0.0, 2.0 * PI), (0.0, PI), &params, 4096,
+        );
+
+        assert!(!pts.is_empty(), "Should have Steiner points");
+
+        // No Steiner point should fall inside the hole.
+        for p in &pts {
+            let in_hole = p.u > 2.0 && p.u < 4.0 && p.v > 1.0 && p.v < 2.0;
+            assert!(!in_hole, "Steiner point {:?} is inside hole", p);
+            assert!(domain.contains_ray(p), "point {:?} outside domain", p);
+        }
+    }
+
+    #[test]
+    fn test_sphere_steiner_grid_respects_budget() {
+        use draper_geometry::{SphereSurface, Surface, Point3d};
+
+        let sph = SphereSurface::new(Point3d::new(0.0, 0.0, 0.0), 10.0);
+        let surface = Surface::Sphere(sph);
+
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(2.0 * PI, 0.0),
+            Point2d::new(2.0 * PI, PI),
+            Point2d::new(0.0, PI),
+        ];
+        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, PI));
+        domain.init_containment_grid();
+
+        // Tight chord-error tol → many candidates; small budget → must cap.
+        let params = make_test_params(0.01);
+        let budget = 50;
+        let pts = generate_sphere_steiner_grid(
+            &surface, &domain, (0.0, 2.0 * PI), (0.0, PI), &params, budget,
+        );
+
+        assert!(pts.len() <= budget, "Budget {} exceeded: {} points", budget, pts.len());
+        assert!(!pts.is_empty(), "Should have at least some Steiner points");
+    }
+
+    #[test]
+    fn test_sphere_steiner_grid_band_skips_poles() {
+        use draper_geometry::{SphereSurface, Surface, Point3d};
+
+        // Partial sphere band: v ∈ [0.02, π - 0.02] — includes both pole
+        // neighborhoods but does NOT include the poles themselves.
+        // The Steiner grid should still skip rows too close to the poles
+        // (v < 0.05 or v > π - 0.05).
+        let sph = SphereSurface::new(Point3d::new(0.0, 0.0, 0.0), 5.0);
+        let surface = Surface::Sphere(sph);
+
+        let v_min = 0.02;
+        let v_max = std::f64::consts::PI - 0.02;
+        let outer = vec![
+            Point2d::new(0.0, v_min),
+            Point2d::new(2.0 * PI, v_min),
+            Point2d::new(2.0 * PI, v_max),
+            Point2d::new(0.0, v_max),
+        ];
+        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (v_min, v_max));
+        domain.init_containment_grid();
+
+        let params = make_test_params(0.05);
+        let pts = generate_sphere_steiner_grid(
+            &surface, &domain, (0.0, 2.0 * PI), (v_min, v_max), &params, 4096,
+        );
+
+        const POLE_EPS: f64 = 0.05;
+        for p in &pts {
+            // Even though the domain includes v=0.02, no Steiner point
+            // should land in the pole-degenerate zone [0, 0.05) or (π-0.05, π].
+            assert!(p.v > POLE_EPS, "v={} too close to north pole", p.v);
+            assert!(p.v < std::f64::consts::PI - POLE_EPS, "v={} too close to south pole", p.v);
+        }
     }
 }
 
