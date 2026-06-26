@@ -1594,14 +1594,15 @@ pub(crate) fn generate_cylinder_or_cone_steiner_grid(
     } else {
         std::f64::consts::PI / 8.0 // fallback: 22.5°
     };
-    // Cap: at least 8 subdivisions, at most 64.
-    // Previous cap was 128 which generated up to 128×64 = 8192 candidate points
-    // per face, making the O(boundary) contains_ray filtering extremely slow
-    // on mobile WASM (caused multi-minute UI freezes on drill_top.stp).
-    // 64 angular subdivisions is more than enough for visual quality at any
-    // practical LOD — even a tight 0.01mm chord error on a 100mm cylinder only
-    // needs ~50 subdivisions.
-    let n_u_raw = ((u_span / du_max).ceil() as usize).max(8).min(64);
+    // Profile-aware caps: the previous global cap of 64 was too aggressive
+    // for desktop and caused visible quality regression. The new
+    // `SteinerBudgetProfile` system restores desktop quality (up to 96
+    // angular subdivisions) while keeping mobile fast (cap 32).
+    let profile = params.steiner_profile;
+    let max_u_cap = profile.max_u_cyl();
+    let max_v_cap = profile.max_v_cyl();
+    let min_u_floor = profile.min_u_cyl();
+    let n_u_raw = ((u_span / du_max).ceil() as usize).max(min_u_floor).min(max_u_cap);
 
     // Determine n_v (axial subdivisions) from desired aspect ratio.
     // Target: quad size in v ≈ arc length per angular quad.
@@ -1609,8 +1610,8 @@ pub(crate) fn generate_cylinder_or_cone_steiner_grid(
     let arc_per_quad = u_span * radius_max / n_u_raw as f64;
     // Use a relaxed aspect ratio (up to 4:1) to avoid excessive V subdivisions
     // on very tall cylinders with small radius.
-    let target_dv = arc_per_quad.max(v_span / 32.0);
-    let n_v_raw = ((v_span / target_dv).ceil() as usize).max(2).min(32);
+    let target_dv = arc_per_quad.max(v_span / max_v_cap as f64);
+    let n_v_raw = ((v_span / target_dv).ceil() as usize).max(2).min(max_v_cap);
 
     // BUDGET-AWARE CAP: Don't generate more candidate points than we can possibly
     // use. The previous code generated up to 64×64 = 4096 candidates, then
@@ -1618,13 +1619,14 @@ pub(crate) fn generate_cylinder_or_cone_steiner_grid(
     // budget (often ~2000). This wasted enormous time on candidates that were
     // immediately discarded.
     //
-    // Now: cap n_u × n_v to ~1.5× budget (the 1.5× accounts for points filtered
-    // out by domain containment). This keeps the candidate count proportional
-    // to what we'll actually keep.
-    let max_candidates = (max_budget as f64 * 1.5).ceil() as usize;
+    // Now: cap n_u × n_v to profile.candidate_multiplier() × budget
+    // (desktop = 2×, tablet = 1.5×, mobile = 1.25×). Desktop uses a higher
+    // multiplier because it has more CPU headroom and the extra candidates
+    // preserve grid structure better.
+    let max_candidates = (max_budget as f64 * profile.candidate_multiplier()).ceil() as usize;
     let mut n_u = n_u_raw;
     let mut n_v = n_v_raw;
-    while n_u > 8 && (n_u - 1) * (n_v - 1) > max_candidates {
+    while n_u > min_u_floor && (n_u - 1) * (n_v - 1) > max_candidates {
         n_u -= 1;
     }
     while n_v > 2 && (n_u - 1) * (n_v - 1) > max_candidates {
@@ -1741,6 +1743,7 @@ pub(crate) fn generate_planar_steiner_grid(
     u_range: (f64, f64),
     v_range: (f64, f64),
     max_budget: usize,
+    profile: crate::triangulate::SteinerBudgetProfile,
 ) -> Vec<Point2d> {
     let (u_min, u_max) = u_range;
     let (v_min, v_max) = v_range;
@@ -1775,17 +1778,18 @@ pub(crate) fn generate_planar_steiner_grid(
         (u_span.max(v_span) / 8.0).max(1e-9)
     };
 
-    // n_u, n_v from target edge length, capped to [4, 32].
-    // Previous cap was 64 which generated up to 64×64 = 4096 candidate points,
-    // making the O(boundary) filtering very slow on mobile WASM.
-    // 32 is more than enough for planar face visualization quality.
-    let n_u_raw = ((u_span / target_edge).ceil() as usize).max(4).min(32);
-    let n_v_raw = ((v_span / target_edge).ceil() as usize).max(4).min(32);
+    // Profile-aware caps: desktop gets up to 64×64 (4096 candidates),
+    // tablet 48×48 (2304), mobile 32×32 (1024). The previous global cap
+    // of 32 was too aggressive for desktop and caused visible quality
+    // regression on planar faces with holes (notably on drill_top.stp
+    // where the user reported "сильно хуже чем было раньше").
+    let max_uv_cap = profile.max_uv_plane();
+    let n_u_raw = ((u_span / target_edge).ceil() as usize).max(4).min(max_uv_cap);
+    let n_v_raw = ((v_span / target_edge).ceil() as usize).max(4).min(max_uv_cap);
 
     // BUDGET-AWARE CAP: same as cylinder/cone grid — don't generate more
-    // candidates than ~1.5× the budget. Avoids wasting time filtering points
-    // that will be immediately downsampled away.
-    let max_candidates = (max_budget as f64 * 1.5).ceil() as usize;
+    // candidates than profile.candidate_multiplier() × budget.
+    let max_candidates = (max_budget as f64 * profile.candidate_multiplier()).ceil() as usize;
     let mut n_u = n_u_raw;
     let mut n_v = n_v_raw;
     while n_u > 4 && (n_u - 1) * (n_v - 1) > max_candidates {
@@ -2765,6 +2769,7 @@ pub fn triangulate_surface_consistent(
             (u_min, u_max),
             (v_min, v_max),
             planar_budget,
+            params.steiner_profile,
         )
     } else if matches!(surface, Surface::Cylinder(_) | Surface::Cone(_)) {
         // Cylinder/cone faces — use a dedicated regular (u, v) Steiner grid.
@@ -4661,6 +4666,7 @@ mod tests {
         // Interior points: (4-1) × (4-1) = 9 points.
         let pts = generate_planar_steiner_grid(
             &domain, &outer_uv, (0.0, 10.0), (0.0, 10.0), 4096,
+            crate::triangulate::SteinerBudgetProfile::Desktop,
         );
 
         assert!(pts.len() >= 4, "Expected ≥4 interior points, got {}", pts.len());
@@ -4699,6 +4705,7 @@ mod tests {
         ];
         let pts = generate_planar_steiner_grid(
             &domain, &outer_uv, (0.0, 10.0), (0.0, 10.0), 4096,
+            crate::triangulate::SteinerBudgetProfile::Desktop,
         );
 
         // No point should fall inside the hole region [4,6]×[4,6].
@@ -4731,6 +4738,7 @@ mod tests {
         let budget = 5;
         let pts = generate_planar_steiner_grid(
             &domain, &outer_uv, (0.0, 10.0), (0.0, 10.0), budget,
+            crate::triangulate::SteinerBudgetProfile::Desktop,
         );
 
         assert!(pts.len() <= budget, "Expected ≤{} points, got {}", budget, pts.len());
@@ -4759,6 +4767,7 @@ mod tests {
 
         let pts = generate_planar_steiner_grid(
             &domain, &outer_uv, (0.0, 10.0), (0.0, 10.0), 4096,
+            crate::triangulate::SteinerBudgetProfile::Desktop,
         );
 
         let tol = 1e-9;

@@ -110,6 +110,84 @@ impl Default for TriangulationGuard {
 use std::f64::consts::PI;
 use std::collections::HashMap;
 
+/// Steiner grid budget profile — controls the maximum grid density
+/// per face based on the target platform.
+///
+/// Profiles were introduced after the regression caused by the global
+/// caps `n_u ≤ 64, n_v ≤ 32` (commit `276735c`). Those caps were too
+/// aggressive for desktop and produced visibly coarse meshes. The
+/// profile system restores desktop quality while keeping mobile fast.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SteinerBudgetProfile {
+    /// Desktop profile — high-quality grid.
+    /// `n_u ≤ 96`, `n_v ≤ 64` for cylinder/cone.
+    /// `n_u/n_v ≤ 64` for plane.
+    /// Used when running on native or wide-screen WASM (≥ 1024 px).
+    Desktop,
+    /// Tablet profile — balanced.
+    /// `n_u ≤ 64`, `n_v ≤ 32`.
+    /// Used for WASM on medium screens (768–1023 px).
+    Tablet,
+    /// Mobile profile — coarser grid for slower CPUs.
+    /// `n_u ≤ 32`, `n_v ≤ 16`.
+    /// Used for WASM on narrow screens (< 768 px).
+    Mobile,
+}
+
+impl SteinerBudgetProfile {
+    /// Maximum number of U subdivisions for cylinder/cone Steiner grid.
+    pub fn max_u_cyl(&self) -> usize {
+        match self {
+            Self::Desktop => 96,
+            Self::Tablet => 64,
+            Self::Mobile => 32,
+        }
+    }
+    /// Maximum number of V subdivisions for cylinder/cone Steiner grid.
+    pub fn max_v_cyl(&self) -> usize {
+        match self {
+            Self::Desktop => 64,
+            Self::Tablet => 32,
+            Self::Mobile => 16,
+        }
+    }
+    /// Maximum number of U/V subdivisions for planar Steiner grid.
+    pub fn max_uv_plane(&self) -> usize {
+        match self {
+            Self::Desktop => 64,
+            Self::Tablet => 48,
+            Self::Mobile => 32,
+        }
+    }
+    /// Budget multiplier — how many candidate points to generate
+    /// relative to the requested budget. Higher = more filtering work
+    /// but better grid structure preservation.
+    pub fn candidate_multiplier(&self) -> f64 {
+        match self {
+            Self::Desktop => 2.0,
+            Self::Tablet => 1.5,
+            Self::Mobile => 1.25,
+        }
+    }
+    /// Minimum floor for n_u (cylinder/cone) — prevents visually
+    /// broken grids even at extreme LOD downgrades.
+    pub fn min_u_cyl(&self) -> usize {
+        match self {
+            Self::Desktop => 12,
+            Self::Tablet => 10,
+            Self::Mobile => 8,
+        }
+    }
+}
+
+impl Default for SteinerBudgetProfile {
+    fn default() -> Self {
+        // Default to Desktop — native builds and tests use this.
+        // The WASM viewer overrides via `TriangulationParams::steiner_profile`.
+        Self::Desktop
+    }
+}
+
 /// Triangulation parameters.
 #[derive(Clone)]
 pub struct TriangulationParams {
@@ -140,6 +218,10 @@ pub struct TriangulationParams {
     /// This prevents a single face from generating millions of triangles
     /// that freeze the browser on WASM. Default: 2000.
     pub max_face_triangles: usize,
+    /// Steiner grid budget profile — controls max grid density per face.
+    /// Defaults to `Desktop`. The WASM viewer sets this to `Mobile` or
+    /// `Tablet` based on screen width to keep mobile devices responsive.
+    pub steiner_profile: SteinerBudgetProfile,
     /// Target fraction of triangles to KEEP after post-triangulation decimation.
     /// `1.0` = no decimation (keep all triangles).
     /// `0.1` = keep only 10% of triangles (very coarse, ~90% reduction).
@@ -171,6 +253,7 @@ impl std::fmt::Debug for TriangulationParams {
             .field("adaptive", &self.adaptive)
             .field("parallel", &self.parallel)
             .field("max_face_triangles", &self.max_face_triangles)
+            .field("steiner_profile", &self.steiner_profile)
             .field("keep_ratio", &self.keep_ratio)
             .field("progress_callback", &self.progress_callback.as_ref().map(|_| "Some(...)"))
             .finish()
@@ -190,6 +273,7 @@ impl Default for TriangulationParams {
             parallel: false,
             progress_callback: None,
             max_face_triangles: 8000,
+            steiner_profile: SteinerBudgetProfile::default(),
             keep_ratio: 1.0, // No decimation by default — preserve backward compatibility
         }
     }
@@ -278,6 +362,7 @@ impl TriangulationParams {
             parallel: false,
             progress_callback: None,
             max_face_triangles,
+            steiner_profile: SteinerBudgetProfile::default(),
             keep_ratio,
         }
     }

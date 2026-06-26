@@ -506,6 +506,13 @@ pub struct PendingBrepInstance {
     pub transform: Option<[[f64; 4]; 4]>,
     /// Optional RGBA color (0..1 range).
     pub color: Option<[f32; 4]>,
+    /// Optional estimate of the face count for this BREP.
+    /// Used by the viewer to decide how aggressively to downgrade LOD on
+    /// mobile (>2000 faces → 2-level downgrade, else 1-level). `None` if
+    /// the estimate is not available (viewer treats it as 0, i.e., no
+    /// downgrade beyond the default 1-level).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub face_count_estimate: Option<usize>,
 }
 
 /// Result of `triangulate_pending_chunked` — allows progressive, non-blocking
@@ -776,6 +783,27 @@ impl OwnedStepConversionContext {
         // max_deviation, angular_samples, height_samples, max_face_triangles,
         // and detail_level proportionally to `lod`.
         Self::new_with_params(step_file, TriangulationParams::for_lod(lod.clamp(0.0, 1.0)))
+    }
+
+    /// Create a new owning conversion context with an LOD value and a Steiner
+    /// budget profile.
+    ///
+    /// This is the entry point used by the WASM viewer, which detects the
+    /// platform (mobile / tablet / desktop) from `screen_width` and selects
+    /// the appropriate profile. The profile controls the maximum grid density
+    /// per face — mobile uses lower caps to avoid UI freezes on slow CPUs,
+    /// desktop uses higher caps for visual quality.
+    ///
+    /// See `draper_mesh::triangulate::SteinerBudgetProfile` for the full
+    /// matrix of cap values per profile.
+    pub fn new_with_lod_and_profile(
+        step_file: StepFile,
+        lod: f64,
+        profile: draper_mesh::triangulate::SteinerBudgetProfile,
+    ) -> Self {
+        let mut params = TriangulationParams::for_lod(lod.clamp(0.0, 1.0));
+        params.steiner_profile = profile;
+        Self::new_with_params(step_file, params)
     }
 
     /// Create a new owning conversion context with explicit triangulation params.
@@ -1219,6 +1247,92 @@ impl OwnedStepConversionContext {
         if self.active_session.take().is_some() {
             log::info!("Aborted active BREP chunked session");
         }
+    }
+
+    /// Take the currently-active chunked session, finalize it with whatever
+    /// faces have been processed so far, and return the partial mesh + face
+    /// infos.
+    ///
+    /// This is called by the viewer when the global loading timeout fires
+    /// (120s on mobile, 300s on desktop). Without this method, the active
+    /// BREP session would be silently dropped on timeout — the user would
+    /// see "4 of 5 instances" loaded but the 5th instance would simply
+    /// vanish ("исчез один элемент сборки" — user-reported regression).
+    ///
+    /// Returns `None` if there is no active session, or if the session
+    /// produced 0 triangles (e.g., it was aborted before the first face
+    /// completed). In either case the caller should log a warning.
+    ///
+    /// Returns `Some((mesh, faces, faces_done, faces_total))` if the session
+    /// had any progress. The caller is responsible for building a
+    /// `DetailedMeshInstance` from the mesh via `build_instance`-equivalent
+    /// logic (apply transform + decimation).
+    pub fn take_partial_active_session(
+        &mut self,
+        pending: &PendingBrepInstance,
+    ) -> Option<(TriangleMesh, Vec<FaceInfo>, usize, usize)> {
+        let session_box = self.active_session.take()?;
+        let session = *session_box;
+        let brep_id = session.brep_id;
+        let faces_done = session.next_face_idx;
+        let faces_total = session.face_data_list.len();
+
+        log::warn!(
+            "BREP #{}: taking PARTIAL session — {}/{} faces processed ({}% complete)",
+            brep_id, faces_done, faces_total,
+            if faces_total > 0 { (faces_done * 100) / faces_total } else { 0 }
+        );
+
+        if faces_done == 0 {
+            log::warn!(
+                "BREP #{}: partial session had 0 faces completed — nothing to return",
+                brep_id
+            );
+            return None;
+        }
+
+        // Build a lightweight converter for finalize (which uses it only for
+        // _converter param — currently unused inside finalize).
+        let converter = StepConverter::from_cached_maps(
+            &self.step_file,
+            self.config.clone(),
+            self.entity_map.clone(),
+            self.pd_brep_map.clone(),
+            self.nauo_transform_map.clone(),
+        );
+
+        let (mut mesh, faces) = session.finalize(&converter);
+
+        // Apply the instance transform (same as build_instance).
+        if let Some(ref tf) = pending.transform {
+            mesh.transform(tf);
+        }
+
+        // Apply post-triangulation decimation (same as build_instance).
+        if self.params.keep_ratio < 1.0 && mesh.triangle_count() >= 4 {
+            let (orig, final_) = draper_mesh::decimate_mesh(&mut mesh, self.params.keep_ratio);
+            if final_ < orig {
+                log::info!(
+                    "BREP #{} (partial) — decimated {}→{} triangles (keep_ratio={:.2})",
+                    brep_id, orig, final_, self.params.keep_ratio
+                );
+            }
+        }
+
+        if mesh.triangle_count() == 0 {
+            log::warn!(
+                "BREP #{}: partial session produced 0 triangles after finalize — skipping",
+                brep_id
+            );
+            return None;
+        }
+
+        log::info!(
+            "BREP #{}: partial session finalized — {} verts, {} tris, {} faces",
+            brep_id, mesh.vertex_count(), mesh.triangle_count(), faces.len()
+        );
+
+        Some((mesh, faces, faces_done, faces_total))
     }
 }
 
@@ -5625,6 +5739,7 @@ impl<'a> StepConverter<'a> {
                 brep_id: brep.id,
                 transform: None,
                 color,
+                face_count_estimate: None,
             });
         }
 
@@ -5642,6 +5757,7 @@ impl<'a> StepConverter<'a> {
                 brep_id: fb.id,
                 transform: None,
                 color,
+                face_count_estimate: None,
             });
         }
 
@@ -5722,6 +5838,7 @@ impl<'a> StepConverter<'a> {
                         brep_id,
                         transform: item.composed,
                         color,
+                        face_count_estimate: None,
                     });
                 }
             } else {

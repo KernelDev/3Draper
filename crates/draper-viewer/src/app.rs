@@ -3524,25 +3524,42 @@ impl ViewerApp {
             // ─── Mobile: auto-downgrade LOD for faster loading ───────────────
             // Mobile CPUs are 2-4× slower than desktop, and users have less
             // patience for long loads. If we're on mobile and the user hasn't
-            // manually lowered the quality, drop from High → Medium
-            // (or from Ultra → High) to speed up loading by ~2-3×.
-            // The user can always raise the quality manually after loading
-            // completes via the Quality dropdown.
+            // manually lowered the quality, drop by ONE level (Ultra→High,
+            // High→Medium) to speed up loading by ~2× without making the mesh
+            // look like a "low-poly preview".
+            //
+            // Previous strategy (Ultra→Medium, High→Low) was too aggressive —
+            // user reported "сильно хуже чем было раньше" (much worse than before).
+            // With the new SteinerBudgetProfile system (Mobile profile caps grid
+            // at 32×16 instead of 96×64), the Steiner grid is already much
+            // coarser on mobile, so we don't need to also aggressively drop LOD.
+            //
+            // For very large files (>2000 faces estimated) we still drop by TWO
+            // levels because the per-face work compounds. We approximate the
+            // face count from the number of BREPs: each BREP typically has
+            // 100-500 faces, so 5 BREPs ≈ 2500 faces.
+            let total_faces_estimate: usize = pending.len() * 500;
             if self.is_mobile {
-                // Aggressive downgrade for mobile — previous Ultra→High / High→Medium
-                // was too conservative: drill_top.stp's GEAR BREP took 42s on desktop
-                // at LOD 0.5 (Medium), which is 3-7 minutes on mobile. Ultra→Medium /
-                // High→Low cuts the work by ~3-5×, bringing the GEAR BREP to under
-                // 60s on mobile (within the 120s timeout).
-                let new_lod = match self.lod_level {
-                    LodLevel::Ultra => Some(LodLevel::Medium),
-                    LodLevel::High => Some(LodLevel::Low),
-                    LodLevel::Medium => Some(LodLevel::Low),
-                    _ => None, // Low/Preview stay as-is
+                let new_lod = if total_faces_estimate > 2000 {
+                    // Very large file — drop by 2 levels
+                    match self.lod_level {
+                        LodLevel::Ultra => Some(LodLevel::Medium),
+                        LodLevel::High => Some(LodLevel::Low),
+                        LodLevel::Medium => Some(LodLevel::Low),
+                        _ => None,
+                    }
+                } else {
+                    // Normal file — drop by 1 level only
+                    match self.lod_level {
+                        LodLevel::Ultra => Some(LodLevel::High),
+                        LodLevel::High => Some(LodLevel::Medium),
+                        _ => None,
+                    }
                 };
                 if let Some(new) = new_lod {
                     self.log(&format!(
-                        "Mobile detected — auto-lowering quality from {} to {} for faster loading (you can raise it manually after loading completes)",
+                        "Mobile detected (faces≈{}) — auto-lowering quality from {} to {} for faster loading (raise manually after load)",
+                        total_faces_estimate,
                         self.lod_level.label(),
                         new.label()
                     ));
@@ -3873,8 +3890,54 @@ impl ViewerApp {
         let instance_count = self.detailed_instances.len();
         self.is_loading = false;
         self.loading_start = None;
+
+        // CRITICAL: Before clearing pending_breps, salvage any partial
+        // triangulation from the active chunked session. This is symmetric
+        // with the timeout handler — if the user clicked Cancel during a
+        // long-running BREP, the partial work should still appear.
+        let mut salvaged_count = 0usize;
+        if show_partial && !self.pending_breps.is_empty() {
+            let pending_front = self.pending_breps[0].clone();
+            if let Some(ref mut ctx) = self.conversion_ctx {
+                if let Some((partial_mesh, partial_faces, faces_done, faces_total)) =
+                    ctx.take_partial_active_session(&pending_front)
+                {
+                    if partial_mesh.triangle_count() > 0 {
+                        let tri_start = self.mesh.triangle_count();
+                        let color = pending_front.color.unwrap_or_else(|| {
+                            Self::instance_color(self.triangulated_count)
+                        });
+                        self.mesh.merge_with_color(&partial_mesh, color);
+                        let tri_end = self.mesh.triangle_count();
+                        self.instance_triangle_ranges.push((tri_start, tri_end));
+                        let inst_idx = self.instance_triangle_ranges.len() - 1;
+                        if let Some(ref mut tree) = self.assembly_tree {
+                            assign_instance_to_tree(tree, inst_idx);
+                        }
+                        self.detailed_instances.push(DetailedMeshInstance {
+                            name: pending_front.name.clone(),
+                            mesh: partial_mesh,
+                            color: pending_front.color,
+                            transform: pending_front.transform,
+                            brep_id: pending_front.brep_id,
+                            faces: partial_faces,
+                        });
+                        self.triangulated_count += 1;
+                        salvaged_count = 1;
+                        self.log_warning(&format!(
+                            "BREP #{} '{}' — salvaged PARTIAL triangulation on cancel: {}/{} faces ({}%), {} triangles",
+                            pending_front.brep_id, pending_front.name,
+                            faces_done, faces_total,
+                            if faces_total > 0 { (faces_done * 100) / faces_total } else { 0 },
+                            tri_end - tri_start
+                        ));
+                    }
+                }
+            }
+        }
+
         self.pending_breps.clear();
-        // Abort any active chunked BREP session before dropping the context.
+        // Abort any remaining chunked BREP session (already salvaged above if show_partial).
         if let Some(ref mut ctx) = self.conversion_ctx {
             ctx.abort_active_session();
         }
@@ -3883,21 +3946,27 @@ impl ViewerApp {
         // (which has a 4GB limit in Chrome) and eventually crash the tab.
         self.conversion_ctx = None;
         self.pending_step_file = None;
-        self.triangulated_count = 0;
-        self.total_instance_count = 0;
+        self.chunked_brep_faces_done = 0;
+        self.chunked_brep_faces_total = 0;
         #[cfg(target_arch = "wasm32")]
         self.worker_pending_meshes.clear();
+        // Note: do NOT reset triangulated_count / total_instance_count here —
+        // they are used by the partial-result message below. They get reset
+        // on the next load_step_file call.
 
-        if show_partial && had_mesh && instance_count > 0 {
+        if show_partial && (had_mesh || salvaged_count > 0) {
             // Commit partial result so the user sees what was loaded.
+            let shown_instances = instance_count + salvaged_count;
             self.log_warning(&format!(
-                "Loading canceled — showing partial result ({} of {} instances)",
-                instance_count,
-                instance_count + self.pending_breps.len()
+                "Loading canceled — showing partial result ({} instance(s), {} triangles)",
+                shown_instances,
+                self.mesh.triangle_count()
             ));
             self.load_mesh(self.mesh.clone(), &format!("STEP (partial): {}", self.loading_name));
         } else {
             self.log("Loading canceled");
+            self.triangulated_count = 0;
+            self.total_instance_count = 0;
         }
         self.loading_name.clear();
     }
@@ -4048,8 +4117,19 @@ impl ViewerApp {
                 // affects STEP triangulation. Without this, the context would
                 // use TriangulationParams::default() (LOD 1.0) regardless of
                 // the dropdown, and switching High→Low would have no effect.
+                //
+                // Profile: select based on `is_mobile` (which is computed from
+                // `screen_width < 768.0` in `update()`). Desktop/Tablet users
+                // get the Desktop profile (96×64 grid cap) for visual quality;
+                // Mobile users get the Mobile profile (32×16 grid cap) for
+                // responsiveness on slow CPUs.
+                let steiner_profile = if self.is_mobile {
+                    draper_mesh::triangulate::SteinerBudgetProfile::Mobile
+                } else {
+                    draper_mesh::triangulate::SteinerBudgetProfile::Desktop
+                };
                 let ctx_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    OwnedStepConversionContext::new_with_lod(step_file, lod_value)
+                    OwnedStepConversionContext::new_with_lod_and_profile(step_file, lod_value, steiner_profile)
                 }));
                 match ctx_result {
                     Ok(ctx) => {
@@ -4085,9 +4165,83 @@ impl ViewerApp {
             if start.elapsed() > timeout {
                 let elapsed = start.elapsed().as_secs();
                 let remaining = self.pending_breps.len();
+
+                // CRITICAL: Before declaring timeout, salvage any partial
+                // triangulation from the active chunked session. Without this,
+                // the active BREP would simply vanish — the user would see
+                // "4 of 5 instances" but the 5th would be missing. This was
+                // the user-reported "исчез один элемент сборки" regression.
+                if !self.pending_breps.is_empty() {
+                    let pending_front = self.pending_breps[0].clone();
+                    if let Some(ref mut ctx) = self.conversion_ctx {
+                        match ctx.take_partial_active_session(&pending_front) {
+                            Some((partial_mesh, partial_faces, faces_done, faces_total)) => {
+                                if partial_mesh.triangle_count() > 0 {
+                                    let tri_start = self.mesh.triangle_count();
+                                    let color = pending_front.color.unwrap_or_else(|| {
+                                        Self::instance_color(self.triangulated_count)
+                                    });
+                                    self.mesh.merge_with_color(&partial_mesh, color);
+                                    let tri_end = self.mesh.triangle_count();
+                                    self.instance_triangle_ranges.push((tri_start, tri_end));
+
+                                    // Build a partial DetailedMeshInstance for
+                                    // the structure tree / detailed_instances.
+                                    let inst_idx = self.instance_triangle_ranges.len() - 1;
+                                    if let Some(ref mut tree) = self.assembly_tree {
+                                        assign_instance_to_tree(tree, inst_idx);
+                                    }
+                                    self.detailed_instances.push(DetailedMeshInstance {
+                                        name: pending_front.name.clone(),
+                                        mesh: partial_mesh,
+                                        color: pending_front.color,
+                                        transform: pending_front.transform,
+                                        brep_id: pending_front.brep_id,
+                                        faces: partial_faces,
+                                    });
+                                    self.triangulated_count += 1;
+                                    self.log_warning(&format!(
+                                        "BREP #{} '{}' — salvaged PARTIAL triangulation: {}/{} faces ({}%), {} triangles",
+                                        pending_front.brep_id, pending_front.name,
+                                        faces_done, faces_total,
+                                        if faces_total > 0 { (faces_done * 100) / faces_total } else { 0 },
+                                        tri_end - tri_start
+                                    ));
+                                } else {
+                                    self.log_warning(&format!(
+                                        "BREP #{} '{}' — partial session produced 0 triangles, instance skipped",
+                                        pending_front.brep_id, pending_front.name
+                                    ));
+                                    self.failed_face_count += 1;
+                                    if let Some(ref mut tree) = self.assembly_tree {
+                                        skip_instance_in_tree(tree);
+                                    }
+                                }
+                            }
+                            None => {
+                                self.log_warning(&format!(
+                                    "BREP #{} '{}' — no active session to salvage, instance skipped",
+                                    pending_front.brep_id, pending_front.name
+                                ));
+                                self.failed_face_count += 1;
+                                if let Some(ref mut tree) = self.assembly_tree {
+                                    skip_instance_in_tree(tree);
+                                }
+                            }
+                        }
+                    }
+                    // Remove the front BREP regardless — we've either salvaged
+                    // it or skipped it.
+                    self.pending_breps.remove(0);
+                }
+
+                self.chunked_brep_faces_done = 0;
+                self.chunked_brep_faces_total = 0;
+                let loaded_count = self.triangulated_count;
+                let total_count = loaded_count + remaining - 1; // -1 for the one we just salvaged/skipped
                 self.log_warning(&format!(
-                    "Loading timed out after {}s — {} instances remaining, showing partial result",
-                    elapsed, remaining
+                    "Loading timed out after {}s — salvaged partial result: {}/{} instances loaded",
+                    elapsed, loaded_count, total_count.max(loaded_count)
                 ));
                 self.is_loading = false;
                 self.conversion_ctx = None;
