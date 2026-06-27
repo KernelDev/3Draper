@@ -1883,6 +1883,182 @@ pub(crate) fn generate_sphere_steiner_grid(
 }
 
 // ============================================================
+// Torus Steiner grid generator
+// ============================================================
+
+/// Generate a regular (u, v) grid of Steiner points for toroidal faces
+/// that contain holes or have non-rectangular UV bbox.
+///
+/// # Why this exists
+///
+/// Torus surfaces are parameterized as `(u, v) ∈ [0, 2π] × [0, 2π]`
+/// where `u` is the angle around the main ring (radius `R`) and `v`
+/// is the angle around the tube (radius `r`). Both directions are
+/// periodic.
+///
+/// The generic fallback (`parameter_division_2d`) recursively
+/// subdivides the UV bbox by chord error. For small fillet faces
+/// (typical in drill_top.stp — 90+ torus fillet faces), the recursion
+/// produces only 4×4 or 6×6 grids, which is too coarse for visually
+/// smooth fillets. The result looks "faceted" instead of smooth.
+///
+/// This dedicated generator produces a proper regular grid in (u, v)
+/// space — `n_u` and `n_v` both derived from chord-error tolerance,
+/// with a minimum floor of 24 (desktop) to guarantee smooth fillets
+/// even on small faces.
+///
+/// # Chord-error geometry
+///
+/// - **u direction**: arc length per `du` is `(R + r·cos(v)) · du`.
+///   Worst case (max radius) is at `v = 0` (outer equator):
+///   `R + r`. Use `d_u_max = 2·acos(1 - tol/(R+r))`.
+/// - **v direction**: arc length per `dv` is `r · dv` (constant —
+///   the tube has constant radius `r`). Use
+///   `d_v_max = 2·acos(1 - tol/r)`.
+///
+/// # Special cases
+///
+/// 1. **Degenerate torus** (`r < 1e-6` or `R < 1e-6`): the torus
+///    collapses to a circle or point — no Steiner points needed
+///    (return empty Vec, let generic fallback handle).
+///
+/// 2. **Partial torus** (`u_span < 2π` or `v_span < 2π`): no
+///    wrap-around — the grid is naturally bounded by `u_range` /
+///    `v_range`. This is automatically handled because we generate
+///    grid points only inside `[u_min, u_max] × [v_min, v_max]`.
+///
+/// # Strategy
+///
+/// 1. **Chord-error tols**: `d_u_max` from `(R+r)`, `d_v_max` from `r`.
+/// 2. **n_u, n_v**: `ceil(span / d_max)`, clamped to
+///    `[min_u_torus, max_u_torus]` / `[min_v_torus, max_v_torus]`.
+/// 3. **Budget-aware cap**: shrink `n_u`/`n_v` until
+///    `(n_u-1)·(n_v-1) ≤ candidate_multiplier × budget`.
+/// 4. **Generate interior grid**: skip `i=0, i=n_u, j=0, j=n_v`
+///    (boundary comes from face edges).
+/// 5. **Filter**: keep only points strictly inside the face domain
+///    (inside outer boundary, outside all holes, not on any boundary
+///    edge within `boundary_tol`).
+/// 6. **Downsample**: `coarse_grid_sample` (preserves grid structure)
+///    then `downsample_interior_points` (final cap).
+pub(crate) fn generate_torus_steiner_grid(
+    surface: &Surface,
+    domain: &ParametricDomain,
+    u_range: (f64, f64),
+    v_range: (f64, f64),
+    params: &crate::triangulate::TriangulationParams,
+    max_budget: usize,
+) -> Vec<Point2d> {
+    let torus = match surface {
+        Surface::Torus(t) => t,
+        _ => return Vec::new(),
+    };
+    let (u_min, u_max) = u_range;
+    let (v_min, v_max) = v_range;
+    let u_span = u_max - u_min;
+    let v_span = v_max - v_min;
+    if u_span <= 0.0 || v_span <= 0.0 {
+        return Vec::new();
+    }
+
+    let major_r = torus.major_radius.max(1e-9);
+    let minor_r = torus.minor_radius.max(1e-9);
+
+    // Special case: degenerate torus (minor_radius ≈ 0 → circle-like,
+    // or major_radius ≈ 0 → point). No Steiner points — let the
+    // generic fallback handle.
+    if minor_r < 1e-6 || major_r < 1e-6 {
+        return Vec::new();
+    }
+
+    // Chord-error tolerances.
+    // u direction: worst-case radius is (R + r) — outer equator.
+    // v direction: radius is r (constant — the tube).
+    let chord_tol = params.max_deviation.max(1e-5);
+
+    // u: d_u_max = 2·acos(1 - tol/(R+r))
+    let radius_u = major_r + minor_r;
+    let d_u_max = if radius_u > chord_tol * 1.001 {
+        2.0 * (1.0 - chord_tol / radius_u).acos()
+    } else {
+        std::f64::consts::PI / 8.0
+    };
+
+    // v: d_v_max = 2·acos(1 - tol/r)
+    let d_v_max = if minor_r > chord_tol * 1.001 {
+        2.0 * (1.0 - chord_tol / minor_r).acos()
+    } else {
+        std::f64::consts::PI / 8.0
+    };
+
+    // Profile-aware caps.
+    let profile = params.steiner_profile;
+    let max_u_cap = profile.max_u_torus();
+    let max_v_cap = profile.max_v_torus();
+    let min_u_floor = profile.min_u_torus();
+    let min_v_floor = profile.min_v_torus();
+    let n_u_raw = ((u_span / d_u_max).ceil() as usize).max(min_u_floor).min(max_u_cap);
+    let n_v_raw = ((v_span / d_v_max).ceil() as usize).max(min_v_floor).min(max_v_cap);
+
+    // BUDGET-AWARE CAP: same as cylinder/sphere grid.
+    let max_candidates = (max_budget as f64 * profile.candidate_multiplier()).ceil() as usize;
+    let mut n_u = n_u_raw;
+    let mut n_v = n_v_raw;
+    while n_u > min_u_floor && (n_u - 1) * (n_v - 1) > max_candidates {
+        n_u -= 1;
+    }
+    while n_v > min_v_floor && (n_u - 1) * (n_v - 1) > max_candidates {
+        n_v -= 1;
+    }
+
+    log::debug!(
+        "torus steiner grid: n_u={}, n_v={}, R={:.4}, r={:.4}, u_span={:.4}, v_span={:.4}, budget={}",
+        n_u, n_v, major_r, minor_r, u_span, v_span, max_budget
+    );
+
+    // Generate grid points (excluding boundaries — those come from face edges).
+    let mut grid: Vec<Point2d> = Vec::with_capacity((n_u - 1) * (n_v - 1));
+    for j in 1..n_v {
+        let v = v_min + v_span * j as f64 / n_v as f64;
+        for i in 1..n_u {
+            let u = u_min + u_span * i as f64 / n_u as f64;
+            grid.push(Point2d::new(u, v));
+        }
+    }
+
+    // Filter to points strictly inside the face domain (outside holes, inside outer boundary).
+    let span_max = u_span.max(v_span);
+    let boundary_tol = (span_max * 1e-6).max(1e-9);
+
+    let mut filtered: Vec<Point2d> = Vec::with_capacity(grid.len());
+    for pt in &grid {
+        // Use cached containment grid (O(1)) — see cylinder grid for full rationale.
+        if !domain.contains(pt) {
+            continue;
+        }
+        if is_point_on_boundary(&domain.outer_boundary, pt, boundary_tol) {
+            continue;
+        }
+        let on_hole = domain.holes.iter()
+            .any(|hole| is_point_on_boundary(hole, pt, boundary_tol));
+        if on_hole {
+            continue;
+        }
+        filtered.push(*pt);
+    }
+
+    log::debug!(
+        "torus steiner grid: {} grid pts → {} after domain filter",
+        grid.len(), filtered.len()
+    );
+
+    // Downsample to budget if needed (preserving grid structure via coarse_grid_sample,
+    // then a final cap via downsample_interior_points).
+    let coarsened = coarse_grid_sample(&filtered, max_budget);
+    downsample_interior_points(&coarsened, max_budget)
+}
+
+// ============================================================
 // Planar Steiner grid generator (for planes WITH holes)
 // ============================================================
 
@@ -3034,6 +3210,41 @@ pub fn triangulate_surface_consistent(
             (v_min, v_max),
             params,
             sphere_budget,
+        )
+    } else if matches!(surface, Surface::Torus(_)) {
+        // Torus faces — use a dedicated regular (u, v) Steiner grid.
+        //
+        // WHY: `parameter_division_2d` (the generic branch below)
+        // recursively subdivides the UV bbox by chord error. For small
+        // fillet faces (typical in drill_top.stp — 90+ torus fillet
+        // faces), the recursion produces only 4×4 or 6×6 grids, which
+        // is too coarse for visually smooth fillets. The result looks
+        // "faceted" instead of smooth.
+        //
+        // `generate_torus_steiner_grid` produces a proper regular grid
+        // in (u, v) space — n_u derived from chord-error tolerance
+        // using worst-case radius (R + r) (outer equator), n_v derived
+        // from chord-error tolerance using tube radius r. Both have a
+        // minimum floor of 24 (desktop) to guarantee smooth fillets
+        // even on small faces.
+        //
+        // Special case: degenerate torus (minor_radius ≈ 0 or
+        // major_radius ≈ 0) returns empty Vec, letting the generic
+        // fallback handle it.
+        //
+        // This branch is entered for torus faces WITH holes or with
+        // non-rectangular UV bbox. Torus faces WITHOUT holes and with
+        // 4-corner UV bbox are handled by the earlier branch (returns
+        // empty Vec). Full-torus faces (no boundary at all) are handled
+        // by `triangulate_torus_full_grid` before reaching here.
+        let torus_budget = max_interior_budget.max(8);
+        generate_torus_steiner_grid(
+            surface,
+            &domain,
+            (u_min, u_max),
+            (v_min, v_max),
+            params,
+            torus_budget,
         )
     } else {
         // Compute adaptive subdivision grid for the entire surface, then
@@ -5184,6 +5395,194 @@ mod tests {
             assert!(p.v > POLE_EPS, "v={} too close to north pole", p.v);
             assert!(p.v < std::f64::consts::PI - POLE_EPS, "v={} too close to south pole", p.v);
         }
+    }
+
+    // ============================================================
+    // Torus Steiner grid tests
+    // ============================================================
+
+    #[test]
+    fn test_torus_steiner_grid_basic() {
+        use draper_geometry::{TorusSurface, Surface, Point3d};
+
+        // Torus R=2, r=0.5 (typical fillet size), full U/V range.
+        let torus = TorusSurface::new_z(Point3d::new(0.0, 0.0, 0.0), 2.0, 0.5);
+        let surface = Surface::Torus(torus);
+
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(2.0 * PI, 0.0),
+            Point2d::new(2.0 * PI, 2.0 * PI),
+            Point2d::new(0.0, 2.0 * PI),
+        ];
+        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, 2.0 * PI));
+        domain.init_containment_grid();
+
+        let params = make_test_params(0.05);
+        let pts = generate_torus_steiner_grid(
+            &surface, &domain, (0.0, 2.0 * PI), (0.0, 2.0 * PI), &params, 4096,
+        );
+
+        // Should have multiple interior points (regular grid in both u and v).
+        // The bug being fixed: parameter_division_2d returns only 4×4 or 6×6
+        // for small torus fillet faces. Our new generator should produce many.
+        assert!(pts.len() >= 50, "Expected ≥50 Steiner points, got {}", pts.len());
+
+        // All points should be strictly inside the domain (not on boundary).
+        for p in &pts {
+            assert!(p.u > 1e-6 && p.u < 2.0 * PI - 1e-6, "u={} on boundary", p.u);
+            assert!(p.v > 1e-6 && p.v < 2.0 * PI - 1e-6, "v={} on boundary", p.v);
+            assert!(domain.contains_ray(p), "point {:?} outside domain", p);
+        }
+
+        // n_u floor is 24 on desktop — should have at least 23 distinct u
+        // values (n_u - 1 interior columns).
+        let mut u_values: Vec<f64> = pts.iter().map(|p| p.u).collect();
+        u_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        u_values.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+        assert!(u_values.len() >= 10, "Expected ≥10 distinct u values, got {}: {:?}", u_values.len(), u_values);
+
+        // n_v floor is 24 on desktop — should have at least 10 distinct v values.
+        let mut v_values: Vec<f64> = pts.iter().map(|p| p.v).collect();
+        v_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v_values.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+        assert!(v_values.len() >= 10, "Expected ≥10 distinct v values, got {}: {:?}", v_values.len(), v_values);
+    }
+
+    #[test]
+    fn test_torus_steiner_grid_excludes_holes() {
+        use draper_geometry::{TorusSurface, Surface, Point3d};
+
+        let torus = TorusSurface::new_z(Point3d::new(0.0, 0.0, 0.0), 2.0, 0.5);
+        let surface = Surface::Torus(torus);
+
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(2.0 * PI, 0.0),
+            Point2d::new(2.0 * PI, 2.0 * PI),
+            Point2d::new(0.0, 2.0 * PI),
+        ];
+        // Hole at u ∈ [2.0, 4.0], v ∈ [3.0, 4.0].
+        let hole = vec![
+            Point2d::new(2.0, 3.0),
+            Point2d::new(4.0, 3.0),
+            Point2d::new(4.0, 4.0),
+            Point2d::new(2.0, 4.0),
+        ];
+        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, 2.0 * PI))
+            .with_hole(hole);
+        domain.init_containment_grid();
+
+        let params = make_test_params(0.05);
+        let pts = generate_torus_steiner_grid(
+            &surface, &domain, (0.0, 2.0 * PI), (0.0, 2.0 * PI), &params, 4096,
+        );
+
+        assert!(!pts.is_empty(), "Should have Steiner points");
+
+        // No Steiner point should fall inside the hole.
+        for p in &pts {
+            let in_hole = p.u > 2.0 && p.u < 4.0 && p.v > 3.0 && p.v < 4.0;
+            assert!(!in_hole, "Steiner point {:?} is inside hole", p);
+            assert!(domain.contains_ray(p), "point {:?} outside domain", p);
+        }
+    }
+
+    #[test]
+    fn test_torus_steiner_grid_respects_budget() {
+        use draper_geometry::{TorusSurface, Surface, Point3d};
+
+        let torus = TorusSurface::new_z(Point3d::new(0.0, 0.0, 0.0), 2.0, 0.5);
+        let surface = Surface::Torus(torus);
+
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(2.0 * PI, 0.0),
+            Point2d::new(2.0 * PI, 2.0 * PI),
+            Point2d::new(0.0, 2.0 * PI),
+        ];
+        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, 2.0 * PI));
+        domain.init_containment_grid();
+
+        // Tight chord-error tol → many candidates; small budget → must cap.
+        let params = make_test_params(0.01);
+        let budget = 100;
+        let pts = generate_torus_steiner_grid(
+            &surface, &domain, (0.0, 2.0 * PI), (0.0, 2.0 * PI), &params, budget,
+        );
+
+        assert!(pts.len() <= budget, "Budget {} exceeded: {} points", budget, pts.len());
+        assert!(!pts.is_empty(), "Should have at least some Steiner points");
+    }
+
+    #[test]
+    fn test_torus_steiner_grid_partial_band() {
+        use draper_geometry::{TorusSurface, Surface, Point3d};
+
+        // Partial torus band: u ∈ [0, π] (half torus), v ∈ [0, 2π] (full tube).
+        // The grid should be naturally bounded by the u_range / v_range
+        // (no wrap-around needed for partial torus).
+        let torus = TorusSurface::new_z(Point3d::new(0.0, 0.0, 0.0), 5.0, 1.0);
+        let surface = Surface::Torus(torus);
+
+        let u_min = 0.0;
+        let u_max = PI;
+        let v_min = 0.0;
+        let v_max = 2.0 * PI;
+        let outer = vec![
+            Point2d::new(u_min, v_min),
+            Point2d::new(u_max, v_min),
+            Point2d::new(u_max, v_max),
+            Point2d::new(u_min, v_max),
+        ];
+        let mut domain = ParametricDomain::new(outer, (u_min, u_max), (v_min, v_max));
+        domain.init_containment_grid();
+
+        let params = make_test_params(0.05);
+        let pts = generate_torus_steiner_grid(
+            &surface, &domain, (u_min, u_max), (v_min, v_max), &params, 4096,
+        );
+
+        // All points should be within the partial u range [0, π].
+        for p in &pts {
+            assert!(p.u >= u_min - 1e-9 && p.u <= u_max + 1e-9,
+                    "u={} outside partial range [{}, {}]", p.u, u_min, u_max);
+            assert!(p.v >= v_min - 1e-9 && p.v <= v_max + 1e-9,
+                    "v={} outside full v range [{}, {}]", p.v, v_min, v_max);
+            assert!(domain.contains_ray(p), "point {:?} outside domain", p);
+        }
+
+        // Should still have multiple distinct u and v values.
+        let mut u_values: Vec<f64> = pts.iter().map(|p| p.u).collect();
+        u_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        u_values.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+        assert!(u_values.len() >= 5, "Expected ≥5 distinct u values, got {}", u_values.len());
+    }
+
+    #[test]
+    fn test_torus_steiner_grid_degenerate_returns_empty() {
+        use draper_geometry::{TorusSurface, Surface, Point3d};
+
+        // Degenerate torus: minor_radius ≈ 0 → circle-like.
+        // Should return empty Vec (no Steiner points).
+        let torus = TorusSurface::new_z(Point3d::new(0.0, 0.0, 0.0), 2.0, 1e-9);
+        let surface = Surface::Torus(torus);
+
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(2.0 * PI, 0.0),
+            Point2d::new(2.0 * PI, 2.0 * PI),
+            Point2d::new(0.0, 2.0 * PI),
+        ];
+        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, 2.0 * PI));
+        domain.init_containment_grid();
+
+        let params = make_test_params(0.05);
+        let pts = generate_torus_steiner_grid(
+            &surface, &domain, (0.0, 2.0 * PI), (0.0, 2.0 * PI), &params, 4096,
+        );
+
+        assert!(pts.is_empty(), "Degenerate torus should return empty Vec, got {} points", pts.len());
     }
 }
 

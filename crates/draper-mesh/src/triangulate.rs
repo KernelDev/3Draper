@@ -225,6 +225,51 @@ impl SteinerBudgetProfile {
             Self::Mobile => 4,
         }
     }
+
+    // ── Torus-specific profile methods ───────────────────────────────
+    //
+    // Torus parameterization: u ∈ [0, 2π] (around main ring, radius R),
+    // v ∈ [0, 2π] (around tube, radius r). Both directions are periodic.
+    //
+    // Chord error in u uses radius (R + r) (worst case = outer equator).
+    // Chord error in v uses radius r (the tube).
+    //
+    // The minimum floor for n_u/n_v is 24 on desktop — below this,
+    // fillets look "faceted" instead of smooth (per UNIVERSAL_STEP_PLAN
+    // task 2.3.2). Mobile/Tablet use lower floors to stay responsive.
+
+    /// Maximum number of U subdivisions for torus Steiner grid.
+    /// Same as cylinder/sphere (u period is 2π for all).
+    pub fn max_u_torus(&self) -> usize {
+        match self {
+            Self::Desktop => 96,
+            Self::Tablet => 64,
+            Self::Mobile => 32,
+        }
+    }
+    /// Maximum number of V subdivisions for torus Steiner grid.
+    /// Same as max_v_cyl / max_v_sphere.
+    pub fn max_v_torus(&self) -> usize {
+        match self {
+            Self::Desktop => 64,
+            Self::Tablet => 32,
+            Self::Mobile => 16,
+        }
+    }
+    /// Minimum floor for n_u (torus). 24 on desktop per plan task 2.3.2
+    /// ("min(24, n) — иначе fillet выглядит гранёным").
+    pub fn min_u_torus(&self) -> usize {
+        match self {
+            Self::Desktop => 24,
+            Self::Tablet => 20,
+            Self::Mobile => 16,
+        }
+    }
+    /// Minimum floor for n_v (torus). Same as min_u_torus — both
+    /// directions need at least 24 samples to look smooth.
+    pub fn min_v_torus(&self) -> usize {
+        self.min_u_torus()
+    }
 }
 
 impl Default for SteinerBudgetProfile {
