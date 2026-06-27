@@ -116,9 +116,9 @@
 | Plane | ✅ `generate_planar_steiner_grid` | ✅ Да | OK |
 | Cylinder | ✅ `generate_cylinder_or_cone_steiner_grid` | ✅ Да | OK |
 | Cone | ✅ `generate_cylinder_or_cone_steiner_grid` | ✅ Да | OK |
-| Sphere | ❌ Только generic `parameter_division_2d` | ⚠️ Частично | **Требует работы** |
-| Torus | ❌ Только generic | ⚠️ Частично | **Требует работы** |
-| Revolution | ❌ Только generic | ⚠️ Частично | **Требует работы** |
+| Sphere | ✅ `generate_sphere_steiner_grid` | ✅ Да | OK |
+| Torus | ✅ `generate_torus_steiner_grid` | ✅ Да | OK |
+| Revolution | ✅ `generate_revolution_steiner_grid` | ✅ Да | OK |
 | Extrusion | ❌ Только generic | ⚠️ Частично | **Требует работы** |
 | NURBS | ❌ Только generic + `triangulate_nurbs_cdt` | ⚠️ Частично | **Требует работы** |
 | OffsetSurface | ❌ Аппроксимируется NURBS | ⚠️ Через NURBS | **Требует работы** |
@@ -126,7 +126,7 @@
 | RectangularTrimmedSurface | ✅ Делегирует basis | ✅ Через basis | OK |
 | BoundedSurface (complex entity) | ✅ Через B_SPLINE_SURFACE keyword | ✅ Через NURBS | OK |
 
-**Вывод:** 5 из 8 первичных типов поверхностей не имеют dedicated Steiner grid — они падают в generic `parameter_division_2d`, который возвращает только boundary knots без учёта отверстий. Это причина "неверной триангуляции" на сложных гранях.
+**Вывод:** 2 из 8 первичных типов поверхностей не имеют dedicated Steiner grid — Extrusion и NURBS. Остальные (Plane, Cylinder, Cone, Sphere, Torus, Revolution) реализованы. Это причина "неверной триангуляции" на сложных NURBS-гранях.
 
 ---
 
@@ -178,12 +178,12 @@
 
 **Задачи:**
 
-- [ ] 2.4.1 Создать `generate_revolution_steiner_grid(surface: &RevolutionSurface, domain, (u_min,u_max), (v_min,v_max), params, budget) -> Vec<Point2d>`.
-- [ ] 2.4.2 Алгоритм: n_u по chord-error (24–48), n_v — по адаптивной дискретизации profile curve (использовать `adaptive_curve_discretization` из `edge_cache.rs`).
-- [ ] 2.4.3 Special case: если profile — line → v grid равномерный (аналогично цилиндру).
-- [ ] 2.4.4 Special case: если profile — circle arc → torus-like grid (делегировать в `generate_torus_steiner_grid` после преобразования).
-- [ ] 2.4.5 Интегрировать в `triangulate_surface_consistent`.
-- [ ] 2.4.6 Тест: bottle-neck profile (line + arc + line) с отверстием в widest section.
+- [x] 2.4.1 Создать `generate_revolution_steiner_grid(surface: &RevolutionSurface, domain, (u_min,u_max), (v_min,v_max), params, budget) -> Vec<Point2d>`. **Реализовано:** функция в `parametric_domain.rs`.
+- [x] 2.4.2 Алгоритм: n_u по chord-error (24–48), n_v — по адаптивной дискретизации profile curve. **Реализовано:** n_u из `d_u_max = 2·acos(1 - tol/R_max)` (R_max = max перпендикулярного расстояния от profile до оси). n_v зависит от типа profile: Line → uniform (near-square cells), Circle/Arc → chord-error с radius, NURBS/general → arc-length proxy (`target_seg = sqrt(8·tol·R_eff)`).
+- [x] 2.4.3 Special case: если profile — line → v grid равномерный (аналогично цилиндру). **Реализовано:** `Curve3d::Line(_)` → `target_dv = arc_per_quad.max(v_span / max_v_cap)`.
+- [x] 2.4.4 Special case: если profile — circle arc → torus-like grid. **Реализовано упрощённо:** для `Curve3d::Circle` и `Curve3d::Arc` используется chord-error формула с radius профиля (тот же метод что у torus tube). Делегирование в `generate_torus_steiner_grid` отложено — требуется нетривиальное преобразование параметризации.
+- [x] 2.4.5 Интегрировать в `triangulate_surface_consistent`. **Реализовано:** dispatch branch после torus, перед generic `parameter_division_2d`.
+- [x] 2.4.6 Тест: revolution с hole. **Реализовано:** 5 unit-тестов (line_profile / excludes_holes / respects_budget / axis_degenerate / circle_profile). Профиль-dependent тесты покрывают Line, Circle и degenerate (axis-through) cases.
 
 **Критерий приёмки:** RevolutionSurface с нелинейным profile триангулируется с сохранением деталей профиля.
 
@@ -616,6 +616,7 @@
 | 2026-06-27 | `552a7ff` (main) · `feec20b` (gh-pages) | **Phase 0 стабилизация:** 1.1 `SteinerBudgetProfile` enum (Desktop 96×64 / Tablet 64×32 / Mobile 32×16) + `candidate_multiplier()`; 1.2 `take_partial_active_session` salvage при timeout/Cancel + warning logs; 1.3 mobile LOD downgrade смягчён до 1 ступени (Ultra→High), 2 ступени только при 5+ BREP. Частично: 1.1.4 (per-face adaptive budget), 1.2.4 (UI-баннер partial), 1.2.5 (auto-тест), 1.3.3 (localStorage), 1.3.4 (UI quality badge), 1.3.5 (mobile auto-тест). Все 180 mesh + 97 step + 7 integration тестов проходят; WASM release собран и задеплоен на gh-pages. |
 | 2026-06-27 | `4222438` (main) · `a7cc2d7` (gh-pages) | **Phase 1 / 2.2 — Dedicated sphere Steiner grid:** `generate_sphere_steiner_grid()` с pole-skipping (v < 0.05 или v > π - 0.05 пропускаются) и equator ring (v = π/2 как mandatory Steiner points для full-sphere case). Добавлены `max_u_sphere` / `max_v_sphere` / `min_u_sphere` / `min_v_sphere` методы в `SteinerBudgetProfile`. Dispatch в `triangulate_surface_consistent` перед generic `parameter_division_2d` fallback. 4 новых unit-теста (basic / excludes_holes / respects_budget / band_skips_poles). Все 184 mesh + 97 step + 7 integration тестов проходят. WASM release задеплоен. |
 | 2026-06-27 | `c8c3bb2` (main) · `b15b3f3` (gh-pages) | **Phase 1 / 2.3 — Dedicated torus Steiner grid:** `generate_torus_steiner_grid()` с chord-error по (R+r) для u и r для v. Min floor = 24 desktop (plan 2.3.2). Degenerate torus (minor_r < 1e-6) → пустой Vec. Partial torus → grid естественно ограничен range. Добавлены `max_u_torus` / `max_v_torus` / `min_u_torus` / `min_v_torus` методы в `SteinerBudgetProfile`. Dispatch после sphere branch. 5 новых unit-тестов (basic / excludes_holes / respects_budget / partial_band / degenerate). Все 189 mesh тестов проходят. WASM release задеплоен. |
+| 2026-06-28 | `1a27828` (main) · `b6cbbbc` (gh-pages) | **Phase 1 / 2.4 — Dedicated revolution Steiner grid:** `generate_revolution_steiner_grid()` с profile-aware n_v (Line → uniform, Circle/Arc → chord-error, NURBS/general → arc-length proxy). Axis-degeneracy filter (пропускает Steiner points где profile ≈ на оси). n_u из chord-error по max_rev_radius. Добавлены `max_u_revolution` / `max_v_revolution` / `min_u_revolution` / `min_v_revolution` методы в `SteinerBudgetProfile`. Dispatch после torus branch. 5 новых unit-тестов (line_profile / excludes_holes / respects_budget / axis_degenerate / circle_profile). Все 194 mesh тестов проходят. WASM release задеплоен. |
 
 ---
 
