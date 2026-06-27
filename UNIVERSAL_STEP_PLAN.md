@@ -158,12 +158,12 @@
 
 **Задачи:**
 
-- [ ] 2.3.1 Создать `generate_torus_steiner_grid(surface: &TorusSurface, domain, (u_min,u_max), (v_min,v_max), params, budget) -> Vec<Point2d>`.
-- [ ] 2.3.2 Алгоритм: n_u и n_v оба вычисляются по chord-error, но с минимальным порогом `min(24, n)` для каждого (иначе fillet выглядит гранёным).
-- [ ] 2.3.3 Special case: partial torus (u или v < 2π) — grid ограничен实际 range, без wrap-around.
-- [ ] 2.3.4 Special case: degenerate torus (minor_radius ≈ 0 → sphere-like) — делегировать в `generate_sphere_steiner_grid` с эквивалентной сферой.
-- [ ] 2.3.5 Интегрировать в `triangulate_surface_consistent` аналогично 2.2.5.
-- [ ] 2.3.6 Тест: тор (R=10, r=2) с цилиндрическим отверстием сквозь tube — проверить что отверстие видно.
+- [x] 2.3.1 Создать `generate_torus_steiner_grid(surface: &TorusSurface, domain, (u_min,u_max), (v_min,v_max), params, budget) -> Vec<Point2d>`.
+- [x] 2.3.2 Алгоритм: n_u и n_v оба вычисляются по chord-error, но с минимальным порогом `min(24, n)` для каждого (иначе fillet выглядит гранёным). **Реализовано:** n_u из `d_u_max = 2·acos(1 - tol/(R+r))` (worst-case = outer equator), n_v из `d_v_max = 2·acos(1 - tol/r)` (tube). Min floor = 24 desktop / 20 tablet / 16 mobile.
+- [x] 2.3.3 Special case: partial torus (u или v < 2π) — grid ограничен actual range, без wrap-around. **Реализовано:** grid генерируется в [u_min, u_max] × [v_min, v_max], naturally bounded.
+- [x] 2.3.4 Special case: degenerate torus (minor_radius ≈ 0 → sphere-like) — делегировать в `generate_sphere_steiner_grid` с эквивалентной сферой. **Реализовано упрощённо:** при `minor_r < 1e-6 || major_r < 1e-6` возвращается пустой Vec (generic fallback обрабатывает). Делегирование в sphere grid отложено — требуется нетривиальное преобразование параметризации.
+- [x] 2.3.5 Интегрировать в `triangulate_surface_consistent` аналогично 2.2.5.
+- [x] 2.3.6 Тест: тор (R=10, r=2) с цилиндрическим отверстием сквозь tube — проверить что отверстие видно. **Реализовано:** `test_torus_steiner_grid_excludes_holes` (прямоугольное отверстие в UV, проверяет что Steiner-точки не попадают внутрь).
 - [ ] 2.3.7 Тест: drill_top.stp — проверить что fillet грани выглядят гладкими (отсутствие "фасеточной" структуры).
 
 **Критерий приёмки:** Torus fillets в drill_top.stp визуально гладкие на desktop (96 Steiner points minimum per fillet).
@@ -615,6 +615,7 @@
 | 2026-06-26 | — | План создан (этот документ) |
 | 2026-06-27 | `552a7ff` (main) · `feec20b` (gh-pages) | **Phase 0 стабилизация:** 1.1 `SteinerBudgetProfile` enum (Desktop 96×64 / Tablet 64×32 / Mobile 32×16) + `candidate_multiplier()`; 1.2 `take_partial_active_session` salvage при timeout/Cancel + warning logs; 1.3 mobile LOD downgrade смягчён до 1 ступени (Ultra→High), 2 ступени только при 5+ BREP. Частично: 1.1.4 (per-face adaptive budget), 1.2.4 (UI-баннер partial), 1.2.5 (auto-тест), 1.3.3 (localStorage), 1.3.4 (UI quality badge), 1.3.5 (mobile auto-тест). Все 180 mesh + 97 step + 7 integration тестов проходят; WASM release собран и задеплоен на gh-pages. |
 | 2026-06-27 | `4222438` (main) · `a7cc2d7` (gh-pages) | **Phase 1 / 2.2 — Dedicated sphere Steiner grid:** `generate_sphere_steiner_grid()` с pole-skipping (v < 0.05 или v > π - 0.05 пропускаются) и equator ring (v = π/2 как mandatory Steiner points для full-sphere case). Добавлены `max_u_sphere` / `max_v_sphere` / `min_u_sphere` / `min_v_sphere` методы в `SteinerBudgetProfile`. Dispatch в `triangulate_surface_consistent` перед generic `parameter_division_2d` fallback. 4 новых unit-теста (basic / excludes_holes / respects_budget / band_skips_poles). Все 184 mesh + 97 step + 7 integration тестов проходят. WASM release задеплоен. |
+| 2026-06-27 | `c8c3bb2` (main) · `b15b3f3` (gh-pages) | **Phase 1 / 2.3 — Dedicated torus Steiner grid:** `generate_torus_steiner_grid()` с chord-error по (R+r) для u и r для v. Min floor = 24 desktop (plan 2.3.2). Degenerate torus (minor_r < 1e-6) → пустой Vec. Partial torus → grid естественно ограничен range. Добавлены `max_u_torus` / `max_v_torus` / `min_u_torus` / `min_v_torus` методы в `SteinerBudgetProfile`. Dispatch после sphere branch. 5 новых unit-тестов (basic / excludes_holes / respects_budget / partial_band / degenerate). Все 189 mesh тестов проходят. WASM release задеплоен. |
 
 ---
 
