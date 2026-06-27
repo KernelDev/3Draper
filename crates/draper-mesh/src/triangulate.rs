@@ -270,6 +270,58 @@ impl SteinerBudgetProfile {
     pub fn min_v_torus(&self) -> usize {
         self.min_u_torus()
     }
+
+    // ── Revolution-specific profile methods ────────────────────────────
+    //
+    // RevolutionSurface parameterization: u ∈ [0, 2π] (revolution angle),
+    // v ∈ [v_min, v_max] (profile curve parameter). Only u is periodic.
+    //
+    // n_u uses the maximum revolution radius (max distance from profile
+    // to axis) — the same chord-error formula as cylinder.
+    // n_v depends on the profile curve type:
+    //   - Line → uniform, few subdivisions (2–8)
+    //   - Circle/Arc → chord-error with the circle radius
+    //   - NURBS/general → adaptive sampling of profile curvature
+    //
+    // The minimum floor for n_u is 12 on desktop (same as cylinder) to
+    // avoid faceted revolution surfaces. n_v minimum is lower (4) since
+    // linear profiles need few v-samples.
+
+    /// Maximum number of U subdivisions for revolution Steiner grid.
+    /// Same as cylinder (u period is 2π).
+    pub fn max_u_revolution(&self) -> usize {
+        match self {
+            Self::Desktop => 96,
+            Self::Tablet => 64,
+            Self::Mobile => 32,
+        }
+    }
+    /// Maximum number of V subdivisions for revolution Steiner grid.
+    pub fn max_v_revolution(&self) -> usize {
+        match self {
+            Self::Desktop => 64,
+            Self::Tablet => 32,
+            Self::Mobile => 16,
+        }
+    }
+    /// Minimum floor for n_u (revolution). 12 on desktop, same as cylinder.
+    pub fn min_u_revolution(&self) -> usize {
+        match self {
+            Self::Desktop => 12,
+            Self::Tablet => 10,
+            Self::Mobile => 8,
+        }
+    }
+    /// Minimum floor for n_v (revolution). 4 on desktop — linear profiles
+    /// need few v-samples, but curved profiles need more. The adaptive
+    /// profile sampling will push n_v higher for curved profiles.
+    pub fn min_v_revolution(&self) -> usize {
+        match self {
+            Self::Desktop => 4,
+            Self::Tablet => 3,
+            Self::Mobile => 2,
+        }
+    }
 }
 
 impl Default for SteinerBudgetProfile {
