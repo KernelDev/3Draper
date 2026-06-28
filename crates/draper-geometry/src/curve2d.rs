@@ -33,6 +33,16 @@ pub enum Curve2d {
     Parabola(Parabola2d),
     /// A NURBS curve in UV space.
     Nurbs(Nurbs2d),
+    /// Composite 2D curve: a sequence of curve segments joined end-to-end.
+    ///
+    /// The global parameter `t ∈ [0, 1]` is mapped to per-segment local
+    /// parameters using arc-length proportional mapping, analogous to
+    /// `Curve3d::Composite`.
+    Composite {
+        segments: Vec<Curve2d>,
+        /// Cumulative arc-length fractions [0..1].
+        cum_lengths: Vec<f64>,
+    },
 }
 
 /// A straight line in UV space.
@@ -527,6 +537,37 @@ fn find_knot_span_2d(knots: &[f64], degree: usize, t: f64, n: usize) -> usize {
 }
 
 impl Curve2d {
+    /// For a Composite curve, find which segment and local parameter
+    /// correspond to the given global parameter `t ∈ [0, 1]`.
+    fn composite_segment_at(&self, t: f64) -> (usize, f64) {
+        if let Curve2d::Composite { segments, cum_lengths } = self {
+            if segments.is_empty() || cum_lengths.is_empty() {
+                return (0, t);
+            }
+            let t = t.clamp(0.0, 1.0);
+            let mut seg_idx = 0;
+            for (i, &cum) in cum_lengths.iter().enumerate() {
+                if t <= cum || i == cum_lengths.len() - 1 {
+                    seg_idx = i;
+                    break;
+                }
+            }
+            let t_start = if seg_idx == 0 { 0.0 } else { cum_lengths[seg_idx - 1] };
+            let t_end = cum_lengths[seg_idx];
+            let seg_span = t_end - t_start;
+            let local_frac = if seg_span > 1e-15 {
+                (t - t_start) / seg_span
+            } else {
+                0.5
+            };
+            let (p_min, p_max) = segments[seg_idx].param_range();
+            let local_t = p_min + local_frac * (p_max - p_min);
+            (seg_idx, local_t)
+        } else {
+            (0, t)
+        }
+    }
+
     /// Evaluate the curve at parameter t.
     pub fn point_at(&self, t: f64) -> Point2d {
         match self {
@@ -536,6 +577,14 @@ impl Curve2d {
             Curve2d::Hyperbola(h) => h.point_at(t),
             Curve2d::Parabola(p) => p.point_at(t),
             Curve2d::Nurbs(n) => n.point_at(t),
+            Curve2d::Composite { .. } => {
+                let (seg_idx, local_t) = self.composite_segment_at(t);
+                if let Curve2d::Composite { segments, .. } = self {
+                    segments[seg_idx].point_at(local_t)
+                } else {
+                    Point2d::new(0.0, 0.0)
+                }
+            }
         }
     }
 
@@ -548,6 +597,26 @@ impl Curve2d {
             Curve2d::Hyperbola(h) => h.derivative_at(t),
             Curve2d::Parabola(p) => p.derivative_at(t),
             Curve2d::Nurbs(n) => n.derivative_at(t),
+            Curve2d::Composite { .. } => {
+                let (seg_idx, local_t) = self.composite_segment_at(t);
+                if let Curve2d::Composite { segments, cum_lengths } = self {
+                    let seg = &segments[seg_idx];
+                    let (du, dv) = seg.derivative_at(local_t);
+                    let t_start = if seg_idx == 0 { 0.0 } else { cum_lengths[seg_idx - 1] };
+                    let t_end = cum_lengths[seg_idx];
+                    let seg_span = t_end - t_start;
+                    let (p_min, p_max) = seg.param_range();
+                    let param_span = p_max - p_min;
+                    let scale = if param_span > 1e-15 && seg_span > 1e-15 {
+                        param_span / seg_span
+                    } else {
+                        1.0
+                    };
+                    (du * scale, dv * scale)
+                } else {
+                    (0.0, 0.0)
+                }
+            }
         }
     }
 
@@ -560,6 +629,7 @@ impl Curve2d {
             Curve2d::Hyperbola(h) => h.param_range(),
             Curve2d::Parabola(p) => p.param_range(),
             Curve2d::Nurbs(n) => n.param_range(),
+            Curve2d::Composite { .. } => (0.0, 1.0),
         }
     }
 
@@ -572,6 +642,9 @@ impl Curve2d {
             Curve2d::Hyperbola(h) => h.length(),
             Curve2d::Parabola(p) => p.length(),
             Curve2d::Nurbs(n) => n.length(),
+            Curve2d::Composite { segments, .. } => {
+                segments.iter().map(|s| s.length()).sum()
+            }
         }
     }
 

@@ -61,6 +61,25 @@ pub enum Curve3d {
         /// End parameter on the basis curve.
         end: f64,
     },
+    /// Composite curve: a sequence of curve segments joined end-to-end.
+    ///
+    /// The global parameter `t ∈ [0, 1]` is mapped to per-segment local
+    /// parameters using arc-length proportional mapping: each segment
+    /// occupies a fraction of the total length proportional to its own
+    /// arc length. This ensures uniform speed across segment boundaries
+    /// and provides a natural, predictable parameterization.
+    ///
+    /// `cum_lengths[i]` stores the cumulative arc-length fraction at the
+    /// end of segment `i` (so `cum_lengths[last] == 1.0`). To evaluate
+    /// at global parameter `t`, we find the segment `i` such that
+    /// `cum_lengths[i-1] <= t < cum_lengths[i]`, then map `t` linearly
+    /// to the segment's local parameter range.
+    Composite {
+        segments: Vec<Curve3d>,
+        /// Cumulative arc-length fractions [0..1]. Length = segments.len().
+        /// cum_lengths[0] = len(seg_0) / total_len, cum_lengths[i] = sum(len(seg_0..=i)) / total_len.
+        cum_lengths: Vec<f64>,
+    },
 }
 
 /// A line in 3D.
@@ -609,6 +628,47 @@ impl Curve3d {
                 });
                 all_coincident
             }
+            Curve3d::Composite { segments, .. } => {
+                // A composite curve is degenerate if all segments are degenerate
+                segments.iter().all(|s| s.is_degenerate(tolerance))
+            }
+        }
+    }
+
+    /// For a Composite curve, find which segment and local parameter
+    /// correspond to the given global parameter `t ∈ [0, 1]`.
+    ///
+    /// Returns `(segment_index, local_t)` where `local_t` is in the
+    /// segment's own parameter range.
+    fn composite_segment_at(&self, t: f64) -> (usize, f64) {
+        if let Curve3d::Composite { segments, cum_lengths } = self {
+            if segments.is_empty() || cum_lengths.is_empty() {
+                return (0, t);
+            }
+            // Clamp t to [0, 1]
+            let t = t.clamp(0.0, 1.0);
+            // Find segment: cum_lengths[i-1] <= t < cum_lengths[i]
+            let mut seg_idx = 0;
+            for (i, &cum) in cum_lengths.iter().enumerate() {
+                if t <= cum || i == cum_lengths.len() - 1 {
+                    seg_idx = i;
+                    break;
+                }
+            }
+            let t_start = if seg_idx == 0 { 0.0 } else { cum_lengths[seg_idx - 1] };
+            let t_end = cum_lengths[seg_idx];
+            let seg_span = t_end - t_start;
+            let local_frac = if seg_span > 1e-15 {
+                (t - t_start) / seg_span
+            } else {
+                0.5
+            };
+            // Map local_frac ∈ [0,1] to the segment's parameter range
+            let (p_min, p_max) = segments[seg_idx].param_range();
+            let local_t = p_min + local_frac * (p_max - p_min);
+            (seg_idx, local_t)
+        } else {
+            (0, t)
         }
     }
 
@@ -632,6 +692,14 @@ impl Curve3d {
                 let end = *end;
                 let basis_t = start + t * (end - start);
                 basis.point_at(basis_t)
+            }
+            Curve3d::Composite { .. } => {
+                let (seg_idx, local_t) = self.composite_segment_at(t);
+                if let Curve3d::Composite { segments, .. } = self {
+                    segments[seg_idx].point_at(local_t)
+                } else {
+                    Point3d::ORIGIN
+                }
             }
         }
     }
@@ -712,6 +780,33 @@ impl Curve3d {
                     )
                 }
             }
+            Curve3d::Composite { .. } => {
+                // Composite derivative: delegate to the segment's derivative,
+                // scaled by the mapping factor d(local_t)/d(global_t).
+                let (seg_idx, local_t) = self.composite_segment_at(t);
+                if let Curve3d::Composite { segments, cum_lengths } = self {
+                    let seg = &segments[seg_idx];
+                    let seg_der = seg.derivative_at(local_t);
+                    // Scale factor: seg_span / (p_max - p_min)
+                    let t_start = if seg_idx == 0 { 0.0 } else { cum_lengths[seg_idx - 1] };
+                    let t_end = cum_lengths[seg_idx];
+                    let seg_span = t_end - t_start;
+                    let (p_min, p_max) = seg.param_range();
+                    let param_span = p_max - p_min;
+                    let scale = if param_span > 1e-15 && seg_span > 1e-15 {
+                        param_span / seg_span
+                    } else {
+                        1.0
+                    };
+                    Vec3d::new(
+                        seg_der.x * scale,
+                        seg_der.y * scale,
+                        seg_der.z * scale,
+                    )
+                } else {
+                    Vec3d::ZERO
+                }
+            }
         }
     }
 
@@ -734,6 +829,7 @@ impl Curve3d {
                     (0.0, 1.0)
                 }
             }
+            Curve3d::Composite { .. } => (0.0, 1.0),
         }
     }
 
@@ -795,6 +891,10 @@ impl Curve3d {
                 weights: nurbs.weights.clone(),
                 knots: nurbs.knots.clone(),
             }),
+            Curve3d::Composite { segments, cum_lengths } => Curve3d::Composite {
+                segments: segments.iter().map(|s| s.transform(t)).collect(),
+                cum_lengths: cum_lengths.clone(),
+            },
         }
     }
 }

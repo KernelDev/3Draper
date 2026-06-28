@@ -620,6 +620,20 @@ impl StepWriter {
                 };
                 self.emit_nurbs_curve(&lifted)
             }
+            Curve2d::Composite { segments, .. } => {
+                // Emit each segment recursively, then wrap in COMPOSITE_CURVE
+                let mut segment_ids = Vec::new();
+                for seg in segments {
+                    segment_ids.push(self.emit_curve_2d(seg));
+                }
+                let id = self.alloc_id();
+                self.push_line(&format!(
+                    "#{} = COMPOSITE_CURVE('',({}),.F.);",
+                    id,
+                    segment_ids.iter().map(|s| format!("#{}", s)).collect::<Vec<_>>().join(",")
+                ));
+                id
+            }
         }
     }
 
@@ -638,6 +652,19 @@ impl StepWriter {
             }
             Curve3d::Trimmed { basis, start, end } => {
                 self.emit_trimmed_curve(basis, *start, *end)
+            }
+            Curve3d::Composite { segments, .. } => {
+                let mut segment_ids = Vec::new();
+                for seg in segments {
+                    segment_ids.push(self.emit_curve(seg));
+                }
+                let id = self.alloc_id();
+                self.push_line(&format!(
+                    "#{} = COMPOSITE_CURVE('',({}),.F.);",
+                    id,
+                    segment_ids.iter().map(|s| format!("#{}", s)).collect::<Vec<_>>().join(",")
+                ));
+                id
             }
         }
     }

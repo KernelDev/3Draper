@@ -1112,6 +1112,7 @@ impl JsonApi {
                         Some(draper_geometry::Curve3d::Nurbs(_)) => "Nurbs".to_string(),
                         Some(draper_geometry::Curve3d::PCurve { .. }) => "PCurve".to_string(),
                         Some(draper_geometry::Curve3d::Trimmed { .. }) => "Trimmed".to_string(),
+                        Some(draper_geometry::Curve3d::Composite { .. }) => "Composite".to_string(),
                     };
                     edge_info.entry(id)
                         .and_modify(|(_, faces)| faces.push(fi))

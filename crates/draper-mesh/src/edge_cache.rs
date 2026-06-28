@@ -618,6 +618,50 @@ impl EdgeDiscretizationCache {
             );
         }
 
+        // For composite curves, discretize segment-by-segment to ensure
+        // we get proper sampling at segment boundaries (where curvature
+        // changes abruptly). Then concatenate the results.
+        if let Curve3d::Composite { segments, cum_lengths } = curve {
+            let mut all_points: Vec<Point3d> = Vec::new();
+            let mut all_params: Vec<f64> = Vec::new();
+
+            for (i, seg) in segments.iter().enumerate() {
+                let seg_start_frac = if i == 0 { 0.0 } else { cum_lengths[i - 1] };
+                let seg_end_frac = cum_lengths[i];
+
+                // Determine sample count for this segment
+                let seg_n = if matches!(seg, Curve3d::Line(_)) { 2 } else { n_samples_hint.max(8) };
+
+                // Create a sub-edge for this segment
+                let (seg_t_min, seg_t_max) = seg.param_range();
+                let seg_edge = Edge::new(seg.clone(), (seg_t_min, seg_t_max));
+                let (mut seg_points, mut seg_params) = self.adaptive_discretize(&seg_edge, seg_n);
+
+                // Remap local params to global composite param range [0,1]
+                for p in &mut seg_params {
+                    *p = seg_start_frac + *p * (seg_end_frac - seg_start_frac);
+                }
+
+                // Skip first point if it duplicates the last point of previous segment
+                if !all_points.is_empty() && !seg_points.is_empty() {
+                    let last = all_points.last().unwrap();
+                    let first = &seg_points[0];
+                    let dx = first.x - last.x;
+                    let dy = first.y - last.y;
+                    let dz = first.z - last.z;
+                    if (dx * dx + dy * dy + dz * dz) < 1e-12 {
+                        seg_points.remove(0);
+                        seg_params.remove(0);
+                    }
+                }
+
+                all_points.extend(seg_points);
+                all_params.extend(seg_params);
+            }
+
+            return (all_points, all_params);
+        }
+
         // Adaptive subdivision threshold: use LOD override if set, else adaptive.
         let max_deviation = self.effective_chord_tolerance();
 

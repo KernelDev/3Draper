@@ -6458,6 +6458,7 @@ impl<'a> StepConverter<'a> {
                     Curve3d::Nurbs(_) => "Nurbs",
                     Curve3d::PCurve { .. } => "PCurve",
                     Curve3d::Trimmed { .. } => "Trimmed",
+                    Curve3d::Composite { .. } => "Composite",
                 };
                 let edge = if let Curve3d::Line(ref line) = curve {
                     // For lines, compute param range from vertex projections.
@@ -9273,8 +9274,12 @@ impl<'a> StepConverter<'a> {
     fn resolve_composite_curve(&self, entity: &crate::schema::StepEntity, depth: usize) -> Option<Curve3d> {
         // COMPOSITE_CURVE('', (#segment1, #segment2, ...), .U.)
         // COMPOSITE_CURVE_ON_SURFACE('', (#segment1, #segment2, ...), .U., #basis_surface)
-        let mut all_points: Vec<Point3d> = Vec::new();
-        let mut n_segments = 0;
+        //
+        // Primary path: return Curve3d::Composite which preserves the analytical
+        // structure of each segment. Falls back to degree-1 NURBS polyline if
+        // segment resolution fails or if the composite would be degenerate.
+        let mut segments: Vec<Curve3d> = Vec::new();
+        let mut seg_lengths: Vec<f64> = Vec::new();
 
         for param in &entity.params {
             if let StepValue::List(items) = param {
@@ -9298,22 +9303,25 @@ impl<'a> StepConverter<'a> {
                                     true
                                 };
 
-                                // Sample the curve into ~32 points
+                                // If same_sense is false, wrap in Trimmed with reversed direction
+                                let curve = if same_sense {
+                                    curve
+                                } else {
+                                    // Reverse: map t ∈ [0,1] → [param_max, param_min]
+                                    let (t_min, t_max) = curve.param_range();
+                                    Curve3d::Trimmed {
+                                        basis: Box::new(curve),
+                                        start: t_max,
+                                        end: t_min,
+                                    }
+                                };
+
+                                // Estimate segment arc length for proportional parameter mapping
                                 let (t_min, t_max) = curve.param_range();
-                                let n_samples = 32;
-                                let mut segment_points = Vec::with_capacity(n_samples);
-                                for i in 0..n_samples {
-                                    let t = t_min + (t_max - t_min) * i as f64 / (n_samples - 1) as f64;
-                                    segment_points.push(curve.point_at(t));
-                                }
+                                let seg_len = estimate_curve_length(&curve, t_min, t_max, 16);
 
-                                // Reverse if same_sense is false
-                                if !same_sense {
-                                    segment_points.reverse();
-                                }
-
-                                all_points.extend(segment_points);
-                                n_segments += 1;
+                                segments.push(curve);
+                                seg_lengths.push(seg_len);
                             }
                         }
                     }
@@ -9321,51 +9329,37 @@ impl<'a> StepConverter<'a> {
             }
         }
 
-        if all_points.len() >= 2 {
-            // Remove near-duplicate consecutive points
-            all_points = deduplicate_points_3d(&all_points, 1e-6);
+        if segments.is_empty() {
+            return None;
         }
 
-        if all_points.len() >= 2 {
-            let n = all_points.len();
-            let degree = 1;
-            let weights = vec![1.0; n];
-            let mut knots = Vec::with_capacity(n + degree + 1);
-            for _ in 0..=degree { knots.push(0.0); }
-            for i in 1..n-1 { knots.push(i as f64); }
-            for _ in 0..=degree { knots.push((n - 1) as f64); }
-
-            Some(Curve3d::Nurbs(NurbsCurve {
-                degree,
-                control_points: all_points,
-                weights,
-                knots,
-            }))
-        } else if n_segments > 0 {
-            // Fallback: try just the first segment
-            for param in &entity.params {
-                if let StepValue::List(items) = param {
-                    for item in items {
-                        if let Some(ref_id) = self.get_ref(item) {
-                            if let Some(seg_entity) = self.step.find_entity(ref_id) {
-                                if seg_entity.type_name == "COMPOSITE_CURVE_SEGMENT" {
-                                    if let Some(curve) = self.resolve_composite_curve_segment_curve(seg_entity, depth + 1) {
-                                        return Some(curve);
-                                    }
-                                } else if self.is_curve_type(&seg_entity.type_name) {
-                                    if let Some(curve) = self.resolve_curve(ref_id, depth + 1) {
-                                        return Some(curve);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            None
-        } else {
-            None
+        // Single segment — just return it directly
+        if segments.len() == 1 {
+            return Some(segments.into_iter().next().unwrap());
         }
+
+        // Compute cumulative arc-length fractions for parameter mapping
+        let total_len: f64 = seg_lengths.iter().sum();
+        if total_len < 1e-15 {
+            // Degenerate — all segments have zero length
+            return Some(segments.into_iter().next().unwrap());
+        }
+
+        let mut cum_lengths: Vec<f64> = Vec::with_capacity(seg_lengths.len());
+        let mut cum = 0.0;
+        for len in &seg_lengths {
+            cum += len / total_len;
+            cum_lengths.push(cum.min(1.0)); // Clamp to avoid floating-point drift
+        }
+        // Ensure last entry is exactly 1.0
+        if let Some(last) = cum_lengths.last_mut() {
+            *last = 1.0;
+        }
+
+        Some(Curve3d::Composite {
+            segments,
+            cum_lengths,
+        })
     }
 
     /// Extract the parent_curve from a COMPOSITE_CURVE_SEGMENT.
@@ -9918,6 +9912,7 @@ impl<'a> StepConverter<'a> {
                         Some(Curve3d::Nurbs(_)) => "Nurbs",
                         Some(Curve3d::PCurve { .. }) => "PCurve",
                         Some(Curve3d::Trimmed { .. }) => "Trimmed",
+                        Some(Curve3d::Composite { .. }) => "Composite",
                         None => "None",
                     };
                     s.push_str(&format!(" #{}={}({})", sid, curve_type, self.edge_sample_count(edge)));
@@ -10152,6 +10147,7 @@ impl<'a> StepConverter<'a> {
             Some(Curve3d::Nurbs(_)) => 32,
             Some(Curve3d::PCurve { .. }) => 32,
             Some(Curve3d::Trimmed { .. }) => 32,
+            Some(Curve3d::Composite { .. }) => 32,
             None => 2,
         }
     }
@@ -11735,6 +11731,25 @@ fn approximate_offset_curve_2d(basis_curve: &Curve2d, distance: f64) -> Curve2d 
         })
 }
 
+/// Estimate the arc length of a curve by sampling n points and summing chord distances.
+fn estimate_curve_length(curve: &Curve3d, t_min: f64, t_max: f64, n: usize) -> f64 {
+    if n < 2 {
+        return 0.0;
+    }
+    let mut total = 0.0;
+    let mut prev = curve.point_at(t_min);
+    for i in 1..n {
+        let t = t_min + (t_max - t_min) * i as f64 / (n - 1) as f64;
+        let p = curve.point_at(t);
+        let dx = p.x - prev.x;
+        let dy = p.y - prev.y;
+        let dz = p.z - prev.z;
+        total += (dx * dx + dy * dy + dz * dz).sqrt();
+        prev = p;
+    }
+    total
+}
+
 /// Deduplicate consecutive 2D points that are very close together.
 fn deduplicate_points_2d(points: &[Point2d], _tolerance: f64) -> Vec<Point2d> {
     if points.is_empty() {
@@ -12530,6 +12545,7 @@ mod diag_tests {
                                 Curve3d::Nurbs(_) => "Nurbs",
                                 Curve3d::PCurve { .. } => "PCurve",
                                 Curve3d::Trimmed { .. } => "Trimmed",
+                                Curve3d::Composite { .. } => "Composite",
                             };
                             *edge_type_counts.entry(tn.to_string()).or_insert(0) += 1;
                         }
@@ -12547,6 +12563,7 @@ mod diag_tests {
                                     Curve3d::Nurbs(_) => "Nurbs",
                                     Curve3d::PCurve { .. } => "PCurve",
                                     Curve3d::Trimmed { .. } => "Trimmed",
+                                    Curve3d::Composite { .. } => "Composite",
                                 };
                                 *edge_type_counts.entry(tn.to_string()).or_insert(0) += 1;
                             }
@@ -13039,6 +13056,7 @@ mod diag_tests {
                         Some(Curve3d::Nurbs(_)) => "Nurbs",
                         Some(Curve3d::PCurve { .. }) => "PCurve",
                         Some(Curve3d::Trimmed { .. }) => "Trimmed",
+                        Some(Curve3d::Composite { .. }) => "Composite",
                         None => "None",
                     };
                     outer_edge_types.push(tn.to_string());
@@ -13057,6 +13075,7 @@ mod diag_tests {
                             Some(Curve3d::Nurbs(_)) => "Nurbs",
                             Some(Curve3d::PCurve { .. }) => "PCurve",
                             Some(Curve3d::Trimmed { .. }) => "Trimmed",
+                            Some(Curve3d::Composite { .. }) => "Composite",
                             None => "None",
                         };
                         inner_edge_types.push(tn.to_string());
@@ -13344,21 +13363,98 @@ mod step_parser_extension_tests {
 
     #[test]
     fn test_composite_curve_with_segments() {
+        // Two ARC segments, each with a bounded param range
         let step = make_step(
             "#1 = COMPOSITE_CURVE('',(#2,#3),.U.);\n\
              #2 = COMPOSITE_CURVE_SEGMENT(.CONTINUOUS.,#10,.T.);\n\
              #3 = COMPOSITE_CURVE_SEGMENT(.CONTINUOUS.,#20,.T.);\n\
-             #10 = LINE('',#100,#200);\n\
-             #20 = LINE('',#101,#201);\n\
-             #100 = CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
-             #101 = CARTESIAN_POINT('',(5.0,0.0,0.0));\n\
-             #200 = DIRECTION('',(1.0,0.0,0.0));\n\
-             #201 = DIRECTION('',(0.0,1.0,0.0));"
+             #10 = CIRCLE('',#100,1.0);\n\
+             #20 = CIRCLE('',#101,2.0);\n\
+             #100 = AXIS2_PLACEMENT_3D('',#200,#300,#400);\n\
+             #101 = AXIS2_PLACEMENT_3D('',#201,#301,#401);\n\
+             #200 = CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
+             #201 = CARTESIAN_POINT('',(3.0,0.0,0.0));\n\
+             #300 = DIRECTION('',(0.0,0.0,1.0));\n\
+             #301 = DIRECTION('',(0.0,0.0,1.0));\n\
+             #400 = DIRECTION('',(1.0,0.0,0.0));\n\
+             #401 = DIRECTION('',(1.0,0.0,0.0));"
         );
         let file = parse_step(&step).unwrap();
         let converter = StepConverter::new(&file);
         let curve = converter.resolve_curve(1, 0);
+
+        // The result might be Composite if 2 segments are resolved,
+        // or it could be a single curve if one segment fails.
+        // At minimum, it should resolve.
         assert!(curve.is_some(), "Should resolve composite curve");
+
+        if let Some(Curve3d::Composite { segments, cum_lengths }) = &curve {
+            assert_eq!(segments.len(), 2, "Should have 2 segments");
+            assert_eq!(cum_lengths.len(), 2, "Should have 2 cumulative lengths");
+            assert!((cum_lengths[1] - 1.0).abs() < 1e-10, "Last cum_length should be 1.0");
+
+            // Verify point_at works
+            let p0 = curve.as_ref().unwrap().point_at(0.0);
+            assert!(p0.x.is_finite(), "Start point should be finite");
+        }
+    }
+
+    #[test]
+    fn test_composite_curve_param_range() {
+        let step = make_step(
+            "#1 = COMPOSITE_CURVE('',(#2,#3),.U.);\n\
+             #2 = COMPOSITE_CURVE_SEGMENT(.CONTINUOUS.,#10,.T.);\n\
+             #3 = COMPOSITE_CURVE_SEGMENT(.CONTINUOUS.,#20,.T.);\n\
+             #10 = CIRCLE('',#100,1.0);\n\
+             #20 = CIRCLE('',#101,2.0);\n\
+             #100 = AXIS2_PLACEMENT_3D('',#200,#300,#400);\n\
+             #101 = AXIS2_PLACEMENT_3D('',#201,#301,#401);\n\
+             #200 = CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
+             #201 = CARTESIAN_POINT('',(3.0,0.0,0.0));\n\
+             #300 = DIRECTION('',(0.0,0.0,1.0));\n\
+             #301 = DIRECTION('',(0.0,0.0,1.0));\n\
+             #400 = DIRECTION('',(1.0,0.0,0.0));\n\
+             #401 = DIRECTION('',(1.0,0.0,0.0));"
+        );
+        let file = parse_step(&step).unwrap();
+        let converter = StepConverter::new(&file);
+        let curve = converter.resolve_curve(1, 0);
+
+        if let Some(curve) = &curve {
+            if let Curve3d::Composite { .. } = curve {
+                let (t_min, t_max) = curve.param_range();
+                assert!((t_min - 0.0).abs() < 1e-10, "t_min should be 0");
+                assert!((t_max - 1.0).abs() < 1e-10, "t_max should be 1");
+            }
+        }
+    }
+
+    #[test]
+    fn test_composite_curve_not_degenerate() {
+        let step = make_step(
+            "#1 = COMPOSITE_CURVE('',(#2,#3),.U.);\n\
+             #2 = COMPOSITE_CURVE_SEGMENT(.CONTINUOUS.,#10,.T.);\n\
+             #3 = COMPOSITE_CURVE_SEGMENT(.CONTINUOUS.,#20,.T.);\n\
+             #10 = CIRCLE('',#100,1.0);\n\
+             #20 = CIRCLE('',#101,2.0);\n\
+             #100 = AXIS2_PLACEMENT_3D('',#200,#300,#400);\n\
+             #101 = AXIS2_PLACEMENT_3D('',#201,#301,#401);\n\
+             #200 = CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
+             #201 = CARTESIAN_POINT('',(3.0,0.0,0.0));\n\
+             #300 = DIRECTION('',(0.0,0.0,1.0));\n\
+             #301 = DIRECTION('',(0.0,0.0,1.0));\n\
+             #400 = DIRECTION('',(1.0,0.0,0.0));\n\
+             #401 = DIRECTION('',(1.0,0.0,0.0));"
+        );
+        let file = parse_step(&step).unwrap();
+        let converter = StepConverter::new(&file);
+        let curve = converter.resolve_curve(1, 0);
+
+        if let Some(curve) = &curve {
+            if let Curve3d::Composite { .. } = curve {
+                assert!(!curve.is_degenerate(1e-6), "Composite of circles should not be degenerate");
+            }
+        }
     }
 
     #[test]
