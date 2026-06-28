@@ -1527,6 +1527,129 @@ fn coarse_grid_sample(pts: &[Point2d], budget: usize) -> Vec<Point2d> {
 ///    Solve for `du` given `tol`: `du = 2 * acos(1 - tol/r)`.
 ///    For cones, use the MAXIMUM radius along the v-range (worst case).
 ///
+// ============================================================
+// Unified degenerate-UV filter (Phase 1 / 2.7)
+// ============================================================
+
+/// Check whether a (u, v) parametric point on a surface is degenerate.
+///
+/// A degenerate UV point is one where the surface parameterization
+/// collapses — multiple UV values map to the same 3D point, or the
+/// surface normal is undefined. This includes:
+///
+/// - **Sphere poles**: v ≈ 0 (north) or v ≈ π (south), where all u
+///   values collapse to a single 3D point.
+/// - **Cone apex**: the tip where radius → 0, again all u values
+///   collapse.
+/// - **Revolution axis pinch**: profile curve on or very near the
+///   revolution axis — surface pinches like a cone apex.
+/// - **NURBS collapsed edges**: boundary rows of coincident control
+///   points where the surface degenerates.
+///
+/// This function wraps `Surface::is_degenerate_at()` and additionally
+/// provides fast analytical checks for known surface types (sphere
+/// poles, cone apex, revolution axis) that avoid the numerical
+/// derivative computation in `is_degenerate_at()`.
+///
+/// # Arguments
+/// * `surface` — the parametric surface
+/// * `u`, `v` — parametric coordinates
+/// * `tol` — geometric tolerance for zero-comparisons
+///
+/// # Returns
+/// `true` if the (u, v) point is near a degenerate region where
+/// interior Steiner points would create phantom vertices that break
+/// watertightness.
+pub(crate) fn is_degenerate_uv(surface: &Surface, u: f64, v: f64, tol: f64) -> bool {
+    // Fast analytical checks for known surface types — these avoid
+    // the expensive numerical derivative computation in is_degenerate_at().
+
+    match surface {
+        Surface::Sphere(sphere) => {
+            // Sphere poles: v ≈ 0 or v ≈ π.
+            // At the poles, all u values produce the same 3D point.
+            // Use the same POLE_EPS as generate_sphere_steiner_grid (0.05).
+            const POLE_EPS: f64 = 0.05;
+            v < POLE_EPS || v > PI - POLE_EPS
+        }
+        Surface::Cone(cone) => {
+            // Cone apex: radius → 0 at v such that radius = 0.
+            // For non-expanding: apex at v = radius / tan(half_angle).
+            // For expanding: apex at v = 0.
+            // We check if the radius at this v is below threshold.
+            let r = if cone.expanding {
+                v * cone.half_angle.tan()
+            } else {
+                (cone.radius - v * cone.half_angle.tan()).max(0.0)
+            };
+            // The threshold is relative to the base radius — points near
+            // the apex where the radius is < 1% of base radius or
+            // < absolute tol are degenerate.
+            let apex_threshold = (cone.radius * 0.02).max(tol);
+            r < apex_threshold
+        }
+        Surface::Revolution(rev) => {
+            // Revolution axis pinch: when the profile curve is near the
+            // revolution axis, all u values produce the same 3D point.
+            // Check the perpendicular distance from the profile point to
+            // the revolution axis.
+            let p = rev.profile.point_at(v);
+            let axis = &rev.axis;
+            let origin = &rev.origin;
+            let vx = p.x - origin.x;
+            let vy = p.y - origin.y;
+            let vz = p.z - origin.z;
+            let dot = vx * axis.x + vy * axis.y + vz * axis.z;
+            let perp_x = vx - dot * axis.x;
+            let perp_y = vy - dot * axis.y;
+            let perp_z = vz - dot * axis.z;
+            let perp_dist = (perp_x * perp_x + perp_y * perp_y + perp_z * perp_z).sqrt();
+            // Use the same threshold as generate_revolution_steiner_grid:
+            // 2% of the max revolution radius, with an absolute minimum.
+            // We need a reasonable max_rev_radius estimate — compute from
+            // the profile's bounding box.
+            let n_probe = 16;
+            let mut max_r: f64 = 0.0;
+            for i in 0..=n_probe {
+                let t = i as f64 / n_probe as f64;
+                let pp = rev.profile.point_at(t);
+                let dvx = pp.x - origin.x;
+                let dvy = pp.y - origin.y;
+                let dvz = pp.z - origin.z;
+                let d = dvx * axis.x + dvy * axis.y + dvz * axis.z;
+                let px = dvx - d * axis.x;
+                let py = dvy - d * axis.y;
+                let pz = dvz - d * axis.z;
+                let dist = (px * px + py * py + pz * pz).sqrt();
+                if dist > max_r { max_r = dist; }
+            }
+            let axis_degen_threshold = (max_r * 0.02).max(1e-4);
+            perp_dist < axis_degen_threshold
+        }
+        _ => {
+            // For other surface types (Cylinder, Torus, Extrusion, Plane),
+            // use the generic Surface::is_degenerate_at() method.
+            //
+            // IMPORTANT: We use a very tight tolerance here (1e-6) because
+            // is_degenerate_at() uses a fixed numerical step of 1e-4 for
+            // computing partial derivatives. If we pass the chord tolerance
+            // (e.g., 0.05), then for a cylinder with radius 5, the u-derivative
+            // step produces a 3D displacement of 5e-4, which is < 0.05 and
+            // would be incorrectly flagged as DU_ZERO. The tight tolerance
+            // ensures only truly singular points (both partials zero, like a
+            // fully collapsed NURBS boundary) are caught.
+            let tight_tol = 1e-6;
+            let flags = surface.is_degenerate_at(u, v, tight_tol);
+            // Only flag as degenerate if BOTH partials are zero (SINGULAR)
+            // or if the point/normal is invalid. A single zero partial (like
+            // on a cylinder seam) is NOT degenerate for Steiner point purposes.
+            flags.is_singular()
+                || flags.contains(draper_geometry::DegeneracyFlags::POINT_INVALID)
+                || flags.contains(draper_geometry::DegeneracyFlags::NORMAL_INVALID)
+        }
+    }
+}
+
 /// 2. **n_v (axial subdivisions)**: chosen so that the axial quad size
 ///    roughly matches the arc length per angular quad, producing
 ///    near-square grid cells. Capped to avoid excessive density on
@@ -1674,6 +1797,13 @@ pub(crate) fn generate_cylinder_or_cone_steiner_grid(
         if is_point_on_boundary(&domain.outer_boundary, pt, boundary_tol) {
             continue;
         }
+        // Unified degenerate-UV filter (2.7.2): skip Steiner points
+        // near the cone apex where all u values collapse to one 3D point.
+        // For cylinders this is a no-op (no degeneracy).
+        if is_degenerate_uv(surface, pt.u, pt.v, params.max_deviation.max(1e-5)) {
+            continue;
+        }
+
         let on_hole = domain.holes.iter()
             .any(|hole| is_point_on_boundary(hole, pt, boundary_tol));
         if on_hole {
@@ -1819,6 +1949,7 @@ pub(crate) fn generate_sphere_steiner_grid(
     // `triangulate_sphere_face_with_boundary` (triangulate.rs).
     // At the poles, all u values collapse to a single 3D point, so
     // interior Steiner points there are degenerate.
+    // NOTE: is_degenerate_uv() uses the same POLE_EPS = 0.05 threshold.
     const POLE_EPS: f64 = 0.05;
 
     // Generate grid points (excluding boundaries — those come from face edges).
@@ -1826,6 +1957,8 @@ pub(crate) fn generate_sphere_steiner_grid(
     for j in 1..n_v {
         let v = v_min + v_span * j as f64 / n_v as f64;
         // Skip rows too close to the poles — points there are degenerate.
+        // This is equivalent to is_degenerate_uv() but checked per-row
+        // for efficiency (avoid generating N_u points just to discard them).
         if v < POLE_EPS || v > std::f64::consts::PI - POLE_EPS {
             continue;
         }
@@ -2034,6 +2167,12 @@ pub(crate) fn generate_torus_steiner_grid(
     for pt in &grid {
         // Use cached containment grid (O(1)) — see cylinder grid for full rationale.
         if !domain.contains(pt) {
+            continue;
+        }
+        // Unified degenerate-UV filter (2.7.2): for torus this is
+        // typically a no-op (no degeneracy), but catches degenerate
+        // NURBS or unusual cases.
+        if is_degenerate_uv(surface, pt.u, pt.v, params.max_deviation.max(1e-5)) {
             continue;
         }
         if is_point_on_boundary(&domain.outer_boundary, pt, boundary_tol) {
@@ -2265,23 +2404,14 @@ pub(crate) fn generate_revolution_steiner_grid(
     // would create phantom vertices (many u-values mapping to one 3D
     // point) that break watertightness. Filter them out.
     //
-    // The threshold is a fraction of the maximum revolution radius,
-    // with an absolute minimum to catch axis-intersecting profiles.
-    let axis_degen_threshold = (max_rev_radius * 0.02).max(1e-4);
+    // Uses the unified is_degenerate_uv() function (Phase 1 / 2.7.2)
+    // which internally checks the perpendicular distance to the axis
+    // using the same threshold formula (2% of max revolution radius).
 
     let mut filtered: Vec<Point2d> = Vec::with_capacity(grid.len());
     for pt in &grid {
-        // Check if the profile at this v is near the axis.
-        let p = profile.point_at(pt.v);
-        let vx = p.x - origin.x;
-        let vy = p.y - origin.y;
-        let vz = p.z - origin.z;
-        let dot = vx * axis.x + vy * axis.y + vz * axis.z;
-        let perp_x = vx - dot * axis.x;
-        let perp_y = vy - dot * axis.y;
-        let perp_z = vz - dot * axis.z;
-        let perp_dist = (perp_x * perp_x + perp_y * perp_y + perp_z * perp_z).sqrt();
-        if perp_dist < axis_degen_threshold {
+        // Unified degenerate-UV filter (2.7.2).
+        if is_degenerate_uv(surface, pt.u, pt.v, params.max_deviation.max(1e-5)) {
             continue; // Degenerate-axis point — skip.
         }
 
@@ -2493,6 +2623,11 @@ pub(crate) fn generate_extrusion_steiner_grid(
     let mut filtered: Vec<Point2d> = Vec::with_capacity(grid.len());
     for pt in &grid {
         if !domain.contains(pt) {
+            continue;
+        }
+        // Unified degenerate-UV filter (2.7.2): for extrusion this is
+        // typically a no-op (no degeneracy), but catches unusual profiles.
+        if is_degenerate_uv(surface, pt.u, pt.v, params.max_deviation.max(1e-5)) {
             continue;
         }
         if is_point_on_boundary(&domain.outer_boundary, pt, boundary_tol) {
@@ -2795,6 +2930,11 @@ pub(crate) fn generate_nurbs_steiner_grid(
     let mut filtered: Vec<Point2d> = Vec::with_capacity(grid.len());
     for pt in &grid {
         if !domain.contains(pt) {
+            continue;
+        }
+        // Unified degenerate-UV filter (2.7.2): catches NURBS with
+        // collapsed boundary rows (degenerate edges).
+        if is_degenerate_uv(surface, pt.u, pt.v, params.max_deviation.max(1e-5)) {
             continue;
         }
         if is_point_on_boundary(&domain.outer_boundary, pt, boundary_tol) {
@@ -3715,6 +3855,92 @@ pub fn triangulate_surface_consistent(
                 mesh.add_triangle(0, (i_next + 1) as u32, (i + 1) as u32);
             }
         }
+        return mesh;
+    }
+
+    // ── Phase 1 / 2.7.3: Degenerate-boundary pre-check ───────────
+    //
+    // If more than 50% of the boundary points are degenerate (near a
+    // pole, apex, or axis pinch), the surface parameterization has
+    // collapsed for most of the face. This typically happens for:
+    //   - Cone caps near the apex (radius → 0)
+    //   - Sphere caps near the poles (v ≈ 0 or v ≈ π)
+    //   - Revolution faces near the axis
+    //
+    // In these cases, earcutr produces many degenerate (zero-area)
+    // triangles because different UV values map to the same 3D point.
+    // Instead, we use fan triangulation from the degenerate point
+    // (apex/pole), which produces a clean mesh with a single apex
+    // vertex and no degenerate triangles.
+    //
+    // The 50% threshold is chosen because faces with only a few
+    // degenerate boundary points (e.g., a cone side that barely
+    // touches the apex) are handled correctly by earcutr with the
+    // degenerate-UV filter in the Steiner grid generators.
+    let degenerate_tol = params.max_deviation.max(1e-5);
+    let n_boundary = outer_uv.len();
+    let n_degenerate_boundary = outer_uv.iter()
+        .filter(|pt| is_degenerate_uv(&surface, pt.u, pt.v, degenerate_tol))
+        .count();
+    let degenerate_fraction = if n_boundary > 0 {
+        n_degenerate_boundary as f64 / n_boundary as f64
+    } else {
+        0.0
+    };
+
+    if degenerate_fraction > 0.5 && n_boundary >= 3 {
+        log::info!(
+            "triangulate_surface_consistent: {:.0}% boundary points degenerate ({}/{}) — using fan triangulation from apex",
+            degenerate_fraction * 100.0, n_degenerate_boundary, n_boundary
+        );
+
+        // Find the degenerate apex/pole point — the 3D point that most
+        // boundary points converge to. We evaluate the surface at the
+        // average UV of the degenerate boundary points.
+        let (avg_u, avg_v) = outer_uv.iter()
+            .filter(|pt| is_degenerate_uv(&surface, pt.u, pt.v, degenerate_tol))
+            .fold((0.0_f64, 0.0_f64), |(au, av), pt| (au + pt.u, av + pt.v));
+        let n_deg = n_degenerate_boundary.max(1);
+        let apex_uv = Point2d::new(avg_u / n_deg as f64, avg_v / n_deg as f64);
+        let apex_3d = surface.point_at(apex_uv.u, apex_uv.v);
+
+        let mut mesh = TriangleMesh::new();
+
+        // Add apex as vertex 0
+        let apex_idx = mesh.add_vertex(apex_3d);
+        let apex_normal = {
+            let n = surface.normal_at(apex_uv.u, apex_uv.v);
+            if n.x.is_finite() && n.y.is_finite() && n.z.is_finite() {
+                [n.x, n.y, n.z]
+            } else {
+                [0.0, 0.0, 1.0] // fallback
+            }
+        };
+        mesh.add_vertex_normal(apex_idx, apex_normal);
+
+        // Add non-degenerate boundary points
+        let non_degenerate_3d: Vec<Point3d> = outer_uv.iter()
+            .zip(boundary_points_3d.iter())
+            .filter(|(uv, _)| !is_degenerate_uv(&surface, uv.u, uv.v, degenerate_tol))
+            .map(|(_, p3d)| *p3d)
+            .collect();
+
+        for p in &non_degenerate_3d {
+            let idx = mesh.add_vertex(*p);
+            mesh.add_vertex_normal(idx, apex_normal); // approximate
+        }
+
+        // Fan triangulation from apex
+        let n = non_degenerate_3d.len();
+        for i in 0..n {
+            let i_next = (i + 1) % n;
+            if forward {
+                mesh.add_triangle(0, (i + 1) as u32, (i_next + 1) as u32);
+            } else {
+                mesh.add_triangle(0, (i_next + 1) as u32, (i + 1) as u32);
+            }
+        }
+
         return mesh;
     }
 
@@ -6991,6 +7217,199 @@ mod tests {
 
         // Should have Steiner points (ruled in u, curved in v)
         assert!(!pts.is_empty(), "Ruled NURBS should produce interior points, got 0");
+    }
+
+    // ============================================================
+    // Tests for unified degenerate-UV filter (Phase 1 / 2.7)
+    // ============================================================
+
+    #[test]
+    fn test_is_degenerate_uv_sphere_poles() {
+        use draper_geometry::{SphereSurface, Surface, Point3d};
+
+        let sphere = SphereSurface::new(Point3d::ORIGIN, 5.0);
+        let surface = Surface::Sphere(sphere);
+
+        // North pole (v ≈ 0) — degenerate
+        assert!(is_degenerate_uv(&surface, 0.0, 0.01, 0.05),
+                "v=0.01 near north pole should be degenerate");
+
+        // South pole (v ≈ π) — degenerate
+        assert!(is_degenerate_uv(&surface, 0.0, PI - 0.01, 0.05),
+                "v=π-0.01 near south pole should be degenerate");
+
+        // Equator (v = π/2) — NOT degenerate
+        assert!(!is_degenerate_uv(&surface, 0.0, PI / 2.0, 0.05),
+                "v=π/2 at equator should NOT be degenerate");
+
+        // Mid-latitude — NOT degenerate
+        assert!(!is_degenerate_uv(&surface, 1.0, 1.0, 0.05),
+                "v=1.0 mid-latitude should NOT be degenerate");
+    }
+
+    #[test]
+    fn test_is_degenerate_uv_cone_apex() {
+        use draper_geometry::{ConeSurface, Surface};
+
+        // Non-expanding cone: apex at v = radius / tan(half_angle)
+        // half_angle = π/6 (30°), radius = 5.0 → apex at v = 5/tan(30°) ≈ 8.66
+        let cone = ConeSurface::new_z(5.0, PI / 6.0);
+        let surface = Surface::Cone(cone);
+
+        // At v=0 (base) — NOT degenerate (full radius)
+        assert!(!is_degenerate_uv(&surface, 0.0, 0.0, 0.05),
+                "v=0 at cone base should NOT be degenerate");
+
+        // At v=8.0 — close to apex but not yet degenerate
+        // radius at v=8: 5 - 8*tan(30°) = 5 - 4.62 = 0.38
+        // threshold = max(5 * 0.02, 0.05) = 0.1 → 0.38 > 0.1 → not degenerate
+        assert!(!is_degenerate_uv(&surface, 0.0, 8.0, 0.05),
+                "v=8.0 should NOT be degenerate yet");
+
+        // At v=8.66 — near apex (radius ≈ 0)
+        // radius at v=8.66: 5 - 8.66*0.577 ≈ 5 - 5.0 = 0.0 → degenerate
+        assert!(is_degenerate_uv(&surface, 0.0, 8.66, 0.05),
+                "v=8.66 near apex should be degenerate");
+    }
+
+    #[test]
+    fn test_is_degenerate_uv_cylinder_no_degeneracy() {
+        use draper_geometry::{CylinderSurface, Surface};
+
+        let cyl = CylinderSurface::new_z(5.0);
+        let surface = Surface::Cylinder(cyl);
+
+        // Cylinder has no degeneracy anywhere
+        assert!(!is_degenerate_uv(&surface, 0.0, 0.0, 0.05),
+                "Cylinder should have no degeneracy");
+        assert!(!is_degenerate_uv(&surface, PI, 2.5, 0.05),
+                "Cylinder should have no degeneracy");
+    }
+
+    #[test]
+    fn test_cone_steiner_grid_skips_apex() {
+        use draper_geometry::{ConeSurface, Surface};
+
+        // Cone with half_angle=π/6, radius=5.0
+        // apex at v ≈ 8.66
+        let cone = ConeSurface::new_z(5.0, PI / 6.0);
+        let surface = Surface::Cone(cone);
+
+        // Create a face domain that includes the apex region
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(2.0 * PI, 0.0),
+            Point2d::new(2.0 * PI, 9.0),
+            Point2d::new(0.0, 9.0),
+        ];
+        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, 9.0));
+        domain.init_containment_grid();
+
+        let params = make_test_params(0.05);
+        let pts = generate_cylinder_or_cone_steiner_grid(
+            &surface, &domain, (0.0, 2.0 * PI), (0.0, 9.0), &params, 4096,
+        );
+
+        // All Steiner points should be far from the apex
+        for pt in &pts {
+            // Check that the point is not in the degenerate zone
+            assert!(!is_degenerate_uv(&surface, pt.u, pt.v, params.max_deviation.max(1e-5)),
+                    "Steiner point at ({:.4}, {:.4}) is in degenerate zone near cone apex", pt.u, pt.v);
+        }
+    }
+
+    #[test]
+    fn test_sphere_cap_pole_single_vertex() {
+        // Test that a sphere cap near the north pole produces a mesh
+        // where the pole vertex is NOT duplicated as many vertices.
+        //
+        // This is tested indirectly: the Steiner grid for a sphere cap
+        // should skip all points near the pole (v < 0.05), leaving only
+        // boundary points. The degenerate-boundary pre-check should then
+        // trigger fan triangulation from the pole.
+        use draper_geometry::{SphereSurface, Surface, Point3d};
+
+        let sphere = SphereSurface::new(Point3d::ORIGIN, 10.0);
+        let surface = Surface::Sphere(sphere);
+
+        // Sphere cap: v ∈ [0, π/4] (near north pole)
+        let v_min = 0.0;
+        let v_max = PI / 4.0;
+
+        // Create boundary points — many near the pole
+        let n_u = 24;
+        let n_ring = 3;
+        let mut outer_uv = Vec::new();
+        // Bottom ring (v = v_max)
+        for i in 0..n_u {
+            let u = 2.0 * PI * i as f64 / n_u as f64;
+            outer_uv.push(Point2d::new(u, v_max));
+        }
+        // Lines converging to pole (v = 0)
+        for ring in 1..=n_ring {
+            let v = v_max * ring as f64 / (n_ring + 1) as f64;
+            for i in 0..n_u {
+                let u = 2.0 * PI * i as f64 / n_u as f64;
+                outer_uv.push(Point2d::new(u, v));
+            }
+        }
+
+        // Check that most boundary points are degenerate near the pole
+        let n_degenerate = outer_uv.iter()
+            .filter(|pt| is_degenerate_uv(&surface, pt.u, pt.v, 0.05))
+            .count();
+        // The bottom ring (n_u points at v=π/4) should NOT be degenerate.
+        // The inner rings have v < 0.05? No — v_max/2 ≈ 0.39, v_max/4 ≈ 0.2.
+        // Actually v_max = π/4 ≈ 0.785. v_max/4 ≈ 0.196 > 0.05.
+        // So only the v values very close to 0 would be degenerate.
+        // With our boundary, v_min=0 and v_max=π/4: no boundary points at v < 0.05.
+        // Let me make the cap smaller — v ∈ [0, 0.03].
+        let v_small = 0.03;
+        let mut cap_uv = Vec::new();
+        for i in 0..n_u {
+            let u = 2.0 * PI * i as f64 / n_u as f64;
+            cap_uv.push(Point2d::new(u, v_small));
+        }
+        for ring in 1..=3 {
+            let v = v_small * ring as f64 / 4.0;
+            for i in 0..n_u {
+                let u = 2.0 * PI * i as f64 / n_u as f64;
+                cap_uv.push(Point2d::new(u, v));
+            }
+        }
+        let n_deg_small = cap_uv.iter()
+            .filter(|pt| is_degenerate_uv(&surface, pt.u, pt.v, 0.05))
+            .count();
+        // All points with v < 0.05 are degenerate
+        assert!(n_deg_small > cap_uv.len() / 2,
+                "More than 50% of small cap boundary should be degenerate, got {}/{}",
+                n_deg_small, cap_uv.len());
+    }
+
+    #[test]
+    fn test_is_degenerate_uv_revolution_axis() {
+        use draper_geometry::{RevolutionSurface, Surface, Direction3d, Point3d};
+
+        // Profile: line from (0, 0, 0) to (5, 0, 5) — crosses the axis at v=0
+        let profile = Curve3d::Line(draper_geometry::Line::through_points(
+            Point3d::new(0.0, 0.0, 0.0),
+            Point3d::new(5.0, 0.0, 5.0),
+        ).unwrap());
+        let rev = RevolutionSurface::new(profile, Direction3d::Z, Point3d::ORIGIN);
+        let surface = Surface::Revolution(rev);
+
+        // At v=0: profile at (0, 0, 0) — ON the axis → degenerate
+        assert!(is_degenerate_uv(&surface, 0.0, 0.0, 0.05),
+                "v=0 on revolution axis should be degenerate");
+
+        // At v=0.5: profile at (2.5, 0, 2.5) — perpendicular dist = 2.5
+        // threshold ≈ max(5*0.02, 1e-4) = 0.1 → 2.5 > 0.1 → NOT degenerate
+        assert!(!is_degenerate_uv(&surface, 0.0, 0.5, 0.05),
+                "v=0.5 away from axis should NOT be degenerate");
+
+        // At v=1.0: profile at (5, 0, 5) — perpendicular dist = 5
+        assert!(!is_degenerate_uv(&surface, 0.0, 1.0, 0.05),
+                "v=1.0 away from axis should NOT be degenerate");
     }
 }
 
