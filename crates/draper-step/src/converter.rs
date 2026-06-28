@@ -28,7 +28,7 @@ use draper_geometry::{
     Point3d, Point2d, Direction3d, Vec3d, Surface, Plane, CylinderSurface, SphereSurface,
     ConeSurface, TorusSurface, RevolutionSurface, ExtrusionSurface,
     NurbsSurface, Curve3d, Curve2d, Line, Circle,  Arc, NurbsCurve,
-    Line2d, Circle2d, Ellipse2d, Nurbs2d,
+    Line2d, Circle2d, Ellipse2d, Hyperbola2d, Parabola2d, Nurbs2d,
 };
 use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary_and_holes_uv, ear_clip, validate_watertight, validate_edge_consistency, filter_degenerate_triangles, weld_boundary_edge_vertices};
 use draper_topology::{Face, Wire, CoEdge, Edge as TopoEdge, Shell, Solid};
@@ -7367,6 +7367,8 @@ impl<'a> StepConverter<'a> {
             "LINE" => self.resolve_line_curve_2d(entity),
             "CIRCLE" => self.resolve_circle_curve_2d(entity),
             "ELLIPSE" => self.resolve_ellipse_curve_2d(entity),
+            "HYPERBOLA" => self.resolve_hyperbola_curve_2d(entity),
+            "PARABOLA" => self.resolve_parabola_curve_2d(entity),
             "B_SPLINE_CURVE_WITH_KNOTS" | "B_SPLINE_CURVE" | "BEZIER_CURVE" |
             "RATIONAL_B_SPLINE_CURVE" => self.resolve_bspline_curve_2d(entity),
             "TRIMMED_CURVE" => self.resolve_trimmed_curve_2d(entity),
@@ -7432,6 +7434,79 @@ impl<'a> StepConverter<'a> {
         let semi_minor = self.find_float_param(entity, 1)?;
 
         Some(Curve2d::Ellipse(Ellipse2d::new_full(center, semi_major, semi_minor, rotation)))
+    }
+
+    /// Resolve a 2D HYPERBOLA curve to a Hyperbola2d.
+    /// STEP format: `#N = HYPERBOLA('', #axis2_2d, semi_real, semi_imag);`
+    ///
+    /// The axis2 placement provides:
+    ///   - location = center of the hyperbola
+    ///   - ref_direction = transverse axis direction (along which the branches open)
+    ///
+    /// In 2D (PCURVE context), the hyperbola is defined in UV parameter space.
+    /// Since STEP does not carry explicit parameter bounds on the HYPERBOLA entity
+    /// itself (those come from TRIMMED_CURVE wrapping), we use a default parameter
+    /// range of [-5, 5] which is sufficient for most PCURVE hyperbolas that appear
+    /// on conic surfaces. When wrapped in TRIMMED_CURVE, `resolve_trimmed_curve_2d`
+    /// will override this range.
+    fn resolve_hyperbola_curve_2d(&self, entity: &crate::schema::StepEntity) -> Option<Curve2d> {
+        let axis2_id = self.find_axis2_2d_ref(entity)?;
+        let (center, rotation) = self.resolve_axis2_2d_with_rotation(axis2_id)?;
+        let semi_real = self.find_float_param(entity, 0)?;
+        let semi_imag = self.find_float_param(entity, 1)?;
+
+        // Transverse axis direction from rotation angle
+        let axis_u = rotation.cos();
+        let axis_v = rotation.sin();
+
+        // Default parameter range; will be overridden by TRIMMED_CURVE
+        let t_start = -5.0;
+        let t_end = 5.0;
+
+        Some(Curve2d::Hyperbola(Hyperbola2d::new(
+            center,
+            semi_real.abs(),
+            semi_imag.abs(),
+            axis_u,
+            axis_v,
+            t_start,
+            t_end,
+        )))
+    }
+
+    /// Resolve a 2D PARABOLA curve to a Parabola2d.
+    /// STEP format: `#N = PARABOLA('', #axis2_2d, focal_dist);`
+    ///
+    /// The axis2 placement provides:
+    ///   - location = vertex of the parabola
+    ///   - ref_direction = direction the parabola opens (toward the focus)
+    ///
+    /// In 2D (PCURVE context), the parabola is defined in UV parameter space.
+    /// Since STEP does not carry explicit parameter bounds on the PARABOLA entity
+    /// itself (those come from TRIMMED_CURVE wrapping), we use a default parameter
+    /// range of [-5, 5]. When wrapped in TRIMMED_CURVE, `resolve_trimmed_curve_2d`
+    /// will override this range.
+    fn resolve_parabola_curve_2d(&self, entity: &crate::schema::StepEntity) -> Option<Curve2d> {
+        let axis2_id = self.find_axis2_2d_ref(entity)?;
+        let (vertex, rotation) = self.resolve_axis2_2d_with_rotation(axis2_id)?;
+        let focal_dist = self.find_float_param(entity, 0)?;
+
+        // Axis direction from rotation angle
+        let axis_u = rotation.cos();
+        let axis_v = rotation.sin();
+
+        // Default parameter range; will be overridden by TRIMMED_CURVE
+        let t_start = -5.0;
+        let t_end = 5.0;
+
+        Some(Curve2d::Parabola(Parabola2d::new(
+            vertex,
+            focal_dist.abs(),
+            axis_u,
+            axis_v,
+            t_start,
+            t_end,
+        )))
     }
 
     /// Resolve a 2D B_SPLINE_CURVE to a Nurbs2d.
@@ -7548,6 +7623,35 @@ impl<'a> StepConverter<'a> {
             if let (Some(t1), Some(t2)) = (trim1, trim2) {
                 return Some(Curve2d::Circle(Circle2d::new_arc(
                     circle.center, circle.radius, t1, t2,
+                )));
+            }
+        }
+
+        // For HYPERBOLA in UV, trims define parameter range [t_start, t_end]
+        if let Curve2d::Hyperbola(ref hyp) = basis {
+            if let (Some(t1), Some(t2)) = (trim1, trim2) {
+                return Some(Curve2d::Hyperbola(Hyperbola2d::new(
+                    hyp.center,
+                    hyp.semi_real,
+                    hyp.semi_imag,
+                    hyp.axis_u,
+                    hyp.axis_v,
+                    t1,
+                    t2,
+                )));
+            }
+        }
+
+        // For PARABOLA in UV, trims define parameter range [t_start, t_end]
+        if let Curve2d::Parabola(ref par) = basis {
+            if let (Some(t1), Some(t2)) = (trim1, trim2) {
+                return Some(Curve2d::Parabola(Parabola2d::new(
+                    par.vertex,
+                    par.focal_dist,
+                    par.axis_u,
+                    par.axis_v,
+                    t1,
+                    t2,
                 )));
             }
         }

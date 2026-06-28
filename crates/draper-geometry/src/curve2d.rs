@@ -10,6 +10,8 @@
 //! - Line2d: straight line in UV space (from PCURVE LINE in STEP)
 //! - Circle2d: circular arc in UV space (from PCURVE CIRCLE in STEP)
 //! - Ellipse2d: elliptical arc in UV space (from PCURVE ELLIPSE in STEP)
+//! - Hyperbola2d: hyperbolic arc in UV space (from PCURVE HYPERBOLA in STEP)
+//! - Parabola2d: parabolic arc in UV space (from PCURVE PARABOLA in STEP)
 //! - Nurbs2d: NURBS curve in UV space (from PCURVE B_SPLINE_CURVE in STEP)
 
 use crate::Point2d;
@@ -25,6 +27,10 @@ pub enum Curve2d {
     Circle(Circle2d),
     /// An elliptical arc in UV space.
     Ellipse(Ellipse2d),
+    /// A hyperbolic arc in UV space.
+    Hyperbola(Hyperbola2d),
+    /// A parabolic arc in UV space.
+    Parabola(Parabola2d),
     /// A NURBS curve in UV space.
     Nurbs(Nurbs2d),
 }
@@ -213,6 +219,174 @@ impl Ellipse2d {
     }
 }
 
+/// A hyperbolic arc in UV space.
+///
+/// Standard form: u²/a² - v²/b² = 1, where a = semi_real, b = semi_imag.
+/// The hyperbola lies in UV space with its center at `center`,
+/// its transverse axis along (axis_u, axis_v), and conjugate axis
+/// perpendicular to that (rotated 90° CCW).
+///
+/// Parametric form:
+///   P(t) = center + a·cosh(t)·(axis_u, axis_v) + b·sinh(t)·(-axis_v, axis_u)
+///   P'(t) = a·sinh(t)·(axis_u, axis_v) + b·cosh(t)·(-axis_v, axis_u)
+///
+/// The parameter t ∈ [t_start, t_end] maps to the trimmed portion.
+/// STEP TRIMMED_CURVE provides the bounds.
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Hyperbola2d {
+    /// Center of the hyperbola in UV space.
+    pub center: Point2d,
+    /// Semi-real axis length (a in u²/a² - v²/b² = 1).
+    pub semi_real: f64,
+    /// Semi-imaginary axis length (b in u²/a² - v²/b² = 1).
+    pub semi_imag: f64,
+    /// Direction of the transverse axis (unit vector in UV space).
+    pub axis_u: f64,
+    pub axis_v: f64,
+    /// Start parameter value (typically from TRIMMED_CURVE).
+    pub t_start: f64,
+    /// End parameter value (typically from TRIMMED_CURVE).
+    pub t_end: f64,
+}
+
+impl Hyperbola2d {
+    /// Create a full hyperbola with given parameter range.
+    pub fn new(center: Point2d, semi_real: f64, semi_imag: f64, axis_u: f64, axis_v: f64, t_start: f64, t_end: f64) -> Self {
+        Self { center, semi_real, semi_imag, axis_u, axis_v, t_start, t_end }
+    }
+
+    /// Evaluate at parameter t ∈ [0, 1] (maps to [t_start, t_end]).
+    pub fn point_at(&self, t: f64) -> Point2d {
+        let s = self.t_start + t * (self.t_end - self.t_start);
+        let ch = s.cosh();
+        let sh = s.sinh();
+        // Conjugate axis direction is 90° CCW from transverse axis
+        let conj_u = -self.axis_v;
+        let conj_v = self.axis_u;
+        Point2d::new(
+            self.center.u + self.semi_real * ch * self.axis_u + self.semi_imag * sh * conj_u,
+            self.center.v + self.semi_real * ch * self.axis_v + self.semi_imag * sh * conj_v,
+        )
+    }
+
+    /// Derivative at parameter t ∈ [0, 1].
+    pub fn derivative_at(&self, t: f64) -> (f64, f64) {
+        let dt = self.t_end - self.t_start;
+        let s = self.t_start + t * dt;
+        let sh = s.sinh();
+        let ch = s.cosh();
+        let conj_u = -self.axis_v;
+        let conj_v = self.axis_u;
+        let du = (self.semi_real * sh * self.axis_u + self.semi_imag * ch * conj_u) * dt;
+        let dv = (self.semi_real * sh * self.axis_v + self.semi_imag * ch * conj_v) * dt;
+        (du, dv)
+    }
+
+    /// Parameter range is always [0, 1] (canonical).
+    pub fn param_range(&self) -> (f64, f64) {
+        (0.0, 1.0)
+    }
+
+    /// Approximate arc length using numerical integration.
+    pub fn length(&self) -> f64 {
+        let n = 100;
+        let mut length = 0.0;
+        let mut prev = self.point_at(0.0);
+        for i in 1..=n {
+            let t = i as f64 / n as f64;
+            let curr = self.point_at(t);
+            let du = curr.u - prev.u;
+            let dv = curr.v - prev.v;
+            length += (du * du + dv * dv).sqrt();
+            prev = curr;
+        }
+        length
+    }
+}
+
+/// A parabolic arc in UV space.
+///
+/// Standard form: u = v²/(4f), where f = focal_dist.
+/// The parabola opens along (axis_u, axis_v) direction, with vertex at `vertex`.
+///
+/// Parametric form (parameter t = coordinate along conjugate axis):
+///   P(t) = vertex + (t²/(4f))·(axis_u, axis_v) + t·(-axis_v, axis_u)
+///   P'(t) = (t/(2f))·(axis_u, axis_v) + (-axis_v, axis_u)
+///
+/// The parameter t ∈ [t_start, t_end] maps to the trimmed portion.
+/// STEP TRIMMED_CURVE provides the bounds.
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Parabola2d {
+    /// Vertex of the parabola in UV space.
+    pub vertex: Point2d,
+    /// Focal distance f > 0.
+    pub focal_dist: f64,
+    /// Direction the parabola opens (unit vector in UV space).
+    pub axis_u: f64,
+    pub axis_v: f64,
+    /// Start parameter value (typically from TRIMMED_CURVE).
+    pub t_start: f64,
+    /// End parameter value (typically from TRIMMED_CURVE).
+    pub t_end: f64,
+}
+
+impl Parabola2d {
+    /// Create a parabola with given parameter range.
+    pub fn new(vertex: Point2d, focal_dist: f64, axis_u: f64, axis_v: f64, t_start: f64, t_end: f64) -> Self {
+        Self { vertex, focal_dist, axis_u, axis_v, t_start, t_end }
+    }
+
+    /// Evaluate at parameter t ∈ [0, 1] (maps to [t_start, t_end]).
+    pub fn point_at(&self, t: f64) -> Point2d {
+        let s = self.t_start + t * (self.t_end - self.t_start);
+        let f = if self.focal_dist.abs() < 1e-15 { 1e-15 } else { self.focal_dist };
+        let along = s * s / (4.0 * f);
+        // Conjugate direction is 90° CCW from axis direction
+        let conj_u = -self.axis_v;
+        let conj_v = self.axis_u;
+        Point2d::new(
+            self.vertex.u + along * self.axis_u + s * conj_u,
+            self.vertex.v + along * self.axis_v + s * conj_v,
+        )
+    }
+
+    /// Derivative at parameter t ∈ [0, 1].
+    pub fn derivative_at(&self, t: f64) -> (f64, f64) {
+        let dt = self.t_end - self.t_start;
+        let s = self.t_start + t * dt;
+        let f = if self.focal_dist.abs() < 1e-15 { 1e-15 } else { self.focal_dist };
+        let d_along = s / (2.0 * f);
+        let conj_u = -self.axis_v;
+        let conj_v = self.axis_u;
+        let du = (d_along * self.axis_u + conj_u) * dt;
+        let dv = (d_along * self.axis_v + conj_v) * dt;
+        (du, dv)
+    }
+
+    /// Parameter range is always [0, 1] (canonical).
+    pub fn param_range(&self) -> (f64, f64) {
+        (0.0, 1.0)
+    }
+
+    /// Approximate arc length using numerical integration.
+    pub fn length(&self) -> f64 {
+        let n = 100;
+        let mut length = 0.0;
+        let mut prev = self.point_at(0.0);
+        for i in 1..=n {
+            let t = i as f64 / n as f64;
+            let curr = self.point_at(t);
+            let du = curr.u - prev.u;
+            let dv = curr.v - prev.v;
+            length += (du * du + dv * dv).sqrt();
+            prev = curr;
+        }
+        length
+    }
+}
+
 /// A NURBS curve in UV space.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -359,6 +533,8 @@ impl Curve2d {
             Curve2d::Line(l) => l.point_at(t),
             Curve2d::Circle(c) => c.point_at(t),
             Curve2d::Ellipse(e) => e.point_at(t),
+            Curve2d::Hyperbola(h) => h.point_at(t),
+            Curve2d::Parabola(p) => p.point_at(t),
             Curve2d::Nurbs(n) => n.point_at(t),
         }
     }
@@ -369,6 +545,8 @@ impl Curve2d {
             Curve2d::Line(l) => l.derivative_at(t),
             Curve2d::Circle(c) => c.derivative_at(t),
             Curve2d::Ellipse(e) => e.derivative_at(t),
+            Curve2d::Hyperbola(h) => h.derivative_at(t),
+            Curve2d::Parabola(p) => p.derivative_at(t),
             Curve2d::Nurbs(n) => n.derivative_at(t),
         }
     }
@@ -379,6 +557,8 @@ impl Curve2d {
             Curve2d::Line(l) => l.param_range(),
             Curve2d::Circle(c) => c.param_range(),
             Curve2d::Ellipse(e) => e.param_range(),
+            Curve2d::Hyperbola(h) => h.param_range(),
+            Curve2d::Parabola(p) => p.param_range(),
             Curve2d::Nurbs(n) => n.param_range(),
         }
     }
@@ -389,6 +569,8 @@ impl Curve2d {
             Curve2d::Line(l) => l.length(),
             Curve2d::Circle(c) => c.length(),
             Curve2d::Ellipse(e) => e.length(),
+            Curve2d::Hyperbola(h) => h.length(),
+            Curve2d::Parabola(p) => p.length(),
             Curve2d::Nurbs(n) => n.length(),
         }
     }
@@ -488,5 +670,157 @@ mod tests {
         assert!((samples[0].u - 0.0).abs() < 1e-10);
         assert!((samples[5].u - 5.0).abs() < 1e-10);
         assert!((samples[10].u - 10.0).abs() < 1e-10);
+    }
+
+    // ── Hyperbola2d tests ─────────────────────────────────────
+
+    #[test]
+    fn test_hyperbola2d_point_at_zero() {
+        // Hyperbola centered at origin, a=2, b=1, axis along +U.
+        // At t=0 (mapped to s = t_start + 0 * (t_end - t_start) = t_start),
+        // P(s) = center + a*cosh(s)*axis + b*sinh(s)*conj.
+        // With t_start=-1, t_end=1: at canonical t=0.5, s=0.
+        // P(0) = (0,0) + 2*cosh(0)*(1,0) + 1*sinh(0)*(0,1) = (2, 0)
+        let hyp = Hyperbola2d::new(
+            Point2d::new(0.0, 0.0),
+            2.0, 1.0,
+            1.0, 0.0,  // axis along +U
+            -1.0, 1.0, // t ∈ [-1, 1]
+        );
+        let p = hyp.point_at(0.5); // s = 0
+        assert!((p.u - 2.0).abs() < 1e-10, "Expected u=2.0, got {}", p.u);
+        assert!(p.v.abs() < 1e-10, "Expected v=0.0, got {}", p.v);
+    }
+
+    #[test]
+    fn test_hyperbola2d_derivative_at_zero() {
+        // At s=0: P'(0) = a*sinh(0)*axis + b*cosh(0)*conj = 0 + 1*(0,1) = (0, dt)
+        // dt = t_end - t_start = 2, so P'(0.5) = (0, 2)
+        let hyp = Hyperbola2d::new(
+            Point2d::new(0.0, 0.0),
+            2.0, 1.0,
+            1.0, 0.0,
+            -1.0, 1.0,
+        );
+        let (du, dv) = hyp.derivative_at(0.5);
+        assert!(du.abs() < 1e-10, "Expected du≈0, got {}", du);
+        assert!((dv - 2.0).abs() < 1e-10, "Expected dv=2.0, got {}", dv);
+    }
+
+    #[test]
+    fn test_hyperbola2d_length_positive() {
+        let hyp = Hyperbola2d::new(
+            Point2d::new(0.0, 0.0),
+            2.0, 1.0,
+            1.0, 0.0,
+            -1.0, 1.0,
+        );
+        assert!(hyp.length() > 0.0, "Hyperbola arc length should be positive");
+    }
+
+    #[test]
+    fn test_hyperbola2d_rotated_axis() {
+        // Hyperbola with axis rotated 90° (along +V)
+        let hyp = Hyperbola2d::new(
+            Point2d::new(1.0, 1.0),
+            3.0, 2.0,
+            0.0, 1.0,  // axis along +V
+            -0.5, 0.5,
+        );
+        let p = hyp.point_at(0.5); // s = 0
+        // P(0) = (1,1) + 3*cosh(0)*(0,1) + 2*sinh(0)*(-1,0) = (1, 4)
+        assert!((p.u - 1.0).abs() < 1e-10, "Expected u=1.0, got {}", p.u);
+        assert!((p.v - 4.0).abs() < 1e-10, "Expected v=4.0, got {}", p.v);
+    }
+
+    // ── Parabola2d tests ──────────────────────────────────────
+
+    #[test]
+    fn test_parabola2d_point_at_zero() {
+        // Parabola with vertex at origin, f=1, axis along +U.
+        // At s=0 (canonical t such that s = t_start + t*(t_end-t_start)):
+        // P(0) = vertex + 0²/(4f)*axis + 0*conj = vertex
+        let par = Parabola2d::new(
+            Point2d::new(0.0, 0.0),
+            1.0,
+            1.0, 0.0,  // axis along +U
+            -2.0, 2.0,
+        );
+        let p = par.point_at(0.5); // s = 0
+        assert!(p.u.abs() < 1e-10, "Expected u=0.0, got {}", p.u);
+        assert!(p.v.abs() < 1e-10, "Expected v=0.0, got {}", p.v);
+    }
+
+    #[test]
+    fn test_parabola2d_point_at_nonzero() {
+        // Parabola with vertex at origin, f=1, axis along +U.
+        // t_start=0, t_end=2. At canonical t=0.5, s=1.
+        // P(1) = (0,0) + 1²/(4*1)*(1,0) + 1*(0,1) = (0.25, 1.0)
+        let par = Parabola2d::new(
+            Point2d::new(0.0, 0.0),
+            1.0,
+            1.0, 0.0,
+            0.0, 2.0,
+        );
+        let p = par.point_at(0.5); // s = 1
+        assert!((p.u - 0.25).abs() < 1e-10, "Expected u=0.25, got {}", p.u);
+        assert!((p.v - 1.0).abs() < 1e-10, "Expected v=1.0, got {}", p.v);
+    }
+
+    #[test]
+    fn test_parabola2d_derivative() {
+        // At s=1, f=1: d_along = 1/(2*1) = 0.5
+        // P'(1) = (0.5*axis + conj) * dt, where dt = t_end - t_start = 2
+        // P'(1) = (0.5*(1,0) + (0,1)) * 2 = (1.0, 2.0)
+        let par = Parabola2d::new(
+            Point2d::new(0.0, 0.0),
+            1.0,
+            1.0, 0.0,
+            0.0, 2.0,
+        );
+        let (du, dv) = par.derivative_at(0.5);
+        assert!((du - 1.0).abs() < 1e-10, "Expected du=1.0, got {}", du);
+        assert!((dv - 2.0).abs() < 1e-10, "Expected dv=2.0, got {}", dv);
+    }
+
+    #[test]
+    fn test_parabola2d_length_positive() {
+        let par = Parabola2d::new(
+            Point2d::new(0.0, 0.0),
+            1.0,
+            1.0, 0.0,
+            -2.0, 2.0,
+        );
+        assert!(par.length() > 0.0, "Parabola arc length should be positive");
+    }
+
+    #[test]
+    fn test_curve2d_hyperbola_dispatch() {
+        let hyp = Hyperbola2d::new(
+            Point2d::new(0.0, 0.0),
+            2.0, 1.0,
+            1.0, 0.0,
+            -1.0, 1.0,
+        );
+        let curve = Curve2d::Hyperbola(hyp);
+        let p = curve.point_at(0.5);
+        assert!((p.u - 2.0).abs() < 1e-10);
+        assert!(p.v.abs() < 1e-10);
+        assert!(curve.length() > 0.0);
+    }
+
+    #[test]
+    fn test_curve2d_parabola_dispatch() {
+        let par = Parabola2d::new(
+            Point2d::new(0.0, 0.0),
+            1.0,
+            1.0, 0.0,
+            0.0, 2.0,
+        );
+        let curve = Curve2d::Parabola(par);
+        let p = curve.point_at(0.5);
+        assert!((p.u - 0.25).abs() < 1e-10);
+        assert!((p.v - 1.0).abs() < 1e-10);
+        assert!(curve.length() > 0.0);
     }
 }

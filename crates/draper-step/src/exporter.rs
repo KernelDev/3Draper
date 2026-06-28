@@ -566,6 +566,45 @@ impl StepWriter {
                 ));
                 id
             }
+            Curve2d::Hyperbola(hyp) => {
+                let pt_id = self.emit_point(&Point3d::new(hyp.center.u, hyp.center.v, 0.0));
+                let ref_dir_id = self.emit_direction(&Direction3d::new(
+                    hyp.axis_u, hyp.axis_v, 0.0,
+                ).unwrap_or(Direction3d::X));
+                let axis2d_id = self.alloc_id();
+                self.push_line(&format!(
+                    "#{} = AXIS2_PLACEMENT_2D('',#{},#{});",
+                    axis2d_id, pt_id, ref_dir_id
+                ));
+                let id = self.alloc_id();
+                self.push_line(&format!(
+                    "#{} = HYPERBOLA('',#{},{},{});",
+                    id,
+                    axis2d_id,
+                    fmt_f64(hyp.semi_real),
+                    fmt_f64(hyp.semi_imag)
+                ));
+                id
+            }
+            Curve2d::Parabola(par) => {
+                let pt_id = self.emit_point(&Point3d::new(par.vertex.u, par.vertex.v, 0.0));
+                let ref_dir_id = self.emit_direction(&Direction3d::new(
+                    par.axis_u, par.axis_v, 0.0,
+                ).unwrap_or(Direction3d::X));
+                let axis2d_id = self.alloc_id();
+                self.push_line(&format!(
+                    "#{} = AXIS2_PLACEMENT_2D('',#{},#{});",
+                    axis2d_id, pt_id, ref_dir_id
+                ));
+                let id = self.alloc_id();
+                self.push_line(&format!(
+                    "#{} = PARABOLA('',#{},{});",
+                    id,
+                    axis2d_id,
+                    fmt_f64(par.focal_dist)
+                ));
+                id
+            }
             Curve2d::Nurbs(nurbs) => {
                 // Emit as 2D B-spline by lifting control points to (u, v, 0)
                 let lifted_cps: Vec<Point3d> = nurbs
