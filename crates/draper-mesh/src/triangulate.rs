@@ -322,6 +322,58 @@ impl SteinerBudgetProfile {
             Self::Mobile => 2,
         }
     }
+
+    // ── Extrusion-specific profile methods ─────────────────────────────
+    //
+    // ExtrusionSurface parameterization: u ∈ [u_min, u_max] (profile curve
+    // parameter), v ∈ [v_min, v_max] (extrusion distance along direction).
+    // Neither direction is periodic.
+    //
+    // n_u depends on the profile curve type (same logic as revolution):
+    //   - Line → uniform, few subdivisions (2–8)
+    //   - Circle/Arc → chord-error with the circle radius
+    //   - NURBS/general → adaptive sampling of profile curvature
+    //
+    // n_v is almost always small (2–8) because the extrusion direction
+    // is STRAIGHT (dS/dv = D = constant). The surface has zero curvature
+    // in v — only the profile contributes curvature.
+
+    /// Maximum number of U subdivisions for extrusion Steiner grid.
+    /// Same as revolution (profile-dependent, not angular).
+    pub fn max_u_extrusion(&self) -> usize {
+        match self {
+            Self::Desktop => 64,
+            Self::Tablet => 48,
+            Self::Mobile => 32,
+        }
+    }
+    /// Maximum number of V subdivisions for extrusion Steiner grid.
+    /// Lower than other surfaces — extrusion direction is always straight.
+    pub fn max_v_extrusion(&self) -> usize {
+        match self {
+            Self::Desktop => 16,
+            Self::Tablet => 10,
+            Self::Mobile => 8,
+        }
+    }
+    /// Minimum floor for n_u (extrusion). 6 on desktop — lower than
+    /// revolution because extrusion profiles tend to be simpler.
+    pub fn min_u_extrusion(&self) -> usize {
+        match self {
+            Self::Desktop => 6,
+            Self::Tablet => 5,
+            Self::Mobile => 4,
+        }
+    }
+    /// Minimum floor for n_v (extrusion). 2 on desktop — extrusion
+    /// direction is always straight, so very few v-samples needed.
+    pub fn min_v_extrusion(&self) -> usize {
+        match self {
+            Self::Desktop => 2,
+            Self::Tablet => 2,
+            Self::Mobile => 2,
+        }
+    }
 }
 
 impl Default for SteinerBudgetProfile {

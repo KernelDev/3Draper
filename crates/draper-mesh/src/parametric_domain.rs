@@ -2313,6 +2313,210 @@ pub(crate) fn generate_revolution_steiner_grid(
 }
 
 // ============================================================
+// Extrusion Steiner grid generator
+// ============================================================
+
+/// Generate a regular (u, v) grid of Steiner points for extrusion faces
+/// that contain holes or have non-rectangular UV bbox.
+///
+/// # Why this exists
+///
+/// Extrusion surfaces are parameterized as `(u, v) ∈ [u_min, u_max] × [v_min, v_max]`
+/// where `u` is the profile curve parameter and `v` is the extrusion distance.
+/// The surface formula is `S(u, v) = P(u) + v · D` — the profile swept along
+/// the extrusion direction `D`.
+///
+/// The generic `parameter_division_2d` branch recursively subdivides the UV
+/// bbox by chord error. Since `dS/dv = D` is constant (zero curvature in v),
+/// the recursion produces very few v-knots — correct for the surface but
+/// insufficient for earcutr when the face has holes or a complex boundary.
+/// With too few interior points, earcutr produces long thin triangles that
+/// span the full extrusion length, crossing over holes.
+///
+/// `generate_extrusion_steiner_grid` produces a regular grid in (u, v) space:
+///
+///   - **n_u** from the profile curve type (same strategy as revolution):
+///     - Line → few uniform subdivisions
+///     - Circle/Arc → chord-error with the circle radius
+///     - NURBS/general → arc-length-based adaptive
+///   - **n_v** is small (typically 2–8) because the extrusion direction
+///     is always straight — the surface has zero curvature in v.
+///
+/// This ensures earcutr receives enough interior Steiner points to produce
+/// well-shaped triangles around holes and complex boundaries.
+pub(crate) fn generate_extrusion_steiner_grid(
+    surface: &Surface,
+    domain: &ParametricDomain,
+    u_range: (f64, f64),
+    v_range: (f64, f64),
+    params: &crate::triangulate::TriangulationParams,
+    max_budget: usize,
+) -> Vec<Point2d> {
+    let ext = match surface {
+        Surface::Extrusion(e) => e,
+        _ => return Vec::new(),
+    };
+    let (u_min, u_max) = u_range;
+    let (v_min, v_max) = v_range;
+    let u_span = u_max - u_min;
+    let v_span = v_max - v_min;
+    if u_span <= 0.0 || v_span <= 0.0 {
+        return Vec::new();
+    }
+
+    let profile = &ext.profile;
+    let chord_tol = params.max_deviation.max(1e-5);
+    let profile_budget = params.steiner_profile;
+    let max_u_cap = profile_budget.max_u_extrusion();
+    let max_v_cap = profile_budget.max_v_extrusion();
+    let min_u_floor = profile_budget.min_u_extrusion();
+    let min_v_floor = profile_budget.min_v_extrusion();
+
+    // ── Step 1: Compute n_u from profile curve type ────────────────
+    //
+    // Same strategy as revolution: the profile determines how many
+    // u-subdivisions are needed. The extrusion direction contributes
+    // no curvature, so only the profile matters.
+    let n_u_raw = match profile {
+        Curve3d::Line(_) => {
+            // Linear profile — few u-samples needed.
+            min_u_floor.max(4)
+        }
+        Curve3d::Circle(c) => {
+            // Circular profile → chord-error formula.
+            let r = c.radius.max(1e-9);
+            let circle_span = if u_span > 1.99 * PI { 2.0 * PI } else { u_span };
+            let du_max = if r > chord_tol * 1.001 {
+                2.0 * (1.0 - chord_tol / r).acos()
+            } else {
+                std::f64::consts::PI / 8.0
+            };
+            ((circle_span / du_max).ceil() as usize).max(min_u_floor).min(max_u_cap)
+        }
+        Curve3d::Arc(arc) => {
+            // Arc profile → chord-error with the circle radius.
+            let r = arc.circle.radius.max(1e-9);
+            let du_max = if r > chord_tol * 1.001 {
+                2.0 * (1.0 - chord_tol / r).acos()
+            } else {
+                std::f64::consts::PI / 8.0
+            };
+            ((u_span / du_max).ceil() as usize).max(min_u_floor).min(max_u_cap)
+        }
+        _ => {
+            // General profile (NURBS, ellipse, composite, etc.).
+            // Sample profile to compute arc length, then use arc-length
+            // proxy for subdivision count.
+            let n_probe = 64;
+            let mut arc_len: f64 = 0.0;
+            let mut prev_p: Option<Point3d> = None;
+            for i in 0..=n_probe {
+                let t = u_min + u_span * i as f64 / n_probe as f64;
+                let p = profile.point_at(t);
+                if let Some(pp) = prev_p {
+                    let dx = p.x - pp.x;
+                    let dy = p.y - pp.y;
+                    let dz = p.z - pp.z;
+                    arc_len += (dx * dx + dy * dy + dz * dz).sqrt();
+                }
+                prev_p = Some(p);
+            }
+            let target_seg = (8.0 * chord_tol * arc_len.max(1e-9).sqrt()).max(chord_tol * 10.0);
+            let n_u_est = (arc_len / target_seg).ceil() as usize;
+            n_u_est.max(min_u_floor).min(max_u_cap)
+        }
+    };
+
+    // ── Step 2: Compute n_v ────────────────────────────────────────
+    //
+    // The extrusion direction is always straight (dS/dv = D = constant).
+    // n_v is therefore small — just enough to create near-square cells
+    // and provide interior Steiner points for earcutr to work with holes.
+    let dir_len = (ext.direction.x * ext.direction.x
+        + ext.direction.y * ext.direction.y
+        + ext.direction.z * ext.direction.z)
+        .sqrt();
+    // Estimate profile arc length per u-subdivision.
+    let n_probe_v = 32;
+    let mut seg_len: f64 = 0.0;
+    let mut prev_p: Option<Point3d> = None;
+    for i in 0..=n_probe_v {
+        let t = u_min + u_span * i as f64 / (n_u_raw * n_probe_v) as f64;
+        let p = profile.point_at(t);
+        if let Some(pp) = prev_p {
+            let dx = p.x - pp.x;
+            let dy = p.y - pp.y;
+            let dz = p.z - pp.z;
+            seg_len += (dx * dx + dy * dy + dz * dz).sqrt();
+        }
+        prev_p = Some(p);
+    }
+    let profile_arc_per_u = seg_len.max(1e-9);
+    // Target: dv such that the extrusion segment length ≈ profile arc per u-cell.
+    let target_dv = if dir_len > 1e-9 {
+        (profile_arc_per_u / dir_len).max(v_span / max_v_cap as f64)
+    } else {
+        v_span / max_v_cap as f64
+    };
+    let n_v_raw = ((v_span / target_dv).ceil() as usize).max(min_v_floor).min(max_v_cap);
+
+    // ── Step 3: Budget-aware cap ────────────────────────────────────
+    let max_candidates = (max_budget as f64 * profile_budget.candidate_multiplier()).ceil() as usize;
+    let mut n_u = n_u_raw;
+    let mut n_v = n_v_raw;
+    while n_u > min_u_floor && (n_u - 1) * (n_v - 1) > max_candidates {
+        n_u -= 1;
+    }
+    while n_v > min_v_floor && (n_u - 1) * (n_v - 1) > max_candidates {
+        n_v -= 1;
+    }
+
+    log::debug!(
+        "extrusion steiner grid: n_u={}, n_v={}, u_span={:.4}, v_span={:.4}, budget={}",
+        n_u, n_v, u_span, v_span, max_budget
+    );
+
+    // ── Step 4: Generate grid points (excluding boundaries) ─────────
+    let mut grid: Vec<Point2d> = Vec::with_capacity((n_u - 1) * (n_v - 1));
+    for j in 1..n_v {
+        let v = v_min + v_span * j as f64 / n_v as f64;
+        for i in 1..n_u {
+            let u = u_min + u_span * i as f64 / n_u as f64;
+            grid.push(Point2d::new(u, v));
+        }
+    }
+
+    // ── Step 5: Filter to domain ────────────────────────────────────
+    let span_max = u_span.max(v_span);
+    let boundary_tol = (span_max * 1e-6).max(1e-9);
+
+    let mut filtered: Vec<Point2d> = Vec::with_capacity(grid.len());
+    for pt in &grid {
+        if !domain.contains(pt) {
+            continue;
+        }
+        if is_point_on_boundary(&domain.outer_boundary, pt, boundary_tol) {
+            continue;
+        }
+        let on_hole = domain.holes.iter()
+            .any(|hole| is_point_on_boundary(hole, pt, boundary_tol));
+        if on_hole {
+            continue;
+        }
+        filtered.push(*pt);
+    }
+
+    log::debug!(
+        "extrusion steiner grid: {} grid pts → {} after domain filter",
+        grid.len(), filtered.len()
+    );
+
+    // ── Step 6: Downsample to budget if needed ──────────────────────
+    let coarsened = coarse_grid_sample(&filtered, max_budget);
+    downsample_interior_points(&coarsened, max_budget)
+}
+
+// ============================================================
 // Planar Steiner grid generator (for planes WITH holes)
 // ============================================================
 
@@ -3532,6 +3736,30 @@ pub fn triangulate_surface_consistent(
             (v_min, v_max),
             params,
             rev_budget,
+        )
+    } else if matches!(surface, Surface::Extrusion(_)) {
+        // Extrusion faces — use a dedicated regular (u, v) Steiner grid.
+        //
+        // WHY: Extrusion surfaces have `S(u, v) = P(u) + v·D` where D
+        // is constant. The generic `parameter_division_2d` branch
+        // correctly identifies zero curvature in the v-direction and
+        // produces very few v-knots. However, for faces with holes or
+        // complex boundaries, earcutr needs interior Steiner points in
+        // both u and v to produce well-shaped triangles around the holes.
+        //
+        // `generate_extrusion_steiner_grid` produces a regular grid
+        // in (u, v) space — n_u from the profile curve type (same as
+        // revolution: line → uniform, circle/arc → chord-error,
+        // NURBS/general → arc-length-based), n_v from target aspect
+        // ratio (typically 2–8 since v is always straight).
+        let ext_budget = max_interior_budget.max(8);
+        generate_extrusion_steiner_grid(
+            surface,
+            &domain,
+            (u_min, u_max),
+            (v_min, v_max),
+            params,
+            ext_budget,
         )
     } else {
         // Compute adaptive subdivision grid for the entire surface, then
@@ -6047,6 +6275,140 @@ mod tests {
             u_vals.len()
         };
         assert!(n_distinct_u >= 6, "Expected ≥6 distinct u values, got {}", n_distinct_u);
+    }
+
+    // ============================================================
+    // Extrusion Steiner grid tests
+    // ============================================================
+
+    #[test]
+    fn test_extrusion_steiner_grid_line_profile() {
+        use draper_geometry::{ExtrusionSurface, Surface, Point3d, Direction3d, Curve3d, Line};
+
+        // Linear profile extruded along Z → flat rectangular surface.
+        let line = Line::new(Point3d::new(0.0, 0.0, 0.0), Direction3d::X);
+        let ext = ExtrusionSurface::new(Curve3d::Line(line), Direction3d::Z);
+        let surface = Surface::Extrusion(ext);
+
+        // UV domain: u ∈ [0, 1], v ∈ [0, 10]
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(1.0, 0.0),
+            Point2d::new(1.0, 10.0),
+            Point2d::new(0.0, 10.0),
+        ];
+        let mut domain = ParametricDomain::new(outer, (0.0, 1.0), (0.0, 10.0));
+        domain.init_containment_grid();
+
+        let params = make_test_params(0.05);
+        let pts = generate_extrusion_steiner_grid(
+            &surface, &domain, (0.0, 1.0), (0.0, 10.0), &params, 4096,
+        );
+
+        // Linear profile → few u-samples. Should have some interior points.
+        for p in &pts {
+            assert!(domain.contains_ray(p), "point {:?} outside domain", p);
+        }
+    }
+
+    #[test]
+    fn test_extrusion_steiner_grid_circle_profile() {
+        use draper_geometry::{ExtrusionSurface, Surface, Point3d, Direction3d, Curve3d, Circle};
+
+        // Circular profile extruded along Z → cylindrical surface.
+        let circle = Circle::new_xy(Point3d::ORIGIN, 5.0);
+        let ext = ExtrusionSurface::new(Curve3d::Circle(circle), Direction3d::Z);
+        let surface = Surface::Extrusion(ext);
+
+        // UV domain: u ∈ [0, 2π], v ∈ [0, 10]
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(2.0 * PI, 0.0),
+            Point2d::new(2.0 * PI, 10.0),
+            Point2d::new(0.0, 10.0),
+        ];
+        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, 10.0));
+        domain.init_containment_grid();
+
+        let params = make_test_params(0.05);
+        let pts = generate_extrusion_steiner_grid(
+            &surface, &domain, (0.0, 2.0 * PI), (0.0, 10.0), &params, 4096,
+        );
+
+        assert!(!pts.is_empty(), "Circle profile extrusion should have Steiner points");
+        // Should have multiple distinct u values (from circle chord-error).
+        let n_distinct_u = {
+            let mut u_vals: Vec<f64> = pts.iter().map(|p| p.u).collect();
+            u_vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            u_vals.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+            u_vals.len()
+        };
+        assert!(n_distinct_u >= 4, "Expected ≥4 distinct u values, got {}", n_distinct_u);
+    }
+
+    #[test]
+    fn test_extrusion_steiner_grid_excludes_holes() {
+        use draper_geometry::{ExtrusionSurface, Surface, Point3d, Direction3d, Curve3d, Circle};
+
+        let circle = Circle::new_xy(Point3d::ORIGIN, 5.0);
+        let ext = ExtrusionSurface::new(Curve3d::Circle(circle), Direction3d::Z);
+        let surface = Surface::Extrusion(ext);
+
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(2.0 * PI, 0.0),
+            Point2d::new(2.0 * PI, 10.0),
+            Point2d::new(0.0, 10.0),
+        ];
+        // Hole in the middle of the face.
+        let hole = vec![
+            Point2d::new(1.0, 3.0),
+            Point2d::new(3.0, 3.0),
+            Point2d::new(3.0, 7.0),
+            Point2d::new(1.0, 7.0),
+        ];
+        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, 10.0))
+            .with_hole(hole);
+        domain.init_containment_grid();
+
+        let params = make_test_params(0.05);
+        let pts = generate_extrusion_steiner_grid(
+            &surface, &domain, (0.0, 2.0 * PI), (0.0, 10.0), &params, 4096,
+        );
+
+        // No Steiner point should land inside the hole.
+        for p in &pts {
+            let in_hole = p.u > 1.0 && p.u < 3.0 && p.v > 3.0 && p.v < 7.0;
+            assert!(!in_hole, "Steiner point {:?} is inside hole", p);
+        }
+        assert!(!pts.is_empty(), "Should have Steiner points outside the hole");
+    }
+
+    #[test]
+    fn test_extrusion_steiner_grid_respects_budget() {
+        use draper_geometry::{ExtrusionSurface, Surface, Point3d, Direction3d, Curve3d, Circle};
+
+        let circle = Circle::new_xy(Point3d::ORIGIN, 5.0);
+        let ext = ExtrusionSurface::new(Curve3d::Circle(circle), Direction3d::Z);
+        let surface = Surface::Extrusion(ext);
+
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(2.0 * PI, 0.0),
+            Point2d::new(2.0 * PI, 10.0),
+            Point2d::new(0.0, 10.0),
+        ];
+        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, 10.0));
+        domain.init_containment_grid();
+
+        let params = make_test_params(0.01);
+        let budget = 50;
+        let pts = generate_extrusion_steiner_grid(
+            &surface, &domain, (0.0, 2.0 * PI), (0.0, 10.0), &params, budget,
+        );
+
+        assert!(pts.len() <= budget, "Budget {} exceeded: {} points", budget, pts.len());
+        assert!(!pts.is_empty(), "Should have at least some Steiner points");
     }
 }
 
