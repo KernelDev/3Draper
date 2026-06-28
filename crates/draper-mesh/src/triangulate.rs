@@ -374,6 +374,53 @@ impl SteinerBudgetProfile {
             Self::Mobile => 2,
         }
     }
+
+    // ── NURBS Steiner budget ──────────────────────────────────
+    // NURBS surfaces are the most general case. Unlike analytic
+    // surfaces (sphere, torus, cylinder), NURBS have no fixed
+    // curvature formula — the grid density depends on degree,
+    // control point layout, and knot vector. The budget here is
+    // a per-axis CAP: the actual n_u/n_v are derived from
+    // `parameter_division_2d` chord-error subdivision, then
+    // densified if below the 8×8 minimum for faces with holes.
+
+    /// Maximum number of u-subdivisions for NURBS Steiner grids.
+    pub fn max_u_nurbs(&self) -> usize {
+        match self {
+            Self::Desktop => 96,
+            Self::Tablet => 64,
+            Self::Mobile => 32,
+        }
+    }
+
+    /// Maximum number of v-subdivisions for NURBS Steiner grids.
+    pub fn max_v_nurbs(&self) -> usize {
+        match self {
+            Self::Desktop => 96,
+            Self::Tablet => 64,
+            Self::Mobile => 32,
+        }
+    }
+
+    /// Minimum number of u-subdivisions for NURBS Steiner grids.
+    /// This is only used for the 8×8 densify floor (faces with holes);
+    /// bilinear NURBS (deg 1×1) skip the grid entirely.
+    pub fn min_u_nurbs(&self) -> usize {
+        match self {
+            Self::Desktop => 8,
+            Self::Tablet => 6,
+            Self::Mobile => 4,
+        }
+    }
+
+    /// Minimum number of v-subdivisions for NURBS Steiner grids.
+    pub fn min_v_nurbs(&self) -> usize {
+        match self {
+            Self::Desktop => 8,
+            Self::Tablet => 6,
+            Self::Mobile => 4,
+        }
+    }
 }
 
 impl Default for SteinerBudgetProfile {

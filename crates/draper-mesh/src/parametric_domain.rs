@@ -2517,6 +2517,308 @@ pub(crate) fn generate_extrusion_steiner_grid(
 }
 
 // ============================================================
+// NURBS Steiner grid generator
+// ============================================================
+
+/// Generate a curvature-adaptive Steiner grid for NURBS surfaces.
+///
+/// # Why this exists
+///
+/// NURBS surfaces are the most general parametric surface type. The
+/// generic `parameter_division_2d` branch recursively subdivides the
+/// UV bbox by chord error, which works well for smooth surfaces but
+/// has several problems:
+///
+/// 1. **Too coarse for faces with holes**: For small NURBS faces
+///    (typical in drill_top.stp — 288 NURBS-like faces), the recursion
+///    produces only 4×4 or 6×6 grids. With holes, earcutr needs at
+///    least 8×8 interior Steiner points to produce well-shaped triangles
+///    around the holes.
+///
+/// 2. **No curvature-adaptive refinement**: The chord-error subdivision
+///    treats the surface uniformly. For NURBS with regions of high
+///    curvature (fillets, blends, free-form features), the grid is
+///    too sparse in high-curvature areas and too dense in flat areas.
+///
+/// 3. **No special-case handling**: Bilinear NURBS (deg 1×1) are flat
+///    and need no interior points, ruled NURBS (one degree = 1) need
+///    refinement only in the nonlinear direction, and periodic NURBS
+///    (closed surfaces) must not add Steiner points on the seam.
+///
+/// # Strategy
+///
+/// 1. **Base grid from `parameter_division_2d`**: Use the existing
+///    chord-error subdivision to get initial u/v knot vectors. This
+///    leverages the well-tested adaptive recursion.
+///
+/// 2. **Densify**: If the grid is below the 8×8 minimum (for faces
+///    with holes) or below `min_u_nurbs`/`min_v_nurbs`, increase
+///    n_u/n_v uniformly.
+///
+/// 3. **Curvature-adaptive refinement**: For each sub-rectangle of
+///    the base grid, estimate the Gauss curvature at the center.
+///    If |K| > threshold, subdivide that rectangle in both u and v.
+///    This concentrates Steiner points in high-curvature regions.
+///
+/// 4. **Special cases**:
+///    - Bilinear (deg 1×1): return empty Vec (handled as plane)
+///    - Ruled (one degree = 1): densify only the nonlinear direction
+///    - Periodic (u_closed/v_closed): skip points on the seam
+///
+/// 5. **Budget**: downsample via `coarse_grid_sample` and
+///    `downsample_interior_points` if the grid exceeds the budget.
+pub(crate) fn generate_nurbs_steiner_grid(
+    surface: &Surface,
+    domain: &ParametricDomain,
+    u_range: (f64, f64),
+    v_range: (f64, f64),
+    params: &crate::triangulate::TriangulationParams,
+    max_budget: usize,
+) -> Vec<Point2d> {
+    let nurbs = match surface {
+        Surface::Nurbs(n) => n,
+        _ => return Vec::new(),
+    };
+    let (u_min, u_max) = u_range;
+    let (v_min, v_max) = v_range;
+    let u_span = u_max - u_min;
+    let v_span = v_max - v_min;
+    if u_span <= 0.0 || v_span <= 0.0 {
+        return Vec::new();
+    }
+
+    // ── Step 1: Special case — bilinear NURBS (deg 1×1) ──────────
+    //
+    // A degree (1, 1) NURBS is a bilinear surface (flat or ruled).
+    // It needs no interior Steiner points — the surface IS linear
+    // in both directions, and earcutr can triangulate the boundary
+    // polygon directly. Return empty Vec (falls back to the
+    // bilinear NURBS branch which returns no interior points).
+    if nurbs.u_degree <= 1 && nurbs.v_degree <= 1 {
+        log::debug!("NURBS steiner grid: bilinear (deg 1×1), no interior points needed");
+        return Vec::new();
+    }
+
+    let is_ruled_u = nurbs.u_degree <= 1;  // linear in u, curved in v
+    let is_ruled_v = nurbs.v_degree <= 1;  // linear in v, curved in u
+    let is_ruled = is_ruled_u || is_ruled_v;
+
+    let budget_profile = params.steiner_profile;
+    let max_u_cap = budget_profile.max_u_nurbs();
+    let max_v_cap = budget_profile.max_v_nurbs();
+    let min_u_floor = budget_profile.min_u_nurbs();
+    let min_v_floor = budget_profile.min_v_nurbs();
+
+    // ── Step 2: Base grid from parameter_division_2d ──────────────
+    //
+    // Use the existing chord-error subdivision to get initial u/v
+    // knot vectors. This is the same subdivision used by the generic
+    // fallback branch, but we'll densify and curvature-refine it.
+    let chord_tol = (params.max_deviation * 10.0).max(1e-5);
+    let max_axis_dim = ((params.max_face_triangles / 2) as f64).sqrt().ceil() as usize;
+    let max_axis_dim = max_axis_dim.clamp(4, 64);
+
+    let (base_u_knots, base_v_knots) = crate::parametric_division_2d::parameter_division_2d(
+        surface,
+        (u_min, u_max),
+        (v_min, v_max),
+        chord_tol,
+        max_axis_dim,
+    );
+
+    // Number of interior subdivisions = knots - 1 (for uniform grids)
+    // For non-uniform knot vectors, use the knot count directly.
+    let base_n_u = if base_u_knots.len() >= 2 {
+        (base_u_knots.len() - 1).max(2)
+    } else {
+        min_u_floor
+    };
+    let base_n_v = if base_v_knots.len() >= 2 {
+        (base_v_knots.len() - 1).max(2)
+    } else {
+        min_v_floor
+    };
+
+    log::debug!(
+        "NURBS steiner grid: base grid {}×{} (u_deg={}, v_deg={}, ruled_u={}, ruled_v={})",
+        base_n_u, base_n_v, nurbs.u_degree, nurbs.v_degree, is_ruled_u, is_ruled_v
+    );
+
+    // ── Step 3: Densify — ensure minimum grid density ─────────────
+    //
+    // For faces with holes, earcutr needs at least 8×8 interior
+    // Steiner points to produce well-shaped triangles around the
+    // holes. For ruled NURBS, densify only the nonlinear direction.
+    let mut n_u = base_n_u;
+    let mut n_v = base_n_v;
+
+    if is_ruled {
+        // Ruled NURBS: densify only the nonlinear direction.
+        // The linear direction needs few subdivisions (surface is
+        // straight in that direction, similar to extrusion v-dir).
+        if is_ruled_u {
+            // Linear in u — keep u minimal, densify v
+            n_u = n_u.max(4).min(max_u_cap);
+            n_v = n_v.max(min_v_floor).min(max_v_cap);
+        } else {
+            // Linear in v — keep v minimal, densify u
+            n_u = n_u.max(min_u_floor).min(max_u_cap);
+            n_v = n_v.max(4).min(max_v_cap);
+        }
+    } else {
+        // General NURBS: densify both directions to at least the
+        // minimum floor. This ensures faces with holes get enough
+        // interior Steiner points for earcutr.
+        n_u = n_u.max(min_u_floor).min(max_u_cap);
+        n_v = n_v.max(min_v_floor).min(max_v_cap);
+    }
+
+    // ── Step 4: Curvature-adaptive refinement ─────────────────────
+    //
+    // For each sub-rectangle of the base grid, estimate the Gauss
+    // curvature at the center. If |K| > threshold, subdivide that
+    // rectangle. This concentrates Steiner points in high-curvature
+    // regions (fillets, blends, free-form features).
+    //
+    // Strategy: instead of modifying the base grid directly, we
+    // compute a curvature map and use it to generate additional
+    // Steiner points in high-curvature sub-rectangles.
+    //
+    // The threshold is derived from `max_deviation`: regions where
+    // the chord error would exceed `max_deviation` if left
+    // unrefined need additional points.
+    let curvature_refine = !is_ruled && n_u >= 4 && n_v >= 4 && max_budget > 32;
+    let mut extra_points: Vec<Point2d> = Vec::new();
+
+    if curvature_refine {
+        // Probe curvature at grid centers. For each sub-rectangle,
+        // if |Gauss curvature| is high, add a Steiner point at
+        // the center (and optionally at quarter points).
+        let k_threshold = 1.0 / (params.max_deviation.max(1e-6) * 100.0);
+        let du = u_span / n_u as f64;
+        let dv = v_span / n_v as f64;
+        let mut n_refined: usize = 0;
+
+        for i in 0..n_u {
+            for j in 0..n_v {
+                let uc = u_min + du * (i as f64 + 0.5);
+                let vc = v_min + dv * (j as f64 + 0.5);
+
+                // Quick check: is this sub-rectangle inside the domain?
+                let center_pt = Point2d::new(uc, vc);
+                if !domain.contains(&center_pt) {
+                    continue;
+                }
+
+                // Estimate Gauss curvature at the center of this
+                // sub-rectangle using Surface::curvature_at.
+                let curv = surface.curvature_at(uc, vc);
+                let k_abs = curv.max_abs;
+
+                if k_abs > k_threshold {
+                    // High curvature — add center point
+                    extra_points.push(center_pt);
+
+                    // For very high curvature, also add quarter points
+                    // (4 points at 1/4 and 3/4 positions within the sub-rect)
+                    if k_abs > k_threshold * 4.0 {
+                        let offsets = [
+                            (0.25, 0.25), (0.75, 0.25),
+                            (0.25, 0.75), (0.75, 0.75),
+                        ];
+                        for (ou, ov) in &offsets {
+                            let up = u_min + du * (i as f64 + ou);
+                            let vp = v_min + dv * (j as f64 + ov);
+                            let pt = Point2d::new(up, vp);
+                            if domain.contains(&pt) {
+                                extra_points.push(pt);
+                            }
+                        }
+                    }
+                    n_refined += 1;
+                }
+            }
+        }
+
+        if n_refined > 0 {
+            log::debug!(
+                "NURBS steiner grid: curvature refinement added {} extra points ({} of {} sub-rects refined, k_threshold={:.4})",
+                extra_points.len(), n_refined, n_u * n_v, k_threshold
+            );
+        }
+    }
+
+    // ── Step 5: Budget-aware cap ───────────────────────────────────
+    let max_candidates = (max_budget as f64 * budget_profile.candidate_multiplier()).ceil() as usize;
+    while n_u > min_u_floor && (n_u - 1) * (n_v - 1) > max_candidates {
+        n_u -= 1;
+    }
+    while n_v > min_v_floor && (n_u - 1) * (n_v - 1) > max_candidates {
+        n_v -= 1;
+    }
+
+    log::debug!(
+        "NURBS steiner grid: n_u={}, n_v={}, u_span={:.4}, v_span={:.4}, budget={}, extra_curv={}",
+        n_u, n_v, u_span, v_span, max_budget, extra_points.len()
+    );
+
+    // ── Step 6: Generate grid points (excluding boundaries) ─────────
+    let mut grid: Vec<Point2d> = Vec::with_capacity((n_u - 1) * (n_v - 1) + extra_points.len());
+    for j in 1..n_v {
+        let v = v_min + v_span * j as f64 / n_v as f64;
+        for i in 1..n_u {
+            let u = u_min + u_span * i as f64 / n_u as f64;
+
+            // ── Periodic seam skip (2.6.6) ───────────────────────
+            // For u-closed surfaces, skip the seam line (u = u_max)
+            // to avoid duplicate Steiner points that map to the same
+            // 3D point as the u = u_min boundary.
+            if nurbs.u_closed && (u_max - u).abs() < u_span * 1e-6 {
+                continue;
+            }
+            // For v-closed surfaces, skip the seam line (v = v_max).
+            if nurbs.v_closed && (v_max - v).abs() < v_span * 1e-6 {
+                continue;
+            }
+
+            grid.push(Point2d::new(u, v));
+        }
+    }
+
+    // Add curvature-adaptive extra points
+    grid.extend(extra_points);
+
+    // ── Step 7: Filter to domain ────────────────────────────────────
+    let span_max = u_span.max(v_span);
+    let boundary_tol = (span_max * 1e-6).max(1e-9);
+
+    let mut filtered: Vec<Point2d> = Vec::with_capacity(grid.len());
+    for pt in &grid {
+        if !domain.contains(pt) {
+            continue;
+        }
+        if is_point_on_boundary(&domain.outer_boundary, pt, boundary_tol) {
+            continue;
+        }
+        let on_hole = domain.holes.iter()
+            .any(|hole| is_point_on_boundary(hole, pt, boundary_tol));
+        if on_hole {
+            continue;
+        }
+        filtered.push(*pt);
+    }
+
+    log::debug!(
+        "NURBS steiner grid: {} grid pts → {} after domain filter",
+        grid.len(), filtered.len()
+    );
+
+    // ── Step 8: Downsample to budget if needed ──────────────────────
+    let coarsened = coarse_grid_sample(&filtered, max_budget);
+    downsample_interior_points(&coarsened, max_budget)
+}
+
+// ============================================================
 // Planar Steiner grid generator (for planes WITH holes)
 // ============================================================
 
@@ -3760,6 +4062,42 @@ pub fn triangulate_surface_consistent(
             (v_min, v_max),
             params,
             ext_budget,
+        )
+    } else if matches!(surface, Surface::Nurbs(_)) {
+        // NURBS faces — use a dedicated curvature-adaptive Steiner grid.
+        //
+        // WHY: The generic `parameter_division_2d` branch recursively
+        // subdivides the UV bbox by chord error. For NURBS surfaces,
+        // this has several problems:
+        //
+        // 1. Too coarse for faces with holes — the recursion may
+        //    produce only 4×4 or 6×6 grids. earcutr needs at least
+        //    8×8 interior Steiner points for well-shaped triangles
+        //    around holes.
+        //
+        // 2. No curvature-adaptive refinement — the chord-error
+        //    subdivision treats the surface uniformly, producing too
+        //    few points in high-curvature regions and too many in
+        //    flat regions.
+        //
+        // 3. No special-case handling — bilinear NURBS (deg 1×1)
+        //    need no interior points, ruled NURBS (one degree = 1)
+        //    need refinement only in the nonlinear direction, and
+        //    periodic NURBS must not add Steiner points on the seam.
+        //
+        // `generate_nurbs_steiner_grid` addresses all of these:
+        // - Bilinear → empty Vec (falls back to no interior points)
+        // - Ruled → densify only the nonlinear direction
+        // - General → densify both directions + curvature refinement
+        // - Periodic → skip seam points
+        let nurbs_budget = max_interior_budget.max(8);
+        generate_nurbs_steiner_grid(
+            surface,
+            &domain,
+            (u_min, u_max),
+            (v_min, v_max),
+            params,
+            nurbs_budget,
         )
     } else {
         // Compute adaptive subdivision grid for the entire surface, then
@@ -6409,6 +6747,250 @@ mod tests {
 
         assert!(pts.len() <= budget, "Budget {} exceeded: {} points", budget, pts.len());
         assert!(!pts.is_empty(), "Should have at least some Steiner points");
+    }
+
+    // ── NURBS Steiner grid tests ──────────────────────────────────
+
+    #[test]
+    fn test_nurbs_steiner_grid_bilinear_returns_empty() {
+        use draper_geometry::{NurbsSurface, Surface, Point3d};
+
+        // Bilinear NURBS (degree 1×1): flat surface, no interior points needed.
+        let nurbs = NurbsSurface::from_v_rows(
+            1, 1,
+            vec![
+                vec![Point3d::new(0.0, 0.0, 0.0), Point3d::new(1.0, 0.0, 0.0)],
+                vec![Point3d::new(0.0, 1.0, 0.0), Point3d::new(1.0, 1.0, 0.0)],
+            ],
+            vec![vec![1.0, 1.0], vec![1.0, 1.0]],
+            vec![0.0, 0.0, 1.0, 1.0],
+            vec![0.0, 0.0, 1.0, 1.0],
+            false, false,
+        );
+        let surface = Surface::Nurbs(nurbs);
+
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(1.0, 0.0),
+            Point2d::new(1.0, 1.0),
+            Point2d::new(0.0, 1.0),
+        ];
+        let mut domain = ParametricDomain::new(outer, (0.0, 1.0), (0.0, 1.0));
+        domain.init_containment_grid();
+
+        let params = make_test_params(0.01);
+        let pts = generate_nurbs_steiner_grid(
+            &surface, &domain, (0.0, 1.0), (0.0, 1.0), &params, 200,
+        );
+
+        assert!(pts.is_empty(), "Bilinear NURBS should have no interior points, got {}", pts.len());
+    }
+
+    #[test]
+    fn test_nurbs_steiner_grid_high_degree_produces_points() {
+        use draper_geometry::{NurbsSurface, Surface, Point3d};
+
+        // Degree 3×3 NURBS surface — should produce interior Steiner points.
+        let n = 6;
+        let mut v_rows_cp = Vec::new();
+        let mut v_rows_w = Vec::new();
+        for j in 0..n {
+            let mut row_cp = Vec::new();
+            let mut row_w = Vec::new();
+            for i in 0..n {
+                let u = i as f64 / (n - 1) as f64;
+                let v = j as f64 / (n - 1) as f64;
+                // A simple curved surface: z = sin(pi*u)*sin(pi*v)
+                let z = (std::f64::consts::PI * u).sin() * (std::f64::consts::PI * v).sin();
+                row_cp.push(Point3d::new(u, v, z));
+                row_w.push(1.0);
+            }
+            v_rows_cp.push(row_cp);
+            v_rows_w.push(row_w);
+        }
+
+        // Uniform knot vectors for degree 3 with 6 control points
+        let u_knots: Vec<f64> = vec![0.0, 0.0, 0.0, 0.0, 0.333, 0.667, 1.0, 1.0, 1.0, 1.0];
+        let v_knots: Vec<f64> = u_knots.clone();
+
+        let nurbs = NurbsSurface::from_v_rows(
+            3, 3,
+            v_rows_cp,
+            v_rows_w,
+            u_knots,
+            v_knots,
+            false, false,
+        );
+        let surface = Surface::Nurbs(nurbs);
+
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(1.0, 0.0),
+            Point2d::new(1.0, 1.0),
+            Point2d::new(0.0, 1.0),
+        ];
+        let mut domain = ParametricDomain::new(outer, (0.0, 1.0), (0.0, 1.0));
+        domain.init_containment_grid();
+
+        let params = make_test_params(0.01);
+        let pts = generate_nurbs_steiner_grid(
+            &surface, &domain, (0.0, 1.0), (0.0, 1.0), &params, 500,
+        );
+
+        // Should have multiple interior points (at least 8×8 = 64 minus boundary)
+        assert!(pts.len() >= 20, "Expected ≥20 Steiner points for deg-3 NURBS, got {}", pts.len());
+    }
+
+    #[test]
+    fn test_nurbs_steiner_grid_excludes_holes() {
+        use draper_geometry::{NurbsSurface, Surface, Point3d};
+
+        // Degree 3×3 NURBS with a rectangular hole in the middle
+        let n = 6;
+        let mut v_rows_cp = Vec::new();
+        let mut v_rows_w = Vec::new();
+        for j in 0..n {
+            let mut row_cp = Vec::new();
+            let mut row_w = Vec::new();
+            for i in 0..n {
+                let u = i as f64 / (n - 1) as f64;
+                let v = j as f64 / (n - 1) as f64;
+                let z = (std::f64::consts::PI * u).sin() * (std::f64::consts::PI * v).sin();
+                row_cp.push(Point3d::new(u, v, z));
+                row_w.push(1.0);
+            }
+            v_rows_cp.push(row_cp);
+            v_rows_w.push(row_w);
+        }
+
+        let u_knots: Vec<f64> = vec![0.0, 0.0, 0.0, 0.0, 0.333, 0.667, 1.0, 1.0, 1.0, 1.0];
+        let v_knots: Vec<f64> = u_knots.clone();
+
+        let nurbs = NurbsSurface::from_v_rows(3, 3, v_rows_cp, v_rows_w, u_knots, v_knots, false, false);
+        let surface = Surface::Nurbs(nurbs);
+
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(1.0, 0.0),
+            Point2d::new(1.0, 1.0),
+            Point2d::new(0.0, 1.0),
+        ];
+        let hole = vec![
+            Point2d::new(0.3, 0.3),
+            Point2d::new(0.7, 0.3),
+            Point2d::new(0.7, 0.7),
+            Point2d::new(0.3, 0.7),
+        ];
+        let domain = ParametricDomain::new(outer, (0.0, 1.0), (0.0, 1.0)).with_hole(hole);
+        // Note: we can't call init_containment_grid on a domain with holes
+        // in the test, but we can still verify the filter logic.
+
+        let params = make_test_params(0.01);
+        let pts = generate_nurbs_steiner_grid(
+            &surface, &domain, (0.0, 1.0), (0.0, 1.0), &params, 500,
+        );
+
+        // No Steiner point should fall inside the hole
+        for pt in &pts {
+            let in_hole = pt.u > 0.3 && pt.u < 0.7 && pt.v > 0.3 && pt.v < 0.7;
+            assert!(!in_hole, "Steiner point {:?} should not be inside the hole", pt);
+        }
+    }
+
+    #[test]
+    fn test_nurbs_steiner_grid_respects_budget() {
+        use draper_geometry::{NurbsSurface, Surface, Point3d};
+
+        let n = 6;
+        let mut v_rows_cp = Vec::new();
+        let mut v_rows_w = Vec::new();
+        for j in 0..n {
+            let mut row_cp = Vec::new();
+            let mut row_w = Vec::new();
+            for i in 0..n {
+                let u = i as f64 / (n - 1) as f64;
+                let v = j as f64 / (n - 1) as f64;
+                let z = (std::f64::consts::PI * u).sin() * (std::f64::consts::PI * v).sin();
+                row_cp.push(Point3d::new(u, v, z));
+                row_w.push(1.0);
+            }
+            v_rows_cp.push(row_cp);
+            v_rows_w.push(row_w);
+        }
+
+        let u_knots: Vec<f64> = vec![0.0, 0.0, 0.0, 0.0, 0.333, 0.667, 1.0, 1.0, 1.0, 1.0];
+        let v_knots: Vec<f64> = u_knots.clone();
+
+        let nurbs = NurbsSurface::from_v_rows(3, 3, v_rows_cp, v_rows_w, u_knots, v_knots, false, false);
+        let surface = Surface::Nurbs(nurbs);
+
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(1.0, 0.0),
+            Point2d::new(1.0, 1.0),
+            Point2d::new(0.0, 1.0),
+        ];
+        let mut domain = ParametricDomain::new(outer, (0.0, 1.0), (0.0, 1.0));
+        domain.init_containment_grid();
+
+        let params = make_test_params(0.01);
+        let budget = 30;
+        let pts = generate_nurbs_steiner_grid(
+            &surface, &domain, (0.0, 1.0), (0.0, 1.0), &params, budget,
+        );
+
+        assert!(pts.len() <= budget, "Budget {} exceeded: {} points", budget, pts.len());
+        assert!(!pts.is_empty(), "Should have at least some Steiner points");
+    }
+
+    #[test]
+    fn test_nurbs_steiner_grid_ruled_densifies_nonlinear() {
+        use draper_geometry::{NurbsSurface, Surface, Point3d};
+
+        // Ruled NURBS: degree 1 in u, degree 3 in v.
+        // Should densify in v (nonlinear direction) but keep u minimal.
+        let n_u = 4; // 2 control points needed for degree 1
+        let n_v = 6;
+        let mut v_rows_cp = Vec::new();
+        let mut v_rows_w = Vec::new();
+        for j in 0..n_v {
+            let mut row_cp = Vec::new();
+            let mut row_w = Vec::new();
+            for i in 0..n_u {
+                let u = i as f64 / (n_u - 1) as f64;
+                let v = j as f64 / (n_v - 1) as f64;
+                let z = (std::f64::consts::PI * v).sin();
+                row_cp.push(Point3d::new(u, v, z));
+                row_w.push(1.0);
+            }
+            v_rows_cp.push(row_cp);
+            v_rows_w.push(row_w);
+        }
+
+        // Degree 1 in u → knot vector: [0,0, 1,1] (4 control points)
+        let u_knots: Vec<f64> = vec![0.0, 0.0, 0.333, 0.667, 1.0, 1.0];
+        // Degree 3 in v
+        let v_knots: Vec<f64> = vec![0.0, 0.0, 0.0, 0.0, 0.333, 0.667, 1.0, 1.0, 1.0, 1.0];
+
+        let nurbs = NurbsSurface::from_v_rows(1, 3, v_rows_cp, v_rows_w, u_knots, v_knots, false, false);
+        let surface = Surface::Nurbs(nurbs);
+
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(1.0, 0.0),
+            Point2d::new(1.0, 1.0),
+            Point2d::new(0.0, 1.0),
+        ];
+        let mut domain = ParametricDomain::new(outer, (0.0, 1.0), (0.0, 1.0));
+        domain.init_containment_grid();
+
+        let params = make_test_params(0.01);
+        let pts = generate_nurbs_steiner_grid(
+            &surface, &domain, (0.0, 1.0), (0.0, 1.0), &params, 500,
+        );
+
+        // Should have Steiner points (ruled in u, curved in v)
+        assert!(!pts.is_empty(), "Ruled NURBS should produce interior points, got 0");
     }
 }
 
