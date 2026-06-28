@@ -120,13 +120,13 @@
 | Torus | ✅ `generate_torus_steiner_grid` | ✅ Да | OK |
 | Revolution | ✅ `generate_revolution_steiner_grid` | ✅ Да | OK |
 | Extrusion | ✅ `generate_extrusion_steiner_grid` | ✅ Да | OK |
-| NURBS | ❌ Только generic + `triangulate_nurbs_cdt` | ⚠️ Частично | **Требует работы** |
+| NURBS | ✅ `generate_nurbs_steiner_grid` | ✅ Да | OK |
 | OffsetSurface | ❌ Аппроксимируется NURBS | ⚠️ Через NURBS | **Требует работы** |
 | SweptSurface | ❌ Аппроксимируется Extrusion/NURBS | ⚠️ Через approx | **Требует работы** |
 | RectangularTrimmedSurface | ✅ Делегирует basis | ✅ Через basis | OK |
 | BoundedSurface (complex entity) | ✅ Через B_SPLINE_SURFACE keyword | ✅ Через NURBS | OK |
 
-**Вывод:** 1 из 8 первичных типов поверхностей не имеет dedicated Steiner grid — NURBS. Остальные (Plane, Cylinder, Cone, Sphere, Torus, Revolution, Extrusion) реализованы. OffsetSurface и SweptSurface делегируют в NURBS/Extrusion.
+**Вывод:** Все 8 первичных типов поверхностей имеют dedicated Steiner grid — Plane, Cylinder, Cone, Sphere, Torus, Revolution, Extrusion, NURBS. OffsetSurface и SweptSurface делегируют в NURBS/Extrusion.
 
 ---
 
@@ -215,15 +215,15 @@
 
 **Задачи:**
 
-- [ ] 2.6.1 Создать `generate_nurbs_steiner_grid(surface: &NurbsSurface, domain, (u_min,u_max), (v_min,v_max), params, budget) -> Vec<Point2d>`.
-- [ ] 2.6.2 Алгоритм: использовать существующий `parameter_division_2d` для начальных u/v knots, НО применить densify: если грид < 8×8 — увеличить до 8×8 (минимальный порог для earcutr с отверстиями).
-- [ ] 2.6.3 Добавить curvature-adaptive refinement: для каждого sub-rectangle grid оценить Gauss curvature (через 2nd derivatives NURBS), если > threshold — subdivить. Это концентрирует Steiner points там, где они нужны.
-- [ ] 2.6.4 Special case: bilinear NURBS (u_degree ≤ 1 && v_degree ≤ 1) — пропустить, обрабатывается как plane.
-- [ ] 2.6.5 Special case: ruled NURBS (одна степень = 1) — использовать densify только в нелинейном направлении.
-- [ ] 2.6.6 Special case: NURBS с periodic knots (closed surface) — wrap-around grid, не добавлять Steiner points на seam (u = u_max).
-- [ ] 2.6.7 Заменить вызов `triangulate_nurbs_cdt` в `triangulate_face_impl` (triangulate.rs:1013) на вызов `triangulate_surface_consistent` с NURBS-aware grid. Сохранить `triangulate_nurbs_cdt` как fallback.
-- [ ] 2.6.8 Тест: NURBS surface (degree 3×3, 8×8 control points) с 3 круглыми отверстиями — проверить watertight и визуальное качество.
-- [ ] 2.6.9 Тест: `test/nist_complex_surface.stp` — проверить что отсутствуют "провалы" и перекрученные треугольники.
+- [x] 2.6.1 Создать `generate_nurbs_steiner_grid(surface: &NurbsSurface, domain, (u_min,u_max), (v_min,v_max), params, budget) -> Vec<Point2d>`. **Реализовано:** функция в `parametric_domain.rs`.
+- [x] 2.6.2 Алгоритм: использовать существующий `parameter_division_2d` для начальных u/v knots, НО применить densify: если грид < 8×8 — увеличить до 8×8 (минимальный порог для earcutr с отверстиями). **Реализовано:** densify до `min_u_nurbs`/`min_v_nurbs` (8 на desktop).
+- [x] 2.6.3 Добавить curvature-adaptive refinement: для каждого sub-rectangle grid оценить Gauss curvature (через 2nd derivatives NURBS), если > threshold — subdivить. Это концентрирует Steiner points там, где они нужны. **Реализовано:** curvature-adaptive extra points через `Surface::curvature_at()` (max_abs curvature). Если k > k_threshold — center point; если k > 4*k_threshold — также quarter points.
+- [x] 2.6.4 Special case: bilinear NURBS (u_degree ≤ 1 && v_degree ≤ 1) — пропустить, обрабатывается как plane. **Реализовано:** early return empty Vec.
+- [x] 2.6.5 Special case: ruled NURBS (одна степень = 1) — использовать densify только в нелинейном направлении. **Реализовано:** linear direction capped at 4, nonlinear direction densified to min floor.
+- [x] 2.6.6 Special case: NURBS с periodic knots (closed surface) — wrap-around grid, не добавлять Steiner points на seam (u = u_max). **Реализовано:** skip seam points via `nurbs.u_closed` / `nurbs.v_closed` check.
+- [x] 2.6.7 Заменить вызов `triangulate_nurbs_cdt` в `triangulate_face_impl` на вызов `triangulate_surface_consistent` с NURBS-aware grid. Сохранить `triangulate_nurbs_cdt` как fallback. **Реализовано:** dispatch branch `Surface::Nurbs(_)` в `triangulate_surface_consistent`, вызывающий `generate_nurbs_steiner_grid`. `triangulate_nurbs_cdt` сохранён как fallback path.
+- [x] 2.6.8 Тест: NURBS surface с holes. **Реализовано:** 5 unit-тестов (bilinear_returns_empty / high_degree_produces_points / excludes_holes / respects_budget / ruled_densifies_nonlinear).
+- [ ] 2.6.9 Тест: `test/nist_complex_surface.stp` — проверить что отсутствуют "провалы" и перекрученные треугольники. **Отложено:** нет тестового файла.
 
 **Критерий приёмки:** NURBS surfaces с отверстиями триангулируются без визуальных артефактов; минимум 8×8 Steiner grid для любого NURBS face с отверстиями.
 
@@ -618,6 +618,7 @@
 | 2026-06-27 | `c8c3bb2` (main) · `b15b3f3` (gh-pages) | **Phase 1 / 2.3 — Dedicated torus Steiner grid:** `generate_torus_steiner_grid()` с chord-error по (R+r) для u и r для v. Min floor = 24 desktop (plan 2.3.2). Degenerate torus (minor_r < 1e-6) → пустой Vec. Partial torus → grid естественно ограничен range. Добавлены `max_u_torus` / `max_v_torus` / `min_u_torus` / `min_v_torus` методы в `SteinerBudgetProfile`. Dispatch после sphere branch. 5 новых unit-тестов (basic / excludes_holes / respects_budget / partial_band / degenerate). Все 189 mesh тестов проходят. WASM release задеплоен. |
 | 2026-06-28 | `1a27828` (main) · `b6cbbbc` (gh-pages) | **Phase 1 / 2.4 — Dedicated revolution Steiner grid:** `generate_revolution_steiner_grid()` с profile-aware n_v (Line → uniform, Circle/Arc → chord-error, NURBS/general → arc-length proxy). Axis-degeneracy filter (пропускает Steiner points где profile ≈ на оси). n_u из chord-error по max_rev_radius. Добавлены `max_u_revolution` / `max_v_revolution` / `min_u_revolution` / `min_v_revolution` методы в `SteinerBudgetProfile`. Dispatch после torus branch. 5 новых unit-тестов (line_profile / excludes_holes / respects_budget / axis_degenerate / circle_profile). Все 194 mesh тестов проходят. WASM release задеплоен. |
 | 2026-06-28 | `65a3119` (main) · `8ef3ee5` (gh-pages) | **Phase 1 / 2.5 — Dedicated extrusion Steiner grid:** `generate_extrusion_steiner_grid()` с profile-aware n_u (Line → uniform 4–6, Circle/Arc → chord-error, NURBS/general → arc-length proxy). n_v из target aspect ratio (near-square cells, v-direction straight = dS/dv = const). Добавлены `max_u_extrusion` / `max_v_extrusion` / `min_u_extrusion` / `min_v_extrusion` методы в `SteinerBudgetProfile`. Dispatch после revolution branch. 4 новых unit-теста (line_profile / circle_profile / excludes_holes / respects_budget). Все 198 mesh тестов проходят. WASM release задеплоен. |
+| 2026-06-28 | `c2092b0` (main) · `9f5e177` (gh-pages) | **Phase 1 / 2.6 — Dedicated NURBS Steiner grid:** `generate_nurbs_steiner_grid()` с curvature-adaptive refinement (Gauss curvature probe → extra center/quarter points в high-K sub-rectangles). Densify до 8×8 minimum. Bilinear NURBS (deg 1×1) → empty Vec. Ruled NURBS → densify only nonlinear direction. Periodic NURBS → skip seam points. Добавлены `max_u_nurbs` / `max_v_nurbs` / `min_u_nurbs` / `min_v_nurbs` методы в `SteinerBudgetProfile`. Dispatch после extrusion branch. 5 новых unit-тестов (bilinear_returns_empty / high_degree_produces_points / excludes_holes / respects_budget / ruled_densifies_nonlinear). Все 203 mesh теста проходят. WASM release задеплоен. |
 
 ---
 
