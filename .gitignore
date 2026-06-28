@@ -36,3 +36,4 @@ target/
 .gh-pages/
 tool-results/
 dist-wasm/
+gh-pages-worktree/
