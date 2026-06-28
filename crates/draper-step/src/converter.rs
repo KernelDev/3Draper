@@ -7343,14 +7343,89 @@ impl<'a> StepConverter<'a> {
             if let StepValue::List(items) = param {
                 for item in items {
                     if let Some(curve_2d_id) = self.get_ref(item) {
+                        // First, try resolving as a native 2D curve
                         if let Some(curve_2d) = self.resolve_curve_2d(curve_2d_id) {
                             return Some(curve_2d);
+                        }
+
+                        // Fallback: if the entity is OFFSET_CURVE_3D referenced from
+                        // a PCURVE, we convert the 3D offset to a 2D approximation by
+                        // sampling the 3D offset curve and projecting each point to UV
+                        // space using the surface's parameterization.
+                        if let Some(entity) = self.step.find_entity(curve_2d_id) {
+                            if entity.type_name == "OFFSET_CURVE_3D" {
+                                if let Some(curve_3d) = self.resolve_offset_curve_3d(entity, 0) {
+                                    return self.project_curve_3d_to_2d(&curve_3d, pcurve_entity);
+                                }
+                            }
                         }
                     }
                 }
             }
         }
         None
+    }
+
+    /// Project a 3D curve to 2D UV space by finding the surface referenced
+    /// in the PCURVE entity and using its `project_point` method to convert
+    /// sampled 3D points to UV coordinates, then fitting a Nurbs2d.
+    fn project_curve_3d_to_2d(&self, curve_3d: &Curve3d, pcurve_entity: &crate::schema::StepEntity) -> Option<Curve2d> {
+        // Extract the surface from the PCURVE entity
+        // PCURVE('', #surface, #definitional_rep)
+        let mut surface_id: Option<i64> = None;
+        for param in &pcurve_entity.params {
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(entity) = self.step.find_entity(ref_id) {
+                    if entity.type_name != "DEFINITIONAL_REPRESENTATION" && surface_id.is_none() {
+                        surface_id = Some(ref_id);
+                    }
+                }
+            }
+        }
+
+        let surface_id = surface_id?;
+        let surface = self.extract_surface(surface_id, 0)?;
+
+        // Sample the 3D curve and project to UV
+        let n_samples = 64;
+        let (t_min, t_max) = curve_3d.param_range();
+        let mut uv_points: Vec<Point2d> = Vec::with_capacity(n_samples);
+
+        for i in 0..n_samples {
+            let t = t_min + (t_max - t_min) * i as f64 / (n_samples - 1) as f64;
+            let p3d = curve_3d.point_at(t);
+            let (u, v) = surface.project_point(&p3d);
+            if u.is_finite() && v.is_finite() {
+                uv_points.push(Point2d::new(u, v));
+            }
+        }
+
+        if uv_points.len() < 2 {
+            return None;
+        }
+
+        // Deduplicate and fit a Nurbs2d
+        uv_points = deduplicate_points_2d(&uv_points, 1e-6);
+
+        fit_nurbs_curve_through_points_2d(&uv_points, 3)
+            .map(Curve2d::Nurbs)
+            .or_else(|| {
+                // Fallback to degree-1 polyline
+                let n = uv_points.len();
+                if n < 2 { return None; }
+                let degree = 1;
+                let weights = vec![1.0; n];
+                let mut knots = Vec::with_capacity(n + degree + 1);
+                for _ in 0..=degree { knots.push(0.0); }
+                for i in 1..n-1 { knots.push(i as f64); }
+                for _ in 0..=degree { knots.push((n - 1) as f64); }
+                Some(Curve2d::Nurbs(Nurbs2d {
+                    degree,
+                    control_points: uv_points,
+                    weights,
+                    knots,
+                }))
+            })
     }
 
     /// Resolve a 2D curve entity (in UV space) to a Curve2d.
@@ -7373,6 +7448,7 @@ impl<'a> StepConverter<'a> {
             "RATIONAL_B_SPLINE_CURVE" => self.resolve_bspline_curve_2d(entity),
             "TRIMMED_CURVE" => self.resolve_trimmed_curve_2d(entity),
             "POLYLINE" => self.resolve_polyline_curve_2d(entity),
+            "OFFSET_CURVE_2D" => self.resolve_offset_curve_2d(entity, 0),
             _ => {
                 log::debug!("resolve_curve_2d #{}: unsupported 2D curve type '{}'", curve_id, type_name);
                 None
@@ -7700,6 +7776,55 @@ impl<'a> StepConverter<'a> {
         } else {
             None
         }
+    }
+
+    /// Resolve an OFFSET_CURVE_2D entity with NURBS approximation.
+    /// STEP format: OFFSET_CURVE_2D('', #basis_curve, distance, #ref_direction, self_intersect)
+    /// The basis curve is a 2D curve in UV space; offset is applied perpendicular
+    /// to the tangent direction in 2D.
+    fn resolve_offset_curve_2d(&self, entity: &crate::schema::StepEntity, _depth: usize) -> Option<Curve2d> {
+        let mut basis_curve_id: Option<i64> = None;
+        let mut offset_dist: f64 = 0.0;
+        let mut found_floats = 0;
+
+        for param in &entity.params {
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(referenced) = self.step.find_entity(ref_id) {
+                    // The first curve-type reference is the basis curve
+                    if self.is_2d_curve_type(&referenced.type_name) && basis_curve_id.is_none() {
+                        basis_curve_id = Some(ref_id);
+                    }
+                }
+            }
+            if let Some(val) = self.get_float(param) {
+                if found_floats == 0 {
+                    offset_dist = val;
+                }
+                found_floats += 1;
+            }
+        }
+
+        let basis_curve_id = basis_curve_id?;
+        let basis_curve = self.resolve_curve_2d(basis_curve_id)?;
+
+        if offset_dist.abs() < 1e-10 {
+            // Zero offset — just return the basis curve
+            return Some(basis_curve);
+        }
+
+        // Approximate the offset curve in 2D using Nurbs2d
+        Some(approximate_offset_curve_2d(&basis_curve, offset_dist))
+    }
+
+    /// Check if a type name is a known 2D curve type (used for OFFSET_CURVE_2D basis curve detection).
+    fn is_2d_curve_type(&self, type_name: &str) -> bool {
+        matches!(
+            type_name,
+            "LINE" | "CIRCLE" | "ELLIPSE" | "HYPERBOLA" | "PARABOLA" |
+            "B_SPLINE_CURVE_WITH_KNOTS" | "B_SPLINE_CURVE" | "BEZIER_CURVE" |
+            "RATIONAL_B_SPLINE_CURVE" | "TRIMMED_CURVE" | "POLYLINE" |
+            "OFFSET_CURVE_2D"
+        ) || type_name.contains("B_SPLINE_CURVE")
     }
 
     /// Resolve a 2D CARTESIAN_POINT entity.
@@ -11538,6 +11663,176 @@ fn approximate_offset_curve(basis_curve: &Curve3d, distance: f64, ref_direction:
         })
 }
 
+/// Approximate an offset of a 2D curve by sampling, offsetting each point
+/// perpendicular to the 2D tangent, and fitting a degree-3 Nurbs2d through
+/// the result. Falls back to degree-1 polyline if the fit fails.
+///
+/// In 2D, the offset normal is simply the tangent rotated 90° CCW
+/// (for positive distance) or CW (for negative distance).
+fn approximate_offset_curve_2d(basis_curve: &Curve2d, distance: f64) -> Curve2d {
+    let n_samples = 64;
+    let (t_min, t_max) = basis_curve.param_range();
+    let eps = (t_max - t_min) * 1e-7;
+
+    let mut offset_points: Vec<Point2d> = Vec::with_capacity(n_samples);
+
+    for i in 0..n_samples {
+        let t = t_min + (t_max - t_min) * i as f64 / (n_samples - 1) as f64;
+        let p = basis_curve.point_at(t);
+
+        // Compute tangent using central differences
+        let t_lo = (t - eps).max(t_min);
+        let t_hi = (t + eps).min(t_max);
+        let p_lo = basis_curve.point_at(t_lo);
+        let p_hi = basis_curve.point_at(t_hi);
+
+        let du = p_hi.u - p_lo.u;
+        let dv = p_hi.v - p_lo.v;
+        let t_len = (du * du + dv * dv).sqrt();
+
+        if t_len < 1e-15 {
+            offset_points.push(p);
+            continue;
+        }
+
+        // 2D normal: tangent rotated 90° CCW → (-dv, du) / length
+        // For positive distance, offset to the left of the tangent direction.
+        let nu = -dv / t_len;
+        let nv = du / t_len;
+
+        offset_points.push(Point2d::new(
+            p.u + distance * nu,
+            p.v + distance * nv,
+        ));
+    }
+
+    // Remove near-duplicate consecutive points
+    offset_points = deduplicate_points_2d(&offset_points, 1e-6);
+
+    if offset_points.len() < 2 {
+        // Degenerate offset — return basis curve as-is
+        return basis_curve.clone();
+    }
+
+    // Fit a degree-3 Nurbs2d through the offset points
+    fit_nurbs_curve_through_points_2d(&offset_points, 3)
+        .map(Curve2d::Nurbs)
+        .unwrap_or_else(|| {
+            // Fallback to degree-1 polyline
+            let n = offset_points.len();
+            let degree = 1;
+            let weights = vec![1.0; n];
+            let mut knots = Vec::with_capacity(n + degree + 1);
+            for _ in 0..=degree { knots.push(0.0); }
+            for i in 1..n-1 { knots.push(i as f64); }
+            for _ in 0..=degree { knots.push((n - 1) as f64); }
+            Curve2d::Nurbs(Nurbs2d {
+                degree,
+                control_points: offset_points,
+                weights,
+                knots,
+            })
+        })
+}
+
+/// Deduplicate consecutive 2D points that are very close together.
+fn deduplicate_points_2d(points: &[Point2d], _tolerance: f64) -> Vec<Point2d> {
+    if points.is_empty() {
+        return Vec::new();
+    }
+    let mut unique = vec![points[0]];
+    for p in &points[1..] {
+        let last = unique.last().unwrap();
+        let du = p.u - last.u;
+        let dv = p.v - last.v;
+        if du * du + dv * dv > 1e-12 {
+            unique.push(*p);
+        }
+    }
+    // Also check last vs first (closed loop)
+    if unique.len() > 1 {
+        let first = unique[0];
+        let last = *unique.last().unwrap();
+        let du = first.u - last.u;
+        let dv = first.v - last.v;
+        if du * du + dv * dv < 1e-12 {
+            unique.pop();
+        }
+    }
+    unique
+}
+
+/// Fit a degree-p NURBS curve through 2D points using global interpolation
+/// with chord-length parameterization. This is the 2D analog of
+/// `fit_nurbs_curve_through_points`.
+fn fit_nurbs_curve_through_points_2d(points: &[Point2d], degree: usize) -> Option<Nurbs2d> {
+    let n = points.len();
+    if n < degree + 1 {
+        return None;
+    }
+
+    // 1. Chord-length parameterization
+    let mut chords = vec![0.0f64; n];
+    let mut total_chord = 0.0f64;
+    for i in 1..n {
+        let du = points[i].u - points[i-1].u;
+        let dv = points[i].v - points[i-1].v;
+        total_chord += (du * du + dv * dv).sqrt();
+        chords[i] = total_chord;
+    }
+
+    if total_chord < 1e-15 {
+        return None;
+    }
+
+    // Normalize to [0, 1]
+    let t: Vec<f64> = chords.iter().map(|c| c / total_chord).collect();
+
+    // 2. Compute knot vector using averaging
+    let m = n + degree + 1;
+    let mut knots = Vec::with_capacity(m);
+    for _ in 0..=degree { knots.push(0.0); }
+    for j in 1..=(n - degree - 1) {
+        let sum: f64 = (1..=degree).map(|k| t[j + k - 1]).sum();
+        knots.push(sum / degree as f64);
+    }
+    for _ in 0..=degree { knots.push(1.0); }
+
+    // 3. Build and solve the linear system for control points
+    let mut matrix = vec![vec![0.0f64; n]; n];
+    for i in 0..n {
+        let basis = compute_bspline_basis_values(&knots, degree, t[i], n);
+        for j in 0..n {
+            matrix[i][j] = basis[j];
+        }
+    }
+
+    // Solve for each coordinate (u, v) using Gaussian elimination
+    let mut control_points = Vec::with_capacity(n);
+    for coord in 0..2 {
+        let rhs: Vec<f64> = points.iter().map(|p| if coord == 0 { p.u } else { p.v }).collect();
+
+        if let Some(solution) = solve_linear_system_gauss(&matrix, &rhs) {
+            for (i, &val) in solution.iter().enumerate() {
+                if coord == 0 {
+                    control_points.push(Point2d::new(val, 0.0));
+                } else {
+                    control_points[i].v = val;
+                }
+            }
+        } else {
+            return None;
+        }
+    }
+
+    Some(Nurbs2d {
+        degree,
+        control_points,
+        weights: vec![1.0; n],
+        knots,
+    })
+}
+
 /// Compute the principal normal (Frenet normal, in the osculating plane,
 /// perpendicular to the tangent and pointing toward the center of curvature)
 /// using numerical differentiation.
@@ -13111,6 +13406,101 @@ mod step_parser_extension_tests {
         let converter = StepConverter::new(&file);
         let curve = converter.resolve_curve(1, 0).unwrap();
         assert!(matches!(curve, Curve3d::Line(_)), "Zero offset should return the line");
+    }
+
+    // ─── 3.3.5 OFFSET_SURFACE ─────────
+
+    // ─── 3.3 OFFSET_CURVE_2D ─────────
+
+    #[test]
+    fn test_offset_curve_2d_line_basis() {
+        // OFFSET_CURVE_2D with a LINE basis curve — offset of a straight line
+        // in UV space is another straight line (or Nurbs2d approximating it).
+        let step = make_step(
+            "#1 = OFFSET_CURVE_2D('',#10,0.5,.F.);\n\
+             #10 = LINE('',#100,#201);\n\
+             #100 = CARTESIAN_POINT('',(0.0,0.0));\n\
+             #201 = DIRECTION('',(1.0,0.0));"
+        );
+        let file = parse_step(&step).unwrap();
+        let converter = StepConverter::new(&file);
+        let curve = converter.resolve_curve_2d(1);
+        assert!(curve.is_some(), "Should resolve 2D offset curve from line basis");
+
+        // The result should be a Nurbs2d (offset approximation)
+        let c = curve.unwrap();
+        assert!(matches!(c, Curve2d::Nurbs(_)), "Offset of line should be approximated as Nurbs2d");
+
+        // Verify the offset is approximately 0.5 perpendicular to the line
+        let p_start = c.point_at(0.0);
+        let p_end = c.point_at(1.0);
+        // Original line goes from (0,0) to (1,0) direction, offset 0.5 in +v
+        assert!((p_start.v - 0.5).abs() < 0.1, "Start point v should be near 0.5, got {}", p_start.v);
+        assert!((p_end.v - 0.5).abs() < 0.1, "End point v should be near 0.5, got {}", p_end.v);
+    }
+
+    #[test]
+    fn test_offset_curve_2d_circle_basis() {
+        // OFFSET_CURVE_2D with a CIRCLE basis — offset of a circle in UV.
+        // For a CCW-oriented circle, the 2D offset normal points inward
+        // (toward center), so a positive offset reduces the radius.
+        let step = make_step(
+            "#1 = OFFSET_CURVE_2D('',#10,0.2,.F.);\n\
+             #10 = CIRCLE('',#100,1.0);\n\
+             #100 = AXIS2_PLACEMENT_2D('',#101,#102);\n\
+             #101 = CARTESIAN_POINT('',(2.0,3.0));\n\
+             #102 = DIRECTION('',(1.0,0.0));"
+        );
+        let file = parse_step(&step).unwrap();
+        let converter = StepConverter::new(&file);
+        let curve = converter.resolve_curve_2d(1);
+        assert!(curve.is_some(), "Should resolve 2D offset curve from circle basis");
+
+        let c = curve.unwrap();
+        // Positive offset on a CCW circle → radius decreases: 1.0 - 0.2 = 0.8
+        for t in &[0.0, 0.25, 0.5, 0.75, 1.0] {
+            let p = c.point_at(*t);
+            let dx = p.u - 2.0;
+            let dy = p.v - 3.0;
+            let r = (dx * dx + dy * dy).sqrt();
+            assert!((r - 0.8).abs() < 0.15, "Point at t={} should be at radius ~0.8, got {:.4}", t, r);
+        }
+    }
+
+    #[test]
+    fn test_offset_curve_2d_zero_distance() {
+        // Zero offset should return the basis curve as-is
+        let step = make_step(
+            "#1 = OFFSET_CURVE_2D('',#10,0.0,.F.);\n\
+             #10 = LINE('',#100,#201);\n\
+             #100 = CARTESIAN_POINT('',(0.0,0.0));\n\
+             #201 = DIRECTION('',(1.0,0.0));"
+        );
+        let file = parse_step(&step).unwrap();
+        let converter = StepConverter::new(&file);
+        let curve = converter.resolve_curve_2d(1).unwrap();
+        assert!(matches!(curve, Curve2d::Line(_)), "Zero offset should return the line as-is");
+    }
+
+    #[test]
+    fn test_offset_curve_2d_negative_distance() {
+        // Negative offset should offset in the opposite direction
+        let step = make_step(
+            "#1 = OFFSET_CURVE_2D('',#10,-0.5,.F.);\n\
+             #10 = LINE('',#100,#201);\n\
+             #100 = CARTESIAN_POINT('',(0.0,0.0));\n\
+             #201 = DIRECTION('',(1.0,0.0));"
+        );
+        let file = parse_step(&step).unwrap();
+        let converter = StepConverter::new(&file);
+        let curve = converter.resolve_curve_2d(1);
+        assert!(curve.is_some(), "Should resolve 2D offset curve with negative distance");
+
+        let c = curve.unwrap();
+        let p = c.point_at(0.5);
+        // Negative offset: line goes +u direction, normal is +v for CCW,
+        // so negative offset should go to -v
+        assert!(p.v < 0.0, "Negative offset should be at negative v, got v={}", p.v);
     }
 
     // ─── 3.3.5 OFFSET_SURFACE ─────────
