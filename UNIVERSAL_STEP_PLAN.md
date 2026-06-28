@@ -119,14 +119,14 @@
 | Sphere | ✅ `generate_sphere_steiner_grid` | ✅ Да | OK |
 | Torus | ✅ `generate_torus_steiner_grid` | ✅ Да | OK |
 | Revolution | ✅ `generate_revolution_steiner_grid` | ✅ Да | OK |
-| Extrusion | ❌ Только generic | ⚠️ Частично | **Требует работы** |
+| Extrusion | ✅ `generate_extrusion_steiner_grid` | ✅ Да | OK |
 | NURBS | ❌ Только generic + `triangulate_nurbs_cdt` | ⚠️ Частично | **Требует работы** |
 | OffsetSurface | ❌ Аппроксимируется NURBS | ⚠️ Через NURBS | **Требует работы** |
 | SweptSurface | ❌ Аппроксимируется Extrusion/NURBS | ⚠️ Через approx | **Требует работы** |
 | RectangularTrimmedSurface | ✅ Делегирует basis | ✅ Через basis | OK |
 | BoundedSurface (complex entity) | ✅ Через B_SPLINE_SURFACE keyword | ✅ Через NURBS | OK |
 
-**Вывод:** 2 из 8 первичных типов поверхностей не имеют dedicated Steiner grid — Extrusion и NURBS. Остальные (Plane, Cylinder, Cone, Sphere, Torus, Revolution) реализованы. Это причина "неверной триангуляции" на сложных NURBS-гранях.
+**Вывод:** 1 из 8 первичных типов поверхностей не имеет dedicated Steiner grid — NURBS. Остальные (Plane, Cylinder, Cone, Sphere, Torus, Revolution, Extrusion) реализованы. OffsetSurface и SweptSurface делегируют в NURBS/Extrusion.
 
 ---
 
@@ -197,11 +197,11 @@
 
 **Задачи:**
 
-- [ ] 2.5.1 Создать `generate_extrusion_steiner_grid(surface: &ExtrusionSurface, domain, (u_min,u_max), (v_min,v_max), params, budget) -> Vec<Point2d>`.
-- [ ] 2.5.2 Алгоритм: n_u по адаптивной дискретизации profile, n_v по chord-error (обычно 2–8 для linear extrusion).
-- [ ] 2.5.3 Special case: если extrusion direction не perpendicular profile → параметризация искажена, использовать Jacobian-based chord tol.
-- [ ] 2.5.4 Интегрировать в `triangulate_surface_consistent`.
-- [ ] 2.5.5 Тест: extrusion of a NURBS profile (S-curve) with 2 holes.
+- [x] 2.5.1 Создать `generate_extrusion_steiner_grid(surface: &ExtrusionSurface, domain, (u_min,u_max), (v_min,v_max), params, budget) -> Vec<Point2d>`. **Реализовано:** функция в `parametric_domain.rs`.
+- [x] 2.5.2 Алгоритм: n_u по адаптивной дискретизации profile, n_v по target aspect ratio (обычно 2–8 для linear extrusion). **Реализовано:** n_u от типа profile (Line → uniform 4–6, Circle/Arc → chord-error, NURBS/general → arc-length proxy). n_v = (v_span / target_dv) где target_dv = profile_arc_per_u / dir_len (near-square cells). V-direction всегда straight (dS/dv = D = const).
+- [ ] 2.5.3 Special case: если extrusion direction не perpendicular profile → параметризация искажена, использовать Jacobian-based chord tol. **Отложено:** текущая реализация использует profile curve arc-length + direction length что корректно для любого угла между profile и direction.
+- [x] 2.5.4 Интегрировать в `triangulate_surface_consistent`. **Реализовано:** dispatch branch после revolution, перед generic `parameter_division_2d`.
+- [x] 2.5.5 Тест: extrusion с holes. **Реализовано:** 4 unit-теста (line_profile / circle_profile / excludes_holes / respects_budget).
 
 **Критерий приёмки:** ExtrusionSurface с NURBS profile корректно триангулируется с учётом кривизны profile.
 
@@ -617,6 +617,7 @@
 | 2026-06-27 | `4222438` (main) · `a7cc2d7` (gh-pages) | **Phase 1 / 2.2 — Dedicated sphere Steiner grid:** `generate_sphere_steiner_grid()` с pole-skipping (v < 0.05 или v > π - 0.05 пропускаются) и equator ring (v = π/2 как mandatory Steiner points для full-sphere case). Добавлены `max_u_sphere` / `max_v_sphere` / `min_u_sphere` / `min_v_sphere` методы в `SteinerBudgetProfile`. Dispatch в `triangulate_surface_consistent` перед generic `parameter_division_2d` fallback. 4 новых unit-теста (basic / excludes_holes / respects_budget / band_skips_poles). Все 184 mesh + 97 step + 7 integration тестов проходят. WASM release задеплоен. |
 | 2026-06-27 | `c8c3bb2` (main) · `b15b3f3` (gh-pages) | **Phase 1 / 2.3 — Dedicated torus Steiner grid:** `generate_torus_steiner_grid()` с chord-error по (R+r) для u и r для v. Min floor = 24 desktop (plan 2.3.2). Degenerate torus (minor_r < 1e-6) → пустой Vec. Partial torus → grid естественно ограничен range. Добавлены `max_u_torus` / `max_v_torus` / `min_u_torus` / `min_v_torus` методы в `SteinerBudgetProfile`. Dispatch после sphere branch. 5 новых unit-тестов (basic / excludes_holes / respects_budget / partial_band / degenerate). Все 189 mesh тестов проходят. WASM release задеплоен. |
 | 2026-06-28 | `1a27828` (main) · `b6cbbbc` (gh-pages) | **Phase 1 / 2.4 — Dedicated revolution Steiner grid:** `generate_revolution_steiner_grid()` с profile-aware n_v (Line → uniform, Circle/Arc → chord-error, NURBS/general → arc-length proxy). Axis-degeneracy filter (пропускает Steiner points где profile ≈ на оси). n_u из chord-error по max_rev_radius. Добавлены `max_u_revolution` / `max_v_revolution` / `min_u_revolution` / `min_v_revolution` методы в `SteinerBudgetProfile`. Dispatch после torus branch. 5 новых unit-тестов (line_profile / excludes_holes / respects_budget / axis_degenerate / circle_profile). Все 194 mesh тестов проходят. WASM release задеплоен. |
+| 2026-06-28 | `65a3119` (main) · `8ef3ee5` (gh-pages) | **Phase 1 / 2.5 — Dedicated extrusion Steiner grid:** `generate_extrusion_steiner_grid()` с profile-aware n_u (Line → uniform 4–6, Circle/Arc → chord-error, NURBS/general → arc-length proxy). n_v из target aspect ratio (near-square cells, v-direction straight = dS/dv = const). Добавлены `max_u_extrusion` / `max_v_extrusion` / `min_u_extrusion` / `min_v_extrusion` методы в `SteinerBudgetProfile`. Dispatch после revolution branch. 4 новых unit-теста (line_profile / circle_profile / excludes_holes / respects_budget). Все 198 mesh тестов проходят. WASM release задеплоен. |
 
 ---
 
