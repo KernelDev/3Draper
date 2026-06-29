@@ -203,6 +203,8 @@ impl TriangulationParams {
             max_face_triangles: draper_mesh::adaptive::DEFAULT_MAX_FACE_TRIANGLES,
             steiner_profile: draper_mesh::triangulate::SteinerBudgetProfile::default(),
             keep_ratio: 1.0,
+            adaptive_lod_enabled: false,
+            target_triangles_per_face: None,
         }
     }
 }
