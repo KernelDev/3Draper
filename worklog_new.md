@@ -3718,3 +3718,26 @@ Stage Summary:
   * Fewer face skips (1.5s limit passes through stuck faces faster)
   * Less pixelated NURBS (1 chord-refinement iteration = ~2× triangles)
 - Long-term plan (Stages 1-6) targets: 30-40s total load on mobile, watertight mesh, smooth NURBS surfaces, 60fps UI on all devices
+
+---
+Task ID: 4.2
+Agent: Main
+Task: Phase 3 / 4.2 — Adaptive LOD per-face triangle budget
+
+Work Log:
+- Added `target_triangles_per_face: Option<usize>`, `adaptive_lod_enabled: bool`, and `TOTAL_TRIANGLE_BUDGET: usize = 100_000` to TriangulationParams
+- Implemented `with_adaptive_lod(face_count)` method: per-face budget = (detail_level × 100K) / face_count, capped to max_face_triangles
+- Implemented `compute_target_triangles_per_face()` method for querying budget without mutation
+- Updated `new_with_lod()` and `new_with_lod_and_profile()` to enable adaptive LOD by default
+- Added adaptive LOD computation in `triangulate_brep_detailed()` after healing pipeline — params cloned and modified locally
+- Updated 3 decimation call sites in converter.rs to skip decimation when adaptive_lod_enabled=true
+- 9 unit tests added in triangulate.rs::adaptive_lod_tests module
+- All 412 tests pass (91 geometry + 218 mesh + 103 step)
+- WASM release built and deployed to gh-pages
+
+Stage Summary:
+- Adaptive LOD replaces old approach (triangulate all faces at full quality → decimate) with per-face budget control
+- Total triangle budget = detail_level × 100K, distributed equally across faces
+- Post-triangulation decimation skipped when adaptive LOD is active
+- Legacy path (uniform budget + decimation) preserved for adaptive_lod_enabled=false
+- Commits: `cde41f2` (main), `6c517ec` (gh-pages)
