@@ -481,7 +481,41 @@ pub struct TriangulationParams {
     /// planar with linear edges, so per-face triangulation alone produces the
     /// same N-2 triangles regardless of LOD. Decimation collapses coplanar
     /// internal edges, drastically reducing the count for low LOD.
+    ///
+    /// When `adaptive_lod_enabled` is true, decimation is SKIPPED because
+    /// the per-face triangle budget is already controlled via
+    /// `target_triangles_per_face` → `max_face_triangles`.
     pub keep_ratio: f64,
+    /// Target number of triangles PER FACE when adaptive LOD is enabled.
+    ///
+    /// When `Some(n)`, each face is triangulated with a budget of ≤ n
+    /// triangles, and `max_face_triangles` is capped to this value.
+    /// This replaces the old approach of triangulating every face at
+    /// full quality and then decimating the combined mesh.
+    ///
+    /// The budget is computed as:
+    ///   target_per_face = (lod × TOTAL_BUDGET) / face_count
+    /// where TOTAL_BUDGET = 100 000 for LOD 1.0.
+    ///
+    /// Small faces naturally use fewer triangles (they have fewer boundary
+    /// points), leaving budget for larger, more curved faces.
+    ///
+    /// When `None`, the original `max_face_triangles` from `for_lod()`
+    /// is used (uniform per face, same as before).
+    pub target_triangles_per_face: Option<usize>,
+    /// Whether adaptive LOD is enabled.
+    ///
+    /// When `true`:
+    /// - `target_triangles_per_face` controls the per-face triangle budget
+    ///   (computed from total budget / face count × LOD factor).
+    /// - Post-triangulation decimation is SKIPPED (each face already
+    ///   respects its budget, so global decimation is unnecessary).
+    /// - `max_face_triangles` is capped to `target_triangles_per_face`.
+    ///
+    /// When `false` (default):
+    /// - The original uniform per-face budget is used.
+    /// - Post-triangulation decimation is applied when `keep_ratio < 1.0`.
+    pub adaptive_lod_enabled: bool,
 }
 
 impl std::fmt::Debug for TriangulationParams {
@@ -498,6 +532,8 @@ impl std::fmt::Debug for TriangulationParams {
             .field("max_face_triangles", &self.max_face_triangles)
             .field("steiner_profile", &self.steiner_profile)
             .field("keep_ratio", &self.keep_ratio)
+            .field("target_triangles_per_face", &self.target_triangles_per_face)
+            .field("adaptive_lod_enabled", &self.adaptive_lod_enabled)
             .field("progress_callback", &self.progress_callback.as_ref().map(|_| "Some(...)"))
             .finish()
     }
@@ -518,6 +554,8 @@ impl Default for TriangulationParams {
             max_face_triangles: 8000,
             steiner_profile: SteinerBudgetProfile::default(),
             keep_ratio: 1.0, // No decimation by default — preserve backward compatibility
+            target_triangles_per_face: None,
+            adaptive_lod_enabled: false,
         }
     }
 }
@@ -607,7 +645,74 @@ impl TriangulationParams {
             max_face_triangles,
             steiner_profile: SteinerBudgetProfile::default(),
             keep_ratio,
+            target_triangles_per_face: None,
+            adaptive_lod_enabled: false,
         }
+    }
+
+    /// Total triangle budget at a given LOD level.
+    ///
+    /// At LOD 1.0 the total budget is 100 000 triangles for the entire BREP.
+    /// This scales linearly with LOD: LOD 0.5 → 50 000, LOD 0.3 → 30 000.
+    ///
+    /// This constant was chosen so that a typical CAD assembly (drill_top.stp,
+    /// ~2971 faces) produces ~33 triangles per face at LOD 1.0 — enough
+    /// for good visual quality on curved surfaces while keeping the total
+    /// count under 100K for GPU efficiency.
+    pub const TOTAL_TRIANGLE_BUDGET: usize = 100_000;
+
+    /// Compute the per-face triangle budget for adaptive LOD.
+    ///
+    /// The formula is:
+    /// ```ignore
+    /// target_per_face = (lod × TOTAL_TRIANGLE_BUDGET) / face_count
+    /// ```
+    ///
+    /// This is clamped to at least 4 triangles (minimum for a visible face)
+    /// and at most `max_face_triangles` (the hard ceiling from the LOD preset).
+    ///
+    /// When `adaptive_lod_enabled` is false, returns `None`.
+    pub fn compute_target_triangles_per_face(&self, face_count: usize) -> Option<usize> {
+        if !self.adaptive_lod_enabled || face_count == 0 {
+            return None;
+        }
+        let total_budget = (self.detail_level * Self::TOTAL_TRIANGLE_BUDGET as f64).round() as usize;
+        let per_face = (total_budget / face_count).max(4);
+        // Don't exceed the hard ceiling from for_lod()
+        let capped = per_face.min(self.max_face_triangles);
+        Some(capped)
+    }
+
+    /// Enable adaptive LOD, computing the per-face budget from face count.
+    ///
+    /// This replaces the old approach of triangulating every face at full
+    /// quality and then decimating the combined mesh. Instead, each face
+    /// gets a fair share of the total triangle budget, proportional to
+    /// `detail_level` (which scales with LOD).
+    ///
+    /// After calling this:
+    /// - `adaptive_lod_enabled` = `true`
+    /// - `target_triangles_per_face` = `Some(budget)`
+    /// - `max_face_triangles` is capped to `target_triangles_per_face`
+    /// - `keep_ratio` is set to 1.0 (no decimation — each face already
+    ///   respects its budget)
+    pub fn with_adaptive_lod(&mut self, face_count: usize) {
+        if face_count == 0 {
+            return;
+        }
+        self.adaptive_lod_enabled = true;
+        let total_budget = (self.detail_level * Self::TOTAL_TRIANGLE_BUDGET as f64).round() as usize;
+        let per_face = (total_budget / face_count).max(4);
+        // Don't exceed the hard ceiling from for_lod()
+        let budget = per_face.min(self.max_face_triangles);
+        self.target_triangles_per_face = Some(budget);
+        self.max_face_triangles = budget;
+        // No decimation needed — each face already respects its budget
+        self.keep_ratio = 1.0;
+        log::info!(
+            "Adaptive LOD: {} faces × {} tris/face = {} total budget (LOD {:.2})",
+            face_count, budget, face_count * budget, self.detail_level
+        );
     }
 
     /// Create parameters optimized for preview (LOD ≈ 0.15).
@@ -9611,5 +9716,103 @@ impl FallbackStats {
     /// Create zero-initialized stats.
     pub fn new() -> Self {
         Self::default()
+    }
+}
+
+#[cfg(test)]
+mod adaptive_lod_tests {
+    use super::*;
+
+    #[test]
+    fn test_adaptive_lod_budget_computation() {
+        // With LOD 1.0 (detail_level=1.0) and 100 faces:
+        // total_budget = 1.0 * 100_000 = 100_000
+        // per_face = 100_000 / 100 = 1000
+        let mut params = TriangulationParams::for_lod(1.0);
+        params.adaptive_lod_enabled = true;
+        let budget = params.compute_target_triangles_per_face(100);
+        assert_eq!(budget, Some(1000));
+    }
+
+    #[test]
+    fn test_adaptive_lod_low_detail() {
+        // With LOD 0.5 (detail_level=0.625) and 200 faces:
+        // total_budget = 0.625 * 100_000 = 62_500
+        // per_face = 62_500 / 200 = 312
+        let mut params = TriangulationParams::for_lod(0.5);
+        params.adaptive_lod_enabled = true;
+        let budget = params.compute_target_triangles_per_face(200);
+        assert_eq!(budget, Some(312));
+    }
+
+    #[test]
+    fn test_adaptive_lod_minimum_floor() {
+        // With very many faces, per-face budget should never go below 4
+        let mut params = TriangulationParams::for_lod(0.1);
+        params.adaptive_lod_enabled = true;
+        let budget = params.compute_target_triangles_per_face(1_000_000);
+        assert!(budget.unwrap() >= 4, "budget should be at least 4, got {:?}", budget);
+    }
+
+    #[test]
+    fn test_adaptive_lod_capped_by_max_face_triangles() {
+        // With very few faces, budget should not exceed max_face_triangles
+        let mut params = TriangulationParams::for_lod(1.0);
+        params.adaptive_lod_enabled = true;
+        let max_ft = params.max_face_triangles;
+        let budget = params.compute_target_triangles_per_face(5);
+        // 100_000 / 5 = 20_000, but max_face_triangles at LOD 1.0 = 8000
+        assert_eq!(budget, Some(max_ft));
+        assert!(budget.unwrap() <= max_ft);
+    }
+
+    #[test]
+    fn test_adaptive_lod_disabled_returns_none() {
+        let params = TriangulationParams::for_lod(1.0);
+        // adaptive_lod_enabled = false by default
+        let budget = params.compute_target_triangles_per_face(100);
+        assert_eq!(budget, None);
+    }
+
+    #[test]
+    fn test_with_adaptive_lod_sets_fields() {
+        let mut params = TriangulationParams::for_lod(0.5);
+        assert!(!params.adaptive_lod_enabled);
+        assert_eq!(params.target_triangles_per_face, None);
+
+        params.with_adaptive_lod(100);
+
+        assert!(params.adaptive_lod_enabled);
+        assert!(params.target_triangles_per_face.is_some());
+        assert_eq!(params.keep_ratio, 1.0); // No decimation when adaptive
+        // max_face_triangles should be capped to target
+        assert_eq!(params.max_face_triangles, params.target_triangles_per_face.unwrap());
+    }
+
+    #[test]
+    fn test_adaptive_lod_preview_quality() {
+        // Preview (LOD 0.15, detail_level ≈ 0.36) with 50 faces:
+        // total_budget ≈ 36_250, per_face ≈ 725
+        let mut params = TriangulationParams::for_lod(0.15);
+        params.adaptive_lod_enabled = true;
+        let budget = params.compute_target_triangles_per_face(50);
+        let expected = ((0.3625_f64 * 100_000.0).round() as usize / 50).max(4);
+        assert_eq!(budget, Some(expected.min(params.max_face_triangles)));
+    }
+
+    #[test]
+    fn test_default_params_no_adaptive_lod() {
+        let params = TriangulationParams::default();
+        assert!(!params.adaptive_lod_enabled);
+        assert_eq!(params.target_triangles_per_face, None);
+        assert_eq!(params.keep_ratio, 1.0);
+    }
+
+    #[test]
+    fn test_adaptive_lod_zero_face_count() {
+        let mut params = TriangulationParams::for_lod(1.0);
+        params.adaptive_lod_enabled = true;
+        let budget = params.compute_target_triangles_per_face(0);
+        assert_eq!(budget, None); // Guard against division by zero
     }
 }

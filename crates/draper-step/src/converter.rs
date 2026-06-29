@@ -782,7 +782,12 @@ impl OwnedStepConversionContext {
         // dropdown actually changes triangle count. for_lod(lod) scales
         // max_deviation, angular_samples, height_samples, max_face_triangles,
         // and detail_level proportionally to `lod`.
-        Self::new_with_params(step_file, TriangulationParams::for_lod(lod.clamp(0.0, 1.0)))
+        let mut params = TriangulationParams::for_lod(lod.clamp(0.0, 1.0));
+        // Enable adaptive LOD — each face gets a fair share of the total
+        // triangle budget instead of triangulating all faces at full quality
+        // and then decimating.
+        params.adaptive_lod_enabled = true;
+        Self::new_with_params(step_file, params)
     }
 
     /// Create a new owning conversion context with an LOD value and a Steiner
@@ -803,6 +808,11 @@ impl OwnedStepConversionContext {
     ) -> Self {
         let mut params = TriangulationParams::for_lod(lod.clamp(0.0, 1.0));
         params.steiner_profile = profile;
+        // Enable adaptive LOD — each face gets a fair share of the total
+        // triangle budget instead of triangulating all faces at full quality
+        // and then decimating. The per-face budget is computed later in
+        // triangulate_brep_detailed when the face count is known.
+        params.adaptive_lod_enabled = true;
         Self::new_with_params(step_file, params)
     }
 
@@ -1020,7 +1030,10 @@ impl OwnedStepConversionContext {
         //
         // Decimation preserves the silhouette (boundary edges are never
         // collapsed, boundary vertices are never moved).
-        if self.params.keep_ratio < 1.0 && instance_mesh.triangle_count() >= 4 {
+        //
+        // Skip decimation when adaptive LOD is enabled — each face already
+        // respects its per-face budget, so global decimation is unnecessary.
+        if !self.params.adaptive_lod_enabled && self.params.keep_ratio < 1.0 && instance_mesh.triangle_count() >= 4 {
             let (orig, final_) = draper_mesh::decimate_mesh(&mut instance_mesh, self.params.keep_ratio);
             if final_ < orig {
                 log::info!(
@@ -1222,7 +1235,9 @@ impl OwnedStepConversionContext {
         }
 
         // Apply post-triangulation decimation for LOD support.
-        if self.params.keep_ratio < 1.0 && mesh.triangle_count() >= 4 {
+        // Skip when adaptive LOD is enabled — each face already respects
+        // its per-face budget, so global decimation is unnecessary.
+        if !self.params.adaptive_lod_enabled && self.params.keep_ratio < 1.0 && mesh.triangle_count() >= 4 {
             let (orig, final_) = draper_mesh::decimate_mesh(&mut mesh, self.params.keep_ratio);
             if final_ < orig {
                 log::info!(
@@ -1309,7 +1324,9 @@ impl OwnedStepConversionContext {
         }
 
         // Apply post-triangulation decimation (same as build_instance).
-        if self.params.keep_ratio < 1.0 && mesh.triangle_count() >= 4 {
+        // Skip when adaptive LOD is enabled — each face already respects
+        // its per-face budget, so global decimation is unnecessary.
+        if !self.params.adaptive_lod_enabled && self.params.keep_ratio < 1.0 && mesh.triangle_count() >= 4 {
             let (orig, final_) = draper_mesh::decimate_mesh(&mut mesh, self.params.keep_ratio);
             if final_ < orig {
                 log::info!(
@@ -3952,6 +3969,16 @@ impl<'a> StepConverter<'a> {
             face_data_list
         };
 
+        // ─── Adaptive LOD: compute per-face triangle budget ─────────────
+        // When adaptive_lod_enabled is set in the viewer, compute a per-face
+        // budget from total_budget / face_count so that each face gets a fair
+        // share. This replaces the old approach of triangulating every face at
+        // full quality and then decimating the combined mesh.
+        let mut params = params.clone();
+        if params.adaptive_lod_enabled {
+            params.with_adaptive_lod(face_data_list.len());
+        }
+
         // Create edge discretization cache for this BREP
         let mut edge_cache = EdgeDiscretizationCache::with_tolerance(tol_ctx.clone(), 64);
 
@@ -4178,7 +4205,7 @@ impl<'a> StepConverter<'a> {
             };
 
             let tri_start = mesh.triangle_count();
-            let face_mesh = self.surface_to_mesh_cached(face_data, params, bbox, &mut edge_cache);
+            let face_mesh = self.surface_to_mesh_cached(face_data, &params, bbox, &mut edge_cache);
             
             // Set face ID for all triangles in this face mesh
             let face_tri_count = face_mesh.triangle_count();
