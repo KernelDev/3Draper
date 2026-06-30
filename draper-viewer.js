@@ -1,222 +1,3 @@
-/* @ts-self-types="./draper-viewer.d.ts" */
-
-/**
- * Result of `worker_parse_step` — contains file statistics and pending BREP descriptors.
- */
-export class WorkerParseResult {
-    static __wrap(ptr) {
-        const obj = Object.create(WorkerParseResult.prototype);
-        obj.__wbg_ptr = ptr;
-        WorkerParseResultFinalization.register(obj, obj.__wbg_ptr, obj);
-        return obj;
-    }
-    __destroy_into_raw() {
-        const ptr = this.__wbg_ptr;
-        this.__wbg_ptr = 0;
-        WorkerParseResultFinalization.unregister(this);
-        return ptr;
-    }
-    free() {
-        const ptr = this.__destroy_into_raw();
-        wasm.__wbg_workerparseresult_free(ptr, 0);
-    }
-    /**
-     * @returns {string}
-     */
-    get assembly_tree_json() {
-        let deferred1_0;
-        let deferred1_1;
-        try {
-            const ret = wasm.workerparseresult_assembly_tree_json(this.__wbg_ptr);
-            deferred1_0 = ret[0];
-            deferred1_1 = ret[1];
-            return getStringFromWasm0(ret[0], ret[1]);
-        } finally {
-            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
-        }
-    }
-    /**
-     * @returns {number}
-     */
-    get brep_count() {
-        const ret = wasm.workerparseresult_brep_count(this.__wbg_ptr);
-        return ret >>> 0;
-    }
-    /**
-     * @returns {number}
-     */
-    get entity_count() {
-        const ret = wasm.workerparseresult_entity_count(this.__wbg_ptr);
-        return ret >>> 0;
-    }
-    /**
-     * @returns {string}
-     */
-    get error() {
-        let deferred1_0;
-        let deferred1_1;
-        try {
-            const ret = wasm.workerparseresult_error(this.__wbg_ptr);
-            deferred1_0 = ret[0];
-            deferred1_1 = ret[1];
-            return getStringFromWasm0(ret[0], ret[1]);
-        } finally {
-            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
-        }
-    }
-    /**
-     * @returns {number}
-     */
-    get face_count() {
-        const ret = wasm.workerparseresult_face_count(this.__wbg_ptr);
-        return ret >>> 0;
-    }
-    /**
-     * @returns {string}
-     */
-    get pending_breps_json() {
-        let deferred1_0;
-        let deferred1_1;
-        try {
-            const ret = wasm.workerparseresult_pending_breps_json(this.__wbg_ptr);
-            deferred1_0 = ret[0];
-            deferred1_1 = ret[1];
-            return getStringFromWasm0(ret[0], ret[1]);
-        } finally {
-            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
-        }
-    }
-    /**
-     * @returns {number}
-     */
-    get shell_count() {
-        const ret = wasm.workerparseresult_shell_count(this.__wbg_ptr);
-        return ret >>> 0;
-    }
-}
-if (Symbol.dispose) WorkerParseResult.prototype[Symbol.dispose] = WorkerParseResult.prototype.free;
-
-/**
- * Result of `worker_triangulate_brep` — contains mesh data for one BREP.
- */
-export class WorkerTriangulateResult {
-    static __wrap(ptr) {
-        const obj = Object.create(WorkerTriangulateResult.prototype);
-        obj.__wbg_ptr = ptr;
-        WorkerTriangulateResultFinalization.register(obj, obj.__wbg_ptr, obj);
-        return obj;
-    }
-    __destroy_into_raw() {
-        const ptr = this.__wbg_ptr;
-        this.__wbg_ptr = 0;
-        WorkerTriangulateResultFinalization.unregister(this);
-        return ptr;
-    }
-    free() {
-        const ptr = this.__destroy_into_raw();
-        wasm.__wbg_workertriangulateresult_free(ptr, 0);
-    }
-    /**
-     * @returns {bigint}
-     */
-    get brep_id() {
-        const ret = wasm.workertriangulateresult_brep_id(this.__wbg_ptr);
-        return ret;
-    }
-    /**
-     * @returns {Float32Array}
-     */
-    get color() {
-        const ret = wasm.workertriangulateresult_color(this.__wbg_ptr);
-        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
-        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
-        return v1;
-    }
-    /**
-     * @returns {Float32Array}
-     */
-    get colors() {
-        const ret = wasm.workertriangulateresult_colors(this.__wbg_ptr);
-        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
-        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
-        return v1;
-    }
-    /**
-     * @returns {string}
-     */
-    get error() {
-        let deferred1_0;
-        let deferred1_1;
-        try {
-            const ret = wasm.workertriangulateresult_error(this.__wbg_ptr);
-            deferred1_0 = ret[0];
-            deferred1_1 = ret[1];
-            return getStringFromWasm0(ret[0], ret[1]);
-        } finally {
-            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
-        }
-    }
-    /**
-     * @returns {Float32Array}
-     */
-    get face_normals() {
-        const ret = wasm.workertriangulateresult_face_normals(this.__wbg_ptr);
-        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
-        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
-        return v1;
-    }
-    /**
-     * @returns {Uint32Array}
-     */
-    get indices() {
-        const ret = wasm.workertriangulateresult_indices(this.__wbg_ptr);
-        var v1 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
-        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
-        return v1;
-    }
-    /**
-     * @returns {string}
-     */
-    get name() {
-        let deferred1_0;
-        let deferred1_1;
-        try {
-            const ret = wasm.workertriangulateresult_name(this.__wbg_ptr);
-            deferred1_0 = ret[0];
-            deferred1_1 = ret[1];
-            return getStringFromWasm0(ret[0], ret[1]);
-        } finally {
-            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
-        }
-    }
-    /**
-     * @returns {Float32Array}
-     */
-    get normals() {
-        const ret = wasm.workertriangulateresult_normals(this.__wbg_ptr);
-        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
-        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
-        return v1;
-    }
-    /**
-     * @returns {number}
-     */
-    get remaining() {
-        const ret = wasm.workertriangulateresult_remaining(this.__wbg_ptr);
-        return ret >>> 0;
-    }
-    /**
-     * @returns {Float32Array}
-     */
-    get vertices() {
-        const ret = wasm.workertriangulateresult_vertices(this.__wbg_ptr);
-        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
-        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
-        return v1;
-    }
-}
-if (Symbol.dispose) WorkerTriangulateResult.prototype[Symbol.dispose] = WorkerTriangulateResult.prototype.free;
-
 /**
  * This is the entry point for the web version.
  * It is called automatically when the wasm module is loaded.
@@ -224,71 +5,6 @@ if (Symbol.dispose) WorkerTriangulateResult.prototype[Symbol.dispose] = WorkerTr
  */
 export function start() {
     wasm.start();
-}
-
-/**
- * Cancel all pending work in the worker and release resources.
- */
-export function worker_cancel() {
-    wasm.worker_cancel();
-}
-
-/**
- * Get the assembly tree JSON from the worker state.
- * Called after `worker_parse_step` to retrieve the tree.
- * @returns {string}
- */
-export function worker_get_assembly_tree() {
-    let deferred1_0;
-    let deferred1_1;
-    try {
-        const ret = wasm.worker_get_assembly_tree();
-        deferred1_0 = ret[0];
-        deferred1_1 = ret[1];
-        return getStringFromWasm0(ret[0], ret[1]);
-    } finally {
-        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
-    }
-}
-
-/**
- * Parse a STEP file in the worker thread.
- *
- * This is called from `worker.js` when the main thread sends a `parse` message.
- * The STEP file text is parsed into a `StepFile`, and the assembly tree +
- * pending BREP instances are extracted (but no triangulation happens yet).
- *
- * Returns a `WorkerParseResult` with file statistics and pending BREP descriptors.
- * The parsed state is stored in thread-local storage for subsequent
- * `worker_triangulate_brep` calls.
- * @param {string} content
- * @param {string} name
- * @param {number} lod
- * @param {boolean} is_mobile
- * @returns {WorkerParseResult}
- */
-export function worker_parse_step(content, name, lod, is_mobile) {
-    const ptr0 = passStringToWasm0(content, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-    const len1 = WASM_VECTOR_LEN;
-    const ret = wasm.worker_parse_step(ptr0, len0, ptr1, len1, lod, is_mobile);
-    return WorkerParseResult.__wrap(ret);
-}
-
-/**
- * Triangulate the next pending BREP in the worker thread.
- *
- * This is called from `worker.js` when the main thread sends a `triangulate_next`
- * message. It processes one BREP at a time, returning the mesh data.
- *
- * If no more BREPs are pending, returns a result with empty vertices/indices
- * and `remaining = 0`.
- * @returns {WorkerTriangulateResult}
- */
-export function worker_triangulate_brep() {
-    const ret = wasm.worker_triangulate_brep();
-    return WorkerTriangulateResult.__wrap(ret);
 }
 function __wbg_get_imports() {
     const import0 = {
@@ -511,20 +227,12 @@ function __wbg_get_imports() {
             const ret = arg0.button;
             return ret;
         },
-        __wbg_call_6e37a87ff352da3d: function() { return handleError(function (arg0, arg1, arg2, arg3, arg4) {
-            const ret = arg0.call(arg1, arg2, arg3, arg4);
-            return ret;
-        }, arguments); },
         __wbg_call_7d39dd526ab44e10: function() { return handleError(function (arg0, arg1, arg2, arg3, arg4, arg5) {
             const ret = arg0.call(arg1, arg2, arg3, arg4, arg5);
             return ret;
         }, arguments); },
         __wbg_call_8a89609d89f6608a: function() { return handleError(function (arg0, arg1) {
             const ret = arg0.call(arg1);
-            return ret;
-        }, arguments); },
-        __wbg_call_9c758de292015997: function() { return handleError(function (arg0, arg1, arg2) {
-            const ret = arg0.call(arg1, arg2);
             return ret;
         }, arguments); },
         __wbg_cancelAnimationFrame_fd3abe3611601214: function() { return handleError(function (arg0, arg1) {
@@ -982,10 +690,6 @@ function __wbg_get_imports() {
                 wasm.__wbindgen_free(deferred0_0, deferred0_1, 1);
             }
         },
-        __wbg_eval_35600f795897d127: function() { return handleError(function (arg0, arg1) {
-            const ret = eval(getStringFromWasm0(arg0, arg1));
-            return ret;
-        }, arguments); },
         __wbg_features_205df3dd891b74bf: function(arg0) {
             const ret = arg0.features;
             return ret;
@@ -1205,6 +909,10 @@ function __wbg_get_imports() {
             const ret = arg0[arg1 >>> 0];
             return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
         },
+        __wbg_get_95fa8cf1fb21bb82: function(arg0, arg1, arg2) {
+            const ret = arg0[getStringFromWasm0(arg1, arg2)];
+            return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
+        },
         __wbg_get_c4eb9c8665471988: function(arg0, arg1) {
             const ret = arg0[arg1 >>> 0];
             return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
@@ -1229,10 +937,6 @@ function __wbg_get_imports() {
             const ret = arg0.gpu;
             return ret;
         },
-        __wbg_has_73740b27f436fed3: function() { return handleError(function (arg0, arg1) {
-            const ret = Reflect.has(arg0, arg1);
-            return ret;
-        }, arguments); },
         __wbg_has_dc80aa6186153231: function(arg0, arg1, arg2) {
             const ret = arg0.has(getStringFromWasm0(arg1, arg2));
             return ret;
@@ -1379,6 +1083,16 @@ function __wbg_get_imports() {
             let result;
             try {
                 result = arg0 instanceof HTMLInputElement;
+            } catch (_) {
+                result = false;
+            }
+            const ret = result;
+            return ret;
+        },
+        __wbg_instanceof_Object_873c13f9f41aec78: function(arg0) {
+            let result;
+            try {
+                result = arg0 instanceof Object;
             } catch (_) {
                 result = false;
             }
@@ -1736,14 +1450,6 @@ function __wbg_get_imports() {
             const ret = new Uint8Array(arg0, arg1 >>> 0, arg2 >>> 0);
             return ret;
         },
-        __wbg_new_with_length_21806dff02ad1c3e: function(arg0) {
-            const ret = new Uint32Array(arg0 >>> 0);
-            return ret;
-        },
-        __wbg_new_with_length_7d20818cf1afe359: function(arg0) {
-            const ret = new Float32Array(arg0 >>> 0);
-            return ret;
-        },
         __wbg_new_with_record_from_str_to_blob_promise_b54de74614453ed8: function() { return handleError(function (arg0) {
             const ret = new ClipboardItem(arg0);
             return ret;
@@ -1985,9 +1691,6 @@ function __wbg_get_imports() {
         __wbg_setViewport_b5382516378a0227: function(arg0, arg1, arg2, arg3, arg4, arg5, arg6) {
             arg0.setViewport(arg1, arg2, arg3, arg4, arg5, arg6);
         },
-        __wbg_set_190f84efe1abf2cc: function(arg0, arg1, arg2) {
-            arg0.set(getArrayU32FromWasm0(arg1, arg2));
-        },
         __wbg_set_6e30c9374c26414c: function() { return handleError(function (arg0, arg1, arg2) {
             const ret = Reflect.set(arg0, arg1, arg2);
             return ret;
@@ -2042,9 +1745,6 @@ function __wbg_get_imports() {
         },
         __wbg_set_base_mip_level_5a0524f10a35bff6: function(arg0, arg1) {
             arg0.baseMipLevel = arg1 >>> 0;
-        },
-        __wbg_set_bd7b6300364788fc: function(arg0, arg1, arg2) {
-            arg0.set(getArrayF32FromWasm0(arg1, arg2));
         },
         __wbg_set_beginning_of_pass_write_index_aa7255a7590f9493: function(arg0, arg1) {
             arg0.beginningOfPassWriteIndex = arg1 >>> 0;
@@ -2952,27 +2652,27 @@ function __wbg_get_imports() {
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
             // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 1142, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h02c6bc4fe7ddc8b1);
+            const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h3bbeeb48243b1a76);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 3030, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h925e8d6377294b5d);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 3026, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__he7c4e79e608204f1);
             return ret;
         },
         __wbindgen_cast_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("Array<any>")], shim_idx: 484, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hc904ec35267f910e);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("Array<any>")], shim_idx: 479, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h3e36779b9d417991);
             return ret;
         },
         __wbindgen_cast_0000000000000004: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("Event")], shim_idx: 484, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hc904ec35267f910e_3);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("Event")], shim_idx: 479, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h3e36779b9d417991_3);
             return ret;
         },
         __wbindgen_cast_0000000000000005: function(arg0, arg1) {
             // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 482, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hbca3773cac796aac);
+            const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hd24d28f6e9c4c203);
             return ret;
         },
         __wbindgen_cast_0000000000000006: function(arg0) {
@@ -3036,27 +2736,27 @@ function __wbg_get_imports() {
     };
 }
 
-function wasm_bindgen__convert__closures_____invoke__hbca3773cac796aac(arg0, arg1) {
-    const ret = wasm.wasm_bindgen__convert__closures_____invoke__hbca3773cac796aac(arg0, arg1);
+function wasm_bindgen__convert__closures_____invoke__hd24d28f6e9c4c203(arg0, arg1) {
+    const ret = wasm.wasm_bindgen__convert__closures_____invoke__hd24d28f6e9c4c203(arg0, arg1);
     if (ret[1]) {
         throw takeFromExternrefTable0(ret[0]);
     }
 }
 
-function wasm_bindgen__convert__closures_____invoke__h02c6bc4fe7ddc8b1(arg0, arg1, arg2) {
-    wasm.wasm_bindgen__convert__closures_____invoke__h02c6bc4fe7ddc8b1(arg0, arg1, arg2);
+function wasm_bindgen__convert__closures_____invoke__h3bbeeb48243b1a76(arg0, arg1, arg2) {
+    wasm.wasm_bindgen__convert__closures_____invoke__h3bbeeb48243b1a76(arg0, arg1, arg2);
 }
 
-function wasm_bindgen__convert__closures_____invoke__hc904ec35267f910e(arg0, arg1, arg2) {
-    wasm.wasm_bindgen__convert__closures_____invoke__hc904ec35267f910e(arg0, arg1, arg2);
+function wasm_bindgen__convert__closures_____invoke__h3e36779b9d417991(arg0, arg1, arg2) {
+    wasm.wasm_bindgen__convert__closures_____invoke__h3e36779b9d417991(arg0, arg1, arg2);
 }
 
-function wasm_bindgen__convert__closures_____invoke__hc904ec35267f910e_3(arg0, arg1, arg2) {
-    wasm.wasm_bindgen__convert__closures_____invoke__hc904ec35267f910e_3(arg0, arg1, arg2);
+function wasm_bindgen__convert__closures_____invoke__h3e36779b9d417991_3(arg0, arg1, arg2) {
+    wasm.wasm_bindgen__convert__closures_____invoke__h3e36779b9d417991_3(arg0, arg1, arg2);
 }
 
-function wasm_bindgen__convert__closures_____invoke__h925e8d6377294b5d(arg0, arg1, arg2) {
-    const ret = wasm.wasm_bindgen__convert__closures_____invoke__h925e8d6377294b5d(arg0, arg1, arg2);
+function wasm_bindgen__convert__closures_____invoke__he7c4e79e608204f1(arg0, arg1, arg2) {
+    const ret = wasm.wasm_bindgen__convert__closures_____invoke__he7c4e79e608204f1(arg0, arg1, arg2);
     if (ret[1]) {
         throw takeFromExternrefTable0(ret[0]);
     }
@@ -3139,12 +2839,6 @@ const __wbindgen_enum_GpuVertexStepMode = ["vertex", "instance"];
 
 
 const __wbindgen_enum_ResizeObserverBoxOptions = ["border-box", "content-box", "device-pixel-content-box"];
-const WorkerParseResultFinalization = (typeof FinalizationRegistry === 'undefined')
-    ? { register: () => {}, unregister: () => {} }
-    : new FinalizationRegistry(ptr => wasm.__wbg_workerparseresult_free(ptr, 1));
-const WorkerTriangulateResultFinalization = (typeof FinalizationRegistry === 'undefined')
-    ? { register: () => {}, unregister: () => {} }
-    : new FinalizationRegistry(ptr => wasm.__wbg_workertriangulateresult_free(ptr, 1));
 
 function addToExternrefTable0(obj) {
     const idx = wasm.__externref_table_alloc();
