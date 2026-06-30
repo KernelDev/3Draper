@@ -23,6 +23,8 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
           Cross-Origin-Opener-Policy: same-origin
           Cross-Origin-Embedder-Policy: require-corp
     -->
+    <!-- Web Worker bridge — creates the global draperWorkerBridge object -->
+    <script src="worker-bridge.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         html, body {
