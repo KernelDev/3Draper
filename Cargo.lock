@@ -1083,6 +1083,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "draper-worker"
+version = "0.1.0"
+dependencies = [
+ "draper-wasm",
+]
+
+[[package]]
 name = "earcut"
 version = "0.4.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"

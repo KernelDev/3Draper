@@ -8,6 +8,7 @@ members = [
     "crates/draper-core",
     "crates/draper-ffi",
     "crates/draper-wasm",
+    "crates/draper-worker",
     "crates/draper-viewer",
     "crates/draper-cloud",
     "crates/draper-ai",
@@ -48,6 +49,7 @@ draper-cloud = { path = "crates/draper-cloud" }
 draper-ai = { path = "crates/draper-ai" }
 draper-testing = { path = "crates/draper-testing" }
 draper-json = { path = "crates/draper-json" }
+draper-wasm = { path = "crates/draper-wasm" }
 
 # Math & numerics
 nalgebra = "0.33"

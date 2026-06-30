@@ -344,12 +344,12 @@
 
 **Задачи:**
 
-- [ ] 4.1.1 Создать `crates/draper-wasm/src/worker.rs` — отдельный WASM модуль, экспортирующий `triangulate_step(step_bytes: &[u8], lod: f64) -> TriangulationResult`.
-- [ ] 4.1.2 Настроить `Trunk.toml` / `wasm-bindgen` для сборки двух артефактов: main (UI) + worker (triangulation). Worker загружается через `Worker::new("/draper-worker.js")`.
-- [ ] 4.1.3 В viewer: при загрузке STEP postMessage `{type: 'triangulate', bytes, lod}` в worker. Worker возвращает `{type: 'progress', faces_done, faces_total}` периодически и `{type: 'done', mesh_bytes}` в конце.
-- [ ] 4.1.4 Передача mesh: serialize `TriangleMesh` в flatbuffers или bincode, передать как `Transferable` (ArrayBuffer) для zero-copy.
-- [ ] 4.1.5 Cancel: postMessage `{type: 'cancel'}` в worker; worker aborts session.
-- [ ] 4.1.6 Fallback: если Worker creation fails (CSP, old browser) — использовать текущий main-thread chunked path.
+- [x] 4.1.1 Создать `crates/draper-wasm/src/worker.rs` — отдельный WASM модуль, экспортирующий `parse_step_worker`, `triangulate_brep_structured`, `pending_brep_count`, `cancel_triangulation`, `drop_parse_context`. **Реализовано:** lightweight WASM модуль с thread-local `OwnedStepConversionContext`, JSON сериализация pending_breps и assembly_tree, `MeshDataResult` с flat arrays для zero-copy transfer.
+- [x] 4.1.2 Настроить сборку двух артефактов: main (draper-viewer.wasm) + worker (draper-worker.wasm). **Реализовано:** новый crate `draper-worker` (thin wrapper с `features = ["worker"]`), обновлён `deploy_gh_pages.sh` для сборки обоих артефактов + `wasm-bindgen` для каждого.
+- [x] 4.1.3 В viewer: при загрузке STEP отправить content в Worker через JS bridge. **Реализовано:** `worker.js` обновлён для загрузки `draper-worker.wasm`, `worker-bridge.js` обновлён с LOD+profile параметрами, JS bridge функции в `index.html` (`workerInit`, `workerParseStep`, `workerTriangulateNext`, etc.), Rust-side polling через `js_sys`/`web_sys` interop.
+- [x] 4.1.4 Передача mesh: serialize `TriangleMesh` → `MeshData` (flat Float32Array/Uint32Array), передать как `Transferable` (ArrayBuffer) для zero-copy. **Реализовано:** `MeshDataResult` в worker.rs с TypedArray views, `getTransferables()` в worker.js для zero-copy.
+- [x] 4.1.5 Cancel: postMessage `{type: 'cancel'}` в worker; worker вызывает `cancel_triangulation()` которая aborts session + drops context. **Реализовано:** `worker_cancel()` в viewer, `handleCancel()` в worker.js, `cancel_triangulation()` в worker.rs.
+- [x] 4.1.6 Fallback: если Worker creation fails (CSP, old browser) — использовать текущий main-thread chunked path. **Реализовано:** `try_init_worker()` возвращает false при ошибке, `use_worker` устанавливается динамически, Worker errors переключают на fallback, `process_pending_breps` имеет два пути: Worker path и chunked path.
 - [ ] 4.1.7 Тест: загрузить drill_top.stp — UI должен оставаться полностью responsive (scroll, click, zoom) во время триангуляции.
 
 **Критерий приёмки:** UI framerate ≥ 60fps во время загрузки любого файла. Cancel button реагирует мгновенно.

@@ -1,0 +1,11 @@
+[package]
+name = "draper-worker"
+version.workspace = true
+edition.workspace = true
+description = "Thin wrapper that builds draper-wasm with the 'worker' feature — produces draper-worker.wasm for the STEP triangulation Web Worker."
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+draper-wasm = { workspace = true, features = ["worker"] }

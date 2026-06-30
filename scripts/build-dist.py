@@ -66,6 +66,17 @@ def main() -> int:
     nojekyll.write_text("", encoding="utf-8")
     print(f"Wrote {nojekyll}")
 
+    # Copy worker JS files from viewer directory
+    for js_file in ["worker.js", "worker-bridge.js"]:
+        src = VIEWER_DIR / js_file
+        if src.exists():
+            dst = DIST_DIR / js_file
+            import shutil
+            shutil.copy2(src, dst)
+            print(f"Copied {src} -> {dst} ({dst.stat().st_size} bytes)")
+        else:
+            print(f"WARNING: {src} not found — worker will not be available")
+
     # Summary
     print("\nDist contents:")
     for p in sorted(DIST_DIR.iterdir()):

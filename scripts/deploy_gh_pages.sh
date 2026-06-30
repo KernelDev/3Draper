@@ -3,11 +3,13 @@
 # This is the same build the GitHub Actions workflow produces, but run
 # locally so the user sees the change immediately without waiting for CI.
 #
-# The gh-pages branch is a minimal orphan branch containing only 4 files:
-#   .nojekyll, draper-viewer.js, draper-viewer_bg.wasm, index.html
+# The gh-pages branch contains:
+#   .nojekyll, draper-viewer.js, draper-viewer_bg.wasm,
+#   draper-worker.js, draper-worker_bg.wasm, worker.js, worker-bridge.js,
+#   index.html
+#
 # We clone it fresh into /tmp/gh-deploy, swap in the newly-built wasm/js,
-# commit, and push. The existing index.html is preserved (it's only
-# updated when the user explicitly changes the demo HTML).
+# commit, and push.
 #
 # Usage:
 #   scripts/deploy_gh_pages.sh                       # default commit msg
@@ -21,14 +23,19 @@ cd "$PROJECT_ROOT"
 
 COMMIT_MSG="${1:-deploy: WASM rebuild from $(git rev-parse --short HEAD)}"
 
-echo "==> Building WASM release (web-deploy feature)..."
+echo "==> Building viewer WASM release (web-deploy feature)..."
 cargo build -p draper-viewer \
     --release \
     --no-default-features \
     --features web-deploy \
     --target wasm32-unknown-unknown
 
-echo "==> Running wasm-bindgen --target web..."
+echo "==> Building worker WASM release..."
+cargo build -p draper-worker \
+    --release \
+    --target wasm32-unknown-unknown
+
+echo "==> Running wasm-bindgen for viewer..."
 rm -rf /tmp/wasm-bindgen-out
 mkdir -p /tmp/wasm-bindgen-out
 wasm-bindgen \
@@ -37,10 +44,23 @@ wasm-bindgen \
     --out-dir /tmp/wasm-bindgen-out \
     "$PROJECT_ROOT/target/wasm32-unknown-unknown/release/draper-viewer.wasm"
 
-WASM_FILE="/tmp/wasm-bindgen-out/draper-viewer_bg.wasm"
-JS_FILE="/tmp/wasm-bindgen-out/draper-viewer.js"
-echo "    wasm: $(stat -c '%s' "$WASM_FILE") bytes"
-echo "    js:   $(stat -c '%s' "$JS_FILE") bytes"
+echo "==> Running wasm-bindgen for worker..."
+mkdir -p /tmp/wasm-bindgen-out-worker
+wasm-bindgen \
+    --target web \
+    --no-typescript \
+    --out-dir /tmp/wasm-bindgen-out-worker \
+    "$PROJECT_ROOT/target/wasm32-unknown-unknown/release/draper-worker.wasm"
+
+VIEWER_WASM="/tmp/wasm-bindgen-out/draper-viewer_bg.wasm"
+VIEWER_JS="/tmp/wasm-bindgen-out/draper-viewer.js"
+WORKER_WASM="/tmp/wasm-bindgen-out-worker/draper-worker_bg.wasm"
+WORKER_JS="/tmp/wasm-bindgen-out-worker/draper-worker.js"
+
+echo "    viewer wasm: $(stat -c '%s' "$VIEWER_WASM") bytes"
+echo "    viewer js:   $(stat -c '%s' "$VIEWER_JS") bytes"
+echo "    worker wasm: $(stat -c '%s' "$WORKER_WASM") bytes"
+echo "    worker js:   $(stat -c '%s' "$WORKER_JS") bytes"
 
 # Get the authenticated remote URL from the main repo
 REMOTE_URL=$(git remote get-url origin)
@@ -52,9 +72,15 @@ git clone --branch gh-pages --single-branch "$REMOTE_URL" /tmp/gh-deploy 2>&1 | 
 cd /tmp/gh-deploy
 git remote set-url origin "$REMOTE_URL"
 
-# Swap in new wasm + js (keep existing index.html)
-cp "$WASM_FILE" /tmp/gh-deploy/draper-viewer_bg.wasm
-cp "$JS_FILE"   /tmp/gh-deploy/draper-viewer.js
+# Swap in new wasm + js
+cp "$VIEWER_WASM" /tmp/gh-deploy/draper-viewer_bg.wasm
+cp "$VIEWER_JS"   /tmp/gh-deploy/draper-viewer.js
+cp "$WORKER_WASM" /tmp/gh-deploy/draper-worker_bg.wasm
+cp "$WORKER_JS"   /tmp/gh-deploy/draper-worker.js
+
+# Copy worker JS files
+cp "$PROJECT_ROOT/crates/draper-viewer/worker.js" /tmp/gh-deploy/worker.js
+cp "$PROJECT_ROOT/crates/draper-viewer/worker-bridge.js" /tmp/gh-deploy/worker-bridge.js
 
 git add -A
 git -c user.email=dev@3draper.local -c user.name="3Draper Dev" \

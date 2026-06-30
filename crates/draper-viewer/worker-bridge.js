@@ -77,9 +77,11 @@ export class DraperWorkerBridge {
      * Parse a STEP file in the worker.
      * @param {string} content - The STEP file content (text)
      * @param {string} name - File name for logging
-     * @returns {Promise<{stats: object}>} Parse result with file statistics
+     * @param {number} [lod=1.0] - Level of detail (0.0=coarse, 1.0=full quality)
+     * @param {string} [profile='Desktop'] - Steiner budget profile: 'Desktop', 'Tablet', 'Mobile'
+     * @returns {Promise<{stats: object, pending_breps_json: string, assembly_tree_json: string}>} Parse result
      */
-    async parseStep(content, name = 'unknown.stp') {
+    async parseStep(content, name = 'unknown.stp', lod = 1.0, profile = 'Desktop') {
         const id = ++this.requestId;
         return new Promise((resolve, reject) => {
             this.pendingCallbacks.set(id, { resolve, reject });
@@ -88,6 +90,8 @@ export class DraperWorkerBridge {
                 id,
                 content,
                 name,
+                lod,
+                profile,
             });
         });
     }

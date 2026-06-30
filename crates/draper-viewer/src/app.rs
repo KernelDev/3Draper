@@ -1130,9 +1130,15 @@ impl ViewerApp {
             chunked_triangulator: ChunkedBrepTriangulator::new(),
             lod_level: LodLevel::High,
             #[cfg(target_arch = "wasm32")]
-            use_worker: false, // Disabled until wasm-bindgen exports are complete (Phase 1.3 WIP)
+            use_worker: {
+                // Try to initialize the Worker on startup. If it fails
+                // (CSP restrictions, old browser, etc.), fall back to
+                // main-thread chunked processing.
+                let worker_ok = Self::try_init_worker();
+                worker_ok
+            },
             #[cfg(target_arch = "wasm32")]
-            worker_ready: false,
+            worker_ready: false, // Will be set to true when Worker posts 'ready'
             #[cfg(target_arch = "wasm32")]
             worker_pending_meshes: Vec::new(),
             current_solid: Some(solid_clone_for_field),
@@ -3891,6 +3897,10 @@ impl ViewerApp {
         self.is_loading = false;
         self.loading_start = None;
 
+        // Cancel Worker if active
+        #[cfg(target_arch = "wasm32")]
+        self.worker_cancel();
+
         // CRITICAL: Before clearing pending_breps, salvage any partial
         // triangulation from the active chunked session. This is symmetric
         // with the timeout handler — if the user clicked Cancel during a
@@ -3969,6 +3979,344 @@ impl ViewerApp {
             self.total_instance_count = 0;
         }
         self.loading_name.clear();
+    }
+
+    // ─── Worker initialization and JS interop (WASM only) ────────────────
+
+    /// Try to initialize the Web Worker via the JS bridge.
+    ///
+    /// Returns `true` if the Worker was created successfully, `false` if
+    /// the browser doesn't support Workers or the JS bridge is unavailable
+    /// (e.g., CSP restrictions, old browser). On failure, the viewer falls
+    /// back to main-thread chunked processing.
+    #[cfg(target_arch = "wasm32")]
+    fn try_init_worker() -> bool {
+        use wasm_bindgen::JsCast;
+        use wasm_bindgen::JsValue;
+        let window = match web_sys::window() {
+            Some(w) => w,
+            None => return false,
+        };
+
+        // Call window.workerInit() — returns true if Worker was created
+        let result = window.get("workerInit").and_then(|v| {
+            let func: js_sys::Function = v.dyn_into().ok()?;
+            func.call0(&JsValue::NULL).ok()
+        });
+
+        match result {
+            Some(val) => {
+                let ok = val.as_bool().unwrap_or(false);
+                if ok {
+                    log::info!("[Viewer] Web Worker initialized successfully");
+                } else {
+                    log::warn!("[Viewer] Web Worker init returned false — falling back to main thread");
+                }
+                ok
+            }
+            None => {
+                log::warn!("[Viewer] window.workerInit not found — falling back to main thread");
+                false
+            }
+        }
+    }
+
+    /// Check if the Worker has posted 'ready' (WASM initialized).
+    #[cfg(target_arch = "wasm32")]
+    fn check_worker_ready(&mut self) {
+        use wasm_bindgen::JsCast;
+        use wasm_bindgen::JsValue;
+        if !self.use_worker || self.worker_ready {
+            return;
+        }
+        let window = match web_sys::window() {
+            Some(w) => w,
+            None => return,
+        };
+        let result = window.get("workerIsReady").and_then(|v| {
+            let func: js_sys::Function = v.dyn_into().ok()?;
+            func.call0(&JsValue::NULL).ok()
+        });
+        if let Some(val) = result {
+            self.worker_ready = val.as_bool().unwrap_or(false);
+        }
+    }
+
+    /// Check for Worker errors and log them.
+    #[cfg(target_arch = "wasm32")]
+    fn check_worker_error(&mut self) -> Option<String> {
+        use wasm_bindgen::JsCast;
+        use wasm_bindgen::JsValue;
+        if !self.use_worker {
+            return None;
+        }
+        let window = match web_sys::window() {
+            Some(w) => w,
+            None => return None,
+        };
+        let result = window.get("workerGetError").and_then(|v| {
+            let func: js_sys::Function = v.dyn_into().ok()?;
+            func.call0(&JsValue::NULL).ok()
+        });
+        result.and_then(|v| v.as_string()).filter(|s| !s.is_empty())
+    }
+
+    /// Send STEP content to the Worker for parsing.
+    ///
+    /// Returns `true` if the message was sent successfully.
+    /// The result is polled via `check_worker_parse_result()`.
+    #[cfg(target_arch = "wasm32")]
+    fn worker_parse_step(&mut self, content: &str, name: &str, lod: f64, profile: &str) -> bool {
+        use wasm_bindgen::JsCast;
+        use wasm_bindgen::JsValue;
+        if !self.use_worker {
+            return false;
+        }
+        let window = match web_sys::window() {
+            Some(w) => w,
+            None => return false,
+        };
+        let result = window.get("workerParseStep").and_then(|v| {
+            let func: js_sys::Function = v.dyn_into().ok()?;
+            func.call4(
+                &JsValue::NULL,
+                &JsValue::from_str(content),
+                &JsValue::from_str(name),
+                &JsValue::from_f64(lod),
+                &JsValue::from_str(profile),
+            ).ok()
+        });
+        result.map(|v| v.as_bool().unwrap_or(false)).unwrap_or(false)
+    }
+
+    /// Check if the Worker has finished parsing the STEP file.
+    ///
+    /// Returns `Some((pending_breps_json, assembly_tree_json))` if ready,
+    /// `None` if still pending.
+    #[cfg(target_arch = "wasm32")]
+    fn check_worker_parse_result(&mut self) -> Option<(String, String)> {
+        use wasm_bindgen::JsCast;
+        use wasm_bindgen::JsValue;
+        if !self.use_worker {
+            return None;
+        }
+        let window = match web_sys::window() {
+            Some(w) => w,
+            None => return None,
+        };
+        let result = window.get("workerGetParseResult").and_then(|v| {
+            let func: js_sys::Function = v.dyn_into().ok()?;
+            func.call0(&JsValue::NULL).ok()
+        });
+        result.and_then(|v| {
+            if v.is_null() || v.is_undefined() {
+                return None;
+            }
+            let obj: js_sys::Object = v.dyn_into().ok()?;
+            let pbj = js_sys::Reflect::get(&obj, &JsValue::from_str("pending_breps_json")).ok()?;
+            let atj = js_sys::Reflect::get(&obj, &JsValue::from_str("assembly_tree_json")).ok()?;
+            Some((pbj.as_string()?, atj.as_string()?))
+        })
+    }
+
+    /// Request the Worker to triangulate the next BREP.
+    #[cfg(target_arch = "wasm32")]
+    fn worker_triangulate_next(&mut self) -> bool {
+        use wasm_bindgen::JsCast;
+        use wasm_bindgen::JsValue;
+        if !self.use_worker {
+            return false;
+        }
+        let window = match web_sys::window() {
+            Some(w) => w,
+            None => return false,
+        };
+        let result = window.get("workerTriangulateNext").and_then(|v| {
+            let func: js_sys::Function = v.dyn_into().ok()?;
+            func.call0(&JsValue::NULL).ok()
+        });
+        result.map(|v| v.as_bool().unwrap_or(false)).unwrap_or(false)
+    }
+
+    /// Collect pending mesh results from the Worker.
+    ///
+    /// This reads the JS `window._draperWorkerPendingMeshes` array and
+    /// converts each entry to a `WorkerMeshResult`.
+    #[cfg(target_arch = "wasm32")]
+    fn collect_worker_meshes(&mut self) {
+        use wasm_bindgen::JsCast;
+        use wasm_bindgen::JsValue;
+        if !self.use_worker {
+            return;
+        }
+        let window = match web_sys::window() {
+            Some(w) => w,
+            None => return,
+        };
+        let result = window.get("workerGetPendingMeshes").and_then(|v| {
+            let func: js_sys::Function = v.dyn_into().ok()?;
+            func.call0(&JsValue::NULL).ok()
+        });
+
+        if let Some(val) = result {
+            let arr_result: Result<js_sys::Array, JsValue> = val.dyn_into();
+            if let Ok(arr) = arr_result {
+                for i in 0..arr.length() {
+                    let item = arr.get(i);
+                    if item.is_null() || item.is_undefined() {
+                        continue;
+                    }
+                    let obj: js_sys::Object = match item.dyn_into() {
+                        Ok(o) => o,
+                        Err(_) => continue,
+                    };
+
+                    let name = js_sys::Reflect::get(&obj, &JsValue::from_str("name"))
+                        .ok()
+                        .and_then(|v| v.as_string())
+                        .unwrap_or_default();
+
+                    let brep_id = js_sys::Reflect::get(&obj, &JsValue::from_str("brep_id"))
+                        .ok()
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(-1.0) as usize;
+
+                    let color = js_sys::Reflect::get(&obj, &JsValue::from_str("color"))
+                        .ok()
+                        .and_then(|v| {
+                            if v.is_null() || v.is_undefined() {
+                                return None;
+                            }
+                            let arr: js_sys::Array = v.dyn_into().ok()?;
+                            if arr.length() < 4 {
+                                return None;
+                            }
+                            Some([
+                                arr.get(0).as_f64()? as f32,
+                                arr.get(1).as_f64()? as f32,
+                                arr.get(2).as_f64()? as f32,
+                                arr.get(3).as_f64()? as f32,
+                            ])
+                        });
+
+                    let vertices = js_sys::Reflect::get(&obj, &JsValue::from_str("vertices"))
+                        .ok()
+                        .and_then(|v| {
+                            let arr: js_sys::Float32Array = v.dyn_into().ok()?;
+                            Some(arr.to_vec())
+                        })
+                        .unwrap_or_default();
+
+                    let indices = js_sys::Reflect::get(&obj, &JsValue::from_str("indices"))
+                        .ok()
+                        .and_then(|v| {
+                            let arr: js_sys::Uint32Array = v.dyn_into().ok()?;
+                            Some(arr.to_vec())
+                        })
+                        .unwrap_or_default();
+
+                    let normals = js_sys::Reflect::get(&obj, &JsValue::from_str("normals"))
+                        .ok()
+                        .and_then(|v| {
+                            if v.is_null() || v.is_undefined() {
+                                return None;
+                            }
+                            let len = js_sys::Reflect::get(&v, &JsValue::from_str("length"))
+                                .ok()
+                                .and_then(|l| l.as_f64())
+                                .unwrap_or(0.0) as usize;
+                            if len == 0 {
+                                return None;
+                            }
+                            let arr: js_sys::Float32Array = v.dyn_into().ok()?;
+                            Some(arr.to_vec())
+                        });
+
+                    let face_normals = js_sys::Reflect::get(&obj, &JsValue::from_str("face_normals"))
+                        .ok()
+                        .and_then(|v| {
+                            if v.is_null() || v.is_undefined() {
+                                return None;
+                            }
+                            let len = js_sys::Reflect::get(&v, &JsValue::from_str("length"))
+                                .ok()
+                                .and_then(|l| l.as_f64())
+                                .unwrap_or(0.0) as usize;
+                            if len == 0 {
+                                return None;
+                            }
+                            let arr: js_sys::Float32Array = v.dyn_into().ok()?;
+                            Some(arr.to_vec())
+                        });
+
+                    let colors = js_sys::Reflect::get(&obj, &JsValue::from_str("colors"))
+                        .ok()
+                        .and_then(|v| {
+                            if v.is_null() || v.is_undefined() {
+                                return None;
+                            }
+                            let len = js_sys::Reflect::get(&v, &JsValue::from_str("length"))
+                                .ok()
+                                .and_then(|l| l.as_f64())
+                                .unwrap_or(0.0) as usize;
+                            if len == 0 {
+                                return None;
+                            }
+                            let arr: js_sys::Float32Array = v.dyn_into().ok()?;
+                            Some(arr.to_vec())
+                        });
+
+                    self.worker_pending_meshes.push(WorkerMeshResult {
+                        name,
+                        brep_id,
+                        color,
+                        vertices,
+                        indices,
+                        normals,
+                        face_normals,
+                        colors,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Check if the Worker has completed all BREPs.
+    #[cfg(target_arch = "wasm32")]
+    fn worker_all_complete(&mut self) -> bool {
+        use wasm_bindgen::JsCast;
+        use wasm_bindgen::JsValue;
+        if !self.use_worker {
+            return false;
+        }
+        let window = match web_sys::window() {
+            Some(w) => w,
+            None => return false,
+        };
+        let result = window.get("workerAllComplete").and_then(|v| {
+            let func: js_sys::Function = v.dyn_into().ok()?;
+            func.call0(&JsValue::NULL).ok()
+        });
+        result.map(|v| v.as_bool().unwrap_or(false)).unwrap_or(false)
+    }
+
+    /// Cancel Worker triangulation.
+    #[cfg(target_arch = "wasm32")]
+    fn worker_cancel(&mut self) {
+        use wasm_bindgen::JsCast;
+        use wasm_bindgen::JsValue;
+        if !self.use_worker {
+            return;
+        }
+        let window = match web_sys::window() {
+            Some(w) => w,
+            None => return,
+        };
+        let _ = window.get("workerCancel").and_then(|v| {
+            let func: js_sys::Function = v.dyn_into().ok()?;
+            func.call0(&JsValue::NULL).ok()
+        });
+        self.worker_pending_meshes.clear();
     }
 
     /// Convert a WorkerMeshResult (flat f32 arrays from Web Worker) to a TriangleMesh.
@@ -4263,7 +4611,133 @@ impl ViewerApp {
         let frame_start = web_time::Instant::now();
         let frame_budget = self.chunked_triangulator.time_budget;
 
-        // ─── WASM path: intra-BREP chunked triangulation ───────────────────
+        // ─── WASM path: Worker-based triangulation (if available) ───────────
+        // When the Web Worker is active, we use a polling approach:
+        //   1. Collect any pending mesh results from the Worker
+        //   2. Process them (merge into scene)
+        //   3. Request the next BREP to be triangulated
+        //   4. Check if all BREPs are done
+        #[cfg(target_arch = "wasm32")]
+        if self.use_worker && self.worker_ready {
+            // If Worker is still parsing (no pending_breps yet), check for result
+            if self.is_loading && self.pending_breps.is_empty() {
+                if let Some((pbreps_json, _tree_json)) = self.check_worker_parse_result() {
+                    // Worker finished parsing — set up the pending BREP list
+                    let pbreps: Vec<serde_json::Value> = serde_json::from_str(&pbreps_json)
+                        .unwrap_or_default();
+                    self.total_instance_count = pbreps.len();
+
+                    // Populate pending_breps from JSON
+                    for p in &pbreps {
+                        let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+                        let brep_id = p.get("brep_id").and_then(|v| v.as_i64()).unwrap_or(-1);
+                        let transform = p.get("transform").and_then(|v| {
+                            if v.is_null() { return None; }
+                            let arr = v.as_array()?;
+                            if arr.len() < 4 { return None; }
+                            let mut tf = [[0.0f64; 4]; 4];
+                            for i in 0..4 {
+                                let row = arr.get(i)?.as_array()?;
+                                if row.len() < 4 { return None; }
+                                for j in 0..4 {
+                                    tf[i][j] = row.get(j)?.as_f64()?;
+                                }
+                            }
+                            Some(tf)
+                        });
+                        let color = p.get("color").and_then(|v| {
+                            if v.is_null() { return None; }
+                            let arr = v.as_array()?;
+                            if arr.len() < 4 { return None; }
+                            Some([
+                                arr.get(0)?.as_f64()? as f32,
+                                arr.get(1)?.as_f64()? as f32,
+                                arr.get(2)?.as_f64()? as f32,
+                                arr.get(3)?.as_f64()? as f32,
+                            ])
+                        });
+                        self.pending_breps.push(draper_step::PendingBrepInstance {
+                            name,
+                            brep_id,
+                            transform,
+                            color,
+                            face_count_estimate: None,
+                        });
+                    }
+
+                    // Set up assembly tree from JSON (basic)
+                    self.show_structure = true;
+
+                    self.log(&format!(
+                        "Worker: STEP parsed — {} BREP instances queued for triangulation",
+                        self.pending_breps.len()
+                    ));
+
+                    // Start triangulating the first BREP
+                    if !self.pending_breps.is_empty() {
+                        self.worker_triangulate_next();
+                    }
+                } else {
+                    // Still waiting for Worker to parse — check for errors
+                    if let Some(err) = self.check_worker_error() {
+                        self.log_warning(&format!("Worker parse error: {} — falling back to main thread", err));
+                        self.use_worker = false;
+                        self.is_loading = false;
+                        // Fall through — user can retry
+                    }
+                    return true; // Still loading
+                }
+            }
+
+            // Check for Worker errors
+            if let Some(err) = self.check_worker_error() {
+                self.log_warning(&format!("Worker error: {} — falling back to main thread", err));
+                self.use_worker = false;
+                // Fall through to the chunked path below
+            } else {
+                // Collect any pending mesh results from the Worker
+                self.collect_worker_meshes();
+                if !self.worker_pending_meshes.is_empty() {
+                    self.process_worker_results();
+                }
+
+                // Request the next BREP if Worker is idle
+                // (Worker processes one BREP at a time; we request the next
+                // after each result comes back)
+                if self.is_loading && !self.pending_breps.is_empty() {
+                    self.worker_triangulate_next();
+                }
+
+                // Check if all BREPs are done
+                if self.worker_all_complete() || self.pending_breps.is_empty() {
+                    // Final collection of any remaining results
+                    self.collect_worker_meshes();
+                    if !self.worker_pending_meshes.is_empty() {
+                        self.process_worker_results();
+                    }
+
+                    self.is_loading = false;
+                    self.conversion_ctx = None;
+                    self.loading_start = None;
+                    let vcount = self.mesh.vertex_count();
+                    let tcount = self.mesh.triangle_count();
+                    self.log(&format!(
+                        "Worker: Triangulation complete — {} instances, {} vertices, {} triangles",
+                        self.triangulated_count, vcount, tcount
+                    ));
+                    if self.failed_face_count > 0 {
+                        self.log_warning(&format!("{} instances failed triangulation", self.failed_face_count));
+                    }
+                    self.load_mesh(self.mesh.clone(), &format!("STEP: {}", self.loading_name));
+                    self.loading_name.clear();
+                    return false;
+                }
+
+                return self.is_loading;
+            }
+        }
+
+        // ─── WASM path: intra-BREP chunked triangulation (fallback) ─────────
         // On WASM, a single BREP can take 10-60s on mobile (e.g., drill_top.stp's
         // GEAR BREP is 12s desktop = 60s mobile). Blocking the main thread for
         // that long freezes the browser UI. Instead, we process each BREP in
@@ -4569,8 +5043,54 @@ impl ViewerApp {
     /// Import STEP from string (used by web file loading).
     fn import_step_from_str(&mut self, content: &str, name: &str) {
         self.log(&format!("Parsing STEP file: '{}' ({} chars)...", name, content.len()));
-        // Wrap parse_step in catch_unwind to prevent WASM panics from crashing the app.
-        // If STEP parsing panics (e.g., malformed input), we log the error and keep running.
+
+        // ─── Worker path: send STEP content to Web Worker ────────────────
+        // If the Worker is available and ready, we offload the entire
+        // STEP parsing + triangulation to the background thread. The main
+        // thread only receives completed mesh data and merges it into the scene.
+        #[cfg(target_arch = "wasm32")]
+        {
+            if self.use_worker && self.worker_ready {
+                let lod_value = self.lod_level.lod_value();
+                let profile = if self.is_mobile { "Mobile" } else { "Desktop" };
+                let sent = self.worker_parse_step(content, name, lod_value, profile);
+                if sent {
+                    self.log(&format!("Sent '{}' to Worker for background parsing (LOD={:.2}, profile={})", name, lod_value, profile));
+                    // Set up loading state — actual pending_breps will come from Worker
+                    self.cancel_loading(false);
+                    self.current_solid = None;
+                    self.current_nurbs_surface = None;
+                    self.solid_uv_breakdown = None;
+                    self.uv_window_face_idx = None;
+                    self.uv_window_prev_face_idx = None;
+                    self.last_step_name = name.to_string();
+                    self.is_loading = true;
+                    self.loading_name = name.to_string();
+                    self.loading_start = Some(web_time::Instant::now());
+                    self.total_instance_count = 0;
+                    self.triangulated_count = 0;
+                    self.detailed_instances.clear();
+                    self.instance_triangle_ranges.clear();
+                    self.selected_instance = None;
+                    self.selected_face = None;
+                    self.highlighted_face = None;
+                    self.failed_face_count = 0;
+                    self.mesh = TriangleMesh::new();
+                    self.pending_breps.clear();
+                    self.conversion_ctx = None;
+                    self.pending_step_file = None;
+
+                    // Wait for Worker parse result — check each frame
+                    return;
+                } else {
+                    self.log_warning("Worker send failed — falling back to main-thread parsing");
+                }
+            }
+        }
+
+        // ─── Main-thread path: parse STEP on the main thread ─────────────
+        // This is the fallback for when the Worker is unavailable or
+        // for native builds where there's no need for a Worker.
         let parse_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             draper_step::parse_step(content)
         }));

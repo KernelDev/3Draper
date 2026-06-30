@@ -7,6 +7,12 @@ description = "WASM-bindgen bindings for the 3Draper kernel — exposes the full
 [lib]
 crate-type = ["cdylib", "lib"]
 
+[features]
+default = []
+# Worker mode: only exports STEP parsing + triangulation functions
+# (no Document, Mesh, GDT, etc.). Used for the separate draper-worker.wasm binary.
+worker = []
+
 [dependencies]
 draper-geometry = { workspace = true }
 draper-topology = { workspace = true }
@@ -26,3 +32,15 @@ web-sys = { version = "0.3", features = ["console"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+# ─── Worker binary target ───────────────────────────────────────────
+# A separate crate-type is NOT needed — instead, we build this crate
+# twice with different feature flags:
+#   1. `cargo build -p draper-wasm`                           → main bindings
+#   2. `cargo build -p draper-wasm --features worker`         → worker bindings
+# Both produce a .wasm file, but with different exports.
+#
+# However, cargo doesn't allow two builds of the same crate in the same
+# target dir with different features. The solution: a thin wrapper crate
+# `draper-worker` that depends on draper-wasm with the worker feature.
+# See crates/draper-worker/Cargo.toml.
