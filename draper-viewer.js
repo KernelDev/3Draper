@@ -1,5 +1,3 @@
-/* @ts-self-types="./draper-viewer.d.ts" */
-
 /**
  * This is the entry point for the web version.
  * It is called automatically when the wasm module is loaded.
