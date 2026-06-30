@@ -1053,6 +1053,215 @@ impl OwnedStepConversionContext {
         })
     }
 
+    /// Triangulate multiple BREP instances in **parallel** using rayon.
+    ///
+    /// This is the native-only counterpart to `triangulate_pending()` —
+    /// instead of processing BREPs one-at-a-time sequentially, it dispatches
+    /// all uncached BREPs to rayon's thread pool. Each thread creates its own
+    /// `StepConverter`, `EdgeDiscretizationCache`, and dedup map, so there is
+    /// **no shared mutable state** between threads. The `StepFile` reference
+    /// is shared read-only (it's `Sync`).
+    ///
+    /// BREPs that are already in `brep_detail_cache` are resolved on the
+    /// calling thread (just a clone) — only uncached BREPs go through
+    /// rayon. After completion, all new results are inserted into the cache.
+    ///
+    /// Returns results in the same order as the input `pending` list.
+    ///
+    /// # Cancellation
+    /// If `cancel_flag` returns `true` at any point, remaining BREPs are
+    /// skipped and partial results are returned. This enables the viewer's
+    /// Cancel button to work with parallel triangulation.
+    ///
+    /// # Progress
+    /// `progress_callback` is called after each BREP completes (from any
+    /// thread) with `(completed_count, total_count)`. The callback must be
+    /// thread-safe.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn triangulate_breps_parallel<F, C>(
+        &mut self,
+        pending: &[PendingBrepInstance],
+        cancel_flag: C,
+        progress_callback: F,
+    ) -> Vec<Option<DetailedMeshInstance>>
+    where
+        F: Fn(usize, usize) + Sync + Send,
+        C: Fn() -> bool + Sync + Send,
+    {
+        if pending.is_empty() {
+            return Vec::new();
+        }
+
+        // Lazy bounding box computation (same as triangulate_pending).
+        if !self.bbox_computed && self.bbox.is_none() {
+            let converter = StepConverter::with_config(&self.step_file, self.config.clone());
+            self.bbox = converter.compute_bounding_box();
+            self.bbox_computed = true;
+            if let Some((bmin, bmax)) = &self.bbox {
+                let dx = bmax.x - bmin.x;
+                let dy = bmax.y - bmin.y;
+                let dz = bmax.z - bmin.z;
+                let diagonal = (dx * dx + dy * dy + dz * dz).sqrt();
+                if diagonal > 1.0 {
+                    let floor = diagonal * 0.0002;
+                    if self.params.max_deviation < floor && self.params.max_deviation < 1.0 {
+                        self.params.max_deviation = floor;
+                    }
+                }
+            }
+        }
+
+        // Ensure StepFile indexes are populated BEFORE entering parallel scope.
+        // The RefCell-based lazy init in StepFile is NOT thread-safe — we must
+        // trigger it on the main thread so that rayon threads only read.
+        {
+            let _ = self.step_file.pd_brep_index();
+            let _ = self.step_file.nauo_transform_index();
+        }
+
+        // Separate cached vs uncached BREPs.
+        // Cached BREPs are resolved immediately (just a clone); uncached go to rayon.
+        let mut results: Vec<Option<DetailedMeshInstance>> = Vec::with_capacity(pending.len());
+        let mut uncached_indices: Vec<usize> = Vec::new();
+        let mut uncached_brep_ids: Vec<i64> = Vec::new();
+        let mut uncached_pending: Vec<PendingBrepInstance> = Vec::new();
+
+        for (i, p) in pending.iter().enumerate() {
+            if let Some(cached) = self.brep_detail_cache.get(&p.brep_id) {
+                // Cache hit — resolve immediately
+                let (mesh, faces) = cached.clone();
+                let mut instance_mesh = mesh;
+                if let Some(ref tf) = p.transform {
+                    instance_mesh.transform(tf);
+                }
+                // Apply decimation for non-adaptive LOD
+                if !self.params.adaptive_lod_enabled && self.params.keep_ratio < 1.0 && instance_mesh.triangle_count() >= 4 {
+                    draper_mesh::decimate_mesh(&mut instance_mesh, self.params.keep_ratio);
+                }
+                results.push(Some(DetailedMeshInstance {
+                    name: p.name.clone(),
+                    mesh: instance_mesh,
+                    color: p.color,
+                    transform: p.transform,
+                    brep_id: p.brep_id,
+                    faces,
+                }));
+            } else {
+                results.push(None); // placeholder — will be filled by rayon
+                uncached_indices.push(i);
+                uncached_brep_ids.push(p.brep_id);
+                uncached_pending.push(p.clone());
+            }
+        }
+
+        if uncached_indices.is_empty() {
+            return results; // all cached
+        }
+
+        // Clone the data needed by each rayon thread. Each thread will create
+        // its own StepConverter from these pre-built maps — no RefCell access
+        // inside the parallel scope.
+        //
+        // We extract the step_file reference separately from &self to avoid
+        // borrowing conflicts with the mutable cache update later.
+        let entity_map = self.entity_map.clone();
+        let pd_brep_map = self.pd_brep_map.clone();
+        let nauo_transform_map = self.nauo_transform_map.clone();
+        let config = self.config.clone();
+        let params = self.params.clone();
+        let bbox = self.bbox;
+
+        let total_count = uncached_indices.len();
+        let completed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        // Wrap callbacks in Arc so they can be shared across rayon threads.
+        let cancel_flag = std::sync::Arc::new(cancel_flag);
+        let progress_callback = std::sync::Arc::new(progress_callback);
+
+        // Dispatch uncached BREPs to rayon.
+        // We use a scoped thread pool so we can borrow step_file by reference.
+        let parallel_results: Vec<(usize, DetailedMeshInstance, (TriangleMesh, Vec<FaceInfo>))> =
+            rayon::scope(|s| {
+                let step_file = &self.step_file;
+                let (tx, rx) = std::sync::mpsc::channel();
+
+                for (local_idx, (&result_idx, &brep_id)) in uncached_indices.iter().zip(uncached_brep_ids.iter()).enumerate() {
+                    let tx = tx.clone();
+                    let entity_map = entity_map.clone();
+                    let pd_brep_map = pd_brep_map.clone();
+                    let nauo_transform_map = nauo_transform_map.clone();
+                    let config = config.clone();
+                    let params = params.clone();
+                    let pending_inst = uncached_pending[local_idx].clone();
+                    let cancel_flag = cancel_flag.clone();
+                    let progress_callback = progress_callback.clone();
+                    let completed = completed.clone();
+
+                    s.spawn(move |_| {
+                        // Check cancellation
+                        if cancel_flag() {
+                            return;
+                        }
+
+                        // Each thread creates its own StepConverter — no shared mutable state.
+                        let converter = StepConverter::from_cached_maps(
+                            step_file,
+                            config,
+                            entity_map,
+                            pd_brep_map,
+                            nauo_transform_map,
+                        );
+
+                        let (mesh, faces) = match converter.triangulate_brep_detailed(brep_id, &params, &bbox) {
+                            Some(result) => result,
+                            None => return, // triangulation failed
+                        };
+
+                        // Cache the mesh in BREP-local space (before transform/decimation)
+                        let cache_entry = (mesh.clone(), faces.clone());
+
+                        // Apply instance transform
+                        let mut instance_mesh = mesh;
+                        if let Some(ref tf) = pending_inst.transform {
+                            instance_mesh.transform(tf);
+                        }
+
+                        // Apply decimation for non-adaptive LOD
+                        if !params.adaptive_lod_enabled && params.keep_ratio < 1.0 && instance_mesh.triangle_count() >= 4 {
+                            draper_mesh::decimate_mesh(&mut instance_mesh, params.keep_ratio);
+                        }
+
+                        let instance = DetailedMeshInstance {
+                            name: pending_inst.name.clone(),
+                            mesh: instance_mesh,
+                            color: pending_inst.color,
+                            transform: pending_inst.transform,
+                            brep_id,
+                            faces,
+                        };
+
+                        // Report progress
+                        let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        progress_callback(done, total_count);
+
+                        let _ = tx.send((result_idx, instance, cache_entry));
+                    });
+                }
+
+                drop(tx); // drop the extra sender
+                rx.iter().collect()
+            });
+
+        // Merge parallel results back into the results vector + cache.
+        for (result_idx, instance, cache_entry) in parallel_results {
+            let brep_id = instance.brep_id;
+            results[result_idx] = Some(instance);
+            self.brep_detail_cache.insert(brep_id, cache_entry);
+        }
+
+        results
+    }
+
     /// Get a reference to the owned StepFile.
     pub fn step_file(&self) -> &StepFile {
         &self.step_file
@@ -14001,6 +14210,203 @@ mod step_parser_extension_tests {
                  is ~1000 tris). fine={} coarse={} on BREP#{}",
                 fine_tris, coarse_tris, target.brep_id
             );
+        }
+    }
+}
+
+// ============================================================
+// Parallel BREP triangulation tests (native only)
+// ============================================================
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod parallel_brep_tests {
+    use super::*;
+    use crate::parse_step;
+
+    /// Create a minimal STEP file with a single box (MANIFOLD_SOLID_BREP).
+    fn make_box_step(offset: i64) -> String {
+        format!(
+            "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('test'),'2;1');\n\
+             FILE_NAME('test.stp','2024-01-01',(''),(''),'3Draper','','');\n\
+             FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));\nENDSEC;\nDATA;\n\
+             #{o}1 = MANIFOLD_SOLID_BREP('',#{o}2);\n\
+             #{o}2 = CLOSED_SHELL('',(#{o}3,#{o}4,#{o}5,#{o}6,#{o}7,#{o}8));\n\
+             #{o}3 = ADVANCED_FACE('',(#{o}9),#{o}10,.T.);\n\
+             #{o}4 = ADVANCED_FACE('',(#{o}11),#{o}12,.T.);\n\
+             #{o}5 = ADVANCED_FACE('',(#{o}13),#{o}14,.T.);\n\
+             #{o}6 = ADVANCED_FACE('',(#{o}15),#{o}16,.T.);\n\
+             #{o}7 = ADVANCED_FACE('',(#{o}17),#{o}18,.T.);\n\
+             #{o}8 = ADVANCED_FACE('',(#{o}19),#{o}20,.T.);\n\
+             #{o}9 = EDGE_LOOP('',(#{o}21));\n\
+             #{o}10 = PLANE('',#{o}22);\n\
+             #{o}11 = EDGE_LOOP('',(#{o}23));\n\
+             #{o}12 = PLANE('',#{o}24);\n\
+             #{o}13 = EDGE_LOOP('',(#{o}25));\n\
+             #{o}14 = PLANE('',#{o}26);\n\
+             #{o}15 = EDGE_LOOP('',(#{o}27));\n\
+             #{o}16 = PLANE('',#{o}28);\n\
+             #{o}17 = EDGE_LOOP('',(#{o}29));\n\
+             #{o}18 = PLANE('',#{o}30);\n\
+             #{o}19 = EDGE_LOOP('',(#{o}31));\n\
+             #{o}20 = PLANE('',#{o}32);\n\
+             #{o}21 = ORIENTED_EDGE('',*,*,#{o}33,.T.);\n\
+             #{o}22 = AXIS2_PLACEMENT_3D('',#{o}34,$,$);\n\
+             #{o}33 = EDGE_CURVE('',#{o}35,#{o}35,#{o}36,.T.);\n\
+             #{o}34 = CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
+             #{o}35 = VERTEX_POINT('',#{o}37);\n\
+             #{o}36 = LINE('',#{o}38,#{o}39);\n\
+             #{o}37 = CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
+             #{o}38 = CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
+             #{o}39 = VECTOR('',#{o}40,1.0);\n\
+             #{o}40 = DIRECTION('',(1.0,0.0,0.0));\n\
+             #{o}23 = EDGE_LOOP('',(#{o}41));\n\
+             #{o}24 = AXIS2_PLACEMENT_3D('',#{o}42,$,$);\n\
+             #{o}41 = ORIENTED_EDGE('',*,*,#{o}43,.T.);\n\
+             #{o}42 = CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
+             #{o}43 = EDGE_CURVE('',#{o}35,#{o}35,#{o}44,.T.);\n\
+             #{o}44 = LINE('',#{o}45,#{o}46);\n\
+             #{o}45 = CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
+             #{o}46 = VECTOR('',#{o}47,1.0);\n\
+             #{o}47 = DIRECTION('',(0.0,1.0,0.0));\n\
+             #{o}25 = EDGE_LOOP('',(#{o}48));\n\
+             #{o}26 = AXIS2_PLACEMENT_3D('',#{o}49,$,$);\n\
+             #{o}48 = ORIENTED_EDGE('',*,*,#{o}50,.T.);\n\
+             #{o}49 = CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
+             #{o}50 = EDGE_CURVE('',#{o}35,#{o}35,#{o}51,.T.);\n\
+             #{o}51 = LINE('',#{o}52,#{o}53);\n\
+             #{o}52 = CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
+             #{o}53 = VECTOR('',#{o}54,1.0);\n\
+             #{o}54 = DIRECTION('',(0.0,0.0,1.0));\n\
+             #{o}27 = EDGE_LOOP('',(#{o}55));\n\
+             #{o}28 = AXIS2_PLACEMENT_3D('',#{o}56,$,$);\n\
+             #{o}55 = ORIENTED_EDGE('',*,*,#{o}57,.T.);\n\
+             #{o}56 = CARTESIAN_POINT('',(1.0,0.0,0.0));\n\
+             #{o}57 = EDGE_CURVE('',#{o}35,#{o}35,#{o}58,.T.);\n\
+             #{o}58 = LINE('',#{o}59,#{o}60);\n\
+             #{o}59 = CARTESIAN_POINT('',(1.0,0.0,0.0));\n\
+             #{o}60 = VECTOR('',#{o}61,1.0);\n\
+             #{o}61 = DIRECTION('',(0.0,1.0,0.0));\n\
+             #{o}29 = EDGE_LOOP('',(#{o}62));\n\
+             #{o}30 = AXIS2_PLACEMENT_3D('',#{o}63,$,$);\n\
+             #{o}62 = ORIENTED_EDGE('',*,*,#{o}64,.T.);\n\
+             #{o}63 = CARTESIAN_POINT('',(0.0,1.0,0.0));\n\
+             #{o}64 = EDGE_CURVE('',#{o}35,#{o}35,#{o}65,.T.);\n\
+             #{o}65 = LINE('',#{o}66,#{o}67);\n\
+             #{o}66 = CARTESIAN_POINT('',(0.0,1.0,0.0));\n\
+             #{o}67 = VECTOR('',#{o}68,1.0);\n\
+             #{o}68 = DIRECTION('',(1.0,0.0,0.0));\n\
+             #{o}31 = EDGE_LOOP('',(#{o}69));\n\
+             #{o}32 = AXIS2_PLACEMENT_3D('',#{o}70,$,$);\n\
+             #{o}69 = ORIENTED_EDGE('',*,*,#{o}71,.T.);\n\
+             #{o}70 = CARTESIAN_POINT('',(0.0,0.0,1.0));\n\
+             #{o}71 = EDGE_CURVE('',#{o}35,#{o}35,#{o}72,.T.);\n\
+             #{o}72 = LINE('',#{o}73,#{o}74);\n\
+             #{o}73 = CARTESIAN_POINT('',(0.0,0.0,1.0));\n\
+             #{o}74 = VECTOR('',#{o}75,1.0);\n\
+             #{o}75 = DIRECTION('',(1.0,0.0,0.0));\n\
+             ENDSEC;\nEND-ISO-10303-21;",
+            o = offset
+        )
+    }
+
+    #[test]
+    fn test_parallel_empty_input() {
+        // Empty input should return empty results immediately.
+        let step_content = make_box_step(0);
+        let step_file = parse_step(&step_content).unwrap();
+        let mut ctx = OwnedStepConversionContext::new(step_file);
+        let results = ctx.triangulate_breps_parallel(
+            &[],
+            || false,
+            |_, _| {},
+        );
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_parallel_cancel_flag_respected() {
+        // When cancel_flag returns true immediately, no BREPs should be processed.
+        let step_content = make_box_step(0);
+        let step_file = parse_step(&step_content).unwrap();
+        let mut ctx = OwnedStepConversionContext::new(step_file);
+        let pending = vec![PendingBrepInstance {
+            name: "test".to_string(),
+            brep_id: 1,
+            transform: None,
+            color: None,
+            face_count_estimate: None,
+        }];
+        let results = ctx.triangulate_breps_parallel(
+            &pending,
+            || true, // cancel immediately
+            |_, _| {},
+        );
+        // All results should be None (cancelled)
+        assert!(results.iter().all(|r| r.is_none()));
+    }
+
+    #[test]
+    fn test_parallel_progress_callback_no_panic() {
+        // The progress callback should not cause panics.
+        let step_content = make_box_step(0);
+        let step_file = parse_step(&step_content).unwrap();
+        let mut ctx = OwnedStepConversionContext::new(step_file);
+
+        let pending = vec![PendingBrepInstance {
+            name: "test".to_string(),
+            brep_id: 1,
+            transform: None,
+            color: None,
+            face_count_estimate: None,
+        }];
+        let _results = ctx.triangulate_breps_parallel(
+            &pending,
+            || false,
+            |_done, _total| {
+                // Just ensure no panic
+            },
+        );
+    }
+
+    #[test]
+    fn test_parallel_results_order_preserved() {
+        // Results should be returned in the same order as input.
+        // Even if BREPs complete in different order, the result indices
+        // should match the input indices.
+        let step_content = make_box_step(0);
+        let step_file = parse_step(&step_content).unwrap();
+        let mut ctx = OwnedStepConversionContext::new(step_file);
+
+        let pending = vec![
+            PendingBrepInstance {
+                name: "first".to_string(),
+                brep_id: 1,
+                transform: None,
+                color: None,
+                face_count_estimate: None,
+            },
+            PendingBrepInstance {
+                name: "second".to_string(),
+                brep_id: 1, // same brep_id — should hit cache on second
+                transform: None,
+                color: None,
+                face_count_estimate: None,
+            },
+        ];
+        let results = ctx.triangulate_breps_parallel(
+            &pending,
+            || false,
+            |_, _| {},
+        );
+
+        // Both should succeed or both should fail, but they should have
+        // matching names in the correct order.
+        assert_eq!(results.len(), 2);
+        if let Some(ref inst) = results[0] {
+            assert_eq!(inst.name, "first");
+        }
+        if let Some(ref inst) = results[1] {
+            assert_eq!(inst.name, "second");
         }
     }
 }

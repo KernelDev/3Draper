@@ -50,12 +50,12 @@ wasm-bindgen \
     --target web \
     --no-typescript \
     --out-dir /tmp/wasm-bindgen-out-worker \
-    "$PROJECT_ROOT/target/wasm32-unknown-unknown/release/draper-worker.wasm"
+    "$PROJECT_ROOT/target/wasm32-unknown-unknown/release/draper_worker.wasm"
 
 VIEWER_WASM="/tmp/wasm-bindgen-out/draper-viewer_bg.wasm"
 VIEWER_JS="/tmp/wasm-bindgen-out/draper-viewer.js"
-WORKER_WASM="/tmp/wasm-bindgen-out-worker/draper-worker_bg.wasm"
-WORKER_JS="/tmp/wasm-bindgen-out-worker/draper-worker.js"
+WORKER_WASM="/tmp/wasm-bindgen-out-worker/draper_worker_bg.wasm"
+WORKER_JS="/tmp/wasm-bindgen-out-worker/draper_worker.js"
 
 echo "    viewer wasm: $(stat -c '%s' "$VIEWER_WASM") bytes"
 echo "    viewer js:   $(stat -c '%s' "$VIEWER_JS") bytes"
@@ -73,6 +73,9 @@ cd /tmp/gh-deploy
 git remote set-url origin "$REMOTE_URL"
 
 # Swap in new wasm + js
+# Note: wasm-bindgen produces draper_worker_*.wasm/js (underscores),
+# but the web worker JS expects draper-worker.* (hyphens).
+# We rename during copy to match the expected names.
 cp "$VIEWER_WASM" /tmp/gh-deploy/draper-viewer_bg.wasm
 cp "$VIEWER_JS"   /tmp/gh-deploy/draper-viewer.js
 cp "$WORKER_WASM" /tmp/gh-deploy/draper-worker_bg.wasm

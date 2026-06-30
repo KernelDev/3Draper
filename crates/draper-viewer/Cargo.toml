@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [features]
 default = ["native"]
-native = ["rfd", "env_logger", "draper-mesh/export-3mf"]
+native = ["rfd", "env_logger", "draper-mesh/export-3mf", "rayon"]
 web = ["web-sys", "wasm-bindgen", "console_log", "wasm-bindgen-futures", "js-sys", "web-time", "wgpu/webgl", "wgpu/webgpu", "console_error_panic_hook", "draper-mesh/wasm-parallel"]
 # web-deploy: same as 'web' but without wasm-parallel (wasm-bindgen-rayon).
 # Used for GitHub Pages deployment where SharedArrayBuffer/COOP/COEP
@@ -37,6 +37,7 @@ serde_json = "1"
 # Native-only dependencies
 rfd = { version = "0.15", optional = true }
 env_logger = { version = "0.11", optional = true }
+rayon = { version = "1.10", optional = true }
 
 # Web-only dependencies
 web-sys = { version = "0.3", optional = true, features = [
