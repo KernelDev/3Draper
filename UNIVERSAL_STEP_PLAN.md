@@ -350,7 +350,7 @@
 - [x] 4.1.4 Передача mesh: serialize `TriangleMesh` → `MeshData` (flat Float32Array/Uint32Array), передать как `Transferable` (ArrayBuffer) для zero-copy. **Реализовано:** `MeshDataResult` в worker.rs с TypedArray views, `getTransferables()` в worker.js для zero-copy.
 - [x] 4.1.5 Cancel: postMessage `{type: 'cancel'}` в worker; worker вызывает `cancel_triangulation()` которая aborts session + drops context. **Реализовано:** `worker_cancel()` в viewer, `handleCancel()` в worker.js, `cancel_triangulation()` в worker.rs.
 - [x] 4.1.6 Fallback: если Worker creation fails (CSP, old browser) — использовать текущий main-thread chunked path. **Реализовано:** `try_init_worker()` возвращает false при ошибке, `use_worker` устанавливается динамически, Worker errors переключают на fallback, `process_pending_breps` имеет два пути: Worker path и chunked path.
-- [ ] 4.1.7 Тест: загрузить drill_top.stp — UI должен оставаться полностью responsive (scroll, click, zoom) во время триангуляции.
+- [~] 4.1.7 Тест: загрузить drill_top.stp — UI должен оставаться полностью responsive (scroll, click, zoom) во время триангуляции. **Частично:** WASM-сборка обоих артефактов (viewer 9.2MB + worker 1.3MB) проверена, worker.js и worker-bridge.js реализованы, cargo test — 476 тестов пройдено. Ручное тестирование в браузере отложено — требует загрузки drill_top.stp на gh-pages и проверки responsiveness.
 
 **Критерий приёмки:** UI framerate ≥ 60fps во время загрузки любого файла. Cancel button реагирует мгновенно.
 
