@@ -205,6 +205,7 @@ impl TriangulationParams {
             keep_ratio: 1.0,
             adaptive_lod_enabled: false,
             target_triangles_per_face: None,
+            bbox_surface_area: None,
         }
     }
 }

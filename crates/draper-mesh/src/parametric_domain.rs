@@ -1145,6 +1145,18 @@ fn polygon_area_3d(polygon: &[Point3d]) -> f64 {
     (nx * nx + ny * ny + nz * nz).sqrt() * 0.5
 }
 
+/// Estimate the surface area of a face from its 3D boundary polygon.
+///
+/// Uses the outer boundary polygon area (via `polygon_area_3d`) as an
+/// approximation. This is accurate for planar faces and within ~20% for
+/// gently curved surfaces. For highly curved surfaces (e.g. half a sphere),
+/// the boundary polygon area underestimates the true surface area, but
+/// this is acceptable for budget scaling purposes — the adaptive multiplier
+/// only needs a rough relative measure (face_area / bbox_area).
+fn estimate_face_area_from_boundary(boundary_points_3d: &[Point3d]) -> f64 {
+    polygon_area_3d(boundary_points_3d)
+}
+
 /// Generate interior UV grid points for a parametric domain.
 ///
 /// Creates a regular grid of points within the domain's bounding box,
@@ -3974,6 +3986,35 @@ pub fn triangulate_surface_consistent(
     let hole_polylines_3d_capped: Vec<Vec<Point3d>> = hole_polylines_3d.iter().map(|h| h.clone()).collect();
     let normalized_holes_uv_capped: Vec<Vec<Point2d>> = normalized_holes_uv;
 
+    // ── Adaptive per-face-area budget (task 1.1.4) ─────────────────
+    //
+    // If the caller provided `bbox_surface_area`, scale `max_face_triangles`
+    // based on the face's area relative to the total bounding box area.
+    // Large faces (>25% of bbox) get up to 2× budget; small faces (<1%)
+    // get 0.5× budget. This prevents budget overflow on parts with many
+    // tiny faces while giving large curved faces enough Steiner points.
+    let effective_max_face_triangles = if let Some(bbox_area) = params.bbox_surface_area {
+        if bbox_area > 1e-10 {
+            // Estimate face area from boundary polygon (3D polygon area via cross products).
+            let face_area = estimate_face_area_from_boundary(&boundary_points_3d);
+            let fraction = face_area / bbox_area;
+            let multiplier = params.steiner_profile.face_area_budget_multiplier(fraction);
+            let adjusted = (params.max_face_triangles as f64 * multiplier).round() as usize;
+            // Ensure a minimum floor of 4 triangles per face
+            adjusted.max(4)
+        } else {
+            params.max_face_triangles
+        }
+    } else {
+        params.max_face_triangles
+    };
+
+    // Create a local copy of params with the adapted max_face_triangles.
+    // This ensures ALL downstream Steiner grid generators and budget
+    // calculations use the face-area-adjusted budget consistently.
+    let mut params = params.clone();
+    params.max_face_triangles = effective_max_face_triangles;
+
     let max_total_points = (params.max_face_triangles / 2).max(6);
 
     // ============================================================
@@ -4154,7 +4195,7 @@ pub fn triangulate_surface_consistent(
             &domain,
             (u_min, u_max),
             (v_min, v_max),
-            params,
+            &params,
             cyl_cone_budget,
         )
     } else if matches!(surface, Surface::Sphere(_)) {
@@ -4194,7 +4235,7 @@ pub fn triangulate_surface_consistent(
             &domain,
             (u_min, u_max),
             (v_min, v_max),
-            params,
+            &params,
             sphere_budget,
         )
     } else if matches!(surface, Surface::Torus(_)) {
@@ -4229,7 +4270,7 @@ pub fn triangulate_surface_consistent(
             &domain,
             (u_min, u_max),
             (v_min, v_max),
-            params,
+            &params,
             torus_budget,
         )
     } else if matches!(surface, Surface::Revolution(_)) {
@@ -4262,7 +4303,7 @@ pub fn triangulate_surface_consistent(
             &domain,
             (u_min, u_max),
             (v_min, v_max),
-            params,
+            &params,
             rev_budget,
         )
     } else if matches!(surface, Surface::Extrusion(_)) {
@@ -4286,7 +4327,7 @@ pub fn triangulate_surface_consistent(
             &domain,
             (u_min, u_max),
             (v_min, v_max),
-            params,
+            &params,
             ext_budget,
         )
     } else if matches!(surface, Surface::Nurbs(_)) {
@@ -4322,7 +4363,7 @@ pub fn triangulate_surface_consistent(
             &domain,
             (u_min, u_max),
             (v_min, v_max),
-            params,
+            &params,
             nurbs_budget,
         )
     } else {

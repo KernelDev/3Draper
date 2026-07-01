@@ -169,6 +169,44 @@ impl SteinerBudgetProfile {
             Self::Mobile => 1.25,
         }
     }
+
+    /// Adaptive per-face-area budget multiplier.
+    ///
+    /// Computes a multiplier for `max_face_triangles` based on the face's
+    /// area relative to the total bounding box area of the part. This allows
+    /// large faces to receive more Steiner points (up to 2×) while small
+    /// faces use fewer (down to 0.5×), preventing budget overflow on parts
+    /// with many tiny faces (e.g. fillets on drill_top.stp).
+    ///
+    /// # Arguments
+    /// * `face_area_fraction` — face area / total bbox surface area, in [0, 1].
+    ///   If the caller doesn't know the bbox area, pass 1.0 (no adjustment).
+    ///
+    /// # Returns
+    /// Multiplier in [0.5, 2.0]:
+    /// - face < 1% of bbox → 0.5× budget (small face, few triangles needed)
+    /// - face 1%–25% of bbox → linear interpolation from 0.5× to 1.0×
+    /// - face > 25% of bbox → 2.0× budget (large face needs more detail)
+    pub fn face_area_budget_multiplier(&self, face_area_fraction: f64) -> f64 {
+        // Clamp to valid range
+        let f = face_area_fraction.clamp(0.0, 1.0);
+
+        if f < 0.01 {
+            // Face area < 1% of bbox → minimal budget
+            0.5
+        } else if f < 0.25 {
+            // Linear interpolation from 0.5 at 1% to 1.0 at 25%
+            // t goes from 0.0 (at 1%) to 1.0 (at 25%)
+            let t = (f - 0.01) / (0.25 - 0.01);
+            0.5 + t * 0.5
+        } else {
+            // Face area > 25% of bbox → generous budget
+            // But cap at 2.0 to prevent excessive tessellation
+            // Scale from 1.0 at 25% to 2.0 at 100%
+            let t = ((f - 0.25) / 0.75).min(1.0);
+            1.0 + t * 1.0
+        }
+    }
     /// Minimum floor for n_u (cylinder/cone) — prevents visually
     /// broken grids even at extreme LOD downgrades.
     pub fn min_u_cyl(&self) -> usize {
@@ -516,6 +554,18 @@ pub struct TriangulationParams {
     /// - The original uniform per-face budget is used.
     /// - Post-triangulation decimation is applied when `keep_ratio < 1.0`.
     pub adaptive_lod_enabled: bool,
+    /// Total surface area of the bounding box of the part, used for
+    /// adaptive per-face-area budget scaling (task 1.1.4).
+    ///
+    /// When `Some(area)`, each face's `max_face_triangles` is scaled by
+    /// `steiner_profile.face_area_budget_multiplier(face_area / area)`.
+    /// Large faces (>25% of bbox) get up to 2× budget; small faces (<1%)
+    /// get 0.5× budget. This prevents budget overflow on parts with many
+    /// tiny faces (e.g. fillets on drill_top.stp) while giving large
+    /// curved faces enough Steiner points.
+    ///
+    /// When `None`, no per-face-area adjustment is applied (uniform budget).
+    pub bbox_surface_area: Option<f64>,
 }
 
 impl std::fmt::Debug for TriangulationParams {
@@ -534,6 +584,7 @@ impl std::fmt::Debug for TriangulationParams {
             .field("keep_ratio", &self.keep_ratio)
             .field("target_triangles_per_face", &self.target_triangles_per_face)
             .field("adaptive_lod_enabled", &self.adaptive_lod_enabled)
+            .field("bbox_surface_area", &self.bbox_surface_area)
             .field("progress_callback", &self.progress_callback.as_ref().map(|_| "Some(...)"))
             .finish()
     }
@@ -556,6 +607,7 @@ impl Default for TriangulationParams {
             keep_ratio: 1.0, // No decimation by default — preserve backward compatibility
             target_triangles_per_face: None,
             adaptive_lod_enabled: false,
+            bbox_surface_area: None,
         }
     }
 }
@@ -647,6 +699,7 @@ impl TriangulationParams {
             keep_ratio,
             target_triangles_per_face: None,
             adaptive_lod_enabled: false,
+            bbox_surface_area: None,
         }
     }
 
@@ -9814,5 +9867,82 @@ mod adaptive_lod_tests {
         params.adaptive_lod_enabled = true;
         let budget = params.compute_target_triangles_per_face(0);
         assert_eq!(budget, None); // Guard against division by zero
+    }
+
+    // ── face_area_budget_multiplier tests (task 1.1.4) ─────────────
+
+    #[test]
+    fn test_face_area_budget_tiny_face() {
+        // Face < 1% of bbox → 0.5× budget
+        let profile = SteinerBudgetProfile::Desktop;
+        let mult = profile.face_area_budget_multiplier(0.005);
+        assert!((mult - 0.5).abs() < 1e-10,
+            "Tiny face (<1%) should get 0.5× budget, got {}", mult);
+    }
+
+    #[test]
+    fn test_face_area_budget_medium_face() {
+        // Face 1%–25% of bbox → linear interpolation from 0.5× to 1.0×
+        let profile = SteinerBudgetProfile::Desktop;
+        let mult_at_1pct = profile.face_area_budget_multiplier(0.01);
+        let mult_at_25pct = profile.face_area_budget_multiplier(0.25);
+        assert!((mult_at_1pct - 0.5).abs() < 1e-10,
+            "At 1% should be 0.5×, got {}", mult_at_1pct);
+        assert!((mult_at_25pct - 1.0).abs() < 1e-10,
+            "At 25% should be 1.0×, got {}", mult_at_25pct);
+        // Midpoint (13%) should be ~0.75
+        let mult_at_13pct = profile.face_area_budget_multiplier(0.13);
+        assert!((mult_at_13pct - 0.75).abs() < 0.02,
+            "At 13% should be ~0.75×, got {}", mult_at_13pct);
+    }
+
+    #[test]
+    fn test_face_area_budget_large_face() {
+        // Face > 25% of bbox → up to 2.0× budget
+        let profile = SteinerBudgetProfile::Desktop;
+        let mult_at_50pct = profile.face_area_budget_multiplier(0.50);
+        let mult_at_100pct = profile.face_area_budget_multiplier(1.0);
+        assert!(mult_at_50pct > 1.0 && mult_at_50pct < 2.0,
+            "At 50% should be between 1.0 and 2.0, got {}", mult_at_50pct);
+        assert!((mult_at_100pct - 2.0).abs() < 1e-10,
+            "At 100% should be 2.0×, got {}", mult_at_100pct);
+    }
+
+    #[test]
+    fn test_face_area_budget_zero_and_negative() {
+        let profile = SteinerBudgetProfile::Desktop;
+        // Zero → 0.5× (treated as tiny face)
+        assert!((profile.face_area_budget_multiplier(0.0) - 0.5).abs() < 1e-10);
+        // Negative → clamped to 0 → 0.5×
+        assert!((profile.face_area_budget_multiplier(-0.5) - 0.5).abs() < 1e-10);
+        // > 1.0 → clamped to 1.0 → 2.0×
+        assert!((profile.face_area_budget_multiplier(5.0) - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_face_area_budget_consistent_across_profiles() {
+        // The multiplier formula is profile-independent (same for Desktop/Tablet/Mobile)
+        let desktop = SteinerBudgetProfile::Desktop;
+        let tablet = SteinerBudgetProfile::Tablet;
+        let mobile = SteinerBudgetProfile::Mobile;
+        for fraction in [0.005, 0.01, 0.05, 0.13, 0.25, 0.5, 1.0] {
+            assert!((desktop.face_area_budget_multiplier(fraction)
+                     - tablet.face_area_budget_multiplier(fraction)).abs() < 1e-10,
+                "Desktop/Tablet mismatch at fraction={}", fraction);
+            assert!((desktop.face_area_budget_multiplier(fraction)
+                     - mobile.face_area_budget_multiplier(fraction)).abs() < 1e-10,
+                "Desktop/Mobile mismatch at fraction={}", fraction);
+        }
+    }
+
+    #[test]
+    fn test_bbox_surface_area_propagation() {
+        // Verify that bbox_surface_area is None by default and Some after
+        // being set, and that it flows through for_lod() correctly.
+        let mut params = TriangulationParams::for_lod(1.0);
+        assert_eq!(params.bbox_surface_area, None,
+            "Default bbox_surface_area should be None");
+        params.bbox_surface_area = Some(1000.0);
+        assert_eq!(params.bbox_surface_area, Some(1000.0));
     }
 }

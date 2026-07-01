@@ -875,6 +875,15 @@ impl OwnedStepConversionContext {
                     params.max_deviation = floor;
                 }
             }
+            // Compute bounding box surface area for adaptive per-face-area
+            // budget scaling (task 1.1.4). The surface area of a box is
+            // 2*(dx*dy + dy*dz + dz*dx). This is used by
+            // `face_area_budget_multiplier` in `triangulate_surface_consistent`
+            // to give larger faces more Steiner points and smaller faces fewer.
+            let bbox_area = 2.0 * (dx * dy + dy * dz + dz * dx);
+            if bbox_area > 1e-10 {
+                params.bbox_surface_area = Some(bbox_area);
+            }
         }
 
         // Enable parallel face triangulation on native (uses rayon internally).
@@ -912,6 +921,11 @@ impl OwnedStepConversionContext {
                 if params.max_deviation < floor && params.max_deviation < 1.0 {
                     params.max_deviation = floor;
                 }
+            }
+            // Also propagate bbox_surface_area for adaptive per-face budget
+            let bbox_area = 2.0 * (dx * dy + dy * dz + dz * dx);
+            if bbox_area > 1e-10 {
+                params.bbox_surface_area = Some(bbox_area);
             }
         }
         #[cfg(not(target_arch = "wasm32"))]
