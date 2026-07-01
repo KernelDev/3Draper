@@ -440,11 +440,11 @@
 
 **Задачи:**
 
-- [ ] 5.2.1 Создать `crates/draper-topology/src/validator.rs` с функцией `validate_brep(brep: &Brep) -> TopologyReport`.
-- [ ] 5.2.2 Проверки: (a) каждый face имеет ≥ 1 outer loop; (b) каждый edge в loop имеет корректную orientation; (c) каждое internal edge имеет 2 coedges (для solid) или 1 (для sheet); (d) эйлерова характеристика для closed solid = 2.
-- [ ] 5.2.3 В `prepare_brep_session` (converter.rs) вызывать `validate_brep` и логировать warnings. Не блокировать триангуляцию — только диагностика.
-- [ ] 5.2.4 Если найдены dangling edges (1 coedge для internal position) — попытаться heal: найти matching edge по geometry и слить.
-- [ ] 5.2.5 Тест: искусственно сломанный BREP (face missing) — проверить что validator находит проблему.
+- [x] 5.2.1 Создать `crates/draper-topology/src/validator.rs` с функцией `validate_brep(brep: &Brep) -> TopologyReport`. **Реализовано:** `validate_brep(solid: &Solid, config: &TopologyValidationConfig) -> TopologyReport` — новый модуль `validator.rs` с `TopologyReport` (face_count, edge_count, vertex_count, euler_characteristic, faces_without_outer_loop, edges_with_bad_orientation, dangling_edges), удобные обёртки `validate_brep_default` и `validate_brep_critical`. Экспорт через `lib.rs`.
+- [x] 5.2.2 Проверки: (a) каждый face имеет ≥ 1 outer loop; (b) каждый edge в loop имеет корректную orientation; (c) каждое internal edge имеет 2 coedges (для solid) или 1 (для sheet); (d) эйлерова характеристика для closed solid = 2. **Реализовано:** (a) `faces_without_outer_loop` счётчик + Error-level ValidationIssue; (b) `check_wire_edge_orientation` — проверка соединения consecutive coedges; (c) `dangling_edges` счётчик для closed solid edges с 1 coedge; (d) Euler characteristic computed + Warning/Info-level ValidationIssue при отклонении от 2.
+- [x] 5.2.3 В `prepare_brep_session` (converter.rs) вызывать `validate_brep` и логировать warnings. Не блокировать триангуляцию — только диагностика. **Реализовано:** `validate_brep` вызывается после healing pipeline с `TopologyValidationConfig::critical_only()`. Clean → info log; Issues → warn log с summary + до 10 error-level issues.
+- [x] 5.2.4 Если найдены dangling edges (1 coedge для internal position) — попытаться heal: найти matching edge по geometry и слить. **Реализовано:** `heal_dangling_edges(solid: &mut Solid, tolerance: f64) -> usize` — поиск geometric match по endpoint coincidence (forward/reverse), добавление CoEdge в face wire.
+- [x] 5.2.5 Тест: искусственно сломанный BREP (face missing) — проверить что validator находит проблему. **Реализовано:** 8 unit-тестов: `test_validate_proper_box_is_clean`, `test_validate_broken_brep_missing_face` (dangling edges detected), `test_validate_face_without_outer_loop`, `test_validate_solid_with_empty_shell`, `test_report_summary`, `test_heal_dangling_edges_after_face_removal`, `test_validate_brep_critical`, `test_validate_brep_default`.
 
 **Критерий приёмки:** Все 24 тестовых файла проходят `validate_brep` без warnings.
 

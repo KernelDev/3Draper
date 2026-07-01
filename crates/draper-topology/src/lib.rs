@@ -13,6 +13,7 @@ pub mod shape;
 pub mod builder;
 pub mod traversal;
 pub mod validation;
+pub mod validator;
 pub mod healing;
 pub mod boolean;
 pub mod queries;
@@ -26,6 +27,10 @@ pub use validation::{
     ValidationError, validate_solid, validate_solid_readonly, validate_shell,
     Severity, ValidationIssue, TopologyValidationConfig, TopologyValidationReport,
     validate_topology,
+};
+pub use validator::{
+    TopologyReport, validate_brep, validate_brep_default, validate_brep_critical,
+    heal_dangling_edges,
 };
 pub use healing::*;
 pub use boolean::*;

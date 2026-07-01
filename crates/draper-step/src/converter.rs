@@ -33,6 +33,8 @@ use draper_geometry::{
 use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary_and_holes_uv, ear_clip, validate_watertight, validate_edge_consistency, filter_degenerate_triangles, weld_boundary_edge_vertices};
 use draper_topology::{Face, Wire, CoEdge, Edge as TopoEdge, Shell, Solid};
 use draper_topology::healing::{heal_solid, HealingParams, HealingReport};
+use draper_topology::validator::validate_brep;
+use draper_topology::validation::TopologyValidationConfig;
 use draper_geometry::tolerance::ToleranceContext;
 use draper_mesh::edge_cache::{EdgeDiscretizationCache, deterministic_round_point};
 use std::collections::HashMap;
@@ -4785,6 +4787,37 @@ impl<'a> StepConverter<'a> {
         } else {
             face_data_list
         };
+
+        // ─── Validate BREP topology (5.2.3) ─────────────────────────────
+        // Run topology validation and log warnings. This is diagnostic only —
+        // it does NOT block triangulation. Issues are logged for developer
+        // awareness and debugging.
+        {
+            let (solid, _) = face_data_list_to_solid(&face_data_list);
+            let report = validate_brep(&solid, &TopologyValidationConfig::critical_only());
+            if !report.is_clean() {
+                log::warn!(
+                    "BREP #{} topology validation: {}",
+                    brep_id, report.summary()
+                );
+                // Log individual error-level issues
+                for issue in report.detailed.issues.iter()
+                    .filter(|i| i.severity == draper_topology::validation::Severity::Error)
+                    .take(10) // Cap at 10 to avoid log spam
+                {
+                    log::warn!("  [{}] {}{}: {}",
+                        issue.severity, issue.check,
+                        issue.entity_id.map(|id| format!(" {}", id)).unwrap_or_default(),
+                        issue.message
+                    );
+                }
+            } else {
+                log::info!(
+                    "BREP #{} topology validation: clean ({} faces, {} edges, Euler={})",
+                    brep_id, report.face_count, report.edge_count, report.euler_characteristic
+                );
+            }
+        }
 
         // Create edge discretization cache for this BREP
         let mut edge_cache = EdgeDiscretizationCache::with_tolerance(tol_ctx.clone(), 64);
