@@ -602,6 +602,12 @@ pub struct ViewerApp {
     #[cfg(target_arch = "wasm32")]
     _pending_step_name: Option<String>,
 
+    /// Information about a partial result after loading timeout or cancel.
+    /// Displayed in the UI Info section to inform the user that the model
+    /// is incomplete but intentionally so. Set to Some("...") when timeout
+    /// fires or when cancel salvages partial results; cleared on new load.
+    partial_result_info: Option<String>,
+
     // ─── Modeling (editing + boolean + GDT) ────────────────────────────────
     /// The current solid being edited (set whenever a primitive is loaded
     /// or a STEP file with a single solid is imported). Operations like
@@ -1176,6 +1182,7 @@ impl ViewerApp {
             _pending_step_content: None,
             #[cfg(target_arch = "wasm32")]
             _pending_step_name: None,
+            partial_result_info: None,
             current_solid: Some(solid_clone_for_field),
             current_nurbs_surface: None,
             secondary_solid: None,
@@ -4038,10 +4045,17 @@ impl ViewerApp {
         if show_partial && (had_mesh || salvaged_count > 0) {
             // Commit partial result so the user sees what was loaded.
             let shown_instances = instance_count + salvaged_count;
+            let face_count = self.mesh.triangle_count() / 3;
             self.log_warning(&format!(
                 "Loading canceled — showing partial result ({} instance(s), {} triangles)",
                 shown_instances,
                 self.mesh.triangle_count()
+            ));
+            self.partial_result_info = Some(format!(
+                "Canceled — {}/{} instances, {} faces triangulated",
+                shown_instances,
+                self.total_instance_count.max(shown_instances),
+                face_count
             ));
             self.load_mesh(self.mesh.clone(), &format!("STEP (partial): {}", self.loading_name));
         } else {
@@ -4662,6 +4676,13 @@ impl ViewerApp {
                     "Loading timed out after {}s — salvaged partial result: {}/{} instances loaded",
                     elapsed, loaded_count, total_count.max(loaded_count)
                 ));
+                // Store partial result info for UI display
+                let total_instances = total_count.max(loaded_count);
+                let face_count = self.current_model.triangle_count / 3; // approximate faces from triangles
+                self.partial_result_info = Some(format!(
+                    "Timed out after {}s — {}/{} instances, {} faces triangulated",
+                    elapsed, loaded_count, total_instances, face_count
+                ));
                 self.is_loading = false;
                 self.conversion_ctx = None;
                 self.pending_step_file = None;
@@ -5228,6 +5249,9 @@ impl ViewerApp {
     /// Import STEP from string (used by web file loading).
     fn import_step_from_str(&mut self, content: &str, name: &str) {
         self.log(&format!("Parsing STEP file: '{}' ({} chars)...", name, content.len()));
+
+        // Clear partial result info from previous load
+        self.partial_result_info = None;
 
         // ─── Cache lookup (WASM only) ──────────────────────────────────
         // Before doing any parsing or triangulation, check if we already
@@ -7162,6 +7186,13 @@ impl eframe::App for ViewerApp {
                     let progress = self.triangulated_count as f32 / self.total_instance_count as f32;
                     ui.label(egui::RichText::new(format!("Loading: {}/{} ({:.0}%)", self.triangulated_count, self.total_instance_count, progress * 100.0))
                         .size(11.0).color(egui::Color32::from_rgb(80, 180, 80)));
+                }
+
+                // Partial result info (after timeout or cancel)
+                if let Some(ref info) = self.partial_result_info {
+                    ui.label(egui::RichText::new(info.clone())
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(255, 180, 50)));
                 }
 
                 if let Some((inst_idx, fid)) = self.highlighted_face {
@@ -9281,6 +9312,12 @@ impl ViewerApp {
                                 let progress = self.triangulated_count as f32 / self.total_instance_count as f32;
                                 ui.label(egui::RichText::new(format!("Loading: {}/{} ({:.0}%)", self.triangulated_count, self.total_instance_count, progress * 100.0))
                                     .size(11.0).color(egui::Color32::from_rgb(80, 180, 80)));
+                            }
+                            // Partial result info (after timeout or cancel)
+                            if let Some(ref info) = self.partial_result_info {
+                                ui.label(egui::RichText::new(info.clone())
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(255, 180, 50)));
                             }
                             if let Some((inst_idx, fid)) = self.highlighted_face {
                                 ui.label(egui::RichText::new(format!("Face: #{} (inst #{})", fid, inst_idx))
