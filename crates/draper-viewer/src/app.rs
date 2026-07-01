@@ -564,6 +564,10 @@ pub struct ViewerApp {
     /// Affects `max_deviation`, `angular_samples`, `height_samples`, etc.
     /// Users can change this before loading a STEP file to trade quality for speed.
     lod_level: LodLevel,
+    /// If the LOD was auto-downgraded for mobile, this records the original
+    /// level before downgrade (for UI display: "Medium (auto-downgraded from Ultra)").
+    /// Cleared when the user manually changes LOD or when a new file is loaded.
+    lod_downgraded_from: Option<LodLevel>,
 
     // ─── Web Worker mode (WASM only) ────────────────────────────────────────
     /// Whether to use a Web Worker for STEP parsing + triangulation.
@@ -876,6 +880,18 @@ impl LodLevel {
     fn all() -> &'static [LodLevel] {
         &[LodLevel::Preview, LodLevel::Low, LodLevel::Medium, LodLevel::High, LodLevel::Ultra]
     }
+
+    /// Parse a LOD level from its label string (used for localStorage restore).
+    fn from_label(label: &str) -> Option<LodLevel> {
+        match label {
+            "Preview" => Some(LodLevel::Preview),
+            "Low" => Some(LodLevel::Low),
+            "Medium" => Some(LodLevel::Medium),
+            "High" => Some(LodLevel::High),
+            "Ultra" => Some(LodLevel::Ultra),
+            _ => None,
+        }
+    }
 }
 
 /// Result of a worker-based triangulation (WASM only).
@@ -1157,7 +1173,17 @@ impl ViewerApp {
             close_mobile_panel_after_load: false,
             mobile_controls_tab: MobileControlsTab::Primitives,
             chunked_triangulator: ChunkedBrepTriangulator::new(),
-            lod_level: LodLevel::High,
+            lod_level: {
+                // Restore LOD from localStorage if available (WASM only).
+                // This prevents "quality jumping" between sessions on mobile.
+                #[cfg(target_arch = "wasm32")]
+                {
+                    Self::load_lod_from_local_storage().unwrap_or(LodLevel::High)
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                LodLevel::High
+            },
+            lod_downgraded_from: None,
             #[cfg(target_arch = "wasm32")]
             use_worker: {
                 // Try to initialize the Worker on startup. If it fails
@@ -1516,6 +1542,34 @@ impl ViewerApp {
                 "No solid loaded — load a primitive or STEP file before changing LOD",
             );
         }
+    }
+
+    // ─── localStorage helpers for LOD persistence (WASM only) ────────────
+
+    /// Save the current LOD level to localStorage so it persists across sessions.
+    /// Key: `3draper_mobile_lod`. Value: LOD label string ("Low", "Medium", etc.)
+    #[cfg(target_arch = "wasm32")]
+    fn save_lod_to_local_storage(&self) {
+        let label = self.lod_level.label();
+        let js = format!(
+            "try {{ localStorage.setItem('3draper_mobile_lod', '{}'); }} catch(e) {{}}"
+            , label
+        );
+        let _ = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.default_view())
+            .and_then(|w| js_sys::Function::new_no_args(&js).call0(&w.into()).ok());
+    }
+
+    /// Load the previously saved LOD level from localStorage.
+    /// Returns None if localStorage is unavailable or no saved value exists.
+    #[cfg(target_arch = "wasm32")]
+    fn load_lod_from_local_storage() -> Option<LodLevel> {
+        let js = "try { return localStorage.getItem('3draper_mobile_lod') || ''; } catch(e) { return ''; }";
+        let result = web_sys::window()
+            .and_then(|w| js_sys::Function::new_no_args(js).call0(&w.into()).ok())
+            .and_then(|v| v.as_string());
+        result.as_deref().and_then(LodLevel::from_label)
     }
 
     /// Apply fillet to the edge at `model_edge_index` of the current solid.
@@ -3647,7 +3701,11 @@ impl ViewerApp {
                         self.lod_level.label(),
                         new.label()
                     ));
+                    self.lod_downgraded_from = Some(self.lod_level);
                     self.lod_level = new;
+                    // Persist the downgraded LOD to localStorage
+                    #[cfg(target_arch = "wasm32")]
+                    self.save_lod_to_local_storage();
                 }
             }
 
@@ -5252,6 +5310,8 @@ impl ViewerApp {
 
         // Clear partial result info from previous load
         self.partial_result_info = None;
+        // Clear LOD downgrade info — new file starts fresh
+        self.lod_downgraded_from = None;
 
         // ─── Cache lookup (WASM only) ──────────────────────────────────
         // Before doing any parsing or triangulation, check if we already
@@ -6102,12 +6162,15 @@ impl eframe::App for ViewerApp {
                     for &lod in LodLevel::all() {
                         if ui.radio_value(&mut self.lod_level, lod, lod.label()).clicked() {
                             if lod != prev_lod {
+                                self.lod_downgraded_from = None; // user manually changed
                                 self.log(&format!(
                                     "LOD changed {} → {} — re-triangulating current model...",
                                     prev_lod.label(),
                                     lod.label()
                                 ));
                                 self.retriangulate_for_lod();
+                                #[cfg(target_arch = "wasm32")]
+                                self.save_lod_to_local_storage();
                             }
                         }
                     }
@@ -7126,20 +7189,28 @@ impl eframe::App for ViewerApp {
                 // LOD selector for mobile
                 ui.add_space(4.0);
                 let prev_lod_mobile = self.lod_level;
+                let quality_label = if let Some(from) = self.lod_downgraded_from {
+                    format!("Quality: {} (auto from {})", self.lod_level.label(), from.label())
+                } else {
+                    format!("Quality: {}", self.lod_level.label())
+                };
                 egui::ComboBox::from_id_salt("lod_mobile")
-                    .selected_text(format!("Quality: {}", self.lod_level.label()))
+                    .selected_text(&quality_label)
                     .show_ui(ui, |ui| {
                         for &lod in LodLevel::all() {
                             ui.selectable_value(&mut self.lod_level, lod, lod.label());
                         }
                     });
                 if self.lod_level != prev_lod_mobile {
+                    self.lod_downgraded_from = None; // user manually changed
                     self.log(&format!(
                         "LOD changed {} → {} — re-triangulating current model...",
                         prev_lod_mobile.label(),
                         self.lod_level.label()
                     ));
                     self.retriangulate_for_lod();
+                    #[cfg(target_arch = "wasm32")]
+                    self.save_lod_to_local_storage();
                 }
 
                 if ui.button("Reset Camera").clicked() {
@@ -9252,20 +9323,28 @@ impl ViewerApp {
                             ui.add_space(6.0);
                             ui.heading(egui::RichText::new("Triangulation Quality").size(13.0));
                             let prev_lod_panel = self.lod_level;
+                            let quality_label_panel = if let Some(from) = self.lod_downgraded_from {
+                                format!("Quality: {} (auto from {})", self.lod_level.label(), from.label())
+                            } else {
+                                format!("Quality: {}", self.lod_level.label())
+                            };
                             egui::ComboBox::from_id_salt("lod_mobile_panel")
-                                .selected_text(format!("Quality: {}", self.lod_level.label()))
+                                .selected_text(&quality_label_panel)
                                 .show_ui(ui, |ui| {
                                     for &lod in LodLevel::all() {
                                         ui.selectable_value(&mut self.lod_level, lod, lod.label());
                                     }
                                 });
                             if self.lod_level != prev_lod_panel {
+                                self.lod_downgraded_from = None; // user manually changed
                                 self.log(&format!(
                                     "LOD changed {} → {} — re-triangulating current model...",
                                     prev_lod_panel.label(),
                                     self.lod_level.label()
                                 ));
                                 self.retriangulate_for_lod();
+                                #[cfg(target_arch = "wasm32")]
+                                self.save_lod_to_local_storage();
                             }
 
                             ui.add_space(6.0);

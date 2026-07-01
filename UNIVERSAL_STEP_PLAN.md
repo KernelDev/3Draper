@@ -97,8 +97,8 @@
 
 - [x] 1.3.1 Уменьшить агрессивность downgrade: Ultra→High (вместо Medium), High→Medium (вместо Low), Medium→остаётся Medium. LOD 0.50 вместо 0.30.
 - [x] 1.3.2 Добавить эвристику по сложности файла: если BREP count ≤ 2 и faces ≤ 500 → не понижать LOD (мобильный CPU справится). Если > 2000 faces → понижать на 2 ступени (Ultra→Medium). Это избегает излишнего downgrade для простых деталей. **Реализовано** через `pending.len() * 500 > 2000` (5+ BREP / 2500+ faces proxy); `PendingBrepInstance::face_count_estimate` поле добавлено, но пока всегда None (BREP count как proxy).
-- [ ] 1.3.3 Сохранить выбранное mobile LOD в `localStorage` — чтобы при следующей загрузке пользователь не видел "качество скачет". Ключ: `3draper_mobile_lod`.
-- [ ] 1.3.4 В UI явно показывать "Quality: Medium (auto-downgraded from Ultra for mobile)" — чтобы пользователь понимал причину и мог поднять вручную.
+- [x] 1.3.3 Сохранить выбранное mobile LOD в `localStorage` — чтобы при следующей загрузке пользователь не видел "качество скачет". Ключ: `3draper_mobile_lod`. **Реализовано:** `save_lod_to_local_storage()` вызывается при мобильном downgrade и при ручном изменении LOD; `load_lod_from_local_storage()` вызывается при создании DraperApp (startup). Использует JS eval через `js_sys::Function` для доступа к localStorage (надёжнее чем web-sys bindings).
+- [x] 1.3.4 В UI явно показывать "Quality: Medium (auto-downgraded from Ultra for mobile)" — чтобы пользователь понимал причину и мог поднять вручную. **Реализовано:** добавлено поле `lod_downgraded_from: Option<LodLevel>`, устанавливается при мобильном downgrade, отображается в Quality ComboBox как "Quality: Medium (auto from Ultra)", очищается при ручном изменении LOD или загрузке нового файла.
 - [ ] 1.3.5 Тест: загрузить `nist_cylinder.stp` на mobile — должно завершиться за < 15с при LOD 0.5, без freeze. Загрузить `drill_top.stp` — должно завершиться за < 90с при LOD 0.5 (с chunking).
 
 **Критерий приёмки:** Mobile LOD downgrade активируется только для действительно больших файлов (> 2000 faces), и downgrade на одну ступень вместо двух.
