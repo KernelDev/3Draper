@@ -1,3 +1,5 @@
+/* @ts-self-types="./draper_worker.d.ts" */
+
 /**
  * Triangulated mesh data returned to JS — flat arrays suitable for
  * `Float32Array` / `Uint32Array` views and zero-copy transfer.
