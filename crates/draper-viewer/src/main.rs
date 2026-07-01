@@ -8,6 +8,9 @@ mod app;
 mod camera;
 mod renderer;
 
+#[cfg(target_arch = "wasm32")]
+mod cache;
+
 // ─── Native entry point ──────────────────────────────────────────────────
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -104,6 +107,9 @@ mod web_entry {
         console_error_panic_hook::set_once();
 
         console_log::init_with_level(log::Level::Info).ok();
+
+        // Initialize IndexedDB cache database
+        crate::cache::init_cache_db();
 
         let window = web_sys::window().expect("no window");
         let document = window.document().expect("no document");
