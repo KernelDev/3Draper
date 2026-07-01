@@ -788,16 +788,84 @@ impl EdgeDiscretizationCache {
                     u_min, u_max, v_min, v_max,
                 );
             }
+
+            // 5.1.1 — Snap UV coordinates near the seam boundary for periodic NURBS.
+            if nurbs.u_closed || nurbs.v_closed {
+                Self::snap_seam_uvs(&mut uvs, surface);
+            }
+
             uvs
         } else {
             // Non-NURBS surfaces: project_point() is fast, use it directly
-            points_3d
+            let mut uvs: Vec<Point2d> = points_3d
                 .iter()
                 .map(|p| {
                     let (u, v) = surface.project_point(p);
                     Point2d::new(u, v)
                 })
-                .collect()
+                .collect();
+
+            // 5.1.1 — Snap UV coordinates near the seam boundary to the exact value.
+            // This ensures consistent UV coordinates on both sides of the seam,
+            // which is critical for seam-split detection and vertex deduplication.
+            Self::snap_seam_uvs(&mut uvs, surface);
+
+            uvs
+        }
+    }
+
+    /// Snap UV coordinates that are very close to the seam boundary of a periodic
+    /// surface to the exact boundary value. This ensures consistent UV coordinates
+    /// on both sides of the seam, which is critical for the seam-split logic and
+    /// for vertex deduplication at the seam.
+    ///
+    /// Without snapping, two edges at u≈0 and u≈2π on a periodic surface can have
+    /// UV values like u=0.0001 and u=6.2822 instead of exactly u=0 and u=2π.
+    /// The seam-split logic then fails to detect the seam crossing, and vertices
+    /// at the seam don't get deduplicated, leaving boundary edges.
+    fn snap_seam_uvs(uvs: &mut [Point2d], surface: &Surface) {
+        use std::f64::consts::PI;
+        let is_u_periodic = surface.is_u_periodic();
+        let is_v_periodic = surface.is_v_periodic();
+        if !is_u_periodic && !is_v_periodic {
+            return;
+        }
+
+        let (u_min, u_max) = match surface {
+            Surface::Nurbs(n) => n.u_range(),
+            Surface::Cylinder(_) | Surface::Cone(_) | Surface::Revolution(_) => (0.0, 2.0 * PI),
+            Surface::Sphere(_) => (0.0, 2.0 * PI),
+            Surface::Torus(_) => (0.0, 2.0 * PI),
+            Surface::Plane(_) | Surface::Extrusion(_) => (0.0, 1.0),
+        };
+        let (v_min, v_max) = match surface {
+            Surface::Nurbs(n) => n.v_range(),
+            Surface::Sphere(_) => (0.0, PI),
+            Surface::Torus(_) => (0.0, 2.0 * PI),
+            _ => (0.0, 1.0),
+        };
+        let u_range = u_max - u_min;
+        let v_range = v_max - v_min;
+
+        // Snap threshold: if a UV value is within 1% of the boundary, snap it.
+        let u_snap_thresh = u_range * 0.01;
+        let v_snap_thresh = v_range * 0.01;
+
+        for uv in uvs.iter_mut() {
+            if is_u_periodic && u_range > 0.0 {
+                if (uv.u - u_min).abs() < u_snap_thresh {
+                    uv.u = u_min;
+                } else if (uv.u - u_max).abs() < u_snap_thresh {
+                    uv.u = u_max;
+                }
+            }
+            if is_v_periodic && v_range > 0.0 {
+                if (uv.v - v_min).abs() < v_snap_thresh {
+                    uv.v = v_min;
+                } else if (uv.v - v_max).abs() < v_snap_thresh {
+                    uv.v = v_max;
+                }
+            }
         }
     }
 

@@ -897,6 +897,95 @@ pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64)
         );
     }
 
+    // PASS 3 (5.1.3): Seam-specific weld with intermediate tolerance.
+    //
+    // PASS 1 uses weld_tolerance (coarse, catches short boundary edges).
+    // PASS 2 uses weld_tolerance * 0.01 (tight, catches near-identical vertices).
+    // PASS 3 uses weld_tolerance * 0.1 (intermediate, catches seam mismatches
+    // that are too large for PASS 2 but too small for PASS 1).
+    //
+    // This is specifically for periodic surfaces where two boundary vertices
+    // at the seam (u=0 vs u=2π) differ by a small amount due to floating-point
+    // precision. PASS 2 is too tight (1e-3 cap), PASS 1 requires a short edge
+    // between them. PASS 3 bridges the gap.
+    {
+        let pass3_tolerance = (weld_tolerance * 0.1).min(0.01).max(1e-5);
+        let pass3_tol_sq = pass3_tolerance * pass3_tolerance;
+
+        // Build spatial hash for PASS 3
+        let pass3_cell_size = pass3_tolerance;
+        let mut pass3_spatial: HashMap<(i64, i64, i64), Vec<u32>> = HashMap::new();
+        for &vi in &boundary_vertices {
+            let v = mesh.vertices[vi as usize];
+            let cell = (
+                (v.x / pass3_cell_size).floor() as i64,
+                (v.y / pass3_cell_size).floor() as i64,
+                (v.z / pass3_cell_size).floor() as i64,
+            );
+            pass3_spatial.entry(cell).or_default().push(vi);
+        }
+
+        let mut pass3_count = 0usize;
+        // Only check vertices that are on boundary edges but NOT already welded
+        // (i.e., they still have a different root in the union-find)
+        for &v1 in &boundary_vertices {
+            let p1 = mesh.vertices[v1 as usize];
+            let cell = (
+                (p1.x / pass3_cell_size).floor() as i64,
+                (p1.y / pass3_cell_size).floor() as i64,
+                (p1.z / pass3_cell_size).floor() as i64,
+            );
+
+            let mut best_match: Option<u32> = None;
+            let mut best_dist_sq = pass3_tol_sq;
+
+            for dx in -1i64..=1 {
+                for dy in -1i64..=1 {
+                    for dz in -1i64..=1 {
+                        let neighbor_cell = (cell.0 + dx, cell.1 + dy, cell.2 + dz);
+                        if let Some(candidates) = pass3_spatial.get(&neighbor_cell) {
+                            for &candidate in candidates {
+                                if candidate == v1 { continue; }
+                                if !boundary_vertices.contains(&candidate) { continue; }
+                                // Skip if already welded to the same root
+                                let root_v1 = find(&mut parent, v1);
+                                let root_cand = find(&mut parent, candidate);
+                                if root_v1 == root_cand { continue; }
+
+                                let pc = mesh.vertices[candidate as usize];
+                                let ddx = pc.x - p1.x;
+                                let ddy = pc.y - p1.y;
+                                let ddz = pc.z - p1.z;
+                                let dist_sq = ddx * ddx + ddy * ddy + ddz * ddz;
+                                if dist_sq < best_dist_sq {
+                                    best_dist_sq = dist_sq;
+                                    best_match = Some(candidate);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(target) = best_match {
+                let root_v1 = find(&mut parent, v1);
+                let root_target = find(&mut parent, target);
+                if root_v1 != root_target {
+                    parent[root_v1 as usize] = root_target;
+                    weld_count += 1;
+                    pass3_count += 1;
+                }
+            }
+        }
+
+        if pass3_count > 0 {
+            log::warn!(
+                "WELD: PASS 3 (seam-specific) welded {} boundary vertices (tol={:.6})",
+                pass3_count, pass3_tolerance
+            );
+        }
+    }
+
     if weld_count == 0 {
         log::warn!("WELD: no vertices welded");
         return;
