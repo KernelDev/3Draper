@@ -206,6 +206,8 @@ impl TriangulationParams {
             adaptive_lod_enabled: false,
             target_triangles_per_face: None,
             bbox_surface_area: None,
+            brep_time_limit_override: None,
+            face_time_limit_override: None,
         }
     }
 }

@@ -6342,6 +6342,10 @@ impl eframe::App for ViewerApp {
         let mut pending_instance_isolate: Option<usize> = None;
         let mut pending_face_visibility_toggle: Option<(usize, u64)> = None;
         let mut pending_face_isolate: Option<(usize, u64)> = None;
+        // Subtree-level actions: hide/show/isolate all descendant instances of a subassembly node
+        let mut pending_subtree_hide: Option<Vec<usize>> = None;
+        let mut pending_subtree_show: Option<Vec<usize>> = None;
+        let mut pending_subtree_isolate: Option<Vec<usize>> = None;
 
         if self.show_structure && !self.is_mobile {
             // Clone data needed for drawing to avoid borrow conflicts
@@ -6428,7 +6432,7 @@ impl eframe::App for ViewerApp {
                                 .max_height(300.0)
                                 .show(ui, |ui| {
                                     if let Some(ref tree) = assembly_tree_clone {
-                                        draw_assembly_node_static(ui, tree, selected_instance, &hidden_instances, &mut pending_instance_select, &mut pending_visibility_toggle, &mut pending_instance_isolate, &open_tree_nodes, &scroll_to_tree_node);
+                                        draw_assembly_node_static(ui, tree, selected_instance, &hidden_instances, &mut pending_instance_select, &mut pending_visibility_toggle, &mut pending_instance_isolate, &mut pending_subtree_hide, &mut pending_subtree_show, &mut pending_subtree_isolate, &open_tree_nodes, &scroll_to_tree_node);
                                     } else if !detailed_instances_clone.is_empty() {
                                         for (i, inst) in detailed_instances_clone.iter().enumerate() {
                                             let is_selected = selected_instance == Some(i);
@@ -6712,6 +6716,64 @@ impl eframe::App for ViewerApp {
                         self.uv_window_face_idx = None;
                         self.uv_window_prev_face_idx = None;
                         self.solid_uv_breakdown = None;
+                    }
+                }
+            }
+            self.highlight_dirty = true;
+            self.edge_dirty = true;
+            self.wireframe_overlay_dirty = true;
+        }
+        // ─── Subtree-level hide/show/isolate (desktop) ─────────────────
+        if let Some(indices) = pending_subtree_hide {
+            let count = indices.len();
+            for idx in &indices {
+                self.hidden_instances.insert(*idx);
+            }
+            self.log(&format!("Subtree hidden: {} instance(s)", count));
+            self.highlight_dirty = true;
+            self.edge_dirty = true;
+            self.wireframe_overlay_dirty = true;
+        }
+        if let Some(indices) = pending_subtree_show {
+            let count = indices.len();
+            for idx in &indices {
+                self.hidden_instances.remove(idx);
+            }
+            self.log(&format!("Subtree shown: {} instance(s)", count));
+            self.highlight_dirty = true;
+            self.edge_dirty = true;
+            self.wireframe_overlay_dirty = true;
+        }
+        if let Some(indices) = pending_subtree_isolate {
+            let total_instances = self.instance_triangle_ranges.len();
+            let visible_count = total_instances.saturating_sub(self.hidden_instances.len());
+            // Check if the subtree is already the only visible one
+            let all_others_hidden = indices.iter().all(|idx| !self.hidden_instances.contains(idx))
+                && self.hidden_instances.len() == total_instances - indices.len();
+            if all_others_hidden && visible_count == indices.len() {
+                // Restore all
+                self.hidden_instances.clear();
+                self.log(&format!("Restored all instances (was isolated to subtree of {})", indices.len()));
+            } else {
+                // Hide all except subtree instances
+                self.hidden_instances.clear();
+                for i in 0..total_instances {
+                    if !indices.contains(&i) {
+                        self.hidden_instances.insert(i);
+                    }
+                }
+                self.log(&format!("Isolated subtree: {} instance(s) visible", indices.len()));
+                // Auto-select the first instance in the subtree
+                if let Some(&first_idx) = indices.first() {
+                    if self.selected_instance != Some(first_idx) {
+                        self.selected_instance = Some(first_idx);
+                        self.selected_face = None;
+                        self.highlighted_face = None;
+                        if self.uv_window_face_idx.is_some() {
+                            self.uv_window_face_idx = None;
+                            self.uv_window_prev_face_idx = None;
+                            self.solid_uv_breakdown = None;
+                        }
                     }
                 }
             }
@@ -9461,6 +9523,10 @@ impl ViewerApp {
             let mut pending_instance_isolate: Option<usize> = None;
             let mut pending_face_visibility_toggle: Option<(usize, u64)> = None;
             let mut pending_face_isolate: Option<(usize, u64)> = None;
+            // Subtree-level actions for mobile
+            let mut pending_subtree_hide: Option<Vec<usize>> = None;
+            let mut pending_subtree_show: Option<Vec<usize>> = None;
+            let mut pending_subtree_isolate: Option<Vec<usize>> = None;
 
             let assembly_tree_clone = self.assembly_tree.clone();
             let detailed_instances_clone = self.detailed_instances.clone();
@@ -9509,7 +9575,7 @@ impl ViewerApp {
                         ui.heading(egui::RichText::new("Tree").size(13.0));
                         egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
                             if let Some(ref tree) = assembly_tree_clone {
-                                draw_assembly_node_static(ui, tree, selected_instance, &hidden_instances, &mut pending_instance_select, &mut pending_visibility_toggle, &mut pending_instance_isolate, &open_tree_nodes, &scroll_to_tree_node);
+                                draw_assembly_node_static(ui, tree, selected_instance, &hidden_instances, &mut pending_instance_select, &mut pending_visibility_toggle, &mut pending_instance_isolate, &mut pending_subtree_hide, &mut pending_subtree_show, &mut pending_subtree_isolate, &open_tree_nodes, &scroll_to_tree_node);
                             } else if !detailed_instances_clone.is_empty() {
                                 for (i, inst) in detailed_instances_clone.iter().enumerate() {
                                     let is_selected = selected_instance == Some(i);
@@ -9759,6 +9825,58 @@ impl ViewerApp {
                                 self.hidden_faces.insert((inst_idx, f.face_id));
                             } else {
                                 self.hidden_faces.remove(&(inst_idx, f.face_id));
+                            }
+                        }
+                    }
+                }
+                self.highlight_dirty = true;
+                self.edge_dirty = true;
+                self.wireframe_overlay_dirty = true;
+            }
+            // ─── Mobile: Subtree-level hide/show/isolate ──────────────
+            if let Some(indices) = pending_subtree_hide {
+                for idx in &indices {
+                    self.hidden_instances.insert(*idx);
+                }
+                self.log(&format!("Subtree hidden: {} instance(s)", indices.len()));
+                self.highlight_dirty = true;
+                self.edge_dirty = true;
+                self.wireframe_overlay_dirty = true;
+            }
+            if let Some(indices) = pending_subtree_show {
+                for idx in &indices {
+                    self.hidden_instances.remove(idx);
+                }
+                self.log(&format!("Subtree shown: {} instance(s)", indices.len()));
+                self.highlight_dirty = true;
+                self.edge_dirty = true;
+                self.wireframe_overlay_dirty = true;
+            }
+            if let Some(indices) = pending_subtree_isolate {
+                let total_instances = self.instance_triangle_ranges.len();
+                let visible_count = total_instances.saturating_sub(self.hidden_instances.len());
+                let all_others_hidden = indices.iter().all(|idx| !self.hidden_instances.contains(idx))
+                    && self.hidden_instances.len() == total_instances - indices.len();
+                if all_others_hidden && visible_count == indices.len() {
+                    self.hidden_instances.clear();
+                    self.log(&format!("Restored all instances (was isolated to subtree of {})", indices.len()));
+                } else {
+                    self.hidden_instances.clear();
+                    for i in 0..total_instances {
+                        if !indices.contains(&i) {
+                            self.hidden_instances.insert(i);
+                        }
+                    }
+                    self.log(&format!("Isolated subtree: {} instance(s) visible", indices.len()));
+                    if let Some(&first_idx) = indices.first() {
+                        if self.selected_instance != Some(first_idx) {
+                            self.selected_instance = Some(first_idx);
+                            self.selected_face = None;
+                            self.highlighted_face = None;
+                            if self.uv_window_face_idx.is_some() {
+                                self.uv_window_face_idx = None;
+                                self.uv_window_prev_face_idx = None;
+                                self.solid_uv_breakdown = None;
                             }
                         }
                     }
@@ -10596,6 +10714,11 @@ fn generate_solid_face_uv_svg(
 }
 
 /// Draw an assembly tree node recursively (static function to avoid borrow conflicts).
+///
+/// Internal nodes (subassemblies) now show:
+/// - Folder icon + child count in label
+/// - Eye icon to show/hide the entire subtree
+/// - Isolate button to show only this subtree's instances
 fn draw_assembly_node_static(
     ui: &mut egui::Ui,
     node: &AssemblyNode,
@@ -10604,6 +10727,9 @@ fn draw_assembly_node_static(
     pending_instance_select: &mut Option<usize>,
     pending_visibility_toggle: &mut Option<usize>,
     pending_instance_isolate: &mut Option<usize>,
+    pending_subtree_hide: &mut Option<Vec<usize>>,
+    pending_subtree_show: &mut Option<Vec<usize>>,
+    pending_subtree_isolate: &mut Option<Vec<usize>>,
     open_tree_nodes: &std::collections::HashSet<String>,
     scroll_to_tree_node: &Option<String>,
 ) {
@@ -10618,13 +10744,20 @@ fn draw_assembly_node_static(
         Some(idx) => format!(" [{}]", idx),
         None => String::new(),
     };
-    let label = format!("{}{}{}", node.name, brep_str, inst_str);
 
     // Use instance_index for selection (exact mapping to instance)
     // usize::MAX sentinel means "failed triangulation" — not selectable
     let is_selected = node.instance_index.map_or(false, |idx| idx != usize::MAX && selected_instance == Some(idx));
 
     if has_children {
+        // ─── Internal node (subassembly) ─────────────────────────────────
+        // Collect all descendant instance indices for subtree operations
+        let subtree_indices = collect_subtree_instance_indices(node);
+        let subtree_count = subtree_indices.len();
+        // Count how many subtree instances are currently visible
+        let visible_subtree_count = subtree_indices.iter().filter(|idx| !hidden_instances.contains(idx)).count();
+        let all_subtree_hidden = !subtree_indices.is_empty() && visible_subtree_count == 0;
+
         let should_be_open = open_tree_nodes.contains(&key);
         // Use CollapsingState to programmatically force open/close
         let id = egui::Id::new(format!("tree_{}_{}", node.name, node.pd_id));
@@ -10644,14 +10777,54 @@ fn draw_assembly_node_static(
             }
         }
         state.show_header(ui, |ui| {
-            ui.label(egui::RichText::new(&label).size(11.0));
+            ui.horizontal(|ui| {
+                // ─── Subtree visibility toggle (eye icon) ─────────────
+                if !subtree_indices.is_empty() {
+                    let eye_color = if all_subtree_hidden {
+                        egui::Color32::from_rgb(180, 80, 80)
+                    } else if visible_subtree_count < subtree_count {
+                        // Partially visible — amber color
+                        egui::Color32::from_rgb(200, 160, 40)
+                    } else {
+                        egui::Color32::from_rgb(80, 180, 80)
+                    };
+                    let eye_text = if all_subtree_hidden { "  " } else { "👁" };
+                    if ui.add(egui::Label::new(egui::RichText::new(eye_text).size(11.0).color(eye_color)).sense(egui::Sense::click())).clicked() {
+                        if all_subtree_hidden {
+                            *pending_subtree_show = Some(subtree_indices.clone());
+                        } else {
+                            *pending_subtree_hide = Some(subtree_indices.clone());
+                        }
+                    }
+                }
+                // ─── Subtree isolate button ───────────────────────────
+                if subtree_count > 0 {
+                    let isolate_btn = egui::Button::new(
+                        egui::RichText::new("◎").size(11.0)
+                    ).frame(false);
+                    if ui.add(isolate_btn).on_hover_text(
+                        "Isolate subtree: hide all other instances (click again to restore)"
+                    ).clicked() {
+                        *pending_subtree_isolate = Some(subtree_indices.clone());
+                    }
+                }
+                // ─── Label with folder icon and child count ───────────
+                let count_str = if subtree_count > 0 {
+                    format!(" ({} part{})", subtree_count, if subtree_count != 1 { "s" } else { "" })
+                } else {
+                    String::new()
+                };
+                let label = format!("[+] {}{}{}{}", node.name, brep_str, inst_str, count_str);
+                ui.label(egui::RichText::new(&label).size(11.0));
+            });
         }).body(|ui| {
             for child in &node.children {
-                draw_assembly_node_static(ui, child, selected_instance, hidden_instances, pending_instance_select, pending_visibility_toggle, pending_instance_isolate, open_tree_nodes, scroll_to_tree_node);
+                draw_assembly_node_static(ui, child, selected_instance, hidden_instances, pending_instance_select, pending_visibility_toggle, pending_instance_isolate, pending_subtree_hide, pending_subtree_show, pending_subtree_isolate, open_tree_nodes, scroll_to_tree_node);
             }
         });
     } else {
-        // Leaf node: draw visibility checkbox + isolate button + selectable label
+        // ─── Leaf node: draw visibility checkbox + isolate button + selectable label ───
+        let label = format!("{}{}{}", node.name, brep_str, inst_str);
         ui.horizontal(|ui| {
             // Visibility checkbox (eye icon equivalent)
             // usize::MAX sentinel = failed instance, not selectable
@@ -10714,6 +10887,26 @@ fn has_descendant_with_key(node: &AssemblyNode, target_key: &str) -> bool {
         }
     }
     false
+}
+
+/// Collect all valid instance indices from the subtree rooted at `node`.
+/// Only leaf nodes with a valid (non-MAX) instance_index are included.
+/// Used for subtree-level visibility/isolate operations on subassembly nodes.
+fn collect_subtree_instance_indices(node: &AssemblyNode) -> Vec<usize> {
+    let mut result = Vec::new();
+    collect_subtree_instance_indices_recursive(node, &mut result);
+    result
+}
+
+fn collect_subtree_instance_indices_recursive(node: &AssemblyNode, out: &mut Vec<usize>) {
+    if let Some(idx) = node.instance_index {
+        if idx != usize::MAX {
+            out.push(idx);
+        }
+    }
+    for child in &node.children {
+        collect_subtree_instance_indices_recursive(child, out);
+    }
 }
 
 impl ViewerApp {
