@@ -514,6 +514,10 @@ function __wbg_get_imports() {
         __wbg_debug_78b457f1effb3792: function(arg0) {
             console.debug(arg0);
         },
+        __wbg_defaultView_d062822747467313: function(arg0) {
+            const ret = arg0.defaultView;
+            return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
+        },
         __wbg_deleteBuffer_520156dc8a1f81af: function(arg0, arg1) {
             arg0.deleteBuffer(arg1);
         },
@@ -1490,6 +1494,10 @@ function __wbg_get_imports() {
         },
         __wbg_new_from_slice_18fa1f71286d66b8: function(arg0, arg1) {
             const ret = new Uint8Array(getArrayU8FromWasm0(arg0, arg1));
+            return ret;
+        },
+        __wbg_new_no_args_67747f9e48367a42: function(arg0, arg1) {
+            const ret = new Function(getStringFromWasm0(arg0, arg1));
             return ret;
         },
         __wbg_new_with_byte_offset_and_length_d836f26d916dd9ad: function(arg0, arg1, arg2) {
