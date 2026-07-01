@@ -1,10 +1,12 @@
-//! Dump the actual UVs passed to earcutr for face #803.
-//! This calls the same code path as triangulation to get the paired 3D/UV arrays.
+//! Dump the UV coordinates and triangulation for a specific face of a STEP file.
+//!
+//! Usage: torus_earcutr_dump [path] [face_index]
+//!
+//! This tool loads a STEP file, triangulates it, and prints detailed
+//! boundary/triangulation information for a specific face — useful for
+//! debugging artifacts like "bridge" triangles on periodic surfaces.
 
 use draper_step::{parse_step, step_structure_lazy, StepConversionContext};
-use draper_mesh::triangulate::{collect_face_boundary_with_uv_from_cache, EdgeDiscretizationCache};
-use draper_mesh::triangulate::TriangulationParams;
-use draper_geometry::Surface;
 
 fn main() {
     env_logger::builder()
@@ -21,7 +23,8 @@ fn main() {
     let (_tree, pending) = step_structure_lazy(&step);
 
     let p = &pending[0];
-    // Build solid and edge cache the same way triangulation does
+
+    // Use the public API from StepConversionContext
     let ctx = StepConversionContext::new(&step);
     let inst = match ctx.triangulate_pending(p) {
         Some(i) => i,
@@ -29,7 +32,7 @@ fn main() {
     };
 
     if face_idx < 1 || face_idx > inst.faces.len() {
-        eprintln!("Face index {} out of range", face_idx);
+        eprintln!("Face index {} out of range (1..{})", face_idx, inst.faces.len());
         return;
     }
 
@@ -37,70 +40,101 @@ fn main() {
     println!("Face {} (STEP #{}, surf={}), forward={}",
         face_idx, face.step_face_id, face.surface_type, face.forward);
 
-    // We need to rebuild the solid+cache to call collect_face_boundary_with_uv_from_cache
-    // Use the public API from draper_mesh
-    let solid = draper_step::converter::face_data_list_to_solid(&p.faces);
-    let mut cache = EdgeDiscretizationCache::new();
-    cache.pre_populate_for_solid(&solid, 21);
-
-    // Get the face from solid (it should match face_idx - 1)
-    let solid_faces = solid.faces();
-    if face_idx - 1 >= solid_faces.len() {
-        eprintln!("Solid face index out of range");
-        return;
-    }
-    let solid_face = &solid_faces[face_idx - 1];
-
-    let surface = face.surface.clone();
-    let (boundary_3d, boundary_uvs) = collect_face_boundary_with_uv_from_cache(
-        solid_face, &cache, &surface);
-
-    println!("\nBoundary: {} points", boundary_3d.len());
-    println!("\nAll UVs:");
-    for (i, uv) in boundary_uvs.iter().enumerate() {
-        let p3d = boundary_3d[i];
-        // Mark corners and transitions
-        let mark = if i > 0 {
-            let prev = boundary_uvs[i-1];
-            let du = (uv.u - prev.u).abs();
-            let dv = (uv.v - prev.v).abs();
-            if du > 0.1 || dv > 0.1 { " <<JUMP>>" } else { "" }
-        } else { "" };
-        if i < 10 || i > boundary_uvs.len() - 10 || i % 10 == 0 || !mark.is_empty() {
-            println!("  [{}]: uv=({:.4},{:.4}) 3d=({:.4},{:.4},{:.4}){}",
-                i, uv.u, uv.v, p3d.x, p3d.y, p3d.z, mark);
+    // Print surface details
+    match &face.surface {
+        draper_geometry::Surface::Torus(t) => {
+            println!("  Torus: major_radius={:.4}, minor_radius={:.4}", t.major_radius, t.minor_radius);
+        }
+        draper_geometry::Surface::Cylinder(c) => {
+            println!("  Cylinder: radius={:.4}", c.radius);
+        }
+        draper_geometry::Surface::Sphere(s) => {
+            println!("  Sphere: radius={:.4}", s.radius);
+        }
+        draper_geometry::Surface::Cone(c) => {
+            println!("  Cone: radius={:.4}, half_angle={:.4}", c.radius, c.half_angle);
+        }
+        draper_geometry::Surface::Plane(_) => {
+            println!("  Plane");
+        }
+        draper_geometry::Surface::Revolution(r) => {
+            println!("  Revolution (axis-based)");
+            let _ = r;
+        }
+        draper_geometry::Surface::Extrusion(e) => {
+            println!("  Extrusion");
+            let _ = e;
+        }
+        draper_geometry::Surface::Nurbs(n) => {
+            println!("  NURBS: u_degree={}, v_degree={}", n.u_degree, n.v_degree);
         }
     }
 
-    // Run earcutr directly to see what triangles it produces
-    use earcutr;
-    let mut flat_uvs: Vec<f64> = Vec::with_capacity(boundary_uvs.len() * 2);
-    for uv in &boundary_uvs {
-        flat_uvs.push(uv.u);
-        flat_uvs.push(uv.v);
+    // Print boundary info
+    println!("\nOuter boundary: {} polylines", face.outer_boundary.len());
+    for (i, polyline) in face.outer_boundary.iter().enumerate() {
+        println!("  polyline {}: {} points", i, polyline.len());
     }
-    let hole_indices: Vec<u32> = vec![];
-    let tris = earcutr::earcut(&flat_uvs, &hole_indices, 2);
-    println!("\nearcutr produced {} triangles (= {} indices)",
-        tris.len() / 3, tris.len());
+    println!("Inner boundaries (holes): {}", face.inner_boundaries.len());
+    for (i, hole) in face.inner_boundaries.iter().enumerate() {
+        println!("  hole {}: {} polylines", i, hole.len());
+    }
 
-    // Check for "bridge" triangles — those with vertices far apart in index
-    let mut bridge_count = 0;
-    for (ti, chunk) in tris.chunks(3).enumerate() {
-        let i0 = chunk[0] as usize;
-        let i1 = chunk[1] as usize;
-        let i2 = chunk[2] as usize;
-        let idx_span = (i0 as i32 - i1 as i32).abs().max((i1 as i32 - i2 as i32).abs()).max((i0 as i32 - i2 as i32).abs());
+    // Print UV boundary info
+    println!("\nOuter UV boundary: {} polylines", face.outer_uv_boundary.len());
+    for (i, polyline) in face.outer_uv_boundary.iter().enumerate() {
+        if !polyline.is_empty() {
+            let u_range = polyline.iter().map(|p| p.u)
+                .fold((f64::MAX, f64::MIN), |(min, max), u| (min.min(u), max.max(u)));
+            let v_range = polyline.iter().map(|p| p.v)
+                .fold((f64::MAX, f64::MIN), |(min, max), v| (min.min(v), max.max(v)));
+            println!("  uv_polyline {}: {} points, u=[{:.4},{:.4}], v=[{:.4},{:.4}]",
+                i, polyline.len(), u_range.0, u_range.1, v_range.0, v_range.1);
+        }
+    }
+
+    // Print triangle range and check for bridge triangles
+    let (tri_start, tri_end) = face.triangle_range;
+    let mesh = &inst.mesh;
+    let num_face_tris = tri_end.saturating_sub(tri_start);
+    println!("\nFace {} triangles: range [{}, {}) = {} triangles",
+        face_idx, tri_start, tri_end, num_face_tris);
+    println!("Mesh total: {} vertices, {} triangles",
+        mesh.vertices.len(), mesh.triangles.len());
+
+    // Check for bridge triangles (large index span between vertices)
+    let mut bridge_count = 0usize;
+    for ti in tri_start..tri_end {
+        if ti >= mesh.triangles.len() {
+            break;
+        }
+        let [i0, i1, i2] = mesh.triangles[ti];
+        let idx_span = (i0 as i32 - i1 as i32).abs()
+            .max((i1 as i32 - i2 as i32).abs())
+            .max((i0 as i32 - i2 as i32).abs());
+
         if idx_span > 20 {
             if bridge_count < 10 {
-                let u0 = boundary_uvs[i0];
-                let u1 = boundary_uvs[i1];
-                let u2 = boundary_uvs[i2];
-                println!("  BRIDGE t{}: idx=({},{},{}) span={} uv=({:.3},{:.3})({:.3},{:.3})({:.3},{:.3})",
-                    ti, i0, i1, i2, idx_span, u0.u, u0.v, u1.u, u1.v, u2.u, u2.v);
+                let _v0 = &mesh.vertices[i0 as usize];
+                let _v1 = &mesh.vertices[i1 as usize];
+                let _v2 = &mesh.vertices[i2 as usize];
+                println!("  BRIDGE t{}: idx=({},{},{}) span={}",
+                    ti, i0, i1, i2, idx_span);
             }
             bridge_count += 1;
         }
     }
-    println!("\nTotal bridge triangles: {} (out of {})", bridge_count, tris.len() / 3);
+    println!("\nTotal bridge triangles: {} (out of {})", bridge_count, num_face_tris);
+
+    // Print UV triangles
+    if !face.uv_triangles.is_empty() {
+        println!("\nUV triangles: {}", face.uv_triangles.len());
+        for (i, tri) in face.uv_triangles.iter().enumerate().take(20) {
+            println!("  uv_tri[{}]: ({:.4},{:.4}) ({:.4},{:.4}) ({:.4},{:.4})",
+                i, tri[0].u, tri[0].v, tri[1].u, tri[1].v, tri[2].u, tri[2].v);
+        }
+        if face.uv_triangles.len() > 20 {
+            println!("  ... and {} more", face.uv_triangles.len() - 20);
+        }
+    }
 }
