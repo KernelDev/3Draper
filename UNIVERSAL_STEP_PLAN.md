@@ -458,11 +458,11 @@
 
 **Задачи:**
 
-- [ ] 5.3.1 Создать `crates/draper-testing/tests/complex_files.rs` с тестами для каждого "тяжёлого" файла (drill_top, Vulcan, transmission, 8394-121_Spit-Fire, Zentralstaender).
-- [ ] 5.3.2 Каждый тест помечен `#[ignore]` по умолчанию (быстрый CI). Запускаются через `cargo test -- --ignored` (nightly или manual).
-- [ ] 5.3.3 Каждый тест проверяет: (a) load без panic; (b) triangle_count > 0 для каждого instance; (c) boundary edge % < 5%; (d) elapsed time < 60s desktop.
-- [ ] 5.3.4 CI workflow (`.github/workflows/ci.yml`) — nightly job с `--ignored` tests. Результаты в GitHub Actions artifacts.
-- [ ] 5.3.5 Benchmark regression: сравнить triangle_count и elapsed_time с `benchmark_baseline.csv`. Если regression > 20% — fail.
+- [x] 5.3.1 Создать `crates/draper-testing/tests/complex_files.rs` с тестами для каждого "тяжёлого" файла (drill_top, Vulcan, transmission, 8394-121_Spit-Fire, Zentralstaender). **Реализовано:** 8 индивидуальных тестов (drill_top, Vulcan, transmission, Spit-Fire, Zentralstaender, as1-oc-214, compressor, 3.05.078) + сводный test_all_complex_files_summary.
+- [x] 5.3.2 Каждый тест помечен `#[ignore]` по умолчанию (быстрый CI). Запускаются через `cargo test -- --ignored` (nightly или manual). **Реализовано:** все 9 тяжёлых тестов помечены `#[ignore]`, 1 non-ignored инфраструктурный тест.
+- [x] 5.3.3 Каждый тест проверяет: (a) load без panic; (b) triangle_count > 0 для каждого instance; (c) boundary edge % < 5%; (d) elapsed time < 60s desktop. **Реализовано:** assert_complex_file_checks() проверяет все 4 условия. Константы MAX_BOUNDARY_EDGE_PCT=5%, MAX_ELAPSED_SECS=60s.
+- [x] 5.3.4 CI workflow (`.github/workflows/nightly-tests.yml`) — nightly job с `--ignored` tests. Результаты в GitHub Actions artifacts. **Реализовано:** cron '0 3 * * *' (03:00 UTC), 30-min timeout, upload benchmark_baseline.csv as artifact.
+- [x] 5.3.5 Benchmark regression: сравнить triangle_count и elapsed_time с `benchmark_baseline.csv`. Если regression > 20% — fail. **Реализовано:** read_baseline() парсит CSV, check_regression() сравнивает текущие результаты с baseline, panic при отклонении > 20%.
 
 **Критерий приёмки:** Nightly CI ловит регрессии на сложных файлах до того, как они попадают к пользователю.
 

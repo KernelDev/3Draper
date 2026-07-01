@@ -1,0 +1,53 @@
+name: Nightly Complex File Tests
+
+on:
+  schedule:
+    # Run every night at 03:00 UTC
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  complex-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+
+      - name: Build draper-testing
+        run: cargo build -p draper-testing --tests --exclude draper-diag
+
+      - name: Run complex file tests (ignored)
+        run: cargo test -p draper-testing --test complex_files -- --ignored --nocapture
+        timeout-minutes: 20
+
+      - name: Run standard tests
+        run: cargo test -p draper-testing --test complex_files --exclude draper-diag
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: complex-test-results
+          path: |
+            benchmark_baseline.csv
+          retention-days: 30
