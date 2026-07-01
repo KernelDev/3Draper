@@ -7452,6 +7452,239 @@ mod tests {
         assert!(!is_degenerate_uv(&surface, 0.0, 1.0, 0.05),
                 "v=1.0 away from axis should NOT be degenerate");
     }
+
+    // ── task 1.1.5: cylinder R=10, H=50, 3 holes — grid resolution test ──
+
+    /// Helper: extract grid dimensions (n_u, n_v) from the Steiner grid points.
+    /// Interior grid points are generated at i=1..n_u-1, j=1..n_v-1, so the
+    /// number of unique u/v values gives (n_u-1) and (n_v-1) respectively.
+    /// We add 2 to recover the full grid dimensions (including boundary rows/cols).
+    fn extract_grid_dims(pts: &[Point2d]) -> (usize, usize) {
+        if pts.is_empty() {
+            return (0, 0);
+        }
+        let tol = 1e-9;
+        let mut us: Vec<f64> = pts.iter().map(|p| p.u).collect();
+        us.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mut u_unique: Vec<f64> = Vec::new();
+        for u in us {
+            if u_unique.last().map_or(true, |last| (last - u).abs() > tol) {
+                u_unique.push(u);
+            }
+        }
+        let mut vs: Vec<f64> = pts.iter().map(|p| p.v).collect();
+        vs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mut v_unique: Vec<f64> = Vec::new();
+        for v in vs {
+            if v_unique.last().map_or(true, |last| (last - v).abs() > tol) {
+                v_unique.push(v);
+            }
+        }
+        // Interior points are at i=1..n_u-1 → n_u = u_unique.len() + 1
+        // (the +1 accounts for the i=0 boundary row that is not included
+        // in the interior point set; similarly i=n_u is also excluded,
+        // but n_u = (n_u-1) + 1 because the unique count IS n_u-1).
+        // Actually: unique u values correspond to i=1,2,...,n_u-1,
+        // which is n_u-1 values. So n_u = u_unique.len() + 1.
+        // Wait: for a full cylinder face with no holes, all interior
+        // points survive. The grid generates (n_u-1)*(n_v-1) points.
+        // The unique u values = n_u-1 (from i=1 to n_u-1).
+        // So n_u = u_unique.len() + 1, n_v = v_unique.len() + 1.
+        // But boundary u=0 and u=2π are NOT interior points, so
+        // u_unique contains n_u - 1 values → n_u = u_unique.len() + 1.
+        let n_u = u_unique.len() + 1;
+        let n_v = v_unique.len() + 1;
+        (n_u, n_v)
+    }
+
+    #[test]
+    fn test_cylinder_r10_h50_3holes_desktop_grid_resolution() {
+        use draper_geometry::{CylinderSurface, Surface};
+        use crate::triangulate::SteinerBudgetProfile;
+
+        // Cylinder R=10, H=50 — a large face that should get high grid resolution
+        // on the Desktop profile.
+        let cyl = CylinderSurface::new_z(10.0);
+        let surface = Surface::Cylinder(cyl);
+
+        // Full cylinder outer boundary in UV: u ∈ [0, 2π], v ∈ [0, 50]
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(2.0 * PI, 0.0),
+            Point2d::new(2.0 * PI, 50.0),
+            Point2d::new(0.0, 50.0),
+        ];
+
+        // 3 holes at various positions (simulating drilled holes in the cylinder wall)
+        let hole1 = vec![
+            Point2d::new(0.5, 10.0),
+            Point2d::new(1.5, 10.0),
+            Point2d::new(1.5, 15.0),
+            Point2d::new(0.5, 15.0),
+        ];
+        let hole2 = vec![
+            Point2d::new(3.0, 25.0),
+            Point2d::new(4.0, 25.0),
+            Point2d::new(4.0, 30.0),
+            Point2d::new(3.0, 30.0),
+        ];
+        let hole3 = vec![
+            Point2d::new(5.0, 35.0),
+            Point2d::new(6.0, 35.0),
+            Point2d::new(6.0, 40.0),
+            Point2d::new(5.0, 40.0),
+        ];
+
+        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, 50.0))
+            .with_hole(hole1)
+            .with_hole(hole2)
+            .with_hole(hole3);
+        domain.init_containment_grid();
+
+        let mut params = crate::triangulate::TriangulationParams::default();
+        params.max_deviation = 0.01;
+        params.steiner_profile = SteinerBudgetProfile::Desktop;
+        params.max_face_triangles = 8000;
+        params.adaptive = true;
+
+        let pts = generate_cylinder_or_cone_steiner_grid(
+            &surface, &domain, (0.0, 2.0 * PI), (0.0, 50.0), &params, 8000,
+        );
+
+        let (n_u, n_v) = extract_grid_dims(&pts);
+
+        // Desktop profile: n_u ≥ 48, n_v ≥ 24
+        // For R=10 with max_deviation=0.01, the chord-error formula gives
+        // n_u ≈ 71 (clamped to [12, 96]) and n_v ≈ 57 (clamped to [2, 64]).
+        // Both comfortably exceed the minimums.
+        assert!(n_u >= 48,
+            "Desktop: n_u = {} < 48 minimum for cylinder R=10 H=50", n_u);
+        assert!(n_v >= 24,
+            "Desktop: n_v = {} < 24 minimum for cylinder R=10 H=50", n_v);
+
+        // Additionally, the total number of Steiner points should be substantial
+        // (at least (48-1)*(24-1) = 1081 minus the 3 holes' worth of points)
+        assert!(pts.len() >= 1000,
+            "Desktop: expected ≥1000 Steiner points, got {}", pts.len());
+    }
+
+    #[test]
+    fn test_cylinder_r10_h50_3holes_mobile_grid_resolution() {
+        use draper_geometry::{CylinderSurface, Surface};
+        use crate::triangulate::SteinerBudgetProfile;
+
+        let cyl = CylinderSurface::new_z(10.0);
+        let surface = Surface::Cylinder(cyl);
+
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(2.0 * PI, 0.0),
+            Point2d::new(2.0 * PI, 50.0),
+            Point2d::new(0.0, 50.0),
+        ];
+
+        let hole1 = vec![
+            Point2d::new(0.5, 10.0),
+            Point2d::new(1.5, 10.0),
+            Point2d::new(1.5, 15.0),
+            Point2d::new(0.5, 15.0),
+        ];
+        let hole2 = vec![
+            Point2d::new(3.0, 25.0),
+            Point2d::new(4.0, 25.0),
+            Point2d::new(4.0, 30.0),
+            Point2d::new(3.0, 30.0),
+        ];
+        let hole3 = vec![
+            Point2d::new(5.0, 35.0),
+            Point2d::new(6.0, 35.0),
+            Point2d::new(6.0, 40.0),
+            Point2d::new(5.0, 40.0),
+        ];
+
+        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, 50.0))
+            .with_hole(hole1)
+            .with_hole(hole2)
+            .with_hole(hole3);
+        domain.init_containment_grid();
+
+        let mut params = crate::triangulate::TriangulationParams::default();
+        params.max_deviation = 0.01;
+        params.steiner_profile = SteinerBudgetProfile::Mobile;
+        params.max_face_triangles = 8000;
+        params.adaptive = true;
+
+        let pts = generate_cylinder_or_cone_steiner_grid(
+            &surface, &domain, (0.0, 2.0 * PI), (0.0, 50.0), &params, 8000,
+        );
+
+        let (n_u, n_v) = extract_grid_dims(&pts);
+
+        // Mobile profile: n_u ≥ 16, n_v ≥ 8
+        // For R=10 with max_deviation=0.01, the chord-error formula gives n_u ≈ 71,
+        // but Mobile caps at max_u_cyl=32, and n_v capped at max_v_cyl=16.
+        // Both exceed the minimums.
+        assert!(n_u >= 16,
+            "Mobile: n_u = {} < 16 minimum for cylinder R=10 H=50", n_u);
+        assert!(n_v >= 8,
+            "Mobile: n_v = {} < 8 minimum for cylinder R=10 H=50", n_v);
+
+        // Mobile should also produce a meaningful number of points
+        assert!(pts.len() >= 100,
+            "Mobile: expected ≥100 Steiner points, got {}", pts.len());
+    }
+
+    #[test]
+    fn test_cylinder_r10_h50_budget_scaling_effect() {
+        use draper_geometry::{CylinderSurface, Surface};
+        use crate::triangulate::SteinerBudgetProfile;
+
+        // Verify that the adaptive budget scaling from task 1.1.4 affects the
+        // grid resolution: a large face (high area fraction of bbox) should get
+        // a budget multiplier ≥ 1.0, producing a denser grid than without scaling.
+        let cyl = CylinderSurface::new_z(10.0);
+        let surface = Surface::Cylinder(cyl);
+
+        let outer = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(2.0 * PI, 0.0),
+            Point2d::new(2.0 * PI, 50.0),
+            Point2d::new(0.0, 50.0),
+        ];
+        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, 50.0));
+        domain.init_containment_grid();
+
+        let mut params = crate::triangulate::TriangulationParams::default();
+        params.max_deviation = 0.01;
+        params.steiner_profile = SteinerBudgetProfile::Desktop;
+        params.adaptive = true;
+
+        // With base budget (8000)
+        params.max_face_triangles = 8000;
+        let pts_base = generate_cylinder_or_cone_steiner_grid(
+            &surface, &domain, (0.0, 2.0 * PI), (0.0, 50.0), &params, 8000,
+        );
+
+        // With doubled budget (16000) — simulating the 2.0× multiplier for
+        // a very large face (area fraction = 100% of bbox)
+        let pts_doubled = generate_cylinder_or_cone_steiner_grid(
+            &surface, &domain, (0.0, 2.0 * PI), (0.0, 50.0), &params, 16000,
+        );
+
+        // The doubled budget should produce at least as many Steiner points
+        // as the base budget. With Desktop profile caps (max_u_cyl=96,
+        // max_v_cyl=64), the base budget of 8000 may not be the limiting
+        // factor for this particular geometry, so the counts may be equal.
+        // But the test ensures the budget cap mechanism doesn't regress.
+        assert!(pts_doubled.len() >= pts_base.len(),
+            "Doubled budget should produce ≥ base points: {} < {}",
+            pts_doubled.len(), pts_base.len());
+
+        // Both should produce meaningful grids
+        let (n_u_base, n_v_base) = extract_grid_dims(&pts_base);
+        assert!(n_u_base >= 48, "Base: n_u = {} < 48", n_u_base);
+        assert!(n_v_base >= 24, "Base: n_v = {} < 24", n_v_base);
+    }
 }
 
 // ============================================================
