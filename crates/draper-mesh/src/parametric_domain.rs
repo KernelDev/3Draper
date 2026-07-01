@@ -2007,7 +2007,7 @@ pub(crate) fn is_degenerate_uv(surface: &Surface, u: f64, v: f64, tol: f64) -> b
     // the expensive numerical derivative computation in is_degenerate_at().
 
     match surface {
-        Surface::Sphere(sphere) => {
+        Surface::Sphere(_) => {
             // Sphere poles: v ≈ 0 or v ≈ π.
             // At the poles, all u values produce the same 3D point.
             // Use the same POLE_EPS as generate_sphere_steiner_grid (0.05).

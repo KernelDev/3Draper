@@ -23,15 +23,11 @@ fn main() {
         let mut total_verts = 0usize;
         let mut total_tris = 0usize;
         let mut ok_count = 0usize;
-        let mut fail_count = 0usize;
         for p in &pending {
-            match ctx.triangulate_pending(p) {
-                Some(inst) => {
-                    total_verts += inst.mesh.vertex_count();
-                    total_tris += inst.mesh.triangle_count();
-                    ok_count += 1;
-                }
-                None => fail_count += 1,
+            if let Some(inst) = ctx.triangulate_pending(p) {
+                total_verts += inst.mesh.vertex_count();
+                total_tris += inst.mesh.triangle_count();
+                ok_count += 1;
             }
         }
         println!(

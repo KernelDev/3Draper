@@ -2,7 +2,6 @@
 //! Usage: face_triangulation_dump <file.stp> <face_index_1based>
 
 use draper_step::{parse_step, step_structure_lazy, StepConversionContext};
-use draper_geometry::{Point3d, Point2d};
 
 fn main() {
     let path = std::env::args().nth(1).unwrap_or("test/drill_top.stp".to_string());

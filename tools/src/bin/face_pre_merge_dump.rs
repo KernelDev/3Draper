@@ -2,7 +2,6 @@
 //! Usage: face_pre_merge_dump <file.stp> <step_face_id>
 
 use draper_step::{parse_step, step_structure_lazy, StepConversionContext};
-use draper_step::converter::StepConversionContext as Ctx;
 
 fn main() {
     let path = std::env::args().nth(1).unwrap_or("test/drill_top.stp".to_string());

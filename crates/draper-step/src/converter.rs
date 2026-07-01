@@ -4836,7 +4836,7 @@ impl<'a> StepConverter<'a> {
             }
             let mut alias_count = 0usize;
             let mut skipped_different_curves = 0usize;
-            for (vp, step_ids) in &vertex_pair_to_step_ids {
+            for (_vp, step_ids) in &vertex_pair_to_step_ids {
                 if step_ids.len() < 2 { continue; }
                 let shape_tol = (tol_ctx.model_scale * 1e-3).max(1e-6);
                 let shape_groups = self.group_step_ids_by_curve_shape(step_ids, shape_tol);
