@@ -1,4 +1,4 @@
-/* @ts-self-types="./draper_worker.d.ts" */
+/* @ts-self-types="./draper_wasm.d.ts" */
 
 /**
  * Triangulated mesh data returned to JS — flat arrays suitable for
@@ -397,7 +397,7 @@ function __wbg_get_imports() {
     };
     return {
         __proto__: null,
-        "./draper_worker_bg.js": import0,
+        "./draper_wasm_bg.js": import0,
     };
 }
 
@@ -617,7 +617,7 @@ async function __wbg_init(module_or_path) {
     }
 
     if (module_or_path === undefined) {
-        module_or_path = new URL('draper_worker_bg.wasm', import.meta.url);
+        module_or_path = new URL('draper_wasm_bg.wasm', import.meta.url);
     }
     const imports = __wbg_get_imports();
 
