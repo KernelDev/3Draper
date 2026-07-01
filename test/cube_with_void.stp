@@ -1,0 +1,231 @@
+ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('3Draper test: BREP_WITH_VOIDS — cube with cylindrical void'),'2;1');
+FILE_NAME('cube_with_void.stp','2026-07-02T00:00:00',('3Draper'),(''),
+  '3Draper Test Suite','','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));
+ENDSEC;
+DATA;
+
+/* ========================================================================== */
+/* Cube (0,0,0)-(10,10,10) with cylindrical void (R=2, axis Z at (5,5,0)-(5,5,10)) */
+/*                                                                            */
+/* This tests BREP_WITH_VOIDS support:                                        */
+/*   - Outer shell: 6 planar faces (cube)                                     */
+/*   - Void shell: 1 cylindrical face + 2 planar caps (inner cylinder)        */
+/*   - Expected: 6 outer faces + 3 void faces = 9 faces total                */
+/* ========================================================================== */
+
+/* ---------- Coordinate system primitives ---------- */
+#1 = CARTESIAN_POINT('',(0.0,0.0,0.0));
+#2 = CARTESIAN_POINT('',(10.0,0.0,0.0));
+#3 = CARTESIAN_POINT('',(10.0,10.0,0.0));
+#4 = CARTESIAN_POINT('',(0.0,10.0,0.0));
+#5 = CARTESIAN_POINT('',(0.0,0.0,10.0));
+#6 = CARTESIAN_POINT('',(10.0,0.0,10.0));
+#7 = CARTESIAN_POINT('',(10.0,10.0,10.0));
+#8 = CARTESIAN_POINT('',(0.0,10.0,10.0));
+
+/* Cylinder center and axis points */
+#9 = CARTESIAN_POINT('',(5.0,5.0,0.0));
+#10 = CARTESIAN_POINT('',(5.0,5.0,10.0));
+
+/* Points on cylinder for bottom/top circles */
+#11 = CARTESIAN_POINT('',(7.0,5.0,0.0));   /* Bottom circle point */
+#12 = CARTESIAN_POINT('',(7.0,5.0,10.0));  /* Top circle point */
+
+#20 = DIRECTION('',(1.0,0.0,0.0));
+#21 = DIRECTION('',(0.0,1.0,0.0));
+#22 = DIRECTION('',(0.0,0.0,1.0));
+#23 = DIRECTION('',(-1.0,0.0,0.0));
+#24 = DIRECTION('',(0.0,-1.0,0.0));
+#25 = DIRECTION('',(0.0,0.0,-1.0));
+
+/* ---------- AXIS2_PLACEMENT_3D placements ---------- */
+#30 = AXIS2_PLACEMENT_3D('',#1,$,$);      /* Origin */
+#31 = AXIS2_PLACEMENT_3D('',#9,#22,#20);  /* Cylinder axis: Z up, X as ref */
+
+/* ---------- Planes for cube faces ---------- */
+#40 = PLANE('',#30);                       /* XY at Z=0 */
+#41 = PLANE('',AXIS2_PLACEMENT_3D('',#5,#22,#20));   /* XY at Z=10 */
+#42 = PLANE('',AXIS2_PLACEMENT_3D('',#2,#20,#22));   /* YZ at X=10 */
+#43 = PLANE('',AXIS2_PLACEMENT_3D('',#1,#23,#22));   /* YZ at X=0 */
+#44 = PLANE('',AXIS2_PLACEMENT_3D('',#4,#21,#22));   /* XZ at Y=10 */
+#45 = PLANE('',AXIS2_PLACEMENT_3D('',#1,#24,#22));   /* XZ at Y=0 */
+
+/* ---------- Cylinder for void ---------- */
+#50 = CYLINDER('',#31,2.0);               /* R=2 cylinder */
+
+/* ---------- Vectors for lines ---------- */
+#60 = VECTOR('',#20,10.0);
+#61 = VECTOR('',#21,10.0);
+#62 = VECTOR('',#22,10.0);
+#63 = VECTOR('',#23,10.0);
+#64 = VECTOR('',#24,10.0);
+#65 = VECTOR('',#25,10.0);
+
+/* ---------- Lines for cube edges ---------- */
+#70 = LINE('',#1,#60);    /* X+ from origin */
+#71 = LINE('',#2,#61);    /* Y+ from (10,0,0) */
+#72 = LINE('',#3,#65);    /* Z- from (10,10,0) */
+#73 = LINE('',#4,#60);    /* X+ from (0,10,0) */
+#74 = LINE('',#5,#60);    /* X+ from (0,0,10) */
+#75 = LINE('',#6,#61);    /* Y+ from (10,0,10) */
+#76 = LINE('',#7,#65);    /* Z- from (10,10,10) */
+#77 = LINE('',#8,#63);    /* X- from (0,10,10) */
+#78 = LINE('',#1,#61);    /* Y+ from origin */
+#79 = LINE('',#1,#22);    /* Z+ from origin */
+#80 = LINE('',#2,#22);    /* Z+ from (10,0,0) */
+#81 = LINE('',#3,#22);    /* Z+ from (10,10,0) */
+#82 = LINE('',#4,#22);    /* Z+ from (0,10,0) */
+
+/* ---------- Circles for cylinder edges ---------- */
+#90 = CIRCLE('',AXIS2_PLACEMENT_3D('',#9,#22,#20),2.0);   /* Bottom circle R=2 */
+#91 = CIRCLE('',AXIS2_PLACEMENT_3D('',#10,#22,#20),2.0);  /* Top circle R=2 */
+
+/* ---------- Vertex points ---------- */
+#100 = VERTEX_POINT('',#1);
+#101 = VERTEX_POINT('',#2);
+#102 = VERTEX_POINT('',#3);
+#103 = VERTEX_POINT('',#4);
+#104 = VERTEX_POINT('',#5);
+#105 = VERTEX_POINT('',#6);
+#106 = VERTEX_POINT('',#7);
+#107 = VERTEX_POINT('',#8);
+
+/* Cylinder circle start/end vertices */
+#108 = VERTEX_POINT('',#11);   /* Bottom start point */
+#109 = VERTEX_POINT('',#12);   /* Top start point */
+
+/* ---------- Edge curves for cube ---------- */
+#120 = EDGE_CURVE('',#100,#101,#70,.T.);   /* (0,0,0)→(10,0,0) */
+#121 = EDGE_CURVE('',#101,#102,#71,.T.);   /* (10,0,0)→(10,10,0) */
+#122 = EDGE_CURVE('',#103,#102,#72,.F.);   /* (0,10,0)→(10,10,0) reversed */
+#123 = EDGE_CURVE('',#100,#103,#73,.F.);   /* (0,0,0)→(0,10,0) reversed */
+#124 = EDGE_CURVE('',#104,#105,#74,.T.);   /* (0,0,10)→(10,0,10) */
+#125 = EDGE_CURVE('',#105,#106,#75,.T.);   /* (10,0,10)→(10,10,10) */
+#126 = EDGE_CURVE('',#107,#106,#76,.F.);   /* (0,10,10)→(10,10,10) reversed */
+#127 = EDGE_CURVE('',#104,#107,#77,.F.);   /* (0,0,10)→(0,10,10) reversed */
+#128 = EDGE_CURVE('',#100,#104,#79,.T.);   /* (0,0,0)→(0,0,10) */
+#129 = EDGE_CURVE('',#101,#105,#80,.T.);   /* (10,0,0)→(10,0,10) */
+#130 = EDGE_CURVE('',#102,#106,#81,.T.);   /* (10,10,0)→(10,10,10) */
+#131 = EDGE_CURVE('',#103,#107,#82,.T.);   /* (0,10,0)→(0,10,10) */
+
+/* ---------- Edge curves for cylinder ---------- */
+#140 = EDGE_CURVE('',#108,#108,#90,.T.);   /* Bottom circle (closed) */
+#141 = EDGE_CURVE('',#109,#109,#91,.T.);   /* Top circle (closed) */
+/* Vertical line on cylinder surface */
+#142 = EDGE_CURVE('',#108,#109,LINE('',#11,VECTOR('',#22,10.0)),.T.);
+
+/* ---------- Oriented edges for cube faces ---------- */
+/* Bottom face (Z=0): #100→#101→#102→#103, normal -Z */
+#150 = ORIENTED_EDGE('',*,*,#120,.T.);
+#151 = ORIENTED_EDGE('',*,*,#121,.T.);
+#152 = ORIENTED_EDGE('',*,*,#122,.T.);
+#153 = ORIENTED_EDGE('',*,*,#123,.T.);
+
+/* Top face (Z=10): #104→#107→#106→#105, normal +Z */
+#154 = ORIENTED_EDGE('',*,*,#124,.T.);
+#155 = ORIENTED_EDGE('',*,*,#126,.F.);
+#156 = ORIENTED_EDGE('',*,*,#125,.F.);
+#157 = ORIENTED_EDGE('',*,*,#127,.F.);
+
+/* Front face (Y=0): #100→#104→#105→#101, normal -Y */
+#158 = ORIENTED_EDGE('',*,*,#128,.T.);
+#159 = ORIENTED_EDGE('',*,*,#124,.F.);
+#160 = ORIENTED_EDGE('',*,*,#129,.F.);
+#161 = ORIENTED_EDGE('',*,*,#120,.F.);
+
+/* Back face (Y=10): #103→#102→#106→#107, normal +Y */
+#162 = ORIENTED_EDGE('',*,*,#122,.F.);
+#163 = ORIENTED_EDGE('',*,*,#130,.T.);
+#164 = ORIENTED_EDGE('',*,*,#126,.T.);
+#165 = ORIENTED_EDGE('',*,*,#131,.F.);
+
+/* Right face (X=10): #101→#105→#106→#102, normal +X */
+#166 = ORIENTED_EDGE('',*,*,#129,.T.);
+#167 = ORIENTED_EDGE('',*,*,#125,.T.);
+#168 = ORIENTED_EDGE('',*,*,#130,.F.);
+#169 = ORIENTED_EDGE('',*,*,#121,.F.);
+
+/* Left face (X=0): #100→#103→#107→#104, normal -X */
+#170 = ORIENTED_EDGE('',*,*,#123,.T.);
+#171 = ORIENTED_EDGE('',*,*,#131,.T.);
+#172 = ORIENTED_EDGE('',*,*,#127,.T.);
+#173 = ORIENTED_EDGE('',*,*,#128,.F.);
+
+/* ---------- Wire loops for cube faces ---------- */
+#180 = EDGE_LOOP('',(#150,#151,#152,#153));  /* Bottom */
+#181 = EDGE_LOOP('',(#154,#155,#156,#157));  /* Top */
+#182 = EDGE_LOOP('',(#158,#159,#160,#161));  /* Front */
+#183 = EDGE_LOOP('',(#162,#163,#164,#165));  /* Back */
+#184 = EDGE_LOOP('',(#166,#167,#168,#169));  /* Right */
+#185 = EDGE_LOOP('',(#170,#171,#172,#173));  /* Left */
+
+/* ---------- Face outer bounds for cube ---------- */
+#190 = FACE_OUTER_BOUND('',#180,.T.);
+#191 = FACE_OUTER_BOUND('',#181,.T.);
+#192 = FACE_OUTER_BOUND('',#182,.T.);
+#193 = FACE_OUTER_BOUND('',#183,.T.);
+#194 = FACE_OUTER_BOUND('',#184,.T.);
+#195 = FACE_OUTER_BOUND('',#185,.T.);
+
+/* ---------- Advanced faces for outer cube ---------- */
+#200 = ADVANCED_FACE('',(#190),#40,.F.);  /* Bottom (Z=0), normal -Z → .F. */
+#201 = ADVANCED_FACE('',(#191),#41,.T.);  /* Top (Z=10), normal +Z → .T. */
+#202 = ADVANCED_FACE('',(#192),#45,.F.);  /* Front (Y=0), normal -Y → .F. */
+#203 = ADVANCED_FACE('',(#193),#44,.T.);  /* Back (Y=10), normal +Y → .T. */
+#204 = ADVANCED_FACE('',(#194),#42,.T.);  /* Right (X=10), normal +X → .T. */
+#205 = ADVANCED_FACE('',(#195),#43,.F.);  /* Left (X=0), normal -X → .F. */
+
+/* ---------- Oriented edges for void shell ---------- */
+/* Cylinder surface: bottom circle + vertical line + top circle (reversed) + vertical line (reversed) */
+#210 = ORIENTED_EDGE('',*,*,#140,.T.);   /* Bottom circle forward */
+#211 = ORIENTED_EDGE('',*,*,#142,.T.);   /* Vertical up */
+#212 = ORIENTED_EDGE('',*,*,#141,.F.);   /* Top circle reversed */
+#213 = ORIENTED_EDGE('',*,*,#142,.F.);   /* Vertical down */
+
+/* Bottom cap: bottom circle reversed (normal into solid = -Z direction at void) */
+#214 = ORIENTED_EDGE('',*,*,#140,.F.);
+
+/* Top cap: top circle forward (normal into solid = +Z direction at void) */
+#215 = ORIENTED_EDGE('',*,*,#141,.T.);
+
+/* ---------- Wire loops for void shell ---------- */
+#220 = EDGE_LOOP('',(#210,#211,#212,#213));  /* Cylinder lateral */
+#221 = EDGE_LOOP('',(#214));                   /* Bottom cap */
+#222 = EDGE_LOOP('',(#215));                   /* Top cap */
+
+/* ---------- Face bounds for void shell ---------- */
+#230 = FACE_OUTER_BOUND('',#220,.T.);
+#231 = FACE_OUTER_BOUND('',#221,.T.);
+#232 = FACE_OUTER_BOUND('',#222,.T.);
+
+/* ---------- Advanced faces for void shell ---------- */
+/* Void face normals point INTO the solid (away from void cavity) */
+#240 = ADVANCED_FACE('',(#230),#50,.F.);  /* Cylinder, normal points inward (toward axis) */
+#241 = ADVANCED_FACE('',(#231),#40,.T.);  /* Bottom cap at Z=0, normal +Z (into solid) */
+#242 = ADVANCED_FACE('',(#232),#41,.F.);  /* Top cap at Z=10, normal -Z (into solid) */
+
+/* ---------- Shells ---------- */
+#300 = CLOSED_SHELL('',(#200,#201,#202,#203,#204,#205));  /* Outer cube */
+#301 = CLOSED_SHELL('',(#240,#241,#242));                  /* Void cylinder */
+
+/* ---------- BREP_WITH_VOIDS ---------- */
+#400 = BREP_WITH_VOIDS('cube_with_void',#300,(#301));
+
+/* ---------- Shape representation ---------- */
+#500 = MANIFOLD_SOLID_BREP('',#300);
+#501 = MANIFOLD_SOLID_BREP('',#301);
+
+/* Product definition */
+#600 = SHAPE_DEFINITION_REPRESENTATION(
+  PRODUCT_DEFINITION_SHAPE('',$,.PRODUCT_DEFINITION(
+    PRODUCT_DEFINITION_FORMATION('',$,.PRODUCT('cube_with_void','',$)))),
+  SHAPE_REPRESENTATION('',(#1),#30));
+
+#601 = SHAPE_REPRESENTATION_RELATIONSHIP('','',#600,
+  ADVANCED_BREP_SHAPE_REPRESENTATION('',(#400),#30));
+
+ENDSEC;
+END-ISO-10303-21;

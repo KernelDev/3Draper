@@ -114,6 +114,9 @@ pub struct JsonFaceInfo {
     pub triangle_range: [usize; 2],
     /// Whether the face normal matches the surface normal.
     pub forward: bool,
+    /// Whether this face belongs to a void shell (internal cavity).
+    #[serde(default)]
+    pub is_void: bool,
 }
 
 // ============================================================
@@ -387,6 +390,7 @@ impl JsonFaceInfo {
             inner_boundaries: fi.inner_boundaries.clone(),
             triangle_range: [fi.triangle_range.0, fi.triangle_range.1],
             forward: fi.forward,
+            is_void: fi.is_void,
         }
     }
 
@@ -404,6 +408,7 @@ impl JsonFaceInfo {
             triangle_range: (self.triangle_range[0], self.triangle_range[1]),
             forward: self.forward,
             uv_triangles: Vec::new(),
+            is_void: self.is_void,
         }
     }
 }

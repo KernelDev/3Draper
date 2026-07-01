@@ -267,19 +267,21 @@ pub fn heal_solid(solid: &Solid, params: &HealingParams) -> (Solid, HealingRepor
 
     // Heal outer shell
     let outer_shell = if let Some(ref shell) = solid.outer_shell {
-        let (healed_shell, shell_report) = heal_shell(shell, params);
+        let (healed_shell, shell_report) = heal_shell(shell, params, false);
         merge_report(&mut report, &shell_report);
         Some(healed_shell)
     } else {
         None
     };
 
-    // Heal inner shells
+    // Heal inner shells (void shells) — pass is_void=true so that
+    // fix_normal_orientation uses the correct heuristic (void face
+    // normals should point TOWARD the centroid, i.e., INTO the solid).
     let inner_shells: Vec<Shell> = solid
         .inner_shells
         .iter()
         .map(|shell| {
-            let (healed, r) = heal_shell(shell, params);
+            let (healed, r) = heal_shell(shell, params, true);
             merge_report(&mut report, &r);
             healed
         })
@@ -305,7 +307,12 @@ pub fn heal_solid(solid: &Solid, params: &HealingParams) -> (Solid, HealingRepor
 /// 5. Merge coplanar/co-cylindrical faces (3.1.5)
 /// 6. Remove small-feature faces
 /// 7. Fix normal orientation (for closed shells)
-pub fn heal_shell(shell: &Shell, params: &HealingParams) -> (Shell, HealingReport) {
+///
+/// `is_void_shell` — when true, indicates this shell represents a void/cavity
+/// inside a solid. For void shells, face normals should point INTO the solid
+/// material (i.e., TOWARD the centroid of the shell), which is the opposite
+/// of the outer shell heuristic (normals point AWAY from centroid).
+pub fn heal_shell(shell: &Shell, params: &HealingParams, is_void_shell: bool) -> (Shell, HealingReport) {
     let mut report = HealingReport::default();
     let mut shell = shell.clone();
 
@@ -339,7 +346,7 @@ pub fn heal_shell(shell: &Shell, params: &HealingParams) -> (Shell, HealingRepor
 
     // 7. Fix normal orientation for closed shells
     if params.fix_normals && shell.closed {
-        fix_normal_orientation(&mut shell, params, &mut report);
+        fix_normal_orientation(&mut shell, params, &mut report, is_void_shell);
     }
 
     // 8. Detect and fix self-intersections
@@ -1243,7 +1250,7 @@ fn remove_small_features(shell: &mut Shell, params: &HealingParams, report: &mut
 /// 1. Computes the shell's centroid
 /// 2. For each face, checks whether its normal points away from the centroid
 /// 3. Flips faces whose normals point inward
-fn fix_normal_orientation(shell: &mut Shell, _params: &HealingParams, report: &mut HealingReport) {
+fn fix_normal_orientation(shell: &mut Shell, _params: &HealingParams, report: &mut HealingReport, is_void_shell: bool) {
     if shell.faces.is_empty() {
         return;
     }
@@ -1301,10 +1308,22 @@ fn fix_normal_orientation(shell: &mut Shell, _params: &HealingParams, report: &m
             face_point.z - centroid.z,
         );
 
-        // If the normal points toward the centroid (dot product < 0),
-        // the face is oriented inward and needs to be flipped
+        // For an OUTER shell: face normals should point AWAY from the centroid
+        // (outward from the solid). If the normal points toward the centroid
+        // (dot < 0), the face needs to be flipped.
+        //
+        // For a VOID shell (inner cavity): face normals should point TOWARD the
+        // centroid (INTO the solid material, which is toward the void interior).
+        // If the normal points away from the centroid (dot > 0), the face needs
+        // to be flipped. This is the OPPOSITE heuristic.
         let dot = normal.x * to_face.x + normal.y * to_face.y + normal.z * to_face.z;
-        if dot < 0.0 {
+        let needs_flip = if is_void_shell {
+            dot > 0.0 // Void: flip if normal points AWAY from centroid
+        } else {
+            dot < 0.0 // Outer: flip if normal points TOWARD centroid
+        };
+
+        if needs_flip {
             face.forward = !face.forward;
             flipped += 1;
         }
@@ -1312,7 +1331,10 @@ fn fix_normal_orientation(shell: &mut Shell, _params: &HealingParams, report: &m
 
     if flipped > 0 {
         report.normals_fixed = flipped;
-        report.add_msg(format!("Fixed orientation of {} faces", flipped));
+        report.add_msg(format!("Fixed orientation of {} faces{}",
+            flipped,
+            if is_void_shell { " (void shell)" } else { "" }
+        ));
     }
 }
 
@@ -2401,7 +2423,7 @@ mod tests {
             ..HealingParams::default()
         };
 
-        let (healed, report) = heal_shell(&shell, &params);
+        let (healed, report) = heal_shell(&shell, &params, false);
 
         assert_eq!(report.small_faces_removed, 1);
         assert_eq!(healed.faces.len(), 1);
@@ -2528,7 +2550,7 @@ mod tests {
     fn test_heal_empty_shell() {
         let shell = Shell::new(vec![]);
         let params = HealingParams::default();
-        let (healed, report) = heal_shell(&shell, &params);
+        let (healed, report) = heal_shell(&shell, &params, false);
         assert!(healed.faces.is_empty());
         assert_eq!(report.total_fixes(), 0);
     }
@@ -2748,7 +2770,7 @@ mod tests {
             ..HealingParams::default()
         };
 
-        let (healed, report) = heal_shell(&shell, &params);
+        let (healed, report) = heal_shell(&shell, &params, false);
 
         assert!(report.faces_merged >= 1, "Expected at least 1 face pair merged, got {}", report.faces_merged);
         assert_eq!(healed.faces.len(), 1, "Expected 1 face after merging, got {}", healed.faces.len());
@@ -2821,7 +2843,7 @@ mod tests {
             ..HealingParams::default()
         };
 
-        let (healed, report) = heal_shell(&shell, &params);
+        let (healed, report) = heal_shell(&shell, &params, false);
 
         assert!(report.faces_merged >= 1, "Expected at least 1 face pair merged, got {}", report.faces_merged);
         assert_eq!(healed.faces.len(), 1, "Expected 1 face after merging, got {}", healed.faces.len());
@@ -2879,7 +2901,7 @@ mod tests {
             ..HealingParams::default()
         };
 
-        let (healed, report) = heal_shell(&shell, &params);
+        let (healed, report) = heal_shell(&shell, &params, false);
 
         assert_eq!(report.faces_merged, 0, "Non-coplanar faces should not be merged");
         assert_eq!(healed.faces.len(), 2, "Should still have 2 faces");

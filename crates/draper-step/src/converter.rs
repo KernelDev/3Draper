@@ -114,6 +114,11 @@ struct FaceData {
     /// STEP entity IDs of EDGE_CURVE entities for inner edges.
     /// Same structure as `inner_edges`.
     inner_edge_step_ids: Vec<Vec<i64>>,
+    /// Whether this face belongs to a void shell (internal cavity).
+    /// Void faces have normals pointing INTO the solid material (away from
+    /// the void cavity). This flag is used by the healing pipeline to
+    /// avoid incorrectly flipping void face normals.
+    is_void: bool,
 }
 
 // ============================================================
@@ -126,8 +131,14 @@ struct FaceData {
 /// Returns the Solid and a mapping from each Face's `TopoId` to its
 /// index in the original `face_data_list`. This mapping allows us to
 /// recover STEP-specific metadata after healing.
+///
+/// Faces with `is_void = true` are placed into separate inner shells
+/// (one per contiguous group, or all in one inner shell for simplicity).
+/// This ensures that `fix_normal_orientation` in the healing pipeline
+/// processes void shells independently and does not corrupt their normals.
 fn face_data_list_to_solid(face_data_list: &[FaceData]) -> (Solid, HashMap<draper_topology::TopoId, usize>) {
-    let mut topo_faces = Vec::with_capacity(face_data_list.len());
+    let mut outer_topo_faces = Vec::new();
+    let mut void_topo_faces = Vec::new();
     let mut face_id_to_index = HashMap::new();
 
     for (fd_idx, fd) in face_data_list.iter().enumerate() {
@@ -177,11 +188,28 @@ fn face_data_list_to_solid(face_data_list: &[FaceData]) -> (Solid, HashMap<drape
             face.add_hole(wire);
         }
 
-        topo_faces.push(face);
+        if fd.is_void {
+            void_topo_faces.push(face);
+        } else {
+            outer_topo_faces.push(face);
+        }
     }
 
-    let shell = Shell::new_closed(topo_faces);
-    (Solid::new(shell), face_id_to_index)
+    let outer_shell = Shell::new_closed(outer_topo_faces);
+    let mut solid = Solid::new(outer_shell);
+
+    // Add void faces as a single inner shell (all voids together).
+    // In practice, BREP_WITH_VOIDS typically has one void shell, but
+    // we merge all void faces into one inner shell for simplicity.
+    // The healing pipeline will process inner shells independently,
+    // so their normals won't be corrupted by the centroid-based
+    // orientation fix that works for outer shells.
+    if !void_topo_faces.is_empty() {
+        let void_shell = Shell::new_closed(void_topo_faces);
+        solid.add_void(void_shell);
+    }
+
+    (solid, face_id_to_index)
 }
 
 /// Apply healing results back to the original `FaceData` list.
@@ -267,6 +295,7 @@ fn apply_healing_to_face_data(
                 edge_step_ids: vec![0; n_edges],
                 outer_edge_step_ids: vec![0; n_outer],
                 inner_edge_step_ids: n_inner.iter().map(|&n| vec![0; n]).collect(),
+                is_void: false, // Synthetic faces from healing are not void faces
             });
         }
     }
@@ -336,6 +365,9 @@ pub struct FaceInfo {
     /// UV-space triangles for visualization: each triangle is 3 UV points.
     /// Used to display the actual triangulation in the UV grid SVG.
     pub uv_triangles: Vec<[Point2d; 3]>,
+    /// Whether this face belongs to a void shell (internal cavity).
+    /// Void faces have normals pointing INTO the solid material.
+    pub is_void: bool,
 }
 /// A mesh instance to be rendered — the mesh geometry is transformed by the given matrix
 /// and painted with the given color. Multiple instances can reference the same BREP geometry
@@ -1674,6 +1706,7 @@ impl BrepSession {
             triangle_range: (tri_start, tri_end),
             forward: face_data.forward,
             uv_triangles,
+            is_void: face_data.is_void,
         });
     }
 
@@ -2048,7 +2081,7 @@ impl<'a> StepConverter<'a> {
         let outer_shell_id = outer_shell_id?;
 
         // Extract outer shell faces
-        let outer_face_data = self.extract_shell_faces(outer_shell_id)?;
+        let outer_face_data = self.extract_shell_faces(outer_shell_id, false)?;
         if outer_face_data.is_empty() {
             log::warn!(
                 "extract_solid_from_brep: outer shell #{} has no faces — skipping BREP #{}",
@@ -2062,7 +2095,7 @@ impl<'a> StepConverter<'a> {
 
         // Extract void shells (if any) and add as inner shells
         for void_shell_id in &void_shell_ids {
-            match self.extract_shell_faces(*void_shell_id) {
+            match self.extract_shell_faces(*void_shell_id, true) {
                 Some(void_face_data) => {
                     if void_face_data.is_empty() {
                         continue;
@@ -3064,7 +3097,7 @@ impl<'a> StepConverter<'a> {
         for type_name in &surface_types {
             for entity in self.step.find_entities_by_type(type_name) {
                 if let Some(surface) = self.extract_surface(entity.id, 0) {
-                    let face_data = FaceData { surface, outer_edges: vec![], inner_edges: vec![], edges: vec![], forward: true, step_face_id: entity.id, surface_step_id: None, edge_curves_2d: vec![], edge_step_ids: vec![], outer_edge_step_ids: vec![], inner_edge_step_ids: vec![] };
+                    let face_data = FaceData { surface, outer_edges: vec![], inner_edges: vec![], edges: vec![], forward: true, step_face_id: entity.id, surface_step_id: None, edge_curves_2d: vec![], edge_step_ids: vec![], outer_edge_step_ids: vec![], inner_edge_step_ids: vec![], is_void: false };
                     let mesh = self.surface_to_mesh(&face_data, &params, &bbox);
                     results.push(MeshInstance {
                         name: entity.type_name.clone(),
@@ -3707,11 +3740,11 @@ impl<'a> StepConverter<'a> {
         // P7: Use find_all_shell_refs to support BREP_WITH_VOIDS.
         let (outer_shell_id, void_shell_ids) = self.find_all_shell_refs_by_brep_id(brep_id);
         let shell_id = outer_shell_id?;
-        let mut face_data_list = self.extract_shell_faces(shell_id)?;
+        let mut face_data_list = self.extract_shell_faces(shell_id, false)?;
 
         // Append void shell faces (already correctly oriented per STEP convention).
         for void_shell_id in &void_shell_ids {
-            if let Some(void_faces) = self.extract_shell_faces(*void_shell_id) {
+            if let Some(void_faces) = self.extract_shell_faces(*void_shell_id, true) {
                 face_data_list.extend(void_faces);
             }
         }
@@ -4117,7 +4150,7 @@ impl<'a> StepConverter<'a> {
         // an internal cavity (face normals already point into the solid material).
         let (outer_shell_id, void_shell_ids) = self.find_all_shell_refs_by_brep_id(brep_id);
         let shell_id = outer_shell_id?;
-        let mut face_data_list = self.extract_shell_faces(shell_id)?;
+        let mut face_data_list = self.extract_shell_faces(shell_id, false)?;
 
         // Extract faces from each void shell and append them to the list.
         // The void shells have INVERTED orientation in STEP — their face normals
@@ -4125,7 +4158,7 @@ impl<'a> StepConverter<'a> {
         // the resulting mesh represents a solid with internal cavities.
         // (Algorithm adapted from truck-step v0.4.0, ricosjp/truck, Apache-2.0 OR MIT.)
         for void_shell_id in &void_shell_ids {
-            match self.extract_shell_faces(*void_shell_id) {
+            match self.extract_shell_faces(*void_shell_id, true) {
                 Some(void_faces) => {
                     log::info!(
                         "BREP #{}: appending {} faces from void shell #{}",
@@ -4492,6 +4525,7 @@ impl<'a> StepConverter<'a> {
                 triangle_range: (tri_start, tri_end),
                 forward: face_data.forward,
                 uv_triangles,
+                is_void: face_data.is_void,
             });
         }
         // Validation — do NOT apply repair_mesh (see comment in triangulate_brep).
@@ -4713,11 +4747,11 @@ impl<'a> StepConverter<'a> {
         // P7: Use find_all_shell_refs to support BREP_WITH_VOIDS.
         let (outer_shell_id, void_shell_ids) = self.find_all_shell_refs_by_brep_id(brep_id);
         let shell_id = outer_shell_id?;
-        let mut face_data_list = self.extract_shell_faces(shell_id)?;
+        let mut face_data_list = self.extract_shell_faces(shell_id, false)?;
 
         // Extract faces from each void shell and append them to the list.
         for void_shell_id in &void_shell_ids {
-            match self.extract_shell_faces(*void_shell_id) {
+            match self.extract_shell_faces(*void_shell_id, true) {
                 Some(void_faces) => {
                     log::info!(
                         "BREP #{}: appending {} faces from void shell #{}",
@@ -5015,7 +5049,7 @@ impl<'a> StepConverter<'a> {
         params: &TriangulationParams,
         bbox: &Option<(Point3d, Point3d)>,
     ) -> Option<TriangleMesh> {
-        let face_data_list = self.extract_shell_faces(shell_id)?;
+        let face_data_list = self.extract_shell_faces(shell_id, false)?;
 
         // Create tolerance context for healing
         let tol_ctx = match bbox {
@@ -6258,21 +6292,87 @@ impl<'a> StepConverter<'a> {
         Some((min, max))
     }
 
-    /// Extract FaceData (surface + boundary edges) from a CLOSED_SHELL or OPEN_SHELL entity.
-    fn extract_shell_faces(&self, shell_id: i64) -> Option<Vec<FaceData>> {
+    /// Extract FaceData (surface + boundary edges) from a CLOSED_SHELL, OPEN_SHELL,
+    /// or ORIENTED_CLOSED_SHELL entity.
+    ///
+    /// For `ORIENTED_CLOSED_SHELL('', #basis_shell, .F.)`, the shell-level orientation
+    /// is applied by flipping the `forward` flag on all extracted faces. This is critical
+    /// for `BREP_WITH_VOIDS` where void shells may use `ORIENTED_CLOSED_SHELL` with
+    /// `.F.` orientation to indicate that face normals point INTO the solid material.
+    fn extract_shell_faces(&self, shell_id: i64, is_void: bool) -> Option<Vec<FaceData>> {
         let shell = self.step.find_entity(shell_id)?;
+
+        // Check if this is an ORIENTED_CLOSED_SHELL wrapping a basis shell.
+        // ORIENTED_CLOSED_SHELL('', #basis_shell_ref, .T./.F.)
+        // When orientation is .F., face normals must be flipped.
+        let shell_orientation_forward = if shell.type_name == "ORIENTED_CLOSED_SHELL" {
+            // Last parameter is the orientation (.T. or .F.)
+            let orient = shell.params.last().and_then(|p| {
+                if let StepValue::Enum(e) = p { Some(e.as_str()) } else { None }
+            }).unwrap_or("T");
+            orient == "T"
+        } else {
+            true // Default forward orientation for CLOSED_SHELL, OPEN_SHELL
+        };
+
+        // If ORIENTED_CLOSED_SHELL, we need to extract faces from the basis shell reference
+        let effective_shell_id = if shell.type_name == "ORIENTED_CLOSED_SHELL" {
+            // Find the basis shell reference (typically 2nd param, index 1)
+            let mut basis_id = None;
+            for (i, param) in shell.params.iter().enumerate() {
+                if i == 0 { continue; } // Skip name
+                if let Some(ref_id) = self.get_ref(param) {
+                    if let Some(entity) = self.step.find_entity(ref_id) {
+                        if entity.type_name.contains("SHELL") {
+                            basis_id = Some(ref_id);
+                            break;
+                        }
+                    }
+                }
+            }
+            match basis_id {
+                Some(id) => {
+                    log::info!(
+                        "ORIENTED_CLOSED_SHELL #{}: orientation={}, basis shell #{}",
+                        shell_id, shell_orientation_forward, id
+                    );
+                    id
+                }
+                None => {
+                    log::warn!(
+                        "ORIENTED_CLOSED_SHELL #{}: no basis shell reference found — using shell directly",
+                        shell_id
+                    );
+                    shell_id
+                }
+            }
+        } else {
+            shell_id
+        };
+
+        let actual_shell = if effective_shell_id != shell_id {
+            self.step.find_entity(effective_shell_id)?
+        } else {
+            shell
+        };
+
         let mut face_data_list = Vec::new();
         let mut total_face_refs = 0usize;
         let mut failed_count = 0usize;
 
         // CLOSED_SHELL('', (#face1, #face2, ...))
-        for param in &shell.params {
+        for param in &actual_shell.params {
             match param {
                 StepValue::List(items) => {
                     for item in items {
                         if let Some(face_id) = self.get_ref(item) {
                             total_face_refs += 1;
-                            if let Some(face_data) = self.extract_face_data(face_id) {
+                            if let Some(mut face_data) = self.extract_face_data(face_id) {
+                                // Apply shell-level orientation flip if needed
+                                if !shell_orientation_forward {
+                                    face_data.forward = !face_data.forward;
+                                }
+                                face_data.is_void = is_void;
                                 face_data_list.push(face_data);
                             } else {
                                 failed_count += 1;
@@ -6286,7 +6386,12 @@ impl<'a> StepConverter<'a> {
                 }
                 StepValue::Ref(face_id) => {
                     total_face_refs += 1;
-                    if let Some(face_data) = self.extract_face_data(*face_id) {
+                    if let Some(mut face_data) = self.extract_face_data(*face_id) {
+                        // Apply shell-level orientation flip if needed
+                        if !shell_orientation_forward {
+                            face_data.forward = !face_data.forward;
+                        }
+                        face_data.is_void = is_void;
                         face_data_list.push(face_data);
                     } else {
                         failed_count += 1;
@@ -6359,6 +6464,7 @@ impl<'a> StepConverter<'a> {
                     edge_step_ids: all_step_ids,
                     outer_edge_step_ids: outer_step_ids,
                     inner_edge_step_ids: inner_step_ids,
+                    is_void: false, // Will be set by extract_shell_faces caller
                 })
             }
             _ => {
@@ -6376,6 +6482,7 @@ impl<'a> StepConverter<'a> {
                         edge_step_ids: vec![],
                         outer_edge_step_ids: vec![],
                         inner_edge_step_ids: vec![],
+                        is_void: false, // Will be set by extract_shell_faces caller
                     })
                 } else {
                     None
@@ -12790,7 +12897,7 @@ mod diag_tests {
                     Some(id) => id,
                     None => continue,
                 };
-                let face_data_list = match converter.extract_shell_faces(shell_id) {
+                let face_data_list = match converter.extract_shell_faces(shell_id, false) {
                     Some(list) => list,
                     None => continue,
                 };
@@ -13188,7 +13295,7 @@ mod diag_tests {
 
         for brep in &breps {
             if let Some(shell_id) = converter.find_shell_ref_by_brep_id(brep.id) {
-                if let Some(face_data_list) = converter.extract_shell_faces(shell_id) {
+                if let Some(face_data_list) = converter.extract_shell_faces(shell_id, false) {
                     for (fi, face_data) in face_data_list.iter().enumerate() {
                         total_faces += 1;
                         let surface_type = match &face_data.surface {
@@ -13287,7 +13394,7 @@ mod diag_tests {
                 }
             };
 
-            let face_data_list = match converter.extract_shell_faces(shell_id) {
+            let face_data_list = match converter.extract_shell_faces(shell_id, false) {
                 Some(list) => list,
                 None => {
                     eprintln!("\nBREP#{} — could not extract shell faces, skipping", brep.id);
@@ -14455,5 +14562,226 @@ mod parallel_brep_tests {
         if let Some(ref inst) = results[1] {
             assert_eq!(inst.name, "second");
         }
+    }
+}
+
+/// Unit tests for BREP_WITH_VOIDS support (6.3).
+#[cfg(test)]
+mod brep_with_voids_tests {
+    use super::*;
+
+    /// Parse a minimal STEP content string into a StepFile.
+    fn parse_step_content(content: &str) -> Option<StepFile> {
+        crate::parser::parse_step(content).ok()
+    }
+
+    /// Test that find_all_shell_refs correctly identifies the outer shell
+    /// and void shells in a BREP_WITH_VOIDS entity.
+    #[test]
+    fn test_find_all_shell_refs_brep_with_voids() {
+        let content = r#"ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('Test BREP_WITH_VOIDS'),'2;1');
+FILE_NAME('test.stp','2026-07-02',('3Draper'),(''),'Test','','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));
+ENDSEC;
+DATA;
+#1 = CARTESIAN_POINT('',(0.0,0.0,0.0));
+#2 = DIRECTION('',(1.0,0.0,0.0));
+#3 = DIRECTION('',(0.0,1.0,0.0));
+#4 = DIRECTION('',(0.0,0.0,1.0));
+#10 = AXIS2_PLACEMENT_3D('',#1,$,$);
+#20 = PLANE('',#10);
+#30 = ADVANCED_FACE('',(#40),#20,.T.);
+#40 = FACE_OUTER_BOUND('',#50,.T.);
+#50 = EDGE_LOOP('',(#60));
+#60 = ORIENTED_EDGE('',*,*,#70,.T.);
+#70 = EDGE_CURVE('',#80,#80,#90,.T.);
+#80 = VERTEX_POINT('',#1);
+#90 = CIRCLE('',#10,5.0);
+#100 = CLOSED_SHELL('',(#30));
+#110 = CLOSED_SHELL('',(#30));
+#200 = BREP_WITH_VOIDS('test',#100,(#110));
+ENDSEC;
+END-ISO-10303-21;
+"#;
+        let step_file = parse_step_content(content).expect("parse STEP");
+        let converter = StepConverter::new(&step_file);
+
+        // Find the BREP_WITH_VOIDS entity
+        let brep_entity = step_file.find_entity(200).expect("BREP entity #200");
+        assert_eq!(brep_entity.type_name, "BREP_WITH_VOIDS");
+
+        let (outer, voids) = converter.find_all_shell_refs(&brep_entity);
+        assert!(outer.is_some(), "Should find outer shell reference");
+        assert_eq!(voids.len(), 1, "Should find 1 void shell reference");
+    }
+
+    /// Test that find_all_shell_refs returns empty voids for MANIFOLD_SOLID_BREP.
+    #[test]
+    fn test_find_all_shell_refs_manifold_solid_brep() {
+        let content = r#"ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('Test'),'2;1');
+FILE_NAME('test.stp','2026-07-02',('3Draper'),(''),'Test','','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));
+ENDSEC;
+DATA;
+#1 = CARTESIAN_POINT('',(0.0,0.0,0.0));
+#10 = AXIS2_PLACEMENT_3D('',#1,$,$);
+#20 = PLANE('',#10);
+#30 = ADVANCED_FACE('',(#40),#20,.T.);
+#40 = FACE_OUTER_BOUND('',#50,.T.);
+#50 = EDGE_LOOP('',(#60));
+#60 = ORIENTED_EDGE('',*,*,#70,.T.);
+#70 = EDGE_CURVE('',#80,#80,#90,.T.);
+#80 = VERTEX_POINT('',#1);
+#90 = CIRCLE('',#10,5.0);
+#100 = CLOSED_SHELL('',(#30));
+#200 = MANIFOLD_SOLID_BREP('test',#100);
+ENDSEC;
+END-ISO-10303-21;
+"#;
+        let step_file = parse_step_content(content).expect("parse STEP");
+        let converter = StepConverter::new(&step_file);
+
+        let brep_entity = step_file.find_entity(200).expect("BREP entity #200");
+        assert_eq!(brep_entity.type_name, "MANIFOLD_SOLID_BREP");
+
+        let (outer, voids) = converter.find_all_shell_refs(&brep_entity);
+        assert!(outer.is_some(), "Should find outer shell reference");
+        assert!(voids.is_empty(), "MANIFOLD_SOLID_BREP should have no void shells");
+    }
+
+    /// Test that ORIENTED_CLOSED_SHELL with .F. orientation is correctly handled.
+    /// When a void shell is wrapped in ORIENTED_CLOSED_SHELL with orientation .F.,
+    /// the face forward flags should be flipped.
+    #[test]
+    fn test_oriented_closed_shell_with_false_orientation() {
+        let content = r#"ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('Test ORIENTED_CLOSED_SHELL'),'2;1');
+FILE_NAME('test.stp','2026-07-02',('3Draper'),(''),'Test','','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));
+ENDSEC;
+DATA;
+#1 = CARTESIAN_POINT('',(0.0,0.0,0.0));
+#10 = AXIS2_PLACEMENT_3D('',#1,$,$);
+#20 = PLANE('',#10);
+#30 = ADVANCED_FACE('',(#40),#20,.T.);
+#40 = FACE_OUTER_BOUND('',#50,.T.);
+#50 = EDGE_LOOP('',(#60));
+#60 = ORIENTED_EDGE('',*,*,#70,.T.);
+#70 = EDGE_CURVE('',#80,#80,#90,.T.);
+#80 = VERTEX_POINT('',#1);
+#90 = CIRCLE('',#10,5.0);
+#100 = CLOSED_SHELL('',(#30));
+/* ORIENTED_CLOSED_SHELL wrapping #100 with .F. orientation */
+#110 = ORIENTED_CLOSED_SHELL('',#100,.F.);
+#200 = BREP_WITH_VOIDS('test',#100,(#110));
+ENDSEC;
+END-ISO-10303-21;
+"#;
+        let step_file = parse_step_content(content).expect("parse STEP");
+        let converter = StepConverter::new(&step_file);
+
+        // Find the BREP_WITH_VOIDS entity
+        let brep_entity = step_file.find_entity(200).expect("BREP entity #200");
+        let (outer, voids) = converter.find_all_shell_refs(&brep_entity);
+        assert!(outer.is_some(), "Should find outer shell reference");
+        assert_eq!(voids.len(), 1, "Should find 1 void shell reference (ORIENTED_CLOSED_SHELL)");
+
+        // The void shell is #110 (ORIENTED_CLOSED_SHELL)
+        let void_shell_id = voids[0];
+        assert_eq!(void_shell_id, 110);
+
+        // Extract faces from void shell with is_void=true
+        let void_faces = converter.extract_shell_faces(void_shell_id, true);
+        assert!(void_faces.is_some(), "Should extract faces from ORIENTED_CLOSED_SHELL");
+
+        let void_faces = void_faces.unwrap();
+        // The face inside CLOSED_SHELL #100 had forward=true from ADVANCED_FACE.
+        // ORIENTED_CLOSED_SHELL with .F. should flip it to forward=false.
+        for face in &void_faces {
+            assert!(!face.forward, "Void face should have flipped forward flag due to ORIENTED_CLOSED_SHELL .F.");
+            assert!(face.is_void, "Void face should have is_void=true");
+        }
+    }
+
+    /// Test that face_data_list_to_solid correctly separates void faces into inner_shells.
+    #[test]
+    fn test_face_data_list_to_solid_separates_voids() {
+        // Create a minimal FaceData list with both outer and void faces
+        let outer_face = FaceData {
+            surface: Surface::Plane(Plane::from_origin_and_normal(
+                Point3d::ORIGIN, Direction3d::Z)),
+            outer_edges: vec![],
+            inner_edges: vec![],
+            edges: vec![],
+            forward: true,
+            step_face_id: 1,
+            surface_step_id: None,
+            edge_curves_2d: vec![],
+            edge_step_ids: vec![],
+            outer_edge_step_ids: vec![],
+            inner_edge_step_ids: vec![],
+            is_void: false,
+        };
+
+        let void_face = FaceData {
+            surface: Surface::Plane(Plane::from_origin_and_normal(
+                Point3d::new(5.0, 5.0, 5.0), Direction3d::Z)),
+            outer_edges: vec![],
+            inner_edges: vec![],
+            edges: vec![],
+            forward: false, // Void faces have reversed orientation
+            step_face_id: 2,
+            surface_step_id: None,
+            edge_curves_2d: vec![],
+            edge_step_ids: vec![],
+            outer_edge_step_ids: vec![],
+            inner_edge_step_ids: vec![],
+            is_void: true,
+        };
+
+        let face_data_list = vec![outer_face, void_face];
+        let (solid, face_id_map) = face_data_list_to_solid(&face_data_list);
+
+        // Outer shell should have 1 face
+        assert!(solid.outer_shell.is_some());
+        assert_eq!(solid.outer_shell.as_ref().unwrap().faces.len(), 1,
+            "Outer shell should have 1 face (non-void)");
+
+        // Inner shells should have 1 face
+        assert_eq!(solid.inner_shells.len(), 1, "Should have 1 inner shell (void)");
+        assert_eq!(solid.inner_shells[0].faces.len(), 1,
+            "Inner shell should have 1 face (void)");
+
+        // Face ID map should have 2 entries
+        assert_eq!(face_id_map.len(), 2, "Face ID map should have 2 entries");
+    }
+
+    /// Test that FaceData.is_void field defaults to false and survives cloning.
+    #[test]
+    fn test_face_data_is_void_field() {
+        let fd = FaceData {
+            surface: Surface::Plane(Plane::from_origin_and_normal(
+                Point3d::ORIGIN, Direction3d::Z)),
+            outer_edges: vec![],
+            inner_edges: vec![],
+            edges: vec![],
+            forward: true,
+            step_face_id: 1,
+            surface_step_id: None,
+            edge_curves_2d: vec![],
+            edge_step_ids: vec![],
+            outer_edge_step_ids: vec![],
+            inner_edge_step_ids: vec![],
+            is_void: true,
+        };
+
+        assert!(fd.is_void);
+        let cloned = fd.clone();
+        assert!(cloned.is_void, "is_void should survive cloning");
     }
 }
