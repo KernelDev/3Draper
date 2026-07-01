@@ -1,0 +1,225 @@
+ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('3Draper test: 3-level nested assembly with verified transforms'),'2;1');
+FILE_NAME('nested_assembly.stp','2026-07-01T00:00:00',('3Draper'),(''),
+  '3Draper Test Suite','','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));
+ENDSEC;
+DATA;
+
+/* ========================================================================== */
+/* 3-level nested assembly test:                                               */
+/*   Root → SubAssembly (translate +10 X) → LeafPart (translate +20 Y)         */
+/*   Expected composed transform for LeafPart: translation (10, 20, 0)         */
+/* ========================================================================== */
+
+/* ---------- Shared geometry primitives ---------- */
+#1 = CARTESIAN_POINT('',(0.0,0.0,0.0));
+#10 = DIRECTION('',(1.0,0.0,0.0));
+#11 = DIRECTION('',(0.0,1.0,0.0));
+#12 = DIRECTION('',(0.0,0.0,1.0));
+#13 = DIRECTION('',(-1.0,0.0,0.0));
+#14 = DIRECTION('',(0.0,-1.0,0.0));
+#15 = DIRECTION('',(0.0,0.0,-1.0));
+
+#20 = VECTOR('',#10,5.0);
+#21 = VECTOR('',#11,5.0);
+#22 = VECTOR('',#12,5.0);
+#23 = VECTOR('',#13,5.0);
+#24 = VECTOR('',#14,5.0);
+#25 = VECTOR('',#15,5.0);
+
+/* ---------- LeafPart: unit cube (0,0,0) to (5,5,5) ---------- */
+#100 = CARTESIAN_POINT('',(0.0,0.0,0.0));
+#101 = CARTESIAN_POINT('',(5.0,0.0,0.0));
+#102 = CARTESIAN_POINT('',(5.0,5.0,0.0));
+#103 = CARTESIAN_POINT('',(0.0,5.0,0.0));
+#104 = CARTESIAN_POINT('',(0.0,0.0,5.0));
+#105 = CARTESIAN_POINT('',(5.0,0.0,5.0));
+#106 = CARTESIAN_POINT('',(5.0,5.0,5.0));
+#107 = CARTESIAN_POINT('',(0.0,5.0,5.0));
+
+#150 = VERTEX_POINT('',#100);
+#151 = VERTEX_POINT('',#101);
+#152 = VERTEX_POINT('',#102);
+#153 = VERTEX_POINT('',#103);
+#154 = VERTEX_POINT('',#104);
+#155 = VERTEX_POINT('',#105);
+#156 = VERTEX_POINT('',#106);
+#157 = VERTEX_POINT('',#107);
+
+#160 = LINE('',#100,#20);
+#161 = LINE('',#101,#21);
+#162 = LINE('',#102,#23);
+#163 = LINE('',#103,#24);
+#164 = LINE('',#104,#20);
+#165 = LINE('',#105,#21);
+#166 = LINE('',#106,#23);
+#167 = LINE('',#107,#24);
+#168 = LINE('',#100,#22);
+#169 = LINE('',#101,#22);
+#170 = LINE('',#102,#22);
+#171 = LINE('',#103,#22);
+
+#180 = EDGE_CURVE('',#150,#151,#160,.T.);
+#181 = EDGE_CURVE('',#151,#152,#161,.T.);
+#182 = EDGE_CURVE('',#152,#153,#162,.T.);
+#183 = EDGE_CURVE('',#153,#150,#163,.T.);
+#184 = EDGE_CURVE('',#154,#155,#164,.T.);
+#185 = EDGE_CURVE('',#155,#156,#165,.T.);
+#186 = EDGE_CURVE('',#156,#157,#166,.T.);
+#187 = EDGE_CURVE('',#157,#154,#167,.T.);
+#188 = EDGE_CURVE('',#150,#154,#168,.T.);
+#189 = EDGE_CURVE('',#151,#155,#169,.T.);
+#190 = EDGE_CURVE('',#152,#156,#170,.T.);
+#191 = EDGE_CURVE('',#153,#157,#171,.T.);
+
+#200 = ORIENTED_EDGE('',*,*,#180,.F.);
+#201 = ORIENTED_EDGE('',*,*,#181,.F.);
+#202 = ORIENTED_EDGE('',*,*,#182,.F.);
+#203 = ORIENTED_EDGE('',*,*,#183,.F.);
+#204 = ORIENTED_EDGE('',*,*,#184,.T.);
+#205 = ORIENTED_EDGE('',*,*,#185,.T.);
+#206 = ORIENTED_EDGE('',*,*,#186,.T.);
+#207 = ORIENTED_EDGE('',*,*,#187,.T.);
+#208 = ORIENTED_EDGE('',*,*,#180,.T.);
+#209 = ORIENTED_EDGE('',*,*,#189,.T.);
+#210 = ORIENTED_EDGE('',*,*,#184,.F.);
+#211 = ORIENTED_EDGE('',*,*,#188,.F.);
+#212 = ORIENTED_EDGE('',*,*,#182,.F.);
+#213 = ORIENTED_EDGE('',*,*,#190,.T.);
+#214 = ORIENTED_EDGE('',*,*,#186,.F.);
+#215 = ORIENTED_EDGE('',*,*,#191,.F.);
+#216 = ORIENTED_EDGE('',*,*,#183,.T.);
+#217 = ORIENTED_EDGE('',*,*,#191,.T.);
+#218 = ORIENTED_EDGE('',*,*,#187,.F.);
+#219 = ORIENTED_EDGE('',*,*,#188,.T.);
+#220 = ORIENTED_EDGE('',*,*,#181,.F.);
+#221 = ORIENTED_EDGE('',*,*,#190,.F.);
+#222 = ORIENTED_EDGE('',*,*,#185,.F.);
+#223 = ORIENTED_EDGE('',*,*,#189,.F.);
+
+#230 = EDGE_LOOP('',(#200,#201,#202,#203));
+#231 = EDGE_LOOP('',(#204,#205,#206,#207));
+#232 = EDGE_LOOP('',(#208,#209,#210,#211));
+#233 = EDGE_LOOP('',(#212,#213,#214,#215));
+#234 = EDGE_LOOP('',(#216,#217,#218,#219));
+#235 = EDGE_LOOP('',(#220,#221,#222,#223));
+
+#240 = FACE_OUTER_BOUND('',#230,.T.);
+#241 = FACE_OUTER_BOUND('',#231,.T.);
+#242 = FACE_OUTER_BOUND('',#232,.T.);
+#243 = FACE_OUTER_BOUND('',#233,.T.);
+#244 = FACE_OUTER_BOUND('',#234,.T.);
+#245 = FACE_OUTER_BOUND('',#235,.T.);
+
+#250 = AXIS2_PLACEMENT_3D('',#100,#15,#10);
+#251 = AXIS2_PLACEMENT_3D('',#104,#12,#10);
+#252 = AXIS2_PLACEMENT_3D('',#100,#14,#10);
+#253 = AXIS2_PLACEMENT_3D('',#103,#11,#10);
+#254 = AXIS2_PLACEMENT_3D('',#100,#13,#12);
+#255 = AXIS2_PLACEMENT_3D('',#101,#10,#12);
+
+#260 = PLANE('',#250);
+#261 = PLANE('',#251);
+#262 = PLANE('',#252);
+#263 = PLANE('',#253);
+#264 = PLANE('',#254);
+#265 = PLANE('',#255);
+
+#270 = ADVANCED_FACE('',(#240),#260,.F.);
+#271 = ADVANCED_FACE('',(#241),#261,.T.);
+#272 = ADVANCED_FACE('',(#242),#262,.F.);
+#273 = ADVANCED_FACE('',(#243),#263,.T.);
+#274 = ADVANCED_FACE('',(#244),#264,.F.);
+#275 = ADVANCED_FACE('',(#245),#265,.T.);
+
+#280 = CLOSED_SHELL('',(#270,#271,#272,#273,#274,#275));
+#281 = MANIFOLD_SOLID_BREP('leaf_cube',#280);
+
+/* ---------- Shape representation context ---------- */
+#400 = ( GEOMETRIC_REPRESENTATION_CONTEXT(3)
+         GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#401))
+         GLOBAL_UNIT_ASSIGNED_CONTEXT((#402,#403,#404))
+         REPRESENTATION_CONTEXT('model','3D') );
+#401 = UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.0E-06),#402,'','');
+#402 = ( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) );
+#403 = ( NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.) );
+#404 = ( NAMED_UNIT(*) SI_UNIT($,.STERADIAN.) SOLID_ANGLE_UNIT() );
+
+/* ---------- LeafPart product structure ---------- */
+#500 = PRODUCT('LeafPart','LeafPart','Leaf cube part',(#501));
+#501 = PRODUCT_CONTEXT('',#502,'mechanical');
+#502 = APPLICATION_CONTEXT('automotive_design');
+#503 = PRODUCT_DEFINITION_FORMATION('','',#500);
+#504 = PRODUCT_DEFINITION_CONTEXT('part definition',#502,'design');
+#505 = PRODUCT_DEFINITION('','',#503,#504);
+#506 = PRODUCT_DEFINITION_SHAPE('','',#505);
+#507 = ADVANCED_BREP_SHAPE_REPRESENTATION('leaf',(#281),#400);
+#508 = SHAPE_DEFINITION_REPRESENTATION(#506,#507);
+
+/* ---------- SubAssembly product structure ---------- */
+#600 = PRODUCT('SubAssembly','SubAssembly','Middle-level assembly',(#601));
+#601 = PRODUCT_CONTEXT('',#502,'mechanical');
+#602 = PRODUCT_DEFINITION_FORMATION('','',#600);
+#603 = PRODUCT_DEFINITION_CONTEXT('part definition',#502,'design');
+#604 = PRODUCT_DEFINITION('','',#602,#603);
+#605 = PRODUCT_DEFINITION_SHAPE('','',#604);
+/* SubAssembly SR has the leaf BREP + placement for it */
+#606 = ADVANCED_BREP_SHAPE_REPRESENTATION('subasm',(#281),#400);
+#607 = SHAPE_DEFINITION_REPRESENTATION(#605,#606);
+
+/* ---------- Root Assembly product structure ---------- */
+#700 = PRODUCT('RootAssembly','RootAssembly','Top-level assembly',(#701));
+#701 = PRODUCT_CONTEXT('',#502,'mechanical');
+#702 = PRODUCT_DEFINITION_FORMATION('','',#700);
+#703 = PRODUCT_DEFINITION_CONTEXT('part definition',#502,'design');
+#704 = PRODUCT_DEFINITION('','',#702,#703);
+#705 = PRODUCT_DEFINITION_SHAPE('','',#704);
+/* Root SR references subassembly BREP */
+#706 = ADVANCED_BREP_SHAPE_REPRESENTATION('root',(#281),#400);
+#707 = SHAPE_DEFINITION_REPRESENTATION(#705,#706);
+
+/* ---------- NAUO: LeafPart → SubAssembly (translate +20 Y) ---------- */
+#800 = NEXT_ASSEMBLY_USAGE_OCCURRENCE('leaf_in_sub','leaf_in_sub',
+        'LeafPart in SubAssembly',#604,#505,$);
+
+/* PDS for this NAUO */
+#810 = PRODUCT_DEFINITION_SHAPE('Placement','Placement of leaf in sub',#800);
+
+/* CDSR: transform for LeafPart in SubAssembly */
+/* The IDT maps from leaf SR (#507) to subassembly SR (#606) */
+/* origin = identity at (0,0,0), target = shifted +20 in Y */
+#820 = CARTESIAN_POINT('',(0.0,20.0,0.0));
+#821 = AXIS2_PLACEMENT_3D('',#1,#12,#10);   /* identity origin */
+#822 = AXIS2_PLACEMENT_3D('',#820,#12,#10); /* target at Y=+20 */
+
+#830 = CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#840,#850);
+#840 = ( REPRESENTATION_RELATIONSHIP('','',#606,#507)
+         REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#845)
+         SHAPE_REPRESENTATION_RELATIONSHIP() );
+#845 = ITEM_DEFINED_TRANSFORMATION('','',#822,#821);
+#850 = PRODUCT_DEFINITION_SHAPE('Placement','Placement',#800);
+
+/* ---------- NAUO: SubAssembly → RootAssembly (translate +10 X) ---------- */
+#900 = NEXT_ASSEMBLY_USAGE_OCCURRENCE('sub_in_root','sub_in_root',
+        'SubAssembly in RootAssembly',#704,#604,$);
+
+/* PDS for this NAUO */
+#910 = PRODUCT_DEFINITION_SHAPE('Placement','Placement of sub in root',#900);
+
+/* CDSR: transform for SubAssembly in RootAssembly */
+/* origin = identity at (0,0,0), target = shifted +10 in X */
+#920 = CARTESIAN_POINT('',(10.0,0.0,0.0));
+#921 = AXIS2_PLACEMENT_3D('',#1,#12,#10);   /* identity origin */
+#922 = AXIS2_PLACEMENT_3D('',#920,#12,#10); /* target at X=+10 */
+
+#930 = CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#940,#950);
+#940 = ( REPRESENTATION_RELATIONSHIP('','',#706,#606)
+         REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#945)
+         SHAPE_REPRESENTATION_RELATIONSHIP() );
+#945 = ITEM_DEFINED_TRANSFORMATION('','',#922,#921);
+#950 = PRODUCT_DEFINITION_SHAPE('Placement','Placement',#900);
+
+ENDSEC;
+END-ISO-10303-21;
