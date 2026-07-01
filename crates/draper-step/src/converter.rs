@@ -4342,25 +4342,21 @@ impl<'a> StepConverter<'a> {
         // Time guard: limit per-BREP triangulation time.
         // WASM uses a moderate limit to avoid browser freezes;
         // native uses a generous limit for complex assemblies.
-        // WASM uses 30s (reduced from 60s for mobile responsiveness — combined
-        // with the 3s per-face limit, this ensures no single BREP blocks the UI
-        // for more than 30s. Remaining faces are skipped and the partial mesh
-        // is returned).
+        // Use override from TriangulationParams if provided.
         #[cfg(target_arch = "wasm32")]
-        let brep_time_limit = std::time::Duration::from_secs(30);
+        let default_brep_time_limit = std::time::Duration::from_secs(30);
         #[cfg(not(target_arch = "wasm32"))]
-        let brep_time_limit = std::time::Duration::from_secs(600); // 10 min on native
+        let default_brep_time_limit = std::time::Duration::from_secs(600);
+        let brep_time_limit = params.brep_time_limit_override.unwrap_or(default_brep_time_limit);
 
         // Per-FACE time limit: if a single face takes longer than this,
         // we skip it (returning an empty mesh for that face) rather than blocking.
-        // WASM uses 3s (reduced from 10s for mobile responsiveness — a single
-        // 10s face freeze is unacceptable on mobile, and 3s is still enough
-        // for most NURBS faces at Medium LOD).
-        // native uses 120s for complex NURBS faces.
+        // Use override from TriangulationParams if provided.
         #[cfg(target_arch = "wasm32")]
-        let face_time_limit = std::time::Duration::from_secs(3);
+        let default_face_time_limit = std::time::Duration::from_secs(3);
         #[cfg(not(target_arch = "wasm32"))]
-        let face_time_limit = std::time::Duration::from_secs(120);
+        let default_face_time_limit = std::time::Duration::from_secs(120);
+        let face_time_limit = params.face_time_limit_override.unwrap_or(default_face_time_limit);
 
         let brep_start = StdInstant::now();
 
@@ -4926,15 +4922,19 @@ impl<'a> StepConverter<'a> {
         }
 
         // Time guard: limit per-BREP triangulation time.
+        // Use override from TriangulationParams if provided, otherwise use
+        // platform-specific defaults (30s WASM / 600s native).
         #[cfg(target_arch = "wasm32")]
-        let brep_time_limit = std::time::Duration::from_secs(30);
+        let default_brep_time_limit = std::time::Duration::from_secs(30);
         #[cfg(not(target_arch = "wasm32"))]
-        let brep_time_limit = std::time::Duration::from_secs(600);
+        let default_brep_time_limit = std::time::Duration::from_secs(600);
+        let brep_time_limit = params.brep_time_limit_override.unwrap_or(default_brep_time_limit);
 
         #[cfg(target_arch = "wasm32")]
-        let face_time_limit = std::time::Duration::from_secs(3);
+        let default_face_time_limit = std::time::Duration::from_secs(3);
         #[cfg(not(target_arch = "wasm32"))]
-        let face_time_limit = std::time::Duration::from_secs(120);
+        let default_face_time_limit = std::time::Duration::from_secs(120);
+        let face_time_limit = params.face_time_limit_override.unwrap_or(default_face_time_limit);
 
         // Tolerance-based dedup
         let merge_tol = (tol_ctx.model_scale * 1e-4).max(tol_ctx.absolute * 10.0);

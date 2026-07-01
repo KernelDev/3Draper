@@ -566,6 +566,19 @@ pub struct TriangulationParams {
     ///
     /// When `None`, no per-face-area adjustment is applied (uniform budget).
     pub bbox_surface_area: Option<f64>,
+    /// Override for the per-BREP wall-clock time limit.
+    ///
+    /// Defaults to `None` (use platform-specific defaults: 30s WASM, 600s native).
+    /// When `Some(duration)`, the BREP session uses this value instead of the
+    /// default, allowing tests to simulate timeout scenarios with very short
+    /// limits (e.g. 1s).
+    pub brep_time_limit_override: Option<std::time::Duration>,
+    /// Override for the per-face wall-clock time limit.
+    ///
+    /// Defaults to `None` (use platform-specific defaults: 3s WASM, 120s native).
+    /// When `Some(duration)`, each face gets this time budget instead of the
+    /// default, allowing tests to force face-level timeouts.
+    pub face_time_limit_override: Option<std::time::Duration>,
 }
 
 impl std::fmt::Debug for TriangulationParams {
@@ -585,6 +598,8 @@ impl std::fmt::Debug for TriangulationParams {
             .field("target_triangles_per_face", &self.target_triangles_per_face)
             .field("adaptive_lod_enabled", &self.adaptive_lod_enabled)
             .field("bbox_surface_area", &self.bbox_surface_area)
+            .field("brep_time_limit_override", &self.brep_time_limit_override)
+            .field("face_time_limit_override", &self.face_time_limit_override)
             .field("progress_callback", &self.progress_callback.as_ref().map(|_| "Some(...)"))
             .finish()
     }
@@ -608,6 +623,8 @@ impl Default for TriangulationParams {
             target_triangles_per_face: None,
             adaptive_lod_enabled: false,
             bbox_surface_area: None,
+            brep_time_limit_override: None,
+            face_time_limit_override: None,
         }
     }
 }
@@ -700,6 +717,8 @@ impl TriangulationParams {
             target_triangles_per_face: None,
             adaptive_lod_enabled: false,
             bbox_surface_area: None,
+            brep_time_limit_override: None,
+            face_time_limit_override: None,
         }
     }
 

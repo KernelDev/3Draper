@@ -7,9 +7,9 @@
 //! real-world CAD assemblies like as1-oc-214.stp.
 
 use draper_step::converter::{
-    step_structure_lazy, OwnedStepConversionContext, PendingBrepInstance,
+    step_structure_lazy, OwnedStepConversionContext,
 };
-use draper_mesh::{validate_watertight, WatertightReport};
+use draper_mesh::validate_watertight;
 use std::env;
 use std::path::Path;
 use std::time::Instant;
@@ -71,7 +71,7 @@ fn main() {
         "Part", "Verts", "Tris", "Edges", "Bound", "NonMan", "Euler", "Status");
     println!("{}", "-".repeat(108));
 
-    for (i, pending) in pending_instances.iter().enumerate() {
+    for (_i, pending) in pending_instances.iter().enumerate() {
         let tri_start = Instant::now();
         let instance = ctx.triangulate_pending(pending);
 
