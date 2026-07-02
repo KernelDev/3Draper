@@ -3257,6 +3257,18 @@ fn triangulate_cylinder_full_at_v_range(
 /// position. This avoids the "twisted/lobed" bug.
 ///
 /// Apex degeneracy: when v_max reaches the cone's apex height, the top row
+/// Negate a surface normal for `forward:false` faces (Bug B fix — 8.2.1/8.2.2).
+/// For `forward:false`, the geometric outward normal must be flipped so it
+/// points inward (toward the solid), matching the inverted triangle winding.
+#[inline]
+fn orient_normal(n: Direction3d, forward: bool) -> Direction3d {
+    if forward {
+        n
+    } else {
+        Direction3d::new(-n.x, -n.y, -n.z).unwrap_or(n)
+    }
+}
+
 /// collapses to a single apex vertex (since `cone.point_at(u, apex_v)` is
 /// the apex point for any u). Triangles connecting the bottom row to the
 /// apex row are fan-triangulated.
@@ -3353,7 +3365,7 @@ fn triangulate_cone_tube_from_boundary(
         if top_row_at_apex && j == n_v {
             // Apex row — single vertex (all u values map to the apex point).
             let p = cone.point_at(0.0, apex_v);
-            let n = cone.normal_at(0.0, apex_v);
+            let n = orient_normal(cone.normal_at(0.0, apex_v), forward);
             let idx = mesh.add_vertex(p);
             mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
             row_vertex_offset.push(idx);
@@ -3372,7 +3384,7 @@ fn triangulate_cone_tube_from_boundary(
                 } else {
                     crate::edge_cache::deterministic_round_point(cone.point_at(u, v))
                 };
-                let n = cone.normal_at(u, v);
+                let n = orient_normal(cone.normal_at(u, v), forward);
                 let idx = mesh.add_vertex(p);
                 mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
             }
@@ -3469,7 +3481,7 @@ fn triangulate_cone_full_at_v_range(
         let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
         if top_row_at_apex && j == n_v {
             let p = cone.point_at(0.0, apex_v);
-            let n = cone.normal_at(0.0, apex_v);
+            let n = orient_normal(cone.normal_at(0.0, apex_v), forward);
             let idx = mesh.add_vertex(p);
             mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
             row_vertex_offset.push(idx);
@@ -3482,7 +3494,7 @@ fn triangulate_cone_full_at_v_range(
             for i in 0..n_u {
                 let u = 2.0 * PI * i as f64 / n_u as f64;
                 let p = crate::edge_cache::deterministic_round_point(cone.point_at(u, v));
-                let n = cone.normal_at(u, v);
+                let n = orient_normal(cone.normal_at(u, v), forward);
                 let idx = mesh.add_vertex(p);
                 mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
             }
@@ -3678,6 +3690,7 @@ fn triangulate_cone_face(face: &Face, cone: &ConeSurface, params: &Triangulation
 /// all vertices collapse to a single point. We generate only 1 apex vertex
 /// instead of n_u to avoid degenerate (zero-area) triangles.
 fn triangulate_cone_full(face: &Face, cone: &ConeSurface, params: &TriangulationParams) -> TriangleMesh {
+    let forward = face.forward;
     let mut mesh = TriangleMesh::new();
     let (v_min, v_max) = compute_axis_v_range(face, &cone.origin, &cone.axis);
     let (v_min, v_max) = if v_min < v_max { (v_min, v_max) } else { (0.0, cone.height().min(100.0)) };
@@ -3710,7 +3723,7 @@ fn triangulate_cone_full(face: &Face, cone: &ConeSurface, params: &Triangulation
         if top_row_at_apex && j == n_v {
             // Apex row — single vertex
             let p = cone.point_at(0.0, apex_v);
-            let n = cone.normal_at(0.0, apex_v);
+            let n = orient_normal(cone.normal_at(0.0, apex_v), forward);
             let idx = mesh.add_vertex(p);
             mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
             let _ = Some(idx);
@@ -3725,7 +3738,7 @@ fn triangulate_cone_full(face: &Face, cone: &ConeSurface, params: &Triangulation
             for i in 0..n_u {
                 let u = 2.0 * PI * i as f64 / n_u as f64;
                 let p = cone.point_at(u, v);
-                let n = cone.normal_at(u, v);
+                let n = orient_normal(cone.normal_at(u, v), forward);
                 let idx = mesh.add_vertex(p);
                 mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
             }
@@ -7026,7 +7039,7 @@ fn triangulate_cone_with_boundary(
             let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
             let v = v_min + (v_max - v_min) * j as f64 / (n_v - 1).max(1) as f64;
             let p = cone.point_at(u, v);
-            let n = cone.normal_at(u, v);
+            let n = orient_normal(cone.normal_at(u, v), forward);
             let idx = mesh.add_vertex(p);
             mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
         }
@@ -7225,7 +7238,7 @@ fn triangulate_cone_face_with_boundary(
         if top_at_apex && j == n_v {
             // Apex row — single vertex
             let p = cone.point_at(0.0, apex_v);
-            let n = cone.normal_at(0.0, apex_v);
+            let n = orient_normal(cone.normal_at(0.0, apex_v), forward);
             let idx = mesh.add_vertex(p);
             mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
             let _ = Some(idx);
@@ -7240,7 +7253,7 @@ fn triangulate_cone_face_with_boundary(
             for i in 0..n_u {
                 let u = u_min + du * i as f64;
                 let p = cone.point_at(u, v);
-                let n = cone.normal_at(u, v);
+                let n = orient_normal(cone.normal_at(u, v), forward);
                 let idx = mesh.add_vertex(p);
                 mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
             }

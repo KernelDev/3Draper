@@ -293,6 +293,9 @@ fn uv_triangles_to_3d(
                 let uv = points[idx as usize];
                 let p3d = surface.point_at(uv.u, uv.v);
                 let n = surface.normal_at(uv.u, uv.v);
+                // Bug B fix (8.2.1/8.2.2): for forward:false faces, the geometric
+                // normal must be negated so it points inward (toward the solid).
+                let n = if forward { n } else { draper_geometry::Direction3d::new(-n.x, -n.y, -n.z).unwrap_or(n) };
                 let vi = mesh.add_vertex(p3d);
                 mesh.add_vertex_normal(vi, [n.x, n.y, n.z]);
                 vi
@@ -4060,6 +4063,41 @@ pub fn triangulate_surface_consistent(
     }
 
     // ============================================================
+    // Step 1.25: Ensure UV polygon is CCW (Bug A fix — 8.2.1/8.2.2)
+    //
+    // When `forward:false`, the boundary coedges are reversed,
+    // producing a CW (clockwise) UV polygon. earcutr interprets
+    // CW input as a hole and produces CW triangles. The subsequent
+    // `forward:false` winding swap (tri[0],tri[2],tri[1]) then
+    // over-corrects, resulting in normals pointing outward when
+    // they should point inward.
+    //
+    // Fix: Detect CW polygons via signed area and reverse them to CCW.
+    // This ensures earcutr always receives CCW input and produces
+    // CCW triangles, so the `forward` flag's winding swap is the
+    // only correction needed. The 3D boundary points must be
+    // reversed in sync to maintain UV↔3D correspondence.
+    // ============================================================
+    let _ccw_data: Vec<Point3d>;
+    let boundary_points_3d: &[Point3d] = {
+        let signed_area = polygon_signed_area_2d(&outer_uv);
+        if signed_area < 0.0 {
+            log::info!(
+                "CCW normalization: UV polygon has negative signed area ({:.6}) — reversing to CCW (forward={})",
+                signed_area, forward
+            );
+            outer_uv.reverse();
+            // Also reverse 3D boundary to stay in sync with UV order
+            let mut reversed_3d: Vec<Point3d> = boundary_points_3d.to_vec();
+            reversed_3d.reverse();
+            _ccw_data = reversed_3d;
+            &_ccw_data
+        } else {
+            boundary_points_3d
+        }
+    };
+
+    // ============================================================
     // Step 1.55: Proactive seam-split for periodic surfaces (5.1.2)
     //
     // For periodic surfaces whose UV polygon spans more than 90% of the
@@ -5140,6 +5178,9 @@ pub fn triangulate_surface_consistent(
                         (deterministic_round_point(surface.point_at(uv.u, uv.v)), surface.normal_at(uv.u, uv.v))
                     }
                 };
+                // Bug B fix (8.2.1/8.2.2): for forward:false faces, negate the
+                // geometric normal so it points inward (toward the solid).
+                let n = if forward { n } else { draper_geometry::Direction3d::new(-n.x, -n.y, -n.z).unwrap_or(n) };
                 // Position-based dedup: if a vertex with the same 3D position
                 // already exists in the face mesh, reuse it. This prevents
                 // position-degenerate triangles when two UV indices map to the
