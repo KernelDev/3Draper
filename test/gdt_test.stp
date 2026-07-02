@@ -1,0 +1,245 @@
+ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('AP242 GD&T Test File - Simple block with geometric tolerances'),'2;1');
+FILE_NAME('gdt_test.stp','2026-07-03',('KernelDev'),('3Draper'),'3Draper v0.1','','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));
+ENDSEC;
+
+DATA;
+/* ================================================================
+   AP242 GD&T Test — rectangular block 20x10x5 mm with GD&T
+   ================================================================
+   Entity ID mapping:
+     #1-#8    : Units (length, angle, plane_angle, solid_angle, SI, conversion)
+     #10-#12  : Product context, definition, formation
+     #20-#24  : Shape representation / product definition shape
+     #30-#37  : Cartesian points
+     #40-#47  : Directions
+     #50-#52  : Axes2Placement3D
+     #60-#65  : Plane surfaces
+     #70-#75  : Advanced faces
+     #80-#91  : Vertex points
+     #92-#103 : Edges / oriented edges
+     #104-#109: Edge curves (lines)
+     #110-#115: Edge loops
+     #116-#121: Coedges
+     #122-#123: Loops (outer)
+     #124      : Closed shell
+     #125      : Manifold solid brep
+     #130-#132 : Shape aspect, property definition, geometric tolerance
+     #140-#141 : Datum features
+   ================================================================ */
+
+/* ── Units ────────────────────────────────────────────────────── */
+#1 = ( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) );
+#2 = ( NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.DEGREE.) );
+#3 = ( NAMED_UNIT(*) SI_UNIT($,.STERADIAN.) SOLID_ANGLE_UNIT() );
+#4 = UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-07),#1,'distance_accuracy_value','confusion accuracy');
+#5 = DIMENSIONAL_EXPONENTS(1.0,0.0,0.0,0.0,0.0,0.0,0.0);
+#6 = DIMENSIONAL_EXPONENTS(0.0,0.0,0.0,0.0,0.0,0.0,0.0);
+#7 = DIMENSIONAL_EXPONENTS(0.0,0.0,0.0,0.0,0.0,0.0,0.0);
+#8 = ( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) );
+
+/* ── Product context & definition ─────────────────────────────── */
+#10 = PRODUCT_CONTEXT('',#11,'mechanical');
+#11 = APPLICATION_CONTEXT('automotive design');
+#12 = PRODUCT('GDT_TEST','GDT_TEST','',( #13 ));
+#13 = PRODUCT_RELATED_PRODUCT_CATEGORY('part',$,(#12));
+#14 = PRODUCT_DEFINITION_FORMATION('','',#12);
+#15 = PRODUCT_DEFINITION_CONTEXT('part definition',#11,'design');
+#16 = PRODUCT_DEFINITION('design','',#14,#15);
+
+/* ── Shape representation ─────────────────────────────────────── */
+#20 = SHAPE_REPRESENTATION('GDT_TEST',(#50),#21);
+#21 = ( GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#4)) GLOBAL_UNIT_ASSIGNED_CONTEXT((#1,#2,#3)) REPRESENTATION_CONTEXT('context3d','') );
+#22 = SHAPE_DEFINITION_REPRESENTATION(#23,#20);
+#23 = PRODUCT_DEFINITION_SHAPE('','',#16);
+#24 = SHAPE_DEFINITION_REPRESENTATION(#23,#20);
+
+/* ── Cartesian points ─────────────────────────────────────────── */
+/* Bottom face corners (z=0) */
+#30 = CARTESIAN_POINT('origin',(0.0,0.0,0.0));
+#31 = CARTESIAN_POINT('p1',(20.0,0.0,0.0));
+#32 = CARTESIAN_POINT('p2',(20.0,10.0,0.0));
+#33 = CARTESIAN_POINT('p3',(0.0,10.0,0.0));
+/* Top face corners (z=5) */
+#34 = CARTESIAN_POINT('p4',(0.0,0.0,5.0));
+#35 = CARTESIAN_POINT('p5',(20.0,0.0,5.0));
+#36 = CARTESIAN_POINT('p6',(20.0,10.0,5.0));
+#37 = CARTESIAN_POINT('p7',(0.0,10.0,5.0));
+
+/* ── Directions ───────────────────────────────────────────────── */
+#40 = DIRECTION('',(1.0,0.0,0.0));
+#41 = DIRECTION('',(0.0,1.0,0.0));
+#42 = DIRECTION('',(0.0,0.0,1.0));
+#43 = DIRECTION('',(-1.0,0.0,0.0));
+#44 = DIRECTION('',(0.0,-1.0,0.0));
+#45 = DIRECTION('',(0.0,0.0,-1.0));
+
+/* ── Axes2Placement3D ─────────────────────────────────────────── */
+#50 = AXIS2_PLACEMENT_3D('placement',#30,#42,#40);
+
+/* ── Plane surfaces ───────────────────────────────────────────── */
+/* Bottom (z=0) */
+#60 = PLANE('bottom_plane',AXIS2_PLACEMENT_3D('',#30,#45,#40));
+/* Top (z=5) — this face will have FLATNESS tolerance */
+#61 = PLANE('top_plane',AXIS2_PLACEMENT_3D('',#34,#42,#40));
+/* Front (y=0) */
+#62 = PLANE('front_plane',AXIS2_PLACEMENT_3D('',#30,#42,#43));
+/* Back (y=10) — this face will have PERPENDICULARITY tolerance */
+#63 = PLANE('back_plane',AXIS2_PLACEMENT_3D('',#33,#45,#40));
+/* Left (x=0) */
+#64 = PLANE('left_plane',AXIS2_PLACEMENT_3D('',#30,#42,#41));
+/* Right (x=20) */
+#65 = PLANE('right_plane',AXIS2_PLACEMENT_3D('',#31,#45,#44));
+
+/* ── Vertices ─────────────────────────────────────────────────── */
+#80 = VERTEX_POINT('',#30);
+#81 = VERTEX_POINT('',#31);
+#82 = VERTEX_POINT('',#32);
+#83 = VERTEX_POINT('',#33);
+#84 = VERTEX_POINT('',#34);
+#85 = VERTEX_POINT('',#35);
+#86 = VERTEX_POINT('',#36);
+#87 = VERTEX_POINT('',#37);
+
+/* ── Edges ────────────────────────────────────────────────────── */
+/* Bottom face edges */
+#90 = EDGE_CURVE('',#80,#81,(#200),.T.);
+#91 = EDGE_CURVE('',#81,#82,(#201),.T.);
+#92 = EDGE_CURVE('',#82,#83,(#202),.T.);
+#93 = EDGE_CURVE('',#83,#80,(#203),.T.);
+/* Top face edges */
+#94 = EDGE_CURVE('',#84,#85,(#204),.T.);
+#95 = EDGE_CURVE('',#85,#86,(#205),.T.);
+#96 = EDGE_CURVE('',#86,#87,(#206),.T.);
+#97 = EDGE_CURVE('',#87,#84,(#207),.T.);
+/* Vertical edges */
+#98 = EDGE_CURVE('',#80,#84,(#208),.T.);
+#99 = EDGE_CURVE('',#81,#85,(#209),.T.);
+#100 = EDGE_CURVE('',#82,#86,(#210),.T.);
+#101 = EDGE_CURVE('',#83,#87,(#211),.T.);
+
+/* ── Edge curves (lines as trimming curves) ───────────────────── */
+#200 = LINE('',#30,#40);
+#201 = LINE('',#31,#41);
+#202 = LINE('',#32,#43);
+#203 = LINE('',#33,#44);
+#204 = LINE('',#34,#40);
+#205 = LINE('',#35,#41);
+#206 = LINE('',#36,#43);
+#207 = LINE('',#37,#44);
+#208 = LINE('',#30,#42);
+#209 = LINE('',#31,#42);
+#210 = LINE('',#32,#42);
+#211 = LINE('',#33,#42);
+
+/* ── Oriented edges ───────────────────────────────────────────── */
+/* Bottom face (z=0, normal down) */
+#300 = ORIENTED_EDGE('',*,*,#90,.T.);
+#301 = ORIENTED_EDGE('',*,*,#91,.T.);
+#302 = ORIENTED_EDGE('',*,*,#92,.T.);
+#303 = ORIENTED_EDGE('',*,*,#93,.T.);
+/* Top face (z=5, normal up) */
+#304 = ORIENTED_EDGE('',*,*,#94,.T.);
+#305 = ORIENTED_EDGE('',*,*,#95,.T.);
+#306 = ORIENTED_EDGE('',*,*,#96,.T.);
+#307 = ORIENTED_EDGE('',*,*,#97,.T.);
+/* Front face (y=0) */
+#308 = ORIENTED_EDGE('',*,*,#90,.T.);
+#309 = ORIENTED_EDGE('',*,*,#99,.T.);
+#310 = ORIENTED_EDGE('',*,*,#94,.F.);
+#311 = ORIENTED_EDGE('',*,*,#98,.F.);
+/* Back face (y=10) */
+#312 = ORIENTED_EDGE('',*,*,#92,.F.);
+#313 = ORIENTED_EDGE('',*,*,#100,.T.);
+#314 = ORIENTED_EDGE('',*,*,#96,.T.);
+#315 = ORIENTED_EDGE('',*,*,#101,.F.);
+/* Left face (x=0) */
+#316 = ORIENTED_EDGE('',*,*,#93,.F.);
+#317 = ORIENTED_EDGE('',*,*,#101,.T.);
+#318 = ORIENTED_EDGE('',*,*,#97,.T.);
+#319 = ORIENTED_EDGE('',*,*,#98,.T.);
+/* Right face (x=20) */
+#320 = ORIENTED_EDGE('',*,*,#91,.F.);
+#321 = ORIENTED_EDGE('',*,*,#99,.F.);
+#322 = ORIENTED_EDGE('',*,*,#95,.T.);
+#323 = ORIENTED_EDGE('',*,*,#100,.F.);
+
+/* ── Edge loops ───────────────────────────────────────────────── */
+#400 = EDGE_LOOP('',(#300,#301,#302,#303));
+#401 = EDGE_LOOP('',(#304,#305,#306,#307));
+#402 = EDGE_LOOP('',(#308,#309,#310,#311));
+#403 = EDGE_LOOP('',(#312,#313,#314,#315));
+#404 = EDGE_LOOP('',(#316,#317,#318,#319));
+#405 = EDGE_LOOP('',(#320,#321,#322,#323));
+
+/* ── Face outer bounds ────────────────────────────────────────── */
+#500 = FACE_OUTER_BOUND('',#400,.T.);
+#501 = FACE_OUTER_BOUND('',#401,.T.);
+#502 = FACE_OUTER_BOUND('',#402,.T.);
+#503 = FACE_OUTER_BOUND('',#403,.T.);
+#504 = FACE_OUTER_BOUND('',#404,.T.);
+#505 = FACE_OUTER_BOUND('',#405,.T.);
+
+/* ── Advanced faces ───────────────────────────────────────────── */
+#600 = ADVANCED_FACE('bottom',(#500),#60,.F.);
+#601 = ADVANCED_FACE('top',(#501),#61,.T.);
+#602 = ADVANCED_FACE('front',(#502),#62,.F.);
+#603 = ADVANCED_FACE('back',(#503),#63,.T.);
+#604 = ADVANCED_FACE('left',(#504),#64,.F.);
+#605 = ADVANCED_FACE('right',(#505),#65,.T.);
+
+/* ── Closed shell ─────────────────────────────────────────────── */
+#700 = CLOSED_SHELL('',(#600,#601,#602,#603,#604,#605));
+
+/* ── Manifold solid brep ──────────────────────────────────────── */
+#800 = MANIFOLD_SOLID_BREP('GDT_TEST_BLOCK',#700);
+
+/* ── Shape representation link ────────────────────────────────── */
+#810 = ADVANCED_BREP_SHAPE_REPRESENTATION('GDT_TEST',(#50,#800),#21);
+#820 = SHAPE_REPRESENTATION_RELATIONSHIP('SRR','none',#20,#810);
+
+/* ================================================================
+   GD&T ENTITIES (AP242)
+   ================================================================ */
+
+/* ── Shape aspects — bridge entities connecting GD&T to faces ─── */
+/* Shape aspect for top face (flatness tolerance applies here) */
+#900 = SHAPE_ASPECT('top surface','flatness control',#23,.F.);
+#901 = SHAPE_ASPECT_RELATIONSHIP('applied_to','','',#900,#902);
+/* Shape aspect for back face (perpendicularity tolerance applies here) */
+#902 = SHAPE_ASPECT('back surface','perpendicularity control',#23,.F.);
+#903 = SHAPE_ASPECT_RELATIONSHIP('applied_to','','',#902,#904);
+
+/* ── Property definitions ─────────────────────────────────────── */
+#910 = PROPERTY_DEFINITION('geometric tolerance property','','',#23);
+
+/* ── Datum features ───────────────────────────────────────────── */
+/* Datum A: bottom face (#600) */
+#920 = DATUM_FEATURE('A','datum A - bottom plane',#900);
+/* Datum B: left face (#604) */
+#921 = DATUM_FEATURE('B','datum B - left plane',#902);
+
+/* ── Datum references ─────────────────────────────────────────── */
+#930 = DATUM_REFERENCE('',#920,$);
+#931 = DATUM_REFERENCE('',#921,$);
+
+/* ── Geometric tolerances ─────────────────────────────────────── */
+/* Flatness 0.01 applied to top face (#601) via shape aspect #900 */
+#940 = FLATNESS_TOLERANCE('flatness','top surface flatness',0.01,#910);
+/* This tolerance applies to shape aspect #900 which links to face #601 */
+
+/* Perpendicularity 0.02 w.r.t. datum A, applied to back face (#603) via shape aspect #902 */
+#941 = PERPENDICULARITY_TOLERANCE('perpendicularity','back surface perpendicularity',0.02,#910,(#930));
+/* This tolerance applies to shape aspect #902 which links to face #603 */
+
+/* ── Tolerance applied-to links ───────────────────────────────── */
+/* GEOMETRIC_TOLERANCE_WITH_DATUM_REFERENCE for #941 */
+/* The applied_to field is set via the shape_aspect chain:
+   #940 applied_to → #900 (shape_aspect for top face)
+   #941 applied_to → #902 (shape_aspect for back face) */
+
+ENDSEC;
+
+END-ISO-10303-21;
