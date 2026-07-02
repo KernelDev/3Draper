@@ -3766,3 +3766,73 @@ Stage Summary:
 - Fix: unit-aware angle conversion based on HEADER + heuristic fallback
 - UV viz: per-polyline containment test + reduced stroke weight
 - Files changed: converter.rs, validation.rs, app.rs, nist_cone.stp, UNIVERSAL_STEP_PLAN.md
+
+---
+Task ID: 6.1.3
+Agent: Main
+Task: GD&T 3D annotations overlay in viewport (6.1.3)
+
+Work Log:
+- Added show_gdt_annotations: bool field to DraperApp
+- Implemented draw_gdt_annotations() — 2D overlay on 3D viewport
+- Resolve chain: tolerance.applied_to → ShapeAspect.relating_shape → FaceInfo.step_face_id → face centroid
+- World-to-screen projection using camera MVP matrices
+- Draws: leader line (gold), attachment dot, Feature Control Frame (FCF)
+- Multi-cell FCF with vertical separators (ASME Y14.5)
+- Added toggle "3D Annotations" checkbox in STEP Tools panel
+- Fixed egui 0.31 API: rect_stroke needs StrokeKind::Outside, Other(s) → &str
+
+Stage Summary:
+- 6.1.3 completed — GD&T annotations displayed as 2D overlays on 3D viewport
+- Deployed to gh-pages (f03c43f)
+
+---
+Task ID: 6.1.4
+Agent: Main
+Task: AP242 GD&T test suite (6.1.4)
+
+Work Log:
+- Created test/gdt_test.stp — synthetic AP242 STEP file with GD&T
+- Created gdt_ap242.rs — 5 unit-tests:
+  (1) extract_gdt() no-panic on NIST files
+  (2) GdtToleranceType mapping for 14 ASME Y14.5 types
+  (3) from_step_type_and_name for generic GEOMETRIC_TOLERANCE
+  (4) Face centroid computation from outer_boundary
+  (5) step_face_id populated in FaceInfo
+
+Stage Summary:
+- 6.1.4 completed — all 5 tests pass
+- Section 6.1 (AP242 GD&T) fully completed
+
+---
+Task ID: 7.1+7.2
+Agent: Main
+Task: ABC/NIST Dataset integration test infrastructure
+
+Work Log:
+- Created abc_dataset.rs — automated STEP file discovery and testing
+- Auto-discovers all .stp/.STEP files in test/ directory (26 files)
+- 3 tests: (1) parse (fast), (2) triangulate+watertight+time (slow, #[ignore]), (3) summary
+- 95% success rate target for dataset tests
+- Marked 7.1.1-7.1.3 and 7.2.1-7.2.2 as completed
+
+Stage Summary:
+- Dataset test infrastructure operational
+- 26 STEP files auto-discovered, parse test passes for all
+
+---
+Task ID: 8.1.1-diag
+Agent: Main (via Explore subagent)
+Task: Diagnose drill_top Step#803 triangulation artifacts
+
+Work Log:
+- Identified Step#803 as ADVANCED_FACE with TOROIDAL_SURFACE (R=0.46, r=0.015)
+- Very thin torus (r/R ≈ 0.033) — fillet on drill bit
+- V direction wraps full 2π — periodic seam handling issue
+- Code already has unwrap_periodic_torus_boundary() and normalize_uv_polygon()
+- Probable cause: double normalization + proactive seam-split on thin sub-polygons
+- Diagnostic tools available: face_3d_by_step_id, face_triangulation_dump
+
+Stage Summary:
+- Diagnosis complete — V-periodic seam handling for thin torus fillet
+- Fix requires deeper debugging — deferred pending user's triangulation bug review
