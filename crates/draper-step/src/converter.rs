@@ -1986,6 +1986,12 @@ struct StepConverter<'a> {
     step: &'a StepFile,
     _entity_map: HashMap<i64, usize>,
     config: StepConversionConfig,
+    /// Whether the STEP file uses degrees for plane angle measures.
+    /// Determined from HEADER units via `extract_units()`. Affects
+    /// CONICAL_SURFACE semi_angle interpretation: if degrees, the raw
+    /// value must be converted to radians; if radians (SI default),
+    /// use as-is.
+    angle_in_degrees: bool,
     /// Pre-built index: pd_id → brep_id (resolved eagerly in new() — O(n) instead of O(n³) per-call)
     pd_brep_map: HashMap<i64, Option<i64>>,
     /// Pre-built index: nauo_id → transform (resolved eagerly in new() — O(n) instead of O(n²) per-call)
@@ -2002,6 +2008,13 @@ impl<'a> StepConverter<'a> {
     fn with_config(step: &'a StepFile, config: StepConversionConfig) -> Self {
         // Reuse the StepFile's entity_index instead of rebuilding from scratch
         let entity_map = step.entity_index_ref().clone();
+
+        // ─── Determine angle unit from HEADER ───
+        // STEP files may use RADIAN (SI default) or DEGREE (via CONVERSION_BASED_UNIT).
+        // This affects CONICAL_SURFACE semi_angle interpretation: degrees must be
+        // converted to radians; radians are used as-is.
+        let unit_data = crate::pmi::extract_units(step);
+        let angle_in_degrees = unit_data.units.uses_degrees();
 
         // ─── Use or build reverse-index maps ───
         // These are cached on the StepFile so that multiple StepConverter instances
@@ -2026,6 +2039,7 @@ impl<'a> StepConverter<'a> {
             step,
             _entity_map: entity_map,
             config,
+            angle_in_degrees,
             pd_brep_map,
             nauo_transform_map,
             bbox_cache: std::cell::RefCell::new(None),
@@ -8462,10 +8476,28 @@ impl<'a> StepConverter<'a> {
         let axis2_id = self.find_axis2_ref(entity)?;
         let (origin, axis, u_dir) = self.resolve_axis2(axis2_id)?;
         let radius = self.find_float_param(entity, 0)?;
-        let half_angle_deg = self.find_float_param(entity, 1)?;
-        let half_angle_rad = half_angle_deg.abs().to_radians();
+        // STEP ISO-10303-42 specifies CONICAL_SURFACE semi_angle as a
+        // plane_angle_measure, whose unit is determined by the HEADER's
+        // GLOBAL_UNIT_ASSIGNED_CONTEXT. Most industrial STEP files use
+        // DEGREE (via CONVERSION_BASED_UNIT), while some use RADIAN
+        // (SI_UNIT $ .RADIAN.). We detect the unit from HEADER and
+        // convert accordingly.
+        //
+        // However, many real-world STEP files are inconsistent: they
+        // declare RADIAN in the HEADER but provide semi_angle in degrees
+        // (e.g. 45.0 instead of 0.7854). To handle this, we use a
+        // heuristic: if the raw value exceeds π/2 (the maximum valid
+        // half-angle for a cone in radians), it must be in degrees.
+        let half_angle_raw = self.find_float_param(entity, 1)?;
+        let use_degrees = self.angle_in_degrees || half_angle_raw.abs() > std::f64::consts::FRAC_PI_2;
+        let half_angle_rad = if use_degrees {
+            half_angle_raw.abs().to_radians()
+        } else {
+            // Already in radians — use as-is
+            half_angle_raw.abs()
+        };
         // Negative semi-angle: apex is opposite to axis direction → flip axis
-        let (axis, u_dir) = if half_angle_deg < 0.0 {
+        let (axis, u_dir) = if half_angle_raw < 0.0 {
             let flipped_axis = Direction3d::new(-axis.x, -axis.y, -axis.z).unwrap_or(axis);
             let flipped_u_dir = Direction3d::new(-u_dir.x, -u_dir.y, -u_dir.z).unwrap_or(u_dir);
             (flipped_axis, flipped_u_dir)

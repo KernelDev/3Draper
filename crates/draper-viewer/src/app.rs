@@ -8506,46 +8506,94 @@ impl ViewerApp {
                         // Draw filled triangles so the user can see the actual UV
                         // subdivision of the face, not just the boundary.
                         //
-                        // Each triangle is rendered as a filled polygon with a
-                        // clearly visible edge stroke so the user can see both
-                        // the triangle shape AND its edges at the same time.
-                        let outer_uv_poly: Vec<(f64, f64)> = face_uv.outer_polylines.iter()
-                            .flat_map(|p| p.iter().copied())
-                            .collect();
+                        // Each triangle is rendered as a filled polygon with a thin
+                        // edge stroke so the user can see both the triangle shape
+                        // AND its edges at the same time.
+                        //
+                        // The in-hole / outside-boundary check is done using
+                        // per-polyline `point_in_polygon` against EACH outer
+                        // polyline separately (not a flat_map). This is necessary
+                        // because `split_at_seam_jumps` breaks the outer boundary
+                        // into multiple disconnected segments, and a flat_map
+                        // polygon would have self-intersections. Triangles that
+                        // were seam-unwrapped may have centroids outside the
+                        // original [0,2π] range, so we also check against a
+                        // period-shifted version of each polyline.
                         let hole_polys: Vec<Vec<(f64, f64)>> = face_uv.inner_polylines.iter()
                             .cloned()
                             .collect();
+                        // Build per-polyline outer polygons for point-in-polygon
+                        // testing. Also build period-shifted copies for seam-
+                        // unwrapped triangles whose centroids may lie outside
+                        // the original UV range.
+                        let u_per = if face_uv.u_periodic { face_uv.u_period } else { 0.0 };
+                        let v_per = if face_uv.v_periodic { face_uv.v_period } else { 0.0 };
+                        let outer_polys: Vec<Vec<(f64, f64)>> = face_uv.outer_polylines.clone();
+                        // Period-shifted copies: shift by -u_period and +u_period
+                        let outer_polys_shifted: Vec<Vec<(f64, f64)>> = if u_per > 0.0 {
+                            let mut shifted = Vec::new();
+                            for poly in &outer_polys {
+                                let p_neg: Vec<(f64, f64)> = poly.iter().map(|&(u, v)| (u - u_per, v)).collect();
+                                let p_pos: Vec<(f64, f64)> = poly.iter().map(|&(u, v)| (u + u_per, v)).collect();
+                                shifted.push(p_neg);
+                                shifted.push(p_pos);
+                            }
+                            shifted
+                        } else {
+                            Vec::new()
+                        };
+                        let hole_polys_shifted: Vec<Vec<(f64, f64)>> = if u_per > 0.0 {
+                            let mut shifted = Vec::new();
+                            for poly in &hole_polys {
+                                let p_neg: Vec<(f64, f64)> = poly.iter().map(|&(u, v)| (u - u_per, v)).collect();
+                                let p_pos: Vec<(f64, f64)> = poly.iter().map(|&(u, v)| (u + u_per, v)).collect();
+                                shifted.push(p_neg);
+                                shifted.push(p_pos);
+                            }
+                            shifted
+                        } else {
+                            Vec::new()
+                        };
+
                         if !face_uv.uv_triangles.is_empty() {
                             let tri_limit = 3000.min(face_uv.uv_triangles.len());
                             for (ti, tri) in face_uv.uv_triangles.iter().enumerate() {
                                 let cu = (tri[0].0 + tri[1].0 + tri[2].0) / 3.0;
                                 let cv = (tri[0].1 + tri[1].1 + tri[2].1) / 3.0;
-                                let in_hole = hole_polys.iter().any(|h| point_in_polygon(cu, cv, h));
-                                let in_outer = !outer_uv_poly.is_empty() && point_in_polygon(cu, cv, &outer_uv_poly);
+                                // Check centroid against each outer polyline separately
+                                // (including period-shifted copies) to handle seam-unwrapped
+                                // triangles correctly.
+                                let in_outer = outer_polys.iter().any(|p| point_in_polygon(cu, cv, p))
+                                    || outer_polys_shifted.iter().any(|p| point_in_polygon(cu, cv, p));
+                                let in_hole = hole_polys.iter().any(|h| point_in_polygon(cu, cv, h))
+                                    || hole_polys_shifted.iter().any(|h| point_in_polygon(cu, cv, h));
 
                                 let p0 = egui::pos2(map_u(tri[0].0), map_v(tri[0].1));
                                 let p1 = egui::pos2(map_u(tri[1].0), map_v(tri[1].1));
                                 let p2 = egui::pos2(map_u(tri[2].0), map_v(tri[2].1));
 
                                 if in_hole || !in_outer {
-                                    // Triangle inside a hole or outside the outer boundary — red outline.
+                                    // Triangle inside a hole or outside the outer boundary —
+                                    // subtle red outline (lower opacity than before to reduce
+                                    // the "aura" effect).
                                     painter.add(egui::Shape::convex_polygon(
                                         vec![p0, p1, p2],
-                                        egui::Color32::from_rgba_premultiplied(255, 34, 34, 30),
-                                        egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(255, 68, 68, 200)),
+                                        egui::Color32::from_rgba_premultiplied(255, 34, 34, 15),
+                                        egui::Stroke::new(0.5, egui::Color32::from_rgba_premultiplied(255, 68, 68, 100)),
                                     ));
                                 } else {
-                                    // Valid triangle — alternating blue tints with a
-                                    // bright cyan edge so the triangulation is clearly
-                                    // visible even on top of the colored fill.
+                                    // Valid triangle — alternating blue tints with a thin
+                                    // edge stroke. Reduced edge opacity and thickness to
+                                    // eliminate the dense line grid artifact ("extra lines")
+                                    // while keeping triangle boundaries visible at zoom.
                                     let fill = if ti % 2 == 0 {
-                                        egui::Color32::from_rgba_premultiplied(68, 136, 255, 32)
+                                        egui::Color32::from_rgba_premultiplied(68, 136, 255, 28)
                                     } else {
-                                        egui::Color32::from_rgba_premultiplied(85, 170, 255, 32)
+                                        egui::Color32::from_rgba_premultiplied(85, 170, 255, 28)
                                     };
                                     let edge = egui::Stroke::new(
-                                        1.0,
-                                        egui::Color32::from_rgba_premultiplied(180, 220, 255, 220),
+                                        0.5,
+                                        egui::Color32::from_rgba_premultiplied(120, 180, 255, 100),
                                     );
                                     painter.add(egui::Shape::convex_polygon(vec![p0, p1, p2], fill, edge));
                                 }
@@ -8620,6 +8668,8 @@ impl ViewerApp {
                         }
 
                         // Surface evaluation points (inside outer boundary)
+                        // Use per-polyline point_in_polygon (not flat_map) for
+                        // consistency with the triangle rendering above.
                         if let Some(s) = surface_ref {
                             for i in 0..=u_divs {
                                 for j in 0..=v_divs {
@@ -8627,11 +8677,12 @@ impl ViewerApp {
                                     let v = v_min + (v_max - v_min) * j as f64 / v_divs as f64;
                                     let p = s.point_at(u, v);
                                     if p.x.is_finite() && p.y.is_finite() && p.z.is_finite() {
-                                        let inside = !outer_uv_poly.is_empty() && point_in_polygon(u, v, &outer_uv_poly);
+                                        let inside = outer_polys.iter().any(|poly| point_in_polygon(u, v, poly))
+                                            || outer_polys_shifted.iter().any(|poly| point_in_polygon(u, v, poly));
                                         if inside {
                                             painter.circle_filled(
                                                 egui::pos2(map_u(u), map_v(v)), 2.0,
-                                                egui::Color32::from_rgba_premultiplied(102, 136, 255, 180),
+                                                egui::Color32::from_rgba_premultiplied(102, 136, 255, 120),
                                             );
                                         }
                                     }

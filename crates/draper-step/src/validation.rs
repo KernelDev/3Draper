@@ -865,10 +865,18 @@ fn validate_conical_surface(entity: &StepEntity, step_file: &StepFile, report: &
 
     if floats.len() >= 2 {
         let semi_angle = floats[1];
-        if semi_angle < 0.0 || semi_angle > std::f64::consts::FRAC_PI_2 {
+        // The semi_angle unit depends on the file's GLOBAL_UNIT_ASSIGNED_CONTEXT.
+        // Most industrial files use DEGREE; some use RADIAN. Detect from units.
+        let unit_data = crate::pmi::extract_units(step_file);
+        let semi_angle_rad = if unit_data.units.uses_degrees() {
+            semi_angle.to_radians()
+        } else {
+            semi_angle
+        };
+        if semi_angle_rad < 0.0 || semi_angle_rad > std::f64::consts::FRAC_PI_2 {
             report.add(StepValidationIssue::warning(
                 Some(entity.id),
-                format!("CONICAL_SURFACE has unusual semi_angle ({:.6} rad, {:.1} deg)", semi_angle, semi_angle.to_degrees()),
+                format!("CONICAL_SURFACE has unusual semi_angle ({:.6} rad, {:.1} deg, file unit: {})", semi_angle_rad, semi_angle_rad.to_degrees(), unit_data.units.plane_angle_unit),
             ).with_suggestion("Semi-angle should typically be in [0, π/2]"));
         }
     }

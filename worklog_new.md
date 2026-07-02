@@ -3741,3 +3741,28 @@ Stage Summary:
 - Post-triangulation decimation skipped when adaptive LOD is active
 - Legacy path (uniform budget + decimation) preserved for adaptive_lod_enabled=false
 - Commits: `cde41f2` (main), `6c517ec` (gh-pages)
+
+---
+Task ID: bug-8.2.4
+Agent: Main
+Task: Fix Plane Step#87 and Cone Step#78 triangulation in 3.05.078.stp + UV visualization artifacts
+
+Work Log:
+- Analyzed uploaded UV/mesh visualization screenshot showing incorrect triangulation
+- Investigated triangulation code path: triangulate_planar_face → ear_clip/earcutr; triangulate_cone_face → tube_grid/parametric_domain
+- Discovered critical Bug E: `extract_cone()` in converter.rs always called `.to_radians()` on semi_angle, but STEP ISO-10303-42 defines semi_angle as plane_angle_measure whose unit depends on HEADER
+- For 3.05.078.stp (RADIAN in HEADER): semi_angle=0.7854 (π/4=45°) became 0.0137 rad (0.79°) after double conversion → cone rendered as near-cylinder
+- For drill_top/Vulcan/transmission (DEGREE in HEADER): values like 45.0, 23.0 were correctly converted from degrees
+- Added `angle_in_degrees: bool` field to StepConverter, initialized from `extract_units().uses_degrees()` in `with_config()`
+- Updated `extract_cone()` to convert only when angle_in_degrees==true OR raw value > π/2 (heuristic for inconsistent files like Zentralstaender.stp)
+- Updated `validate_conical_surface()` in validation.rs to respect angle units
+- Updated nist_cone.stp to use DEGREE in HEADER (semi_angle=26.565 is degrees)
+- Fixed UV visualization "aura" artifacts: replaced flat_map outer_uv_poly with per-polyline point_in_polygon + period-shifted copies for seam-unwrapped triangles
+- Fixed UV visualization "extra lines": reduced triangle edge stroke from 1.0px/alpha220 to 0.5px/alpha100; reduced fill alpha from 32 to 28
+- Updated UNIVERSAL_STEP_PLAN.md with Bug 8.2.4 entry
+
+Stage Summary:
+- Root cause: CONICAL_SURFACE semi_angle double-converted from radians to radians
+- Fix: unit-aware angle conversion based on HEADER + heuristic fallback
+- UV viz: per-polyline containment test + reduced stroke weight
+- Files changed: converter.rs, validation.rs, app.rs, nist_cone.stp, UNIVERSAL_STEP_PLAN.md
