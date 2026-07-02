@@ -1718,6 +1718,24 @@ impl BrepSession {
         // Filter degenerate triangles
         filter_degenerate_triangles(&mut self.mesh, 1e-10);
 
+        // ─── Recompute face_infos.triangle_range from triangle_face_ids ───
+        // After filter_degenerate_triangles removes triangles, the original
+        // triangle_range values are stale. Recompute from surviving ids.
+        if let Some(ref fids) = self.mesh.triangle_face_ids {
+            let mut fid_ranges: std::collections::HashMap<u64, (usize, usize)> = std::collections::HashMap::new();
+            for (ti, &fid) in fids.iter().enumerate() {
+                let entry = fid_ranges.entry(fid).or_insert((ti, ti));
+                entry.1 = ti + 1;
+            }
+            for fi in &mut self.face_infos {
+                if let Some(&(start, end)) = fid_ranges.get(&fi.face_id) {
+                    fi.triangle_range = (start, end);
+                } else {
+                    fi.triangle_range = (0, 0);
+                }
+            }
+        }
+
         // Weld boundary edge vertices
         {
             let weld_tol = (self.tol_ctx.model_scale * 3e-2).min(10.0).max(1e-4);
@@ -4584,6 +4602,39 @@ impl<'a> StepConverter<'a> {
         // path was missing this call (only the non-detailed path had it), which
         // is why degenerate triangles appeared in the final mesh.
         filter_degenerate_triangles(&mut mesh, 1e-10);
+
+        // ─── Recompute face_infos.triangle_range from triangle_face_ids ───
+        // After filter_degenerate_triangles removes triangles, the original
+        // triangle_range values in FaceInfo are stale — they refer to the
+        // pre-filter mesh indices. This causes the UV viewer and diagnostic
+        // tools to display triangles from the WRONG face. Recompute ranges
+        // from the surviving triangle_face_ids.
+        if let Some(ref fids) = mesh.triangle_face_ids {
+            // Build face_id → [start, end) mapping from the filtered mesh
+            let mut fid_ranges: std::collections::HashMap<u64, (usize, usize)> = std::collections::HashMap::new();
+            for (ti, &fid) in fids.iter().enumerate() {
+                let entry = fid_ranges.entry(fid).or_insert((ti, ti));
+                entry.1 = ti + 1;
+            }
+            for fi in &mut face_infos {
+                if let Some(&(start, end)) = fid_ranges.get(&fi.face_id) {
+                    if (fi.triangle_range.0, fi.triangle_range.1) != (start, end) {
+                        log::debug!(
+                            "FaceInfo #{} (STEP #{}): triangle_range updated [{},{}) → [{},{}) ({}→{} tris)",
+                            fi.face_id, fi.step_face_id,
+                            fi.triangle_range.0, fi.triangle_range.1,
+                            start, end,
+                            fi.triangle_range.1 - fi.triangle_range.0,
+                            end - start,
+                        );
+                        fi.triangle_range = (start, end);
+                    }
+                } else {
+                    // Face has no surviving triangles after filtering
+                    fi.triangle_range = (0, 0);
+                }
+            }
+        }
 
         // Weld boundary edge vertices to fix seam mismatches between
         // adjacent faces using different EDGE_CURVE entities.

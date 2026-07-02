@@ -3325,13 +3325,13 @@ fn triangulate_cone_tube_from_boundary(
     // When bottom ring is empty but top ring has points (boundary is at v_max,
     // apex is at v_min), swap the direction so the boundary ring becomes the
     // "bottom" and the apex is at the "top" of the iteration.
-    let (effective_bottom, effective_top, effective_v_min, effective_v_max, swapped) =
+    let (effective_bottom, effective_top, _effective_v_min, _effective_v_max, _swapped) =
         if bottom_ring.len() < 3 && top_ring.len() >= 3 {
             // Boundary points are at v_max (top), apex at v_min (bottom).
             // Swap: use top_ring as bottom, generate toward apex at v_min.
             (top_ring.clone(), bottom_ring.clone(), v_min, v_max, true)
         } else {
-            (bottom_ring, top_ring, v_min, v_max, false)
+            (bottom_ring.clone(), top_ring.clone(), v_min, v_max, false)
         };
 
     if effective_bottom.len() < 3 {
@@ -3411,9 +3411,9 @@ fn triangulate_cone_tube_from_boundary(
             for i in 0..n_u {
                 let u = bottom_u[i];
                 let p = if j == 0 && !apex_at_bottom {
-                    bottom_ring[i].1
+                    effective_bottom[i].1
                 } else if j == n_v && use_cached_top && !apex_at_top {
-                    top_ring[i].1
+                    effective_top[i].1
                 } else {
                     crate::edge_cache::deterministic_round_point(cone.point_at(u, v))
                 };

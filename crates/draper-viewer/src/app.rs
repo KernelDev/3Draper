@@ -8574,13 +8574,9 @@ impl ViewerApp {
 
                                 if in_hole || !in_outer {
                                     // Triangle inside a hole or outside the outer boundary —
-                                    // subtle red outline (lower opacity than before to reduce
-                                    // the "aura" effect).
-                                    painter.add(egui::Shape::convex_polygon(
-                                        vec![p0, p1, p2],
-                                        egui::Color32::from_rgba_premultiplied(255, 34, 34, 15),
-                                        egui::Stroke::new(0.5, egui::Color32::from_rgba_premultiplied(255, 68, 68, 100)),
-                                    ));
+                                    // skip drawing entirely to avoid the "aura" effect.
+                                    // Previously drawn with subtle red which accumulated into
+                                    // visible halos around the boundary.
                                 } else {
                                     // Valid triangle — alternating blue tints with a thin
                                     // edge stroke. Reduced edge opacity and thickness to
@@ -8591,11 +8587,11 @@ impl ViewerApp {
                                     } else {
                                         egui::Color32::from_rgba_premultiplied(85, 170, 255, 28)
                                     };
-                                    let edge = egui::Stroke::new(
-                                        0.5,
-                                        egui::Color32::from_rgba_premultiplied(120, 180, 255, 100),
-                                    );
-                                    painter.add(egui::Shape::convex_polygon(vec![p0, p1, p2], fill, edge));
+                                    // No edge stroke on individual triangles — the dense
+                                    // grid of thin lines creates the "extra lines" artifact.
+                                    // Triangle boundaries are visible from the alternating
+                                    // fill colors at sufficient zoom.
+                                    painter.add(egui::Shape::convex_polygon(vec![p0, p1, p2], fill, egui::Stroke::NONE));
                                 }
                                 if ti >= tri_limit { break; }
                             }
