@@ -2144,10 +2144,15 @@ impl<'a> StepConverter<'a> {
         pd_brep_map: HashMap<i64, Option<i64>>,
         nauo_transform_map: HashMap<i64, Option<[[f64; 4]; 4]>>,
     ) -> Self {
+        // Determine angle unit from HEADER (same logic as with_config)
+        let unit_data = crate::pmi::extract_units(step);
+        let angle_in_degrees = unit_data.units.uses_degrees();
+
         Self {
             step,
             _entity_map: entity_map,
             config,
+            angle_in_degrees,
             pd_brep_map,
             nauo_transform_map,
             bbox_cache: std::cell::RefCell::new(None),

@@ -3291,13 +3291,28 @@ fn triangulate_cone_tube_from_boundary(
         v_max = v_max.max(v);
     }
     if v_min >= v_max {
-        v_min = 0.0;
-        v_max = cone.height().min(100.0);
+        // All boundary points at the same v — use the full cone range.
+        // With STEP parameterization, apex is at v_apex = -radius/tan(ha).
+        // For a standard cone tube from base (v=0) to apex (v=apex_v):
+        let apex_v = cone.apex_v();
+        if cone.expanding {
+            v_min = 0.0;
+            v_max = cone.height().min(100.0);
+        } else {
+            v_min = apex_v;
+            v_max = 0.0;
+        }
     }
 
-    let apex_v = cone.height();
-    let v_max = v_max.min(apex_v);
-    let top_row_at_apex = apex_v.is_finite() && (v_max - apex_v).abs() < apex_v * 0.01 + 1e-6;
+    // Clamp v range to exclude the apex (where radius = 0).
+    // With STEP parameterization (r = radius + v*tan(ha)), the apex is at
+    // v_apex = -radius/tan(ha) (negative for standard cones). Clamp v_min
+    // to not go past the apex. For expanding cones, apex is at v=0.
+    let apex_v = cone.apex_v();
+    if !cone.expanding && apex_v.is_finite() {
+        v_min = v_min.max(apex_v);
+    }
+    let top_row_at_apex = !cone.expanding && apex_v.is_finite() && (v_min - apex_v).abs() < apex_v.abs() * 0.01 + 1e-6;
 
     // Split boundary into bottom/top rings, each as a sorted Vec<(u, Point3d)>
     // with u in [0, 2π) (full-wrap) or unwrapped to a continuous range
@@ -3307,16 +3322,28 @@ fn triangulate_cone_tube_from_boundary(
         boundary_3d, &cone.origin, &cone.axis, &cone.x_dir, v_min, v_max, dedup_tol,
     );
 
-    if bottom_ring.len() < 3 {
+    // When bottom ring is empty but top ring has points (boundary is at v_max,
+    // apex is at v_min), swap the direction so the boundary ring becomes the
+    // "bottom" and the apex is at the "top" of the iteration.
+    let (effective_bottom, effective_top, effective_v_min, effective_v_max, swapped) =
+        if bottom_ring.len() < 3 && top_ring.len() >= 3 {
+            // Boundary points are at v_max (top), apex at v_min (bottom).
+            // Swap: use top_ring as bottom, generate toward apex at v_min.
+            (top_ring.clone(), bottom_ring.clone(), v_min, v_max, true)
+        } else {
+            (bottom_ring, top_ring, v_min, v_max, false)
+        };
+
+    if effective_bottom.len() < 3 {
         log::warn!(
-            "Cone tube face has only {} bottom ring points (need ≥3) — falling back to analytic full triangulation",
-            bottom_ring.len()
+            "Cone tube face has only {} ring points (need ≥3) — falling back to analytic full triangulation",
+            effective_bottom.len()
         );
         return triangulate_cone_full_at_v_range(cone, params, v_min, v_max, forward);
     }
 
-    let n_u = bottom_ring.len();
-    let bottom_u: Vec<f64> = bottom_ring.iter().map(|(u, _)| *u).collect();
+    let n_u = effective_bottom.len();
+    let bottom_u: Vec<f64> = effective_bottom.iter().map(|(u, _)| *u).collect();
 
     // Use cached top ring points only if its u angles match the bottom ring's.
     // For `make_cone()`, the lateral face has no top edge, so top_ring is empty
@@ -3325,9 +3352,9 @@ fn triangulate_cone_tube_from_boundary(
     //
     // For PARTIAL-wrap faces from STEP files, both rings are unwrapped to the
     // same range, so u values should align if cap arcs share chord tolerance.
-    let use_cached_top = !top_row_at_apex && top_ring.len() == n_u && {
+    let use_cached_top = !top_row_at_apex && effective_top.len() == n_u && {
         let ang_tol = PI / n_u as f64 * 0.5;
-        top_ring.iter().enumerate().all(|(i, (tu, _))| {
+        effective_top.iter().enumerate().all(|(i, (tu, _))| {
             let mut du = (tu - bottom_u[i]).abs();
             if du > PI { du = 2.0 * PI - du; }
             du <= ang_tol
@@ -3351,10 +3378,16 @@ fn triangulate_cone_tube_from_boundary(
 
     // Generate vertex grid with apex degeneracy handling.
     // - j=0 (bottom): use cached bottom_ring points (shared with bottom cap face).
-    // - j=n_v (top, if apex): single apex vertex (cone.point_at(0, apex_v)).
+    // - If apex is at v_min (j=0): single apex vertex at row 0.
+    // - j=n_v (top, if apex at v_max): single apex vertex.
     // - j=n_v (top, if not apex & use_cached_top): cached top_ring points.
     // - j=n_v (top, if not apex & !use_cached_top): analytic cone.point_at(bottom_u[i], v_max).
     // - 0 < j < n_v (intermediate): analytic cone.point_at(bottom_u[i], v_j).
+    
+    // Determine which row the apex is at (if any)
+    let apex_at_bottom = top_row_at_apex && apex_v <= v_min;
+    let apex_at_top = top_row_at_apex && apex_v >= v_max;
+    
     let mut row_vertex_offset: Vec<u32> = Vec::with_capacity(n_v + 1);
     let mut row_vertex_count: Vec<usize> = Vec::with_capacity(n_v + 1);
     let mut total_vertices = 0u32;
@@ -3362,7 +3395,7 @@ fn triangulate_cone_tube_from_boundary(
     for j in 0..=n_v {
         let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
 
-        if top_row_at_apex && j == n_v {
+        if (apex_at_bottom && j == 0) || (apex_at_top && j == n_v) {
             // Apex row — single vertex (all u values map to the apex point).
             let p = cone.point_at(0.0, apex_v);
             let n = orient_normal(cone.normal_at(0.0, apex_v), forward);
@@ -3377,9 +3410,9 @@ fn triangulate_cone_tube_from_boundary(
             row_vertex_count.push(n_u);
             for i in 0..n_u {
                 let u = bottom_u[i];
-                let p = if j == 0 {
+                let p = if j == 0 && !apex_at_bottom {
                     bottom_ring[i].1
-                } else if j == n_v && use_cached_top {
+                } else if j == n_v && use_cached_top && !apex_at_top {
                     top_ring[i].1
                 } else {
                     crate::edge_cache::deterministic_round_point(cone.point_at(u, v))
@@ -3393,7 +3426,7 @@ fn triangulate_cone_tube_from_boundary(
     }
 
     // Generate triangles.
-    // Apex row fans from the previous row; other rows use standard quad split.
+    // Apex row fans from the adjacent ring; other rows use standard quad split.
     //
     // For FULL-wrap: i_next = (i+1) % row_count (wrap around).
     // For PARTIAL-wrap: i_next = i+1, NO wrap (last column has no right
@@ -3405,9 +3438,26 @@ fn triangulate_cone_tube_from_boundary(
         let row_base = row_vertex_offset[j];
         let next_row_base = row_vertex_offset[j_next];
 
-        if next_row_count == 1 {
+        if row_count == 1 {
+            // Current row is apex — fan from apex to next row ring.
+            let apex = row_base;
+            for i in 0..next_row_count {
+                let i_next = if is_full_wrap {
+                    (i + 1) % next_row_count
+                } else {
+                    if i + 1 >= next_row_count { continue; }
+                    i + 1
+                };
+                let v0 = next_row_base + i as u32;
+                let v1 = next_row_base + i_next as u32;
+                if forward {
+                    mesh.add_triangle(apex, v0, v1);
+                } else {
+                    mesh.add_triangle(apex, v1, v0);
+                }
+            }
+        } else if next_row_count == 1 {
             // Next row is apex — fan from current row ring to apex.
-            // For full-wrap, fan wraps around; for partial, no wrap.
             let apex = next_row_base;
             for i in 0..row_count {
                 let i_next = if is_full_wrap {
@@ -3460,9 +3510,10 @@ fn triangulate_cone_full_at_v_range(
     forward: bool,
 ) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
-    let apex_v = cone.height();
-    let v_max = v_max.min(apex_v);
-    let top_row_at_apex = apex_v.is_finite() && (v_max - apex_v).abs() < apex_v * 0.01 + 1e-6;
+    let apex_v = cone.apex_v();
+    // Clamp v_min to not go past the apex (apex is at negative v for standard cones)
+    let v_min = if !cone.expanding && apex_v.is_finite() { v_min.max(apex_v) } else { v_min };
+    let top_row_at_apex = !cone.expanding && apex_v.is_finite() && (v_min - apex_v).abs() < apex_v.abs() * 0.01 + 1e-6;
 
     let (n_u, n_v) = if params.adaptive {
         crate::adaptive::required_samples(
@@ -3693,7 +3744,15 @@ fn triangulate_cone_full(face: &Face, cone: &ConeSurface, params: &Triangulation
     let forward = face.forward;
     let mut mesh = TriangleMesh::new();
     let (v_min, v_max) = compute_axis_v_range(face, &cone.origin, &cone.axis);
-    let (v_min, v_max) = if v_min < v_max { (v_min, v_max) } else { (0.0, cone.height().min(100.0)) };
+    // For a full cone without wires, the v range goes from the apex to the base.
+    // With STEP parameterization, apex is at negative v and base is at v=0 (or wherever the edges are).
+    let (mut v_min, v_max) = if v_min < v_max {
+        (v_min, v_max)
+    } else {
+        // No edges found — use default range from apex to a reasonable height above base
+        let apex_v = cone.apex_v();
+        (apex_v, apex_v + cone.height().min(100.0))
+    };
 
     let (n_u, n_v) = if params.adaptive {
         crate::adaptive::required_samples(
@@ -3704,12 +3763,14 @@ fn triangulate_cone_full(face: &Face, cone: &ConeSurface, params: &Triangulation
         (params.angular_samples, params.height_samples.max(2))
     };
 
-    // Clamp v_max to apex height
-    let apex_v = cone.height();
-    let v_max = v_max.min(apex_v);
+    // Clamp v_min to apex v value (apex is at negative v for standard cones)
+    let apex_v = cone.apex_v();
+    if !cone.expanding && apex_v.is_finite() {
+        v_min = v_min.max(apex_v);
+    }
 
-    // Check if the top row reaches the apex (radius = 0)
-    let top_row_at_apex = apex_v.is_finite() && (v_max - apex_v).abs() < apex_v * 0.01 + 1e-6;
+    // Check if the bottom row reaches the apex (radius = 0)
+    let top_row_at_apex = !cone.expanding && apex_v.is_finite() && (v_min - apex_v).abs() < apex_v.abs() * 0.01 + 1e-6;
 
     // Generate vertex grid with apex degeneracy handling
     let mut _apex_vertex: Option<u32> = None;
@@ -7138,11 +7199,11 @@ fn triangulate_cone_face_with_boundary(
         return mesh;
     }
 
-    let apex_v = cone.height();
+    let apex_v = cone.apex_v();
 
     // Handle degenerate cone: infinite or zero height (non-expanding).
     // Expanding cones always have infinite height — that's normal for them.
-    if !cone.expanding && (!apex_v.is_finite() || apex_v > 1e6) {
+    if !cone.expanding && (!apex_v.is_finite() || apex_v.abs() > 1e6) {
         // Near-cylinder: half_angle is very small, cone is essentially a cylinder.
         // Use the generic UV-trimmed path which handles cylinders.
         return triangulate_surface_uv_trimmed(
@@ -7186,7 +7247,7 @@ fn triangulate_cone_face_with_boundary(
 
     // Handle degenerate v range — if v range is near-zero, the cone face
     // is essentially a flat disc. Triangulate as a cap face.
-    if v_range < apex_v * 0.001 + 1e-6 && !cone.expanding {
+    if v_range < apex_v.abs() * 0.001 + 1e-6 && !cone.expanding {
         return triangulate_cap_face(&Surface::Cone(cone.clone()), boundary_points, forward);
     }
 
@@ -7197,11 +7258,11 @@ fn triangulate_cone_face_with_boundary(
         u_max = 2.0 * PI;
     }
 
-    // Clamp v_max to apex height (only for non-expanding cones)
-    if !cone.expanding {
-        v_max = v_max.min(apex_v);
+    // Clamp v_min to apex v value (apex is at negative v for standard cones)
+    if !cone.expanding && apex_v.is_finite() {
+        v_min = v_min.max(apex_v);
     }
-    let top_at_apex = !cone.expanding && apex_v.is_finite() && (v_max - apex_v).abs() < apex_v * 0.05 + 1e-6;
+    let top_at_apex = !cone.expanding && apex_v.is_finite() && (v_min - apex_v).abs() < apex_v.abs() * 0.05 + 1e-6;
 
     // Add small margin
     let margin_u = (u_max - u_min) * 0.001;
@@ -7209,10 +7270,12 @@ fn triangulate_cone_face_with_boundary(
     u_min -= margin_u; u_max += margin_u;
     v_min -= margin_v; v_max += margin_v;
 
-    // Clamp v range (only lower bound for expanding cones)
-    v_min = v_min.max(0.0);
-    if !cone.expanding {
-        v_max = v_max.min(apex_v);
+    // Clamp v range for expanding cones (v_min = 0 at apex)
+    if cone.expanding {
+        v_min = v_min.max(0.0);
+    }
+    if !cone.expanding && apex_v.is_finite() {
+        v_min = v_min.max(apex_v);
     }
 
     // Grid resolution
@@ -7797,7 +7860,7 @@ fn estimate_v_range(face: &Face) -> Option<(f64, f64)> {
             }
             Surface::Cone(cone) => {
                 let (v_min, v_max) = compute_axis_v_range(face, &cone.origin, &cone.axis);
-                if v_min < v_max { Some((v_min, v_max)) } else { Some((0.0, cone.height().min(100.0))) }
+                if v_min < v_max { Some((v_min, v_max)) } else { Some((cone.apex_v(), cone.apex_v() + cone.height().min(100.0))) }
             }
             Surface::Revolution(rev) => Some(rev.profile.param_range()),
             Surface::Extrusion(ext) => Some(ext.profile.param_range()),
@@ -7896,9 +7959,9 @@ fn compute_axis_v_range(face: &Face, origin: &Point3d, axis: &Direction3d) -> (f
                     v_max = v_base.max(v_top);
                 }
                 Surface::Cone(cone) => {
-                    let h = cone.height().min(100.0);
+                    let apex_v = cone.apex_v();
                     let base_pt = cone.point_at(0.0, 0.0);
-                    let apex_pt = cone.point_at(0.0, h);
+                    let apex_pt = cone.point_at(0.0, apex_v);
                     let v_base = (base_pt.x - origin.x) * axis.x
                                + (base_pt.y - origin.y) * axis.y
                                + (base_pt.z - origin.z) * axis.z;

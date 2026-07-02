@@ -65,12 +65,12 @@ pub fn required_angular_samples(
             let r_start = if cone.expanding {
                 v_start * cone.half_angle.tan()
             } else {
-                (cone.radius - v_start * cone.half_angle.tan()).max(0.0)
+                (cone.radius + v_start * cone.half_angle.tan()).max(0.0)
             };
             let r_end = if cone.expanding {
                 v_end * cone.half_angle.tan()
             } else {
-                (cone.radius - v_end * cone.half_angle.tan()).max(0.0)
+                (cone.radius + v_end * cone.half_angle.tan()).max(0.0)
             };
             let avg_radius = (r_start + r_end) / 2.0;
             if avg_radius < 1e-10 {
@@ -131,12 +131,12 @@ pub fn required_height_samples(
             let r_start = if cone.expanding {
                 v_start * cone.half_angle.tan()
             } else {
-                (cone.radius - v_start * cone.half_angle.tan()).max(0.0)
+                (cone.radius + v_start * cone.half_angle.tan()).max(0.0)
             };
             let r_end = if cone.expanding {
                 v_end * cone.half_angle.tan()
             } else {
-                (cone.radius - v_end * cone.half_angle.tan()).max(0.0)
+                (cone.radius + v_end * cone.half_angle.tan()).max(0.0)
             };
             // If radius changes significantly, need more samples
             let radius_ratio = (r_start / r_end.max(1e-10)).max(r_end / r_start.max(1e-10));

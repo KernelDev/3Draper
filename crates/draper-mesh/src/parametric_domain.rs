@@ -2019,13 +2019,14 @@ pub(crate) fn is_degenerate_uv(surface: &Surface, u: f64, v: f64, tol: f64) -> b
         }
         Surface::Cone(cone) => {
             // Cone apex: radius → 0 at v such that radius = 0.
-            // For non-expanding: apex at v = radius / tan(half_angle).
+            // STEP parameterization: r = radius + v * tan(half_angle)
+            // For non-expanding: apex at v = -radius / tan(half_angle).
             // For expanding: apex at v = 0.
             // We check if the radius at this v is below threshold.
             let r = if cone.expanding {
                 v * cone.half_angle.tan()
             } else {
-                (cone.radius - v * cone.half_angle.tan()).max(0.0)
+                (cone.radius + v * cone.half_angle.tan()).max(0.0)
             };
             // The threshold is relative to the base radius — points near
             // the apex where the radius is < 1% of base radius or
@@ -2140,12 +2141,12 @@ pub(crate) fn generate_cylinder_or_cone_steiner_grid(
             let r_min = if c.expanding {
                 v_min * tan_ha
             } else {
-                (c.radius - v_min * tan_ha).max(0.0)
+                (c.radius + v_min * tan_ha).max(0.0)
             };
             let r_max = if c.expanding {
                 v_max * tan_ha
             } else {
-                (c.radius - v_max * tan_ha).max(0.0)
+                (c.radius + v_max * tan_ha).max(0.0)
             };
             (r_min, r_max)
         }
@@ -7818,8 +7819,8 @@ mod tests {
     fn test_is_degenerate_uv_cone_apex() {
         use draper_geometry::{ConeSurface, Surface};
 
-        // Non-expanding cone: apex at v = radius / tan(half_angle)
-        // half_angle = π/6 (30°), radius = 5.0 → apex at v = 5/tan(30°) ≈ 8.66
+        // Non-expanding cone with STEP parameterization: r = radius + v * tan(half_angle)
+        // half_angle = π/6 (30°), radius = 5.0 → apex at v = -5/tan(30°) ≈ -8.66
         let cone = ConeSurface::new_z(5.0, PI / 6.0);
         let surface = Surface::Cone(cone);
 
@@ -7827,16 +7828,16 @@ mod tests {
         assert!(!is_degenerate_uv(&surface, 0.0, 0.0, 0.05),
                 "v=0 at cone base should NOT be degenerate");
 
-        // At v=8.0 — close to apex but not yet degenerate
-        // radius at v=8: 5 - 8*tan(30°) = 5 - 4.62 = 0.38
+        // At v=-8.0 — close to apex but not yet degenerate
+        // radius at v=-8: 5 + (-8)*tan(30°) = 5 - 4.62 = 0.38
         // threshold = max(5 * 0.02, 0.05) = 0.1 → 0.38 > 0.1 → not degenerate
-        assert!(!is_degenerate_uv(&surface, 0.0, 8.0, 0.05),
-                "v=8.0 should NOT be degenerate yet");
+        assert!(!is_degenerate_uv(&surface, 0.0, -8.0, 0.05),
+                "v=-8.0 should NOT be degenerate yet");
 
-        // At v=8.66 — near apex (radius ≈ 0)
-        // radius at v=8.66: 5 - 8.66*0.577 ≈ 5 - 5.0 = 0.0 → degenerate
-        assert!(is_degenerate_uv(&surface, 0.0, 8.66, 0.05),
-                "v=8.66 near apex should be degenerate");
+        // At v=-8.66 — near apex (radius ≈ 0)
+        // radius at v=-8.66: 5 + (-8.66)*0.577 ≈ 5 - 5.0 = 0.0 → degenerate
+        assert!(is_degenerate_uv(&surface, 0.0, -8.66, 0.05),
+                "v=-8.66 near apex should be degenerate");
     }
 
     #[test]

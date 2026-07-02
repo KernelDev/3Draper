@@ -315,8 +315,11 @@ impl ConeSurface {
         Self { origin, axis, half_angle, radius: 0.0, x_dir, expanding: true }
     }
 
-    /// Height from base to apex.
-    /// For expanding cones, this is infinity (no natural apex in positive v direction).
+    /// Distance from the reference point (v=0) to the apex along the axis.
+    ///
+    /// For standard cones with the STEP parameterization (r = radius + v*tan(ha)),
+    /// the apex is at v = -radius/tan(ha). The distance is always positive.
+    /// For expanding cones, there is no apex in the positive v direction (infinity).
     pub fn height(&self) -> f64 {
         if self.expanding {
             f64::INFINITY
@@ -327,15 +330,34 @@ impl ConeSurface {
         }
     }
 
-    /// Evaluate: u = angle in radians [0, 2pi], v = height from base along axis.
-    /// For standard cones: At v=0: radius = self.radius (base). At v=height(): radius = 0 (apex).
+    /// The v parameter value at which the apex occurs (radius = 0).
+    /// For standard cones: v_apex = -radius / tan(half_angle).
+    /// For expanding cones: v_apex = 0 (apex is at origin).
+    pub fn apex_v(&self) -> f64 {
+        if self.expanding {
+            0.0
+        } else if self.half_angle.abs() < 1e-10 {
+            f64::NEG_INFINITY
+        } else {
+            -self.radius / self.half_angle.tan()
+        }
+    }
+
+    /// Evaluate: u = angle in radians [0, 2pi], v = distance along axis from origin.
+    ///
+    /// Parameterization follows STEP ISO 10303-42:
+    ///   C(u, v) = origin + v * axis + (radius + v * tan(half_angle)) * (cos(u) * x_dir + sin(u) * y_dir)
+    ///
+    /// For standard cones: At v=0: radius = self.radius (reference). Radius increases with v.
+    ///   Apex is at v = -radius / tan(half_angle) (where radius becomes 0).
     /// For expanding cones: At v=0: radius = 0 (apex). At v>0: radius = v * tan(half_angle).
     pub fn point_at(&self, u: f64, v: f64) -> Point3d {
         let r = if self.expanding {
             v * self.half_angle.tan()
         } else {
-            // Radius decreases linearly from base to apex
-            (self.radius - v * self.half_angle.tan()).max(0.0)
+            // STEP parameterization: r = radius + v * tan(half_angle)
+            // Radius increases with v; apex is at v = -radius/tan(ha)
+            (self.radius + v * self.half_angle.tan()).max(0.0)
         };
         let y_dir = self.axis.cross(&self.x_dir);
 
@@ -1601,7 +1623,7 @@ impl Surface {
                 let r = if cone.expanding {
                     v * cone.half_angle.tan()
                 } else {
-                    (cone.radius - v * cone.half_angle.tan()).max(0.0)
+                    (cone.radius + v * cone.half_angle.tan()).max(0.0)
                 };
                 if r < tolerance {
                     flags |= DegeneracyFlags::DU_ZERO | DegeneracyFlags::DV_ZERO;
@@ -1861,7 +1883,7 @@ impl Surface {
                 let r = if cone.expanding {
                     v * cone.half_angle.tan()
                 } else {
-                    (cone.radius - v * cone.half_angle.tan()).max(0.0)
+                    (cone.radius + v * cone.half_angle.tan()).max(0.0)
                 };
                 let k_circ = if r > 1e-10 {
                     cone.half_angle.cos() / r
@@ -2592,11 +2614,11 @@ mod tests {
     #[test]
     fn test_cone_apex_degenerate() {
         let cone = ConeSurface::new_z(10.0, 0.5);
+        // With STEP parameterization, apex is at v = -radius / tan(half_angle)
+        let apex_v = cone.apex_v();
         let surface = Surface::Cone(cone);
-        // At v = height (apex), the cone is degenerate
-        let apex_v = 10.0 / 0.5_f64.tan(); // height = radius / tan(half_angle)
         let flags = surface.is_degenerate_at(0.0, apex_v, 1e-6);
-        assert!(flags.is_degenerate(), "Cone apex should be degenerate, got {:?}", flags);
+        assert!(flags.is_degenerate(), "Cone apex should be degenerate at v={}, got {:?}", apex_v, flags);
         assert!(flags.is_singular(), "Cone apex should be singular (both partials zero)");
     }
 
