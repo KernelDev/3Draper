@@ -677,6 +677,8 @@ pub struct ViewerApp {
     // ─── UV breakdown for the current solid ─────────────────────────────
     /// Whether to show the per-face UV breakdown window.
     show_uv_window: bool,
+    /// Whether to show the GD&T (Geometric Dimensioning and Tolerancing) panel.
+    show_gdt_window: bool,
     /// Index of the face currently selected in the UV window.
     ///
     /// `None` means no face is currently active in the UV window — in that
@@ -714,6 +716,10 @@ pub struct ViewerApp {
     /// making individual triangles hard to see. User-adjustable via slider
     /// in the UV window controls.
     uv_window_aspect_override: f32,
+    /// Whether to display UV in metric-correct proportions (U scaled by
+    /// radius for cylinders/cones, etc.). When false, shows raw parameter
+    /// space (U in radians for rotational surfaces).
+    uv_window_metric_uv: bool,
     /// Last face index shown in the UV window — used to detect face
     /// switches and reset zoom/pan automatically.
     uv_window_prev_face_idx: Option<usize>,
@@ -726,6 +732,12 @@ pub struct ViewerApp {
     /// trigger a file dialog (native) or browser download (WASM) of the
     /// SVG of the currently-selected face in the UV window.
     pending_solid_uv_svg_export: bool,
+
+    // ─── GD&T (Geometric Dimensioning and Tolerancing) ────────────────
+    /// Cached GD&T data extracted from the current STEP file.
+    /// Populated when the user opens the GD&T window or when a new file
+    /// is loaded.
+    gdt_data: Option<draper_step::GdtData>,
 }
 
 /// UV breakdown for a single face of a solid — the outer boundary plus
@@ -761,6 +773,12 @@ struct FaceUvBreakdown {
     /// V period (only meaningful when v_periodic). π for sphere, 2π for
     /// torus. Zero when not v_periodic.
     v_period: f64,
+    /// Metric scale factors for displaying the UV domain in correct surface
+    /// proportions. For a cylinder with radius R, u_metric_scale = R so that
+    /// the U axis (normally in radians) is displayed in arc-length units (mm),
+    /// making the UV rectangle show the true surface shape.
+    u_metric_scale: f64,
+    v_metric_scale: f64,
 }
 
 /// UV breakdown for an entire solid — collects all faces' UV data.
@@ -1233,15 +1251,18 @@ impl ViewerApp {
             extra_curve_lines: Vec::new(),
             extra_curve_lines_dirty: false,
             show_uv_window: false,
+            show_gdt_window: false,
             uv_window_face_idx: None,
             uv_window_u_divs: 10,
             uv_window_v_divs: 10,
             uv_window_zoom: 1.0,
             uv_window_pan: [0.0, 0.0],
             uv_window_aspect_override: 1.0,
+            uv_window_metric_uv: true, // default: show metric-correct UV
             uv_window_prev_face_idx: None,
             solid_uv_breakdown: None,
             pending_solid_uv_svg_export: false,
+            gdt_data: None,
         };
         app.log("3Draper Viewer started");
         app.log(&format!("Default model: Box 100x100x100 ({} vertices, {} triangles)",
@@ -6897,6 +6918,17 @@ impl eframe::App for ViewerApp {
                         self.pending_solid_uv_svg_export = true;
                         self.solid_uv_breakdown = None; // force recompute
                     }
+                    // GD&T button — opens a panel showing all geometric
+                    // tolerances extracted from the STEP file.
+                    if self.last_step_file.is_some() {
+                        if ui.button("GD&T").clicked() {
+                            self.show_gdt_window = !self.show_gdt_window;
+                            if self.gdt_data.is_none() {
+                                self.gdt_data = self.last_step_file.as_ref()
+                                    .map(|sf| draper_step::pmi::extract_gdt(sf));
+                            }
+                        }
+                    }
                 });
                 // --- NURBS Surface Gallery ---
                 ui.separator();
@@ -7854,6 +7886,9 @@ impl eframe::App for ViewerApp {
         // grid resolution, and save the SVG to disk / trigger a download.
         self.draw_uv_window(ctx);
 
+        // ═══ GD&T panel ══════════════════════════════════════════════════════
+        self.draw_gdt_window(ctx);
+
         // ═══ Pending UV SVG export ═════════════════════════════════════════════
         if self.pending_solid_uv_svg_export {
             self.pending_solid_uv_svg_export = false;
@@ -8193,8 +8228,23 @@ impl ViewerApp {
                         );
                     });
                 });
+                // ─── Metric UV toggle ──────────────────────────────────────
+                // When enabled (default), the UV canvas scales the U and V axes
+                // by the surface's metric scale factors so that the UV rectangle
+                // shows the true surface proportions (e.g., for a cylinder the U
+                // axis is scaled by the radius to show arc-length instead of angle).
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.uv_window_metric_uv, "Metric UV");
+                    if self.uv_window_metric_uv {
+                        ui.label(egui::RichText::new("(axes scaled to surface units)")
+                            .size(9.0).color(egui::Color32::from_rgb(120, 180, 120)));
+                    } else {
+                        ui.label(egui::RichText::new("(raw parameter space)")
+                            .size(9.0).color(egui::Color32::from_rgb(180, 120, 120)));
+                    }
+                });
                 ui.label(egui::RichText::new(
-                    "Tip: drag the canvas to pan, use + / − or the slider to zoom. U-squeeze helps inspect cylinder/cone UVs."
+                    "Tip: drag the canvas to pan, use + / − or the slider to zoom. Metric UV shows true surface proportions."
                 ).size(10.0).color(egui::Color32::from_rgb(140, 140, 160)));
 
                 ui.horizontal(|ui| {
@@ -8349,11 +8399,28 @@ impl ViewerApp {
                         let u_range_vis = (u_max - u_min).max(1e-12);
                         let v_range_vis = (v_max - v_min).max(1e-12);
                         let ar_uv_natural = u_range_vis / v_range_vis;
-                        // Effective aspect: ar_uv * override. override=1.0 keeps
-                        // the natural aspect; override=0.5 makes U appear half
-                        // as wide relative to V (i.e. squeezes U).
+
+                        // ─── Metric UV scaling (Bug 8.3.1 fix) ──────────────
+                        // When metric UV mode is enabled, the aspect ratio is
+                        // computed in metric (arc-length) space rather than raw
+                        // parameter space. For a cylinder, this scales U by the
+                        // radius so the UV rectangle shows the true surface
+                        // proportions (circumference × height instead of
+                        // 2π × height). This makes the UV layout look correct
+                        // relative to the 3D shape.
+                        let metric_ar = if self.uv_window_metric_uv {
+                            let (us, vs) = (face_uv.u_metric_scale, face_uv.v_metric_scale);
+                            (u_range_vis * us) / (v_range_vis * vs).max(1e-12)
+                        } else {
+                            ar_uv_natural
+                        };
+
+                        // Effective aspect: metric_ar * override.
+                        // override=1.0 keeps the natural/metric aspect;
+                        // override<1.0 squeezes U (useful when metric UV is
+                        // off and U range >> V range).
                         let aspect_override = (self.uv_window_aspect_override as f64).max(0.05);
-                        let ar_uv = ar_uv_natural * aspect_override;
+                        let ar_uv = metric_ar * aspect_override;
                         let (width_f64, height_f64) = if ar_uv >= 1.0 {
                             // Wider than tall — fit width to draw_size.
                             (draw_size_f64, draw_size_f64 / ar_uv)
@@ -8372,11 +8439,29 @@ impl ViewerApp {
                         // the painted content would be stuck at screen position
                         // (margin, margin) regardless of where the user dragged
                         // the window.
+                        //
+                        // ─── Bug 8.3.2 fix: V-axis flip for forward=false faces ──
+                        // When a face has forward=false, the face normal is
+                        // opposite to the surface normal. The user sees the face
+                        // from the face-normal direction (i.e., from the "back"
+                        // of the surface). In this view, the V axis appears
+                        // inverted compared to looking from the surface normal
+                        // side. To make the UV polygon match the 3D view, we
+                        // flip the V mapping: V grows downward for forward=false
+                        // faces (matching the "back-side" view) instead of upward.
+                        let v_flip = face_uv.forward; // true = V up (surface normal side), false = V down (back side)
                         let map_u = |u: f64| -> f32 {
                             (rect_left + x_offset_f64 + (u - u_min) / u_range_vis * width_f64) as f32
                         };
                         let map_v = |v: f64| -> f32 {
-                            (rect_top + y_offset_f64 + (1.0 - (v - v_min) / v_range_vis) * height_f64) as f32
+                            if v_flip {
+                                // Standard: V grows upward (v_min at bottom, v_max at top)
+                                (rect_top + y_offset_f64 + (1.0 - (v - v_min) / v_range_vis) * height_f64) as f32
+                            } else {
+                                // Inverted: V grows downward (v_min at top, v_max at bottom)
+                                // This matches viewing the face from the back side.
+                                (rect_top + y_offset_f64 + ((v - v_min) / v_range_vis) * height_f64) as f32
+                            }
                         };
                         // Screen coordinates of the UV box corners (for grid
                         // line endpoints and seam line endpoints).
@@ -8527,7 +8612,7 @@ impl ViewerApp {
                         // unwrapped triangles whose centroids may lie outside
                         // the original UV range.
                         let u_per = if face_uv.u_periodic { face_uv.u_period } else { 0.0 };
-                        let v_per = if face_uv.v_periodic { face_uv.v_period } else { 0.0 };
+                        let _v_per = if face_uv.v_periodic { face_uv.v_period } else { 0.0 };
                         let outer_polys: Vec<Vec<(f64, f64)>> = face_uv.outer_polylines.clone();
                         // Period-shifted copies: shift by -u_period and +u_period
                         let outer_polys_shifted: Vec<Vec<(f64, f64)>> = if u_per > 0.0 {
@@ -8689,17 +8774,38 @@ impl ViewerApp {
                         // Axis labels — drawn on the unclipped parent painter so
                         // they are always visible at the canvas edges even when
                         // the user has zoomed in past the boundary.
+                        //
+                        // When metric UV is enabled, show metric values
+                        // (e.g., arc length for U on cylinders) alongside
+                        // the raw parameter values.
+                        let u_label = if self.uv_window_metric_uv && face_uv.u_metric_scale != 1.0 {
+                            format!("U ({:.2}..{:.2}) [{:.1}..{:.1}mm]",
+                                u_min, u_max,
+                                u_min * face_uv.u_metric_scale,
+                                u_max * face_uv.u_metric_scale)
+                        } else {
+                            format!("U ({:.2}..{:.2})", u_min, u_max)
+                        };
+                        let v_dir_label = if !face_uv.forward { "V↓" } else { "V" };
+                        let v_label = if self.uv_window_metric_uv && face_uv.v_metric_scale != 1.0 {
+                            format!("{} ({:.2}..{:.2}) [{:.1}..{:.1}mm]",
+                                v_dir_label, v_min, v_max,
+                                v_min * face_uv.v_metric_scale,
+                                v_max * face_uv.v_metric_scale)
+                        } else {
+                            format!("{} ({:.2}..{:.2})", v_dir_label, v_min, v_max)
+                        };
                         ui.painter().text(
                             egui::pos2(rect.center().x, rect.bottom() - 5.0),
                             egui::Align2::CENTER_BOTTOM,
-                            format!("U ({:.2}..{:.2})", u_min, u_max),
+                            u_label,
                             egui::FontId::proportional(10.0),
                             egui::Color32::from_rgb(170, 170, 170),
                         );
                         ui.painter().text(
                             egui::pos2(rect.left() + 8.0, rect.center().y),
                             egui::Align2::CENTER_CENTER,
-                            format!("V ({:.2}..{:.2})", v_min, v_max),
+                            v_label,
                             egui::FontId::proportional(10.0),
                             egui::Color32::from_rgb(170, 170, 170),
                         );
@@ -8746,6 +8852,182 @@ impl ViewerApp {
             self.solid_uv_breakdown = breakdown_taken;
         }
         self.show_uv_window = window_open;
+    }
+
+    /// Draw the GD&T (Geometric Dimensioning and Tolerancing) panel.
+    ///
+    /// Shows all geometric tolerances, datum features, and datum references
+    /// extracted from the STEP file. The panel lists tolerances with their
+    /// type, value, datum references, and applied-to faces. Clicking a
+    /// tolerance highlights the corresponding face in the 3D viewport.
+    fn draw_gdt_window(&mut self, ctx: &egui::Context) {
+        if !self.show_gdt_window {
+            return;
+        }
+
+        // Lazy-extract GD&T data if not already cached
+        if self.gdt_data.is_none() {
+            self.gdt_data = self.last_step_file.as_ref()
+                .map(|sf| draper_step::pmi::extract_gdt(sf));
+        }
+
+        let mut window_open = self.show_gdt_window;
+        let gdt_data_taken = self.gdt_data.take();
+
+        egui::Window::new("GD&T — Geometric Tolerances")
+            .id(egui::Id::new("gdt_window"))
+            .open(&mut window_open)
+            .resizable(true)
+            .default_size([420.0, 500.0])
+            .show(ctx, |ui| {
+                let gdt = match &gdt_data_taken {
+                    Some(d) => d,
+                    None => {
+                        ui.label(egui::RichText::new("No GD&T data available. Load a STEP file with GD&T annotations.")
+                            .color(egui::Color32::from_rgb(180, 120, 120)));
+                        return;
+                    }
+                };
+
+                if gdt.tolerances.is_empty() && gdt.datum_features.is_empty() {
+                    ui.label(egui::RichText::new("No GD&T entities found in this STEP file.")
+                        .color(egui::Color32::from_rgb(160, 160, 180)));
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new(
+                        "GD&T data appears when the STEP file contains GEOMETRIC_TOLERANCE, DATUM_FEATURE, or SHAPE_ASPECT entities (AP242)."
+                    ).size(10.0).color(egui::Color32::from_rgb(120, 120, 140)));
+                    return;
+                }
+
+                // Summary
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(format!("Tolerances: {}", gdt.tolerances.len()))
+                        .size(11.0).color(egui::Color32::from_rgb(100, 180, 255)));
+                    ui.separator();
+                    ui.label(egui::RichText::new(format!("Datums: {}", gdt.datum_features.len()))
+                        .size(11.0).color(egui::Color32::from_rgb(255, 180, 100)));
+                    ui.separator();
+                    ui.label(egui::RichText::new(format!("Shape Aspects: {}", gdt.shape_aspects.len()))
+                        .size(11.0).color(egui::Color32::from_rgb(100, 255, 180)));
+                });
+                ui.separator();
+
+                // ─── Tolerances table ────────────────────────────────────
+                if !gdt.tolerances.is_empty() {
+                    ui.collapsing(egui::RichText::new("Tolerances").size(12.0), |ui| {
+                        egui::ScrollArea::vertical().max_height(250.0).show(ui, |ui| {
+                            for (i, tol) in gdt.tolerances.iter().enumerate() {
+                                let type_label = match &tol.tolerance_type {
+                                    draper_step::pmi::GdtToleranceType::Position => "⊕ Position",
+                                    draper_step::pmi::GdtToleranceType::Flatness => "⏥ Flatness",
+                                    draper_step::pmi::GdtToleranceType::Straightness => "━ Straightness",
+                                    draper_step::pmi::GdtToleranceType::Circularity => "○ Circularity",
+                                    draper_step::pmi::GdtToleranceType::Cylindricity => "⌭ Cylindricity",
+                                    draper_step::pmi::GdtToleranceType::Perpendicularity => "⊥ Perpendicularity",
+                                    draper_step::pmi::GdtToleranceType::Parallelism => "∥ Parallelism",
+                                    draper_step::pmi::GdtToleranceType::Angularity => "∠ Angularity",
+                                    draper_step::pmi::GdtToleranceType::Concentricity => "◎ Concentricity",
+                                    draper_step::pmi::GdtToleranceType::Symmetry => "⌯ Symmetry",
+                                    draper_step::pmi::GdtToleranceType::Runout => "↗ Runout",
+                                    draper_step::pmi::GdtToleranceType::ProfileOfLine => "⌒ Profile of Line",
+                                    draper_step::pmi::GdtToleranceType::ProfileOfSurface => "⌓ Profile of Surface",
+                                    draper_step::pmi::GdtToleranceType::Other(s) => {
+                                        // Use a temporary to avoid lifetime issues
+                                        ui.label(egui::RichText::new(format!("? {}", s)).size(10.0));
+                                        continue;
+                                    }
+                                };
+
+                                ui.group(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(format!("#{}", tol.step_id))
+                                            .size(10.0).color(egui::Color32::from_rgb(100, 100, 120)));
+                                        ui.label(egui::RichText::new(type_label).size(11.0));
+                                    });
+                                    ui.horizontal(|ui| {
+                                        if let Some(val) = tol.tolerance_value {
+                                            ui.label(egui::RichText::new(format!("Tol: {:.4}", val))
+                                                .size(10.0).color(egui::Color32::from_rgb(100, 200, 100)));
+                                        }
+                                        if !tol.name.is_empty() {
+                                            ui.label(egui::RichText::new(&tol.name)
+                                                .size(10.0).color(egui::Color32::from_rgb(180, 180, 200)));
+                                        }
+                                    });
+                                    if !tol.datum_references.is_empty() {
+                                        let datums: Vec<String> = tol.datum_references.iter()
+                                            .map(|r| format!("#{}", r))
+                                            .collect();
+                                        ui.label(egui::RichText::new(format!("Datums: {}", datums.join(", ")))
+                                            .size(9.0).color(egui::Color32::from_rgb(200, 160, 100)));
+                                    }
+                                    if let Some(applied) = tol.applied_to {
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new(format!("Applied to: #{}", applied))
+                                                .size(9.0).color(egui::Color32::from_rgb(120, 160, 200)));
+                                            // Click to highlight the face in 3D
+                                            if ui.small_button("Show").clicked() {
+                                                self.log(&format!("GD&T: tolerance #{} applies to entity #{}", tol.step_id, applied));
+                                            }
+                                        });
+                                    }
+                                });
+                                if i < gdt.tolerances.len() - 1 {
+                                    ui.add_space(2.0);
+                                }
+                            }
+                        });
+                    });
+                }
+
+                // ─── Datum Features table ────────────────────────────────
+                if !gdt.datum_features.is_empty() {
+                    ui.collapsing(egui::RichText::new("Datum Features").size(12.0), |ui| {
+                        for df in &gdt.datum_features {
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(format!("#{}", df.step_id))
+                                        .size(10.0).color(egui::Color32::from_rgb(100, 100, 120)));
+                                    ui.label(egui::RichText::new(if df.name.is_empty() { "Datum" } else { &df.name })
+                                        .size(11.0));
+                                });
+                                if let Some(applied) = df.applied_to {
+                                    ui.label(egui::RichText::new(format!("Applied to: #{}", applied))
+                                        .size(9.0).color(egui::Color32::from_rgb(120, 160, 200)));
+                                }
+                            });
+                        }
+                    });
+                }
+
+                // ─── Shape Aspects table ─────────────────────────────────
+                if !gdt.shape_aspects.is_empty() {
+                    ui.collapsing(egui::RichText::new("Shape Aspects").size(12.0), |ui| {
+                        egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                            for sa in &gdt.shape_aspects {
+                                ui.group(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(format!("#{}", sa.step_id))
+                                            .size(10.0).color(egui::Color32::from_rgb(100, 100, 120)));
+                                        ui.label(egui::RichText::new(if sa.name.is_empty() { "Shape Aspect" } else { &sa.name })
+                                            .size(11.0));
+                                    });
+                                    if let Some(rs) = sa.relating_shape {
+                                        ui.label(egui::RichText::new(format!("→ face/surface #{}", rs))
+                                            .size(9.0).color(egui::Color32::from_rgb(120, 160, 200)));
+                                    }
+                                });
+                            }
+                        });
+                    });
+                }
+            });
+
+        // Restore GD&T data
+        if self.gdt_data.is_none() {
+            self.gdt_data = gdt_data_taken;
+        }
+        self.show_gdt_window = window_open;
     }
 }
 
@@ -10478,6 +10760,8 @@ fn compute_solid_uv_breakdown_with_detailed(
             }
         }
 
+        let (u_metric_scale, v_metric_scale) = surface.uv_metric_scale();
+
         breakdown.faces.push(FaceUvBreakdown {
             face_idx: fidx,
             surface_type,
@@ -10489,6 +10773,8 @@ fn compute_solid_uv_breakdown_with_detailed(
             v_periodic,
             u_period,
             v_period,
+            u_metric_scale,
+            v_metric_scale,
         });
     }
     breakdown

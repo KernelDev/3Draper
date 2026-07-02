@@ -577,6 +577,74 @@ pub struct DatumReference {
     pub modifier: Option<String>,
 }
 
+/// A shape aspect extracted from a STEP file.
+///
+/// In AP242, `SHAPE_ASPECT` is the bridge entity that connects GD&T tolerances
+/// to specific geometric features (faces, edges). The entity chain is:
+///
+/// ```text
+/// PROPERTY_DEFINITION → SHAPE_ASPECT → (specific face/edge reference)
+/// GEOMETRIC_TOLERANCE → SHAPE_ASPECT (via applied_to)
+/// ```
+///
+/// Without parsing `SHAPE_ASPECT`, the `applied_to` field in `GeometricTolerance`
+/// and `DatumFeature` is just a raw entity reference with no way to map it to
+/// actual mesh faces.
+#[derive(Clone, Debug)]
+pub struct ShapeAspect {
+    /// STEP entity ID.
+    pub step_id: i64,
+    /// Name/label (e.g., "plane surface", "cylindrical surface").
+    pub name: String,
+    /// Description.
+    pub description: String,
+    /// The product_definition_shape this aspect belongs to.
+    pub of_shape: Option<i64>,
+    /// The specific shape (entity ID) this aspect references — typically an
+    /// ADVANCED_FACE, CYLINDRICAL_SURFACE, PLANE, etc.
+    pub relating_shape: Option<i64>,
+    /// Product definition shape ID (from the OF_SHAPE parameter).
+    pub product_def_shape_id: Option<i64>,
+}
+
+/// A shape aspect relationship extracted from a STEP file.
+///
+/// `SHAPE_ASPECT_RELATIONSHIP` links two shape aspects together. In GD&T context,
+/// this is used to connect a tolerance's shape aspect to a datum's shape aspect.
+#[derive(Clone, Debug)]
+pub struct ShapeAspectRelationship {
+    /// STEP entity ID.
+    pub step_id: i64,
+    /// Name/label.
+    pub name: String,
+    /// Description.
+    pub description: String,
+    /// The "from" shape aspect (e.g., the tolerance's aspect).
+    pub relating_aspect: Option<i64>,
+    /// The "to" shape aspect (e.g., the datum's aspect).
+    pub related_aspect: Option<i64>,
+}
+
+/// A property definition extracted from a STEP file.
+///
+/// In AP242, `PROPERTY_DEFINITION` associates shape aspects with product
+/// definitions. It's used in the GD&T representation chain:
+///
+/// ```text
+/// PRODUCT_DEFINITION_SHAPE → PROPERTY_DEFINITION → SHAPE_ASPECT
+/// ```
+#[derive(Clone, Debug)]
+pub struct PropertyDefinition {
+    /// STEP entity ID.
+    pub step_id: i64,
+    /// Name/label.
+    pub name: String,
+    /// Description.
+    pub description: String,
+    /// The definition this property applies to (usually a PRODUCT_DEFINITION_SHAPE).
+    pub definition: Option<i64>,
+}
+
 /// Container for all GD&T data extracted from a STEP file.
 #[derive(Clone, Debug, Default)]
 pub struct GdtData {
@@ -586,6 +654,12 @@ pub struct GdtData {
     pub datum_features: Vec<DatumFeature>,
     /// All datum references.
     pub datum_references: Vec<DatumReference>,
+    /// All shape aspects — the bridge entities connecting tolerances to faces.
+    pub shape_aspects: Vec<ShapeAspect>,
+    /// All shape aspect relationships — links between tolerance and datum aspects.
+    pub shape_aspect_relationships: Vec<ShapeAspectRelationship>,
+    /// All property definitions — associates shape aspects with product defs.
+    pub property_definitions: Vec<PropertyDefinition>,
 }
 
 /// Extract GD&T (Geometric Dimensioning and Tolerancing) data from a STEP file.
@@ -722,6 +796,150 @@ pub fn extract_gdt(step_file: &StepFile) -> GdtData {
                 datum_feature_id,
                 modifier,
             });
+        }
+
+        // Parse SHAPE_ASPECT — the bridge entity connecting tolerances to faces
+        // STEP schema: SHAPE_ASPECT(name, description, OF_SHAPE(product_def_shape), product_def_shape_id)
+        // or: SHAPE_ASPECT(name, description, of_shape_ref, shape_representation_ref)
+        if type_upper == "SHAPE_ASPECT" {
+            let name = extract_string_param(&entity.params, 0).unwrap_or_default();
+            let description = extract_string_param(&entity.params, 1).unwrap_or_default();
+            let refs: Vec<i64> = entity.params.iter()
+                .filter_map(|p| match p { StepValue::Ref(id) => Some(*id), _ => None })
+                .collect();
+            let of_shape = refs.first().copied();
+            let product_def_shape_id = refs.get(1).copied();
+            // The relating_shape is typically a REPRESENTATION_ITEM or
+            // ADVANCED_FACE referenced by the shape aspect — we capture it
+            // from any additional references beyond the first two.
+            let relating_shape = refs.get(2).copied();
+
+            gdt.shape_aspects.push(ShapeAspect {
+                step_id: entity.id,
+                name,
+                description,
+                of_shape,
+                relating_shape,
+                product_def_shape_id,
+            });
+        }
+
+        // Parse DERIVED_SHAPE_ASPECT — a subtype of SHAPE_ASPECT used for
+        // toleranced shape aspects (e.g., a feature-of-size that has a tolerance).
+        // Inherits SHAPE_ASPECT parameters.
+        if type_upper == "DERIVED_SHAPE_ASPECT" {
+            let name = extract_string_param(&entity.params, 0).unwrap_or_default();
+            let description = extract_string_param(&entity.params, 1).unwrap_or_default();
+            let refs: Vec<i64> = entity.params.iter()
+                .filter_map(|p| match p { StepValue::Ref(id) => Some(*id), _ => None })
+                .collect();
+            let of_shape = refs.first().copied();
+            let product_def_shape_id = refs.get(1).copied();
+            let relating_shape = refs.get(2).copied();
+
+            gdt.shape_aspects.push(ShapeAspect {
+                step_id: entity.id,
+                name,
+                description,
+                of_shape,
+                relating_shape,
+                product_def_shape_id,
+            });
+        }
+
+        // Parse SHAPE_ASPECT_RELATIONSHIP — links two shape aspects
+        // STEP schema: SHAPE_ASPECT_RELATIONSHIP(name, description, relating_aspect, related_aspect)
+        if type_upper == "SHAPE_ASPECT_RELATIONSHIP" {
+            let name = extract_string_param(&entity.params, 0).unwrap_or_default();
+            let description = extract_string_param(&entity.params, 1).unwrap_or_default();
+            let refs: Vec<i64> = entity.params.iter()
+                .filter_map(|p| match p { StepValue::Ref(id) => Some(*id), _ => None })
+                .collect();
+            let relating_aspect = refs.first().copied();
+            let related_aspect = refs.get(1).copied();
+
+            gdt.shape_aspect_relationships.push(ShapeAspectRelationship {
+                step_id: entity.id,
+                name,
+                description,
+                relating_aspect,
+                related_aspect,
+            });
+        }
+
+        // Parse PROPERTY_DEFINITION — associates shape aspects with product defs
+        // STEP schema: PROPERTY_DEFINITION(name, description, definition)
+        if type_upper == "PROPERTY_DEFINITION" {
+            let name = extract_string_param(&entity.params, 0).unwrap_or_default();
+            let description = extract_string_param(&entity.params, 1).unwrap_or_default();
+            let definition = entity.params.iter()
+                .filter_map(|p| match p { StepValue::Ref(id) => Some(*id), _ => None })
+                .next();
+
+            gdt.property_definitions.push(PropertyDefinition {
+                step_id: entity.id,
+                name,
+                description,
+                definition,
+            });
+        }
+
+        // Parse PRODUCT_DEFINITION_SHAPE — container for shape aspects
+        // STEP schema: PRODUCT_DEFINITION_SHAPE(name, description, definition)
+        // This is a subtype of PROPERTY_DEFINITION, we store it as such.
+        if type_upper == "PRODUCT_DEFINITION_SHAPE" {
+            let name = extract_string_param(&entity.params, 0).unwrap_or_default();
+            let description = extract_string_param(&entity.params, 1).unwrap_or_default();
+            let definition = entity.params.iter()
+                .filter_map(|p| match p { StepValue::Ref(id) => Some(*id), _ => None })
+                .next();
+
+            gdt.property_definitions.push(PropertyDefinition {
+                step_id: entity.id,
+                name,
+                description,
+                definition,
+            });
+        }
+    }
+
+    // ─── Post-process: resolve applied_to via SHAPE_ASPECT chain ────────
+    // In AP242, the GEOMETRIC_TOLERANCE.applied_to often points to a
+    // SHAPE_ASPECT rather than directly to a face. We follow the chain:
+    //   GEOMETRIC_TOLERANCE → applied_to (SHAPE_ASPECT) → relating_shape (face/surface)
+    // This resolves the actual face/surface ID for each tolerance.
+    if !gdt.shape_aspects.is_empty() {
+        let aspect_map: std::collections::HashMap<i64, &ShapeAspect> = gdt.shape_aspects
+            .iter()
+            .map(|sa| (sa.step_id, sa))
+            .collect();
+
+        for tol in &mut gdt.tolerances {
+            if let Some(applied_to) = tol.applied_to {
+                // Check if applied_to is a SHAPE_ASPECT
+                if let Some(aspect) = aspect_map.get(&applied_to) {
+                    if let Some(relating) = aspect.relating_shape {
+                        // Replace the SHAPE_ASPECT reference with the actual face/surface
+                        tol.applied_to = Some(relating);
+                    }
+                    // Keep the original name from the shape aspect if the tolerance
+                    // name is empty
+                    if tol.name.is_empty() && !aspect.name.is_empty() {
+                        tol.name = aspect.name.clone();
+                    }
+                }
+            }
+        }
+
+        // Also resolve DATUM_FEATURE.applied_to via SHAPE_ASPECT
+        for df in &mut gdt.datum_features {
+            if let Some(applied_to) = df.applied_to {
+                if let Some(aspect) = aspect_map.get(&applied_to) {
+                    if let Some(relating) = aspect.relating_shape {
+                        df.applied_to = Some(relating);
+                    }
+                }
+            }
         }
     }
 
@@ -1691,5 +1909,128 @@ END-ISO-10303-21;
         let tess = extract_tessellated_geometry(&file);
         assert!(tess.faces.is_empty());
         assert!(tess.representation_ids.is_empty());
+    }
+
+    #[test]
+    fn test_shape_aspect_parsing() {
+        let step = r#"ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('test'), '2;1');
+FILE_NAME('test.stp', '2024-01-01', (''), (''), 'test', '', '');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
+ENDSEC;
+DATA;
+#10 = SHAPE_ASPECT('plane surface', '', #20, #30);
+#20 = PRODUCT_DEFINITION_SHAPE('', '', #40);
+#30 = ADVANCED_FACE('face_1', ..., #100);
+#40 = PRODUCT_DEFINITION('', '', #50, #60);
+#50 = PRODUCT_DEFINITION_FORMATION('', '', #70);
+ENDSEC;
+END-ISO-10303-21;
+"#;
+        let file = parse_step_string(step);
+        let gdt = extract_gdt(&file);
+        assert_eq!(gdt.shape_aspects.len(), 1, "Should parse 1 SHAPE_ASPECT");
+        let sa = &gdt.shape_aspects[0];
+        assert_eq!(sa.step_id, 10);
+        assert_eq!(sa.name, "plane surface");
+        assert_eq!(sa.of_shape, Some(20));
+        assert_eq!(sa.product_def_shape_id, Some(30));
+    }
+
+    #[test]
+    fn test_shape_aspect_relationship_parsing() {
+        let step = r#"ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('test'), '2;1');
+FILE_NAME('test.stp', '2024-01-01', (''), (''), 'test', '', '');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
+ENDSEC;
+DATA;
+#15 = SHAPE_ASPECT_RELATIONSHIP('tolerance to datum', '', #10, #12);
+ENDSEC;
+END-ISO-10303-21;
+"#;
+        let file = parse_step_string(step);
+        let gdt = extract_gdt(&file);
+        assert_eq!(gdt.shape_aspect_relationships.len(), 1, "Should parse 1 SHAPE_ASPECT_RELATIONSHIP");
+        let sar = &gdt.shape_aspect_relationships[0];
+        assert_eq!(sar.step_id, 15);
+        assert_eq!(sar.name, "tolerance to datum");
+        assert_eq!(sar.relating_aspect, Some(10));
+        assert_eq!(sar.related_aspect, Some(12));
+    }
+
+    #[test]
+    fn test_property_definition_parsing() {
+        let step = r#"ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('test'), '2;1');
+FILE_NAME('test.stp', '2024-01-01', (''), (''), 'test', '', '');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
+ENDSEC;
+DATA;
+#20 = PROPERTY_DEFINITION('tolerance property', '', #40);
+#25 = PRODUCT_DEFINITION_SHAPE('shape property', '', #40);
+ENDSEC;
+END-ISO-10303-21;
+"#;
+        let file = parse_step_string(step);
+        let gdt = extract_gdt(&file);
+        // Both PROPERTY_DEFINITION and PRODUCT_DEFINITION_SHAPE are stored
+        assert_eq!(gdt.property_definitions.len(), 2, "Should parse 2 property definitions");
+        let pd = gdt.property_definitions.iter().find(|p| p.step_id == 20).unwrap();
+        assert_eq!(pd.name, "tolerance property");
+        assert_eq!(pd.definition, Some(40));
+        let pds = gdt.property_definitions.iter().find(|p| p.step_id == 25).unwrap();
+        assert_eq!(pds.name, "shape property");
+    }
+
+    #[test]
+    fn test_gdt_applied_to_resolution_via_shape_aspect() {
+        // Test that GEOMETRIC_TOLERANCE.applied_to is resolved through SHAPE_ASPECT
+        let step = r#"ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('test'), '2;1');
+FILE_NAME('test.stp', '2024-01-01', (''), (''), 'test', '', '');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
+ENDSEC;
+DATA;
+#10 = SHAPE_ASPECT('toleranced face', '', #20, #30, #100);
+#30 = GEOMETRIC_TOLERANCE('flatness', '', 0.05, #10);
+#100 = ADVANCED_FACE('actual face', ..., #200);
+ENDSEC;
+END-ISO-10303-21;
+"#;
+        let file = parse_step_string(step);
+        let gdt = extract_gdt(&file);
+        assert_eq!(gdt.tolerances.len(), 1, "Should parse 1 tolerance");
+        assert_eq!(gdt.shape_aspects.len(), 1, "Should parse 1 shape aspect");
+        // The tolerance's applied_to should be resolved from #10 (SHAPE_ASPECT)
+        // to #100 (ADVANCED_FACE) through the shape aspect's relating_shape
+        let tol = &gdt.tolerances[0];
+        // SHAPE_ASPECT #10 has refs [#20, #30, #100], so relating_shape = #100
+        assert_eq!(tol.applied_to, Some(100), "applied_to should be resolved to the actual face via SHAPE_ASPECT");
+    }
+
+    #[test]
+    fn test_derived_shape_aspect_parsing() {
+        let step = r#"ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('test'), '2;1');
+FILE_NAME('test.stp', '2024-01-01', (''), (''), 'test', '', '');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
+ENDSEC;
+DATA;
+#12 = DERIVED_SHAPE_ASPECT('derived feature', '', #20, #30);
+ENDSEC;
+END-ISO-10303-21;
+"#;
+        let file = parse_step_string(step);
+        let gdt = extract_gdt(&file);
+        assert_eq!(gdt.shape_aspects.len(), 1, "DERIVED_SHAPE_ASPECT should be parsed as ShapeAspect");
+        let sa = &gdt.shape_aspects[0];
+        assert_eq!(sa.step_id, 12);
+        assert_eq!(sa.name, "derived feature");
     }
 }

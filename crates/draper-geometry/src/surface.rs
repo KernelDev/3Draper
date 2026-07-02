@@ -1856,6 +1856,47 @@ impl Surface {
         }
     }
 
+    /// Return (u_scale, v_scale) multipliers for converting the UV
+    /// parameter-space domain into metric (arc-length) space.
+    ///
+    /// For surfaces where one or both parameters are angles (cylinder,
+    /// cone, sphere, torus), the raw UV domain does not reflect the
+    /// true surface proportions. For example, a cylinder with R=10 and
+    /// H=5 has a UV domain of [0, 2π] × [0, 5] which looks wider than
+    /// tall, but the actual surface is much wider (circumference ≈ 62.8)
+    /// than tall (5).
+    ///
+    /// Multiplying the UV bounds by these scales gives metric-correct
+    /// dimensions suitable for aspect-ratio-correct display.
+    ///
+    /// | Surface  | u_scale | v_scale |
+    /// |----------|---------|---------|
+    /// | Plane    | 1.0     | 1.0     |
+    /// | Cylinder | R       | 1.0     |
+    /// | Cone     | R_base  | 1/cos(α)|
+    /// | Sphere   | R       | R       |
+    /// | Torus    | R+r     | r       |
+    /// | Others   | 1.0     | 1.0     |
+    pub fn uv_metric_scale(&self) -> (f64, f64) {
+        match self {
+            Surface::Plane(_) => (1.0, 1.0),
+            Surface::Cylinder(c) => (c.radius, 1.0),
+            Surface::Cone(c) => {
+                // U is angle, scale by base radius.
+                // V is distance along axis, but the slant distance is v/cos(half_angle).
+                let v_scale = if c.half_angle.abs() > 1e-10 {
+                    1.0 / c.half_angle.cos()
+                } else {
+                    1.0
+                };
+                (c.radius, v_scale)
+            }
+            Surface::Sphere(s) => (s.radius, s.radius),
+            Surface::Torus(t) => (t.major_radius + t.minor_radius, t.minor_radius),
+            Surface::Revolution(_) | Surface::Extrusion(_) | Surface::Nurbs(_) => (1.0, 1.0),
+        }
+    }
+
     /// Compute the curvature at a point on the surface.
     ///
     /// For analytical surfaces (plane, cylinder, cone, sphere, torus),
@@ -2936,5 +2977,52 @@ mod curvature_tests {
 
         assert!(du_err < 1.0, "dS/du error should be small, got {}", du_err);
         assert!(dv_err < 1.0, "dS/dv error should be small, got {}", dv_err);
+    }
+
+    #[test]
+    fn test_uv_metric_scale_plane() {
+        let plane = Plane { origin: Point3d::ORIGIN, u_dir: Direction3d::X, v_dir: Direction3d::Y, normal: Direction3d::Z };
+        let surface = Surface::Plane(plane);
+        let (us, vs) = surface.uv_metric_scale();
+        assert_eq!(us, 1.0, "Plane U metric scale should be 1.0");
+        assert_eq!(vs, 1.0, "Plane V metric scale should be 1.0");
+    }
+
+    #[test]
+    fn test_uv_metric_scale_cylinder() {
+        let cyl = CylinderSurface::new_z(5.0);
+        let surface = Surface::Cylinder(cyl);
+        let (us, vs) = surface.uv_metric_scale();
+        assert!((us - 5.0).abs() < 1e-10, "Cylinder U metric scale should be radius (5.0), got {}", us);
+        assert_eq!(vs, 1.0, "Cylinder V metric scale should be 1.0");
+    }
+
+    #[test]
+    fn test_uv_metric_scale_cone() {
+        let cone = ConeSurface::new_z(10.0, PI / 4.0);
+        let surface = Surface::Cone(cone);
+        let (us, vs) = surface.uv_metric_scale();
+        assert!((us - 10.0).abs() < 1e-10, "Cone U metric scale should be base radius (10.0), got {}", us);
+        // cos(π/4) = √2/2, 1/cos(π/4) = √2 ≈ 1.414
+        let expected_vs = 1.0 / (PI / 4.0).cos();
+        assert!((vs - expected_vs).abs() < 1e-10, "Cone V metric scale should be 1/cos(half_angle), got {} expected {}", vs, expected_vs);
+    }
+
+    #[test]
+    fn test_uv_metric_scale_sphere() {
+        let sphere = SphereSurface::new(Point3d::ORIGIN, 7.0);
+        let surface = Surface::Sphere(sphere);
+        let (us, vs) = surface.uv_metric_scale();
+        assert!((us - 7.0).abs() < 1e-10, "Sphere U metric scale should be radius (7.0), got {}", us);
+        assert!((vs - 7.0).abs() < 1e-10, "Sphere V metric scale should be radius (7.0), got {}", vs);
+    }
+
+    #[test]
+    fn test_uv_metric_scale_torus() {
+        let torus = TorusSurface { center: Point3d::ORIGIN, axis: Direction3d::Z, major_radius: 10.0, minor_radius: 3.0, x_dir: Direction3d::X };
+        let surface = Surface::Torus(torus);
+        let (us, vs) = surface.uv_metric_scale();
+        assert!((us - 13.0).abs() < 1e-10, "Torus U metric scale should be R+r (13.0), got {}", us);
+        assert!((vs - 3.0).abs() < 1e-10, "Torus V metric scale should be r (3.0), got {}", vs);
     }
 }
