@@ -4709,6 +4709,16 @@ impl<'a> StepConverter<'a> {
         // in this context, for surface-type-specific crease angles.
         draper_mesh::smooth_normals(&mut mesh, 0.785);
 
+        // Recompute face normals from the FINAL vertex positions.
+        // This is necessary because post-processing steps (weld_boundary_edge_vertices,
+        // merge_coincident_vertices, filter_degenerate_triangles) may have moved vertices
+        // or removed/added triangles, making the original face_normals (computed from
+        // pre-merge geometry or padded with (0,0,1) defaults) inconsistent with the
+        // current vertex positions. Without this recomputation, lighting artifacts
+        // appear on faces like cones and cylinders that lacked face_normals in their
+        // per-face meshes (the structured grid triangulation functions don't set them).
+        mesh.compute_face_normals();
+
         if skipped_faces > 0 {
             log::warn!("BREP #{} detailed: {} faces skipped due to time limit", brep_id, skipped_faces);
         }

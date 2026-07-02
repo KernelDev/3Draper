@@ -828,6 +828,11 @@ impl TriangleMesh {
         // wins for shared vertices. This is acceptable because normals are
         // later smoothed by `smooth_normals_adaptive` which computes proper
         // averaged normals across shared edges.
+        //
+        // When `other` lacks vertex normals, we derive them from the face
+        // normals of the triangles in `other` (per-triangle normal assigned
+        // to each vertex of that triangle). This avoids leaving vertices
+        // with (0,0,1) defaults that cause incorrect smooth shading.
         match (&mut self.normals, &other.normals) {
             (Some(ref mut self_normals), Some(ref other_normals)) => {
                 // For new vertices, add their normals. For reused vertices,
@@ -845,11 +850,92 @@ impl TriangleMesh {
                     }
                 }
             }
+            (Some(ref mut self_normals), None) => {
+                // `other` has no vertex normals — derive from face geometry.
+                // Build a per-vertex normal by averaging face normals of
+                // all triangles in `other` that reference that vertex.
+                let mut vertex_face_normals: Vec<Vec<[f64; 3]>> = vec![Vec::new(); other.vertices.len()];
+                for &src_idx in &kept_src_indices {
+                    let tri = other.triangles[src_idx];
+                    // Compute face normal from cross product
+                    let v0 = other.vertices[tri[0] as usize];
+                    let v1 = other.vertices[tri[1] as usize];
+                    let v2 = other.vertices[tri[2] as usize];
+                    let e1 = (v1.x - v0.x, v1.y - v0.y, v1.z - v0.z);
+                    let e2 = (v2.x - v0.x, v2.y - v0.y, v2.z - v0.z);
+                    let nx = e1.1 * e2.2 - e1.2 * e2.1;
+                    let ny = e1.2 * e2.0 - e1.0 * e2.2;
+                    let nz = e1.0 * e2.1 - e1.1 * e2.0;
+                    let len = (nx * nx + ny * ny + nz * nz).sqrt();
+                    let fn_normal = if len > 1e-15 {
+                        [nx / len, ny / len, nz / len]
+                    } else {
+                        [0.0, 0.0, 1.0]
+                    };
+                    vertex_face_normals[tri[0] as usize].push(fn_normal);
+                    vertex_face_normals[tri[1] as usize].push(fn_normal);
+                    vertex_face_normals[tri[2] as usize].push(fn_normal);
+                }
+                for (i, _vertex) in other.vertices.iter().enumerate() {
+                    let global_idx = index_map[i] as usize;
+                    if global_idx >= self_normals.len() {
+                        // Average face normals for this vertex
+                        let fns = &vertex_face_normals[i];
+                        let n = if fns.is_empty() {
+                            [0.0, 0.0, 1.0]
+                        } else {
+                            let mut sum = [0.0_f64; 3];
+                            for &f in fns {
+                                sum[0] += f[0];
+                                sum[1] += f[1];
+                                sum[2] += f[2];
+                            }
+                            let len = (sum[0]*sum[0] + sum[1]*sum[1] + sum[2]*sum[2]).sqrt();
+                            if len > 1e-15 {
+                                [sum[0]/len, sum[1]/len, sum[2]/len]
+                            } else {
+                                [0.0, 0.0, 1.0]
+                            }
+                        };
+                        self_normals.push(n);
+                    }
+                }
+            }
             (None, Some(ref other_normals)) => {
                 // Fill default normals for pre-existing vertices that don't
                 // have normals yet, then add normals for new vertices.
                 // Use old_vertex_count (saved before merge) to avoid underflow.
-                let mut combined = vec![[0.0, 0.0, 1.0]; old_vertex_count];
+                // Derive normals from face geometry for pre-existing vertices.
+                let mut combined: Vec<[f64; 3]> = Vec::with_capacity(self.vertices.len());
+                // Compute per-vertex normals for existing mesh by averaging face normals
+                let mut existing_vfn: Vec<Vec<[f64; 3]>> = vec![Vec::new(); old_vertex_count];
+                for tri in &self.triangles {
+                    let v0 = self.vertices[tri[0] as usize];
+                    let v1 = self.vertices[tri[1] as usize];
+                    let v2 = self.vertices[tri[2] as usize];
+                    let e1 = (v1.x - v0.x, v1.y - v0.y, v1.z - v0.z);
+                    let e2 = (v2.x - v0.x, v2.y - v0.y, v2.z - v0.z);
+                    let nx = e1.1 * e2.2 - e1.2 * e2.1;
+                    let ny = e1.2 * e2.0 - e1.0 * e2.2;
+                    let nz = e1.0 * e2.1 - e1.1 * e2.0;
+                    let len = (nx * nx + ny * ny + nz * nz).sqrt();
+                    let fn_n = if len > 1e-15 { [nx/len, ny/len, nz/len] } else { [0.0, 0.0, 1.0] };
+                    if (tri[0] as usize) < old_vertex_count { existing_vfn[tri[0] as usize].push(fn_n); }
+                    if (tri[1] as usize) < old_vertex_count { existing_vfn[tri[1] as usize].push(fn_n); }
+                    if (tri[2] as usize) < old_vertex_count { existing_vfn[tri[2] as usize].push(fn_n); }
+                }
+                for i in 0..old_vertex_count {
+                    let fns = &existing_vfn[i];
+                    if fns.is_empty() {
+                        combined.push([0.0, 0.0, 1.0]);
+                    } else {
+                        let mut sum = [0.0_f64; 3];
+                        for &f in fns { sum[0] += f[0]; sum[1] += f[1]; sum[2] += f[2]; }
+                        let len = (sum[0]*sum[0] + sum[1]*sum[1] + sum[2]*sum[2]).sqrt();
+                        if len > 1e-15 { combined.push([sum[0]/len, sum[1]/len, sum[2]/len]); }
+                        else { combined.push([0.0, 0.0, 1.0]); }
+                    }
+                }
                 for (i, _vertex) in other.vertices.iter().enumerate() {
                     let global_idx = index_map[i] as usize;
                     if global_idx >= combined.len() {
@@ -873,8 +959,51 @@ impl TriangleMesh {
         //   (None, None) → nothing to do.
         let kept_len = kept_src_indices.len();
         if self.face_normals.is_none() && other.face_normals.is_some() {
+            // Compute face normals for pre-existing triangles from geometry,
+            // instead of using wrong (0,0,1) defaults.
             let existing_count = self.triangles.len().saturating_sub(kept_len);
-            self.face_normals = Some(vec![[0.0, 0.0, 1.0]; existing_count]);
+            let mut init_normals = Vec::with_capacity(existing_count);
+            for i in 0..existing_count {
+                let tri = self.triangles[i];
+                let v0 = self.vertices[tri[0] as usize];
+                let v1 = self.vertices[tri[1] as usize];
+                let v2 = self.vertices[tri[2] as usize];
+                let e1 = (v1.x - v0.x, v1.y - v0.y, v1.z - v0.z);
+                let e2 = (v2.x - v0.x, v2.y - v0.y, v2.z - v0.z);
+                let nx = e1.1 * e2.2 - e1.2 * e2.1;
+                let ny = e1.2 * e2.0 - e1.0 * e2.2;
+                let nz = e1.0 * e2.1 - e1.1 * e2.0;
+                let len = (nx * nx + ny * ny + nz * nz).sqrt();
+                if len > 1e-15 {
+                    init_normals.push([nx / len, ny / len, nz / len]);
+                } else {
+                    init_normals.push([0.0, 0.0, 1.0]);
+                }
+            }
+            self.face_normals = Some(init_normals);
+        } else if self.face_normals.is_none() && other.face_normals.is_none() && kept_len > 0 {
+            // Both self and other lack face normals — compute from geometry
+            // for ALL triangles (existing + newly-added).
+            let total_count = self.triangles.len();
+            let mut all_normals = Vec::with_capacity(total_count);
+            for i in 0..total_count {
+                let tri = self.triangles[i];
+                let v0 = self.vertices[tri[0] as usize];
+                let v1 = self.vertices[tri[1] as usize];
+                let v2 = self.vertices[tri[2] as usize];
+                let e1 = (v1.x - v0.x, v1.y - v0.y, v1.z - v0.z);
+                let e2 = (v2.x - v0.x, v2.y - v0.y, v2.z - v0.z);
+                let nx = e1.1 * e2.2 - e1.2 * e2.1;
+                let ny = e1.2 * e2.0 - e1.0 * e2.2;
+                let nz = e1.0 * e2.1 - e1.1 * e2.0;
+                let len = (nx * nx + ny * ny + nz * nz).sqrt();
+                if len > 1e-15 {
+                    all_normals.push([nx / len, ny / len, nz / len]);
+                } else {
+                    all_normals.push([0.0, 0.0, 1.0]);
+                }
+            }
+            self.face_normals = Some(all_normals);
         }
         match (&mut self.face_normals, &other.face_normals) {
             (Some(ref mut dest), Some(ref src)) => {
@@ -883,11 +1012,27 @@ impl TriangleMesh {
                 }
             }
             (Some(ref mut dest), None) => {
-                // `other` has no face normals — pad with defaults for the
-                // newly-added triangles so the per-triangle arrays stay
-                // length-consistent with self.triangles.
-                for _ in 0..kept_len {
-                    dest.push([0.0, 0.0, 1.0]);
+                // `other` has no face normals — compute them from the
+                // triangle geometry instead of using a wrong (0,0,1) default.
+                // This is critical for correct lighting: structured grid
+                // triangulation functions (cone tube, cylinder tube, etc.)
+                // don't set face_normals, so the merge must derive them.
+                for &src_idx in &kept_src_indices {
+                    let tri = other.triangles[src_idx];
+                    let v0 = other.vertices[tri[0] as usize];
+                    let v1 = other.vertices[tri[1] as usize];
+                    let v2 = other.vertices[tri[2] as usize];
+                    let e1 = (v1.x - v0.x, v1.y - v0.y, v1.z - v0.z);
+                    let e2 = (v2.x - v0.x, v2.y - v0.y, v2.z - v0.z);
+                    let nx = e1.1 * e2.2 - e1.2 * e2.1;
+                    let ny = e1.2 * e2.0 - e1.0 * e2.2;
+                    let nz = e1.0 * e2.1 - e1.1 * e2.0;
+                    let len = (nx * nx + ny * ny + nz * nz).sqrt();
+                    if len > 1e-15 {
+                        dest.push([nx / len, ny / len, nz / len]);
+                    } else {
+                        dest.push([0.0, 0.0, 1.0]);
+                    }
                 }
             }
             _ => {}
