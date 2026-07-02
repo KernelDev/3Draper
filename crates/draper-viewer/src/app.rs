@@ -679,6 +679,8 @@ pub struct ViewerApp {
     show_uv_window: bool,
     /// Whether to show the GD&T (Geometric Dimensioning and Tolerancing) panel.
     show_gdt_window: bool,
+    /// Whether to show GD&T annotations overlaid on the 3D viewport.
+    show_gdt_annotations: bool,
     /// Index of the face currently selected in the UV window.
     ///
     /// `None` means no face is currently active in the UV window — in that
@@ -1252,6 +1254,7 @@ impl ViewerApp {
             extra_curve_lines_dirty: false,
             show_uv_window: false,
             show_gdt_window: false,
+            show_gdt_annotations: false,
             uv_window_face_idx: None,
             uv_window_u_divs: 10,
             uv_window_v_divs: 10,
@@ -6928,6 +6931,8 @@ impl eframe::App for ViewerApp {
                                     .map(|sf| draper_step::pmi::extract_gdt(sf));
                             }
                         }
+                        // Toggle 3D annotation overlay for GD&T tolerances
+                        ui.checkbox(&mut self.show_gdt_annotations, "3D Annotations");
                     }
                 });
                 // --- NURBS Surface Gallery ---
@@ -7769,6 +7774,16 @@ impl eframe::App for ViewerApp {
 
                 if self.show_axes {
                     self.draw_axes_overlay(ui, rect);
+                }
+
+                // ─── GD&T 3D annotations overlay ───
+                if self.show_gdt_annotations {
+                    // Lazy-load GD&T data if not yet extracted
+                    if self.gdt_data.is_none() {
+                        self.gdt_data = self.last_step_file.as_ref()
+                            .map(|sf| draper_step::pmi::extract_gdt(sf));
+                    }
+                    self.draw_gdt_annotations(ui, rect);
                 }
 
                 // ─── Loading progress overlay ───
@@ -11277,6 +11292,233 @@ impl ViewerApp {
                 egui::FontId::proportional(14.0),
                 color,
             );
+        }
+    }
+
+    /// Draw GD&T annotations as 2D overlays on the 3D viewport.
+    ///
+    /// For each geometric tolerance extracted from the STEP file, this method:
+    /// 1. Resolves the `applied_to` entity → ADVANCED_FACE → FaceInfo
+    /// 2. Computes the centroid of the face boundary in 3D
+    /// 3. Projects the centroid to screen coordinates
+    /// 4. Draws a leader line + tolerance frame label at an offset from the centroid
+    fn draw_gdt_annotations(&self, ui: &mut egui::Ui, rect: egui::Rect) {
+        let gdt_data = match &self.gdt_data {
+            Some(d) => d,
+            None => return,
+        };
+
+        if gdt_data.tolerances.is_empty() {
+            return;
+        }
+
+        // Compute MVP for world-to-screen projection
+        let view = self.camera.view_matrix();
+        let aspect = rect.width() / rect.height();
+        let proj = self.camera.projection_matrix(aspect);
+        let mvp = mat4_mul(&proj, &view);
+
+        // Build a lookup: shape_aspect.relating_shape → step_face_id
+        // The chain is: tolerance.applied_to → shape_aspect.step_id → relating_shape (ADVANCED_FACE ID)
+        let mut sa_to_face_id: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+        for sa in &gdt_data.shape_aspects {
+            if let Some(rs) = sa.relating_shape {
+                sa_to_face_id.insert(sa.step_id, rs);
+            }
+        }
+
+        // Build a lookup: step_face_id → centroid (average of outer boundary points)
+        // Search all detailed_instances for matching faces
+        let mut face_centroids: std::collections::HashMap<i64, [f32; 3]> = std::collections::HashMap::new();
+        for inst in &self.detailed_instances {
+            for face in &inst.faces {
+                // Compute centroid from outer_boundary
+                let mut cx = 0.0f64;
+                let mut cy = 0.0f64;
+                let mut cz = 0.0f64;
+                let mut count = 0u32;
+                for poly in &face.outer_boundary {
+                    for pt in poly {
+                        cx += pt.x;
+                        cy += pt.y;
+                        cz += pt.z;
+                        count += 1;
+                    }
+                }
+                if count > 0 {
+                    let inv = 1.0 / count as f64;
+                    face_centroids.insert(
+                        face.step_face_id,
+                        [(cx * inv) as f32, (cy * inv) as f32, (cz * inv) as f32],
+                    );
+                }
+            }
+        }
+
+        // Project 3D → 2D helper
+        let world_to_screen = |p: [f32; 3]| -> Option<egui::Pos2> {
+            let x = mvp[0][0] * p[0] + mvp[1][0] * p[1] + mvp[2][0] * p[2] + mvp[3][0];
+            let y = mvp[0][1] * p[0] + mvp[1][1] * p[1] + mvp[2][1] * p[2] + mvp[3][1];
+            let w = mvp[0][3] * p[0] + mvp[1][3] * p[1] + mvp[2][3] * p[2] + mvp[3][3];
+            if w.abs() < 1e-6 {
+                return None; // Behind camera or degenerate
+            }
+            let ndc_x = x / w;
+            let ndc_y = y / w;
+            // Check if behind camera
+            if w < 0.0 {
+                return None;
+            }
+            // NDC [-1,1] → screen
+            let sx = rect.left() + (ndc_x * 0.5 + 0.5) * rect.width();
+            let sy = rect.top() + (1.0 - (ndc_y * 0.5 + 0.5)) * rect.height();
+            // Clip to viewport with some margin
+            if sx < rect.left() - 50.0 || sx > rect.right() + 50.0 ||
+               sy < rect.top() - 50.0 || sy > rect.bottom() + 50.0 {
+                return None;
+            }
+            Some(egui::pos2(sx, sy))
+        };
+
+        let painter = ui.painter();
+
+        for tol in &gdt_data.tolerances {
+            // Resolve tolerance.applied_to → face centroid
+            let face_id = tol.applied_to
+                .and_then(|aid| sa_to_face_id.get(&aid).copied())
+                .or(tol.applied_to); // Fallback: maybe applied_to IS the face ID directly
+
+            let centroid_3d = match face_id.and_then(|fid| face_centroids.get(&fid)) {
+                Some(c) => *c,
+                None => continue, // No matching face found
+            };
+
+            let anchor_2d = match world_to_screen(centroid_3d) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            // Compute a label offset: shift right and up from the anchor point
+            // The offset direction follows the camera's right/up but stays in screen space
+            let offset_x = 60.0;
+            let offset_y = -40.0;
+            let label_pos = egui::pos2(anchor_2d.x + offset_x, anchor_2d.y + offset_y);
+
+            // ─── Leader line (dashed look via two segments with a small gap) ───
+            let mid_x = anchor_2d.x + offset_x * 0.3;
+            let mid_y = anchor_2d.y + offset_y * 0.3;
+            painter.line_segment(
+                [anchor_2d, egui::pos2(mid_x, mid_y)],
+                egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 200, 60)),
+            );
+            painter.line_segment(
+                [egui::pos2(mid_x, mid_y), label_pos],
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 200, 60)),
+            );
+
+            // ─── Small dot at the anchor (attachment point on the face) ───
+            painter.circle_filled(anchor_2d, 3.0, egui::Color32::from_rgb(255, 200, 60));
+
+            // ─── Tolerance frame (feature control frame) ───
+            // Build the text content
+            let type_symbol = match &tol.tolerance_type {
+                draper_step::pmi::GdtToleranceType::Position => "\u{2295}",
+                draper_step::pmi::GdtToleranceType::Flatness => "\u{2365}",
+                draper_step::pmi::GdtToleranceType::Straightness => "\u{2500}",
+                draper_step::pmi::GdtToleranceType::Circularity => "\u{25CB}",
+                draper_step::pmi::GdtToleranceType::Cylindricity => "\u{232D}",
+                draper_step::pmi::GdtToleranceType::Perpendicularity => "\u{22A5}",
+                draper_step::pmi::GdtToleranceType::Parallelism => "\u{2225}",
+                draper_step::pmi::GdtToleranceType::Angularity => "\u{2220}",
+                draper_step::pmi::GdtToleranceType::Concentricity => "\u{25CE}",
+                draper_step::pmi::GdtToleranceType::Symmetry => "\u{232F}",
+                draper_step::pmi::GdtToleranceType::Runout => "\u{2197}",
+                draper_step::pmi::GdtToleranceType::ProfileOfLine => "\u{2312}",
+                draper_step::pmi::GdtToleranceType::ProfileOfSurface => "\u{2313}",
+                draper_step::pmi::GdtToleranceType::Other(s) => {
+                    // Use first characters of the name as fallback
+                    if s.is_empty() { "?" } else { s.as_str() }
+                }
+            };
+
+            let tol_text = match tol.tolerance_value {
+                Some(v) => format!("{} {:.4}", type_symbol, v),
+                None => format!("{}", type_symbol),
+            };
+
+            // Datum references
+            let datum_text = if !tol.datum_references.is_empty() {
+                let datums: Vec<String> = gdt_data.datum_features.iter()
+                    .filter(|df| tol.datum_references.contains(&df.step_id))
+                    .map(|df| if df.name.is_empty() { format!("#{}", df.step_id) } else { df.name.clone() })
+                    .collect();
+                if datums.is_empty() {
+                    // Fallback: show raw entity IDs
+                    let refs: Vec<String> = tol.datum_references.iter().map(|r| format!("#{}", r)).collect();
+                    format!(" | {}", refs.join(" "))
+                } else {
+                    format!(" | {}", datums.join(" "))
+                }
+            } else {
+                String::new()
+            };
+
+            let full_text = format!("{}{}", tol_text, datum_text);
+
+            // Measure text for frame sizing
+            let font_id = egui::FontId::proportional(11.0);
+            let text_galley = painter.layout_no_wrap(full_text.clone(), font_id.clone(), egui::Color32::WHITE);
+            let text_width = text_galley.size().x;
+            let text_height = text_galley.size().y;
+
+            // Frame padding
+            let pad = 4.0;
+            let frame_rect = egui::Rect::from_min_size(
+                label_pos - egui::vec2(pad, pad),
+                egui::vec2(text_width + pad * 2.0, text_height + pad * 2.0),
+            );
+
+            // Draw frame background
+            painter.rect_filled(
+                frame_rect,
+                2.0,
+                egui::Color32::from_rgba_premultiplied(30, 30, 50, 220),
+            );
+            // Draw frame border
+            painter.rect_stroke(
+                frame_rect,
+                2.0,
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 200, 60)),
+                egui::StrokeKind::Outside,
+            );
+
+            // Draw separator lines for multi-cell FCF (Feature Control Frame)
+            // Cell 1: symbol, Cell 2: tolerance value, Cell 3+: datum references
+            let symbol_width = painter.layout_no_wrap(
+                format!("{} ", type_symbol), font_id.clone(), egui::Color32::WHITE
+            ).size().x;
+            let tol_width = painter.layout_no_wrap(
+                tol_text.clone(), font_id.clone(), egui::Color32::WHITE
+            ).size().x;
+
+            // Vertical separator after symbol
+            let sep1_x = label_pos.x + symbol_width + pad * 0.5;
+            painter.line_segment(
+                [egui::pos2(sep1_x, frame_rect.top()), egui::pos2(sep1_x, frame_rect.bottom())],
+                egui::Stroke::new(0.5, egui::Color32::from_rgb(200, 160, 40)),
+            );
+
+            // Vertical separator after tolerance value (if there are datums)
+            if !tol.datum_references.is_empty() {
+                let sep2_x = label_pos.x + tol_width + pad * 0.5;
+                painter.line_segment(
+                    [egui::pos2(sep2_x, frame_rect.top()), egui::pos2(sep2_x, frame_rect.bottom())],
+                    egui::Stroke::new(0.5, egui::Color32::from_rgb(200, 160, 40)),
+                );
+            }
+
+            // Draw text
+            painter.galley(label_pos, text_galley, egui::Color32::WHITE);
         }
     }
 }
