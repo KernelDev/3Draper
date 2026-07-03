@@ -1021,15 +1021,41 @@ pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64)
     mesh.triangles = kept_tris;
     mesh.triangle_face_ids = if kept_face_ids.is_empty() { None } else { Some(kept_face_ids) };
 
-    // Remove duplicate triangles (same 3 indices in any order)
-    let mut seen: HashSet<[u32; 3]> = HashSet::new();
+    // Remove duplicate triangles (same 3 indices in any order).
+    // NOTE: After welding, two triangles from DIFFERENT faces may end up
+    // with the same sorted vertex indices. Removing these as "duplicates"
+    // creates holes in one of the faces (e.g., Step#87 plane face loses
+    // 101 triangles, Step#78 cone face loses 50). 
+    //
+    // We only remove duplicates if they belong to the SAME face (same face_id).
+    // Cross-face duplicates are preserved to avoid creating holes.
+    // The later `remove_duplicate_triangles` post-processing step handles
+    // true geometric duplicates that would create non-manifold edges.
+    let face_ids_ref = mesh.triangle_face_ids.as_ref();
+    let mut seen: HashMap<[u32; 3], u64> = HashMap::with_capacity(mesh.triangles.len());
     let mut unique_tris = Vec::with_capacity(mesh.triangles.len());
     let mut unique_ids = Vec::with_capacity(mesh.triangles.len());
     let face_ids = mesh.triangle_face_ids.take();
+    let mut cross_face_dup_removed = 0usize;
     for (ti, tri) in mesh.triangles.iter().enumerate() {
         let mut sorted = [tri[0], tri[1], tri[2]];
         sorted.sort();
-        if seen.insert(sorted) {
+        let fid = face_ids.as_ref().and_then(|ids| ids.get(ti)).copied().unwrap_or(u64::MAX);
+        if let Some(&existing_fid) = seen.get(&sorted) {
+            // Same vertex indices — only remove if from the same face
+            if existing_fid == fid {
+                // Same face: true duplicate, remove it
+                continue;
+            } else {
+                // Different faces: cross-face duplicate, KEEP it to avoid holes
+                cross_face_dup_removed += 1;
+                unique_tris.push(*tri);
+                if let Some(ref ids) = face_ids {
+                    unique_ids.push(ids[ti]);
+                }
+            }
+        } else {
+            seen.insert(sorted, fid);
             unique_tris.push(*tri);
             if let Some(ref ids) = face_ids {
                 unique_ids.push(ids[ti]);
@@ -1041,9 +1067,10 @@ pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64)
     mesh.triangle_face_ids = if unique_ids.is_empty() { None } else { Some(unique_ids) };
 
     log::warn!(
-        "WELD: removed {} degenerate + {} duplicate triangles after welding",
-        removed_degenerate, dup_removed
+        "WELD: removed {} degenerate + {} same-face duplicate triangles after welding (kept {} cross-face duplicates)",
+        removed_degenerate, dup_removed, cross_face_dup_removed
     );
+    eprintln!("WELD_DETAIL: degenerate_removed={} same_face_dup_removed={} cross_face_dup_kept={}", removed_degenerate, dup_removed, cross_face_dup_removed);
 
     // Compact vertices
     compact_vertices(mesh);

@@ -4041,7 +4041,18 @@ impl<'a> StepConverter<'a> {
                 face_mesh.vertex_count(), face_mesh.triangle_count(),
                 fbmin.x, fbmin.y, fbmin.z, fbmax.x, fbmax.y, fbmax.z);
             total_face_vertices += face_mesh.vertices.len();
+            let pre_merge_tri_count = mesh.triangle_count();
             mesh.merge_deduplicating(&face_mesh, &mut dedup_map);
+            let post_merge_tri_count = mesh.triangle_count();
+            let face_tri_count = face_mesh.triangle_count();
+            let added_tris = post_merge_tri_count - pre_merge_tri_count;
+            let lost_tris = face_tri_count as isize - added_tris as isize;
+            if lost_tris > 3 {
+                eprintln!(
+                    "MERGE_LOSS: BREP #{} STEP #{} ({}): {} of {} triangles lost during merge",
+                    brep_id, face_data.step_face_id, surface_type, lost_tris, face_tri_count
+                );
+            }
         }
         let deduped_vertices = total_face_vertices - mesh.vertices.len();
         if deduped_vertices > 0 {
@@ -4055,7 +4066,13 @@ impl<'a> StepConverter<'a> {
         // Degenerate triangles (zero area, NaN/Inf vertices, or collapsed
         // indices) create non-manifold edges and false boundary edges.
         // Remove them before validation and snapping.
+        let pre_filter_tris = mesh.triangle_count();
         filter_degenerate_triangles(&mut mesh, 1e-10);
+        let post_filter_tris = mesh.triangle_count();
+        let filter_removed = pre_filter_tris - post_filter_tris;
+        if filter_removed > 0 {
+            eprintln!("POST_FILTER: BREP #{}: {} degenerate triangles removed ({}→{})", brep_id, filter_removed, pre_filter_tris, post_filter_tris);
+        }
 
         // ─── Post-merge: weld boundary edge vertices ────────────────
         // When two adjacent faces share a geometric edge but use different
@@ -4201,6 +4218,7 @@ impl<'a> StepConverter<'a> {
         params: &TriangulationParams,
         bbox: &Option<(Point3d, Point3d)>,
     ) -> Option<(TriangleMesh, Vec<FaceInfo>)> {
+        eprintln!("ENTER triangulate_brep_detailed: BREP #{}", brep_id);
         // P7: Use find_all_shell_refs to support BREP_WITH_VOIDS.
         // The outer shell provides the main solid; each void shell provides
         // an internal cavity (face normals already point into the solid material).
@@ -4531,7 +4549,23 @@ impl<'a> StepConverter<'a> {
             let mut face_mesh_with_ids = face_mesh.clone();
             face_mesh_with_ids.triangle_face_ids = Some(vec![face_id; face_tri_count]);
 
+            let pre_merge_tri_count = mesh.triangle_count();
             mesh.merge_deduplicating(&face_mesh_with_ids, &mut dedup_map);
+            let post_merge_tri_count = mesh.triangle_count();
+            let added_tris = post_merge_tri_count - pre_merge_tri_count;
+            let lost_tris = face_tri_count as isize - added_tris as isize;
+            eprintln!("MERGE: BREP #{} STEP #{} ({}): face_tris={} added={} lost={}",
+                brep_id, step_face_id, surface_type, face_tri_count, added_tris, lost_tris);
+            if lost_tris > 0 {
+                log::warn!(
+                    "BREP #{} face #{} (STEP #{}, {}): {} of {} triangles lost during merge (degenerate/duplicate)",
+                    brep_id, face_id, step_face_id, surface_type, lost_tris, face_tri_count
+                );
+                eprintln!(
+                    "MERGE_LOSS: BREP #{} face #{} (STEP #{}, {}): {} of {} triangles lost during merge",
+                    brep_id, face_id, step_face_id, surface_type, lost_tris, face_tri_count
+                );
+            }
             total_face_vertices_detailed += face_mesh_with_ids.vertices.len();
             let tri_end = mesh.triangle_count();
 
@@ -4620,7 +4654,11 @@ impl<'a> StepConverter<'a> {
         // These create non-manifold edges and false boundary edges. The detailed
         // path was missing this call (only the non-detailed path had it), which
         // is why degenerate triangles appeared in the final mesh.
+        let pre_filter_tris = mesh.triangle_count();
         filter_degenerate_triangles(&mut mesh, 1e-10);
+        let post_filter_tris = mesh.triangle_count();
+        let filter_removed = pre_filter_tris - post_filter_tris;
+        eprintln!("POST_FILTER_DETAILED: BREP #{}: {} degenerate removed ({}→{})", brep_id, filter_removed, pre_filter_tris, post_filter_tris);
 
         // ─── Recompute face_infos.triangle_range from triangle_face_ids ───
         // After filter_degenerate_triangles removes triangles, the original
@@ -4669,7 +4707,19 @@ impl<'a> StepConverter<'a> {
         // weld_boundary_edge_vertices's PASS 2 comment for details.
         {
             let weld_tol = (tol_ctx.model_scale * 3e-2).min(10.0).max(1e-4);
+            let pre_weld_tris = mesh.triangle_count();
             weld_boundary_edge_vertices(&mut mesh, weld_tol);
+            let post_weld_tris = mesh.triangle_count();
+            eprintln!("POST_WELD_DETAILED: BREP #{}: tris after weld ({}→{})", brep_id, pre_weld_tris, post_weld_tris);
+            // After welding, some triangles may have become degenerate (duplicate
+            // vertices merged). Filter again before dedup.
+            let pre_filter2 = mesh.triangle_count();
+            filter_degenerate_triangles(&mut mesh, 1e-10);
+            let post_filter2 = mesh.triangle_count();
+            let filter2_removed = pre_filter2 - post_filter2;
+            if filter2_removed > 0 {
+                eprintln!("POST_WELD_FILTER: BREP #{}: {} degenerate removed after welding ({}→{})", brep_id, filter2_removed, pre_filter2, post_filter2);
+            }
         }
 
         // Remove duplicate triangles (same 3 vertex indices). These arise when
@@ -4678,11 +4728,13 @@ impl<'a> StepConverter<'a> {
         // is represented as multiple NURBS faces covering the same region.
         // Duplicates create non-manifold edges (3+ triangles per edge).
         let dup_removed = mesh.remove_duplicate_triangles();
+        eprintln!("POST_DEDUP_DETAILED: BREP #{}: {} duplicates removed ({}→{})", brep_id, dup_removed, mesh.triangle_count() + dup_removed, mesh.triangle_count());
         if dup_removed > 0 {
             log::info!(
                 "BREP #{} detailed: removed {} duplicate/degenerate triangles ({} → {})",
                 brep_id, dup_removed, mesh.triangle_count() + dup_removed, mesh.triangle_count(),
             );
+            eprintln!("POST_DEDUP_DETAILED: BREP #{}: {} duplicate triangles removed", brep_id, dup_removed);
         }
 
         // ─── Recompute face_infos.triangle_range after remove_duplicate_triangles ───
