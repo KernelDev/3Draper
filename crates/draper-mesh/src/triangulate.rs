@@ -2731,11 +2731,26 @@ fn triangulate_cylinder_face(face: &Face, cyl: &CylinderSurface, params: &Triang
     // go around the "long way" (e.g., from u=0 through u=3π/2 to u=π,
     // instead of the "short way" through u=π/2).
     //
-    // PARTIAL-wrap cylinder faces (e.g., half-cylinders from STEP files with
-    // 2 half-circle arcs + 2 seam lines) are now handled by
-    // triangulate_surface_consistent below. The tube grid approach skips
-    // seam-line intermediate vertices, breaking watertightness between
-    // adjacent half-cylinder faces. Only use tube grid for FULL-wrap faces.
+    // Detection: no holes, both bottom_ring and top_ring have ≥3 points.
+    // Triangulation: `triangulate_cylinder_tube_from_boundary` handles both
+    // full and partial wrap (uses `is_full_wrap` to decide wrap-around).
+    if hole_polylines.is_empty() && boundary_3d.len() >= 6 {
+        let (v_min_pw, v_max_pw) = compute_axis_v_range_pts(&boundary_3d, &cyl.origin, &cyl.axis);
+        if v_max_pw > v_min_pw {
+            let dedup_tol = params.max_deviation.max(1e-6) * 0.5;
+            let (bottom_ring, top_ring, _) = split_boundary_into_rings_with_u(
+                &boundary_3d, &cyl.origin, &cyl.axis, &cyl.x_dir,
+                v_min_pw, v_max_pw, dedup_tol,
+            );
+            if bottom_ring.len() >= 3 && top_ring.len() >= 3 {
+                log::info!(
+                    "Cylinder face #{}: PARTIAL tube face detected ({} bottom + {} top ring points, {} bnd pts) — using tube grid triangulation",
+                    face.id, bottom_ring.len(), top_ring.len(), boundary_3d.len()
+                );
+                return triangulate_cylinder_tube_from_boundary(cyl, params, &boundary_3d, face.forward);
+            }
+        }
+    }
 
     crate::parametric_domain::triangulate_surface_consistent(
         &surface,
@@ -3713,11 +3728,26 @@ fn triangulate_cone_face(face: &Face, cone: &ConeSurface, params: &Triangulation
     // Collect holes from inner loops
     let (hole_polylines, hole_uvs) = collect_face_holes_with_uv_from_cache(face, cache, &surface);
 
-    // PARTIAL-wrap cone faces (e.g., half-cones from STEP files with
-    // 2 half-circle arcs + 2 seam lines) are now handled by
-    // triangulate_surface_consistent below. The tube grid approach skips
-    // seam-line intermediate vertices, breaking watertightness between
-    // adjacent half-cone faces. Only use tube grid for FULL-wrap faces.
+    // Detect PARTIAL-wrap tube face (same logic as triangulate_cylinder_face).
+    // See triangulate_cylinder_face for detailed comments on why partial-wrap
+    // faces need this detection (earcutr produces twisted triangles for them).
+    if hole_polylines.is_empty() && boundary_3d.len() >= 6 {
+        let (v_min_pw, v_max_pw) = compute_axis_v_range_pts(&boundary_3d, &cone.origin, &cone.axis);
+        if v_max_pw > v_min_pw {
+            let dedup_tol = params.max_deviation.max(1e-6) * 0.5;
+            let (bottom_ring, top_ring, _) = split_boundary_into_rings_with_u(
+                &boundary_3d, &cone.origin, &cone.axis, &cone.x_dir,
+                v_min_pw, v_max_pw, dedup_tol,
+            );
+            if bottom_ring.len() >= 3 && top_ring.len() >= 3 {
+                log::info!(
+                    "Cone face #{}: PARTIAL tube face detected ({} bottom + {} top ring points, {} bnd pts) — using tube grid triangulation",
+                    face.id, bottom_ring.len(), top_ring.len(), boundary_3d.len()
+                );
+                return triangulate_cone_tube_from_boundary(cone, params, &boundary_3d, face.forward);
+            }
+        }
+    }
 
     crate::parametric_domain::triangulate_surface_consistent(
         &surface,
@@ -5511,13 +5541,24 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
                     );
                     return triangulate_cylinder_tube_from_boundary(cyl, params, boundary_points, forward);
                 }
-                // PARTIAL-wrap cylinder faces (e.g., half-cylinders from STEP files
-                // with 2 half-circle arcs + 2 seam lines) are now handled by
-                // triangulate_surface_consistent below. The tube grid approach
-                // skips seam-line intermediate vertices (split_boundary_into_rings_with_u
-                // discards points at intermediate v-levels), breaking watertightness
-                // between adjacent half-cylinder faces. The earcutr path preserves
-                // ALL boundary points including seam-line vertices.
+                // Check for PARTIAL-wrap tube face: both bottom_ring and
+                // top_ring must have ≥3 points (i.e., the boundary has arcs
+                // at two distinct v-levels, plus seam lines connecting them).
+                let (v_min_pw, v_max_pw) = compute_axis_v_range_pts(boundary_points, &cyl.origin, &cyl.axis);
+                if v_max_pw > v_min_pw {
+                    let dedup_tol = params.max_deviation.max(1e-6) * 0.5;
+                    let (bottom_ring, top_ring, _) = split_boundary_into_rings_with_u(
+                        boundary_points, &cyl.origin, &cyl.axis, &cyl.x_dir,
+                        v_min_pw, v_max_pw, dedup_tol,
+                    );
+                    if bottom_ring.len() >= 3 && top_ring.len() >= 3 {
+                        log::info!(
+                            "Cylinder face: PARTIAL tube face detected ({} bottom + {} top ring points, {} bnd pts) — using tube grid triangulation",
+                            bottom_ring.len(), top_ring.len(), boundary_points.len()
+                        );
+                        return triangulate_cylinder_tube_from_boundary(cyl, params, boundary_points, forward);
+                    }
+                }
             }
             // Cylinder: use earcutr-based consistent triangulation.
             // The grid-based approach with boundary snapping only approximates
@@ -5556,13 +5597,22 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
                     );
                     return triangulate_cone_tube_from_boundary(cone, params, boundary_points, forward);
                 }
-                // PARTIAL-wrap cone faces (e.g., half-cones from STEP files with
-                // 2 half-circle arcs + 2 seam lines) are now handled by
-                // triangulate_cone_face_with_boundary_uv below. The tube grid
-                // approach skips seam-line intermediate vertices, breaking
-                // watertightness between adjacent half-cone faces. The earcutr
-                // path via triangulate_surface_consistent preserves ALL boundary
-                // points including seam-line vertices.
+                // Check for PARTIAL-wrap tube face.
+                let (v_min_pw, v_max_pw) = compute_axis_v_range_pts(boundary_points, &cone.origin, &cone.axis);
+                if v_max_pw > v_min_pw {
+                    let dedup_tol = params.max_deviation.max(1e-6) * 0.5;
+                    let (bottom_ring, top_ring, _) = split_boundary_into_rings_with_u(
+                        boundary_points, &cone.origin, &cone.axis, &cone.x_dir,
+                        v_min_pw, v_max_pw, dedup_tol,
+                    );
+                    if bottom_ring.len() >= 3 && top_ring.len() >= 3 {
+                        log::info!(
+                            "Cone face: PARTIAL tube face detected ({} bottom + {} top ring points, {} bnd pts) — using tube grid triangulation",
+                            bottom_ring.len(), top_ring.len(), boundary_points.len()
+                        );
+                        return triangulate_cone_tube_from_boundary(cone, params, boundary_points, forward);
+                    }
+                }
             }
             // Cone: must handle apex degeneracy
             triangulate_cone_face_with_boundary_uv(
