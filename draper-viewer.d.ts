@@ -11,8 +11,8 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
-    readonly main: (a: number, b: number) => number;
     readonly start: () => void;
+    readonly main: (a: number, b: number) => number;
     readonly wasm_bindgen__convert__closures_____invoke__he7c4e79e608204f1: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen__convert__closures_____invoke__h3bbeeb48243b1a76: (a: number, b: number, c: any) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h3e36779b9d417991: (a: number, b: number, c: any) => void;
