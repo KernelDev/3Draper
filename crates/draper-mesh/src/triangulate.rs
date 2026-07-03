@@ -2951,7 +2951,7 @@ fn triangulate_cylinder_tube_from_boundary(
             } else {
                 crate::edge_cache::deterministic_round_point(cyl.point_at(u, v))
             };
-            let n = cyl.normal_at(u, v);
+            let n = orient_normal(cyl.normal_at(u, v), forward);
             let idx = mesh.add_vertex(p);
             mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
         }
@@ -3224,7 +3224,7 @@ fn triangulate_cylinder_full_at_v_range(
             let u = 2.0 * PI * i as f64 / n_u as f64;
             let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
             let p = crate::edge_cache::deterministic_round_point(cyl.point_at(u, v));
-            let n = cyl.normal_at(u, v);
+            let n = orient_normal(cyl.normal_at(u, v), forward);
             let idx = mesh.add_vertex(p);
             mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
         }
@@ -3513,7 +3513,12 @@ fn triangulate_cone_full_at_v_range(
     let apex_v = cone.apex_v();
     // Clamp v_min to not go past the apex (apex is at negative v for standard cones)
     let v_min = if !cone.expanding && apex_v.is_finite() { v_min.max(apex_v) } else { v_min };
-    let top_row_at_apex = !cone.expanding && apex_v.is_finite() && (v_min - apex_v).abs() < apex_v.abs() * 0.01 + 1e-6;
+    let apex_near_v_min = !cone.expanding && apex_v.is_finite()
+        && (v_min - apex_v).abs() < apex_v.abs().max(1e-6) * 0.01 + 1e-6;
+    let apex_near_v_max = !cone.expanding && apex_v.is_finite()
+        && (v_max - apex_v).abs() < apex_v.abs().max(1e-6) * 0.01 + 1e-6;
+    let apex_at_bottom = apex_near_v_min; // apex is at j=0
+    let apex_at_top    = apex_near_v_max; // apex is at j=n_v
 
     let (n_u, n_v) = if params.adaptive {
         crate::adaptive::required_samples(
@@ -3530,7 +3535,8 @@ fn triangulate_cone_full_at_v_range(
 
     for j in 0..=n_v {
         let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
-        if top_row_at_apex && j == n_v {
+        if (apex_at_bottom && j == 0) || (apex_at_top && j == n_v) {
+            // Apex row — single vertex (all u values map to the apex point)
             let p = cone.point_at(0.0, apex_v);
             let n = orient_normal(cone.normal_at(0.0, apex_v), forward);
             let idx = mesh.add_vertex(p);
@@ -3558,16 +3564,34 @@ fn triangulate_cone_full_at_v_range(
         let next_row_count = row_vertex_count[j_next];
         let row_base = row_vertex_offset[j];
         let next_row_base = row_vertex_offset[j_next];
-        if next_row_count == 1 {
+        if row_count == 1 {
+            // Current row is apex — fan from apex to next row ring
+            let apex = row_base;
+            for i in 0..next_row_count {
+                let i_next = (i + 1) % next_row_count;
+                let v0 = next_row_base + i as u32;
+                let v1 = next_row_base + i_next as u32;
+                if v0 != v1 {
+                    if forward {
+                        mesh.add_triangle(apex, v0, v1);
+                    } else {
+                        mesh.add_triangle(apex, v1, v0);
+                    }
+                }
+            }
+        } else if next_row_count == 1 {
+            // Next row is apex — fan from current row ring to apex
             let apex = next_row_base;
             for i in 0..row_count {
                 let i_next = (i + 1) % row_count;
                 let v0 = row_base + i as u32;
                 let v1 = row_base + i_next as u32;
-                if forward {
-                    mesh.add_triangle(v0, v1, apex);
-                } else {
-                    mesh.add_triangle(v0, apex, v1);
+                if v0 != v1 {
+                    if forward {
+                        mesh.add_triangle(v0, v1, apex);
+                    } else {
+                        mesh.add_triangle(v0, apex, v1);
+                    }
                 }
             }
         } else {
@@ -3593,6 +3617,7 @@ fn triangulate_cone_full_at_v_range(
 /// Full cylinder triangulation (no boundary edges).
 fn triangulate_cylinder_full(face: &Face, cyl: &CylinderSurface, params: &TriangulationParams) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
+    let forward = face.forward;
     let (v_min, v_max) = compute_axis_v_range(face, &cyl.origin, &cyl.axis);
     let (v_min, v_max) = if v_min < v_max { (v_min, v_max) } else { (0.0, 1.0) };
 
@@ -3613,7 +3638,7 @@ fn triangulate_cylinder_full(face: &Face, cyl: &CylinderSurface, params: &Triang
             let u = 2.0 * PI * i as f64 / n_u as f64;
             let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
             let p = crate::edge_cache::deterministic_round_point(cyl.point_at(u, v));
-            let n = cyl.normal_at(u, v);
+            let n = orient_normal(cyl.normal_at(u, v), forward);
             let idx = mesh.add_vertex(p);
             mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
         }
@@ -3769,8 +3794,16 @@ fn triangulate_cone_full(face: &Face, cone: &ConeSurface, params: &Triangulation
         v_min = v_min.max(apex_v);
     }
 
-    // Check if the bottom row reaches the apex (radius = 0)
-    let top_row_at_apex = !cone.expanding && apex_v.is_finite() && (v_min - apex_v).abs() < apex_v.abs() * 0.01 + 1e-6;
+    // Check if the apex lies at one of the v-range boundaries.
+    // After clamping v_min to apex_v, v_min == apex_v means the apex
+    // is at the BOTTOM row (j=0).  If apex_v ≈ v_max the apex is at
+    // the TOP row (j=n_v).
+    let apex_near_v_min = !cone.expanding && apex_v.is_finite()
+        && (v_min - apex_v).abs() < apex_v.abs().max(1e-6) * 0.01 + 1e-6;
+    let apex_near_v_max = !cone.expanding && apex_v.is_finite()
+        && (v_max - apex_v).abs() < apex_v.abs().max(1e-6) * 0.01 + 1e-6;
+    let apex_at_bottom = apex_near_v_min; // apex is at j=0
+    let apex_at_top    = apex_near_v_max; // apex is at j=n_v
 
     // Generate vertex grid with apex degeneracy handling
     let mut _apex_vertex: Option<u32> = None;
@@ -3781,13 +3814,13 @@ fn triangulate_cone_full(face: &Face, cone: &ConeSurface, params: &Triangulation
     for j in 0..=n_v {
         let v = v_min + (v_max - v_min) * j as f64 / n_v as f64;
 
-        if top_row_at_apex && j == n_v {
-            // Apex row — single vertex
+        if (apex_at_bottom && j == 0) || (apex_at_top && j == n_v) {
+            // Apex row — single vertex (all u values map to the apex point)
             let p = cone.point_at(0.0, apex_v);
             let n = orient_normal(cone.normal_at(0.0, apex_v), forward);
             let idx = mesh.add_vertex(p);
             mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
-            let _ = Some(idx);
+            _apex_vertex = Some(idx);
             row_vertex_offset.push(idx);
             row_vertex_count.push(1);
             total_vertices += 1;
@@ -3815,7 +3848,22 @@ fn triangulate_cone_full(face: &Face, cone: &ConeSurface, params: &Triangulation
         let row_base = row_vertex_offset[j];
         let next_row_base = row_vertex_offset[j_next];
 
-        if next_row_count == 1 {
+        if row_count == 1 {
+            // Current row is apex — fan from apex to next row ring
+            let apex = row_base;
+            for i in 0..next_row_count {
+                let i_next = (i + 1) % next_row_count;
+                let v0 = next_row_base + i as u32;
+                let v1 = next_row_base + i_next as u32;
+                if v0 != v1 {
+                    if face.forward {
+                        mesh.add_triangle(apex, v0, v1);
+                    } else {
+                        mesh.add_triangle(apex, v1, v0);
+                    }
+                }
+            }
+        } else if next_row_count == 1 {
             // Next row is apex — fan from current row ring to apex
             let apex = next_row_base;
             for i in 0..row_count {
@@ -7050,7 +7098,7 @@ fn triangulate_cylinder_with_boundary(
             let u = u_start + (u_end - u_start) * i as f64 / n_u as f64;
             let v = v_min + (v_max - v_min) * j as f64 / (n_v - 1).max(1) as f64;
             let p = cyl.point_at(u, v);
-            let n = cyl.normal_at(u, v);
+            let n = orient_normal(cyl.normal_at(u, v), forward);
             let idx = mesh.add_vertex(p);
             mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
         }

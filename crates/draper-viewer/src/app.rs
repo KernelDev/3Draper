@@ -8676,21 +8676,22 @@ impl ViewerApp {
                                     // Triangle inside a hole or outside the outer boundary —
                                     // skip drawing entirely to avoid the "aura" effect.
                                 } else {
-                                    // Valid triangle — alternating blue tints.
+                                    // Valid triangle — alternating blue tints with stronger contrast.
                                     let fill = if ti % 2 == 0 {
-                                        egui::Color32::from_rgba_premultiplied(68, 136, 255, 28)
+                                        egui::Color32::from_rgba_premultiplied(68, 136, 255, 50)
                                     } else {
-                                        egui::Color32::from_rgba_premultiplied(85, 170, 255, 28)
+                                        egui::Color32::from_rgba_premultiplied(100, 180, 255, 50)
                                     };
-                                    // Draw filled triangle with visible edge stroke so the user
-                                    // can see each triangle's edges in the UV view. Thin, semi-
-                                    // transparent stroke avoids the dense "extra lines" artifact
-                                    // at low zoom while being clearly visible when zoomed in.
-                                    let edge_stroke = egui::Stroke::new(
-                                        0.5,
-                                        egui::Color32::from_rgba_premultiplied(120, 180, 255, 60),
-                                    );
-                                    painter.add(egui::Shape::convex_polygon(vec![p0, p1, p2], fill, edge_stroke));
+                                    // Draw filled triangle (no stroke on convex_polygon — we draw
+                                    // edges separately below for guaranteed visibility).
+                                    painter.add(egui::Shape::convex_polygon(vec![p0, p1, p2], fill, egui::Stroke::NONE));
+                                    // Draw each edge of the triangle as an explicit line segment
+                                    // so the diagonal of each quad-pair is always visible.
+                                    let edge_color = egui::Color32::from_rgba_premultiplied(100, 170, 255, 140);
+                                    let edge_stroke = egui::Stroke::new(1.0, edge_color);
+                                    painter.line_segment([p0, p1], edge_stroke);
+                                    painter.line_segment([p1, p2], edge_stroke);
+                                    painter.line_segment([p2, p0], edge_stroke);
                                 }
                                 if ti >= tri_limit { break; }
                             }
