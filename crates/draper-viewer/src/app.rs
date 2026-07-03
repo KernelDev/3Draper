@@ -8675,23 +8675,22 @@ impl ViewerApp {
                                 if in_hole || !in_outer {
                                     // Triangle inside a hole or outside the outer boundary —
                                     // skip drawing entirely to avoid the "aura" effect.
-                                    // Previously drawn with subtle red which accumulated into
-                                    // visible halos around the boundary.
                                 } else {
-                                    // Valid triangle — alternating blue tints with a thin
-                                    // edge stroke. Reduced edge opacity and thickness to
-                                    // eliminate the dense line grid artifact ("extra lines")
-                                    // while keeping triangle boundaries visible at zoom.
+                                    // Valid triangle — alternating blue tints.
                                     let fill = if ti % 2 == 0 {
                                         egui::Color32::from_rgba_premultiplied(68, 136, 255, 28)
                                     } else {
                                         egui::Color32::from_rgba_premultiplied(85, 170, 255, 28)
                                     };
-                                    // No edge stroke on individual triangles — the dense
-                                    // grid of thin lines creates the "extra lines" artifact.
-                                    // Triangle boundaries are visible from the alternating
-                                    // fill colors at sufficient zoom.
-                                    painter.add(egui::Shape::convex_polygon(vec![p0, p1, p2], fill, egui::Stroke::NONE));
+                                    // Draw filled triangle with visible edge stroke so the user
+                                    // can see each triangle's edges in the UV view. Thin, semi-
+                                    // transparent stroke avoids the dense "extra lines" artifact
+                                    // at low zoom while being clearly visible when zoomed in.
+                                    let edge_stroke = egui::Stroke::new(
+                                        0.5,
+                                        egui::Color32::from_rgba_premultiplied(120, 180, 255, 60),
+                                    );
+                                    painter.add(egui::Shape::convex_polygon(vec![p0, p1, p2], fill, edge_stroke));
                                 }
                                 if ti >= tri_limit { break; }
                             }
@@ -10552,11 +10551,18 @@ fn compute_solid_uv_breakdown_with_detailed(
         // fallback (the user-visible "Plane shows square" bug).
         let face_info = detailed_instance.and_then(|inst| inst.faces.get(fidx));
         if let Some(fi) = face_info {
-            // Use FaceInfo's outer_boundary (3D points) projected to UV
-            for poly3d in &fi.outer_boundary {
-                let uv_raw: Vec<(f64, f64)> = poly3d
+            // Use FaceInfo's outer_uv_boundary (2D UV polylines) directly
+            // instead of re-projecting 3D boundary points to UV.
+            // Re-projecting via surface.project_point() can produce different
+            // u values than the original triangulation used (e.g., for periodic
+            // surfaces where project_point returns u in [0, 2π) while the
+            // triangulation used unwrapped u values). Using the stored UV
+            // boundary ensures the boundary and UV triangles are in the
+            // same coordinate system.
+            for poly2d in &fi.outer_uv_boundary {
+                let uv_raw: Vec<(f64, f64)> = poly2d
                     .iter()
-                    .map(|p| surface.project_point(p))
+                    .map(|p| (p.u, p.v))
                     .collect();
                 let uv = split_at_seam_jumps(uv_raw, u_periodic, v_periodic);
                 for poly in uv {
@@ -10636,15 +10642,19 @@ fn compute_solid_uv_breakdown_with_detailed(
         let mut inner_polylines: Vec<Vec<(f64, f64)>> = Vec::new();
         // Prefer FaceInfo's inner_boundaries
         if let Some(fi) = face_info {
-            for poly3d in &fi.inner_boundaries {
-                let uv_raw: Vec<(f64, f64)> = poly3d
-                    .iter()
-                    .map(|p| surface.project_point(p))
-                    .collect();
-                let uv = split_at_seam_jumps(uv_raw, u_periodic, v_periodic);
-                for poly in uv {
-                    if poly.len() >= 2 {
-                        inner_polylines.push(poly);
+            // Use FaceInfo's inner_uv_boundaries (2D UV polylines) directly
+            // for the same reason as outer_uv_boundary above.
+            for hole_group in &fi.inner_uv_boundaries {
+                for poly2d in hole_group {
+                    let uv_raw: Vec<(f64, f64)> = poly2d
+                        .iter()
+                        .map(|p| (p.u, p.v))
+                        .collect();
+                    let uv = split_at_seam_jumps(uv_raw, u_periodic, v_periodic);
+                    for poly in uv {
+                        if poly.len() >= 2 {
+                            inner_polylines.push(poly);
+                        }
                     }
                 }
             }
@@ -10776,6 +10786,133 @@ fn compute_solid_uv_breakdown_with_detailed(
         }
 
         let (u_metric_scale, v_metric_scale) = surface.uv_metric_scale();
+
+        // ─── Normalize UV coordinates for periodic surfaces ──────────────
+        // For U-periodic surfaces, the boundary UVs and triangle UVs may be
+        // in different u-ranges. For example, a half-cone face covering u from
+        // π to 2π might have boundary points at u=[π, 2π] while the UV triangles
+        // (projected from 3D via project_point) have u in [0, π] (because
+        // project_point maps the 2π seam to u=0). This creates a visual
+        // mismatch where the green boundary appears far from the blue triangles.
+        //
+        // Fix: anchor the u-range to the BOUNDARY polylines (which are the
+        // ground truth), then shift any triangle vertices that are in the
+        // wrong "period cell" by ±u_period to bring them into the same range.
+        // We also need to handle the reverse: boundary might need shifting
+        // if triangles are the anchor (e.g., for synthetic grids).
+        if u_periodic && u_period > 0.0 && !uv_triangles.is_empty() && !outer_polylines.is_empty() {
+            // Find the median u of boundary polylines as the anchor
+            let mut boundary_us: Vec<f64> = Vec::new();
+            for poly in &outer_polylines {
+                boundary_us.extend(poly.iter().map(|p| p.0));
+            }
+            boundary_us.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let boundary_median = if boundary_us.is_empty() { 0.0 } else { boundary_us[boundary_us.len() / 2] };
+
+            // Find median u of triangle vertices
+            let mut tri_us: Vec<f64> = Vec::with_capacity(uv_triangles.len() * 3);
+            for tri in &uv_triangles {
+                tri_us.extend_from_slice(&[tri[0].0, tri[1].0, tri[2].0]);
+            }
+            tri_us.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let tri_median = tri_us[tri_us.len() / 2];
+
+            // If the medians are more than half a period apart, shift the
+            // outlier by ±u_period to bring them into the same range.
+            // Use >= to handle the exact π offset case (boundary at 3π/2,
+            // triangles at π/2, difference = π = half period).
+            let du = boundary_median - tri_median;
+            let tri_shift = if du >= u_period / 2.0 {
+                // Triangles are in a lower period cell — shift up
+                u_period
+            } else if du <= -u_period / 2.0 {
+                // Triangles are in a higher period cell — shift down
+                -u_period
+            } else {
+                0.0
+            };
+
+            if tri_shift.abs() > 0.0 {
+                for tri in &mut uv_triangles {
+                    for pt in tri.iter_mut() {
+                        pt.0 += tri_shift;
+                    }
+                }
+            }
+
+            // After shifting triangles, also check inner polylines against
+            // the outer boundary range (they might also need shifting).
+            let outer_median = boundary_median; // anchor
+            for poly in &mut inner_polylines {
+                if poly.is_empty() { continue; }
+                let mut poly_us: Vec<f64> = poly.iter().map(|p| p.0).collect();
+                poly_us.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let poly_median = poly_us[poly_us.len() / 2];
+                let dv = poly_median - outer_median;
+                let hole_shift = if dv >= u_period / 2.0 {
+                    -u_period
+                } else if dv <= -u_period / 2.0 {
+                    u_period
+                } else {
+                    0.0
+                };
+                if hole_shift.abs() > 0.0 {
+                    for p in poly.iter_mut() { p.0 += hole_shift; }
+                }
+            }
+        }
+
+        // Same normalization for V-periodic surfaces
+        if v_periodic && v_period > 0.0 && !uv_triangles.is_empty() && !outer_polylines.is_empty() {
+            let mut boundary_vs: Vec<f64> = Vec::new();
+            for poly in &outer_polylines {
+                boundary_vs.extend(poly.iter().map(|p| p.1));
+            }
+            boundary_vs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let boundary_median = if boundary_vs.is_empty() { 0.0 } else { boundary_vs[boundary_vs.len() / 2] };
+
+            let mut tri_vs: Vec<f64> = Vec::with_capacity(uv_triangles.len() * 3);
+            for tri in &uv_triangles {
+                tri_vs.extend_from_slice(&[tri[0].1, tri[1].1, tri[2].1]);
+            }
+            tri_vs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let tri_median = tri_vs[tri_vs.len() / 2];
+
+            let dv = boundary_median - tri_median;
+            let tri_shift = if dv >= v_period / 2.0 {
+                v_period
+            } else if dv <= -v_period / 2.0 {
+                -v_period
+            } else {
+                0.0
+            };
+
+            if tri_shift.abs() > 0.0 {
+                for tri in &mut uv_triangles {
+                    for pt in tri.iter_mut() {
+                        pt.1 += tri_shift;
+                    }
+                }
+            }
+
+            for poly in &mut inner_polylines {
+                if poly.is_empty() { continue; }
+                let mut poly_vs: Vec<f64> = poly.iter().map(|p| p.1).collect();
+                poly_vs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let poly_median = poly_vs[poly_vs.len() / 2];
+                let dv = poly_median - boundary_median;
+                let hole_shift = if dv >= v_period / 2.0 {
+                    -v_period
+                } else if dv <= -v_period / 2.0 {
+                    v_period
+                } else {
+                    0.0
+                };
+                if hole_shift.abs() > 0.0 {
+                    for p in poly.iter_mut() { p.1 += hole_shift; }
+                }
+            }
+        }
 
         breakdown.faces.push(FaceUvBreakdown {
             face_idx: fidx,
