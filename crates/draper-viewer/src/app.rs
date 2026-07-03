@@ -5434,55 +5434,68 @@ impl ViewerApp {
                 merged_mesh.compute_face_normals();
                 merged_mesh.ensure_colors([0.62, 0.65, 0.70, 1.0]);
 
-                // Build instance triangle ranges from the cached instance data
-                let mut offset = 0usize;
-                let mut ranges = Vec::new();
-                for inst in &result.instances {
-                    // Each instance in the cache was computed from the merged mesh.
-                    // Since we stored flat arrays, the triangle ranges are sequential.
-                    let tri_count = if offset < merged_mesh.triangle_count() {
-                        // Estimate from the cached instance metadata
-                        0 // We'll use the actual triangle ranges from the mesh
-                    } else {
-                        0
-                    };
-                    ranges.push((offset, offset)); // placeholder
-                    offset += tri_count;
-                }
-
-                // Actually, we need to reconstruct instance triangle ranges
-                // from the merged mesh's face_ids. Each instance with a unique
-                // brep_id gets a range of triangles. But in the cache, we
-                // stored a single merged mesh — so we reconstruct ranges from
-                // the cached instances' triangle_start/triangle_end fields
-                // (stored in instances_json).
                 let cached_instances = result.instances;
-                let mut instance_ranges = Vec::new();
-                for inst in &cached_instances {
-                    // The instance's mesh is empty (placeholder) — we need
-                    // to reconstruct ranges from the mesh's face_ids
-                    // We'll recalculate ranges below
-                    instance_ranges.push((0, 0));
-                }
 
-                // Calculate actual triangle ranges from the merged mesh
-                let final_ranges = if !cached_instances.is_empty() && merged_mesh.triangle_face_ids.is_some() {
-                    // Use face_ids to determine ranges — but this is complex.
-                    // Simpler: just set the range to cover all triangles
-                    // (works fine for single-instance files)
-                    let total = merged_mesh.triangle_count();
-                    vec![(0, total)]
+                // ─── Reconstruct instance triangle ranges from face_ids ───
+                // The merged mesh has triangle_face_ids, and each cached instance
+                // has faces with their face_ids. We use these to determine which
+                // triangles belong to which instance.
+                let total_tris = merged_mesh.triangle_count();
+                let mut final_ranges: Vec<(usize, usize)> = Vec::with_capacity(cached_instances.len());
+
+                if let Some(ref face_ids) = merged_mesh.triangle_face_ids {
+                    // Collect face_ids belonging to each instance
+                    for inst in &cached_instances {
+                        let inst_face_ids: std::collections::HashSet<u64> = inst.faces.iter()
+                            .map(|f| f.face_id)
+                            .collect();
+                        let mut tri_start = total_tris;
+                        let mut tri_end = 0usize;
+                        for (ti, &fid) in face_ids.iter().enumerate() {
+                            if inst_face_ids.contains(&fid) {
+                                tri_start = tri_start.min(ti);
+                                tri_end = tri_end.max(ti + 1);
+                            }
+                        }
+                        if tri_start >= tri_end {
+                            tri_start = 0;
+                            tri_end = 0;
+                        }
+                        final_ranges.push((tri_start, tri_end));
+                    }
+
+                    // ─── Recompute FaceInfo.triangle_range from merged mesh ───
+                    // The cached triangle_range may be stale. Use triangle_face_ids
+                    // to find the actual contiguous range for each face.
+                    let mut face_ranges: std::collections::HashMap<u64, (usize, usize)> = std::collections::HashMap::new();
+                    for (ti, &fid) in face_ids.iter().enumerate() {
+                        let entry = face_ranges.entry(fid).or_insert((ti, ti));
+                        entry.0 = entry.0.min(ti);
+                        entry.1 = entry.1.max(ti + 1);
+                    }
+                    let mut updated_instances = cached_instances;
+                    for inst in &mut updated_instances {
+                        for fi in &mut inst.faces {
+                            if let Some(&(start, end)) = face_ranges.get(&fi.face_id) {
+                                fi.triangle_range = (start, end);
+                            }
+                        }
+                    }
+                    self.detailed_instances = updated_instances;
                 } else {
+                    // No face_ids — fallback: single range covering all triangles
                     let total = merged_mesh.triangle_count();
-                    vec![(0, total)]
-                };
+                    for _ in &cached_instances {
+                        final_ranges.push((0, total));
+                    }
+                    self.detailed_instances = cached_instances;
+                }
 
                 // Set the assembly tree
                 self.assembly_tree = Some(result.assembly_tree);
                 self.show_structure = true;
 
                 // Load the merged mesh
-                self.detailed_instances = cached_instances;
                 self.instance_triangle_ranges = final_ranges;
                 self.load_mesh(merged_mesh, &result.file_name);
 

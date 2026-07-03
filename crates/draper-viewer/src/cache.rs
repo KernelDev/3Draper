@@ -774,15 +774,32 @@ fn js_entry_to_lookup_result(obj: &js_sys::Object) -> Result<CacheLookupResult, 
 
 // ─── Serialization helpers ────────────────────────────────────────────
 
+/// Simplified face metadata — enough for the Structure panel to show
+/// the face list, select faces, and highlight them in the 3D view.
+/// Full boundary/UV/surface data is NOT cached (too large, rarely needed
+/// after initial load). The UV breakdown window won't work from cache,
+/// but the face list, selection, and 3D highlighting will.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedFaceInfo {
+    face_id: u64,
+    step_face_id: i64,
+    surface_type: String,
+    triangle_range: (usize, usize),
+    forward: bool,
+    is_void: bool,
+}
+
 /// Simplified instance metadata — only what's needed to reconstruct
-/// the viewer state. Full FaceInfo data (boundaries, UV, surface geometry)
-/// is NOT cached because it's large and rarely needed after initial load.
+/// the viewer state. Face-level metadata is cached for the Structure
+/// panel; full FaceInfo data (boundaries, UV, surface geometry) is NOT
+/// cached because it's large and rarely needed after initial load.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CachedInstance {
     name: String,
     brep_id: i64,
     color: Option<[f32; 4]>,
     transform: Option<[[f64; 4]; 4]>,
+    faces: Vec<CachedFaceInfo>,
 }
 
 /// Simplified assembly tree — enough to reconstruct the structure panel.
@@ -799,11 +816,22 @@ struct CachedAssemblyNode {
 
 fn serialize_instances(instances: &[DetailedMeshInstance]) -> String {
     let cached: Vec<CachedInstance> = instances.iter().map(|inst| {
+        let faces: Vec<CachedFaceInfo> = inst.faces.iter().map(|fi| {
+            CachedFaceInfo {
+                face_id: fi.face_id,
+                step_face_id: fi.step_face_id,
+                surface_type: fi.surface_type.clone(),
+                triangle_range: fi.triangle_range,
+                forward: fi.forward,
+                is_void: fi.is_void,
+            }
+        }).collect();
         CachedInstance {
             name: inst.name.clone(),
             brep_id: inst.brep_id,
             color: inst.color,
             transform: inst.transform,
+            faces,
         }
     }).collect();
 
@@ -836,17 +864,39 @@ fn deserialize_instances(json: &str) -> Result<Vec<DetailedMeshInstance>, String
     let cached: Vec<CachedInstance> = serde_json::from_str(json)
         .map_err(|e| format!("failed to deserialize instances: {}", e))?;
 
-    // Create placeholder DetailedMeshInstance objects.
-    // The actual mesh data comes from the merged TriangleMesh.
-    // Face-level info (boundaries, UV) is not cached.
+    // Reconstruct DetailedMeshInstance objects from cached data.
+    // The per-instance mesh is empty (the merged mesh is used for rendering).
+    // Face-level metadata (face_id, step_face_id, surface_type, triangle_range,
+    // forward, is_void) is restored from cache so the Structure panel can show
+    // the face list and allow selection. Boundary/UV/surface data is NOT cached,
+    // so the UV breakdown window won't work for cached instances.
+    use draper_step::FaceInfo;
+    use draper_geometry::Surface;
+
     Ok(cached.into_iter().map(|ci| {
+        let faces: Vec<FaceInfo> = ci.faces.into_iter().map(|cf| {
+            FaceInfo {
+                face_id: cf.face_id,
+                step_face_id: cf.step_face_id,
+                surface_type: cf.surface_type,
+                surface: Surface::Plane(draper_geometry::Plane::xy()), // Placeholder — UV view won't work from cache
+                outer_boundary: Vec::new(),
+                inner_boundaries: Vec::new(),
+                outer_uv_boundary: Vec::new(),
+                inner_uv_boundaries: Vec::new(),
+                triangle_range: cf.triangle_range,
+                forward: cf.forward,
+                uv_triangles: Vec::new(),
+                is_void: cf.is_void,
+            }
+        }).collect();
         DetailedMeshInstance {
             name: ci.name,
             mesh: TriangleMesh::new(),
             color: ci.color,
             transform: ci.transform,
             brep_id: ci.brep_id,
-            faces: Vec::new(),
+            faces,
         }
     }).collect())
 }
