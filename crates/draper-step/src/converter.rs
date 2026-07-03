@@ -1751,6 +1751,25 @@ impl BrepSession {
             );
         }
 
+        // Recompute triangle_range after remove_duplicate_triangles (same fix as
+        // the non-chunked path — see comment there for rationale).
+        if dup_removed > 0 {
+            if let Some(ref fids) = self.mesh.triangle_face_ids {
+                let mut fid_ranges: std::collections::HashMap<u64, (usize, usize)> = std::collections::HashMap::new();
+                for (ti, &fid) in fids.iter().enumerate() {
+                    let entry = fid_ranges.entry(fid).or_insert((ti, ti));
+                    entry.1 = ti + 1;
+                }
+                for fi in &mut self.face_infos {
+                    if let Some(&(start, end)) = fid_ranges.get(&fi.face_id) {
+                        fi.triangle_range = (start, end);
+                    } else {
+                        fi.triangle_range = (0, 0);
+                    }
+                }
+            }
+        }
+
         // Validate watertightness (logging only)
         let adaptive_tol = self.edge_cache.adaptive_tolerance().merge_tolerance();
         let report_before = validate_watertight(&self.mesh, false);
@@ -4666,6 +4685,28 @@ impl<'a> StepConverter<'a> {
             );
         }
 
+        // ─── Recompute face_infos.triangle_range after remove_duplicate_triangles ───
+        // remove_duplicate_triangles can remove triangles (degenerate or duplicate),
+        // which shifts indices and makes the previously-recomputed triangle_range stale.
+        // Without this, FaceInfo.triangle_range can reference out-of-bounds indices,
+        // causing the UV viewer and face diagnostics to display wrong triangles.
+        if dup_removed > 0 {
+            if let Some(ref fids) = mesh.triangle_face_ids {
+                let mut fid_ranges: std::collections::HashMap<u64, (usize, usize)> = std::collections::HashMap::new();
+                for (ti, &fid) in fids.iter().enumerate() {
+                    let entry = fid_ranges.entry(fid).or_insert((ti, ti));
+                    entry.1 = ti + 1;
+                }
+                for fi in &mut face_infos {
+                    if let Some(&(start, end)) = fid_ranges.get(&fi.face_id) {
+                        fi.triangle_range = (start, end);
+                    } else {
+                        fi.triangle_range = (0, 0);
+                    }
+                }
+            }
+        }
+
         // ─── Post-merge boundary edge filling ──────────────────────────
         // DISABLED: The fill function adds triangles using vertices from other
         // faces, which creates overlapping triangles and non-manifold edges.
@@ -4809,6 +4850,28 @@ impl<'a> StepConverter<'a> {
 
         log::info!("BREP #{} detailed: edge_cache={} entries, mesh v={} t={} skipped={}",
             brep_id, edge_cache.len(), mesh.vertex_count(), mesh.triangle_count(), skipped_faces);
+
+        // ─── FINAL recomputation of face_infos.triangle_range ───
+        // After ALL post-processing (filter, weld, dedup, smooth), the triangle
+        // indices may have shifted. Recompute from the final triangle_face_ids
+        // to guarantee FaceInfo.triangle_range matches the actual mesh layout.
+        // This is the DEFINITIVE recomputation — any earlier recomputations
+        // may have been invalidated by subsequent processing steps.
+        if let Some(ref fids) = mesh.triangle_face_ids {
+            let mut fid_ranges: std::collections::HashMap<u64, (usize, usize)> = std::collections::HashMap::new();
+            for (ti, &fid) in fids.iter().enumerate() {
+                let entry = fid_ranges.entry(fid).or_insert((ti, ti));
+                entry.1 = ti + 1;
+            }
+            for fi in &mut face_infos {
+                if let Some(&(start, end)) = fid_ranges.get(&fi.face_id) {
+                    fi.triangle_range = (start, end);
+                } else {
+                    fi.triangle_range = (0, 0);
+                }
+            }
+        }
+
         Some((mesh, face_infos))
     }
 
