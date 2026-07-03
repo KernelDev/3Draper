@@ -7352,7 +7352,7 @@ fn triangulate_cone_face_with_boundary(
             let n = orient_normal(cone.normal_at(0.0, apex_v), forward);
             let idx = mesh.add_vertex(p);
             mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
-            let _ = Some(idx);
+            _apex_vertex = Some(idx);
             row_vertex_offset.push(idx);
             row_vertex_count.push(1);
             total_vertices += 1;
@@ -7539,7 +7539,7 @@ fn triangulate_sphere_face_with_boundary(
             let n = sphere.normal_at(0.0, 0.0);
             let idx = mesh.add_vertex(p);
             mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
-            let _ = Some(idx);
+            _pole_vertex_north = Some(idx);
             row_vertex_offset.push(idx);
             row_vertex_count.push(1);
             total_vertices += 1;
@@ -7549,7 +7549,7 @@ fn triangulate_sphere_face_with_boundary(
             let n = sphere.normal_at(0.0, PI);
             let idx = mesh.add_vertex(p);
             mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
-            let _ = Some(idx);
+            _pole_vertex_south = Some(idx);
             row_vertex_offset.push(idx);
             row_vertex_count.push(1);
             total_vertices += 1;

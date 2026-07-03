@@ -295,15 +295,21 @@ impl TriangleMesh {
     /// Returns the number of duplicates removed.
     /// Also filters degenerate triangles (where two vertex indices are equal).
     pub fn remove_duplicate_triangles(&mut self) -> usize {
-        use std::collections::HashSet;
+        use std::collections::HashMap;
         let old_len = self.triangles.len();
         let old_triangles = std::mem::take(&mut self.triangles);
         let old_face_ids = self.triangle_face_ids.take();
         let old_face_normals = self.face_normals.take();
         let old_triangle_colors = self.triangle_colors.take();
 
-        let mut seen: HashSet<[u32; 3]> = HashSet::with_capacity(old_len);
+        // Face-aware dedup: track (sorted_key → face_id) so that triangles
+        // from *different* faces sharing the same vertex indices are BOTH
+        // kept.  Only same-face duplicates are removed.  This prevents holes
+        // in the 3D view (e.g., Step#87 plane face, Step#78 cone face) that
+        // were caused by aggressively removing cross-face duplicates.
+        let mut seen: HashMap<[u32; 3], u64> = HashMap::with_capacity(old_len);
         let mut removed = 0usize;
+        let mut cross_face_kept = 0usize;
 
         for (i, tri) in old_triangles.iter().enumerate() {
             // Skip degenerate triangles (two equal indices)
@@ -314,28 +320,43 @@ impl TriangleMesh {
             // Canonical sorted key so (a,b,c) and (c,b,a) match
             let mut key = [tri[0], tri[1], tri[2]];
             key.sort_unstable();
-            if seen.insert(key) {
-                self.triangles.push(*tri);
-                // Move per-triangle attributes in sync (use get() to handle
-                // any length mismatch from prior filter_degenerate_triangles)
-                if let Some(ref src) = old_face_ids {
-                    if let Some(&fid) = src.get(i) {
-                        self.triangle_face_ids.get_or_insert_with(Vec::new).push(fid);
-                    }
-                }
-                if let Some(ref src) = old_face_normals {
-                    if let Some(&n) = src.get(i) {
-                        self.face_normals.get_or_insert_with(Vec::new).push(n);
-                    }
-                }
-                if let Some(ref src) = old_triangle_colors {
-                    if let Some(&col) = src.get(i) {
-                        self.triangle_colors.get_or_insert_with(Vec::new).push(col);
-                    }
+            let fid = old_face_ids.as_ref().and_then(|ids| ids.get(i)).copied().unwrap_or(u64::MAX);
+            if let Some(&existing_fid) = seen.get(&key) {
+                if existing_fid == fid {
+                    // Same face: true duplicate, remove it
+                    removed += 1;
+                    continue;
+                } else {
+                    // Different faces: cross-face duplicate, KEEP to avoid holes
+                    cross_face_kept += 1;
                 }
             } else {
-                removed += 1;
+                seen.insert(key, fid);
             }
+            self.triangles.push(*tri);
+            // Move per-triangle attributes in sync (use get() to handle
+            // any length mismatch from prior filter_degenerate_triangles)
+            if let Some(ref src) = old_face_ids {
+                if let Some(&fid) = src.get(i) {
+                    self.triangle_face_ids.get_or_insert_with(Vec::new).push(fid);
+                }
+            }
+            if let Some(ref src) = old_face_normals {
+                if let Some(&n) = src.get(i) {
+                    self.face_normals.get_or_insert_with(Vec::new).push(n);
+                }
+            }
+            if let Some(ref src) = old_triangle_colors {
+                if let Some(&col) = src.get(i) {
+                    self.triangle_colors.get_or_insert_with(Vec::new).push(col);
+                }
+            }
+        }
+        if cross_face_kept > 0 {
+            log::debug!(
+                "remove_duplicate_triangles: kept {} cross-face duplicates (different faces sharing same vertices)",
+                cross_face_kept
+            );
         }
         let _ = old_len;
         removed

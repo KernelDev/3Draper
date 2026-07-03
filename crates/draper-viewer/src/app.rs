@@ -7558,7 +7558,10 @@ impl eframe::App for ViewerApp {
 
                     // ─── Mouse/touch picking: click = select solid, Ctrl+click = select face ───
                     // On mobile, tap always selects face (since there's no Ctrl key)
-                    if response.clicked_by(egui::PointerButton::Primary) {
+                    // On mobile, skip click handling when a panel (structure/UV) is open,
+                    // otherwise the CentralPanel steals the tap and clears selected_instance.
+                    let mobile_panel_open = self.is_mobile && self.mobile_panel.is_some();
+                    if response.clicked_by(egui::PointerButton::Primary) && !mobile_panel_open {
                         let ctrl_held = ui.input(|i| i.modifiers.ctrl || i.modifiers.command) || self.is_mobile;
                         let mouse_pos = ui.input(|i| i.pointer.latest_pos());
                         if let Some(pos) = mouse_pos {
@@ -7665,7 +7668,7 @@ impl eframe::App for ViewerApp {
                         }
                     }
 
-                    if response.dragged_by(egui::PointerButton::Primary) {
+                    if response.dragged_by(egui::PointerButton::Primary) && !mobile_panel_open {
                         let delta = response.drag_delta();
                         self.camera.rotate(delta.x, delta.y);
                     }
@@ -9904,7 +9907,7 @@ impl ViewerApp {
                 .default_open(true)
                 .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
+                    egui::ScrollArea::vertical().id_salt("mobile_structure_outer").auto_shrink([false, false]).show(ui, |ui| {
                         // Loading progress
                         if self.is_loading && self.total_instance_count > 0 {
                             let progress = self.triangulated_count as f32 / self.total_instance_count as f32;
@@ -9930,7 +9933,7 @@ impl ViewerApp {
 
                         // Tree
                         ui.heading(egui::RichText::new("Tree").size(13.0));
-                        egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                        egui::ScrollArea::vertical().id_salt("mobile_tree_scroll").max_height(200.0).show(ui, |ui| {
                             if let Some(ref tree) = assembly_tree_clone {
                                 draw_assembly_node_static(ui, tree, selected_instance, &hidden_instances, &mut pending_instance_select, &mut pending_visibility_toggle, &mut pending_instance_isolate, &mut pending_subtree_hide, &mut pending_subtree_show, &mut pending_subtree_isolate, &open_tree_nodes, &scroll_to_tree_node);
                             } else if !detailed_instances_clone.is_empty() {
@@ -9970,7 +9973,7 @@ impl ViewerApp {
                             if let Some(inst) = detailed_instances_clone.get(inst_idx) {
                                 ui.label(egui::RichText::new(format!("BREP #{} — {} faces", inst.brep_id, inst.faces.len()))
                                     .size(11.0).color(egui::Color32::GRAY));
-                                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                                egui::ScrollArea::vertical().id_salt("mobile_face_list_scroll").max_height(200.0).show(ui, |ui| {
                                     for face in &inst.faces {
                                         let is_selected = selected_face == Some((inst_idx, face.face_id));
                                         let is_face_visible = !hidden_faces_clone.contains(&(inst_idx, face.face_id));
