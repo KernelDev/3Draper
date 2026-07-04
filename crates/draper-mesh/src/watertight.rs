@@ -993,10 +993,62 @@ pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64)
 
     log::warn!("WELD: {} vertices welded", weld_count);
 
-    // Apply the welding: replace all vertex indices with their root
-    let root_map: Vec<u32> = (0..mesh.vertices.len() as u32)
+    // Apply the welding: replace all vertex indices with their root.
+    // But first, check which welds would create degenerate triangles
+    // and roll those back.  A weld that makes two vertices in the same
+    // triangle identical (a==b or b==c or a==c) destroys that triangle —
+    // this is the root cause of Step#87/#78 losing 101/50 triangles.
+    //
+    // Strategy: apply all welds, find which root equivalences cause
+    // degeneracy, then "un-weld" by splitting the union-find groups
+    // that cause problems.
+    let mut root_map: Vec<u32> = (0..mesh.vertices.len() as u32)
         .map(|i| find(&mut parent, i))
         .collect();
+
+    // Find which root equivalences cause degenerate triangles
+    let mut bad_roots: HashSet<u32> = HashSet::new();
+    for tri in &mesh.triangles {
+        let a = root_map[tri[0] as usize];
+        let b = root_map[tri[1] as usize];
+        let c = root_map[tri[2] as usize];
+        if a == b {
+            // Vertices tri[0] and tri[1] were welded to the same root.
+            // This weld destroys the triangle.  Mark the root as "bad".
+            bad_roots.insert(a);
+        }
+        if b == c {
+            bad_roots.insert(b);
+        }
+        if a == c {
+            bad_roots.insert(a);
+        }
+    }
+
+    if !bad_roots.is_empty() {
+        eprintln!("WELD_BAD_ROOTS: {} root equivalences cause degeneracy — reverting those welds", bad_roots.len());
+        // Revert: for each vertex whose root is in bad_roots, restore it
+        // to its original index (un-weld).  This preserves triangles that
+        // would otherwise degenerate, at the cost of keeping some boundary
+        // edges unwelded.
+        let mut reverted_count = 0usize;
+        for i in 0..mesh.vertices.len() {
+            let root = root_map[i];
+            if bad_roots.contains(&root) && root != i as u32 {
+                // Revert this vertex to its own index
+                parent[i] = i as u32;
+                reverted_count += 1;
+            }
+        }
+        if reverted_count > 0 {
+            eprintln!("WELD_REVERT: reverted {} vertex welds to prevent degeneracy", reverted_count);
+            // Recompute root_map after revert
+            // (need to re-find because path compression may be stale)
+            for i in 0..mesh.vertices.len() {
+                root_map[i] = find(&mut parent, i as u32);
+            }
+        }
+    }
 
     // Update all triangles
     let mut removed_degenerate = 0usize;
@@ -1010,6 +1062,15 @@ pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64)
         let c = root_map[tri[2] as usize];
         if a == b || b == c || a == c {
             removed_degenerate += 1;
+            // Log which face loses a triangle
+            let fid = face_ids.as_ref().and_then(|ids| ids.get(ti)).copied().unwrap_or(u64::MAX);
+            if removed_degenerate <= 10 {
+                let orig_a = tri[0]; let orig_b = tri[1]; let orig_c = tri[2];
+                eprintln!(
+                    "WELD_DEGEN: tri[{}] face_id={} degenerate after weld: ({},{},{}) → ({},{},{})",
+                    ti, fid, orig_a, orig_b, orig_c, a, b, c
+                );
+            }
             continue;
         }
         kept_tris.push([a, b, c]);

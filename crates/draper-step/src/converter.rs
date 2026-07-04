@@ -1738,8 +1738,18 @@ impl BrepSession {
 
         // Weld boundary edge vertices
         {
-            let weld_tol = (self.tol_ctx.model_scale * 3e-2).min(10.0).max(1e-4);
-            weld_boundary_edge_vertices(&mut self.mesh, weld_tol);
+            // Check watertightness BEFORE welding — if the mesh is already
+            // watertight via edge cache + merge_deduplicating, skip welding
+            // to avoid creating degenerate triangles (Step#87/#78 lose 101/50
+            // triangles when welding collapses boundary vertices).
+            let report_before = validate_watertight(&self.mesh, false);
+            if report_before.is_watertight() {
+                eprintln!("WELD_SKIP: BREP #{} already watertight ({} interior edges) — skipping weld to preserve triangles",
+                    brep_id, report_before.interior_edge_count);
+            } else {
+                let weld_tol = (self.tol_ctx.model_scale * 3e-2).min(10.0).max(1e-4);
+                weld_boundary_edge_vertices(&mut self.mesh, weld_tol);
+            }
         }
 
         // Remove duplicate triangles
@@ -4097,11 +4107,14 @@ impl<'a> StepConverter<'a> {
         // unrelated boundary vertices from different faces. See
         // weld_boundary_edge_vertices's PASS 2 comment for details.
         {
-            let weld_tol = (tol_ctx.model_scale * 3e-2).min(10.0).max(1e-4);
-            weld_boundary_edge_vertices(&mut mesh, weld_tol);
+            // Skip welding if mesh is already watertight — prevents
+            // degenerate triangle creation (Step#87/#78).
+            let report_before = validate_watertight(&mesh, false);
+            if !report_before.is_watertight() {
+                let weld_tol = (tol_ctx.model_scale * 3e-2).min(10.0).max(1e-4);
+                weld_boundary_edge_vertices(&mut mesh, weld_tol);
+            }
         }
-
-        // ─── Post-merge boundary vertex snapping ────────────────────────
         // When the STEP file uses different VERTEX_POINT entities for the
         // same geometric boundary (e.g., Plane face uses LINE, NURBS face
         // uses NURBS curve), bit-exact dedup can't merge the boundary
@@ -4706,19 +4719,29 @@ impl<'a> StepConverter<'a> {
         // unrelated boundary vertices from different faces. See
         // weld_boundary_edge_vertices's PASS 2 comment for details.
         {
-            let weld_tol = (tol_ctx.model_scale * 3e-2).min(10.0).max(1e-4);
-            let pre_weld_tris = mesh.triangle_count();
-            weld_boundary_edge_vertices(&mut mesh, weld_tol);
-            let post_weld_tris = mesh.triangle_count();
-            eprintln!("POST_WELD_DETAILED: BREP #{}: tris after weld ({}→{})", brep_id, pre_weld_tris, post_weld_tris);
-            // After welding, some triangles may have become degenerate (duplicate
-            // vertices merged). Filter again before dedup.
-            let pre_filter2 = mesh.triangle_count();
-            filter_degenerate_triangles(&mut mesh, 1e-10);
-            let post_filter2 = mesh.triangle_count();
-            let filter2_removed = pre_filter2 - post_filter2;
-            if filter2_removed > 0 {
-                eprintln!("POST_WELD_FILTER: BREP #{}: {} degenerate removed after welding ({}→{})", brep_id, filter2_removed, pre_filter2, post_filter2);
+            // Check watertightness BEFORE welding — if the mesh is already
+            // watertight via edge cache + merge_deduplicating, skip welding
+            // to avoid creating degenerate triangles (Step#87/#78 lose 101/50
+            // triangles when welding collapses boundary vertices).
+            let report_before = validate_watertight(&mesh, false);
+            if report_before.is_watertight() {
+                eprintln!("WELD_SKIP: BREP #{} detailed already watertight ({} interior edges) — skipping weld to preserve triangles",
+                    brep_id, report_before.interior_edge_count);
+            } else {
+                let weld_tol = (tol_ctx.model_scale * 3e-2).min(10.0).max(1e-4);
+                let pre_weld_tris = mesh.triangle_count();
+                weld_boundary_edge_vertices(&mut mesh, weld_tol);
+                let post_weld_tris = mesh.triangle_count();
+                eprintln!("POST_WELD_DETAILED: BREP #{}: tris after weld ({}→{})", brep_id, pre_weld_tris, post_weld_tris);
+                // After welding, some triangles may have become degenerate (duplicate
+                // vertices merged). Filter again before dedup.
+                let pre_filter2 = mesh.triangle_count();
+                filter_degenerate_triangles(&mut mesh, 1e-10);
+                let post_filter2 = mesh.triangle_count();
+                let filter2_removed = pre_filter2 - post_filter2;
+                if filter2_removed > 0 {
+                    eprintln!("POST_WELD_FILTER: BREP #{}: {} degenerate removed after welding ({}→{})", brep_id, filter2_removed, pre_filter2, post_filter2);
+                }
             }
         }
 
