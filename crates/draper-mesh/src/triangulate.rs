@@ -2188,6 +2188,56 @@ fn earcutr_triangulate_planar(
         return None;
     }
 
+    // ============================================================
+    // CCW normalization (same as parametric_domain.rs Step 1.25)
+    //
+    // When `forward:false`, the boundary coedges are reversed,
+    // producing a CW (clockwise) UV polygon. earcutr interprets
+    // CW input as a hole and produces CW triangles. The subsequent
+    // `forward:false` winding swap (tri[0],tri[2],tri[1]) then
+    // over-corrects, resulting in normals pointing outward when
+    // they should point inward.
+    //
+    // Fix: Detect CW polygons via signed area and reverse them to CCW.
+    // This ensures earcutr always receives CCW input and produces
+    // CCW triangles, so the `forward` flag's winding swap is the
+    // only correction needed. The 3D boundary points must be
+    // reversed in sync to maintain UV↔3D correspondence.
+    // ============================================================
+    let (outer_2d, outer_3d, holes_2d, holes_3d): (Vec<Point2d>, Vec<Point3d>, Vec<Vec<Point2d>>, Vec<Vec<Point3d>>) = {
+        let mut area = 0.0_f64;
+        for i in 0..outer_2d.len() {
+            let j = (i + 1) % outer_2d.len();
+            area += outer_2d[i].u * outer_2d[j].v - outer_2d[j].u * outer_2d[i].v;
+        }
+        let signed_area = area * 0.5;
+        if signed_area < 0.0 {
+            log::info!(
+                "CCW normalization (planar): UV polygon has negative signed area ({:.6}) — reversing to CCW (forward={})",
+                signed_area, forward
+            );
+            let mut rev_2d: Vec<Point2d> = outer_2d.to_vec();
+            rev_2d.reverse();
+            let mut rev_3d: Vec<Point3d> = outer_3d.to_vec();
+            rev_3d.reverse();
+            let mut rev_holes_2d = Vec::with_capacity(holes_2d.len());
+            let mut rev_holes_3d = Vec::with_capacity(holes_3d.len());
+            for h2d in holes_2d.iter() {
+                let mut h = h2d.to_vec();
+                h.reverse();
+                rev_holes_2d.push(h);
+            }
+            for h3d in holes_3d.iter() {
+                let mut h = h3d.to_vec();
+                h.reverse();
+                rev_holes_3d.push(h);
+            }
+            (rev_2d, rev_3d, rev_holes_2d, rev_holes_3d)
+        } else {
+            (outer_2d.to_vec(), outer_3d.to_vec(), holes_2d.to_vec(), holes_3d.to_vec())
+        }
+    };
+
     let mut mesh = TriangleMesh::new();
 
     // Build the flat coordinate array for earcutr.
@@ -2197,7 +2247,7 @@ fn earcutr_triangulate_planar(
     let mut hole_indices: Vec<usize> = Vec::with_capacity(holes_2d.len());
 
     // Outer boundary points
-    for p in outer_2d {
+    for p in &outer_2d {
         coords.push(p.u);
         coords.push(p.v);
     }
@@ -2227,7 +2277,7 @@ fn earcutr_triangulate_planar(
     // Build combined 3D vertex array: outer vertices first, then valid hole vertices
     // CRITICAL: Only include holes that were also added to coords, so 3D indices
     // match earcutr's 2D indices exactly.
-    let mut all_3d: Vec<Point3d> = outer_3d.to_vec();
+    let mut all_3d: Vec<Point3d> = outer_3d.clone();
     for &hi in &valid_hole_indices {
         all_3d.extend_from_slice(&holes_3d[hi]);
     }

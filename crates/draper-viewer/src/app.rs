@@ -5431,7 +5431,7 @@ impl ViewerApp {
                 // Merge all instance meshes into one TriangleMesh
                 // (cached data has the merged mesh + instance metadata)
                 let mut merged_mesh = result.mesh;
-                merged_mesh.compute_face_normals();
+                merged_mesh.fill_missing_face_normals();
                 merged_mesh.ensure_colors([0.62, 0.65, 0.70, 1.0]);
 
                 let cached_instances = result.instances;

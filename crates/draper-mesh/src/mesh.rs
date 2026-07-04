@@ -644,6 +644,13 @@ impl TriangleMesh {
 
     /// Compute face normals.
     pub fn compute_face_normals(&mut self) {
+        // Don't overwrite existing face normals — they may have been set
+        // analytically (e.g., from plane.normal) and are more accurate
+        // than cross-product normals derived from possibly-inconsistent
+        // winding order.
+        if self.face_normals.is_some() {
+            return;
+        }
         let mut normals = Vec::with_capacity(self.triangles.len());
         for tri in &self.triangles {
             let v0 = self.vertices[tri[0] as usize];
@@ -664,6 +671,37 @@ impl TriangleMesh {
             }
         }
         self.face_normals = Some(normals);
+    }
+
+    /// Compute face normals only for triangles that have placeholder [0,0,1]
+    /// normals (set during merge when one mesh had face_normals and the other
+    /// didn't).  Preserves analytically-set normals (e.g., from plane.normal).
+    pub fn fill_missing_face_normals(&mut self) {
+        if let Some(ref mut normals) = self.face_normals {
+            for (tri_idx, tri) in self.triangles.iter().enumerate() {
+                let n = normals[tri_idx];
+                // Skip if normal is already properly set (not the placeholder)
+                if n[0].abs() > 1e-10 || n[1].abs() > 1e-10 || (n[2] - 1.0).abs() > 1e-10 {
+                    continue;
+                }
+                // Compute from cross product
+                let v0 = self.vertices[tri[0] as usize];
+                let v1 = self.vertices[tri[1] as usize];
+                let v2 = self.vertices[tri[2] as usize];
+                let e1 = (v1.x - v0.x, v1.y - v0.y, v1.z - v0.z);
+                let e2 = (v2.x - v0.x, v2.y - v0.y, v2.z - v0.z);
+                let nx = e1.1 * e2.2 - e1.2 * e2.1;
+                let ny = e1.2 * e2.0 - e1.0 * e2.2;
+                let nz = e1.0 * e2.1 - e1.1 * e2.0;
+                let len = (nx * nx + ny * ny + nz * nz).sqrt();
+                if len > 1e-15 {
+                    normals[tri_idx] = [nx / len, ny / len, nz / len];
+                }
+            }
+        } else {
+            // No face normals at all — compute from scratch
+            self.compute_face_normals();
+        }
     }
 
     /// Merge another mesh into this one.
