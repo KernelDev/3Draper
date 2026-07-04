@@ -9,7 +9,7 @@
 #   index.html
 #
 # We clone it fresh into /tmp/gh-deploy, swap in the newly-built wasm/js,
-# commit, and push.
+# inject the git revision into index.html, add cache busters, commit, and push.
 #
 # Usage:
 #   scripts/deploy_gh_pages.sh                       # default commit msg
@@ -17,11 +17,14 @@
 set -euo pipefail
 
 PROJECT_ROOT="/home/z/my-project"
-export PATH="/home/z/.cargo/bin:/home/z/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin:$PATH"
+export PATH="/home/z/.cargo/bin:$PATH"
 
 cd "$PROJECT_ROOT"
 
-COMMIT_MSG="${1:-deploy: WASM rebuild from $(git rev-parse --short HEAD)}"
+GIT_HASH=$(git rev-parse --short HEAD)
+COMMIT_MSG="${1:-deploy: WASM rebuild from $GIT_HASH}"
+
+echo "==> Git revision: $GIT_HASH"
 
 echo "==> Building viewer WASM release (web-deploy feature)..."
 cargo build -p draper-viewer \
@@ -45,6 +48,7 @@ wasm-bindgen \
     "$PROJECT_ROOT/target/wasm32-unknown-unknown/release/draper-viewer.wasm"
 
 echo "==> Running wasm-bindgen for worker..."
+rm -rf /tmp/wasm-bindgen-out-worker
 mkdir -p /tmp/wasm-bindgen-out-worker
 wasm-bindgen \
     --target web \
@@ -73,9 +77,6 @@ cd /tmp/gh-deploy
 git remote set-url origin "$REMOTE_URL"
 
 # Swap in new wasm + js
-# Note: wasm-bindgen produces draper_worker_*.wasm/js (underscores),
-# but the web worker JS expects draper-worker.* (hyphens).
-# We rename during copy to match the expected names.
 cp "$VIEWER_WASM" /tmp/gh-deploy/draper-viewer_bg.wasm
 cp "$VIEWER_JS"   /tmp/gh-deploy/draper-viewer.js
 cp "$WORKER_WASM" /tmp/gh-deploy/draper-worker_bg.wasm
@@ -85,9 +86,25 @@ cp "$WORKER_JS"   /tmp/gh-deploy/draper-worker.js
 cp "$PROJECT_ROOT/crates/draper-viewer/worker.js" /tmp/gh-deploy/worker.js
 cp "$PROJECT_ROOT/crates/draper-viewer/worker-bridge.js" /tmp/gh-deploy/worker-bridge.js
 
+# ── Inject git revision into index.html ──────────────────────────────
+echo "==> Injecting revision $GIT_HASH into index.html..."
+INDEX_HTML=/tmp/gh-deploy/index.html
+
+# Update page title to include revision
+sed -i "s|<title>3Draper[^<]*</title>|<title>3Draper [$GIT_HASH] — 3D Geometric Kernel</title>|" "$INDEX_HTML"
+
+# Add revision badge in loading screen (after "Loading WebAssembly module..." status)
+sed -i "/<div class=\"status\">Loading WebAssembly module\.\.\.<\/div>/a\\        <div class=\"parallel-badge\" style=\"margin-top:4px;font-size:11px;color:#8ca0b4;\">build: $GIT_HASH</div>" "$INDEX_HTML"
+
+# Add cache buster query parameters to WASM/JS URLs
+sed -i "s|'./draper-viewer.js'|'./draper-viewer.js?v=$GIT_HASH'|g" "$INDEX_HTML"
+sed -i "s|'./draper-viewer_bg.wasm'|'./draper-viewer_bg.wasm?v=$GIT_HASH'|g" "$INDEX_HTML"
+
+echo "    revision in title: $(grep -c "$GIT_HASH" "$INDEX_HTML") occurrences"
+
 git add -A
 git -c user.email=dev@3draper.local -c user.name="3Draper Dev" \
     commit -m "$COMMIT_MSG" 2>&1 | tail -3
 git push origin gh-pages 2>&1 | tail -3
 
-echo "==> Deployed to https://kerneldev.github.io/3Draper/"
+echo "==> Deployed to https://kerneldev.github.io/3Draper/ [build: $GIT_HASH]"
