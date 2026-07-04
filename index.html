@@ -10,8 +10,8 @@
     <title>3Draper [87bc9ba] — 3D Geometric Kernel</title>
     <meta name="description" content="3Draper: A 3D geometric kernel with B-Rep topology, STEP/STL I/O, NURBS surfaces & curves, and interactive 3D viewer running entirely in your browser via WebAssembly.">
     <script type="module">
-import init, * as bindings from './draper-viewer.js';
-const wasm = await init('./draper-viewer_bg.wasm');
+import init, * as bindings from './draper-viewer.js?v=87bc9ba';
+const wasm = await init('./draper-viewer_bg.wasm?v=87bc9ba');
 window.wasmBindings = bindings;
 dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
 </script>
