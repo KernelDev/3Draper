@@ -7764,7 +7764,7 @@ impl eframe::App for ViewerApp {
                     let uniforms = SceneUniforms {
                         mvp,
                         model,
-                        light_dir: [cam_fwd[0], cam_fwd[1], cam_fwd[2], 0.35],
+                        light_dir: [cam_fwd[0], cam_fwd[1], cam_fwd[2], 0.45],
                         camera_pos: [cam_pos[0], cam_pos[1], cam_pos[2], 0.0],
                     };
                     let guard = self.gpu_resources.lock().unwrap();
@@ -9234,7 +9234,7 @@ impl ViewerApp {
                     });
                     // Spacer + info summary
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let info_text = format!("V:{} T:{}", self.current_model.vertex_count, self.current_model.triangle_count);
+                        let info_text = format!("V:{} T:{} [{}]", self.current_model.vertex_count, self.current_model.triangle_count, env!("DRAPER_GIT_HASH"));
                         ui.label(egui::RichText::new(info_text).size(10.0).color(egui::Color32::GRAY));
                     });
                 });

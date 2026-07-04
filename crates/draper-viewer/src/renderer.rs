@@ -327,28 +327,31 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let ndotl_primary = max(dot(effective_normal, light_dir), 0.0);
     let half_dir_primary = normalize(light_dir + view_dir);
     let ndoth_primary = max(dot(effective_normal, half_dir_primary), 0.0);
-    let specular_primary = pow(ndoth_primary, 64.0) * 0.5;
+    // Matte specular: high power (128) for tight highlight, very low intensity (0.12)
+    let specular_primary = pow(ndoth_primary, 128.0) * 0.12;
 
-    // Secondary fill light from upper-right (brighter, more even coverage)
+    // Secondary fill light from upper-right (softer, more even coverage)
     let fill_dir = normalize(vec3<f32>(0.5, 0.8, 0.3));
     let ndotl_fill = max(dot(effective_normal, fill_dir), 0.0);
     let half_dir_fill = normalize(fill_dir + view_dir);
     let ndoth_fill = max(dot(effective_normal, half_dir_fill), 0.0);
-    let specular_fill = pow(ndoth_fill, 48.0) * 0.25;
+    // Soft matte fill specular
+    let specular_fill = pow(ndoth_fill, 64.0) * 0.06;
 
     // Tertiary back light from below-left (fills shadows)
     let back_dir = normalize(vec3<f32>(-0.4, -0.3, -0.5));
     let ndotl_back = max(dot(effective_normal, back_dir), 0.0);
 
-    // Rim light for edge definition
-    let rim_factor = pow(1.0 - max(dot(effective_normal, view_dir), 0.0), 3.0) * 0.15;
+    // Subtle rim light for edge definition (reduced to avoid mirroring look)
+    let rim_factor = pow(1.0 - max(dot(effective_normal, view_dir), 0.0), 3.0) * 0.08;
 
     // Base color — use per-vertex color from mesh (never modified for selection)
     let base_color = in.vertex_color;
 
-    // Combine lighting — strong ambient + multi-directional diffuse
-    let diffuse = ndotl_primary * 0.50 + ndotl_fill * 0.30 + ndotl_back * 0.15;
-    let specular = vec3<f32>(0.90, 0.90, 0.93) * (specular_primary * 0.3 + specular_fill);
+    // Combine lighting — higher ambient for matte CAD look, strong diffuse, minimal specular
+    let diffuse = ndotl_primary * 0.55 + ndotl_fill * 0.35 + ndotl_back * 0.20;
+    // Specular uses a warm low-intensity color (no cool-white mirror look)
+    let specular = vec3<f32>(0.35, 0.35, 0.38) * (specular_primary + specular_fill);
     let lit_color = base_color * (ambient + diffuse) + specular + base_color * rim_factor;
 
     // Apply selection state AFTER lighting to preserve 3D shading
@@ -910,7 +913,7 @@ pub fn create_scene_resources(
         contents: bytemuck::cast_slice(&[SceneUniforms {
             mvp: [[0.0; 4]; 4],
             model: [[0.0; 4]; 4],
-            light_dir: [0.0, 0.0, 1.0, 0.35],
+            light_dir: [0.0, 0.0, 1.0, 0.45],
             camera_pos: [0.0, 0.0, 0.0, 0.0],
         }]),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
