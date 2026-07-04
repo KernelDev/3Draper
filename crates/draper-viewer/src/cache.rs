@@ -787,6 +787,9 @@ struct CachedFaceInfo {
     triangle_range: (usize, usize),
     forward: bool,
     is_void: bool,
+    /// Number of inner boundaries (holes) — cached so the UV breakdown
+    /// can display the correct hole count even after cache restore.
+    num_inner_boundaries: usize,
 }
 
 /// Simplified instance metadata — only what's needed to reconstruct
@@ -824,6 +827,7 @@ fn serialize_instances(instances: &[DetailedMeshInstance]) -> String {
                 triangle_range: fi.triangle_range,
                 forward: fi.forward,
                 is_void: fi.is_void,
+                num_inner_boundaries: fi.inner_boundaries.len(),
             }
         }).collect();
         CachedInstance {
@@ -881,9 +885,9 @@ fn deserialize_instances(json: &str) -> Result<Vec<DetailedMeshInstance>, String
                 surface_type: cf.surface_type,
                 surface: Surface::Plane(draper_geometry::Plane::xy()), // Placeholder — UV view won't work from cache
                 outer_boundary: Vec::new(),
-                inner_boundaries: Vec::new(),
+                inner_boundaries: vec![Vec::new(); cf.num_inner_boundaries],
                 outer_uv_boundary: Vec::new(),
-                inner_uv_boundaries: Vec::new(),
+                inner_uv_boundaries: vec![Vec::new(); cf.num_inner_boundaries],
                 triangle_range: cf.triangle_range,
                 forward: cf.forward,
                 uv_triangles: Vec::new(),

@@ -11381,11 +11381,17 @@ fn earcutr_triangulate_planar_converter(
         coords.push(p.v);
     }
 
-    // Hole points — each hole starts at the current vertex count
-    for hole in holes_2d {
+    // Hole points — each hole starts at the current vertex count.
+    // Track which holes are valid (>=3 2D points) so the 3D vertex array
+    // stays in sync with the 2D coordinate array.  Skipping a hole in 2D
+    // but including it in 3D would shift all subsequent indices and produce
+    // wrong triangles (the root cause of Step#87 plane-face bug).
+    let mut valid_hole_indices: Vec<usize> = Vec::with_capacity(holes_2d.len());
+    for (hi, hole) in holes_2d.iter().enumerate() {
         if hole.len() < 3 {
             continue;
         }
+        valid_hole_indices.push(hi);
         hole_indices.push(coords.len() / 2);
         for p in hole {
             coords.push(p.u);
@@ -11451,10 +11457,13 @@ fn earcutr_triangulate_planar_converter(
         return None;
     }
 
-    // Build combined 3D vertex array: outer vertices first, then hole vertices
+    // Build combined 3D vertex array: outer vertices first, then hole vertices.
+    // Only include 3D vertices for holes that were included in the 2D coords
+    // array (valid_hole_indices).  This keeps the 3D array in sync with the
+    // 2D array so that earcutr's index output maps correctly to 3D points.
     let mut all_3d: Vec<Point3d> = outer_3d.to_vec();
-    for hole in holes_3d {
-        all_3d.extend_from_slice(hole);
+    for &hi in &valid_hole_indices {
+        all_3d.extend_from_slice(&holes_3d[hi]);
     }
 
     // Verify that all triangle indices are within bounds
