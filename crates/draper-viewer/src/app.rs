@@ -1267,7 +1267,7 @@ impl ViewerApp {
             pending_solid_uv_svg_export: false,
             gdt_data: None,
         };
-        app.log("3Draper Viewer started");
+        app.log(&format!("3Draper Viewer started [build: {}]", env!("DRAPER_GIT_HASH")));
         app.log(&format!("Default model: Box 100x100x100 ({} vertices, {} triangles)",
             app.current_model.vertex_count, app.current_model.triangle_count));
         app
@@ -6903,6 +6903,11 @@ impl eframe::App for ViewerApp {
                         .size(10.0)
                         .color(egui::Color32::GRAY)
                 );
+                ui.label(
+                    egui::RichText::new(format!("build: {}", env!("DRAPER_GIT_HASH")))
+                        .size(9.0)
+                        .color(egui::Color32::from_rgb(140, 160, 180))
+                );
                 ui.separator();
 
                 // --- Primitives ---
@@ -9075,6 +9080,7 @@ impl ViewerApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.heading(egui::RichText::new("3Draper").size(14.0));
+                    ui.label(egui::RichText::new(env!("DRAPER_GIT_HASH")).size(9.0).color(egui::Color32::from_rgb(140, 160, 180)));
                     ui.separator();
                     // File menu — import + export (WASM downloads via Blob)
                     ui.menu_button("File", |ui| {
