@@ -807,15 +807,27 @@ impl TriangleMesh {
         // triangle_face_ids) stay aligned with self.triangles.
         let mut became_degenerate = 0usize;
         let mut duplicate_count = 0usize;
+        let mut cross_face_kept = 0usize;
         let mut kept_src_indices: Vec<usize> = Vec::with_capacity(other.triangles.len());
         {
-            // Build a set of existing triangles for O(1) lookup.
-            // Key: sorted [a, b, c] tuple (canonical form).
-            let mut existing_tris: std::collections::HashSet<[u32; 3]> = std::collections::HashSet::with_capacity(self.triangles.len());
-            for tri in &self.triangles {
+            // Face-aware duplicate tracking: keyed by (sorted_indices → face_id).
+            // Cross-face duplicates (same vertex indices, different face) are KEPT
+            // because removing them creates visible holes in the 3D view
+            // (e.g., Step#87 plane face, Step#78 cone face).  Only same-face
+            // duplicates are removed.
+            let mut existing_tris: std::collections::HashMap<[u32; 3], u64> = std::collections::HashMap::with_capacity(self.triangles.len());
+            // Get the face_id for other's triangles — per-face meshes set all
+            // triangle_face_ids to the same value (the face's ID).
+            let other_face_id = other.triangle_face_ids.as_ref()
+                .and_then(|ids| ids.first().copied())
+                .unwrap_or(u64::MAX);
+            for (ti, tri) in self.triangles.iter().enumerate() {
                 let mut sorted = [tri[0], tri[1], tri[2]];
                 sorted.sort();
-                existing_tris.insert(sorted);
+                let fid = self.triangle_face_ids.as_ref()
+                    .and_then(|ids| ids.get(ti).copied())
+                    .unwrap_or(u64::MAX);
+                existing_tris.entry(sorted).or_insert(fid);
             }
 
             for (src_idx, tri) in other.triangles.iter().enumerate() {
@@ -826,22 +838,29 @@ impl TriangleMesh {
                     became_degenerate += 1;
                     continue;
                 }
-                // Check for duplicate (same 3 indices in any order)
+                // Face-aware duplicate check
                 let mut sorted = [a, b, c];
                 sorted.sort();
-                if existing_tris.contains(&sorted) {
-                    duplicate_count += 1;
-                    continue;
+                if let Some(&existing_fid) = existing_tris.get(&sorted) {
+                    if existing_fid == other_face_id {
+                        // Same face: true duplicate, remove it
+                        duplicate_count += 1;
+                        continue;
+                    } else {
+                        // Different faces: cross-face duplicate, KEEP to avoid holes
+                        cross_face_kept += 1;
+                    }
+                } else {
+                    existing_tris.insert(sorted, other_face_id);
                 }
-                existing_tris.insert(sorted);
                 self.triangles.push([a, b, c]);
                 kept_src_indices.push(src_idx);
             }
         }
-        if became_degenerate > 0 || duplicate_count > 0 {
+        if became_degenerate > 0 || duplicate_count > 0 || cross_face_kept > 0 {
             log::warn!(
-                "MERGE_DEGEN: other has {} verts ({} new, {} reused), {} tris — {} degenerate, {} duplicates skipped",
-                other.vertices.len(), new_count, reuse_count, other.triangles.len(), became_degenerate, duplicate_count,
+                "MERGE_DEGEN: other has {} verts ({} new, {} reused), {} tris — {} degenerate, {} same-face dup skipped, {} cross-face dup kept",
+                other.vertices.len(), new_count, reuse_count, other.triangles.len(), became_degenerate, duplicate_count, cross_face_kept,
             );
         }
 
