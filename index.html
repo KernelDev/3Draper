@@ -7,11 +7,11 @@
     <meta name="theme-color" content="#3a5a8c">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <title>3Draper [5b1adf9] — 3D Geometric Kernel</title>
+    <title>3Draper [c09b5d4] — 3D Geometric Kernel</title>
     <meta name="description" content="3Draper: A 3D geometric kernel with B-Rep topology, STEP/STL I/O, NURBS surfaces & curves, and interactive 3D viewer running entirely in your browser via WebAssembly.">
     <script type="module">
-import init, * as bindings from './draper-viewer.js?v=5b1adf9';
-const wasm = await init('./draper-viewer_bg.wasm?v=5b1adf9');
+import init, * as bindings from './draper-viewer.js?v=c09b5d4';
+const wasm = await init('./draper-viewer_bg.wasm?v=c09b5d4');
 window.wasmBindings = bindings;
 dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
 </script>
@@ -137,6 +137,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         <div class="logo">3Draper<span>Viewer</span></div>
         <div class="spinner"></div>
         <div class="status">Loading WebAssembly module...</div>
+        <div class="parallel-badge" style="margin-top:4px;font-size:11px;color:#8ca0b4;">build: c09b5d4</div>
         <div class="parallel-badge" style="margin-top:4px;font-size:11px;color:#8ca0b4;">build: 5b1adf9</div>
         <div class="parallel-badge" style="margin-top:4px;font-size:11px;color:#8ca0b4;">build: 5b1adf9</div>
         <div class="parallel-badge" style="margin-top:4px;font-size:11px;color:#8ca0b4;">build: b896c88</div>
