@@ -90,13 +90,19 @@ cp "$PROJECT_ROOT/crates/draper-viewer/worker-bridge.js" /tmp/gh-deploy/worker-b
 echo "==> Injecting revision $GIT_HASH into index.html..."
 INDEX_HTML=/tmp/gh-deploy/index.html
 
+# Remove any old revision badges from previous deploys
+sed -i '/build: [0-9a-f]\{7\}[\+]*"/d' "$INDEX_HTML"
+
 # Update page title to include revision
 sed -i "s|<title>3Draper[^<]*</title>|<title>3Draper [$GIT_HASH] — 3D Geometric Kernel</title>|" "$INDEX_HTML"
 
 # Add revision badge in loading screen (after "Loading WebAssembly module..." status)
 sed -i "/<div class=\"status\">Loading WebAssembly module\.\.\.<\/div>/a\\        <div class=\"parallel-badge\" style=\"margin-top:4px;font-size:11px;color:#8ca0b4;\">build: $GIT_HASH</div>" "$INDEX_HTML"
 
-# Add cache buster query parameters to WASM/JS URLs
+# Update cache buster query parameters to WASM/JS URLs (replace any existing ?v=)
+sed -i "s|draper-viewer\.js?v=[0-9a-f]*|draper-viewer.js?v=$GIT_HASH|g" "$INDEX_HTML"
+sed -i "s|draper-viewer_bg\.wasm?v=[0-9a-f]*|draper-viewer_bg.wasm?v=$GIT_HASH|g" "$INDEX_HTML"
+# Also add cache busters if they don't exist yet
 sed -i "s|'./draper-viewer.js'|'./draper-viewer.js?v=$GIT_HASH'|g" "$INDEX_HTML"
 sed -i "s|'./draper-viewer_bg.wasm'|'./draper-viewer_bg.wasm?v=$GIT_HASH'|g" "$INDEX_HTML"
 
