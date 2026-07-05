@@ -73,41 +73,18 @@ fn mesh_to_gpu_data(
     let face_ids = mesh.triangle_face_ids.as_ref();
 
     // Check if we have meaningful per-triangle colors (not all default grey)
-    let has_real_colors = colors.map_or(false, |c| {
+    let _has_real_colors = colors.map_or(false, |c| {
         c.iter().any(|col| (col[0] - 0.62).abs() > 0.01 || (col[1] - 0.65).abs() > 0.01 || (col[2] - 0.70).abs() > 0.01)
     });
 
-    // Determine if we need per-triangle processing (face highlight, instance selection, or colors)
-    let needs_per_tri = highlighted_face.is_some() || selected_instance.is_some() || has_real_colors;
-
-    // If we have vertex normals and no special per-triangle processing, use smooth shading
-    if let Some(ref vertex_normals) = mesh.normals {
-        if vertex_normals.len() == mesh.vertices.len() && !needs_per_tri {
-            let mut gpu_vertices = Vec::with_capacity(mesh.vertices.len());
-            let mut gpu_indices = Vec::with_capacity(mesh.triangles.len() * 3);
-
-            for (i, v) in mesh.vertices.iter().enumerate() {
-                let n = vertex_normals.get(i).map(|nn| [nn[0] as f32, nn[1] as f32, nn[2] as f32]).unwrap_or([0.0, 0.0, 1.0]);
-                gpu_vertices.push(MeshVertex {
-                    position: [v.x as f32, v.y as f32, v.z as f32],
-                    normal: n,
-                    color: [0.62, 0.65, 0.70],
-                    selection: 0.0,
-                    highlight: 0.0,
-                });
-            }
-            for tri in &mesh.triangles {
-                gpu_indices.push(tri[0]);
-                gpu_indices.push(tri[1]);
-                gpu_indices.push(tri[2]);
-            }
-            // No instance tracking for smooth shading path (single-instance primitives)
-            let new_ranges: Vec<(usize, usize)> = instance_triangle_ranges.to_vec();
-            return (gpu_vertices, gpu_indices, new_ranges);
-        }
-    }
-
-    // Flat shading: duplicate vertices per triangle with face normals and colors
+    // ALWAYS use flat shading with face normals for CAD models.
+    // The previous smooth shading path (using vertex normals) produced
+    // incorrect results because shared vertices at face boundaries received
+    // normals from the wrong face during merge_deduplicating. This caused
+    // planar faces to appear curved and lighting to be inconsistent.
+    //
+    // Flat shading with analytical face_normals gives each triangle a
+    // uniform, correct normal that matches the surface geometry exactly.
     let mut gpu_vertices = Vec::with_capacity(mesh.triangles.len() * 3);
     let mut gpu_indices = Vec::with_capacity(mesh.triangles.len() * 3);
 
@@ -132,12 +109,27 @@ fn mesh_to_gpu_data(
                 continue;
             }
             // Skip triangles belonging to hidden individual faces.
-            // face_ids[i] gives the per-triangle face_id; combined with
-            // the instance index it forms the key used in hidden_faces.
             if let Some(fid) = face_ids.and_then(|ids| ids.get(i)).copied() {
                 if hidden_faces.contains(&(idx, fid)) {
                     continue;
                 }
+            }
+        }
+
+        // Skip degenerate triangles (zero-area or near-zero-area).
+        // These produce NaN/zero-length cross-product normals and render
+        // as visual artifacts (flickering, random-color pixels).
+        {
+            let v0 = mesh.vertices[tri[0] as usize];
+            let v1 = mesh.vertices[tri[1] as usize];
+            let v2 = mesh.vertices[tri[2] as usize];
+            let e1 = (v1.x - v0.x, v1.y - v0.y, v1.z - v0.z);
+            let e2 = (v2.x - v0.x, v2.y - v0.y, v2.z - v0.z);
+            let cross_len_sq = (e1.1 * e2.2 - e1.2 * e2.1).powi(2)
+                             + (e1.2 * e2.0 - e1.0 * e2.2).powi(2)
+                             + (e1.0 * e2.1 - e1.1 * e2.0).powi(2);
+            if cross_len_sq < 1e-20 {
+                continue;
             }
         }
 

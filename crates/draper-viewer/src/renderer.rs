@@ -314,61 +314,53 @@ fn vs_wireframe(in: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let normal = normalize(in.world_normal);
-    // Primary light: headlight from camera direction
+    let raw_normal = normalize(in.world_normal);
     let light_dir = normalize(uniforms.light_dir.xyz);
     let ambient = uniforms.light_dir.w;
-
-    // Two-sided lighting: flip normal if it faces away from camera
     let view_dir = normalize(uniforms.camera_pos.xyz - in.world_pos);
-    let effective_normal = select(-normal, normal, dot(normal, view_dir) >= 0.0);
 
-    // Primary headlight (strong directional from camera)
-    let ndotl_primary = max(dot(effective_normal, light_dir), 0.0);
-    let half_dir_primary = normalize(light_dir + view_dir);
-    let ndoth_primary = max(dot(effective_normal, half_dir_primary), 0.0);
-    // Matte specular: high power (128) for tight highlight, very low intensity (0.12)
-    let specular_primary = pow(ndoth_primary, 128.0) * 0.12;
+    // For flat-shaded CAD models, face normals from the mesh are already correct.
+    // We use two-sided lighting ONLY to ensure back-faces (which occur when
+    // triangle winding doesn't match the front_face CCW convention) are still
+    // visible and correctly lit. This is a safety net, not the primary path.
+    let effective_normal = select(-raw_normal, raw_normal, dot(raw_normal, view_dir) >= 0.0);
 
-    // Secondary fill light from upper-right (softer, more even coverage)
-    let fill_dir = normalize(vec3<f32>(0.5, 0.8, 0.3));
+    // === Clean CAD lighting model ===
+    // Two directional lights + ambient, no specular, no rim.
+    // This produces uniform, predictable shading that makes surface
+    // geometry clearly visible without distracting highlights.
+
+    // Primary light: headlight from camera direction (key light)
+    let ndotl_key = max(dot(effective_normal, light_dir), 0.0);
+
+    // Secondary light: fixed upper-right direction (fill light)
+    // This ensures surfaces facing away from the camera still have
+    // some shading variation instead of being uniformly dark.
+    let fill_dir = normalize(vec3<f32>(0.4, 0.7, 0.5));
     let ndotl_fill = max(dot(effective_normal, fill_dir), 0.0);
-    let half_dir_fill = normalize(fill_dir + view_dir);
-    let ndoth_fill = max(dot(effective_normal, half_dir_fill), 0.0);
-    // Soft matte fill specular
-    let specular_fill = pow(ndoth_fill, 64.0) * 0.06;
 
-    // Tertiary back light from below-left (fills shadows)
-    let back_dir = normalize(vec3<f32>(-0.4, -0.3, -0.5));
-    let ndotl_back = max(dot(effective_normal, back_dir), 0.0);
+    // Very subtle specular for material identity (barely visible)
+    let half_dir = normalize(light_dir + view_dir);
+    let ndoth = max(dot(effective_normal, half_dir), 0.0);
+    let specular = pow(ndoth, 64.0) * 0.06;
 
-    // Subtle rim light for edge definition (reduced to avoid mirroring look)
-    let rim_factor = pow(1.0 - max(dot(effective_normal, view_dir), 0.0), 3.0) * 0.08;
-
-    // Base color — use per-vertex color from mesh (never modified for selection)
     let base_color = in.vertex_color;
 
-    // Combine lighting — higher ambient for matte CAD look, strong diffuse, minimal specular
-    let diffuse = ndotl_primary * 0.55 + ndotl_fill * 0.35 + ndotl_back * 0.20;
-    // Specular uses a warm low-intensity color (no cool-white mirror look)
-    let specular = vec3<f32>(0.35, 0.35, 0.38) * (specular_primary + specular_fill);
-    let lit_color = base_color * (ambient + diffuse) + specular + base_color * rim_factor;
+    // Combine: ambient + weighted diffuse + tiny specular
+    // The weights are chosen so that:
+    //   - Fully lit face (ndotl_key=1, ndotl_fill=1): ambient + 0.50 + 0.25 = 1.20
+    //   - Face away from camera light (ndotl_key=0, ndotl_fill=0.5): ambient + 0.125 ≈ 0.625
+    //   - Face in shadow (ndotl_key=0, ndotl_fill=0): ambient ≈ 0.50
+    let diffuse = ndotl_key * 0.50 + ndotl_fill * 0.25;
+    let lit_color = base_color * (ambient + diffuse) + vec3<f32>(0.4, 0.4, 0.42) * specular;
 
-    // Apply selection state AFTER lighting to preserve 3D shading
-    // selection: 0 = normal, 1 = selected instance (highlighted), 2 = unused (was dimmed)
+    // Apply selection/highlight tints AFTER lighting
     var final_color = lit_color;
 
-    // Selected instance: add bright cyan-white outline tint to make it stand out
-    // without darkening the rest of the model
     let is_selected = step(0.5, in.v_selection) * step(in.v_selection, 1.5);
     let selected_tint = vec3<f32>(0.18, 0.22, 0.28);
     final_color = final_color + selected_tint * is_selected;
 
-    // NOTE: Non-selected instances are NO LONGER dimmed — the entire model
-    // keeps its original colors. Only the selected instance gets a subtle
-    // additive highlight so it stands out without affecting other parts.
-
-    // Face highlight: additive yellow-gold tint for selected face
     let highlight_tint = vec3<f32>(0.40, 0.32, 0.06);
     final_color = final_color + highlight_tint * in.v_highlight;
 
