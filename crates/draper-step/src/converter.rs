@@ -4887,23 +4887,38 @@ impl<'a> StepConverter<'a> {
             );
         }
 
+        // Recompute face normals from the FINAL vertex positions BEFORE smoothing.
+        // This is necessary because:
+        // 1. Post-processing steps (weld_boundary_edge_vertices, merge_coincident_vertices,
+        //    filter_degenerate_triangles) may have moved vertices or removed/added triangles,
+        //    making the original face_normals inconsistent with the current vertex positions.
+        // 2. Many per-face meshes (especially curved surfaces like cylinders, cones, tori)
+        //    don't set face_normals at all. After merge_deduplicating, these become
+        //    placeholder [0,0,1] normals, which are COMPLETELY WRONG for faces that aren't
+        //    on the XY plane.
+        // 3. smooth_normals() uses face_normals for crease-angle detection. If face_normals
+        //    contain [0,0,1] placeholders, the crease angle between a curved face and an
+        //    adjacent face will be computed incorrectly (e.g., 90° instead of 0°), causing
+        //    normals to NOT be smoothed across smooth transitions. This produces visible
+        //    shading seams on curved surfaces.
+        //
+        // We must force-clear face_normals before recomputing, because compute_face_normals()
+        // has an early-return when face_normals is already Some (to avoid overwriting
+        // analytically-set normals). After vertex welding and filtering, the cross-product
+        // normals are more reliable than the original analytical normals (which may reference
+        // vertex positions that no longer exist).
+        mesh.face_normals = None;
+        mesh.compute_face_normals();
+
         // Smooth vertex normals across shared edges for Gouraud-like shading.
         // Use a crease angle of 45° (0.785 rad) — edges sharper than this
         // maintain their sharp appearance (e.g., box edges), while smoother
         // transitions (cylinders, spheres) get averaged normals.
+        // Now that face_normals are correct (recomputed from cross products),
+        // the crease-angle detection works properly.
         // TODO: Use smooth_normals_adaptive with a Solid reference when available
         // in this context, for surface-type-specific crease angles.
         draper_mesh::smooth_normals(&mut mesh, 0.785);
-
-        // Recompute face normals from the FINAL vertex positions.
-        // This is necessary because post-processing steps (weld_boundary_edge_vertices,
-        // merge_coincident_vertices, filter_degenerate_triangles) may have moved vertices
-        // or removed/added triangles, making the original face_normals (computed from
-        // pre-merge geometry or padded with (0,0,1) defaults) inconsistent with the
-        // current vertex positions. Without this recomputation, lighting artifacts
-        // appear on faces like cones and cylinders that lacked face_normals in their
-        // per-face meshes (the structured grid triangulation functions don't set them).
-        mesh.compute_face_normals();
 
         if skipped_faces > 0 {
             log::warn!("BREP #{} detailed: {} faces skipped due to time limit", brep_id, skipped_faces);
@@ -10749,6 +10764,12 @@ impl<'a> StepConverter<'a> {
                 mesh.add_triangle(tri[0], tri[2], tri[1]);
             }
         }
+
+        // Set analytical face normal (same as the cached version)
+        let normal = if forward { plane.normal } else {
+            Direction3d::new(-plane.normal.x, -plane.normal.y, -plane.normal.z).unwrap_or(Direction3d::Z)
+        };
+        mesh.face_normals = Some(vec![[normal.x, normal.y, normal.z]; mesh.triangles.len()]);
 
         mesh
     }

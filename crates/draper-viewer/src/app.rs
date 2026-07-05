@@ -7711,6 +7711,11 @@ impl eframe::App for ViewerApp {
                     // (moved from mesh_to_gpu_data to avoid cloning the entire mesh)
                     if self.mesh.face_normals.is_none() {
                         self.mesh.compute_face_normals();
+                    } else {
+                        // Fill any remaining [0,0,1] placeholder normals from merge
+                        // (curved surfaces may not have set face_normals, leaving
+                        // placeholders that cause incorrect flat shading)
+                        self.mesh.fill_missing_face_normals();
                     }
                     self.mesh.ensure_colors([0.62, 0.65, 0.70, 1.0]);
 

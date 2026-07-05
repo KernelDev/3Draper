@@ -4003,7 +4003,7 @@ fn triangulate_sphere_full_grid(face: &Face, sphere: &SphereSurface, params: &Tr
 
     // North pole vertex
     let p_north = sphere.point_at(0.0, 0.0);
-    let n_north = sphere.normal_at(0.0, 0.0);
+    let n_north = orient_normal(sphere.normal_at(0.0, 0.0), face.forward);
     let north_idx = mesh.add_vertex(p_north);
     mesh.add_vertex_normal(north_idx, [n_north.x, n_north.y, n_north.z]);
 
@@ -4013,7 +4013,7 @@ fn triangulate_sphere_full_grid(face: &Face, sphere: &SphereSurface, params: &Tr
         for i in 0..n_u {
             let u = 2.0 * PI * i as f64 / n_u as f64;
             let p = sphere.point_at(u, v);
-            let n = sphere.normal_at(u, v);
+            let n = orient_normal(sphere.normal_at(u, v), face.forward);
             let idx = mesh.add_vertex(p);
             mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
         }
@@ -4021,7 +4021,7 @@ fn triangulate_sphere_full_grid(face: &Face, sphere: &SphereSurface, params: &Tr
 
     // South pole vertex
     let p_south = sphere.point_at(0.0, PI);
-    let n_south = sphere.normal_at(0.0, PI);
+    let n_south = orient_normal(sphere.normal_at(0.0, PI), face.forward);
     let south_idx = mesh.add_vertex(p_south);
     mesh.add_vertex_normal(south_idx, [n_south.x, n_south.y, n_south.z]);
 
@@ -4319,7 +4319,13 @@ fn triangulate_torus_full_grid(face: &Face, torus: &TorusSurface, params: &Trian
         for i in 0..n_u {
             let u = 2.0 * PI * i as f64 / n_u as f64;
             let p = crate::edge_cache::deterministic_round_point(torus.point_at(u, v));
-            let n = torus.normal_at(u, v);
+            let n = if face.forward {
+                torus.normal_at(u, v)
+            } else {
+                // For forward:false, negate the outward normal so it points inward
+                let n = torus.normal_at(u, v);
+                draper_geometry::Direction3d::new(-n.x, -n.y, -n.z).unwrap_or(n)
+            };
             let idx = mesh.add_vertex(p);
             mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
         }
@@ -6029,7 +6035,7 @@ fn triangulate_sphere_full_grid_from_boundary(
 
     // North pole vertex
     let p_north = sphere.point_at(0.0, 0.0);
-    let n_north = sphere.normal_at(0.0, 0.0);
+    let n_north = orient_normal(sphere.normal_at(0.0, 0.0), forward);
     let north_idx = mesh.add_vertex(p_north);
     mesh.add_vertex_normal(north_idx, [n_north.x, n_north.y, n_north.z]);
 
@@ -6039,7 +6045,7 @@ fn triangulate_sphere_full_grid_from_boundary(
         for i in 0..n_u {
             let u = 2.0 * PI * i as f64 / n_u as f64;
             let p = sphere.point_at(u, v);
-            let n = sphere.normal_at(u, v);
+            let n = orient_normal(sphere.normal_at(u, v), forward);
             let idx = mesh.add_vertex(p);
             mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
         }
@@ -6047,7 +6053,7 @@ fn triangulate_sphere_full_grid_from_boundary(
 
     // South pole vertex
     let p_south = sphere.point_at(0.0, PI);
-    let n_south = sphere.normal_at(0.0, PI);
+    let n_south = orient_normal(sphere.normal_at(0.0, PI), forward);
     let south_idx = mesh.add_vertex(p_south);
     mesh.add_vertex_normal(south_idx, [n_south.x, n_south.y, n_south.z]);
 
