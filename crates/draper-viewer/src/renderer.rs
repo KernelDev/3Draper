@@ -314,45 +314,39 @@ fn vs_wireframe(in: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let raw_normal = normalize(in.world_normal);
+    let normal = normalize(in.world_normal);
     let light_dir = normalize(uniforms.light_dir.xyz);
     let ambient = uniforms.light_dir.w;
-    let view_dir = normalize(uniforms.camera_pos.xyz - in.world_pos);
 
-    // For flat-shaded CAD models, face normals from the mesh are already correct.
-    // We use two-sided lighting ONLY to ensure back-faces (which occur when
-    // triangle winding doesn't match the front_face CCW convention) are still
-    // visible and correctly lit. This is a safety net, not the primary path.
-    let effective_normal = select(-raw_normal, raw_normal, dot(raw_normal, view_dir) >= 0.0);
-
-    // === Clean CAD lighting model ===
-    // Two directional lights + ambient, no specular, no rim.
-    // This produces uniform, predictable shading that makes surface
-    // geometry clearly visible without distracting highlights.
+    // === CAD lighting: NO two-sided flip ===
+    // The old two-sided lighting (select(-normal, normal, dot(normal, view_dir) >= 0.0))
+    // created SHARP BOUNDARIES within triangles where the normal flip happened.
+    // This caused "part of a triangle colored differently" artifacts.
+    //
+    // Instead, we use abs(dot(normal, light_dir)) for diffuse lighting.
+    // This gives the SAME brightness regardless of which side of the face
+    // the camera is on, with no discontinuity within triangles.
+    // Combined with no backface culling, both sides of every face are
+    // visible and uniformly lit.
 
     // Primary light: headlight from camera direction (key light)
-    let ndotl_key = max(dot(effective_normal, light_dir), 0.0);
+    // abs() ensures uniform lighting on both face sides
+    let ndotl_key = abs(dot(normal, light_dir));
 
     // Secondary light: fixed upper-right direction (fill light)
-    // This ensures surfaces facing away from the camera still have
-    // some shading variation instead of being uniformly dark.
+    // Provides shading variation on faces away from the camera
     let fill_dir = normalize(vec3<f32>(0.4, 0.7, 0.5));
-    let ndotl_fill = max(dot(effective_normal, fill_dir), 0.0);
-
-    // Very subtle specular for material identity (barely visible)
-    let half_dir = normalize(light_dir + view_dir);
-    let ndoth = max(dot(effective_normal, half_dir), 0.0);
-    let specular = pow(ndoth, 64.0) * 0.06;
+    let ndotl_fill = abs(dot(normal, fill_dir));
 
     let base_color = in.vertex_color;
 
-    // Combine: ambient + weighted diffuse + tiny specular
-    // The weights are chosen so that:
-    //   - Fully lit face (ndotl_key=1, ndotl_fill=1): ambient + 0.50 + 0.25 = 1.20
-    //   - Face away from camera light (ndotl_key=0, ndotl_fill=0.5): ambient + 0.125 ≈ 0.625
-    //   - Face in shadow (ndotl_key=0, ndotl_fill=0): ambient ≈ 0.50
-    let diffuse = ndotl_key * 0.50 + ndotl_fill * 0.25;
-    let lit_color = base_color * (ambient + diffuse) + vec3<f32>(0.4, 0.4, 0.42) * specular;
+    // Combine: ambient + weighted diffuse
+    // No specular (causes mirror artifacts on curved surfaces)
+    //   - Fully lit (ndotl=1): ambient + 0.50 + 0.20 = 1.20
+    //   - Partially lit: ambient + moderate diffuse
+    //   - Edge-on (ndotl≈0): ambient ≈ 0.50
+    let diffuse = ndotl_key * 0.50 + ndotl_fill * 0.20;
+    let lit_color = base_color * (ambient + diffuse);
 
     // Apply selection/highlight tints AFTER lighting
     var final_color = lit_color;
