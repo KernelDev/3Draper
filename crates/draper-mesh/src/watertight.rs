@@ -1046,7 +1046,6 @@ pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64)
     // Cross-face duplicates are preserved to avoid creating holes.
     // The later `remove_duplicate_triangles` post-processing step handles
     // true geometric duplicates that would create non-manifold edges.
-    let face_ids_ref = mesh.triangle_face_ids.as_ref();
     let mut seen: HashMap<[u32; 3], u64> = HashMap::with_capacity(mesh.triangles.len());
     let mut unique_tris = Vec::with_capacity(mesh.triangles.len());
     let mut unique_ids = Vec::with_capacity(mesh.triangles.len());
