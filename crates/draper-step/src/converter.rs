@@ -121,6 +121,54 @@ struct FaceData {
     is_void: bool,
 }
 
+/// Signature for FaceData list (for healing diagnostics).
+struct FaceDataSignature {
+    surface_count: usize,
+    edge_count: usize,
+    bbox_min: Point3d,
+    bbox_max: Point3d,
+}
+
+/// Compute signature of FaceData list for before/after healing comparison.
+fn compute_face_data_signature(face_data_list: &[FaceData]) -> FaceDataSignature {
+    let mut surface_count = 0usize;
+    let mut edge_count = 0usize;
+    let mut bbox_min = Point3d::new(f64::MAX, f64::MAX, f64::MAX);
+    let mut bbox_max = Point3d::new(f64::MIN, f64::MIN, f64::MIN);
+    
+    for fd in face_data_list {
+        surface_count += 1;
+        edge_count += fd.edges.len();
+        
+        // Sample edge endpoints for bbox
+        for edge in &fd.edges {
+            if let Some(p) = edge.start_point() {
+                bbox_min.x = bbox_min.x.min(p.x);
+                bbox_min.y = bbox_min.y.min(p.y);
+                bbox_min.z = bbox_min.z.min(p.z);
+                bbox_max.x = bbox_max.x.max(p.x);
+                bbox_max.y = bbox_max.y.max(p.y);
+                bbox_max.z = bbox_max.z.max(p.z);
+            }
+            if let Some(p) = edge.end_point() {
+                bbox_min.x = bbox_min.x.min(p.x);
+                bbox_min.y = bbox_min.y.min(p.y);
+                bbox_min.z = bbox_min.z.min(p.z);
+                bbox_max.x = bbox_max.x.max(p.x);
+                bbox_max.y = bbox_max.y.max(p.y);
+                bbox_max.z = bbox_max.z.max(p.z);
+            }
+        }
+    }
+    
+    FaceDataSignature {
+        surface_count,
+        edge_count,
+        bbox_min,
+        bbox_max,
+    }
+}
+
 // ============================================================
 // FaceData ↔ Solid conversion (for healing pipeline)
 // ============================================================
@@ -4296,6 +4344,17 @@ impl<'a> StepConverter<'a> {
         // ─── Healing pipeline: heal the solid before triangulation ────────
         let face_data_list = if self.config.heal {
             let pre_heal_count = face_data_list.len();
+            
+            // DIAG: Compute pre-healing geometry signature
+            let pre_heal_sig = compute_face_data_signature(&face_data_list);
+            log::info!(
+                "BREP #{} PRE-HEAL: {} faces, sig: {} surfaces, {} edges, bbox [{:.4},{:.4},{:.4}]..[{:.4},{:.4},{:.4}]",
+                brep_id, pre_heal_count,
+                pre_heal_sig.surface_count, pre_heal_sig.edge_count,
+                pre_heal_sig.bbox_min.x, pre_heal_sig.bbox_min.y, pre_heal_sig.bbox_min.z,
+                pre_heal_sig.bbox_max.x, pre_heal_sig.bbox_max.y, pre_heal_sig.bbox_max.z,
+            );
+            
             let (solid, face_id_map) = face_data_list_to_solid(&face_data_list);
             // Use aggressive healing: fix normals, stitch edges, propagate
             // tolerances, merge faces, fix self-intersections, and remove slivers.
@@ -4303,6 +4362,37 @@ impl<'a> StepConverter<'a> {
             let (healed, report) = heal_solid(&solid, &healing_params);
             log_healing_report(brep_id, &report);
             let healed_list = apply_healing_to_face_data(&face_data_list, &healed, &face_id_map);
+            
+            // DIAG: Compute post-healing geometry signature
+            let post_heal_sig = compute_face_data_signature(&healed_list);
+            if post_heal_sig.surface_count != pre_heal_sig.surface_count {
+                log::warn!(
+                    "⚠️ BREP #{} HEALING: surface types changed! pre={} post={}",
+                    brep_id, pre_heal_sig.surface_count, post_heal_sig.surface_count
+                );
+            }
+            if post_heal_sig.edge_count != pre_heal_sig.edge_count {
+                log::warn!(
+                    "⚠️ BREP #{} HEALING: edge count changed! pre={} post={}",
+                    brep_id, pre_heal_sig.edge_count, post_heal_sig.edge_count
+                );
+            }
+            // Check bbox changes (should be same or very similar)
+            let bbox_diff = (
+                (post_heal_sig.bbox_max.x - pre_heal_sig.bbox_max.x).abs() +
+                (post_heal_sig.bbox_max.y - pre_heal_sig.bbox_max.y).abs() +
+                (post_heal_sig.bbox_max.z - pre_heal_sig.bbox_max.z).abs() +
+                (post_heal_sig.bbox_min.x - pre_heal_sig.bbox_min.x).abs() +
+                (post_heal_sig.bbox_min.y - pre_heal_sig.bbox_min.y).abs() +
+                (post_heal_sig.bbox_min.z - pre_heal_sig.bbox_min.z).abs()
+            ) / 6.0;
+            if bbox_diff > tol_ctx.model_scale * 0.01 {
+                log::warn!(
+                    "⚠️ BREP #{} HEALING: bbox shifted by avg {:.6} (model_scale={:.4})",
+                    brep_id, bbox_diff, tol_ctx.model_scale
+                );
+            }
+            
             if healed_list.len() != pre_heal_count {
                 log::warn!(
                     "BREP #{} healing changed face count: {} → {}",
@@ -4349,13 +4439,37 @@ impl<'a> StepConverter<'a> {
 
                 for (_samples, group_sids) in &shape_groups {
                     if group_sids.len() < 2 { continue; }
+                    
+                    // DIAG: Check if curves with different types are being grouped
+                    let curve_types: Vec<String> = group_sids.iter()
+                        .map(|&sid| self.edge_curve_type_name(sid))
+                        .collect();
+                    let unique_types: std::collections::HashSet<&str> = curve_types.iter()
+                        .map(|s| s.as_str())
+                        .collect();
+                    
+                    if unique_types.len() > 1 {
+                        log::warn!(
+                            "⚠️ BREP #{}: ALIASING CURVES WITH DIFFERENT TYPES! vertex_pair {:?} types={:?} step_ids={:?}",
+                            brep_id, vp, curve_types, group_sids
+                        );
+                    }
+                    
                     let canonical = *group_sids.iter().max_by_key(|&&sid| {
                         self.edge_curve_complexity_score(sid)
                     }).unwrap();
+                    let canonical_type = self.edge_curve_type_name(canonical);
                     for &sid in group_sids {
                         if sid != canonical {
                             edge_cache.register_step_id_alias(sid, canonical);
                             alias_count += 1;
+                            let sid_type = self.edge_curve_type_name(sid);
+                            if sid_type != canonical_type {
+                                log::warn!(
+                                    "⚠️ BREP #{}: aliasing {}({}) → {}({}) — DIFFERENT CURVE TYPES!",
+                                    brep_id, sid, sid_type, canonical, canonical_type
+                                );
+                            }
                         }
                     }
                     log::debug!(
@@ -4438,13 +4552,37 @@ impl<'a> StepConverter<'a> {
 
                 for (_samples, group_sids) in &shape_groups {
                     if group_sids.len() < 2 { continue; }
+                    
+                    // DIAG: Check curve types in Phase 2 as well
+                    let curve_types: Vec<String> = group_sids.iter()
+                        .map(|&sid| self.edge_curve_type_name(sid))
+                        .collect();
+                    let unique_types: std::collections::HashSet<&str> = curve_types.iter()
+                        .map(|s| s.as_str())
+                        .collect();
+                    
+                    if unique_types.len() > 1 {
+                        log::warn!(
+                            "⚠️ BREP #{}: Phase 2 ALIASING CURVES WITH DIFFERENT TYPES! types={:?} step_ids={:?}",
+                            brep_id, curve_types, group_sids
+                        );
+                    }
+                    
                     let canonical = *group_sids.iter().max_by_key(|&&sid| {
                         self.edge_curve_complexity_score(sid)
                     }).unwrap();
+                    let canonical_type = self.edge_curve_type_name(canonical);
                     for &sid in group_sids {
                         if sid != canonical {
                             edge_cache.register_step_id_alias(sid, canonical);
                             coord_alias_count += 1;
+                            let sid_type = self.edge_curve_type_name(sid);
+                            if sid_type != canonical_type {
+                                log::warn!(
+                                    "⚠️ BREP #{}: Phase 2 aliasing {}({}) → {}({}) — DIFFERENT CURVE TYPES!",
+                                    brep_id, sid, sid_type, canonical, canonical_type
+                                );
+                            }
                         }
                     }
                 }
@@ -7277,6 +7415,40 @@ impl<'a> StepConverter<'a> {
         } else {
             None
         }
+    }
+
+    /// Get the curve type string for an EDGE_CURVE (for diagnostic logging).
+    fn edge_curve_type_name(&self, edge_curve_id: i64) -> String {
+        let ec_entity = match self.step.find_entity(edge_curve_id) {
+            Some(e) => e,
+            None => return "UNKNOWN".to_string(),
+        };
+
+        for param in &ec_entity.params {
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(entity) = self.step.find_entity(ref_id) {
+                    match entity.type_name.as_str() {
+                        "NURBS_CURVE" | "BSPLINE_CURVE_WITH_KNOTS" | "BSPLINE_CURVE" |
+                        "RATIONAL_BSPLINE_CURVE" => return "NURBS".to_string(),
+                        "CIRCLE" | "ARC" => return "CIRCLE".to_string(),
+                        "ELLIPSE" => return "ELLIPSE".to_string(),
+                        "LINE" => return "LINE".to_string(),
+                        "TRIMMED_CURVE" => return "TRIMMED".to_string(),
+                        "SURFACE_CURVE" => {
+                            // Recurse to find inner curve type
+                            if let Some(inner_id) = self.resolve_3d_curve_ref(ref_id) {
+                                if let Some(inner_entity) = self.step.find_entity(inner_id) {
+                                    return format!("SURFACE_CURVE({})", inner_entity.type_name);
+                                }
+                            }
+                            return "SURFACE_CURVE".to_string();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        "UNKNOWN".to_string()
     }
 
     /// Estimate the "complexity" of an EDGE_CURVE's underlying curve geometry.
