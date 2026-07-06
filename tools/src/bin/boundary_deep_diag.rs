@@ -13,7 +13,7 @@ fn main() {
 
     // Get the pending BREP instances
     let (_tree, pending) = step_structure_lazy(&step);
-    let ctx = OwnedStepConversionContext::new(step);
+    let mut ctx = OwnedStepConversionContext::new(step);
 
     // Triangulate each pending instance and dump info
     for p in &pending {
