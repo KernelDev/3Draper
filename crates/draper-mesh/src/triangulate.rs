@@ -2957,6 +2957,29 @@ fn triangulate_cylinder_tube_from_boundary(
         params.height_samples.max(2)
     };
 
+    // When using cached top ring points, check if the top ring's angular
+    // positions match the bottom ring's. If they don't, force n_v=1.
+    // See cone tube function for full rationale.
+    let n_v = if use_cached_top && top_ring.len() == n_u {
+        let ang_tol = PI / n_u as f64 * 0.5;
+        let angles_match = top_ring.iter().enumerate().all(|(i, (tu, _))| {
+            let mut du = (tu - bottom_u[i]).abs();
+            if du > PI { du = 2.0 * PI - du; }
+            du <= ang_tol
+        });
+        if !angles_match {
+            log::info!(
+                "Cylinder tube: top ring angles don't match bottom ({} pts, step mismatch) — forcing n_v=1 to avoid sliver triangles",
+                n_u
+            );
+            1
+        } else {
+            n_v
+        }
+    } else {
+        n_v
+    };
+
     log::debug!(
         "Cylinder tube face: n_u={}, n_v={}, full_wrap={}, use_cached_top={}, v=[{:.3},{:.3}]",
         n_u, n_v, is_full_wrap, use_cached_top, v_min, v_max
@@ -3396,6 +3419,36 @@ fn triangulate_cone_tube_from_boundary(
         ).1.max(2)
     } else {
         params.height_samples.max(2)
+    };
+
+    // When using cached top ring points, check if the top ring's angular
+    // positions match the bottom ring's. If they don't (different CIRCLE
+    // entities with different radii → different adaptive_discretize steps),
+    // force n_v=1 (no intermediate analytic row). This prevents thin sliver
+    // triangles between the analytic middle row (which uses bottom_u angles)
+    // and the cached top row (which uses top_u angles).
+    //
+    // For cone/cylinder surfaces, the axial direction is straight (zero chord
+    // error), so n_v=1 is always sufficient — there's no geometric benefit
+    // from intermediate rows.
+    let n_v = if use_cached_top && !top_row_at_apex && effective_top.len() == n_u {
+        let ang_tol = PI / n_u as f64 * 0.5;
+        let angles_match = effective_top.iter().enumerate().all(|(i, (tu, _))| {
+            let mut du = (tu - bottom_u[i]).abs();
+            if du > PI { du = 2.0 * PI - du; }
+            du <= ang_tol
+        });
+        if !angles_match {
+            log::info!(
+                "Cone tube: top ring angles don't match bottom ({} pts, step mismatch) — forcing n_v=1 to avoid sliver triangles",
+                n_u
+            );
+            1
+        } else {
+            n_v
+        }
+    } else {
+        n_v
     };
 
     log::debug!(

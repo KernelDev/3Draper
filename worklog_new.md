@@ -4176,3 +4176,35 @@ Stage Summary:
 - No code changes pushed — current state (10ca9e1) is the best trade-off
   between watertightness and visual quality.
 - Future fix: shared angular grid in edge cache for circles on the same axis.
+
+---
+Task ID: step78-sliver-fix-67
+Agent: Main
+Task: Fix Step#78 cone triangulation — sliver triangles from analytic intermediate row
+
+User: "Вот конус step#78 НЕ верно показывается. Это ненормальна триангуляция"
+
+Root cause: The cone tube grid had n_v=2 (3 rows: bottom, analytic middle, top).
+- j=0 (x=4.86, R=30.36): cached bottom ring, 64 pts, angular step 1.96°
+- j=1 (x=2.43, R=32.79): ANALYTIC intermediate row, 64 pts using bottom_u (step 1.96°)
+- j=2 (x=0.00, R=35.22): cached top ring, 64 pts, angular step 3.91°
+
+The middle row (j=1) was analytic, using bottom_u angles (step 1.96°). The top
+row (j=2) was cached with top_u angles (step 3.91°). The quads between j=1 and
+j=2 were TWISTED/SLIVER because the angles didn't match — top[i] at -3.9°
+connected to middle[0] at 0° and middle[1] at -2.0°, creating thin sliver
+triangles that made the surface look faceted/irregular.
+
+Fix: when the top and bottom rings have different angular samplings (different
+CIRCLE entities with different radii), force n_v=1 (only 2 rows: bottom and
+top, no intermediate analytic row). For cone/cylinder surfaces, the axial
+direction is straight (zero chord error), so n_v=1 is always sufficient —
+there's no geometric benefit from intermediate rows.
+
+Applied to both triangulate_cone_tube_from_boundary and
+triangulate_cylinder_tube_from_boundary.
+
+Result:
+- Step#78: 2 rows (was 3), 126 tris (was 252), no sliver triangles
+- BREP #55: watertight ✓ (3780 interior edges, Euler χ=0)
+- draper-mesh 231/231, draper-step test_3_05_078_loads_and_watertight ✓
