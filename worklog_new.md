@@ -4208,3 +4208,32 @@ Result:
 - Step#78: 2 rows (was 3), 126 tris (was 252), no sliver triangles
 - BREP #55: watertight ✓ (3780 interior edges, Euler χ=0)
 - draper-mesh 231/231, draper-step test_3_05_078_loads_and_watertight ✓
+
+---
+Task ID: cone-uniform-grid-68
+Agent: Main
+Task: Fix cone triangulation — match expected STL structure (uniform grid + n_v=1)
+
+User provided reference STLs showing the expected output. Analysis revealed:
+- Our output had TWISTED/SLIVER quads (different angular steps for bottom/top rings)
+- Expected output has RECTANGULAR quads (same angular step for both rings, 2 rows only)
+
+Root cause: edge cache's adaptive_discretize used ADAPTIVE refinement for circles,
+producing DIFFERENT angular steps for circles with different radii (R=30.36 vs R=35.22).
+Also, tube faces used n_v=2 (3 rows including analytic middle), creating extra facets.
+
+Fix (2 changes):
+1. edge_cache.rs: For CIRCLE curves, use a UNIFORM angular grid (no adaptive
+   refinement). n_samples computed from chord tolerance, rounded to multiple of 4.
+   This ensures both rings on the same axis have points at the SAME angles.
+2. triangulate.rs: For cone/cylinder tube faces with cached top ring, ALWAYS
+   force n_v=1 (only 2 rows: bottom and top, no analytic middle row). The axial
+   direction is straight (zero chord error), so n_v=1 is sufficient.
+
+Result (compared with expected STL):
+- Structure now matches: 2 rows, uniform angular grid, rectangular quads
+- Our output: 126 verts/level, 252 cone tris, 2.86° uniform step
+- Expected: 66 verts/level, 128 cone tris, 5.63° uniform step
+- Only difference is point density (more points = higher quality), not structure
+- Watertight: ✓ (2646 interior edges, Euler χ=0)
+- Tests: draper-mesh 231/231, test_3_05_078_loads_and_watertight ✓

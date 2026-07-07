@@ -2957,25 +2957,10 @@ fn triangulate_cylinder_tube_from_boundary(
         params.height_samples.max(2)
     };
 
-    // When using cached top ring points, check if the top ring's angular
-    // positions match the bottom ring's. If they don't, force n_v=1.
+    // When using cached top ring points, ALWAYS force n_v=1.
     // See cone tube function for full rationale.
     let n_v = if use_cached_top && top_ring.len() == n_u {
-        let ang_tol = PI / n_u as f64 * 0.5;
-        let angles_match = top_ring.iter().enumerate().all(|(i, (tu, _))| {
-            let mut du = (tu - bottom_u[i]).abs();
-            if du > PI { du = 2.0 * PI - du; }
-            du <= ang_tol
-        });
-        if !angles_match {
-            log::info!(
-                "Cylinder tube: top ring angles don't match bottom ({} pts, step mismatch) — forcing n_v=1 to avoid sliver triangles",
-                n_u
-            );
-            1
-        } else {
-            n_v
-        }
+        1
     } else {
         n_v
     };
@@ -3421,32 +3406,20 @@ fn triangulate_cone_tube_from_boundary(
         params.height_samples.max(2)
     };
 
-    // When using cached top ring points, check if the top ring's angular
-    // positions match the bottom ring's. If they don't (different CIRCLE
-    // entities with different radii → different adaptive_discretize steps),
-    // force n_v=1 (no intermediate analytic row). This prevents thin sliver
-    // triangles between the analytic middle row (which uses bottom_u angles)
-    // and the cached top row (which uses top_u angles).
+    // When using cached top ring points, ALWAYS force n_v=1 (only 2 rows:
+    // bottom and top, no intermediate analytic row).
     //
     // For cone/cylinder surfaces, the axial direction is straight (zero chord
     // error), so n_v=1 is always sufficient — there's no geometric benefit
-    // from intermediate rows.
+    // from intermediate rows. Using n_v=1 produces cleaner triangulation
+    // that matches what other CAD applications produce: each quad connects
+    // a bottom ring vertex directly to the top ring vertex at the same
+    // angular position, creating a clean developable surface.
+    //
+    // Using n_v>1 adds an analytic middle row that creates extra facets
+    // visible as a "band" on the cone surface.
     let n_v = if use_cached_top && !top_row_at_apex && effective_top.len() == n_u {
-        let ang_tol = PI / n_u as f64 * 0.5;
-        let angles_match = effective_top.iter().enumerate().all(|(i, (tu, _))| {
-            let mut du = (tu - bottom_u[i]).abs();
-            if du > PI { du = 2.0 * PI - du; }
-            du <= ang_tol
-        });
-        if !angles_match {
-            log::info!(
-                "Cone tube: top ring angles don't match bottom ({} pts, step mismatch) — forcing n_v=1 to avoid sliver triangles",
-                n_u
-            );
-            1
-        } else {
-            n_v
-        }
+        1
     } else {
         n_v
     };

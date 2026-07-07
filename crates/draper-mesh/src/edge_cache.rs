@@ -665,6 +665,47 @@ impl EdgeDiscretizationCache {
         // Adaptive subdivision threshold: use LOD override if set, else adaptive.
         let max_deviation = self.effective_chord_tolerance();
 
+        // For CIRCLE curves, use a UNIFORM angular grid — no adaptive refinement.
+        //
+        // This is CRITICAL for watertightness and visual quality of tube faces
+        // (cones, cylinders). When two circles on the same axis have different
+        // radii (e.g., a cone's bottom R=30.36 and top R=35.22), adaptive
+        // refinement produces DIFFERENT angular steps for each ring (more
+        // points for larger radius). Connecting bottom[i] to top[i] by index
+        // then produces TWISTED/SLIVER quads because the angles don't match.
+        //
+        // Using a uniform grid ensures both rings have points at the SAME
+        // angular positions (2π*i/n), producing rectangular quads.
+        //
+        // n_samples is computed from chord tolerance using the radius, then
+        // rounded up to the next multiple of 4 for better sharing between
+        // circles with similar (but not identical) radii.
+        if let Curve3d::Circle(ref circle) = curve {
+            let angle_range = (t_max - t_min).abs();
+            let r = circle.radius;
+            let n_from_tol = if max_deviation > 0.0 && r > 0.0 {
+                let half_angle = (1.0 - max_deviation / r).clamp(-1.0, 1.0).acos();
+                ((angle_range / (2.0 * half_angle)).ceil() as usize).max(4)
+            } else {
+                n_samples_hint.max(8)
+            };
+            // Round up to next multiple of 4 for better angular alignment
+            // between circles with different radii on the same axis.
+            let n = (((n_from_tol + 3) / 4) * 4).min(self.max_samples).max(n_samples_hint.max(8));
+            let n = n.min(self.max_samples).max(2);
+
+            let mut points: Vec<Point3d> = Vec::with_capacity(n);
+            let mut t_params: Vec<f64> = Vec::with_capacity(n);
+            for i in 0..n {
+                let t_norm = if n > 1 { i as f64 / (n - 1) as f64 } else { 0.0 };
+                let t = t_min + t_norm * (t_max - t_min);
+                points.push(curve.point_at(t));
+                t_params.push(t_norm);
+            }
+            return (points, t_params);
+        }
+
+        // For other curve types (NURBS, etc.), keep the adaptive refinement.
         // Start with uniformly spaced points based on hint
         let n_initial = n_samples_hint.min(self.max_samples).max(2);
         let mut t_params: Vec<f64> = vec![0.0]; // Normalized parameter [0, 1]
