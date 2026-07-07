@@ -2942,25 +2942,9 @@ fn triangulate_cylinder_tube_from_boundary(
     let n_u = bottom_ring.len();
     let bottom_u: Vec<f64> = bottom_ring.iter().map(|(u, _)| *u).collect();
 
-    // Use cached top ring points only if its u angles match the bottom ring's.
-    // This is the normal case for cylinders (both caps have the same radius
-    // and chord tolerance → same discretization → same u angles). For
-    // frustum-like cones where top ring has different u angles, we generate
-    // top points analytically (sacrificing top-cap watertightness, but that's
-    // a separate problem outside this function's scope).
-    //
-    // For PARTIAL-wrap faces, both rings are unwrapped to the same range, so
-    // their u values should align if the cap arcs share the same chord
-    // tolerance. If they don't align (different EDGE_CURVEs for bottom/top
-    // arcs), we fall back to analytic top points.
-    let use_cached_top = top_ring.len() == n_u && {
-        let ang_tol = PI / n_u as f64 * 0.5;
-        top_ring.iter().enumerate().all(|(i, (tu, _))| {
-            let mut du = (tu - bottom_u[i]).abs();
-            if du > PI { du = 2.0 * PI - du; }
-            du <= ang_tol
-        })
-    };
+    // Use cached top ring points when available (same count as bottom).
+    // See cone tube function for full rationale.
+    let use_cached_top = top_ring.len() == n_u;
 
     // Compute n_v from adaptive sampling (height direction only — u direction
     // is determined by the cached ring point count, not adaptive sampling).
@@ -2996,15 +2980,7 @@ fn triangulate_cylinder_tube_from_boundary(
             let u = bottom_u[i];
             let p = if j == 0 {
                 bottom_ring[i].1
-            } else if j == n_v && top_ring.len() == n_u {
-                // ALWAYS use cached top ring points when available (same count).
-                // This preserves watertightness with the adjacent cap face.
-                // When two rings come from DIFFERENT CIRCLE entities with different
-                // radii, adaptive_discretize produces different angular samplings,
-                // causing u value mismatch. Using analytic points (cyl.point_at)
-                // would break the edge cache chain, creating boundary edges.
-                // The grid quads may be slightly non-rectangular, but vertices
-                // match the edge cache → watertight by construction.
+            } else if j == n_v && use_cached_top {
                 top_ring[i].1
             } else {
                 crate::edge_cache::deterministic_round_point(cyl.point_at(u, v))
@@ -3403,21 +3379,14 @@ fn triangulate_cone_tube_from_boundary(
     let n_u = effective_bottom.len();
     let bottom_u: Vec<f64> = effective_bottom.iter().map(|(u, _)| *u).collect();
 
-    // Use cached top ring points only if its u angles match the bottom ring's.
-    // For `make_cone()`, the lateral face has no top edge, so top_ring is empty
-    // → use_cached_top = false → top row (if not apex) uses analytic points.
-    // This is OK because the cone's top cap doesn't exist (apex is a single point).
-    //
-    // For PARTIAL-wrap faces from STEP files, both rings are unwrapped to the
-    // same range, so u values should align if cap arcs share chord tolerance.
-    let use_cached_top = !top_row_at_apex && effective_top.len() == n_u && {
-        let ang_tol = PI / n_u as f64 * 0.5;
-        effective_top.iter().enumerate().all(|(i, (tu, _))| {
-            let mut du = (tu - bottom_u[i]).abs();
-            if du > PI { du = 2.0 * PI - du; }
-            du <= ang_tol
-        })
-    };
+    // Use cached top ring points when available (same count as bottom).
+    // When the two rings have different angular samplings (different CIRCLE
+    // entities with different radii), this produces slightly non-rectangular
+    // quads, but the vertices match the edge cache → watertight by construction.
+    // The alternative (interpolating top ring to bottom ring's angles) would
+    // produce rectangular quads but break watertightness (interpolated points
+    // don't match edge cache points).
+    let use_cached_top = !top_row_at_apex && effective_top.len() == n_u;
 
     // Compute n_v from adaptive sampling (height direction only).
     let n_v = if params.adaptive {
@@ -3470,18 +3439,7 @@ fn triangulate_cone_tube_from_boundary(
                 let u = bottom_u[i];
                 let p = if j == 0 && !apex_at_bottom {
                     effective_bottom[i].1
-                } else if j == n_v && !apex_at_top && effective_top.len() == n_u {
-                    // ALWAYS use cached top ring points when available (same count).
-                    // This preserves watertightness with the adjacent cap face.
-                    // When two rings come from DIFFERENT CIRCLE entities with different
-                    // radii (common for cones — top has smaller radius than bottom),
-                    // adaptive_discretize produces different angular samplings,
-                    // causing u value mismatch (use_cached_top becomes false).
-                    // Using analytic points (cone.point_at) would break the edge
-                    // cache chain, creating boundary edges between the cone lateral
-                    // face and the cap face. The grid quads may be slightly
-                    // non-rectangular, but vertices match the edge cache →
-                    // watertight by construction.
+                } else if j == n_v && use_cached_top && !apex_at_top {
                     effective_top[i].1
                 } else {
                     crate::edge_cache::deterministic_round_point(cone.point_at(u, v))

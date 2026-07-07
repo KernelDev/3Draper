@@ -4130,3 +4130,49 @@ Stage Summary:
 - The grid quads may be slightly non-rectangular when u values differ, but
   this is acceptable — visual quality is unchanged, watertightness is
   guaranteed.
+
+---
+Task ID: step84-triangulation-investigation-66
+Agent: Main
+Task: Investigate "Step#84 incorrectly triangulated" in test/3.05.078.stp
+
+Investigation:
+- Created 6 diagnostic tools (dump_step84, dump_step84_twisted, dump_step84_span,
+  dump_step84_grid, dump_step84_half, dump_cones_compare, dump_cones_normals,
+  dump_cones_seam, dump_cones_alignment)
+- Found that Step#84 is a CONICAL_SURFACE (R=32.79, 45°) split into 2 half-cone
+  faces: Step#78 covers -z half, Step#84 covers +z half. Both forward=false.
+- All 252 triangles are on the cone surface (deviation 0), normals point inward
+  (correct for forward=false), angular span <60° per triangle, 0 boundary edges.
+- Found the ROOT CAUSE of twisted quads: bottom and top rings have DIFFERENT
+  angular samplings (bottom step=1.96°, top step=3.91°) because they come from
+  DIFFERENT CIRCLE entities with different radii (R=30.36 vs R=35.22). The edge
+  cache's adaptive_discretize produces different angular steps for different radii.
+  Connecting bottom[i] to top[i] by index creates twisted quads (122 of 252).
+
+Attempted fixes:
+1. Interpolate top ring to bottom ring's angular positions → BROKE WATERTIGHTNESS
+   (interpolated points don't match edge cache → 204 boundary edges)
+2. Fall back to earcutr when angles don't align → WORSE (446 boundary edges,
+   80 non-manifold, 530 twisted quads from UV polygon self-intersection)
+
+Final decision: reverted to commit 10ca9e1 approach (use cached top ring points
+  by index when count matches). This preserves watertightness (0 boundary edges)
+  at the cost of some non-rectangular quads. The twisted quads are a VISUAL
+  QUALITY issue, not a correctness issue — all vertices are on the cone surface,
+  normals are correct, mesh is watertight.
+
+Root cause for future fix: the edge cache should produce the SAME angular
+positions for both rings of a tube face. This requires either:
+a) Forcing both CIRCLE entities to use the same n_samples (currently adaptive)
+b) Using a shared angular grid for all circles on the same axis
+c) Resampling in the edge cache rather than in the triangulation
+
+Stage Summary:
+- Investigated thoroughly, confirmed Step#84 mesh is geometrically correct:
+  all vertices on cone, watertight, correct normals.
+- Twisted quads identified as visual quality issue caused by different angular
+  samplings of bottom/top rings from different CIRCLE entities.
+- No code changes pushed — current state (10ca9e1) is the best trade-off
+  between watertightness and visual quality.
+- Future fix: shared angular grid in edge cache for circles on the same axis.
