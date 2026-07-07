@@ -621,6 +621,73 @@ pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64)
 
     let weld_tol_sq = weld_tolerance * weld_tolerance;
 
+    // ── Face-aware weld guard ───────────────────────────────────────────
+    //
+    // For each vertex, precompute the SET of face IDs (TopoId of the source
+    // BRep face) that use it. This lets us refuse to weld two boundary
+    // vertices that share ANY face — because welding vertices on the SAME
+    // face corrupts that face's triangulation.
+    //
+    // The classic failure case this prevents: a thin annulus face where
+    // R_outer − R_inner < weld_tolerance (e.g., 3.05.078.stp Step#87 has
+    // R_outer=37.5, R_inner=35.22, annulus width=2.28mm, but
+    // weld_tolerance=2.6mm). Without this guard, every outer-ring vertex
+    // gets welded to the inner-ring vertex at the same angular position
+    // (they're 2.28mm apart, within tolerance), collapsing all the
+    // annulus-fill triangles into degenerate sliver triangles along the
+    // outer ring. The UV triangulation is correct (it's computed before
+    // weld), but the 3D mesh ends up with only ~60% of the triangles and
+    // none of them span the annulus.
+    //
+    // The check is: if vertex_face_ids[v1] and vertex_face_ids[candidate]
+    // share ANY face ID, the two vertices are on the same face (or share a
+    // seam) — refuse to weld. Seam vertices (used by 2+ faces) can still
+    // be welded to vertices from a DIFFERENT face (no shared face ID).
+    let vertex_face_ids: Vec<HashSet<u64>> = if let Some(ref face_ids) = mesh.triangle_face_ids {
+        let mut vfids: Vec<HashSet<u64>> = vec![HashSet::new(); mesh.vertices.len()];
+        for (tri_idx, tri) in mesh.triangles.iter().enumerate() {
+            let fid = face_ids.get(tri_idx).copied().unwrap_or(u64::MAX);
+            if fid == u64::MAX { continue; }
+            for &vi in tri {
+                // vi is u32, safe to index into vfids
+                let idx = vi as usize;
+                if idx < vfids.len() {
+                    vfids[idx].insert(fid);
+                }
+            }
+        }
+        vfids
+    } else {
+        // No face IDs available — cannot do face-aware check.
+        // Fall back to empty sets (effectively disabling the guard).
+        vec![HashSet::new(); mesh.vertices.len()]
+    };
+
+    // Helper: returns true if v1 and candidate share ANY face ID.
+    // When face IDs are unavailable (empty sets), returns false (no shared
+    // face) to preserve original behavior.
+    #[inline]
+    fn shares_face(
+        vfid_a: &HashSet<u64>,
+        vfid_b: &HashSet<u64>,
+    ) -> bool {
+        if vfid_a.is_empty() || vfid_b.is_empty() {
+            return false;
+        }
+        // Iterate the smaller set, look up in the larger
+        let (small, large) = if vfid_a.len() <= vfid_b.len() {
+            (vfid_a, vfid_b)
+        } else {
+            (vfid_b, vfid_a)
+        };
+        for fid in small {
+            if large.contains(fid) {
+                return true;
+            }
+        }
+        false
+    }
+
     // PASS 2 tolerance: much tighter than PASS 1.
     //
     // PASS 1 welds SHORT BOUNDARY EDGES (length < weld_tolerance) — these are
@@ -646,6 +713,15 @@ pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64)
     //   - 1e-3 (absolute cap of 1mm)
     let pass2_tolerance = (weld_tolerance * 0.01).min(1e-3);
     let pass2_tol_sq = pass2_tolerance * pass2_tolerance;
+
+    // For PASS 1, we need a distance-aware face check: only refuse the
+    // weld if the two same-face vertices are FAR apart (beyond FP drift).
+    // If they're very close (within pass2_tolerance), they're likely
+    // legitimate FP drift on a seam vertex, and welding is safe.
+    //
+    // The threshold pass2_tol_sq is already computed below — we'll use it
+    // for the same-face distance check in PASS 1.
+    let pass2_tol_sq_for_pass1 = pass2_tol_sq;
 
     // Build edge → triangle count map
     let mut edge_count: HashMap<(u32, u32), usize> = HashMap::new();
@@ -726,6 +802,8 @@ pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64)
     }
 
     let mut weld_count = 0usize;
+    let mut skip_same_face_count = 0usize;
+    let mut skip_no_candidate_count = 0usize;
 
     // PASS 1: For each short boundary edge, find a nearby vertex to weld with.
     // This catches the typical seam mismatch (vertices that are CLOSE but
@@ -771,11 +849,47 @@ pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64)
                             if !boundary_vertices.contains(&candidate) {
                                 continue;
                             }
+                            // CRITICAL #2: Refuse to weld two vertices that share
+                            // ANY face ID, UNLESS they're very close (within
+                            // pass2_tolerance — FP drift range). Welding vertices
+                            // on the SAME face that are far apart corrupts that
+                            // face's triangulation — the classic failure is a
+                            // thin annulus where the outer-ring and inner-ring
+                            // vertices are within weld_tolerance of each other
+                            // (annulus width < weld_tolerance) but both belong
+                            // to the same face. Without this guard, every
+                            // outer-ring vertex gets welded to the inner-ring
+                            // vertex at the same angular position, collapsing
+                            // the annulus-fill triangles into degenerate sliver
+                            // triangles along the outer ring.
+                            //
+                            // The distance exemption (dist < pass2_tolerance)
+                            // allows legitimate FP-drift welds on seam vertices
+                            // that happen to share a face ID (e.g., when
+                            // merge_deduplicating already merged a seam vertex
+                            // with an adjacent face's version, giving it
+                            // face_ids = {A, B}, and the weld is now trying to
+                            // merge it with yet another nearby vertex from
+                            // face A or B that's at FP-drift distance).
+                            //
+                            // Bug history: 3.05.078.stp Step#87 (plane annulus,
+                            // R_outer=37.5, R_inner=35.22, width=2.28mm) lost
+                            // 101 of 252 triangles (40%) when weld_tolerance
+                            // was 2.6mm — the weld merged outer ring vertices
+                            // with inner ring vertices, destroying the
+                            // annulus triangulation while leaving the UV
+                            // visualization (computed before weld) intact.
                             let pc = mesh.vertices[candidate as usize];
                             let dx = pc.x - p1.x;
                             let dy = pc.y - p1.y;
                             let dz = pc.z - p1.z;
                             let dist_sq = dx * dx + dy * dy + dz * dz;
+                            if shares_face(&vertex_face_ids[*v1 as usize], &vertex_face_ids[candidate as usize])
+                                && dist_sq > pass2_tol_sq_for_pass1
+                            {
+                                skip_same_face_count += 1;
+                                continue;
+                            }
                             if dist_sq < best_dist_sq {
                                 best_dist_sq = dist_sq;
                                 best_match = Some(candidate);
@@ -794,8 +908,15 @@ pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64)
                 parent[root_v1 as usize] = root_target;
                 weld_count += 1;
             }
+        } else {
+            skip_no_candidate_count += 1;
         }
     }
+
+    log::warn!(
+        "WELD PASS 1: {} short edges processed, {} welded, {} skipped (same-face), {} skipped (no candidate)",
+        short_boundary_edges.len(), weld_count, skip_same_face_count, skip_no_candidate_count
+    );
 
     // PASS 2: For each boundary vertex on a LONG boundary edge, also look
     // for nearby vertices to weld with. This catches the case where a
@@ -864,11 +985,22 @@ pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64)
                             if !boundary_vertices.contains(&candidate) {
                                 continue;
                             }
+                            // CRITICAL #2: Refuse to weld two vertices that share
+                            // ANY face ID, UNLESS very close. See PASS 1 comment.
+                            // PASS 2 already uses pass2_tol_sq as best_dist_sq
+                            // threshold, so the distance exemption is automatic
+                            // — but we still need the face check to prevent
+                            // same-face welds at the tight tolerance.
                             let pc = mesh.vertices[candidate as usize];
                             let dx = pc.x - p1.x;
                             let dy = pc.y - p1.y;
                             let dz = pc.z - p1.z;
                             let dist_sq = dx * dx + dy * dy + dz * dz;
+                            if shares_face(&vertex_face_ids[v1 as usize], &vertex_face_ids[candidate as usize])
+                                && dist_sq > pass2_tol_sq
+                            {
+                                continue;
+                            }
                             if dist_sq < best_dist_sq {
                                 best_dist_sq = dist_sq;
                                 best_match = Some(candidate);
@@ -957,6 +1089,15 @@ pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64)
                                 let ddy = pc.y - p1.y;
                                 let ddz = pc.z - p1.z;
                                 let dist_sq = ddx * ddx + ddy * ddy + ddz * ddz;
+                                // CRITICAL #2: Refuse to weld two vertices that share
+                                // ANY face ID, UNLESS very close. See PASS 1 comment.
+                                // PASS 3 uses pass3_tol_sq as best_dist_sq threshold,
+                                // so the distance exemption is automatic.
+                                if shares_face(&vertex_face_ids[v1 as usize], &vertex_face_ids[candidate as usize])
+                                    && dist_sq > pass3_tol_sq
+                                {
+                                    continue;
+                                }
                                 if dist_sq < best_dist_sq {
                                     best_dist_sq = dist_sq;
                                     best_match = Some(candidate);

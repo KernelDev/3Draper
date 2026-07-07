@@ -3896,3 +3896,80 @@ Stage Summary:
   adjacent faces (e.g., a circular hole edge shared between a planar cap
   face and a cylindrical side face — the cap face would now produce
   identical 3D points to the cylinder face for that shared edge).
+
+---
+Task ID: step87-weld-annulus-63
+Agent: Main
+Task: Fix Step#87 (3.05.078.stp) — UV looks correct but 3D result is wrong (annulus triangulation collapsed to sliver triangles along outer ring)
+
+Work Log:
+- User reported: "Step#87 in UV looks correct but the 3D result is wrong" for test/3.05.078.stp
+- Re-cloned repo (sandbox was reset between sessions) and reinstalled Rust toolchain + wasm-bindgen-cli
+- Created tools/src/bin/dump_step87.rs diagnostic binary to dump Step#87 triangulation details
+- Ran dump_step87 and found:
+  * Step#87 is an annulus face (Plane) with outer R=37.5, inner R=35.22 (width=2.28mm)
+  * UV triangulation: 252 triangles (correct annulus fill)
+  * 3D triangulation: only 151 triangles (101 lost!)
+  * Triangle distribution: 113 sliver triangles along outer ring + 38 fill + 0 inner
+  * The 3D mesh had only sliver triangles between consecutive outer-ring vertices,
+    not filling the annulus between outer (R=37.5) and inner (R=35.22) rings
+
+- Root cause analysis:
+  * weld_boundary_edge_vertices() PASS 1 uses weld_tolerance = 3% of model_scale = 2.6mm
+  * The annulus width (2.28mm) is LESS than weld_tolerance (2.6mm)
+  * PASS 1 finds "short boundary edges" (length < weld_tol) on the outer ring
+    (consecutive outer-ring vertices are ~1.85mm apart < 2.6mm)
+  * For each short edge endpoint v1 (outer ring), it searches for nearby boundary
+    vertices within weld_tolerance (2.6mm)
+  * The inner-ring vertex at the same angular position is 2.28mm away — WITHIN
+    the 2.6mm tolerance
+  * PASS 1 welds outer-ring v1 → inner-ring candidate (BOTH on face 87)
+  * After welding, every annulus-fill triangle that used both outer[i] and inner[i]
+    becomes degenerate (two identical vertices) → removed
+  * Result: 101 of 252 triangles lost, annulus not filled, only sliver triangles
+    along the outer ring remain
+  * The UV visualization is correct because it's computed BEFORE the weld step
+
+- Fix applied in crates/draper-mesh/src/watertight.rs:
+  1. Added vertex_face_ids: Vec<HashSet<u64>> precomputation — for each vertex,
+     stores the set of face IDs (TopoId) that use it
+  2. Added shares_face() helper — returns true if two vertices share ANY face ID
+  3. In PASS 1, PASS 2, PASS 3: added a distance-aware face check:
+     - If v1 and candidate share ANY face ID AND distance > pass2_tolerance
+       (1% of weld_tol, capped at 1e-3 = FP drift range), SKIP the weld
+     - This prevents welding outer-ring to inner-ring vertices on the same
+       annulus face (they're 2.28mm apart, way beyond FP drift)
+     - Allows legitimate FP-drift welds on seam vertices that happen to share
+       a face ID (e.g., merge_deduplicating already merged a seam vertex with
+       an adjacent face's version)
+  4. Added diagnostic logging: "WELD PASS 1: N short edges processed, M welded,
+     X skipped (same-face), Y skipped (no candidate)"
+
+- Verification with dump_step87 after fix:
+  * WELD PASS 1: 204 short edges processed, 2 welded (legitimate seam welds),
+    1105 skipped (same-face — the bad annulus welds), 198 skipped (no candidate
+    — pre-existing seam mismatches not caused by this fix)
+  * Step#87: 252 triangles (0 lost!), 113 outer + 139 fill + 0 inner
+  * UV:252 == 3D:252 (matching, no longer mismatched)
+  * 200 boundary edges remain (4.7%) — these are pre-existing seam mismatches
+    that the original weld was "fixing" by incorrectly welding same-face vertices.
+    The original "watertight" status was fake — it was achieved by destroying
+    the annulus triangulation. The new state has correct triangulation with
+    some seam gaps, which is the correct trade-off.
+
+- Test results:
+  * draper-mesh lib: 231/231 pass ✅
+  * draper-step lib: brep_with_voids (5), test_3_05_078, test_brick_thin* (3) all pass ✅
+  * draper-step integration: test_3_05_078_loads_and_watertight, test_3_05_078_no_twisted_triangles pass ✅
+
+Stage Summary:
+- Step#87 annulus is now correctly triangulated: 252 triangles filling the
+  annulus between outer (R=37.5) and inner (R=35.22) rings.
+- The fix adds a face-aware guard to weld_boundary_edge_vertices() that
+  prevents welding two vertices on the SAME face when they're far apart
+  (beyond FP drift range). This prevents the annulus-collapse bug while
+  still allowing legitimate seam welds between different faces.
+- 200 boundary edges remain (pre-existing seam mismatches). These were
+  previously "hidden" by the bad same-face welds. A future fix should
+  ensure the EdgeDiscretizationCache + merge_deduplicating properly merge
+  seam vertices so the mesh is genuinely watertight.
