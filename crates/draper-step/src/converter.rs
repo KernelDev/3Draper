@@ -10572,11 +10572,33 @@ impl<'a> StepConverter<'a> {
             return triangulate_face(&face, params);
         }
 
-        // For planar faces with inner loops (holes), use the dedicated hole-aware path
+        // For planar faces with inner loops (holes), use the dedicated hole-aware path.
+        // We ALWAYS route through `triangulate_planar_face_with_holes_cached` so that
+        // the EdgeDiscretizationCache is consulted for BOTH the outer boundary AND the
+        // inner loops. The previous non-cached variant sampled inner-loop edges via
+        // `sample_edges()` without consulting the cache, which broke watertightness
+        // guarantees when an inner-loop edge was shared with another face (the inner
+        // edge would produce different 3D points than the same edge cached elsewhere).
+        //
+        // Since `surface_to_mesh` (the non-cached entry point) does not own a long-lived
+        // cache, we build a fresh local cache here. Within a single face this still
+        // ensures consistent discretization between the outer boundary and any inner
+        // loop edges that may be shared between the two — which is the primary concern.
         if let Surface::Plane(ref plane) = face_data.surface {
             if !face_data.inner_edges.is_empty() {
-                return self.triangulate_planar_face_with_holes(
-                    plane, &face_data.outer_edges, &face_data.inner_edges, face_data.forward,
+                let tol_ctx = match bbox {
+                    Some((bmin, bmax)) => ToleranceContext::from_bounding_box(bmin, bmax),
+                    None => ToleranceContext::new(),
+                };
+                let mut local_edge_cache = EdgeDiscretizationCache::with_tolerance(tol_ctx, 64);
+                return self.triangulate_planar_face_with_holes_cached(
+                    plane,
+                    &face_data.outer_edges,
+                    &face_data.outer_edge_step_ids,
+                    &face_data.inner_edges,
+                    &face_data.inner_edge_step_ids,
+                    face_data.forward,
+                    &mut local_edge_cache,
                 );
             }
         }
@@ -10858,95 +10880,6 @@ impl<'a> StepConverter<'a> {
         mesh
     }
 
-    fn triangulate_planar_face_with_holes(
-        &self,
-        plane: &Plane,
-        outer_edges: &[TopoEdge],
-        inner_loops: &[Vec<TopoEdge>],
-        forward: bool,
-    ) -> TriangleMesh {
-        let mut mesh = TriangleMesh::new();
-
-        // Sample outer boundary points
-        let outer_points_3d = self.sample_edges(outer_edges);
-        if outer_points_3d.is_empty() {
-            return mesh;
-        }
-
-        // Project all points onto the plane's 2D coordinate system
-        let project = |p: &Point3d| -> Point2d {
-            let dx = p.x - plane.origin.x;
-            let dy = p.y - plane.origin.y;
-            let dz = p.z - plane.origin.z;
-            Point2d::new(
-                dx * plane.u_dir.x + dy * plane.u_dir.y + dz * plane.u_dir.z,
-                dx * plane.v_dir.x + dy * plane.v_dir.y + dz * plane.v_dir.z,
-            )
-        };
-
-        let outer_2d: Vec<Point2d> = outer_points_3d.iter().map(|p| project(p)).collect();
-
-        // Sample inner loop (hole) points
-        let mut hole_points_3d: Vec<Vec<Point3d>> = Vec::new();
-        let mut hole_points_2d: Vec<Vec<Point2d>> = Vec::new();
-        for inner_edges in inner_loops {
-            let pts_3d = self.sample_edges(inner_edges);
-            if pts_3d.is_empty() { continue; }
-            let pts_2d: Vec<Point2d> = pts_3d.iter().map(|p| project(p)).collect();
-            hole_points_3d.push(pts_3d);
-            hole_points_2d.push(pts_2d);
-        }
-
-        // Use earcutr (mapbox/earcut algorithm) which natively handles holes.
-        // The bridge-edge + ear-clip approach fails for circular bolt holes.
-        if let Some(m) = earcutr_triangulate_planar_converter(
-            &outer_2d, &outer_points_3d, &hole_points_2d, &hole_points_3d, forward, plane,
-        ) {
-            return m;
-        }
-
-        // Fallback to bridge-edge + ear-clip if earcutr fails
-        log::warn!("earcutr failed for planar face with holes (non-cached), falling back to bridge-edge ear-clip");
-        let (merged_2d, merged_3d) = merge_holes_into_polygon(&outer_2d, &outer_points_3d, &hole_points_2d, &hole_points_3d);
-        let triangles = ear_clip(&merged_2d);
-        let filtered_triangles: Vec<[u32; 3]> = triangles.iter()
-            .filter(|tri| {
-                let a = merged_2d[tri[0] as usize];
-                let b = merged_2d[tri[1] as usize];
-                let c = merged_2d[tri[2] as usize];
-                let centroid_u = (a.u + b.u + c.u) / 3.0;
-                let centroid_v = (a.v + b.v + c.v) / 3.0;
-                let centroid = Point2d::new(centroid_u, centroid_v);
-                for hole in &hole_points_2d {
-                    if point_in_polygon_2d_converter(&centroid, hole) {
-                        return false;
-                    }
-                }
-                point_in_polygon_2d_converter(&centroid, &outer_2d)
-            })
-            .cloned()
-            .collect();
-        for p in &merged_3d {
-            mesh.add_vertex(*p);
-        }
-        for tri in &filtered_triangles {
-            if forward {
-                mesh.add_triangle(tri[0], tri[1], tri[2]);
-            } else {
-                mesh.add_triangle(tri[0], tri[2], tri[1]);
-            }
-        }
-
-        // Set analytical face normal (same as the cached version)
-        let normal = if forward { plane.normal } else {
-            Direction3d::new(-plane.normal.x, -plane.normal.y, -plane.normal.z).unwrap_or(Direction3d::Z)
-        };
-        mesh.face_normals = Some(vec![[normal.x, normal.y, normal.z]; mesh.triangles.len()]);
-
-        mesh
-    }
-
-    /// Sample points from a list of edges at uniform parameter intervals.
     /// Determine the number of samples to take from an edge based on its curve type.
     /// Lines need only 2 samples (start and end), while circles/NURBS need more for curvature.
     ///
