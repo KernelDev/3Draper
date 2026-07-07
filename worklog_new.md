@@ -4058,3 +4058,75 @@ Stage Summary:
   edge-cache consistency investigation (separate task).
 - If a user needs to close real topology gaps, that would be a separate
   "stitch" tool (editing operation), not the default meshing behavior.
+
+---
+Task ID: cone-cylinder-tube-cached-top-65
+Agent: Main
+Task: Fix 204 boundary edges — root cause: cone/cylinder tube faces using analytic top ring points instead of cached points when u values don't match
+
+User feedback: "Исследуй эти причины - что-бы найти причину. Нельзя
+дальше развивать имея такую ошибку" (Investigate the causes to find the
+root cause. Cannot continue development with such an error.)
+
+Work Log:
+- Created dump_edge_comparison.rs diagnostic to compare vertices produced by
+  each face for shared edges. Found 22 exact matches between Step#87 and
+  Step#77 — edge cache IS working for the shared edge #220.
+- Created dup_check.rs diagnostic. Found: ALL 204 boundary edges have UNIQUE
+  vertices (no duplicates) with closest vertex always 1.2mm away — both
+  vertices on the same circle (R=35.22) but at DIFFERENT ANGLES.
+- Created dup_check2.rs diagnostic. Found: Step#87 vs Step#84 (shared edge
+  #236, R=35.22): 47 exact matches, 79 far (>=0.01mm). The "far" pairs are
+  at different angles on the same circle.
+- Investigated alias mechanism — 0 aliases registered, 14 edges skipped as
+  "different curves". This is CORRECT — #220 and #238 are genuinely different
+  semicircles (one through +z, one through -z).
+- Added diagnostic logging to discretize_step_edge for edges 220/222/236/238.
+  Confirmed edge cache works: both calls for step_id=236 hit the same cache
+  key and return identical points.
+- Created dup_check2.rs to compare R=35.22 vertices between Step#87, Step#78,
+  Step#84. Found Step#87 has 41+41 vertices (inner loop), Step#84 has 64+64,
+  Step#78 has 64+64 — DIFFERENT COUNTS!
+- Added diagnostic logging to triangulate_cone_tube_from_boundary. Found
+  ROOT CAUSE:
+    * Cone face has two rings (bottom R=30.36, top R=35.22)
+    * Both rings come from DIFFERENT CIRCLE entities with different radii
+    * adaptive_discretize produces DIFFERENT angular steps for different radii
+      (0.034 rad for R=35.22, 0.068 rad for R=30.36)
+    * use_cached_top check compares u values → 62/64 mismatches → false
+    * Top row uses ANALYTIC points (cone.point_at(bottom_u[i], v_max))
+    * These analytic points DON'T match the edge cache points used by the
+      plane cap face → boundary edges in the merged mesh
+
+- Fix applied in crates/draper-mesh/src/triangulate.rs:
+  1. triangulate_cylinder_tube_from_boundary (line ~2999):
+     Changed `j == n_v && use_cached_top` → `j == n_v && top_ring.len() == n_u`
+  2. triangulate_cone_tube_from_boundary (line ~3473):
+     Changed `j == n_v && use_cached_top && !apex_at_top` →
+     `j == n_v && !apex_at_top && effective_top.len() == n_u`
+  Both functions now ALWAYS use cached top ring points when the top ring has
+  the same count as the bottom ring, regardless of u value alignment.
+
+- Verification:
+  * BREP #55: watertight ✓ (4158 interior edges, Euler χ=0)
+  * boundary edges: 0 (was 204)
+  * WELD_SKIP: BREP #55 detailed already watertight — no welding needed
+  * draper-mesh lib: 231/231 pass ✅
+  * draper-step integration: test_3_05_078_loads_and_watertight ✅
+    test_3_05_078_no_twisted_triangles ✅
+  * draper-step lib: brep_with_voids (5), test_3_05_078 all pass ✅
+
+Stage Summary:
+- ROOT CAUSE FOUND AND FIXED: cone/cylinder tube faces were using analytic
+  top ring points when u values didn't match between bottom and top rings.
+  This broke the edge cache chain — the top ring points didn't match the
+  edge cache points used by the adjacent cap face, creating 204 boundary
+  edges (gaps) in the merged mesh.
+- The fix implements the topology-first principle correctly: edge cache →
+  consistent vertices → watertight by construction. No analytic re-sampling
+  that breaks the chain.
+- BREP #55 (3.05.078.stp) is now FULLY WATERTIGHT: 0 boundary edges, 4158
+  interior edges, Euler χ=0 (closed manifold surface).
+- The grid quads may be slightly non-rectangular when u values differ, but
+  this is acceptable — visual quality is unchanged, watertightness is
+  guaranteed.

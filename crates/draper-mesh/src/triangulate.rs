@@ -2996,7 +2996,15 @@ fn triangulate_cylinder_tube_from_boundary(
             let u = bottom_u[i];
             let p = if j == 0 {
                 bottom_ring[i].1
-            } else if j == n_v && use_cached_top {
+            } else if j == n_v && top_ring.len() == n_u {
+                // ALWAYS use cached top ring points when available (same count).
+                // This preserves watertightness with the adjacent cap face.
+                // When two rings come from DIFFERENT CIRCLE entities with different
+                // radii, adaptive_discretize produces different angular samplings,
+                // causing u value mismatch. Using analytic points (cyl.point_at)
+                // would break the edge cache chain, creating boundary edges.
+                // The grid quads may be slightly non-rectangular, but vertices
+                // match the edge cache → watertight by construction.
                 top_ring[i].1
             } else {
                 crate::edge_cache::deterministic_round_point(cyl.point_at(u, v))
@@ -3462,7 +3470,18 @@ fn triangulate_cone_tube_from_boundary(
                 let u = bottom_u[i];
                 let p = if j == 0 && !apex_at_bottom {
                     effective_bottom[i].1
-                } else if j == n_v && use_cached_top && !apex_at_top {
+                } else if j == n_v && !apex_at_top && effective_top.len() == n_u {
+                    // ALWAYS use cached top ring points when available (same count).
+                    // This preserves watertightness with the adjacent cap face.
+                    // When two rings come from DIFFERENT CIRCLE entities with different
+                    // radii (common for cones — top has smaller radius than bottom),
+                    // adaptive_discretize produces different angular samplings,
+                    // causing u value mismatch (use_cached_top becomes false).
+                    // Using analytic points (cone.point_at) would break the edge
+                    // cache chain, creating boundary edges between the cone lateral
+                    // face and the cap face. The grid quads may be slightly
+                    // non-rectangular, but vertices match the edge cache →
+                    // watertight by construction.
                     effective_top[i].1
                 } else {
                     crate::edge_cache::deterministic_round_point(cone.point_at(u, v))
