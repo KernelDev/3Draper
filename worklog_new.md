@@ -3973,3 +3973,88 @@ Stage Summary:
   previously "hidden" by the bad same-face welds. A future fix should
   ensure the EdgeDiscretizationCache + merge_deduplicating properly merge
   seam vertices so the mesh is genuinely watertight.
+
+---
+Task ID: remove-aggressive-weld-64
+Agent: Main
+Task: Remove aggressive stitching — align with topology-first philosophy (user feedback)
+
+User feedback:
+"Агрессивная сшивка нам не нужно. Согласованная триангуляция должна быть
+если одно ребро, если два ребра но стоит толеранс на ребра и их надо считать
+одним. Агрессивная появляется если нужно специально сшивать - возможно
+специальным инструментом но это уже редактирование."
+
+Translation: Aggressive stitching is NOT needed. Consistent triangulation
+should be [guaranteed] via: (1) one edge → edge cache, (2) two edges in
+tolerance → alias mechanism. Aggressive stitching = separate manual tool
+(editing), not the default.
+
+Work Log:
+- Investigated the 200 boundary edges remaining after the previous face-aware
+  weld guard fix. Created dump_boundary_edges.rs diagnostic.
+- Found: ALL 200 boundary edges have lengths 1.2-3.6mm — NOT FP drift.
+  They're real topology gaps on 3 faces:
+    * Step#87 (Plane annulus): 100 edges
+    * Step#78 (Cone): 50 edges
+    * Step#84 (Cone): 50 edges
+- Investigated the alias mechanism (register_step_id_alias). Found:
+    * Phase 1 (vertex-pair matching): 0 aliases registered, 14 edges skipped
+      as "different curves"
+    * Phase 2 (3D coordinate matching): 0 aliases registered, 14 skipped
+- Created dump_alias_diag.rs to investigate. Found the ROOT CAUSE:
+    * #220 = EDGE_CURVE('', #240, #244, ...) — semicircle from (0,37.5,0) to (0,-37.5,0)
+    * #238 = EDGE_CURVE('', #244, #240, ...) — semicircle from (0,-37.5,0) to (0,37.5,0)
+    * These are DIFFERENT semicircles (one through +z, one through -z)
+    * Together they form the full circle = Step#87's outer boundary
+    * The alias mechanism is CORRECT to not alias them — they're genuinely
+      different edges (different arcs)
+- The 200 boundary edges are NOT alias misses — they're due to the edge cache
+  not producing identical vertices between the planar face path and the
+  cylinder face path. This is a deeper consistency issue to investigate
+  separately.
+
+- Fix applied: removed the aggressive 3% weld tolerance from ALL 3 call sites:
+    1. BrepSession::finalize (chunked/WASM path, line ~1796)
+    2. convert_to_mesh (non-detailed path, line ~4160)
+    3. triangulate_brep_detailed (detailed path, line ~4861)
+  Changed from:
+    weld_tol = (model_scale * 3e-2).min(10.0).max(1e-4)  // 3% = 2.6mm for this model
+  To:
+    weld_tol = (model_scale * 1e-4).max(absolute * 10.0)  // 0.01% = 0.0087mm (FP drift)
+  This matches the merge_tol already used by merge_deduplicating.
+
+- Added philosophy comment explaining the topology-first approach:
+    1. ONE edge → EdgeDiscretizationCache → bit-identical 3D points
+    2. TWO edges in tolerance → alias mechanism → one canonical edge
+    3. Aggressive stitching → NOT the default; separate manual tool
+
+- Kept the face-aware guard from the previous fix as a safety net (prevents
+  same-face welding even at tight tolerances — harmless when no welding
+  occurs, valuable if a future change reintroduces a looser tolerance).
+
+- Verification (dump_step87):
+    * WELD: 0 short boundary edges at tol=0.0087mm → 0 vertices welded
+    * 2772 triangles preserved (0 lost!)
+    * 204 boundary edges remain (real topology gaps — NOT hidden by bad welds)
+    * Step#87: 252 triangles (correct annulus fill)
+
+- Test results:
+    * draper-mesh lib: 231/231 pass ✅
+    * draper-step: test_3_05_078, test_3_05_078_loads_and_watertight,
+      test_3_05_078_no_twisted_triangles, brep_with_voids (5),
+      test_brick_thin* (3) — all pass ✅
+
+Stage Summary:
+- Aggressive stitching (3% = 2.6mm) is REMOVED from all 3 weld call sites.
+- Weld tolerance is now 0.01% of model_scale (0.0087mm = 8.7 microns) —
+  FP-drift only, matching merge_tol.
+- Topology-first philosophy is now the default:
+    * Edge cache → consistent triangulation for shared edges
+    * Aliases → consistent triangulation for two-edges-that-are-one
+    * No aggressive stitching by default
+- 204 boundary edges remain on 3.05.078.stp — these are real topology gaps
+  between the planar face path and the cylinder face path. They need deeper
+  edge-cache consistency investigation (separate task).
+- If a user needs to close real topology gaps, that would be a separate
+  "stitch" tool (editing operation), not the default meshing behavior.

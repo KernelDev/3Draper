@@ -1784,18 +1784,16 @@ impl BrepSession {
             }
         }
 
-        // Weld boundary edge vertices
+        // Weld boundary edge vertices (FP-drift only — NOT aggressive stitching)
+        // See the non-chunked path (triangulate_brep_detailed) for the full
+        // philosophy comment. Tolerance matches merge_tol (0.01% of model scale).
         {
-            // Check watertightness BEFORE welding — if the mesh is already
-            // watertight via edge cache + merge_deduplicating, skip welding
-            // to avoid creating degenerate triangles (Step#87/#78 lose 101/50
-            // triangles when welding collapses boundary vertices).
             let report_before = validate_watertight(&self.mesh, false);
             if report_before.is_watertight() {
                 eprintln!("WELD_SKIP: BREP #{} already watertight ({} interior edges) — skipping weld to preserve triangles",
                     brep_id, report_before.interior_edge_count);
             } else {
-                let weld_tol = (self.tol_ctx.model_scale * 3e-2).min(10.0).max(1e-4);
+                let weld_tol = (self.tol_ctx.model_scale * 1e-4).max(self.tol_ctx.absolute * 10.0);
                 weld_boundary_edge_vertices(&mut self.mesh, weld_tol);
             }
         }
@@ -4132,34 +4130,32 @@ impl<'a> StepConverter<'a> {
             eprintln!("POST_FILTER: BREP #{}: {} degenerate triangles removed ({}→{})", brep_id, filter_removed, pre_filter_tris, post_filter_tris);
         }
 
-        // ─── Post-merge: weld boundary edge vertices ────────────────
-        // When two adjacent faces share a geometric edge but use different
-        // STEP EDGE_CURVE entities (e.g., a Plane face uses a full circle
-        // while a NURBS face uses a half-arc of the same circle), their
-        // discretizations produce slightly different vertex positions at
-        // the shared corners. This creates short boundary edges (holes) in
-        // the merged mesh.
+        // ─── Post-merge: weld boundary edge vertices (FP-drift only) ─────
+        // This step ONLY catches floating-point drift between independent
+        // discretizations of the SAME geometric edge. It is NOT an
+        // aggressive stitcher.
         //
-        // This step welds (merges) vertices connected by short boundary
-        // edges, fixing the seam mismatch without affecting interior
-        // vertices.
+        // Philosophy (topology-first meshing):
+        //   1. ONE edge → EdgeDiscretizationCache guarantees bit-identical
+        //      3D points for all faces sharing that edge.
+        //   2. TWO edges in tolerance → alias mechanism
+        //      (register_step_id_alias) treats them as one canonical edge.
+        //   3. Aggressive stitching (large tolerance) → NOT the default.
+        //      If a user needs to close real topology gaps, that's a
+        //      separate manual "stitch" tool (editing operation).
         //
-        // Tolerance: 3% of model scale, capped at 10mm. This catches the
-        // typical seam mismatch (0.1-0.5mm) AND the larger mismatches from
-        // different EDGE_CURVE entities on the same geometric boundary
-        // (up to ~5mm observed in some files), while being tight enough
-        // to not collapse distinct features.
-        //
-        // PASS 2 (long-edge vertex welding) uses a MUCH TIGHTER tolerance
-        // internally (1% of this value, capped at 1e-3) to avoid welding
-        // unrelated boundary vertices from different faces. See
-        // weld_boundary_edge_vertices's PASS 2 comment for details.
+        // Tolerance: 0.01% of model scale (matching merge_tol). This
+        // catches FP drift (1e-13..1e-6) but NOT real geometric gaps
+        // (which are typically >0.1mm). The previous 3% tolerance was
+        // too aggressive — it collapsed thin annulus faces (e.g.,
+        // 3.05.078.stp Step#87, annulus width 2.28mm < weld_tol 2.6mm)
+        // by welding outer-ring vertices to inner-ring vertices.
         {
             // Skip welding if mesh is already watertight — prevents
-            // degenerate triangle creation (Step#87/#78).
+            // degenerate triangle creation.
             let report_before = validate_watertight(&mesh, false);
             if !report_before.is_watertight() {
-                let weld_tol = (tol_ctx.model_scale * 3e-2).min(10.0).max(1e-4);
+                let weld_tol = (tol_ctx.model_scale * 1e-4).max(tol_ctx.absolute * 10.0);
                 weld_boundary_edge_vertices(&mut mesh, weld_tol);
             }
         }
@@ -4847,26 +4843,20 @@ impl<'a> StepConverter<'a> {
         // Weld boundary edge vertices to fix seam mismatches between
         // adjacent faces using different EDGE_CURVE entities.
         //
-        // PASS 1 (short-edge welding) uses this tolerance — it must be large
-        // enough to catch seam mismatches from different EDGE_CURVE entities
-        // (up to ~5mm observed in some STEP files). 3% of model scale, capped
-        // at 10mm, is the historical value that works for most STEP files.
-        //
-        // PASS 2 (long-edge vertex welding) uses a MUCH TIGHTER tolerance
-        // internally (1% of this value, capped at 1e-3) to avoid welding
-        // unrelated boundary vertices from different faces. See
-        // weld_boundary_edge_vertices's PASS 2 comment for details.
+        // Tolerance: 0.01% of model scale (FP-drift only). The previous 3%
+        // tolerance was too aggressive — it collapsed thin annulus faces
+        // (3.05.078.stp Step#87, annulus width 2.28mm < weld_tol 2.6mm).
+        // See the non-detailed path above for the full philosophy comment.
         {
             // Check watertightness BEFORE welding — if the mesh is already
             // watertight via edge cache + merge_deduplicating, skip welding
-            // to avoid creating degenerate triangles (Step#87/#78 lose 101/50
-            // triangles when welding collapses boundary vertices).
+            // to avoid creating degenerate triangles.
             let report_before = validate_watertight(&mesh, false);
             if report_before.is_watertight() {
                 eprintln!("WELD_SKIP: BREP #{} detailed already watertight ({} interior edges) — skipping weld to preserve triangles",
                     brep_id, report_before.interior_edge_count);
             } else {
-                let weld_tol = (tol_ctx.model_scale * 3e-2).min(10.0).max(1e-4);
+                let weld_tol = (tol_ctx.model_scale * 1e-4).max(tol_ctx.absolute * 10.0);
                 let pre_weld_tris = mesh.triangle_count();
                 weld_boundary_edge_vertices(&mut mesh, weld_tol);
                 let post_weld_tris = mesh.triangle_count();

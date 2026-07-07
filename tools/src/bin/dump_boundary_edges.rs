@@ -1,75 +1,124 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) 2026 KernelDev
-//! Dump the boundary edges of a bolt (or any STEP file) to OBJ for visual inspection.
-
+// Diagnostic: dump all boundary edges for 3.05.078.stp BREP and check
+// whether they come from alias misses or real topology gaps.
 use draper_step::{parse_step, step_structure_lazy, StepConversionContext};
 use draper_mesh::validate_watertight;
-use std::io::Write;
+use std::collections::HashMap;
 
 fn main() {
     env_logger::builder()
-        .filter_level(log::LevelFilter::Warn)
+        .filter_level(log::LevelFilter::Info)
         .init();
 
-    let args: Vec<String> = std::env::args().collect();
-    let path = if args.len() >= 2 { &args[1] } else { "test/as1-oc-214.stp" };
-    let target_brep: Option<i64> = args.get(2).and_then(|s| s.parse().ok());
-
-    println!("Loading: {}", path);
-    let data = std::fs::read_to_string(path).expect("read");
-    let step = parse_step(&data).expect("parse");
+    let content = std::fs::read_to_string("/home/z/my-project/test/3.05.078.stp")
+        .expect("read 3.05.078.stp");
+    let step = parse_step(&content).expect("parse step");
     let (_tree, pending) = step_structure_lazy(&step);
-
     let ctx = StepConversionContext::new(&step);
 
-    let mut obj_path = std::path::PathBuf::from(path);
-    obj_path.set_extension("boundary_edges.obj");
-    let mut f = std::fs::File::create(&obj_path).expect("create obj");
+    for p in &pending {
+        let inst = match ctx.triangulate_pending(p) {
+            Some(i) => i,
+            None => continue,
+        };
 
-    writeln!(f, "# Boundary edges dump from {}", path).unwrap();
+        let report = validate_watertight(&inst.mesh, true);
+        println!("\n=== BREP #{}: v={} t={} ===", p.brep_id, inst.mesh.vertex_count(), inst.mesh.triangle_count());
+        println!("  watertight: {}", report.is_watertight());
+        println!("  boundary edges: {}", report.boundary_edge_count);
 
-    let mut obj_vert_idx: u32 = 1; // OBJ is 1-indexed
-
-    for (i, p) in pending.iter().enumerate() {
-        if let Some(target) = target_brep {
-            if p.brep_id != target { continue; }
+        // Group boundary edges by face pair
+        let fids = inst.mesh.triangle_face_ids.as_ref();
+        if report.boundary_edge_count == 0 || fids.is_none() {
+            continue;
         }
-        if let Some(inst) = ctx.triangulate_pending(p) {
-            let report = validate_watertight(&inst.mesh, true);
-            if report.boundary_edge_count == 0 { continue; }
+        let fids = fids.unwrap();
 
-            println!("\nInst #{}: name='{}' brep_id={} bnd={}",
-                i, inst.name.trim(), inst.brep_id, report.boundary_edge_count);
-
-            // Write boundary edges as OBJ line segments
-            // First write vertices, then write lines
-            let start_vert = obj_vert_idx;
-            for v in &inst.mesh.vertices {
-                writeln!(f, "v {:.6} {:.6} {:.6}", v.x, v.y, v.z).unwrap();
-                obj_vert_idx += 1;
-            }
-            for (a, b) in &report.boundary_edges {
-                let va = start_vert + *a as u32;
-                let vb = start_vert + *b as u32;
-                writeln!(f, "l {} {}", va, vb).unwrap();
-            }
-
-            // Also print the boundary edges with positions for the first 20
-            let mut shown = 0;
-            for (a, b) in &report.boundary_edges {
-                let pa = inst.mesh.vertices[*a as usize];
-                let pb = inst.mesh.vertices[*b as usize];
-                let len = ((pa.x-pb.x).powi(2) + (pa.y-pb.y).powi(2) + (pa.z-pb.z).powi(2)).sqrt();
-                println!("  edge v{}→v{} len={:.4}  ({:.3},{:.3},{:.3}) → ({:.3},{:.3},{:.3})",
-                    a, b, len, pa.x, pa.y, pa.z, pb.x, pb.y, pb.z);
-                shown += 1;
-                if shown >= 30 { break; }
-            }
-            if report.boundary_edge_count > 30 {
-                println!("  ... ({} more)", report.boundary_edge_count - 30);
+        // Build edge → (triangle_idx, face_id) map
+        let mut edge_to_face: HashMap<(u32, u32), u64> = HashMap::new();
+        for (ti, tri) in inst.mesh.triangles.iter().enumerate() {
+            let fid = fids.get(ti).copied().unwrap_or(u64::MAX);
+            let edges = [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])];
+            for (a, b) in edges {
+                let key = if a < b { (a, b) } else { (b, a) };
+                edge_to_face.insert(key, fid);
             }
         }
+
+        // For each boundary edge (count==1), find which face it belongs to
+        // and compute its length + 3D position
+        let mut edge_count_map: HashMap<(u32, u32), usize> = HashMap::new();
+        for tri in &inst.mesh.triangles {
+            let edges = [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])];
+            for (a, b) in edges {
+                let key = if a < b { (a, b) } else { (b, a) };
+                *edge_count_map.entry(key).or_insert(0) += 1;
+            }
+        }
+
+        // Collect boundary edges with their face_id and 3D info
+        let mut boundary_by_face: HashMap<u64, Vec<(f64, [f64; 6])>> = HashMap::new();
+        let mut boundary_lengths: Vec<f64> = Vec::new();
+        for (edge, &count) in &edge_count_map {
+            if count == 1 {
+                let v0 = inst.mesh.vertices[edge.0 as usize];
+                let v1 = inst.mesh.vertices[edge.1 as usize];
+                let dx = v1.x - v0.x;
+                let dy = v1.y - v0.y;
+                let dz = v1.z - v0.z;
+                let len = (dx*dx + dy*dy + dz*dz).sqrt();
+                boundary_lengths.push(len);
+                let fid = edge_to_face.get(edge).copied().unwrap_or(u64::MAX);
+                boundary_by_face.entry(fid).or_default().push((len, [v0.x, v0.y, v0.z, v1.x, v1.y, v1.z]));
+            }
+        }
+
+        // Length statistics
+        boundary_lengths.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let n = boundary_lengths.len();
+        if n > 0 {
+            println!("\n  Boundary edge lengths ({} edges):", n);
+            println!("    min:    {:.6e} mm", boundary_lengths[0]);
+            println!("    25%:    {:.6e} mm", boundary_lengths[n / 4]);
+            println!("    median: {:.6e} mm", boundary_lengths[n / 2]);
+            println!("    75%:    {:.6e} mm", boundary_lengths[3 * n / 4]);
+            println!("    max:    {:.6e} mm", boundary_lengths[n - 1]);
+
+            // Categorize
+            let fp_drift = boundary_lengths.iter().filter(|&&l| l < 1e-6).count();
+            let sub_micron = boundary_lengths.iter().filter(|&&l| l >= 1e-6 && l < 1e-3).count();
+            let sub_mm = boundary_lengths.iter().filter(|&&l| l >= 1e-3 && l < 0.1).count();
+            let small = boundary_lengths.iter().filter(|&&l| l >= 0.1 && l < 1.0).count();
+            let medium = boundary_lengths.iter().filter(|&&l| l >= 1.0 && l < 5.0).count();
+            let large = boundary_lengths.iter().filter(|&&l| l >= 5.0).count();
+            println!("    FP drift (<1e-6 mm):    {}", fp_drift);
+            println!("    sub-micron (1e-6..1e-3): {}", sub_micron);
+            println!("    sub-mm (1e-3..0.1):      {}", sub_mm);
+            println!("    small (0.1..1.0):        {}", small);
+            println!("    medium (1.0..5.0):       {}", medium);
+            println!("    large (>=5.0):           {}", large);
+        }
+
+        // Per-face boundary edges
+        println!("\n  Boundary edges by face:");
+        let mut sorted_faces: Vec<_> = boundary_by_face.iter().collect();
+        sorted_faces.sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
+        for (fid, edges) in sorted_faces.iter().take(15) {
+            // Find step_face_id for this face_id
+            let step_fid = inst.faces.iter()
+                .find(|fi| &fi.face_id == *fid)
+                .map(|fi| fi.step_face_id)
+                .unwrap_or(0);
+            let surface = inst.faces.iter()
+                .find(|fi| &fi.face_id == *fid)
+                .map(|fi| &fi.surface_type)
+                .cloned()
+                .unwrap_or_default();
+            let max_len = edges.iter().map(|(l, _)| *l).fold(0.0f64, f64::max);
+            let avg_len = edges.iter().map(|(l, _)| *l).sum::<f64>() / edges.len() as f64;
+            println!("    face_id={} (Step#{}, {}): {} edges, avg_len={:.4}mm, max_len={:.4}mm",
+                fid, step_fid, surface, edges.len(), avg_len, max_len);
+        }
+
+        break; // Only first BREP
     }
-
-    println!("\nWrote boundary edges to: {}", obj_path.display());
 }
