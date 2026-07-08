@@ -4049,7 +4049,7 @@ impl<'a> StepConverter<'a> {
         // Tolerance-based dedup: catches near-identical vertices from different
         // STEP EDGE_CURVE entities on the same geometric boundary (FP drift
         // typically 1e-13). Merge tolerance = 1 PPM of model scale.
-        let merge_tol = (tol_ctx.model_scale * 1e-4).max(tol_ctx.absolute * 10.0);
+        let merge_tol = (tol_ctx.model_scale * 5e-4).max(tol_ctx.absolute * 10.0);
         let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
         let mut total_face_vertices = 0usize;
         for (fi, face_data) in face_data_list.iter().enumerate() {
@@ -4635,7 +4635,7 @@ impl<'a> StepConverter<'a> {
         // The merge tolerance is set to 1 PPM of the model scale — small enough
         // to never collapse genuinely distinct features, but large enough to catch
         // FP drift between different EDGE_CURVE entities on the same boundary.
-        let merge_tol = (tol_ctx.model_scale * 1e-4).max(tol_ctx.absolute * 10.0);
+        let merge_tol = (tol_ctx.model_scale * 5e-4).max(tol_ctx.absolute * 10.0);
         let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
         let mut total_face_vertices_detailed = 0usize;
         let mut face_infos = Vec::new();
@@ -5343,7 +5343,7 @@ impl<'a> StepConverter<'a> {
         let face_time_limit = params.face_time_limit_override.unwrap_or(default_face_time_limit);
 
         // Tolerance-based dedup
-        let merge_tol = (tol_ctx.model_scale * 1e-4).max(tol_ctx.absolute * 10.0);
+        let merge_tol = (tol_ctx.model_scale * 5e-4).max(tol_ctx.absolute * 10.0);
         let dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
 
         Some(BrepSession {
@@ -5443,7 +5443,7 @@ impl<'a> StepConverter<'a> {
         let mut mesh = TriangleMesh::new();
         // Tolerance-based dedup: catches near-identical vertices from different
         // STEP EDGE_CURVE entities on the same geometric boundary.
-        let merge_tol = (tol_ctx.model_scale * 1e-4).max(tol_ctx.absolute * 10.0);
+        let merge_tol = (tol_ctx.model_scale * 5e-4).max(tol_ctx.absolute * 10.0);
         let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
         for face_data in &face_data_list {
             let face_mesh = self.surface_to_mesh(face_data, params, bbox);
@@ -7556,6 +7556,25 @@ impl<'a> StepConverter<'a> {
                     }
                 }
                 if all_match {
+                    group_sids.push(sid);
+                    found_group = true;
+                    break;
+                }
+                // Try REVERSED comparison (edge traced in opposite direction)
+                let mut all_match_rev = true;
+                let n = samples.len();
+                for i in 0..n {
+                    let a = &samples[i];
+                    let b = &group_samples[n - 1 - i];
+                    let dx = a.x - b.x;
+                    let dy = a.y - b.y;
+                    let dz = a.z - b.z;
+                    if (dx * dx + dy * dy + dz * dz).sqrt() > tol {
+                        all_match_rev = false;
+                        break;
+                    }
+                }
+                if all_match_rev {
                     group_sids.push(sid);
                     found_group = true;
                     break;
