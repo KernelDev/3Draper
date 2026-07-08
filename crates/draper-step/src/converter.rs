@@ -4556,37 +4556,14 @@ impl<'a> StepConverter<'a> {
 
                 for (_samples, group_sids) in &shape_groups {
                     if group_sids.len() < 2 { continue; }
-                    
-                    // DIAG: Check curve types in Phase 2 as well
-                    let curve_types: Vec<String> = group_sids.iter()
-                        .map(|&sid| self.edge_curve_type_name(sid))
-                        .collect();
-                    let unique_types: std::collections::HashSet<&str> = curve_types.iter()
-                        .map(|s| s.as_str())
-                        .collect();
-                    
-                    if unique_types.len() > 1 {
-                        log::warn!(
-                            "⚠️ BREP #{}: Phase 2 ALIASING CURVES WITH DIFFERENT TYPES! types={:?} step_ids={:?}",
-                            brep_id, curve_types, group_sids
-                        );
-                    }
-                    
+
                     let canonical = *group_sids.iter().max_by_key(|&&sid| {
                         self.edge_curve_complexity_score(sid)
                     }).unwrap();
-                    let canonical_type = self.edge_curve_type_name(canonical);
                     for &sid in group_sids {
                         if sid != canonical {
                             edge_cache.register_step_id_alias(sid, canonical);
                             coord_alias_count += 1;
-                            let sid_type = self.edge_curve_type_name(sid);
-                            if sid_type != canonical_type {
-                                log::warn!(
-                                    "⚠️ BREP #{}: Phase 2 aliasing {}({}) → {}({}) — DIFFERENT CURVE TYPES!",
-                                    brep_id, sid, sid_type, canonical, canonical_type
-                                );
-                            }
                         }
                     }
                 }
