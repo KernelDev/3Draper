@@ -3882,7 +3882,12 @@ impl<'a> StepConverter<'a> {
 
         // Create edge discretization cache for this BREP to ensure
         // shared edges produce identical 3D points (watertightness).
-        let mut edge_cache = EdgeDiscretizationCache::with_tolerance(tol_ctx.clone(), 64);
+        let mut edge_cache = EdgeDiscretizationCache::with_tolerance(tol_ctx.clone(), 256);
+        // Apply LOD-aware chord tolerance so the Quality slider changes
+        // circle/edge sampling density. Without this, the edge cache uses
+        // a fixed tolerance derived from the bounding box, making LOD have
+        // no effect on edge discretization.
+        edge_cache.set_chord_tolerance_override(Some(params.max_deviation));
 
         // ─── Build vertex-pair → canonical step_id aliases ──────────────
         // In STEP B-Rep, two faces sharing a geometric boundary may use
@@ -4411,7 +4416,10 @@ impl<'a> StepConverter<'a> {
         }
 
         // Create edge discretization cache for this BREP
-        let mut edge_cache = EdgeDiscretizationCache::with_tolerance(tol_ctx.clone(), 64);
+        let mut edge_cache = EdgeDiscretizationCache::with_tolerance(tol_ctx.clone(), 256);
+        // Apply LOD-aware chord tolerance so the Quality slider changes
+        // circle/edge sampling density.
+        edge_cache.set_chord_tolerance_override(Some(params.max_deviation));
 
         // ─── Build vertex-pair → canonical step_id aliases ──────────────
         {
@@ -5211,7 +5219,10 @@ impl<'a> StepConverter<'a> {
         }
 
         // Create edge discretization cache for this BREP
-        let mut edge_cache = EdgeDiscretizationCache::with_tolerance(tol_ctx.clone(), 64);
+        let mut edge_cache = EdgeDiscretizationCache::with_tolerance(tol_ctx.clone(), 256);
+        // Apply LOD-aware chord tolerance so the Quality slider changes
+        // circle/edge sampling density.
+        edge_cache.set_chord_tolerance_override(Some(params.max_deviation));
 
         // ─── Build vertex-pair → canonical step_id aliases ──────────────
         // (Same logic as triangulate_brep_detailed — see comments there.)
@@ -10580,7 +10591,10 @@ impl<'a> StepConverter<'a> {
                     Some((bmin, bmax)) => ToleranceContext::from_bounding_box(bmin, bmax),
                     None => ToleranceContext::new(),
                 };
-                let mut local_edge_cache = EdgeDiscretizationCache::with_tolerance(tol_ctx, 64);
+                let mut local_edge_cache = EdgeDiscretizationCache::with_tolerance(tol_ctx, 256);
+                // Apply LOD-aware chord tolerance so the Quality slider changes
+                // circle/edge sampling density.
+                local_edge_cache.set_chord_tolerance_override(Some(params.max_deviation));
                 return self.triangulate_planar_face_with_holes_cached(
                     plane,
                     &face_data.outer_edges,

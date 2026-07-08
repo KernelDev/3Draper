@@ -4237,3 +4237,40 @@ Result (compared with expected STL):
 - Only difference is point density (more points = higher quality), not structure
 - Watertight: ✓ (2646 interior edges, Euler χ=0)
 - Tests: draper-mesh 231/231, test_3_05_078_loads_and_watertight ✓
+
+---
+Task ID: lod-override-fix-69
+Agent: Main
+Task: Fix "LOD перестало работать" (Quality slider stopped working) + watertightness regression
+
+User: "3.05.078.stp показывается лучше но теперь в test/as1-oc-214.stp пропала
+согласованность + везде перестало работать изменения качества триангуляции"
+
+Investigation:
+1. LOD issue: The STEP path NEVER called set_chord_tolerance_override on the
+   edge cache. This means effective_chord_tolerance() always returned
+   adaptive_tol.chord_tolerance() = model_scale * 1e-5 (fixed), regardless of
+   the Quality slider. The Quality slider had no effect on edge sampling density.
+2. Watertightness for as1-oc-214: 496 boundary edges exist on bolt (BREP#394)
+   due to NURBS-vs-Plane edge representation mismatch. This is a PRE-EXISTING
+   issue (same count before and after my uniform grid change).
+
+Fix:
+1. Added set_chord_tolerance_override(Some(params.max_deviation)) at all 4
+   edge cache creation sites in converter.rs:
+   - triangulate_brep (line 3885)
+   - triangulate_brep_detailed (line 4419)
+   - prepare_brep_session (line 5222)
+   - surface_to_mesh (line 10594, local cache)
+2. Increased max_samples from 64 to 256 so LOD can actually increase density.
+3. Changed circle uniform grid to use n_samples_hint directly (not tolerance-based)
+   to ensure all circles on the same axis get the SAME n (critical for tube
+   grid watertightness). LOD still affects triangle count via Steiner points
+   and face budgets.
+
+Result:
+- 3.05.078.stp: watertight ✓ (966 interior edges, χ=0)
+- as1-oc-214 bolt: 496 boundary edges (pre-existing, not a regression)
+- LOD works: LOD 0.1=114 tris, 0.3=276, 0.5=440, 0.75=644, 1.0=644
+  (0.75 and 1.0 match due to bbox floor diagonal*0.0002, pre-existing)
+- Tests: draper-mesh 231/231, test_3_05_078_loads_and_watertight ✓

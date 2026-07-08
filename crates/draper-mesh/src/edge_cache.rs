@@ -665,35 +665,24 @@ impl EdgeDiscretizationCache {
         // Adaptive subdivision threshold: use LOD override if set, else adaptive.
         let max_deviation = self.effective_chord_tolerance();
 
-        // For CIRCLE curves, use a UNIFORM angular grid — no adaptive refinement.
+        // For CIRCLE curves, use a UNIFORM angular grid based on n_samples_hint.
         //
-        // This is CRITICAL for watertightness and visual quality of tube faces
-        // (cones, cylinders). When two circles on the same axis have different
-        // radii (e.g., a cone's bottom R=30.36 and top R=35.22), adaptive
-        // refinement produces DIFFERENT angular steps for each ring (more
-        // points for larger radius). Connecting bottom[i] to top[i] by index
-        // then produces TWISTED/SLIVER quads because the angles don't match.
+        // This is CRITICAL for watertightness of tube faces (cones, cylinders).
+        // When two circles on the same axis have different radii, they MUST
+        // have the SAME number of points at the SAME angular positions.
         //
-        // Using a uniform grid ensures both rings have points at the SAME
-        // angular positions (2π*i/n), producing rectangular quads.
+        // Since n_samples_hint is the same for all circles (24, set by
+        // edge_sample_count), using it directly ensures both rings get the
+        // same n. We do NOT apply tolerance-based refinement here because
+        // that would give different n for different radii, breaking the
+        // tube grid's bottom[i]→top[i] connection.
         //
-        // n_samples is computed from chord tolerance using the radius, then
-        // rounded up to the next multiple of 4 for better sharing between
-        // circles with similar (but not identical) radii.
-        if let Curve3d::Circle(ref circle) = curve {
-            let angle_range = (t_max - t_min).abs();
-            let r = circle.radius;
-            let n_from_tol = if max_deviation > 0.0 && r > 0.0 {
-                let half_angle = (1.0 - max_deviation / r).clamp(-1.0, 1.0).acos();
-                ((angle_range / (2.0 * half_angle)).ceil() as usize).max(4)
-            } else {
-                n_samples_hint.max(8)
-            };
-            // Round up to next multiple of 4 for better angular alignment
-            // between circles with different radii on the same axis.
-            let n = (((n_from_tol + 3) / 4) * 4).min(self.max_samples).max(n_samples_hint.max(8));
-            let n = n.min(self.max_samples).max(2);
-
+        // LOD still affects circle density through n_samples_hint: when the
+        // STEP converter calls edge_sample_count, it could scale the result
+        // by LOD. Currently it returns a fixed 24, but the Quality slider
+        // still affects triangle count via Steiner points and face budgets.
+        if let Curve3d::Circle(ref _circle) = curve {
+            let n = n_samples_hint.max(8).min(self.max_samples).max(2);
             let mut points: Vec<Point3d> = Vec::with_capacity(n);
             let mut t_params: Vec<f64> = Vec::with_capacity(n);
             for i in 0..n {
