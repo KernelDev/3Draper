@@ -3951,37 +3951,33 @@ pub fn triangulate_surface_consistent(
     }
 
     // ============================================================
-    // Step 0.5: DegeneracyHandler — merge coincident boundary points
+    // DISABLED: merge_coincident_boundary_points
     //
-    // On surfaces with degeneracies (cone apex, sphere poles), multiple
-    // boundary vertices can map to the same 3D point. For example, on a
-    // cone with an apex, all edges meeting at the apex produce boundary
-    // points that are geometrically identical but have different UV
-    // coordinates. If left as separate vertices, earcutr creates
-    // degenerate (zero-area) triangles between them.
+    // This function was removing "coincident" boundary points, but it
+    // caused WATERTIGHTNESS BREAKAGE. The problem: two faces sharing
+    // the same edge receive points in DIFFERENT ORDER (one forward,
+    // one reversed from the edge cache). merge_coincident_boundary_points
+    // keeps the FIRST point in each cluster and removes the rest — so
+    // it removes DIFFERENT points from each face, producing different
+    // boundary point counts and different 3D positions at the same
+    // index. This makes merge_deduplicating unable to find matches.
     //
-    // The handler detects clusters of coincident boundary 3D points
-    // (within model-scale tolerance) and merges them into a single
-    // representative point, keeping the UV coordinate of the first
-    // point in the cluster. This produces a correct UV polygon for
-    // earcutr while preserving the 3D geometry.
-    //
-    // We store the merged data in owned Vecs and rebind the slice
-    // references to point to the owned data, so the rest of the code
-    // continues using slice references without modification.
+    // The edge cache already applies deterministic rounding (48-bit
+    // mantissa) which prevents FP drift from creating near-duplicate
+    // points. If true coincident points exist (e.g., seam points),
+    // they are handled by the position_map dedup in the mesh builder
+    // (line ~5190), which is order-independent.
     // ============================================================
     let _merged_data: (Vec<Point3d>, Vec<Point2d>);
     let boundary_points_3d: &[Point3d] = {
-        let tol = params.max_deviation * 0.01; // 1% of max_deviation as degeneracy tolerance
-        let (merged_3d, merged_uv) = merge_coincident_boundary_points(boundary_points_3d, boundary_uvs, tol);
-        if merged_3d.len() < 3 {
+        _merged_data = (boundary_points_3d.to_vec(), boundary_uvs.to_vec());
+        if _merged_data.0.len() < 3 {
             log::warn!(
-                "triangulate_surface_consistent: {} boundary points after degeneracy merge — returning empty mesh",
-                merged_3d.len()
+                "triangulate_surface_consistent: {} boundary points — returning empty mesh",
+                _merged_data.0.len()
             );
             return TriangleMesh::new();
         }
-        _merged_data = (merged_3d, merged_uv);
         &_merged_data.0
     };
     let boundary_uvs: &[Point2d] = &_merged_data.1;
