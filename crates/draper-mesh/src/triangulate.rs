@@ -5765,16 +5765,11 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
             // NURBS triangulation strategy:
             //
             // For RULED NURBS (degree 1 in one direction), use strip triangulation
-            // as the PRIMARY approach. Strip triangulation:
-            // 1. Uses ALL boundary points from the edge cache (watertight by construction)
-            // 2. Evaluates the NURBS surface at rail points (proper NURBS handling)
-            // 3. Creates quads between corresponding rail points (follows surface curvature)
-            // 4. Does NOT add interior Steiner points (no orphan vertices)
-            //
-            // The strip approach is "proper NURBS handling" because:
-            // - It uses the actual NURBS surface evaluation (point_at) for all vertices
-            // - It preserves the surface curvature (rails follow the NURBS curve)
-            // - It produces deterministic, watertight results
+            // with IDENTITY resample (preserving original cached boundary points).
+            // Strip triangulation:
+            // 1. Uses ALL boundary points from the longer rail (edge cache → watertight)
+            // 2. Linearly interpolates the shorter rail (deterministic, bit-identical)
+            // 3. Creates quads between corresponding rail points
             //
             // For NON-RULED NURBS (both degrees > 1), fall back to earcutr CDT
             // with curvature-adaptive interior Steiner points.
