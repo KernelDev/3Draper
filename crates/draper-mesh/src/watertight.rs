@@ -1231,6 +1231,352 @@ pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64)
     compact_vertices(mesh);
 }
 
+// ============================================================
+// T-JUNCTION REPAIR (CDT-style post-processing)
+//
+// A T-junction is a vertex that lies on an edge of a triangle but is
+// NOT one of the edge's endpoints. T-junctions arise when two faces
+// share a geometric boundary but discretize it at different
+// resolutions: the face with MORE vertices inserts intermediate
+// points that the face with FEWER vertices doesn't have.
+//
+// This function applies CDT principles as a post-process: for every
+// edge that has a foreign vertex lying on it, split the edge at that
+// vertex and re-triangulate the affected triangles. The result is a
+// mesh with no T-junctions, where every edge is shared by exactly
+// the triangles whose boundaries include it.
+// ============================================================
+
+/// Repair T-junctions in a triangle mesh by splitting edges that have
+/// foreign vertices lying on them.
+///
+/// This is a CDT-style post-processing step that enforces the
+/// "every vertex on an edge must be part of the edge" invariant.
+/// After this function returns, the mesh has no T-junctions.
+///
+/// # Arguments
+/// * `mesh` — The triangle mesh to repair (modified in place).
+/// * `tolerance` — Distance tolerance for point-on-edge test.
+///
+/// # Returns
+/// The number of T-junctions that were repaired (edges split).
+pub fn repair_t_junctions(mesh: &mut TriangleMesh, tolerance: f64) -> usize {
+    use std::collections::{HashMap, HashSet};
+
+    if mesh.triangles.is_empty() || tolerance <= 0.0 {
+        return 0;
+    }
+
+    let tol_sq = tolerance * tolerance;
+    let mut total_repaired = 0usize;
+    let max_iterations = 8;
+
+    for _iter in 0..max_iterations {
+        let n_verts = mesh.vertices.len();
+        if n_verts > 500_000 {
+            log::warn!(
+                "repair_t_junctions: mesh has {} vertices — skipping (too large)",
+                n_verts,
+            );
+            break;
+        }
+
+        // Build edge → triangle list map.
+        let mut edge_tris: HashMap<(u32, u32), Vec<(usize, u32)>> = HashMap::new();
+        for (ti, tri) in mesh.triangles.iter().enumerate() {
+            let [a, b, c] = *tri;
+            for (v0, v1, opp) in [(a, b, c), (b, c, a), (c, a, b)] {
+                let key = if v0 < v1 { (v0, v1) } else { (v1, v0) };
+                edge_tris.entry(key).or_default().push((ti, opp));
+            }
+        }
+
+        // Spatial hash grid for fast vertex lookup.
+        let cell_size = (tolerance * 4.0).max(1e-9);
+        let mut grid: HashMap<(i64, i64, i64), Vec<u32>> = HashMap::new();
+        for (vi, p) in mesh.vertices.iter().enumerate() {
+            let cx = (p.x / cell_size).floor() as i64;
+            let cy = (p.y / cell_size).floor() as i64;
+            let cz = (p.z / cell_size).floor() as i64;
+            grid.entry((cx, cy, cz)).or_default().push(vi as u32);
+        }
+
+        // Collect all split operations needed in this iteration.
+        let mut splits: HashMap<(u32, u32), Vec<(f64, u32)>> = HashMap::new();
+
+        for &(a, b) in edge_tris.keys() {
+            if splits.contains_key(&(a, b)) {
+                continue;
+            }
+
+            let pa = mesh.vertices[a as usize];
+            let pb = mesh.vertices[b as usize];
+
+            let abx = pb.x - pa.x;
+            let aby = pb.y - pa.y;
+            let abz = pb.z - pa.z;
+            let ab_len_sq = abx * abx + aby * aby + abz * abz;
+            if ab_len_sq < 1e-20 {
+                continue;
+            }
+
+            let (xmin, xmax) = if abx >= 0.0 { (pa.x, pb.x) } else { (pb.x, pa.x) };
+            let (ymin, ymax) = if aby >= 0.0 { (pa.y, pb.y) } else { (pb.y, pa.y) };
+            let (zmin, zmax) = if abz >= 0.0 { (pa.z, pb.z) } else { (pb.z, pa.z) };
+
+            let cmin_x = ((xmin - tolerance) / cell_size).floor() as i64;
+            let cmax_x = ((xmax + tolerance) / cell_size).floor() as i64;
+            let cmin_y = ((ymin - tolerance) / cell_size).floor() as i64;
+            let cmax_y = ((ymax + tolerance) / cell_size).floor() as i64;
+            let cmin_z = ((zmin - tolerance) / cell_size).floor() as i64;
+            let cmax_z = ((zmax + tolerance) / cell_size).floor() as i64;
+
+            let dx = cmax_x - cmin_x + 1;
+            let dy = cmax_y - cmin_y + 1;
+            let dz = cmax_z - cmin_z + 1;
+            if dx * dy * dz > 8000 {
+                // Linear scan fallback for very long edges.
+                let mut t_junctions: Vec<(f64, u32)> = Vec::new();
+                for (vi, p) in mesh.vertices.iter().enumerate() {
+                    let vi = vi as u32;
+                    if vi == a || vi == b {
+                        continue;
+                    }
+                    if point_on_segment_3d(p, &pa, &pb, abx, aby, abz, ab_len_sq, tol_sq) {
+                        let apx = p.x - pa.x;
+                        let apy = p.y - pa.y;
+                        let apz = p.z - pa.z;
+                        let t = (apx * abx + apy * aby + apz * abz) / ab_len_sq;
+                        if t > 1e-9 && t < 1.0 - 1e-9 {
+                            t_junctions.push((t, vi));
+                        }
+                    }
+                }
+                if !t_junctions.is_empty() {
+                    t_junctions.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
+                    t_junctions.dedup_by(|x, y| x.1 == y.1);
+                    let key = if a < b { (a, b) } else { (b, a) };
+                    splits.insert(key, t_junctions);
+                }
+                continue;
+            }
+
+            let mut t_junctions: Vec<(f64, u32)> = Vec::new();
+            let mut visited: HashSet<u32> = HashSet::new();
+
+            for cx in cmin_x..=cmax_x {
+                for cy in cmin_y..=cmax_y {
+                    for cz in cmin_z..=cmax_z {
+                        if let Some(cell_verts) = grid.get(&(cx, cy, cz)) {
+                            for &vi in cell_verts {
+                                if vi == a || vi == b {
+                                    continue;
+                                }
+                                if !visited.insert(vi) {
+                                    continue;
+                                }
+                                let p = mesh.vertices[vi as usize];
+                                if point_on_segment_3d(&p, &pa, &pb, abx, aby, abz, ab_len_sq, tol_sq) {
+                                    let apx = p.x - pa.x;
+                                    let apy = p.y - pa.y;
+                                    let apz = p.z - pa.z;
+                                    let t = (apx * abx + apy * aby + apz * abz) / ab_len_sq;
+                                    if t > 1e-9 && t < 1.0 - 1e-9 {
+                                        t_junctions.push((t, vi));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !t_junctions.is_empty() {
+                t_junctions.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
+                t_junctions.dedup_by(|x, y| x.1 == y.1);
+                splits.insert((a, b), t_junctions);
+            }
+        }
+
+        if splits.is_empty() {
+            break;
+        }
+
+        // Apply the splits: replace each triangle sharing a split edge
+        // with a fan of triangles through the inserted vertices.
+        let mut triangles_to_remove: HashSet<usize> = HashSet::new();
+        let mut new_triangles: Vec<[u32; 3]> = Vec::new();
+        let mut new_face_ids: Vec<u64> = Vec::new();
+        let face_ids = mesh.triangle_face_ids.as_ref();
+
+        for ((a, b), t_junctions) in &splits {
+            let mut chain: Vec<u32> = Vec::with_capacity(t_junctions.len() + 2);
+            chain.push(*a);
+            for &(_, vi) in t_junctions {
+                chain.push(vi);
+            }
+            chain.push(*b);
+
+            let edge_key = if a < b { (*a, *b) } else { (*b, *a) };
+            let tris_on_edge = match edge_tris.get(&edge_key) {
+                Some(t) => t,
+                None => continue,
+            };
+
+            for &(ti, opp) in tris_on_edge {
+                triangles_to_remove.insert(ti);
+                let tri = mesh.triangles[ti];
+                let fid = face_ids.and_then(|ids| ids.get(ti).copied()).unwrap_or(u64::MAX);
+
+                // Determine winding order of (a, b) in this triangle.
+                let tri_verts = [tri[0], tri[1], tri[2]];
+                let mut ab_order: Option<bool> = None;
+                for i in 0..3 {
+                    let v0 = tri_verts[i];
+                    let v1 = tri_verts[(i + 1) % 3];
+                    let v2 = tri_verts[(i + 2) % 3];
+                    if v0 == *a && v1 == *b && v2 == opp {
+                        ab_order = Some(true);
+                        break;
+                    }
+                    if v0 == *b && v1 == *a && v2 == opp {
+                        ab_order = Some(false);
+                        break;
+                    }
+                }
+
+                let ab_order = match ab_order {
+                    Some(o) => o,
+                    None => continue,
+                };
+
+                if ab_order {
+                    for i in 0..chain.len() - 1 {
+                        new_triangles.push([chain[i], chain[i + 1], opp]);
+                        new_face_ids.push(fid);
+                    }
+                } else {
+                    for i in 0..chain.len() - 1 {
+                        let v_start = chain[chain.len() - 1 - i];
+                        let v_end = chain[chain.len() - 2 - i];
+                        new_triangles.push([v_start, v_end, opp]);
+                        new_face_ids.push(fid);
+                    }
+                }
+            }
+        }
+
+        // Rebuild triangle list: keep unaffected, append new.
+        let mut keep_triangles: Vec<[u32; 3]> = Vec::with_capacity(mesh.triangles.len());
+        let mut keep_face_ids: Vec<u64> = Vec::with_capacity(mesh.triangles.len());
+        let face_ids_owned = mesh.triangle_face_ids.take();
+        for (ti, tri) in mesh.triangles.iter().enumerate() {
+            if triangles_to_remove.contains(&ti) {
+                continue;
+            }
+            keep_triangles.push(*tri);
+            if let Some(ref ids) = face_ids_owned {
+                keep_face_ids.push(ids[ti]);
+            }
+        }
+        let n_new = new_triangles.len();
+        keep_triangles.extend(new_triangles);
+        if !keep_face_ids.is_empty() || !new_face_ids.is_empty() {
+            keep_face_ids.extend(new_face_ids);
+        }
+
+        mesh.triangles = keep_triangles;
+        mesh.triangle_face_ids = if keep_face_ids.is_empty() {
+            None
+        } else {
+            if keep_face_ids.iter().all(|&x| x == u64::MAX) {
+                None
+            } else {
+                Some(keep_face_ids)
+            }
+        };
+
+        let n_splits = splits.values().map(|v| v.len()).sum::<usize>();
+        total_repaired += n_splits;
+        log::info!(
+            "repair_t_junctions: iter {} — split {} edges, inserted {} vertices, replaced {} triangles with {} new",
+            _iter,
+            splits.len(),
+            n_splits,
+            triangles_to_remove.len(),
+            n_new,
+        );
+    }
+
+    if total_repaired > 0 {
+        compact_vertices(mesh);
+        filter_degenerate_triangles_in_place(mesh, 1e-15);
+    }
+
+    total_repaired
+}
+
+/// Check if point `p` lies on segment `a-b` within tolerance `tol_sq`.
+#[inline]
+fn point_on_segment_3d(
+    p: &Point3d,
+    a: &Point3d,
+    _b: &Point3d,
+    abx: f64,
+    aby: f64,
+    abz: f64,
+    ab_len_sq: f64,
+    tol_sq: f64,
+) -> bool {
+    let apx = p.x - a.x;
+    let apy = p.y - a.y;
+    let apz = p.z - a.z;
+    let t = (apx * abx + apy * aby + apz * abz) / ab_len_sq;
+    if t < 0.0 || t > 1.0 {
+        return false;
+    }
+    let cx = a.x + t * abx - p.x;
+    let cy = a.y + t * aby - p.y;
+    let cz = a.z + t * abz - p.z;
+    (cx * cx + cy * cy + cz * cz) < tol_sq
+}
+
+/// Remove degenerate triangles (zero area) in place.
+fn filter_degenerate_triangles_in_place(mesh: &mut TriangleMesh, min_area_sq: f64) {
+    let face_ids = mesh.triangle_face_ids.take();
+    let mut kept = Vec::with_capacity(mesh.triangles.len());
+    let mut kept_ids = Vec::with_capacity(mesh.triangles.len());
+
+    for (ti, tri) in mesh.triangles.iter().enumerate() {
+        let v0 = mesh.vertices[tri[0] as usize];
+        let v1 = mesh.vertices[tri[1] as usize];
+        let v2 = mesh.vertices[tri[2] as usize];
+        let e1x = v1.x - v0.x;
+        let e1y = v1.y - v0.y;
+        let e1z = v1.z - v0.z;
+        let e2x = v2.x - v0.x;
+        let e2y = v2.y - v0.y;
+        let e2z = v2.z - v0.z;
+        let cx = e1y * e2z - e1z * e2y;
+        let cy = e1z * e2x - e1x * e2z;
+        let cz = e1x * e2y - e1y * e2x;
+        let area_sq = (cx * cx + cy * cy + cz * cz) * 0.25;
+        if area_sq >= min_area_sq {
+            kept.push(*tri);
+            if let Some(ref ids) = face_ids {
+                kept_ids.push(ids[ti]);
+            }
+        }
+    }
+
+    mesh.triangles = kept;
+    mesh.triangle_face_ids = if kept_ids.is_empty() || face_ids.is_none() {
+        face_ids
+    } else {
+        Some(kept_ids)
+    };
+}
+
 /// Remove unused vertices from the mesh and renumber indices.
 pub fn compact_vertices(mesh: &mut TriangleMesh) {
     // Find which vertices are used

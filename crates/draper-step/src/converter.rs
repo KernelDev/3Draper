@@ -1796,6 +1796,24 @@ impl BrepSession {
                 let weld_tol = (self.tol_ctx.model_scale * 1e-4).max(self.tol_ctx.absolute * 10.0);
                 weld_boundary_edge_vertices(&mut self.mesh, weld_tol);
             }
+
+            // CDT-style T-junction repair (always run — T-junctions can
+            // exist even in watertight meshes).
+            let tj_tol = (self.tol_ctx.model_scale * 1e-5).max(self.tol_ctx.absolute * 5.0);
+            let n_tj = draper_mesh::repair_t_junctions(&mut self.mesh, tj_tol);
+            if n_tj > 0 {
+                log::info!(
+                    "BREP #{} detailed (chunked): repaired {} T-junctions (tol={:.2e})",
+                    brep_id, n_tj, tj_tol,
+                );
+                let dup_removed_tj = self.mesh.remove_duplicate_triangles();
+                if dup_removed_tj > 0 {
+                    log::info!(
+                        "BREP #{} detailed (chunked): removed {} duplicate triangles after T-junction repair",
+                        brep_id, dup_removed_tj,
+                    );
+                }
+            }
         }
 
         // Remove duplicate triangles
@@ -4163,6 +4181,24 @@ impl<'a> StepConverter<'a> {
                 let weld_tol = (tol_ctx.model_scale * 1e-4).max(tol_ctx.absolute * 10.0);
                 weld_boundary_edge_vertices(&mut mesh, weld_tol);
             }
+
+            // CDT-style T-junction repair (always run — T-junctions can
+            // exist even in watertight meshes).
+            let tj_tol = (tol_ctx.model_scale * 1e-5).max(tol_ctx.absolute * 5.0);
+            let n_tj = draper_mesh::repair_t_junctions(&mut mesh, tj_tol);
+            if n_tj > 0 {
+                log::info!(
+                    "BREP #{}: repaired {} T-junctions (tol={:.2e})",
+                    brep_id, n_tj, tj_tol,
+                );
+                let dup_removed_tj = mesh.remove_duplicate_triangles();
+                if dup_removed_tj > 0 {
+                    log::info!(
+                        "BREP #{}: removed {} duplicate triangles after T-junction repair",
+                        brep_id, dup_removed_tj,
+                    );
+                }
+            }
         }
         // When the STEP file uses different VERTEX_POINT entities for the
         // same geometric boundary (e.g., Plane face uses LINE, NURBS face
@@ -4854,6 +4890,33 @@ impl<'a> StepConverter<'a> {
                 let filter2_removed = pre_filter2 - post_filter2;
                 if filter2_removed > 0 {
                     eprintln!("POST_WELD_FILTER: BREP #{}: {} degenerate removed after welding ({}→{})", brep_id, filter2_removed, pre_filter2, post_filter2);
+                }
+            }
+
+            // CDT-style T-junction repair (always run — T-junctions can
+            // exist even in watertight meshes).
+            let tj_tol = (tol_ctx.model_scale * 1e-5).max(tol_ctx.absolute * 5.0);
+            let n_tj = draper_mesh::repair_t_junctions(&mut mesh, tj_tol);
+            if n_tj > 0 {
+                log::info!(
+                    "BREP #{} detailed: repaired {} T-junctions (tol={:.2e})",
+                    brep_id, n_tj, tj_tol,
+                );
+                let pre_tj_filter = mesh.triangle_count();
+                filter_degenerate_triangles(&mut mesh, 1e-10);
+                let post_tj_filter = mesh.triangle_count();
+                if pre_tj_filter > post_tj_filter {
+                    eprintln!(
+                        "POST_TJ_FILTER: BREP #{}: {} degenerate removed after T-junction repair ({}→{})",
+                        brep_id, pre_tj_filter - post_tj_filter, pre_tj_filter, post_tj_filter,
+                    );
+                }
+                let dup_removed_tj = mesh.remove_duplicate_triangles();
+                if dup_removed_tj > 0 {
+                    log::info!(
+                        "BREP #{} detailed: removed {} duplicate triangles after T-junction repair",
+                        brep_id, dup_removed_tj,
+                    );
                 }
             }
         }
