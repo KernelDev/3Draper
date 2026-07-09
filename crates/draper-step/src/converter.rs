@@ -1797,20 +1797,26 @@ impl BrepSession {
                 weld_boundary_edge_vertices(&mut self.mesh, weld_tol);
             }
 
-            // CDT-style T-junction repair (always run — T-junctions can
-            // exist even in watertight meshes).
-            let tj_tol = (self.tol_ctx.model_scale * 1e-5).max(self.tol_ctx.absolute * 5.0);
-            let n_tj = draper_mesh::repair_t_junctions(&mut self.mesh, tj_tol);
-            if n_tj > 0 {
+            // Remove duplicate triangles BEFORE T-junction repair.
+            let pre_dedup = self.mesh.triangle_count();
+            let dup_removed = self.mesh.remove_duplicate_triangles();
+            if dup_removed > 0 {
                 log::info!(
-                    "BREP #{} detailed (chunked): repaired {} T-junctions (tol={:.2e})",
-                    brep_id, n_tj, tj_tol,
+                    "BREP #{} detailed (chunked): removed {} duplicate triangles before T-junction repair ({}→{})",
+                    brep_id, dup_removed, pre_dedup, self.mesh.triangle_count(),
                 );
-                let dup_removed_tj = self.mesh.remove_duplicate_triangles();
-                if dup_removed_tj > 0 {
+            }
+
+            // CDT-style T-junction repair — only when non-manifold edges
+            // still exist after duplicate removal. Very tight tolerance.
+            let report_after_dedup = validate_watertight(&self.mesh, false);
+            if report_after_dedup.non_manifold_edge_count > 0 {
+                let tj_tol = (self.tol_ctx.model_scale * 1e-9).max(1e-10);
+                let n_tj = draper_mesh::repair_t_junctions(&mut self.mesh, tj_tol);
+                if n_tj > 0 {
                     log::info!(
-                        "BREP #{} detailed (chunked): removed {} duplicate triangles after T-junction repair",
-                        brep_id, dup_removed_tj,
+                        "BREP #{} detailed (chunked): repaired {} T-junctions (tol={:.2e}, was {} non-manifold)",
+                        brep_id, n_tj, tj_tol, report_after_dedup.non_manifold_edge_count,
                     );
                 }
             }
@@ -4182,20 +4188,27 @@ impl<'a> StepConverter<'a> {
                 weld_boundary_edge_vertices(&mut mesh, weld_tol);
             }
 
-            // CDT-style T-junction repair (always run — T-junctions can
-            // exist even in watertight meshes).
-            let tj_tol = (tol_ctx.model_scale * 1e-5).max(tol_ctx.absolute * 5.0);
-            let n_tj = draper_mesh::repair_t_junctions(&mut mesh, tj_tol);
-            if n_tj > 0 {
+            // Remove duplicate triangles BEFORE T-junction repair.
+            let pre_dedup = mesh.triangle_count();
+            let dup_removed = mesh.remove_duplicate_triangles();
+            if dup_removed > 0 {
                 log::info!(
-                    "BREP #{}: repaired {} T-junctions (tol={:.2e})",
-                    brep_id, n_tj, tj_tol,
+                    "BREP #{}: removed {} duplicate triangles before T-junction repair ({}→{})",
+                    brep_id, dup_removed, pre_dedup, mesh.triangle_count(),
                 );
-                let dup_removed_tj = mesh.remove_duplicate_triangles();
-                if dup_removed_tj > 0 {
+            }
+
+            // CDT-style T-junction repair — only when non-manifold edges
+            // still exist after duplicate removal. Very tight tolerance
+            // (1e-9 * model_scale) to avoid false positives on fine geometry.
+            let report_after_dedup = validate_watertight(&mesh, false);
+            if report_after_dedup.non_manifold_edge_count > 0 {
+                let tj_tol = (tol_ctx.model_scale * 1e-9).max(1e-10);
+                let n_tj = draper_mesh::repair_t_junctions(&mut mesh, tj_tol);
+                if n_tj > 0 {
                     log::info!(
-                        "BREP #{}: removed {} duplicate triangles after T-junction repair",
-                        brep_id, dup_removed_tj,
+                        "BREP #{}: repaired {} T-junctions (tol={:.2e}, was {} non-manifold)",
+                        brep_id, n_tj, tj_tol, report_after_dedup.non_manifold_edge_count,
                     );
                 }
             }
@@ -4893,30 +4906,42 @@ impl<'a> StepConverter<'a> {
                 }
             }
 
-            // CDT-style T-junction repair (always run — T-junctions can
-            // exist even in watertight meshes).
-            let tj_tol = (tol_ctx.model_scale * 1e-5).max(tol_ctx.absolute * 5.0);
-            let n_tj = draper_mesh::repair_t_junctions(&mut mesh, tj_tol);
-            if n_tj > 0 {
-                log::info!(
-                    "BREP #{} detailed: repaired {} T-junctions (tol={:.2e})",
-                    brep_id, n_tj, tj_tol,
-                );
-                let pre_tj_filter = mesh.triangle_count();
-                filter_degenerate_triangles(&mut mesh, 1e-10);
-                let post_tj_filter = mesh.triangle_count();
-                if pre_tj_filter > post_tj_filter {
-                    eprintln!(
-                        "POST_TJ_FILTER: BREP #{}: {} degenerate removed after T-junction repair ({}→{})",
-                        brep_id, pre_tj_filter - post_tj_filter, pre_tj_filter, post_tj_filter,
-                    );
-                }
-                let dup_removed_tj = mesh.remove_duplicate_triangles();
-                if dup_removed_tj > 0 {
+            // Remove duplicate triangles BEFORE T-junction repair.
+            // Duplicates create non-manifold edges (3+ triangles per edge)
+            // that T-junction repair cannot fix — it would split edges in
+            // the duplicate triangles, creating more duplicates and
+            // disconnected components (wrong Euler characteristic).
+            // Removing duplicates first ensures T-junction repair only
+            // sees REAL T-junctions, not artifacts of duplicate geometry.
+            let pre_dedup = mesh.triangle_count();
+            let dup_removed = mesh.remove_duplicate_triangles();
+            if dup_removed > 0 {
+                eprintln!("PRE_TJ_DEDUP: BREP #{} detailed: {} duplicates removed ({}→{})",
+                    brep_id, dup_removed, pre_dedup, mesh.triangle_count());
+            }
+
+            // CDT-style T-junction repair — only when non-manifold edges
+            // STILL exist after duplicate removal. Tolerance must be very
+            // tight (1e-9 * model_scale) to avoid false positives on fine
+            // geometry like bolt threads.
+            let report_after_dedup = validate_watertight(&mesh, false);
+            if report_after_dedup.non_manifold_edge_count > 0 {
+                let tj_tol = (tol_ctx.model_scale * 1e-9).max(1e-10);
+                let n_tj = draper_mesh::repair_t_junctions(&mut mesh, tj_tol);
+                if n_tj > 0 {
                     log::info!(
-                        "BREP #{} detailed: removed {} duplicate triangles after T-junction repair",
-                        brep_id, dup_removed_tj,
+                        "BREP #{} detailed: repaired {} T-junctions (tol={:.2e}, was {} non-manifold)",
+                        brep_id, n_tj, tj_tol, report_after_dedup.non_manifold_edge_count,
                     );
+                    let pre_tj_filter = mesh.triangle_count();
+                    filter_degenerate_triangles(&mut mesh, 1e-10);
+                    let post_tj_filter = mesh.triangle_count();
+                    if pre_tj_filter > post_tj_filter {
+                        eprintln!(
+                            "POST_TJ_FILTER: BREP #{}: {} degenerate removed after T-junction repair ({}→{})",
+                            brep_id, pre_tj_filter - post_tj_filter, pre_tj_filter, post_tj_filter,
+                        );
+                    }
                 }
             }
         }

@@ -1334,7 +1334,11 @@ pub fn repair_t_junctions(mesh: &mut TriangleMesh, tolerance: f64) -> usize {
             let dx = cmax_x - cmin_x + 1;
             let dy = cmax_y - cmin_y + 1;
             let dz = cmax_z - cmin_z + 1;
-            if dx * dy * dz > 8000 {
+            // Use i128 to avoid overflow when edge is very long relative
+            // to cell_size (tolerance can be extremely tight like 1e-10,
+            // making cell_size tiny and dx/dy/dz enormous).
+            let cell_count = (dx as i128) * (dy as i128) * (dz as i128);
+            if cell_count > 8000 {
                 // Linear scan fallback for very long edges.
                 let mut t_junctions: Vec<(f64, u32)> = Vec::new();
                 for (vi, p) in mesh.vertices.iter().enumerate() {
