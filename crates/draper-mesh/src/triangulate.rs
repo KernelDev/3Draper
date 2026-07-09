@@ -4545,28 +4545,15 @@ fn try_strip_triangulation_ruled_nurbs(
         return None;
     }
 
-    // Deduplicate consecutive boundary points (3D tolerance 1e-6).
-    // The converter skips dedup for NURBS, so the boundary may contain
-    // duplicate points at corners and along edges. These duplicates cause
-    // the strip to produce degenerate triangles (zero area, distinct indices)
-    // that get skipped during merging, leaving boundary edges.
-    // By deduplicating here, we ensure the strip works with unique points.
-    let mut deduped_points: Vec<Point3d> = Vec::with_capacity(boundary_points.len());
-    let mut deduped_uvs: Vec<Point2d> = Vec::with_capacity(boundary_uvs.len());
-    let mut orig_to_dedup: Vec<usize> = Vec::with_capacity(boundary_points.len());
-    for (i, p) in boundary_points.iter().enumerate() {
-        let is_dup = deduped_points.iter().rposition(|q| {
-            (q.x - p.x).abs() < 1e-6 && (q.y - p.y).abs() < 1e-6 && (q.z - p.z).abs() < 1e-6
-        });
-        match is_dup {
-            Some(idx) => orig_to_dedup.push(idx),
-            None => {
-                orig_to_dedup.push(deduped_points.len());
-                deduped_points.push(*p);
-                deduped_uvs.push(boundary_uvs[i]);
-            }
-        }
-    }
+    // DISABLED: Deduplicate consecutive boundary points
+    // This was removing DIFFERENT points from different faces (order-dependent),
+    // creating T-junctions and boundary edges between Plane and NURBS faces
+    // sharing the same EDGE_CURVE. The edge cache's deterministic rounding
+    // already handles FP drift. Duplicate points at edge junctions are handled
+    // by the position_map dedup in the mesh builder.
+    let deduped_points: Vec<Point3d> = boundary_points.to_vec();
+    let deduped_uvs: Vec<Point2d> = boundary_uvs.to_vec();
+    let orig_to_dedup: Vec<usize> = (0..boundary_points.len()).collect();
     let boundary_points: &[Point3d] = &deduped_points;
     let boundary_uvs: &[Point2d] = &deduped_uvs;
     log::warn!(
@@ -5807,16 +5794,10 @@ fn triangulate_plane_with_boundary_and_holes_uv(
     // The boundary points come from the StepEdgeCache which ensures shared
     // edges produce identical 3D points. Snapping breaks this guarantee.
 
-    // Deduplicate boundary points — close points create degenerate triangles.
-    // The boundary points come from sampling multiple edges; consecutive edges
-    // share endpoints, but floating-point differences can leave near-duplicates
-    // (1-2 ULP apart). Without dedup, a 4-corner polygon becomes 5 vertices,
-    // producing 3 triangles instead of 2 (with 2 being degenerate).
-    //
-    // We use 1e-9 tolerance to catch ULP-level differences without removing
-    // valid vertices on small geometries. UVs are re-projected below from the
-    // deduped 3D points, so we don't need to keep them in sync here.
-    let boundary_points: Vec<Point3d> = deduplicate_points_3d(boundary_points, 1e-9);
+    // DISABLED: deduplicate_points_3d — removes different points from different
+    // faces (order-dependent), creating T-junctions and boundary edges.
+    // The edge cache's deterministic rounding already handles FP drift.
+    let boundary_points: Vec<Point3d> = boundary_points.to_vec();
     if boundary_points.len() < 3 {
         log::warn!(
             "PLANE_UV_TRI: after dedup, only {} points (< 3) — returning empty mesh",

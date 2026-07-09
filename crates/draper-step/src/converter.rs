@@ -10448,10 +10448,10 @@ impl<'a> StepConverter<'a> {
                         }
                     }
                     if !hole_pts.is_empty() {
-                        // Deduplicate 3D and UV points together (keep them in sync)
-                        let (deduped_pts, deduped_uvs) = deduplicate_points_3d_with_uv(&hole_pts, &hole_uvs, 1e-6);
-                        inner_boundary_points.push(deduped_pts);
-                        inner_boundary_uvs.push(deduped_uvs);
+                        // DISABLED dedup — same reason as outer boundary: removes
+                        // different points from different faces, creating T-junctions.
+                        inner_boundary_points.push(hole_pts);
+                        inner_boundary_uvs.push(hole_uvs);
                     }
                 }
             }
@@ -10485,15 +10485,18 @@ impl<'a> StepConverter<'a> {
         }
 
         // Deduplicate boundary points and their corresponding UVs together
+        // DISABLED for ALL surface types: dedup removes DIFFERENT points from
+        // different faces (because edges come in different order — forward vs
+        // reversed from the edge cache). This creates T-junctions where two
+        // faces sharing an edge have different intermediate vertices, producing
+        // boundary edges that can't be shared.
+        //
+        // The edge cache already applies deterministic rounding, so true
+        // duplicates (same point from different edges meeting at a vertex)
+        // are bit-identical and handled by the position_map dedup in the
+        // mesh builder.
         let before_dedup = boundary_points.len();
-        let (boundary_points, boundary_uvs) = if matches!(&face_data.surface, Surface::Nurbs(_)) {
-            // For NURBS: skip dedup entirely. UV-aware dedup still removes
-            // too many points when edges share 3D curves but have different
-            // UV parameterizations. earcutr can handle duplicate vertices.
-            (boundary_points, boundary_uvs)
-        } else {
-            deduplicate_points_3d_with_uv(&boundary_points, &boundary_uvs, 1e-6)
-        };
+        let (boundary_points, boundary_uvs) = (boundary_points, boundary_uvs);
         if before_dedup != boundary_points.len() {
             log::info!(
                 "DEDUP: {}→{} points (removed {})",
