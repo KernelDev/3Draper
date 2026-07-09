@@ -5042,6 +5042,102 @@ fn try_strip_triangulation_ruled_nurbs(
         }
     }
 
+    // ============================================================
+    // BOUNDARY EDGE ENFORCEMENT (T-junction fix)
+    //
+    // After strip triangulation, the boundary edges along rail_a and rail_b
+    // should be present in the mesh. But if rail_a was resampled to fewer
+    // points than the original boundary (e.g., rail_a had 32 original points
+    // but was resampled to 33 common points), the ORIGINAL boundary points
+    // that were NOT included in the resample are missing from the mesh.
+    //
+    // This creates T-junctions: the adjacent face (e.g., Plane via earcutr)
+    // has ALL original boundary points, but the NURBS strip face only has
+    // the resampled subset.
+    //
+    // FIX: Add ALL original boundary points as mesh vertices, then create
+    // triangles between consecutive original boundary points along each rail
+    // to ensure every boundary edge is present in the mesh.
+    // ============================================================
+    {
+        // Add ALL original boundary points that are not yet in the mesh
+        let mut all_bnd_mesh_idx: Vec<u32> = Vec::with_capacity(boundary_points.len());
+        for (i, p) in boundary_points.iter().enumerate() {
+            let vi = if let Some(&existing) = vertex_map.get(&i) {
+                existing
+            } else {
+                // This boundary point was not included in the strip rails.
+                // Add it as a new mesh vertex.
+                let vi = mesh.add_vertex(*p);
+                let uv = boundary_uvs[i];
+                let derivs = nurbs.derivatives_at(uv.u, uv.v);
+                mesh.add_vertex_normal(vi, [derivs.normal().x, derivs.normal().y, derivs.normal().z]);
+                vertex_map.insert(i, vi);
+                vi
+            };
+            all_bnd_mesh_idx.push(vi);
+        }
+
+        // For each rail (edge of the boundary), ensure consecutive boundary
+        // points are connected by at least one triangle edge. If they're not,
+        // create a fill triangle.
+        let n_bnd = boundary_points.len();
+        let mut mesh_edges: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+        for tri in &mesh.triangles {
+            for k in 0..3 {
+                let a = tri[k];
+                let b = tri[(k + 1) % 3];
+                mesh_edges.insert((a.min(b), a.max(b)));
+            }
+        }
+
+        let mut filled = 0usize;
+        for i in 0..n_bnd {
+            let va = all_bnd_mesh_idx[i];
+            let vb = all_bnd_mesh_idx[(i + 1) % n_bnd];
+            if va == vb { continue; }
+            let key = (va.min(vb), va.max(vb));
+            if !mesh_edges.contains(&key) {
+                // This boundary edge is missing — find the closest interior
+                // vertex to the midpoint and create a fill triangle.
+                let pa = mesh.vertices[va as usize];
+                let pb = mesh.vertices[vb as usize];
+                let mid = Point3d::new(
+                    (pa.x + pb.x) * 0.5,
+                    (pa.y + pb.y) * 0.5,
+                    (pa.z + pb.z) * 0.5,
+                );
+                let mut best_d = f64::MAX;
+                let mut best_vc: Option<u32> = None;
+                for (vi, v) in mesh.vertices.iter().enumerate() {
+                    if vi == va as usize || vi == vb as usize { continue; }
+                    let d = (v.x - mid.x).powi(2) + (v.y - mid.y).powi(2) + (v.z - mid.z).powi(2);
+                    if d < best_d {
+                        best_d = d;
+                        best_vc = Some(vi as u32);
+                    }
+                }
+                if let Some(vc) = best_vc {
+                    let pc = mesh.vertices[vc as usize];
+                    let ab = (pa.x-pb.x).powi(2)+(pa.y-pb.y).powi(2)+(pa.z-pb.z).powi(2);
+                    let bc = (pb.x-pc.x).powi(2)+(pb.y-pc.y).powi(2)+(pb.z-pc.z).powi(2);
+                    let ac = (pa.x-pc.x).powi(2)+(pa.y-pc.y).powi(2)+(pa.z-pc.z).powi(2);
+                    if ab > 1e-20 && bc > 1e-20 && ac > 1e-20 {
+                        if forward {
+                            mesh.add_triangle(va, vb, vc);
+                        } else {
+                            mesh.add_triangle(va, vc, vb);
+                        }
+                        filled += 1;
+                    }
+                }
+            }
+        }
+        if filled > 0 {
+            log::info!("STRIP_BOUNDARY_FILL: added {} boundary edge fill triangles", filled);
+        }
+    }
+
     // NOTE: The side cap fan triangulation was REMOVED.
     //
     // Previously, this code added fan triangles for the side edges (the edges
@@ -5883,6 +5979,7 @@ fn triangulate_plane_with_boundary_and_holes_uv(
     // faces (order-dependent), creating T-junctions and boundary edges.
     // The edge cache's deterministic rounding already handles FP drift.
     let boundary_points: Vec<Point3d> = boundary_points.to_vec();
+    let _ = &boundary_points; // suppress unused warning
     if boundary_points.len() < 3 {
         log::warn!(
             "PLANE_UV_TRI: after dedup, only {} points (< 3) — returning empty mesh",

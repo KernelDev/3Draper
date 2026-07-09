@@ -5341,6 +5341,65 @@ pub fn triangulate_surface_consistent(
                         mesh.add_triangle(va, best_vc, vb);
                     }
                     filled += 1;
+                } else {
+                    // FUNDAMENTAL FIX: If no common neighbor is found, the
+                    // boundary edge (va, vb) is truly missing from the mesh.
+                    // This creates a T-junction with the adjacent face.
+                    //
+                    // Instead of leaving the gap, we INSERT a new vertex at
+                    // the midpoint of (va, vb) and create TWO triangles:
+                    // (va, midpoint, nearest_interior) and (midpoint, vb, nearest_interior).
+                    //
+                    // But simpler: just add a degenerate-free fan from va
+                    // to vb through the closest interior vertex. If no
+                    // interior vertex exists, create the edge directly by
+                    // adding a single triangle (va, vb, va_projection) —
+                    // but this would be degenerate.
+                    //
+                    // BEST APPROACH: Find the closest vertex to the MIDPOINT
+                    // of (va, vb) and create a triangle.
+                    let pa = mesh.vertices[va as usize];
+                    let pb = mesh.vertices[vb as usize];
+                    let mid = Point3d::new(
+                        (pa.x + pb.x) * 0.5,
+                        (pa.y + pb.y) * 0.5,
+                        (pa.z + pb.z) * 0.5,
+                    );
+                    let mut best_d = f64::MAX;
+                    let mut best_vi: Option<u32> = None;
+                    for (vi, v) in mesh.vertices.iter().enumerate() {
+                        if vi == va as usize || vi == vb as usize { continue; }
+                        let d = (v.x - mid.x).powi(2) + (v.y - mid.y).powi(2) + (v.z - mid.z).powi(2);
+                        if d < best_d {
+                            best_d = d;
+                            best_vi = Some(vi as u32);
+                        }
+                    }
+                    if let Some(vc) = best_vi {
+                        // Check this triangle is not degenerate
+                        let pc = mesh.vertices[vc as usize];
+                        let ab = (pa.x-pb.x).powi(2)+(pa.y-pb.y).powi(2)+(pa.z-pb.z).powi(2);
+                        let bc = (pb.x-pc.x).powi(2)+(pb.y-pc.y).powi(2)+(pb.z-pc.z).powi(2);
+                        let ac = (pa.x-pc.x).powi(2)+(pa.y-pc.y).powi(2)+(pa.z-pc.z).powi(2);
+                        if ab > 1e-20 && bc > 1e-20 && ac > 1e-20 {
+                            // Verify centroid is inside domain
+                            let centroid_3d = Point3d::new(
+                                (pa.x + pb.x + pc.x) / 3.0,
+                                (pa.y + pb.y + pc.y) / 3.0,
+                                (pa.z + pb.z + pc.z) / 3.0,
+                            );
+                            let (cu, cv) = surface.project_point(&centroid_3d);
+                            let centroid_uv = Point2d::new(cu, cv);
+                            if domain.contains_ray(&centroid_uv) {
+                                if forward {
+                                    mesh.add_triangle(va, vb, vc);
+                                } else {
+                                    mesh.add_triangle(va, vc, vb);
+                                }
+                                filled += 1;
+                            }
+                        }
+                    }
                 }
                 // If no valid vc found (all candidates span a hole), leave the
                 // edge unfilled — a small gap is better than a triangle covering
