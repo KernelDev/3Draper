@@ -26,6 +26,55 @@ use draper_geometry::{Point3d};
 use draper_topology::Solid;
 use std::collections::HashMap;
 
+/// Statistics for all gap-fill mechanisms (KS-3 from audit plan).
+///
+/// Tracks how many triangles were added/fixed by each of the 7 gap-fill
+/// levels. Useful for diagnosing watertightness issues.
+#[derive(Clone, Debug, Default)]
+pub struct GapFillStatistics {
+    /// Strip boundary edge enforcement fills (triangulate.rs:5097-5181).
+    pub strip_enforcement_fills: usize,
+    /// CDT gap fills after earcutr (parametric_domain.rs:5202-5455).
+    pub cdt_gap_fills: usize,
+    /// weld_boundary_edge_vertices PASS 1 (short boundary edges).
+    pub weld_pass1_fills: usize,
+    /// weld_boundary_edge_vertices PASS 2 (long edge boundary vertices).
+    pub weld_pass2_fills: usize,
+    /// weld_boundary_edge_vertices PASS 3 (seam-specific).
+    pub weld_pass3_fills: usize,
+    /// repair_t_junctions edge splits.
+    pub t_junction_repairs: usize,
+    /// fill_boundary_gaps triangle fills.
+    pub boundary_loop_fills: usize,
+}
+
+impl GapFillStatistics {
+    /// Log a summary of all gap-fill statistics.
+    pub fn log_summary(&self, brep_id: i64) {
+        if self.strip_enforcement_fills == 0 && self.cdt_gap_fills == 0
+            && self.weld_pass1_fills == 0 && self.weld_pass2_fills == 0
+            && self.weld_pass3_fills == 0 && self.t_junction_repairs == 0
+            && self.boundary_loop_fills == 0
+        {
+            return; // No gap-fill activity to report
+        }
+        log::info!(
+            "BREP #{} gap-fill: strip={}, cdt={}, weld={}/{}/{}, tj={}, loop={}",
+            brep_id,
+            self.strip_enforcement_fills, self.cdt_gap_fills,
+            self.weld_pass1_fills, self.weld_pass2_fills, self.weld_pass3_fills,
+            self.t_junction_repairs, self.boundary_loop_fills,
+        );
+    }
+
+    /// Total triangles added/fixed across all mechanisms.
+    pub fn total_fills(&self) -> usize {
+        self.strip_enforcement_fills + self.cdt_gap_fills
+            + self.weld_pass1_fills + self.weld_pass2_fills + self.weld_pass3_fills
+            + self.t_junction_repairs + self.boundary_loop_fills
+    }
+}
+
 /// Result of watertight validation on a merged solid mesh.
 #[derive(Clone, Debug)]
 pub struct WatertightReport {

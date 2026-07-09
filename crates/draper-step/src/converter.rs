@@ -3944,6 +3944,9 @@ impl<'a> StepConverter<'a> {
         // the NURBS step_id as canonical. Otherwise the NURBS face gets
         // only 2 boundary points, producing a degenerate triangulation.
         {
+            // Track aliasing statistics for diagnostics (KS-1 from audit plan)
+            let mut alias_stats = draper_mesh::edge_cache::AliasingStatistics::default();
+
             // Phase 1: STEP entity ID-based aliasing (existing approach)
             // Uses VERTEX_POINT entity IDs to match edges sharing the same
             // geometric boundary.
@@ -3957,6 +3960,7 @@ impl<'a> StepConverter<'a> {
             for face_data in &face_data_list {
                 for &step_id in &face_data.edge_step_ids {
                     if step_id == 0 { continue; }
+                    alias_stats.total_step_ids += 1;
                     if let Some(vp) = self.get_edge_curve_vertex_pair(step_id) {
                         vertex_pair_to_step_ids.entry(vp).or_default().push(step_id);
                     }
@@ -3966,6 +3970,7 @@ impl<'a> StepConverter<'a> {
             let mut skipped_different_curves = 0usize;
             for (_vp, step_ids) in &vertex_pair_to_step_ids {
                 if step_ids.len() < 2 { continue; }
+                alias_stats.phase1_groups += 1;
 
                 // P2: Group by curve SHAPE using 5-point sampling (not just midpoint).
                 // Two edges with the same vertex pair but different shapes
@@ -3984,6 +3989,7 @@ impl<'a> StepConverter<'a> {
                         if sid != canonical {
                             edge_cache.register_step_id_alias(sid, canonical);
                             alias_count += 1;
+                            alias_stats.phase1_aliases += 1;
                         }
                     }
                 }
@@ -3991,14 +3997,10 @@ impl<'a> StepConverter<'a> {
                 // Count groups with multiple step_ids that were NOT aliased
                 // (different curves sharing the same vertex pair)
                 if shape_groups.len() > 1 {
-                    skipped_different_curves += step_ids.len() - shape_groups.iter().map(|(_, g)| g.len().min(1)).sum::<usize>();
+                    let skipped = step_ids.len() - shape_groups.iter().map(|(_, g)| g.len().min(1)).sum::<usize>();
+                    skipped_different_curves += skipped;
+                    alias_stats.phase1_skipped_different_curves += skipped;
                 }
-            }
-            if alias_count > 0 || skipped_different_curves > 0 {
-                log::info!(
-                    "BREP #{}: registered {} step_id aliases from vertex-pair matching (skipped {} edges with same endpoints but different curves)",
-                    brep_id, alias_count, skipped_different_curves,
-                );
             }
 
             // Phase 2: 3D coordinate-based aliasing (supplementary approach)
@@ -4007,13 +4009,7 @@ impl<'a> StepConverter<'a> {
             // This phase matches edges by their 3D endpoint coordinates,
             // catching edges that share the same geometric boundary but
             // have different STEP entity IDs.
-            //
-            // Algorithm:
-            // 1. For each edge's step_id, compute its start and end 3D points
-            // 2. Create a spatial key from the rounded 3D coordinates
-            // 3. Group step_ids by their 3D endpoint pair
-            // 4. Alias non-canonical step_ids to the canonical one
-            let coord_tol = (tol_ctx.model_scale * 2e-3).max(tol_ctx.absolute * 10.0); // 2000 PPM of model scale — matches snap tolerance // 0.1% of model scale for coordinate matching
+            let coord_tol = (tol_ctx.model_scale * 2e-3).max(tol_ctx.absolute * 10.0);
             let mut coord_pair_to_step_ids: HashMap<(i64, i64, i64, i64, i64, i64), Vec<i64>> = HashMap::new();
             let mut step_id_endpoints: HashMap<i64, (Point3d, Point3d)> = HashMap::new();
             let mut unaliased_count = 0usize;
@@ -4025,7 +4021,6 @@ impl<'a> StepConverter<'a> {
                         continue;
                     }
                     unaliased_count += 1;
-                    // Get edge endpoints from the Edge object
                     let edge = &face_data.edges[edge_idx];
                     let start = match edge.start_point() {
                         Some(p) => p,
@@ -4036,7 +4031,6 @@ impl<'a> StepConverter<'a> {
                         None => continue,
                     };
                     step_id_endpoints.insert(step_id, (start, end));
-                    // Quantize 3D coordinates to grid cells for spatial matching
                     let sk = (
                         (start.x / coord_tol).round() as i64,
                         (start.y / coord_tol).round() as i64,
@@ -4045,7 +4039,6 @@ impl<'a> StepConverter<'a> {
                         (end.y / coord_tol).round() as i64,
                         (end.z / coord_tol).round() as i64,
                     );
-                    // Also try reversed endpoint order (same geometric edge, opposite direction)
                     let sk_rev = (
                         (end.x / coord_tol).round() as i64,
                         (end.y / coord_tol).round() as i64,
@@ -4054,34 +4047,62 @@ impl<'a> StepConverter<'a> {
                         (start.y / coord_tol).round() as i64,
                         (start.z / coord_tol).round() as i64,
                     );
-                    // Use canonical ordering (smaller key first) for consistent grouping
                     let canonical_key = if sk <= sk_rev { sk } else { sk_rev };
                     coord_pair_to_step_ids.entry(canonical_key).or_default().push(step_id);
                 }
             }
-            log::info!(
-                "BREP #{}: Phase 2 alias: {} unaliased step_ids, {} coordinate groups, tol={:.2e}",
-                brep_id, unaliased_count, coord_pair_to_step_ids.len(), coord_tol
-            );
             let mut coord_alias_count = 0usize;
+            let mut coord_skipped_different_curves = 0usize;
             for (_key, step_ids) in &coord_pair_to_step_ids {
                 if step_ids.len() < 2 { continue; }
-                // Choose canonical: highest complexity score (densest sampling)
-                let canonical = *step_ids.iter().max_by_key(|&&sid| {
-                    self.edge_curve_complexity_score(sid)
-                }).unwrap();
-                for &sid in step_ids {
-                    if sid != canonical {
-                        edge_cache.register_step_id_alias(sid, canonical);
-                        coord_alias_count += 1;
+                alias_stats.phase2_groups += 1;
+
+                // P2: Apply shape-based grouping (5-point sampling) — same as Phase 1
+                let shape_tol = (tol_ctx.model_scale * 1e-3).max(1e-6);
+                let shape_groups = self.group_step_ids_by_curve_shape(step_ids, shape_tol);
+
+                for (_samples, group_sids) in &shape_groups {
+                    if group_sids.len() < 2 { continue; }
+                    let canonical = *group_sids.iter().max_by_key(|&&sid| {
+                        self.edge_curve_complexity_score(sid)
+                    }).unwrap();
+                    for &sid in group_sids {
+                        if sid != canonical {
+                            edge_cache.register_step_id_alias(sid, canonical);
+                            coord_alias_count += 1;
+                            alias_stats.phase2_aliases += 1;
+                        }
                     }
                 }
+
+                if shape_groups.len() > 1 {
+                    let skipped = step_ids.len() - shape_groups.iter().map(|(_, g)| g.len().min(1)).sum::<usize>();
+                    coord_skipped_different_curves += skipped;
+                    alias_stats.phase2_skipped_different_curves += skipped;
+                }
             }
-            if coord_alias_count > 0 {
-                log::info!(
-                    "BREP #{}: registered {} additional step_id aliases from 3D coordinate matching (tol={:.2e})",
-                    brep_id, coord_alias_count, coord_tol
-                );
+
+            // Log consolidated aliasing statistics (KS-1)
+            alias_stats.log_summary(brep_id);
+        }
+
+        // KS-2: Validate circle consistency in debug builds.
+        // Circles on the same axis must have the same number of points
+        // for watertight tube faces.
+        #[cfg(debug_assertions)]
+        {
+            let inconsistencies = edge_cache.validate_circle_consistency();
+            if !inconsistencies.is_empty() {
+                for inc in &inconsistencies {
+                    log::warn!(
+                        "BREP #{}: circle inconsistency on axis origin=({:.3},{:.3},{:.3}) dir=({:.3},{:.3},{:.3}): {} edges with point counts {:?}",
+                        brep_id,
+                        inc.axis_origin.x, inc.axis_origin.y, inc.axis_origin.z,
+                        inc.axis_dir.x, inc.axis_dir.y, inc.axis_dir.z,
+                        inc.edge_keys.len(),
+                        inc.point_counts,
+                    );
+                }
             }
         }
 

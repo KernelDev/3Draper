@@ -34,7 +34,7 @@
 //! bit pattern regardless of evaluation order, preventing micro-gaps from
 //! accumulating at shared boundaries.
 
-use draper_geometry::{Point3d, Point2d, Curve3d, Curve2d, Surface, tolerance::ToleranceContext};
+use draper_geometry::{Point3d, Point2d, Direction3d, Curve3d, Curve2d, Surface, tolerance::ToleranceContext};
 use draper_topology::{Edge, Solid, TopoId};
 use std::collections::HashMap;
 
@@ -258,6 +258,62 @@ pub struct EdgeCacheStats {
     pub cache_misses: usize,
     /// Number of edges shared by 2+ faces (approximation from uv_per_face).
     pub shared_edges: usize,
+}
+
+/// Statistics for STEP ID aliasing (Phase 1 + Phase 2).
+///
+/// Tracks how many edges were aliased in each phase, how many groups
+/// were formed, and how many edges were skipped as "different curves
+/// with same endpoints".
+#[derive(Clone, Debug, Default)]
+pub struct AliasingStatistics {
+    /// Number of aliases registered in Phase 1 (vertex-pair + shape matching).
+    pub phase1_aliases: usize,
+    /// Number of groups in Phase 1 (vertex-pair groups with 2+ step_ids).
+    pub phase1_groups: usize,
+    /// Number of edges skipped in Phase 1 (same endpoints, different curves).
+    pub phase1_skipped_different_curves: usize,
+    /// Number of aliases registered in Phase 2 (3D coordinate matching).
+    pub phase2_aliases: usize,
+    /// Number of coordinate groups in Phase 2 (with 2+ step_ids).
+    pub phase2_groups: usize,
+    /// Number of edges skipped in Phase 2 (different curves).
+    pub phase2_skipped_different_curves: usize,
+    /// Total number of step_ids processed.
+    pub total_step_ids: usize,
+}
+
+impl AliasingStatistics {
+    /// Log a summary of aliasing statistics.
+    pub fn log_summary(&self, brep_id: i64) {
+        if self.phase1_aliases == 0 && self.phase2_aliases == 0
+            && self.phase1_skipped_different_curves == 0
+            && self.phase2_skipped_different_curves == 0
+        {
+            log::info!(
+                "BREP #{} aliasing: {} step_ids, 0 aliases (no matching edges found)",
+                brep_id, self.total_step_ids,
+            );
+            return;
+        }
+        log::info!(
+            "BREP #{} aliasing: {} step_ids — Phase1: {} aliases in {} groups, {} skipped (different curves); Phase2: {} aliases in {} groups, {} skipped",
+            brep_id,
+            self.total_step_ids,
+            self.phase1_aliases, self.phase1_groups, self.phase1_skipped_different_curves,
+            self.phase2_aliases, self.phase2_groups, self.phase2_skipped_different_curves,
+        );
+    }
+
+    /// Total aliases across all phases.
+    pub fn total_aliases(&self) -> usize {
+        self.phase1_aliases + self.phase2_aliases
+    }
+
+    /// Total skipped edges (different curves with same endpoints).
+    pub fn total_skipped(&self) -> usize {
+        self.phase1_skipped_different_curves + self.phase2_skipped_different_curves
+    }
 }
 
 impl EdgeDiscretizationCache {
@@ -1022,6 +1078,89 @@ impl EdgeDiscretizationCache {
         self.entries.clear();
         self.topo_id_to_key.clear();
     }
+
+    /// Validate that all circles on the same axis have consistent sampling
+    /// (same number of discretization points).
+    ///
+    /// This is critical for watertightness of tube faces (cylinder, cone):
+    /// two circles on the same axis with different radii MUST have the same
+    /// number of points in the same angular positions. Otherwise the
+    /// `bottom[i] → top[i]` connection in tube grid triangulation breaks.
+    ///
+    /// Returns a list of inconsistencies found. Empty vec = all consistent.
+    pub fn validate_circle_consistency(&self) -> Vec<CircleInconsistency> {
+        use std::collections::HashMap;
+
+        // Group cached circles by axis (origin + direction)
+        // Use quantized coordinates as key since Point3d/Direction3d don't impl Hash
+        let quant = 1e-4; // Quantization tolerance for axis grouping
+        let mut axis_groups: HashMap<(i64, i64, i64, i64, i64, i64), Vec<(EdgeCacheKey, usize, Point3d, Direction3d)>> = HashMap::new();
+
+        for (key, entry) in &self.entries {
+            let n = entry.points_3d.len();
+            if n < 8 {
+                continue;
+            }
+
+            if entry.points_3d.len() < 2 {
+                continue;
+            }
+            let first = entry.points_3d.first().unwrap();
+            let last = entry.points_3d.last().unwrap();
+            let axis_origin = *first;
+            let dx = last.x - first.x;
+            let dy = last.y - first.y;
+            let dz = last.z - first.z;
+            let len = (dx * dx + dy * dy + dz * dz).sqrt();
+            if len < 1e-10 {
+                continue;
+            }
+            let axis_dir = Direction3d::new(dx / len, dy / len, dz / len)
+                .unwrap_or(Direction3d::Z);
+
+            let key_q = (
+                (axis_origin.x / quant).round() as i64,
+                (axis_origin.y / quant).round() as i64,
+                (axis_origin.z / quant).round() as i64,
+                (axis_dir.x / quant).round() as i64,
+                (axis_dir.y / quant).round() as i64,
+                (axis_dir.z / quant).round() as i64,
+            );
+            axis_groups.entry(key_q).or_default().push((key.clone(), n, axis_origin, axis_dir));
+        }
+
+        let mut inconsistencies = Vec::new();
+        for (_key_q, group) in &axis_groups {
+            if group.len() < 2 {
+                continue;
+            }
+            let n_values: Vec<usize> = group.iter().map(|(_, n, _, _)| *n).collect();
+            let first_n = n_values[0];
+            if !n_values.iter().all(|&n| n == first_n) {
+                inconsistencies.push(CircleInconsistency {
+                    axis_origin: group[0].2,
+                    axis_dir: group[0].3,
+                    edge_keys: group.iter().map(|(k, _, _, _)| k.clone()).collect(),
+                    point_counts: n_values,
+                });
+            }
+        }
+
+        inconsistencies
+    }
+}
+
+/// Report of a circle sampling inconsistency.
+#[derive(Clone, Debug)]
+pub struct CircleInconsistency {
+    /// Approximate axis origin.
+    pub axis_origin: Point3d,
+    /// Approximate axis direction.
+    pub axis_dir: Direction3d,
+    /// Edge cache keys of circles on this axis.
+    pub edge_keys: Vec<EdgeCacheKey>,
+    /// Point counts for each circle (should all be equal).
+    pub point_counts: Vec<usize>,
 }
 
 /// Compute adaptive grid size for brute-force NURBS point projection.

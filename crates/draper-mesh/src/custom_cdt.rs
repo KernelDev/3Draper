@@ -616,6 +616,57 @@ pub fn point_in_polygon(p: [f64; 2], polygon: &[[f64; 2]]) -> bool {
 }
 
 /// Verify that all constraint edges exist in the triangulation.
+///
+/// This is the PRODUCTION version (not just debug). It checks that every
+/// boundary edge (and hole edge) is present as an edge of at least one
+/// triangle in the mesh.
+///
+/// Returns a list of missing constraint edges. Empty vec = all present.
+pub fn verify_constraint_edges_production(
+    triangles: &[[u32; 3]],
+    n_boundary: usize,
+    hole_ranges: &[(usize, usize)],
+) -> Vec<(u32, u32)> {
+    use std::collections::HashSet;
+
+    let mut tri_edges: HashSet<(u32, u32)> = HashSet::new();
+    for tri in triangles {
+        for i in 0..3 {
+            let a = tri[i].min(tri[(i + 1) % 3]);
+            let b = tri[i].max(tri[(i + 1) % 3]);
+            tri_edges.insert((a, b));
+        }
+    }
+
+    let mut missing = Vec::new();
+
+    // Check outer boundary edges
+    for i in 0..n_boundary {
+        let j = (i + 1) % n_boundary;
+        let a = i.min(j) as u32;
+        let b = i.max(j) as u32;
+        if !tri_edges.contains(&(a, b)) {
+            missing.push((a, b));
+        }
+    }
+
+    // Check hole edges
+    for &(start, end) in hole_ranges {
+        let n_hole = end - start;
+        for i in 0..n_hole {
+            let j = (i + 1) % n_hole;
+            let a = (start + i).min(start + j) as u32;
+            let b = (start + i).max(start + j) as u32;
+            if !tri_edges.contains(&(a, b)) {
+                missing.push((a, b));
+            }
+        }
+    }
+
+    missing
+}
+
+/// Verify that all constraint edges exist in the triangulation.
 #[cfg(debug_assertions)]
 fn verify_constraints(
     triangles: &[[u32; 3]],
