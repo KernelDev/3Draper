@@ -4756,6 +4756,89 @@ fn try_strip_triangulation_ruled_nurbs(
         return None;
     }
 
+    // Resample `rail` to match the arc-length positions of `template_rail`.
+    // This preserves ALL original points from `template_rail` and interpolates
+    // `rail` to those same arc-length fractions.
+    // Returns a Vec of (Point3d, Point2d, original_boundary_index_or_None).
+    let resample_to_positions = |rail: &[usize], template_rail: &[usize], bnd_pts: &[Point3d], bnd_uvs: &[Point2d]|
+        -> Vec<(Point3d, Point2d, Option<usize>)>
+    {
+        if rail.is_empty() || template_rail.is_empty() {
+            return Vec::new();
+        }
+
+        // Compute cumulative arc length for template_rail
+        let mut template_cum: Vec<f64> = Vec::with_capacity(template_rail.len());
+        template_cum.push(0.0);
+        for i in 1..template_rail.len() {
+            let p_prev = bnd_pts[template_rail[i - 1]];
+            let p_curr = bnd_pts[template_rail[i]];
+            let d = ((p_curr.x - p_prev.x).powi(2) + (p_curr.y - p_prev.y).powi(2) + (p_curr.z - p_prev.z).powi(2)).sqrt();
+            template_cum.push(template_cum[i - 1] + d);
+        }
+        let template_total = *template_cum.last().unwrap();
+
+        // Compute cumulative arc length for rail
+        let mut rail_cum: Vec<f64> = Vec::with_capacity(rail.len());
+        rail_cum.push(0.0);
+        for i in 1..rail.len() {
+            let p_prev = bnd_pts[rail[i - 1]];
+            let p_curr = bnd_pts[rail[i]];
+            let d = ((p_curr.x - p_prev.x).powi(2) + (p_curr.y - p_prev.y).powi(2) + (p_curr.z - p_prev.z).powi(2)).sqrt();
+            rail_cum.push(rail_cum[i - 1] + d);
+        }
+        let rail_total = *rail_cum.last().unwrap_or(&1.0);
+
+        // For each template point, interpolate the rail to the same arc-length fraction
+        let mut out: Vec<(Point3d, Point2d, Option<usize>)> = Vec::with_capacity(template_rail.len());
+        for (k, &tmpl_idx) in template_rail.iter().enumerate() {
+            // Arc-length fraction for this template point
+            let frac = if template_total > 1e-15 { template_cum[k] / template_total } else { k as f64 / template_rail.len().max(1) as f64 };
+            let target_len = frac * rail_total;
+
+            // Find the position in rail
+            let seg_idx = match rail_cum.binary_search_by(|c| c.partial_cmp(&target_len).unwrap_or(std::cmp::Ordering::Equal)) {
+                Ok(i) => i,
+                Err(i) => i.saturating_sub(1).min(rail.len().saturating_sub(2)),
+            };
+
+            if seg_idx >= rail.len() {
+                let idx = *rail.last().unwrap();
+                out.push((bnd_pts[idx], bnd_uvs[idx], Some(idx)));
+                continue;
+            }
+
+            let seg_start = rail_cum[seg_idx];
+            let seg_end = if seg_idx + 1 < rail_cum.len() { rail_cum[seg_idx + 1] } else { rail_total };
+            let seg_len = seg_end - seg_start;
+
+            if seg_len < 1e-15 {
+                let idx = rail[seg_idx];
+                out.push((bnd_pts[idx], bnd_uvs[idx], Some(idx)));
+                continue;
+            }
+
+            let local_t = (target_len - seg_start) / seg_len;
+            let idx_a = rail[seg_idx];
+            let idx_b = rail[(seg_idx + 1).min(rail.len() - 1)];
+            let pa = bnd_pts[idx_a];
+            let pb = bnd_pts[idx_b];
+            let ua = bnd_uvs[idx_a];
+            let ub = bnd_uvs[idx_b];
+            let p = Point3d::new(
+                pa.x + local_t * (pb.x - pa.x),
+                pa.y + local_t * (pb.y - pa.y),
+                pa.z + local_t * (pb.z - pa.z),
+            );
+            let uv = Point2d::new(
+                ua.u + local_t * (ub.u - ua.u),
+                ua.v + local_t * (ub.v - ua.v),
+            );
+            out.push((p, uv, None));
+        }
+        out
+    };
+
     // Resample a polyline (Vec of boundary indices) to n target points by arc length.
     // Returns a Vec of (Point3d, Point2d, original_boundary_index_or_None).
     // If original_boundary_index is None, the point was interpolated and does not
@@ -4888,13 +4971,20 @@ fn try_strip_triangulation_ruled_nurbs(
         let vi_a = if let Some(orig) = orig_a {
             *vertex_map.get(&orig).unwrap_or(&0)
         } else {
-            // Evaluate the NURBS surface at the interpolated UV for exact surface point.
-            let p_exact = nurbs.point_at(uv_a.u, uv_a.v);
-            let vi = mesh.add_vertex(p_exact);
+            // Use the LINEARLY INTERPOLATED 3D point (p_a) from the resample
+            // function, NOT nurbs.point_at(uv). The interpolated point p_a is
+            // computed by linearly interpolating between two cached boundary
+            // points (which are bit-identical between faces sharing the same
+            // EDGE_CURVE). This ensures watertightness: both faces get the
+            // exact same 3D position for the same interpolated parameter.
+            //
+            // Using nurbs.point_at(uv) here would give DIFFERENT 3D positions
+            // for different NURBS surfaces sharing the same edge, because each
+            // NURBS surface has its own parameterization. This was the root
+            // cause of the remaining boundary edges.
+            let vi = mesh.add_vertex(p_a);
             let derivs = nurbs.derivatives_at(uv_a.u, uv_a.v);
             mesh.add_vertex_normal(vi, [derivs.normal().x, derivs.normal().y, derivs.normal().z]);
-            // Suppress unused-variable warning
-            let _ = p_a;
             vi
         };
         rail_a_mesh_idx.push(vi_a);
@@ -4904,11 +4994,11 @@ fn try_strip_triangulation_ruled_nurbs(
         let vi_b = if let Some(orig) = orig_b {
             *vertex_map.get(&orig).unwrap_or(&0)
         } else {
-            let p_exact = nurbs.point_at(uv_b.u, uv_b.v);
-            let vi = mesh.add_vertex(p_exact);
+            // Same as Rail A: use linearly interpolated 3D point (p_b)
+            // from cached boundary points, NOT nurbs.point_at(uv).
+            let vi = mesh.add_vertex(p_b);
             let derivs = nurbs.derivatives_at(uv_b.u, uv_b.v);
             mesh.add_vertex_normal(vi, [derivs.normal().x, derivs.normal().y, derivs.normal().z]);
-            let _ = p_b;
             vi
         };
         rail_b_mesh_idx.push(vi_b);
