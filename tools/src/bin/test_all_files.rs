@@ -10,16 +10,25 @@ fn main() {
         .filter_level(log::LevelFilter::Error)
         .init();
 
-    let test_dir = "/home/z/my-project/3Draper/test";
+    let test_dirs = [
+        "/home/z/my-project/3Draper/test",
+        "/home/z/my-project/3Draper/test/synthetic",
+    ];
+
     let mut step_files: Vec<String> = Vec::new();
 
-    if let Ok(entries) = std::fs::read_dir(test_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if let Some(ext) = path.extension() {
-                let ext = ext.to_string_lossy().to_lowercase();
-                if ext == "stp" || ext == "step" {
-                    step_files.push(path.to_string_lossy().to_string());
+    for test_dir in &test_dirs {
+        if let Ok(entries) = std::fs::read_dir(test_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(ext) = path.extension() {
+                    let ext = ext.to_string_lossy().to_lowercase();
+                    if ext == "stp" || ext == "step" {
+                        let p = path.to_string_lossy().to_string();
+                        if !step_files.contains(&p) {
+                            step_files.push(p);
+                        }
+                    }
                 }
             }
         }

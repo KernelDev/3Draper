@@ -1,0 +1,89 @@
+ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('STEP AP214'),'1');
+FILE_NAME('synthetic_test','2026-07-08',('test'),(''),'3Draper synthetic test','','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
+ENDSEC;
+DATA;
+
+#1 = (LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.));
+#2 = (NAMED_UNIT(*)PLANE_ANGLE_UNIT()SI_UNIT($,.RADIAN.));
+#3 = (NAMED_UNIT(*)SI_UNIT($,.STERADIAN.)SOLID_ANGLE_UNIT());
+#4 = UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(0.001),#1,'closure','closure');
+#5 = (GEOMETRIC_REPRESENTATION_CONTEXT(3)GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#4))GLOBAL_UNIT_ASSIGNED_CONTEXT((#1,#2,#3))REPRESENTATION_CONTEXT('','3D'));
+/* Points */
+#10 = CARTESIAN_POINT('',(0.0,0.0,0.0));
+#11 = CARTESIAN_POINT('',(5.0,0.0,0.0));
+#12 = CARTESIAN_POINT('',(4.9,0.0,0.0));
+#13 = CARTESIAN_POINT('',(0.0,0.0,1.0));
+#14 = CARTESIAN_POINT('',(5.0,0.0,1.0));
+#15 = CARTESIAN_POINT('',(4.9,0.0,1.0));
+/* Directions */
+#20 = DIRECTION('',(1.0,0.0,0.0));
+#22 = DIRECTION('',(0.0,0.0,1.0));
+/* Axis2 placements */
+#30 = AXIS2_PLACEMENT_3D('',#10,#22,#20);
+#31 = AXIS2_PLACEMENT_3D('',#13,#22,#20);
+/* Circles */
+#40 = CIRCLE('',#30,5.0);
+#41 = CIRCLE('',#30,4.9);
+#42 = CIRCLE('',#31,5.0);
+#43 = CIRCLE('',#31,4.9);
+/* Lines */
+#44 = LINE('',#11,#22);
+#45 = LINE('',#12,#22);
+/* Planes and cylinder */
+#50 = PLANE('',#30);
+#51 = PLANE('',#31);
+#52 = CYLINDRICAL_SURFACE('',#30,5.0);
+#53 = CYLINDRICAL_SURFACE('',#30,4.9);
+/* Vertices */
+#60 = VERTEX_POINT('',#11);
+#61 = VERTEX_POINT('',#12);
+#62 = VERTEX_POINT('',#14);
+#63 = VERTEX_POINT('',#15);
+/* Edge curves */
+#70 = EDGE_CURVE('',#60,#60,#40,.T.);  /* full circle outer bottom */
+#71 = EDGE_CURVE('',#61,#61,#41,.T.);  /* full circle inner bottom */
+#72 = EDGE_CURVE('',#62,#62,#42,.T.);  /* full circle outer top */
+#73 = EDGE_CURVE('',#63,#63,#43,.T.);  /* full circle inner top */
+#74 = EDGE_CURVE('',#60,#62,#44,.T.);  /* line outer */
+#75 = EDGE_CURVE('',#61,#63,#45,.T.);  /* line inner */
+/* Bottom face (annulus with hole) */
+#80 = ORIENTED_EDGE('',*,*,#70,.T.);
+#81 = ORIENTED_EDGE('',*,*,#71,.F.);
+#82 = EDGE_LOOP('',(#80));
+#83 = EDGE_LOOP('',(#81));
+#84 = FACE_OUTER_BOUND('',#82,.T.);
+#85 = FACE_BOUND('',#83,.T.);
+#86 = ADVANCED_FACE('',(#84,#85),#50,.F.);
+/* Top face (annulus with hole) */
+#87 = ORIENTED_EDGE('',*,*,#72,.F.);
+#88 = ORIENTED_EDGE('',*,*,#73,.T.);
+#89 = EDGE_LOOP('',(#87));
+#90 = EDGE_LOOP('',(#88));
+#91 = FACE_OUTER_BOUND('',#89,.T.);
+#92 = FACE_BOUND('',(#90,.T.);
+#93 = ADVANCED_FACE('',(#91,#92),#51,.T.);
+/* Outer cylinder face */
+#94 = ORIENTED_EDGE('',*,*,#70,.F.);
+#95 = ORIENTED_EDGE('',*,*,#74,.T.);
+#96 = ORIENTED_EDGE('',*,*,#72,.T.);
+#97 = ORIENTED_EDGE('',*,*,#74,.F.);
+#98 = EDGE_LOOP('',(#94,#95,#96,#97));
+#99 = FACE_OUTER_BOUND('',#98,.T.);
+#100 = ADVANCED_FACE('',(#99),#52,.T.);
+/* Inner cylinder face */
+#101 = ORIENTED_EDGE('',*,*,#71,.T.);
+#102 = ORIENTED_EDGE('',*,*,#75,.F.);
+#103 = ORIENTED_EDGE('',*,*,#73,.F.);
+#104 = ORIENTED_EDGE('',*,*,#75,.T.);
+#105 = EDGE_LOOP('',(#101,#102,#103,#104));
+#106 = FACE_OUTER_BOUND('',#105,.T.);
+#107 = ADVANCED_FACE('',(#106),#53,.F.);
+/* Shell and solid */
+#110 = CLOSED_SHELL('',(#86,#93,#100,#107));
+#111 = MANIFOLD_SOLID_BREP('thin_annulus',#110);
+#112 = ADVANCED_BREP_SHAPE_REPRESENTATION('',(#111),#5);
+ENDSEC;
+END-ISO-10303-21;
