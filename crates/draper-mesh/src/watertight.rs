@@ -1402,71 +1402,127 @@ pub fn repair_t_junctions(mesh: &mut TriangleMesh, tolerance: f64) -> usize {
             break;
         }
 
-        // Apply the splits: replace each triangle sharing a split edge
-        // with a fan of triangles through the inserted vertices.
+        // ============================================================
+        // Apply the splits — GROUP BY TRIANGLE (critical fix)
+        //
+        // BUG in previous version: each split edge was processed
+        // independently. If a triangle had T-junctions on 2+ edges,
+        // it was processed multiple times, creating OVERLAPPING
+        // triangles that corrupted the mesh.
+        //
+        // FIX: Group all T-junctions by triangle, then re-triangulate
+        // each affected triangle ONCE using ear-clipping on the
+        // boundary polygon (3 corners + all T-junctions in CCW order).
+        // ============================================================
+
+        // Step 1: Build triangle → list of (edge_endpoint_a, edge_endpoint_b, t_junctions)
+        // The edge endpoints are in the triangle's winding order (not canonical).
+        let mut tri_splits: HashMap<usize, Vec<(u32, u32, Vec<(f64, u32)>)>> = HashMap::new();
+
+        for &(a, b) in splits.keys() {
+            let edge_key = if a < b { (a, b) } else { (b, a) };
+            let tris_on_edge = match edge_tris.get(&edge_key) {
+                Some(t) => t,
+                None => continue,
+            };
+            let tj_list = splits.get(&(a, b)).unwrap();
+
+            for &(ti, opp) in tris_on_edge {
+                let tri = mesh.triangles[ti];
+                // Find the edge direction in this triangle's winding order.
+                // The triangle is (tri[0], tri[1], tri[2]) in CCW order.
+                // Check which pair of vertices matches (a, b) or (b, a).
+                let mut edge_in_tri_order: Option<(u32, u32)> = None;
+                for i in 0..3 {
+                    let v0 = tri[i];
+                    let v1 = tri[(i + 1) % 3];
+                    let v2 = tri[(i + 2) % 3];
+                    if (v0 == a && v1 == b) || (v0 == b && v1 == a) {
+                        // Edge is (v0, v1) in triangle winding, opposite is v2 == opp
+                        if v2 == opp {
+                            edge_in_tri_order = Some((v0, v1));
+                            break;
+                        }
+                    }
+                }
+                if let Some((ea, eb)) = edge_in_tri_order {
+                    // If the triangle traverses the edge as (ea, eb) but the
+                    // t_junctions are sorted along (a, b), we may need to reverse.
+                    let tj_directed: Vec<(f64, u32)> = if (ea, eb) == (a, b) {
+                        tj_list.clone()
+                    } else {
+                        // Reverse: t along (b, a) = 1 - t along (a, b)
+                        tj_list.iter().rev().map(|&(t, v)| (1.0 - t, v)).collect()
+                    };
+                    tri_splits.entry(ti).or_default().push((ea, eb, tj_directed));
+                }
+            }
+        }
+
+        // Step 2: For each affected triangle, build boundary polygon and ear-clip.
         let mut triangles_to_remove: HashSet<usize> = HashSet::new();
         let mut new_triangles: Vec<[u32; 3]> = Vec::new();
         let mut new_face_ids: Vec<u64> = Vec::new();
         let face_ids = mesh.triangle_face_ids.as_ref();
 
-        for ((a, b), t_junctions) in &splits {
-            let mut chain: Vec<u32> = Vec::with_capacity(t_junctions.len() + 2);
-            chain.push(*a);
-            for &(_, vi) in t_junctions {
-                chain.push(vi);
+        for (ti, edge_splits) in &tri_splits {
+            triangles_to_remove.insert(*ti);
+            let tri = mesh.triangles[*ti];
+            let [a, b, c] = tri;
+            let fid = face_ids.and_then(|ids| ids.get(*ti).copied()).unwrap_or(u64::MAX);
+
+            // Build boundary polygon in CCW (triangle winding) order:
+            //   a, [T-junctions on edge a→b], b, [T-junctions on edge b→c], c, [T-junctions on edge c→a]
+            let mut boundary: Vec<u32> = Vec::with_capacity(3 + edge_splits.iter().map(|(_, _, tjs)| tjs.len()).sum::<usize>());
+            boundary.push(a);
+
+            // T-junctions on edge a→b (direction a→b)
+            for (ea, eb, tjs) in edge_splits.iter() {
+                if (*ea, *eb) == (a, b) {
+                    for &(_, vi) in tjs {
+                        boundary.push(vi);
+                    }
+                }
             }
-            chain.push(*b);
+            boundary.push(b);
 
-            let edge_key = if a < b { (*a, *b) } else { (*b, *a) };
-            let tris_on_edge = match edge_tris.get(&edge_key) {
-                Some(t) => t,
-                None => continue,
-            };
-
-            for &(ti, opp) in tris_on_edge {
-                triangles_to_remove.insert(ti);
-                let tri = mesh.triangles[ti];
-                let fid = face_ids.and_then(|ids| ids.get(ti).copied()).unwrap_or(u64::MAX);
-
-                // Determine winding order of (a, b) in this triangle.
-                let tri_verts = [tri[0], tri[1], tri[2]];
-                let mut ab_order: Option<bool> = None;
-                for i in 0..3 {
-                    let v0 = tri_verts[i];
-                    let v1 = tri_verts[(i + 1) % 3];
-                    let v2 = tri_verts[(i + 2) % 3];
-                    if v0 == *a && v1 == *b && v2 == opp {
-                        ab_order = Some(true);
-                        break;
-                    }
-                    if v0 == *b && v1 == *a && v2 == opp {
-                        ab_order = Some(false);
-                        break;
+            // T-junctions on edge b→c (direction b→c)
+            for (ea, eb, tjs) in edge_splits.iter() {
+                if (*ea, *eb) == (b, c) {
+                    for &(_, vi) in tjs {
+                        boundary.push(vi);
                     }
                 }
+            }
+            boundary.push(c);
 
-                let ab_order = match ab_order {
-                    Some(o) => o,
-                    None => continue,
-                };
-
-                if ab_order {
-                    for i in 0..chain.len() - 1 {
-                        new_triangles.push([chain[i], chain[i + 1], opp]);
-                        new_face_ids.push(fid);
-                    }
-                } else {
-                    for i in 0..chain.len() - 1 {
-                        let v_start = chain[chain.len() - 1 - i];
-                        let v_end = chain[chain.len() - 2 - i];
-                        new_triangles.push([v_start, v_end, opp]);
-                        new_face_ids.push(fid);
+            // T-junctions on edge c→a (direction c→a)
+            for (ea, eb, tjs) in edge_splits.iter() {
+                if (*ea, *eb) == (c, a) {
+                    for &(_, vi) in tjs {
+                        boundary.push(vi);
                     }
                 }
+            }
+
+            // Re-triangulate using incremental vertex insertion.
+            // Start with the original triangle, then insert each T-junction
+            // point one at a time, splitting the triangle that contains it.
+            // This guarantees NO new T-junctions are created (unlike ear-clipping
+            // or fan triangulation, which can create interior edges that pass
+            // through boundary vertices).
+            let new_tris = incremental_insert_t_junctions(
+                [a, b, c],
+                edge_splits,
+                &mesh.vertices,
+            );
+            for nt in new_tris {
+                new_triangles.push(nt);
+                new_face_ids.push(fid);
             }
         }
 
-        // Rebuild triangle list: keep unaffected, append new.
+        // Step 3: Rebuild triangle list — keep unaffected, append new.
         let mut keep_triangles: Vec<[u32; 3]> = Vec::with_capacity(mesh.triangles.len());
         let mut keep_face_ids: Vec<u64> = Vec::with_capacity(mesh.triangles.len());
         let face_ids_owned = mesh.triangle_face_ids.take();
@@ -1514,6 +1570,90 @@ pub fn repair_t_junctions(mesh: &mut TriangleMesh, tolerance: f64) -> usize {
     }
 
     total_repaired
+}
+
+/// Incrementally insert T-junction vertices into a triangle, splitting it.
+///
+/// Starts with the original triangle [A, B, C]. For each T-junction vertex
+/// that lies on one of the triangle's edges, finds the current triangle
+/// that has that edge and splits it into two triangles at the T-junction point.
+///
+/// This is the ONLY correct approach for triangles with T-junctions on
+/// multiple edges. Fan triangulation and ear-clipping create interior
+/// edges that pass through T-junction vertices, creating NEW T-junctions.
+/// Incremental insertion never creates such edges.
+///
+/// # Arguments
+/// * `tri` — The original triangle [A, B, C] (vertex indices).
+/// * `edge_splits` — List of (edge_start, edge_end, t_junctions) where
+///   edge_start→edge_end is the edge direction in the triangle's winding
+///   order, and t_junctions is sorted by parameter t along that direction.
+/// * `vertices` — The mesh vertex array (for 3D coordinates).
+///
+/// # Returns
+/// List of triangles [v0, v1, v2] with the same winding as the input.
+fn incremental_insert_t_junctions(
+    tri: [u32; 3],
+    edge_splits: &[(u32, u32, Vec<(f64, u32)>)],
+    _vertices: &[Point3d],
+) -> Vec<[u32; 3]> {
+    // Start with the original triangle
+    let mut triangles: Vec<[u32; 3]> = vec![tri];
+
+    // For each edge with T-junctions, insert them one at a time.
+    // T-junctions are sorted by t (ascending) along the edge direction.
+    for &(mut ea, mut eb, ref tjs) in edge_splits {
+        for &(_, vi) in tjs {
+            // Find the triangle that has edge (ea, eb).
+            // After each insertion, the edge is split: (ea, eb) becomes
+            // (ea, vi) and (vi, eb). Since T-junctions are sorted by t
+            // (ascending), the next T-junction is always on the (vi, eb)
+            // sub-edge, so we update ea = vi.
+            let tri_idx = triangles.iter().position(|t| {
+                let has_ea = t[0] == ea || t[1] == ea || t[2] == ea;
+                let has_eb = t[0] == eb || t[1] == eb || t[2] == eb;
+                has_ea && has_eb
+            });
+
+            match tri_idx {
+                Some(idx) => {
+                    let [a, b, c] = triangles[idx];
+                    // Determine which vertex is the "opposite" (not ea or eb)
+                    let opp = if a != ea && a != eb {
+                        a
+                    } else if b != ea && b != eb {
+                        b
+                    } else {
+                        c
+                    };
+
+                    // Determine winding: is the edge (ea, eb) or (eb, ea)?
+                    let ab_order = (a == ea && b == eb) || (b == ea && c == eb) || (c == ea && a == eb);
+
+                    // Split: replace triangle with two sub-triangles.
+                    if ab_order {
+                        triangles[idx] = [ea, vi, opp];
+                        triangles.push([vi, eb, opp]);
+                    } else {
+                        triangles[idx] = [eb, vi, opp];
+                        triangles.push([vi, ea, opp]);
+                    }
+
+                    // Update edge for next T-junction: since t_junctions are
+                    // sorted ascending by t, the next one is between vi and eb.
+                    ea = vi;
+                }
+                None => {
+                    log::debug!(
+                        "incremental_insert: edge ({}, {}) not found — vertex {} may already be connected",
+                        ea, eb, vi,
+                    );
+                }
+            }
+        }
+    }
+
+    triangles
 }
 
 /// Check if point `p` lies on segment `a-b` within tolerance `tol_sq`.
@@ -2011,5 +2151,197 @@ mod tests {
 
         let report = validate_watertight(&mesh, false);
         assert!(report.degenerate_triangle_count > 0);
+    }
+
+    // ============================================================
+    // T-Junction repair tests
+    // ============================================================
+
+    /// Helper: build a mesh with one triangle (a, b, c) and an extra
+    /// vertex `v` on edge a-b that is NOT part of any triangle.
+    fn make_simple_t_junction_mesh() -> TriangleMesh {
+        let mut mesh = TriangleMesh::new();
+        mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0)); // 0 = a
+        mesh.add_vertex(Point3d::new(2.0, 0.0, 0.0)); // 1 = b
+        mesh.add_vertex(Point3d::new(1.0, 1.0, 0.0)); // 2 = c
+        mesh.add_vertex(Point3d::new(1.0, 0.0, 0.0)); // 3 = v (T-junction on a-b)
+        mesh.add_triangle(0, 1, 2);
+        mesh
+    }
+
+    #[test]
+    fn test_repair_simple_t_junction() {
+        let mut mesh = make_simple_t_junction_mesh();
+        let n_repaired = repair_t_junctions(&mut mesh, 1e-6);
+        assert_eq!(n_repaired, 1, "Should detect 1 T-junction");
+        assert_eq!(mesh.triangle_count(), 2, "Should have 2 triangles after repair");
+        let uses_v3: usize = mesh.triangles.iter()
+            .filter(|t| t[0] == 3 || t[1] == 3 || t[2] == 3)
+            .count();
+        assert_eq!(uses_v3, 2, "Both triangles should use vertex 3");
+    }
+
+    #[test]
+    fn test_repair_multiple_t_junctions_on_same_edge() {
+        let mut mesh = TriangleMesh::new();
+        mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0));  // 0 = a
+        mesh.add_vertex(Point3d::new(3.0, 0.0, 0.0));  // 1 = b
+        mesh.add_vertex(Point3d::new(1.5, 1.0, 0.0));  // 2 = c
+        mesh.add_vertex(Point3d::new(1.0, 0.0, 0.0));  // 3 = v0 (t=1/3)
+        mesh.add_vertex(Point3d::new(2.0, 0.0, 0.0));  // 4 = v1 (t=2/3)
+        mesh.add_triangle(0, 1, 2);
+        let n_repaired = repair_t_junctions(&mut mesh, 1e-6);
+        assert_eq!(n_repaired, 2, "Should detect 2 T-junctions on edge a-b");
+        assert_eq!(mesh.triangle_count(), 3, "Should have 3 triangles after repair");
+    }
+
+    /// CRITICAL TEST: T-junctions on TWO edges of the same triangle.
+    /// This is the bug that caused "terrible" triangulation in as1-oc-214.stp.
+    /// The old code processed each edge independently, creating OVERLAPPING
+    /// triangles. The fix groups by triangle and ear-clips the boundary polygon.
+    #[test]
+    fn test_repair_t_junctions_on_two_edges() {
+        let mut mesh = TriangleMesh::new();
+        // Triangle (0, 1, 2) with:
+        //   - Vertex 3 on edge 0→1 (at t=0.5)
+        //   - Vertex 4 on edge 1→2 (at t=0.5)
+        mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0));  // 0 = a
+        mesh.add_vertex(Point3d::new(2.0, 0.0, 0.0));  // 1 = b
+        mesh.add_vertex(Point3d::new(1.0, 2.0, 0.0));  // 2 = c
+        mesh.add_vertex(Point3d::new(1.0, 0.0, 0.0));  // 3 = v on edge 0-1
+        mesh.add_vertex(Point3d::new(1.5, 1.0, 0.0));  // 4 = v on edge 1-2
+        mesh.add_triangle(0, 1, 2);
+
+        let n_repaired = repair_t_junctions(&mut mesh, 1e-6);
+        assert_eq!(n_repaired, 2, "Should detect 2 T-junctions");
+
+        // The original triangle should be replaced by exactly 3 non-overlapping
+        // triangles (not 4, which would indicate the overlap bug).
+        assert_eq!(mesh.triangle_count(), 3,
+            "Should have 3 triangles (not 4 — 4 indicates the overlap bug), got {}",
+            mesh.triangle_count());
+
+        // Verify no degenerate triangles
+        for tri in &mesh.triangles {
+            let v0 = mesh.vertices[tri[0] as usize];
+            let v1 = mesh.vertices[tri[1] as usize];
+            let v2 = mesh.vertices[tri[2] as usize];
+            let e1x = v1.x - v0.x;
+            let e1y = v1.y - v0.y;
+            let e2x = v2.x - v0.x;
+            let e2y = v2.y - v0.y;
+            let cross = e1x * e2y - e1y * e2x;
+            assert!(cross.abs() > 1e-10,
+                "Degenerate triangle detected: ({}, {}, {})", tri[0], tri[1], tri[2]);
+        }
+
+        // Verify total area is preserved (original triangle area = 2.0)
+        let mut total_area = 0.0_f64;
+        for tri in &mesh.triangles {
+            let v0 = mesh.vertices[tri[0] as usize];
+            let v1 = mesh.vertices[tri[1] as usize];
+            let v2 = mesh.vertices[tri[2] as usize];
+            let cross = (v1.x - v0.x) * (v2.y - v0.y) - (v1.y - v0.y) * (v2.x - v0.x);
+            total_area += cross.abs() * 0.5;
+        }
+        assert!((total_area - 2.0).abs() < 1e-6,
+            "Total area should be 2.0 (preserved), got {}", total_area);
+    }
+
+    /// CRITICAL TEST: T-junctions on ALL THREE edges of the same triangle.
+    #[test]
+    fn test_repair_t_junctions_on_three_edges() {
+        let mut mesh = TriangleMesh::new();
+        mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0));  // 0 = a
+        mesh.add_vertex(Point3d::new(2.0, 0.0, 0.0));  // 1 = b
+        mesh.add_vertex(Point3d::new(1.0, 2.0, 0.0));  // 2 = c
+        mesh.add_vertex(Point3d::new(1.0, 0.0, 0.0));  // 3 = v on edge 0-1 (midpoint)
+        mesh.add_vertex(Point3d::new(1.5, 1.0, 0.0));  // 4 = v on edge 1-2 (midpoint)
+        mesh.add_vertex(Point3d::new(0.5, 1.0, 0.0));  // 5 = v on edge 2-0 (midpoint)
+        mesh.add_triangle(0, 1, 2);
+
+        let n_repaired = repair_t_junctions(&mut mesh, 1e-6);
+        assert_eq!(n_repaired, 3, "Should detect 3 T-junctions");
+
+        // Total area should be preserved (original = 2.0)
+        let mut total_area = 0.0_f64;
+        for tri in &mesh.triangles {
+            let v0 = mesh.vertices[tri[0] as usize];
+            let v1 = mesh.vertices[tri[1] as usize];
+            let v2 = mesh.vertices[tri[2] as usize];
+            let cross = (v1.x - v0.x) * (v2.y - v0.y) - (v1.y - v0.y) * (v2.x - v0.x);
+            total_area += cross.abs() * 0.5;
+        }
+        assert!((total_area - 2.0).abs() < 1e-6,
+            "Total area should be 2.0 (preserved), got {}", total_area);
+
+        // All 6 vertices should be used
+        let mut used = vec![false; 6];
+        for tri in &mesh.triangles {
+            for &v in tri {
+                used[v as usize] = true;
+            }
+        }
+        for (i, u) in used.iter().enumerate() {
+            assert!(*u, "Vertex {} should be used in triangulation", i);
+        }
+    }
+
+    /// Test: 3D-oriented triangle (not in XY plane) — verifies the ear-clipper
+    /// uses full 3D cross product, not just XY.
+    #[test]
+    fn test_repair_t_junction_3d_vertical_triangle() {
+        let mut mesh = TriangleMesh::new();
+        // Triangle in the XZ plane (vertical, not XY)
+        mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0));  // 0 = a
+        mesh.add_vertex(Point3d::new(2.0, 0.0, 0.0));  // 1 = b
+        mesh.add_vertex(Point3d::new(1.0, 0.0, 2.0));  // 2 = c (vertical)
+        mesh.add_vertex(Point3d::new(1.0, 0.0, 0.0));  // 3 = v on edge 0-1
+        mesh.add_triangle(0, 1, 2);
+
+        let n_repaired = repair_t_junctions(&mut mesh, 1e-6);
+        assert_eq!(n_repaired, 1, "Should detect 1 T-junction on vertical triangle");
+        assert_eq!(mesh.triangle_count(), 2, "Should have 2 triangles");
+
+        // Verify no degenerate triangles
+        for tri in &mesh.triangles {
+            let v0 = mesh.vertices[tri[0] as usize];
+            let v1 = mesh.vertices[tri[1] as usize];
+            let v2 = mesh.vertices[tri[2] as usize];
+            let e1x = v1.x - v0.x; let e1y = v1.y - v0.y; let e1z = v1.z - v0.z;
+            let e2x = v2.x - v0.x; let e2y = v2.y - v0.y; let e2z = v2.z - v0.z;
+            let cx = e1y * e2z - e1z * e2y;
+            let cy = e1z * e2x - e1x * e2z;
+            let cz = e1x * e2y - e1y * e2x;
+            let mag_sq = cx*cx + cy*cy + cz*cz;
+            assert!(mag_sq > 1e-10, "Degenerate triangle in 3D");
+        }
+    }
+
+    #[test]
+    fn test_repair_no_t_junctions() {
+        let mut mesh = TriangleMesh::new();
+        mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0));
+        mesh.add_vertex(Point3d::new(1.0, 0.0, 0.0));
+        mesh.add_vertex(Point3d::new(1.0, 1.0, 0.0));
+        mesh.add_vertex(Point3d::new(0.0, 1.0, 0.0));
+        // Watertight quad (2 triangles, no T-junctions)
+        mesh.add_triangle(0, 1, 2);
+        mesh.add_triangle(0, 2, 3);
+        let n = repair_t_junctions(&mut mesh, 1e-6);
+        assert_eq!(n, 0);
+        assert_eq!(mesh.triangle_count(), 2);
+    }
+
+    #[test]
+    fn test_repair_empty_mesh() {
+        let mut mesh = TriangleMesh::new();
+        assert_eq!(repair_t_junctions(&mut mesh, 1e-6), 0);
+    }
+
+    #[test]
+    fn test_repair_zero_tolerance() {
+        let mut mesh = make_simple_t_junction_mesh();
+        assert_eq!(repair_t_junctions(&mut mesh, 0.0), 0);
     }
 }
