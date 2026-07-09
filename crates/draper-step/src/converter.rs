@@ -1820,6 +1820,22 @@ impl BrepSession {
                     );
                 }
             }
+
+            // Gap filling: fill missing triangles for boundary edge loops.
+            // This catches small holes where a face's triangulation didn't
+            // quite reach the boundary (e.g., bolt thread transitions).
+            // Only run if there are still boundary edges after all previous
+            // post-processing steps.
+            let report_after_tj = validate_watertight(&self.mesh, false);
+            if report_after_tj.boundary_edge_count > 0 {
+                let n_filled = draper_mesh::fill_boundary_gaps(&mut self.mesh, 32);
+                if n_filled > 0 {
+                    log::info!(
+                        "BREP #{} detailed (chunked): filled {} gap triangles (was {} boundary edges)",
+                        brep_id, n_filled, report_after_tj.boundary_edge_count,
+                    );
+                }
+            }
         }
 
         // Remove duplicate triangles
@@ -4212,6 +4228,18 @@ impl<'a> StepConverter<'a> {
                     );
                 }
             }
+
+            // Gap filling: fill missing triangles for boundary edge loops.
+            let report_after_tj = validate_watertight(&mesh, false);
+            if report_after_tj.boundary_edge_count > 0 {
+                let n_filled = draper_mesh::fill_boundary_gaps(&mut mesh, 32);
+                if n_filled > 0 {
+                    log::info!(
+                        "BREP #{}: filled {} gap triangles (was {} boundary edges)",
+                        brep_id, n_filled, report_after_tj.boundary_edge_count,
+                    );
+                }
+            }
         }
         // When the STEP file uses different VERTEX_POINT entities for the
         // same geometric boundary (e.g., Plane face uses LINE, NURBS face
@@ -4942,6 +4970,20 @@ impl<'a> StepConverter<'a> {
                             brep_id, pre_tj_filter - post_tj_filter, pre_tj_filter, post_tj_filter,
                         );
                     }
+                }
+            }
+
+            // Gap filling: fill missing triangles for boundary edge loops.
+            // This catches small holes where a face's triangulation didn't
+            // quite reach the boundary (e.g., bolt thread transitions).
+            let report_after_tj = validate_watertight(&mesh, false);
+            if report_after_tj.boundary_edge_count > 0 {
+                let n_filled = draper_mesh::fill_boundary_gaps(&mut mesh, 32);
+                if n_filled > 0 {
+                    log::info!(
+                        "BREP #{} detailed: filled {} gap triangles (was {} boundary edges)",
+                        brep_id, n_filled, report_after_tj.boundary_edge_count,
+                    );
                 }
             }
         }

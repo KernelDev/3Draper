@@ -1721,6 +1721,331 @@ fn filter_degenerate_triangles_in_place(mesh: &mut TriangleMesh, min_area_sq: f6
     };
 }
 
+// ============================================================
+// GAP FILLING — fill missing triangles for boundary edge loops
+//
+// After all weld/T-junction repair, some boundary edges may remain.
+// These form "holes" in the mesh — typically small triangular gaps
+// where a face's triangulation didn't quite reach the boundary.
+//
+// This function:
+// 1. Finds all boundary edges (edges with exactly 1 adjacent triangle)
+// 2. Groups them into closed loops
+// 3. Triangulates each loop using ear-clipping
+// 4. Ensures winding is consistent with existing triangles
+// ============================================================
+
+/// Fill boundary edge loops by adding missing triangles.
+///
+/// This is a post-processing step that runs after weld and T-junction
+/// repair. It finds closed loops of boundary edges and triangulates
+/// them, ensuring the mesh becomes watertight.
+///
+/// # Arguments
+/// * `mesh` — The triangle mesh to repair (modified in place).
+/// * `max_loop_size` — Maximum number of edges in a loop to fill.
+///   Loops larger than this are skipped (too complex, likely a real
+///   topology issue). Default: 32.
+///
+/// # Returns
+/// The number of fill triangles added.
+pub fn fill_boundary_gaps(mesh: &mut TriangleMesh, max_loop_size: usize) -> usize {
+    use std::collections::{HashMap, HashSet};
+
+    if mesh.triangles.is_empty() {
+        return 0;
+    }
+
+    let mut total_filled = 0usize;
+    let max_iterations = 5;
+
+    for _iter in 0..max_iterations {
+        // Step 1: Build edge → (triangle_index, opposite_vertex) map
+        let mut edge_info: HashMap<(u32, u32), Vec<(usize, u32)>> = HashMap::new();
+        for (ti, tri) in mesh.triangles.iter().enumerate() {
+            let [a, b, c] = *tri;
+            for (v0, v1, opp) in [(a, b, c), (b, c, a), (c, a, b)] {
+                let key = if v0 < v1 { (v0, v1) } else { (v1, v0) };
+                edge_info.entry(key).or_default().push((ti, opp));
+            }
+        }
+
+        // Step 2: Find boundary edges (count == 1) — use UNDIRECTED edges
+        // to avoid issues with inconsistent winding between adjacent triangles.
+        let mut boundary_undirected: HashSet<(u32, u32)> = HashSet::new();
+        let mut boundary_tris: HashMap<(u32, u32), (usize, u32)> = HashMap::new(); // edge → (tri_idx, opp)
+
+        for (&key, tris) in &edge_info {
+            if tris.len() == 1 {
+                boundary_undirected.insert(key);
+                boundary_tris.insert(key, tris[0]);
+            }
+        }
+
+        if boundary_undirected.is_empty() {
+            break;
+        }
+
+        // Step 3: Build vertex → neighbors adjacency (UNDIRECTED)
+        let mut adjacency: HashMap<u32, Vec<u32>> = HashMap::new();
+        for &(a, b) in &boundary_undirected {
+            adjacency.entry(a).or_default().push(b);
+            adjacency.entry(b).or_default().push(a);
+        }
+
+        // Step 4: Find closed loops using undirected BFS/DFS
+        let mut loops: Vec<Vec<u32>> = Vec::new();
+        let mut used_edges: HashSet<(u32, u32)> = HashSet::new();
+
+        for &start_edge in &boundary_undirected {
+            if used_edges.contains(&start_edge) {
+                continue;
+            }
+
+            let start_v = start_edge.0;
+            let first_v = start_edge.1;
+            let mut loop_verts: Vec<u32> = vec![start_v];
+            let mut current = first_v;
+            let mut prev = start_v;
+            let mut found_loop = false;
+
+            // Mark start edge as used
+            used_edges.insert((start_v.min(first_v), start_v.max(first_v)));
+
+            loop {
+                if loop_verts.len() > max_loop_size {
+                    break;
+                }
+
+                if current == start_v {
+                    found_loop = true;
+                    break;
+                }
+
+                loop_verts.push(current);
+
+                // Find next vertex from current (not going back to prev)
+                let next = adjacency.get(&current).and_then(|neighbors| {
+                    neighbors.iter().find(|&&n| {
+                        n != prev &&
+                        !used_edges.contains(&(current.min(n), current.max(n)))
+                    }).copied()
+                });
+
+                match next {
+                    Some(n) => {
+                        used_edges.insert((current.min(n), current.max(n)));
+                        prev = current;
+                        current = n;
+                    }
+                    None => break,
+                }
+            }
+
+            if found_loop && loop_verts.len() >= 3 && loop_verts.len() <= max_loop_size {
+                loops.push(loop_verts);
+            }
+        }
+
+        if loops.is_empty() {
+            log::debug!(
+                "fill_boundary_gaps: {} boundary edges but 0 loops found (inconsistent winding or open chains)",
+                boundary_undirected.len(),
+            );
+            break;
+        }
+
+        // Step 5: Triangulate each loop with correct winding
+        let mut new_triangles: Vec<[u32; 3]> = Vec::new();
+        let mut new_face_ids: Vec<u64> = Vec::new();
+        let face_ids = mesh.triangle_face_ids.as_ref();
+
+        for loop_verts in &loops {
+            let n = loop_verts.len();
+            if n < 3 {
+                continue;
+            }
+
+            // Determine winding: check the existing triangle on edge (loop_verts[0], loop_verts[1]).
+            // If the existing triangle has winding (v0, v1, opp), the fill should have (v1, v0, ...)
+            // on that edge → fill winding is REVERSED: (v0, v_{n-1}, v_{n-2}, ..., v1).
+            // If the existing triangle has winding (v1, v0, opp), the fill should have (v0, v1, ...)
+            // on that edge → fill winding is SAME: (v0, v1, v2, ..., v_{n-1}).
+            let v0 = loop_verts[0];
+            let v1 = loop_verts[1];
+            let edge_key = (v0.min(v1), v0.max(v1));
+
+            let (tri_idx, opp) = match boundary_tris.get(&edge_key) {
+                Some(&info) => info,
+                None => continue,
+            };
+
+            let tri = mesh.triangles[tri_idx];
+            let fid = face_ids.and_then(|ids| ids.get(tri_idx).copied()).unwrap_or(u64::MAX);
+
+            // Check if existing triangle has edge (v0, v1) or (v1, v0) in its winding
+            let (a, b, c) = (tri[0], tri[1], tri[2]);
+            let existing_ab_order = if (a == v0 && b == v1) || (b == v0 && c == v1) || (c == v0 && a == v1) {
+                true // existing has (v0, v1)
+            } else {
+                false // existing has (v1, v0)
+            };
+
+            // Build polygon with correct winding
+            let polygon: Vec<u32> = if existing_ab_order {
+                // Existing has (v0, v1) → fill needs (v1, v0) on this edge
+                // Fill polygon: v0, v_{n-1}, v_{n-2}, ..., v1 (reversed)
+                let mut p = vec![v0];
+                for i in (1..n).rev() {
+                    p.push(loop_verts[i]);
+                }
+                p
+            } else {
+                // Existing has (v1, v0) → fill needs (v0, v1) on this edge
+                // Fill polygon: v0, v1, v2, ..., v_{n-1} (same order)
+                loop_verts.clone()
+            };
+
+            if polygon.len() == 3 {
+                let tri = [polygon[0], polygon[1], polygon[2]];
+                if !is_degenerate_triangle(&mesh.vertices, &tri) {
+                    new_triangles.push(tri);
+                    new_face_ids.push(fid);
+                }
+            } else {
+                let tris = ear_clip_loop(&polygon, &mesh.vertices);
+                for t in tris {
+                    if !is_degenerate_triangle(&mesh.vertices, &t) {
+                        new_triangles.push(t);
+                        new_face_ids.push(fid);
+                    }
+                }
+            }
+        }
+
+        if new_triangles.is_empty() {
+            break;
+        }
+
+        // Step 6: Add new triangles to mesh
+        let n_new = new_triangles.len();
+        mesh.triangles.extend(new_triangles);
+        if let Some(ref mut ids) = mesh.triangle_face_ids {
+            ids.extend(new_face_ids);
+        } else if !new_face_ids.is_empty() && !new_face_ids.iter().all(|&x| x == u64::MAX) {
+            let mut all_ids = vec![u64::MAX; mesh.triangles.len() - n_new];
+            all_ids.extend(new_face_ids);
+            mesh.triangle_face_ids = Some(all_ids);
+        }
+
+        total_filled += n_new;
+        log::info!(
+            "fill_boundary_gaps: iter {} — found {} loops from {} boundary edges, added {} fill triangles",
+            _iter,
+            loops.len(),
+            boundary_undirected.len(),
+            n_new,
+        );
+
+        // Remove duplicates that might have been created
+        let dup_removed = mesh.remove_duplicate_triangles();
+        if dup_removed > 0 {
+            log::info!(
+                "fill_boundary_gaps: removed {} duplicate triangles after filling",
+                dup_removed,
+            );
+        }
+    }
+
+    if total_filled > 0 {
+        compact_vertices(mesh);
+        filter_degenerate_triangles_in_place(mesh, 1e-15);
+    }
+
+    total_filled
+}
+
+/// Check if a triangle is degenerate (zero area).
+fn is_degenerate_triangle(vertices: &[Point3d], tri: &[u32; 3]) -> bool {
+    let v0 = vertices[tri[0] as usize];
+    let v1 = vertices[tri[1] as usize];
+    let v2 = vertices[tri[2] as usize];
+    let e1x = v1.x - v0.x;
+    let e1y = v1.y - v0.y;
+    let e1z = v1.z - v0.z;
+    let e2x = v2.x - v0.x;
+    let e2y = v2.y - v0.y;
+    let e2z = v2.z - v0.z;
+    let cx = e1y * e2z - e1z * e2y;
+    let cy = e1z * e2x - e1x * e2z;
+    let cz = e1x * e2y - e1y * e2x;
+    let area_sq = (cx * cx + cy * cy + cz * cz) * 0.25;
+    area_sq < 1e-20
+}
+
+/// Ear-clip a polygon (list of vertex indices) using 3D cross product.
+/// Returns triangles in the same winding as the input polygon.
+fn ear_clip_loop(boundary: &[u32], vertices: &[Point3d]) -> Vec<[u32; 3]> {
+    let n = boundary.len();
+    if n < 3 {
+        return Vec::new();
+    }
+    if n == 3 {
+        return vec![[boundary[0], boundary[1], boundary[2]]];
+    }
+
+    let mut polygon: Vec<u32> = boundary.to_vec();
+    let mut triangles: Vec<[u32; 3]> = Vec::with_capacity(n - 2);
+
+    while polygon.len() > 3 {
+        let plen = polygon.len();
+        let mut found_ear = false;
+
+        for i in 0..plen {
+            let prev_i = if i == 0 { plen - 1 } else { i - 1 };
+            let next_i = if i == plen - 1 { 0 } else { i + 1 };
+
+            let va = vertices[polygon[prev_i] as usize];
+            let vb = vertices[polygon[i] as usize];
+            let vc = vertices[polygon[next_i] as usize];
+
+            // Full 3D cross product magnitude
+            let e1x = vb.x - va.x;
+            let e1y = vb.y - va.y;
+            let e1z = vb.z - va.z;
+            let e2x = vc.x - va.x;
+            let e2y = vc.y - va.y;
+            let e2z = vc.z - va.z;
+            let cx = e1y * e2z - e1z * e2y;
+            let cy = e1z * e2x - e1x * e2z;
+            let cz = e1x * e2y - e1y * e2x;
+            let cross_mag_sq = cx * cx + cy * cy + cz * cz;
+
+            if cross_mag_sq > 1e-20 {
+                triangles.push([polygon[prev_i], polygon[i], polygon[next_i]]);
+                polygon.remove(i);
+                found_ear = true;
+                break;
+            }
+        }
+
+        if !found_ear {
+            if polygon.len() >= 3 {
+                triangles.push([polygon[0], polygon[1], polygon[2]]);
+                polygon.remove(1);
+            } else {
+                break;
+            }
+        }
+    }
+
+    if polygon.len() == 3 {
+        triangles.push([polygon[0], polygon[1], polygon[2]]);
+    }
+
+    triangles
+}
+
 /// Remove unused vertices from the mesh and renumber indices.
 pub fn compact_vertices(mesh: &mut TriangleMesh) {
     // Find which vertices are used
@@ -2347,5 +2672,75 @@ mod tests {
     fn test_repair_zero_tolerance() {
         let mut mesh = make_simple_t_junction_mesh();
         assert_eq!(repair_t_junctions(&mut mesh, 0.0), 0);
+    }
+
+    // ============================================================
+    // Gap filling tests
+    // ============================================================
+
+    #[test]
+    fn test_fill_simple_triangular_gap() {
+        // Create a mesh with a missing triangle: 3 triangles forming a
+        // pyramid base, but the base triangle is missing.
+        let mut mesh = TriangleMesh::new();
+        mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0)); // 0
+        mesh.add_vertex(Point3d::new(1.0, 0.0, 0.0)); // 1
+        mesh.add_vertex(Point3d::new(1.0, 1.0, 0.0)); // 2
+        mesh.add_vertex(Point3d::new(0.0, 1.0, 0.0)); // 3
+        mesh.add_vertex(Point3d::new(0.5, 0.5, 1.0)); // 4 = apex
+
+        // 3 side triangles (apex + 2 base vertices each)
+        // Missing: base triangle (0, 2, 1) or (0, 3, 2)
+        mesh.add_triangle(0, 1, 4); // side 0-1
+        mesh.add_triangle(1, 2, 4); // side 1-2
+        mesh.add_triangle(2, 3, 4); // side 2-3
+        mesh.add_triangle(3, 0, 4); // side 3-0
+        // Base edges: (0,1), (1,2), (2,3), (3,0) — all have count 1
+        // This forms a 4-edge loop (quad), not a 3-edge loop
+
+        let report_before = validate_watertight(&mesh, false);
+        assert_eq!(report_before.boundary_edge_count, 4, "Should have 4 boundary edges");
+
+        let n_filled = fill_boundary_gaps(&mut mesh, 32);
+        assert!(n_filled >= 2, "Should fill at least 2 triangles for quad base, got {}", n_filled);
+
+        let report_after = validate_watertight(&mesh, false);
+        assert_eq!(report_after.boundary_edge_count, 0,
+            "Should have 0 boundary edges after filling, got {}", report_after.boundary_edge_count);
+    }
+
+    #[test]
+    fn test_fill_single_missing_triangle() {
+        // Create a mesh with exactly 1 triangle — all 3 edges are boundary.
+        // fill_boundary_gaps will find the 3-edge loop and add a fill triangle.
+        // remove_duplicate_triangles then removes the duplicate (same vertices).
+        let mut mesh = TriangleMesh::new();
+        mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0)); // 0
+        mesh.add_vertex(Point3d::new(1.0, 0.0, 0.0)); // 1
+        mesh.add_vertex(Point3d::new(1.0, 1.0, 0.0)); // 2
+        mesh.add_triangle(0, 1, 2);
+
+        let n_filled = fill_boundary_gaps(&mut mesh, 32);
+        // A single triangle is a closed loop — fill adds 1 triangle,
+        // but remove_duplicate_triangles removes it, so net = 1 fill (then deduped).
+        assert!(n_filled >= 1, "Single triangle loop should be filled, got {}", n_filled);
+
+        // After fill + dedup, mesh should still have exactly 1 triangle
+        // (the duplicate was removed)
+        assert_eq!(mesh.triangle_count(), 1, "Should still have 1 triangle after dedup");
+    }
+
+    #[test]
+    fn test_fill_no_gaps() {
+        // A watertight cube has no gaps to fill
+        let mut mesh = make_cube_mesh();
+        let n_filled = fill_boundary_gaps(&mut mesh, 32);
+        assert_eq!(n_filled, 0, "Watertight cube should have 0 gaps to fill");
+    }
+
+    #[test]
+    fn test_fill_empty_mesh() {
+        let mut mesh = TriangleMesh::new();
+        assert_eq!(fill_boundary_gaps(&mut mesh, 32), 0);
     }
 }
