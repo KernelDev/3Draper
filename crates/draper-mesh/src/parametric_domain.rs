@@ -313,6 +313,111 @@ fn uv_triangles_to_3d(
     mesh
 }
 
+/// Validate that all UV coordinates on a periodic surface are within a single
+/// period cell (LT-3 from audit plan).
+///
+/// For periodic surfaces (cylinder, torus, etc.), UV coordinates that span
+/// multiple periods can cause triangulation artifacts — earcutr sees them
+/// as disconnected polygons, and seam-split logic may fail.
+///
+/// Returns a list of validation errors. Empty vec = all valid.
+pub fn validate_uv_periodicity(
+    boundary_uvs: &[Point2d],
+    surface: &Surface,
+) -> Vec<UvPeriodicityError> {
+    let mut errors = Vec::new();
+
+    let (u_periodic, v_periodic) = (surface.is_u_periodic(), surface.is_v_periodic());
+    if !u_periodic && !v_periodic {
+        return errors;
+    }
+
+    if boundary_uvs.is_empty() {
+        return errors;
+    }
+
+    let u_period = if u_periodic {
+        match surface {
+            Surface::Nurbs(ref nurbs) => {
+                let (umin, umax) = nurbs.u_range();
+                umax - umin
+            }
+            _ => 2.0 * std::f64::consts::PI,
+        }
+    } else {
+        f64::INFINITY
+    };
+
+    let v_period = if v_periodic {
+        match surface {
+            Surface::Nurbs(ref nurbs) => {
+                let (vmin, vmax) = nurbs.v_range();
+                vmax - vmin
+            }
+            _ => 2.0 * std::f64::consts::PI,
+        }
+    } else {
+        f64::INFINITY
+    };
+
+    let min_u = boundary_uvs.iter().map(|p| p.u).fold(f64::MAX, f64::min);
+    let max_u = boundary_uvs.iter().map(|p| p.u).fold(f64::MIN, f64::max);
+    let min_v = boundary_uvs.iter().map(|p| p.v).fold(f64::MAX, f64::min);
+    let max_v = boundary_uvs.iter().map(|p| p.v).fold(f64::MIN, f64::max);
+
+    let u_span = max_u - min_u;
+    let v_span = max_v - min_v;
+
+    let u_tolerance = u_period * 0.01;
+    let v_tolerance = v_period * 0.01;
+
+    if u_periodic && u_span > u_period + u_tolerance {
+        errors.push(UvPeriodicityError::SpanMultiplePeriods {
+            direction: 'u',
+            span: u_span,
+            period: u_period,
+            min: min_u,
+            max: max_u,
+        });
+    }
+
+    if v_periodic && v_span > v_period + v_tolerance {
+        errors.push(UvPeriodicityError::SpanMultiplePeriods {
+            direction: 'v',
+            span: v_span,
+            period: v_period,
+            min: min_v,
+            max: max_v,
+        });
+    }
+
+    errors
+}
+
+/// Error type for UV periodicity validation.
+#[derive(Clone, Debug)]
+pub enum UvPeriodicityError {
+    /// UV coordinates span more than one full period.
+    SpanMultiplePeriods {
+        direction: char,
+        span: f64,
+        period: f64,
+        min: f64,
+        max: f64,
+    },
+}
+
+impl std::fmt::Display for UvPeriodicityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UvPeriodicityError::SpanMultiplePeriods { direction, span, period, min, max } => {
+                write!(f, "UV {} spans {:.4} > period {:.4} (range [{:.4}, {:.4}])",
+                    direction, span, period, min, max)
+            }
+        }
+    }
+}
+
 /// Re-project a 3D point onto a NURBS surface using Newton-Raphson
 /// starting from an initial UV guess. This is much more accurate and
 /// faster than a full grid search when we have a reasonable initial guess.
@@ -4056,6 +4161,15 @@ pub fn triangulate_surface_consistent(
             if outer_uv.len() < 3 {
                 return TriangleMesh::new();
             }
+        }
+    }
+
+    // LT-3: Validate UV periodicity in debug builds.
+    #[cfg(debug_assertions)]
+    {
+        let errors = validate_uv_periodicity(&outer_uv, surface);
+        for err in &errors {
+            log::warn!("triangulate_surface_consistent: UV periodicity issue — {}", err);
         }
     }
 

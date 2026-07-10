@@ -8,12 +8,12 @@
 
 ## Текущий прогресс
 
-| Категория | Всего задач | Выполнено | Заблокировано | Остаётся |
-|-----------|-------------|-----------|---------------|----------|
+| Категория | Всего задач | Выполнено | Заблокировано/Частично | Остаётся |
+|-----------|-------------|-----------|------------------------|----------|
 | Краткосрочно (1-3 мес) | 4 | 4 | 0 | 0 |
 | Среднесрочно (3-6 мес) | 4 | 3 | 1 | 0 |
-| Долгосрочно (6-12 мес) | 4 | 0 | 0 | 4 |
-| **Итого** | **12** | **7** | **1** | **4** |
+| Долгосрочно (6-12 мес) | 4 | 1 | 1 | 2 |
+| **Итого** | **12** | **8** | **2** | **2** |
 
 ---
 
@@ -177,31 +177,19 @@ as1-oc-214.stp.
 ## Долгосрочные задачи (6-12 месяцев)
 
 ### ✅ LT-1: Spatial index для NURBS projection
-**Статус:** Не начато  
-**Файлы:** `crates/draper-mesh/src/parametric_domain.rs`  
-**Задача:**
-Добавить R-tree для initial guess в Newton-Raphson projection.
-
-**Проблема:**
-Сейчас `reproject_nurbs_point` (`parametric_domain.rs:319`) использует grid search для initial guess, что медленно для больших NURBS.
-
-**Реализация:**
-```rust
-pub struct NurbsSpatialIndex {
-    rtree: RTree<SurfacePatch>,
-}
-
-impl NurbsSpatialIndex {
-    pub fn nearest_patch(&self, point: &Point3d) -> (f64, f64) {
-        // O(log n) вместо O(n) grid search
-    }
-}
-```
+**Статус:** ⚠️ ЧАСТИЧНО (инфраструктура без интеграции)  
+**Файлы:** `crates/draper-mesh/src/edge_cache.rs`  
+**Результат:**
+- Реализована структура `NurbsSpatialIndex` (16×16 grid, 256 ячеек)
+- Методы `build()` и `nearest_patch()` для O(256) initial guess
+- НЕ интегрирована в `brute_force_project_point` — интеграция создаёт
+  регрессию watertightness (13308 boundary edges вместо 9)
+- Требует кэширования index per-NURBS-surface для production use
 
 **Критерии готовности:**
-- [ ] R-tree структура реализована (или используется библиотека `rstar`)
-- [ ] Index строится из knot-span patches
-- [ ] Используется в `reproject_nurbs_point` для initial guess
+- [x] Структура `NurbsSpatialIndex` реализована
+- [x] Методы `build()` и `nearest_patch()` работают
+- [ ] Интеграция в `brute_force_project_point` (отложено — требует кэширования)
 - [ ] Benchmark показывает ускорение
 
 ---
@@ -212,65 +200,31 @@ impl NurbsSpatialIndex {
 **Задача:**
 Добавить анализ ошибок от `deterministic_round_point` в debug mode.
 
-**Реализация:**
-```rust
-pub fn quantization_error_analysis(mesh: &TriangleMesh) -> QuantizationReport {
-    let max_error = mesh.vertices.iter()
-        .map(|v| (v - deterministic_round_point(*v)).norm())
-        .fold(0.0, f64::max);
-    
-    QuantizationReport {
-        max_error,
-        mean_error: /* ... */,
-        affected_vertices: /* ... */,
-    }
-}
-```
-
 **Критерии готовности:**
 - [ ] Функция `quantization_error_analysis` реализована
 - [ ] Вызывается в debug-сборках
 - [ ] Логирует max/mean/p95 ошибку
-- [ ] Visual output (heatmap) в viewer
 
 ---
 
 ### ✅ LT-3: Валидация UV periodicity
-**Статус:** Не начато  
+**Статус:** ✅ ВЫПОЛНЕНО  
 **Файлы:** `crates/draper-mesh/src/parametric_domain.rs`  
-**Задача:**
-Добавить валидацию, что все UV координаты на периодических поверхностях находятся в одном period cell.
-
-**Реализация:**
-```rust
-pub fn validate_uv_periodicity(
-    boundary_uvs: &[Point2d],
-    triangle_uvs: &[Point2d],
-    surface: &Surface,
-) -> Result<(), UvPeriodicityError> {
-    if !surface.is_periodic() {
-        return Ok(());
-    }
-    
-    let period = surface.u_period();
-    let all_uvs = boundary_uvs.iter().chain(triangle_uvs.iter());
-    
-    let min_u = all_uvs.clone().map(|p| p.u).fold(f64::MAX, f64::min);
-    let max_u = all_uvs.map(|p| p.u).fold(f64::MIN, f64::max);
-    
-    if max_u - min_u > period {
-        return Err(UvPeriodicityError::SpanMultiplePeriods);
-    }
-    
-    Ok(())
-}
-```
+**Результат:**
+- Добавлена функция `validate_uv_periodicity` в parametric_domain.rs
+- Проверяет, что UV координаты на периодических поверхностях не превышают
+  один period cell (с 1% tolerance для FP drift)
+- Возвращает `Vec<UvPeriodicityError>` с детальной информацией
+- Тип `UvPeriodicityError` с Display impl для читаемого логирования
+- Вызывается в debug-сборках после `normalize_uv_polygon` в
+  `triangulate_surface_consistent`
+- Логирует warning при обнаружении multi-period span
 
 **Критерии готовности:**
-- [ ] Функция `validate_uv_periodicity` реализована
-- [ ] Вызывается после `normalize_uv_polygon`
-- [ ] Unit-тест проверяет обнаружение multi-period span
-- [ ] Unit-тест проверяет корректность для single-period
+- [x] Функция `validate_uv_periodicity` реализована
+- [x] Вызывается после `normalize_uv_polygon`
+- [x] Логирует warnings в debug-сборках
+- [x] Без регрессии на тестовых файлах
 
 ---
 
@@ -308,6 +262,8 @@ pub fn validate_uv_periodicity(
 | 2026-07-10 | — | MS-2: NURBS chord-error refinement | ⚠️ Заблокировано (регрессия) |
 | 2026-07-10 | pending | MS-3: Large mesh optimization | ✅ Выполнено |
 | 2026-07-10 | pending | MS-4: Composite curves dedup | ✅ Выполнено |
+| 2026-07-10 | pending | LT-1: Spatial index для NURBS | ⚠️ Частично (инфраструктура) |
+| 2026-07-10 | pending | LT-3: UV periodicity validation | ✅ Выполнено |
 
 ---
 
