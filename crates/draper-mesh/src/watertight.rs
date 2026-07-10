@@ -2122,6 +2122,130 @@ pub fn fill_boundary_gaps(mesh: &mut TriangleMesh, max_loop_size: usize) -> usiz
         }
     }
 
+    // ============================================================
+    // Second pass: Open-chain gap filling
+    //
+    // After closed-loop filling, some boundary edges may remain as
+    // "open chains" — edges that don't form a closed loop. This happens
+    // at transitions between surfaces (e.g., bolt thread → bottom plane)
+    // where one surface has an extra vertex the other doesn't.
+    //
+    // For each remaining boundary edge, find the nearest interior vertex
+    // to the edge midpoint and create a fill triangle. This closes the
+    // gap by connecting the boundary edge to existing geometry.
+    // ============================================================
+    loop {
+        let mut edge_info: HashMap<(u32, u32), Vec<(usize, u32)>> = HashMap::new();
+        for (ti, tri) in mesh.triangles.iter().enumerate() {
+            let [a, b, c] = *tri;
+            for (v0, v1, opp) in [(a, b, c), (b, c, a), (c, a, b)] {
+                let key = if v0 < v1 { (v0, v1) } else { (v1, v0) };
+                edge_info.entry(key).or_default().push((ti, opp));
+            }
+        }
+
+        let mut remaining_boundary: Vec<(u32, u32, usize, u32)> = Vec::new();
+        for (&key, tris) in &edge_info {
+            if tris.len() == 1 {
+                remaining_boundary.push((key.0, key.1, tris[0].0, tris[0].1));
+            }
+        }
+
+        if remaining_boundary.is_empty() {
+            break;
+        }
+
+        // For each open boundary edge, find nearest interior vertex
+        let mut new_triangles: Vec<[u32; 3]> = Vec::new();
+        let mut new_face_ids: Vec<u64> = Vec::new();
+        let face_ids = mesh.triangle_face_ids.as_ref();
+
+        for &(v0, v1, tri_idx, opp) in &remaining_boundary {
+            let pa = mesh.vertices[v0 as usize];
+            let pb = mesh.vertices[v1 as usize];
+            let mid = Point3d::new(
+                (pa.x + pb.x) * 0.5,
+                (pa.y + pb.y) * 0.5,
+                (pa.z + pb.z) * 0.5,
+            );
+
+            // Find nearest vertex to midpoint (excluding v0, v1, and opp)
+            // opp is the opposite vertex in the existing triangle — using it
+            // again would create a duplicate triangle, not fill the gap.
+            let mut best_d = f64::MAX;
+            let mut best_v: Option<u32> = None;
+            for (vi, p) in mesh.vertices.iter().enumerate() {
+                let vi = vi as u32;
+                if vi == v0 || vi == v1 || vi == opp {
+                    continue;
+                }
+                let d = (p.x - mid.x).powi(2)
+                    + (p.y - mid.y).powi(2)
+                    + (p.z - mid.z).powi(2);
+                if d < best_d {
+                    best_d = d;
+                    best_v = Some(vi);
+                }
+            }
+
+            if let Some(v2) = best_v {
+                let fid = face_ids.and_then(|ids| ids.get(tri_idx).copied()).unwrap_or(u64::MAX);
+
+                // Determine winding: existing triangle has (v0, v1, opp),
+                // fill should have (v1, v0, v2) to be on the opposite side.
+                let tri = mesh.triangles[tri_idx];
+                let (a, b, c) = (tri[0], tri[1], tri[2]);
+                let existing_order = (a == v0 && b == v1) || (b == v0 && c == v1) || (c == v0 && a == v1);
+
+                let fill_tri = if existing_order {
+                    [v1, v0, v2]
+                } else {
+                    [v0, v1, v2]
+                };
+
+                let is_deg = is_degenerate_triangle(&mesh.vertices, &fill_tri);
+                let already_exists = mesh.triangles.iter().any(|t| {
+                    let mut s1 = [fill_tri[0], fill_tri[1], fill_tri[2]];
+                    let mut s2 = [t[0], t[1], t[2]];
+                    s1.sort();
+                    s2.sort();
+                    s1 == s2
+                });
+
+                if !is_deg && !already_exists {
+                    new_triangles.push(fill_tri);
+                    new_face_ids.push(fid);
+                }
+            }
+        }
+
+        if new_triangles.is_empty() {
+            break;
+        }
+
+        let n_new = new_triangles.len();
+        mesh.triangles.extend(new_triangles);
+        if let Some(ref mut ids) = mesh.triangle_face_ids {
+            ids.extend(new_face_ids);
+        }
+
+        total_filled += n_new;
+        log::info!(
+            "fill_boundary_gaps: open-chain — added {} fill triangles for {} boundary edges",
+            n_new,
+            remaining_boundary.len(),
+        );
+
+        // Remove duplicates
+        let dup_removed = mesh.remove_duplicate_triangles();
+        if dup_removed > 0 {
+            log::info!(
+                "fill_boundary_gaps: removed {} duplicates after open-chain fill",
+                dup_removed,
+            );
+        }
+    }
+
     if total_filled > 0 {
         compact_vertices(mesh);
         filter_degenerate_triangles_in_place(mesh, 1e-15);
