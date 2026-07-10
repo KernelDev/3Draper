@@ -3942,6 +3942,16 @@ impl<'a> StepConverter<'a> {
             edge_cache.pre_compute_circle_axis_n(all_edges);
         }
 
+        // Pre-compute shared NURBS refinement grids (MS-2). For each unique
+        // NURBS surface in this BREP, generate a chord-error-compliant
+        // interior UV grid. All faces sharing the same NURBS surface entity
+        // will use this grid → identical interior Steiner points → watertight.
+        for fd in &face_data_list {
+            if let draper_geometry::Surface::Nurbs(nurbs) = &fd.surface {
+                edge_cache.pre_compute_nurbs_refinement_grid(nurbs, 3);
+            }
+        }
+
         // ─── Build vertex-pair → canonical step_id aliases ──────────────
         // In STEP B-Rep, two faces sharing a geometric boundary may use
         // DIFFERENT EDGE_CURVE entities (e.g., a Plane face uses a LINE
@@ -4547,6 +4557,13 @@ impl<'a> StepConverter<'a> {
                 .flat_map(|fd| fd.edges.iter())
                 .collect();
             edge_cache.pre_compute_circle_axis_n(all_edges);
+        }
+
+        // Pre-compute shared NURBS refinement grids (MS-2).
+        for fd in &face_data_list {
+            if let draper_geometry::Surface::Nurbs(nurbs) = &fd.surface {
+                edge_cache.pre_compute_nurbs_refinement_grid(nurbs, 3);
+            }
         }
 
         // ─── Build vertex-pair → canonical step_id aliases ──────────────
@@ -5397,6 +5414,13 @@ impl<'a> StepConverter<'a> {
                 .flat_map(|fd| fd.edges.iter())
                 .collect();
             edge_cache.pre_compute_circle_axis_n(all_edges);
+        }
+
+        // Pre-compute shared NURBS refinement grids (MS-2).
+        for fd in &face_data_list {
+            if let draper_geometry::Surface::Nurbs(nurbs) = &fd.surface {
+                edge_cache.pre_compute_nurbs_refinement_grid(nurbs, 3);
+            }
         }
 
         // ─── Build vertex-pair → canonical step_id aliases ──────────────
@@ -10800,6 +10824,10 @@ impl<'a> StepConverter<'a> {
                 {
                     let all_edges: Vec<&TopoEdge> = face_data.edges.iter().collect();
                     local_edge_cache.pre_compute_circle_axis_n(all_edges);
+                }
+                // Pre-compute shared NURBS refinement grid for this single face.
+                if let draper_geometry::Surface::Nurbs(nurbs) = &face_data.surface {
+                    local_edge_cache.pre_compute_nurbs_refinement_grid(nurbs, 3);
                 }
                 return self.triangulate_planar_face_with_holes_cached(
                     plane,

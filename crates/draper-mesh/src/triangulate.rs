@@ -1515,8 +1515,24 @@ fn triangulate_face_impl(face: &Face, params: &TriangulationParams, cache: &Edge
             Surface::Cone(cone) => triangulate_cone_face(face, cone, params, cache),
             Surface::Revolution(rev) => triangulate_revolution_face(face, rev, params, cache),
             Surface::Extrusion(ext) => triangulate_extrusion_face(face, ext, params, cache),
-            Surface::Nurbs(_) => {
-                triangulate_nurbs_cdt(face, surface, params, cache)
+            Surface::Nurbs(nurbs) => {
+                // MS-2: Set the shared NURBS refinement grid before
+                // triangulation. The grid was pre-computed by
+                // `pre_compute_nurbs_refinement_grid` (called from
+                // converter.rs or pre_populate_for_solid). It ensures
+                // all faces sharing this NURBS surface get the SAME
+                // interior Steiner points → watertight by construction.
+                let grid_was_set = if let Some(shared_grid) = cache.get_nurbs_refinement_grid(nurbs) {
+                    crate::parametric_domain::set_shared_nurbs_grid(shared_grid.clone());
+                    true
+                } else {
+                    false
+                };
+                let mesh = triangulate_nurbs_cdt(face, surface, params, cache);
+                if grid_was_set {
+                    crate::parametric_domain::clear_shared_nurbs_grid();
+                }
+                mesh
             }
         }
     } else {

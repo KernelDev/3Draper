@@ -3878,6 +3878,36 @@ pub fn triangulate_surface_uv_cdt(
 /// * `hole_uvs` — Pre-computed UV coordinates for hole points.
 /// * `forward` — Whether face normal matches surface normal.
 /// * `params` — Triangulation parameters (for grid resolution).
+
+// Thread-local storage for the shared NURBS refinement grid (MS-2).
+// Set by `set_shared_nurbs_grid` before calling `triangulate_surface_consistent`
+// on a NURBS face, and cleared by `clear_shared_nurbs_grid` after.
+thread_local! {
+    static SHARED_NURBS_GRID: std::cell::RefCell<Option<Vec<Point2d>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Set the shared NURBS refinement grid for the current thread.
+///
+/// Must be called BEFORE `triangulate_surface_consistent` when triangulating
+/// a NURBS face that shares its surface with other faces. The grid ensures
+/// all faces sharing the same NURBS surface get identical interior Steiner
+/// points → watertight by construction.
+///
+/// Must be paired with `clear_shared_nurbs_grid` after the triangulation
+/// completes (use a guard pattern or explicit call).
+pub fn set_shared_nurbs_grid(grid: Vec<Point2d>) {
+    SHARED_NURBS_GRID.with(|g| *g.borrow_mut() = Some(grid));
+}
+
+/// Clear the shared NURBS refinement grid.
+///
+/// Call this after `triangulate_surface_consistent` returns to prevent
+/// the grid from leaking into subsequent unrelated triangulations.
+pub fn clear_shared_nurbs_grid() {
+    SHARED_NURBS_GRID.with(|g| *g.borrow_mut() = None);
+}
+
 pub fn triangulate_surface_consistent(
     surface: &Surface,
     boundary_points_3d: &[Point3d],
@@ -3887,6 +3917,21 @@ pub fn triangulate_surface_consistent(
     forward: bool,
     params: &crate::triangulate::TriangulationParams,
 ) -> TriangleMesh {
+    // ── Shared NURBS refinement grid (MS-2) ──────────────────────────
+    //
+    // When a NURBS surface is shared between multiple faces, we pre-compute
+    // a shared interior UV grid so that all faces get the SAME Steiner
+    // points. This is critical for watertightness: per-face interior points
+    // would create mismatched vertices on shared edges.
+    //
+    // The shared grid is passed via a thread-local (set by
+    // `set_shared_nurbs_grid` before calling this function) to avoid
+    // changing the public API.
+    //
+    // If the grid is available AND the surface is a NURBS, we use it
+    // (filtered by the face's UV domain) instead of the per-face
+    // `generate_nurbs_steiner_grid`.
+
     // Track recursion depth to prevent stack overflow when the seam-split
     // strategy produces sub-polygons that are still self-intersecting.
     // The seam-split logic recursively calls triangulate_surface_consistent
@@ -4967,6 +5012,57 @@ pub fn triangulate_surface_consistent(
     } else if matches!(surface, Surface::Nurbs(_)) {
         // NURBS faces — use a dedicated curvature-adaptive Steiner grid.
         //
+        // MS-2 SHARED REFINEMENT GRID: If a shared grid was set via
+        // `set_shared_nurbs_grid()` (by the caller — typically
+        // `triangulate_face_impl`), use it INSTEAD of the per-face grid.
+        // The shared grid is pre-computed for the entire NURBS surface
+        // entity and is the SAME for all faces sharing that surface.
+        // This ensures all faces get identical interior Steiner points →
+        // watertight by construction (no mismatched interior vertices).
+        //
+        // The shared grid is filtered by the face's UV domain (only
+        // points strictly inside the domain are kept) and downsampled
+        // to the budget.
+        let shared_grid = SHARED_NURBS_GRID.with(|g| g.borrow().clone());
+        if let Some(shared) = shared_grid {
+            // Filter shared grid to face domain
+            let u_span = (u_max - u_min).max(1e-6);
+            let v_span = (v_max - v_min).max(1e-6);
+            let boundary_tol = (u_span.max(v_span) * 1e-6).max(1e-9);
+
+            let mut filtered: Vec<Point2d> = Vec::with_capacity(shared.len());
+            for pt in &shared {
+                // Must be inside the face domain
+                if !domain.contains(pt) {
+                    continue;
+                }
+                // Must not be on boundary (phantom edge prevention)
+                if is_point_on_boundary(&domain.outer_boundary, pt, boundary_tol) {
+                    continue;
+                }
+                let on_hole = domain.holes.iter()
+                    .any(|hole| is_point_on_boundary(hole, pt, boundary_tol));
+                if on_hole {
+                    continue;
+                }
+                filtered.push(*pt);
+            }
+
+            // Downsample to budget if needed
+            if filtered.len() > max_interior_budget {
+                filtered = downsample_interior_points(&filtered, max_interior_budget);
+            }
+
+            log::debug!(
+                "NURBS shared grid: {} shared → {} in-domain (budget={})",
+                shared.len(), filtered.len(), max_interior_budget
+            );
+            filtered
+        } else {
+            // No shared grid — fall back to per-face generation
+            // (existing behavior, may break watertightness for multi-face
+            // NURBS surfaces if chord-error refinement is enabled)
+        //
         // WHY: The generic `parameter_division_2d` branch recursively
         // subdivides the UV bbox by chord error. For NURBS surfaces,
         // this has several problems:
@@ -4992,14 +5088,15 @@ pub fn triangulate_surface_consistent(
         // - General → densify both directions + curvature refinement
         // - Periodic → skip seam points
         let nurbs_budget = max_interior_budget.max(8);
-        generate_nurbs_steiner_grid(
-            surface,
-            &domain,
-            (u_min, u_max),
-            (v_min, v_max),
-            &params,
-            nurbs_budget,
-        )
+            generate_nurbs_steiner_grid(
+                surface,
+                &domain,
+                (u_min, u_max),
+                (v_min, v_max),
+                &params,
+                nurbs_budget,
+            )
+        }
     } else {
         // Compute adaptive subdivision grid for the entire surface, then
         // filter to (a) strictly-interior UV values and (b) points that

@@ -78,6 +78,68 @@ const AXIS_ORIGIN_QUANT: f64 = 1e-4;
 /// direction when grouping circles by axis.
 const AXIS_DIR_QUANT: f64 = 1e-4;
 
+/// Quantization grid for NURBS control point coordinates when hashing.
+/// Two surfaces whose control points differ by less than this are
+/// considered the same surface (for refinement grid sharing).
+const NURBS_HASH_QUANT: f64 = 1e-6;
+
+/// Compute a stable hash of a NURBS surface for the purpose of sharing
+/// a refinement grid across multiple faces that reference the same
+/// underlying surface entity.
+///
+/// The hash incorporates: degrees, control point positions (quantized),
+/// weights (quantized), and knot vectors (quantized). Two surfaces that
+/// are geometrically identical (within `NURBS_HASH_QUANT`) produce the
+/// same hash, ensuring that faces sharing a NURBS surface in a STEP file
+/// receive the SAME interior Steiner grid — which is critical for
+/// watertightness when chord-error refinement is enabled.
+pub fn nurbs_surface_hash(nurbs: &draper_geometry::NurbsSurface) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+
+    // Degrees
+    nurbs.u_degree.hash(&mut hasher);
+    nurbs.v_degree.hash(&mut hasher);
+
+    // Control points (quantized)
+    for row in &nurbs.control_points {
+        for p in row {
+            let qx = (p.x / NURBS_HASH_QUANT).round() as i64;
+            let qy = (p.y / NURBS_HASH_QUANT).round() as i64;
+            let qz = (p.z / NURBS_HASH_QUANT).round() as i64;
+            qx.hash(&mut hasher);
+            qy.hash(&mut hasher);
+            qz.hash(&mut hasher);
+        }
+    }
+
+    // Weights (quantized)
+    for row in &nurbs.weights {
+        for w in row {
+            let qw = (w / NURBS_HASH_QUANT).round() as i64;
+            qw.hash(&mut hasher);
+        }
+    }
+
+    // Knots (quantized)
+    for k in &nurbs.u_knots {
+        let qk = (k / NURBS_HASH_QUANT).round() as i64;
+        qk.hash(&mut hasher);
+    }
+    for k in &nurbs.v_knots {
+        let qk = (k / NURBS_HASH_QUANT).round() as i64;
+        qk.hash(&mut hasher);
+    }
+
+    // Closure flags
+    nurbs.u_closed.hash(&mut hasher);
+    nurbs.v_closed.hash(&mut hasher);
+
+    hasher.finish()
+}
+
 /// Canonical key identifying a circle's axis (origin + direction), quantized
 /// so that two circles on the "same" axis (within tolerance) map to the same
 /// key. Used by `pre_compute_circle_axis_n` to enforce identical sample
@@ -323,6 +385,24 @@ pub struct EdgeDiscretizationCache {
     /// (still LOD-aware, but may break watertightness for multi-radius
     /// tube faces).
     circle_axis_n: HashMap<AxisKey, usize>,
+
+    /// Per-NURBS-surface shared interior refinement grid.
+    ///
+    /// Key: `nurbs_surface_hash()` of the surface. Value: a list of UV
+    /// points that form a chord-error-compliant interior grid covering the
+    /// FULL surface parameter range (not domain-filtered).
+    ///
+    /// When a NURBS face is triangulated, the shared grid is filtered by
+    /// the face's UV domain and used as Steiner points. This ensures that
+    /// all faces sharing the same NURBS surface entity get the SAME
+    /// interior vertices — which is critical for watertightness when
+    /// chord-error refinement is enabled (MS-2 from audit plan).
+    ///
+    /// Without this shared grid, per-face chord-error refinement creates
+    /// different interior vertices on each face (because earcutr produces
+    /// different interior edges), and these mismatched vertices appear as
+    /// BREP boundary edges.
+    nurbs_refinement_grids: HashMap<u64, Vec<Point2d>>,
     /// ── Instrumentation counters ──
     /// Number of cache hits (edge already discretized).
     cache_hits: usize,
@@ -416,6 +496,7 @@ impl EdgeDiscretizationCache {
             max_samples: 64,
             chord_tolerance_override: None,
             circle_axis_n: HashMap::new(),
+            nurbs_refinement_grids: HashMap::new(),
             cache_hits: 0,
             cache_misses: 0,
             shared_edges: 0,
@@ -433,6 +514,7 @@ impl EdgeDiscretizationCache {
             max_samples: max_samples.max(4),
             chord_tolerance_override: None,
             circle_axis_n: HashMap::new(),
+            nurbs_refinement_grids: HashMap::new(),
             cache_hits: 0,
             cache_misses: 0,
             shared_edges: 0,
@@ -450,6 +532,7 @@ impl EdgeDiscretizationCache {
             max_samples: max_samples.max(4),
             chord_tolerance_override: None,
             circle_axis_n: HashMap::new(),
+            nurbs_refinement_grids: HashMap::new(),
             cache_hits: 0,
             cache_misses: 0,
             shared_edges: 0,
@@ -792,6 +875,175 @@ impl EdgeDiscretizationCache {
     fn circle_n_for(&self, circle: &draper_geometry::Circle) -> Option<usize> {
         let key = AxisKey::from_circle(circle);
         self.circle_axis_n.get(&key).copied()
+    }
+
+    /// Pre-compute a shared interior refinement grid for a single NURBS surface.
+    ///
+    /// The grid covers the FULL surface parameter range (u_min..u_max,
+    /// v_min..v_max) and is chord-error-compliant: every grid cell's chord
+    /// deviation is below `effective_chord_tolerance()`.
+    ///
+    /// The grid is stored in the cache keyed by `nurbs_surface_hash()`.
+    /// When a NURBS face is triangulated, `get_nurbs_refinement_grid()` is
+    /// called to retrieve the grid, which is then filtered by the face's
+    /// UV domain. This ensures all faces sharing the same NURBS surface
+    /// entity get the SAME interior Steiner points — critical for
+    /// watertightness (MS-2 from audit plan).
+    ///
+    /// # Algorithm
+    /// 1. Start with knot-span midpoints (1 per span).
+    /// 2. For each grid cell, compute chord error = distance from midpoint
+    ///    of the 4 corners' 3D points to surface.point_at(midpoint UV).
+    /// 3. If chord error > tolerance, subdivide the cell into 4 sub-cells.
+    /// 4. Repeat until convergence or max_iterations.
+    /// 5. Return the final grid (all cell midpoints).
+    pub fn pre_compute_nurbs_refinement_grid(
+        &mut self,
+        nurbs: &draper_geometry::NurbsSurface,
+        max_iterations: usize,
+    ) {
+        let hash = nurbs_surface_hash(nurbs);
+
+        // Skip if already computed (e.g., multiple faces sharing the surface)
+        if self.nurbs_refinement_grids.contains_key(&hash) {
+            return;
+        }
+
+        let chord_tol = self.effective_chord_tolerance();
+        let surface = Surface::Nurbs(nurbs.clone());
+
+        // Get full parameter range from knots
+        let u_min = nurbs.u_knots.first().copied().unwrap_or(0.0);
+        let u_max = nurbs.u_knots.last().copied().unwrap_or(1.0);
+        let v_min = nurbs.v_knots.first().copied().unwrap_or(0.0);
+        let v_max = nurbs.v_knots.last().copied().unwrap_or(1.0);
+
+        if u_max <= u_min || v_max <= v_min {
+            self.nurbs_refinement_grids.insert(hash, Vec::new());
+            return;
+        }
+
+        // Build initial grid from knot-span midpoints
+        let mut u_coords: Vec<f64> = Vec::new();
+        let mut v_coords: Vec<f64> = Vec::new();
+
+        // Use interior knot values + midpoints between consecutive knots
+        for i in 0..nurbs.u_knots.len().saturating_sub(1) {
+            let k0 = nurbs.u_knots[i];
+            let k1 = nurbs.u_knots[i + 1];
+            if k1 > k0 {
+                u_coords.push(k0 + 0.5 * (k1 - k0));
+            }
+        }
+        for i in 0..nurbs.v_knots.len().saturating_sub(1) {
+            let k0 = nurbs.v_knots[i];
+            let k1 = nurbs.v_knots[i + 1];
+            if k1 > k0 {
+                v_coords.push(k0 + 0.5 * (k1 - k0));
+            }
+        }
+
+        // Cartesian product → initial grid
+        let mut grid: Vec<Point2d> = Vec::new();
+        for &u in &u_coords {
+            for &v in &v_coords {
+                grid.push(Point2d::new(u, v));
+            }
+        }
+
+        // Iterative refinement: check chord error and add midpoints where needed
+        for _iter in 0..max_iterations {
+            let mut new_points: Vec<Point2d> = Vec::new();
+            let mut refined = false;
+
+            // For each pair of adjacent grid points (in u and v), check chord error
+            // and subdivide if needed.
+            let mut sorted_u: Vec<f64> = u_coords.clone();
+            sorted_u.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            sorted_u.dedup_by(|a, b| (*a - *b).abs() < 1e-12);
+
+            let mut sorted_v: Vec<f64> = v_coords.clone();
+            sorted_v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            sorted_v.dedup_by(|a, b| (*a - *b).abs() < 1e-12);
+
+            // Check each cell (u_i, v_j) → (u_{i+1}, v_{j+1})
+            for i in 0..sorted_u.len().saturating_sub(1) {
+                for j in 0..sorted_v.len().saturating_sub(1) {
+                    let u0 = sorted_u[i];
+                    let u1 = sorted_u[i + 1];
+                    let v0 = sorted_v[j];
+                    let v1 = sorted_v[j + 1];
+
+                    let um = (u0 + u1) * 0.5;
+                    let vm = (v0 + v1) * 0.5;
+
+                    // 4 corners
+                    let p00 = surface.point_at(u0, v0);
+                    let p10 = surface.point_at(u1, v0);
+                    let p01 = surface.point_at(u0, v1);
+                    let p11 = surface.point_at(u1, v1);
+
+                    // Midpoint of 4 corners (linear interpolation)
+                    let p_mid_linear = Point3d::new(
+                        (p00.x + p10.x + p01.x + p11.x) * 0.25,
+                        (p00.y + p10.y + p01.y + p11.y) * 0.25,
+                        (p00.z + p10.z + p01.z + p11.z) * 0.25,
+                    );
+
+                    // True surface point at midpoint
+                    let p_mid_surface = surface.point_at(um, vm);
+
+                    // Chord error
+                    let err = p_mid_linear.distance_to(&p_mid_surface);
+                    if err > chord_tol {
+                        // Subdivide: add midpoint
+                        new_points.push(Point2d::new(um, vm));
+                        refined = true;
+                    }
+                }
+            }
+
+            if !refined {
+                break;
+            }
+
+            // Add new points to grid and update coordinate lists
+            for p in &new_points {
+                if !u_coords.iter().any(|&u| (u - p.u).abs() < 1e-12) {
+                    u_coords.push(p.u);
+                }
+                if !v_coords.iter().any(|&v| (v - p.v).abs() < 1e-12) {
+                    v_coords.push(p.v);
+                }
+            }
+            grid.extend(new_points);
+        }
+
+        // Clamp to parameter range and dedup
+        let mut filtered: Vec<Point2d> = Vec::new();
+        for p in &grid {
+            let u = p.u.clamp(u_min, u_max);
+            let v = p.v.clamp(v_min, v_max);
+            let pt = Point2d::new(u, v);
+            if !filtered.iter().any(|q| (q.u - pt.u).abs() < 1e-12 && (q.v - pt.v).abs() < 1e-12) {
+                filtered.push(pt);
+            }
+        }
+
+        log::debug!(
+            "NURBS refinement grid: hash={:x}, {} points, chord_tol={:.4}, range u=[{:.3},{:.3}] v=[{:.3},{:.3}]",
+            hash, filtered.len(), chord_tol, u_min, u_max, v_min, v_max
+        );
+
+        self.nurbs_refinement_grids.insert(hash, filtered);
+    }
+
+    /// Get the pre-computed NURBS refinement grid for the given surface.
+    /// Returns `None` if `pre_compute_nurbs_refinement_grid` was not called
+    /// for this surface.
+    pub fn get_nurbs_refinement_grid(&self, nurbs: &draper_geometry::NurbsSurface) -> Option<&Vec<Point2d>> {
+        let hash = nurbs_surface_hash(nurbs);
+        self.nurbs_refinement_grids.get(&hash)
     }
 
     /// Adaptively discretize an edge based on curve curvature.
@@ -1170,7 +1422,7 @@ impl EdgeDiscretizationCache {
     /// computed all UVs eagerly. Lazy UV computation saves ~30% of time for
     /// models with many faces per edge.
     pub fn pre_populate_for_solid(&mut self, solid: &Solid, default_n_samples: usize) {
-        // Phase 0: Pre-compute per-axis-group n for circles. This MUST happen
+        // Phase 0a: Pre-compute per-axis-group n for circles. This MUST happen
         // before any discretization so that the Circle branch in
         // adaptive_discretize can look up the pre-computed n and ensure all
         // circles on the same axis get the same sample count (critical for
@@ -1182,6 +1434,16 @@ impl EdgeDiscretizationCache {
             .filter(|e| !e.degenerate)
             .collect();
         self.pre_compute_circle_axis_n(all_edges);
+
+        // Phase 0b: Pre-compute shared NURBS refinement grids (MS-2).
+        // For each unique NURBS surface in the solid, generate a chord-error-
+        // compliant interior UV grid. All faces sharing the same NURBS surface
+        // will use this grid → identical interior Steiner points → watertight.
+        for face in solid.faces() {
+            if let Some(Surface::Nurbs(nurbs)) = &face.surface {
+                self.pre_compute_nurbs_refinement_grid(nurbs, 3);
+            }
+        }
 
         // Single pass: discretize all edges (3D points only)
         for face in solid.faces() {
@@ -1215,7 +1477,7 @@ impl EdgeDiscretizationCache {
     /// Use `pre_populate_for_solid` instead for sequential triangulation
     /// where UV can be computed lazily.
     pub fn pre_populate_for_solid_full(&mut self, solid: &Solid, default_n_samples: usize) {
-        // Phase 0: Pre-compute per-axis-group n for circles (see
+        // Phase 0a: Pre-compute per-axis-group n for circles (see
         // pre_populate_for_solid for rationale).
         let all_edges: Vec<&Edge> = solid
             .faces()
@@ -1224,6 +1486,13 @@ impl EdgeDiscretizationCache {
             .filter(|e| !e.degenerate)
             .collect();
         self.pre_compute_circle_axis_n(all_edges);
+
+        // Phase 0b: Pre-compute shared NURBS refinement grids (MS-2).
+        for face in solid.faces() {
+            if let Some(Surface::Nurbs(nurbs)) = &face.surface {
+                self.pre_compute_nurbs_refinement_grid(nurbs, 3);
+            }
+        }
 
         // First pass: discretize all edges (3D points only)
         for face in solid.faces() {
