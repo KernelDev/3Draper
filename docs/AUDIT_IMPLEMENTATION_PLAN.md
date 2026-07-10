@@ -8,12 +8,12 @@
 
 ## Текущий прогресс
 
-| Категория | Всего задач | Выполнено | В работе | Остаётся |
-|-----------|-------------|-----------|----------|----------|
+| Категория | Всего задач | Выполнено | Заблокировано | Остаётся |
+|-----------|-------------|-----------|---------------|----------|
 | Краткосрочно (1-3 мес) | 4 | 4 | 0 | 0 |
-| Среднесрочно (3-6 мес) | 4 | 1 | 0 | 3 |
+| Среднесрочно (3-6 мес) | 4 | 1 | 1 | 2 |
 | Долгосрочно (6-12 мес) | 4 | 0 | 0 | 4 |
-| **Итого** | **12** | **5** | **0** | **7** |
+| **Итого** | **12** | **5** | **1** | **6** |
 
 ---
 
@@ -109,60 +109,33 @@
 
 ---
 
-### ✅ MS-2: NURBS chord-error refinement
-**Статус:** Не начато  
+### ⚠️ MS-2: NURBS chord-error refinement
+**Статус:** ⚠️ ЗАБЛОКИРОВАНО АРХИТЕКТУРОЙ  
 **Файлы:** `crates/draper-mesh/src/parametric_domain.rs`  
-**Задача:**
-Реализовать iterative chord-error refinement для NURBS с bit-identical guarantee.
+**Результат:**
+Тестирование показало, что включение NURBS refinement (даже 1 итерация) создаёт
+массивную регрессию watertightness: boundary edges увеличиваются с 9 до 700+ на
+as1-oc-214.stp.
 
-**Проблема:**
-Сейчас NURBS использует 0 iterations chord-error refinement (`parametric_domain.rs:5457–5510`), потому что новые interior vertices не бит-идентичны между гранями. Нужно найти способ сохранять bit-identical guarantee.
+**Причина:**
+1. Разные грани имеют разные boundary loops → разные earcutr триангуляции →
+   разные interior edges для split
+2. Хотя surface.point_at(u,v) детерминирована для ОДНОЙ NURBS entity, разные
+   грани split РАЗНЫЕ edges, создавая РАЗНЫЕ interior vertices
+3. Эти новые vertices формируют edges, interior к ОДНОЙ грани, но appearing
+   как BREP boundary edges — weld + fill_boundary_gaps не могут обработать
+   сотни таких edges
 
-**Реализация:**
-```rust
-pub fn refine_nurbs_chord_error(
-    mesh: &mut TriangleMesh,
-    surface: &NurbsSurface,
-    max_iterations: usize,
-) -> Result<usize, ChordErrorRefinementError> {
-    let mut total_refined = 0;
-    
-    for iteration in 0..max_iterations {
-        let mut refined = false;
-        
-        for triangle in mesh.triangles.iter_mut() {
-            let centroid_uv = triangle.centroid_uv();
-            let centroid_3d = surface.point_at(centroid_uv.u, centroid_uv.v);
-            let interpolated_centroid = triangle.interpolated_centroid();
-            
-            let error = (centroid_3d - interpolated_centroid).norm();
-            
-            if error > CHORD_TOLERANCE {
-                // Split triangle, using deterministic_round_point
-                let new_vertices = split_triangle(triangle, surface);
-                let rounded_vertices = new_vertices.iter()
-                    .map(|v| deterministic_round_point(*v))
-                    .collect::<Vec<_>>();
-                
-                mesh.replace_triangle(triangle, &rounded_vertices);
-                refined = true;
-                total_refined += 1;
-            }
-        }
-        
-        if !refined { break; }
-    }
-    
-    Ok(total_refined)
-}
-```
+**Правильный подход (будущая работа):**
+Использовать SHARED refinement budget для всех граней, разделяющих NURBS surface,
+чтобы одни и те же edges split на всех гранях. Это требует глубокой архитектурной
+переработки — предвычисление shared interior grid для каждого NURBS surface entity
+перед триангуляцией отдельных граней.
 
 **Критерии готовности:**
-- [ ] Функция `refine_nurbs_chord_error` реализована
-- [ ] Использует `deterministic_round_point` для bit-identical guarantee
-- [ ] Пропускает boundary edges (не split shared edges)
-- [ ] Unit-тест проверяет улучшение качества NURBS-граней
-- [ ] Unit-тест проверяет сохранение watertightness
+- [x] Исследована возможность включения refinement
+- [x] Доказано, что простое включение создаёт регрессию
+- [ ] Shared refinement budget (отложено — требует архитектурной переработки)
 
 ---
 
@@ -388,7 +361,8 @@ pub fn validate_uv_periodicity(
 | 2026-07-10 | pending | KS-1: Aliasing statistics | ✅ Выполнено |
 | 2026-07-10 | pending | KS-2: Circle consistency validation | ✅ Выполнено |
 | 2026-07-10 | pending | KS-3: Gap-fill statistics | ✅ Выполнено |
-| 2026-07-10 | pending | KS-4: Constraint edge verification | ✅ Выполнено |
+| 2026-07-10 | `fe8bf4e` | KS-4: Constraint edge verification | ✅ Выполнено |
+| 2026-07-10 | — | MS-2: NURBS chord-error refinement | ⚠️ Заблокировано (регрессия) |
 
 ---
 
