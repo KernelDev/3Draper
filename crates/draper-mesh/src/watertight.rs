@@ -75,6 +75,100 @@ impl GapFillStatistics {
     }
 }
 
+// ============================================================
+// LT-2: Quantization error analysis
+//
+// deterministic_round_point truncates 4 mantissa bits of each f64
+// coordinate, introducing ~1e-14 relative error. This analysis
+// measures the actual quantization error in a mesh's vertices.
+// ============================================================
+
+/// Report of quantization errors in a mesh.
+#[derive(Clone, Debug, Default)]
+pub struct QuantizationReport {
+    /// Maximum quantization error (distance from original to rounded point).
+    pub max_error: f64,
+    /// Mean quantization error.
+    pub mean_error: f64,
+    /// 95th percentile error.
+    pub p95_error: f64,
+    /// Number of vertices with non-zero error.
+    pub affected_vertices: usize,
+    /// Total number of vertices analyzed.
+    pub total_vertices: usize,
+}
+
+impl QuantizationReport {
+    /// Log a summary of quantization errors.
+    pub fn log_summary(&self, label: &str) {
+        if self.total_vertices == 0 {
+            return;
+        }
+        log::info!(
+            "{}: quantization error — max={:.2e}, mean={:.2e}, p95={:.2e}, affected={}/{} ({:.1}%)",
+            label,
+            self.max_error, self.mean_error, self.p95_error,
+            self.affected_vertices, self.total_vertices,
+            self.affected_vertices as f64 / self.total_vertices as f64 * 100.0,
+        );
+    }
+}
+
+/// Analyze quantization errors in a mesh's vertices.
+///
+/// Compares each vertex to its `deterministic_round_point` version and
+/// reports statistics about the rounding error.
+///
+/// # Arguments
+/// * `mesh` — The triangle mesh to analyze.
+///
+/// # Returns
+/// A `QuantizationReport` with max/mean/p95 error statistics.
+pub fn quantization_error_analysis(mesh: &TriangleMesh) -> QuantizationReport {
+    use crate::edge_cache::deterministic_round_point;
+
+    let n = mesh.vertices.len();
+    if n == 0 {
+        return QuantizationReport::default();
+    }
+
+    let mut errors: Vec<f64> = Vec::with_capacity(n);
+    let mut max_error = 0.0_f64;
+    let mut sum_error = 0.0_f64;
+    let mut affected = 0_usize;
+
+    for v in &mesh.vertices {
+        let rounded = deterministic_round_point(*v);
+        let dx = v.x - rounded.x;
+        let dy = v.y - rounded.y;
+        let dz = v.z - rounded.z;
+        let err = (dx * dx + dy * dy + dz * dz).sqrt();
+        errors.push(err);
+        if err > 0.0 {
+            affected += 1;
+        }
+        if err > max_error {
+            max_error = err;
+        }
+        sum_error += err;
+    }
+
+    // Sort for percentile calculation
+    errors.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mean_error = sum_error / n as f64;
+    let p95_idx = ((n as f64) * 0.95) as usize;
+    let p95_error = errors.get(p95_idx.min(n - 1)).copied().unwrap_or(0.0);
+
+    QuantizationReport {
+        max_error,
+        mean_error,
+        p95_error,
+        affected_vertices: affected,
+        total_vertices: n,
+    }
+}
+
 /// Result of watertight validation on a merged solid mesh.
 #[derive(Clone, Debug)]
 pub struct WatertightReport {
@@ -1393,9 +1487,18 @@ pub fn repair_t_junctions(mesh: &mut TriangleMesh, tolerance: f64) -> usize {
             let cmin_z = ((zmin - tolerance) / cell_size).floor() as i64;
             let cmax_z = ((zmax + tolerance) / cell_size).floor() as i64;
 
-            let dx = cmax_x - cmin_x + 1;
-            let dy = cmax_y - cmin_y + 1;
-            let dz = cmax_z - cmin_z + 1;
+            // LT-4: Guard against NaN/Inf coordinates that cause i64 overflow.
+            // If any coordinate is non-finite, skip this edge entirely.
+            if !pa.x.is_finite() || !pa.y.is_finite() || !pa.z.is_finite()
+                || !pb.x.is_finite() || !pb.y.is_finite() || !pb.z.is_finite()
+            {
+                continue;
+            }
+
+            // Saturating subtraction to prevent overflow on very large coordinates
+            let dx = cmax_x.saturating_sub(cmin_x).saturating_add(1);
+            let dy = cmax_y.saturating_sub(cmin_y).saturating_add(1);
+            let dz = cmax_z.saturating_sub(cmin_z).saturating_add(1);
             // Use i128 to avoid overflow when edge is very long relative
             // to cell_size (tolerance can be extremely tight like 1e-10,
             // making cell_size tiny and dx/dy/dz enormous).

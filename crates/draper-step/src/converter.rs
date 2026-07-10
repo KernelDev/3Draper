@@ -4366,6 +4366,13 @@ impl<'a> StepConverter<'a> {
             }
         }
 
+        // LT-2: Quantization error analysis in debug builds.
+        #[cfg(debug_assertions)]
+        {
+            let q_report = draper_mesh::quantization_error_analysis(&mesh);
+            q_report.log_summary(&format!("BREP #{}", brep_id));
+        }
+
         log::info!("BREP #{}: edge_cache={} entries, mesh v={} t={}",
             brep_id, edge_cache.len(), mesh.vertex_count(), mesh.triangle_count());
         Some(mesh)
@@ -5200,6 +5207,13 @@ impl<'a> StepConverter<'a> {
             if wt_report.degenerate_triangle_count > 0 {
                 log::warn!("BREP #{} detailed: {} degenerate triangles", brep_id, wt_report.degenerate_triangle_count);
             }
+        }
+
+        // LT-2: Quantization error analysis in debug builds.
+        #[cfg(debug_assertions)]
+        {
+            let q_report = draper_mesh::quantization_error_analysis(&mesh);
+            q_report.log_summary(&format!("BREP #{} detailed", brep_id));
         }
 
         log::info!("BREP #{} detailed: edge_cache={} entries, mesh v={} t={} skipped={}",
