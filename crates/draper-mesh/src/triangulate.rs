@@ -1528,10 +1528,27 @@ fn triangulate_face_impl(face: &Face, params: &TriangulationParams, cache: &Edge
                 } else {
                     false
                 };
+
+                // LT-1: Pre-compute the NURBS projection grid cache so
+                // that `brute_force_project_point` (used as fallback when
+                // surface.project_point() fails) doesn't recompute the
+                // 10,000-point grid on every call. The cached grid produces
+                // bit-identical results (same grid, same scan) → no
+                // watertightness impact.
+                let u_range = nurbs.u_range();
+                let v_range = nurbs.v_range();
+                let grid_size = crate::edge_cache::adaptive_grid_size(
+                    u_range.1 - u_range.0,
+                    v_range.1 - v_range.0,
+                );
+                crate::edge_cache::set_nurbs_projection_cache(nurbs, grid_size);
+
                 let mesh = triangulate_nurbs_cdt(face, surface, params, cache);
+
                 if grid_was_set {
                     crate::parametric_domain::clear_shared_nurbs_grid();
                 }
+                crate::edge_cache::clear_nurbs_projection_cache();
                 mesh
             }
         }

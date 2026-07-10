@@ -1685,6 +1685,23 @@ pub fn adaptive_grid_size(u_range: f64, v_range: f64) -> usize {
 /// Grid size 100 → 10,201 evaluations per point. Only used as fallback
 /// when project_point() fails, and only for boundary points (typically
 /// < 100 per edge). Applied once and cached by the edge cache.
+///
+/// # LT-1 Optimization: Cached projection grid
+///
+/// The grid of 3D surface points (Phase 1) is cached per-NURBS-surface
+/// (keyed by `nurbs_surface_hash` + `grid_size`). This avoids recomputing
+/// the (grid_size+1)² `surface.point_at()` evaluations on every call.
+///
+/// The cached grid produces BIT-IDENTICAL results to the uncached version
+/// (same grid points, same nearest-point scan). This is critical for
+/// watertightness: changing the initial guess would change Newton-Raphson
+/// convergence, producing different UV coordinates → different 3D points
+/// → boundary edges.
+///
+/// The cache is passed via thread-local `set_nurbs_projection_cache` /
+/// `clear_nurbs_projection_cache` (same pattern as MS-2 shared grid).
+/// When no cache is set, the function falls back to recomputing the grid
+/// each call (original behavior).
 pub fn brute_force_project_point(
     nurbs: &draper_geometry::NurbsSurface,
     point: &Point3d,
@@ -1702,18 +1719,43 @@ pub fn brute_force_project_point(
     let v_step = (v_max - v_min) / grid_size as f64;
 
     // Phase 1: Uniform grid search
-    for i in 0..=grid_size {
-        let u = u_min + u_step * i as f64;
-        for j in 0..=grid_size {
-            let v = v_min + v_step * j as f64;
-            let p = surface.point_at(u, v);
+    //
+    // LT-1: Check if a pre-computed grid is available in the thread-local
+    // cache. If so, scan it instead of recomputing surface.point_at() for
+    // each grid point. The cached grid contains the SAME 3D points that
+    // would be computed here, so the result is bit-identical.
+    let hash = nurbs_surface_hash(nurbs);
+    let cached_grid: Option<Vec<(f64, f64, Point3d)>> = NURBS_PROJECTION_CACHE.with(|c| {
+        c.borrow().as_ref().and_then(|cache| cache.get(hash, grid_size).cloned())
+    });
+
+    if let Some(grid_points) = cached_grid {
+        // Use cached grid — scan for nearest point
+        for (u, v, p) in &grid_points {
             let dist = (p.x - point.x).powi(2)
                 + (p.y - point.y).powi(2)
                 + (p.z - point.z).powi(2);
             if dist < best_dist {
                 best_dist = dist;
-                best_u = u;
-                best_v = v;
+                best_u = *u;
+                best_v = *v;
+            }
+        }
+    } else {
+        // No cache — compute grid inline (original behavior)
+        for i in 0..=grid_size {
+            let u = u_min + u_step * i as f64;
+            for j in 0..=grid_size {
+                let v = v_min + v_step * j as f64;
+                let p = surface.point_at(u, v);
+                let dist = (p.x - point.x).powi(2)
+                    + (p.y - point.y).powi(2)
+                    + (p.z - point.z).powi(2);
+                if dist < best_dist {
+                    best_dist = dist;
+                    best_u = u;
+                    best_v = v;
+                }
             }
         }
     }
@@ -1759,6 +1801,98 @@ pub fn brute_force_project_point(
     } else {
         (best_u, best_v)
     }
+}
+
+// ── LT-1: NURBS projection grid cache ──────────────────────────────────
+//
+// Thread-local cache of pre-computed NURBS projection grids. Keyed by
+// (nurbs_surface_hash, grid_size). Stores the full (grid_size+1)² grid
+// of (u, v, 3D point) tuples.
+//
+// When set via `set_nurbs_projection_cache`, `brute_force_project_point`
+// uses the cached grid instead of recomputing it — saving ~10,000
+// surface.point_at() evaluations per call.
+//
+// The cached grid produces BIT-IDENTICAL results to the uncached version
+// (same grid points, same nearest-point scan) → no watertightness impact.
+
+/// A single entry in the projection grid cache: (u, v, 3D point) tuples
+/// for a specific (nurbs_hash, grid_size) combination.
+type ProjectionGridEntry = Vec<(f64, f64, Point3d)>;
+
+/// Cache of projection grids, keyed by (nurbs_hash, grid_size).
+#[derive(Default)]
+struct NurbsProjectionCache {
+    entries: HashMap<(u64, usize), ProjectionGridEntry>,
+}
+
+impl NurbsProjectionCache {
+    fn get(&self, hash: u64, grid_size: usize) -> Option<&ProjectionGridEntry> {
+        self.entries.get(&(hash, grid_size))
+    }
+
+    fn get_or_compute(
+        &mut self,
+        hash: u64,
+        grid_size: usize,
+        nurbs: &draper_geometry::NurbsSurface,
+    ) -> &ProjectionGridEntry {
+        self.entries.entry((hash, grid_size)).or_insert_with(|| {
+            let (u_min, u_max) = nurbs.u_range();
+            let (v_min, v_max) = nurbs.v_range();
+            let surface = Surface::Nurbs(nurbs.clone());
+            let u_step = (u_max - u_min) / grid_size as f64;
+            let v_step = (v_max - v_min) / grid_size as f64;
+
+            let mut grid = Vec::with_capacity((grid_size + 1) * (grid_size + 1));
+            for i in 0..=grid_size {
+                let u = u_min + u_step * i as f64;
+                for j in 0..=grid_size {
+                    let v = v_min + v_step * j as f64;
+                    let p = surface.point_at(u, v);
+                    grid.push((u, v, p));
+                }
+            }
+            grid
+        })
+    }
+}
+
+thread_local! {
+    static NURBS_PROJECTION_CACHE: std::cell::RefCell<Option<NurbsProjectionCache>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Pre-compute and cache the projection grid for a NURBS surface.
+///
+/// Call this before `brute_force_project_point` to populate the cache.
+/// The grid is stored in a thread-local and used by subsequent calls to
+/// `brute_force_project_point` for the same (surface, grid_size) pair.
+///
+/// Must be paired with `clear_nurbs_projection_cache` after all
+/// projections for this surface are done.
+pub fn set_nurbs_projection_cache(
+    nurbs: &draper_geometry::NurbsSurface,
+    grid_size: usize,
+) {
+    let hash = nurbs_surface_hash(nurbs);
+    NURBS_PROJECTION_CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        if cache.is_none() {
+            *cache = Some(NurbsProjectionCache::default());
+        }
+        if let Some(ref mut cache) = *cache {
+            cache.get_or_compute(hash, grid_size, nurbs);
+        }
+    });
+}
+
+/// Clear the NURBS projection grid cache.
+///
+/// Call this after all `brute_force_project_point` calls for the current
+/// NURBS surface are complete. Frees the memory used by the cached grids.
+pub fn clear_nurbs_projection_cache() {
+    NURBS_PROJECTION_CACHE.with(|c| *c.borrow_mut() = None);
 }
 
 impl Default for EdgeDiscretizationCache {
