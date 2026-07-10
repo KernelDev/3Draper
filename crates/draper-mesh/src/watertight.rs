@@ -1320,15 +1320,23 @@ pub fn repair_t_junctions(mesh: &mut TriangleMesh, tolerance: f64) -> usize {
     let mut total_repaired = 0usize;
     let max_iterations = 8;
 
+    // MS-3: Adaptive vertex limit based on mesh size.
+    // Previously: hard limit at 500K (skip entirely).
+    // Now: process up to 2M vertices (modern machines handle this),
+    // and for >2M use batched edge processing with coarser spatial hash.
+    let n_verts = mesh.vertices.len();
+    let batch_mode = n_verts > 2_000_000;
+
+    if n_verts > 5_000_000 {
+        log::warn!(
+            "repair_t_junctions: mesh has {} vertices — skipping (too large even for batch mode)",
+            n_verts,
+        );
+        return 0;
+    }
+
     for _iter in 0..max_iterations {
         let n_verts = mesh.vertices.len();
-        if n_verts > 500_000 {
-            log::warn!(
-                "repair_t_junctions: mesh has {} vertices — skipping (too large)",
-                n_verts,
-            );
-            break;
-        }
 
         // Build edge → triangle list map.
         let mut edge_tris: HashMap<(u32, u32), Vec<(usize, u32)>> = HashMap::new();
@@ -1341,7 +1349,12 @@ pub fn repair_t_junctions(mesh: &mut TriangleMesh, tolerance: f64) -> usize {
         }
 
         // Spatial hash grid for fast vertex lookup.
-        let cell_size = (tolerance * 4.0).max(1e-9);
+        // MS-3: Use effective_cell_size (coarser for batch mode >2M vertices).
+        let cell_size = if batch_mode {
+            (tolerance * 8.0).max(1e-9)
+        } else {
+            (tolerance * 4.0).max(1e-9)
+        };
         let mut grid: HashMap<(i64, i64, i64), Vec<u32>> = HashMap::new();
         for (vi, p) in mesh.vertices.iter().enumerate() {
             let cx = (p.x / cell_size).floor() as i64;

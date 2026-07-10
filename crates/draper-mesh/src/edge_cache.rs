@@ -698,16 +698,48 @@ impl EdgeDiscretizationCache {
                     *p = seg_start_frac + *p * (seg_end_frac - seg_start_frac);
                 }
 
-                // Skip first point if it duplicates the last point of previous segment
+                // MS-4: Robust deduplication for composite curve joints.
+                // Previous code used a tight 1e-12 tolerance which could miss
+                // close-but-not-identical points (FP drift from different curve
+                // evaluations). Now uses a model-scale-aware tolerance and
+                // snaps the joint point to the midpoint for consistency.
                 if !all_points.is_empty() && !seg_points.is_empty() {
-                    let last = all_points.last().unwrap();
-                    let first = &seg_points[0];
+                    let last = *all_points.last().unwrap();
+                    let first = seg_points[0];
                     let dx = first.x - last.x;
                     let dy = first.y - last.y;
                     let dz = first.z - last.z;
-                    if (dx * dx + dy * dy + dz * dz) < 1e-12 {
+                    let dist_sq = dx * dx + dy * dy + dz * dz;
+
+                    // Use model-scale-aware tolerance (1 PPM of model scale)
+                    let dedup_tol = self.adaptive_tol.merge_tolerance();
+                    let dedup_tol_sq = dedup_tol * dedup_tol;
+
+                    if dist_sq < dedup_tol_sq {
+                        // Points are close enough to deduplicate.
+                        // If they're not bit-identical, snap to midpoint
+                        // and apply deterministic_round_point for consistency.
+                        if dist_sq > 1e-20 {
+                            let mid = Point3d::new(
+                                (last.x + first.x) * 0.5,
+                                (last.y + first.y) * 0.5,
+                                (last.z + first.z) * 0.5,
+                            );
+                            let rounded = deterministic_round_point(mid);
+                            *all_points.last_mut().unwrap() = rounded;
+                        }
                         seg_points.remove(0);
                         seg_params.remove(0);
+                    } else {
+                        // Points are NOT close — this indicates a gap in the
+                        // composite curve. Log a warning but continue (the gap
+                        // will be caught by weld_boundary_edge_vertices later).
+                        if dist_sq < (dedup_tol * 10.0).powi(2) {
+                            log::warn!(
+                                "composite_curve: joint gap {:.2e} > tol {:.2e} — segments may not connect properly",
+                                dist_sq.sqrt(), dedup_tol,
+                            );
+                        }
                     }
                 }
 
