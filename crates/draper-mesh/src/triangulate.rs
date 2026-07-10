@@ -3463,10 +3463,32 @@ fn triangulate_cone_tube_from_boundary(
             row_vertex_count.push(n_u);
             for i in 0..n_u {
                 let u = bottom_u[i];
+                // Determine which row this is and use cached points when
+                // available. CRITICAL for watertightness: the boundary row
+                // (the row that coincides with a face edge) MUST use cached
+                // points so it matches the adjacent cap face's ring vertices.
+                //
+                // - j==0 && !apex_at_bottom: bottom row, use cached bottom ring
+                // - j==n_v && !apex_at_top: top row
+                //   * If apex_at_bottom: the boundary ring is at the top
+                //     (effective_bottom after swap holds the cached points).
+                //     Use effective_bottom[i].1 — NOT analytic, otherwise
+                //     the cap face's ring vertices won't match.
+                //   * If use_cached_top: effective_top holds cached top ring
+                //   * Otherwise: analytic (no cached top ring available)
+                // - Intermediate rows: analytic (cone.point_at)
                 let p = if j == 0 && !apex_at_bottom {
                     effective_bottom[i].1
-                } else if j == n_v && use_cached_top && !apex_at_top {
-                    effective_top[i].1
+                } else if j == n_v && !apex_at_top {
+                    if apex_at_bottom {
+                        // Boundary ring at top (apex is at bottom) — use
+                        // the cached boundary points from effective_bottom.
+                        effective_bottom[i].1
+                    } else if use_cached_top {
+                        effective_top[i].1
+                    } else {
+                        crate::edge_cache::deterministic_round_point(cone.point_at(u, v))
+                    }
                 } else {
                     crate::edge_cache::deterministic_round_point(cone.point_at(u, v))
                 };

@@ -69,6 +69,79 @@ pub fn deterministic_round_point(p: Point3d) -> Point3d {
     )
 }
 
+/// Quantization grid (in millimetres) for axis-origin components when
+/// grouping circles by axis. Two circles whose axis origins differ by
+/// less than this value are treated as sharing the same axis.
+const AXIS_ORIGIN_QUANT: f64 = 1e-4;
+
+/// Quantization grid (radians, applied to direction cosines) for axis
+/// direction when grouping circles by axis.
+const AXIS_DIR_QUANT: f64 = 1e-4;
+
+/// Canonical key identifying a circle's axis (origin + direction), quantized
+/// so that two circles on the "same" axis (within tolerance) map to the same
+/// key. Used by `pre_compute_circle_axis_n` to enforce identical sample
+/// counts across all circles on a shared axis — critical for watertightness
+/// of cone/cylinder tube faces where bottom and top rings come from DIFFERENT
+/// CIRCLE entities with DIFFERENT radii.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct AxisKey {
+    ox: i64,
+    oy: i64,
+    oz: i64,
+    dx: i64,
+    dy: i64,
+    dz: i64,
+}
+
+impl AxisKey {
+    fn from_circle(c: &draper_geometry::Circle) -> Self {
+        // Quantize origin to 1e-4 mm grid
+        let ox = (c.center.x / AXIS_ORIGIN_QUANT).round() as i64;
+        let oy = (c.center.y / AXIS_ORIGIN_QUANT).round() as i64;
+        let oz = (c.center.z / AXIS_ORIGIN_QUANT).round() as i64;
+        // Quantize direction cosines to 1e-4 grid
+        let dx = (c.normal.x / AXIS_DIR_QUANT).round() as i64;
+        let dy = (c.normal.y / AXIS_DIR_QUANT).round() as i64;
+        let dz = (c.normal.z / AXIS_DIR_QUANT).round() as i64;
+        Self { ox, oy, oz, dx, dy, dz }
+    }
+}
+
+/// Compute the number of sample points for a circle of radius `R` given a
+/// chord tolerance `d`. Uses the exact formula:
+///   n = π / acos(1 - d/R)  when d < R
+/// and the small-angle approximation π · sqrt(R / (2d)) as a fallback.
+///
+/// The result is rounded UP to a multiple of 4 so that two circles on the
+/// same axis with similar radii (e.g., R=30.36 and R=35.22) tend to produce
+/// the same n — this preserves watertightness of tube faces.
+///
+/// Always clamps to [8, max_samples] and to at least `8`.
+fn compute_circle_n(radius: f64, chord_tol: f64, max_samples: usize) -> usize {
+    // Sanity guards: degenerate circle or tolerance
+    if !radius.is_finite() || radius <= 0.0 || !chord_tol.is_finite() || chord_tol <= 0.0 {
+        return 8;
+    }
+    // If tolerance is larger than radius, the circle collapses — minimum samples
+    if chord_tol >= radius {
+        return 8;
+    }
+    // Exact: n = π / acos(1 - d/R)
+    let arg = 1.0 - chord_tol / radius;
+    let n_real = if arg < 1.0 {
+        let acos_arg = arg.max(-1.0);
+        std::f64::consts::PI / acos_arg.acos()
+    } else {
+        // Tolerance very close to 0 — use small-angle approximation
+        std::f64::consts::PI * (radius / (2.0 * chord_tol)).sqrt()
+    };
+    // Round up to multiple of 4 (so 4, 8, 12, 16, ...)
+    let n_rounded = ((n_real.ceil() as usize) + 3) & !3;
+    // Clamp to [8, max_samples]
+    n_rounded.clamp(8, max_samples.max(8))
+}
+
 /// Canonical key for edge cache lookup.
 ///
 /// Uses step_entity_id when available (STEP path), falling back to TopoId
@@ -234,6 +307,22 @@ pub struct EdgeDiscretizationCache {
     /// Set via `set_chord_tolerance_override()` by `triangulate_solid()`
     /// from `TriangulationParams::max_deviation`.
     chord_tolerance_override: Option<f64>,
+
+    /// Per-axis-group sample count for circles.
+    ///
+    /// Key: quantized axis (origin + direction). Value: the MAX n across
+    /// all circles sharing that axis. This ensures that two circles on the
+    /// same axis but with different radii (e.g., bottom ring R=30.36 and
+    /// top ring R=35.22 of a cone tube face) get the SAME n — which is
+    /// critical for watertightness (the tube face's bottom[i]→top[i]
+    /// connection requires identical counts).
+    ///
+    /// Computed by `pre_compute_circle_axis_n()` which must be called
+    /// before triangulation starts. If not pre-computed, the Circle branch
+    /// in `adaptive_discretize` falls back to per-circle n computation
+    /// (still LOD-aware, but may break watertightness for multi-radius
+    /// tube faces).
+    circle_axis_n: HashMap<AxisKey, usize>,
     /// ── Instrumentation counters ──
     /// Number of cache hits (edge already discretized).
     cache_hits: usize,
@@ -326,6 +415,7 @@ impl EdgeDiscretizationCache {
             adaptive_tol: AdaptiveTolerance::new(),
             max_samples: 64,
             chord_tolerance_override: None,
+            circle_axis_n: HashMap::new(),
             cache_hits: 0,
             cache_misses: 0,
             shared_edges: 0,
@@ -342,6 +432,7 @@ impl EdgeDiscretizationCache {
             adaptive_tol: AdaptiveTolerance::from_model_scale(tol_ctx.model_scale),
             max_samples: max_samples.max(4),
             chord_tolerance_override: None,
+            circle_axis_n: HashMap::new(),
             cache_hits: 0,
             cache_misses: 0,
             shared_edges: 0,
@@ -358,6 +449,7 @@ impl EdgeDiscretizationCache {
             adaptive_tol: AdaptiveTolerance::from_bounding_box(min, max),
             max_samples: max_samples.max(4),
             chord_tolerance_override: None,
+            circle_axis_n: HashMap::new(),
             cache_hits: 0,
             cache_misses: 0,
             shared_edges: 0,
@@ -647,6 +739,61 @@ impl EdgeDiscretizationCache {
             .unwrap_or_else(|| self.adaptive_tol.chord_tolerance())
     }
 
+    /// Pre-compute the per-axis-group sample count for all CIRCLE curves in the
+    /// given edges. For each axis (quantized origin + direction), finds the
+    /// MAX n across all circles sharing that axis — and stores it.
+    ///
+    /// This MUST be called before triangulation starts. It ensures that two
+    /// circles on the same axis but with different radii (e.g., bottom ring
+    /// R=30.36 and top ring R=35.22 of a cone tube face) get the SAME n —
+    /// which is critical for watertightness (the tube face's bottom[i]→top[i]
+    /// connection requires identical counts on both rings).
+    ///
+    /// The n computation uses the LOD-driven `effective_chord_tolerance()`,
+    /// so a finer LOD produces more circle samples (and a coarser LOD fewer).
+    /// The geometric formula: for a circle of radius R with chord tolerance d,
+    ///   n = π / acos(1 - d/R) ≈ π · sqrt(R / (2d))  for small d/R
+    /// We round n up to a multiple of 4 so that two circles with similar but
+    /// not identical radii (but on the same axis) produce the SAME n.
+    pub fn pre_compute_circle_axis_n<'a, I>(&mut self, edges: I)
+    where
+        I: IntoIterator<Item = &'a Edge>,
+    {
+        let chord_tol = self.effective_chord_tolerance();
+        let mut per_axis_max: HashMap<AxisKey, usize> = HashMap::new();
+
+        for edge in edges {
+            let circle = match &edge.curve {
+                Some(Curve3d::Circle(c)) => c,
+                _ => continue,
+            };
+            let axis_key = AxisKey::from_circle(circle);
+            // Compute n from chord tolerance and radius
+            let n_for_this = compute_circle_n(circle.radius, chord_tol, self.max_samples);
+            let entry = per_axis_max.entry(axis_key).or_insert(0);
+            if n_for_this > *entry {
+                *entry = n_for_this;
+            }
+        }
+
+        // Merge into the persistent map (in case pre_compute is called multiple
+        // times — e.g., for multi-shell solids). Take the max.
+        for (k, v) in per_axis_max {
+            let entry = self.circle_axis_n.entry(k).or_insert(0);
+            if v > *entry {
+                *entry = v;
+            }
+        }
+    }
+
+    /// Look up the pre-computed n for the axis of the given circle.
+    /// Returns `None` if `pre_compute_circle_axis_n` was not called or the
+    /// circle's axis was not seen.
+    fn circle_n_for(&self, circle: &draper_geometry::Circle) -> Option<usize> {
+        let key = AxisKey::from_circle(circle);
+        self.circle_axis_n.get(&key).copied()
+    }
+
     /// Adaptively discretize an edge based on curve curvature.
     ///
     /// Starts with uniformly-spaced points based on the hint, then recursively
@@ -753,24 +900,41 @@ impl EdgeDiscretizationCache {
         // Adaptive subdivision threshold: use LOD override if set, else adaptive.
         let max_deviation = self.effective_chord_tolerance();
 
-        // For CIRCLE curves, use a UNIFORM angular grid based on n_samples_hint.
+        // For CIRCLE curves, use a UNIFORM angular grid. The number of points
+        // is determined by `pre_compute_circle_axis_n` (preferred) or computed
+        // from the LOD-driven chord tolerance as a fallback.
         //
-        // This is CRITICAL for watertightness of tube faces (cones, cylinders).
-        // When two circles on the same axis have different radii, they MUST
-        // have the SAME number of points at the SAME angular positions.
+        // CRITICAL for watertightness: when two circles on the same axis have
+        // different radii (e.g., R=30.36 bottom ring + R=35.22 top ring of a
+        // cone tube face), they MUST have the SAME number of points at the
+        // SAME angular positions. The `pre_compute_circle_axis_n` method
+        // ensures this by computing the MAX n across all circles sharing an
+        // axis — so both rings get the same n.
         //
-        // Since n_samples_hint is the same for all circles (24, set by
-        // edge_sample_count), using it directly ensures both rings get the
-        // same n. We do NOT apply tolerance-based refinement here because
-        // that would give different n for different radii, breaking the
-        // tube grid's bottom[i]→top[i] connection.
-        //
-        // LOD still affects circle density through n_samples_hint: when the
-        // STEP converter calls edge_sample_count, it could scale the result
-        // by LOD. Currently it returns a fixed 24, but the Quality slider
-        // still affects triangle count via Steiner points and face budgets.
-        if let Curve3d::Circle(ref _circle) = curve {
-            let n = n_samples_hint.max(8).min(self.max_samples).max(2);
+        // LOD response: the chord tolerance (set by `set_chord_tolerance_override`)
+        // feeds into `compute_circle_n`, so a finer LOD produces more samples.
+        // The fallback (no pre-compute) still uses LOD, but only per-circle —
+        // which may break watertightness for multi-radius tube faces. Therefore
+        // `pre_compute_circle_axis_n` MUST be called before triangulation.
+        if let Curve3d::Circle(ref circle) = curve {
+            // Determine n: prefer pre-computed per-axis value, else compute
+            // from chord tolerance and this circle's radius.
+            let n = if let Some(n_pre) = self.circle_n_for(circle) {
+                // Use the pre-computed (axis-group max) n. Also enforce a
+                // minimum based on the hint so we don't UNDER-tessellate when
+                // the pre-compute was done with a stale tolerance.
+                n_pre.max(n_samples_hint.max(8).min(self.max_samples))
+            } else {
+                // Fallback: per-circle n from chord tolerance
+                let chord_tol = self.effective_chord_tolerance();
+                let n_from_tol = compute_circle_n(circle.radius, chord_tol, self.max_samples);
+                // Use the MAX of (n_from_tol, n_samples_hint) so the hint
+                // acts as a floor. This is important for the native path
+                // where pre_compute_circle_axis_n may not have been called.
+                n_from_tol.max(n_samples_hint.max(8).min(self.max_samples))
+            };
+            // Final clamp to max_samples
+            let n = n.min(self.max_samples).max(2);
             let mut points: Vec<Point3d> = Vec::with_capacity(n);
             let mut t_params: Vec<f64> = Vec::with_capacity(n);
             for i in 0..n {
@@ -1006,6 +1170,19 @@ impl EdgeDiscretizationCache {
     /// computed all UVs eagerly. Lazy UV computation saves ~30% of time for
     /// models with many faces per edge.
     pub fn pre_populate_for_solid(&mut self, solid: &Solid, default_n_samples: usize) {
+        // Phase 0: Pre-compute per-axis-group n for circles. This MUST happen
+        // before any discretization so that the Circle branch in
+        // adaptive_discretize can look up the pre-computed n and ensure all
+        // circles on the same axis get the same sample count (critical for
+        // watertightness of cone/cylinder tube faces with multi-radius rings).
+        let all_edges: Vec<&Edge> = solid
+            .faces()
+            .iter()
+            .flat_map(|f| f.edges.iter())
+            .filter(|e| !e.degenerate)
+            .collect();
+        self.pre_compute_circle_axis_n(all_edges);
+
         // Single pass: discretize all edges (3D points only)
         for face in solid.faces() {
             for edge in &face.edges {
@@ -1038,6 +1215,16 @@ impl EdgeDiscretizationCache {
     /// Use `pre_populate_for_solid` instead for sequential triangulation
     /// where UV can be computed lazily.
     pub fn pre_populate_for_solid_full(&mut self, solid: &Solid, default_n_samples: usize) {
+        // Phase 0: Pre-compute per-axis-group n for circles (see
+        // pre_populate_for_solid for rationale).
+        let all_edges: Vec<&Edge> = solid
+            .faces()
+            .iter()
+            .flat_map(|f| f.edges.iter())
+            .filter(|e| !e.degenerate)
+            .collect();
+        self.pre_compute_circle_axis_n(all_edges);
+
         // First pass: discretize all edges (3D points only)
         for face in solid.faces() {
             if let Some(ref _surface) = face.surface {

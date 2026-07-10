@@ -4274,3 +4274,95 @@ Result:
 - LOD works: LOD 0.1=114 tris, 0.3=276, 0.5=440, 0.75=644, 1.0=644
   (0.75 and 1.0 match due to bbox floor diagonal*0.0002, pre-existing)
 - Tests: draper-mesh 231/231, test_3_05_078_loads_and_watertight ✓
+
+---
+Task ID: lod-circle-fix-70
+Agent: Main
+Task: Fix LOD regression — Circle edge sampling ignores chord_tolerance_override (Variant A prerequisite)
+
+User: "Продолжай последовательно варианты начиная с A"
+
+Investigation:
+- Ran cargo test -p draper-mesh in fresh sandbox. 4 tests failed:
+  test_cylinder_lod_changes_vertex_count
+  test_lod_actually_changes_cap_circle_resolution
+  test_lod_vertex_count_monotonic
+  test_cone_watertight_at_all_lods
+- All LODs (0.05-1.0) produce identical 38 vertices for cylinder (R=40, h=100)
+- Root cause: adaptive_discretize for Circle (edge_cache.rs:772-783) uses
+  FIXED n_samples_hint (=24 from EDGE_SAMPLES or edge_sample_count) — ignores
+  effective_chord_tolerance() entirely.
+- Task 68 (commit history) intentionally made Circle uniform to fix
+  watertightness for cone with R_bottom=30.36 vs R_top=35.22 (different
+  CIRCLE entities on same axis). But this killed LOD response on circles.
+- Task 69 (worklog) fixed STEP path to call set_chord_tolerance_override
+  on all 4 sites, but the Circle branch in adaptive_discretize IGNORES
+  the override.
+
+Plan:
+- Phase 1: Add per-axis-group n computation for circles.
+  - Add field `circle_axis_n: HashMap<AxisKey, usize>` to EdgeDiscretizationCache
+  - Add method `pre_compute_circle_axis_n(&mut self, edges: &[&Edge])` that:
+    * Groups CIRCLE curves by axis (origin + direction, quantized to 1e-4)
+    * For each circle: computes n from effective_chord_tolerance and radius
+    * Uses MAX n across all circles in the same axis group
+    * Stores per-axis-group n
+  - In adaptive_discretize for Circle:
+    * Look up axis key, use pre-computed n if available
+    * Otherwise compute n from chord tolerance and radius (single-circle fallback)
+  - This preserves watertightness (same n for same-axis circles) while
+    making LOD actually affect circle resolution.
+- Phase 2: Call pre_compute_circle_axis_n before triangulation in
+  triangulate_solid_sequential and STEP path.
+- Phase 3: Verify all 4 failing tests pass + no regression on
+  test_3_05_078_loads_and_watertight.
+
+Phase 1 — Implementation:
+- Added `AxisKey` struct (quantized origin + direction) to edge_cache.rs
+- Added `compute_circle_n(radius, chord_tol, max_samples)` function:
+  n = π / acos(1 - d/R), rounded up to multiple of 4, clamped to [8, max_samples]
+- Added `circle_axis_n: HashMap<AxisKey, usize>` field to EdgeDiscretizationCache
+- Added `pre_compute_circle_axis_n()` method: scans all edges, groups CIRCLE
+  curves by axis, computes MAX n per axis group
+- Added `circle_n_for()` lookup method
+- Modified `adaptive_discretize()` Circle branch:
+  * If pre-computed n available → use it (ensures same-axis circles get same n)
+  * Fallback → compute n from effective_chord_tolerance and radius
+  * Both paths now respond to LOD (was: fixed n_samples_hint=24)
+- Integrated `pre_compute_circle_axis_n` into:
+  * `pre_populate_for_solid()` (native path)
+  * `pre_populate_for_solid_full()` (parallel path)
+  * 4 sites in converter.rs (STEP path): triangulate_brep, triangulate_brep_detailed,
+    prepare_brep_session, surface_to_mesh
+
+Phase 2 — Cone apex-at-bottom bug fix (pre-existing, found during testing):
+- Root cause: in triangulate_cone_tube_from_boundary, when apex_at_bottom=true,
+  the boundary ring is at j=n_v (top row). But the vertex generation code
+  only used cached points for j=n_v when `use_cached_top && !apex_at_top`.
+  With top_row_at_apex=true, use_cached_top=false → fell back to ANALYTIC
+  points → boundary ring didn't match cap face's cached ring → 20 boundary edges.
+- Fix: added `apex_at_bottom` branch in the j=n_v vertex generation:
+  when apex_at_bottom, use effective_bottom[i].1 (cached boundary points)
+  for the top row instead of analytic.
+
+Phase 3 — Verification:
+- draper-mesh tests: 279/279 PASS (243 lib + 12 fuzz + 6 LOD + 18 integration)
+  Previously failing: 4 LOD tests (test_cylinder_lod_changes_vertex_count,
+  test_lod_actually_changes_cap_circle_resolution, test_lod_vertex_count_monotonic,
+  test_cone_watertight_at_all_lods). ALL NOW PASS.
+- draper-step tests: 116/117 PASS. 1 pre-existing failure:
+  test_lod_actually_changes_triangle_count — expects diff≥3000 on Zentralstaender.stp,
+  actual diff=1103 (was 1021 before my changes — IMPROVED, not regressed).
+  LOD ratio 5.2x exceeds 2.0x requirement. Test threshold is unrealistic for
+  this file — pre-existing issue, not caused by my changes.
+
+Stage Summary:
+- LOD regression FIXED: Circle edge sampling now responds to chord_tolerance_override.
+  At LOD 0.05 → n_circle=8, at LOD 1.0 → n_circle=144 (for R=40). Ratio ~18x.
+- Watertightness PRESERVED: pre_compute_circle_axis_n ensures same-axis circles
+  (e.g., R=30.36 + R=35.22 cone rings) get the SAME n via axis-group MAX.
+- Cone apex-at-bottom bug FIXED: boundary ring now uses cached points instead
+  of analytic → 0 boundary edges (was 20) at all LODs.
+- No regressions: all previously passing tests still pass. 2 pre-existing
+  test failures remain (both documented as pre-existing, not regressions).
+- Files changed: edge_cache.rs, triangulate.rs, converter.rs (4 sites)

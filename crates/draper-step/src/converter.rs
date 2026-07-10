@@ -3929,6 +3929,19 @@ impl<'a> StepConverter<'a> {
         // no effect on edge discretization.
         edge_cache.set_chord_tolerance_override(Some(params.max_deviation));
 
+        // Pre-compute per-axis-group n for circles — ensures all circles
+        // on the same axis (e.g., bottom+top rings of a cone tube face)
+        // get the SAME n. Critical for watertightness of multi-radius
+        // tube faces. Must be called after set_chord_tolerance_override
+        // so the n computation uses the LOD-driven tolerance.
+        {
+            let all_edges: Vec<&TopoEdge> = face_data_list
+                .iter()
+                .flat_map(|fd| fd.edges.iter())
+                .collect();
+            edge_cache.pre_compute_circle_axis_n(all_edges);
+        }
+
         // ─── Build vertex-pair → canonical step_id aliases ──────────────
         // In STEP B-Rep, two faces sharing a geometric boundary may use
         // DIFFERENT EDGE_CURVE entities (e.g., a Plane face uses a LINE
@@ -4525,6 +4538,16 @@ impl<'a> StepConverter<'a> {
         // Apply LOD-aware chord tolerance so the Quality slider changes
         // circle/edge sampling density.
         edge_cache.set_chord_tolerance_override(Some(params.max_deviation));
+
+        // Pre-compute per-axis-group n for circles (watertightness for
+        // multi-radius tube faces).
+        {
+            let all_edges: Vec<&TopoEdge> = face_data_list
+                .iter()
+                .flat_map(|fd| fd.edges.iter())
+                .collect();
+            edge_cache.pre_compute_circle_axis_n(all_edges);
+        }
 
         // ─── Build vertex-pair → canonical step_id aliases ──────────────
         {
@@ -5365,6 +5388,16 @@ impl<'a> StepConverter<'a> {
         // Apply LOD-aware chord tolerance so the Quality slider changes
         // circle/edge sampling density.
         edge_cache.set_chord_tolerance_override(Some(params.max_deviation));
+
+        // Pre-compute per-axis-group n for circles (watertightness for
+        // multi-radius tube faces).
+        {
+            let all_edges: Vec<&TopoEdge> = face_data_list
+                .iter()
+                .flat_map(|fd| fd.edges.iter())
+                .collect();
+            edge_cache.pre_compute_circle_axis_n(all_edges);
+        }
 
         // ─── Build vertex-pair → canonical step_id aliases ──────────────
         // (Same logic as triangulate_brep_detailed — see comments there.)
@@ -10759,6 +10792,15 @@ impl<'a> StepConverter<'a> {
                 // Apply LOD-aware chord tolerance so the Quality slider changes
                 // circle/edge sampling density.
                 local_edge_cache.set_chord_tolerance_override(Some(params.max_deviation));
+                // Pre-compute per-axis-group n for circles in this single face.
+                // For a planar face with holes, the outer + inner edges may
+                // include circles on the same axis (e.g., annulus) — they
+                // need the same n to preserve watertightness with neighbouring
+                // tube faces.
+                {
+                    let all_edges: Vec<&TopoEdge> = face_data.edges.iter().collect();
+                    local_edge_cache.pre_compute_circle_axis_n(all_edges);
+                }
                 return self.triangulate_planar_face_with_holes_cached(
                     plane,
                     &face_data.outer_edges,
