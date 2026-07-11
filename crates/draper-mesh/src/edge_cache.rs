@@ -1724,10 +1724,28 @@ pub fn brute_force_project_point(
     // cache. If so, scan it instead of recomputing surface.point_at() for
     // each grid point. The cached grid contains the SAME 3D points that
     // would be computed here, so the result is bit-identical.
+    //
+    // Multi-start (E.3): Collect top-N candidates from the grid for
+    // multi-start Newton-Raphson. This handles high-curvature NURBS
+    // surfaces where the nearest grid point may be in a different basin
+    // of attraction than the true closest point.
     let hash = nurbs_surface_hash(nurbs);
     let cached_grid: Option<Vec<(f64, f64, Point3d)>> = NURBS_PROJECTION_CACHE.with(|c| {
         c.borrow().as_ref().and_then(|cache| cache.get(hash, grid_size).cloned())
     });
+
+    const N_CANDIDATES: usize = 5;
+    let mut candidates: Vec<(f64, f64, f64)> = Vec::with_capacity(N_CANDIDATES + 1);
+    // Helper: insert (u, v, dist_sq) into candidates keeping top-N smallest
+    let try_add_candidate = |candidates: &mut Vec<(f64, f64, f64)>, u: f64, v: f64, dist: f64| {
+        if candidates.len() < N_CANDIDATES {
+            candidates.push((u, v, dist));
+            candidates.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+        } else if dist < candidates[N_CANDIDATES - 1].2 {
+            candidates[N_CANDIDATES - 1] = (u, v, dist);
+            candidates.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+        }
+    };
 
     if let Some(grid_points) = cached_grid {
         // Use cached grid — scan for nearest point
@@ -1740,6 +1758,7 @@ pub fn brute_force_project_point(
                 best_u = *u;
                 best_v = *v;
             }
+            try_add_candidate(&mut candidates, *u, *v, dist);
         }
     } else {
         // No cache — compute grid inline (original behavior)
@@ -1756,6 +1775,7 @@ pub fn brute_force_project_point(
                     best_u = u;
                     best_v = v;
                 }
+                try_add_candidate(&mut candidates, u, v, dist);
             }
         }
     }
@@ -1768,6 +1788,9 @@ pub fn brute_force_project_point(
     let refine_v_end = (best_v + v_step).min(v_max);
     let refine_u_range = refine_u_end - refine_u_start;
     let refine_v_range = refine_v_end - refine_v_start;
+
+    // Also collect candidates from Phase 2 refinement grid
+    try_add_candidate(&mut candidates, best_u, best_v, best_dist);
 
     for i in 0..=refine {
         let u = refine_u_start + refine_u_range * i as f64 / refine as f64;
@@ -1782,25 +1805,36 @@ pub fn brute_force_project_point(
                 best_u = u;
                 best_v = v;
             }
+            try_add_candidate(&mut candidates, u, v, dist);
         }
     }
 
-    // Phase 3: Newton-Raphson refinement from the best grid point
-    let (u_refined, v_refined) = crate::parametric_domain::reproject_nurbs_point(
-        nurbs, point, best_u, best_v,
-    );
+    // Phase 3: Multi-start Newton-Raphson refinement.
+    //
+    // Run Newton-Raphson from each of the top-N candidates and pick the
+    // best result. This is critical for high-curvature NURBS surfaces
+    // where the nearest grid point may be in a different basin of
+    // attraction than the true closest point.
+    //
+    // The original single-start approach would get stuck in a local
+    // minimum, producing large projection errors (1-2 mm). Multi-start
+    // explores multiple basins and finds the global minimum.
+    let mut best_result = (best_u, best_v, best_dist);
 
-    // Validate: if Newton made it worse, fall back to grid result
-    let refined_p = surface.point_at(u_refined, v_refined);
-    let refined_dist = (refined_p.x - point.x).powi(2)
-        + (refined_p.y - point.y).powi(2)
-        + (refined_p.z - point.z).powi(2);
-
-    if refined_dist < best_dist {
-        (u_refined, v_refined)
-    } else {
-        (best_u, best_v)
+    for &(cu, cv, _cdist) in &candidates {
+        let (u_refined, v_refined) = crate::parametric_domain::reproject_nurbs_point(
+            nurbs, point, cu, cv,
+        );
+        let refined_p = surface.point_at(u_refined, v_refined);
+        let refined_dist = (refined_p.x - point.x).powi(2)
+            + (refined_p.y - point.y).powi(2)
+            + (refined_p.z - point.z).powi(2);
+        if refined_dist < best_result.2 {
+            best_result = (u_refined, v_refined, refined_dist);
+        }
     }
+
+    (best_result.0, best_result.1)
 }
 
 // ── LT-1: NURBS projection grid cache ──────────────────────────────────

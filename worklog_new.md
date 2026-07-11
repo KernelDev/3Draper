@@ -4448,3 +4448,55 @@ Stage Summary:
 - 112 twisted quads remain (3.1%), down from perceived 35% — most were
   legitimate fan/thin triangles
 - No code changes needed — variant A's fix is sufficient
+
+---
+Task ID: variant-E-73
+Agent: Main
+Task: Variant E — NURBS projection failures (multi-start Newton-Raphson)
+
+Investigation:
+- Created nurbs_proj_diag.rs and nurbs_extract_diag.rs to diagnose
+- Found 22 NURBS projection failures on transmission_top.stp
+- All 6 NURBS surfaces project 100% correctly on round-trip test
+  (surface point → project → check)
+- Conclusion: failures occur on EDGE points that are off-surface
+  (edges approximate the surface, not lie on it exactly)
+
+Root cause analysis:
+- brute_force_project_point uses single-start Newton-Raphson from
+  the nearest grid point
+- On high-curvature NURBS, the nearest grid point may be in a different
+  basin of attraction than the true closest point
+- Newton-Raphson converges to a local minimum, producing errors up to
+  1.88 mm instead of < 0.001 mm
+
+Fix: Multi-start Newton-Raphson
+- Collect top-5 best grid points (by distance) from Phase 1 (grid search)
+  and Phase 2 (local refinement)
+- Run Newton-Raphson from EACH of the 5 candidates
+- Pick the best result (smallest residual distance)
+- Cost: 5× Newton-Raphson evaluations (cheap — ~15 iterations each)
+- Benefit: explores multiple basins, finds global minimum
+
+Implementation:
+- edge_cache.rs brute_force_project_point:
+  * Phase 1: collect top-5 candidates while scanning grid
+  * Phase 2: add refinement grid points to candidates
+  * Phase 3: run Newton from each candidate, pick best
+- N_CANDIDATES = 5 (constant, balances accuracy vs performance)
+
+Results:
+- NURBS projection failures: 22 → 17 (-23%)
+- Remaining 17 failures have error = brute_force_error (both methods
+  give same result) → points are genuinely off-surface (edge
+  approximation), not fixable by better projection
+- WATERTIGHT: 21/27 (77.8%) — no regression
+- Boundary edges: 80 (was 86 LT-1) — slight improvement
+- Time: 21.83s (was 21.52s) — small overhead from 5× Newton
+- Tests: draper-mesh 279/279, draper-step 116/117 (1 pre-existing)
+
+Stage Summary:
+- Multi-start Newton-Raphson reduces NURBS projection failures by 23%
+- Remaining failures are legitimate (off-surface edge points)
+- No watertightness regression, slight improvement
+- Made StepConverter and extract_bspline_surface public for diagnostics

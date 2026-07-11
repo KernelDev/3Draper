@@ -2115,7 +2115,7 @@ fn format_assembly_node_detailed(node: &AssemblyNode, depth: usize, out: &mut St
     }
 }
 
-struct StepConverter<'a> {
+pub struct StepConverter<'a> {
     step: &'a StepFile,
     _entity_map: HashMap<i64, usize>,
     config: StepConversionConfig,
@@ -2134,7 +2134,7 @@ struct StepConverter<'a> {
 }
 
 impl<'a> StepConverter<'a> {
-    fn new(step: &'a StepFile) -> Self {
+    pub fn new(step: &'a StepFile) -> Self {
         Self::with_config(step, StepConversionConfig::default())
     }
 
@@ -9179,7 +9179,7 @@ impl<'a> StepConverter<'a> {
     /// Format: #N = B_SPLINE_SURFACE_WITH_KNOTS(degree_u, degree_v,
     ///   ((cp_list_row1), (cp_list_row2), ...), .UNSPECIFIED., .F., .F., .F.,
     ///   knot_count_u, knot_count_v, (knots_u), (knots_v), .UNSPECIFIED.);
-    fn extract_bspline_surface(&self, entity: &crate::schema::StepEntity) -> Option<Surface> {
+    pub fn extract_bspline_surface(&self, entity: &crate::schema::StepEntity) -> Option<Surface> {
         // For complex entities, find the B_SPLINE_SURFACE sub-entity for control points
         // and B_SPLINE_SURFACE_WITH_KNOTS sub-entity for knot vectors
         // and RATIONAL_B_SPLINE_SURFACE sub-entity for weights
