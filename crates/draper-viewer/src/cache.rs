@@ -184,12 +184,21 @@ impl CacheManager {
                 return;
             }
 
-            // Step 4: Check LOD — only use cache if LOD matches
+            // Step 4: Check LOD — only use cache if LOD matches EXACTLY.
+            //
+            // CRITICAL: The previous condition `(lod - cached_lod).abs() > 0.01 && lod > cached_lod`
+            // only caused a cache miss when the requested LOD was HIGHER than the cached LOD.
+            // When the user LOWERED the quality (e.g., High → Low), the cache would return
+            // the old high-quality mesh — making the Quality slider appear to have no effect.
+            //
+            // Now we require an exact LOD match (within 0.01 tolerance) for a cache hit.
+            // Any mismatch (higher OR lower) causes a cache miss, ensuring the model is
+            // re-triangulated at the requested LOD.
             let cached_lod = js_sys::Reflect::get(&entry_js, &"lod".into())
                 .ok()
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.0);
-            if (lod - cached_lod).abs() > 0.01 && lod > cached_lod {
+            if (lod - cached_lod).abs() > 0.01 {
                 log::info!("Cache: LOD mismatch (cached={:.2}, requested={:.2}) — miss", cached_lod, lod);
                 let mut guard = state.lock().unwrap();
                 *guard = CacheState::Miss { hash };
