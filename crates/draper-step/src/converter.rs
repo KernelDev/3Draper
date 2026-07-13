@@ -1129,7 +1129,21 @@ impl OwnedStepConversionContext {
         //
         // Skip decimation when adaptive LOD is enabled — each face already
         // respects its per-face budget, so global decimation is unnecessary.
-        if !self.params.adaptive_lod_enabled && self.params.keep_ratio < 1.0 && instance_mesh.triangle_count() >= 4 {
+        // Apply post-triangulation decimation for LOD support.
+        //
+        // CRITICAL: This MUST run even when adaptive_lod_enabled is true.
+        // Adaptive LOD sets per-face max_triangle budgets, but many faces
+        // (especially ruled NURBS and planar faces) produce FEWER triangles
+        // than their budget — so the budget doesn't limit them. Without
+        // decimation, LOD 0.1 (keep_ratio=0.18) would produce the same mesh
+        // as LOD 1.0 (keep_ratio=1.0), making the Quality slider appear
+        // broken.
+        //
+        // The `keep_ratio` comes from `TriangulationParams::for_lod()` and
+        // is NOT overwritten by `with_adaptive_lod()` (which operates on a
+        // cloned params in triangulate_brep_detailed). So self.params still
+        // has the LOD-appropriate keep_ratio.
+        if self.params.keep_ratio < 1.0 && instance_mesh.triangle_count() >= 4 {
             let (orig, final_) = draper_mesh::decimate_mesh(&mut instance_mesh, self.params.keep_ratio);
             if final_ < orig {
                 log::info!(
@@ -1231,7 +1245,7 @@ impl OwnedStepConversionContext {
                     instance_mesh.transform(tf);
                 }
                 // Apply decimation for non-adaptive LOD
-                if !self.params.adaptive_lod_enabled && self.params.keep_ratio < 1.0 && instance_mesh.triangle_count() >= 4 {
+                if self.params.keep_ratio < 1.0 && instance_mesh.triangle_count() >= 4 {
                     draper_mesh::decimate_mesh(&mut instance_mesh, self.params.keep_ratio);
                 }
                 results.push(Some(DetailedMeshInstance {
@@ -1323,7 +1337,7 @@ impl OwnedStepConversionContext {
                         }
 
                         // Apply decimation for non-adaptive LOD
-                        if !params.adaptive_lod_enabled && params.keep_ratio < 1.0 && instance_mesh.triangle_count() >= 4 {
+                        if params.keep_ratio < 1.0 && instance_mesh.triangle_count() >= 4 {
                             draper_mesh::decimate_mesh(&mut instance_mesh, params.keep_ratio);
                         }
 
@@ -1540,9 +1554,11 @@ impl OwnedStepConversionContext {
         }
 
         // Apply post-triangulation decimation for LOD support.
-        // Skip when adaptive LOD is enabled — each face already respects
-        // its per-face budget, so global decimation is unnecessary.
-        if !self.params.adaptive_lod_enabled && self.params.keep_ratio < 1.0 && mesh.triangle_count() >= 4 {
+        // CRITICAL: Must run even when adaptive LOD is enabled — see comment
+        // in triangulate_pending. Without this, the Quality slider has no
+        // visible effect on faces that produce fewer triangles than their
+        // per-face budget (e.g., ruled NURBS, planar faces).
+        if self.params.keep_ratio < 1.0 && mesh.triangle_count() >= 4 {
             let (orig, final_) = draper_mesh::decimate_mesh(&mut mesh, self.params.keep_ratio);
             if final_ < orig {
                 log::info!(
@@ -1629,9 +1645,9 @@ impl OwnedStepConversionContext {
         }
 
         // Apply post-triangulation decimation (same as build_instance).
-        // Skip when adaptive LOD is enabled — each face already respects
-        // its per-face budget, so global decimation is unnecessary.
-        if !self.params.adaptive_lod_enabled && self.params.keep_ratio < 1.0 && mesh.triangle_count() >= 4 {
+        // CRITICAL: Must run even when adaptive LOD is enabled — see comment
+        // in triangulate_pending.
+        if self.params.keep_ratio < 1.0 && mesh.triangle_count() >= 4 {
             let (orig, final_) = draper_mesh::decimate_mesh(&mut mesh, self.params.keep_ratio);
             if final_ < orig {
                 log::info!(
