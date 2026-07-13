@@ -10564,15 +10564,27 @@ impl<'a> StepConverter<'a> {
             return triangulate_face(&face, params);
         }
 
-        // For planar faces with inner loops (holes), use the dedicated hole-aware path
+        // For ALL planar faces (with or without holes), use the dedicated
+        // hole-aware path that consults the EdgeDiscretizationCache.
+        //
+        // CRITICAL: Plane faces WITHOUT holes were previously routed through
+        // the generic boundary collection path below, which samples edges via
+        // edge_cache.discretize_step_edge but then passes them to
+        // triangulate_face_with_boundary_and_holes instead of the planar
+        // earcutr path. This caused:
+        //   1. Quality slider had no effect on planar face boundary density
+        //      (edge_sample_count returns fixed 32 for NURBS, not LOD-scaled)
+        //   2. Non-convex planar faces (L-bracket sides) produced too few
+        //      triangles — earcutr was never called for them
+        //
+        // By routing ALL Plane faces through `triangulate_planar_face_with_holes_cached`,
+        // we ensure earcutr is always used and the edge cache is consulted.
         if let Surface::Plane(ref plane) = face_data.surface {
-            if !face_data.inner_edges.is_empty() {
-                return self.triangulate_planar_face_with_holes_cached(
-                    plane, &face_data.outer_edges, &face_data.outer_edge_step_ids,
-                    &face_data.inner_edges, &face_data.inner_edge_step_ids,
-                    face_data.forward, edge_cache,
-                );
-            }
+            return self.triangulate_planar_face_with_holes_cached(
+                plane, &face_data.outer_edges, &face_data.outer_edge_step_ids,
+                &face_data.inner_edges, &face_data.inner_edge_step_ids,
+                face_data.forward, edge_cache,
+            );
         }
 
         // Collect 3D boundary points from edge curves using the cache.
@@ -10794,51 +10806,54 @@ impl<'a> StepConverter<'a> {
             return triangulate_face(&face, params);
         }
 
-        // For planar faces with inner loops (holes), use the dedicated hole-aware path.
-        // We ALWAYS route through `triangulate_planar_face_with_holes_cached` so that
-        // the EdgeDiscretizationCache is consulted for BOTH the outer boundary AND the
-        // inner loops. The previous non-cached variant sampled inner-loop edges via
-        // `sample_edges()` without consulting the cache, which broke watertightness
-        // guarantees when an inner-loop edge was shared with another face (the inner
-        // edge would produce different 3D points than the same edge cached elsewhere).
+        // For ALL planar faces (with or without holes), use the dedicated
+        // hole-aware path that consults the EdgeDiscretizationCache.
         //
-        // Since `surface_to_mesh` (the non-cached entry point) does not own a long-lived
-        // cache, we build a fresh local cache here. Within a single face this still
-        // ensures consistent discretization between the outer boundary and any inner
-        // loop edges that may be shared between the two — which is the primary concern.
+        // CRITICAL: Plane faces WITHOUT holes were previously routed through
+        // the generic `triangulate_face_with_boundary_and_holes` path, which
+        // samples edges via `edge.point_at(t)` with a FIXED n_samples (32 for
+        // NURBS) — ignoring the edge cache, the LOD-driven chord tolerance
+        // override, and the pre_compute_circle_axis_n grouping. This caused:
+        //   1. Quality slider had no effect on planar face boundary density
+        //   2. Boundary vertices didn't match adjacent faces' cached vertices
+        //      → watertightness breaks (triangles lost during merge)
+        //
+        // By routing ALL Plane faces through `triangulate_planar_face_with_holes_cached`,
+        // we ensure:
+        //   1. Edge cache is used → LOD works (chord tolerance override applied)
+        //   2. Pre-computed circle axis n is used → watertightness preserved
+        //   3. Same code path for holes and no-holes → consistent behavior
         if let Surface::Plane(ref plane) = face_data.surface {
-            if !face_data.inner_edges.is_empty() {
-                let tol_ctx = match bbox {
-                    Some((bmin, bmax)) => ToleranceContext::from_bounding_box(bmin, bmax),
-                    None => ToleranceContext::new(),
-                };
-                let mut local_edge_cache = EdgeDiscretizationCache::with_tolerance(tol_ctx, 256);
-                // Apply LOD-aware chord tolerance so the Quality slider changes
-                // circle/edge sampling density.
-                local_edge_cache.set_chord_tolerance_override(Some(params.max_deviation));
-                // Pre-compute per-axis-group n for circles in this single face.
-                // For a planar face with holes, the outer + inner edges may
-                // include circles on the same axis (e.g., annulus) — they
-                // need the same n to preserve watertightness with neighbouring
-                // tube faces.
-                {
-                    let all_edges: Vec<&TopoEdge> = face_data.edges.iter().collect();
-                    local_edge_cache.pre_compute_circle_axis_n(all_edges);
-                }
-                // Pre-compute shared NURBS refinement grid for this single face.
-                if let draper_geometry::Surface::Nurbs(nurbs) = &face_data.surface {
-                    local_edge_cache.pre_compute_nurbs_refinement_grid(nurbs, 3);
-                }
-                return self.triangulate_planar_face_with_holes_cached(
-                    plane,
-                    &face_data.outer_edges,
-                    &face_data.outer_edge_step_ids,
-                    &face_data.inner_edges,
-                    &face_data.inner_edge_step_ids,
-                    face_data.forward,
-                    &mut local_edge_cache,
-                );
+            let tol_ctx = match bbox {
+                Some((bmin, bmax)) => ToleranceContext::from_bounding_box(bmin, bmax),
+                None => ToleranceContext::new(),
+            };
+            let mut local_edge_cache = EdgeDiscretizationCache::with_tolerance(tol_ctx, 256);
+            // Apply LOD-aware chord tolerance so the Quality slider changes
+            // circle/edge sampling density.
+            local_edge_cache.set_chord_tolerance_override(Some(params.max_deviation));
+            // Pre-compute per-axis-group n for circles in this single face.
+            // For a planar face with holes, the outer + inner edges may
+            // include circles on the same axis (e.g., annulus) — they
+            // need the same n to preserve watertightness with neighbouring
+            // tube faces.
+            {
+                let all_edges: Vec<&TopoEdge> = face_data.edges.iter().collect();
+                local_edge_cache.pre_compute_circle_axis_n(all_edges);
             }
+            // Pre-compute shared NURBS refinement grid for this single face.
+            if let draper_geometry::Surface::Nurbs(nurbs) = &face_data.surface {
+                local_edge_cache.pre_compute_nurbs_refinement_grid(nurbs, 3);
+            }
+            return self.triangulate_planar_face_with_holes_cached(
+                plane,
+                &face_data.outer_edges,
+                &face_data.outer_edge_step_ids,
+                &face_data.inner_edges,
+                &face_data.inner_edge_step_ids,
+                face_data.forward,
+                &mut local_edge_cache,
+            );
         }
 
         // Collect 3D boundary points from edge curves by sampling each edge.
@@ -11041,9 +11056,14 @@ impl<'a> StepConverter<'a> {
                 }
             }
             if !hp3d.is_empty() {
+                let pre_dedup_count = hp3d.len();
                 hp3d = deduplicate_points_3d(&hp3d, 1e-6);
                 // No snap_to_plane — see comment above about watertightness
                 let hp2d: Vec<Point2d> = hp3d.iter().map(|p| project(p)).collect();
+                log::info!(
+                    "PLANAR_HOLE_POINTS: loop {} — {} edges, {} pts pre-dedup, {} post-dedup",
+                    loop_idx, inner_edges.len(), pre_dedup_count, hp3d.len()
+                );
                 hole_points_3d.push(hp3d);
                 hole_points_2d.push(hp2d);
             }
@@ -11051,6 +11071,17 @@ impl<'a> StepConverter<'a> {
 
         // Same triangulation logic as the non-cached version
         if hole_points_2d.is_empty() {
+            // Use earcutr for ALL planar faces (convex and non-convex) for
+            // consistent quality. Previously, convex faces used fan
+            // triangulation and non-convex used ear_clip — both are simpler
+            // than earcutr and can produce poor results on complex polygons.
+            // earcutr handles both cases robustly.
+            if let Some(m) = earcutr_triangulate_planar_converter(
+                &outer_2d, &outer_points_3d, &[], &[], forward, plane,
+            ) {
+                return m;
+            }
+            // Fallback to fan/ear-clip if earcutr fails
             let is_convex = is_convex_polygon_2d(&outer_2d);
             if is_convex && outer_points_3d.len() >= 3 {
                 for p in &outer_points_3d { mesh.add_vertex(*p); }

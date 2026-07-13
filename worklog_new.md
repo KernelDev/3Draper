@@ -4500,3 +4500,39 @@ Stage Summary:
 - Remaining failures are legitimate (off-surface edge points)
 - No watertightness regression, slight improvement
 - Made StepConverter and extract_bspline_surface public for diagnostics
+
+---
+Task ID: plane-face-lod-fix-74
+Agent: Main
+Task: Fix STEP#3084 incorrect triangulation + LOD not working on as1-oc-214.stp
+
+User: "test/as1-oc-214.stp неверно триангулируется STEP#3084 + не работает изменение качества"
+
+Root cause:
+- Plane faces WITHOUT holes were routed through the generic boundary collection
+  path (triangulate_face_with_boundary_and_holes) instead of the dedicated
+  planar earcutr path (triangulate_planar_face_with_holes_cached).
+- This happened in BOTH surface_to_mesh_cached (line 10568) and surface_to_mesh
+  (line 10809): the condition `if !face_data.inner_edges.is_empty()` only
+  routed faces WITH holes to the cached path.
+- For Plane faces WITHOUT holes, the generic path used non-cached edge sampling
+  (edge_sample_count returns fixed 32 for NURBS) → LOD had no effect.
+- Also, non-convex planar faces (L-bracket sides) never got earcutr → poor
+  triangulation quality, triangles lost during merge (6 of 10 lost on STEP#3084).
+
+Fix:
+1. surface_to_mesh_cached (line 10582): route ALL Plane faces through
+   triangulate_planar_face_with_holes_cached (removed the inner_edges.is_empty()
+   condition). This ensures edge cache is used → LOD works + watertightness.
+2. surface_to_mesh (line 10814): same fix for the non-cached entry point.
+3. triangulate_planar_face_with_holes_cached no-holes branch: use earcutr
+   instead of fan/ear-clip for ALL planar faces (convex and non-convex).
+   earcutr produces better quality triangles and handles non-convex polygons
+   robustly.
+
+Results:
+- STEP#3084: was 10 tris (6 lost during merge) → now 4 tris (0 lost)
+- L-bracket (BREP#1934): WATERTIGHT (0 boundary, 0 non-manifold)
+- LOD works: LOD 0.1=375, 0.5=1489, 1.0=2179 tris (4.4× ratio)
+- Benchmark: 21/27 WATERTIGHT, 84 boundary edges, 100% pass rate — no regression
+- Tests: draper-mesh 279/279, draper-step 116/117 (1 pre-existing)
