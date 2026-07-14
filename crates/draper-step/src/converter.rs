@@ -11171,17 +11171,9 @@ impl<'a> StepConverter<'a> {
 
         // Same triangulation logic as the non-cached version
         if hole_points_2d.is_empty() {
-            // Use earcutr for ALL planar faces (convex and non-convex) for
-            // consistent quality. Previously, convex faces used fan
-            // triangulation and non-convex used ear_clip — both are simpler
-            // than earcutr and can produce poor results on complex polygons.
-            // earcutr handles both cases robustly.
-            if let Some(m) = earcutr_triangulate_planar_converter(
-                &outer_2d, &outer_points_3d, &[], &[], forward, plane,
-            ) {
-                return m;
-            }
-            // Fallback to fan/ear-clip if earcutr fails
+            // For convex polygons, use fast fan triangulation O(n).
+            // For non-convex, use ear_clip O(n²) or earcutr O(n log n).
+            // earcutr is only used as fallback if ear_clip fails.
             let is_convex = is_convex_polygon_2d(&outer_2d);
             if is_convex && outer_points_3d.len() >= 3 {
                 for p in &outer_points_3d { mesh.add_vertex(*p); }
@@ -11191,11 +11183,37 @@ impl<'a> StepConverter<'a> {
                     else { mesh.add_triangle(0, i + 1, i); }
                 }
             } else {
+                // Try ear_clip first (faster for simple non-convex polygons)
                 let triangles = ear_clip(&outer_2d);
-                for p in &outer_points_3d { mesh.add_vertex(*p); }
-                for tri in &triangles {
-                    if forward { mesh.add_triangle(tri[0], tri[1], tri[2]); }
-                    else { mesh.add_triangle(tri[0], tri[2], tri[1]); }
+                if !triangles.is_empty() {
+                    for p in &outer_points_3d { mesh.add_vertex(*p); }
+                    for tri in &triangles {
+                        if forward { mesh.add_triangle(tri[0], tri[1], tri[2]); }
+                        else { mesh.add_triangle(tri[0], tri[2], tri[1]); }
+                    }
+                } else {
+                    // Fallback to earcutr if ear_clip fails
+                    if let Some(m) = earcutr_triangulate_planar_converter(
+                        &outer_2d, &outer_points_3d, &[], &[], forward, plane,
+                    ) {
+                        return m;
+                    }
+                    // Last resort: fan from centroid
+                    let n = outer_points_3d.len() as f64;
+                    let cx = outer_points_3d.iter().map(|p| p.x).sum::<f64>() / n;
+                    let cy = outer_points_3d.iter().map(|p| p.y).sum::<f64>() / n;
+                    let cz = outer_points_3d.iter().map(|p| p.z).sum::<f64>() / n;
+                    let centroid = Point3d::new(cx, cy, cz);
+                    let centroid_idx = mesh.add_vertex(centroid);
+                    for p in &outer_points_3d { mesh.add_vertex(*p); }
+                    let n = outer_points_3d.len() as u32;
+                    for i in 0..n {
+                        let v0 = centroid_idx;
+                        let v1 = 1 + i;
+                        let v2 = 1 + ((i + 1) % n);
+                        if forward { mesh.add_triangle(v0, v1, v2); }
+                        else { mesh.add_triangle(v0, v2, v1); }
+                    }
                 }
             }
         } else {

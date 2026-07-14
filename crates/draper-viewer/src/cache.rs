@@ -54,6 +54,15 @@ const STORE_NAME: &str = "triangulations";
 const TTL_MS: u64 = 7 * 24 * 60 * 60 * 1000; // 7 days
 const MAX_ENTRIES: usize = 50; // Max cache entries (simple size limit)
 
+/// Cache version prefix. When the WASM is rebuilt with breaking changes
+/// (new triangulation logic, new mesh format, etc.), this version is
+/// bumped. Old cache entries (with a different version prefix) won't
+/// be found, forcing re-triangulation with the new code.
+///
+/// This prevents corrupted/incompatible cached meshes from causing
+/// rendering hangs or crashes after a WASM update.
+const CACHE_VERSION: &str = "v3_";
+
 // ─── Result types ─────────────────────────────────────────────────────
 
 /// The result of a cache lookup — either a hit with deserialized data,
@@ -146,6 +155,9 @@ impl CacheManager {
                     return;
                 }
             };
+
+            // Prefix hash with cache version to invalidate old entries
+            let hash = format!("{}{}", CACHE_VERSION, hash);
 
             log::info!("Cache: SHA-256 hash = {}...", &hash[..16.min(hash.len())]);
 
@@ -268,6 +280,9 @@ impl CacheManager {
                     return;
                 }
             };
+
+            // Prefix hash with cache version to invalidate old entries
+            let hash = format!("{}{}", CACHE_VERSION, hash);
 
             // Step 2: Build the JS entry object
             let entry = build_js_entry(&hash, &file_name, lod, vertex_count, triangle_count,
