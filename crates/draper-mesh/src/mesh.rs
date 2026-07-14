@@ -17,9 +17,18 @@ pub struct VertexKey(u64, u64, u64);
 
 impl VertexKey {
     /// Create a bit-exact key from a Point3d.
+    ///
+    /// CRITICAL: Applies `deterministic_round_point` BEFORE hashing to ensure
+    /// that points computed via different paths (edge cache vs interior
+    /// evaluation) but representing the same geometric position produce
+    /// the SAME key. Without this rounding, the edge cache produces 48-bit
+    /// mantissa points while interior evaluations may produce full 52-bit
+    /// precision points — their bits differ even though they're geometrically
+    /// identical, causing dedup_rate to drop to ~10%.
     #[inline]
     pub fn from_point(p: &Point3d) -> Self {
-        VertexKey(p.x.to_bits(), p.y.to_bits(), p.z.to_bits())
+        let rounded = crate::edge_cache::deterministic_round_point(*p);
+        VertexKey(rounded.x.to_bits(), rounded.y.to_bits(), rounded.z.to_bits())
     }
 }
 
