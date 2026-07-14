@@ -82,7 +82,13 @@ pub fn decimate_mesh(mesh: &mut TriangleMesh, keep_ratio: f64) -> (usize, usize)
         return (original_count, mesh.triangles.len());
     }
 
-    weld_vertices(mesh);
+    // Face-aware weld: only merge vertices that share at least one face ID.
+    // This preserves cross-face duplicate vertices (intentional for watertightness
+    // — they represent the same geometric boundary point but belong to different
+    // faces). The previous non-face-aware weld_vertices merged ALL coincident
+    // vertices, causing triangles from different NURBS faces to share vertices
+    // → "same 2D points applied to two surfaces" visual corruption.
+    weld_vertices_face_aware(mesh);
 
     // Multi-pass batched decimation.
     //
@@ -456,6 +462,106 @@ fn weld_vertices(mesh: &mut TriangleMesh) {
     mesh.vertices = new_vertices;
 
     // Normals, if present, are no longer valid after welding — drop them.
+    mesh.normals = None;
+    mesh.face_normals = None;
+}
+
+/// Face-aware vertex welding: merges coincident vertices ONLY if they share
+/// at least one common face ID.
+///
+/// This is critical for STEP BREP meshes where `merge_deduplicating` intentionally
+/// keeps cross-face duplicate vertices (same 3D position, different face). These
+/// duplicates represent shared boundary points — merging them would cause triangles
+/// from different faces to share vertices, creating visual corruption ("same 2D
+/// points applied to two surfaces").
+///
+/// The previous non-face-aware `weld_vertices` merged ALL coincident vertices,
+/// breaking the face boundary structure. This face-aware version preserves it.
+fn weld_vertices_face_aware(mesh: &mut TriangleMesh) {
+    if mesh.vertices.is_empty() {
+        return;
+    }
+
+    // Build vertex → set of face IDs
+    let mut vertex_faces: Vec<std::collections::HashSet<u64>> = vec![std::collections::HashSet::new(); mesh.vertices.len()];
+    if let Some(ref face_ids) = mesh.triangle_face_ids {
+        for (ti, &fid) in face_ids.iter().enumerate() {
+            if ti < mesh.triangles.len() {
+                let tri = &mesh.triangles[ti];
+                vertex_faces[tri[0] as usize].insert(fid);
+                vertex_faces[tri[1] as usize].insert(fid);
+                vertex_faces[tri[2] as usize].insert(fid);
+            }
+        }
+    } else {
+        // No face IDs — fall back to non-face-aware weld (backward compatible)
+        weld_vertices(mesh);
+        return;
+    }
+
+    let tol = 1e-6;
+    let cell_inv = 1.0 / tol;
+
+    // Group vertices by quantized position
+    let mut groups: std::collections::HashMap<(i64, i64, i64), Vec<u32>> = std::collections::HashMap::new();
+    for (i, p) in mesh.vertices.iter().enumerate() {
+        let key = (
+            (p.x * cell_inv).round() as i64,
+            (p.y * cell_inv).round() as i64,
+            (p.z * cell_inv).round() as i64,
+        );
+        groups.entry(key).or_default().push(i as u32);
+    }
+
+    // Within each group, merge vertices that share at least one face ID
+    let mut old_to_new: Vec<u32> = vec![u32::MAX; mesh.vertices.len()];
+    let mut new_vertices: Vec<Point3d> = Vec::with_capacity(mesh.vertices.len());
+    let mut new_vertex_faces: Vec<std::collections::HashSet<u64>> = Vec::with_capacity(mesh.vertices.len());
+
+    for (_, members) in &groups {
+        let mut group_new_indices: Vec<u32> = Vec::new();
+
+        for &orig_idx in members {
+            let orig_faces = &vertex_faces[orig_idx as usize];
+            let mut merged_into: Option<u32> = None;
+
+            for &new_idx in &group_new_indices {
+                let existing_faces = &new_vertex_faces[new_idx as usize];
+                if orig_faces.iter().any(|f| existing_faces.contains(f)) {
+                    merged_into = Some(new_idx);
+                    break;
+                }
+            }
+
+            match merged_into {
+                Some(new_idx) => {
+                    old_to_new[orig_idx as usize] = new_idx;
+                    let existing = &mut new_vertex_faces[new_idx as usize];
+                    for f in orig_faces {
+                        existing.insert(*f);
+                    }
+                }
+                None => {
+                    let new_idx = new_vertices.len() as u32;
+                    new_vertices.push(mesh.vertices[orig_idx as usize]);
+                    new_vertex_faces.push(orig_faces.clone());
+                    old_to_new[orig_idx as usize] = new_idx;
+                    group_new_indices.push(new_idx);
+                }
+            }
+        }
+    }
+
+    // Remap triangles
+    for tri in mesh.triangles.iter_mut() {
+        tri[0] = old_to_new[tri[0] as usize];
+        tri[1] = old_to_new[tri[1] as usize];
+        tri[2] = old_to_new[tri[2] as usize];
+    }
+
+    mesh.triangles.retain(|t| t[0] != t[1] && t[1] != t[2] && t[0] != t[2]);
+    mesh.vertices = new_vertices;
+
     mesh.normals = None;
     mesh.face_normals = None;
 }
