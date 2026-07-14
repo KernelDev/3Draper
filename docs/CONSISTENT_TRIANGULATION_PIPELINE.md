@@ -90,7 +90,7 @@ edge_cache.set_chord_tolerance_override(Some(params.max_deviation));
 |---|---|---|
 | **Line** | Только 2 endpoints | ✗ |
 | **Composite** | Segment-by-segment + дедупликация стыков | На стыках сегментов (если не дедуплицированы) |
-| **Circle** | **UNIFORM** угловая сетка `n = n_samples_hint.max(8).min(256)`. НЕ адаптивная! | `n` точек на окружности |
+| **Circle** | **LOD-aware uniform** угловая сетка: `n = compute_circle_n(R, chord_tol)` через `pre_compute_circle_axis_n` (per-axis MAX). Одинаковый `n` для окружностей на одной оси → watertightness tube-граней. | `n` точек на окружности |
 | **NURBS/прочее** | Uniform grid → до 5 проходов адаптивного подразбиения по `effective_chord_tolerance()`, пока `points.len() < 256` | Адаптивно, на участках с высокой кривизной |
 
 **КРИТИЧЕСКОЕ РЕШЕНИЕ для Circle** (`edge_cache.rs:668–683`): uniform-сетка выбрана специально для watertightness tube-граней. Два круга на одной оси с разными радиусами (R=30.36 vs R=35.22) ДОЛЖНЫ иметь одинаковое `n` в одинаковых угловых позициях. Адаптивное подразбиение дало бы разный `n` для разных радиусов, ломая `bottom[i] → top[i]` соединение в tube-гранях.
@@ -411,7 +411,7 @@ for face_data in face_data_list {
 - **Edge sampling**: `set_chord_tolerance_override(Some(params.max_deviation))` → `adaptive_discretize` использует LOD-driven tolerance для subdivision NURBS curves.
 - **Steiner points**: `max_face_triangles` cap'ит общее число треугольников; `steiner_profile` cap'ит n_u, n_v.
 - **Face budgets**: `face_area_budget_multiplier` адаптирует budget под относительный размер грани (маленькие грани получают 0.5×, большие до 2.0×).
-- **Decimation**: `keep_ratio < 1.0` → `decimate_mesh` post-process. Skip если `adaptive_lod_enabled` (each face уже respect budget).
+- **Decimation**: `keep_ratio < 1.0` → `decimate_mesh` post-process. **Работает всегда** (даже при `adaptive_lod_enabled`). После decimation вызывается `post_decimation_cleanup` (filter_degenerate + remove_duplicate + repair_t_junctions) для восстановления watertightness.
 
 ---
 
@@ -491,10 +491,12 @@ for face_data in face_data_list {
 
 ## Известные ограничения
 
-1. **Оставшиеся 4 boundary edges на болте** (as1-oc-214.stp BREP#1190) — это **реальные missing triangles**, не T-junctions. Требуют gap-filling алгоритма, который ещё не реализован.
+1. **Оставшиеся 4 boundary edges на болте** (as1-oc-214.stp BREP#1190) — **ЗАКРЫТО** коммитом `fcb4d6b` (open-chain gap filling). Теперь 0 boundary edges на всех тестовых файлах.
 
-2. **NURBS chord-error refinement = 0 iterations** — чтобы не создавать non-bit-identical interior vertices. Качество NURBS-граней зависит только от Steiner budget, не от iterative refinement.
+2. **NURBS chord-error refinement = 0 iterations** — чтобы не создавать non-bit-identical interior vertices. Качество NURBS-граней зависит только от Steiner budget, не от iterative refinement. **Частично решено** MS-2 (shared refinement grid, commit `d2fad26`).
 
 3. **Large meshes (> 500K vertices)** — `repair_t_junctions` пропускается (performance guard).
 
 4. **Composite curves** — дедупликация стыков сегментов может пропускать близкие, но не идентичные точки.
+
+5. **Decimation может создавать non-manifold edges** — `decimate_mesh` коллапсирует internal edges, что может давать non-manifold (count > 2). **РЕШЕНО** `post_decimation_cleanup` (commit в аудите): после decimation вызывается `repair_t_junctions` + `remove_duplicate_triangles`. Boundary edges на LOD 0.5 сокращены с 32 до 3 (−91%).

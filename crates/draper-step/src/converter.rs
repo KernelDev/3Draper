@@ -1151,6 +1151,8 @@ impl OwnedStepConversionContext {
                     pending.brep_id, orig, final_, self.params.keep_ratio
                 );
             }
+            // Post-decimation cleanup: repair non-manifold edges from collapse
+            self.post_decimation_cleanup(&mut instance_mesh, pending.brep_id);
         }
 
         Some(DetailedMeshInstance {
@@ -1247,6 +1249,7 @@ impl OwnedStepConversionContext {
                 // Apply decimation for non-adaptive LOD
                 if self.params.keep_ratio < 1.0 && instance_mesh.triangle_count() >= 4 {
                     draper_mesh::decimate_mesh(&mut instance_mesh, self.params.keep_ratio);
+                    self.post_decimation_cleanup(&mut instance_mesh, p.brep_id);
                 }
                 results.push(Some(DetailedMeshInstance {
                     name: p.name.clone(),
@@ -1339,6 +1342,24 @@ impl OwnedStepConversionContext {
                         // Apply decimation for non-adaptive LOD
                         if params.keep_ratio < 1.0 && instance_mesh.triangle_count() >= 4 {
                             draper_mesh::decimate_mesh(&mut instance_mesh, params.keep_ratio);
+                            // Post-decimation cleanup (uses self.bbox for tolerance)
+                            // Note: this is a closure, so we inline the cleanup
+                            filter_degenerate_triangles(&mut instance_mesh, 1e-10);
+                            instance_mesh.remove_duplicate_triangles();
+                            let report = validate_watertight(&instance_mesh, false);
+                            if report.non_manifold_edge_count > 0 {
+                                let model_scale = bbox
+                                    .map(|(bmin, bmax)| {
+                                        let dx = bmax.x - bmin.x;
+                                        let dy = bmax.y - bmin.y;
+                                        let dz = bmax.z - bmin.z;
+                                        ((dx * dx + dy * dy + dz * dz).sqrt()).max(1.0)
+                                    })
+                                    .unwrap_or(100.0);
+                                let tj_tol = (model_scale * 1e-9).max(1e-10);
+                                draper_mesh::repair_t_junctions(&mut instance_mesh, tj_tol);
+                                instance_mesh.remove_duplicate_triangles();
+                            }
                         }
 
                         let instance = DetailedMeshInstance {
@@ -1566,6 +1587,10 @@ impl OwnedStepConversionContext {
                     pending.brep_id, orig, final_, self.params.keep_ratio
                 );
             }
+            // Post-decimation cleanup: decimation collapses internal edges,
+            // which can create non-manifold edges (count > 2) and duplicate
+            // triangles. This cleanup restores watertightness.
+            self.post_decimation_cleanup(&mut mesh, pending.brep_id);
         }
 
         Some(DetailedMeshInstance {
@@ -1576,6 +1601,63 @@ impl OwnedStepConversionContext {
             brep_id: pending.brep_id,
             faces,
         })
+    }
+
+    /// Post-decimation cleanup: repairs non-manifold edges and removes
+    /// duplicate triangles created by edge collapse during decimation.
+    ///
+    /// Decimation collapses internal edges (shared by exactly 2 triangles).
+    /// When two triangles share an edge and that edge is collapsed, the
+    /// triangles merge — but this can create:
+    ///   1. Non-manifold edges (3+ triangles sharing an edge)
+    ///   2. Duplicate triangles (same 3 vertex indices)
+    ///   3. Degenerate triangles (zero area from collapsed vertices)
+    ///
+    /// This function runs a lightweight cleanup pass:
+    ///   1. filter_degenerate_triangles — remove zero-area triangles
+    ///   2. remove_duplicate_triangles — remove duplicates
+    ///   3. repair_t_junctions — fix non-manifold edges (only if any exist)
+    ///   4. remove_duplicate_triangles — second pass after T-junction repair
+    ///
+    /// Tolerance for T-junction repair is very tight (1e-9 × model_scale)
+    /// to avoid false positives on fine geometry.
+    fn post_decimation_cleanup(&self, mesh: &mut TriangleMesh, brep_id: i64) {
+        let pre_cleanup = mesh.triangle_count();
+
+        // Step 1: Remove degenerate triangles (zero-area from collapsed vertices)
+        filter_degenerate_triangles(mesh, 1e-10);
+
+        // Step 2: Remove duplicate triangles created by edge collapse
+        let dup_removed = mesh.remove_duplicate_triangles();
+
+        // Step 3: Repair non-manifold edges (only if any exist)
+        let report = validate_watertight(mesh, false);
+        if report.non_manifold_edge_count > 0 {
+            let model_scale = self.bbox
+                .map(|(bmin, bmax)| {
+                    let dx = bmax.x - bmin.x;
+                    let dy = bmax.y - bmin.y;
+                    let dz = bmax.z - bmin.z;
+                    ((dx * dx + dy * dy + dz * dz).sqrt()).max(1.0)
+                })
+                .unwrap_or(100.0);
+            let tj_tol = (model_scale * 1e-9).max(1e-10);
+            let n_tj = draper_mesh::repair_t_junctions(mesh, tj_tol);
+            if n_tj > 0 {
+                // Step 4: Second dedup pass after T-junction repair
+                let dup2 = mesh.remove_duplicate_triangles();
+                log::info!(
+                    "BREP #{} — post-decimation cleanup: {} degenerate, {} dup, {} T-junctions, {} dup2 ({}→{} tris)",
+                    brep_id,
+                    pre_cleanup - mesh.triangle_count() - dup_removed, // approximate
+                    dup_removed,
+                    n_tj,
+                    dup2,
+                    pre_cleanup,
+                    mesh.triangle_count()
+                );
+            }
+        }
     }
 
     /// Abort any active chunked session (e.g., when the user cancels loading).
@@ -1655,6 +1737,8 @@ impl OwnedStepConversionContext {
                     brep_id, orig, final_, self.params.keep_ratio
                 );
             }
+            // Post-decimation cleanup: repair non-manifold edges from collapse
+            self.post_decimation_cleanup(&mut mesh, brep_id);
         }
 
         if mesh.triangle_count() == 0 {

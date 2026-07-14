@@ -4536,3 +4536,34 @@ Results:
 - LOD works: LOD 0.1=375, 0.5=1489, 1.0=2179 tris (4.4× ratio)
 - Benchmark: 21/27 WATERTIGHT, 84 boundary edges, 100% pass rate — no regression
 - Tests: draper-mesh 279/279, draper-step 116/117 (1 pre-existing)
+
+---
+Task ID: audit-fix-7-post-decimation-cleanup-75
+Agent: Main
+Task: Fix audit finding #7 — post-decimation cleanup for watertightness
+
+Root cause: decimate_mesh collapses internal edges, creating non-manifold
+edges and duplicate triangles. This ran AFTER watertightness post-processing,
+so the mesh was watertight before decimation but broken after.
+
+Fix: Added post_decimation_cleanup() method called after every decimate_mesh:
+1. filter_degenerate_triangles — remove zero-area from collapsed vertices
+2. remove_duplicate_triangles — remove duplicates from edge collapse
+3. repair_t_junctions — fix non-manifold edges (only if any exist)
+4. remove_duplicate_triangles — second pass after T-junction repair
+
+Integrated into all 5 decimate_mesh call sites:
+- triangulate_pending (line 1146)
+- triangulate_pending_parallel (line 1251)
+- chunked closure (line 1344, inlined)
+- build_instance (line 1564)
+- chunked finalize (line 1733)
+
+Results on bolt.stp (watertightness per LOD):
+  LOD 0.30: boundary 31→11 (-65%), non_manifold 10→29
+  LOD 0.50: boundary 32→3 (-91%), non_manifold 9→9
+  LOD 0.75: boundary 0→0 (no decimation at keep_ratio=1.0)
+  LOD 1.00: boundary 0→0
+
+Benchmark: 21/27 WATERTIGHT, 79 bnd edges — no regression
+Tests: draper-mesh 279/279, draper-step 116/117 (1 pre-existing)
