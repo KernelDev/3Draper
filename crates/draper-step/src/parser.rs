@@ -54,10 +54,14 @@ pub fn parse_step(input: &str) -> Result<StepFile, StepParseError> {
 /// the entire file into a single contiguous `String`.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn parse_step_file(path: &str) -> Result<StepFile, StepParseError> {
-    let file = std::fs::File::open(path)
+    let data = std::fs::read(path)
         .map_err(|e| StepParseError::IoError(e.to_string()))?;
-    let reader = std::io::BufReader::with_capacity(8 * 1024 * 1024, file);
-    parse_step_reader(reader)
+    // Use from_utf8_lossy to handle ANSI/Windows-1251/1252 encoded files.
+    // STEP files are ASCII-compatible — the only non-UTF-8 bytes are typically
+    // in comments (file names with national characters). Lossy conversion
+    // replaces invalid bytes with U+FFFD, which is safe for parsing.
+    let content = String::from_utf8_lossy(&data);
+    parse_step(&content)
 }
 
 /// Parse a STEP file from any `BufRead` source.

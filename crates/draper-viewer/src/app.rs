@@ -5668,17 +5668,32 @@ impl ViewerApp {
                     let onload = Closure::wrap(Box::new(move |_: web_sys::Event| {
                         log::info!("STEP file loaded into memory: '{}'", name_for_log);
                         if let Ok(result) = reader_clone.result() {
-                            if let Some(text) = result.as_string() {
-                                log::info!("STEP file text extracted: {} chars", text.len());
+                            // Read as ArrayBuffer to support ANSI/Windows-1251/1252
+                            // encoded files (not just UTF-8). Convert to String
+                            // using from_utf8_lossy which replaces invalid bytes
+                            // with U+FFFD — safe for STEP parsing.
+                            if let Some(ab) = result.dyn_ref::<js_sys::ArrayBuffer>() {
+                                let array = js_sys::Uint8Array::new(ab);
+                                let mut bytes = vec![0u8; array.length() as usize];
+                                array.copy_to(&mut bytes);
+                                let text = String::from_utf8_lossy(&bytes).into_owned();
+                                log::info!("STEP file text extracted: {} chars (from {} bytes)", text.len(), bytes.len());
+                                *shared.lock().unwrap() = Some(FileLoadResult::Step {
+                                    name: name_for_log.clone(),
+                                    content: text,
+                                });
+                            } else if let Some(text) = result.as_string() {
+                                // Fallback: some browsers return string directly
+                                log::info!("STEP file text extracted (string): {} chars", text.len());
                                 *shared.lock().unwrap() = Some(FileLoadResult::Step {
                                     name: name_for_log.clone(),
                                     content: text,
                                 });
                             } else {
-                                log::error!("STEP file read result is not a string — file may be binary or have encoding issues");
+                                log::error!("STEP file read result is not ArrayBuffer or string");
                             }
                         } else {
-                            log::error!("STEP file read_as_text() returned error");
+                            log::error!("STEP file read_as_array_buffer() returned error");
                         }
                     }) as Box<dyn FnMut(_)>);
 
@@ -5692,7 +5707,7 @@ impl ViewerApp {
                     reader.set_onerror(Some(onerror.as_ref().unchecked_ref()));
                     onerror.forget();
 
-                    match reader.read_as_text(&file) {
+                    match reader.read_as_array_buffer(&file) {
                         Ok(()) => {
                             log::info!("Started reading STEP file: '{}'", file_name);
                         }

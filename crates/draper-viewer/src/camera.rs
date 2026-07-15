@@ -128,6 +128,10 @@ pub struct OrbitCamera {
     pub near: f32,
     /// Far plane distance.
     pub far: f32,
+    /// Max dimension of the current model's bounding box.
+    /// Used to scale zoom limits so small models can be zoomed in
+    /// and large models can be zoomed out.
+    model_size: f32,
 }
 
 impl OrbitCamera {
@@ -146,6 +150,7 @@ impl OrbitCamera {
             fov: 45.0,
             near: 0.1,
             far: 100000.0,
+            model_size: 100.0,
         }
     }
 
@@ -161,12 +166,16 @@ impl OrbitCamera {
             bbox_max[1] - bbox_min[1],
             bbox_max[2] - bbox_min[2],
         ];
-        let max_dim = size[0].max(size[1]).max(size[2]).max(1.0);
+        let max_dim = size[0].max(size[1]).max(size[2]).max(0.001);
 
+        self.model_size = max_dim;
         self.target = center;
         let fov_rad = self.fov.to_radians();
         self.distance = max_dim / (2.0 * (fov_rad * 0.5).tan()) * 1.5;
         self.distance = self.distance.max(max_dim * 0.5);
+        // Adjust near/far planes to model size
+        self.near = (max_dim * 0.001).max(0.0001);
+        self.far = (max_dim * 1000.0).max(100000.0);
     }
 
     /// Reset orientation to the default isometric view (azimuth -45°, elevation 30°)
@@ -345,7 +354,12 @@ impl OrbitCamera {
     /// in normalized device coordinates (-1 to 1). When None, zoom toward target center.
     pub fn zoom(&mut self, delta: f32, mouse_norm: Option<[f32; 2]>) {
         let factor = 1.0 - delta * 0.001;
-        let new_distance = (self.distance * factor).max(1.0).min(100000.0);
+        // Min distance scales with model size — allows zooming into very
+        // small models (e.g., brick_thin.stp with 0.5mm dimensions).
+        // Max distance allows zooming out from very large models.
+        let min_dist = (self.model_size * 0.01).max(0.001);
+        let max_dist = (self.model_size * 100.0).max(100000.0);
+        let new_distance = (self.distance * factor).max(min_dist).min(max_dist);
         let zoom_ratio = new_distance / self.distance;
 
         if let Some([nx, ny]) = mouse_norm {
