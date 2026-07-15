@@ -3817,16 +3817,12 @@ impl ViewerApp {
                     if polyline.len() < 2 {
                         continue;
                     }
-                    // Downsample: limit to ~500 points per polyline to avoid
-                    // excessive edge vertex count on highly tessellated boundaries
-                    let step = if polyline.len() > 500 {
-                        (polyline.len() as f64 / 500.0).ceil() as usize
-                    } else {
-                        1
-                    };
+                    // Draw ALL boundary points — no downsampling.
+                    // The boundary points come from the edge cache with the
+                    // same LOD-dependent density as the mesh, so edges and
+                    // mesh triangles are always consistent.
                     let mut prev_pos: Option<[f32; 3]> = None;
-                    for i in (0..polyline.len()).step_by(step) {
-                        let p = &polyline[i];
+                    for p in polyline.iter() {
                         let pos = if let Some(m) = tf {
                             transform_point(p, m)
                         } else {
@@ -3875,14 +3871,9 @@ impl ViewerApp {
                     if polyline.len() < 2 {
                         continue;
                     }
-                    let step = if polyline.len() > 500 {
-                        (polyline.len() as f64 / 500.0).ceil() as usize
-                    } else {
-                        1
-                    };
+                    // Draw ALL boundary points — no downsampling.
                     let mut prev_pos: Option<[f32; 3]> = None;
-                    for i in (0..polyline.len()).step_by(step) {
-                        let p = &polyline[i];
+                    for p in polyline.iter() {
                         let pos = if let Some(m) = tf {
                             transform_point(p, m)
                         } else {

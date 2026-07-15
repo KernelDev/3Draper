@@ -10678,7 +10678,7 @@ impl<'a> StepConverter<'a> {
             return self.triangulate_planar_face_with_holes_cached(
                 plane, &face_data.outer_edges, &face_data.outer_edge_step_ids,
                 &face_data.inner_edges, &face_data.inner_edge_step_ids,
-                face_data.forward, edge_cache,
+                face_data.forward, edge_cache, params.detail_level,
             );
         }
 
@@ -10707,7 +10707,7 @@ impl<'a> StepConverter<'a> {
         let mut prev_edge_last_uv: Option<Point2d> = None;
         for (edge_idx, edge) in face_data.outer_edges.iter().enumerate() {
             let step_id = face_data.outer_edge_step_ids.get(edge_idx).copied().unwrap_or(0);
-            let n_samples = self.edge_sample_count(edge);
+            let n_samples = self.edge_sample_count_lod(edge, params.detail_level);
             let curve_2d = face_data.edge_curves_2d.get(edge_idx).and_then(|c| c.as_ref());
 
             if step_id != 0 {
@@ -10758,7 +10758,7 @@ impl<'a> StepConverter<'a> {
                     let step_ids = face_data.inner_edge_step_ids.get(loop_idx);
                     for (edge_idx, edge) in inner_edges.iter().enumerate() {
                         let step_id = step_ids.and_then(|ids| ids.get(edge_idx).copied()).unwrap_or(0);
-                        let n_samples = self.edge_sample_count(edge);
+                        let n_samples = self.edge_sample_count_lod(edge, params.detail_level);
                         // Try to find the curve_2d for this inner edge
                         let curve_2d = self.find_curve_2d_for_edge(edge, face_data);
 
@@ -10790,7 +10790,7 @@ impl<'a> StepConverter<'a> {
         if boundary_points.is_empty() {
             for (edge_idx, edge) in face_data.edges.iter().enumerate() {
                 let step_id = face_data.edge_step_ids.get(edge_idx).copied().unwrap_or(0);
-                let n_samples = self.edge_sample_count(edge);
+                let n_samples = self.edge_sample_count_lod(edge, params.detail_level);
                 let curve_2d = face_data.edge_curves_2d.get(edge_idx).and_then(|c| c.as_ref());
 
                 if step_id != 0 {
@@ -10948,6 +10948,7 @@ impl<'a> StepConverter<'a> {
                 &face_data.inner_edge_step_ids,
                 face_data.forward,
                 &mut local_edge_cache,
+                params.detail_level,
             );
         }
 
@@ -10963,7 +10964,7 @@ impl<'a> StepConverter<'a> {
         let mut inner_boundary_points: Vec<Vec<Point3d>> = Vec::new();
 
         for edge in &face_data.outer_edges {
-            let n_samples = self.edge_sample_count(edge);
+            let n_samples = self.edge_sample_count_lod(edge, params.detail_level);
             for i in 0..n_samples {
                 let t = i as f64 / (n_samples - 1).max(1) as f64;
                 if let Some(p) = edge.point_at(t) {
@@ -10980,7 +10981,7 @@ impl<'a> StepConverter<'a> {
                 for inner_edges in &face_data.inner_edges {
                     let mut hole_pts = Vec::new();
                     for edge in inner_edges {
-                        let n_samples = self.edge_sample_count(edge);
+                        let n_samples = self.edge_sample_count_lod(edge, params.detail_level);
                         for i in 0..n_samples {
                             let t = i as f64 / (n_samples - 1).max(1) as f64;
                             if let Some(p) = edge.point_at(t) {
@@ -10999,7 +11000,7 @@ impl<'a> StepConverter<'a> {
         // If outer boundary is empty, try all edges
         if boundary_points.is_empty() {
             for edge in &face_data.edges {
-                let n_samples = self.edge_sample_count(edge);
+                let n_samples = self.edge_sample_count_lod(edge, params.detail_level);
                 for i in 0..n_samples {
                     let t = i as f64 / (n_samples - 1).max(1) as f64;
                     if let Some(p) = edge.point_at(t) {
@@ -11056,6 +11057,7 @@ impl<'a> StepConverter<'a> {
         inner_step_ids: &[Vec<i64>],
         forward: bool,
         edge_cache: &mut EdgeDiscretizationCache,
+        detail_level: f64,
     ) -> TriangleMesh {
         let mut mesh = TriangleMesh::new();
 
@@ -11063,7 +11065,7 @@ impl<'a> StepConverter<'a> {
         let mut outer_points_3d = Vec::new();
         for (edge_idx, edge) in outer_edges.iter().enumerate() {
             let step_id = outer_step_ids.get(edge_idx).copied().unwrap_or(0);
-            let n_samples = self.edge_sample_count(edge);
+            let n_samples = self.edge_sample_count_lod(edge, detail_level);
             if step_id != 0 {
                 let (pts, _params) = edge_cache.discretize_step_edge(step_id, edge, n_samples);
                 outer_points_3d.extend(pts);
@@ -11098,7 +11100,7 @@ impl<'a> StepConverter<'a> {
                         Some(Curve3d::Composite { .. }) => "Composite",
                         None => "None",
                     };
-                    s.push_str(&format!(" #{}={}({})", sid, curve_type, self.edge_sample_count(edge)));
+                    s.push_str(&format!(" #{}={}({})", sid, curve_type, self.edge_sample_count_lod(edge, detail_level)));
                 }
                 inner_summary.push(s);
             }
@@ -11142,7 +11144,7 @@ impl<'a> StepConverter<'a> {
             let step_ids = inner_step_ids.get(loop_idx);
             for (edge_idx, edge) in inner_edges.iter().enumerate() {
                 let step_id = step_ids.and_then(|ids| ids.get(edge_idx).copied()).unwrap_or(0);
-                let n_samples = self.edge_sample_count(edge);
+                let n_samples = self.edge_sample_count_lod(edge, detail_level);
                 if step_id != 0 {
                     let (pts, _params) = edge_cache.discretize_step_edge(step_id, edge, n_samples);
                     hp3d.extend(pts);
@@ -11268,22 +11270,33 @@ impl<'a> StepConverter<'a> {
     /// On WASM, we use fewer samples to reduce the number of expensive project_point
     /// calls during UV-space triangulation of curved surfaces.
     fn edge_sample_count(&self, edge: &TopoEdge) -> usize {
-        // Use same sample counts on all platforms for consistent results.
-        // Keeping these moderate to avoid excessive boundary points that
-        // slow down triangulation without improving quality.
-        match &edge.curve {
-            Some(Curve3d::Line(_)) => 2,
-            Some(Curve3d::Circle(_)) => 24,
-            Some(Curve3d::Ellipse(_)) => 24,
-            Some(Curve3d::Arc(_)) => 16,
-            Some(Curve3d::Hyperbola(_)) => 24,
-            Some(Curve3d::Parabola(_)) => 24,
-            Some(Curve3d::Nurbs(_)) => 32,
-            Some(Curve3d::PCurve { .. }) => 32,
-            Some(Curve3d::Trimmed { .. }) => 32,
-            Some(Curve3d::Composite { .. }) => 32,
+        self.edge_sample_count_lod(edge, 1.0)
+    }
+
+    /// LOD-aware edge sample count.
+    fn edge_sample_count_lod(&self, edge: &TopoEdge, detail_level: f64) -> usize {
+        // Quality (LOD) controls boundary density:
+        //   - LOD 0.1 (Preview): fewer samples → coarser boundary
+        //   - LOD 1.0 (Ultra): more samples → finer boundary
+        //
+        // detail_level ranges from 0.25 (LOD 0.0) to 1.0 (LOD 1.0).
+        let dl = detail_level.max(0.25).min(1.0);
+        let lod_scale = match &edge.curve {
+            Some(Curve3d::Line(_)) => return 2,  // Lines always 2 points
+            Some(Curve3d::Circle(_)) => {
+                ((8.0_f64 + 24.0 * dl).round()) as usize
+            }
+            Some(Curve3d::Ellipse(_)) => ((8.0_f64 + 24.0 * dl).round()) as usize,
+            Some(Curve3d::Arc(_)) => ((6.0_f64 + 16.0 * dl).round()) as usize,
+            Some(Curve3d::Hyperbola(_)) => ((8.0_f64 + 24.0 * dl).round()) as usize,
+            Some(Curve3d::Parabola(_)) => ((8.0_f64 + 24.0 * dl).round()) as usize,
+            Some(Curve3d::Nurbs(_)) => ((8.0_f64 + 48.0 * dl).round()) as usize,
+            Some(Curve3d::PCurve { .. }) => ((8.0_f64 + 48.0 * dl).round()) as usize,
+            Some(Curve3d::Trimmed { .. }) => ((8.0_f64 + 48.0 * dl).round()) as usize,
+            Some(Curve3d::Composite { .. }) => ((8.0_f64 + 48.0 * dl).round()) as usize,
             None => 2,
-        }
+        };
+        lod_scale.clamp(4, 256)
     }
 
     fn sample_edges(&self, edges: &[TopoEdge]) -> Vec<Point3d> {
