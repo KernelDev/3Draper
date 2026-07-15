@@ -1805,13 +1805,15 @@ impl BrepSession {
         let tri_end = self.mesh.triangle_count();
 
         // Sample boundary edges into polylines (3D and UV)
+        // Use LOD-aware sampling to match mesh boundary density.
+        let dl = self.params.detail_level;
         let outer_boundary: Vec<Vec<Point3d>> = if face_data.outer_edges.is_empty() {
             vec![]
         } else {
-            vec![converter.sample_edges_to_polylines(&face_data.outer_edges)]
+            vec![converter.sample_edges_to_polylines_lod(&face_data.outer_edges, dl)]
         };
         let inner_boundaries: Vec<Vec<Point3d>> = face_data.inner_edges.iter()
-            .map(|edges| converter.sample_edges_to_polylines(edges))
+            .map(|edges| converter.sample_edges_to_polylines_lod(edges, dl))
             .collect();
 
         let outer_uv_boundary = converter.sample_edges_to_uv_polylines(&face_data.outer_edges, &face_data.surface);
@@ -4942,13 +4944,15 @@ impl<'a> StepConverter<'a> {
             let tri_end = mesh.triangle_count();
 
             // Sample boundary edges into polylines (3D and UV)
+            // Use LOD-aware sampling to match mesh boundary density.
+            let dl = params.detail_level;
             let outer_boundary: Vec<Vec<Point3d>> = if face_data.outer_edges.is_empty() {
                 vec![]
             } else {
-                vec![self.sample_edges_to_polylines(&face_data.outer_edges)]
+                vec![self.sample_edges_to_polylines_lod(&face_data.outer_edges, dl)]
             };
             let inner_boundaries: Vec<Vec<Point3d>> = face_data.inner_edges.iter()
-                .map(|edges| self.sample_edges_to_polylines(edges))
+                .map(|edges| self.sample_edges_to_polylines_lod(edges, dl))
                 .collect();
 
             // Project boundary to UV space on all platforms
@@ -5662,12 +5666,26 @@ impl<'a> StepConverter<'a> {
 
     /// Sample edges into 3D polylines for boundary visualization.
     fn sample_edges_to_polylines(&self, edges: &[TopoEdge]) -> Vec<Point3d> {
+        // Use LOD-aware sample count to match mesh boundary density.
+        // This ensures B-Rep edges are drawn with the same number of points
+        // as the mesh triangles, keeping them visually consistent.
+        let detail_level = 1.0; // Default to full quality; overridden in call sites
+        self.sample_edges_to_polylines_lod(edges, detail_level)
+    }
+
+    /// LOD-aware version of sample_edges_to_polylines.
+    /// Uses edge_sample_count_lod to match mesh boundary density.
+    fn sample_edges_to_polylines_lod(&self, edges: &[TopoEdge], detail_level: f64) -> Vec<Point3d> {
         let mut points = Vec::new();
         for edge in edges {
             if let Some(ref _curve) = edge.curve {
-                let steps = 20;
-                for i in 0..=steps {
-                    let t = i as f64 / steps as f64;
+                let steps = self.edge_sample_count_lod(edge, detail_level);
+                for i in 0..steps {
+                    let t = if steps > 1 {
+                        i as f64 / (steps - 1) as f64
+                    } else {
+                        0.0
+                    };
                     if let Some(p) = edge.point_at(t) {
                         let p = deterministic_round_point(p);
                         if points.last().map_or(true, |last: &Point3d| last.distance_to(&p) > 1e-8) {
