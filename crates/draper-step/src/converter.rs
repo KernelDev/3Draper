@@ -1143,7 +1143,9 @@ impl OwnedStepConversionContext {
         // is NOT overwritten by `with_adaptive_lod()` (which operates on a
         // cloned params in triangulate_brep_detailed). So self.params still
         // has the LOD-appropriate keep_ratio.
-        if self.params.keep_ratio < 1.0 && instance_mesh.triangle_count() >= 4 {
+        // DISABLED: decimation breaks watertightness at low LOD. Quality is controlled
+        // by edge cache density (boundary) and Steiner points (interior) instead.
+        if false && self.params.keep_ratio < 1.0 && instance_mesh.triangle_count() >= 4 {
             let (orig, final_) = draper_mesh::decimate_mesh(&mut instance_mesh, self.params.keep_ratio);
             if final_ < orig {
                 log::info!(
@@ -1247,7 +1249,9 @@ impl OwnedStepConversionContext {
                     instance_mesh.transform(tf);
                 }
                 // Apply decimation for non-adaptive LOD
-                if self.params.keep_ratio < 1.0 && instance_mesh.triangle_count() >= 4 {
+                // DISABLED: decimation breaks watertightness at low LOD. Quality is controlled
+        // by edge cache density (boundary) and Steiner points (interior) instead.
+        if false && self.params.keep_ratio < 1.0 && instance_mesh.triangle_count() >= 4 {
                     draper_mesh::decimate_mesh(&mut instance_mesh, self.params.keep_ratio);
                     self.post_decimation_cleanup(&mut instance_mesh, p.brep_id);
                 }
@@ -1340,7 +1344,8 @@ impl OwnedStepConversionContext {
                         }
 
                         // Apply decimation for non-adaptive LOD
-                        if params.keep_ratio < 1.0 && instance_mesh.triangle_count() >= 4 {
+                        // DISABLED: decimation breaks watertightness at low LOD.
+                        if false && params.keep_ratio < 1.0 && instance_mesh.triangle_count() >= 4 {
                             draper_mesh::decimate_mesh(&mut instance_mesh, params.keep_ratio);
                             // Post-decimation cleanup (uses self.bbox for tolerance)
                             // Note: this is a closure, so we inline the cleanup
@@ -1579,7 +1584,8 @@ impl OwnedStepConversionContext {
         // in triangulate_pending. Without this, the Quality slider has no
         // visible effect on faces that produce fewer triangles than their
         // per-face budget (e.g., ruled NURBS, planar faces).
-        if self.params.keep_ratio < 1.0 && mesh.triangle_count() >= 4 {
+        // DISABLED: decimation breaks watertightness at low LOD.
+        if false && self.params.keep_ratio < 1.0 && mesh.triangle_count() >= 4 {
             let (orig, final_) = draper_mesh::decimate_mesh(&mut mesh, self.params.keep_ratio);
             if final_ < orig {
                 log::info!(
@@ -1627,36 +1633,24 @@ impl OwnedStepConversionContext {
         // Step 1: Remove degenerate triangles (zero-area from collapsed vertices)
         filter_degenerate_triangles(mesh, 1e-10);
 
-        // Step 2: Remove duplicate triangles created by edge collapse
-        let dup_removed = mesh.remove_duplicate_triangles();
-
-        // Step 3: Repair non-manifold edges (only if any exist)
+        // Step 2: Fill boundary gaps (missing triangles from edge collapse)
+        // This is the KEY step: when an interior edge is collapsed, some
+        // triangles adjacent to boundary edges become degenerate and are
+        // removed, creating small gaps. fill_boundary_gaps closes them.
         let report = validate_watertight(mesh, false);
-        if report.non_manifold_edge_count > 0 {
-            let model_scale = self.bbox
-                .map(|(bmin, bmax)| {
-                    let dx = bmax.x - bmin.x;
-                    let dy = bmax.y - bmin.y;
-                    let dz = bmax.z - bmin.z;
-                    ((dx * dx + dy * dy + dz * dz).sqrt()).max(1.0)
-                })
-                .unwrap_or(100.0);
-            let tj_tol = (model_scale * 1e-9).max(1e-10);
-            let n_tj = draper_mesh::repair_t_junctions(mesh, tj_tol);
-            if n_tj > 0 {
-                // Step 4: Second dedup pass after T-junction repair
-                let dup2 = mesh.remove_duplicate_triangles();
-                log::info!(
-                    "BREP #{} — post-decimation cleanup: {} degenerate, {} dup, {} T-junctions, {} dup2 ({}→{} tris)",
-                    brep_id,
-                    pre_cleanup - mesh.triangle_count() - dup_removed, // approximate
-                    dup_removed,
-                    n_tj,
-                    dup2,
-                    pre_cleanup,
-                    mesh.triangle_count()
-                );
-            }
+        if report.boundary_edge_count > 0 {
+            draper_mesh::fill_boundary_gaps(mesh, 32);
+        }
+
+        // Step 3: Remove duplicates after gap fill
+        mesh.remove_duplicate_triangles();
+
+        let post_cleanup = mesh.triangle_count();
+        if post_cleanup != pre_cleanup {
+            log::info!(
+                "BREP #{} — post-decimation cleanup: {}→{} tris (bnd was {})",
+                brep_id, pre_cleanup, post_cleanup, report.boundary_edge_count
+            );
         }
     }
 
@@ -1729,7 +1723,8 @@ impl OwnedStepConversionContext {
         // Apply post-triangulation decimation (same as build_instance).
         // CRITICAL: Must run even when adaptive LOD is enabled — see comment
         // in triangulate_pending.
-        if self.params.keep_ratio < 1.0 && mesh.triangle_count() >= 4 {
+        // DISABLED: decimation breaks watertightness at low LOD.
+        if false && self.params.keep_ratio < 1.0 && mesh.triangle_count() >= 4 {
             let (orig, final_) = draper_mesh::decimate_mesh(&mut mesh, self.params.keep_ratio);
             if final_ < orig {
                 log::info!(

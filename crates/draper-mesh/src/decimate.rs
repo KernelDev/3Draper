@@ -82,13 +82,20 @@ pub fn decimate_mesh(mesh: &mut TriangleMesh, keep_ratio: f64) -> (usize, usize)
         return (original_count, mesh.triangles.len());
     }
 
-    // Face-aware weld: only merge vertices that share at least one face ID.
-    // This preserves cross-face duplicate vertices (intentional for watertightness
-    // — they represent the same geometric boundary point but belong to different
-    // faces). The previous non-face-aware weld_vertices merged ALL coincident
-    // vertices, causing triangles from different NURBS faces to share vertices
-    // → "same 2D points applied to two surfaces" visual corruption.
-    weld_vertices_face_aware(mesh);
+    // CRITICAL: Do NOT weld vertices in decimation.
+    //
+    // The edge cache + merge_deduplicating already handle vertex dedup
+    // correctly:
+    //   - Boundary vertices are bit-identical across faces (edge cache)
+    //   - Cross-face duplicates are intentionally kept (merge_deduplicating)
+    //
+    // Welding here would:
+    //   1. Merge seam points within a face (first/last point of closed loop)
+    //      → changes boundary structure → breaks watertightness
+    //   2. Merge cross-face duplicates → triangles from different faces share
+    //      vertices → visual corruption
+    //
+    // Decimation should work on the mesh AS-IS, only collapsing interior edges.
 
     // Multi-pass batched decimation.
     //
@@ -128,7 +135,21 @@ pub fn decimate_mesh(mesh: &mut TriangleMesh, keep_ratio: f64) -> (usize, usize)
         let adjacency = build_adjacency(mesh);
         let current_boundary = &adjacency.boundary_vertices;
 
-        // Collect candidate edges (internal, not boundary-boundary) — O(E)
+        // Collect candidate edges — ONLY interior-interior edges.
+        //
+        // CRITICAL INVARIANT: Quality (LOD) must NOT affect watertightness.
+        // Boundary vertices come from the edge cache with bit-identical 3D
+        // coordinates across faces. Collapsing ANY edge involving a boundary
+        // vertex would:
+        //   1. Move the boundary vertex → breaks bit-identical matching
+        //   2. Create non-manifold edges → breaks watertightness
+        //   3. Change topology → quality affects geometry (wrong!)
+        //
+        // Only edges where BOTH endpoints are interior vertices are safe
+        // to collapse. This ensures:
+        //   - Boundary edges are preserved at ALL quality levels
+        //   - Only interior density changes with quality
+        //   - Watertightness is invariant across LOD levels
         let mut candidates: Vec<(f64, u32, u32)> = Vec::new();
         for (&key, &count) in &adjacency.edge_count {
             if count != 2 {
@@ -140,9 +161,9 @@ pub fn decimate_mesh(mesh: &mut TriangleMesh, keep_ratio: f64) -> (usize, usize)
             let a_is_boundary = current_boundary.contains(&a);
             let b_is_boundary = current_boundary.contains(&b);
 
-            // Don't collapse edges where BOTH endpoints are boundary vertices —
-            // this would deform the silhouette (no internal vertex to absorb the move).
-            if a_is_boundary && b_is_boundary {
+            // NEVER collapse any edge involving a boundary vertex.
+            // Only collapse interior-interior edges.
+            if a_is_boundary || b_is_boundary {
                 continue;
             }
 
@@ -356,9 +377,10 @@ fn find_shortest_collapsible_edge(
         let a_is_boundary = adj.boundary_vertices.contains(&a);
         let b_is_boundary = adj.boundary_vertices.contains(&b);
 
-        // Don't collapse edges where BOTH endpoints are boundary vertices —
-        // this would deform the silhouette (no internal vertex to absorb the move).
-        if a_is_boundary && b_is_boundary {
+        // NEVER collapse any edge involving a boundary vertex.
+        // Only collapse interior-interior edges. This preserves watertightness
+        // at ALL quality levels — boundary edges are never modified.
+        if a_is_boundary || b_is_boundary {
             continue;
         }
 
@@ -376,22 +398,15 @@ fn find_shortest_collapsible_edge(
     }
 
     best.map(|(_, a, b)| {
-        // Determine target position: keep boundary vertex fixed if any.
-        let a_is_boundary = adj.boundary_vertices.contains(&a);
-        let b_is_boundary = adj.boundary_vertices.contains(&b);
-        let target = if a_is_boundary {
-            mesh.vertices[a as usize]
-        } else if b_is_boundary {
-            mesh.vertices[b as usize]
-        } else {
-            let pa = &mesh.vertices[a as usize];
-            let pb = &mesh.vertices[b as usize];
-            Point3d::new(
-                (pa.x + pb.x) * 0.5,
-                (pa.y + pb.y) * 0.5,
-                (pa.z + pb.z) * 0.5,
-            )
-        };
+        // Both endpoints are interior (boundary check done above).
+        // Use midpoint as target position.
+        let pa = &mesh.vertices[a as usize];
+        let pb = &mesh.vertices[b as usize];
+        let target = Point3d::new(
+            (pa.x + pb.x) * 0.5,
+            (pa.y + pb.y) * 0.5,
+            (pa.z + pb.z) * 0.5,
+        );
         (a, b, target)
     })
 }
@@ -667,14 +682,19 @@ mod tests {
 
     #[test]
     fn test_decimate_progressive_ratio() {
-        let make_fresh = || make_grid(8, 8);
+        // Use a larger grid so there are enough interior-interior edges
+        // to collapse (boundary-safe decimation only collapses edges
+        // where BOTH endpoints are interior vertices).
+        let make_fresh = || make_grid(16, 16);
         let (_, r10) = decimate_mesh(&mut make_fresh(), 0.10);
         let (_, r25) = decimate_mesh(&mut make_fresh(), 0.25);
         let (_, r50) = decimate_mesh(&mut make_fresh(), 0.50);
         let (_, r100) = decimate_mesh(&mut make_fresh(), 1.0);
-        assert!(r10 < r25, "Lower keep_ratio should give fewer triangles: r10={} r25={}", r10, r25);
-        assert!(r25 < r50, "Lower keep_ratio should give fewer triangles: r25={} r50={}", r25, r50);
-        assert!(r50 < r100, "Lower keep_ratio should give fewer triangles: r50={} r100={}", r50, r100);
+        // With boundary-safe decimation, lower keep_ratio gives fewer or
+        // equal triangles (may be equal if no more interior edges to collapse).
+        assert!(r10 <= r25, "Lower keep_ratio should give fewer/equal triangles: r10={} r25={}", r10, r25);
+        assert!(r25 <= r50, "Lower keep_ratio should give fewer/equal triangles: r25={} r50={}", r25, r50);
+        assert!(r50 <= r100, "Lower keep_ratio should give fewer/equal triangles: r50={} r100={}", r50, r100);
     }
 
     #[test]
