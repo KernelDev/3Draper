@@ -5872,7 +5872,11 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
                 // at two distinct v-levels, plus seam lines connecting them).
                 let (v_min_pw, v_max_pw) = compute_axis_v_range_pts(boundary_points, &cyl.origin, &cyl.axis);
                 if v_max_pw > v_min_pw {
-                    let dedup_tol = params.max_deviation.max(1e-6) * 0.5;
+                    // Use model-scale-aware dedup_tol. For tiny models (brick_thin.stp
+                    // with 0.06mm model_scale), params.max_deviation can be too large,
+                    // collapsing distinct ring points. Use a fraction of v_range instead.
+                    let v_range_pw = v_max_pw - v_min_pw;
+                    let dedup_tol = v_range_pw * 0.01; // 1% of v-range
                     let (bottom_ring, top_ring, _) = split_boundary_into_rings_with_u(
                         boundary_points, &cyl.origin, &cyl.axis, &cyl.x_dir,
                         v_min_pw, v_max_pw, dedup_tol,
