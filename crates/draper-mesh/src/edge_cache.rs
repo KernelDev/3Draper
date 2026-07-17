@@ -693,6 +693,27 @@ impl EdgeDiscretizationCache {
                 *p = deterministic_round_point(*p);
             }
 
+            // Override first and last points with VERTEX_POINT coordinates.
+            // This is critical for watertightness: two edges sharing the same
+            // geometric vertex but with different curve parameterizations
+            // (e.g., LINE on Plane face vs CIRCLE on Cylinder face) will
+            // produce slightly different curve.point_at() values. By using
+            // the authoritative VERTEX_POINT coordinates instead, we ensure
+            // bit-identical start/end points across all edges sharing the
+            // same geometric vertex.
+            //
+            // This is the OpenCascade approach: vertex positions are
+            // authoritative, curve evaluation is secondary.
+            if !points_3d.is_empty() {
+                if let Some(ref vp) = forward_edge.start_vertex_point {
+                    points_3d[0] = *vp;
+                }
+                if let Some(ref vp) = forward_edge.end_vertex_point {
+                    let last = points_3d.len() - 1;
+                    points_3d[last] = *vp;
+                }
+            }
+
             self.entries.insert(key, EdgeDiscretization {
                 points_3d,
                 uv_per_face: HashMap::new(),

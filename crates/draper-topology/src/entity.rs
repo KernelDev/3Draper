@@ -85,6 +85,13 @@ pub struct Edge {
     pub vertex_start: Option<TopoId>,
     /// End vertex.
     pub vertex_end: Option<TopoId>,
+    /// Authoritative 3D coordinate of the start vertex (from VERTEX_POINT).
+    /// When set, overrides curve.point_at(t_min) for the first discretized point.
+    /// This ensures bit-identical start points across edges sharing the same
+    /// geometric vertex but with different curve parameterizations.
+    pub start_vertex_point: Option<Point3d>,
+    /// Authoritative 3D coordinate of the end vertex (from VERTEX_POINT).
+    pub end_vertex_point: Option<Point3d>,
     /// Whether the edge orientation matches the curve direction.
     pub forward: bool,
     /// Tolerance.
@@ -110,6 +117,8 @@ impl Edge {
             param_range,
             vertex_start: None,
             vertex_end: None,
+            start_vertex_point: None,
+            end_vertex_point: None,
             forward: true,
             tolerance: 1e-6,
             degenerate: false,
@@ -168,6 +177,8 @@ impl Edge {
             param_range: (self.param_range.1, self.param_range.0),
             vertex_start: self.vertex_end,
             vertex_end: self.vertex_start,
+            start_vertex_point: self.end_vertex_point,
+            end_vertex_point: self.start_vertex_point,
             forward: !self.forward,
             tolerance: self.tolerance,
             degenerate: self.degenerate,

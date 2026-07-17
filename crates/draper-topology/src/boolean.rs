@@ -2151,6 +2151,8 @@ fn split_general_face(
         param_range: (0.0, 1.0),
         vertex_start: None,
         vertex_end: None,
+        start_vertex_point: None,
+        end_vertex_point: None,
         forward: true,
         tolerance: tol,
         degenerate: false,
