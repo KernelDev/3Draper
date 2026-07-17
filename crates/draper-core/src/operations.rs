@@ -232,6 +232,8 @@ pub fn add_circular_hole_to_face(
         param_range: (0.0, 2.0 * std::f64::consts::PI),
         vertex_start: Some(TopoId::new()),
         vertex_end: Some(TopoId::new()),
+        start_vertex_point: None,
+        end_vertex_point: None,
         forward: true,
         tolerance: 1e-6,
         degenerate: false,

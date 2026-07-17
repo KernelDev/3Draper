@@ -2217,17 +2217,25 @@ pub struct StepConverter<'a> {
     _entity_map: HashMap<i64, usize>,
     config: StepConversionConfig,
     /// Whether the STEP file uses degrees for plane angle measures.
-    /// Determined from HEADER units via `extract_units()`. Affects
-    /// CONICAL_SURFACE semi_angle interpretation: if degrees, the raw
-    /// value must be converted to radians; if radians (SI default),
-    /// use as-is.
     angle_in_degrees: bool,
-    /// Pre-built index: pd_id → brep_id (resolved eagerly in new() — O(n) instead of O(n³) per-call)
+    /// Pre-built index: pd_id → brep_id
     pd_brep_map: HashMap<i64, Option<i64>>,
-    /// Pre-built index: nauo_id → transform (resolved eagerly in new() — O(n) instead of O(n²) per-call)
+    /// Pre-built index: nauo_id → transform
     nauo_transform_map: HashMap<i64, Option<[[f64; 4]; 4]>>,
-    /// Cache: bounding box (computed once, reused across all BREP triangulations)
+    /// Cache: bounding box
     bbox_cache: std::cell::RefCell<Option<Option<(Point3d, Point3d)>>>,
+    /// Vertex canonicalization map: vertex_id → canonical Point3d.
+    ///
+    /// Groups VERTEX_POINT entities by quantized 3D coordinates and
+    /// assigns a single canonical coordinate to each group. This ensures
+    /// that all edges sharing geometrically-coincident vertices (within
+    /// coord_tol) get bit-identical start/end points, regardless of
+    /// whether they reference the same VERTEX_POINT entity or different
+    /// ones with slightly different coordinates.
+    ///
+    /// This is the OpenCascade Shape Healing approach: before any edge
+    /// discretization, canonicalize all vertex positions.
+    vertex_canonical_map: std::cell::RefCell<Option<HashMap<i64, Point3d>>>,
 }
 
 impl<'a> StepConverter<'a> {
@@ -2273,6 +2281,7 @@ impl<'a> StepConverter<'a> {
             pd_brep_map,
             nauo_transform_map,
             bbox_cache: std::cell::RefCell::new(None),
+            vertex_canonical_map: std::cell::RefCell::new(None),
         }
     }
 
@@ -2386,6 +2395,7 @@ impl<'a> StepConverter<'a> {
             pd_brep_map,
             nauo_transform_map,
             bbox_cache: std::cell::RefCell::new(None),
+            vertex_canonical_map: std::cell::RefCell::new(None),
         }
     }
 
@@ -4287,7 +4297,7 @@ impl<'a> StepConverter<'a> {
         // Tolerance-based dedup: catches near-identical vertices from different
         // STEP EDGE_CURVE entities on the same geometric boundary (FP drift
         // typically 1e-13). Merge tolerance = 1 PPM of model scale.
-        let merge_tol = tol_ctx.model_scale * 1e-3;
+        let merge_tol = tol_ctx.model_scale * 3e-3;
         let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
         let mut total_face_vertices = 0usize;
         for (fi, face_data) in face_data_list.iter().enumerate() {
@@ -4947,7 +4957,7 @@ impl<'a> StepConverter<'a> {
         // The merge tolerance is set to 1 PPM of the model scale — small enough
         // to never collapse genuinely distinct features, but large enough to catch
         // FP drift between different EDGE_CURVE entities on the same boundary.
-        let merge_tol = tol_ctx.model_scale * 1e-3;
+        let merge_tol = tol_ctx.model_scale * 3e-3;
         let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
         let mut total_face_vertices_detailed = 0usize;
         let mut face_infos = Vec::new();
@@ -5734,7 +5744,7 @@ impl<'a> StepConverter<'a> {
         let face_time_limit = params.face_time_limit_override.unwrap_or(default_face_time_limit);
 
         // Tolerance-based dedup
-        let merge_tol = tol_ctx.model_scale * 1e-3;
+        let merge_tol = tol_ctx.model_scale * 3e-3;
         let dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
 
         Some(BrepSession {
@@ -5848,7 +5858,7 @@ impl<'a> StepConverter<'a> {
         let mut mesh = TriangleMesh::new();
         // Tolerance-based dedup: catches near-identical vertices from different
         // STEP EDGE_CURVE entities on the same geometric boundary.
-        let merge_tol = tol_ctx.model_scale * 1e-3;
+        let merge_tol = tol_ctx.model_scale * 3e-3;
         let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
         for face_data in &face_data_list {
             let face_mesh = self.surface_to_mesh(face_data, params, bbox);
@@ -7589,7 +7599,9 @@ impl<'a> StepConverter<'a> {
             }
         }
 
-        // Resolve vertex points
+        // Resolve vertex points — use original VERTEX_POINT coordinates
+        // for both param_range and vertex_point override.
+        // Canonicalization was tried but breaks aliased edges.
         let p1 = vertex_ids.get(0).and_then(|id| self.resolve_vertex_point(*id));
         let p2 = vertex_ids.get(1).and_then(|id| self.resolve_vertex_point(*id));
 
@@ -9306,9 +9318,105 @@ impl<'a> StepConverter<'a> {
 
     /// Resolve a VERTEX_POINT entity to a 3D point.
     /// VERTEX_POINT params: [name, point_ref]
+    /// Build the vertex canonicalization map (lazy, cached).
+    ///
+    /// Groups all VERTEX_POINT entities by quantized 3D coordinates and
+    /// assigns a single canonical coordinate to each group. Called once
+    /// per StepConverter, cached in `vertex_canonical_map`.
+    fn build_vertex_canonical_map(&self) -> HashMap<i64, Point3d> {
+        let bbox = self.compute_bounding_box();
+        let model_scale = match &bbox {
+            Some((bmin, bmax)) => {
+                let dx = bmax.x - bmin.x;
+                let dy = bmax.y - bmin.y;
+                let dz = bmax.z - bmin.z;
+                ((dx * dx + dy * dy + dz * dz).sqrt()).max(1.0)
+            }
+            None => 100.0,
+        };
+        // Quantization tolerance = 1% of model scale (same as coord_tol)
+        let quant = model_scale * 5e-3;
+        let inv_quant = 1.0 / quant;
+
+        // Collect all VERTEX_POINT entities with their 3D coordinates
+        let mut vertex_coords: Vec<(i64, Point3d)> = Vec::new();
+        for entity in &self.step.entities {
+            if entity.type_name == "VERTEX_POINT" {
+                for param in &entity.params {
+                    if let Some(point_id) = self.get_ref(param) {
+                        if let Some(p) = self.resolve_cartesian_point(point_id) {
+                            vertex_coords.push((entity.id, p));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Group by quantized coordinates
+        let mut groups: HashMap<(i64, i64, i64), (Point3d, Vec<i64>)> = HashMap::new();
+        for (vid, p) in &vertex_coords {
+            let key = (
+                (p.x * inv_quant).round() as i64,
+                (p.y * inv_quant).round() as i64,
+                (p.z * inv_quant).round() as i64,
+            );
+            let entry = groups.entry(key).or_insert_with(|| (*p, Vec::new()));
+            entry.1.push(*vid);
+        }
+
+        // Build map: vertex_id → canonical Point3d
+        let mut map = HashMap::new();
+        for (_key, (canonical_p, vids)) in &groups {
+            // Apply deterministic_round_point to the canonical coordinate
+            let canonical_p = deterministic_round_point(*canonical_p);
+            for &vid in vids {
+                map.insert(vid, canonical_p);
+            }
+        }
+
+        log::info!(
+            "Vertex canonicalization: {} vertices → {} groups (quant_tol={:.2e})",
+            vertex_coords.len(), groups.len(), quant
+        );
+
+        map
+    }
+
+    /// Get the canonical 3D coordinate for a vertex_id.
+    /// Returns the canonicalized coordinate if available, otherwise
+    /// falls back to resolve_vertex_point.
+    fn get_canonical_vertex_point(&self, vertex_id: i64) -> Option<Point3d> {
+        // Lazy-build the canonical map
+        {
+            let map = self.vertex_canonical_map.borrow();
+            if let Some(ref m) = *map {
+                if let Some(&p) = m.get(&vertex_id) {
+                    return Some(p);
+                }
+            }
+        }
+        // Build if not yet built
+        {
+            let mut map = self.vertex_canonical_map.borrow_mut();
+            if map.is_none() {
+                *map = Some(self.build_vertex_canonical_map());
+            }
+        }
+        // Try again
+        let map = self.vertex_canonical_map.borrow();
+        if let Some(ref m) = *map {
+            if let Some(&p) = m.get(&vertex_id) {
+                return Some(p);
+            }
+        }
+        // Fallback: resolve without canonicalization
+        self.resolve_vertex_point(vertex_id)
+    }
+
     fn resolve_vertex_point(&self, vertex_id: i64) -> Option<Point3d> {
         let vertex_entity = self.step.find_entity(vertex_id)?;
-        
+
         if vertex_entity.type_name != "VERTEX_POINT" {
             return None;
         }
