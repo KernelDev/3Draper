@@ -1890,7 +1890,7 @@ impl BrepSession {
                 eprintln!("WELD_SKIP: BREP #{} already watertight ({} interior edges) — skipping weld to preserve triangles",
                     brep_id, report_before.interior_edge_count);
             } else {
-                let weld_tol = (self.tol_ctx.model_scale * 1e-2).max(self.tol_ctx.absolute * 10.0);
+                let weld_tol = self.tol_ctx.weld_tolerance();
                 weld_boundary_edge_vertices(&mut self.mesh, weld_tol);
             }
 
@@ -2100,6 +2100,26 @@ pub fn step_structure_detailed(step_file: &StepFile) -> String {
 /// Returns an `Option<f64>` with the best available tolerance value.
 /// If multiple tolerance values are found, the smallest (tightest) is returned.
 /// If no tolerance information is found, returns `None`.
+/// Recursively extract a float from any StepValue, handling nested
+/// List and TypedValue wrappers (e.g., LENGTH_MEASURE(2.26e-6) is
+/// parsed as Typed { type_name: "LENGTH_MEASURE", value: Float(2.26e-6) }).
+fn extract_float_from_step_value(val: &StepValue) -> Option<f64> {
+    match val {
+        StepValue::Float(f) => Some(*f),
+        StepValue::Integer(i) => Some(*i as f64),
+        StepValue::List(params) => {
+            for p in params {
+                if let Some(f) = extract_float_from_step_value(p) {
+                    return Some(f);
+                }
+            }
+            None
+        }
+        StepValue::Typed { value, .. } => extract_float_from_step_value(value),
+        _ => None,
+    }
+}
+
 pub fn extract_step_tolerance(step_file: &StepFile) -> Option<f64> {
     let mut best_tolerance: Option<f64> = None;
 
@@ -2107,42 +2127,31 @@ pub fn extract_step_tolerance(step_file: &StepFile) -> Option<f64> {
         let type_name = entity.type_name.to_uppercase();
 
         if type_name == "UNCERTAINTY_MEASURE_WITH_UNIT" {
-            // Format: UNCERTAINTY_MEASURE_WITH_UNIT(name, measure_with_unit)
-            // The first parameter is typically the uncertainty value
-            if let Some(StepValue::List(params)) = entity.params.get(0) {
-                if let Some(StepValue::Float(val)) = params.first() {
-                    let tol = val.abs();
-                    best_tolerance = Some(match best_tolerance {
-                        Some(existing) => existing.min(tol),
-                        None => tol,
-                    });
+            // Format: UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(value), unit_ref)
+            // The value is inside a TypedValue wrapper (LENGTH_MEASURE).
+            for param in &entity.params {
+                if let Some(val) = extract_float_from_step_value(param) {
+                    if val > 0.0 && val < 1.0 {
+                        best_tolerance = Some(match best_tolerance {
+                            Some(existing) => existing.min(val),
+                            None => val,
+                        });
+                        break;
+                    }
                 }
-            }
-            // Also try the second parameter pattern
-            if let Some(StepValue::Float(val)) = entity.params.get(0) {
-                let tol = val.abs();
-                best_tolerance = Some(match best_tolerance {
-                    Some(existing) => existing.min(tol),
-                    None => tol,
-                });
             }
         }
 
         if type_name.starts_with("GEOMETRIC_TOLERANCE") || type_name.starts_with("SHAPE_TOLERANCE") {
-            // Geometric tolerances have the tolerance value as one of the parameters
-            // The exact position depends on the specific subtype, but typically
-            // the first numeric parameter is the tolerance value
             for param in &entity.params {
-                if let StepValue::Float(val) = param {
-                    let tol = val.abs();
-                    if tol > 1e-15 && tol < 1000.0 {
-                        // Sanity check: tolerance should be small positive number
+                if let Some(val) = extract_float_from_step_value(param) {
+                    if val > 1e-15 && val < 1000.0 {
                         best_tolerance = Some(match best_tolerance {
-                            Some(existing) => existing.min(tol),
-                            None => tol,
+                            Some(existing) => existing.min(val),
+                            None => val,
                         });
                     }
-                    break; // Only use the first numeric parameter
+                    break;
                 }
             }
         }
@@ -4010,8 +4019,16 @@ impl<'a> StepConverter<'a> {
 
         // Create tolerance context for this BREP
         let tol_ctx = match bbox {
-            Some((bmin, bmax)) => ToleranceContext::from_bounding_box(bmin, bmax),
-            None => ToleranceContext::new(),
+            Some((bmin, bmax)) => {
+                let mut ctx = ToleranceContext::from_bounding_box(bmin, bmax);
+                ctx.step_uncertainty = extract_step_tolerance(&self.step);
+                ctx
+            },
+            None => {
+                let mut ctx = ToleranceContext::new();
+                ctx.step_uncertainty = extract_step_tolerance(&self.step);
+                ctx
+            },
         };
 
         // ─── Healing pipeline: heal the solid before triangulation ────────
@@ -4118,7 +4135,7 @@ impl<'a> StepConverter<'a> {
                 //   Plane face uses a LINE for a boundary that a Cylinder face
                 //   parameterizes as a CIRCLE ARC). This is standard STEP export
                 //   behavior from SolidWorks, CATIA, Pro/E, etc.
-                let shape_tol = (tol_ctx.model_scale * 1e-2).max(1e-6);
+                let shape_tol = tol_ctx.aliasing_tolerance().max(1e-6);
                 let shape_groups = self.group_step_ids_by_curve_shape(step_ids, shape_tol);
 
                 // If shape_groups has multiple groups, check if they have
@@ -4196,7 +4213,7 @@ impl<'a> StepConverter<'a> {
             // This phase matches edges by their 3D endpoint coordinates,
             // catching edges that share the same geometric boundary but
             // have different STEP entity IDs.
-            let coord_tol = (tol_ctx.model_scale * 1e-2).max(tol_ctx.absolute * 10.0);
+            let coord_tol = tol_ctx.aliasing_tolerance();
             let mut coord_pair_to_step_ids: HashMap<(i64, i64, i64, i64, i64, i64), Vec<i64>> = HashMap::new();
             let mut step_id_endpoints: HashMap<i64, (Point3d, Point3d)> = HashMap::new();
             let mut unaliased_count = 0usize;
@@ -4245,7 +4262,7 @@ impl<'a> StepConverter<'a> {
                 alias_stats.phase2_groups += 1;
 
                 // P2: Apply shape-based grouping (5-point sampling) — same as Phase 1
-                let shape_tol = (tol_ctx.model_scale * 1e-2).max(1e-6);
+                let shape_tol = tol_ctx.aliasing_tolerance().max(1e-6);
                 let shape_groups = self.group_step_ids_by_curve_shape(step_ids, shape_tol);
 
                 for (_samples, group_sids) in &shape_groups {
@@ -4297,7 +4314,7 @@ impl<'a> StepConverter<'a> {
         // Tolerance-based dedup: catches near-identical vertices from different
         // STEP EDGE_CURVE entities on the same geometric boundary (FP drift
         // typically 1e-13). Merge tolerance = 1 PPM of model scale.
-        let merge_tol = tol_ctx.model_scale * 3e-3;
+        let merge_tol = tol_ctx.vertex_merge_tolerance();
         let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
         let mut total_face_vertices = 0usize;
         for (fi, face_data) in face_data_list.iter().enumerate() {
@@ -4409,7 +4426,7 @@ impl<'a> StepConverter<'a> {
             // tolerance-based welding to close.
             let report_before = validate_watertight(&mesh, false);
             if report_before.boundary_edge_count > 0 || report_before.non_manifold_edge_count > 0 {
-                let weld_tol = (tol_ctx.model_scale * 1e-2).max(tol_ctx.absolute * 10.0);
+                let weld_tol = tol_ctx.weld_tolerance();
                 weld_boundary_edge_vertices(&mut mesh, weld_tol);
             }
 
@@ -4631,8 +4648,16 @@ impl<'a> StepConverter<'a> {
 
         // Create tolerance context for this BREP
         let tol_ctx = match bbox {
-            Some((bmin, bmax)) => ToleranceContext::from_bounding_box(bmin, bmax),
-            None => ToleranceContext::new(),
+            Some((bmin, bmax)) => {
+                let mut ctx = ToleranceContext::from_bounding_box(bmin, bmax);
+                ctx.step_uncertainty = extract_step_tolerance(&self.step);
+                ctx
+            },
+            None => {
+                let mut ctx = ToleranceContext::new();
+                ctx.step_uncertainty = extract_step_tolerance(&self.step);
+                ctx
+            },
         };
 
         // ─── Healing pipeline: heal the solid before triangulation ────────
@@ -4751,7 +4776,7 @@ impl<'a> StepConverter<'a> {
                 // ARCHITECTURAL DECISION: Different curve types (Line vs Circle)
                 // sharing the same VERTEX_POINT endpoints ALWAYS represent the
                 // same physical boundary. Always alias them.
-                let shape_tol = (tol_ctx.model_scale * 1e-2).max(1e-6);
+                let shape_tol = tol_ctx.aliasing_tolerance().max(1e-6);
                 let shape_groups = self.group_step_ids_by_curve_shape(step_ids, shape_tol);
 
                 // If shape_groups has multiple groups with DIFFERENT curve types,
@@ -4857,7 +4882,7 @@ impl<'a> StepConverter<'a> {
             // Phase 2: 3D coordinate-based aliasing (supplementary)
             // Same logic as in triangulate_brep() — see comments there.
             // Also applies midpoint check to avoid aliasing different curves.
-            let coord_tol = (tol_ctx.model_scale * 1e-2).max(tol_ctx.absolute * 10.0); // 2000 PPM of model scale
+            let coord_tol = tol_ctx.aliasing_tolerance(); // 2000 PPM of model scale
             let mut coord_pair_to_step_ids: HashMap<(i64, i64, i64, i64, i64, i64), Vec<i64>> = HashMap::new();
             for face_data in &face_data_list {
                 for (edge_idx, &step_id) in face_data.edge_step_ids.iter().enumerate() {
@@ -4896,7 +4921,7 @@ impl<'a> StepConverter<'a> {
                 coord_groups_with_multiple += 1;
 
                 // P2: Apply shape-based grouping (5-point sampling) — same as Phase 1
-                let shape_tol = (tol_ctx.model_scale * 1e-2).max(1e-6);
+                let shape_tol = tol_ctx.aliasing_tolerance().max(1e-6);
                 let shape_groups = self.group_step_ids_by_curve_shape(step_ids, shape_tol);
 
                 for (_samples, group_sids) in &shape_groups {
@@ -4957,7 +4982,7 @@ impl<'a> StepConverter<'a> {
         // The merge tolerance is set to 1 PPM of the model scale — small enough
         // to never collapse genuinely distinct features, but large enough to catch
         // FP drift between different EDGE_CURVE entities on the same boundary.
-        let merge_tol = tol_ctx.model_scale * 3e-3;
+        let merge_tol = tol_ctx.vertex_merge_tolerance();
         let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
         let mut total_face_vertices_detailed = 0usize;
         let mut face_infos = Vec::new();
@@ -5188,7 +5213,7 @@ impl<'a> StepConverter<'a> {
                 eprintln!("WELD_SKIP: BREP #{} detailed already watertight ({} interior edges) — skipping weld to preserve triangles",
                     brep_id, report_before.interior_edge_count);
             } else {
-                let weld_tol = (tol_ctx.model_scale * 1e-2).max(tol_ctx.absolute * 10.0);
+                let weld_tol = tol_ctx.weld_tolerance();
                 let pre_weld_tris = mesh.triangle_count();
                 weld_boundary_edge_vertices(&mut mesh, weld_tol);
                 let post_weld_tris = mesh.triangle_count();
@@ -5548,8 +5573,16 @@ impl<'a> StepConverter<'a> {
 
         // Create tolerance context for this BREP
         let tol_ctx = match bbox {
-            Some((bmin, bmax)) => ToleranceContext::from_bounding_box(bmin, bmax),
-            None => ToleranceContext::new(),
+            Some((bmin, bmax)) => {
+                let mut ctx = ToleranceContext::from_bounding_box(bmin, bmax);
+                ctx.step_uncertainty = extract_step_tolerance(&self.step);
+                ctx
+            },
+            None => {
+                let mut ctx = ToleranceContext::new();
+                ctx.step_uncertainty = extract_step_tolerance(&self.step);
+                ctx
+            },
         };
 
         // ─── Healing pipeline: heal the solid before triangulation ────────
@@ -5641,7 +5674,7 @@ impl<'a> StepConverter<'a> {
             let mut skipped_different_curves = 0usize;
             for (_vp, step_ids) in &vertex_pair_to_step_ids {
                 if step_ids.len() < 2 { continue; }
-                let shape_tol = (tol_ctx.model_scale * 1e-2).max(1e-6);
+                let shape_tol = tol_ctx.aliasing_tolerance().max(1e-6);
                 let shape_groups = self.group_step_ids_by_curve_shape(step_ids, shape_tol);
                 for (_samples, group_sids) in &shape_groups {
                     if group_sids.len() < 2 { continue; }
@@ -5667,7 +5700,7 @@ impl<'a> StepConverter<'a> {
             }
 
             // Phase 2: 3D coordinate-based aliasing (supplementary)
-            let coord_tol = (tol_ctx.model_scale * 1e-2).max(tol_ctx.absolute * 10.0);
+            let coord_tol = tol_ctx.aliasing_tolerance();
             let mut coord_pair_to_step_ids: HashMap<(i64, i64, i64, i64, i64, i64), Vec<i64>> = HashMap::new();
             for face_data in &face_data_list {
                 for (edge_idx, &step_id) in face_data.edge_step_ids.iter().enumerate() {
@@ -5704,7 +5737,7 @@ impl<'a> StepConverter<'a> {
             for (_key, step_ids) in &coord_pair_to_step_ids {
                 if step_ids.len() < 2 { continue; }
                 coord_groups_with_multiple += 1;
-                let shape_tol = (tol_ctx.model_scale * 1e-2).max(1e-6);
+                let shape_tol = tol_ctx.aliasing_tolerance().max(1e-6);
                 let shape_groups = self.group_step_ids_by_curve_shape(step_ids, shape_tol);
                 for (_samples, group_sids) in &shape_groups {
                     if group_sids.len() < 2 { continue; }
@@ -5744,7 +5777,7 @@ impl<'a> StepConverter<'a> {
         let face_time_limit = params.face_time_limit_override.unwrap_or(default_face_time_limit);
 
         // Tolerance-based dedup
-        let merge_tol = tol_ctx.model_scale * 3e-3;
+        let merge_tol = tol_ctx.vertex_merge_tolerance();
         let dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
 
         Some(BrepSession {
@@ -5840,8 +5873,16 @@ impl<'a> StepConverter<'a> {
 
         // Create tolerance context for healing
         let tol_ctx = match bbox {
-            Some((bmin, bmax)) => ToleranceContext::from_bounding_box(bmin, bmax),
-            None => ToleranceContext::new(),
+            Some((bmin, bmax)) => {
+                let mut ctx = ToleranceContext::from_bounding_box(bmin, bmax);
+                ctx.step_uncertainty = extract_step_tolerance(&self.step);
+                ctx
+            },
+            None => {
+                let mut ctx = ToleranceContext::new();
+                ctx.step_uncertainty = extract_step_tolerance(&self.step);
+                ctx
+            },
         };
 
         // ─── Healing pipeline ────────
@@ -5858,7 +5899,7 @@ impl<'a> StepConverter<'a> {
         let mut mesh = TriangleMesh::new();
         // Tolerance-based dedup: catches near-identical vertices from different
         // STEP EDGE_CURVE entities on the same geometric boundary.
-        let merge_tol = tol_ctx.model_scale * 3e-3;
+        let merge_tol = tol_ctx.vertex_merge_tolerance();
         let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
         for face_data in &face_data_list {
             let face_mesh = self.surface_to_mesh(face_data, params, bbox);
@@ -11256,8 +11297,16 @@ impl<'a> StepConverter<'a> {
         //   3. Same code path for holes and no-holes → consistent behavior
         if let Surface::Plane(ref plane) = face_data.surface {
             let tol_ctx = match bbox {
-                Some((bmin, bmax)) => ToleranceContext::from_bounding_box(bmin, bmax),
-                None => ToleranceContext::new(),
+                Some((bmin, bmax)) => {
+                let mut ctx = ToleranceContext::from_bounding_box(bmin, bmax);
+                ctx.step_uncertainty = extract_step_tolerance(&self.step);
+                ctx
+            },
+                None => {
+                let mut ctx = ToleranceContext::new();
+                ctx.step_uncertainty = extract_step_tolerance(&self.step);
+                ctx
+            },
             };
             let mut local_edge_cache = EdgeDiscretizationCache::with_tolerance(tol_ctx, 256);
             // Apply LOD-aware chord tolerance so the Quality slider changes

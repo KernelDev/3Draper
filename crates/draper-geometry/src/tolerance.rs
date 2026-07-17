@@ -35,6 +35,12 @@ pub struct ToleranceContext {
     pub parametric: f64,
     /// Characteristic size of the model (bounding box diagonal).
     pub model_scale: f64,
+    /// STEP model uncertainty (from UNCERTAINTY_MEASURE_WITH_UNIT).
+    /// When available, this is the authoritative tolerance from the CAD
+    /// system that created the file. Used as the basis for vertex merging
+    /// and edge aliasing tolerances (multiplied by a factor of 100).
+    /// If not available, falls back to model_scale-derived tolerances.
+    pub step_uncertainty: Option<f64>,
 }
 
 impl Default for ToleranceContext {
@@ -45,6 +51,7 @@ impl Default for ToleranceContext {
             angular: DEFAULT_ANGULAR_TOLERANCE,
             parametric: DEFAULT_PARAMETRIC_TOLERANCE,
             model_scale: 1.0,
+            step_uncertainty: None,
         }
     }
 }
@@ -69,6 +76,7 @@ impl ToleranceContext {
             angular: DEFAULT_ANGULAR_TOLERANCE,
             parametric: DEFAULT_PARAMETRIC_TOLERANCE,
             model_scale,
+            step_uncertainty: None,
         }
     }
 
@@ -80,14 +88,63 @@ impl ToleranceContext {
             angular: DEFAULT_ANGULAR_TOLERANCE,
             parametric: DEFAULT_PARAMETRIC_TOLERANCE,
             model_scale: model_scale.max(1e-10),
+            step_uncertainty: None,
         }
     }
 
     /// Effective coincidence tolerance: absolute + relative * model_scale.
-    /// This adapts to the model's scale — for large models, the tolerance
-    /// increases slightly to avoid false negatives at boundaries.
     pub fn coincidence_tolerance(&self) -> f64 {
         self.absolute + self.relative * self.model_scale
+    }
+
+    /// Vertex merge tolerance for topology-based vertex merging.
+    ///
+    /// Uses STEP model uncertainty (UNCERTAINTY_MEASURE_WITH_UNIT) when
+    /// available, multiplied by 100 (matching OpenCascade Shape Healing
+    /// approach). Falls back to model_scale * 3e-3 when not available.
+    ///
+    /// The factor of 100 on uncertainty is standard practice:
+    /// - Uncertainty = CAD system's stated geometric precision
+    /// - Vertex coordinates can differ by up to 100× uncertainty due to
+    ///   different export paths, rounding, and parameterization
+    /// - 100× uncertainty is still much smaller than feature sizes
+    ///   (arc lengths, edge lengths), preventing false merges
+    pub fn vertex_merge_tolerance(&self) -> f64 {
+        match self.step_uncertainty {
+            Some(u) if u > 0.0 && u.is_finite() => {
+                // STEP uncertainty * 100 — OpenCascade Shape Healing factor
+                let tol = u * 100.0;
+                // Cap at 1% of model scale to prevent over-merging on
+                // models with very large uncertainty values
+                tol.min(self.model_scale * 1e-2)
+            }
+            _ => {
+                // Fallback: 0.3% of model scale
+                self.model_scale * 3e-3
+            }
+        }
+    }
+
+    /// Edge aliasing tolerance (for grouping edges by 3D coordinate endpoints).
+    ///
+    /// Same as vertex_merge_tolerance but slightly larger (×2) to ensure
+    /// that edges which should share vertices are grouped together even
+    /// if their endpoints differ by slightly more than the merge tolerance.
+    pub fn aliasing_tolerance(&self) -> f64 {
+        self.vertex_merge_tolerance() * 2.0
+    }
+
+    /// Weld tolerance for post-merge boundary edge welding.
+    ///
+    /// Uses STEP uncertainty × 200 when available, or model_scale × 1e-2.
+    pub fn weld_tolerance(&self) -> f64 {
+        match self.step_uncertainty {
+            Some(u) if u > 0.0 && u.is_finite() => {
+                let tol = u * 200.0;
+                tol.min(self.model_scale * 2e-2)
+            }
+            _ => self.model_scale * 1e-2,
+        }
     }
 
     /// Squared coincidence tolerance for efficient distance comparisons.
