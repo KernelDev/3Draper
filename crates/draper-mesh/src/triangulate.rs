@@ -2820,7 +2820,7 @@ fn triangulate_cylinder_face(face: &Face, cyl: &CylinderSurface, params: &Triang
     if hole_polylines.is_empty() && boundary_3d.len() >= 6 {
         let (v_min_pw, v_max_pw) = compute_axis_v_range_pts(&boundary_3d, &cyl.origin, &cyl.axis);
         if v_max_pw > v_min_pw {
-            let dedup_tol = params.max_deviation.max(1e-6) * 0.5;
+            let dedup_tol = (v_max_pw - v_min_pw).abs() * 0.01 + 1e-12;
             let (bottom_ring, top_ring, _) = split_boundary_into_rings_with_u(
                 &boundary_3d, &cyl.origin, &cyl.axis, &cyl.x_dir,
                 v_min_pw, v_max_pw, dedup_tol,
@@ -2956,7 +2956,12 @@ fn triangulate_cylinder_tube_from_boundary(
     // Split boundary into bottom/top rings, each as a sorted Vec<(u, Point3d)>
     // with u in [0, 2π) (full-wrap) or unwrapped to a continuous range
     // [u_start, u_end] (partial-wrap). `is_full_wrap` indicates which.
-    let dedup_tol = params.max_deviation.max(1e-6) * 0.5;
+    // Use v_range-based dedup_tol — scale-independent, always proportional
+    // to the face's actual height. params.max_deviation can be much larger
+    // than the feature size for tiny models (e.g., brick_thin.stp with
+    // 0.06mm model_scale), collapsing distinct ring points into 1-2 points
+    // and producing fan triangulation instead of quad strips.
+    let dedup_tol = (v_max - v_min).abs() * 0.01 + 1e-12;
     let (bottom_ring, top_ring, is_full_wrap) = split_boundary_into_rings_with_u(
         boundary_3d, &cyl.origin, &cyl.axis, &cyl.x_dir, v_min, v_max, dedup_tol,
     );
@@ -3392,7 +3397,12 @@ fn triangulate_cone_tube_from_boundary(
     // Split boundary into bottom/top rings, each as a sorted Vec<(u, Point3d)>
     // with u in [0, 2π) (full-wrap) or unwrapped to a continuous range
     // [u_start, u_end] (partial-wrap). `is_full_wrap` indicates which.
-    let dedup_tol = params.max_deviation.max(1e-6) * 0.5;
+    // Use v_range-based dedup_tol — scale-independent, always proportional
+    // to the face's actual height. params.max_deviation can be much larger
+    // than the feature size for tiny models (e.g., brick_thin.stp with
+    // 0.06mm model_scale), collapsing distinct ring points into 1-2 points
+    // and producing fan triangulation instead of quad strips.
+    let dedup_tol = (v_max - v_min).abs() * 0.01 + 1e-12;
     let (bottom_ring, top_ring, is_full_wrap) = split_boundary_into_rings_with_u(
         boundary_3d, &cone.origin, &cone.axis, &cone.x_dir, v_min, v_max, dedup_tol,
     );
@@ -3842,7 +3852,8 @@ fn triangulate_cone_face(face: &Face, cone: &ConeSurface, params: &Triangulation
     if hole_polylines.is_empty() && boundary_3d.len() >= 6 {
         let (v_min_pw, v_max_pw) = compute_axis_v_range_pts(&boundary_3d, &cone.origin, &cone.axis);
         if v_max_pw > v_min_pw {
-            let dedup_tol = params.max_deviation.max(1e-6) * 0.5;
+            // Use v_range-based dedup_tol — scale-independent, always proportional
+            let dedup_tol = (v_max_pw - v_min_pw).abs() * 0.01 + 1e-12;
             let (bottom_ring, top_ring, _) = split_boundary_into_rings_with_u(
                 &boundary_3d, &cone.origin, &cone.axis, &cone.x_dir,
                 v_min_pw, v_max_pw, dedup_tol,
@@ -5930,7 +5941,8 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
                 // Check for PARTIAL-wrap tube face.
                 let (v_min_pw, v_max_pw) = compute_axis_v_range_pts(boundary_points, &cone.origin, &cone.axis);
                 if v_max_pw > v_min_pw {
-                    let dedup_tol = params.max_deviation.max(1e-6) * 0.5;
+                    // Use v_range-based dedup_tol — scale-independent, always proportional
+                    let dedup_tol = (v_max_pw - v_min_pw).abs() * 0.01 + 1e-12;
                     let (bottom_ring, top_ring, _) = split_boundary_into_rings_with_u(
                         boundary_points, &cone.origin, &cone.axis, &cone.x_dir,
                         v_min_pw, v_max_pw, dedup_tol,
