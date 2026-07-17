@@ -7920,6 +7920,105 @@ impl<'a> StepConverter<'a> {
     ///   The samples at t=0.1 and t=0.9 differ.
     /// - Two B-spline curves that share endpoints and centroid but have
     ///   different control polygons (different shape).
+    /// Check if two EDGE_CURVE entities are geometrically equal by comparing
+    /// their curve geometry directly (not sampled points).
+    ///
+    /// This is the OpenCascade approach: compare curve parameters, not
+    /// discretized samples. This catches curves with different
+    /// parameterizations (e.g., different x_dir reference direction on
+    /// a CIRCLE) that 5-point sampling would miss.
+    ///
+    /// Returns:
+    /// - `true` — curves are geometrically equal (same group)
+    /// - `false` — curves are geometrically different (different groups)
+    /// - None is not returned; if comparison is not applicable (unknown
+    ///   curve types), returns `false` to fall through to 5-point sampling.
+    fn curves_geometrically_equal(&self, sid_a: i64, sid_b: i64, tol: f64) -> bool {
+        let edge_a = match self.resolve_edge_curve(sid_a) {
+            Some(e) => e,
+            None => return false,
+        };
+        let edge_b = match self.resolve_edge_curve(sid_b) {
+            Some(e) => e,
+            None => return false,
+        };
+
+        match (&edge_a.curve, &edge_b.curve) {
+            // Two LINEs with the same endpoints (guaranteed by caller —
+            // vertex_pair grouping) are always the same line.
+            (Some(Curve3d::Line(_)), Some(Curve3d::Line(_))) => true,
+
+            // Two CIRCLEs: compare center, radius, axis normal, AND midpoint.
+            // Same circle geometry + same endpoints → could be same arc or
+            // different arcs (short way vs long way). Midpoint check
+            // distinguishes them: same arc → midpoints within tol.
+            (Some(Curve3d::Circle(ca)), Some(Curve3d::Circle(cb))) => {
+                let center_dist = ca.center.distance_to(&cb.center);
+                let radius_diff = (ca.radius - cb.radius).abs();
+                let axis_dot = ca.normal.x * cb.normal.x
+                    + ca.normal.y * cb.normal.y
+                    + ca.normal.z * cb.normal.z;
+                let axis_parallel = axis_dot.abs() > 0.9999;
+
+                if !(center_dist < tol && radius_diff < tol && axis_parallel) {
+                    return false;
+                }
+
+                // Same circle geometry — check if same ARC by comparing midpoints.
+                // Midpoint = point_at(t_mid) where t_mid is the midpoint of
+                // each edge's param_range.
+                let (ta1, ta2) = edge_a.param_range;
+                let (tb1, tb2) = edge_b.param_range;
+                let tma = (ta1 + ta2) * 0.5;
+                let tmb = (tb1 + tb2) * 0.5;
+                let pa = edge_a.point_at(tma);
+                let pb = edge_b.point_at(tmb);
+                match (pa, pb) {
+                    (Some(p1), Some(p2)) => p1.distance_to(&p2) < tol,
+                    _ => false,
+                }
+            }
+
+            // Two ELLIPSEs: compare center, radii, axis
+            (Some(Curve3d::Ellipse(ea)), Some(Curve3d::Ellipse(eb))) => {
+                let center_dist = ea.center.distance_to(&eb.center);
+                let r1_diff = (ea.semi_major - eb.semi_major).abs();
+                let r2_diff = (ea.semi_minor - eb.semi_minor).abs();
+                center_dist < tol && r1_diff < tol && r2_diff < tol
+            }
+
+            // Two NURBS: compare degree, knots, control points, weights
+            (Some(Curve3d::Nurbs(na)), Some(Curve3d::Nurbs(nb))) => {
+                if na.degree != nb.degree {
+                    return false;
+                }
+                if na.knots.len() != nb.knots.len() {
+                    return false;
+                }
+                // Check knots match (within tol)
+                for (ka, kb) in na.knots.iter().zip(nb.knots.iter()) {
+                    if (ka - kb).abs() > tol {
+                        return false;
+                    }
+                }
+                // Check control points match (within tol)
+                if na.control_points.len() != nb.control_points.len() {
+                    return false;
+                }
+                for (pa, pb) in na.control_points.iter().zip(nb.control_points.iter()) {
+                    if pa.distance_to(pb) > tol {
+                        return false;
+                    }
+                }
+                true
+            }
+
+            // Different curve types or unsupported — fall through to
+            // 5-point sampling
+            _ => false,
+        }
+    }
+
     ///
     /// Returns a Vec of (representative_sample_set, step_ids_in_group) pairs.
     /// step_ids that couldn't be sampled (curve resolution failed) each get
@@ -7933,16 +8032,28 @@ impl<'a> StepConverter<'a> {
         for &sid in step_ids {
             let samples = self.compute_edge_curve_sample_points(sid).unwrap_or_default();
             // Find an existing group with matching samples.
-            // A "match" means: same number of samples AND every sample
-            // within `tol` of the corresponding group sample.
             let mut found_group = false;
             for (group_samples, group_sids) in groups.iter_mut() {
+                // ── Geometric comparison (matching OpenCascade approach) ──
+                // Before 5-point sampling, try geometric comparison:
+                // - CIRCLE: compare center, radius, axis normal
+                // - LINE: same endpoints → always same (guaranteed by caller)
+                // This catches curves with different parameterizations
+                // (e.g., different x_dir reference direction) that 5-point
+                // sampling would miss.
+                if let Some(&first_sid) = group_sids.first() {
+                    if self.curves_geometrically_equal(sid, first_sid, tol) {
+                        group_sids.push(sid);
+                        found_group = true;
+                        break;
+                    }
+                }
+
+                // Fall back to 5-point sampling
                 if group_samples.len() != samples.len() {
                     continue;
                 }
                 if samples.is_empty() {
-                    // Both empty — treat as same group only if we're the
-                    // first one. Otherwise, isolated step_ids stay isolated.
                     if group_sids.is_empty() {
                         group_sids.push(sid);
                         found_group = true;
