@@ -1890,7 +1890,7 @@ impl BrepSession {
                 eprintln!("WELD_SKIP: BREP #{} already watertight ({} interior edges) — skipping weld to preserve triangles",
                     brep_id, report_before.interior_edge_count);
             } else {
-                let weld_tol = (self.tol_ctx.model_scale * 1e-4).max(self.tol_ctx.absolute * 10.0);
+                let weld_tol = (self.tol_ctx.model_scale * 5e-3).max(self.tol_ctx.absolute * 10.0);
                 weld_boundary_edge_vertices(&mut self.mesh, weld_tol);
             }
 
@@ -4230,7 +4230,7 @@ impl<'a> StepConverter<'a> {
         // Tolerance-based dedup: catches near-identical vertices from different
         // STEP EDGE_CURVE entities on the same geometric boundary (FP drift
         // typically 1e-13). Merge tolerance = 1 PPM of model scale.
-        let merge_tol = tol_ctx.model_scale * 5e-3;
+        let merge_tol = tol_ctx.model_scale * 3e-3;
         let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
         let mut total_face_vertices = 0usize;
         for (fi, face_data) in face_data_list.iter().enumerate() {
@@ -4337,11 +4337,12 @@ impl<'a> StepConverter<'a> {
         // 3.05.078.stp Step#87, annulus width 2.28mm < weld_tol 2.6mm)
         // by welding outer-ring vertices to inner-ring vertices.
         {
-            // Skip welding if mesh is already watertight — prevents
-            // degenerate triangle creation.
+            // Always run weld if there are boundary edges — even a few
+            // boundary edges indicate non-aliased shared edges that need
+            // tolerance-based welding to close.
             let report_before = validate_watertight(&mesh, false);
-            if !report_before.is_watertight() {
-                let weld_tol = (tol_ctx.model_scale * 1e-4).max(tol_ctx.absolute * 10.0);
+            if report_before.boundary_edge_count > 0 || report_before.non_manifold_edge_count > 0 {
+                let weld_tol = (tol_ctx.model_scale * 5e-3).max(tol_ctx.absolute * 10.0);
                 weld_boundary_edge_vertices(&mut mesh, weld_tol);
             }
 
@@ -4854,7 +4855,7 @@ impl<'a> StepConverter<'a> {
         // The merge tolerance is set to 1 PPM of the model scale — small enough
         // to never collapse genuinely distinct features, but large enough to catch
         // FP drift between different EDGE_CURVE entities on the same boundary.
-        let merge_tol = tol_ctx.model_scale * 5e-3;
+        let merge_tol = tol_ctx.model_scale * 3e-3;
         let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
         let mut total_face_vertices_detailed = 0usize;
         let mut face_infos = Vec::new();
@@ -5085,7 +5086,7 @@ impl<'a> StepConverter<'a> {
                 eprintln!("WELD_SKIP: BREP #{} detailed already watertight ({} interior edges) — skipping weld to preserve triangles",
                     brep_id, report_before.interior_edge_count);
             } else {
-                let weld_tol = (tol_ctx.model_scale * 1e-4).max(tol_ctx.absolute * 10.0);
+                let weld_tol = (tol_ctx.model_scale * 5e-3).max(tol_ctx.absolute * 10.0);
                 let pre_weld_tris = mesh.triangle_count();
                 weld_boundary_edge_vertices(&mut mesh, weld_tol);
                 let post_weld_tris = mesh.triangle_count();
@@ -5641,7 +5642,7 @@ impl<'a> StepConverter<'a> {
         let face_time_limit = params.face_time_limit_override.unwrap_or(default_face_time_limit);
 
         // Tolerance-based dedup
-        let merge_tol = tol_ctx.model_scale * 5e-3;
+        let merge_tol = tol_ctx.model_scale * 3e-3;
         let dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
 
         Some(BrepSession {
@@ -5755,7 +5756,7 @@ impl<'a> StepConverter<'a> {
         let mut mesh = TriangleMesh::new();
         // Tolerance-based dedup: catches near-identical vertices from different
         // STEP EDGE_CURVE entities on the same geometric boundary.
-        let merge_tol = tol_ctx.model_scale * 5e-3;
+        let merge_tol = tol_ctx.model_scale * 3e-3;
         let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
         for face_data in &face_data_list {
             let face_mesh = self.surface_to_mesh(face_data, params, bbox);

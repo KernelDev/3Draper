@@ -1184,7 +1184,11 @@ pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64)
     // precision. PASS 2 is too tight (1e-3 cap), PASS 1 requires a short edge
     // between them. PASS 3 bridges the gap.
     {
-        let pass3_tolerance = (weld_tolerance * 0.1).min(0.01).max(1e-5);
+        // PASS 3: Use full weld_tolerance for boundary vertex matching.
+        // The previous 10% factor was too conservative for small models
+        // where different curve types (LINE vs CIRCLE) create boundary
+        // edges with vertex distances up to 33% of weld_tolerance.
+        let pass3_tolerance = weld_tolerance;
         let pass3_tol_sq = pass3_tolerance * pass3_tolerance;
 
         // Build spatial hash for PASS 3
