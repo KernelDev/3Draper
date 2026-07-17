@@ -4088,18 +4088,76 @@ impl<'a> StepConverter<'a> {
             }
             let mut alias_count = 0usize;
             let mut skipped_different_curves = 0usize;
-            for (_vp, step_ids) in &vertex_pair_to_step_ids {
+            for (vp, step_ids) in &vertex_pair_to_step_ids {
                 if step_ids.len() < 2 { continue; }
                 alias_stats.phase1_groups += 1;
 
-                // P2: Group by curve SHAPE using 5-point sampling (not just midpoint).
-                // Two edges with the same vertex pair but different shapes
-                // (e.g., two semicircles forming a full circle, or a LINE
-                // vs a B-spline approximating a line) must NOT be aliased.
-                let shape_tol = (tol_ctx.model_scale * 1e-2).max(1e-6); // 1000 PPM of model scale
+                // P2: Group by curve SHAPE using 5-point sampling.
+                //
+                // ARCHITECTURAL DECISION (matching OpenCascade behavior):
+                // When two EDGE_CURVE entities share the same VERTEX_POINT endpoints:
+                // - SAME curve type (both Circle, both Line, etc.): check 5-point
+                //   shape match to prevent aliasing two semicircles going in
+                //   opposite directions (which share endpoints but are different
+                //   boundaries).
+                // - DIFFERENT curve types (Line vs Circle, Line vs NURBS, etc.):
+                //   ALWAYS alias, using the higher-complexity curve as canonical.
+                //   In STEP BREP files, different curve types for the same vertex
+                //   pair ALWAYS represent the same physical boundary — the different
+                //   types arise from different face parameterizations (e.g., a
+                //   Plane face uses a LINE for a boundary that a Cylinder face
+                //   parameterizes as a CIRCLE ARC). This is standard STEP export
+                //   behavior from SolidWorks, CATIA, Pro/E, etc.
+                let shape_tol = (tol_ctx.model_scale * 1e-2).max(1e-6);
                 let shape_groups = self.group_step_ids_by_curve_shape(step_ids, shape_tol);
 
-                // Alias within each shape group
+                // If shape_groups has multiple groups, check if they have
+                // different curve types. If so, merge ALL groups — they
+                // represent the same physical boundary with different
+                // parameterizations.
+                if shape_groups.len() > 1 {
+                    // Check curve types for each group
+                    let mut curve_types: std::collections::HashSet<&str> = std::collections::HashSet::new();
+                    for (_samples, group_sids) in &shape_groups {
+                        if let Some(&sid) = group_sids.first() {
+                            if let Some(edge) = self.resolve_edge_curve(sid) {
+                                let ct = match &edge.curve {
+                                    Some(draper_geometry::Curve3d::Line(_)) => "Line",
+                                    Some(draper_geometry::Curve3d::Circle(_)) => "Circle",
+                                    Some(draper_geometry::Curve3d::Nurbs(_)) => "Nurbs",
+                                    Some(draper_geometry::Curve3d::Ellipse(_)) => "Ellipse",
+                                    Some(draper_geometry::Curve3d::Arc(_)) => "Arc",
+                                    _ => "Other",
+                                };
+                                curve_types.insert(ct);
+                            }
+                        }
+                    }
+
+                    if curve_types.len() > 1 {
+                        // Different curve types — merge ALL groups and alias
+                        let all_sids: Vec<i64> = shape_groups.iter()
+                            .flat_map(|(_, g)| g.iter().copied())
+                            .collect();
+                        let canonical = *all_sids.iter().max_by_key(|&&sid| {
+                            self.edge_curve_complexity_score(sid)
+                        }).unwrap();
+                        for &sid in &all_sids {
+                            if sid != canonical {
+                                edge_cache.register_step_id_alias(sid, canonical);
+                                alias_count += 1;
+                                alias_stats.phase1_aliases += 1;
+                            }
+                        }
+                        log::info!(
+                            "BREP #{}: aliased {} step_ids with different curve types at vertex_pair {:?} (types: {:?})",
+                            brep_id, all_sids.len(), vp, curve_types
+                        );
+                        continue; // Skip normal aliasing — already done
+                    }
+                }
+
+                // Same curve type — alias within each shape group normally
                 for (_samples, group_sids) in &shape_groups {
                     if group_sids.len() < 2 { continue; }
                     let canonical = *group_sids.iter().max_by_key(|&&sid| {
@@ -4115,7 +4173,6 @@ impl<'a> StepConverter<'a> {
                 }
 
                 // Count groups with multiple step_ids that were NOT aliased
-                // (different curves sharing the same vertex pair)
                 if shape_groups.len() > 1 {
                     let skipped = step_ids.len() - shape_groups.iter().map(|(_, g)| g.len().min(1)).sum::<usize>();
                     skipped_different_curves += skipped;
@@ -4681,9 +4738,44 @@ impl<'a> StepConverter<'a> {
                 if step_ids.len() < 2 { continue; }
 
                 // P2: Group by curve SHAPE using 5-point sampling.
+                // ARCHITECTURAL DECISION: Different curve types (Line vs Circle)
+                // sharing the same VERTEX_POINT endpoints ALWAYS represent the
+                // same physical boundary. Always alias them.
                 let shape_tol = (tol_ctx.model_scale * 1e-2).max(1e-6);
                 let shape_groups = self.group_step_ids_by_curve_shape(step_ids, shape_tol);
 
+                // If shape_groups has multiple groups with DIFFERENT curve types,
+                // merge ALL groups — they represent the same boundary.
+                if shape_groups.len() > 1 {
+                    let mut curve_types: std::collections::HashSet<String> = std::collections::HashSet::new();
+                    for (_samples, group_sids) in &shape_groups {
+                        if let Some(&sid) = group_sids.first() {
+                            curve_types.insert(self.edge_curve_type_name(sid));
+                        }
+                    }
+                    if curve_types.len() > 1 {
+                        // Different curve types — merge ALL and alias
+                        let all_sids: Vec<i64> = shape_groups.iter()
+                            .flat_map(|(_, g)| g.iter().copied())
+                            .collect();
+                        let canonical = *all_sids.iter().max_by_key(|&&sid| {
+                            self.edge_curve_complexity_score(sid)
+                        }).unwrap();
+                        for &sid in &all_sids {
+                            if sid != canonical {
+                                edge_cache.register_step_id_alias(sid, canonical);
+                                alias_count += 1;
+                            }
+                        }
+                        log::info!(
+                            "BREP #{}: aliased {} step_ids with different curve types at VP {:?} (types: {:?})",
+                            brep_id, all_sids.len(), vp, curve_types
+                        );
+                        continue;
+                    }
+                }
+
+                // Same curve type — alias within each shape group
                 for (_samples, group_sids) in &shape_groups {
                     if group_sids.len() < 2 { continue; }
                     
@@ -7101,7 +7193,7 @@ impl<'a> StepConverter<'a> {
     }
 
     /// Extract both surface geometry and boundary edges from an ADVANCED_FACE or FACE_SURFACE entity.
-    fn extract_face_data(&self, face_id: i64) -> Option<FaceData> {
+    pub fn extract_face_data(&self, face_id: i64) -> Option<FaceData> {
         let face_entity = self.step.find_entity(face_id)?;
 
         match face_entity.type_name.as_str() {
@@ -7711,7 +7803,7 @@ impl<'a> StepConverter<'a> {
     /// they represent the same geometric boundary (different curve representations
     /// of the same edge). Returns the vertex IDs in canonical order (min, max)
     /// for consistent hashing.
-    fn get_edge_curve_vertex_pair(&self, edge_curve_id: i64) -> Option<(i64, i64)> {
+    pub fn get_edge_curve_vertex_pair(&self, edge_curve_id: i64) -> Option<(i64, i64)> {
         let ec_entity = self.step.find_entity(edge_curve_id)?;
         let mut vertex_ids: Vec<i64> = Vec::new();
         for param in &ec_entity.params {
