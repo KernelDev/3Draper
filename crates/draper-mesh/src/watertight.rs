@@ -734,6 +734,153 @@ fn triangle_area_3d(v0: &Point3d, v1: &Point3d, v2: &Point3d) -> f64 {
 // Vertex compaction — remove unused vertices after mesh surgery
 // ============================================================
 
+/// Compute the mesh-based sewing tolerance by scanning boundary vertices
+/// for near-coincident pairs from different faces.
+///
+/// This is the **second pass** of the auto-tolerance computation. The first
+/// pass (`StepConverter::compute_sewing_tolerance`) scans VERTEX_POINT
+/// entities, but the actual mesh gaps may be larger because:
+/// - Two faces share a geometric edge but use different EDGE_CURVE entities
+///   (e.g., LINE vs NURBS approximation)
+/// - The edge cache produces different interior points for the two curves
+/// - These interior points become boundary vertices that don't match
+///
+/// This function scans the actual mesh boundary vertices and finds the
+/// maximum distance between near-coincident pairs from different faces.
+/// The returned tolerance is 2x this maximum, capped to 0.5% of the
+/// model's bounding-box diagonal.
+///
+/// Returns `None` if no near-coincident pairs are found (mesh is clean).
+pub fn compute_mesh_weld_tolerance(
+    mesh: &TriangleMesh,
+    seed_tolerance: f64,
+    model_scale: f64,
+) -> Option<f64> {
+    use std::collections::HashMap;
+
+    if mesh.triangles.is_empty() || seed_tolerance <= 0.0 {
+        return None;
+    }
+
+    // ── Collect boundary vertices with their face IDs ──────────────────
+    // A boundary vertex is a vertex used by at least one boundary edge
+    // (an edge used by only 1 triangle).
+    let mut edge_count: HashMap<(u32, u32), usize> = HashMap::new();
+    for tri in &mesh.triangles {
+        let edges = [
+            (tri[0].min(tri[1]), tri[0].max(tri[1])),
+            (tri[1].min(tri[2]), tri[1].max(tri[2])),
+            (tri[2].min(tri[0]), tri[2].max(tri[0])),
+        ];
+        for e in &edges {
+            *edge_count.entry(*e).or_insert(0) += 1;
+        }
+    }
+
+    // Collect (vertex_index, face_id) for boundary vertices.
+    // If triangle_face_ids is available, use it; otherwise use 0.
+    let face_ids = mesh.triangle_face_ids.as_ref();
+    let mut boundary_vertices: Vec<(u32, u64)> = Vec::new();
+    let mut seen_vertices: std::collections::HashSet<u32> = std::collections::HashSet::new();
+
+    for (tri_idx, tri) in mesh.triangles.iter().enumerate() {
+        let edges = [
+            (tri[0].min(tri[1]), tri[0].max(tri[1])),
+            (tri[1].min(tri[2]), tri[1].max(tri[2])),
+            (tri[2].min(tri[0]), tri[2].max(tri[0])),
+        ];
+        let fid = face_ids.and_then(|ids| ids.get(tri_idx).copied()).unwrap_or(0);
+        for e in &edges {
+            if edge_count.get(e).copied().unwrap_or(0) == 1 {
+                // Boundary edge — both vertices are boundary vertices
+                for &v in &[e.0, e.1] {
+                    if seen_vertices.insert(v) {
+                        boundary_vertices.push((v, fid));
+                    }
+                }
+            }
+        }
+    }
+
+    if boundary_vertices.len() < 2 {
+        return None;
+    }
+
+    // ── Build spatial hash for O(N) near-pair search ───────────────────
+    // Cell size = seed_tolerance. Scan 3x3x3 neighborhood.
+    let cell_size = seed_tolerance;
+    let inv_cell = 1.0 / cell_size;
+
+    let mut grid: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
+    for (i, &(v, _)) in boundary_vertices.iter().enumerate() {
+        let p = &mesh.vertices[v as usize];
+        let key = (
+            (p.x * inv_cell).floor() as i64,
+            (p.y * inv_cell).floor() as i64,
+            (p.z * inv_cell).floor() as i64,
+        );
+        grid.entry(key).or_default().push(i);
+    }
+
+    // ── Scan for near-coincident pairs from DIFFERENT faces ────────────
+    let mut max_gap: f64 = 0.0;
+    let mut pair_count = 0usize;
+    let seed_tol_sq = seed_tolerance * seed_tolerance;
+
+    for (i, &(vi, fi)) in boundary_vertices.iter().enumerate() {
+        let p = &mesh.vertices[vi as usize];
+        let cx = (p.x * inv_cell).floor() as i64;
+        let cy = (p.y * inv_cell).floor() as i64;
+        let cz = (p.z * inv_cell).floor() as i64;
+
+        for dx in -1i64..=1 {
+            for dy in -1i64..=1 {
+                for dz in -1i64..=1 {
+                    let neighbor_key = (cx + dx, cy + dy, cz + dz);
+                    if let Some(candidates) = grid.get(&neighbor_key) {
+                        for &j in candidates {
+                            if j <= i { continue; }
+                            let (vj, fj) = boundary_vertices[j];
+                            // Only count pairs from DIFFERENT faces
+                            if fi == fj && fi != 0 { continue; }
+                            let q = &mesh.vertices[vj as usize];
+                            let ddx = p.x - q.x;
+                            let ddy = p.y - q.y;
+                            let ddz = p.z - q.z;
+                            let dist_sq = ddx*ddx + ddy*ddy + ddz*ddz;
+                            if dist_sq > 1e-30 && dist_sq < seed_tol_sq {
+                                let dist = dist_sq.sqrt();
+                                pair_count += 1;
+                                if dist > max_gap {
+                                    max_gap = dist;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if max_gap <= 0.0 {
+        return None;
+    }
+
+    // ── Compute mesh welding tolerance with 2x safety margin ──────────
+    let mesh_weld_tol = max_gap * 2.0;
+
+    // Cap to 0.5% of model scale to prevent over-merging thin features
+    let max_tol = model_scale * 5e-3;
+    let final_tol = mesh_weld_tol.min(max_tol);
+
+    log::info!(
+        "mesh sew-tol: {} boundary vertices, {} near-pairs, max_gap={:.2e}, mesh_weld_tol={:.2e} (capped to {:.2e})",
+        boundary_vertices.len(), pair_count, max_gap, final_tol, max_tol,
+    );
+
+    Some(final_tol)
+}
+
 /// Weld (merge) vertices that are connected by short boundary edges.
 ///
 /// This fixes the "seam mismatch" problem where two adjacent faces share
@@ -756,6 +903,38 @@ fn triangle_area_3d(v0: &Point3d, v1: &Point3d, v2: &Point3d) -> f64 {
 /// - The weld tolerance is small (typically 0.5mm or 0.1% of model scale)
 /// - Vertices farther apart are never merged
 pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64) {
+    weld_boundary_edge_vertices_with_pass2_frac(mesh, weld_tolerance, 0.01);
+}
+
+/// Aggressive variant of `weld_boundary_edge_vertices` for the second-pass
+/// mesh-based weld (OpenCascade Shape Healing approach).
+///
+/// When the first pass (VERTEX_POINT-based sewing_tol) didn't fully close
+/// the mesh, we compute a mesh-based weld tolerance from the actual mesh
+/// boundary vertex gaps. This second pass uses the FULL weld tolerance
+/// (pass2_frac = 1.0) for the face-aware guard exemption, allowing welds
+/// between seam vertices that share face IDs but are very close together.
+///
+/// This is safe because:
+/// - The mesh-based weld tolerance is derived from actual mesh gaps (2x
+///   max_gap), so it's tightly bound to the model's real discrepancies
+/// - The face-aware guard still prevents welding vertices on the SAME
+///   face that are FAR apart (annulus protection)
+/// - Only seam vertices (on 2+ faces) benefit from the relaxed guard
+pub fn weld_boundary_edge_vertices_aggressive(mesh: &mut TriangleMesh, weld_tolerance: f64) {
+    weld_boundary_edge_vertices_with_pass2_frac(mesh, weld_tolerance, 1.0);
+}
+
+/// Internal: weld boundary edge vertices with a configurable pass2 fraction.
+///
+/// `pass2_frac` controls the face-aware guard exemption threshold:
+/// - 0.01 (conservative): exempt welds within 1% of weld_tolerance (FP drift)
+/// - 1.0 (aggressive): exempt welds within full weld_tolerance (mesh-based)
+fn weld_boundary_edge_vertices_with_pass2_frac(
+    mesh: &mut TriangleMesh,
+    weld_tolerance: f64,
+    pass2_frac: f64,
+) {
     use std::collections::{HashMap, HashSet};
 
     if mesh.triangles.is_empty() || weld_tolerance <= 0.0 {
@@ -852,9 +1031,12 @@ pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64)
     // unrelated vertices.
     //
     // The PASS 2 tolerance is derived from weld_tolerance: use the SMALLER of
-    //   - weld_tolerance * 0.01 (1% of PASS 1 tolerance)
+    //   - weld_tolerance * pass2_frac (configurable fraction of PASS 1 tolerance)
     //   - 1e-3 (absolute cap of 1mm)
-    let pass2_tolerance = (weld_tolerance * 0.01).min(1e-3);
+    //
+    // pass2_frac = 0.01 (conservative, default): catches FP drift only
+    // pass2_frac = 1.0 (aggressive, mesh-based second pass): catches real gaps
+    let pass2_tolerance = (weld_tolerance * pass2_frac).min(1e-3);
     let pass2_tol_sq = pass2_tolerance * pass2_tolerance;
 
     // For PASS 1, we need a distance-aware face check: only refuse the

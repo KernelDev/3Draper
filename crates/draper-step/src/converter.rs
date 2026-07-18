@@ -1890,8 +1890,37 @@ impl BrepSession {
                 eprintln!("WELD_SKIP: BREP #{} already watertight ({} interior edges) — skipping weld to preserve triangles",
                     brep_id, report_before.interior_edge_count);
             } else {
-                let weld_tol = self.tol_ctx.weld_tolerance();
+                // Use the MAX of:
+                // - sewing_tol (auto-computed from VERTEX_POINT distribution)
+                // - weld_tolerance() (STEP uncertainty-based, when available)
+                // This ensures we use the more aggressive tolerance, catching
+                // both empirical gaps and CAD-system-stated precision.
+                let weld_tol = self.tol_ctx.sewing_tol
+                    .max(self.tol_ctx.weld_tolerance())
+                    .max(self.tol_ctx.absolute * 10.0);
                 weld_boundary_edge_vertices(&mut self.mesh, weld_tol);
+
+                // ── Second-pass mesh-based weld (OpenCascade Shape Healing) ──
+                // If the VERTEX_POINT-based sewing_tol didn't fully close the
+                // mesh, scan the actual mesh boundary vertices for near-coincident
+                // pairs from different faces.
+                let report_after_weld = validate_watertight(&self.mesh, false);
+                if !report_after_weld.is_watertight() {
+                    let seed_tol = (self.tol_ctx.model_scale * 1e-2).max(self.tol_ctx.absolute * 100.0);
+                    if let Some(mesh_weld_tol) = draper_mesh::compute_mesh_weld_tolerance(
+                        &self.mesh,
+                        seed_tol,
+                        self.tol_ctx.model_scale,
+                    ) {
+                        if mesh_weld_tol > weld_tol {
+                            log::info!(
+                                "BREP #{} detailed (chunked): second-pass mesh weld with tol={:.2e} (was {:.2e})",
+                                brep_id, mesh_weld_tol, weld_tol,
+                            );
+                            draper_mesh::weld_boundary_edge_vertices_aggressive(&mut self.mesh, mesh_weld_tol);
+                        }
+                    }
+                }
             }
 
             // Remove duplicate triangles BEFORE T-junction repair.
@@ -4031,6 +4060,17 @@ impl<'a> StepConverter<'a> {
             },
         };
 
+        // ─── Auto-compute sewing tolerance (OpenCascade Shape Healing) ────
+        // Scan the BREP's actual vertex distribution to find the maximum
+        // gap between near-coincident VERTEX_POINT entities. This handles
+        // STEP files where the modeling system used slightly different
+        // VERTEX_POINT entities (e.g., 17 microns apart on a 40mm model)
+        // for the same geometric vertex. The fixed `model_scale * 1e-4`
+        // formula is too small for these cases — the computed sewing_tol
+        // adapts to the actual model geometry.
+        let sewing_tol = self.compute_sewing_tolerance(&face_data_list, &tol_ctx, brep_id);
+        let tol_ctx = tol_ctx.with_sewing_tol(sewing_tol);
+
         // ─── Healing pipeline: heal the solid before triangulation ────────
         let face_data_list = if self.config.heal {
             let (solid, face_id_map) = face_data_list_to_solid(&face_data_list);
@@ -4213,7 +4253,15 @@ impl<'a> StepConverter<'a> {
             // This phase matches edges by their 3D endpoint coordinates,
             // catching edges that share the same geometric boundary but
             // have different STEP entity IDs.
-            let coord_tol = tol_ctx.aliasing_tolerance();
+            //
+            // Use the MAX of:
+            // - aliasing_tolerance() (STEP uncertainty-based, when available)
+            // - sewing_tol * 2 (auto-computed from VERTEX_POINT distribution)
+            // - model_scale * 2e-3 (old default, catches mesh-based gaps)
+            let coord_tol = tol_ctx.aliasing_tolerance()
+                .max(tol_ctx.sewing_tol * 2.0)
+                .max(tol_ctx.model_scale * 2e-3)
+                .max(tol_ctx.absolute * 10.0);
             let mut coord_pair_to_step_ids: HashMap<(i64, i64, i64, i64, i64, i64), Vec<i64>> = HashMap::new();
             let mut step_id_endpoints: HashMap<i64, (Point3d, Point3d)> = HashMap::new();
             let mut unaliased_count = 0usize;
@@ -4312,9 +4360,14 @@ impl<'a> StepConverter<'a> {
 
         let mut mesh = TriangleMesh::new();
         // Tolerance-based dedup: catches near-identical vertices from different
-        // STEP EDGE_CURVE entities on the same geometric boundary (FP drift
-        // typically 1e-13). Merge tolerance = 1 PPM of model scale.
-        let merge_tol = tol_ctx.vertex_merge_tolerance();
+        // STEP EDGE_CURVE entities on the same geometric boundary.
+        //
+        // Uses the MAX of:
+        // - vertex_merge_tolerance() (STEP uncertainty-based, when available)
+        // - sewing_tol (auto-computed from VERTEX_POINT distribution)
+        // This ensures we catch both CAD-system-stated precision and empirical
+        // vertex gaps from different EDGE_CURVE entities.
+        let merge_tol = tol_ctx.vertex_merge_tolerance().max(tol_ctx.sewing_tol);
         let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
         let mut total_face_vertices = 0usize;
         for (fi, face_data) in face_data_list.iter().enumerate() {
@@ -4414,20 +4467,49 @@ impl<'a> StepConverter<'a> {
         //      If a user needs to close real topology gaps, that's a
         //      separate manual "stitch" tool (editing operation).
         //
-        // Tolerance: 0.01% of model scale (matching merge_tol). This
-        // catches FP drift (1e-13..1e-6) but NOT real geometric gaps
-        // (which are typically >0.1mm). The previous 3% tolerance was
-        // too aggressive — it collapsed thin annulus faces (e.g.,
-        // 3.05.078.stp Step#87, annulus width 2.28mm < weld_tol 2.6mm)
-        // by welding outer-ring vertices to inner-ring vertices.
+        // Tolerance: sewing_tol (auto-computed from BREP vertex distribution).
+        // This catches both FP drift (1e-13..1e-6) AND small geometric gaps
+        // from different VERTEX_POINT entities (typically 1e-5..1e-3). The
+        // face-aware weld guard prevents over-merging within a single face
+        // (e.g., thin annulus rings).
         {
             // Always run weld if there are boundary edges — even a few
             // boundary edges indicate non-aliased shared edges that need
             // tolerance-based welding to close.
             let report_before = validate_watertight(&mesh, false);
             if report_before.boundary_edge_count > 0 || report_before.non_manifold_edge_count > 0 {
-                let weld_tol = tol_ctx.weld_tolerance();
+                // Use the MAX of sewing_tol and weld_tolerance() (STEP uncertainty-based).
+                let weld_tol = tol_ctx.sewing_tol
+                    .max(tol_ctx.weld_tolerance())
+                    .max(tol_ctx.absolute * 10.0);
                 weld_boundary_edge_vertices(&mut mesh, weld_tol);
+
+                // ── Second-pass mesh-based weld (OpenCascade Shape Healing) ──
+                // If the VERTEX_POINT-based sewing_tol didn't fully close the
+                // mesh, scan the actual mesh boundary vertices for near-coincident
+                // pairs from different faces. The actual gaps may be larger
+                // because two faces can share a geometric edge but use different
+                // EDGE_CURVE entities (e.g., LINE vs NURBS), producing different
+                // interior boundary points.
+                let report_after_weld = validate_watertight(&mesh, false);
+                if !report_after_weld.is_watertight() {
+                    let seed_tol = (tol_ctx.model_scale * 1e-2).max(tol_ctx.absolute * 100.0);
+                    if let Some(mesh_weld_tol) = draper_mesh::compute_mesh_weld_tolerance(
+                        &mesh,
+                        seed_tol,
+                        tol_ctx.model_scale,
+                    ) {
+                        // Only re-weld if mesh_weld_tol is larger than the
+                        // current sewing_tol (otherwise no benefit).
+                        if mesh_weld_tol > weld_tol {
+                            log::info!(
+                                "BREP #{}: second-pass mesh weld with tol={:.2e} (was {:.2e})",
+                                brep_id, mesh_weld_tol, weld_tol,
+                            );
+                            draper_mesh::weld_boundary_edge_vertices_aggressive(&mut mesh, mesh_weld_tol);
+                        }
+                    }
+                }
             }
 
             // Remove duplicate triangles BEFORE T-junction repair.
@@ -4660,6 +4742,17 @@ impl<'a> StepConverter<'a> {
             },
         };
 
+        // ─── Auto-compute sewing tolerance (OpenCascade Shape Healing) ────
+        // Scan the BREP's actual vertex distribution to find the maximum
+        // gap between near-coincident VERTEX_POINT entities. This handles
+        // STEP files where the modeling system used slightly different
+        // VERTEX_POINT entities (e.g., 17 microns apart on a 40mm model)
+        // for the same geometric vertex. The fixed `model_scale * 1e-4`
+        // formula is too small for these cases — the computed sewing_tol
+        // adapts to the actual model geometry.
+        let sewing_tol = self.compute_sewing_tolerance(&face_data_list, &tol_ctx, brep_id);
+        let tol_ctx = tol_ctx.with_sewing_tol(sewing_tol);
+
         // ─── Healing pipeline: heal the solid before triangulation ────────
         let face_data_list = if self.config.heal {
             let pre_heal_count = face_data_list.len();
@@ -4882,7 +4975,12 @@ impl<'a> StepConverter<'a> {
             // Phase 2: 3D coordinate-based aliasing (supplementary)
             // Same logic as in triangulate_brep() — see comments there.
             // Also applies midpoint check to avoid aliasing different curves.
-            let coord_tol = tol_ctx.aliasing_tolerance(); // 2000 PPM of model scale
+            //
+            // Use the MAX of aliasing_tolerance(), sewing_tol * 2, and old default.
+            let coord_tol = tol_ctx.aliasing_tolerance()
+                .max(tol_ctx.sewing_tol * 2.0)
+                .max(tol_ctx.model_scale * 2e-3)
+                .max(tol_ctx.absolute * 10.0);
             let mut coord_pair_to_step_ids: HashMap<(i64, i64, i64, i64, i64, i64), Vec<i64>> = HashMap::new();
             for face_data in &face_data_list {
                 for (edge_idx, &step_id) in face_data.edge_step_ids.iter().enumerate() {
@@ -4979,10 +5077,11 @@ impl<'a> StepConverter<'a> {
         // apart). Without a tolerance fallback these vertices end up with different
         // indices, producing boundary edges and non-watertight meshes.
         //
-        // The merge tolerance is set to 1 PPM of the model scale — small enough
-        // to never collapse genuinely distinct features, but large enough to catch
-        // FP drift between different EDGE_CURVE entities on the same boundary.
-        let merge_tol = tol_ctx.vertex_merge_tolerance();
+        // Uses the MAX of vertex_merge_tolerance() (STEP uncertainty-based)
+        // and sewing_tol (auto-computed from VERTEX_POINT distribution).
+        // This ensures we catch both CAD-system-stated precision and empirical
+        // vertex gaps from different EDGE_CURVE entities.
+        let merge_tol = tol_ctx.vertex_merge_tolerance().max(tol_ctx.sewing_tol);
         let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
         let mut total_face_vertices_detailed = 0usize;
         let mut face_infos = Vec::new();
@@ -5213,11 +5312,43 @@ impl<'a> StepConverter<'a> {
                 eprintln!("WELD_SKIP: BREP #{} detailed already watertight ({} interior edges) — skipping weld to preserve triangles",
                     brep_id, report_before.interior_edge_count);
             } else {
-                let weld_tol = tol_ctx.weld_tolerance();
+                // Use the MAX of sewing_tol and weld_tolerance() (STEP uncertainty-based).
+                let weld_tol = tol_ctx.sewing_tol
+                    .max(tol_ctx.weld_tolerance())
+                    .max(tol_ctx.absolute * 10.0);
                 let pre_weld_tris = mesh.triangle_count();
                 weld_boundary_edge_vertices(&mut mesh, weld_tol);
                 let post_weld_tris = mesh.triangle_count();
                 eprintln!("POST_WELD_DETAILED: BREP #{}: tris after weld ({}→{})", brep_id, pre_weld_tris, post_weld_tris);
+
+                // ── Second-pass mesh-based weld (OpenCascade Shape Healing) ──
+                // If the VERTEX_POINT-based sewing_tol didn't fully close the
+                // mesh, scan the actual mesh boundary vertices for near-coincident
+                // pairs from different faces. The actual gaps may be larger
+                // because two faces can share a geometric edge but use different
+                // EDGE_CURVE entities (e.g., LINE vs NURBS), producing different
+                // interior boundary points.
+                let report_after_weld = validate_watertight(&mesh, false);
+                if !report_after_weld.is_watertight() {
+                    let seed_tol = (tol_ctx.model_scale * 1e-2).max(tol_ctx.absolute * 100.0);
+                    if let Some(mesh_weld_tol) = draper_mesh::compute_mesh_weld_tolerance(
+                        &mesh,
+                        seed_tol,
+                        tol_ctx.model_scale,
+                    ) {
+                        if mesh_weld_tol > weld_tol {
+                            log::info!(
+                                "BREP #{} detailed: second-pass mesh weld with tol={:.2e} (was {:.2e})",
+                                brep_id, mesh_weld_tol, weld_tol,
+                            );
+                            let pre_weld2_tris = mesh.triangle_count();
+                            draper_mesh::weld_boundary_edge_vertices_aggressive(&mut mesh, mesh_weld_tol);
+                            let post_weld2_tris = mesh.triangle_count();
+                            eprintln!("POST_WELD2_DETAILED: BREP #{}: tris after mesh-weld ({}→{})", brep_id, pre_weld2_tris, post_weld2_tris);
+                        }
+                    }
+                }
+
                 // After welding, some triangles may have become degenerate (duplicate
                 // vertices merged). Filter again before dedup.
                 let pre_filter2 = mesh.triangle_count();
@@ -5585,6 +5716,17 @@ impl<'a> StepConverter<'a> {
             },
         };
 
+        // ─── Auto-compute sewing tolerance (OpenCascade Shape Healing) ────
+        // Scan the BREP's actual vertex distribution to find the maximum
+        // gap between near-coincident VERTEX_POINT entities. This handles
+        // STEP files where the modeling system used slightly different
+        // VERTEX_POINT entities (e.g., 17 microns apart on a 40mm model)
+        // for the same geometric vertex. The fixed `model_scale * 1e-4`
+        // formula is too small for these cases — the computed sewing_tol
+        // adapts to the actual model geometry.
+        let sewing_tol = self.compute_sewing_tolerance(&face_data_list, &tol_ctx, brep_id);
+        let tol_ctx = tol_ctx.with_sewing_tol(sewing_tol);
+
         // ─── Healing pipeline: heal the solid before triangulation ────────
         let face_data_list = if self.config.heal {
             let pre_heal_count = face_data_list.len();
@@ -5700,7 +5842,11 @@ impl<'a> StepConverter<'a> {
             }
 
             // Phase 2: 3D coordinate-based aliasing (supplementary)
-            let coord_tol = tol_ctx.aliasing_tolerance();
+            // Use the MAX of aliasing_tolerance(), sewing_tol * 2, and old default.
+            let coord_tol = tol_ctx.aliasing_tolerance()
+                .max(tol_ctx.sewing_tol * 2.0)
+                .max(tol_ctx.model_scale * 2e-3)
+                .max(tol_ctx.absolute * 10.0);
             let mut coord_pair_to_step_ids: HashMap<(i64, i64, i64, i64, i64, i64), Vec<i64>> = HashMap::new();
             for face_data in &face_data_list {
                 for (edge_idx, &step_id) in face_data.edge_step_ids.iter().enumerate() {
@@ -5776,8 +5922,8 @@ impl<'a> StepConverter<'a> {
         let default_face_time_limit = std::time::Duration::from_secs(120);
         let face_time_limit = params.face_time_limit_override.unwrap_or(default_face_time_limit);
 
-        // Tolerance-based dedup
-        let merge_tol = tol_ctx.vertex_merge_tolerance();
+        // Tolerance-based dedup — uses MAX of vertex_merge_tolerance() and sewing_tol.
+        let merge_tol = tol_ctx.vertex_merge_tolerance().max(tol_ctx.sewing_tol);
         let dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
 
         Some(BrepSession {
@@ -5885,6 +6031,10 @@ impl<'a> StepConverter<'a> {
             },
         };
 
+        // ─── Auto-compute sewing tolerance (OpenCascade Shape Healing) ────
+        let sewing_tol = self.compute_sewing_tolerance(&face_data_list, &tol_ctx, shell_id);
+        let tol_ctx = tol_ctx.with_sewing_tol(sewing_tol);
+
         // ─── Healing pipeline ────────
         let face_data_list = if self.config.heal {
             let (solid, face_id_map) = face_data_list_to_solid(&face_data_list);
@@ -5897,9 +6047,8 @@ impl<'a> StepConverter<'a> {
         };
 
         let mut mesh = TriangleMesh::new();
-        // Tolerance-based dedup: catches near-identical vertices from different
-        // STEP EDGE_CURVE entities on the same geometric boundary.
-        let merge_tol = tol_ctx.vertex_merge_tolerance();
+        // Tolerance-based dedup — uses MAX of vertex_merge_tolerance() and sewing_tol.
+        let merge_tol = tol_ctx.vertex_merge_tolerance().max(tol_ctx.sewing_tol);
         let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
         for face_data in &face_data_list {
             let face_mesh = self.surface_to_mesh(face_data, params, bbox);
@@ -8414,6 +8563,152 @@ impl<'a> StepConverter<'a> {
         } else {
             None
         }
+    }
+
+    /// Compute an automatic sewing tolerance based on the BREP's actual vertex
+    /// distribution — the OpenCascade Shape Healing approach.
+    ///
+    /// Instead of using a fixed PPM of `model_scale`, this method scans all
+    /// VERTEX_POINT 3D coordinates used in this BREP and finds the maximum
+    /// distance between near-coincident pairs (those that should be
+    /// topologically unified but have different STEP entity IDs).
+    ///
+    /// **Algorithm:**
+    /// 1. Collect all unique VERTEX_POINT 3D coordinates from this BREP's edges.
+    /// 2. Build a spatial hash grid (cell size = seed_tol = 1% of model_scale).
+    /// 3. For each vertex, scan its cell + 26 neighboring cells for near-pairs.
+    /// 4. Track the maximum distance among all pairs within seed_tol.
+    /// 5. Apply a 2x safety margin to ensure all such pairs get unified.
+    /// 6. Cap to `[1e-7, 5e-3]` of model_scale for sanity.
+    ///
+    /// This handles STEP files where the modeling system used slightly
+    /// different VERTEX_POINT entities (e.g., 17 microns apart on a 40mm
+    /// model) for the same geometric vertex. Without this auto-tolerance,
+    /// the fixed `model_scale * 1e-4` would be 4 microns — too small to
+    /// catch the 17-micron gap, leaving the mesh non-watertight.
+    ///
+    /// Returns the computed sewing tolerance. The caller should inject it
+    /// into `ToleranceContext` via `tol_ctx.with_sewing_tol(...)`.
+    fn compute_sewing_tolerance(
+        &self,
+        face_data_list: &[FaceData],
+        tol_ctx: &ToleranceContext,
+        brep_id: i64,
+    ) -> f64 {
+        use std::collections::HashSet;
+
+        // ── Step 1: Collect all unique VERTEX_POINT 3D coordinates ──────
+        let mut vertex_points: Vec<Point3d> = Vec::new();
+        let mut seen_step_ids: HashSet<i64> = HashSet::new();
+
+        for face_data in face_data_list {
+            for &step_id in &face_data.edge_step_ids {
+                if step_id == 0 { continue; }
+                if !seen_step_ids.insert(step_id) { continue; }
+                if let Some((p1, p2)) = self.get_edge_curve_vertex_pair_3d(step_id) {
+                    vertex_points.push(p1);
+                    vertex_points.push(p2);
+                }
+            }
+        }
+
+        let n = vertex_points.len();
+        if n < 2 {
+            let default_tol = (tol_ctx.model_scale * 1e-4).max(tol_ctx.absolute * 10.0);
+            log::info!(
+                "BREP #{} sew-tol: {} vertices — using default {:.2e} (insufficient data)",
+                brep_id, n, default_tol,
+            );
+            return default_tol;
+        }
+
+        // ── Step 2: Build spatial hash grid for O(N) near-pair search ──
+        // Cell size = seed_tol = 1% of model_scale.
+        // Pairs within this distance are candidates for "should be unified".
+        let seed_tol = (tol_ctx.model_scale * 1e-2).max(tol_ctx.absolute * 100.0);
+        let seed_tol_sq = seed_tol * seed_tol;
+        let inv_seed = 1.0 / seed_tol;
+
+        let mut grid: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
+        for (i, p) in vertex_points.iter().enumerate() {
+            let key = (
+                (p.x * inv_seed).floor() as i64,
+                (p.y * inv_seed).floor() as i64,
+                (p.z * inv_seed).floor() as i64,
+            );
+            grid.entry(key).or_default().push(i);
+        }
+
+        // ── Step 3: Scan each vertex's 3x3x3 neighborhood for near-pairs ──
+        let mut max_gap: f64 = 0.0;
+        let mut pair_count = 0usize;
+        let mut max_pair: (usize, usize) = (0, 0);
+
+        for (i, p) in vertex_points.iter().enumerate() {
+            let cx = (p.x * inv_seed).floor() as i64;
+            let cy = (p.y * inv_seed).floor() as i64;
+            let cz = (p.z * inv_seed).floor() as i64;
+
+            for dx in -1i64..=1 {
+                for dy in -1i64..=1 {
+                    for dz in -1i64..=1 {
+                        let neighbor_key = (cx + dx, cy + dy, cz + dz);
+                        if let Some(candidates) = grid.get(&neighbor_key) {
+                            for &j in candidates {
+                                if j <= i { continue; } // each pair once
+                                let q = &vertex_points[j];
+                                let ddx = p.x - q.x;
+                                let ddy = p.y - q.y;
+                                let ddz = p.z - q.z;
+                                let dist_sq = ddx*ddx + ddy*ddy + ddz*ddz;
+                                // Exclude exact 0 (same point) and pairs beyond seed_tol
+                                if dist_sq > 1e-30 && dist_sq < seed_tol_sq {
+                                    let dist = dist_sq.sqrt();
+                                    pair_count += 1;
+                                    if dist > max_gap {
+                                        max_gap = dist;
+                                        max_pair = (i, j);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Step 4: Compute sewing tolerance with 2x safety margin ──────
+        let default_tol = (tol_ctx.model_scale * 1e-4).max(tol_ctx.absolute * 10.0);
+        let sewing_tol = if max_gap > 0.0 {
+            // 2x safety margin to ensure all near-coincident vertices get
+            // unified, even if there's a slightly larger gap we missed.
+            max_gap * 2.0
+        } else {
+            default_tol
+        };
+
+        // ── Step 5: Cap to [1e-7, 5e-3] of model_scale for sanity ──────
+        let min_tol = (tol_ctx.model_scale * 1e-7).max(1e-12);
+        let max_tol = tol_ctx.model_scale * 5e-3; // 0.5% — prevents over-merging thin features
+        let final_tol = sewing_tol.max(min_tol).min(max_tol).max(default_tol.min(max_tol));
+
+        if max_gap > 0.0 {
+            let p1 = &vertex_points[max_pair.0];
+            let p2 = &vertex_points[max_pair.1];
+            log::info!(
+                "BREP #{} sew-tol: model_scale={:.4}, vertices={}, near-pairs={}, max_gap={:.2e} (between ({:.4},{:.4},{:.4}) and ({:.4},{:.4},{:.4})), sewing_tol={:.2e} (capped to [{:.2e}, {:.2e}])",
+                brep_id, tol_ctx.model_scale, n, pair_count, max_gap,
+                p1.x, p1.y, p1.z, p2.x, p2.y, p2.z,
+                final_tol, min_tol, max_tol,
+            );
+        } else {
+            log::info!(
+                "BREP #{} sew-tol: model_scale={:.4}, vertices={}, no near-pairs (model is clean) — using default {:.2e}",
+                brep_id, tol_ctx.model_scale, n, final_tol,
+            );
+        }
+
+        final_tol
     }
 
     /// Evaluate a B_SPLINE_CURVE at its parameter midpoint.

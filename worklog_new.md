@@ -4567,3 +4567,41 @@ Results on bolt.stp (watertightness per LOD):
 
 Benchmark: 21/27 WATERTIGHT, 79 bnd edges — no regression
 Tests: draper-mesh 279/279, draper-step 116/117 (1 pre-existing)
+
+---
+Task ID: auto-sewing-tol
+Agent: Main
+Task: Implement auto-computed sewing tolerance (OpenCascade Shape Healing approach)
+
+Work Log:
+- Added `sewing_tol: f64` field to ToleranceContext (draper-geometry/src/tolerance.rs)
+  - Defaults to `model_scale * 1e-4` in from_bounding_box / from_model_scale
+  - Added `with_sewing_tol()` builder method for overriding
+- Added `StepConverter::compute_sewing_tolerance()` method (draper-step/src/converter.rs)
+  - Scans all VERTEX_POINT 3D coordinates from BREP edges
+  - Builds spatial hash grid (cell size = 1% of model_scale)
+  - Finds max distance between near-coincident pairs (within seed tolerance)
+  - Returns 2x max_gap with safety margin, capped to [1e-7, 5e-3] of model_scale
+- Added `compute_mesh_weld_tolerance()` function (draper-mesh/src/watertight.rs)
+  - Second-pass: scans actual mesh boundary vertices for near-coincident pairs
+  - Catches gaps from different EDGE_CURVE entities (LINE vs NURBS) sharing same edge
+  - Returns 2x max_gap, capped to 0.5% of model_scale
+- Added `weld_boundary_edge_vertices_aggressive()` function
+  - Uses pass2_frac = 1.0 (full weld_tol for face-aware guard exemption)
+  - Allows welding seam vertices that share face IDs but are close together
+  - Safe because mesh-based weld_tol is tightly bound to actual mesh gaps
+- Integrated into all 4 BREP processing paths (triangulate_brep, triangulate_brep_detailed,
+  start_brep_session, triangulate_shell_by_id):
+  - Compute sewing_tol after face_data_list is built
+  - Use sewing_tol for merge_tol, weld_tol
+  - Use max(sewing_tol * 2, model_scale * 2e-3) for coord_tol (Phase 2 aliasing)
+  - After first weld pass, if still not watertight, run second-pass mesh weld
+- Added diag_sew_tol.rs diagnostic tool
+
+Stage Summary:
+- brick_thin_round.stp: 1020 → 563 boundary edges (45% reduction)
+- as1-oc-214_bolt.stp: 138 → 141 boundary edges (essentially unchanged)
+- nist_cube/cylinder/sphere: remain WATERTIGHT (no regression)
+- nist_cone.stp: still not watertight (known cone issue, separate fix needed)
+- The auto-tolerance adapts to each model's actual vertex distribution
+- Two-pass approach: VERTEX_POINT-based (topology) + mesh-based (geometry)

@@ -3131,6 +3131,7 @@ mod tests {
             angular: 1e-5,
             parametric: 1e-8,
             model_scale: 100.0,
+            sewing_tol: 100.0 * 1e-4, // default; not used in this test
         };
         let floor = ctx.coincidence_tolerance(); // 1e-3 + 1e-6 * 100 = 1.001e-3
 

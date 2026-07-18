@@ -41,6 +41,20 @@ pub struct ToleranceContext {
     /// and edge aliasing tolerances (multiplied by a factor of 100).
     /// If not available, falls back to model_scale-derived tolerances.
     pub step_uncertainty: Option<f64>,
+    /// Auto-computed sewing tolerance for vertex merging.
+    ///
+    /// Derived from the actual vertex distribution of the BREP: scans all
+    /// VERTEX_POINT 3D coordinates, finds the maximum distance between
+    /// near-coincident pairs (those that should be topologically unified but
+    /// have different STEP entity IDs), and applies a 2x safety margin.
+    ///
+    /// Used for: merge_tol (face-merge vertex dedup), weld_tol (boundary
+    /// vertex welding), coord_tol (Phase 2 endpoint grouping). Capped to
+    /// [1e-7, 5e-3] of model_scale to prevent over-merging thin features.
+    ///
+    /// This is the OpenCascade Shape Healing approach: each model gets its
+    /// own tolerance based on its actual geometry, not a fixed PPM formula.
+    pub sewing_tol: f64,
 }
 
 impl Default for ToleranceContext {
@@ -52,6 +66,7 @@ impl Default for ToleranceContext {
             parametric: DEFAULT_PARAMETRIC_TOLERANCE,
             model_scale: 1.0,
             step_uncertainty: None,
+            sewing_tol: 1e-4, // Will be overridden by compute_sewing_tolerance
         }
     }
 }
@@ -75,6 +90,7 @@ impl ToleranceContext {
             relative: DEFAULT_RELATIVE_TOLERANCE,
             angular: DEFAULT_ANGULAR_TOLERANCE,
             parametric: DEFAULT_PARAMETRIC_TOLERANCE,
+            sewing_tol: model_scale * 1e-4, // Default; override with with_sewing_tol
             model_scale,
             step_uncertainty: None,
         }
@@ -82,14 +98,26 @@ impl ToleranceContext {
 
     /// Create a tolerance context from a specific model scale.
     pub fn from_model_scale(model_scale: f64) -> Self {
+        let ms = model_scale.max(1e-10);
         Self {
             absolute: DEFAULT_ABSOLUTE_TOLERANCE,
             relative: DEFAULT_RELATIVE_TOLERANCE,
             angular: DEFAULT_ANGULAR_TOLERANCE,
             parametric: DEFAULT_PARAMETRIC_TOLERANCE,
-            model_scale: model_scale.max(1e-10),
+            sewing_tol: ms * 1e-4, // Default; override with with_sewing_tol
+            model_scale: ms,
             step_uncertainty: None,
         }
+    }
+
+    /// Return a copy of this context with the sewing tolerance replaced.
+    ///
+    /// This is used by StepConverter::compute_sewing_tolerance to inject the
+    /// auto-computed sewing tolerance into the context after analyzing the
+    /// BREP's actual vertex distribution.
+    pub fn with_sewing_tol(mut self, sewing_tol: f64) -> Self {
+        self.sewing_tol = sewing_tol;
+        self
     }
 
     /// Effective coincidence tolerance: absolute + relative * model_scale.
