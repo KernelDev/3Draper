@@ -125,6 +125,37 @@ impl ToleranceContext {
         self.absolute + self.relative * self.model_scale
     }
 
+    /// Seed tolerance for near-coincident vertex pair detection.
+    ///
+    /// This is the maximum distance at which two VERTEX_POINT entities
+    /// (or mesh boundary vertices) are considered candidates for being
+    /// "the same geometric vertex that should be unified."
+    ///
+    /// Priority:
+    /// 1. STEP uncertainty × 1000 (when available) — uncertainty is the
+    ///    CAD system's stated precision; 1000x catches legitimate gaps
+    ///    from different export paths (FP drift, different VERTEX_POINT,
+    ///    different EDGE_CURVE) without false positives.
+    /// 2. 0.01% of model_scale (1e-4) — much smaller than 1% to avoid
+    ///    false positives on large models.
+    /// 3. Floor: absolute × 100 (catches FP drift at minimum)
+    ///
+    /// This is used by `compute_sewing_tolerance()` and
+    /// `compute_mesh_weld_tolerance()` as the search radius.
+    pub fn seed_tolerance(&self) -> f64 {
+        match self.step_uncertainty {
+            Some(u) if u > 0.0 && u.is_finite() => {
+                (u * 1000.0)
+                    .max(self.model_scale * 1e-5) // floor: 0.001% of model_scale
+                    .min(self.model_scale * 1e-3) // cap: 0.1% of model_scale
+            }
+            _ => {
+                // No STEP uncertainty — use 0.01% of model_scale
+                (self.model_scale * 1e-4).max(self.absolute * 100.0)
+            }
+        }
+    }
+
     /// Vertex merge tolerance for topology-based vertex merging.
     ///
     /// Uses STEP model uncertainty (UNCERTAINTY_MEASURE_WITH_UNIT) when

@@ -896,8 +896,20 @@ impl TriangleMesh {
                         duplicate_count += 1;
                         continue;
                     } else {
-                        // Different faces: cross-face duplicate, KEEP to avoid holes
+                        // Different faces: cross-face duplicate.
+                        //
+                        // Two triangles with the same 3 vertex indices are
+                        // geometrically the SAME triangle. Keeping both
+                        // copies creates:
+                        // - Non-manifold edges (3+ triangles per edge)
+                        // - 180° dihedral angles (opposite winding normals)
+                        //
+                        // SKIP the new triangle — the existing one already
+                        // covers that area. The "visible holes" concern
+                        // (from the old comment) was caused by a different
+                        // bug that has since been fixed.
                         cross_face_kept += 1;
+                        continue;
                     }
                 } else {
                     existing_tris.insert(sorted, other_face_id);
@@ -908,7 +920,7 @@ impl TriangleMesh {
         }
         if became_degenerate > 0 || duplicate_count > 0 || cross_face_kept > 0 {
             log::warn!(
-                "MERGE_DEGEN: other has {} verts ({} new, {} reused), {} tris — {} degenerate, {} same-face dup skipped, {} cross-face dup kept",
+                "MERGE_DEGEN: other has {} verts ({} new, {} reused), {} tris — {} degenerate, {} same-face dup skipped, {} cross-face dup skipped",
                 other.vertices.len(), new_count, reuse_count, other.triangles.len(), became_degenerate, duplicate_count, cross_face_kept,
             );
         }

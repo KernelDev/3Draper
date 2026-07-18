@@ -1906,7 +1906,7 @@ impl BrepSession {
                 // pairs from different faces.
                 let report_after_weld = validate_watertight(&self.mesh, false);
                 if !report_after_weld.is_watertight() {
-                    let seed_tol = (self.tol_ctx.model_scale * 1e-2).max(self.tol_ctx.absolute * 100.0);
+                    let seed_tol = self.tol_ctx.seed_tolerance();
                     if let Some(mesh_weld_tol) = draper_mesh::compute_mesh_weld_tolerance(
                         &self.mesh,
                         seed_tol,
@@ -1952,8 +1952,9 @@ impl BrepSession {
             // quite reach the boundary (e.g., bolt thread transitions).
             // Only run if there are still boundary edges after all previous
             // post-processing steps.
+            // SAFETY GUARD: Only fill when boundary_edge_count is SMALL (< 50).
             let report_after_tj = validate_watertight(&self.mesh, false);
-            if report_after_tj.boundary_edge_count > 0 {
+            if report_after_tj.boundary_edge_count > 0 && report_after_tj.boundary_edge_count < 50 {
                 let n_filled = draper_mesh::fill_boundary_gaps(&mut self.mesh, 32);
                 if n_filled > 0 {
                     log::info!(
@@ -4257,10 +4258,10 @@ impl<'a> StepConverter<'a> {
             // Use the MAX of:
             // - aliasing_tolerance() (STEP uncertainty-based, when available)
             // - sewing_tol * 2 (auto-computed from VERTEX_POINT distribution)
-            // - model_scale * 2e-3 (old default, catches mesh-based gaps)
+            
             let coord_tol = tol_ctx.aliasing_tolerance()
                 .max(tol_ctx.sewing_tol * 2.0)
-                .max(tol_ctx.model_scale * 2e-3)
+                
                 .max(tol_ctx.absolute * 10.0);
             let mut coord_pair_to_step_ids: HashMap<(i64, i64, i64, i64, i64, i64), Vec<i64>> = HashMap::new();
             let mut step_id_endpoints: HashMap<i64, (Point3d, Point3d)> = HashMap::new();
@@ -4493,7 +4494,7 @@ impl<'a> StepConverter<'a> {
                 // interior boundary points.
                 let report_after_weld = validate_watertight(&mesh, false);
                 if !report_after_weld.is_watertight() {
-                    let seed_tol = (tol_ctx.model_scale * 1e-2).max(tol_ctx.absolute * 100.0);
+                    let seed_tol = tol_ctx.seed_tolerance();
                     if let Some(mesh_weld_tol) = draper_mesh::compute_mesh_weld_tolerance(
                         &mesh,
                         seed_tol,
@@ -4538,8 +4539,9 @@ impl<'a> StepConverter<'a> {
             }
 
             // Gap filling: fill missing triangles for boundary edge loops.
+            // SAFETY GUARD: Only fill when boundary_edge_count is SMALL (< 50).
             let report_after_tj = validate_watertight(&mesh, false);
-            if report_after_tj.boundary_edge_count > 0 {
+            if report_after_tj.boundary_edge_count > 0 && report_after_tj.boundary_edge_count < 50 {
                 let n_filled = draper_mesh::fill_boundary_gaps(&mut mesh, 32);
                 if n_filled > 0 {
                     log::info!(
@@ -4976,10 +4978,10 @@ impl<'a> StepConverter<'a> {
             // Same logic as in triangulate_brep() — see comments there.
             // Also applies midpoint check to avoid aliasing different curves.
             //
-            // Use the MAX of aliasing_tolerance(), sewing_tol * 2, and old default.
+            // Use the MAX of aliasing_tolerance() and sewing_tol * 2.
             let coord_tol = tol_ctx.aliasing_tolerance()
                 .max(tol_ctx.sewing_tol * 2.0)
-                .max(tol_ctx.model_scale * 2e-3)
+                
                 .max(tol_ctx.absolute * 10.0);
             let mut coord_pair_to_step_ids: HashMap<(i64, i64, i64, i64, i64, i64), Vec<i64>> = HashMap::new();
             for face_data in &face_data_list {
@@ -5330,7 +5332,7 @@ impl<'a> StepConverter<'a> {
                 // interior boundary points.
                 let report_after_weld = validate_watertight(&mesh, false);
                 if !report_after_weld.is_watertight() {
-                    let seed_tol = (tol_ctx.model_scale * 1e-2).max(tol_ctx.absolute * 100.0);
+                    let seed_tol = tol_ctx.seed_tolerance();
                     if let Some(mesh_weld_tol) = draper_mesh::compute_mesh_weld_tolerance(
                         &mesh,
                         seed_tol,
@@ -5402,8 +5404,14 @@ impl<'a> StepConverter<'a> {
             // Gap filling: fill missing triangles for boundary edge loops.
             // This catches small holes where a face's triangulation didn't
             // quite reach the boundary (e.g., bolt thread transitions).
+            //
+            // SAFETY GUARD: Only fill when boundary_edge_count is SMALL (< 50).
+            // When there are hundreds of boundary edges, the gap filling
+            // creates overlapping triangles that produce non-manifold edges
+            // and 180° dihedral angles. In that case, it's better to leave
+            // the boundary edges open than to create bad geometry.
             let report_after_tj = validate_watertight(&mesh, false);
-            if report_after_tj.boundary_edge_count > 0 {
+            if report_after_tj.boundary_edge_count > 0 && report_after_tj.boundary_edge_count < 50 {
                 let n_filled = draper_mesh::fill_boundary_gaps(&mut mesh, 32);
                 if n_filled > 0 {
                     log::info!(
@@ -5842,10 +5850,10 @@ impl<'a> StepConverter<'a> {
             }
 
             // Phase 2: 3D coordinate-based aliasing (supplementary)
-            // Use the MAX of aliasing_tolerance(), sewing_tol * 2, and old default.
+            // Use the MAX of aliasing_tolerance() and sewing_tol * 2.
             let coord_tol = tol_ctx.aliasing_tolerance()
                 .max(tol_ctx.sewing_tol * 2.0)
-                .max(tol_ctx.model_scale * 2e-3)
+                
                 .max(tol_ctx.absolute * 10.0);
             let mut coord_pair_to_step_ids: HashMap<(i64, i64, i64, i64, i64, i64), Vec<i64>> = HashMap::new();
             for face_data in &face_data_list {
@@ -8623,9 +8631,16 @@ impl<'a> StepConverter<'a> {
         }
 
         // ── Step 2: Build spatial hash grid for O(N) near-pair search ──
-        // Cell size = seed_tol = 1% of model_scale.
-        // Pairs within this distance are candidates for "should be unified".
-        let seed_tol = (tol_ctx.model_scale * 1e-2).max(tol_ctx.absolute * 100.0);
+        // Cell size = seed_tol (from ToleranceContext::seed_tolerance()).
+        //
+        // CRITICAL: The seed_tol must be small enough to only catch TRUE
+        // near-coincident pairs (vertices that should be topologically
+        // unified). If it's too large, it catches FALSE POSITIVES —
+        // vertices from DIFFERENT geometric features that happen to be
+        // nearby in 3D space.
+        //
+        // See ToleranceContext::seed_tolerance() for the full priority logic.
+        let seed_tol = tol_ctx.seed_tolerance();
         let seed_tol_sq = seed_tol * seed_tol;
         let inv_seed = 1.0 / seed_tol;
 
@@ -8678,7 +8693,15 @@ impl<'a> StepConverter<'a> {
         }
 
         // ── Step 4: Compute sewing tolerance with 2x safety margin ──────
-        let default_tol = (tol_ctx.model_scale * 1e-4).max(tol_ctx.absolute * 10.0);
+        // Default tolerance uses STEP uncertainty when available (×100,
+        // matching OpenCascade Shape Healing). Falls back to model_scale * 1e-4.
+        let default_tol = match tol_ctx.step_uncertainty {
+            Some(u) if u > 0.0 && u.is_finite() => {
+                // STEP uncertainty × 100 — matches vertex_merge_tolerance()
+                (u * 100.0).max(tol_ctx.absolute * 10.0)
+            }
+            _ => (tol_ctx.model_scale * 1e-4).max(tol_ctx.absolute * 10.0),
+        };
         let sewing_tol = if max_gap > 0.0 {
             // 2x safety margin to ensure all near-coincident vertices get
             // unified, even if there's a slightly larger gap we missed.
@@ -8690,7 +8713,9 @@ impl<'a> StepConverter<'a> {
         // ── Step 5: Cap to [1e-7, 5e-3] of model_scale for sanity ──────
         let min_tol = (tol_ctx.model_scale * 1e-7).max(1e-12);
         let max_tol = tol_ctx.model_scale * 5e-3; // 0.5% — prevents over-merging thin features
-        let final_tol = sewing_tol.max(min_tol).min(max_tol).max(default_tol.min(max_tol));
+        // Use sewing_tol, but don't let it go below default_tol (which may be
+        // STEP uncertainty-based) or above max_tol.
+        let final_tol = sewing_tol.max(default_tol).min(max_tol).max(min_tol);
 
         if max_gap > 0.0 {
             let p1 = &vertex_points[max_pair.0];
