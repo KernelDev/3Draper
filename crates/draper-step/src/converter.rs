@@ -12791,8 +12791,20 @@ fn earcutr_triangulate_planar_converter(
     }
 
     // Add vertices and triangles to the mesh
+    // Project each 3D point onto the plane to ensure coplanarity.
+    // This fixes same-face 180° angles caused by non-planar boundary points
+    // (FP drift from edge discretization).
+    let plane_origin = plane.origin;
+    let plane_normal = plane.normal;
+    let project_to_plane = |p: &Point3d| -> Point3d {
+        let dx = p.x - plane_origin.x;
+        let dy = p.y - plane_origin.y;
+        let dz = p.z - plane_origin.z;
+        let dist = dx * plane_normal.x + dy * plane_normal.y + dz * plane_normal.z;
+        Point3d::new(p.x - dist * plane_normal.x, p.y - dist * plane_normal.y, p.z - dist * plane_normal.z)
+    };
     for p in &all_3d {
-        mesh.add_vertex(*p);
+        mesh.add_vertex(project_to_plane(p));
     }
 
     // DIAGNOSTIC: Check for duplicate 3D positions in the local mesh
@@ -12821,6 +12833,52 @@ fn earcutr_triangulate_planar_converter(
     }
 
     // earcutr produces triangles as [i0, i1, i2, i0, i1, i2, ...]
+    // ============================================================
+    // Winding consistency check (fixes same-face 180° angles)
+    // ============================================================
+    // earcutr should produce all triangles with the same winding (CCW for
+    // CCW input). However, for self-intersecting or "figure-8" polygons,
+    // earcutr can produce some triangles with flipped winding. This creates
+    // 180° dihedral angles between adjacent triangles from the same face.
+    //
+    // Fix: After earcutr, compute the signed 2D area of each triangle.
+    // If the sign doesn't match the outer polygon's signed area sign,
+    // flip the triangle's winding.
+    //
+    // The outer polygon is CCW (after normalization), so all triangles
+    // should have positive signed area. Any triangle with negative signed
+    // area is flipped.
+    let mut winding_flipped = 0usize;
+    let expected_sign: f64 = 1.0; // CCW = positive signed area
+    for chunk in triangle_indices.chunks(3) {
+        if chunk.len() < 3 {
+            break;
+        }
+        let a = chunk[0] as usize;
+        let b = chunk[1] as usize;
+        let c = chunk[2] as usize;
+        if a >= n_verts || b >= n_verts || c >= n_verts {
+            continue;
+        }
+        // Get 2D coordinates
+        let pa = [coords[a * 2], coords[a * 2 + 1]];
+        let pb = [coords[b * 2], coords[b * 2 + 1]];
+        let pc = [coords[c * 2], coords[c * 2 + 1]];
+        // Signed area = 0.5 * ((bx-ax)*(cy-ay) - (cx-ax)*(by-ay))
+        let signed_area2 = (pb[0] - pa[0]) * (pc[1] - pa[1]) - (pc[0] - pa[0]) * (pb[1] - pa[1]);
+        if signed_area2 * expected_sign < 0.0 {
+            // Triangle has wrong winding — flip it by swapping b and c
+            // We'll track the flip and apply it when building the mesh
+            winding_flipped += 1;
+        }
+    }
+    if winding_flipped > 0 {
+        log::warn!(
+            "WINDING_FIX: earcutr produced {} triangles with flipped winding (out of {}) — fixing",
+            winding_flipped, triangle_indices.len() / 3,
+        );
+    }
+
     for chunk in triangle_indices.chunks(3) {
         if chunk.len() < 3 {
             break;
@@ -12848,12 +12906,32 @@ fn earcutr_triangulate_planar_converter(
             continue;
         }
 
+        // Check 2D winding — flip if inconsistent with outer polygon (CCW)
+        let pa2 = [coords[a as usize * 2], coords[a as usize * 2 + 1]];
+        let pb2 = [coords[b as usize * 2], coords[b as usize * 2 + 1]];
+        let pc2 = [coords[c as usize * 2], coords[c as usize * 2 + 1]];
+        let signed_area2 = (pb2[0] - pa2[0]) * (pc2[1] - pa2[1]) - (pc2[0] - pa2[0]) * (pb2[1] - pa2[1]);
+        let tri_flipped = signed_area2 * expected_sign < 0.0;
+
         // Verify vertices are valid
         if (a as usize) < all_3d.len() && (b as usize) < all_3d.len() && (c as usize) < all_3d.len() {
-            if forward {
-                mesh.add_triangle(a, b, c);
+            // Winding logic:
+            // - earcutr produces CCW triangles (after our CCW normalization)
+            // - If earcutr produced a CW triangle (tri_flipped), we need to
+            //   flip it back to CCW before applying the forward flag
+            // - forward=true: keep CCW → add_triangle(a, b, c)
+            // - forward=false: swap to CW → add_triangle(a, c, b)
+            //
+            // When tri_flipped is true, swap b and c to correct the winding
+            let (b_final, c_final) = if tri_flipped {
+                (c, b) // flip
             } else {
-                mesh.add_triangle(a, c, b);
+                (b, c) // keep
+            };
+            if forward {
+                mesh.add_triangle(a, b_final, c_final);
+            } else {
+                mesh.add_triangle(a, c_final, b_final);
             }
         }
     }

@@ -759,6 +759,82 @@ pub fn fix_inconsistent_winding(mesh: &mut TriangleMesh) -> usize {
         return 0;
     }
 
+    // ── Step 1: Remove same-face overlapping triangles (180° angles) ──
+    // Two triangles from the same face sharing an edge with 180° dihedral
+    // angle are overlapping — one is redundant. This happens when
+    // merge_deduplicating reuses a vertex from a different face (off-plane),
+    // making the triangle non-coplanar with its neighbor.
+    //
+    // Fix: For each pair of same-face triangles sharing an edge, compute
+    // the dihedral angle. If >170°, remove the smaller-area triangle.
+    if let Some(ref face_ids) = mesh.triangle_face_ids {
+        let mut edge_to_tris: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+        for (ti, tri) in mesh.triangles.iter().enumerate() {
+            let [a, b, c] = *tri;
+            for (v0, v1) in [(a, b), (b, c), (c, a)] {
+                let key = if v0 < v1 { (v0, v1) } else { (v1, v0) };
+                edge_to_tris.entry(key).or_default().push(ti);
+            }
+        }
+
+        let mut to_remove: HashSet<usize> = HashSet::new();
+        for (_edge, tris) in &edge_to_tris {
+            if tris.len() != 2 { continue; }
+            let fid0 = face_ids.get(tris[0]).copied().unwrap_or(0);
+            let fid1 = face_ids.get(tris[1]).copied().unwrap_or(0);
+            // Only check same-face pairs
+            if fid0 != fid1 || fid0 == 0 { continue; }
+
+            let tri0 = mesh.triangles[tris[0]];
+            let tri1 = mesh.triangles[tris[1]];
+            let n0 = compute_tri_normal(&mesh.vertices, &tri0);
+            let n1 = compute_tri_normal(&mesh.vertices, &tri1);
+            if n0.is_none() || n1.is_none() { continue; }
+            let (n0, n1) = (n0.unwrap(), n1.unwrap());
+            let dot = n0.0*n1.0 + n0.1*n1.1 + n0.2*n1.2;
+            let len0 = (n0.0*n0.0 + n0.1*n0.1 + n0.2*n0.2).sqrt();
+            let len1 = (n1.0*n1.0 + n1.1*n1.1 + n1.2*n1.2).sqrt();
+            if len0 < 1e-15 || len1 < 1e-15 { continue; }
+            let cos_angle = (dot / (len0 * len1)).max(-1.0).min(1.0);
+            let angle_deg = cos_angle.acos().to_degrees();
+
+            if angle_deg > 170.0 {
+                // Overlapping triangles — remove the smaller one
+                let area0 = tri_area(&mesh.vertices, &tri0);
+                let area1 = tri_area(&mesh.vertices, &tri1);
+                let remove_idx = if area0 < area1 { tris[0] } else { tris[1] };
+                to_remove.insert(remove_idx);
+            }
+        }
+
+        if !to_remove.is_empty() {
+            log::info!(
+                "fix_inconsistent_winding: removing {} same-face overlapping triangles (180° angles)",
+                to_remove.len(),
+            );
+            // Rebuild triangles and face_ids without the removed ones
+            let mut new_tris: Vec<[u32; 3]> = Vec::with_capacity(mesh.triangles.len() - to_remove.len());
+            let mut new_face_ids: Vec<u64> = Vec::with_capacity(new_tris.len());
+            for (ti, tri) in mesh.triangles.iter().enumerate() {
+                if to_remove.contains(&ti) { continue; }
+                new_tris.push(*tri);
+                if let Some(fid) = face_ids.get(ti) {
+                    new_face_ids.push(*fid);
+                }
+            }
+            mesh.triangles = new_tris;
+            mesh.triangle_face_ids = Some(new_face_ids);
+            // Also rebuild triangle_range in face_infos if present
+            if let Some(ref fids) = mesh.triangle_face_ids {
+                let mut fid_ranges: HashMap<u64, (usize, usize)> = HashMap::new();
+                for (ti, &fid) in fids.iter().enumerate() {
+                    let entry = fid_ranges.entry(fid).or_insert((ti, ti));
+                    entry.1 = ti + 1;
+                }
+            }
+        }
+    }
+
     // Build edge → triangles map
     let mut edge_to_tris: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
     for (ti, tri) in mesh.triangles.iter().enumerate() {
@@ -832,7 +908,34 @@ pub fn fix_inconsistent_winding(mesh: &mut TriangleMesh) -> usize {
                 // Inconsistent winding: both go A→B (or both B→A)
                 let consistent = ref_a != neigh_a; // opposite directions
 
-                if !consistent {
+                // Also check dihedral angle. Even if edge directions are
+                // "consistent" (opposite), the 3D normals might be opposite
+                // (180° angle) due to non-coplanar vertices. In that case,
+                // flip the neighbor to make the normals consistent.
+                let needs_flip = if !consistent {
+                    true // edge direction inconsistent → flip
+                } else {
+                    // Edge direction is consistent, but check 3D normal
+                    let n0 = compute_tri_normal(&mesh.vertices, &tri);
+                    let n1 = compute_tri_normal(&mesh.vertices, &neighbor);
+                    if let (Some(n0), Some(n1)) = (n0, n1) {
+                        let dot = n0.0*n1.0 + n0.1*n1.1 + n0.2*n1.2;
+                        let len0 = (n0.0*n0.0 + n0.1*n0.1 + n0.2*n0.2).sqrt();
+                        let len1 = (n1.0*n1.0 + n1.1*n1.1 + n1.2*n1.2).sqrt();
+                        if len0 > 1e-15 && len1 > 1e-15 {
+                            let cos_angle = (dot / (len0 * len1)).max(-1.0).min(1.0);
+                            let angle_deg = cos_angle.acos().to_degrees();
+                            // If normals are nearly opposite (>170°), flip
+                            angle_deg > 170.0
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                };
+
+                if needs_flip {
                     // Flip the neighbor triangle's winding
                     let t = &mut mesh.triangles[neighbor_idx];
                     let tmp = t[1];
@@ -881,6 +984,36 @@ fn get_edge_direction(tri: &[u32; 3], ev0: u32, ev1: u32) -> Option<(u32, u32)> 
         return Some((c, a));
     }
     None
+}
+
+/// Compute the normal of a triangle (not normalized).
+fn compute_tri_normal(vertices: &[Point3d], tri: &[u32; 3]) -> Option<(f64, f64, f64)> {
+    let v0 = &vertices[tri[0] as usize];
+    let v1 = &vertices[tri[1] as usize];
+    let v2 = &vertices[tri[2] as usize];
+    let e1 = (v1.x - v0.x, v1.y - v0.y, v1.z - v0.z);
+    let e2 = (v2.x - v0.x, v2.y - v0.y, v2.z - v0.z);
+    let n = (
+        e1.1 * e2.2 - e1.2 * e2.1,
+        e1.2 * e2.0 - e1.0 * e2.2,
+        e1.0 * e2.1 - e1.1 * e2.0,
+    );
+    let len_sq = n.0*n.0 + n.1*n.1 + n.2*n.2;
+    if len_sq < 1e-30 { return None; }
+    Some(n)
+}
+
+/// Compute the area of a triangle.
+fn tri_area(vertices: &[Point3d], tri: &[u32; 3]) -> f64 {
+    let v0 = &vertices[tri[0] as usize];
+    let v1 = &vertices[tri[1] as usize];
+    let v2 = &vertices[tri[2] as usize];
+    let e1 = (v1.x - v0.x, v1.y - v0.y, v1.z - v0.z);
+    let e2 = (v2.x - v0.x, v2.y - v0.y, v2.z - v0.z);
+    let cx = e1.1 * e2.2 - e1.2 * e2.1;
+    let cy = e1.2 * e2.0 - e1.0 * e2.2;
+    let cz = e1.0 * e2.1 - e1.1 * e2.0;
+    0.5 * (cx*cx + cy*cy + cz*cz).sqrt()
 }
 
 

@@ -8960,13 +8960,30 @@ fn triangulate_3d_polygon_fallback(
         outer_only_mode = true; // fan uses only outer + centroid, no hole vertices
     }
 
-    // Step 6: Build mesh using ORIGINAL 3D points (preserves watertightness)
+    // Step 6: Build mesh using 3D points projected onto the best-fit plane.
+    //
+    // CRITICAL: For planar faces (Plane surface type), the boundary points
+    // should all lie on the same plane. However, due to FP drift in edge
+    // discretization (especially when different EDGE_CURVE entities share
+    // the same boundary), the points can be slightly off-plane. Using these
+    // non-coplanar points directly produces triangles with inconsistent 3D
+    // normals — even though the 2D triangulation is correct — creating
+    // 180° dihedral angles between adjacent triangles from the same face.
+    //
+    // Fix: Project each 3D point onto the best-fit plane. The projection
+    // distance is typically < 1e-6 (FP drift), so it doesn't affect
+    // watertightness (the merge tolerance catches differences this small).
+    // But it ensures all triangles are coplanar → consistent 3D normals.
+    //
+    // The projection formula: p' = p - ((p - origin) · normal) * normal
+    // where origin = (cx, cy, cz) and normal = (nx, ny, nz).
     let mut mesh = TriangleMesh::new();
 
     // Compute the face normal from the best-fit plane (used for vertex normals)
     let face_normal: [f64; 3] = [nx, ny, nz];
 
     // If using fan-from-centroid, prepend centroid as vertex 0.
+    // The centroid is already on the best-fit plane (computed from 2D).
     let mut vertex_map: Vec<u32> = Vec::with_capacity(all_2d.len() + 1);
     if let Some(centroid) = fan_centroid_3d {
         let vi = mesh.add_vertex(centroid);
@@ -8974,9 +8991,20 @@ fn triangulate_3d_polygon_fallback(
         vertex_map.push(vi);
     }
 
-    // Add outer boundary vertices
+    // Helper: project a 3D point onto the best-fit plane.
+    // p' = p - ((p - origin) · normal) * normal
+    let project_to_plane = |p: &Point3d| -> Point3d {
+        let dx = p.x - cx;
+        let dy = p.y - cy;
+        let dz = p.z - cz;
+        let dist = dx * nx + dy * ny + dz * nz;
+        Point3d::new(p.x - dist * nx, p.y - dist * ny, p.z - dist * nz)
+    };
+
+    // Add outer boundary vertices (projected onto best-fit plane)
     for p in boundary_3d {
-        let vi = mesh.add_vertex(*p);
+        let projected = project_to_plane(p);
+        let vi = mesh.add_vertex(projected);
         mesh.add_vertex_normal(vi, face_normal);
         vertex_map.push(vi);
     }
@@ -8993,7 +9021,8 @@ fn triangulate_3d_polygon_fallback(
                 continue;
             }
             for p in hole {
-                let vi = mesh.add_vertex(*p);
+                let projected = project_to_plane(p);
+                let vi = mesh.add_vertex(projected);
                 mesh.add_vertex_normal(vi, face_normal);
                 vertex_map.push(vi);
             }
@@ -9001,6 +9030,20 @@ fn triangulate_3d_polygon_fallback(
     }
 
     // Add triangles (filter degenerate)
+    // ============================================================
+    // Winding consistency check (fixes same-face 180° angles)
+    // ============================================================
+    // earcutr should produce all triangles with the same winding (CCW for
+    // CCW input). However, for self-intersecting or "figure-8" polygons,
+    // earcutr can produce some triangles with flipped winding. This creates
+    // 180° dihedral angles between adjacent triangles from the same face.
+    //
+    // Fix: After earcutr, compute the signed 2D area of each triangle AND
+    // the 3D normal. If the 3D normal points against the best-fit plane
+    // normal, flip the triangle. This catches both 2D winding issues AND
+    // non-planar boundary points that cause 3D normal inconsistency.
+    let expected_sign: f64 = 1.0; // CCW = positive signed area
+    let face_normal_3d = (nx, ny, nz);
     for chunk in triangle_indices.chunks(3) {
         if chunk.len() < 3 { break; }
         let a = chunk[0] as usize;
@@ -9015,10 +9058,46 @@ fn triangulate_3d_polygon_fallback(
         if va == vb || vb == vc || va == vc {
             continue;
         }
-        if forward {
-            mesh.add_triangle(va, vb, vc);
+
+        // Check 2D winding — flip if inconsistent with outer polygon (CCW)
+        let pa2 = all_2d[a];
+        let pb2 = all_2d[b];
+        let pc2 = all_2d[c];
+        let signed_area2 = (pb2.0 - pa2.0) * (pc2.1 - pa2.1) - (pc2.0 - pa2.0) * (pb2.1 - pa2.1);
+        let tri_flipped_2d = signed_area2 * expected_sign < 0.0;
+
+        // Check 3D normal against best-fit plane normal
+        let pa3 = mesh.vertices[va as usize];
+        let pb3 = mesh.vertices[vb as usize];
+        let pc3 = mesh.vertices[vc as usize];
+        let e1 = (pb3.x - pa3.x, pb3.y - pa3.y, pb3.z - pa3.z);
+        let e2 = (pc3.x - pa3.x, pc3.y - pa3.y, pc3.z - pa3.z);
+        let n3 = (
+            e1.1 * e2.2 - e1.2 * e2.1,
+            e1.2 * e2.0 - e1.0 * e2.2,
+            e1.0 * e2.1 - e1.1 * e2.0,
+        );
+        let dot = n3.0 * face_normal_3d.0 + n3.1 * face_normal_3d.1 + n3.2 * face_normal_3d.2;
+        // If the 3D normal points against the face normal, flip the triangle
+        let tri_flipped_3d = dot < 0.0;
+
+        // Combined flip: flip if either 2D or 3D check says flip
+        let tri_flipped = tri_flipped_2d != tri_flipped_3d; // XOR: if exactly one says flip
+
+        // Winding logic:
+        // - earcutr produces CCW triangles (after our CCW normalization)
+        // - If the triangle needs flipping (2D or 3D check), flip it
+        // - forward=true: keep CCW → add_triangle(a, b, c)
+        // - forward=false: swap to CW → add_triangle(a, c, b)
+        let (b_final, c_final) = if tri_flipped {
+            (vc, vb) // flip
         } else {
-            mesh.add_triangle(va, vc, vb);
+            (vb, vc) // keep
+        };
+        if forward {
+            mesh.add_triangle(va, b_final, c_final);
+        } else {
+            mesh.add_triangle(va, c_final, b_final);
         }
     }
 
