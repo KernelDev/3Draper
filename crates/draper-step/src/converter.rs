@@ -1965,6 +1965,9 @@ impl BrepSession {
             }
         }
 
+        // ─── Fix inconsistent winding (face orientation repair) ──────────
+        draper_mesh::fix_inconsistent_winding(&mut self.mesh);
+
         // Remove duplicate triangles
         let dup_removed = self.mesh.remove_duplicate_triangles();
         if dup_removed > 0 {
@@ -4551,6 +4554,15 @@ impl<'a> StepConverter<'a> {
                 }
             }
         }
+
+        // ─── Fix inconsistent winding (face orientation repair) ──────────
+        // After all welding and gap filling, some faces may have their
+        // normals flipped relative to adjacent faces. This creates 180°
+        // dihedral angles at shared edges. The fix_inconsistent_winding
+        // function uses BFS flood-fill to propagate consistent winding
+        // from a reference triangle to all connected triangles.
+        draper_mesh::fix_inconsistent_winding(&mut mesh);
+
         // When the STEP file uses different VERTEX_POINT entities for the
         // same geometric boundary (e.g., Plane face uses LINE, NURBS face
         // uses NURBS curve), bit-exact dedup can't merge the boundary
@@ -5421,6 +5433,9 @@ impl<'a> StepConverter<'a> {
                 }
             }
         }
+
+        // ─── Fix inconsistent winding (face orientation repair) ──────────
+        draper_mesh::fix_inconsistent_winding(&mut mesh);
 
         // Remove duplicate triangles (same 3 vertex indices). These arise when
         // two STEP faces overlap geometrically and share the same edges — common

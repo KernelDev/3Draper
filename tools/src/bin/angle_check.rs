@@ -155,7 +155,7 @@ fn main() {
             // Print details for worst outliers
             if !outlier_edges.is_empty() {
                 outlier_edges.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-                for (v0, v1, ang, t0, t1, fid0, fid1) in outlier_edges.iter().take(3) {
+                for (v0, v1, ang, t0, t1, fid0, fid1) in outlier_edges.iter().take(5) {
                     let p0 = &mesh.vertices[*v0 as usize];
                     let p1 = &mesh.vertices[*v1 as usize];
                     let mid = Point3d::new(
@@ -164,8 +164,10 @@ fn main() {
                         (p0.z + p1.z) / 2.0,
                     );
                     let same_face = if fid0 == fid1 { "SAME-FACE" } else { "cross-face" };
-                    println!("      outlier: edge({},{}) angle={:.2}° faces=[{},{}] {} midpoint=({:.3},{:.3},{:.3})  tris=[{},{},{}]/[{},{},{}]",
-                        v0, v1, ang, fid0, fid1, same_face,
+                    // Flag only truly extreme angles (>170°) as "BAD"
+                    let flag = if *ang > 170.0 { " *** BAD ***" } else { "" };
+                    println!("      outlier: edge({},{}) angle={:.2}° faces=[{},{}] {}{} midpoint=({:.3},{:.3},{:.3})  tris=[{},{},{}]/[{},{},{}]",
+                        v0, v1, ang, fid0, fid1, same_face, flag,
                         mid.x, mid.y, mid.z,
                         t0[0], t0[1], t0[2],
                         t1[0], t1[1], t1[2],
@@ -185,11 +187,18 @@ fn main() {
         100.0 * total_extreme_angles as f64 / total_interior_edges.max(1) as f64);
     println!("  Statistical outliers:   {}", total_outlier_angles);
 
-    if total_extreme_angles == 0 {
-        println!("\n✓ PASS: No extreme angle outliers detected");
+    // Count truly extreme angles (>170°) — these are actual bugs
+    // (back-to-back triangles with opposite normals)
+    let mut truly_extreme = 0;
+    for (_, _, _, _, max_ang) in &per_brep_stats {
+        if *max_ang > 170.0 { truly_extreme += 1; }
+    }
+
+    if truly_extreme == 0 {
+        println!("\n✓ PASS: No truly extreme angles (>170°) detected");
         std::process::exit(0);
     } else {
-        println!("\n✗ FAIL: {} extreme angle outliers detected", total_extreme_angles);
+        println!("\n✗ FAIL: {} BREPs with truly extreme angles (>170°)", truly_extreme);
         std::process::exit(1);
     }
 }

@@ -734,6 +734,156 @@ fn triangle_area_3d(v0: &Point3d, v1: &Point3d, v2: &Point3d) -> f64 {
 // Vertex compaction — remove unused vertices after mesh surgery
 // ============================================================
 
+/// Fix inconsistent winding between adjacent triangles.
+///
+/// For each interior edge (shared by exactly 2 triangles), compute the
+/// dihedral angle between the two triangle normals. If the angle is
+/// extremely large (>170°), the two triangles have opposite normals,
+/// which means one of them has reversed winding.
+///
+/// This function uses a BFS/flood-fill approach:
+/// 1. Start from a "reference" triangle (assumed to have correct winding).
+/// 2. For each adjacent triangle sharing an edge, check if the winding
+///    is consistent. If not, flip the adjacent triangle.
+/// 3. Continue BFS until all connected triangles are processed.
+///
+/// This fixes the common case where some faces have their normals flipped
+/// relative to adjacent faces. It does NOT fix same-face triangulation bugs
+/// (where earcutr produces inconsistent winding within a single face).
+///
+/// Returns the number of triangles flipped.
+pub fn fix_inconsistent_winding(mesh: &mut TriangleMesh) -> usize {
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    if mesh.triangles.is_empty() {
+        return 0;
+    }
+
+    // Build edge → triangles map
+    let mut edge_to_tris: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+    for (ti, tri) in mesh.triangles.iter().enumerate() {
+        let [a, b, c] = *tri;
+        for (v0, v1) in [(a, b), (b, c), (c, a)] {
+            let key = if v0 < v1 { (v0, v1) } else { (v1, v0) };
+            edge_to_tris.entry(key).or_default().push(ti);
+        }
+    }
+
+    // Build triangle adjacency: for each triangle, list of (neighbor_tri, shared_edge)
+    let mut tri_adjacency: HashMap<usize, Vec<(usize, u32, u32)>> = HashMap::new();
+    for (edge, tris) in &edge_to_tris {
+        if tris.len() == 2 {
+            tri_adjacency.entry(tris[0]).or_default().push((tris[1], edge.0, edge.1));
+            tri_adjacency.entry(tris[1]).or_default().push((tris[0], edge.0, edge.1));
+        }
+    }
+
+    // BFS flood-fill: for each connected component, pick a reference triangle
+    // and propagate consistent winding.
+    let mut visited = vec![false; mesh.triangles.len()];
+    let mut flipped_count = 0usize;
+
+    for start_tri in 0..mesh.triangles.len() {
+        if visited[start_tri] {
+            continue;
+        }
+
+        // Start BFS from this triangle (reference winding)
+        let mut queue: VecDeque<usize> = VecDeque::new();
+        queue.push_back(start_tri);
+        visited[start_tri] = true;
+
+        while let Some(tri_idx) = queue.pop_front() {
+            let neighbors = match tri_adjacency.get(&tri_idx) {
+                Some(n) => n,
+                None => continue,
+            };
+
+            let tri = mesh.triangles[tri_idx];
+
+            for &(neighbor_idx, ev0, ev1) in neighbors {
+                if visited[neighbor_idx] {
+                    continue;
+                }
+                visited[neighbor_idx] = true;
+
+                let neighbor = mesh.triangles[neighbor_idx];
+
+                // Check winding consistency:
+                // For a shared edge (ev0, ev1), the two triangles should
+                // traverse it in OPPOSITE directions.
+                // - Reference tri: edge goes ev0→ev1 (or ev1→ev0)
+                // - Neighbor tri: should go ev1→ev0 (or ev0→ev1) — opposite
+
+                // Find the directed edge in the reference triangle
+                let ref_dir = get_edge_direction(&tri, ev0, ev1);
+                let neigh_dir = get_edge_direction(&neighbor, ev0, ev1);
+
+                if ref_dir.is_none() || neigh_dir.is_none() {
+                    // Edge not found in one of the triangles — shouldn't happen
+                    queue.push_back(neighbor_idx);
+                    continue;
+                }
+
+                let (ref_a, ref_b) = ref_dir.unwrap();
+                let (neigh_a, neigh_b) = neigh_dir.unwrap();
+
+                // Consistent winding: ref goes A→B, neighbor goes B→A
+                // Inconsistent winding: both go A→B (or both B→A)
+                let consistent = ref_a != neigh_a; // opposite directions
+
+                if !consistent {
+                    // Flip the neighbor triangle's winding
+                    let t = &mut mesh.triangles[neighbor_idx];
+                    let tmp = t[1];
+                    t[1] = t[2];
+                    t[2] = tmp;
+                    flipped_count += 1;
+                }
+
+                queue.push_back(neighbor_idx);
+            }
+        }
+    }
+
+    // Also flip face normals if they exist
+    if let Some(ref mut face_normals) = mesh.face_normals {
+        // After flipping triangles, the face normals might be wrong.
+        // But we can't easily know which face normals to flip without
+        // re-computing. Leave them as-is — the visual normals are computed
+        // from triangle winding, not face_normals.
+        let _ = face_normals;
+    }
+
+    if flipped_count > 0 {
+        log::info!(
+            "fix_inconsistent_winding: flipped {} triangles to achieve consistent winding",
+            flipped_count,
+        );
+    }
+
+    flipped_count
+}
+
+/// Get the directed edge (a, b) for edge (ev0, ev1) in triangle [v0, v1, v2].
+/// Returns Some((a, b)) where the edge goes a→b in the triangle's winding.
+/// Returns None if the edge is not part of the triangle.
+fn get_edge_direction(tri: &[u32; 3], ev0: u32, ev1: u32) -> Option<(u32, u32)> {
+    let [a, b, c] = *tri;
+    // Check all 3 edges: a→b, b→c, c→a
+    if (a == ev0 && b == ev1) || (a == ev1 && b == ev0) {
+        return Some((a, b));
+    }
+    if (b == ev0 && c == ev1) || (b == ev1 && c == ev0) {
+        return Some((b, c));
+    }
+    if (c == ev0 && a == ev1) || (c == ev1 && a == ev0) {
+        return Some((c, a));
+    }
+    None
+}
+
+
 /// Compute the mesh-based sewing tolerance by scanning boundary vertices
 /// for near-coincident pairs from different faces.
 ///
