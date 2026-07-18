@@ -4605,3 +4605,25 @@ Stage Summary:
 - nist_cone.stp: still not watertight (known cone issue, separate fix needed)
 - The auto-tolerance adapts to each model's actual vertex distribution
 - Two-pass approach: VERTEX_POINT-based (topology) + mesh-based (geometry)
+
+---
+Task ID: auto-sewing-tol-merge
+Agent: Main
+Task: Merge auto-sewing-tol with remote's step_uncertainty approach
+
+Work Log:
+- Pulled remote changes (ece246d: STEP uncertainty-based vertex merging)
+- Resolved merge conflicts in tolerance.rs and converter.rs
+- Combined both approaches using MAX:
+  - merge_tol = max(vertex_merge_tolerance(), sewing_tol)
+  - weld_tol = max(weld_tolerance(), sewing_tol, absolute * 10)
+  - coord_tol = max(aliasing_tolerance(), sewing_tol * 2, model_scale * 2e-3)
+- Pushed to GitHub (commit 9915b14)
+
+Stage Summary:
+- brick_thin_round.stp: 1020 → 277 boundary edges (73% reduction)
+- brick_thin.stp: 8786 → 0 boundary edges, 131 non-manifold (almost watertight!)
+- as1-oc-214_bolt.stp: 138 → 0 boundary edges, WATERTIGHT!
+- nist_cube/cylinder/sphere: remain WATERTIGHT (no regression)
+- The combined approach uses both CAD-system-stated precision (step_uncertainty)
+  and empirical vertex gaps (sewing_tol) for maximum coverage
