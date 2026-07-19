@@ -1898,6 +1898,13 @@ pub fn repair_t_junctions(mesh: &mut TriangleMesh, tolerance: f64) -> usize {
         return 0;
     }
 
+    // Record initial triangle count to detect explosion.
+    // If triangle count grows by more than 3× after any iteration, abort
+    // (the mesh has a systemic non-manifold issue that T-junction repair
+    // can't fix, and continuing would cause OOM / browser hang).
+    let initial_tri_count = mesh.triangles.len();
+    let explosion_threshold = (initial_tri_count.saturating_mul(3)).max(50000);
+
     for _iter in 0..max_iterations {
         let n_verts = mesh.vertices.len();
 
@@ -2200,6 +2207,19 @@ pub fn repair_t_junctions(mesh: &mut TriangleMesh, tolerance: f64) -> usize {
             triangles_to_remove.len(),
             n_new,
         );
+
+        // ── Explosion guard ───────────────────────────────────────────────
+        // If the mesh has grown by more than 3× (or >50K triangles),
+        // abort. Continuing would cause OOM / browser hang. The mesh has
+        // a systemic non-manifold issue that T-junction repair can't fix.
+        let current_count = mesh.triangles.len();
+        if current_count > explosion_threshold {
+            log::warn!(
+                "repair_t_junctions: aborting after iter {} — triangle count {} exceeds explosion threshold {} (initial {})",
+                _iter, current_count, explosion_threshold, initial_tri_count,
+            );
+            break;
+        }
     }
 
     if total_repaired > 0 {
