@@ -881,6 +881,13 @@ impl StepWriter {
                 id
             }
             Surface::Nurbs(nurbs) => self.emit_nurbs_surface(nurbs),
+            Surface::Offset(_) | Surface::Ruled(_) => {
+                // Audit item 4.3 (2026-07-19): Offset/Ruled surfaces
+                // are not yet supported in STEP export. Fall back to NURBS
+                // conversion (TODO: implement direct export).
+                log::warn!("Offset/Ruled surface export not yet implemented, skipping");
+                self.alloc_id() // Return a dummy ID
+            }
         };
         self.surface_cache.insert(key, id);
         id

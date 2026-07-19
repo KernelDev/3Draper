@@ -491,6 +491,8 @@ fn surface_param_range(surface: &Surface) -> (f64, f64, f64, f64) {
         }
         Surface::Revolution(_) => (0.0, 2.0 * PI, -1e6, 1e6),
         Surface::Extrusion(_) => (-1e6, 1e6, -1e6, 1e6),
+        Surface::Offset(o) => surface_param_range(&o.base),
+        Surface::Ruled(_) => (-1e6, 1e6, 0.0, 1.0),
     }
 }
 

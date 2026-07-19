@@ -339,6 +339,8 @@ fn surface_param_range_u(surface: &Surface) -> (f64, f64) {
         Surface::Cylinder(_) | Surface::Cone(_) | Surface::Sphere(_) |
         Surface::Torus(_) | Surface::Revolution(_) => (0.0, 2.0 * PI),
         Surface::Nurbs(n) => n.u_range(),
+        Surface::Offset(o) => surface_param_range_u(&o.base),
+        Surface::Ruled(_) => (-1e6, 1e6),
     }
 }
 
@@ -352,6 +354,8 @@ fn surface_param_range_v(surface: &Surface) -> (f64, f64) {
         Surface::Sphere(_) => (0.0, PI),
         Surface::Torus(_) => (0.0, 2.0 * PI),
         Surface::Nurbs(n) => n.v_range(),
+        Surface::Offset(o) => surface_param_range_v(&o.base),
+        Surface::Ruled(_) => (0.0, 1.0),
     }
 }
 

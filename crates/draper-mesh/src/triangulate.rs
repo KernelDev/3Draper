@@ -1551,6 +1551,12 @@ fn triangulate_face_impl(face: &Face, params: &TriangulationParams, cache: &Edge
                 crate::edge_cache::clear_nurbs_projection_cache();
                 mesh
             }
+            Surface::Offset(_) | Surface::Ruled(_) => {
+                // Audit item 4.3 (2026-07-19): Offset/Ruled surfaces
+                // fall back to generic face triangulation.
+                // TODO: implement specialized triangulators for these types.
+                crate::triangulate_face(face, params)
+            }
         }
     } else {
         TriangleMesh::new()
@@ -9764,6 +9770,8 @@ fn estimate_face_complexity(face: &Face) -> u32 {
             Surface::Revolution(_) => 70,
             Surface::Extrusion(_) => 30,
             Surface::Plane(_) => 10,
+            Surface::Offset(_) => 80,
+            Surface::Ruled(_) => 50,
         }
     } else {
         0

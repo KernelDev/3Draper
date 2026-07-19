@@ -233,6 +233,8 @@ fn surface_u_range(surface: &Surface) -> (f64, f64) {
             let (u_min, u_max) = n.u_range();
             (u_min, u_max)
         }
+        Surface::Offset(_) => (-1e6, 1e6),
+        Surface::Ruled(_) => (-1e6, 1e6),
     }
 }
 
@@ -249,6 +251,8 @@ fn surface_v_range(surface: &Surface) -> (f64, f64) {
             let (v_min, v_max) = n.v_range();
             (v_min, v_max)
         }
+        Surface::Offset(_) => (-1e6, 1e6),
+        Surface::Ruled(_) => (0.0, 1.0),
     }
 }
 

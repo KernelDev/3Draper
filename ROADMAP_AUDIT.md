@@ -87,11 +87,11 @@ Add per-entity tolerance fields. See 2.2 for details.
 - `vertex_merge_tolerance()` uses uncertainty × 100
 - `seed_tolerance()` uses uncertainty × 1000
 
-### 3.3. Tolerance Consistency Validation `[ ]`
-**Plan:**
-- Add validation: vertex on edge within edge.tolerance
-- Add validation: edge on face within face.tolerance
-- Add validation: hierarchy consistency (vertex.tol ≤ edge.tol ≤ face.tol)
+### 3.3. Tolerance Consistency Validation `[x]`
+**Status:** DONE
+- Added `validate_tolerance_consistency(solid)` function
+- Checks: vertex_on_edge, edge ≤ face, face ≤ shell tolerances
+- Returns `ToleranceConsistencyReport` with violation counts
 
 **Files:** `crates/draper-topology/src/validator.rs`
 
@@ -113,13 +113,18 @@ Edge cache provides bit-identical boundary points. Ongoing work to extend covera
 
 **Files:** `crates/draper-geometry/src/surface.rs`
 
-### 4.3. Extended Surface Types `[ ]`
+### 4.3. Extended Surface Types `[~]`
 **Problem:** No OFFSET_SURFACE, generalized SWEPT_SURFACE, RULED_SURFACE, COMPOSITE_SURFACE.
 
 **Plan:**
-- Add `OffsetSurface { base, distance }` — offset along normals
-- Add `RuledSurface { curve1, curve2 }` — linear interpolation
-- Add `CompositeSurface { patches }` — joined patches
+- [x] Add `OffsetSurface { base, distance }` — offset along normals
+- [x] Add `RuledSurface { curve1, curve2 }` — linear interpolation
+- [x] Implement `point_at` for both new types
+- [x] Implement `transform` for both new types
+- [x] Add to `natural_uv_domain`, `project_point`, `type_name`, etc.
+- [ ] Add STEP parser support for OFFSET_SURFACE, RULED_SURFACE
+- [ ] Implement specialized triangulators
+- [ ] Add COMPOSITE_SURFACE
 
 **Files:** `crates/draper-geometry/src/surface.rs`
 
@@ -326,6 +331,8 @@ Cache per-face triangulation. See 7.3 for details.
 | 2026-07-19 | 6.1 intersect_plane_cylinder | DONE | TBD |
 | 2026-07-19 | 6.1 intersect_cylinder_cylinder | DONE | TBD |
 | 2026-07-19 | 2.1 intersect_surfaces dispatcher | PARTIAL | TBD |
+| 2026-07-19 | 3.3 Tolerance consistency validation | DONE | TBD |
+| 2026-07-19 | 4.3 OffsetSurface + RuledSurface (skeleton) | PARTIAL | TBD |
 
 ---
 

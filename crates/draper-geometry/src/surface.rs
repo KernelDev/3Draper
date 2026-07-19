@@ -85,6 +85,16 @@ pub enum Surface {
     Extrusion(ExtrusionSurface),
     /// NURBS surface
     Nurbs(NurbsSurface),
+    /// Offset surface — base surface offset along its normals by `distance`.
+    ///
+    /// Audit item 4.3 (2026-07-19): Added for extended surface types.
+    /// S(u,v) = base.point_at(u,v) + distance * base.normal_at(u,v)
+    Offset(OffsetSurface),
+    /// Ruled surface — linear interpolation between two curves.
+    ///
+    /// Audit item 4.3 (2026-07-19): Added for extended surface types.
+    /// S(u,v) = (1-v)*curve1.point_at(u) + v*curve2.point_at(u)
+    Ruled(RuledSurface),
 }
 
 /// A plane in 3D space.
@@ -740,6 +750,63 @@ impl ExtrusionSurface {
         );
 
         SurfaceDerivatives { point, du, dv }
+    }
+}
+
+/// Offset surface — base surface offset along its normals by `distance`.
+///
+/// Audit item 4.3 (2026-07-19): Added for extended surface types.
+///
+/// S(u,v) = base.point_at(u,v) + distance * base.normal_at(u,v)
+///
+/// Common use cases:
+/// - Thickening a sheet metal face
+/// - Creating a shell offset for blending operations
+/// - Offset surfaces in fillet/blend generation
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct OffsetSurface {
+    /// The base surface to offset from.
+    pub base: Box<Surface>,
+    /// Offset distance along the base surface's normals.
+    /// Positive = offset in normal direction, negative = opposite.
+    pub distance: f64,
+}
+
+impl OffsetSurface {
+    pub fn new(base: Surface, distance: f64) -> Self {
+        Self {
+            base: Box::new(base),
+            distance,
+        }
+    }
+}
+
+/// Ruled surface — linear interpolation between two curves.
+///
+/// Audit item 4.3 (2026-07-19): Added for extended surface types.
+///
+/// S(u,v) = (1-v)*curve1.point_at(u) + v*curve2.point_at(u)
+///
+/// Common use cases:
+/// - Lofting between two profiles
+/// - Connecting two edges of a face with a smooth transition
+/// - Draft surfaces in molding design
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct RuledSurface {
+    /// First curve (at v=0).
+    pub curve1: Box<Curve3d>,
+    /// Second curve (at v=1).
+    pub curve2: Box<Curve3d>,
+}
+
+impl RuledSurface {
+    pub fn new(curve1: Curve3d, curve2: Curve3d) -> Self {
+        Self {
+            curve1: Box::new(curve1),
+            curve2: Box::new(curve2),
+        }
     }
 }
 
@@ -1820,6 +1887,8 @@ impl Surface {
             }
             Surface::Revolution(_) => false, // Can't easily tell without evaluating
             Surface::Extrusion(_) => false,
+            Surface::Offset(_) => false, // Offset surfaces inherit base's degeneracy
+            Surface::Ruled(_) => false,  // Ruled surfaces need both curves checked
             Surface::Nurbs(n) => {
                 // Check if all control points are coincident
                 if n.control_points.is_empty() || n.control_points[0].is_empty() {
@@ -1847,6 +1916,8 @@ impl Surface {
             Surface::Revolution(_) => "Revolution",
             Surface::Extrusion(_) => "Extrusion",
             Surface::Nurbs(_) => "Nurbs",
+            Surface::Offset(_) => "Offset",
+            Surface::Ruled(_) => "Ruled",
         }
     }
 
@@ -1861,6 +1932,26 @@ impl Surface {
             Surface::Revolution(r) => r.point_at(u, v),
             Surface::Extrusion(e) => e.point_at(u, v),
             Surface::Nurbs(n) => nurbs_surface_eval(n, u, v),
+            Surface::Offset(o) => {
+                // S(u,v) = base.point_at(u,v) + distance * base.normal_at(u,v)
+                let p = o.base.point_at(u, v);
+                let n = o.base.normal_at(u, v);
+                Point3d::new(
+                    p.x + o.distance * n.x,
+                    p.y + o.distance * n.y,
+                    p.z + o.distance * n.z,
+                )
+            }
+            Surface::Ruled(r) => {
+                // S(u,v) = (1-v)*curve1.point_at(u) + v*curve2.point_at(u)
+                let p1 = r.curve1.point_at(u);
+                let p2 = r.curve2.point_at(u);
+                Point3d::new(
+                    p1.x * (1.0 - v) + p2.x * v,
+                    p1.y * (1.0 - v) + p2.y * v,
+                    p1.z * (1.0 - v) + p2.z * v,
+                )
+            }
         }
     }
 
@@ -1972,6 +2063,14 @@ impl Surface {
                 let (v0, v1) = n.v_range();
                 (u0, u1, v0, v1)
             }
+            Surface::Offset(o) => {
+                // Inherit UV domain from base surface
+                o.base.natural_uv_domain()
+            }
+            Surface::Ruled(_) => {
+                // u from curve param range, v from [0, 1]
+                (-LARGE, LARGE, 0.0, 1.0)
+            }
         }
     }
 
@@ -2013,6 +2112,7 @@ impl Surface {
             Surface::Sphere(s) => (s.radius, s.radius),
             Surface::Torus(t) => (t.major_radius + t.minor_radius, t.minor_radius),
             Surface::Revolution(_) | Surface::Extrusion(_) | Surface::Nurbs(_) => (1.0, 1.0),
+            Surface::Offset(_) | Surface::Ruled(_) => (1.0, 1.0),
         }
     }
 
@@ -2571,6 +2671,15 @@ impl Surface {
 
                 (best_u, best_v)
             }
+            Surface::Offset(o) => {
+                // Project onto base surface
+                o.base.project_point(point)
+            }
+            Surface::Ruled(r) => {
+                // Use curve1's param range start as approximation
+                // (full implementation would use closest_point_on_curve)
+                (0.0, 0.0)
+            }
         }
     }
 
@@ -2628,6 +2737,14 @@ impl Surface {
                 v_knots: n.v_knots.clone(),
                 u_closed: n.u_closed,
                 v_closed: n.v_closed,
+            }),
+            Surface::Offset(o) => Surface::Offset(OffsetSurface {
+                base: Box::new(o.base.transform(t)),
+                distance: o.distance,
+            }),
+            Surface::Ruled(r) => Surface::Ruled(RuledSurface {
+                curve1: Box::new(r.curve1.transform(t)),
+                curve2: Box::new(r.curve2.transform(t)),
             }),
         }
     }

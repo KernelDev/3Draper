@@ -1785,6 +1785,8 @@ impl BrepSession {
                     n.u_degree, n.v_degree, n.control_points.len(),
                     n.control_points.first().map(|r| r.len()).unwrap_or(0))
             }
+            Surface::Offset(_) => "Offset".to_string(),
+            Surface::Ruled(_) => "Ruled".to_string(),
         };
 
         let tri_start = self.mesh.triangle_count();
@@ -4392,6 +4394,8 @@ impl<'a> StepConverter<'a> {
                         n.control_points.first().map(|r| r.len()).unwrap_or(0),
                         n.u_knots.len(), u0, u1, n.v_knots.len(), v0, v1)
                 }
+                Surface::Offset(_) => "Offset",
+                Surface::Ruled(_) => "Ruled",
             };
             let n_outer = face_data.outer_edges.len();
             let n_inner = face_data.inner_edges.len();
@@ -4731,6 +4735,8 @@ impl<'a> StepConverter<'a> {
                     Surface::Revolution(_) => "Revolution",
                     Surface::Extrusion(_) => "Extrusion",
                     Surface::Nurbs(_) => "Nurbs",
+                    Surface::Offset(_) => "Offset",
+                    Surface::Ruled(_) => "Ruled",
                 };
                 *surface_counts.entry(key).or_insert(0) += 1;
             }
@@ -5146,6 +5152,8 @@ impl<'a> StepConverter<'a> {
                         n.u_degree, n.v_degree, n.control_points.len(), 
                         n.control_points.first().map(|r| r.len()).unwrap_or(0))
                 }
+                Surface::Offset(_) => "Offset".to_string(),
+                Surface::Ruled(_) => "Ruled".to_string(),
             };
 
             let tri_start = mesh.triangle_count();
@@ -5714,6 +5722,8 @@ impl<'a> StepConverter<'a> {
                     Surface::Revolution(_) => "Revolution",
                     Surface::Extrusion(_) => "Extrusion",
                     Surface::Nurbs(_) => "Nurbs",
+                    Surface::Offset(_) => "Offset",
+                    Surface::Ruled(_) => "Ruled",
                 };
                 *surface_counts.entry(key).or_insert(0) += 1;
             }
@@ -11346,6 +11356,8 @@ impl<'a> StepConverter<'a> {
                 let n_v = n.control_points.first().map(|r| r.len()).unwrap_or(0);
                 &*format!("Nurbs({}x{},deg={}/{})", n_u, n_v, n.u_degree, n.v_degree)
             }
+            Surface::Offset(_) => "Offset",
+            Surface::Ruled(_) => "Ruled",
         };
 
         // Log NURBS face processing for debugging
@@ -14175,6 +14187,8 @@ fn surface_param_range_u(surface: &Surface) -> (f64, f64) {
                 (0.0, 1.0)
             }
         }
+        Surface::Offset(o) => surface_param_range_u(&o.base),
+        Surface::Ruled(_) => (0.0, 1.0),
     }
 }
 
@@ -14195,6 +14209,8 @@ fn surface_param_range_v(surface: &Surface) -> (f64, f64) {
             }
         }
         Surface::Extrusion(_) => (-10.0, 10.0), // Infinite in v (extrusion direction)
+        Surface::Offset(o) => surface_param_range_v(&o.base),
+        Surface::Ruled(_) => (0.0, 1.0),
     }
 }
 
@@ -14530,6 +14546,8 @@ mod diag_tests {
                         Surface::Revolution(_) => "Revolution",
                         Surface::Extrusion(_) => "Extrusion",
                         Surface::Nurbs(_) => "Nurbs",
+                    Surface::Offset(_) => "Offset",
+                    Surface::Ruled(_) => "Ruled",
                     }.to_string();
                     *file_surface_counts.entry(surface_type.clone()).or_insert(0) += 1;
 
@@ -14923,6 +14941,8 @@ mod diag_tests {
                             Surface::Revolution(_) => "Revolution",
                             Surface::Extrusion(_) => "Extrusion",
                             Surface::Nurbs(_) => "Nurbs",
+                    Surface::Offset(_) => "Offset",
+                    Surface::Ruled(_) => "Ruled",
                         }.to_string();
                         *surface_type_counts.entry(surface_type.clone()).or_insert(0) += 1;
 

@@ -120,6 +120,8 @@ fn surface_param_range_approx(surface: &Surface) -> (f64, f64, f64, f64) {
         }
         Surface::Revolution(_) => (0.0, 2.0 * PI, -1e4, 1e4),
         Surface::Extrusion(_) => (-1e4, 1e4, -1e4, 1e4),
+        Surface::Offset(o) => surface_param_range_approx(&o.base),
+        Surface::Ruled(_) => (-1e4, 1e4, 0.0, 1.0),
     }
 }
 

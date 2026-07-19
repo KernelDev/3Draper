@@ -1392,6 +1392,7 @@ impl EdgeDiscretizationCache {
             Surface::Sphere(_) => (0.0, 2.0 * PI),
             Surface::Torus(_) => (0.0, 2.0 * PI),
             Surface::Plane(_) | Surface::Extrusion(_) => (0.0, 1.0),
+            Surface::Offset(_) | Surface::Ruled(_) => (0.0, 1.0),
         };
         let (v_min, v_max) = match surface {
             Surface::Nurbs(n) => n.v_range(),
@@ -2002,6 +2003,8 @@ pub fn compute_adaptive_crease_angle(surface: &Surface) -> f64 {
             // 60° is a good compromise.
             std::f64::consts::PI / 3.0
         }
+        Surface::Offset(_) => std::f64::consts::PI / 3.0,
+        Surface::Ruled(_) => std::f64::consts::FRAC_PI_2,
     }
 }
 
