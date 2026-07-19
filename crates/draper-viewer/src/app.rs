@@ -3473,6 +3473,7 @@ impl ViewerApp {
                 instance_index: None,
                 transform: None,
                 color: None,
+                layers: Vec::new(),
                 children: Vec::new(),
             });
             JsonModel::from_instances(self.detailed_instances.clone(), assembly, &self.current_model.name)
@@ -3511,6 +3512,7 @@ impl ViewerApp {
                 instance_index: Some(0),
                 transform: None,
                 color: None,
+                layers: Vec::new(),
                 children: Vec::new(),
             };
             JsonModel::from_instances(self.detailed_instances.clone(), assembly, &self.current_model.name)
@@ -5955,6 +5957,7 @@ impl ViewerApp {
                 instance_index: None,
                 transform: None,
                 color: None,
+                layers: Vec::new(),
                 children: Vec::new(),
             });
             JsonModel::from_instances(self.detailed_instances.clone(), assembly, &self.current_model.name)
@@ -5992,6 +5995,7 @@ impl ViewerApp {
                 instance_index: Some(0),
                 transform: None,
                 color: None,
+                layers: Vec::new(),
                 children: Vec::new(),
             };
             JsonModel::from_instances(self.detailed_instances.clone(), assembly, &self.current_model.name)

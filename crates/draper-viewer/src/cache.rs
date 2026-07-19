@@ -838,6 +838,8 @@ struct CachedAssemblyNode {
     instance_index: Option<usize>,
     transform: Option<[[f64; 4]; 4]>,
     color: Option<[f32; 4]>,
+    #[serde(default)]
+    layers: Vec<String>,
     children: Vec<CachedAssemblyNode>,
 }
 
@@ -878,6 +880,7 @@ fn serialize_assembly_tree(tree: &AssemblyNode) -> String {
             instance_index: node.instance_index,
             transform: node.transform,
             color: node.color,
+            layers: node.layers.clone(),
             children: node.children.iter().map(convert).collect(),
         }
     }
@@ -941,6 +944,7 @@ fn deserialize_assembly_tree(json: &str) -> Result<AssemblyNode, String> {
             instance_index: node.instance_index,
             transform: node.transform,
             color: node.color,
+            layers: node.layers,
             children: node.children.into_iter().map(convert).collect(),
         }
     }

@@ -782,6 +782,7 @@ impl JsonApi {
                 instance_index: None,
                 transform: None,
                 color: None,
+                layers: Vec::new(),
                 children: json_instances.iter().enumerate().map(|(i, _)| draper_step::AssemblyNode {
                     name: format!("solid_{}", i),
                     pd_id: -1,
@@ -789,6 +790,7 @@ impl JsonApi {
                     instance_index: Some(i),
                     transform: None,
                     color: None,
+                    layers: Vec::new(),
                     children: Vec::new(),
                 }).collect(),
             };

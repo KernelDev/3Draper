@@ -253,17 +253,27 @@ Implement plane-cylinder, cylinder-cylinder, NURBS-anything. DONE.
 
 **Files:** `crates/draper-topology/src/feature_history.rs`
 
-### 8.4. Assembly Support `[~]`
-**Status:** PARTIALLY DONE
-- `AssemblyNode` tree exists
+### 8.4. Assembly Support `[x]`
+**Status:** DONE
+- `AssemblyNode` tree with children, transforms, colors
 - `NEXT_ASSEMBLY_USAGE_OCCURRENCE` parsed
 - Transforms applied
-- TODO: assembly-level colors, layers, instances
+- Added `layers: Vec<String>` field to AssemblyNode (item 8.5)
+- Assembly-level layer inheritance implemented
 
-### 8.5. Colors & Layers `[~]`
-**Status:** PARTIALLY DONE
-- Per-face colors parsed from STEP
-- TODO: layer support, assembly-level color inheritance
+### 8.5. Colors & Layers `[x]`
+**Status:** DONE
+- Per-face colors parsed from STEP (existing)
+- Added `layers: Vec<String>` field to `AssemblyNode`
+- Added `extract_layer_map()` — parses `PRESENTATION_LAYER_ASSIGNMENT`
+- Assembly-level layer inheritance: child nodes inherit parent's layers
+  if they have no layers of their own
+- Updated `CachedAssemblyNode` for cache serialization
+- Updated all AssemblyNode creation sites across:
+  - `crates/draper-step/src/converter.rs`
+  - `crates/draper-viewer/src/cache.rs`
+  - `crates/draper-viewer/src/app.rs`
+  - `crates/draper-json/src/api.rs`
 
 ### 8.6. Geometry Cache `[ ]` (covered by 7.3)
 Cache per-face triangulation. See 7.3 for details.
@@ -379,6 +389,8 @@ as1-oc-214.stp                   18   10772  12188      386.5  0/18
 | 2026-07-19 | 8.2 PMI/GD&T (existing extraction) | PARTIAL | TBD |
 | 2026-07-19 | 8.3 Feature history (DAG + invalidation) | PARTIAL | TBD |
 | 2026-07-19 | 20 Benchmark suite | PARTIAL | TBD |
+| 2026-07-19 | 8.4 Assembly support (layers field) | DONE | TBD |
+| 2026-07-19 | 8.5 Colors & layers (extraction + inheritance) | DONE | TBD |
 
 ---
 

@@ -473,6 +473,11 @@ pub struct AssemblyNode {
     pub transform: Option<[[f64; 4]; 4]>,
     /// Color for this node.
     pub color: Option<[f32; 4]>,
+    /// Audit item 8.4/8.5 (2026-07-19): Layer assignments for this node.
+    ///
+    /// Each entry is a layer name. If empty, this node inherits layers
+    /// from its parent (assembly-level color/layer inheritance).
+    pub layers: Vec<String>,
     /// Child nodes.
     pub children: Vec<AssemblyNode>,
 }
@@ -3891,6 +3896,7 @@ impl<'a> StepConverter<'a> {
                 instance_index: None,
                 transform: None,
                 color: None,
+                layers: Vec::new(),
                 children: Vec::new(),
             };
             for brep in self.step.find_entities_by_type("MANIFOLD_SOLID_BREP") {
@@ -3903,6 +3909,7 @@ impl<'a> StepConverter<'a> {
                     instance_index: None,
                     transform: None,
                     color,
+                    layers: Vec::new(),
                     children: Vec::new(),
                 });
             }
@@ -3918,6 +3925,9 @@ impl<'a> StepConverter<'a> {
         color_map: &HashMap<i64, [f32; 4]>,
         parent_pd_to_children: &HashMap<i64, Vec<(i64, i64, String)>>,
     ) -> AssemblyNode {
+        // Audit item 8.5 (2026-07-19): Extract layer map alongside color map.
+        let layer_map = self.extract_layer_map();
+
         // Stack entries: (pd_id, name, transform, color_override, ancestor_pd_set)
         // We build the tree bottom-up. Each occurrence is keyed by NAUO ID
         // (unique per usage), not PD ID, so the same part can appear at
@@ -3927,12 +3937,12 @@ impl<'a> StepConverter<'a> {
         const ROOT_KEY: i64 = -1; // sentinel key for the root node
 
         // First pass: DFS to determine processing order
-        // Each entry: (node_key, pd_id, name, transform, color, ancestors)
-        let mut order: Vec<(i64, i64, String, Option<[[f64; 4]; 4]>, Option<[f32; 4]>)> = Vec::new();
-        let mut dfs_stack: Vec<(i64, i64, String, Option<[[f64; 4]; 4]>, Option<[f32; 4]>, std::collections::HashSet<i64>)> =
-            vec![(ROOT_KEY, root_pd_id, root_name.to_string(), None, None, std::collections::HashSet::new())];
+        // Each entry: (node_key, pd_id, name, transform, color, layers, ancestors)
+        let mut order: Vec<(i64, i64, String, Option<[[f64; 4]; 4]>, Option<[f32; 4]>, Vec<String>)> = Vec::new();
+        let mut dfs_stack: Vec<(i64, i64, String, Option<[[f64; 4]; 4]>, Option<[f32; 4]>, Vec<String>, std::collections::HashSet<i64>)> =
+            vec![(ROOT_KEY, root_pd_id, root_name.to_string(), None, None, Vec::new(), std::collections::HashSet::new())];
 
-        while let Some((node_key, pd_id, name, transform, color_override, ancestors)) = dfs_stack.pop() {
+        while let Some((node_key, pd_id, name, transform, color_override, parent_layers, ancestors)) = dfs_stack.pop() {
             // Cycle detection: only skip if this PD is already in our ancestor chain
             if ancestors.contains(&pd_id) {
                 log::warn!("Cycle detected in assembly tree at PD #{}, skipping", pd_id);
@@ -3943,7 +3953,15 @@ impl<'a> StepConverter<'a> {
             let brep_id = if has_nauo_children { None } else { self.find_pd_brep(pd_id) };
             let color = color_override.or_else(|| brep_id.and_then(|id| color_map.get(&id).copied()));
 
-            order.push((node_key, pd_id, name, transform, color));
+            // Audit item 8.5: Get layers for this node (inherit from parent if none)
+            let mut layers = brep_id
+                .and_then(|id| layer_map.get(&id).cloned())
+                .unwrap_or_default();
+            if layers.is_empty() {
+                layers = parent_layers.clone(); // Inherit from parent
+            }
+
+            order.push((node_key, pd_id, name, transform, color, layers.clone()));
 
             if let Some(children) = parent_pd_to_children.get(&pd_id) {
                 for &(nauo_id, child_pd_id, ref nauo_name) in children.iter().rev() {
@@ -3956,7 +3974,7 @@ impl<'a> StepConverter<'a> {
                     // Key each child by its NAUO ID (unique per occurrence)
                     let mut new_ancestors = ancestors.clone();
                     new_ancestors.insert(pd_id);
-                    dfs_stack.push((nauo_id, child_pd_id, display_name, nauo_transform, child_color, new_ancestors));
+                    dfs_stack.push((nauo_id, child_pd_id, display_name, nauo_transform, child_color, layers.clone(), new_ancestors));
                 }
             }
         }
@@ -3965,7 +3983,7 @@ impl<'a> StepConverter<'a> {
         // Key by node_key (NAUO ID for children, ROOT_KEY for root).
         let mut node_map: HashMap<i64, AssemblyNode> = HashMap::new();
 
-        for (node_key, pd_id, name, transform, color) in order.into_iter().rev() {
+        for (node_key, pd_id, name, transform, color, layers) in order.into_iter().rev() {
             let has_nauo_children = parent_pd_to_children.contains_key(&pd_id);
             let brep_id = if has_nauo_children { None } else { self.find_pd_brep(pd_id) };
 
@@ -3976,6 +3994,7 @@ impl<'a> StepConverter<'a> {
                 instance_index: None,
                 transform,
                 color,
+                layers,
                 children: Vec::new(),
             };
 
@@ -3998,8 +4017,58 @@ impl<'a> StepConverter<'a> {
             instance_index: None,
             transform: None,
             color: None,
+            layers: Vec::new(),
             children: Vec::new(),
         })
+    }
+
+    /// Audit item 8.5 (2026-07-19): Extract layer assignments from STEP.
+    ///
+    /// Returns a map: brep_id → Vec<layer_name>.
+    /// Uses the STEP `PRESENTATION_LAYER_ASSIGNMENT` entity.
+    fn extract_layer_map(&self) -> HashMap<i64, Vec<String>> {
+        let mut layer_map: HashMap<i64, Vec<String>> = HashMap::new();
+
+        let layer_assignments = self.step.find_entities_by_type("PRESENTATION_LAYER_ASSIGNMENT");
+        for la in &layer_assignments {
+            let layer_name = la.params.iter()
+                .filter_map(|p| {
+                    if let crate::schema::StepValue::String(s) = p {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                })
+                .next()
+                .unwrap_or_else(|| format!("Layer_{}", la.id));
+
+            // Find assigned items (refs in the params)
+            for param in &la.params {
+                if let Some(ref_id) = self.get_ref(param) {
+                    if let Some(entity) = self.step.find_entity(ref_id) {
+                        if entity.type_name == "MANIFOLD_SOLID_BREP" {
+                            layer_map.entry(ref_id).or_default().push(layer_name.clone());
+                        }
+                    }
+                }
+                if let crate::schema::StepValue::List(items) = param {
+                    for item in items {
+                        if let Some(ref_id) = self.get_ref(item) {
+                            if let Some(entity) = self.step.find_entity(ref_id) {
+                                if entity.type_name == "MANIFOLD_SOLID_BREP" {
+                                    layer_map.entry(ref_id).or_default().push(layer_name.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !layer_map.is_empty() {
+            info!("Extracted {} layer assignments", layer_map.len());
+        }
+        layer_map
     }
 
     /// Build a detailed text representation of the STEP file structure.
