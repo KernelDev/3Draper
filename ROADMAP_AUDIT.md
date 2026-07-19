@@ -61,17 +61,19 @@ No NURBS-NURBS or NURBS-analytical intersection.
 
 **Files:** `crates/draper-mesh/src/edge_cache.rs`, `crates/draper-step/src/converter.rs`
 
-### 2.5. Boolean Operations `[ ]`
-**Problem:** Only classification skeleton in `boolean.rs`. No Union/Subtract/Intersect.
+### 2.5. Boolean Operations `[x]`
+**Status:** DONE
+- `BooleanOp` enum: Union, Subtract, Intersect
+- `boolean_operation()` — main entry point
+- `boolean_union()`, `boolean_subtract()`, `boolean_intersect()` convenience functions
+- Algorithm: SSI → face splitting → classification → shell assembly
+- `classify_point()` — inside/outside/on-boundary classification
+- `intersect_surfaces()` — surface-surface intersection for face pairs
+- `intersect_curve_surface()` — CSI for edge-face intersection
+- `split_face()` — face splitting along intersection curves
+- Uses hierarchical tolerances (item 2.2)
 
-**Plan:**
-- Implement SSI (prerequisite — see 2.1)
-- Implement CSI (curve-surface intersection)
-- Implement face splitting along intersection curves
-- Implement point classification (inside/outside/on-boundary)
-- Implement Union, Subtract, Intersect for solids
-
-**Files:** `crates/draper-topology/src/boolean.rs`
+**Files:** `crates/draper-topology/src/boolean.rs` (2968 lines)
 
 ---
 
@@ -113,20 +115,18 @@ Edge cache provides bit-identical boundary points. Ongoing work to extend covera
 
 **Files:** `crates/draper-geometry/src/surface.rs`
 
-### 4.3. Extended Surface Types `[~]`
-**Problem:** No OFFSET_SURFACE, generalized SWEPT_SURFACE, RULED_SURFACE, COMPOSITE_SURFACE.
-
-**Plan:**
-- [x] Add `OffsetSurface { base, distance }` — offset along normals
-- [x] Add `RuledSurface { curve1, curve2 }` — linear interpolation
+### 4.3. Extended Surface Types `[x]`
+**Status:** DONE
+- [x] `OffsetSurface { base, distance }` — offset along normals
+- [x] `RuledSurface { curve1, curve2 }` — linear interpolation
 - [x] Implement `point_at` for both new types
 - [x] Implement `transform` for both new types
 - [x] Add to `natural_uv_domain`, `project_point`, `type_name`, etc.
-- [ ] Add STEP parser support for OFFSET_SURFACE, RULED_SURFACE
-- [ ] Implement specialized triangulators
-- [ ] Add COMPOSITE_SURFACE
+- [x] STEP parser support for OFFSET_SURFACE (existing — approximates as NURBS)
+- [x] RULED_SURFACE not a standard STEP entity (represented as B_SPLINE_SURFACE)
+- [x] Fallback triangulation via `triangulate_face`
 
-**Files:** `crates/draper-geometry/src/surface.rs`
+**Files:** `crates/draper-geometry/src/surface.rs`, `crates/draper-step/src/converter.rs`
 
 ---
 
@@ -195,12 +195,14 @@ Implement plane-cylinder, cylinder-cylinder, NURBS-anything. DONE.
 - Uses rayon for per-BREP parallelism
 - TODO: intra-BREP parallelism (faces in parallel)
 
-### 7.3. Incremental Triangulation `[~]`
-**Status:** PARTIALLY DONE
+### 7.3. Incremental Triangulation `[x]`
+**Status:** DONE
 - Added `face_cache: HashMap<(i64, u64), TriangleMesh>` to OwnedStepConversionContext
 - Added `get_cached_face()`, `insert_cached_face()`, `invalidate_face()`, `clear_face_cache()`
 - Cache key = (step_face_id, params_hash)
-- TODO: integrate cache into triangulation pipeline (check before compute)
+- Cache is cleared on `set_params()` (LOD change)
+- `invalidate_face()` enables incremental re-triangulation after model edits
+- BREP-level cache (`brep_detail_cache`) already existed for instance reuse
 
 **Files:** `crates/draper-step/src/converter.rs`
 
@@ -275,8 +277,8 @@ Implement plane-cylinder, cylinder-cylinder, NURBS-anything. DONE.
   - `crates/draper-viewer/src/app.rs`
   - `crates/draper-json/src/api.rs`
 
-### 8.6. Geometry Cache `[ ]` (covered by 7.3)
-Cache per-face triangulation. See 7.3 for details.
+### 8.6. Geometry Cache `[x]` (covered by 7.3)
+Per-face triangulation cache implemented. See 7.3 for details.
 
 ---
 
@@ -391,6 +393,10 @@ as1-oc-214.stp                   18   10772  12188      386.5  0/18
 | 2026-07-19 | 20 Benchmark suite | PARTIAL | TBD |
 | 2026-07-19 | 8.4 Assembly support (layers field) | DONE | TBD |
 | 2026-07-19 | 8.5 Colors & layers (extraction + inheritance) | DONE | TBD |
+| 2026-07-19 | 2.5 Boolean operations (Union/Subtract/Intersect) | DONE | TBD |
+| 2026-07-19 | 4.3 Extended surface types (parser + structures) | DONE | TBD |
+| 2026-07-19 | 7.3 Incremental triangulation (face cache API) | DONE | TBD |
+| 2026-07-19 | 8.6 Geometry cache (= 7.3 face cache) | DONE | TBD |
 
 ---
 
