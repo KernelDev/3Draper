@@ -21,17 +21,44 @@ use draper_geometry::Surface;
 const MIN_ANGULAR_SAMPLES: usize = 6;
 
 /// Maximum number of angular samples (to prevent excessive tessellation).
-/// Increased to 64 to allow finer resolution for high-curvature NURBS surfaces.
-/// The actual triangle count is controlled by `max_face_triangles` which caps
-/// the total per-face triangle budget.
-const MAX_ANGULAR_SAMPLES: usize = 64;
+///
+/// Audit item 16 (2026-07-19): Increased from 64 to 512 to support
+/// high-curvature NURBS surfaces (e.g., turbine blades, organic shapes).
+/// The actual triangle count is still controlled by `max_face_triangles`
+/// which caps the total per-face triangle budget.
+///
+/// The value is LOD-aware: at Preview LOD (0.1), the effective max is 64;
+/// at Ultra LOD (1.0), the full 512 is used. See `max_angular_for_lod()`.
+const MAX_ANGULAR_SAMPLES: usize = 512;
 
 /// Minimum number of height/v samples for any curved surface.
 const MIN_HEIGHT_SAMPLES: usize = 2;
 
 /// Maximum number of height/v samples.
-/// Increased to 64 to match angular samples for high-curvature NURBS.
-const MAX_HEIGHT_SAMPLES: usize = 64;
+///
+/// Audit item 16 (2026-07-19): Increased from 64 to 512 to match angular
+/// samples for high-curvature NURBS.
+const MAX_HEIGHT_SAMPLES: usize = 512;
+
+/// LOD-aware maximum for angular samples.
+///
+/// Scales the hard cap `MAX_ANGULAR_SAMPLES` by the detail level:
+/// - detail_level = 0.1 (Preview) → max 64 samples
+/// - detail_level = 0.5 (Medium) → max 256 samples
+/// - detail_level = 1.0 (Ultra) → max 512 samples
+///
+/// This prevents excessive tessellation at low LOD while allowing
+/// high-fidelity tessellation at Ultra LOD.
+fn max_angular_for_lod(detail_level: f64) -> usize {
+    let scaled = (MAX_ANGULAR_SAMPLES as f64 * detail_level) as usize;
+    scaled.max(64).min(MAX_ANGULAR_SAMPLES)
+}
+
+/// LOD-aware maximum for height samples (same scaling as angular).
+fn max_height_for_lod(detail_level: f64) -> usize {
+    let scaled = (MAX_HEIGHT_SAMPLES as f64 * detail_level) as usize;
+    scaled.max(64).min(MAX_HEIGHT_SAMPLES)
+}
 
 /// Compute the required number of angular (u-direction) samples for a surface
 /// given a maximum deviation tolerance.
@@ -142,7 +169,7 @@ pub fn required_height_samples(
             let radius_ratio = (r_start / r_end.max(1e-10)).max(r_end / r_start.max(1e-10));
             let n = if radius_ratio > 2.0 { 8 } else if radius_ratio > 1.5 { 4 } else { 2 };
             let n_scaled = (n as f64 * detail_level).ceil() as usize;
-            n_scaled.max(MIN_HEIGHT_SAMPLES).min(MAX_HEIGHT_SAMPLES)
+            n_scaled.max(MIN_HEIGHT_SAMPLES).min(max_height_for_lod(detail_level))
         }
         Surface::Sphere(sphere) => {
             // v goes from polar angle v_start to v_end
@@ -180,17 +207,17 @@ fn samples_for_arc_radius(angle: f64, radius: f64, max_deviation: f64, detail_le
 
     let d_over_r = (max_deviation / radius).min(1.0 - 1e-10);
     if d_over_r <= 0.0 {
-        return MAX_ANGULAR_SAMPLES;
+        return max_angular_for_lod(detail_level);
     }
 
     let half_angle = (1.0 - d_over_r).acos();
     if half_angle < 1e-10 {
-        return MAX_ANGULAR_SAMPLES;
+        return max_angular_for_lod(detail_level);
     }
 
     let n = (angle / (2.0 * half_angle)).ceil() as usize;
     let n = (n as f64 * detail_level).ceil() as usize;
-    n.max(MIN_ANGULAR_SAMPLES).min(MAX_ANGULAR_SAMPLES)
+    n.max(MIN_ANGULAR_SAMPLES).min(max_angular_for_lod(detail_level))
 }
 
 /// Sample curvature at several points and return the maximum absolute curvature.

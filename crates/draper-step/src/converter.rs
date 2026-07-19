@@ -60,17 +60,18 @@ pub struct StepConversionConfig {
     /// triangulation. Healing fixes common B-Rep defects such as gaps,
     /// holes, flipped normals, degenerate edges, and small features.
     ///
-    /// Default: `false` — healing is DISABLED because the heal_solid pipeline
-    /// was dropping valid NURBS faces (e.g., cylindrical walls of bolt holes
-    /// represented as NURBS surfaces), producing non-watertight meshes with
-    /// missing faces. The edge cache + bit-exact dedup already produces
-    /// watertight meshes without healing.
+    /// Audit item 2.3 (2026-07-19): Default changed to `true`.
+    /// Previously `false` because heal_solid dropped valid NURBS faces.
+    /// Root cause was `remove_small_features` removing small NURBS faces.
+    /// Fixed: NURBS faces are now NEVER removed by `remove_small_features`.
+    /// Also, `are_surfaces_compatible` returns `false` for NURBS, so
+    /// `merge_faces` never merges NURBS faces.
     pub heal: bool,
 }
 
 impl Default for StepConversionConfig {
     fn default() -> Self {
-        Self { heal: false }
+        Self { heal: true }
     }
 }
 

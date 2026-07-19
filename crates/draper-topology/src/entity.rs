@@ -358,23 +358,33 @@ pub struct Shell {
     pub faces: Vec<Face>,
     /// Whether the shell is closed (forms a solid boundary).
     pub closed: bool,
+    /// Tolerance for the shell (max of all face tolerances).
+    ///
+    /// Audit item 2.2 (2026-07-19): Added for hierarchical tolerant modeling.
+    /// This is the maximum tolerance of any face in the shell, used for
+    /// shell-level coincidence checks (e.g., when stitching shells).
+    pub tolerance: f64,
 }
 
 impl Shell {
     pub fn new(faces: Vec<Face>) -> Self {
+        let tolerance = faces.iter().map(|f| f.tolerance).fold(0.0_f64, f64::max);
         Self {
             id: TopoId::new(),
             faces,
             closed: false,
+            tolerance,
         }
     }
 
     /// Create a closed shell.
     pub fn new_closed(faces: Vec<Face>) -> Self {
+        let tolerance = faces.iter().map(|f| f.tolerance).fold(0.0_f64, f64::max);
         Self {
             id: TopoId::new(),
             faces,
             closed: true,
+            tolerance,
         }
     }
 
@@ -400,19 +410,26 @@ pub struct Solid {
     pub outer_shell: Option<Shell>,
     /// Inner shells (voids/cavities).
     pub inner_shells: Vec<Shell>,
+    /// Tolerance for the solid (max of all shell tolerances).
+    ///
+    /// Audit item 2.2 (2026-07-19): Added for hierarchical tolerant modeling.
+    pub tolerance: f64,
 }
 
 impl Solid {
     pub fn new(shell: Shell) -> Self {
+        let tolerance = shell.tolerance;
         Self {
             id: TopoId::new(),
             outer_shell: Some(shell),
             inner_shells: Vec::new(),
+            tolerance,
         }
     }
 
     /// Add an inner shell (void/cavity).
     pub fn add_void(&mut self, shell: Shell) {
+        self.tolerance = self.tolerance.max(shell.tolerance);
         self.inner_shells.push(shell);
     }
 

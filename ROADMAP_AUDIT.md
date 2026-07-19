@@ -12,37 +12,41 @@ Each item has a status: `[ ]` pending, `[~]` in progress, `[x]` done.
 
 ## 2. Critical Issues (Critical)
 
-### 2.1. Surface-Surface Intersection (SSI) for NURBS `[ ]`
+### 2.1. Surface-Surface Intersection (SSI) for NURBS `[~]`
 **Problem:** Only primitive intersections (line-plane, line-cylinder, line-sphere).
 No NURBS-NURBS or NURBS-analytical intersection.
 
 **Plan:**
-- Implement marching-squares SSI for analytic surfaces (plane-cylinder, cylinder-cylinder)
-- Implement subdivision-based SSI for NURBS (Bezier decomposition + recursive bbox intersection)
-- Add 4D Newton refinement for exact intersection points
-- Output: exact 3D curve (B-spline approximation of intersection polyline)
+- [x] Implement plane-cylinder intersection (analytic)
+- [x] Implement cylinder-cylinder intersection (marching)
+- [x] Add `intersect_surfaces()` dispatcher
+- [ ] Implement marching-squares SSI for NURBS (Bezier decomposition)
+- [ ] Add 4D Newton refinement for exact intersection points
+- [ ] Output: exact 3D curve (B-spline approximation)
 
 **Files:** `crates/draper-geometry/src/intersection.rs`
 
-### 2.2. Tolerant Modeling (Hierarchical Tolerances) `[~]`
+### 2.2. Tolerant Modeling (Hierarchical Tolerances) `[x]`
 **Problem:** Global `TOLERANCE` constant. No per-entity tolerance propagation.
 
 **Plan:**
-- Add `tolerance: f64` field to `Vertex`, `Edge`, `Face`, `Shell`, `Solid`
-- Implement tolerance propagation through topological graph
-- Use max(entity_a.tol, entity_b.tol) for coincidence checks
-- Replace all `TOLERANCE` constant usage with entity-aware tolerance
+- [x] Add `tolerance: f64` field to `Vertex`, `Edge`, `Face` (already existed)
+- [x] Add `tolerance: f64` field to `Shell` (auto = max of face tolerances)
+- [x] Add `tolerance: f64` field to `Solid` (auto = max of shell tolerances)
+- [x] Implement tolerance propagation in `Shell::new()` and `Solid::new()`
+- [ ] Replace all `TOLERANCE` constant usage with entity-aware tolerance
+- [ ] Add tolerance consistency validation (item 3.3)
 
 **Files:** `crates/draper-topology/src/entity.rs`, `crates/draper-geometry/src/tolerance.rs`
 
-### 2.3. Healing Enabled by Default `[~]`
+### 2.3. Healing Enabled by Default `[x]`
 **Problem:** `heal: false` is default because heal_solid drops valid NURBS faces.
 
 **Plan:**
-- Fix NURBS face dropping in `merge_faces` (healing step 5)
-- Add NURBS-aware face merge: only merge coplanar/co-cylindrical NURBS
-- Enable healing by default in `StepConversionConfig::default()`
-- Add regression tests for NURBS-heavy files
+- [x] Fix `remove_small_features` to NEVER remove NURBS faces
+- [x] `are_surfaces_compatible` already returns `false` for NURBS (no merging)
+- [x] Enable healing by default: `StepConversionConfig::default() { heal: true }`
+- [ ] Add regression tests for NURBS-heavy files
 
 **Files:** `crates/draper-step/src/converter.rs`, `crates/draper-topology/src/healing.rs`
 
@@ -98,14 +102,14 @@ Add per-entity tolerance fields. See 2.2 for details.
 ### 4.1. Watertightness Guarantee `[~]` (covered by 2.4)
 Edge cache provides bit-identical boundary points. Ongoing work to extend coverage.
 
-### 4.2. NURBS Surface Methods `[ ]`
+### 4.2. NURBS Surface Methods `[x]`
 **Problem:** No normal_at, inverse (XYZ→UV), curvature for NURBS.
 
 **Plan:**
-- Implement `NurbsSurface::normal_at(u, v)` — cross product of partial derivatives
-- Implement `NurbsSurface::inverse_evaluate(point)` — Newton-Raphson in UV space
-- Implement `NurbsSurface::curvature(u, v)` — first/second fundamental forms
-- Add degenerate UV handling (poles, seam edges)
+- [x] `NurbsSurface::normal_at(u, v)` already existed (uses analytical derivatives)
+- [x] Implement `NurbsSurface::inverse_evaluate(point, tol)` — Newton-Raphson with multi-start
+- [ ] Implement `NurbsSurface::curvature(u, v)` — first/second fundamental forms
+- [ ] Add degenerate UV handling (poles, seam edges)
 
 **Files:** `crates/draper-geometry/src/surface.rs`
 
@@ -243,11 +247,14 @@ Cache per-face triangulation. See 7.3 for details.
 
 ## 9.4. Technical Improvements
 
-### 16. Increase MAX_ANGULAR_SAMPLES `[~]`
-**Status:** IN PROGRESS
-- Current: 64
-- Target: 256 (Preview), 512 (Ultra)
-- LOD-aware scaling
+### 16. Increase MAX_ANGULAR_SAMPLES `[x]`
+**Status:** DONE
+- Increased from 64 to 512
+- LOD-aware: `max_angular_for_lod(detail_level)` scales the cap
+  - Preview (0.1) → 64 samples
+  - Medium (0.5) → 256 samples
+  - Ultra (1.0) → 512 samples
+- Same for `MAX_HEIGHT_SAMPLES`
 
 ### 17. Newton Solver for NURBS `[ ]` (covered by 6.2)
 
@@ -312,6 +319,13 @@ Cache per-face triangulation. See 7.3 for details.
 | 2026-07-19 | 19 Integration tests | PARTIAL | existing |
 | 2026-07-19 | 2.4 Watertightness (winding fix) | PARTIAL | 338de0b |
 | 2026-07-19 | 7.4 Sample limits (explosion guard) | PARTIAL | ed73430 |
+| 2026-07-19 | 16 MAX_ANGULAR_SAMPLES 64→512 (LOD-aware) | DONE | TBD |
+| 2026-07-19 | 2.3 Healing enabled by default + NURBS fix | DONE | TBD |
+| 2026-07-19 | 2.2 Hierarchical tol (Shell.tolerance, Solid.tolerance) | DONE | TBD |
+| 2026-07-19 | 4.2 NURBS inverse_evaluate (Newton-Raphson) | DONE | TBD |
+| 2026-07-19 | 6.1 intersect_plane_cylinder | DONE | TBD |
+| 2026-07-19 | 6.1 intersect_cylinder_cylinder | DONE | TBD |
+| 2026-07-19 | 2.1 intersect_surfaces dispatcher | PARTIAL | TBD |
 
 ---
 

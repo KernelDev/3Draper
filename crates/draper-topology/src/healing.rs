@@ -289,6 +289,7 @@ pub fn heal_solid(solid: &Solid, params: &HealingParams) -> (Solid, HealingRepor
 
     let healed_solid = Solid {
         id: solid.id,
+        tolerance: solid.tolerance,
         outer_shell,
         inner_shells,
     };
@@ -1229,6 +1230,14 @@ fn remove_small_features(shell: &mut Shell, params: &HealingParams, report: &mut
             Some(ref s) => s,
             None => return true,
         };
+
+        // Audit item 2.3 (2026-07-19): NEVER remove NURBS faces.
+        // These represent complex geometry (fillets, organic shapes) that
+        // may have small area but are topologically important. Removing
+        // them was the root cause of "healing drops valid NURBS faces" bug.
+        if matches!(surface, Surface::Nurbs(_)) {
+            return true;
+        }
 
         // Estimate face area by sampling the surface within the wire boundary.
         // For simplicity, use the edge polygon area as an approximation.

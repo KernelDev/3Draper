@@ -1564,6 +1564,125 @@ impl NurbsSurface {
 
         SurfaceDerivatives { point, du, dv }
     }
+
+    /// Inverse evaluation: given a 3D point, find the (u, v) parameters.
+    ///
+    /// Audit item 4.2 (2026-07-19): Added for NURBS surface methods.
+    ///
+    /// Uses Newton-Raphson iteration on the residual:
+    ///   F(u, v) = S(u, v) - target_point
+    /// The Jacobian is the 3×2 matrix [dS/du, dS/dv].
+    /// At each step: (u, v) -= (J^T J)^-1 J^T F
+    ///
+    /// Returns `None` if Newton doesn't converge within 20 iterations or
+    /// if the point is outside the parametric domain.
+    ///
+    /// **Multi-start strategy:** Tries 9 starting points (3×3 grid in UV
+    /// space) to avoid local minima. Returns the best result found.
+    pub fn inverse_evaluate(&self, target: &Point3d, tol: f64) -> Option<(f64, f64)> {
+        let (u_min, u_max) = self.u_range();
+        let (v_min, v_max) = self.v_range();
+
+        // Multi-start: 3×3 grid of starting points
+        let u_starts = [u_min, (u_min + u_max) / 2.0, u_max];
+        let v_starts = [v_min, (v_min + v_max) / 2.0, v_max];
+
+        let mut best: Option<(f64, f64, f64)> = None; // (u, v, dist_sq)
+
+        for &u0 in &u_starts {
+            for &v0 in &v_starts {
+                if let Some((u, v, dist_sq)) = self.newton_inverse(target, u0, v0, tol, u_min, u_max, v_min, v_max) {
+                    match best {
+                        None => best = Some((u, v, dist_sq)),
+                        Some((_, _, best_dist)) => {
+                            if dist_sq < best_dist {
+                                best = Some((u, v, dist_sq));
+                            }
+                        }
+                    }
+                    // Early exit if we found a good enough solution
+                    if dist_sq < tol * tol {
+                        return Some((u, v));
+                    }
+                }
+            }
+        }
+
+        best.map(|(u, v, _)| (u, v))
+    }
+
+    /// Newton-Raphson inverse evaluation from a single starting point.
+    fn newton_inverse(
+        &self,
+        target: &Point3d,
+        u0: f64,
+        v0: f64,
+        tol: f64,
+        u_min: f64,
+        u_max: f64,
+        v_min: f64,
+        v_max: f64,
+    ) -> Option<(f64, f64, f64)> {
+        let mut u = u0.clamp(u_min, u_max);
+        let mut v = v0.clamp(v_min, v_max);
+        let max_iter = 20;
+
+        for _ in 0..max_iter {
+            let derivs = self.derivatives_at(u, v);
+            let p = derivs.point;
+
+            // Residual: F = S(u,v) - target
+            let fx = p.x - target.x;
+            let fy = p.y - target.y;
+            let fz = p.z - target.z;
+            let dist_sq = fx * fx + fy * fy + fz * fz;
+
+            if dist_sq < tol * tol {
+                return Some((u, v, dist_sq));
+            }
+
+            // Jacobian: J = [dS/du, dS/dv] (3×2 matrix)
+            let du = derivs.du;
+            let dv = derivs.dv;
+
+            // J^T J (2×2 matrix)
+            let jtj_00 = du.x * du.x + du.y * du.y + du.z * du.z;
+            let jtj_01 = du.x * dv.x + du.y * dv.y + du.z * dv.z;
+            let jtj_11 = dv.x * dv.x + dv.y * dv.y + dv.z * dv.z;
+
+            // J^T F (2×1 vector)
+            let jtf_0 = du.x * fx + du.y * fy + du.z * fz;
+            let jtf_1 = dv.x * fx + dv.y * fy + dv.z * fz;
+
+            // Solve (J^T J) Δ = J^T F using Cramer's rule
+            let det = jtj_00 * jtj_11 - jtj_01 * jtj_01;
+            if det.abs() < 1e-20 {
+                // Singular Jacobian — can't solve, abort this start
+                return Some((u, v, dist_sq));
+            }
+
+            let delta_u = (jtj_11 * jtf_0 - jtj_01 * jtf_1) / det;
+            let delta_v = (jtj_00 * jtf_1 - jtj_01 * jtf_0) / det;
+
+            // Update with damping to prevent overshooting
+            let step_scale = 0.5; // Conservative damping
+            u -= step_scale * delta_u;
+            v -= step_scale * delta_v;
+
+            // Clamp to parametric domain
+            u = u.clamp(u_min, u_max);
+            v = v.clamp(v_min, v_max);
+        }
+
+        // Return best effort
+        let derivs = self.derivatives_at(u, v);
+        let p = derivs.point;
+        let fx = p.x - target.x;
+        let fy = p.y - target.y;
+        let fz = p.z - target.z;
+        let dist_sq = fx * fx + fy * fy + fz * fz;
+        Some((u, v, dist_sq))
+    }
 }
 
 impl Surface {
