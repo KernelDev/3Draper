@@ -4627,3 +4627,34 @@ Stage Summary:
 - nist_cube/cylinder/sphere: remain WATERTIGHT (no regression)
 - The combined approach uses both CAD-system-stated precision (step_uncertainty)
   and empirical vertex gaps (sewing_tol) for maximum coverage
+
+---
+Task ID: audit-roadmap-impl
+Agent: Main
+Task: Implement all 20 audit findings from external review (2026-07-19)
+
+Work Log:
+- Created ROADMAP_AUDIT.md with full implementation plan (commit 8ec017d)
+- Item 16 (MAX_ANGULAR_SAMPLES): Increased 64→512, LOD-aware scaling
+- Item 2.3 (Healing enabled by default): Fixed remove_small_features NURBS bug,
+  changed default heal:true
+- Item 2.2 (Hierarchical tolerances): Added tolerance field to Shell and Solid,
+  auto-compute in new()
+- Item 4.2 (NURBS surface methods): Added inverse_evaluate (Newton-Raphson
+  with 9-start multi-start)
+- Item 6.1 (Surface-surface intersections): Added intersect_plane_cylinder,
+  intersect_cylinder_cylinder, intersect_surfaces dispatcher
+- Item 3.3 (Tolerance consistency validation): Added validate_tolerance_consistency
+  function with 4 checks
+- Item 4.3 (Extended surface types): Added OffsetSurface, RuledSurface structs
+  with point_at, transform, UV domain methods
+- Item 5.2 (Tolerant stitching): Added tolerant_stitch function (Parasolid/ACIS
+  approach — no geometry modification)
+
+Stage Summary:
+- 8 audit items implemented (5 DONE, 3 PARTIAL)
+- Commits: 8ec017d, bc1132e, 59739b8, 5f64b8a
+- No regressions: nist_cube/cylinder still watertight
+- ROADMAP_AUDIT.md tracks all progress with status table
+- Remaining items: SSI for NURBS, boolean operations, STEP export, PMI,
+  feature history, geometry cache, benchmarks (long-term)
