@@ -18,6 +18,7 @@ pub mod healing;
 pub mod boolean;
 pub mod queries;
 pub mod operations;
+pub mod feature_history;
 
 pub use entity::*;
 pub use shape::*;

@@ -225,21 +225,33 @@ Implement plane-cylinder, cylinder-cylinder, NURBS-anything. DONE.
 
 **Files:** `crates/draper-step/src/exporter.rs`
 
-### 8.2. PMI / GD&T `[ ]`
-**Plan:**
-- Parse GD&T entities (GEOMETRIC_TOLERANCE, DATUM)
-- Render GD&T annotations in viewer
-- Support AP242 PMI
+### 8.2. PMI / GD&T `[~]`
+**Status:** PARTIALLY DONE
+- `extract_tessellated_geometry()` — parses TRIANGULATED_FACE (AP242)
+- `extract_pmi()` — parses PMI annotations (PRODUCT_DEFINITION_FORMATION, DRAUGHTING_MODEL)
+- `extract_gdt()` — parses GEOMETRIC_TOLERANCE, DATUM_FEATURE, DATUM_REFERENCE
+- `GeometricTolerance` struct with type classification (flatness, cylindricity, etc.)
+- `extract_colour_and_layer()` — parses colours and layers
+- `extract_units()` — parses LENGTH_UNIT, PLANE_ANGLE_UNIT
+- TODO: render GD&T annotations in viewer
+- TODO: full AP242 PMI presentation (PresentationLayeredAPI)
 
 **Files:** `crates/draper-step/src/pmi.rs`
 
-### 8.3. Feature History `[ ]`
-**Plan:**
-- Add `FeatureTree` structure
-- Each feature records its parameters and dependencies
-- On parameter change, re-evaluate only affected features
+### 8.3. Feature History `[~]`
+**Status:** PARTIALLY DONE
+- Added `feature_history` module in `crates/draper-topology/src/feature_history.rs`
+- `FeatureTree` structure with DAG of features
+- `Feature` struct with ID, name, params, dependencies, cached_result
+- `FeatureParams` enum: Sketch, Extrude, Revolve, Union, Subtract, Intersect, Fillet, Chamfer, Shell, Transform
+- `add_feature()`, `update_params()`, `evaluate()`, `topological_order()`
+- Automatic dependency extraction from params
+- Transitive invalidation on parameter change
+- Cycle detection during evaluation
+- Unit tests included
+- TODO: actual feature evaluation (requires geometry engine for extrude, boolean, etc.)
 
-**Files:** new `crates/draper-history/`
+**Files:** `crates/draper-topology/src/feature_history.rs`
 
 ### 8.4. Assembly Support `[~]`
 **Status:** PARTIALLY DONE
@@ -348,6 +360,8 @@ Cache per-face triangulation. See 7.3 for details.
 | 2026-07-19 | 5.3 Auto healing parameters | DONE | TBD |
 | 2026-07-19 | 8.1 STEP export AP203/AP214/AP242 | DONE | TBD |
 | 2026-07-19 | 7.3 Incremental triangulation (face cache) | PARTIAL | TBD |
+| 2026-07-19 | 8.2 PMI/GD&T (existing extraction) | PARTIAL | TBD |
+| 2026-07-19 | 8.3 Feature history (DAG + invalidation) | PARTIAL | TBD |
 
 ---
 
