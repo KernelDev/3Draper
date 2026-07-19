@@ -4658,3 +4658,26 @@ Stage Summary:
 - ROADMAP_AUDIT.md tracks all progress with status table
 - Remaining items: SSI for NURBS, boolean operations, STEP export, PMI,
   feature history, geometry cache, benchmarks (long-term)
+
+---
+Task ID: audit-impl-continued
+Agent: Main
+Task: Continue implementing audit roadmap items (2026-07-19, session 2)
+
+Work Log:
+- Item 6.2 (4D Newton solver): newton_surface_surface() with pseudo-inverse
+- Item 6.3 (Degenerate handling): is_degenerate_at() checks + perturbation
+- Item 2.1 (Marching SSI): intersect_marching_ssi() for NURBS-NURBS
+- Item 5.3 (Auto healing): HealingParams::auto_from_brep(ctx, face_count)
+- Item 8.1 (STEP export): StepSchema enum (Ap203, Ap214, Ap242)
+- Item 7.3 (Incremental triangulation): face_cache with get/insert/invalidate
+- Item 8.2 (PMI/GD&T): documented existing extraction functions
+- Item 8.3 (Feature history): FeatureTree DAG with invalidation
+- Item 20 (Benchmarks): benchmark tool with timing + watertightness
+
+Stage Summary:
+- Commits: 35a8624, 7c55a38, 77f5680
+- 9 additional audit items implemented (6 DONE, 3 PARTIAL)
+- Total audit items now: 16 implemented (10 DONE, 6 PARTIAL), 4 remaining
+- No regressions: nist_cube/cylinder/sphere still watertight
+- Benchmark results captured in ROADMAP_AUDIT.md
