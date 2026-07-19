@@ -292,11 +292,27 @@ Cache per-face triangulation. See 7.3 for details.
 - `angle_check.rs` validates dihedral angles
 - TODO: NIST test suite, regression baseline
 
-### 20. Benchmarks vs OpenCascade `[ ]`
-**Plan:**
-- Create benchmark suite (criterion.rs)
-- Compare triangulation time, mesh quality, watertightness
-- Publish results in `benchmark_baseline.csv`
+### 20. Benchmarks vs OpenCascade `[~]`
+**Status:** PARTIALLY DONE
+- Added `benchmark` tool (`tools/src/bin/benchmark.rs`)
+- Measures triangulation time, vertex/triangle counts, watertightness
+- Runs across all test files (nist_cube, nist_cylinder, brick_thin, etc.)
+- Outputs CSV for comparison with other CAD kernels
+- TODO: add OpenCascade comparison baseline (requires OCCT build)
+
+**Benchmark results (3Draper, 2026-07-19):**
+```
+File                          BREPs   Verts   Tris   Time(ms)  Watertight
+nist_cube.stp                     1       8     12        0.6  1/1
+nist_cylinder.stp                 1     154    304        1.9  1/1
+nist_sphere.stp                   1     482    960        3.3  1/1
+brick_thin.stp                    1    3078   6185      217.7  0/1
+brick_thin_round.stp              1     828   1570       18.5  0/1
+as1-oc-214_bolt.stp               1      18     11       13.7  0/1
+as1-oc-214.stp                   18   10772  12188      386.5  0/18
+```
+
+**Files:** `tools/src/bin/benchmark.rs`
 
 ---
 
@@ -362,6 +378,7 @@ Cache per-face triangulation. See 7.3 for details.
 | 2026-07-19 | 7.3 Incremental triangulation (face cache) | PARTIAL | TBD |
 | 2026-07-19 | 8.2 PMI/GD&T (existing extraction) | PARTIAL | TBD |
 | 2026-07-19 | 8.3 Feature history (DAG + invalidation) | PARTIAL | TBD |
+| 2026-07-19 | 20 Benchmark suite | PARTIAL | TBD |
 
 ---
 
