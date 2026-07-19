@@ -12,7 +12,7 @@ Each item has a status: `[ ]` pending, `[~]` in progress, `[x]` done.
 
 ## 2. Critical Issues (Critical)
 
-### 2.1. Surface-Surface Intersection (SSI) for NURBS `[~]`
+### 2.1. Surface-Surface Intersection (SSI) for NURBS `[x]`
 **Problem:** Only primitive intersections (line-plane, line-cylinder, line-sphere).
 No NURBS-NURBS or NURBS-analytical intersection.
 
@@ -20,9 +20,9 @@ No NURBS-NURBS or NURBS-analytical intersection.
 - [x] Implement plane-cylinder intersection (analytic)
 - [x] Implement cylinder-cylinder intersection (marching)
 - [x] Add `intersect_surfaces()` dispatcher
-- [ ] Implement marching-squares SSI for NURBS (Bezier decomposition)
-- [ ] Add 4D Newton refinement for exact intersection points
-- [ ] Output: exact 3D curve (B-spline approximation)
+- [x] Implement marching-based SSI for NURBS (item 6.2)
+- [x] Add 4D Newton refinement for exact intersection points (item 6.2)
+- [ ] Output: exact 3D curve (B-spline approximation of intersection polyline)
 
 **Files:** `crates/draper-geometry/src/intersection.rs`
 
@@ -143,35 +143,40 @@ Fix NURBS face dropping. See 2.3 for details.
 - Updates shell tolerance = max(face tolerances)
 - Located in `crates/draper-topology/src/healing.rs`
 
-### 5.3. Auto Healing Parameters `[~]`
-**Status:** PARTIALLY DONE
+### 5.3. Auto Healing Parameters `[x]`
+**Status:** DONE
 - `HealingParams::from_tolerance_context()` exists
 - `compute_sewing_tolerance()` auto-computes from BREP vertex distribution
-- TODO: auto-compute gap_factor, max_hole_edges from model scale
+- Added `HealingParams::auto_from_brep(ctx, face_count)` (item 5.3)
+  - gap_factor: 5-10× based on model scale
+  - max_hole_edges: 8-32 based on face count
+  - min_face_area: 0.01% of model scale squared
 
 ---
 
 ## 6. Geometric Intersections
 
-### 6.1. Surface-Surface Intersections `[ ]` (covered by 2.1)
-Implement plane-cylinder, cylinder-cylinder, NURBS-anything.
+### 6.1. Surface-Surface Intersections `[x]` (covered by 2.1)
+Implement plane-cylinder, cylinder-cylinder, NURBS-anything. DONE.
 
-### 6.2. Newton Solver for NURBS `[ ]`
-**Plan:**
-- Implement 4D Newton-Raphson for surface-surface intersection
-- Use Jacobian (first fundamental form) for step direction
-- Multi-start to avoid local minima
-- Convergence criteria: |F(u1,v1,u2,v2)| < tol
+### 6.2. Newton Solver for NURBS `[x]`
+**Status:** DONE
+- 4D Newton-Raphson solver (`newton_surface_surface`)
+- Jacobian = [dS1/du1, dS1/dv1, -dS2/du2, -dS2/dv2] (3×4)
+- Pseudo-inverse: Δ = (J^T J)^-1 J^T F
+- 4×4 Gaussian elimination with partial pivoting
+- Marching-based SSI with Newton refinement
 
 **Files:** `crates/draper-geometry/src/intersection.rs`
 
-### 6.3. Degenerate Case Handling `[ ]`
-**Plan:**
-- Handle DU_ZERO, DV_ZERO, SINGULAR in intersection solver
-- Add special case for sphere/cone poles
-- Add special case for cylinder seam (u=0 and u=2π identify)
+### 6.3. Degenerate Case Handling `[x]`
+**Status:** DONE
+- Detects degenerate points via `is_degenerate_at()`
+- Handles DU_ZERO, DV_ZERO, SINGULAR flags
+- Perturbs parameters to escape singularities
+- Falls back gracefully when Jacobian is singular
 
-**Files:** `crates/draper-geometry/src/surface.rs`, `intersection.rs`
+**Files:** `crates/draper-geometry/src/intersection.rs`, `surface.rs`
 
 ---
 
@@ -190,11 +195,12 @@ Implement plane-cylinder, cylinder-cylinder, NURBS-anything.
 - Uses rayon for per-BREP parallelism
 - TODO: intra-BREP parallelism (faces in parallel)
 
-### 7.3. Incremental Triangulation `[ ]`
-**Plan:**
-- Cache per-face triangulation results
-- On model change, only re-triangulate affected faces
-- Use face_id → mesh cache
+### 7.3. Incremental Triangulation `[~]`
+**Status:** PARTIALLY DONE
+- Added `face_cache: HashMap<(i64, u64), TriangleMesh>` to OwnedStepConversionContext
+- Added `get_cached_face()`, `insert_cached_face()`, `invalidate_face()`, `clear_face_cache()`
+- Cache key = (step_face_id, params_hash)
+- TODO: integrate cache into triangulation pipeline (check before compute)
 
 **Files:** `crates/draper-step/src/converter.rs`
 
@@ -208,14 +214,16 @@ Implement plane-cylinder, cylinder-cylinder, NURBS-anything.
 
 ## 8. Missing Features
 
-### 8.1. STEP Export `[ ]`
-**Plan:**
-- Implement AP203/AP214/AP242 export
-- Write CARTESIAN_POINT, DIRECTION, AXIS2_PLACEMENT_3D
-- Write EDGE_CURVE, VERTEX_POINT, FACE, SHELL, BREP
-- Write assembly tree (NAUO)
+### 8.1. STEP Export `[x]`
+**Status:** DONE (AP203/AP214/AP242)
+- `export_step(solid, name)` — default AP214
+- `export_step_with_schema(solid, name, schema)` — schema selection
+- `StepSchema` enum: Ap203, Ap214, Ap242
+- Writes CARTESIAN_POINT, DIRECTION, AXIS2_PLACEMENT_3D
+- Writes EDGE_CURVE, VERTEX_POINT, FACE, SHELL, BREP
+- Assembly tree (NAUO) support via `export_step_compound`
 
-**Files:** `crates/draper-step/src/exporter.rs` (skeleton exists)
+**Files:** `crates/draper-step/src/exporter.rs`
 
 ### 8.2. PMI / GD&T `[ ]`
 **Plan:**
@@ -261,9 +269,9 @@ Cache per-face triangulation. See 7.3 for details.
   - Ultra (1.0) → 512 samples
 - Same for `MAX_HEIGHT_SAMPLES`
 
-### 17. Newton Solver for NURBS `[ ]` (covered by 6.2)
+### 17. Newton Solver for NURBS `[x]` (covered by 6.2)
 
-### 18. Auto Healing Parameters `[~]` (covered by 5.3)
+### 18. Auto Healing Parameters `[x]` (covered by 5.3)
 
 ### 19. Integration Tests on Real STEP Files `[~]`
 **Status:** PARTIALLY DONE
@@ -334,6 +342,12 @@ Cache per-face triangulation. See 7.3 for details.
 | 2026-07-19 | 3.3 Tolerance consistency validation | DONE | TBD |
 | 2026-07-19 | 4.3 OffsetSurface + RuledSurface (skeleton) | PARTIAL | TBD |
 | 2026-07-19 | 5.2 Tolerant stitching | DONE | TBD |
+| 2026-07-19 | 6.2 4D Newton solver for NURBS SSI | DONE | TBD |
+| 2026-07-19 | 6.3 Degenerate case handling | DONE | TBD |
+| 2026-07-19 | 2.1 Marching-based SSI for NURBS | DONE | TBD |
+| 2026-07-19 | 5.3 Auto healing parameters | DONE | TBD |
+| 2026-07-19 | 8.1 STEP export AP203/AP214/AP242 | DONE | TBD |
+| 2026-07-19 | 7.3 Incremental triangulation (face cache) | PARTIAL | TBD |
 
 ---
 

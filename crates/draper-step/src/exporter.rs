@@ -993,6 +993,35 @@ impl StepWriter {
 // Public API
 // ─────────────────────────────────────────────────────────────────────────
 
+/// STEP application protocol version.
+///
+/// Audit item 8.1 (2026-07-19): Added AP242 support.
+#[derive(Clone, Copy, Debug)]
+pub enum StepSchema {
+    /// AP203 — Configuration controlled design
+    Ap203,
+    /// AP214 — Automotive design (default, most widely supported)
+    Ap214,
+    /// AP242 — Managed model based 3D engineering (latest standard)
+    Ap242,
+}
+
+impl Default for StepSchema {
+    fn default() -> Self {
+        StepSchema::Ap214
+    }
+}
+
+impl StepSchema {
+    fn schema_string(&self) -> &'static str {
+        match self {
+            StepSchema::Ap203 => "CONFIG_CONTROL_DESIGN { 1 0 10303 203 1 1 1 }",
+            StepSchema::Ap214 => "AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }",
+            StepSchema::Ap242 => "AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF { 1 0 10303 442 1 1 4 }",
+        }
+    }
+}
+
 /// Export a solid to STEP AP203/AP214 format.
 ///
 /// Supports:
@@ -1003,6 +1032,13 @@ impl StepWriter {
 /// - Multiple inner wires per face (holes)
 /// - Shared EDGE_CURVE / VERTEX_POINT / CARTESIAN_POINT deduplication
 pub fn export_step(solid: &Solid, name: &str) -> String {
+    export_step_with_schema(solid, name, StepSchema::default())
+}
+
+/// Export a solid to STEP with a specified schema (AP203/AP214/AP242).
+///
+/// Audit item 8.1 (2026-07-19): Added schema selection.
+pub fn export_step_with_schema(solid: &Solid, name: &str, schema: StepSchema) -> String {
     let mut sw = StepWriter::new();
 
     // ── Header ──
@@ -1014,7 +1050,7 @@ pub fn export_step(solid: &Solid, name: &str) -> String {
         "FILE_NAME('{}.stp','{}',('3Draper'),(''),'3Draper','','');",
         name, now
     ));
-    sw.push_line("FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));");
+    sw.push_line(&format!("FILE_SCHEMA(('{}'));", schema.schema_string()));
     sw.push_line("ENDSEC;");
 
     // ── Data section ──

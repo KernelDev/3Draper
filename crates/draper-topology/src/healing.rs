@@ -198,6 +198,50 @@ impl HealingParams {
         }
     }
 
+    /// Audit item 5.3 (2026-07-19): Auto-compute healing parameters from
+    /// the BREP's bounding box and face count.
+    ///
+    /// Automatically determines:
+    /// - `gap_factor`: scaled by model size (larger models need larger gaps)
+    /// - `max_hole_edges`: scaled by face count (more faces = larger holes allowed)
+    /// - `min_face_area`: scaled by model scale squared
+    /// - `tolerance`: from ToleranceContext
+    pub fn auto_from_brep(ctx: &ToleranceContext, face_count: usize) -> Self {
+        let model_scale = ctx.model_scale;
+        let base_tol = ctx.coincidence_tolerance();
+
+        // gap_factor: 10× for small models, 5× for large models
+        // (small models have tighter tolerances, need more gap closing)
+        let gap_factor = if model_scale < 1.0 {
+            10.0
+        } else if model_scale < 100.0 {
+            8.0
+        } else {
+            5.0
+        };
+
+        // max_hole_edges: 8 for simple parts, up to 32 for complex parts
+        let max_hole_edges = if face_count < 20 {
+            8
+        } else if face_count < 100 {
+            16
+        } else {
+            32
+        };
+
+        // min_face_area: 0.01% of model scale squared
+        let min_face_area = (model_scale * model_scale) * 1e-4;
+
+        Self {
+            gap_factor,
+            max_hole_edges,
+            min_face_area,
+            tolerance: base_tol,
+            tolerance_context: Some(ctx.clone()),
+            ..Self::aggressive()
+        }
+    }
+
     /// Effective gap tolerance: `tolerance * gap_factor`.
     pub fn gap_tolerance(&self) -> f64 {
         self.tolerance * self.gap_factor

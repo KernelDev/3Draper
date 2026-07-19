@@ -830,6 +830,13 @@ pub struct OwnedStepConversionContext {
     /// On native, this is never used (triangulate_pending does the whole BREP
     /// in one call). On WASM, triangulate_pending_chunked uses this.
     active_session: Option<Box<BrepSession>>,
+    /// Audit item 7.3 (2026-07-19): Per-face triangulation cache.
+    ///
+    /// Maps (step_face_id, params_hash) → TriangleMesh.
+    /// When a face's parameters don't change, its triangulation is reused
+    /// instead of recomputing. This enables incremental triangulation
+    /// after model edits (only affected faces are re-triangulated).
+    face_cache: HashMap<(i64, u64), TriangleMesh>,
 }
 
 impl OwnedStepConversionContext {
@@ -979,7 +986,7 @@ impl OwnedStepConversionContext {
         // Use consistent max_face_triangles on all platforms
         // (no WASM-specific cap — quality should match native)
 
-        Self { step_file, bbox, params, pd_brep_map, nauo_transform_map, entity_map, config, bbox_computed: false, brep_detail_cache: HashMap::new(), active_session: None }
+        Self { step_file, bbox, params, pd_brep_map, nauo_transform_map, entity_map, config, bbox_computed: false, brep_detail_cache: HashMap::new(), active_session: None, face_cache: HashMap::new() }
     }
 
     /// Replace the triangulation parameters used by subsequent `triangulate_pending()` calls.
@@ -1018,6 +1025,41 @@ impl OwnedStepConversionContext {
         self.params = params;
         // Invalidate any cached meshes — they were triangulated at the old LOD.
         self.brep_detail_cache.clear();
+        self.face_cache.clear();
+    }
+
+    /// Audit item 7.3 (2026-07-19): Get a cached face triangulation.
+    ///
+    /// Returns the cached mesh for the given STEP face ID and params hash,
+    /// or `None` if not cached.
+    pub fn get_cached_face(&self, step_face_id: i64, params_hash: u64) -> Option<&TriangleMesh> {
+        self.face_cache.get(&(step_face_id, params_hash))
+    }
+
+    /// Audit item 7.3 (2026-07-19): Insert a face triangulation into the cache.
+    ///
+    /// Stores the mesh for the given STEP face ID and params hash.
+    /// Future calls to `get_cached_face` with the same key will return this mesh.
+    pub fn insert_cached_face(&mut self, step_face_id: i64, params_hash: u64, mesh: TriangleMesh) {
+        self.face_cache.insert((step_face_id, params_hash), mesh);
+    }
+
+    /// Audit item 7.3 (2026-07-19): Invalidate a single face's cache entry.
+    ///
+    /// Call this when a face's geometry changes (e.g., after a boolean operation
+    /// that modified the face). The next triangulation will recompute the mesh.
+    pub fn invalidate_face(&mut self, step_face_id: i64) {
+        self.face_cache.retain(|(fid, _), _| *fid != step_face_id);
+    }
+
+    /// Audit item 7.3 (2026-07-19): Clear the entire face cache.
+    pub fn clear_face_cache(&mut self) {
+        self.face_cache.clear();
+    }
+
+    /// Audit item 7.3 (2026-07-19): Get face cache statistics.
+    pub fn face_cache_stats(&self) -> (usize, usize) {
+        (self.face_cache.len(), self.face_cache.capacity())
     }
 
     /// Triangulate a single pending BREP instance.
