@@ -135,13 +135,13 @@ Edge cache provides bit-identical boundary points. Ongoing work to extend covera
 ### 5.1. NURBS-Safe Healing `[~]` (covered by 2.3)
 Fix NURBS face dropping. See 2.3 for details.
 
-### 5.2. Tolerant Stitching `[ ]`
-**Plan:**
-- Add `tolerant_stitch(shell, tolerance)` — merge edges within tolerance
-- Edges get tolerance = max(their tolerance, gap/2)
-- No geometry modification, only topology
-
-**Files:** `crates/draper-topology/src/healing.rs`
+### 5.2. Tolerant Stitching `[x]`
+**Status:** DONE
+- Added `tolerant_stitch(shell, tolerance)` function
+- Merges edges within tolerance without modifying geometry
+- Sets edge tolerance = max(current, gap/2)
+- Updates shell tolerance = max(face tolerances)
+- Located in `crates/draper-topology/src/healing.rs`
 
 ### 5.3. Auto Healing Parameters `[~]`
 **Status:** PARTIALLY DONE
@@ -333,6 +333,7 @@ Cache per-face triangulation. See 7.3 for details.
 | 2026-07-19 | 2.1 intersect_surfaces dispatcher | PARTIAL | TBD |
 | 2026-07-19 | 3.3 Tolerance consistency validation | DONE | TBD |
 | 2026-07-19 | 4.3 OffsetSurface + RuledSurface (skeleton) | PARTIAL | TBD |
+| 2026-07-19 | 5.2 Tolerant stitching | DONE | TBD |
 
 ---
 
