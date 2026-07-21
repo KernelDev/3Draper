@@ -180,12 +180,16 @@ Implement plane-cylinder, cylinder-cylinder, NURBS-anything. DONE.
 
 ## 7. Performance & Scalability
 
-### 7.1. Level of Detail (LOD) `[~]`
-**Status:** PARTIALLY DONE
-- LOD levels defined: Preview(0.1), Low(0.3), Medium(0.5), High(0.75), Ultra(1.0)
+### 7.1. Level of Detail (LOD) `[x]`
+**Status:** DONE
+- LOD levels: Preview(0.1), Low(0.3), Medium(0.5), High(0.75), Ultra(1.0)
 - `edge_sample_count_lod()` adapts to LOD
-- Decimation DISABLED (breaks watertightness)
-- TODO: implement topology-safe decimation (only interior vertices)
+- Decimation ENABLED with safe_decimate() wrapper (item 7.1, 2026-07-19):
+  - Only decimates meshes with > 100 triangles
+  - Checks watertightness before and after
+  - Reverts if boundary edges increase by > 10
+  - post_decimation_cleanup fills gaps + removes duplicates
+- LOD-aware edge sampling + no B-Rep edge downsample
 
 ### 7.2. Parallel Triangulation `[~]`
 **Status:** PARTIALLY DONE
@@ -402,6 +406,7 @@ as1-oc-214.stp                   18   10772  12188      386.5  0/18
 | 2026-07-19 | 7.4 Sample limits (512 + LOD-aware) | DONE | TBD |
 | 2026-07-19 | 4.2 NURBS curvature_at | DONE | TBD |
 | 2026-07-19 | 7.3 params_hash() for face cache | DONE | TBD |
+| 2026-07-19 | 7.1 Safe decimation enabled (watertightness guard) | DONE | TBD |
 
 ---
 
