@@ -79,8 +79,8 @@ No NURBS-NURBS or NURBS-analytical intersection.
 
 ## 3. Tolerance Issues
 
-### 3.1. Hierarchical Tolerances `[~]` (covered by 2.2)
-Add per-entity tolerance fields. See 2.2 for details.
+### 3.1. Hierarchical Tolerances `[x]` (covered by 2.2)
+DONE — per-entity tolerance fields added to Vertex, Edge, Face, Shell, Solid.
 
 ### 3.2. STEP Uncertainty Extraction `[x]`
 **Status:** DONE in commit `ece246d` (2026-07-18)
@@ -101,17 +101,15 @@ Add per-entity tolerance fields. See 2.2 for details.
 
 ## 4. Triangulation & Watertightness
 
-### 4.1. Watertightness Guarantee `[~]` (covered by 2.4)
-Edge cache provides bit-identical boundary points. Ongoing work to extend coverage.
+### 4.1. Watertightness Guarantee `[x]` (covered by 2.4)
+DONE — edge cache provides bit-identical boundary points. Weld + T-junction repair are safety nets.
 
 ### 4.2. NURBS Surface Methods `[x]`
-**Problem:** No normal_at, inverse (XYZ→UV), curvature for NURBS.
-
-**Plan:**
-- [x] `NurbsSurface::normal_at(u, v)` already existed (uses analytical derivatives)
-- [x] Implement `NurbsSurface::inverse_evaluate(point, tol)` — Newton-Raphson with multi-start
-- [ ] Implement `NurbsSurface::curvature(u, v)` — first/second fundamental forms
-- [ ] Add degenerate UV handling (poles, seam edges)
+**Status:** DONE
+- [x] `NurbsSurface::normal_at(u, v)` — analytical derivatives
+- [x] `NurbsSurface::inverse_evaluate(point, tol)` — Newton-Raphson with multi-start
+- [x] `NurbsSurface::curvature_at(u, v)` — first/second fundamental forms (numerical)
+- [x] Degenerate UV handling via `is_degenerate_at()` (item 6.3)
 
 **Files:** `crates/draper-geometry/src/surface.rs`
 
@@ -132,8 +130,8 @@ Edge cache provides bit-identical boundary points. Ongoing work to extend covera
 
 ## 5. Topology & Healing
 
-### 5.1. NURBS-Safe Healing `[~]` (covered by 2.3)
-Fix NURBS face dropping. See 2.3 for details.
+### 5.1. NURBS-Safe Healing `[x]` (covered by 2.3)
+DONE — NURBS faces never removed by remove_small_features. Healing enabled by default.
 
 ### 5.2. Tolerant Stitching `[x]`
 **Status:** DONE
@@ -206,11 +204,12 @@ Implement plane-cylinder, cylinder-cylinder, NURBS-anything. DONE.
 
 **Files:** `crates/draper-step/src/converter.rs`
 
-### 7.4. Sample Limits `[~]`
-**Status:** PARTIALLY DONE
-- Current: `MAX_ANGULAR_SAMPLES = 64`, `MAX_HEIGHT_SAMPLES = 64`
-- Plan: increase to 256-512 for high-curvature NURBS
-- LOD-aware: Ultra LOD uses higher limits
+### 7.4. Sample Limits `[x]`
+**Status:** DONE
+- `MAX_ANGULAR_SAMPLES = 512` (was 64)
+- `MAX_HEIGHT_SAMPLES = 512` (was 64)
+- LOD-aware: `max_angular_for_lod()` scales cap by detail level
+  - Preview (0.1) → 64, Medium (0.5) → 256, Ultra (1.0) → 512
 
 ---
 
@@ -397,6 +396,12 @@ as1-oc-214.stp                   18   10772  12188      386.5  0/18
 | 2026-07-19 | 4.3 Extended surface types (parser + structures) | DONE | TBD |
 | 2026-07-19 | 7.3 Incremental triangulation (face cache API) | DONE | TBD |
 | 2026-07-19 | 8.6 Geometry cache (= 7.3 face cache) | DONE | TBD |
+| 2026-07-19 | 3.1 Hierarchical tolerances | DONE | TBD |
+| 2026-07-19 | 4.1 Watertightness guarantee | DONE | TBD |
+| 2026-07-19 | 5.1 NURBS-safe healing | DONE | TBD |
+| 2026-07-19 | 7.4 Sample limits (512 + LOD-aware) | DONE | TBD |
+| 2026-07-19 | 4.2 NURBS curvature_at | DONE | TBD |
+| 2026-07-19 | 7.3 params_hash() for face cache | DONE | TBD |
 
 ---
 

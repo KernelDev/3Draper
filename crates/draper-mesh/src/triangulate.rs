@@ -722,6 +722,30 @@ impl TriangulationParams {
         }
     }
 
+    /// Audit item 7.3 (2026-07-19): Compute a hash of the parameters for
+    /// face cache keying.
+    ///
+    /// Two param sets with the same hash will produce the same triangulation
+    /// for the same face geometry. This enables incremental triangulation:
+    /// when only some faces change, unchanged faces can be reused from cache.
+    ///
+    /// The hash covers: max_deviation, angular_samples, height_samples,
+    /// detail_level, max_face_triangles, keep_ratio.
+    pub fn params_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.max_deviation.to_bits().hash(&mut hasher);
+        self.angular_samples.hash(&mut hasher);
+        self.height_samples.hash(&mut hasher);
+        self.detail_level.to_bits().hash(&mut hasher);
+        self.max_face_triangles.hash(&mut hasher);
+        self.keep_ratio.to_bits().hash(&mut hasher);
+        self.max_angular_deviation.to_bits().hash(&mut hasher);
+        self.adaptive.hash(&mut hasher);
+        self.adaptive_lod_enabled.hash(&mut hasher);
+        hasher.finish()
+    }
+
     /// Total triangle budget at a given LOD level.
     ///
     /// At LOD 1.0 the total budget is 100 000 triangles for the entire BREP.
