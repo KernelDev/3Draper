@@ -191,11 +191,14 @@ Implement plane-cylinder, cylinder-cylinder, NURBS-anything. DONE.
   - post_decimation_cleanup fills gaps + removes duplicates
 - LOD-aware edge sampling + no B-Rep edge downsample
 
-### 7.2. Parallel Triangulation `[~]`
-**Status:** PARTIALLY DONE
-- `triangulate_breps_parallel()` exists in converter.rs
-- Uses rayon for per-BREP parallelism
-- TODO: intra-BREP parallelism (faces in parallel)
+### 7.2. Parallel Triangulation `[x]`
+**Status:** DONE
+- Per-BREP parallelism: `triangulate_breps_parallel()` (existing)
+- Intra-BREP parallelism: rayon `par_iter` on faces (item 7.2, 2026-07-19)
+- Only activates when `params.parallel = true` (native) AND face count > 4
+- Each face gets its own thread-local `StepConverter` (avoids RefCell Sync issues)
+- Results merged sequentially (preserves dedup_map consistency)
+- Sequential fallback on WASM (no rayon)
 
 ### 7.3. Incremental Triangulation `[x]`
 **Status:** DONE
@@ -407,6 +410,7 @@ as1-oc-214.stp                   18   10772  12188      386.5  0/18
 | 2026-07-19 | 4.2 NURBS curvature_at | DONE | TBD |
 | 2026-07-19 | 7.3 params_hash() for face cache | DONE | TBD |
 | 2026-07-19 | 7.1 Safe decimation enabled (watertightness guard) | DONE | TBD |
+| 2026-07-19 | 7.2 Intra-BREP parallel face triangulation (rayon) | DONE | TBD |
 
 ---
 

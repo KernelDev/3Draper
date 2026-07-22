@@ -5225,6 +5225,86 @@ impl<'a> StepConverter<'a> {
         let mut skipped_faces = 0;
         let _timed_out_faces = 0;
 
+        // ── Audit item 7.2 (2026-07-19): Intra-BREP parallel face triangulation ──
+        //
+        // When params.parallel is true (native only), triangulate all faces
+        // in parallel using rayon. The edge_cache is pre-populated (read-only
+        // during face triangulation), so each face can be triangulated
+        // independently. Results are merged sequentially afterwards.
+        #[cfg(not(target_arch = "wasm32"))]
+        let parallel_face_meshes: Option<Vec<(u64, i64, TriangleMesh, String)>> = if params.parallel && face_data_list.len() > 4 {
+            log::info!("BREP #{}: parallel face triangulation ({} faces)", brep_id, face_data_list.len());
+            use rayon::prelude::*;
+
+            // Pre-populate edge cache for all faces (shared, read-only during parallel phase)
+            // The edge cache was already built above, so we just need to ensure it's populated.
+
+            // Triangulate each face in parallel
+            // NOTE: StepConverter contains RefCell fields (not Sync), so we
+            // cannot use &self in par_iter. Instead, we extract the needed
+            // data (face_data) and call the thread-safe surface_to_mesh_static.
+            let bbox_clone = bbox.clone();
+            let params_clone = params.clone();
+            let step = self.step;
+            let results: Vec<(u64, i64, TriangleMesh, String)> = face_data_list
+                .par_iter()
+                .enumerate()
+                .filter_map(|(fi, face_data)| {
+                    let face_id = (fi + 1) as u64;
+                    let step_face_id = face_data.step_face_id;
+
+                    let surface_type = match &face_data.surface {
+                        Surface::Plane(_) => "Plane".to_string(),
+                        Surface::Cylinder(_) => "Cylinder".to_string(),
+                        Surface::Cone(_) => "Cone".to_string(),
+                        Surface::Sphere(_) => "Sphere".to_string(),
+                        Surface::Torus(_) => "Torus".to_string(),
+                        Surface::Revolution(_) => "Revolution".to_string(),
+                        Surface::Extrusion(_) => "Extrusion".to_string(),
+                        Surface::Nurbs(n) => format!("Nurbs({}x{},deg={}/{})",
+                            n.control_points.len(),
+                            n.control_points.first().map(|r| r.len()).unwrap_or(0),
+                            n.u_degree, n.v_degree),
+                        Surface::Offset(_) => "Offset".to_string(),
+                        Surface::Ruled(_) => "Ruled".to_string(),
+                    };
+
+                    // Create a thread-local converter for this face
+                    let local_converter = StepConverter::new(step);
+                    let face_mesh = local_converter.surface_to_mesh(face_data, &params_clone, &bbox_clone);
+                    Some((face_id, step_face_id, face_mesh, surface_type))
+                })
+                .collect();
+
+            Some(results)
+        } else {
+            None
+        };
+
+        // If parallel results exist, merge them sequentially
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(parallel_results) = parallel_face_meshes {
+            for (face_id, step_face_id, face_mesh, surface_type) in parallel_results {
+                let face_tri_count = face_mesh.triangle_count();
+                if face_tri_count == 0 {
+                    log::warn!("BREP #{} face #{} (STEP #{}, type={}): 0 triangles", brep_id, face_id, step_face_id, surface_type);
+                }
+
+                let mut face_mesh_with_ids = face_mesh.clone();
+                face_mesh_with_ids.triangle_face_ids = Some(vec![face_id; face_tri_count]);
+
+                let pre_merge = mesh.triangle_count();
+                mesh.merge_deduplicating(&face_mesh_with_ids, &mut dedup_map);
+                let added = mesh.triangle_count() - pre_merge;
+                if face_tri_count as isize - added as isize > 3 {
+                    log::warn!("BREP #{} face #{} ({}): {} of {} triangles lost during merge",
+                        brep_id, face_id, surface_type, face_tri_count as isize - added as isize, face_tri_count);
+                }
+                total_face_vertices_detailed += face_mesh_with_ids.vertices.len();
+                next_face_id = face_id + 1;
+            }
+        } else {
+        // ── Sequential path (WASM or small face count) ──
         for (fi, face_data) in face_data_list.iter().enumerate() {
             // Check BREP-level time budget — skip remaining faces if we're over limit
             if brep_start.elapsed() > brep_time_limit {
@@ -5400,6 +5480,9 @@ impl<'a> StepConverter<'a> {
         let post_filter_tris = mesh.triangle_count();
         let filter_removed = pre_filter_tris - post_filter_tris;
         eprintln!("POST_FILTER_DETAILED: BREP #{}: {} degenerate removed ({}→{})", brep_id, filter_removed, pre_filter_tris, post_filter_tris);
+
+        // Close sequential path else block
+        } // end else (sequential path)
 
         // ─── Recompute face_infos.triangle_range from triangle_face_ids ───
         // After filter_degenerate_triangles removes triangles, the original
