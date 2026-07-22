@@ -1680,6 +1680,16 @@ impl OwnedStepConversionContext {
     /// MORE boundary edges than before, reverts to the original mesh.
     /// This prevents the "decimation breaks watertightness" bug.
     fn safe_decimate(&self, mesh: &mut TriangleMesh, keep_ratio: f64, brep_id: i64) {
+        // Skip decimation on WASM — validate_watertight + mesh.clone() are
+        // too expensive on the browser main thread and cause UI hangs.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (mesh, keep_ratio, brep_id);
+            return;
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
         if keep_ratio >= 1.0 || mesh.triangle_count() < 100 {
             return;
         }
@@ -1717,6 +1727,7 @@ impl OwnedStepConversionContext {
                 );
             }
         }
+        } // end #[cfg(not(target_arch = "wasm32"))]
     }
 
     /// Abort any active chunked session (e.g., when the user cancels loading).

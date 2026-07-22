@@ -539,14 +539,21 @@ pub fn validate_watertight(mesh: &TriangleMesh, verbose: bool) -> WatertightRepo
         // (because they have the same 3D position). The resulting triangle
         // has zero area and its edges are phantom (e.g., an edge between
         // two coincident points) — they shouldn't be counted.
-        let p0 = mesh.vertices[v0 as usize];
-        let p1 = mesh.vertices[v1 as usize];
-        let p2 = mesh.vertices[v2 as usize];
-        let area = ((p1.x - p0.x) * (p2.y - p0.y) - (p1.y - p0.y) * (p2.x - p0.x)).abs()
-                 + ((p1.y - p0.y) * (p2.z - p0.z) - (p1.z - p0.z) * (p2.y - p0.y)).abs()
-                 + ((p1.z - p0.z) * (p2.x - p0.x) - (p1.x - p0.x) * (p2.z - p0.z)).abs();
-        if area < 1e-20 {
-            continue;
+        //
+        // Performance: skip the area check when verbose=false on large meshes
+        // (>5000 tris) — the 3-vertex access per triangle is expensive on WASM.
+        if !verbose && triangle_count > 5000 {
+            // Skip area check for performance — only check index degeneracy
+        } else {
+            let p0 = mesh.vertices[v0 as usize];
+            let p1 = mesh.vertices[v1 as usize];
+            let p2 = mesh.vertices[v2 as usize];
+            let area = ((p1.x - p0.x) * (p2.y - p0.y) - (p1.y - p0.y) * (p2.x - p0.x)).abs()
+                     + ((p1.y - p0.y) * (p2.z - p0.z) - (p1.z - p0.z) * (p2.y - p0.y)).abs()
+                     + ((p1.z - p0.z) * (p2.x - p0.x) - (p1.x - p0.x) * (p2.z - p0.z)).abs();
+            if area < 1e-20 {
+                continue;
+            }
         }
 
         let edges = [
@@ -767,6 +774,10 @@ pub fn fix_inconsistent_winding(mesh: &mut TriangleMesh) -> usize {
     //
     // Fix: For each pair of same-face triangles sharing an edge, compute
     // the dihedral angle. If >170°, remove the smaller-area triangle.
+    //
+    // WASM guard: Skip this step on WASM — the HashMap + normal computation
+    // are expensive on the browser main thread. BFS winding fix is sufficient.
+    #[cfg(not(target_arch = "wasm32"))]
     if let Some(ref face_ids) = mesh.triangle_face_ids {
         let mut edge_to_tris: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
         for (ti, tri) in mesh.triangles.iter().enumerate() {
