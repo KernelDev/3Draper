@@ -1208,6 +1208,9 @@ fn project_point_to_surface(surface: &Surface, point: &Point3d) -> (f64, f64) {
         Surface::Nurbs(_) => {
             project_point_to_surface_grid(surface, point, 0.0, 1.0, 0.0, 1.0)
         }
+        Surface::Offset(_) | Surface::Ruled(_) => {
+            project_point_to_surface_grid(surface, point, -100.0, 100.0, -100.0, 100.0)
+        }
     }
 }
 
