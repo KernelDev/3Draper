@@ -88,33 +88,33 @@ impl StepConversionConfig {
 
 /// Extracted face data with surface and boundary edges.
 #[derive(Clone)]
-struct FaceData {
+pub struct FaceData {
     surface: Surface,
     /// Edges from the outer boundary loop (FACE_OUTER_BOUND)
-    outer_edges: Vec<TopoEdge>,
+    pub outer_edges: Vec<TopoEdge>,
     /// Edges from inner boundary loops (FACE_BOUND = holes)
-    inner_edges: Vec<Vec<TopoEdge>>,
+    pub inner_edges: Vec<Vec<TopoEdge>>,
     /// All edges combined (for backward compat with surface_to_mesh)
-    edges: Vec<TopoEdge>,
-    forward: bool,
+    pub edges: Vec<TopoEdge>,
+    pub forward: bool,
     /// STEP entity ID of the ADVANCED_FACE this data was extracted from.
-    step_face_id: i64,
+    pub step_face_id: i64,
     /// STEP entity ID of the face's surface (for PCURVE matching).
-    surface_step_id: Option<i64>,
+    pub surface_step_id: Option<i64>,
     /// Analytical PCURVEs in UV space for each edge in `edges`.
     /// Same length as `edges`. When present, used instead of surface.project_point().
-    edge_curves_2d: Vec<Option<Curve2d>>,
+    pub edge_curves_2d: Vec<Option<Curve2d>>,
     /// STEP entity IDs of EDGE_CURVE entities for each edge in `edges`.
     /// Same length as `edges`. Used for edge discretization caching —
     /// when two faces share the same STEP EDGE_CURVE, they must produce
     /// identical 3D boundary points to ensure mesh watertightness.
-    edge_step_ids: Vec<i64>,
+    pub edge_step_ids: Vec<i64>,
     /// STEP entity IDs of EDGE_CURVE entities for outer edges.
     /// Same length as `outer_edges`.
-    outer_edge_step_ids: Vec<i64>,
+    pub outer_edge_step_ids: Vec<i64>,
     /// STEP entity IDs of EDGE_CURVE entities for inner edges.
     /// Same structure as `inner_edges`.
-    inner_edge_step_ids: Vec<Vec<i64>>,
+    pub inner_edge_step_ids: Vec<Vec<i64>>,
     /// Whether this face belongs to a void shell (internal cavity).
     /// Void faces have normals pointing INTO the solid material (away from
     /// the void cavity). This flag is used by the healing pipeline to

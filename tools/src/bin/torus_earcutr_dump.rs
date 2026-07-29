@@ -68,6 +68,12 @@ fn main() {
         draper_geometry::Surface::Nurbs(n) => {
             println!("  NURBS: u_degree={}, v_degree={}", n.u_degree, n.v_degree);
         }
+        draper_geometry::Surface::Offset(_) => {
+            println!("  Offset surface");
+        }
+        draper_geometry::Surface::Ruled(_) => {
+            println!("  Ruled surface");
+        }
     }
 
     // Print boundary info

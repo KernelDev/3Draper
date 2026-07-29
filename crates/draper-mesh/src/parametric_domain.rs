@@ -893,9 +893,7 @@ fn get_surface_u_range(surface: &Surface) -> (f64, f64) {
         Surface::Cylinder(_) | Surface::Cone(_) | Surface::Revolution(_) => (0.0, 2.0 * PI),
         Surface::Sphere(_) => (0.0, 2.0 * PI),
         Surface::Torus(_) => (0.0, 2.0 * PI),
-        Surface::Plane(_) | Surface::Extrusion(_) => (0.0, 1.0),
-        Surface::Offset(_) => (0.0, 1.0),
-        Surface::Ruled(_) => (0.0, 1.0),
+        Surface::Plane(_) | Surface::Extrusion(_) | Surface::Offset(_) | Surface::Ruled(_) => (0.0, 1.0),
     }
 }
 
