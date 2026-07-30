@@ -73,8 +73,8 @@ pub fn render_ribbon(ctx: &egui::Context, active: &mut RibbonTab) {
     egui::TopBottomPanel::top("ribbon_bar")
         .exact_height(90.0)
         .show(ctx, |ui| {
-            // Tab selector row
-            ui.horizontal_wrapped(|ui| {
+            // Tab selector row — horizontal, no wrapping
+            ui.horizontal(|ui| {
                 for tab in RibbonTab::ALL {
                     if ui.selectable_label(*active == *tab, tab.label()).clicked() {
                         *active = *tab;
@@ -84,42 +84,53 @@ pub fn render_ribbon(ctx: &egui::Context, active: &mut RibbonTab) {
 
             ui.separator();
 
-            // Content row — buttons for the active tab
+            // Content row — groups laid out horizontally, scrollable
             egui::ScrollArea::horizontal().show(ui, |ui| {
-                match active {
-                    RibbonTab::File => render_file_ribbon(ui),
-                    RibbonTab::Home => render_home_ribbon(ui),
-                    RibbonTab::Sketch => render_sketch_ribbon(ui),
-                    RibbonTab::Insert => render_insert_ribbon(ui),
-                    RibbonTab::Modify => render_modify_ribbon(ui),
-                    RibbonTab::SheetMetal => render_sheetmetal_ribbon(ui),
-                    RibbonTab::Assembly => render_assembly_ribbon(ui),
-                    RibbonTab::Cam => render_cam_ribbon(ui),
-                    RibbonTab::Drawing => render_drawing_ribbon(ui),
-                    RibbonTab::Simulation => render_simulation_ribbon(ui),
-                    RibbonTab::Inspect => render_inspect_ribbon(ui),
-                    RibbonTab::Ai => render_ai_ribbon(ui),
-                    RibbonTab::Tools => render_tools_ribbon(ui),
-                    RibbonTab::View => render_view_ribbon(ui),
-                    RibbonTab::Surface => render_surface_ribbon(ui),
-                }
+                ui.horizontal(|ui| {
+                    match active {
+                        RibbonTab::File => render_file_ribbon(ui),
+                        RibbonTab::Home => render_home_ribbon(ui),
+                        RibbonTab::Sketch => render_sketch_ribbon(ui),
+                        RibbonTab::Insert => render_insert_ribbon(ui),
+                        RibbonTab::Modify => render_modify_ribbon(ui),
+                        RibbonTab::SheetMetal => render_sheetmetal_ribbon(ui),
+                        RibbonTab::Assembly => render_assembly_ribbon(ui),
+                        RibbonTab::Cam => render_cam_ribbon(ui),
+                        RibbonTab::Drawing => render_drawing_ribbon(ui),
+                        RibbonTab::Simulation => render_simulation_ribbon(ui),
+                        RibbonTab::Inspect => render_inspect_ribbon(ui),
+                        RibbonTab::Ai => render_ai_ribbon(ui),
+                        RibbonTab::Tools => render_tools_ribbon(ui),
+                        RibbonTab::View => render_view_ribbon(ui),
+                        RibbonTab::Surface => render_surface_ribbon(ui),
+                    }
+                });
             });
         });
 }
 
-/// Helper: render a button group with a label.
+/// Helper: render a button group with a label at the bottom.
+/// Groups are laid out horizontally (left to right) within the ribbon.
+/// Buttons within a group are also horizontal.
 fn group(ui: &mut egui::Ui, label: &str, content: impl FnOnce(&mut egui::Ui)) {
     ui.vertical(|ui| {
-        content(ui);
+        // Buttons row — horizontal
+        ui.horizontal(|ui| {
+            content(ui);
+        });
+        // Group label at the bottom
         ui.label(egui::RichText::new(label).small().color(egui::Color32::GRAY));
     });
     ui.separator();
 }
 
-/// Helper: render a command button.
+/// Helper: render a command button with icon on top, label below.
 fn cmd_button(ui: &mut egui::Ui, icon: &str, label: &str) -> bool {
-    ui.add_sized([50.0, 40.0], egui::Button::new(format!("{}\n{}", icon, label)))
-        .clicked()
+    let button = egui::Button::new(
+        egui::RichText::new(format!("{}\n{}", icon, label))
+            .small()
+    );
+    ui.add_sized([55.0, 45.0], button).clicked()
 }
 
 /// File ribbon tab.
