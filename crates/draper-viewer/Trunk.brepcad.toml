@@ -1,0 +1,26 @@
+# Trunk configuration for BRepCAD WASM build
+# https://trunkrs.dev/configuration/
+#
+# Usage:
+#   trunk serve --config crates/draper-viewer/Trunk.brepcad.toml crates/draper-viewer/brepcad.html
+#   trunk build --config crates/draper-viewer/Trunk.brepcad.toml crates/draper-viewer/brepcad.html --release
+
+[build]
+target = "brepcad.html"
+dist = "dist-brepcad"
+cargo_flags = ["--package", "draper-viewer", "--no-default-features", "--features", "web-deploy"]
+
+[watch]
+ignore = ["../../target"]
+
+[serve]
+# The address to serve on.
+addresses = ["127.0.0.1"]
+# The port to serve on.
+port = 8081
+
+# Cross-Origin Isolation headers for SharedArrayBuffer support.
+# Required for WASM parallel threading (wasm-bindgen-rayon).
+[serve.headers]
+"Cross-Origin-Opener-Policy" = "same-origin"
+"Cross-Origin-Embedder-Policy" = "require-corp"

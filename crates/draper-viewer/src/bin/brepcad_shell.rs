@@ -9,14 +9,21 @@
 //! This binary only enables the extended menu/ribbon UI via the
 //! `enable_brepcad_ui` flag on `ViewerApp`.
 //!
+//! Supports BOTH native (desktop) and WASM (browser) targets.
+//!
 //! Usage:
-//!     cargo run --bin brepcad-shell
+//!     cargo run --bin brepcad-shell                                          # native
+//!     cargo build --bin brepcad-shell --target wasm32-unknown-unknown \
+//!         --no-default-features --features web-deploy --release              # WASM
 
-use std::sync::Arc;
-use egui_wgpu::{WgpuSetup, WgpuSetupCreateNew};
+// ─── Native entry point ──────────────────────────────────────────────────
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<(), eframe::Error> {
     env_logger::init();
+
+    use std::sync::Arc;
+    use egui_wgpu::{WgpuSetup, WgpuSetupCreateNew};
 
     let wgpu_setup = WgpuSetupCreateNew {
         // Request POLYGON_MODE_LINE feature for wireframe rendering
@@ -66,4 +73,148 @@ fn main() -> Result<(), eframe::Error> {
             Ok(Box::new(app))
         }),
     )
+}
+
+// ─── Web (wasm32) entry point ────────────────────────────────────────────
+
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    // Web entry: use eframe's WebRunner.
+    // The actual startup is handled by the wasm_bindgen start function below.
+    // This main() is never called on wasm — the #[wasm_bindgen(start)] function is.
+}
+
+#[cfg(target_arch = "wasm32")]
+mod web_entry {
+    use eframe::WebRunner;
+    use wasm_bindgen::prelude::*;
+
+    /// Show an error page in the browser, replacing the loading overlay.
+    fn show_error_page(document: &web_sys::Document, html: &str) {
+        if let Some(body) = document.body() {
+            let error_div = document.create_element("div").unwrap();
+            error_div.set_inner_html(&format!(
+                "<div style='color:#ff6b6b;padding:20px;font-family:sans-serif;max-width:600px;margin:40px auto;'>\
+                {}\
+                </div>", html
+            ));
+            let _ = body.append_child(&error_div);
+            // Hide loading overlay
+            if let Some(loading) = document.get_element_by_id("loading") {
+                loading.set_attribute("style", "display:none").ok();
+            }
+        }
+    }
+
+    /// This is the entry point for the web version of BRepCAD.
+    /// It is called automatically when the wasm module is loaded.
+    #[wasm_bindgen(start)]
+    pub async fn start() {
+        // Install panic hook so WASM panics show readable stack traces
+        console_error_panic_hook::set_once();
+        console_log::init_with_level(log::Level::Info).ok();
+
+        // Initialize IndexedDB cache database
+        draper_viewer::cache::init_cache_db();
+
+        let window = web_sys::window().expect("no window");
+        let document = window.document().expect("no document");
+        let canvas = document
+            .get_element_by_id("the_canvas_id")
+            .expect("failed to find the_canvas_id")
+            .unchecked_into::<web_sys::HtmlCanvasElement>();
+
+        // ── Feature detection: check if WebGL2 is available WITHOUT
+        // actually creating a context on the canvas.
+        let webgl2_available = {
+            let offscreen = document
+                .create_element("canvas")
+                .ok()
+                .and_then(|el| el.unchecked_into::<web_sys::HtmlCanvasElement>().get_context("webgl2").ok())
+                .map(|ctx| ctx.is_some())
+                .unwrap_or(false);
+            offscreen
+        };
+
+        if !webgl2_available {
+            let msg = "WebGL2 is not available in this browser. \
+                       BRepCAD requires WebGL2 support.";
+            log::error!("{}", msg);
+            show_error_page(&document, &format!(
+                "<h2>BRepCAD — Graphics Not Available</h2>\
+                 <p>{}</p>\
+                 <p style='color:#888;font-size:14px;'>\
+                 Try using Chrome 113+, Edge 113+, or Firefox with WebGL2 enabled.\
+                 </p>", msg
+            ));
+            return;
+        }
+
+        // Configure wgpu to use WebGL2 as fallback when WebGPU is not available
+        let web_options = eframe::WebOptions {
+            wgpu_options: egui_wgpu::WgpuConfiguration {
+                wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(
+                    egui_wgpu::WgpuSetupCreateNew {
+                        instance_descriptor: wgpu::InstanceDescriptor {
+                            // Try WebGPU first, fall back to WebGL2
+                            backends: wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
+                            ..Default::default()
+                        },
+                        device_descriptor: std::sync::Arc::new(|adapter| {
+                            let base_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
+                                let mut limits = wgpu::Limits::downlevel_webgl2_defaults();
+                                let adapter_limits = adapter.limits();
+                                limits.max_color_attachments = limits.max_color_attachments.min(adapter_limits.max_color_attachments);
+                                limits
+                            } else {
+                                wgpu::Limits::default()
+                            };
+
+                            wgpu::DeviceDescriptor {
+                                label: Some("BRepCAD wgpu device (web)"),
+                                required_features: wgpu::Features::default(),
+                                required_limits: wgpu::Limits {
+                                    max_texture_dimension_2d: 8192.min(base_limits.max_texture_dimension_2d),
+                                    ..base_limits
+                                },
+                                memory_hints: wgpu::MemoryHints::default(),
+                            }
+                        }),
+                        ..Default::default()
+                    }
+                ),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let runner = WebRunner::new();
+        match runner
+            .start(
+                canvas,
+                web_options,
+                Box::new(|cc| {
+                    let mut app = draper_viewer::app::ViewerApp::new(cc);
+                    // Enable the BRepCAD extended UI (21-menu bar + 15-tab ribbon)
+                    app.enable_brepcad_ui = true;
+                    Ok(Box::new(app))
+                }),
+            )
+            .await
+        {
+            Ok(()) => {}
+            Err(e) => {
+                let msg = format!("BRepCAD failed to start: {e:?}");
+                log::error!("{msg}");
+                show_error_page(&document, &format!(
+                    "<h2>BRepCAD — Rendering Error</h2>\
+                     <p>{msg}</p>\
+                     <p style='color:#888;font-size:14px;'>\
+                     Make sure you're using a browser with WebGPU or WebGL2 support.\
+                     Try Chrome 113+, Edge 113+, or Firefox Nightly with WebGPU enabled.\
+                     </p>"
+                ));
+            }
+        }
+    }
 }

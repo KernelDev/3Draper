@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <!-- Mobile-first viewport: allows user zoom (accessibility) but starts at 1.0 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#3a5a8c">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>BRepCAD — 3Draper-powered CAD/CAE/CAM</title>
+    <meta name="description" content="BRepCAD: A full-featured CAD/CAE/CAM application with B-Rep topology, STEP/STL I/O, NURBS surfaces & curves, and interactive 3D viewer running entirely in your browser via WebAssembly.">
+    <link data-trunk rel="rust" data-bin="brepcad-shell" data-wasm-opt="2" data-cargo-no-default-features data-cargo-features="web-deploy" />
+    <!--
+        Cross-Origin Isolation headers for SharedArrayBuffer support.
+        Required for WASM parallel threading (wasm-bindgen-rayon).
+        Trunk's serve mode sets these automatically via the [serve.headers] config.
+        For production, configure your web server to send:
+          Cross-Origin-Opener-Policy: same-origin
+          Cross-Origin-Embedder-Policy: require-corp
+    -->
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body {
+            width: 100%;
+            height: 100%;
+            /* Use 100dvh for mobile browsers (handles URL bar hide/show).
+               Fall back to 100vh for older browsers. */
+            height: 100dvh;
+            overflow: hidden;
+            background: #e8e9ef;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+            /* Prevent text selection on touch — feels more app-like. */
+            -webkit-user-select: none;
+            user-select: none;
+            -webkit-tap-highlight-color: transparent;
+            /* Respect notch / safe areas on iPhone. */
+            padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+        }
+        #the_canvas_id {
+            width: 100%;
+            height: 100%;
+            display: block;
+            touch-action: none; /* Prevent browser from intercepting touch gestures */
+        }
+        #loading {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: #e8e9ef;
+            z-index: 1000;
+            transition: opacity 0.5s ease;
+            padding: 20px;
+            text-align: center;
+        }
+        #loading.fade-out {
+            opacity: 0;
+            pointer-events: none;
+        }
+        #loading .logo {
+            font-size: 32px;
+            font-weight: 700;
+            color: #3a5a8c;
+            margin-bottom: 24px;
+            letter-spacing: 2px;
+        }
+        #loading .logo span {
+            color: #556677;
+            font-weight: 300;
+            font-size: 18px;
+            margin-left: 8px;
+        }
+        #loading .spinner {
+            width: 48px;
+            height: 48px;
+            border: 3px solid rgba(58, 90, 140, 0.2);
+            border-top: 3px solid #3a5a8c;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        #loading .status {
+            margin-top: 20px;
+            color: #556677;
+            font-size: 14px;
+            /* Allow status text to wrap on narrow phones instead of overflowing. */
+            max-width: 90vw;
+            word-wrap: break-word;
+        }
+        #loading .parallel-badge {
+            margin-top: 8px;
+            font-size: 12px;
+            color: #8a8a8a;
+        }
+        /* Mobile-only hint shown briefly after loading. */
+        #mobile-hint {
+            position: fixed;
+            bottom: max(60px, env(safe-area-inset-bottom));
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(40, 40, 50, 0.85);
+            color: white;
+            padding: 8px 14px;
+            border-radius: 18px;
+            font-size: 12px;
+            font-weight: 500;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.4s ease;
+            z-index: 999;
+            max-width: 90vw;
+            text-align: center;
+        }
+        #mobile-hint.show {
+            opacity: 1;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        /* On very small screens, shrink the loading logo. */
+        @media (max-width: 360px) {
+            #loading .logo { font-size: 24px; letter-spacing: 1px; }
+            #loading .logo span { font-size: 14px; display: block; margin-left: 0; margin-top: 4px; }
+            #loading .spinner { width: 40px; height: 40px; }
+        }
+    </style>
+</head>
+<body>
+    <div id="loading">
+        <div class="logo">BRep<span>CAD</span></div>
+        <div class="spinner"></div>
+        <div class="status">Loading BRepCAD WebAssembly...</div>
+        <div class="parallel-badge" id="parallel-badge"></div>
+    </div>
+    <canvas id="the_canvas_id"></canvas>
+    <div id="mobile-hint">Tap ⚙ for Surfaces &amp; Curves</div>
+    <script>
+        // Hide loading overlay once WASM application has fully started
+        var loadingEl = document.getElementById("loading");
+        var hintEl = document.getElementById("mobile-hint");
+        function hideLoading() {
+            if (loadingEl) {
+                loadingEl.classList.add("fade-out");
+                setTimeout(function() { loadingEl.style.display = "none"; }, 600);
+            }
+            // Show the mobile hint briefly after load (only on touch devices).
+            if (hintEl && ('ontouchstart' in window || navigator.maxTouchPoints > 0)) {
+                setTimeout(function() { hintEl.classList.add("show"); }, 800);
+                setTimeout(function() { hintEl.classList.remove("show"); }, 5000);
+            }
+        }
+        // Listen for the TrunkApplicationStarted event (dispatched after WASM init)
+        window.addEventListener("TrunkApplicationStarted", function() {
+            setTimeout(hideLoading, 100);
+        });
+        // Fallback: hide after 15 seconds even if WASM fails to load
+        setTimeout(hideLoading, 15000);
+
+        // ── Cross-Origin Isolation Detection ──────────────────────────────
+        // Check if SharedArrayBuffer is available (required for WASM parallel threading).
+        // If not available, show a badge indicating single-threaded mode.
+        (function() {
+            var badge = document.getElementById('parallel-badge');
+            if (!badge) return;
+
+            if (typeof SharedArrayBuffer !== 'undefined' && window.crossOriginIsolated) {
+                badge.textContent = 'Multi-threaded (SharedArrayBuffer available)';
+                badge.style.color = '#4a8c4a';
+            } else {
+                badge.textContent = 'Single-threaded (add COOP/COEP headers for parallel mode)';
+                badge.style.color = '#c8a04a';
+            }
+        })();
+
+        // ── Prevent context menu on long-press (mobile) ───────────────────
+        window.addEventListener('contextmenu', function(e) {
+            if (e.target && e.target.id === 'the_canvas_id') {
+                e.preventDefault();
+            }
+        });
+
+        // ── Web Worker Bridge for STEP Triangulation ───────────────────────
+        // The worker bridge provides an async API for offloading STEP parsing
+        // and triangulation to a background thread. The Rust viewer calls
+        // into this bridge via js_sys / wasm_bindgen.
+        //
+        // Flow:
+        //   1. Viewer detects Worker support → sets use_worker = true
+        //   2. Viewer calls workerParseStep(content, name, lod, profile)
+        //   3. Worker parses STEP → returns pending_breps + assembly_tree
+        //   4. Viewer calls workerTriangulateNext() in a loop
+        //   5. Worker triangulates one BREP → returns mesh data
+        //   6. Viewer merges mesh data into scene
+        //   7. When all BREPs done → workerTriangulateAllComplete() returns true
+        window._draperWorker = null;
+        window._draperWorkerPendingMeshes = [];
+        window._draperWorkerError = null;
+        window._draperWorkerReady = false;
+        window._draperWorkerParseResult = null;
+
+        // Try to initialize the worker. Returns true if successful.
+        window.workerInit = function() {
+            try {
+                if (window._draperWorker) return true;
+                window._draperWorker = new Worker('worker.js', { type: 'module' });
+                window._draperWorker.onmessage = function(e) {
+                    var msg = e.data;
+                    switch (msg.type) {
+                        case 'ready':
+                            window._draperWorkerReady = true;
+                            console.log('[3Draper] Worker ready');
+                            break;
+                        case 'parse_complete':
+                            window._draperWorkerParseResult = {
+                                stats: msg.stats,
+                                pending_breps_json: msg.pending_breps_json,
+                                assembly_tree_json: msg.assembly_tree_json,
+                            };
+                            break;
+                        case 'triangulate_result':
+                            window._draperWorkerPendingMeshes.push({
+                                name: msg.name,
+                                brep_id: msg.brep_id,
+                                color: msg.color,
+                                vertex_count: msg.mesh.vertex_count,
+                                triangle_count: msg.mesh.triangle_count,
+                                vertices: msg.mesh.vertices,
+                                indices: msg.mesh.indices,
+                                normals: msg.mesh.normals,
+                                face_normals: msg.mesh.face_normals,
+                                colors: msg.mesh.colors,
+                                progress: msg.progress,
+                            });
+                            break;
+                        case 'triangulate_error':
+                            window._draperWorkerPendingMeshes.push({
+                                name: msg.name,
+                                brep_id: msg.brep_id,
+                                color: msg.color,
+                                vertex_count: 0,
+                                triangle_count: 0,
+                                vertices: new Float32Array(0),
+                                indices: new Uint32Array(0),
+                                error: msg.error,
+                                progress: msg.progress,
+                            });
+                            break;
+                        case 'all_complete':
+                            window._draperWorkerParseResult = window._draperWorkerParseResult || {};
+                            window._draperWorkerParseResult.all_complete = true;
+                            window._draperWorkerParseResult.summary = msg.summary;
+                            break;
+                        case 'error':
+                            window._draperWorkerError = msg.message;
+                            console.error('[3Draper] Worker error:', msg.message);
+                            break;
+                    }
+                };
+                window._draperWorker.onerror = function(e) {
+                    window._draperWorkerError = e.message;
+                    console.error('[3Draper] Worker error:', e.message);
+                };
+                return true;
+            } catch (err) {
+                console.warn('[3Draper] Worker init failed, falling back to main thread:', err.message);
+                window._draperWorkerError = err.message;
+                return false;
+            }
+        };
+
+        // Check if worker is ready
+        window.workerIsReady = function() {
+            return window._draperWorkerReady === true;
+        };
+
+        // Get worker error (if any)
+        window.workerGetError = function() {
+            var err = window._draperWorkerError;
+            window._draperWorkerError = null;
+            return err || '';
+        };
+
+        // Parse STEP in worker. Returns immediately; result polled via workerGetParseResult().
+        window.workerParseStep = function(content, name, lod, profile) {
+            if (!window._draperWorker) return false;
+            window._draperWorkerParseResult = null;
+            window._draperWorkerPendingMeshes = [];
+            window._draperWorker.postMessage({
+                type: 'parse',
+                id: 1,
+                content: content,
+                name: name,
+                lod: lod,
+                profile: profile,
+            });
+            return true;
+        };
+
+        // Get parse result (null if not ready yet)
+        window.workerGetParseResult = function() {
+            return window._draperWorkerParseResult;
+        };
+
+        // Triangulate next BREP in worker
+        window.workerTriangulateNext = function() {
+            if (!window._draperWorker) return false;
+            window._draperWorker.postMessage({ type: 'triangulate_next', id: 2 });
+            return true;
+        };
+
+        // Get pending mesh results from worker (and clear them)
+        window.workerGetPendingMeshes = function() {
+            var meshes = window._draperWorkerPendingMeshes;
+            window._draperWorkerPendingMeshes = [];
+            return meshes;
+        };
+
+        // Cancel worker triangulation
+        window.workerCancel = function() {
+            if (!window._draperWorker) return;
+            window._draperWorker.postMessage({ type: 'cancel' });
+            window._draperWorkerPendingMeshes = [];
+            window._draperWorkerParseResult = null;
+        };
+
+        // Check if worker completed all BREPs
+        window.workerAllComplete = function() {
+            return window._draperWorkerParseResult &&
+                   window._draperWorkerParseResult.all_complete === true;
+        };
+    </script>
+</body>
+</html>
