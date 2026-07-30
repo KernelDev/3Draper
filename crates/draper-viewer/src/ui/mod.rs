@@ -14,6 +14,7 @@ pub mod view_modes;
 pub mod dialogs;
 pub mod core_engine;
 pub mod sketch;
+pub mod workspaces;
 
 use eframe::egui;
 

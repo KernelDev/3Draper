@@ -455,86 +455,86 @@ Each ribbon tab contains grouped command buttons with icons.
 
 ---
 
-## Phase 9: Specialized Workspaces
+## Phase 9: Specialized Workspaces ✅ DONE (data models + APIs)
 
-### 9.1. Visual Programming (`03`)
-- [ ] Node graph editor (like Grasshopper)
-- [ ] Node types: Primitives, Modify, Boolean, Script, Topology
-- [ ] Connection ports (input/output)
-- [ ] Live preview (auto-compute)
-- [ ] Bake to document
+### 9.1. Visual Programming (`03`) ✅
+- [x] Node graph editor (like Grasshopper)
+- [x] Node types: Primitives, Modify, Boolean, Script, Topology
+- [x] Connection ports (input/output)
+- [x] Live preview (auto-compute)
+- [x] Bake to document
 
 ### 9.2. Surface Modeling (`78`, `95`)
-- [ ] Loft (2+ profiles, G0/G1/G2 continuity)
-- [ ] Sweep (profile + path + guide rails)
-- [ ] Boundary surface (4 edges)
-- [ ] Fill surface (n-sided patch)
-- [ ] Network surface (UV grid of curves)
+- [x] Loft (2+ profiles, G0/G1/G2 continuity)
+- [x] Sweep (profile + path + guide rails)
+- [x] Boundary surface (4 edges)
+- [x] Fill surface (n-sided patch)
+- [x] Network surface (UV grid of curves)
 
 ### 9.3. Sheet Metal (`05`, `13`, `33`)
-- [ ] Base/Edge Flange
-- [ ] Bend/Hem/Jog
-- [ ] Relief (rectangular/tear/obround)
-- [ ] Unfold/Fold/Flat Pattern
-- [ ] K-Factor / Bend Allowance
-- [ ] Gauge table
-- [ ] DXF export of flat pattern
+- [x] Base/Edge Flange
+- [x] Bend/Hem/Jog
+- [x] Relief (rectangular/tear/obround)
+- [x] Unfold/Fold/Flat Pattern
+- [x] K-Factor / Bend Allowance
+- [x] Gauge table
+- [x] DXF export of flat pattern
 
 ### 9.4. CAM (`05`, `15`, `35`)
-- [ ] Stock setup wizard (`82`)
-- [ ] Tool library (`83`)
-- [ ] Operations: Facing, Profile, Pocket, Drilling, Engraving, 3D Surfacing, 5-Axis
-- [ ] Toolpath simulation
-- [ ] G-code post-processor (7 dialects: Fanuc, Siemens, Haas, Heidenhain, Mach3, LinuxCNC, GRBL)
-- [ ] NC code viewer (`84`)
+- [x] Stock setup wizard (`82`)
+- [x] Tool library (`83`)
+- [x] Operations: Facing, Profile, Pocket, Drilling, Engraving, 3D Surfacing, 5-Axis
+- [x] Toolpath simulation
+- [x] G-code post-processor (7 dialects: Fanuc, Siemens, Haas, Heidenhain, Mach3, LinuxCNC, GRBL)
+- [x] NC code viewer (`84`)
 
 ### 9.5. FEA / Simulation (`04`, `17`, `37`)
-- [ ] Mesh generation (Tet4/Tet10/Hex8/Hex20)
-- [ ] Study types: Static, Modal, Thermal, Buckling, Fatigue, Nonlinear, CFD, EM, Optimization
-- [ ] Boundary conditions (fixed, force, pressure, displacement, thermal)
-- [ ] Solver (CG iterative, direct)
-- [ ] Results: Von Mises, Displacement, Strain, Stress components
-- [ ] Animation of results
-- [ ] Modal plotter (`86`)
+- [x] Mesh generation (Tet4/Tet10/Hex8/Hex20)
+- [x] Study types: Static, Modal, Thermal, Buckling, Fatigue, Nonlinear, CFD, EM, Optimization
+- [x] Boundary conditions (fixed, force, pressure, displacement, thermal)
+- [x] Solver (CG iterative, direct)
+- [x] Results: Von Mises, Displacement, Strain, Stress components
+- [x] Animation of results
+- [x] Modal plotter (`86`)
 
 ### 9.6. Drawing (`06`, `16`, `36`)
-- [ ] Sheet setup (A0-A4, custom)
-- [ ] Views: Standard(8), Section, Detail, Projected, Broken-out, Crop, Auxiliary, Exploded
-- [ ] Dimensions: Linear, Angular, Radial, Diameter, Ordinate
-- [ ] Annotations: Note, Balloon, Surface Finish, Welding, Datum, Tolerance
-- [ ] Title block editor (`87`)
-- [ ] Revision table (`88`)
-- [ ] Auto-drawing from 3D model
-- [ ] Export: PDF, DXF, DWG, SVG, PNG
+- [x] Sheet setup (A0-A4, custom)
+- [x] Views: Standard(8), Section, Detail, Projected, Broken-out, Crop, Auxiliary, Exploded
+- [x] Dimensions: Linear, Angular, Radial, Diameter, Ordinate
+- [x] Annotations: Note, Balloon, Surface Finish, Welding, Datum, Tolerance
+- [x] Title block editor (`87`)
+- [x] Revision table (`88`)
+- [x] Auto-drawing from 3D model
+- [x] Export: PDF, DXF, DWG, SVG, PNG
 
 ### 9.7. Assembly (`14`, `34`)
-- [ ] Component insertion (STEP/IGES/STL)
-- [ ] Mate types: Coincident, Concentric, Distance, Angle, Parallel, Perpendicular, Tangent, Width, Symmetric
-- [ ] Mate solver (3D constraint solving)
-- [ ] BOM editor (`90`)
-- [ ] Exploded view
-- [ ] Motion study (interference detection)
+- [x] Component insertion (STEP/IGES/STL)
+- [x] Mate types: Coincident, Concentric, Distance, Angle, Parallel, Perpendicular, Tangent, Width, Symmetric
+- [x] Mate solver (3D constraint solving)
+- [x] BOM editor (`90`)
+- [x] Exploded view
+- [x] Motion study (interference detection)
 
 ### 9.8. Point Cloud & Reverse Engineering (`80`, `81`)
-- [ ] Import: .ply, .xyz, .las (12.4M points)
-- [ ] RANSAC shape detection
-- [ ] Fit primitives (plane, cylinder, sphere)
-- [ ] Mesh from point cloud (Poisson, Delaunay)
-- [ ] 6-step reverse engineering wizard (`81`)
+- [x] Import: .ply, .xyz, .las (12.4M points)
+- [x] RANSAC shape detection
+- [x] Fit primitives (plane, cylinder, sphere)
+- [x] Mesh from point cloud (Poisson, Delaunay)
+- [x] 6-step reverse engineering wizard (`81`)
 
 ### 9.9. Mold Design (`22`, `61`)
-- [ ] Mold base catalog (Misumi/HASCO/DME/LKM)
-- [ ] Runner/Cooling/Ejection systems
-- [ ] Cavity/core separation
-- [ ] Flow/Cooling/Warpage analysis
-- [ ] Cost/cycle time estimation
+- [x] Mold base catalog (Misumi/HASCO/DME/LKM)
+- [x] Runner/Cooling/Ejection systems
+- [x] Cavity/core separation
+- [x] Flow/Cooling/Warpage analysis
+- [x] Cost/cycle time estimation
 
 ### 9.10. AI Features (`25`, `39`, `68`)
-- [ ] Shape from Text (text → 3D model)
-- [ ] AI Assistant (chat, DRC, suggestions, cost estimation)
-- [ ] Smart features: auto-fillet, auto-pattern, auto-repair, auto-dimension, auto-constrain
-- [ ] Generative design (4 variants)
-- [ ] Topology optimization (3 presets)
+- [x] Shape from Text (text → 3D model)
+- [x] AI Assistant (chat, DRC, suggestions, cost estimation)
+- [x] Smart features: auto-fillet, auto-pattern, auto-repair, auto-dimension, auto-constrain
+- [x] Generative design (4 variants)
+- [x] Topology optimization (3 presets)
 
 ---
 
