@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="450" height="800" viewBox="0 0 450 800">
+<title>Panel: Performance Monitor (Tools → Performance Monitor)</title>
+<rect x="0" y="0" width="450" height="800" fill="#1f1f1f"/>
+<rect x="0" y="0" width="450" height="36" fill="#262626" stroke="#1a1a1a" stroke-width="1"/>
+<text x="14" y="22" fill="#e6e6e6" font-size="14" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Panel: Performance Monitor (Tools → Performance Monitor)</text>
+<text x="14" y="32" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Real-time FPS, draw calls, memory, GPU/CPU usage, operation timings, alerts</text>
+<rect x="0" y="36" width="450" height="764" fill="#2b2b2b"/>
+<rect x="0" y="36" width="450" height="26" fill="#323232" stroke="#1a1a1a" stroke-width="1"/>
+<text x="8" y="52.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Performance</text>
+<circle cx="438.0" cy="45.0" r="1.5" fill="#a8a8a8" opacity="1.0"/>
+<circle cx="438.0" cy="50.0" r="1.5" fill="#a8a8a8" opacity="1.0"/>
+<circle cx="438.0" cy="55.0" r="1.5" fill="#a8a8a8" opacity="1.0"/>
+<rect x="8" y="68" width="434" height="70" rx="3" fill="#262626" stroke="#5ac878" stroke-width="1"/>
+<text x="16" y="86" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">FPS:</text>
+<text x="60" y="86" fill="#5ac878" font-size="18" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="start">60.0</text>
+<text x="140" y="86" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Frame:</text>
+<text x="190" y="86" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">16.67 ms</text>
+<text x="290" y="86" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Draws:</text>
+<text x="345" y="86" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">1,247</text>
+<text x="16" y="108" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Triangles:</text>
+<text x="80" y="108" fill="#e6e6e6" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">84,392</text>
+<text x="180" y="108" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Bodies:</text>
+<text x="230" y="108" fill="#e6e6e6" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">12</text>
+<text x="280" y="108" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Edges:</text>
+<text x="325" y="108" fill="#e6e6e6" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">348</text>
+<text x="16" y="124" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Memory:</text>
+<text x="80" y="124" fill="#e6e6e6" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">284 MB</text>
+<text x="180" y="124" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">GPU:</text>
+<text x="230" y="124" fill="#e6e6e6" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">NVIDIA RTX 4070</text>
+<rect x="8" y="150" width="434" height="100" rx="3" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="16" y="164" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">FPS History (60s)</text>
+<line x1="16" y1="170" x2="434" y2="170" stroke="#3e3e3e" stroke-width="0.5" stroke-dasharray="2 2"/>
+<line x1="16" y1="188" x2="434" y2="188" stroke="#3e3e3e" stroke-width="0.5" stroke-dasharray="2 2"/>
+<line x1="16" y1="206" x2="434" y2="206" stroke="#3e3e3e" stroke-width="0.5" stroke-dasharray="2 2"/>
+<line x1="16" y1="224" x2="434" y2="224" stroke="#3e3e3e" stroke-width="0.5" stroke-dasharray="2 2"/>
+<line x1="16" y1="242" x2="434" y2="242" stroke="#3e3e3e" stroke-width="0.5" stroke-dasharray="2 2"/>
+<polyline points="16.0,258.27091604506484 22.96666666666667,257.9251567960218 29.933333333333334,258.664209661188 36.9,260 43.86666666666667,258.46894059460533 50.833333333333336,242.03175902790852 57.8,260 64.76666666666667,256.791950258034 71.73333333333333,257.39649579025763 78.7,260 85.66666666666667,260 92.63333333333334,260 99.6,260 106.56666666666666,260 113.53333333333333,251.14014077186215 120.5,247.8240515901474 127.46666666666667,260 134.43333333333334,260 141.4,260 148.36666666666667,258.7241204747506 155.33333333333334,260 162.3,242.55745642389587 169.26666666666668,256.2526721942653 176.23333333333335,260 183.2,260 190.16666666666666,257.11244392813836 197.13333333333333,260 204.1,260 211.06666666666666,260 218.03333333333333,246.64133342902193 225.0,260 231.96666666666667,241.82575529929832 238.93333333333334,228.56065493337377 245.9,252.71731126160597 252.86666666666667,249.01027944384805 259.83333333333337,260 266.8,260 273.76666666666665,245.37110310445166 280.73333333333335,260 287.7,247.9735661090918 294.6666666666667,258.9650738439646 301.6333333333333,256.47320266452164 308.6,260 315.56666666666666,260 322.53333333333336,260 329.5,260 336.4666666666667,260 343.43333333333334,260 350.4,252.4761744173648 357.3666666666667,251.39154687420108 364.3333333333333,254.36038071036782 371.3,260 378.26666666666665,256.9986131480314 385.23333333333335,260 392.2,250.16848949376208 399.1666666666667,246.8135048011741 406.1333333333333,260 413.1,260 420.06666666666666,260 427.03333333333336,260" fill="none" stroke="#5ac878" stroke-width="1.5"/>
+<line x1="16" y1="170" x2="434" y2="170" stroke="#0a84ff" stroke-width="0.5" stroke-dasharray="3 2"/>
+<text x="440" y="172" fill="#0a84ff" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">60</text>
+<rect x="8" y="260" width="434" height="100" rx="3" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="16" y="274" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Memory Usage (MB)</text>
+<polyline points="16.0,333.15354410827763 22.96666666666667,339.55133188487827 29.933333333333334,345.03020287906713 36.9,339.85396743192985 43.86666666666667,331.82610036488046 50.833333333333336,342.4296563491758 57.8,334.43904966022114 64.76666666666667,332.4844606751581 71.73333333333333,334.3148423911056 78.7,328.42656646543315 85.66666666666667,328.2122572406725 92.63333333333334,318.9572391188765 99.6,326.22415471468895 106.56666666666666,331.2251366014867 113.53333333333333,330.0966284432034 120.5,330.4915892859616 127.46666666666667,321.02908691288405 134.43333333333334,327.4207976071058 141.4,324.13725171376285 148.36666666666667,319.30334742740956 155.33333333333334,325.47262235512676 162.3,322.509558225365 169.26666666666668,329.0381740748988 176.23333333333335,324.4958973713858 183.2,321.1251347785209 190.16666666666666,315.50434725511997 197.13333333333333,310.87123229227217 204.1,315.7886407031858 211.06666666666666,313.54545145984093 218.03333333333333,313.0937470309733 225.0,307.7932426554227 231.96666666666667,307.81189504605663 238.93333333333334,309.8862720860438 245.9,315.1525326565375 252.86666666666667,305.0637504911459 259.83333333333337,306.6709737858124 266.8,301.71068056137176 273.76666666666665,306.8435516448698 280.73333333333335,296.4251155624775 287.7,306.6226064335448 294.6666666666667,296.3533100115374 301.6333333333333,302.5474289314853 308.6,304.67809124437844 315.56666666666666,306.71654978940353 322.53333333333336,301.1249466473864 329.5,292.6680590743975 336.4666666666667,294.6814024162493 343.43333333333334,294.3933574515232 350.4,308.20418835083774 357.3666666666667,292.4873718180638 364.3333333333333,292.3319084275848 371.3,296.7396461651456 378.26666666666665,296.2114449576659 385.23333333333335,292.31109016870516 392.2,283.1205939368861 399.1666666666667,295.5644833572272 406.1333333333333,291.6534641667342 413.1,282.1634331983172 420.06666666666666,289.9415238372532 427.03333333333336,288.6484070841325" fill="none" stroke="#0a84ff" stroke-width="1.5"/>
+<text x="16" y="350" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">150 MB</text>
+<text x="16" y="290" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">300 MB</text>
+<rect x="8" y="370" width="434" height="220" rx="3" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="16" y="384" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Operation Timings (last 60s)</text>
+<text x="16" y="410" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Render frame</text>
+<rect x="160" y="400" width="200" height="14" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="160" y="400" width="180" height="14" rx="2" fill="#5ac878"/>
+<text x="370" y="410" fill="#5ac878" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">16.7 ms</text>
+<text x="16" y="432" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Triangulate</text>
+<rect x="160" y="422" width="200" height="14" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="160" y="422" width="120" height="14" rx="2" fill="#e2a73a"/>
+<text x="370" y="432" fill="#e2a73a" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">124.5 ms</text>
+<text x="16" y="454" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Boolean Union</text>
+<rect x="160" y="444" width="200" height="14" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="160" y="444" width="60" height="14" rx="2" fill="#e6e6e6"/>
+<text x="370" y="454" fill="#e6e6e6" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">45.2 ms</text>
+<text x="16" y="476" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">STEP Import</text>
+<rect x="160" y="466" width="200" height="14" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="160" y="466" width="50" height="14" rx="2" fill="#e2a73a"/>
+<text x="370" y="476" fill="#e2a73a" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">234.8 ms</text>
+<text x="16" y="498" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">STEP Export</text>
+<rect x="160" y="488" width="200" height="14" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="160" y="488" width="40" height="14" rx="2" fill="#e6e6e6"/>
+<text x="370" y="498" fill="#e6e6e6" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">178.3 ms</text>
+<text x="16" y="520" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Fillet R5</text>
+<rect x="160" y="510" width="200" height="14" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="160" y="510" width="36" height="14" rx="2" fill="#e6e6e6"/>
+<text x="370" y="520" fill="#e6e6e6" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">56.7 ms</text>
+<text x="16" y="542" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Mesh (Tet4)</text>
+<rect x="160" y="532" width="200" height="14" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="160" y="532" width="30" height="14" rx="2" fill="#e25555"/>
+<text x="370" y="542" fill="#e25555" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">1245.0 ms</text>
+<text x="16" y="564" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">View Fit All</text>
+<rect x="160" y="554" width="200" height="14" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="160" y="554" width="24" height="14" rx="2" fill="#5ac878"/>
+<text x="370" y="564" fill="#5ac878" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">8.4 ms</text>
+<rect x="8" y="600" width="434" height="100" rx="3" fill="#262626" stroke="#e2a73a" stroke-width="1"/>
+<text x="16" y="614" fill="#e2a73a" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Alerts</text>
+<text x="16" y="634" fill="#e2a73a" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="start">⚠</text>
+<text x="32" y="634" fill="#e6e6e6" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Triangulation took 124ms — consider LOD</text>
+<text x="16" y="650" fill="#e2a73a" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="start">⚠</text>
+<text x="32" y="650" fill="#e6e6e6" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Mesh memory: 1.2 GB (high)</text>
+<text x="16" y="666" fill="#5ac878" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="start">✓</text>
+<text x="32" y="666" fill="#e6e6e6" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">All systems nominal</text>
+<text x="16" y="682" fill="#5ac878" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="start">●</text>
+<text x="32" y="682" fill="#e6e6e6" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">GPU acceleration: Active (CUDA 12.1)</text>
+</svg>

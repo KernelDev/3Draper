@@ -1,0 +1,233 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1400" height="280" viewBox="0 0 1400 280">
+<title>Panel: Animation Timeline (Motion Study)</title>
+<rect x="0" y="0" width="1400" height="280" fill="#1f1f1f"/>
+<rect x="0" y="0" width="1400" height="36" fill="#262626" stroke="#1a1a1a" stroke-width="1"/>
+<text x="14" y="22" fill="#e6e6e6" font-size="14" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Panel: Animation Timeline (Motion Study)</text>
+<text x="14" y="32" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Multi-track timeline with keyframes, camera moves, explode/collapse animation, part visibility tracks, playback controls</text>
+<rect x="0" y="0" width="1400" height="36" fill="#262626" stroke="#1a1a1a" stroke-width="1"/>
+<text x="14" y="22" fill="#e6e6e6" font-size="14" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Animation Timeline — Motion Study</text>
+<text x="14" y="32" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">8 tracks  ·  120 frames  ·  24 fps  ·  duration: 5.00 sec</text>
+<rect x="0" y="36" width="1400" height="244" fill="#2b2b2b" stroke="#1a1a1a" stroke-width="1"/>
+<rect x="8" y="44" width="70" height="24" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<polyline points="17,56.0 22.0,51.0 27,56.0 22.0,61.0" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="34" y="59.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">|◀</text>
+<rect x="82" y="44" width="70" height="24" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<polyline points="93.6,52.0 98.4,56.0 93.6,60.0" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="108" y="59.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">◀</text>
+<rect x="156" y="44" width="80" height="24" rx="3" fill="#0a84ff" stroke="#0a84ff" stroke-width="1"/>
+<polygon points="167,51.0 167,61.0 174,56.0" fill="#ffffff" opacity="1.0"/>
+<text x="182" y="59.96" fill="#ffffff" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">▶ Play</text>
+<rect x="240" y="44" width="70" height="24" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<polyline points="251.6,52.0 256.4,56.0 251.6,60.0" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="266" y="59.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">▶|</text>
+<rect x="314" y="44" width="70" height="24" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="324" y="51.0" width="3" height="10" fill="#e6e6e6"/>
+<rect x="329" y="51.0" width="3" height="10" fill="#e6e6e6"/>
+<text x="340" y="59.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">⏹ Stop</text>
+<rect x="388" y="44" width="70" height="24" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<path d="M399 50.0 L405 50.0 L407 53.0 L407 61.0 L405 62.0 L399 62.0 L397 61.0 L397 53.0 Z" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<line x1="400" y1="56.0" x2="404" y2="56.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="400" y1="60.0" x2="404" y2="60.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="414" y="59.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">⏺ Record</text>
+<rect x="470" y="44" width="140" height="24" rx="3" fill="#0d0d0d" stroke="#0a84ff" stroke-width="1"/>
+<text x="540" y="60" fill="#0a84ff" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="middle">00:02.342 / 00:05.000</text>
+<text x="620" y="60" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Speed:</text>
+<rect x="666" y="44" width="80" height="24" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="672" y="59.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">1.0×</text>
+<polyline points="733.6,54.8 736.0,58.4 738.4,54.8" fill="none" stroke="#a8a8a8" stroke-width="1.2"/>
+<rect x="762" y="46" width="10" height="10" rx="1" fill="#0a84ff" stroke="#0a84ff" stroke-width="1"/>
+<polyline points="765,51.0 766.0,54.0 770,49" fill="none" stroke="#ffffff" stroke-width="1.6"/>
+<text x="780" y="54.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Loop</text>
+<rect x="832" y="46" width="10" height="10" rx="1" fill="none" stroke="#a8a8a8" stroke-width="1"/>
+<text x="850" y="54.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Ping-pong</text>
+<rect x="900" y="44" width="100" height="24" rx="3" fill="#0a84ff" stroke="#0a84ff" stroke-width="1"/>
+<text x="950.0" y="59.96" fill="#ffffff" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">+ Keyframe</text>
+<rect x="1004" y="44" width="100" height="24" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<text x="1054.0" y="59.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Easing…</text>
+<polyline points="1096.8,54.4 1100.0,59.2 1103.2,54.4" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<rect x="1300" y="44" width="90" height="24" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<path d="M1309 61.0 L1309 51.0 L1312.0 51.0 M1316.0 51.0 L1319 51.0 L1319 61.0 Z M1314.0 51.0 L1314.0 59.0 M1311.0 53.0 L1314.0 50.0 L1317.0 53.0" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<text x="1326" y="59.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Export</text>
+<polyline points="1382.8,54.4 1386.0,59.2 1389.2,54.4" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<rect x="8" y="76" width="1384" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<line x1="168.0" y1="76" x2="168.0" y2="98" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="168.0" y="91" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="middle">0</text>
+<line x1="270.0" y1="76" x2="270.0" y2="98" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="270.0" y="91" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="middle">10</text>
+<line x1="372.0" y1="76" x2="372.0" y2="98" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="372.0" y="91" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="middle">20</text>
+<line x1="474.0" y1="76" x2="474.0" y2="98" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="474.0" y="91" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="middle">30</text>
+<line x1="576.0" y1="76" x2="576.0" y2="98" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="576.0" y="91" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="middle">40</text>
+<line x1="678.0" y1="76" x2="678.0" y2="98" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="678.0" y="91" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="middle">50</text>
+<line x1="780.0" y1="76" x2="780.0" y2="98" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="780.0" y="91" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="middle">60</text>
+<line x1="882.0" y1="76" x2="882.0" y2="98" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="882.0" y="91" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="middle">70</text>
+<line x1="984.0" y1="76" x2="984.0" y2="98" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="984.0" y="91" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="middle">80</text>
+<line x1="1086.0" y1="76" x2="1086.0" y2="98" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="1086.0" y="91" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="middle">90</text>
+<line x1="1188.0" y1="76" x2="1188.0" y2="98" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="1188.0" y="91" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="middle">100</text>
+<line x1="1290.0" y1="76" x2="1290.0" y2="98" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="1290.0" y="91" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="middle">110</text>
+<line x1="1392.0" y1="76" x2="1392.0" y2="98" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="1392.0" y="91" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="middle">120</text>
+<text x="88.0" y="91" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="middle">Frame #</text>
+<rect x="8" y="98" width="160" height="22" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="12" y="102" width="4" height="14" fill="#0a84ff"/>
+<text x="22" y="113" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="500" font-style="normal" text-anchor="start">Camera</text>
+<ellipse cx="132.0" cy="109.0" rx="6" ry="3" fill="none" opacity="1.0" stroke="#a8a8a8" stroke-width="1.2"/>
+<circle cx="132.0" cy="109.0" r="1.5" fill="#a8a8a8" opacity="1.0"/>
+<rect x="148" y="109" width="8" height="4" rx="1" fill="none" stroke="#6e6e6e" stroke-width="1.2"/>
+<path d="M149 109 L149 106 Q149 102 152.0 102 Q155 102 155 106 L155 109" fill="none" stroke="#6e6e6e" stroke-width="1.2" opacity="1.0"/>
+<rect x="168" y="98" width="1224" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="168.0" y="100" width="306.0" height="18" rx="2" fill="#0a84ff" stroke="#0a84ff" stroke-width="1" opacity="0.3"/>
+<text x="321.0" y="112" fill="#0a84ff" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="middle">Move In</text>
+<polygon points="168.0,103 171.0,109 168.0,115 165.0,109" fill="#0a84ff" opacity="1.0"/>
+<polygon points="474.0,103 477.0,109 474.0,115 471.0,109" fill="#0a84ff" opacity="1.0"/>
+<rect x="474.0" y="100" width="255.0" height="18" rx="2" fill="#0a84ff" stroke="#0a84ff" stroke-width="1" opacity="0.3"/>
+<text x="601.5" y="112" fill="#0a84ff" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="middle">Orbit L</text>
+<polygon points="474.0,103 477.0,109 474.0,115 471.0,109" fill="#0a84ff" opacity="1.0"/>
+<polygon points="729.0,103 732.0,109 729.0,115 726.0,109" fill="#0a84ff" opacity="1.0"/>
+<rect x="729.0" y="100" width="204.0" height="18" rx="2" fill="#0a84ff" stroke="#0a84ff" stroke-width="1" opacity="0.3"/>
+<text x="831.0" y="112" fill="#0a84ff" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="middle">Zoom</text>
+<polygon points="729.0,103 732.0,109 729.0,115 726.0,109" fill="#0a84ff" opacity="1.0"/>
+<polygon points="933.0,103 936.0,109 933.0,115 930.0,109" fill="#0a84ff" opacity="1.0"/>
+<rect x="933.0" y="100" width="306.0" height="18" rx="2" fill="#0a84ff" stroke="#0a84ff" stroke-width="1" opacity="0.3"/>
+<text x="1086.0" y="112" fill="#0a84ff" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="middle">Orbit R</text>
+<polygon points="933.0,103 936.0,109 933.0,115 930.0,109" fill="#0a84ff" opacity="1.0"/>
+<polygon points="1239.0,103 1242.0,109 1239.0,115 1236.0,109" fill="#0a84ff" opacity="1.0"/>
+<rect x="1239.0" y="100" width="153.0" height="18" rx="2" fill="#0a84ff" stroke="#0a84ff" stroke-width="1" opacity="0.3"/>
+<text x="1315.5" y="112" fill="#0a84ff" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="middle">Hold</text>
+<polygon points="1239.0,103 1242.0,109 1239.0,115 1236.0,109" fill="#0a84ff" opacity="1.0"/>
+<polygon points="1392.0,103 1395.0,109 1392.0,115 1389.0,109" fill="#0a84ff" opacity="1.0"/>
+<rect x="8" y="120" width="160" height="22" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="12" y="124" width="4" height="14" fill="#e2a73a"/>
+<text x="22" y="135" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="500" font-style="normal" text-anchor="start">Explode</text>
+<ellipse cx="132.0" cy="131.0" rx="6" ry="3" fill="none" opacity="1.0" stroke="#a8a8a8" stroke-width="1.2"/>
+<circle cx="132.0" cy="131.0" r="1.5" fill="#a8a8a8" opacity="1.0"/>
+<rect x="148" y="131" width="8" height="4" rx="1" fill="none" stroke="#6e6e6e" stroke-width="1.2"/>
+<path d="M149 131 L149 128 Q149 124 152.0 124 Q155 124 155 128 L155 131" fill="none" stroke="#6e6e6e" stroke-width="1.2" opacity="1.0"/>
+<rect x="168" y="120" width="1224" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="372.0" y="122" width="408.0" height="18" rx="2" fill="#e2a73a" stroke="#e2a73a" stroke-width="1" opacity="0.3"/>
+<text x="576.0" y="134" fill="#e2a73a" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="middle">Explode</text>
+<polygon points="372.0,125 375.0,131 372.0,137 369.0,131" fill="#e2a73a" opacity="1.0"/>
+<polygon points="780.0,125 783.0,131 780.0,137 777.0,131" fill="#e2a73a" opacity="1.0"/>
+<rect x="780.0" y="122" width="306.0" height="18" rx="2" fill="#e2a73a" stroke="#e2a73a" stroke-width="1" opacity="0.3"/>
+<text x="933.0" y="134" fill="#e2a73a" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="middle">Hold</text>
+<polygon points="780.0,125 783.0,131 780.0,137 777.0,131" fill="#e2a73a" opacity="1.0"/>
+<polygon points="1086.0,125 1089.0,131 1086.0,137 1083.0,131" fill="#e2a73a" opacity="1.0"/>
+<rect x="1086.0" y="122" width="306.0" height="18" rx="2" fill="#e2a73a" stroke="#e2a73a" stroke-width="1" opacity="0.3"/>
+<text x="1239.0" y="134" fill="#e2a73a" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="middle">Collapse</text>
+<polygon points="1086.0,125 1089.0,131 1086.0,137 1083.0,131" fill="#e2a73a" opacity="1.0"/>
+<polygon points="1392.0,125 1395.0,131 1392.0,137 1389.0,131" fill="#e2a73a" opacity="1.0"/>
+<rect x="8" y="142" width="160" height="22" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="12" y="146" width="4" height="14" fill="#5ac878"/>
+<text x="22" y="157" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="500" font-style="normal" text-anchor="start">Body[0]: Block</text>
+<ellipse cx="132.0" cy="153.0" rx="6" ry="3" fill="none" opacity="1.0" stroke="#a8a8a8" stroke-width="1.2"/>
+<circle cx="132.0" cy="153.0" r="1.5" fill="#a8a8a8" opacity="1.0"/>
+<rect x="148" y="153" width="8" height="4" rx="1" fill="none" stroke="#6e6e6e" stroke-width="1.2"/>
+<path d="M149 153 L149 150 Q149 146 152.0 146 Q155 146 155 150 L155 153" fill="none" stroke="#6e6e6e" stroke-width="1.2" opacity="1.0"/>
+<rect x="168" y="142" width="1224" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="168.0" y="144" width="1224.0" height="18" rx="2" fill="#5ac878" stroke="#5ac878" stroke-width="1" opacity="0.3"/>
+<text x="780.0" y="156" fill="#5ac878" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="middle">Visible</text>
+<polygon points="168.0,147 171.0,153 168.0,159 165.0,153" fill="#5ac878" opacity="1.0"/>
+<polygon points="1392.0,147 1395.0,153 1392.0,159 1389.0,153" fill="#5ac878" opacity="1.0"/>
+<rect x="8" y="164" width="160" height="22" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="12" y="168" width="4" height="14" fill="#5ac878"/>
+<text x="22" y="179" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="500" font-style="normal" text-anchor="start">Body[1]: Head</text>
+<ellipse cx="132.0" cy="175.0" rx="6" ry="3" fill="none" opacity="1.0" stroke="#a8a8a8" stroke-width="1.2"/>
+<circle cx="132.0" cy="175.0" r="1.5" fill="#a8a8a8" opacity="1.0"/>
+<rect x="148" y="175" width="8" height="4" rx="1" fill="none" stroke="#6e6e6e" stroke-width="1.2"/>
+<path d="M149 175 L149 172 Q149 168 152.0 168 Q155 168 155 172 L155 175" fill="none" stroke="#6e6e6e" stroke-width="1.2" opacity="1.0"/>
+<rect x="168" y="164" width="1224" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="168.0" y="166" width="510.0" height="18" rx="2" fill="#5ac878" stroke="#5ac878" stroke-width="1" opacity="0.3"/>
+<text x="423.0" y="178" fill="#5ac878" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="middle">Visible</text>
+<polygon points="168.0,169 171.0,175 168.0,181 165.0,175" fill="#5ac878" opacity="1.0"/>
+<polygon points="678.0,169 681.0,175 678.0,181 675.0,175" fill="#5ac878" opacity="1.0"/>
+<rect x="678.0" y="166" width="714.0" height="18" rx="2" fill="#5ac878" stroke="#5ac878" stroke-width="1" opacity="0.3"/>
+<text x="1035.0" y="178" fill="#5ac878" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="middle">Hidden</text>
+<polygon points="678.0,169 681.0,175 678.0,181 675.0,175" fill="#5ac878" opacity="1.0"/>
+<polygon points="1392.0,169 1395.0,175 1392.0,181 1389.0,175" fill="#5ac878" opacity="1.0"/>
+<rect x="8" y="186" width="160" height="22" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="12" y="190" width="4" height="14" fill="#5ac878"/>
+<text x="22" y="201" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="500" font-style="normal" text-anchor="start">Body[2]: Piston</text>
+<ellipse cx="132.0" cy="197.0" rx="6" ry="3" fill="none" opacity="1.0" stroke="#a8a8a8" stroke-width="1.2"/>
+<circle cx="132.0" cy="197.0" r="1.5" fill="#a8a8a8" opacity="1.0"/>
+<rect x="148" y="197" width="8" height="4" rx="1" fill="none" stroke="#6e6e6e" stroke-width="1.2"/>
+<path d="M149 197 L149 194 Q149 190 152.0 190 Q155 190 155 194 L155 197" fill="none" stroke="#6e6e6e" stroke-width="1.2" opacity="1.0"/>
+<rect x="168" y="186" width="1224" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="168.0" y="188" width="306.0" height="18" rx="2" fill="#5ac878" stroke="#5ac878" stroke-width="1" opacity="0.3"/>
+<text x="321.0" y="200" fill="#5ac878" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="middle">Hidden</text>
+<polygon points="168.0,191 171.0,197 168.0,203 165.0,197" fill="#5ac878" opacity="1.0"/>
+<polygon points="474.0,191 477.0,197 474.0,203 471.0,197" fill="#5ac878" opacity="1.0"/>
+<rect x="474.0" y="188" width="918.0" height="18" rx="2" fill="#5ac878" stroke="#5ac878" stroke-width="1" opacity="0.3"/>
+<text x="933.0" y="200" fill="#5ac878" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="middle">Visible</text>
+<polygon points="474.0,191 477.0,197 474.0,203 471.0,197" fill="#5ac878" opacity="1.0"/>
+<polygon points="1392.0,191 1395.0,197 1392.0,203 1389.0,197" fill="#5ac878" opacity="1.0"/>
+<rect x="8" y="208" width="160" height="22" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="12" y="212" width="4" height="14" fill="#5ac878"/>
+<text x="22" y="223" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="500" font-style="normal" text-anchor="start">Body[3]: Crank</text>
+<ellipse cx="132.0" cy="219.0" rx="6" ry="3" fill="none" opacity="1.0" stroke="#a8a8a8" stroke-width="1.2"/>
+<circle cx="132.0" cy="219.0" r="1.5" fill="#a8a8a8" opacity="1.0"/>
+<rect x="148" y="219" width="8" height="4" rx="1" fill="none" stroke="#6e6e6e" stroke-width="1.2"/>
+<path d="M149 219 L149 216 Q149 212 152.0 212 Q155 212 155 216 L155 219" fill="none" stroke="#6e6e6e" stroke-width="1.2" opacity="1.0"/>
+<rect x="168" y="208" width="1224" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="168.0" y="210" width="1224.0" height="18" rx="2" fill="#5ac878" stroke="#5ac878" stroke-width="1" opacity="0.3"/>
+<text x="780.0" y="222" fill="#5ac878" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="middle">Visible</text>
+<polygon points="168.0,213 171.0,219 168.0,225 165.0,219" fill="#5ac878" opacity="1.0"/>
+<polygon points="1392.0,213 1395.0,219 1392.0,225 1389.0,219" fill="#5ac878" opacity="1.0"/>
+<rect x="8" y="230" width="160" height="22" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="12" y="234" width="4" height="14" fill="#b070ff"/>
+<text x="22" y="245" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="500" font-style="normal" text-anchor="start">Material</text>
+<ellipse cx="132.0" cy="241.0" rx="6" ry="3" fill="none" opacity="1.0" stroke="#a8a8a8" stroke-width="1.2"/>
+<circle cx="132.0" cy="241.0" r="1.5" fill="#a8a8a8" opacity="1.0"/>
+<rect x="148" y="241" width="8" height="4" rx="1" fill="none" stroke="#6e6e6e" stroke-width="1.2"/>
+<path d="M149 241 L149 238 Q149 234 152.0 234 Q155 234 155 238 L155 241" fill="none" stroke="#6e6e6e" stroke-width="1.2" opacity="1.0"/>
+<rect x="168" y="230" width="1224" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="168.0" y="232" width="612.0" height="18" rx="2" fill="#b070ff" stroke="#b070ff" stroke-width="1" opacity="0.3"/>
+<text x="474.0" y="244" fill="#b070ff" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="middle">Default</text>
+<polygon points="168.0,235 171.0,241 168.0,247 165.0,241" fill="#b070ff" opacity="1.0"/>
+<polygon points="780.0,235 783.0,241 780.0,247 777.0,241" fill="#b070ff" opacity="1.0"/>
+<rect x="780.0" y="232" width="612.0" height="18" rx="2" fill="#b070ff" stroke="#b070ff" stroke-width="1" opacity="0.3"/>
+<text x="1086.0" y="244" fill="#b070ff" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="middle">Heated (red)</text>
+<polygon points="780.0,235 783.0,241 780.0,247 777.0,241" fill="#b070ff" opacity="1.0"/>
+<polygon points="1392.0,235 1395.0,241 1392.0,247 1389.0,241" fill="#b070ff" opacity="1.0"/>
+<rect x="8" y="252" width="160" height="22" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="12" y="256" width="4" height="14" fill="#e25555"/>
+<text x="22" y="267" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="500" font-style="normal" text-anchor="start">Lighting</text>
+<ellipse cx="132.0" cy="263.0" rx="6" ry="3" fill="none" opacity="1.0" stroke="#a8a8a8" stroke-width="1.2"/>
+<circle cx="132.0" cy="263.0" r="1.5" fill="#a8a8a8" opacity="1.0"/>
+<rect x="148" y="263" width="8" height="4" rx="1" fill="none" stroke="#6e6e6e" stroke-width="1.2"/>
+<path d="M149 263 L149 260 Q149 256 152.0 256 Q155 256 155 260 L155 263" fill="none" stroke="#6e6e6e" stroke-width="1.2" opacity="1.0"/>
+<rect x="168" y="252" width="1224" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="168.0" y="254" width="306.0" height="18" rx="2" fill="#e25555" stroke="#e25555" stroke-width="1" opacity="0.3"/>
+<text x="321.0" y="266" fill="#e25555" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="middle">Day</text>
+<polygon points="168.0,257 171.0,263 168.0,269 165.0,263" fill="#e25555" opacity="1.0"/>
+<polygon points="474.0,257 477.0,263 474.0,269 471.0,263" fill="#e25555" opacity="1.0"/>
+<rect x="474.0" y="254" width="612.0" height="18" rx="2" fill="#e25555" stroke="#e25555" stroke-width="1" opacity="0.3"/>
+<text x="780.0" y="266" fill="#e25555" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="middle">Sunset</text>
+<polygon points="474.0,257 477.0,263 474.0,269 471.0,263" fill="#e25555" opacity="1.0"/>
+<polygon points="1086.0,257 1089.0,263 1086.0,269 1083.0,263" fill="#e25555" opacity="1.0"/>
+<rect x="1086.0" y="254" width="306.0" height="18" rx="2" fill="#e25555" stroke="#e25555" stroke-width="1" opacity="0.3"/>
+<text x="1239.0" y="266" fill="#e25555" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="middle">Night</text>
+<polygon points="1086.0,257 1089.0,263 1086.0,269 1083.0,263" fill="#e25555" opacity="1.0"/>
+<polygon points="1392.0,257 1395.0,263 1392.0,269 1389.0,263" fill="#e25555" opacity="1.0"/>
+<line x1="739.2" y1="76" x2="739.2" y2="274" stroke="#e2a73a" stroke-width="2"/>
+<polygon points="739.2,76 734.2,70 744.2,70" fill="#e2a73a" opacity="1.0"/>
+<rect x="0" y="258" width="1400" height="22" fill="#1a1a1a" stroke="#1a1a1a" stroke-width="1"/>
+<line x1="0" y1="258" x2="1400" y2="258" stroke="#3e3e3e" stroke-width="1"/>
+<text x="8" y="272.6" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Ready</text>
+<text x="1332" y="272.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">F8: Ortho</text>
+<text x="1254" y="272.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">F2: Sketch</text>
+<text x="1176" y="272.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">SNAP: Grid</text>
+<text x="1146" y="272.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">mm</text>
+<text x="1080" y="272.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">Z: 0.000</text>
+<text x="1014" y="272.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">Y: 0.000</text>
+<text x="948" y="272.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">X: 0.000</text>
+</svg>

@@ -1,0 +1,225 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1100" height="700" viewBox="0 0 1100 700">
+<title>Dialog: Constraint Diagnostics (Assembly → Constraints → Diagnostics…)</title>
+<rect x="0" y="0" width="1100" height="700" fill="#1f1f1f"/>
+<rect x="0" y="0" width="1100" height="36" fill="#262626" stroke="#1a1a1a" stroke-width="1"/>
+<text x="14" y="22" fill="#e6e6e6" font-size="14" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Dialog: Constraint Diagnostics (Assembly → Constraints → Diagnostics…)</text>
+<text x="14" y="32" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Lists all assembly constraints with status, DOF, conflicts, suggestions</text>
+<rect x="0" y="36" width="1100" height="664" fill="#000000" opacity="0.45"/>
+<rect x="0" y="0" width="1100" height="700" fill="#000000" opacity="0.55"/>
+<rect x="83" y="84" width="940" height="560" rx="6" fill="#000000" opacity="0.6"/>
+<rect x="80" y="80" width="940" height="560" rx="6" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="80" y="80" width="940" height="32" rx="6" fill="#323232" stroke="#1a1a1a" stroke-width="1"/>
+<rect x="80" y="95" width="940" height="17" fill="#323232"/>
+<text x="94" y="100.68" fill="#e6e6e6" font-size="13" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Constraint Diagnostics</text>
+<rect x="992" y="84" width="22" height="22" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<line x1="997" y1="89" x2="1007" y2="99" stroke="#a8a8a8" stroke-width="1.2"/>
+<line x1="1007" y1="89" x2="997" y2="99" stroke="#a8a8a8" stroke-width="1.2"/>
+<rect x="81" y="112" width="938" height="484" fill="#2b2b2b"/>
+<rect x="81" y="596" width="938" height="43" fill="#323232"/>
+<line x1="80" y1="596" x2="1020" y2="596" stroke="#1a1a1a" stroke-width="1"/>
+<rect x="926" y="604" width="72" height="28" rx="3" fill="#0a84ff" stroke="#0a84ff" stroke-width="1"/>
+<text x="962.0" y="622.32" fill="#ffffff" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="middle">Close</text>
+<rect x="814" y="604" width="104" height="28" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<text x="866.0" y="622.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Auto-Infer</text>
+<rect x="718" y="604" width="88" height="28" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<text x="762.0" y="622.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Auto-Fix</text>
+<text x="96" y="134" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Assembly: Engine_Assembly.brep  ·  12 components  ·  34 constraints</text>
+<rect x="670" y="122" width="100" height="24" rx="3" fill="#5ac87822" stroke="#5ac878" stroke-width="1"/>
+<circle cx="682" cy="134" r="4" fill="#5ac878" opacity="1.0"/>
+<text x="694" y="134" fill="#5ac878" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">OK: 18</text>
+<rect x="780" y="122" width="100" height="24" rx="3" fill="#e2a73a22" stroke="#e2a73a" stroke-width="1"/>
+<circle cx="792" cy="134" r="4" fill="#e2a73a" opacity="1.0"/>
+<text x="804" y="134" fill="#e2a73a" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Warning: 3</text>
+<rect x="890" y="122" width="100" height="24" rx="3" fill="#e2555522" stroke="#e25555" stroke-width="1"/>
+<circle cx="902" cy="134" r="4" fill="#e25555" opacity="1.0"/>
+<text x="914" y="134" fill="#e25555" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Error: 1</text>
+<rect x="96" y="162" width="40" height="22" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<text x="104" y="176.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">#</text>
+<rect x="136" y="162" width="200" height="22" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<text x="144" y="176.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Constraint</text>
+<rect x="336" y="162" width="110" height="22" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<text x="344" y="176.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Type</text>
+<rect x="446" y="162" width="130" height="22" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<text x="454" y="176.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Comp A</text>
+<rect x="576" y="162" width="130" height="22" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<text x="584" y="176.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Comp B</text>
+<rect x="706" y="162" width="90" height="22" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<text x="714" y="176.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Status</text>
+<rect x="796" y="162" width="60" height="22" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<text x="804" y="176.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">DOF</text>
+<rect x="96" y="184" width="40" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="104" y="198.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">1</text>
+<rect x="136" y="184" width="200" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="144" y="198.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Mate: Bottom→Top</text>
+<rect x="336" y="184" width="110" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="344" y="198.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Coincident</text>
+<rect x="446" y="184" width="130" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="454" y="198.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Engine_Block</text>
+<rect x="576" y="184" width="130" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="584" y="198.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Cylinder_Head</text>
+<rect x="706" y="184" width="90" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="714" y="198.96" fill="#5ac878" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">OK</text>
+<rect x="796" y="184" width="60" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="804" y="198.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">0</text>
+<rect x="96" y="206" width="40" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="104" y="220.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">2</text>
+<rect x="136" y="206" width="200" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="144" y="220.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Mate: Bolt Hole A</text>
+<rect x="336" y="206" width="110" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="344" y="220.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Concentric</text>
+<rect x="446" y="206" width="130" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="454" y="220.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Engine_Block</text>
+<rect x="576" y="206" width="130" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="584" y="220.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Bolt_A_M8</text>
+<rect x="706" y="206" width="90" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="714" y="220.96" fill="#5ac878" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">OK</text>
+<rect x="796" y="206" width="60" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="804" y="220.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">0</text>
+<rect x="96" y="228" width="40" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="104" y="242.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">3</text>
+<rect x="136" y="228" width="200" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="144" y="242.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Mate: Bolt Hole B</text>
+<rect x="336" y="228" width="110" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="344" y="242.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Concentric</text>
+<rect x="446" y="228" width="130" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="454" y="242.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Engine_Block</text>
+<rect x="576" y="228" width="130" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="584" y="242.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Bolt_B_M8</text>
+<rect x="706" y="228" width="90" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="714" y="242.96" fill="#5ac878" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">OK</text>
+<rect x="796" y="228" width="60" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="804" y="242.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">0</text>
+<rect x="96" y="250" width="40" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="104" y="264.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">4</text>
+<rect x="136" y="250" width="200" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="144" y="264.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Mate: Bolt Hole C</text>
+<rect x="336" y="250" width="110" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="344" y="264.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Concentric</text>
+<rect x="446" y="250" width="130" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="454" y="264.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Engine_Block</text>
+<rect x="576" y="250" width="130" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="584" y="264.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Bolt_C_M8</text>
+<rect x="706" y="250" width="90" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="714" y="264.96" fill="#5ac878" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">OK</text>
+<rect x="796" y="250" width="60" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="804" y="264.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">0</text>
+<rect x="96" y="272" width="40" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="104" y="286.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">5</text>
+<rect x="136" y="272" width="200" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="144" y="286.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Mate: Bolt Hole D</text>
+<rect x="336" y="272" width="110" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="344" y="286.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Concentric</text>
+<rect x="446" y="272" width="130" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="454" y="286.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Engine_Block</text>
+<rect x="576" y="272" width="130" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="584" y="286.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Bolt_D_M8</text>
+<rect x="706" y="272" width="90" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="714" y="286.96" fill="#5ac878" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">OK</text>
+<rect x="796" y="272" width="60" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="804" y="286.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">0</text>
+<rect x="96" y="294" width="40" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="104" y="308.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">6</text>
+<rect x="136" y="294" width="200" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="144" y="308.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Mate: Piston→Cyl</text>
+<rect x="336" y="294" width="110" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="344" y="308.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Cylindrical</text>
+<rect x="446" y="294" width="130" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="454" y="308.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Piston_1</text>
+<rect x="576" y="294" width="130" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="584" y="308.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Engine_Block</text>
+<rect x="706" y="294" width="90" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="714" y="308.96" fill="#5ac878" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">OK</text>
+<rect x="796" y="294" width="60" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="804" y="308.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">1</text>
+<rect x="96" y="316" width="40" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="104" y="330.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">7</text>
+<rect x="136" y="316" width="200" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="144" y="330.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Mate: Pin→Piston</text>
+<rect x="336" y="316" width="110" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="344" y="330.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Concentric</text>
+<rect x="446" y="316" width="130" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="454" y="330.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Wrist_Pin_1</text>
+<rect x="576" y="316" width="130" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="584" y="330.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Piston_1</text>
+<rect x="706" y="316" width="90" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="714" y="330.96" fill="#5ac878" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">OK</text>
+<rect x="796" y="316" width="60" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="804" y="330.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">0</text>
+<rect x="96" y="338" width="40" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="104" y="352.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">8</text>
+<rect x="136" y="338" width="200" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="144" y="352.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Mate: Rod→Pin</text>
+<rect x="336" y="338" width="110" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="344" y="352.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Concentric</text>
+<rect x="446" y="338" width="130" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="454" y="352.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Con_Rod_1</text>
+<rect x="576" y="338" width="130" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="584" y="352.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Wrist_Pin_1</text>
+<rect x="706" y="338" width="90" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="714" y="352.96" fill="#5ac878" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">OK</text>
+<rect x="796" y="338" width="60" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="804" y="352.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">1</text>
+<rect x="96" y="360" width="40" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="104" y="374.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">9</text>
+<rect x="136" y="360" width="200" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="144" y="374.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Mate: Crank→Rod</text>
+<rect x="336" y="360" width="110" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="344" y="374.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Cylindrical</text>
+<rect x="446" y="360" width="130" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="454" y="374.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Crankshaft</text>
+<rect x="576" y="360" width="130" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="584" y="374.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Con_Rod_1</text>
+<rect x="706" y="360" width="90" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="714" y="374.96" fill="#5ac878" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">OK</text>
+<rect x="796" y="360" width="60" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="804" y="374.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">1</text>
+<rect x="96" y="382" width="40" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="104" y="396.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">10</text>
+<rect x="136" y="382" width="200" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="144" y="396.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Mate: Crank Thrust</text>
+<rect x="336" y="382" width="110" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="344" y="396.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Parallel</text>
+<rect x="446" y="382" width="130" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="454" y="396.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Crankshaft</text>
+<rect x="576" y="382" width="130" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="584" y="396.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Engine_Block</text>
+<rect x="706" y="382" width="90" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="714" y="396.96" fill="#5ac878" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">OK</text>
+<rect x="796" y="382" width="60" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="804" y="396.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">0</text>
+<rect x="96" y="404" width="40" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="104" y="418.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">11</text>
+<rect x="136" y="404" width="200" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="144" y="418.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Mate: Cap→Block</text>
+<rect x="336" y="404" width="110" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="344" y="418.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Coincident</text>
+<rect x="446" y="404" width="130" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="454" y="418.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Bearing_Cap_1</text>
+<rect x="576" y="404" width="130" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="584" y="418.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Engine_Block</text>
+<rect x="706" y="404" width="90" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="714" y="418.96" fill="#e2a73a" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">⚠ Warning</text>
+<rect x="796" y="404" width="60" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="804" y="418.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">0</text>
+<rect x="96" y="426" width="40" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="104" y="440.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">12</text>
+<rect x="136" y="426" width="200" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="144" y="440.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Mate: Cap Bolts</text>
+<rect x="336" y="426" width="110" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="344" y="440.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Concentric</text>
+<rect x="446" y="426" width="130" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="454" y="440.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Bearing_Cap_1</text>
+<rect x="576" y="426" width="130" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="584" y="440.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Bolt_E_M10</text>
+<rect x="706" y="426" width="90" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="714" y="440.96" fill="#e25555" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">✗ Error</text>
+<rect x="796" y="426" width="60" height="22" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="804" y="440.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">0</text>
+<rect x="92" y="550" width="916" height="46" rx="3" fill="#262626" stroke="#e2a73a" stroke-width="1"/>
+<path d="M114.0 560 L122 575 L106 575 Z" fill="none" stroke="#e2a73a" stroke-width="1.4285714285714286" opacity="1.0"/>
+<line x1="114.0" y1="567.0" x2="114.0" y2="569.0" stroke="#e2a73a" stroke-width="1.4285714285714286"/>
+<circle cx="114.0" cy="571.0" r="0.8" fill="#e2a73a" opacity="1.0"/>
+<text x="132" y="568" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Total DOF: 4 (3 rotational + 1 translational)</text>
+<text x="132" y="584" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Suggestion: Bearing_Cap_1 has conflicting constraint with Crankshaft. Try replacing concentric with parallel mate.</text>
+</svg>

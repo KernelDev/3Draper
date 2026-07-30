@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1200" height="800" viewBox="0 0 1200 800">
+<title>Wizard: CAM Stock Setup (CAM → Setup → Stock)</title>
+<rect x="0" y="0" width="1200" height="800" fill="#1f1f1f"/>
+<rect x="0" y="0" width="1200" height="36" fill="#262626" stroke="#1a1a1a" stroke-width="1"/>
+<text x="14" y="22" fill="#e6e6e6" font-size="14" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Wizard: CAM Stock Setup (CAM → Setup → Stock)</text>
+<text x="14" y="32" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">3D stock preview with bounding box, offset stock, custom stock. Material selection, fixture positions.</text>
+<rect x="0" y="36" width="1200" height="764" fill="#000000" opacity="0.45"/>
+<rect x="0" y="0" width="1200" height="800" fill="#000000" opacity="0.55"/>
+<rect x="83" y="74" width="1040" height="660" rx="6" fill="#000000" opacity="0.6"/>
+<rect x="80" y="70" width="1040" height="660" rx="6" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="80" y="70" width="1040" height="32" rx="6" fill="#323232" stroke="#1a1a1a" stroke-width="1"/>
+<rect x="80" y="85" width="1040" height="17" fill="#323232"/>
+<text x="94" y="90.68" fill="#e6e6e6" font-size="13" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">CAM Stock Setup</text>
+<rect x="1092" y="74" width="22" height="22" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<line x1="1097" y1="79" x2="1107" y2="89" stroke="#a8a8a8" stroke-width="1.2"/>
+<line x1="1107" y1="79" x2="1097" y2="89" stroke="#a8a8a8" stroke-width="1.2"/>
+<rect x="81" y="102" width="1038" height="584" fill="#2b2b2b"/>
+<rect x="81" y="686" width="1038" height="43" fill="#323232"/>
+<line x1="80" y1="686" x2="1120" y2="686" stroke="#1a1a1a" stroke-width="1"/>
+<rect x="1026" y="694" width="72" height="28" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<text x="1062.0" y="712.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Cancel</text>
+<rect x="946" y="694" width="72" height="28" rx="3" fill="#0a84ff" stroke="#0a84ff" stroke-width="1"/>
+<text x="982.0" y="712.32" fill="#ffffff" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="middle">Next →</text>
+<rect x="866" y="694" width="72" height="28" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<text x="902.0" y="712.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Back</text>
+<circle cx="108" cy="122" r="10" fill="#5ac878" opacity="1.0" stroke="#5ac878" stroke-width="2"/>
+<text x="108" y="126" fill="#ffffff" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="middle">✓</text>
+<text x="126" y="126" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Setup</text>
+<line x1="122" y1="122" x2="283" y2="122" stroke="#5ac878" stroke-width="2"/>
+<circle cx="309" cy="122" r="10" fill="#0a84ff" opacity="1.0" stroke="#0a84ff" stroke-width="2"/>
+<text x="309" y="126" fill="#ffffff" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="middle">2</text>
+<text x="327" y="126" fill="#0a84ff" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Stock (current)</text>
+<line x1="323" y1="122" x2="484" y2="122" stroke="#3e3e3e" stroke-width="2"/>
+<circle cx="510" cy="122" r="10" fill="#2b2b2b" opacity="1.0" stroke="#3e3e3e" stroke-width="2"/>
+<text x="510" y="126" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">3</text>
+<text x="528" y="126" fill="#6e6e6e" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Fixtures</text>
+<line x1="524" y1="122" x2="685" y2="122" stroke="#3e3e3e" stroke-width="2"/>
+<circle cx="711" cy="122" r="10" fill="#2b2b2b" opacity="1.0" stroke="#3e3e3e" stroke-width="2"/>
+<text x="711" y="126" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">4</text>
+<text x="729" y="126" fill="#6e6e6e" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Tools</text>
+<line x1="725" y1="122" x2="886" y2="122" stroke="#3e3e3e" stroke-width="2"/>
+<circle cx="912" cy="122" r="10" fill="#2b2b2b" opacity="1.0" stroke="#3e3e3e" stroke-width="2"/>
+<text x="912" y="126" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">5</text>
+<text x="930" y="126" fill="#6e6e6e" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Operations</text>
+<text x="96" y="154" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Stock type:</text>
+<rect x="180" y="142" width="116" height="24" rx="3" fill="#0a84ff" stroke="#0a84ff" stroke-width="1"/>
+<text x="238.0" y="157.96" fill="#ffffff" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="middle">Bounding Box</text>
+<rect x="304" y="142" width="148" height="24" rx="3" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="1"/>
+<text x="378.0" y="157.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Offset from Part</text>
+<rect x="460" y="142" width="116" height="24" rx="3" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="1"/>
+<text x="518.0" y="157.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Custom Solid</text>
+<rect x="584" y="142" width="92" height="24" rx="3" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="1"/>
+<text x="630.0" y="157.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">From Mesh</text>
+<rect x="684" y="142" width="116" height="24" rx="3" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="1"/>
+<text x="742.0" y="157.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Cylinder Bar</text>
+<rect x="81" y="174" width="320" height="409" fill="#2b2b2b"/>
+<text x="96" y="186" fill="#e6e6e6" font-size="13" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Dimensions (mm)</text>
+<line x1="96" y1="204" x2="384" y2="204" stroke="#3e3e3e" stroke-width="1"/>
+<text x="104" y="228" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">X (length):</text>
+<rect x="230" y="216" width="130" height="22" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="236" y="230.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">210.000</text>
+<line x1="279" y1="220" x2="279" y2="234" stroke="#0a84ff" stroke-width="1"/>
+<text x="365" y="228" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">mm</text>
+<text x="104" y="256" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Y (width):</text>
+<rect x="230" y="244" width="130" height="22" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="236" y="258.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">160.000</text>
+<line x1="279" y1="248" x2="279" y2="262" stroke="#0a84ff" stroke-width="1"/>
+<text x="365" y="256" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">mm</text>
+<text x="104" y="284" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Z (height):</text>
+<rect x="230" y="272" width="130" height="22" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="236" y="286.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">80.000</text>
+<line x1="273" y1="276" x2="273" y2="290" stroke="#0a84ff" stroke-width="1"/>
+<text x="365" y="284" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">mm</text>
+<text x="104" y="312" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Offset X:</text>
+<rect x="230" y="300" width="130" height="22" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="236" y="314.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">5.000</text>
+<line x1="267" y1="304" x2="267" y2="318" stroke="#0a84ff" stroke-width="1"/>
+<text x="365" y="312" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">mm</text>
+<text x="104" y="340" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Offset Y:</text>
+<rect x="230" y="328" width="130" height="22" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="236" y="342.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">5.000</text>
+<line x1="267" y1="332" x2="267" y2="346" stroke="#0a84ff" stroke-width="1"/>
+<text x="365" y="340" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">mm</text>
+<text x="104" y="368" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Offset Z (top):</text>
+<rect x="230" y="356" width="130" height="22" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="236" y="370.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">5.000</text>
+<line x1="267" y1="360" x2="267" y2="374" stroke="#0a84ff" stroke-width="1"/>
+<text x="365" y="368" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">mm</text>
+<text x="96" y="392" fill="#e6e6e6" font-size="13" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Material</text>
+<line x1="96" y1="410" x2="384" y2="410" stroke="#3e3e3e" stroke-width="1"/>
+<text x="104" y="434" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Material:</text>
+<rect x="230" y="422" width="160" height="22" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="236" y="436.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Aluminum 6061-T6</text>
+<polyline points="377.6,431.8 380.0,435.4 382.4,431.8" fill="none" stroke="#a8a8a8" stroke-width="1.2"/>
+<text x="104" y="462" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Hardness:</text>
+<rect x="230" y="450" width="130" height="22" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="236" y="464.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">95 HB</text>
+<line x1="267" y1="454" x2="267" y2="468" stroke="#0a84ff" stroke-width="1"/>
+<text x="96" y="486" fill="#e6e6e6" font-size="13" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Origin</text>
+<line x1="96" y1="504" x2="384" y2="504" stroke="#3e3e3e" stroke-width="1"/>
+<circle cx="111.0" cy="523.0" r="6.0" fill="none" opacity="1.0" stroke="#a8a8a8" stroke-width="1.2"/>
+<text x="124" y="526.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Top-left</text>
+<circle cx="261.0" cy="523.0" r="6.0" fill="none" opacity="1.0" stroke="#a8a8a8" stroke-width="1.2"/>
+<text x="274" y="526.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Top-center</text>
+<circle cx="111.0" cy="545.0" r="6.0" fill="none" opacity="1.0" stroke="#0a84ff" stroke-width="1.2"/>
+<circle cx="111.0" cy="545.0" r="3.5" fill="#0a84ff" opacity="1.0"/>
+<text x="124" y="548.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Bottom-left</text>
+<circle cx="261.0" cy="545.0" r="6.0" fill="none" opacity="1.0" stroke="#a8a8a8" stroke-width="1.2"/>
+<text x="274" y="548.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Bottom-center</text>
+<circle cx="111.0" cy="567.0" r="6.0" fill="none" opacity="1.0" stroke="#a8a8a8" stroke-width="1.2"/>
+<text x="124" y="570.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Center</text>
+<rect x="401" y="174" width="718" height="409" fill="#151515"/>
+<polygon points="560.0,474.0 560.0,274.0 530.0,254.0 930.0,254.0 960.0,274.0 560.0,274.0" fill="none" opacity="1.0" stroke="#e2a73a" stroke-width="1.5" stroke-dasharray="6 3"/>
+<polygon points="560.0,474.0 530.0,454.0 930.0,454.0 960.0,474.0" fill="#e2a73a" opacity="0.1" stroke="#e2a73a" stroke-width="1.5" stroke-dasharray="6 3"/>
+<polygon points="960.0,274.0 930.0,254.0 930.0,454.0 960.0,474.0" fill="#e2a73a" opacity="0.15" stroke="#e2a73a" stroke-width="1.5" stroke-dasharray="6 3"/>
+<polygon points="570.0,464.0 570.0,284.0 550.0,269.0 930.0,269.0 950.0,284.0 570.0,284.0" fill="#3a4049" opacity="1.0" stroke="#0d0d0d" stroke-width="1"/>
+<polygon points="570.0,464.0 550.0,449.0 930.0,449.0 950.0,464.0" fill="#4a525c" opacity="1.0" stroke="#0d0d0d" stroke-width="1"/>
+<polygon points="950.0,284.0 930.0,269.0 930.0,449.0 950.0,464.0" fill="#6a7280" opacity="1.0" stroke="#0d0d0d" stroke-width="1"/>
+<line x1="560.0" y1="494.0" x2="960.0" y2="494.0" stroke="#e2a73a" stroke-width="1"/>
+<text x="760.0" y="508.0" fill="#e2a73a" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="middle">210 mm</text>
+<line x1="980.0" y1="274.0" x2="980.0" y2="474.0" stroke="#e2a73a" stroke-width="1"/>
+<text x="994.0" y="374" fill="#e2a73a" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="middle">160 mm</text>
+<rect x="413" y="186" width="280" height="80" rx="3" fill="#2b2b2b" stroke="#1a1a1a" stroke-width="1"/>
+<text x="423" y="204" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Stock Volume</text>
+<text x="423" y="224" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">Volume: 2,688,000 mm³</text>
+<text x="423" y="240" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">Mass: 7.25 kg (Al 6061)</text>
+<text x="423" y="256" fill="#e2a73a" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="start">Material removal: 78%</text>
+</svg>

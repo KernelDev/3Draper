@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1400" height="220" viewBox="0 0 1400 220">
+<title>Ribbon Tab: Assembly</title>
+<rect x="0" y="0" width="1400" height="220" fill="#1f1f1f"/>
+<rect x="0" y="0" width="1400" height="36" fill="#262626" stroke="#1a1a1a" stroke-width="1"/>
+<text x="14" y="22" fill="#e6e6e6" font-size="14" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Ribbon Tab: Assembly</text>
+<text x="14" y="32" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Ribbon groups shown when &#x27;Assembly&#x27; is active</text>
+<rect x="0" y="36" width="1400" height="154" fill="#2b2b2b" stroke="#1a1a1a" stroke-width="1"/>
+<rect x="0" y="36" width="1400" height="22" fill="#1f1f1f"/>
+<text x="13" y="51.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">File</text>
+<text x="59" y="51.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Home</text>
+<text x="105" y="51.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Sketch</text>
+<text x="165" y="51.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Insert</text>
+<text x="225" y="51.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Modify</text>
+<text x="285" y="51.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Sheet Metal</text>
+<rect x="371" y="37" width="74" height="22" fill="#2b2b2b" stroke="#0a84ff" stroke-width="0"/>
+<rect x="371" y="56" width="74" height="2" fill="#0a84ff"/>
+<text x="380" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Assembly</text>
+<text x="454" y="51.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">CAM</text>
+<text x="493" y="51.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Drawing</text>
+<text x="560" y="51.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Simulation</text>
+<text x="648" y="51.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Inspect</text>
+<text x="715" y="51.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">AI</text>
+<text x="747" y="51.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Tools</text>
+<text x="800" y="51.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">View</text>
+<line x1="0" y1="58" x2="1400" y2="58" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="6" y="62" width="140" height="124" rx="2" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="10" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<path d="M21 79 L26.0 76 L31 79 L31 85 L26.0 88 L21 85 Z" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<rect x="46" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<path d="M56 80 L56 87 L68 87 L68 79 L62.0 79 L60.0 77 L56 77 Z" fill="#e6e6e6" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<rect x="82" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<ellipse cx="98.0" cy="82.0" rx="6" ry="3" fill="none" opacity="1.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<circle cx="98.0" cy="82.0" r="1.5" fill="#e6e6e6" opacity="1.0"/>
+<rect x="10" y="102" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="22" y="118" width="8" height="4" rx="1" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<path d="M23 118 L23 115 Q23 111 26.0 111 Q29 111 29 115 L29 118" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<text x="10" y="183.24" fill="#a8a8a8" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Components</text>
+<rect x="150" y="62" width="130" height="124" rx="2" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="154" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<circle cx="170.0" cy="82.0" r="4" fill="none" opacity="1.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<circle cx="170.0" cy="82.0" r="1.2" fill="#e6e6e6" opacity="1.0"/>
+<rect x="190" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<circle cx="206.0" cy="82.0" r="4" fill="none" opacity="1.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<circle cx="206.0" cy="82.0" r="1.2" fill="#e6e6e6" opacity="1.0"/>
+<text x="154" y="183.24" fill="#a8a8a8" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Mate</text>
+<rect x="284" y="62" width="110" height="124" rx="2" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="288" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<polygon points="301,77 301,87 308,82.0" fill="#e6e6e6" opacity="1.0"/>
+<rect x="324" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<path d="M340.0 76 L346 87 L334 87 Z" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<line x1="340.0" y1="81.0" x2="340.0" y2="83.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<circle cx="340.0" cy="85.0" r="0.8" fill="#e6e6e6" opacity="1.0"/>
+<text x="288" y="183.24" fill="#a8a8a8" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Solve</text>
+<rect x="398" y="62" width="100" height="124" rx="2" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="402" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<path d="M413 76 L421.2 76 L423 79 L423 88 L413 88 Z" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<polyline points="421.2,76 421.2,79 423,79" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<rect x="438" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<path d="M449 87 L449 77 L452.0 77 M456.0 77 L459 77 L459 87 Z M454.0 77 L454.0 85 M451.0 79 L454.0 76 L457.0 79" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<text x="402" y="183.24" fill="#a8a8a8" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">BOM</text>
+<rect x="502" y="62" width="110" height="124" rx="2" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="506" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<polyline points="517,82.0 522.0,77 527,82.0 522.0,87" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<rect x="542" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<polyline points="553,87 558.0,87 558.0,77 563,77" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="506" y="183.24" fill="#a8a8a8" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Explode</text>
+<rect x="616" y="62" width="140" height="124" rx="2" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="620" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<polygon points="633,77 633,87 640,82.0" fill="#e6e6e6" opacity="1.0"/>
+<rect x="656" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="667" y="77" width="10" height="10" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="667" y1="77" x2="677" y2="87" stroke="#e6e6e6" stroke-width="1.2" stroke-dasharray="2 2"/>
+<rect x="692" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<circle cx="708.0" cy="82.0" r="6" fill="none" opacity="1.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<polyline points="708.0,79.0 708.0,82.0 711.0,82.0" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="620" y="183.24" fill="#a8a8a8" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Motion</text>
+<rect x="760" y="62" width="140" height="124" rx="2" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="764" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<circle cx="780.0" cy="82.0" r="6" fill="none" opacity="1.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="780.0" y1="80.0" x2="780.0" y2="83.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<circle cx="780.0" cy="85.0" r="0.8" fill="#e6e6e6" opacity="1.0"/>
+<rect x="800" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="810" y="76" width="12" height="12" rx="2" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="813" y="86" fill="#e6e6e6" font-size="7" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="start">AI</text>
+<rect x="836" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<circle cx="852.0" cy="82.0" r="6" fill="none" opacity="1.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="852.0" y1="80.0" x2="852.0" y2="83.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<circle cx="852.0" cy="85.0" r="0.8" fill="#e6e6e6" opacity="1.0"/>
+<rect x="764" y="102" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<path d="M780.0 112 L786 123 L774 123 Z" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<line x1="780.0" y1="117.0" x2="780.0" y2="119.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<circle cx="780.0" cy="121.0" r="0.8" fill="#e6e6e6" opacity="1.0"/>
+<text x="764" y="183.24" fill="#a8a8a8" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Constraints</text>
+<rect x="0" y="198" width="1400" height="22" fill="#1a1a1a" stroke="#1a1a1a" stroke-width="1"/>
+<line x1="0" y1="198" x2="1400" y2="198" stroke="#3e3e3e" stroke-width="1"/>
+<text x="8" y="212.6" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Ready</text>
+<text x="1332" y="212.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">F8: Ortho</text>
+<text x="1254" y="212.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">F2: Sketch</text>
+<text x="1176" y="212.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">SNAP: Grid</text>
+<text x="1146" y="212.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">mm</text>
+<text x="1080" y="212.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">Z: 0.000</text>
+<text x="1014" y="212.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">Y: 0.000</text>
+<text x="948" y="212.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">X: 0.000</text>
+</svg>

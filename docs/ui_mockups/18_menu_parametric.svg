@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1100" height="700" viewBox="0 0 1100 700">
+<title>Parametric Menu — Parameters, History, Advanced</title>
+<rect x="0" y="0" width="1100" height="700" fill="#1f1f1f"/>
+<rect x="0" y="0" width="1100" height="36" fill="#262626" stroke="#1a1a1a" stroke-width="1"/>
+<text x="14" y="22" fill="#e6e6e6" font-size="14" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Parametric Menu — Parameters, History, Advanced</text>
+<text x="14" y="32" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Full parametric workflow: formulas, history rollback, design tables, configuration variants</text>
+<rect x="0" y="36" width="1100" height="22" fill="#1f1f1f" stroke="#1a1a1a" stroke-width="1"/>
+<text x="12" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">File</text>
+<text x="62" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Edit</text>
+<text x="112" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">View</text>
+<text x="162" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Insert</text>
+<text x="226" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Sketch</text>
+<text x="290" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Modify</text>
+<text x="354" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Sheet Metal</text>
+<text x="453" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Assembly</text>
+<text x="531" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">CAM</text>
+<text x="574" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Drawing</text>
+<text x="645" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Simulation</text>
+<rect x="729" y="38" width="86" height="18" rx="2" fill="#3c3c3c" stroke="#0a84ff" stroke-width="0.8"/>
+<text x="737" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="500" font-style="normal" text-anchor="start">Parametric</text>
+<text x="829" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Optimize</text>
+<text x="907" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Generate</text>
+<text x="985" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">GD&amp;T</text>
+<text x="1035" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Heal</text>
+<text x="1085" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Inspect</text>
+<text x="1156" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Mold</text>
+<text x="1206" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Tools</text>
+<text x="1263" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Scripting</text>
+<text x="1348" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">AI</text>
+<text x="1384" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Window</text>
+<text x="1448" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Help</text>
+<rect x="733" y="61" width="220" height="346" rx="3" fill="#000000" opacity="0.4"/>
+<rect x="731" y="58" width="220" height="346" rx="3" fill="#2b2b2b" stroke="#111111" stroke-width="1"/>
+<rect x="631" y="36" width="100" height="22" fill="#3c3c3c" stroke="#111111" stroke-width="1"/>
+<text x="639" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="500" font-style="normal" text-anchor="start">Parametric</text>
+<rect x="733" y="62" width="216" height="26" fill="none"/>
+<line x1="742.0" y1="75.0" x2="748.0" y2="75.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="745.0" y1="72.0" x2="745.0" y2="78.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="759" y="79.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Add Parameter…</text>
+<text x="939" y="78.96000000000001" fill="#a8a8a8" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">P</text>
+<rect x="733" y="88" width="216" height="26" fill="none"/>
+<circle cx="745.0" cy="101.0" r="3" fill="none" opacity="1.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="749.0" y1="101.0" x2="751.0" y2="101.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="747.8284271247462" y1="103.82842712474618" x2="749.2426406871193" y2="105.24264068711929" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="745.0" y1="105.0" x2="745.0" y2="107.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="742.1715728752538" y1="103.82842712474618" x2="740.7573593128807" y2="105.24264068711929" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="741.0" y1="101.0" x2="739.0" y2="101.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="742.1715728752538" y1="98.17157287525382" x2="740.7573593128807" y2="96.75735931288071" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="745.0" y1="97.0" x2="745.0" y2="95.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="747.8284271247462" y1="98.17157287525382" x2="749.2426406871193" y2="96.75735931288071" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="759" y="105.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Set Parameter…</text>
+<rect x="733" y="114" width="216" height="26" fill="none"/>
+<path d="M742 121 L748 121 L750 124 L750 132 L748 133 L742 133 L740 132 L740 124 Z" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<line x1="743" y1="127" x2="747" y2="127" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="743" y1="131" x2="747" y2="131" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="759" y="131.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Set Formula…</text>
+<rect x="733" y="140" width="216" height="26" fill="none"/>
+<circle cx="744.0" cy="152.0" r="4.8" fill="none" opacity="1.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="748.2" y1="156.2" x2="751" y2="159" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="759" y="157.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Get Parameter…</text>
+<rect x="733" y="166" width="216" height="26" fill="none"/>
+<rect x="741" y="179" width="8" height="4" rx="1" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<path d="M742 179 L742 176 Q742 172 745.0 172 Q748 172 748 176 L748 179" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<text x="759" y="183.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Toggle Lock</text>
+<rect x="733" y="192" width="216" height="26" fill="none"/>
+<path d="M739 203 L739 210 L751 210 L751 202 L745.0 202 L743.0 200 L739 200 Z" fill="#e6e6e6" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<text x="759" y="209.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">List Parameters…</text>
+<rect x="733" y="218" width="216" height="26" fill="none"/>
+<path d="M742 225 L748 225 L750 228 L750 236 L748 237 L742 237 L740 236 L740 228 Z" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<line x1="743" y1="231" x2="747" y2="231" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="743" y1="235" x2="747" y2="235" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="759" y="235.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Evaluate Expression…</text>
+<rect x="733" y="244" width="216" height="26" fill="none"/>
+<line x1="740" y1="252" x2="750" y2="262" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="750" y1="252" x2="740" y2="262" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="759" y="261.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Clear Parameters</text>
+<line x1="739" y1="274.0" x2="943" y2="274.0" stroke="#454545" stroke-width="1"/>
+<rect x="733" y="278" width="216" height="26" fill="none"/>
+<path d="M740 296 L740 286 L743.0 286 M747.0 286 L750 286 L750 296 Z M745.0 286 L745.0 294 M742.0 288 L745.0 285 L748.0 288" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<text x="759" y="295.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Export Parameters…</text>
+<rect x="733" y="304" width="216" height="26" fill="none"/>
+<path d="M740 322 L740 312 L743.0 312 M747.0 312 L750 312 L750 322 Z M745.0 314 L745.0 320 M742.0 318 L745.0 321 L748.0 318" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<text x="759" y="321.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Import Parameters…</text>
+<line x1="739" y1="334.0" x2="943" y2="334.0" stroke="#454545" stroke-width="1"/>
+<rect x="733" y="338" width="216" height="26" fill="none"/>
+<circle cx="745.0" cy="351.0" r="6" fill="none" opacity="1.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<polyline points="745.0,348.0 745.0,351.0 748.0,351.0" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="759" y="355.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">History</text>
+<polyline points="942.6,347.0 947.4,351.0 942.6,355.0" fill="none" stroke="#a8a8a8" stroke-width="1.2"/>
+<line x1="739" y1="368.0" x2="943" y2="368.0" stroke="#454545" stroke-width="1"/>
+<rect x="733" y="372" width="216" height="26" fill="none"/>
+<rect x="739" y="379" width="12" height="12" rx="2" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="742" y="389" fill="#e6e6e6" font-size="7" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="start">AI</text>
+<text x="759" y="389.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Advanced</text>
+<polyline points="942.6,381.0 947.4,385.0 942.6,389.0" fill="none" stroke="#a8a8a8" stroke-width="1.2"/>
+<rect x="0" y="670" width="1100" height="30" fill="#262626" stroke="#1a1a1a" stroke-width="1"/>
+<text x="14" y="690" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Menu: Parametric  ·  12 items</text>
+<text x="1086" y="690" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="end">BRepCAD UI Mockup</text>
+</svg>

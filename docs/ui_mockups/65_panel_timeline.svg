@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1200" height="220" viewBox="0 0 1200 220">
+<title>Panel: Timeline (Feature History)</title>
+<rect x="0" y="0" width="1200" height="220" fill="#1f1f1f"/>
+<rect x="0" y="0" width="1200" height="36" fill="#262626" stroke="#1a1a1a" stroke-width="1"/>
+<text x="14" y="22" fill="#e6e6e6" font-size="14" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Panel: Timeline (Feature History)</text>
+<text x="14" y="32" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Horizontal feature scrubber with rollback marker, suppress toggles, drag-to-reorder, branch indicators</text>
+<rect x="0" y="36" width="1200" height="184" fill="#2b2b2b"/>
+<rect x="0" y="36" width="1200" height="26" fill="#323232" stroke="#1a1a1a" stroke-width="1"/>
+<rect x="6" y="38" width="54" height="22" fill="#2b2b2b"/>
+<text x="12" y="52.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Linear</text>
+<text x="70" y="52.96" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Tree</text>
+<text x="114" y="52.96" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Milestones</text>
+<circle cx="1188.0" cy="45.0" r="1.5" fill="#a8a8a8" opacity="1.0"/>
+<circle cx="1188.0" cy="50.0" r="1.5" fill="#a8a8a8" opacity="1.0"/>
+<circle cx="1188.0" cy="55.0" r="1.5" fill="#a8a8a8" opacity="1.0"/>
+<rect x="8" y="66" width="80" height="22" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<circle cx="22.0" cy="77.0" r="6" fill="none" opacity="1.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<polyline points="22.0,74.0 22.0,77.0 25.0,77.0" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="34" y="80.96000000000001" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Rollback</text>
+<rect x="92" y="66" width="60" height="22" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<polygon points="103,72.0 103,82.0 110,77.0" fill="#e6e6e6" opacity="1.0"/>
+<text x="118" y="80.96000000000001" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Forward</text>
+<rect x="156" y="66" width="70" height="22" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<circle cx="170.0" cy="77.0" r="6" fill="none" opacity="1.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<polyline points="170.0,74.0 170.0,77.0 173.0,77.0" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="182" y="80.96000000000001" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Branch…</text>
+<rect x="230" y="66" width="90" height="22" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<circle cx="244.0" cy="77.0" r="6" fill="none" opacity="1.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<polyline points="244.0,74.0 244.0,77.0 247.0,77.0" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="256" y="80.96000000000001" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Snapshot</text>
+<rect x="324" y="66" width="80" height="22" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<path d="M332 72.0 L344 72.0 L338.0 78.6 L338.0 82.0 L336.0 82.0 L336.0 78.6 Z" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<text x="350" y="80.96000000000001" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Filter…</text>
+<rect x="1100" y="66" width="90" height="22" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<circle cx="1114.0" cy="77.0" r="6" fill="none" opacity="1.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<polyline points="1114.0,74.0 1114.0,77.0 1117.0,77.0" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="1126" y="80.96000000000001" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Diff</text>
+<rect x="8" y="100" width="1184" height="90" rx="3" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<line x1="16" y1="104" x2="16" y2="186" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="16" y="112" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">T0</text>
+<line x1="112" y1="104" x2="112" y2="186" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="112" y="112" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">T1</text>
+<line x1="208" y1="104" x2="208" y2="186" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="208" y="112" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">T2</text>
+<line x1="304" y1="104" x2="304" y2="186" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="304" y="112" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">T3</text>
+<line x1="400" y1="104" x2="400" y2="186" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="400" y="112" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">T4</text>
+<line x1="496" y1="104" x2="496" y2="186" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="496" y="112" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">T5</text>
+<line x1="592" y1="104" x2="592" y2="186" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="592" y="112" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">T6</text>
+<line x1="688" y1="104" x2="688" y2="186" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="688" y="112" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">T7</text>
+<line x1="784" y1="104" x2="784" y2="186" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="784" y="112" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">T8</text>
+<line x1="880" y1="104" x2="880" y2="186" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="880" y="112" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">T9</text>
+<line x1="976" y1="104" x2="976" y2="186" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="976" y="112" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">T10</text>
+<line x1="1072" y1="104" x2="1072" y2="186" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="1072" y="112" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">T11</text>
+<line x1="1168" y1="104" x2="1168" y2="186" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="1168" y="112" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">T12</text>
+<rect x="16" y="118" width="76" height="60" rx="3" fill="#3a3a3a" stroke="#0a84ff" stroke-width="1"/>
+<line x1="51.0" y1="135" x2="61.0" y2="125" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="54.0" y="150" fill="#e6e6e6" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="500" font-style="normal" text-anchor="middle">Sketch 1</text>
+<text x="54.0" y="162" fill="#a8a8a8" font-size="8" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="middle">T0</text>
+<rect x="96" y="118" width="96" height="60" rx="3" fill="#3a3a3a" stroke="#0a84ff" stroke-width="1"/>
+<path d="M141.0 127 L146.0 124 L151.0 127 L151.0 133 L146.0 136 L141.0 133 Z" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<line x1="141.0" y1="127" x2="146.0" y2="130" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="146.0" y1="124" x2="146.0" y2="130" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="151.0" y1="127" x2="146.0" y2="130" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="144.0" y="150" fill="#e6e6e6" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="500" font-style="normal" text-anchor="middle">Extrude 1</text>
+<text x="144.0" y="162" fill="#a8a8a8" font-size="8" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="middle">T1</text>
+<rect x="196" y="118" width="56" height="60" rx="3" fill="#3a3a3a" stroke="#0a84ff" stroke-width="1"/>
+<path d="M221.0 135 L227.6 135 Q231.0 135 231.0 128.4" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<line x1="221.0" y1="135" x2="221.0" y2="133" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="224.0" y="150" fill="#e6e6e6" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="500" font-style="normal" text-anchor="middle">Fillet 1</text>
+<text x="224.0" y="162" fill="#a8a8a8" font-size="8" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="middle">T2</text>
+<rect x="256" y="118" width="56" height="60" rx="3" fill="#3a3a3a" stroke="#0a84ff" stroke-width="1"/>
+<path d="M281.0 135 L287.6 135 Q291.0 135 291.0 128.4" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<line x1="281.0" y1="135" x2="281.0" y2="133" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="284.0" y="150" fill="#e6e6e6" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="500" font-style="normal" text-anchor="middle">Fillet 2</text>
+<text x="284.0" y="162" fill="#a8a8a8" font-size="8" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="middle">T3</text>
+<rect x="316" y="118" width="76" height="60" rx="3" fill="#3a3a3a" stroke="#0a84ff" stroke-width="1"/>
+<line x1="351.0" y1="135" x2="361.0" y2="125" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="354.0" y="150" fill="#e6e6e6" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="500" font-style="normal" text-anchor="middle">Sketch 2</text>
+<text x="354.0" y="162" fill="#a8a8a8" font-size="8" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="middle">T4</text>
+<rect x="396" y="118" width="96" height="60" rx="3" fill="#3a3a3a" stroke="#0a84ff" stroke-width="1"/>
+<circle cx="443.0" cy="130.0" r="5" fill="rgba(230,230,230,0.3)" opacity="1.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<circle cx="449.0" cy="130.0" r="5" fill="none" opacity="1.0" stroke="#e6e6e6" stroke-width="1.2" stroke-dasharray="2 2"/>
+<text x="444.0" y="150" fill="#e6e6e6" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="500" font-style="normal" text-anchor="middle">Cut 1</text>
+<text x="444.0" y="162" fill="#a8a8a8" font-size="8" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="middle">T5</text>
+<rect x="496" y="118" width="136" height="60" rx="3" fill="#3a3a3a" stroke="#0a84ff" stroke-width="1"/>
+<rect x="561.0" y="127" width="5" height="5" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<rect x="566.0" y="127" width="5" height="5" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<rect x="571.0" y="127" width="5" height="5" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="564.0" y="150" fill="#e6e6e6" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="500" font-style="normal" text-anchor="middle">Pattern 1</text>
+<text x="564.0" y="162" fill="#a8a8a8" font-size="8" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="middle">T6</text>
+<rect x="636" y="118" width="76" height="60" rx="3" fill="#3a3a3a" stroke="#0a84ff" stroke-width="1"/>
+<path d="M671.0 125 L681.0 125 L681.0 135 L671.0 135 Z M673.0 127 L679.0 127 L679.0 133 L673.0 133 Z" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<text x="674.0" y="150" fill="#e6e6e6" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="500" font-style="normal" text-anchor="middle">Shell 1</text>
+<text x="674.0" y="162" fill="#a8a8a8" font-size="8" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="middle">T7</text>
+<rect x="716" y="118" width="56" height="60" rx="3" fill="#3a3a3a" stroke="#0a84ff" stroke-width="1"/>
+<line x1="746.0" y1="124" x2="746.0" y2="136" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="744.0" y1="126" x2="748.0" y2="128" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="743.6" y1="129" x2="748.4" y2="131" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="743.2" y1="132" x2="748.8" y2="134" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="742.8" y1="135" x2="749.2" y2="137" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="744.0" y="150" fill="#e6e6e6" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="500" font-style="normal" text-anchor="middle">Hole 1</text>
+<text x="744.0" y="162" fill="#a8a8a8" font-size="8" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="middle">T8</text>
+<rect x="776" y="118" width="56" height="60" rx="3" fill="#323232" stroke="#6e6e6e" stroke-width="1"/>
+<line x1="806.0" y1="124" x2="806.0" y2="136" stroke="#6e6e6e" stroke-width="1.2"/>
+<line x1="804.0" y1="126" x2="808.0" y2="128" stroke="#6e6e6e" stroke-width="1.2"/>
+<line x1="803.6" y1="129" x2="808.4" y2="131" stroke="#6e6e6e" stroke-width="1.2"/>
+<line x1="803.2" y1="132" x2="808.8" y2="134" stroke="#6e6e6e" stroke-width="1.2"/>
+<line x1="802.8" y1="135" x2="809.2" y2="137" stroke="#6e6e6e" stroke-width="1.2"/>
+<text x="804.0" y="150" fill="#6e6e6e" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="500" font-style="normal" text-anchor="middle">Hole 2</text>
+<text x="804.0" y="162" fill="#a8a8a8" font-size="8" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="middle">T9</text>
+<text x="804.0" y="174" fill="#e2a73a" font-size="8" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">(suppressed)</text>
+<rect x="836" y="118" width="76" height="60" rx="3" fill="#3a3a3a" stroke="#0a84ff" stroke-width="1"/>
+<path d="M871.0 135 L879.0 135 L881.0 133" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<text x="874.0" y="150" fill="#e6e6e6" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="500" font-style="normal" text-anchor="middle">Chamfer 1</text>
+<text x="874.0" y="162" fill="#a8a8a8" font-size="8" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="middle">T10</text>
+<rect x="916" y="118" width="76" height="60" rx="3" fill="#2b2b2b" stroke="#1a1a1a" stroke-width="1"/>
+<line x1="951.0" y1="135" x2="961.0" y2="125" stroke="#a8a8a8" stroke-width="1.2"/>
+<text x="954.0" y="150" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="500" font-style="normal" text-anchor="middle">Sketch 3</text>
+<text x="954.0" y="162" fill="#a8a8a8" font-size="8" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="middle">T11</text>
+<line x1="950" y1="100" x2="950" y2="190" stroke="#e2a73a" stroke-width="2" stroke-dasharray="4 2"/>
+<polygon points="950,100 945,94 955,94" fill="#e2a73a" opacity="1.0"/>
+<text x="950" y="90" fill="#e2a73a" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="middle">▼ Rollback</text>
+<line x1="980" y1="140" x2="1040" y2="140" stroke="#0a84ff" stroke-width="1.5" stroke-dasharray="3 2"/>
+<text x="1010" y="134" fill="#0a84ff" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="middle">Branch B</text>
+<rect x="0" y="190" width="1200" height="30" fill="#262626" stroke="#1a1a1a" stroke-width="1"/>
+<text x="8" y="206" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">12 features  ·  Rolled back to T9  ·  1 suppressed  ·  1 branch</text>
+</svg>

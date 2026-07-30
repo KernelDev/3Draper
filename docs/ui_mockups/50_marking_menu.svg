@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1200" height="800" viewBox="0 0 1200 800">
+<title>Marking Menu (Space key) — radial pie</title>
+
+  <defs>
+    <linearGradient id="lin1" x1="0" y1="0" x2="0" y2="1">
+  <stop offset="0" stop-color="#202020"/>
+  <stop offset="1" stop-color="#0d0d0d"/>
+</linearGradient>
+  </defs>
+<rect x="0" y="0" width="1200" height="800" fill="#1f1f1f"/>
+<rect x="0" y="0" width="1200" height="36" fill="#262626" stroke="#1a1a1a" stroke-width="1"/>
+<text x="14" y="22" fill="#e6e6e6" font-size="14" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Marking Menu (Space key) — radial pie</text>
+<text x="14" y="32" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Fusion-style radial command palette, 8 directions + center ESC</text>
+<rect x="0" y="36" width="1200" height="740" fill="url(#lin1)"/>
+<line x1="300" y1="517.0" x2="540.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="300" y1="517.0" x2="59.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="330" y1="517.0" x2="570.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="330" y1="517.0" x2="89.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="360" y1="517.0" x2="600.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="360" y1="517.0" x2="119.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="390" y1="517.0" x2="630.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="390" y1="517.0" x2="149.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="420" y1="517.0" x2="660.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="420" y1="517.0" x2="179.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="450" y1="517.0" x2="690.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="450" y1="517.0" x2="209.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="480" y1="517.0" x2="720.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="480" y1="517.0" x2="239.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="510" y1="517.0" x2="750.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="510" y1="517.0" x2="269.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="540" y1="517.0" x2="780.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="540" y1="517.0" x2="299.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="570" y1="517.0" x2="810.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="570" y1="517.0" x2="329.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="600" y1="517.0" x2="840.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="600" y1="517.0" x2="359.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="630" y1="517.0" x2="870.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="630" y1="517.0" x2="389.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="660" y1="517.0" x2="900.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="660" y1="517.0" x2="419.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="690" y1="517.0" x2="930.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="690" y1="517.0" x2="449.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="720" y1="517.0" x2="960.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="720" y1="517.0" x2="479.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="750" y1="517.0" x2="990.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="750" y1="517.0" x2="509.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="780" y1="517.0" x2="1020.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="780" y1="517.0" x2="539.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="810" y1="517.0" x2="1050.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="810" y1="517.0" x2="569.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="840" y1="517.0" x2="1080.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="840" y1="517.0" x2="599.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="870" y1="517.0" x2="1110.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="870" y1="517.0" x2="629.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="900" y1="517.0" x2="1140.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="900" y1="517.0" x2="659.5" y2="776" stroke="#888888" stroke-width="0.5"/>
+<line x1="0" y1="517.0" x2="1200" y2="517.0" stroke="#666666" stroke-width="1"/>
+<line x1="50" y1="726" x2="80" y2="726" stroke="#e25555" stroke-width="2"/>
+<text x="84" y="730" fill="#e25555" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="start">X</text>
+<line x1="50" y1="726" x2="50" y2="696" stroke="#5ac878" stroke-width="2"/>
+<text x="47" y="690" fill="#5ac878" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="start">Y</text>
+<line x1="50" y1="726" x2="30" y2="741" stroke="#4a90e2" stroke-width="2"/>
+<text x="20" y="748" fill="#4a90e2" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="start">Z</text>
+<polygon points="510.0,316.0 650.0,316.0 670.0,331.0 530.0,331.0" fill="#6a7280" opacity="1.0" stroke="#0d0d0d" stroke-width="0.5"/>
+<polygon points="670.0,331.0 650.0,316.0 650.0,406.0 670.0,421.0" fill="#3a4049" opacity="1.0" stroke="#0d0d0d" stroke-width="0.5"/>
+<polygon points="530.0,331.0 670.0,331.0 670.0,421.0 530.0,421.0" fill="#4a525c" opacity="1.0" stroke="#0d0d0d" stroke-width="0.5"/>
+<polyline points="530.0,331.0 670.0,331.0 670.0,421.0 530.0,421.0 530.0,331.0" fill="none" stroke="#0d0d0d" stroke-width="1.2"/>
+<polyline points="530.0,331.0 510.0,316.0 650.0,316.0 670.0,331.0" fill="none" stroke="#0d0d0d" stroke-width="1.2"/>
+<line x1="670.0" y1="331.0" x2="650.0" y2="316.0" stroke="#0d0d0d" stroke-width="1.2"/>
+<line x1="530.0" y1="421.0" x2="510.0" y2="406.0" stroke="#0d0d0d" stroke-width="1.2"/>
+<line x1="670.0" y1="421.0" x2="650.0" y2="406.0" stroke="#0d0d0d" stroke-width="1.2"/>
+<rect x="0" y="36" width="1200" height="740" fill="#000000" opacity="0.4"/>
+<polygon points="600,400 600.0,290.0 607.1943442153157,290.2355184437536 614.3578811442056,290.9410652488809 621.4599354217742,292.11361915564464 628.4700949612773,293.74815910820246 635.3583411833478,295.83768575553836 642.0951775601599,298.37325142375846 648.6517559240901,301.34399843140426 655.0,304.7372055837117 661.1127256321563,308.53834264672 666.9637571909593,312.73113256796415 672.5280396610076,317.2976211773125 677.7817459305202,322.21825406947977" fill="#323232" opacity="1.0" stroke="#3e3e3e" stroke-width="1"/>
+<line x1="622.3618654141039" y1="338.942613425443" x2="632.3618654141039" y2="328.942613425443" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="646.6873787485409" y="291.286697033623" fill="#e6e6e6" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Line</text>
+<polygon points="600,400 677.7817459305202,322.21825406947977 682.7023788226875,327.4719603389924 687.2688674320359,333.03624280904074 691.46165735328,338.88727436784376 695.2627944162882,345.0 698.6560015685957,351.34824407590986 701.6267485762415,357.90482243984013 704.1623142444616,364.64165881665224 706.2518408917975,371.5299050387227 707.8863808443554,378.5400645782259 709.0589347511192,385.6421188557943 709.7644815562464,392.80565578468423 710.0,400.0" fill="#323232" opacity="1.0" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="661.057386574557" y="367.63813458589607" width="10" height="10" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="712.713302966377" y="357.31262125145906" fill="#e6e6e6" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Rectangle</text>
+<polygon points="600,400 710.0,400.0 709.7644815562464,407.1943442153157 709.0589347511192,414.3578811442057 707.8863808443554,421.4599354217741 706.2518408917975,428.47009496127725 704.1623142444616,435.35834118334776 701.6267485762415,442.09517756015987 698.6560015685957,448.65175592409014 695.2627944162882,455.0 691.46165735328,461.11272563215624 687.2688674320359,466.96375719095926 682.7023788226875,472.5280396610076 677.7817459305202,477.78174593052023" fill="#0a84ff" opacity="1.0" stroke="#0a84ff" stroke-width="1"/>
+<circle cx="666.057386574557" cy="427.36186541410393" r="6.4" fill="none" opacity="1.0" stroke="#ffffff" stroke-width="1.2"/>
+<text x="712.713302966377" y="450.68737874854094" fill="#ffffff" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Circle</text>
+<polygon points="600,400 677.7817459305202,477.78174593052023 672.5280396610076,482.7023788226875 666.9637571909593,487.26886743203585 661.1127256321563,491.46165735328 655.0,495.2627944162882 648.6517559240901,498.65600156859574 642.0951775601599,501.62674857624154 635.3583411833478,504.16231424446164 628.4700949612773,506.2518408917975 621.4599354217742,507.88638084435536 614.3578811442056,509.0589347511191 607.1943442153157,509.7644815562464 600.0,510.0" fill="#323232" opacity="1.0" stroke="#3e3e3e" stroke-width="1"/>
+<path d="M622.3618654141039 471.057386574557 A10 10 0 0 1 632.3618654141039 471.057386574557" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<text x="646.6873787485409" y="516.713302966377" fill="#e6e6e6" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Arc</text>
+<polygon points="600,400 600.0,510.0 592.8056557846843,509.7644815562464 585.6421188557944,509.0589347511191 578.540064578226,507.88638084435536 571.5299050387227,506.25184089179754 564.6416588166522,504.16231424446164 557.9048224398401,501.62674857624154 551.3482440759099,498.65600156859574 545.0,495.2627944162883 538.8872743678438,491.46165735328 533.0362428090407,487.26886743203585 527.4719603389924,482.7023788226875 522.2182540694798,477.78174593052023" fill="#323232" opacity="1.0" stroke="#3e3e3e" stroke-width="1"/>
+<line x1="567.6381345858961" y1="461.057386574557" x2="577.6381345858961" y2="461.057386574557" stroke="#e6e6e6" stroke-width="1.2" stroke-dasharray="2 2"/>
+<line x1="567.6381345858961" y1="461.057386574557" x2="567.6381345858961" y2="471.057386574557" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="577.6381345858961" y1="461.057386574557" x2="577.6381345858961" y2="471.057386574557" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="569.6381345858961" y1="470.057386574557" x2="575.6381345858961" y2="470.057386574557" stroke="#e6e6e6" stroke-width="1.2"/>
+<polygon points="569.6381345858961,470.057386574557 572.6381345858961,468.057386574557 572.6381345858961,472.057386574557" fill="#e6e6e6" opacity="1.0"/>
+<polygon points="575.6381345858961,470.057386574557 572.6381345858961,468.057386574557 572.6381345858961,472.057386574557" fill="#e6e6e6" opacity="1.0"/>
+<text x="553.3126212514591" y="516.713302966377" fill="#e6e6e6" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="end">Dimension</text>
+<polygon points="600,400 522.2182540694798,477.78174593052023 517.2976211773125,472.5280396610076 512.7311325679641,466.9637571909593 508.53834264672,461.11272563215624 504.7372055837117,455.0 501.3439984314043,448.65175592409014 498.37325142375846,442.09517756015987 495.83768575553836,435.35834118334776 493.7481591082025,428.4700949612773 492.11361915564464,421.45993542177416 490.9410652488809,414.3578811442057 490.2355184437536,407.19434421531577 490.0,400.0" fill="#323232" opacity="1.0" stroke="#3e3e3e" stroke-width="1"/>
+<path d="M528.942613425443 432.36186541410393 L535.542613425443 432.36186541410393 Q538.942613425443 432.36186541410393 538.942613425443 425.7618654141039" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<line x1="528.942613425443" y1="432.36186541410393" x2="528.942613425443" y2="430.36186541410393" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="487.286697033623" y="450.68737874854094" fill="#e6e6e6" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="end">Fillet</text>
+<polygon points="600,400 490.0,400.0 490.2355184437536,392.8056557846843 490.9410652488808,385.64211885579437 492.11361915564464,378.5400645782259 493.74815910820246,371.5299050387227 495.83768575553836,364.64165881665224 498.37325142375846,357.90482243984013 501.34399843140426,351.34824407590986 504.7372055837117,345.0 508.53834264672,338.8872743678438 512.7311325679641,333.03624280904074 517.2976211773125,327.4719603389924 522.2182540694797,322.21825406947977" fill="#323232" opacity="1.0" stroke="#3e3e3e" stroke-width="1"/>
+<line x1="528.942613425443" y1="377.63813458589607" x2="538.942613425443" y2="367.63813458589607" stroke="#e6e6e6" stroke-width="1.2"/>
+<circle cx="538.942613425443" cy="367.63813458589607" r="2.5" fill="#e6e6e6" opacity="1.0"/>
+<text x="487.286697033623" y="357.31262125145906" fill="#e6e6e6" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="end">Trim</text>
+<polygon points="600,400 522.2182540694797,322.21825406947977 527.4719603389924,317.2976211773125 533.0362428090407,312.73113256796415 538.8872743678437,308.53834264672 545.0,304.7372055837118 551.3482440759099,301.3439984314043 557.90482243984,298.37325142375846 564.6416588166522,295.83768575553836 571.5299050387227,293.74815910820246 578.5400645782258,292.11361915564464 585.6421188557944,290.9410652488809 592.8056557846842,290.2355184437536 600.0,290.0" fill="#323232" opacity="1.0" stroke="#3e3e3e" stroke-width="1"/>
+<line x1="567.6381345858961" y1="328.942613425443" x2="577.6381345858961" y2="338.942613425443" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="577.6381345858961" y1="328.942613425443" x2="567.6381345858961" y2="338.942613425443" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="553.312621251459" y="291.28669703362306" fill="#e6e6e6" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="end">Delete</text>
+<circle cx="600" cy="400" r="28" fill="#2b2b2b" opacity="1.0" stroke="#0a84ff" stroke-width="1.5"/>
+<text x="600" y="404" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="middle">ESC</text>
+<rect x="20" y="700" width="1160" height="60" rx="4" fill="#323232" stroke="#1a1a1a" stroke-width="1"/>
+<text x="30" y="722" fill="#0a84ff" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="start">Marking Menu</text>
+<text x="30" y="740" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Press SPACE to invoke · Hover direction to highlight · Click to activate · ESC or click center to dismiss</text>
+</svg>

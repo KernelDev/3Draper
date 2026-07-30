@@ -1,0 +1,190 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 900" font-family="'Segoe UI','Tahoma',sans-serif">
+  <rect width="1440" height="900" fill="#1e1e2e"/>
+
+  <!-- Title bar -->
+  <rect x="0" y="0" width="1440" height="32" fill="#181825"/>
+  <text x="12" y="21" fill="#cdd6f4" font-size="13" font-weight="bold">BRep CAD — Drawing + Assembly</text>
+  <rect x="1380" y="6" width="48" height="20" rx="3" fill="#f38ba8"/>
+  <text x="1404" y="20" fill="#1e1e2e" font-size="11" text-anchor="middle" font-weight="bold">✕</text>
+
+  <!-- Ribbon -->
+  <rect x="0" y="32" width="1440" height="36" fill="#11111b"/>
+  <rect x="0" y="32" width="1440" height="28" fill="#181825"/>
+  <rect x="378" y="34" width="70" height="24" rx="3" fill="#313244"/>
+  <text x="413" y="50" fill="#89b4fa" font-size="10" text-anchor="middle" font-weight="bold">Assembly</text>
+  <rect x="580" y="34" width="70" height="24" rx="3" fill="#313244"/>
+  <text x="615" y="50" fill="#cba6f7" font-size="10" text-anchor="middle" font-weight="bold">Drawing</text>
+
+  <!-- Left: Assembly Tree -->
+  <rect x="0" y="68" width="240" height="772" fill="#181825"/>
+  <rect x="0" y="68" width="240" height="24" fill="#11111b"/>
+  <text x="8" y="84" fill="#cdd6f4" font-size="10" font-weight="bold">Assembly</text>
+
+  <rect x="4" y="96" width="232" height="22" fill="#313244"/>
+  <text x="14" y="111" fill="#89b4fa" font-size="10">📁 Main Assembly</text>
+  <rect x="4" y="120" width="232" height="22" fill="none"/>
+  <text x="24" y="135" fill="#a6adc8" font-size="10">📦 Bracket [FIXED]</text>
+  <rect x="4" y="142" width="232" height="22" fill="#313244"/>
+  <text x="24" y="157" fill="#a6adc8" font-size="10">📦 Plate</text>
+  <text x="200" y="157" fill="#f38ba8" font-size="9">⚠ Interfere</text>
+  <rect x="4" y="164" width="232" height="22" fill="none"/>
+  <text x="24" y="179" fill="#a6adc8" font-size="10">📦 Shaft</text>
+  <rect x="4" y="186" width="232" height="22" fill="#313244"/>
+  <text x="24" y="201" fill="#a6adc8" font-size="10">📦 Bearing</text>
+
+  <text x="8" y="226" fill="#cdd6f4" font-size="10" font-weight="bold">Mates</text>
+  <rect x="4" y="234" width="232" height="22" fill="#313244"/>
+  <text x="14" y="249" fill="#a6e3a1" font-size="9">Coincident: Bracket↔Plate</text>
+  <rect x="4" y="256" width="232" height="22" fill="none"/>
+  <text x="14" y="271" fill="#a6e3a1" font-size="9">Concentric: Shaft↔Bearing</text>
+  <rect x="4" y="278" width="232" height="22" fill="#313244"/>
+  <text x="14" y="293" fill="#f9e2af" font-size="9">Distance: 10mm (Plate↔Shaft)</text>
+  <rect x="4" y="300" width="232" height="22" fill="none"/>
+  <text x="14" y="315" fill="#a6e3a1" font-size="9">Parallel: Bracket↔Plate</text>
+
+  <!-- BOM -->
+  <text x="8" y="342" fill="#cdd6f4" font-size="10" font-weight="bold">BOM</text>
+  <rect x="4" y="350" width="232" height="20" fill="#313244"/>
+  <text x="10" y="364" fill="#6c7086" font-size="8">Item</text>
+  <text x="80" y="364" fill="#6c7086" font-size="8">Name</text>
+  <text x="170" y="364" fill="#6c7086" font-size="8">Qty</text>
+  <text x="210" y="364" fill="#6c7086" font-size="8">Mat</text>
+  <rect x="4" y="370" width="232" height="18" fill="none"/>
+  <text x="10" y="382" fill="#cdd6f4" font-size="8">1</text>
+  <text x="80" y="382" fill="#cdd6f4" font-size="8">Bracket</text>
+  <text x="170" y="382" fill="#cdd6f4" font-size="8">1</text>
+  <text x="210" y="382" fill="#cdd6f4" font-size="8">Steel</text>
+  <rect x="4" y="388" width="232" height="18" fill="#313244"/>
+  <text x="10" y="400" fill="#cdd6f4" font-size="8">2</text>
+  <text x="80" y="400" fill="#cdd6f4" font-size="8">Plate</text>
+  <text x="170" y="400" fill="#cdd6f4" font-size="8">1</text>
+  <text x="210" y="400" fill="#cdd6f4" font-size="8">Al</text>
+  <rect x="4" y="406" width="232" height="18" fill="none"/>
+  <text x="10" y="418" fill="#cdd6f4" font-size="8">3</text>
+  <text x="80" y="418" fill="#cdd6f4" font-size="8">Shaft</text>
+  <text x="170" y="418" fill="#cdd6f4" font-size="8">1</text>
+  <text x="210" y="418" fill="#cdd6f4" font-size="8">Steel</text>
+
+  <!-- Center: 3D Assembly View -->
+  <rect x="240" y="68" width="640" height="772" fill="#0a0a14"/>
+  <g opacity="0.05" stroke="#89b4fa">
+    <line x1="240" y1="300" x2="880" y2="300"/>
+    <line x1="240" y1="500" x2="880" y2="500"/>
+    <line x1="400" y1="68" x2="400" y2="840"/>
+    <line x1="600" y1="68" x2="600" y2="840"/>
+  </g>
+
+  <!-- Assembly: bracket + plate + shaft + bearing -->
+  <g transform="translate(440, 350)">
+    <!-- Bracket (L-shape) -->
+    <polygon points="-80,0 80,0 80,20 -80,20" fill="#45475a" stroke="#89b4fa" stroke-width="1.5"/>
+    <polygon points="80,0 80,20 110,20 110,-60 80,-60" fill="#313244" stroke="#89b4fa" stroke-width="1.5"/>
+    <!-- Plate (on top, interference highlight) -->
+    <polygon points="-60,-20 60,-20 60,-5 -60,-5" fill="#313244" stroke="#f38ba8" stroke-width="2" stroke-dasharray="4,2"/>
+    <text x="-10" y="-12" fill="#f38ba8" font-size="8">⚠ Interference</text>
+    <!-- Shaft (cylinder) -->
+    <ellipse cx="20" cy="-60" rx="8" ry="4" fill="#5b6b8d" stroke="#89dceb" stroke-width="1"/>
+    <rect x="12" y="-60" width="16" height="40" fill="#45475a" stroke="#89dceb" stroke-width="1"/>
+    <ellipse cx="20" cy="-20" rx="8" ry="4" fill="#5b6b8d" stroke="#89dceb" stroke-width="1"/>
+    <!-- Bearing -->
+    <ellipse cx="20" cy="-50" rx="14" ry="6" fill="none" stroke="#cba6f7" stroke-width="2"/>
+    <ellipse cx="20" cy="-50" rx="10" ry="4" fill="none" stroke="#cba6f7" stroke-width="1"/>
+
+    <!-- Labels -->
+    <text x="-40" y="38" fill="#89b4fa" font-size="9">Bracket</text>
+    <text x="-30" y="-28" fill="#f38ba8" font-size="9">Plate</text>
+    <text x="40" y="-40" fill="#89dceb" font-size="9">Shaft</text>
+    <text x="40" y="-55" fill="#cba6f7" font-size="9">Bearing</text>
+  </g>
+
+  <!-- HUD -->
+  <rect x="248" y="76" width="160" height="50" rx="4" fill="#11111b" opacity="0.8"/>
+  <text x="254" y="92" fill="#cdd6f4" font-size="10">Components: 4</text>
+  <text x="254" y="106" fill="#a6e3a1" font-size="9">Mates: 4 (solved)</text>
+  <text x="254" y="120" fill="#f38ba8" font-size="9">Interference: 1 pair</text>
+
+  <!-- Right: Drawing Sheet (2D) -->
+  <rect x="880" y="68" width="560" height="772" fill="#0d0d1a"/>
+  <rect x="880" y="68" width="560" height="24" fill="#11111b"/>
+  <text x="890" y="84" fill="#cdd6f4" font-size="11" font-weight="bold">Drawing — A3 Landscape</text>
+
+  <!-- Sheet border -->
+  <rect x="910" y="100" width="500" height="350" fill="#f0f0f0" stroke="#333" stroke-width="1"/>
+  <rect x="920" y="110" width="480" height="330" fill="none" stroke="#666" stroke-width="0.5"/>
+
+  <!-- Top view -->
+  <rect x="930" y="120" width="200" height="100" fill="none" stroke="#333" stroke-width="1.5"/>
+  <text x="1030" y="116" fill="#333" font-size="9" text-anchor="middle">TOP VIEW</text>
+  <rect x="970" y="140" width="120" height="60" fill="none" stroke="#555" stroke-width="1"/>
+  <circle cx="1030" cy="170" r="15" fill="none" stroke="#555" stroke-width="1"/>
+  <!-- Dimensions -->
+  <line x1="930" y1="100" x2="1130" y2="100" stroke="#333" stroke-width="0.5"/>
+  <text x="1030" y="96" fill="#333" font-size="8" text-anchor="middle">200</text>
+  <line x1="920" y1="120" x2="920" y2="220" stroke="#333" stroke-width="0.5"/>
+  <text x="914" y="172" fill="#333" font-size="8" text-anchor="middle" transform="rotate(-90,914,172)">100</text>
+
+  <!-- Front view -->
+  <rect x="1180" y="120" width="200" height="100" fill="none" stroke="#333" stroke-width="1.5"/>
+  <text x="1280" y="116" fill="#333" font-size="9" text-anchor="middle">FRONT VIEW</text>
+  <rect x="1210" y="140" width="140" height="60" fill="none" stroke="#555" stroke-width="1"/>
+  <line x1="1210" y1="160" x2="1350" y2="160" stroke="#555" stroke-width="1" stroke-dasharray="4,2"/>
+
+  <!-- Isometric view -->
+  <rect x="930" y="240" width="150" height="120" fill="none" stroke="#333" stroke-width="1.5"/>
+  <text x="1005" y="236" fill="#333" font-size="9" text-anchor="middle">ISO</text>
+  <g transform="translate(970, 270)">
+    <polygon points="0,0 50,-15 0,-30 -50,-15" fill="#ddd" stroke="#333" stroke-width="1"/>
+    <polygon points="50,-15 50,30 0,45 0,-30" fill="#bbb" stroke="#333" stroke-width="1"/>
+    <polygon points="-50,-15 -50,30 0,45 0,-30" fill="#999" stroke="#333" stroke-width="1"/>
+  </g>
+
+  <!-- Title block -->
+  <rect x="1180" y="290" width="220" height="70" fill="none" stroke="#333" stroke-width="1"/>
+  <line x1="1180" y1="310" x2="1400" y2="310" stroke="#333" stroke-width="0.5"/>
+  <line x1="1290" y1="290" x2="1290" y2="360" stroke="#333" stroke-width="0.5"/>
+  <text x="1188" y="304" fill="#333" font-size="7">Title:</text>
+  <text x="1210" y="304" fill="#333" font-size="7" font-weight="bold">Bracket Assembly</text>
+  <text x="1188" y="326" fill="#333" font-size="7">Drawn:</text>
+  <text x="1210" y="326" fill="#333" font-size="7">Z.User</text>
+  <text x="1188" y="340" fill="#333" font-size="7">Date:</text>
+  <text x="1210" y="340" fill="#333" font-size="7">2026-07-15</text>
+  <text x="1188" y="354" fill="#333" font-size="7">Scale:</text>
+  <text x="1210" y="354" fill="#333" font-size="7">1:2</text>
+  <text x="1298" y="304" fill="#333" font-size="7">Sheet:</text>
+  <text x="1330" y="304" fill="#333" font-size="7">1/1</text>
+  <text x="1298" y="326" fill="#333" font-size="7">Rev:</text>
+  <text x="1330" y="326" fill="#333" font-size="7">A</text>
+  <text x="1298" y="340" fill="#333" font-size="7">Size:</text>
+  <text x="1330" y="340" fill="#333" font-size="7">A3</text>
+
+  <!-- Balloons -->
+  <circle cx="970" cy="155" r="10" fill="white" stroke="#333" stroke-width="1"/>
+  <text x="970" y="159" fill="#333" font-size="9" text-anchor="middle">1</text>
+  <line x1="980" y1="155" x2="1030" y2="170" stroke="#333" stroke-width="0.5"/>
+
+  <circle cx="1080" cy="155" r="10" fill="white" stroke="#333" stroke-width="1"/>
+  <text x="1080" y="159" fill="#333" font-size="9" text-anchor="middle">2</text>
+  <line x1="1070" y1="155" x2="1030" y2="170" stroke="#333" stroke-width="0.5"/>
+
+  <!-- Drawing toolbar -->
+  <rect x="910" y="460" width="500" height="28" rx="4" fill="#181825"/>
+  <rect x="914" y="462" width="50" height="24" rx="3" fill="#313244"/>
+  <text x="939" y="478" fill="#cdd6f4" font-size="9" text-anchor="middle">New Sheet</text>
+  <rect x="968" y="462" width="50" height="24" rx="3" fill="#313244"/>
+  <text x="993" y="478" fill="#cdd6f4" font-size="9" text-anchor="middle">Add View</text>
+  <rect x="1022" y="462" width="50" height="24" rx="3" fill="#313244"/>
+  <text x="1047" y="478" fill="#cdd6f4" font-size="9" text-anchor="middle">Dim</text>
+  <rect x="1076" y="462" width="50" height="24" rx="3" fill="#313244"/>
+  <text x="1101" y="478" fill="#cdd6f4" font-size="9" text-anchor="middle">Note</text>
+  <rect x="1130" y="462" width="60" height="24" rx="3" fill="#313244" stroke="#a6e3a1"/>
+  <text x="1160" y="478" fill="#a6e3a1" font-size="9" text-anchor="middle" font-weight="bold">PDF</text>
+  <rect x="1194" y="462" width="50" height="24" rx="3" fill="#313244"/>
+  <text x="1219" y="478" fill="#cdd6f4" font-size="9" text-anchor="middle">DXF</text>
+
+  <!-- Bottom -->
+  <rect x="0" y="840" width="1440" height="60" fill="#11111b"/>
+  <text x="8" y="878" fill="#89b4fa" font-size="10">Assembly: 4 components, 4 mates, 1 interference</text>
+  <text x="500" y="878" fill="#cba6f7" font-size="10">Drawing: A3, 3 views, 2 balloons, 4 dims</text>
+  <text x="900" y="878" fill="#6c7086" font-size="10">Scale: 1:2</text>
+  <text x="1100" y="878" fill="#6c7086" font-size="10">Units: mm</text>
+</svg>

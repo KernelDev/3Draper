@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1200" height="700" viewBox="0 0 1200 700">
+<title>Dialog: Insert → Box (primitive creation)</title>
+
+  <defs>
+    <linearGradient id="lin1" x1="0" y1="0" x2="0" y2="1">
+  <stop offset="0" stop-color="#202020"/>
+  <stop offset="1" stop-color="#0d0d0d"/>
+</linearGradient>
+  </defs>
+<rect x="0" y="0" width="1200" height="700" fill="#1f1f1f"/>
+<rect x="0" y="0" width="1200" height="36" fill="#262626" stroke="#1a1a1a" stroke-width="1"/>
+<text x="14" y="22" fill="#e6e6e6" font-size="14" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Dialog: Insert → Box (primitive creation)</text>
+<text x="14" y="32" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Common dialog pattern for Box/Cylinder/Sphere/Cone/Torus. Shows: dimensions, position, direction, preview</text>
+<rect x="0" y="36" width="1200" height="664" fill="#000000" opacity="0.45"/>
+<rect x="0" y="0" width="1200" height="700" fill="#000000" opacity="0.55"/>
+<rect x="203" y="104" width="800" height="500" rx="6" fill="#000000" opacity="0.6"/>
+<rect x="200" y="100" width="800" height="500" rx="6" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="200" y="100" width="800" height="32" rx="6" fill="#323232" stroke="#1a1a1a" stroke-width="1"/>
+<rect x="200" y="115" width="800" height="17" fill="#323232"/>
+<text x="214" y="120.68" fill="#e6e6e6" font-size="13" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Insert Box</text>
+<rect x="972" y="104" width="22" height="22" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<line x1="977" y1="109" x2="987" y2="119" stroke="#a8a8a8" stroke-width="1.2"/>
+<line x1="987" y1="109" x2="977" y2="119" stroke="#a8a8a8" stroke-width="1.2"/>
+<rect x="201" y="132" width="798" height="424" fill="#2b2b2b"/>
+<rect x="201" y="556" width="798" height="43" fill="#323232"/>
+<line x1="200" y1="556" x2="1000" y2="556" stroke="#1a1a1a" stroke-width="1"/>
+<rect x="906" y="564" width="72" height="28" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<text x="942.0" y="582.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Cancel</text>
+<rect x="826" y="564" width="72" height="28" rx="3" fill="#0a84ff" stroke="#0a84ff" stroke-width="1"/>
+<text x="862.0" y="582.32" fill="#ffffff" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="middle">OK</text>
+<rect x="201" y="132" width="320" height="423" fill="#2b2b2b"/>
+<text x="216" y="154" fill="#e6e6e6" font-size="13" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Dimensions</text>
+<line x1="216" y1="162" x2="504" y2="162" stroke="#3e3e3e" stroke-width="1"/>
+<text x="224" y="194" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Width (X):</text>
+<rect x="350" y="182" width="130" height="22" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="356" y="196.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">50.000</text>
+<line x1="393" y1="186" x2="393" y2="200" stroke="#0a84ff" stroke-width="1"/>
+<text x="485" y="194" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">mm</text>
+<text x="224" y="226" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Depth (Y):</text>
+<rect x="350" y="214" width="130" height="22" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="356" y="228.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">30.000</text>
+<line x1="393" y1="218" x2="393" y2="232" stroke="#0a84ff" stroke-width="1"/>
+<text x="485" y="226" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">mm</text>
+<text x="224" y="258" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Height (Z):</text>
+<rect x="350" y="246" width="130" height="22" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="356" y="260.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">20.000</text>
+<line x1="393" y1="250" x2="393" y2="264" stroke="#0a84ff" stroke-width="1"/>
+<text x="485" y="258" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">mm</text>
+<text x="216" y="286" fill="#e6e6e6" font-size="13" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Position</text>
+<line x1="216" y1="294" x2="504" y2="294" stroke="#3e3e3e" stroke-width="1"/>
+<text x="224" y="324" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Center X:</text>
+<rect x="350" y="312" width="130" height="22" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="356" y="326.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">0.000</text>
+<line x1="387" y1="316" x2="387" y2="330" stroke="#0a84ff" stroke-width="1"/>
+<text x="224" y="356" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Center Y:</text>
+<rect x="350" y="344" width="130" height="22" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="356" y="358.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">0.000</text>
+<line x1="387" y1="348" x2="387" y2="362" stroke="#0a84ff" stroke-width="1"/>
+<text x="224" y="388" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Center Z:</text>
+<rect x="350" y="376" width="130" height="22" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="356" y="390.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">0.000</text>
+<line x1="387" y1="380" x2="387" y2="394" stroke="#0a84ff" stroke-width="1"/>
+<text x="216" y="416" fill="#e6e6e6" font-size="13" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Operation</text>
+<line x1="216" y1="424" x2="504" y2="424" stroke="#3e3e3e" stroke-width="1"/>
+<circle cx="231.0" cy="449.0" r="6.0" fill="none" opacity="1.0" stroke="#0a84ff" stroke-width="1.2"/>
+<circle cx="231.0" cy="449.0" r="3.5" fill="#0a84ff" opacity="1.0"/>
+<text x="244" y="452.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">New Body</text>
+<circle cx="231.0" cy="471.0" r="6.0" fill="none" opacity="1.0" stroke="#a8a8a8" stroke-width="1.2"/>
+<text x="244" y="474.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Join (Union)</text>
+<circle cx="231.0" cy="493.0" r="6.0" fill="none" opacity="1.0" stroke="#a8a8a8" stroke-width="1.2"/>
+<text x="244" y="496.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Cut (Difference)</text>
+<circle cx="231.0" cy="515.0" r="6.0" fill="none" opacity="1.0" stroke="#a8a8a8" stroke-width="1.2"/>
+<text x="244" y="518.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Intersect</text>
+<rect x="521" y="132" width="478" height="423" fill="#151515"/>
+<rect x="521" y="132" width="478" height="423" fill="url(#lin1)"/>
+<line x1="641" y1="406.95" x2="778.475" y2="555" stroke="#888888" stroke-width="0.5"/>
+<line x1="641" y1="406.95" x2="503.525" y2="555" stroke="#888888" stroke-width="0.5"/>
+<line x1="671" y1="406.95" x2="808.475" y2="555" stroke="#888888" stroke-width="0.5"/>
+<line x1="671" y1="406.95" x2="533.525" y2="555" stroke="#888888" stroke-width="0.5"/>
+<line x1="701" y1="406.95" x2="838.475" y2="555" stroke="#888888" stroke-width="0.5"/>
+<line x1="701" y1="406.95" x2="563.525" y2="555" stroke="#888888" stroke-width="0.5"/>
+<line x1="731" y1="406.95" x2="868.475" y2="555" stroke="#888888" stroke-width="0.5"/>
+<line x1="731" y1="406.95" x2="593.525" y2="555" stroke="#888888" stroke-width="0.5"/>
+<line x1="761" y1="406.95" x2="898.475" y2="555" stroke="#888888" stroke-width="0.5"/>
+<line x1="761" y1="406.95" x2="623.525" y2="555" stroke="#888888" stroke-width="0.5"/>
+<line x1="791" y1="406.95" x2="928.475" y2="555" stroke="#888888" stroke-width="0.5"/>
+<line x1="791" y1="406.95" x2="653.525" y2="555" stroke="#888888" stroke-width="0.5"/>
+<line x1="821" y1="406.95" x2="958.475" y2="555" stroke="#888888" stroke-width="0.5"/>
+<line x1="821" y1="406.95" x2="683.525" y2="555" stroke="#888888" stroke-width="0.5"/>
+<line x1="851" y1="406.95" x2="988.475" y2="555" stroke="#888888" stroke-width="0.5"/>
+<line x1="851" y1="406.95" x2="713.525" y2="555" stroke="#888888" stroke-width="0.5"/>
+<line x1="881" y1="406.95" x2="1018.475" y2="555" stroke="#888888" stroke-width="0.5"/>
+<line x1="881" y1="406.95" x2="743.525" y2="555" stroke="#888888" stroke-width="0.5"/>
+<line x1="521" y1="406.95" x2="999" y2="406.95" stroke="#666666" stroke-width="1"/>
+<line x1="571" y1="505" x2="601" y2="505" stroke="#e25555" stroke-width="2"/>
+<text x="605" y="509" fill="#e25555" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="start">X</text>
+<line x1="571" y1="505" x2="571" y2="475" stroke="#5ac878" stroke-width="2"/>
+<text x="568" y="469" fill="#5ac878" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="start">Y</text>
+<line x1="571" y1="505" x2="551" y2="520" stroke="#4a90e2" stroke-width="2"/>
+<text x="541" y="527" fill="#4a90e2" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="start">Z</text>
+<polygon points="670.0,253.5 810.0,253.5 830.0,268.5 690.0,268.5" fill="#6a7280" opacity="1.0" stroke="#0d0d0d" stroke-width="0.5"/>
+<polygon points="830.0,268.5 810.0,253.5 810.0,343.5 830.0,358.5" fill="#3a4049" opacity="1.0" stroke="#0d0d0d" stroke-width="0.5"/>
+<polygon points="690.0,268.5 830.0,268.5 830.0,358.5 690.0,358.5" fill="#4a525c" opacity="1.0" stroke="#0d0d0d" stroke-width="0.5"/>
+<polyline points="690.0,268.5 830.0,268.5 830.0,358.5 690.0,358.5 690.0,268.5" fill="none" stroke="#0d0d0d" stroke-width="1.2"/>
+<polyline points="690.0,268.5 670.0,253.5 810.0,253.5 830.0,268.5" fill="none" stroke="#0d0d0d" stroke-width="1.2"/>
+<line x1="830.0" y1="268.5" x2="810.0" y2="253.5" stroke="#0d0d0d" stroke-width="1.2"/>
+<line x1="690.0" y1="358.5" x2="670.0" y2="343.5" stroke="#0d0d0d" stroke-width="1.2"/>
+<line x1="830.0" y1="358.5" x2="810.0" y2="343.5" stroke="#0d0d0d" stroke-width="1.2"/>
+<text x="533" y="154" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Preview</text>
+<text x="533" y="170" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Live update as you type</text>
+</svg>

@@ -1,0 +1,232 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1200" height="700" viewBox="0 0 1200 700">
+<title>Context Menu: Sketch entity right-click</title>
+<rect x="0" y="0" width="1200" height="700" fill="#1f1f1f"/>
+<rect x="0" y="0" width="1200" height="36" fill="#262626" stroke="#1a1a1a" stroke-width="1"/>
+<text x="14" y="22" fill="#e6e6e6" font-size="14" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Context Menu: Sketch entity right-click</text>
+<text x="14" y="32" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Shown when user right-clicks on a Line entity in Sketch mode</text>
+<rect x="0" y="36" width="1200" height="22" fill="#1f1f1f" stroke="#1a1a1a" stroke-width="1"/>
+<text x="12" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">File</text>
+<text x="62" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Edit</text>
+<text x="112" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">View</text>
+<text x="162" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Insert</text>
+<rect x="218" y="38" width="58" height="18" rx="2" fill="#3c3c3c" stroke="#0a84ff" stroke-width="0.8"/>
+<text x="226" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="500" font-style="normal" text-anchor="start">Sketch</text>
+<text x="290" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Modify</text>
+<text x="354" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Sheet Metal</text>
+<text x="453" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Assembly</text>
+<text x="531" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">CAM</text>
+<text x="574" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Drawing</text>
+<text x="645" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Simulation</text>
+<text x="737" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Parametric</text>
+<text x="829" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Optimize</text>
+<text x="907" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Generate</text>
+<text x="985" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">GD&amp;T</text>
+<text x="1035" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Heal</text>
+<text x="1085" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Inspect</text>
+<text x="1156" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Mold</text>
+<text x="1206" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Tools</text>
+<text x="1263" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Scripting</text>
+<text x="1348" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">AI</text>
+<text x="1384" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Window</text>
+<text x="1448" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Help</text>
+<rect x="0" y="58" width="1200" height="80" fill="#2b2b2b" stroke="#1a1a1a" stroke-width="1"/>
+<rect x="0" y="58" width="1200" height="22" fill="#1f1f1f"/>
+<text x="13" y="73.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">File</text>
+<text x="59" y="73.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Home</text>
+<rect x="96" y="59" width="60" height="22" fill="#2b2b2b" stroke="#0a84ff" stroke-width="0"/>
+<rect x="96" y="78" width="60" height="2" fill="#0a84ff"/>
+<text x="105" y="73.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Sketch</text>
+<text x="165" y="73.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Insert</text>
+<text x="225" y="73.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Modify</text>
+<text x="285" y="73.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Sheet Metal</text>
+<text x="380" y="73.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Assembly</text>
+<text x="454" y="73.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">CAM</text>
+<text x="493" y="73.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Drawing</text>
+<text x="560" y="73.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Simulation</text>
+<text x="648" y="73.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Inspect</text>
+<text x="715" y="73.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">AI</text>
+<text x="747" y="73.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Tools</text>
+<text x="800" y="73.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">View</text>
+<line x1="0" y1="80" x2="1200" y2="80" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="6" y="84" width="160" height="50" rx="2" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="10" y="88" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<line x1="21" y1="109" x2="31" y2="99" stroke="#e6e6e6" stroke-width="1.2"/>
+<rect x="46" y="88" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="57" y="99" width="10" height="10" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<rect x="82" y="88" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<circle cx="98.0" cy="104.0" r="6.4" fill="none" opacity="1.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="10" y="131.24" fill="#a8a8a8" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Draw</text>
+<rect x="170" y="84" width="140" height="50" rx="2" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="174" y="88" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<line x1="185" y1="99" x2="195" y2="101" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="185" y1="107" x2="195" y2="109" stroke="#e6e6e6" stroke-width="1.2"/>
+<rect x="210" y="88" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<line x1="221" y1="109" x2="231" y2="109" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="231" y1="99" x2="231" y2="109" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="174" y="131.24" fill="#a8a8a8" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Constraint</text>
+<rect x="0" y="138" width="1200" height="540" fill="#1a1a1a"/>
+<line x1="0" y1="138" x2="0" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="25" y1="138" x2="25" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="50" y1="138" x2="50" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="75" y1="138" x2="75" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="100" y1="138" x2="100" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="125" y1="138" x2="125" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="150" y1="138" x2="150" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="175" y1="138" x2="175" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="200" y1="138" x2="200" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="225" y1="138" x2="225" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="250" y1="138" x2="250" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="275" y1="138" x2="275" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="300" y1="138" x2="300" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="325" y1="138" x2="325" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="350" y1="138" x2="350" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="375" y1="138" x2="375" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="400" y1="138" x2="400" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="425" y1="138" x2="425" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="450" y1="138" x2="450" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="475" y1="138" x2="475" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="500" y1="138" x2="500" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="525" y1="138" x2="525" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="550" y1="138" x2="550" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="575" y1="138" x2="575" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="600" y1="138" x2="600" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="625" y1="138" x2="625" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="650" y1="138" x2="650" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="675" y1="138" x2="675" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="700" y1="138" x2="700" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="725" y1="138" x2="725" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="750" y1="138" x2="750" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="775" y1="138" x2="775" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="800" y1="138" x2="800" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="825" y1="138" x2="825" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="850" y1="138" x2="850" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="875" y1="138" x2="875" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="900" y1="138" x2="900" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="925" y1="138" x2="925" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="950" y1="138" x2="950" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="975" y1="138" x2="975" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="1000" y1="138" x2="1000" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="1025" y1="138" x2="1025" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="1050" y1="138" x2="1050" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="1075" y1="138" x2="1075" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="1100" y1="138" x2="1100" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="1125" y1="138" x2="1125" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="1150" y1="138" x2="1150" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="1175" y1="138" x2="1175" y2="678" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="0" y1="138" x2="1200" y2="138" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="0" y1="163" x2="1200" y2="163" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="0" y1="188" x2="1200" y2="188" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="0" y1="213" x2="1200" y2="213" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="0" y1="238" x2="1200" y2="238" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="0" y1="263" x2="1200" y2="263" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="0" y1="288" x2="1200" y2="288" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="0" y1="313" x2="1200" y2="313" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="0" y1="338" x2="1200" y2="338" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="0" y1="363" x2="1200" y2="363" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="0" y1="388" x2="1200" y2="388" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="0" y1="413" x2="1200" y2="413" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="0" y1="438" x2="1200" y2="438" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="0" y1="463" x2="1200" y2="463" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="0" y1="488" x2="1200" y2="488" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="0" y1="513" x2="1200" y2="513" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="0" y1="538" x2="1200" y2="538" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="0" y1="563" x2="1200" y2="563" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="0" y1="588" x2="1200" y2="588" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="0" y1="613" x2="1200" y2="613" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="0" y1="638" x2="1200" y2="638" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="0" y1="663" x2="1200" y2="663" stroke="#2a2a2a" stroke-width="0.5"/>
+<line x1="0" y1="138" x2="0" y2="678" stroke="#3a3a3a" stroke-width="0.8"/>
+<line x1="100" y1="138" x2="100" y2="678" stroke="#3a3a3a" stroke-width="0.8"/>
+<line x1="200" y1="138" x2="200" y2="678" stroke="#3a3a3a" stroke-width="0.8"/>
+<line x1="300" y1="138" x2="300" y2="678" stroke="#3a3a3a" stroke-width="0.8"/>
+<line x1="400" y1="138" x2="400" y2="678" stroke="#3a3a3a" stroke-width="0.8"/>
+<line x1="500" y1="138" x2="500" y2="678" stroke="#3a3a3a" stroke-width="0.8"/>
+<line x1="600" y1="138" x2="600" y2="678" stroke="#3a3a3a" stroke-width="0.8"/>
+<line x1="700" y1="138" x2="700" y2="678" stroke="#3a3a3a" stroke-width="0.8"/>
+<line x1="800" y1="138" x2="800" y2="678" stroke="#3a3a3a" stroke-width="0.8"/>
+<line x1="900" y1="138" x2="900" y2="678" stroke="#3a3a3a" stroke-width="0.8"/>
+<line x1="1000" y1="138" x2="1000" y2="678" stroke="#3a3a3a" stroke-width="0.8"/>
+<line x1="1100" y1="138" x2="1100" y2="678" stroke="#3a3a3a" stroke-width="0.8"/>
+<line x1="0" y1="138" x2="1200" y2="138" stroke="#3a3a3a" stroke-width="0.8"/>
+<line x1="0" y1="238" x2="1200" y2="238" stroke="#3a3a3a" stroke-width="0.8"/>
+<line x1="0" y1="338" x2="1200" y2="338" stroke="#3a3a3a" stroke-width="0.8"/>
+<line x1="0" y1="438" x2="1200" y2="438" stroke="#3a3a3a" stroke-width="0.8"/>
+<line x1="0" y1="538" x2="1200" y2="538" stroke="#3a3a3a" stroke-width="0.8"/>
+<line x1="0" y1="638" x2="1200" y2="638" stroke="#3a3a3a" stroke-width="0.8"/>
+<line x1="200" y1="200" x2="500" y2="350" stroke="#4a90e2" stroke-width="2"/>
+<circle cx="200" cy="200" r="4" fill="#4a90e2" opacity="1.0"/>
+<circle cx="500" cy="350" r="4" fill="#4a90e2" opacity="1.0"/>
+<line x1="500" y1="350" x2="700" y2="300" stroke="#a8a8a8" stroke-width="1.5"/>
+<line x1="700" y1="300" x2="800" y2="450" stroke="#a8a8a8" stroke-width="1.5"/>
+<circle cx="800" cy="250" r="60" fill="none" opacity="1.0" stroke="#a8a8a8" stroke-width="1.5"/>
+<line x1="150" y1="500" x2="900" y2="500" stroke="#a8a8a8" stroke-width="1.5"/>
+<rect x="345" y="270" width="10" height="10" fill="#4a90e2" stroke="#ffffff" stroke-width="1"/>
+<line x1="200" y1="220" x2="500" y2="220" stroke="#e2a73a" stroke-width="0.8" stroke-dasharray="2 2"/>
+<line x1="200" y1="200" x2="200" y2="220" stroke="#e2a73a" stroke-width="0.8"/>
+<line x1="500" y1="350" x2="500" y2="220" stroke="#e2a73a" stroke-width="0.8"/>
+<text x="340" y="215" fill="#e2a73a" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="middle">350.00</text>
+<line x1="370" y1="280" x2="390" y2="280" stroke="#ffffff" stroke-width="1"/>
+<line x1="380" y1="270" x2="380" y2="290" stroke="#ffffff" stroke-width="1"/>
+<rect x="392" y="293" width="220" height="250" rx="3" fill="#000000" opacity="0.4"/>
+<rect x="390" y="290" width="220" height="250" rx="3" fill="#2b2b2b" stroke="#111111" stroke-width="1"/>
+<rect x="392" y="294" width="216" height="26" fill="none"/>
+<line x1="399" y1="312" x2="409" y2="302" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="418" y="311.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Repeat Line</text>
+<text x="598" y="310.96" fill="#a8a8a8" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">L</text>
+<line x1="398" y1="324.0" x2="602" y2="324.0" stroke="#454545" stroke-width="1"/>
+<rect x="392" y="328" width="216" height="26" fill="none"/>
+<line x1="399" y1="336" x2="409" y2="338" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="399" y1="344" x2="409" y2="346" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="418" y="345.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Constraints</text>
+<polyline points="601.6,337.0 606.4,341.0 601.6,345.0" fill="none" stroke="#a8a8a8" stroke-width="1.2"/>
+<rect x="392" y="354" width="216" height="26" fill="none"/>
+<line x1="399" y1="362" x2="409" y2="362" stroke="#e6e6e6" stroke-width="1.2" stroke-dasharray="2 2"/>
+<line x1="399" y1="362" x2="399" y2="372" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="409" y1="362" x2="409" y2="372" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="401" y1="371" x2="407" y2="371" stroke="#e6e6e6" stroke-width="1.2"/>
+<polygon points="401,371 404,369 404,373" fill="#e6e6e6" opacity="1.0"/>
+<polygon points="407,371 404,369 404,373" fill="#e6e6e6" opacity="1.0"/>
+<text x="418" y="371.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Dimension</text>
+<polyline points="601.6,363.0 606.4,367.0 601.6,371.0" fill="none" stroke="#a8a8a8" stroke-width="1.2"/>
+<line x1="398" y1="384.0" x2="602" y2="384.0" stroke="#454545" stroke-width="1"/>
+<rect x="392" y="388" width="216" height="26" fill="none"/>
+<line x1="399" y1="406" x2="409" y2="396" stroke="#e6e6e6" stroke-width="1.2"/>
+<circle cx="409" cy="396" r="2.5" fill="#e6e6e6" opacity="1.0"/>
+<text x="418" y="405.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Modify</text>
+<polyline points="601.6,397.0 606.4,401.0 601.6,405.0" fill="none" stroke="#a8a8a8" stroke-width="1.2"/>
+<line x1="398" y1="418.0" x2="602" y2="418.0" stroke="#454545" stroke-width="1"/>
+<rect x="392" y="422" width="216" height="26" fill="none"/>
+<path d="M404.0 430 L409 433 L404.0 436 L399 433 Z M404.0 435 L409 438 L404.0 441 L399 438 Z M404.0 440 L409 443 L404.0 446 L399 443 Z" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<text x="418" y="439.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Convert to Construction</text>
+<rect x="392" y="448" width="216" height="26" fill="none"/>
+<line x1="399" y1="456" x2="409" y2="456" stroke="#e6e6e6" stroke-width="1.2" stroke-dasharray="2 2"/>
+<line x1="399" y1="456" x2="399" y2="466" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="409" y1="456" x2="409" y2="466" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="401" y1="465" x2="407" y2="465" stroke="#e6e6e6" stroke-width="1.2"/>
+<polygon points="401,465 404,463 404,467" fill="#e6e6e6" opacity="1.0"/>
+<polygon points="407,465 404,463 404,467" fill="#e6e6e6" opacity="1.0"/>
+<text x="418" y="465.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Edit Length…</text>
+<rect x="392" y="474" width="216" height="26" fill="none"/>
+<rect x="399" y="482" width="10" height="10" rx="1" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="401" y1="486" x2="407" y2="486" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="401" y1="966.0" x2="407" y2="966.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="401" y1="489" x2="407" y2="489" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="418" y="491.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Properties…</text>
+<line x1="398" y1="504.0" x2="602" y2="504.0" stroke="#454545" stroke-width="1"/>
+<rect x="392" y="508" width="216" height="26" fill="none"/>
+<line x1="399" y1="516" x2="409" y2="526" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="409" y1="516" x2="399" y2="526" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="418" y="525.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Delete</text>
+<text x="598" y="524.96" fill="#a8a8a8" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">Del</text>
+<rect x="0" y="678" width="1200" height="22" fill="#1a1a1a" stroke="#1a1a1a" stroke-width="1"/>
+<line x1="0" y1="678" x2="1200" y2="678" stroke="#3e3e3e" stroke-width="1"/>
+<text x="8" y="692.6" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Ready</text>
+<text x="1132" y="692.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">F8: Ortho</text>
+<text x="1054" y="692.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">F2: Sketch</text>
+<text x="976" y="692.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">SNAP: Grid</text>
+<text x="946" y="692.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">mm</text>
+<text x="880" y="692.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">Z: 0.000</text>
+<text x="814" y="692.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">Y: 0.000</text>
+<text x="748" y="692.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">X: 0.000</text>
+</svg>

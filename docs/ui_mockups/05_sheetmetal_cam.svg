@@ -1,0 +1,167 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 900" font-family="'Segoe UI','Tahoma',sans-serif">
+  <rect width="1440" height="900" fill="#1e1e2e"/>
+
+  <!-- Title bar -->
+  <rect x="0" y="0" width="1440" height="32" fill="#181825"/>
+  <text x="12" y="21" fill="#cdd6f4" font-size="13" font-weight="bold">BRep CAD — Sheet Metal + CAM</text>
+  <rect x="1380" y="6" width="48" height="20" rx="3" fill="#f38ba8"/>
+  <text x="1404" y="20" fill="#1e1e2e" font-size="11" text-anchor="middle" font-weight="bold">✕</text>
+
+  <!-- Ribbon with Sheet Metal + CAM tabs active -->
+  <rect x="0" y="32" width="1440" height="60" fill="#11111b"/>
+  <rect x="0" y="32" width="1440" height="28" fill="#181825"/>
+  <rect x="304" y="34" width="80" height="24" rx="3" fill="#313244"/>
+  <text x="344" y="50" fill="#f9e2af" font-size="10" text-anchor="middle" font-weight="bold">Sheet Metal</text>
+  <rect x="452" y="34" width="60" height="24" rx="3" fill="#313244"/>
+  <text x="482" y="50" fill="#a6e3a1" font-size="10" text-anchor="middle" font-weight="bold">CAM</text>
+
+  <!-- Sheet Metal tools -->
+  <rect x="8" y="64" width="60" height="24" rx="3" fill="#313244"/>
+  <text x="38" y="80" fill="#cdd6f4" font-size="9" text-anchor="middle">Base Flange</text>
+  <rect x="72" y="64" width="50" height="24" rx="3" fill="#313244"/>
+  <text x="97" y="80" fill="#cdd6f4" font-size="9" text-anchor="middle">Edge Flange</text>
+  <rect x="126" y="64" width="40" height="24" rx="3" fill="#313244"/>
+  <text x="146" y="80" fill="#cdd6f4" font-size="9" text-anchor="middle">Bend</text>
+  <rect x="170" y="64" width="40" height="24" rx="3" fill="#313244"/>
+  <text x="190" y="80" fill="#cdd6f4" font-size="9" text-anchor="middle">Hem</text>
+  <rect x="214" y="64" width="50" height="24" rx="3" fill="#313244"/>
+  <text x="239" y="80" fill="#cdd6f4" font-size="9" text-anchor="middle">Relief</text>
+  <line x1="270" y1="62" x2="270" y2="90" stroke="#45475a"/>
+  <rect x="276" y="64" width="50" height="24" rx="3" fill="#313244" stroke="#a6e3a1"/>
+  <text x="301" y="80" fill="#a6e3a1" font-size="9" text-anchor="middle" font-weight="bold">Unfold</text>
+  <rect x="330" y="64" width="40" height="24" rx="3" fill="#313244"/>
+  <text x="350" y="80" fill="#cdd6f4" font-size="9" text-anchor="middle">Fold</text>
+  <rect x="374" y="64" width="60" height="24" rx="3" fill="#313244"/>
+  <text x="404" y="80" fill="#cdd6f4" font-size="9" text-anchor="middle">Flat Pattern</text>
+
+  <!-- CAM tools -->
+  <rect x="450" y="64" width="50" height="24" rx="3" fill="#313244" stroke="#a6e3a1"/>
+  <text x="475" y="80" fill="#a6e3a1" font-size="9" text-anchor="middle" font-weight="bold">▶ Sim</text>
+  <rect x="504" y="64" width="40" height="24" rx="3" fill="#313244"/>
+  <text x="524" y="80" fill="#cdd6f4" font-size="9" text-anchor="middle">Add Op</text>
+  <rect x="548" y="64" width="40" height="24" rx="3" fill="#313244"/>
+  <text x="568" y="80" fill="#cdd6f4" font-size="9" text-anchor="middle">G-Code</text>
+
+  <!-- Left: Viewport (3D folded part) -->
+  <rect x="0" y="92" width="860" height="748" fill="#0a0a14"/>
+  <g opacity="0.05" stroke="#89b4fa">
+    <line x1="0" y1="200" x2="860" y2="200"/>
+    <line x1="0" y1="400" x2="860" y2="400"/>
+    <line x1="0" y1="600" x2="860" y2="600"/>
+    <line x1="200" y1="92" x2="200" y2="840"/>
+    <line x1="400" y1="92" x2="400" y2="840"/>
+    <line x1="600" y1="92" x2="600" y2="840"/>
+  </g>
+
+  <!-- 3D Sheet Metal Part (L-bracket with bend) -->
+  <g transform="translate(300, 300)">
+    <!-- Base flange (horizontal) -->
+    <polygon points="-100,0 100,0 100,30 -100,30" fill="#313244" stroke="#89b4fa" stroke-width="1.5"/>
+    <!-- Bend region (curved) -->
+    <path d="M 100,0 Q 140,0 140,-40 L 140,-10 Q 140,20 100,20" fill="#45475a" stroke="#f9e2af" stroke-width="1.5"/>
+    <!-- Flange (vertical) -->
+    <polygon points="140,-40 140,20 170,20 170,-40" fill="#313244" stroke="#89b4fa" stroke-width="1.5"/>
+    <!-- Top of flange -->
+    <polygon points="140,-40 170,-40 170,-70 140,-70" fill="#1e1e2e" stroke="#89b4fa" stroke-width="1.5"/>
+
+    <!-- Bend annotation -->
+    <text x="120" y="-10" fill="#f9e2af" font-size="10">R=2mm</text>
+    <text x="120" y="4" fill="#f9e2af" font-size="9">90°</text>
+    <!-- Thickness annotation -->
+    <line x1="-100" y1="35" x2="-100" y2="50" stroke="#a6adc8" stroke-width="1"/>
+    <line x1="-100" y1="45" x2="-80" y2="45" stroke="#a6adc8" stroke-width="1"/>
+    <text x="-90" y="42" fill="#a6adc8" font-size="8">T=1.5mm</text>
+  </g>
+
+  <!-- CAM toolpath overlay -->
+  <g transform="translate(300, 300)" opacity="0.8">
+    <!-- Toolpath (yellow dashed line following contour) -->
+    <path d="M -100,0 L 100,0 L 100,-70 L 170,-70 L 170,30 L -100,30 Z" 
+          fill="none" stroke="#f9e2af" stroke-width="1.5" stroke-dasharray="4,3"/>
+    <!-- Tool position -->
+    <circle cx="50" cy="0" r="6" fill="#f38ba8" opacity="0.8"/>
+    <circle cx="50" cy="0" r="12" fill="none" stroke="#f38ba8" stroke-width="1" opacity="0.4"/>
+    <text x="60" y="-10" fill="#f38ba8" font-size="9">Tool Ø6</text>
+  </g>
+
+  <!-- HUD -->
+  <rect x="8" y="100" width="200" height="60" rx="4" fill="#11111b" opacity="0.8"/>
+  <text x="14" y="116" fill="#cdd6f4" font-size="10">Material: Steel 1.5mm</text>
+  <text x="14" y="130" fill="#a6adc8" font-size="9">K-Factor: 0.44</text>
+  <text x="14" y="144" fill="#f9e2af" font-size="9">Bend Allowance: 4.71mm</text>
+  <text x="14" y="156" fill="#a6e3a1" font-size="9">CAM: Profile Op 1/3</text>
+
+  <!-- Right-top: Flat Pattern Preview -->
+  <rect x="860" y="92" width="580" height="360" fill="#0d0d1a"/>
+  <rect x="860" y="92" width="580" height="24" fill="#11111b"/>
+  <text x="870" y="108" fill="#cdd6f4" font-size="11" font-weight="bold">Flat Pattern (Unfolded)</text>
+
+  <!-- Flat pattern drawing -->
+  <g transform="translate(960, 200)">
+    <!-- Sheet outline -->
+    <rect x="0" y="0" width="380" height="120" fill="none" stroke="#89b4fa" stroke-width="2"/>
+    <!-- Bend line -->
+    <line x1="280" y1="0" x2="280" y2="120" stroke="#f9e2af" stroke-width="2" stroke-dasharray="6,4"/>
+    <text x="286" y="14" fill="#f9e2af" font-size="9">Bend ↑ 90°</text>
+    <!-- Dimensions -->
+    <line x1="0" y1="-15" x2="380" y2="-15" stroke="#6c7086" stroke-width="1"/>
+    <line x1="0" y1="-20" x2="0" y2="-10" stroke="#6c7086" stroke-width="1"/>
+    <line x1="380" y1="-20" x2="380" y2="-10" stroke="#6c7086" stroke-width="1"/>
+    <text x="190" y="-18" fill="#a6adc8" font-size="9" text-anchor="middle">380.0</text>
+    <line x1="-15" y1="0" x2="-15" y2="120" stroke="#6c7086" stroke-width="1"/>
+    <text x="-22" y="64" fill="#a6adc8" font-size="9" text-anchor="middle" transform="rotate(-90,-22,64)">120.0</text>
+    <!-- Bend dimension -->
+    <line x1="280" y1="135" x2="380" y2="135" stroke="#f9e2af" stroke-width="1"/>
+    <text x="330" y="148" fill="#f9e2af" font-size="9" text-anchor="middle">100.0 + BA</text>
+  </g>
+
+  <!-- Right-bottom: CAM Operations -->
+  <rect x="860" y="452" width="580" height="388" fill="#181825"/>
+  <rect x="860" y="452" width="580" height="24" fill="#11111b"/>
+  <text x="870" y="468" fill="#cdd6f4" font-size="11" font-weight="bold">CAM Operations</text>
+
+  <!-- Op list -->
+  <rect x="864" y="484" width="572" height="40" rx="4" fill="#313244"/>
+  <circle cx="876" cy="504" r="6" fill="#a6e3a1"/>
+  <text x="870" y="508" fill="#1e1e2e" font-size="9" text-anchor="middle">✓</text>
+  <text x="890" y="500" fill="#cdd6f4" font-size="10" font-weight="bold">Op 1: Facing</text>
+  <text x="890" y="514" fill="#6c7086" font-size="9">Tool: Ø10 Flat  |  Feed: 500  |  Spindle: 8000</text>
+  <text x="1380" y="504" fill="#a6e3a1" font-size="10" text-anchor="end">Done</text>
+  <text x="1380" y="516" fill="#6c7086" font-size="8" text-anchor="end">12.3s</text>
+
+  <rect x="864" y="528" width="572" height="40" rx="4" fill="#313244" stroke="#f9e2af"/>
+  <circle cx="876" cy="548" r="6" fill="#f9e2af"/>
+  <text x="890" y="544" fill="#cdd6f4" font-size="10" font-weight="bold">Op 2: Profile (contour)</text>
+  <text x="890" y="558" fill="#6c7086" font-size="9">Tool: Ø6 Flat  |  Feed: 400  |  Spindle: 10000</text>
+  <text x="1380" y="548" fill="#f9e2af" font-size="10" text-anchor="end">▶ Running</text>
+  <text x="1380" y="560" fill="#6c7086" font-size="8" text-anchor="end">45% — 8.2s</text>
+
+  <rect x="864" y="572" width="572" height="40" rx="4" fill="#313244" opacity="0.5"/>
+  <circle cx="876" cy="592" r="6" fill="#6c7086"/>
+  <text x="890" y="588" fill="#a6adc8" font-size="10">Op 3: Drilling (4 holes)</text>
+  <text x="890" y="602" fill="#6c7086" font-size="9">Tool: Ø3 Drill  |  Feed: 200  |  Spindle: 12000</text>
+  <text x="1380" y="592" fill="#6c7086" font-size="10" text-anchor="end">Queued</text>
+
+  <!-- G-code preview -->
+  <rect x="864" y="620" width="572" height="200" rx="4" fill="#0d0d1a"/>
+  <text x="874" y="636" fill="#cdd6f4" font-size="10" font-weight="bold">G-Code Preview</text>
+  <text x="874" y="656" fill="#a6e3a1" font-size="9" font-family="monospace">G21 G90 G54</text>
+  <text x="874" y="670" fill="#a6e3a1" font-size="9" font-family="monospace">G0 Z10</text>
+  <text x="874" y="684" fill="#a6e3a1" font-size="9" font-family="monospace">G0 X0 Y0</text>
+  <text x="874" y="698" fill="#f9e2af" font-size="9" font-family="monospace">G1 Z-1 F200 S10000 M3</text>
+  <text x="874" y="712" fill="#f9e2af" font-size="9" font-family="monospace">G1 X380 F400</text>
+  <text x="874" y="726" fill="#f9e2af" font-size="9" font-family="monospace">G1 Y120</text>
+  <text x="874" y="740" fill="#f9e2af" font-size="9" font-family="monospace">G1 X0</text>
+  <text x="874" y="754" fill="#f9e2af" font-size="9" font-family="monospace">G1 Y0</text>
+  <text x="874" y="768" fill="#a6e3a1" font-size="9" font-family="monospace">G0 Z10 M5</text>
+  <text x="874" y="782" fill="#89dceb" font-size="9" font-family="monospace">M30 ; End</text>
+  <rect x="864" y="792" width="572" height="20" rx="3" fill="#313244"/>
+  <text x="870" y="806" fill="#6c7086" font-size="9">Lines: 248  |  Est. time: 28.5s  |  File: part.nc</text>
+
+  <!-- Bottom -->
+  <rect x="0" y="840" width="1440" height="60" fill="#11111b"/>
+  <text x="8" y="878" fill="#f9e2af" font-size="10">Sheet Metal: 1 bend, BA=4.71mm, flat=380×120mm</text>
+  <text x="500" y="878" fill="#a6e3a1" font-size="10">CAM: Op 2/3 running — 45%</text>
+  <text x="800" y="878" fill="#6c7086" font-size="10">Tool: Ø6 Flat  Z:-1  F:400</text>
+  <text x="1100" y="878" fill="#6c7086" font-size="10">Spindle: 10000 RPM</text>
+</svg>

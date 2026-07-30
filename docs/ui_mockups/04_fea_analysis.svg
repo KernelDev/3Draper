@@ -1,0 +1,211 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 900" font-family="'Segoe UI','Tahoma',sans-serif">
+  <rect width="1440" height="900" fill="#1e1e2e"/>
+
+  <!-- Title bar -->
+  <rect x="0" y="0" width="1440" height="32" fill="#181825"/>
+  <text x="12" y="21" fill="#cdd6f4" font-size="13" font-weight="bold">BRep CAD — FEA Analysis</text>
+  <rect x="1380" y="6" width="48" height="20" rx="3" fill="#f38ba8"/>
+  <text x="1404" y="20" fill="#1e1e2e" font-size="11" text-anchor="middle" font-weight="bold">✕</text>
+
+  <!-- Ribbon -->
+  <rect x="0" y="32" width="1440" height="36" fill="#11111b"/>
+  <rect x="516" y="34" width="60" height="24" rx="3" fill="#313244"/>
+  <text x="546" y="50" fill="#89b4fa" font-size="10" text-anchor="middle" font-weight="bold">FEA</text>
+
+  <!-- FEA tools -->
+  <rect x="8" y="36" width="100" height="24" rx="3" fill="#313244" stroke="#a6e3a1"/>
+  <text x="58" y="52" fill="#a6e3a1" font-size="10" text-anchor="middle" font-weight="bold">▶ Solve</text>
+  <rect x="114" y="36" width="80" height="24" rx="3" fill="#313244"/>
+  <text x="154" y="52" fill="#a6adc8" font-size="10" text-anchor="middle">Mesh</text>
+  <rect x="200" y="36" width="80" height="24" rx="3" fill="#313244"/>
+  <text x="240" y="52" fill="#a6adc8" font-size="10" text-anchor="middle">BC...</text>
+  <rect x="286" y="36" width="80" height="24" rx="3" fill="#313244"/>
+  <text x="326" y="52" fill="#a6adc8" font-size="10" text-anchor="middle">Load...</text>
+  <rect x="372" y="36" width="100" height="24" rx="3" fill="#313244"/>
+  <text x="422" y="52" fill="#a6adc8" font-size="10" text-anchor="middle">Materials</text>
+
+  <!-- Left: Model tree -->
+  <rect x="0" y="68" width="240" height="772" fill="#181825"/>
+  <rect x="0" y="68" width="240" height="28" fill="#11111b"/>
+  <text x="10" y="86" fill="#cdd6f4" font-size="11" font-weight="bold">FEA Study</text>
+
+  <rect x="4" y="104" width="232" height="22" fill="#313244"/>
+  <text x="14" y="119" fill="#89b4fa" font-size="10">📁 Static Analysis</text>
+  <rect x="4" y="130" width="232" height="22" fill="none"/>
+  <text x="24" y="145" fill="#a6adc8" font-size="10">⚙ Mesh (Tet4)</text>
+  <rect x="4" y="152" width="232" height="22" fill="none"/>
+  <text x="24" y="167" fill="#a6adc8" font-size="10">  Nodes: 12,847</text>
+  <rect x="4" y="174" width="232" height="22" fill="none"/>
+  <text x="24" y="189" fill="#a6adc8" font-size="10">  Elements: 8,234</text>
+  <rect x="4" y="196" width="232" height="22" fill="#313244"/>
+  <text x="24" y="211" fill="#a6e3a1" font-size="10">🔒 Fixed (Bottom)</text>
+  <rect x="4" y="218" width="232" height="22" fill="none"/>
+  <text x="44" y="233" fill="#6c7086" font-size="9">  3 faces, 247 nodes</text>
+  <rect x="4" y="240" width="232" height="22" fill="#313244"/>
+  <text x="24" y="255" fill="#f38ba8" font-size="10">↓ Force 1000N (Top)</text>
+  <rect x="4" y="262" width="232" height="22" fill="none"/>
+  <text x="44" y="277" fill="#6c7086" font-size="9">  1 face, Y-direction</text>
+  <rect x="4" y="284" width="232" height="22" fill="#313244"/>
+  <text x="24" y="299" fill="#89dceb" font-size="10"> Steel AISI 1045</text>
+  <rect x="4" y="306" width="232" height="22" fill="none"/>
+  <text x="44" y="321" fill="#6c7086" font-size="9">  E=200GPa ν=0.29 ρ=7850</text>
+
+  <text x="10" y="350" fill="#cdd6f4" font-size="10" font-weight="bold">Results:</text>
+  <rect x="4" y="358" width="232" height="22" fill="#313244"/>
+  <text x="14" y="373" fill="#89b4fa" font-size="10">📊 Von Mises Stress</text>
+  <rect x="4" y="380" width="232" height="22" fill="none"/>
+  <text x="14" y="395" fill="#a6adc8" font-size="10">  Max: 245 MPa</text>
+  <rect x="4" y="402" width="232" height="22" fill="none"/>
+  <text x="14" y="417" fill="#a6adc8" font-size="10">  Min: 0.1 MPa</text>
+  <rect x="4" y="424" width="232" height="22" fill="#313244"/>
+  <text x="14" y="439" fill="#89dceb" font-size="10">📐 Displacement</text>
+  <rect x="4" y="446" width="232" height="22" fill="none"/>
+  <text x="14" y="461" fill="#a6adc8" font-size="10">  Max: 0.42 mm</text>
+
+  <!-- Center: 3D Viewport with FEA results -->
+  <rect x="240" y="68" width="920" height="772" fill="#0a0a14"/>
+
+  <!-- Grid -->
+  <g opacity="0.05" stroke="#89b4fa">
+    <line x1="240" y1="200" x2="1160" y2="200"/>
+    <line x1="240" y1="400" x2="1160" y2="400"/>
+    <line x1="240" y1="600" x2="1160" y2="600"/>
+    <line x1="400" y1="68" x2="400" y2="840"/>
+    <line x1="600" y1="68" x2="600" y2="840"/>
+    <line x1="800" y1="68" x2="800" y2="840"/>
+    <line x1="1000" y1="68" x2="1000" y2="840"/>
+  </g>
+
+  <!-- 3D Model with FEA mesh and color contours -->
+  <g transform="translate(580, 300)">
+    <!-- Mesh triangles (simplified) -->
+    <polygon points="0,-80 80,-40 40,20" fill="#3b1d1d" stroke="#1e1e2e" stroke-width="0.5" opacity="0.8"/>
+    <polygon points="80,-40 40,20 100,40" fill="#5b2d2d" stroke="#1e1e2e" stroke-width="0.5" opacity="0.8"/>
+    <polygon points="0,-80 40,20 -40,0" fill="#2d4b2d" stroke="#1e1e2e" stroke-width="0.5" opacity="0.8"/>
+    <polygon points="-40,0 40,20 -20,60" fill="#4b6b2d" stroke="#1e1e2e" stroke-width="0.5" opacity="0.8"/>
+    <polygon points="40,20 100,40 60,80" fill="#8b4b2d" stroke="#1e1e2e" stroke-width="0.5" opacity="0.8"/>
+    <polygon points="40,20 60,80 -20,60" fill="#6b8b2d" stroke="#1e1e2e" stroke-width="0.5" opacity="0.8"/>
+    <polygon points="-20,60 60,80 0,100" fill="#ab6b2d" stroke="#1e1e2e" stroke-width="0.5" opacity="0.8"/>
+    <polygon points="60,80 100,40 120,90" fill="#cb8b4d" stroke="#1e1e2e" stroke-width="0.5" opacity="0.8"/>
+    <polygon points="60,80 120,90 80,120" fill="#ebab6d" stroke="#1e1e2e" stroke-width="0.5" opacity="0.8"/>
+    <polygon points="60,80 80,120 0,100" fill="#db9b5d" stroke="#1e1e2e" stroke-width="0.5" opacity="0.8"/>
+    <polygon points="0,100 80,120 20,140" fill="#fbbf8d" stroke="#1e1e2e" stroke-width="0.5" opacity="0.8"/>
+    <polygon points="80,120 120,90 100,140" fill="#fbdfad" stroke="#1e1e2e" stroke-width="0.5" opacity="0.8"/>
+
+    <!-- Stress concentration (red area) -->
+    <polygon points="80,120 100,140 60,150" fill="#f38ba8" stroke="#1e1e2e" stroke-width="0.5"/>
+    <polygon points="80,120 60,150 20,140" fill="#eba0ac" stroke="#1e1e2e" stroke-width="0.5"/>
+
+    <!-- BC markers -->
+    <!-- Fixed (bottom) -->
+    <line x1="-30" y1="145" x2="30" y2="145" stroke="#a6e3a1" stroke-width="3"/>
+    <g stroke="#a6e3a1" stroke-width="1.5">
+      <line x1="-30" y1="145" x2="-35" y2="155"/>
+      <line x1="-20" y1="145" x2="-25" y2="155"/>
+      <line x1="-10" y1="145" x2="-15" y2="155"/>
+      <line x1="0" y1="145" x2="-5" y2="155"/>
+      <line x1="10" y1="145" x2="5" y2="155"/>
+      <line x1="20" y1="145" x2="15" y2="155"/>
+      <line x1="30" y1="145" x2="25" y2="155"/>
+    </g>
+    <text x="-50" y="165" fill="#a6e3a1" font-size="9">Fixed</text>
+
+    <!-- Force (top) -->
+    <line x1="0" y1="-80" x2="0" y2="-110" stroke="#f38ba8" stroke-width="3"/>
+    <polygon points="0,-110 -5,-100 5,-100" fill="#f38ba8"/>
+    <text x="10" y="-105" fill="#f38ba8" font-size="9">F=1000N</text>
+  </g>
+
+  <!-- Color scale legend -->
+  <rect x="1060" y="200" width="30" height="400" rx="4" fill="#11111b" opacity="0.8"/>
+  <defs>
+    <linearGradient id="feaScale" x1="0%" y1="100%" x2="0%" y2="0%">
+      <stop offset="0%" style="stop-color:#1e3a1e"/>
+      <stop offset="20%" style="stop-color:#4b8b2d"/>
+      <stop offset="40%" style="stop-color:#cbbf4d"/>
+      <stop offset="60%" style="stop-color:#cb8b4d"/>
+      <stop offset="80%" style="stop-color:#eb6b6d"/>
+      <stop offset="100%" style="stop-color:#f38ba8"/>
+    </linearGradient>
+  </defs>
+  <rect x="1064" y="204" width="12" height="392" fill="url(#feaScale)"/>
+  <text x="1080" y="212" fill="#f38ba8" font-size="9">245</text>
+  <text x="1080" y="252" fill="#eb6b6d" font-size="9">200</text>
+  <text x="1080" y="332" fill="#cb8b4d" font-size="9">150</text>
+  <text x="1080" y="412" fill="#cbbf4d" font-size="9">100</text>
+  <text x="1080" y="492" fill="#4b8b2d" font-size="9">50</text>
+  <text x="1080" y="600" fill="#1e3a1e" font-size="9">0</text>
+  <text x="1060" y="620" fill="#cdd6f4" font-size="9">MPa</text>
+
+  <!-- Deformation scale -->
+  <rect x="1060" y="640" width="80" height="24" rx="4" fill="#313244"/>
+  <text x="1100" y="656" fill="#cdd6f4" font-size="9" text-anchor="middle">Scale: 50×</text>
+
+  <!-- Right panel: FEA properties -->
+  <rect x="1160" y="68" width="280" height="772" fill="#181825"/>
+  <rect x="1160" y="68" width="280" height="28" fill="#11111b"/>
+  <text x="1170" y="86" fill="#cdd6f4" font-size="11" font-weight="bold">Analysis Results</text>
+
+  <rect x="1164" y="104" width="272" height="22" fill="#313244"/>
+  <text x="1170" y="119" fill="#a6adc8" font-size="10">Study Type</text>
+  <text x="1260" y="119" fill="#cdd6f4" font-size="10">Static</text>
+  <rect x="1164" y="128" width="272" height="22" fill="none"/>
+  <text x="1170" y="143" fill="#a6adc8" font-size="10">Solver</text>
+  <text x="1260" y="143" fill="#cdd6f4" font-size="10">CG Iterative</text>
+  <rect x="1164" y="152" width="272" height="22" fill="#313244"/>
+  <text x="1170" y="167" fill="#a6adc8" font-size="10">Iterations</text>
+  <text x="1260" y="167" fill="#a6e3a1" font-size="10">147 / 1000</text>
+  <rect x="1164" y="176" width="272" height="22" fill="none"/>
+  <text x="1170" y="191" fill="#a6adc8" font-size="10">Converged</text>
+  <text x="1260" y="191" fill="#a6e3a1" font-size="10">✓ Yes (1e-7)</text>
+
+  <!-- Key results -->
+  <rect x="1164" y="210" width="272" height="3" fill="#45475a"/>
+  <text x="1170" y="228" fill="#cdd6f4" font-size="10" font-weight="bold">Key Results</text>
+
+  <rect x="1164" y="236" width="272" height="40" rx="4" fill="#313244"/>
+  <text x="1170" y="252" fill="#a6adc8" font-size="9">Max Von Mises</text>
+  <text x="1170" y="268" fill="#f38ba8" font-size="14" font-weight="bold">245.3 MPa</text>
+
+  <rect x="1164" y="280" width="272" height="40" rx="4" fill="#313244"/>
+  <text x="1170" y="296" fill="#a6adc8" font-size="9">Max Displacement</text>
+  <text x="1170" y="312" fill="#89dceb" font-size="14" font-weight="bold">0.42 mm</text>
+
+  <rect x="1164" y="324" width="272" height="40" rx="4" fill="#313244"/>
+  <text x="1170" y="340" fill="#a6adc8" font-size="9">Safety Factor</text>
+  <text x="1170" y="356" fill="#f9e2af" font-size="14" font-weight="bold">2.16</text>
+
+  <rect x="1164" y="368" width="272" height="40" rx="4" fill="#313244"/>
+  <text x="1170" y="384" fill="#a6adc8" font-size="9">Total Mass</text>
+  <text x="1170" y="400" fill="#cdd6f4" font-size="14" font-weight="bold">1.247 kg</text>
+
+  <!-- Result type selector -->
+  <rect x="1164" y="420" width="272" height="3" fill="#45475a"/>
+  <text x="1170" y="438" fill="#cdd6f4" font-size="10" font-weight="bold">Display</text>
+  <rect x="1164" y="446" width="130" height="24" rx="3" fill="#313244" stroke="#89b4fa"/>
+  <text x="1229" y="462" fill="#89b4fa" font-size="9" text-anchor="middle">Von Mises</text>
+  <rect x="1300" y="446" width="130" height="24" rx="3" fill="#313244"/>
+  <text x="1365" y="462" fill="#6c7086" font-size="9" text-anchor="middle">Displacement</text>
+  <rect x="1164" y="474" width="130" height="24" rx="3" fill="#313244"/>
+  <text x="1229" y="490" fill="#6c7086" font-size="9" text-anchor="middle">Strain</text>
+  <rect x="1300" y="474" width="130" height="24" rx="3" fill="#313244"/>
+  <text x="1365" y="490" fill="#6c7086" font-size="9" text-anchor="middle">Stress XX</text>
+
+  <!-- Animation controls -->
+  <rect x="1164" y="510" width="272" height="3" fill="#45475a"/>
+  <text x="1170" y="528" fill="#cdd6f4" font-size="10" font-weight="bold">Animation</text>
+  <rect x="1164" y="536" width="30" height="24" rx="3" fill="#313244"/>
+  <text x="1179" y="552" fill="#a6e3a1" font-size="12" text-anchor="middle">▶</text>
+  <rect x="1200" y="536" width="30" height="24" rx="3" fill="#313244"/>
+  <text x="1215" y="552" fill="#a6adc8" font-size="12" text-anchor="middle">⏸</text>
+  <rect x="1236" y="536" width="196" height="24" rx="3" fill="#313244"/>
+  <rect x="1240" y="540" width="100" height="16" rx="2" fill="#89b4fa" opacity="0.5"/>
+  <text x="1340" y="552" fill="#a6adc8" font-size="9" text-anchor="middle">0.42mm / 50×</text>
+
+  <!-- Bottom status -->
+  <rect x="0" y="840" width="1440" height="60" fill="#11111b"/>
+  <text x="8" y="878" fill="#a6e3a1" font-size="10">FEA: Solved — 147 iterations, 0.83s</text>
+  <text x="500" y="878" fill="#6c7086" font-size="10">Nodes: 12,847  Elements: 8,234</text>
+  <text x="800" y="878" fill="#f38ba8" font-size="10">Max Stress: 245 MPa</text>
+  <text x="1000" y="878" fill="#89dceb" font-size="10">Max Disp: 0.42mm</text>
+</svg>

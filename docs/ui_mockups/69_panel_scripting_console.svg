@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="700" height="800" viewBox="0 0 700 800">
+<title>Panel: Scripting Console (full panel)</title>
+<rect x="0" y="0" width="700" height="800" fill="#1f1f1f"/>
+<rect x="0" y="0" width="700" height="36" fill="#262626" stroke="#1a1a1a" stroke-width="1"/>
+<text x="14" y="22" fill="#e6e6e6" font-size="14" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Panel: Scripting Console (full panel)</text>
+<text x="14" y="32" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Multi-tab: Console / Editor / Output / Variables. PascalScript + Python + Lua REPL. Live API completion.</text>
+<rect x="0" y="36" width="700" height="764" fill="#2b2b2b"/>
+<rect x="0" y="36" width="700" height="26" fill="#323232" stroke="#1a1a1a" stroke-width="1"/>
+<rect x="6" y="38" width="61" height="22" fill="#2b2b2b"/>
+<text x="12" y="52.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Console</text>
+<text x="77" y="52.96" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Editor</text>
+<text x="135" y="52.96" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Output</text>
+<text x="193" y="52.96" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Variables</text>
+<circle cx="688.0" cy="45.0" r="1.5" fill="#a8a8a8" opacity="1.0"/>
+<circle cx="688.0" cy="50.0" r="1.5" fill="#a8a8a8" opacity="1.0"/>
+<circle cx="688.0" cy="55.0" r="1.5" fill="#a8a8a8" opacity="1.0"/>
+<rect x="8" y="68" width="80" height="24" rx="3" fill="#0a84ff" stroke="#0a84ff" stroke-width="1"/>
+<polygon points="19,75.0 19,85.0 26,80.0" fill="#ffffff" opacity="1.0"/>
+<text x="34" y="83.96000000000001" fill="#ffffff" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Run</text>
+<rect x="92" y="68" width="80" height="24" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="102" y="75.0" width="3" height="10" fill="#e6e6e6"/>
+<rect x="107" y="75.0" width="3" height="10" fill="#e6e6e6"/>
+<text x="118" y="83.96000000000001" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Stop</text>
+<rect x="176" y="68" width="80" height="24" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<path d="M187 74.0 L193 74.0 L195 77.0 L195 85.0 L193 86.0 L187 86.0 L185 85.0 L185 77.0 Z" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<line x1="188" y1="80.0" x2="192" y2="80.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="188" y1="84.0" x2="192" y2="84.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="202" y="83.96000000000001" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">New</text>
+<rect x="260" y="68" width="80" height="24" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<path d="M268 85.0 L268 77.0 L272.0 77.0 L276.0 74.0 L280 74.0 L280 85.0 Z" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<text x="286" y="83.96000000000001" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Open</text>
+<rect x="344" y="68" width="80" height="24" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<path d="M352 86.0 L352 74.0 L364 74.0 L364 86.0 Z" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<rect x="358.8" y="74.0" width="4.8" height="6.4" fill="#e6e6e6" stroke="#e6e6e6" stroke-width="1.2"/>
+<rect x="354" y="80.8" width="7.2" height="5.6" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="370" y="83.96000000000001" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Save</text>
+<rect x="428" y="68" width="80" height="24" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<path d="M437 85.0 L437 75.0 L440.0 75.0 M444.0 75.0 L447 75.0 L447 85.0 Z M442.0 75.0 L442.0 83.0 M439.0 77.0 L442.0 74.0 L445.0 77.0" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<text x="454" y="83.96000000000001" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Export</text>
+<text x="520" y="84" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Lang:</text>
+<rect x="562" y="68" width="130" height="24" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="568" y="83.96000000000001" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">PascalScript</text>
+<polyline points="679.6,78.8 682.0,82.4 684.4,78.8" fill="none" stroke="#a8a8a8" stroke-width="1.2"/>
+<rect x="702" y="68" width="80" height="24" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<polyline points="713.6,76.0 718.4,80.0 713.6,84.0" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="728" y="83.96000000000001" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Debug</text>
+<rect x="786" y="68" width="90" height="24" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<circle cx="800.0" cy="80.0" r="6" fill="none" opacity="1.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="800.0" y1="78.0" x2="800.0" y2="81.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<circle cx="800.0" cy="83.0" r="0.8" fill="#e6e6e6" opacity="1.0"/>
+<text x="812" y="83.96000000000001" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Profile</text>
+<rect x="8" y="100" width="684" height="480" rx="3" fill="#0d0d0d" stroke="#3e3e3e" stroke-width="1"/>
+<text x="14" y="125" fill="#0a84ff" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="start">&gt;&gt;&gt;</text>
+<text x="46" y="125" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">model := BRepAPI.CreateBox(50, 30, 20);</text>
+<text x="14" y="143" fill="#5ac878" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="start">&lt;&lt;&lt;</text>
+<text x="46" y="143" fill="#5ac878" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">Body created: 0x7f3a2c4d5000</text>
+<text x="14" y="161" fill="#0a84ff" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="start">&gt;&gt;&gt;</text>
+<text x="46" y="161" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">fillet := model.Fillet(2.0);</text>
+<text x="14" y="179" fill="#5ac878" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="start">&lt;&lt;&lt;</text>
+<text x="46" y="179" fill="#5ac878" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">Fillet applied: 4 edges, R=2.0 mm</text>
+<text x="14" y="197" fill="#0a84ff" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="start">&gt;&gt;&gt;</text>
+<text x="46" y="197" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">thickness := Measure.Volume(model);</text>
+<text x="14" y="215" fill="#5ac878" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="start">&lt;&lt;&lt;</text>
+<text x="46" y="215" fill="#5ac878" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">Volume = 24783.5 mm³  (24.783 cm³)</text>
+<text x="14" y="233" fill="#0a84ff" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="start">&gt;&gt;&gt;</text>
+<text x="46" y="233" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">mat := MaterialLibrary.Get(&#x27;Al 6061-T6&#x27;);</text>
+<text x="14" y="251" fill="#5ac878" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="start">&lt;&lt;&lt;</text>
+<text x="46" y="251" fill="#5ac878" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">Material loaded: Aluminum 6061-T6 (ρ=2.70 g/cm³)</text>
+<text x="14" y="269" fill="#0a84ff" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="start">&gt;&gt;&gt;</text>
+<text x="46" y="269" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">model.Material := mat;</text>
+<text x="14" y="287" fill="#0a84ff" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="start">&gt;&gt;&gt;</text>
+<text x="46" y="287" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">mass := mat.Density * thickness / 1000;</text>
+<text x="14" y="305" fill="#5ac878" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="start">&lt;&lt;&lt;</text>
+<text x="46" y="305" fill="#5ac878" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">Mass = 66.91 g  (0.0669 kg)</text>
+<text x="14" y="323" fill="#0a84ff" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="start">&gt;&gt;&gt;</text>
+<text x="46" y="323" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">BRepAPI.ExportSTEP(model, &#x27;output.step&#x27;);</text>
+<text x="14" y="341" fill="#5ac878" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="start">&lt;&lt;&lt;</text>
+<text x="46" y="341" fill="#5ac878" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">Exported to: output.step  (3.2 KB, 0.04s)</text>
+<text x="14" y="359" fill="#e2a73a" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="start">⚠</text>
+<text x="46" y="359" fill="#e2a73a" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">Warning: face #3 has high curvature — consider splitting</text>
+<text x="14" y="377" fill="#0a84ff" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="start">&gt;&gt;&gt;</text>
+<text x="46" y="377" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start"></text>
+<text x="46" y="395" fill="#0a84ff" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="start">│</text>
+<rect x="8" y="588" width="684" height="28" rx="3" fill="#262626" stroke="#0a84ff" stroke-width="1"/>
+<text x="14" y="607" fill="#0a84ff" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="start">&gt;&gt;&gt;</text>
+<rect x="46" y="591" width="640" height="22" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="52" y="605.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">model.</text>
+<line x1="89" y1="595" x2="89" y2="609" stroke="#0a84ff" stroke-width="1"/>
+<rect x="46" y="448" width="320" height="140" rx="3" fill="#323232" stroke="#0a84ff" stroke-width="1"/>
+<text x="54" y="464" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Auto-complete:</text>
+<rect x="48" y="474" width="316" height="16" fill="#094771"/>
+<text x="56" y="488" fill="#ffffff" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">model.Fillet(radius)</text>
+<text x="360" y="488" fill="#0a84ff" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">method</text>
+<text x="56" y="504" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">model.Chamfer(distance)</text>
+<text x="360" y="504" fill="#0a84ff" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">method</text>
+<text x="56" y="520" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">model.Shell(thickness)</text>
+<text x="360" y="520" fill="#0a84ff" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">method</text>
+<text x="56" y="536" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">model.Thicken(distance)</text>
+<text x="360" y="536" fill="#0a84ff" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">method</text>
+<text x="56" y="552" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">model.Material := ...</text>
+<text x="360" y="552" fill="#e2a73a" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">property</text>
+<text x="56" y="568" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">model.ExportSTEP(path)</text>
+<text x="360" y="568" fill="#0a84ff" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">method</text>
+<text x="56" y="584" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">model.BBox()</text>
+<text x="360" y="584" fill="#0a84ff" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">method</text>
+<rect x="0" y="770" width="700" height="30" fill="#262626" stroke="#1a1a1a" stroke-width="1"/>
+<text x="8" y="786" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">PascalScript 4.0  ·  Memory: 24 MB  ·  1.2k tokens  ·  Last error: none</text>
+</svg>

@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>BRepCAD — UI Mockups Gallery</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: #1a1a1a;
+  color: #e6e6e6;
+  font-family: 'Segoe UI', Inter, Roboto, Arial, sans-serif;
+  padding: 24px;
+  line-height: 1.5;
+}
+h1 {
+  font-size: 28px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: #ffffff;
+  border-bottom: 2px solid #0a84ff;
+  padding-bottom: 12px;
+}
+.subtitle {
+  color: #a8a8a8;
+  font-size: 14px;
+  margin-bottom: 32px;
+}
+.stats {
+  display: flex;
+  gap: 24px;
+  margin-bottom: 32px;
+  flex-wrap: wrap;
+}
+.stat {
+  background: #2b2b2b;
+  border: 1px solid #3a3a3a;
+  border-left: 4px solid #0a84ff;
+  padding: 16px 20px;
+  border-radius: 4px;
+  min-width: 160px;
+}
+.stat .num { font-size: 28px; font-weight: 700; color: #0a84ff; }
+.stat .lbl { font-size: 12px; color: #a8a8a8; text-transform: uppercase;
+  letter-spacing: 0.5px; margin-top: 4px; }
+.section {
+  margin-bottom: 48px;
+}
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.section-header h2 {
+  font-size: 20px;
+  font-weight: 600;
+  color: #ffffff;
+}
+.section-icon { font-size: 24px; }
+.section-desc {
+  color: #a8a8a8;
+  font-size: 13px;
+  margin-bottom: 16px;
+  padding-left: 36px;
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  gap: 16px;
+}
+.card {
+  background: #2b2b2b;
+  border: 1px solid #3a3a3a;
+  border-radius: 6px;
+  overflow: hidden;
+  transition: all 0.2s ease;
+  text-decoration: none;
+  color: inherit;
+  display: block;
+}
+.card:hover {
+  border-color: #0a84ff;
+  background: #323232;
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(10, 132, 255, 0.15);
+}
+.card-thumb {
+  width: 100%;
+  height: 220px;
+  background: #1a1a1a;
+  border-bottom: 1px solid #3a3a3a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.card-thumb img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+.card-body {
+  padding: 12px 16px 16px;
+}
+.card-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #ffffff;
+  margin-bottom: 4px;
+}
+.card-desc {
+  font-size: 12px;
+  color: #a8a8a8;
+  line-height: 1.4;
+}
+.card-num {
+  display: inline-block;
+  background: #0a84ff;
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 3px;
+  margin-right: 8px;
+  vertical-align: middle;
+}
+.checklist {
+  background: #2b2b2b;
+  border: 1px solid #3a3a3a;
+  border-radius: 6px;
+  padding: 24px;
+  margin-top: 48px;
+}
+.checklist h2 {
+  font-size: 20px;
+  font-weight: 600;
+  color: #ffffff;
+  margin-bottom: 16px;
+  border-bottom: 1px solid #3a3a3a;
+  padding-bottom: 8px;
+}
+.checklist-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 8px 24px;
+}
+.check-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  padding: 4px 0;
+}
+.check-icon {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  font-size: 12px;
+  font-weight: 700;
+  margin-top: 1px;
+}
+.check-yes { background: #5ac878; color: #ffffff; }
+.check-no  { background: #e25555; color: #ffffff; }
+.check-maybe { background: #e2a73a; color: #ffffff; }
+.gap-note {
+  margin-top: 16px;
+  padding: 12px 16px;
+  background: #1a1a1a;
+  border-left: 3px solid #e2a73a;
+  font-size: 13px;
+  color: #a8a8a8;
+}
+.gap-note strong { color: #e2a73a; }
+footer {
+  margin-top: 48px;
+  padding-top: 24px;
+  border-top: 1px solid #3a3a3a;
+  color: #707070;
+  font-size: 12px;
+  text-align: center;
+}
+</style>
+</head>
+<body>
+<h1>BRepCAD — UI Mockups Gallery</h1>
+<p class="subtitle">Все виды приложения, формы, режимы, меню и подменю. "
+"<span style='color:#0a84ff'>96 макетов</span> "
+"для оценки покрытия и проектирования следующих итераций.</p>
+<div class="stats"><div class="stat"><div class="num">96</div><div class="lbl">Total mockups</div></div><div class="stat"><div class="num">11</div><div class="lbl">Categories</div></div><div class="stat"><div class="num">21</div><div class="lbl">Menus w/ submenus</div></div><div class="stat"><div class="num">15</div><div class="lbl">Ribbon tabs</div></div><div class="stat"><div class="num">25</div><div class="lbl">Dialogs</div></div><div class="stat"><div class="num">9</div><div class="lbl">View modes</div></div><div class="stat"><div class="num">250+</div><div class="lbl">Commands</div></div></div><section class="section"><div class="section-header"><span class="section-icon">📊</span><h2>Overview</h2></div><p class="section-desc">Главные экраны приложения — композитные макеты, показывающие сочетание ленты, вьюпорта, док-панелей и статус-бара.</p><div class="grid"><a class="card" href="01_main_window.svg" target="_blank"><div class="card-thumb"><img src="01_main_window.svg" alt="Main Window" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">01</span>Main Window</div><div class="card-desc">Главное окно: лента, вьюпорт, дерево модели, свойства, таймлайн, статус-бар</div></div></a><a class="card" href="02_sketch_mode.svg" target="_blank"><div class="card-thumb"><img src="02_sketch_mode.svg" alt="Sketch Mode" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">02</span>Sketch Mode</div><div class="card-desc">Режим эскиза: 2D-холст с сеткой, инструменты рисования, ограничения</div></div></a><a class="card" href="03_visual_programming.svg" target="_blank"><div class="card-thumb"><img src="03_visual_programming.svg" alt="Visual Programming" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">03</span>Visual Programming</div><div class="card-desc">Визуальное программирование: нодовый редактор с превью</div></div></a><a class="card" href="04_fea_analysis.svg" target="_blank"><div class="card-thumb"><img src="04_fea_analysis.svg" alt="FEA Analysis" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">04</span>FEA Analysis</div><div class="card-desc">Анализ методом конечных элементов: сетка, результаты, легенда</div></div></a><a class="card" href="05_sheetmetal_cam.svg" target="_blank"><div class="card-thumb"><img src="05_sheetmetal_cam.svg" alt="Sheet Metal + CAM" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">05</span>Sheet Metal + CAM</div><div class="card-desc">Листовой металл + CAM: развёртка, G-code, симуляция</div></div></a><a class="card" href="06_drawing_assembly.svg" target="_blank"><div class="card-thumb"><img src="06_drawing_assembly.svg" alt="Drawing + Assembly" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">06</span>Drawing + Assembly</div><div class="card-desc">Чертёж + сборка: 2D лист с видами, BOM, спецификации</div></div></a></div></section><section class="section"><div class="section-header"><span class="section-icon">📋</span><h2>Menu Bar — Cascading Submenus</h2></div><p class="section-desc">Каждое верхнее меню в раскрытом виде со всеми подменю. Помогает оценить полноту функционала и иерархию команд.</p><div class="grid"><a class="card" href="07_menu_file.svg" target="_blank"><div class="card-thumb"><img src="07_menu_file.svg" alt="File" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">01</span>File</div><div class="card-desc">New/Open/Save + Import (15 formats) + Export (12 formats) + Render (5) + Recent Files</div></div></a><a class="card" href="08_menu_edit.svg" target="_blank"><div class="card-thumb"><img src="08_menu_edit.svg" alt="Edit" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">02</span>Edit</div><div class="card-desc">Undo/Redo + History branching (Snapshot/Branch/Diff/Tree) + Clipboard + Find</div></div></a><a class="card" href="09_menu_view.svg" target="_blank"><div class="card-thumb"><img src="09_menu_view.svg" alt="View" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">03</span>View</div><div class="card-desc">8 ориентаций + Zoom + Display Style (3) + Display Options (10) + Camera + Layouts</div></div></a><a class="card" href="10_menu_insert.svg" target="_blank"><div class="card-thumb"><img src="10_menu_insert.svg" alt="Insert" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">04</span>Insert</div><div class="card-desc">5 примитивов + Reference Geometry + Sketch + Mesh + Component + Pattern/Mirror</div></div></a><a class="card" href="11_menu_sketch.svg" target="_blank"><div class="card-thumb"><img src="11_menu_sketch.svg" alt="Sketch" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">05</span>Sketch</div><div class="card-desc">Draw (8) + Constraints (9) + Dimensions (4) + Modify (7) + Block (4) + Info (4) + Parametric (4)</div></div></a><a class="card" href="12_menu_modify.svg" target="_blank"><div class="card-thumb"><img src="12_menu_modify.svg" alt="Modify" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">06</span>Modify</div><div class="card-desc">Boolean (3) + Edge (2) + Surface (2) + Transform (3) + Pattern (3) + Direct (8) + Deform (4)</div></div></a><a class="card" href="13_menu_sheetmetal.svg" target="_blank"><div class="card-thumb"><img src="13_menu_sheetmetal.svg" alt="Sheet Metal" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">07</span>Sheet Metal</div><div class="card-desc">Base/Edge Flange + Bend/Hem/Jog + Lofted + Relief + Unfold/Fold/Flat + Material (Gauge) + Export DXF</div></div></a><a class="card" href="14_menu_assembly.svg" target="_blank"><div class="card-thumb"><img src="14_menu_assembly.svg" alt="Assembly" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">08</span>Assembly</div><div class="card-desc">Add Component + Mate (9 types) + Solve + BOM + Explode + Motion + Constraints Diag</div></div></a><a class="card" href="15_menu_cam.svg" target="_blank"><div class="card-thumb"><img src="15_menu_cam.svg" alt="CAM" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">09</span>CAM</div><div class="card-desc">Setup + Tools (6) + Operations (9) + Simulate (5) + Post (7 dialects) + 5-Axis (6) + AI (6)</div></div></a><a class="card" href="16_menu_drawing.svg" target="_blank"><div class="card-thumb"><img src="16_menu_drawing.svg" alt="Drawing" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">10</span>Drawing</div><div class="card-desc">Sheet + Views (8) + Dimensions (5) + Annotations (6) + Templates (6) + Export (4) + Auto Drawing (3)</div></div></a><a class="card" href="17_menu_simulation.svg" target="_blank"><div class="card-thumb"><img src="17_menu_simulation.svg" alt="Simulation" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">11</span>Simulation</div><div class="card-desc">Mesh + Study (9 types) + Run (4) + Results (5 probes + animate + CSV)</div></div></a><a class="card" href="18_menu_parametric.svg" target="_blank"><div class="card-thumb"><img src="18_menu_parametric.svg" alt="Parametric" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">12</span>Parametric</div><div class="card-desc">Parameters (10) + History (8) + Advanced (Variants/DepGraph/DesignTable)</div></div></a><a class="card" href="19_menu_optimize_generate.svg" target="_blank"><div class="card-thumb"><img src="19_menu_optimize_generate.svg" alt="Optimize + Generate" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">13</span>Optimize + Generate</div><div class="card-desc">Topology Optimization (3 presets + density + solver + constraints) + Generative (4 variants)</div></div></a><a class="card" href="20_menu_gdt.svg" target="_blank"><div class="card-thumb"><img src="20_menu_gdt.svg" alt="GD&T" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">14</span>GD&T</div><div class="card-desc">Datum + Form (4) + Orientation (3) + Position + Profile (2) + Runout (2) + Analyze + Reports + Stackup + DRF</div></div></a><a class="card" href="21_menu_heal_inspect.svg" target="_blank"><div class="card-thumb"><img src="21_menu_heal_inspect.svg" alt="Heal + Inspect" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">15</span>Heal + Inspect</div><div class="card-desc">Heal (9 repair ops) + Inspect: Measure (13) + Analysis (8) + Tools (4)</div></div></a><a class="card" href="22_menu_mold.svg" target="_blank"><div class="card-thumb"><img src="22_menu_mold.svg" alt="Mold" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">16</span>Mold</div><div class="card-desc">Catalog + Mold Base + Runner/Cooling/Ejection + Cavity Count + Clamping Force + Flow/Cooling/Warpage + Cost/Cycle/Report</div></div></a><a class="card" href="23_menu_tools.svg" target="_blank"><div class="card-thumb"><img src="23_menu_tools.svg" alt="Tools" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">17</span>Tools</div><div class="card-desc">Options + Customize + Plugins + Scripting + AI + Macros (2) + Perf + Theme + UI Layout (4) + Plugins (5) + Industrial (5)</div></div></a><a class="card" href="24_menu_scripting.svg" target="_blank"><div class="card-thumb"><img src="24_menu_scripting.svg" alt="Scripting" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">18</span>Scripting</div><div class="card-desc">List/Load/Record/Stop/Run+Params/Debug Step/Profile + Library Browser + API Reference</div></div></a><a class="card" href="25_menu_ai.svg" target="_blank"><div class="card-thumb"><img src="25_menu_ai.svg" alt="AI" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">19</span>AI</div><div class="card-desc">Shape from Text + Assistant (4) + Smart (5) + Generate (4) + Optimize (4) + Settings</div></div></a><a class="card" href="26_menu_window.svg" target="_blank"><div class="card-thumb"><img src="26_menu_window.svg" alt="Window" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">20</span>Window</div><div class="card-desc">Close All + Cascade + Tile H/V + Next/Prev Tab + Documents + Save Layout + Tabs list</div></div></a><a class="card" href="27_menu_help.svg" target="_blank"><div class="card-thumb"><img src="27_menu_help.svg" alt="Help" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">21</span>Help</div><div class="card-desc">Check Updates + About + Docs + Forum + Bug + Assets + Changelog + Rollback + Tutorials (3) + Examples (7)</div></div></a></div></section><section class="section"><div class="section-header"><span class="section-icon">🎀</span><h2>Ribbon Tabs</h2></div><p class="section-desc">Каждая вкладка ленты со всеми группами кнопок. Помогает оценить плотность и группировку команд.</p><div class="grid"><a class="card" href="28_ribbon_file.svg" target="_blank"><div class="card-thumb"><img src="28_ribbon_file.svg" alt="File Ribbon" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">01</span>File Ribbon</div><div class="card-desc">Document (6) + Render (5) + Recent (3) + Application (1)</div></div></a><a class="card" href="29_ribbon_home.svg" target="_blank"><div class="card-thumb"><img src="29_ribbon_home.svg" alt="Home Ribbon" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">02</span>Home Ribbon</div><div class="card-desc">Clipboard + Selection + History + View + Display + Windows</div></div></a><a class="card" href="30_ribbon_sketch.svg" target="_blank"><div class="card-thumb"><img src="30_ribbon_sketch.svg" alt="Sketch Ribbon" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">03</span>Sketch Ribbon</div><div class="card-desc">Mode + Draw (8) + Constraint (9) + Dimension (4) + Modify (7) + Block (4) + Info (4) + Parametric (4)</div></div></a><a class="card" href="31_ribbon_insert.svg" target="_blank"><div class="card-thumb"><img src="31_ribbon_insert.svg" alt="Insert Ribbon" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">04</span>Insert Ribbon</div><div class="card-desc">Primitives (5) + Reference (4) + Sketch (2) + Mesh (3) + Component (3)</div></div></a><a class="card" href="32_ribbon_modify.svg" target="_blank"><div class="card-thumb"><img src="32_ribbon_modify.svg" alt="Modify Ribbon" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">05</span>Modify Ribbon</div><div class="card-desc">Boolean (3) + Edge (2) + Surface (2) + Transform (3) + Pattern (3) + Direct (8) + Deform (4)</div></div></a><a class="card" href="33_ribbon_sheetmetal.svg" target="_blank"><div class="card-thumb"><img src="33_ribbon_sheetmetal.svg" alt="Sheet Metal Ribbon" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">06</span>Sheet Metal Ribbon</div><div class="card-desc">Base (3) + Bends (3) + Relief (2) + Flatten (4) + Convert (1) + Material (2) + Export (1)</div></div></a><a class="card" href="34_ribbon_assembly.svg" target="_blank"><div class="card-thumb"><img src="34_ribbon_assembly.svg" alt="Assembly Ribbon" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">07</span>Assembly Ribbon</div><div class="card-desc">Components (4) + Mate (2) + Solve (2) + BOM (2) + Explode (2) + Motion (3) + Constraints (4)</div></div></a><a class="card" href="35_ribbon_cam.svg" target="_blank"><div class="card-thumb"><img src="35_ribbon_cam.svg" alt="CAM Ribbon" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">08</span>CAM Ribbon</div><div class="card-desc">Setup (3) + Tools (6) + 2.5 Axis (6) + 3 Axis (2) + 5 Axis (6) + Simulate (5) + Post (7) + AI (6)</div></div></a><a class="card" href="36_ribbon_drawing.svg" target="_blank"><div class="card-thumb"><img src="36_ribbon_drawing.svg" alt="Drawing Ribbon" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">09</span>Drawing Ribbon</div><div class="card-desc">Sheet (1) + Views (8) + Dimensions (5) + Annotations (6) + Templates (6) + Auto Drawing (3) + Export (4)</div></div></a><a class="card" href="37_ribbon_simulation.svg" target="_blank"><div class="card-thumb"><img src="37_ribbon_simulation.svg" alt="Simulation Ribbon" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">10</span>Simulation Ribbon</div><div class="card-desc">Setup (4) + Study (9) + Run (4) + Results (8)</div></div></a><a class="card" href="38_ribbon_inspect.svg" target="_blank"><div class="card-thumb"><img src="38_ribbon_inspect.svg" alt="Inspect Ribbon" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">11</span>Inspect Ribbon</div><div class="card-desc">Measure (9) + Analysis (8) + Tools (4)</div></div></a><a class="card" href="39_ribbon_ai.svg" target="_blank"><div class="card-thumb"><img src="39_ribbon_ai.svg" alt="AI Ribbon" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">12</span>AI Ribbon</div><div class="card-desc">Generate (5) + Optimize (4) + Assistant (4) + Smart (5) + Settings (1)</div></div></a><a class="card" href="40_ribbon_tools.svg" target="_blank"><div class="card-thumb"><img src="40_ribbon_tools.svg" alt="Tools Ribbon" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">13</span>Tools Ribbon</div><div class="card-desc">Application (5) + Macros (2) + Performance (2) + Theme (1) + UI Layout (4) + Plugins (5) + Industrial (5)</div></div></a><a class="card" href="41_ribbon_view.svg" target="_blank"><div class="card-thumb"><img src="41_ribbon_view.svg" alt="View Ribbon" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">14</span>View Ribbon</div><div class="card-desc">Orient (8) + Zoom (4) + Display Style (3) + Options (5) + Camera (4) + Layouts (5)</div></div></a></div></section><section class="section"><div class="section-header"><span class="section-icon">👁️</span><h2>View Modes</h2></div><p class="section-desc">Режимы отображения 3D-вьюпорта. Помогают оценить варианты визуализации модели.</p><div class="grid"><a class="card" href="42_mode_wireframe.svg" target="_blank"><div class="card-thumb"><img src="42_mode_wireframe.svg" alt="Wireframe" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">01</span>Wireframe</div><div class="card-desc">Только рёбра, без заливки. Скрытые линии — пунктиром.</div></div></a><a class="card" href="43_mode_shaded.svg" target="_blank"><div class="card-thumb"><img src="43_mode_shaded.svg" alt="Shaded" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">02</span>Shaded</div><div class="card-desc">PBR-материал, без overlay рёбер. Для презентаций.</div></div></a><a class="card" href="44_mode_shaded_edges.svg" target="_blank"><div class="card-thumb"><img src="44_mode_shaded_edges.svg" alt="Shaded + Edges" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">03</span>Shaded + Edges</div><div class="card-desc">Заливка + чёрные рёбра. По умолчанию для моделирования.</div></div></a><a class="card" href="45_mode_direct_modeling.svg" target="_blank"><div class="card-thumb"><img src="45_mode_direct_modeling.svg" alt="Direct Modeling" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">04</span>Direct Modeling</div><div class="card-desc">Гизмо Move/Rotate на выбранной грани + панель параметров</div></div></a><a class="card" href="46_mode_drawing.svg" target="_blank"><div class="card-thumb"><img src="46_mode_drawing.svg" alt="Drawing Mode" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">05</span>Drawing Mode</div><div class="card-desc">2D лист с видами (Top/Front/Right/Iso), размерами, BOM-балунами, title block</div></div></a></div></section><section class="section"><div class="section-header"><span class="section-icon">🖱️</span><h2>Context Menus & Marking Menu</h2></div><p class="section-desc">Контекстные меню по правому клику и радиальное marking menu по пробелу. Fusion 360-style workflow.</p><div class="grid"><a class="card" href="47_context_menu_viewport.svg" target="_blank"><div class="card-thumb"><img src="47_context_menu_viewport.svg" alt="Viewport Right-Click" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">01</span>Viewport Right-Click</div><div class="card-desc">Repeat + Recent Commands + View submenu + Display Style submenu + Select/Deselect + Marking Menu + Properties</div></div></a><a class="card" href="48_context_menu_browser.svg" target="_blank"><div class="card-thumb"><img src="48_context_menu_browser.svg" alt="Browser Tree Right-Click" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">02</span>Browser Tree Right-Click</div><div class="card-desc">Edit/Rename/Duplicate/Delete + Isolate/Hide + Material (6) + Appearance + Export (4) + Properties</div></div></a><a class="card" href="49_context_menu_sketch.svg" target="_blank"><div class="card-thumb"><img src="49_context_menu_sketch.svg" alt="Sketch Entity Right-Click" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">03</span>Sketch Entity Right-Click</div><div class="card-desc">Constraints (8) + Dimensions (3) + Modify (6) + Construction + Properties + Delete</div></div></a><a class="card" href="50_marking_menu.svg" target="_blank"><div class="card-thumb"><img src="50_marking_menu.svg" alt="Marking Menu (Space)" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">04</span>Marking Menu (Space)</div><div class="card-desc">Радиальное pie-меню с 8 направлениями + центр ESC. Line/Rect/Circle/Arc/Dimension/Fillet/Trim/Delete</div></div></a></div></section><section class="section"><div class="section-header"><span class="section-icon">🪟</span><h2>Dialog Windows</h2></div><p class="section-desc">Модальные диалоговые окна. Показывают, какие параметры и опции доступны пользователю.</p><div class="grid"><a class="card" href="51_dialog_options.svg" target="_blank"><div class="card-thumb"><img src="51_dialog_options.svg" alt="Options…" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">01</span>Options…</div><div class="card-desc">10 разделов: General/Display/File Locations/Hotkeys/Theme/Advanced/Plugins/AI/Performance/Cloud Sync</div></div></a><a class="card" href="52_dialog_customize.svg" target="_blank"><div class="card-thumb"><img src="52_dialog_customize.svg" alt="Customize…" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">02</span>Customize…</div><div class="card-desc">5 вкладок: Commands/Keyboard/Toolbars/Ribbon/Marking Menu/QAT. Таблица шорткатов с конфликтом-чекером</div></div></a><a class="card" href="53_dialog_primitives.svg" target="_blank"><div class="card-thumb"><img src="53_dialog_primitives.svg" alt="Insert → Box" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">03</span>Insert → Box</div><div class="card-desc">Dimensions (W×D×H) + Position (X,Y,Z) + Operation (New/Join/Cut/Intersect) + Live Preview</div></div></a><a class="card" href="54_dialog_shortcut_editor.svg" target="_blank"><div class="card-thumb"><img src="54_dialog_shortcut_editor.svg" alt="Shortcut Editor" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">04</span>Shortcut Editor</div><div class="card-desc">Фильтр + таблица всех команд (245) + захват нового шортката + авто-определение конфликтов</div></div></a><a class="card" href="55_dialog_command_search.svg" target="_blank"><div class="card-thumb"><img src="55_dialog_command_search.svg" alt="Command Search (Ctrl+Shift+P)" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">05</span>Command Search (Ctrl+Shift+P)</div><div class="card-desc">VS Code-style палитра с fuzzy search по всем командам. Показывает путь и шорткат.</div></div></a><a class="card" href="56_dialog_plugin_manager.svg" target="_blank"><div class="card-thumb"><img src="56_dialog_plugin_manager.svg" alt="Plugins Manager" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">06</span>Plugins Manager</div><div class="card-desc">8 плагинов с включением/выключением, update-бейджами, настройками, удалением. Tabs: Installed/Marketplace/Settings</div></div></a><a class="card" href="57_dialog_about.svg" target="_blank"><div class="card-thumb"><img src="57_dialog_about.svg" alt="About BRepCAD" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">07</span>About BRepCAD</div><div class="card-desc">Версия, build hash, платформа, компилятор, лицензия, ссылки</div></div></a><a class="card" href="58_dialog_update.svg" target="_blank"><div class="card-thumb"><img src="58_dialog_update.svg" alt="Check for Updates" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">08</span>Check for Updates</div><div class="card-desc">Сравнение версий, размер загрузки, changelog с галочками новых фич</div></div></a><a class="card" href="59_dialog_material_editor.svg" target="_blank"><div class="card-thumb"><img src="59_dialog_material_editor.svg" alt="Material Editor" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">09</span>Material Editor</div><div class="card-desc">Library (7 категорий) + Properties (10) + Appearance + Thermal + Favorites</div></div></a><a class="card" href="60_dialog_constraint_diagnostics.svg" target="_blank"><div class="card-thumb"><img src="60_dialog_constraint_diagnostics.svg" alt="Constraint Diagnostics" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">10</span>Constraint Diagnostics</div><div class="card-desc">Таблица 12 констрейнтов со статусом OK/Warning/Error + DOF-анализ + автофикс</div></div></a><a class="card" href="61_dialog_mold_catalog.svg" target="_blank"><div class="card-thumb"><img src="61_dialog_mold_catalog.svg" alt="Mold Base Catalog" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">11</span>Mold Base Catalog</div><div class="card-desc">Фильтры (Vendor/Series/Size/Material/Stroke) + сетка карточек с превью</div></div></a><a class="card" href="62_dialog_render_settings.svg" target="_blank"><div class="card-thumb"><img src="62_dialog_render_settings.svg" alt="Render Settings" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">12</span>Render Settings</div><div class="card-desc">Output + Quality (samples slider, denoise) + Environment (HDRI) + 4 формата</div></div></a></div></section><section class="section"><div class="section-header"><span class="section-icon">📊</span><h2>Individual Panels (Detailed)</h2></div><p class="section-desc">Детальные виды каждой док-панели для оценки состава и UX.</p><div class="grid"><a class="card" href="63_panel_browser.svg" target="_blank"><div class="card-thumb"><img src="63_panel_browser.svg" alt="Browser (Model Tree)" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">01</span>Browser (Model Tree)</div><div class="card-desc">36 nodes, 3 вкладки (Tree/Layers/Selection), фильтр, дерево до 2 уровней (Bodies/Sketches/Planes/Mesh/Simulation/History)</div></div></a><a class="card" href="64_panel_properties.svg" target="_blank"><div class="card-thumb"><img src="64_panel_properties.svg" alt="Properties" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">02</span>Properties</div><div class="card-desc">4 вкладки (Props/Constraints/Dim/Material), 5 групп свойств (Identity/Geometry/Appearance/Display/References)</div></div></a><a class="card" href="65_panel_timeline.svg" target="_blank"><div class="card-thumb"><img src="65_panel_timeline.svg" alt="Timeline (Feature History)" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">03</span>Timeline (Feature History)</div><div class="card-desc">12 фич в линейном виде + rollback маркер + suppressed-флаг + branch indicator + 3 вкладки</div></div></a><a class="card" href="66_panel_measure.svg" target="_blank"><div class="card-thumb"><img src="66_panel_measure.svg" alt="Measure" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">04</span>Measure</div><div class="card-desc">6 типов измерений + результат (Distance/ΔX/ΔY/ΔZ) + recent 8 измерений + Copy/Export CSV</div></div></a><a class="card" href="67_panel_section.svg" target="_blank"><div class="card-thumb"><img src="67_panel_section.svg" alt="Section Cut" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">05</span>Section Cut</div><div class="card-desc">3 типа секущих плоскостей + cap + hatch (ANSI31) + live update + export SVG</div></div></a><a class="card" href="68_panel_ai_chat.svg" target="_blank"><div class="card-thumb"><img src="68_panel_ai_chat.svg" alt="AI Assistant Chat" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">06</span>AI Assistant Chat</div><div class="card-desc">4 режима (Chat/DRC/Suggest/Cost) + история сообщений + action buttons + suggestion chips</div></div></a></div></section><section class="section"><div class="section-header"><span class="section-icon">➕</span><h2>Missing UI (Gap Coverage) — Batch 1</h2></div><p class="section-desc">Макеты, добавленные для закрытия пробелов из первоначального чек-листа (✗ → ✓).</p><div class="grid"><a class="card" href="69_panel_scripting_console.svg" target="_blank"><div class="card-thumb"><img src="69_panel_scripting_console.svg" alt="Scripting Console (full panel)" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">01</span>Scripting Console (full panel)</div><div class="card-desc">Multi-tab: Console/Editor/Output/Variables. PascalScript+Python+Lua REPL, autocomplete, profiling.</div></div></a><a class="card" href="70_dialog_macro_recorder.svg" target="_blank"><div class="card-thumb"><img src="70_dialog_macro_recorder.svg" alt="Macro Recorder" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">02</span>Macro Recorder</div><div class="card-desc">Records all user actions (mouse/keyboard/commands) into editable PascalScript. Filter events, conflict-check.</div></div></a><a class="card" href="71_panel_performance_monitor.svg" target="_blank"><div class="card-thumb"><img src="71_panel_performance_monitor.svg" alt="Performance Monitor" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">03</span>Performance Monitor</div><div class="card-desc">Real-time FPS, memory, draw calls, triangle count + FPS/memory graphs + operation timings + alerts.</div></div></a><a class="card" href="72_dialog_tutorial_browser.svg" target="_blank"><div class="card-thumb"><img src="72_dialog_tutorial_browser.svg" alt="Tutorial Browser" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">04</span>Tutorial Browser</div><div class="card-desc">16 categories sidebar + 12+ tutorial cards with difficulty/duration/progress + preview pane.</div></div></a><a class="card" href="73_panel_cloud_collaboration.svg" target="_blank"><div class="card-thumb"><img src="73_panel_cloud_collaboration.svg" alt="Cloud Sync & Collaboration" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">05</span>Cloud Sync & Collaboration</div><div class="card-desc">Active users (5 online), live cursors, recent changes feed, branch info, share/commit/merge buttons.</div></div></a><a class="card" href="74_dialog_print_plot.svg" target="_blank"><div class="card-thumb"><img src="74_dialog_print_plot.svg" alt="Print / Plot" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">06</span>Print / Plot</div><div class="card-desc">Printer selection, paper size, orientation, scale, plot area, line weights, color/BW, live preview.</div></div></a><a class="card" href="75_dialog_license.svg" target="_blank"><div class="card-thumb"><img src="75_dialog_license.svg" alt="License / Activation" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">07</span>License / Activation</div><div class="card-desc">License status, ID, expiry, seats (42/50 used), customer info, support & renewal contacts.</div></div></a><a class="card" href="76_dialog_crash_recovery.svg" target="_blank"><div class="card-thumb"><img src="76_dialog_crash_recovery.svg" alt="Crash Recovery" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">08</span>Crash Recovery</div><div class="card-desc">3 recovered docs with work-time at risk, auto-save count, preview of selected, restore/discard.</div></div></a><a class="card" href="77_dialog_onboarding.svg" target="_blank"><div class="card-thumb"><img src="77_dialog_onboarding.svg" alt="First-Run Onboarding Wizard" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">09</span>First-Run Onboarding Wizard</div><div class="card-desc">4-step wizard (Welcome/Profile/Workspace/Shortcuts). Profile form: name, email, industry, units, standard.</div></div></a><a class="card" href="78_workspace_surface_modeling.svg" target="_blank"><div class="card-thumb"><img src="78_workspace_surface_modeling.svg" alt="Surface Modeling Workspace (Loft/Sweep)" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">10</span>Surface Modeling Workspace (Loft/Sweep)</div><div class="card-desc">Multi-profile loft with guide curves + sweep along path. Profile list, continuity G0/G1/G2, live preview.</div></div></a><a class="card" href="79_view_compare_models.svg" target="_blank"><div class="card-thumb"><img src="79_view_compare_models.svg" alt="Compare Models (side-by-side)" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">11</span>Compare Models (side-by-side)</div><div class="card-desc">Two models side-by-side with deviation stats (volume/area/mass/faces/edges) + histogram.</div></div></a><a class="card" href="80_workflow_point_cloud.svg" target="_blank"><div class="card-thumb"><img src="80_workflow_point_cloud.svg" alt="Point Cloud Import & Processing" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">12</span>Point Cloud Import & Processing</div><div class="card-desc">Import .ply/.xyz/.las, decimate, segment (RANSAC), fit primitives, convert to BRep, 12.4M points demo.</div></div></a><a class="card" href="81_workflow_reverse_engineering.svg" target="_blank"><div class="card-thumb"><img src="81_workflow_reverse_engineering.svg" alt="Reverse Engineering Workflow" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">13</span>Reverse Engineering Workflow</div><div class="card-desc">6-step workflow: Import Mesh → Segment → Feature Recognition → Parametric Rebuild → Edit & Compare → Export.</div></div></a></div></section><section class="section"><div class="section-header"><span class="section-icon">➕</span><h2>Missing UI (Gap Coverage) — Batch 2</h2></div><p class="section-desc">Продолжение макетов для закрытия пробелов.</p><div class="grid"><a class="card" href="82_wizard_cam_stock.svg" target="_blank"><div class="card-thumb"><img src="82_wizard_cam_stock.svg" alt="CAM Stock Setup Wizard" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">01</span>CAM Stock Setup Wizard</div><div class="card-desc">5-step wizard (Setup/Stock/Fixtures/Tools/Operations). Stock types: BBox/Offset/Custom/Mesh/Cylinder. 3D preview.</div></div></a><a class="card" href="83_dialog_tool_library.svg" target="_blank"><div class="card-thumb"><img src="83_dialog_tool_library.svg" alt="Tool Library Editor" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">02</span>Tool Library Editor</div><div class="card-desc">24 tools across 7 types (End/Ball/Drill/Face/Chamfer/Special). 3D tool preview + cutting parameters.</div></div></a><a class="card" href="84_dialog_nc_code_viewer.svg" target="_blank"><div class="card-thumb"><img src="84_dialog_nc_code_viewer.svg" alt="NC Code Viewer (GCode)" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">03</span>NC Code Viewer (GCode)</div><div class="card-desc">Syntax-highlighted G-code + 3D toolpath simulation (rapid=red, feed=green, drill=orange) + cycle time.</div></div></a><a class="card" href="85_panel_fea_mesh_control.svg" target="_blank"><div class="card-thumb"><img src="85_panel_fea_mesh_control.svg" alt="FEA Mesh Control" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">04</span>FEA Mesh Control</div><div class="card-desc">Element type (Tet4/Tet10/Hex8/Hex20), global+local mesh size, refinement options, quality metrics.</div></div></a><a class="card" href="86_dialog_modal_plotter.svg" target="_blank"><div class="card-thumb"><img src="86_dialog_modal_plotter.svg" alt="Modal/Frequency Result Plotter" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">05</span>Modal/Frequency Result Plotter</div><div class="card-desc">FRF plot with 8 natural frequencies marked + mode shapes table (freq/period/damping/mass/stiffness) + animation.</div></div></a><a class="card" href="87_dialog_title_block_editor.svg" target="_blank"><div class="card-thumb"><img src="87_dialog_title_block_editor.svg" alt="Title Block Editor" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">06</span>Title Block Editor</div><div class="card-desc">15 standard fields + 3 custom fields, editable title block preview, logo placement, multi-sheet support.</div></div></a><a class="card" href="88_dialog_revision_table.svg" target="_blank"><div class="card-thumb"><img src="88_dialog_revision_table.svg" alt="Revision Table Editor" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">07</span>Revision Table Editor</div><div class="card-desc">5 revisions (A-E) with multi-line descriptions, author/checked/approved workflow, pending approval indicator.</div></div></a><a class="card" href="89_dialog_layer_manager.svg" target="_blank"><div class="card-thumb"><img src="89_dialog_layer_manager.svg" alt="Layer Manager" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">08</span>Layer Manager</div><div class="card-desc">13 layers with visibility/lock/color/linetype/lineweight/print/count/description. Drag-to-reorder.</div></div></a><a class="card" href="90_dialog_bom_editor.svg" target="_blank"><div class="card-thumb"><img src="90_dialog_bom_editor.svg" alt="BOM Editor" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">09</span>BOM Editor</div><div class="card-desc">15 BOM items with part numbers, materials, mass, unit/total cost, supplier, stock status. Total: €511.92.</div></div></a><a class="card" href="91_dialog_param_search_replace.svg" target="_blank"><div class="card-thumb"><img src="91_dialog_param_search_replace.svg" alt="Search/Replace in Parameters" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">10</span>Search/Replace in Parameters</div><div class="card-desc">Find/replace parameter names with formula auto-update. 5 matches shown, 3 selected for replacement.</div></div></a></div></section><section class="section"><div class="section-header"><span class="section-icon">➕</span><h2>Missing UI (Gap Coverage) — Batch 3</h2></div><p class="section-desc">Финальная партия макетов: Animation Timeline, Walkthrough, VR/AR.</p><div class="grid"><a class="card" href="92_panel_animation_timeline.svg" target="_blank"><div class="card-thumb"><img src="92_panel_animation_timeline.svg" alt="Animation Timeline (Motion Study)" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">01</span>Animation Timeline (Motion Study)</div><div class="card-desc">8 tracks (Camera/Explode/4 Bodies/Material/Lighting), 120 frames, keyframe diamonds, playback controls.</div></div></a><a class="card" href="93_mode_walkthrough.svg" target="_blank"><div class="card-thumb"><img src="93_mode_walkthrough.svg" alt="Walkthrough / Flythrough" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">02</span>Walkthrough / Flythrough</div><div class="card-desc">First-person nav: WASD movement, mouse look, mini-map, speed control, bookmarks, collision/gravity.</div></div></a><a class="card" href="94_mode_vr_ar.svg" target="_blank"><div class="card-thumb"><img src="94_mode_vr_ar.svg" alt="VR / AR Preview Mode" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">03</span>VR / AR Preview Mode</div><div class="card-desc">Stereo rendering (left/right eye), VR headset + controller status, hand tracking, world scale 1:1.</div></div></a></div></section><section class="section"><div class="section-header"><span class="section-icon">🔧</span><h2>P3 Implementation Updates</h2></div><p class="section-desc">Макеты, добавленные после реализации P3-кода (Surface Modeling workspace + Animation Timeline detailed view).</p><div class="grid"><a class="card" href="95_ribbon_surface.svg" target="_blank"><div class="card-thumb"><img src="95_ribbon_surface.svg" alt="Ribbon Tab: Surface (NEW)" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">01</span>Ribbon Tab: Surface (NEW)</div><div class="card-desc">P3: новая вкладка ленты 'Surface' с 5 командами (Loft/Sweep/Boundary/Fill/Network). Группы: Create / Profile / Guides / Continuity (G0/G1/G2) / Operations. Появляется автоматически через TRibbon.Build из категории 'Surface'.</div></div></a><a class="card" href="96_panel_animation_timeline.svg" target="_blank"><div class="card-thumb"><img src="96_panel_animation_timeline.svg" alt="Animation Timeline — detailed (NEW)" loading="lazy"/></div><div class="card-body"><div class="card-title"><span class="card-num">02</span>Animation Timeline — detailed (NEW)</div><div class="card-desc">P3: детальный вид панели Animation Timeline. 8 треков с цветными keyframe-сегментами, 120 frames, playback controls (Play/Pause/Step/Rec), time display, speed/loop/ping-pong, keyframe + easing buttons, yellow playhead at frame 56.</div></div></a></div></section>
+<section class="checklist">
+<h2>📋 Checklist покрытия UI</h2>
+<p style="color:#a8a8a8; font-size:13px; margin-bottom:16px;">
+Что уже есть в макетах (✓), что требует доработки (⚠), и чего пока не хватает (✗).
+</p>
+<div class="checklist-grid">
+<div class="check-item"><span class="check-icon check-yes">✓</span>Главное окно с лентой, вьюпортом, доками, статус-баром</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Все 21 верхних меню с раскрытыми подменю</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Все 14 вкладок ленты (File, Home, Sketch, Insert, Modify, SM, Assembly, CAM, Drawing, Simulation, Inspect, AI, Tools, View)</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>3 режима отображения (Wireframe, Shaded, Shaded+Edges)</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Режим прямого моделирования с гизмо</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Режим чертежа (2D sheet с видами, размерами, BOM)</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Контекстное меню вьюпорта</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Контекстное меню дерева Browser</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Контекстное меню сущности эскиза</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Marking Menu (радиальное pie)</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Options диалог (10 разделов настроек)</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Customize диалог (5 вкладок)</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Insert Primitive диалог (Box и др.)</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Shortcut Editor с конфликт-чекером</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Command Search палитра (Ctrl+Shift+P)</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Plugin Manager (8 плагинов)</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>About диалог</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Update диалог с changelog</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Material Editor (Library + Properties)</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Constraint Diagnostics с DOF</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Mold Base Catalog (Misumi/HASCO/DME/LKM)</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Render Settings (PBR + HDRI)</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Browser panel (Tree/Layers/Selection)</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Properties panel (4 вкладки)</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Timeline panel с rollback + branches</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Measure panel</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Section Cut panel</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>AI Chat panel</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Sketch Mode (2D)</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Visual Programming editor</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>FEA Analysis panel</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Sheet Metal + CAM composite</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Drawing + Assembly composite</div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Scripting Console (полноценная панель, 4 вкладки, autocomplete) — <strong>added</strong></div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Macro Recorder dialog (с фильтром событий, генерацией кода) — <strong>added</strong></div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Performance Monitor panel (FPS/memory графики, тайминги, алерты) — <strong>added</strong></div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Help / Tutorial Browser dialog (16 категорий, 12+ туториалов) — <strong>added</strong></div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Cloud Sync / Collaboration panel (5 онлайн, live cursors, ветки) — <strong>added</strong></div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Print / Plot dialog (paper, scale, line weights, preview) — <strong>added</strong></div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>License / Activation dialog (статус, seats, обновление) — <strong>added</strong></div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Crash Recovery dialog (3 восстановленных документа) — <strong>added</strong></div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>First-Run / Onboarding wizard (4 шага: Welcome/Profile/Workspace/Shortcuts) — <strong>added</strong></div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Surface modeling workspace (Loft/Sweep с G0/G1/G2 непрерывностью) — <strong>added</strong></div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Compare Models side-by-side (с гистограммой отклонений) — <strong>added</strong></div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Point Cloud import/processing UI (decimate, RANSAC segment, fit primitives) — <strong>added</strong></div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Reverse Engineering workflow (6-step wizard с deviation heatmap) — <strong>added</strong></div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>CAM Stock Setup wizard (5 шагов, BBox/Offset/Custom/Mesh/Cylinder) — <strong>added</strong></div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Tool Library Editor dialog (24 инструмента, 7 типов, 3D-превью) — <strong>added</strong></div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>NC Code Viewer (GCode с подсветкой + 3D-симуляция toolpath) — <strong>added</strong></div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>FEA Mesh Control panel (Tet4/10, Hex8/20, local controls, quality) — <strong>added</strong></div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Modal/Frequency result plotter (FRF + 8 мод + анимация) — <strong>added</strong></div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Drawing Title Block Editor (15 стандартных + 3 кастом-полей) — <strong>added</strong></div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Revision Table Editor (5 ревизий, multi-line desc, approval workflow) — <strong>added</strong></div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Layer Manager dialog (13 слоёв с visibility/lock/linetype/lineweight) — <strong>added</strong></div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Property Set / BOM Editor (15 items, cost, supplier, stock) — <strong>added</strong></div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Search/Replace in parameters (с auto-update формул) — <strong>added</strong></div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Animation Timeline (Motion Study: 8 треков, 120 frames, keyframes) — <strong>added</strong></div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>Walkthrough / Flythrough controls (WASD, mini-map, bookmarks) — <strong>added</strong></div>
+<div class="check-item"><span class="check-icon check-yes">✓</span>VR / AR preview mode (stereo, headset+controllers, hand tracking) — <strong>added</strong></div>
+</div>
+<div class="gap-note">
+<strong>Резюме покрытия:</strong> Все 26 пунктов из первоначального gap-чеклиста закрыты.
+Финальное покрытие: <strong>96 макетов</strong>, 10 категорий, все основные рабочие процессы
+CAD-приложения отражены: моделирование, эскиз, листовой металл, сборка, CAM, чертёж,
+симуляция (FEA), AI, surface modeling, RE (reverse engineering), point cloud,
+VR/AR, walkthrough, scripting, collaboration, и все каскадные меню/ленты/диалоги.
+</div>
+</section>
+
+<footer>
+BRepCAD UI Mockups Gallery · Generated 2024-12-17 · 96 SVG mockups ·
+Scripts: <code>scripts/ui_mockups/{svgkit,gen_menus,gen_ribbon_modes_context,gen_dialogs_panels,gen_missing,gen_missing2,gen_missing3,gen_index}.py</code>
+</footer>
+</body>
+</html>

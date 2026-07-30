@@ -1,0 +1,205 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1200" height="800" viewBox="0 0 1200 800">
+<title>Dialog: Tutorial Browser (Help → Tutorials → Open Tutorial…)</title>
+<rect x="0" y="0" width="1200" height="800" fill="#1f1f1f"/>
+<rect x="0" y="0" width="1200" height="36" fill="#262626" stroke="#1a1a1a" stroke-width="1"/>
+<text x="14" y="22" fill="#e6e6e6" font-size="14" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Dialog: Tutorial Browser (Help → Tutorials → Open Tutorial…)</text>
+<text x="14" y="32" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Categories sidebar + card grid + preview pane. Categories: Getting Started / Modeling / Sketching / Sheet Metal / Assembly / CAM / Drawing / Simulation / AI / Advanced</text>
+<rect x="0" y="36" width="1200" height="764" fill="#000000" opacity="0.45"/>
+<rect x="0" y="0" width="1200" height="800" fill="#000000" opacity="0.55"/>
+<rect x="63" y="74" width="1080" height="660" rx="6" fill="#000000" opacity="0.6"/>
+<rect x="60" y="70" width="1080" height="660" rx="6" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="60" y="70" width="1080" height="32" rx="6" fill="#323232" stroke="#1a1a1a" stroke-width="1"/>
+<rect x="60" y="85" width="1080" height="17" fill="#323232"/>
+<text x="74" y="90.68" fill="#e6e6e6" font-size="13" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Tutorial Browser</text>
+<rect x="1112" y="74" width="22" height="22" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<line x1="1117" y1="79" x2="1127" y2="89" stroke="#a8a8a8" stroke-width="1.2"/>
+<line x1="1127" y1="79" x2="1117" y2="89" stroke="#a8a8a8" stroke-width="1.2"/>
+<rect x="61" y="102" width="1078" height="584" fill="#2b2b2b"/>
+<rect x="61" y="686" width="1078" height="43" fill="#323232"/>
+<line x1="60" y1="686" x2="1140" y2="686" stroke="#1a1a1a" stroke-width="1"/>
+<rect x="1046" y="694" width="72" height="28" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<text x="1082.0" y="712.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Close</text>
+<rect x="902" y="694" width="136" height="28" rx="3" fill="#0a84ff" stroke="#0a84ff" stroke-width="1"/>
+<text x="970.0" y="712.32" fill="#ffffff" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="middle">Start Tutorial</text>
+<rect x="750" y="694" width="144" height="28" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<text x="822.0" y="712.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Open in Browser</text>
+<rect x="72" y="110" width="280" height="24" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="78" y="125.96000000000001" fill="#6e6e6e" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Search tutorials…</text>
+<rect x="360" y="110" width="100" height="24" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<path d="M368 117.0 L380 117.0 L374.0 123.6 L374.0 127.0 L372.0 127.0 L372.0 123.6 Z" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<text x="386" y="125.96000000000001" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Filter</text>
+<polyline points="452.8,120.4 456.0,125.2 459.2,120.4" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<rect x="464" y="110" width="100" height="24" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<text x="514.0" y="125.96000000000001" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Sort: Newest</text>
+<polyline points="556.8,120.4 560.0,125.2 563.2,120.4" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="580" y="126" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Level:</text>
+<rect x="620" y="112" width="90" height="22" rx="3" fill="#2b2b2b" stroke="#0a84ff" stroke-width="1"/>
+<text x="665" y="126.6" fill="#0a84ff" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Beginner</text>
+<rect x="720" y="112" width="90" height="22" rx="3" fill="#2b2b2b" stroke="#a8a8a8" stroke-width="1"/>
+<text x="765" y="126.6" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Intermediate</text>
+<rect x="820" y="112" width="90" height="22" rx="3" fill="#2b2b2b" stroke="#a8a8a8" stroke-width="1"/>
+<text x="865" y="126.6" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Advanced</text>
+<rect x="61" y="146" width="220" height="539" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="64" y="156" width="214" height="22" fill="#094771"/>
+<polyline points="72.9,164.5 77.1,168.0 72.9,171.5" fill="none" stroke="#ffffff" stroke-width="1.2"/>
+<text x="88" y="172" fill="#ffffff" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Getting Started</text>
+<text x="268" y="172" fill="#ffffff" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">5</text>
+<polyline points="72.9,188.5 77.1,192.0 72.9,195.5" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="88" y="196" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Modeling</text>
+<text x="268" y="196" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">12</text>
+<polyline points="72.9,212.5 77.1,216.0 72.9,219.5" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="88" y="220" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Sketching</text>
+<text x="268" y="220" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">8</text>
+<polyline points="72.9,236.5 77.1,240.0 72.9,243.5" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="88" y="244" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Sheet Metal</text>
+<text x="268" y="244" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">6</text>
+<polyline points="72.9,260.5 77.1,264.0 72.9,267.5" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="88" y="268" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Assembly</text>
+<text x="268" y="268" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">7</text>
+<polyline points="72.9,284.5 77.1,288.0 72.9,291.5" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="88" y="292" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">CAM</text>
+<text x="268" y="292" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">9</text>
+<polyline points="72.9,308.5 77.1,312.0 72.9,315.5" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="88" y="316" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Drawing</text>
+<text x="268" y="316" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">5</text>
+<polyline points="72.9,332.5 77.1,336.0 72.9,339.5" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="88" y="340" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Simulation / FEA</text>
+<text x="268" y="340" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">6</text>
+<polyline points="72.9,356.5 77.1,360.0 72.9,363.5" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="88" y="364" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">GD&amp;T</text>
+<text x="268" y="364" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">4</text>
+<polyline points="72.9,380.5 77.1,384.0 72.9,387.5" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="88" y="388" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">AI Assistant</text>
+<text x="268" y="388" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">5</text>
+<polyline points="72.9,404.5 77.1,408.0 72.9,411.5" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="88" y="412" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Mold Design</text>
+<text x="268" y="412" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">4</text>
+<polyline points="72.9,428.5 77.1,432.0 72.9,435.5" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="88" y="436" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Reverse Engineering</text>
+<text x="268" y="436" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">3</text>
+<polyline points="72.9,452.5 77.1,456.0 72.9,459.5" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="88" y="460" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Plugins</text>
+<text x="268" y="460" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">4</text>
+<polyline points="72.9,476.5 77.1,480.0 72.9,483.5" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="88" y="484" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Scripting</text>
+<text x="268" y="484" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">8</text>
+<polyline points="72.9,500.5 77.1,504.0 72.9,507.5" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="88" y="508" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Keyboard Shortcuts</text>
+<text x="268" y="508" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">2</text>
+<polyline points="72.9,524.5 77.1,528.0 72.9,531.5" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="88" y="532" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Industrial Examples</text>
+<text x="268" y="532" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">5</text>
+<rect x="296" y="158" width="199" height="180" rx="3" fill="#2b2b2b" stroke="#0a84ff" stroke-width="2"/>
+<rect x="304" y="166" width="183" height="80" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="382.5" y="191" width="26" height="26" fill="none" stroke="#0a84ff" stroke-width="2.2857142857142856"/>
+<text x="395.5" y="258" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="middle">Your First Part: Bracket</text>
+<rect x="304" y="266" width="68" height="16" rx="2" fill="#5ac878"/>
+<text x="338.0" y="278" fill="#ffffff" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="middle">Beginner</text>
+<text x="487" y="278" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">12 min</text>
+<text x="395.5" y="306" fill="#0a84ff" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="middle">▶ Start</text>
+<rect x="304" y="316" width="183" height="4" rx="2" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="304" y="316" width="54.9" height="4" rx="2" fill="#0a84ff"/>
+<text x="395.5" y="330" fill="#a8a8a8" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">30% complete</text>
+<rect x="505" y="158" width="199" height="180" rx="3" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="513" y="166" width="183" height="80" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<path d="M591.5 193 L604.5 190 L617.5 193 L617.5 215 L604.5 218 L591.5 215 Z" fill="none" stroke="#e6e6e6" stroke-width="2.2857142857142856" opacity="1.0"/>
+<line x1="591.5" y1="193" x2="604.5" y2="196" stroke="#e6e6e6" stroke-width="2.2857142857142856"/>
+<line x1="604.5" y1="190" x2="604.5" y2="196" stroke="#e6e6e6" stroke-width="2.2857142857142856"/>
+<line x1="617.5" y1="193" x2="604.5" y2="196" stroke="#e6e6e6" stroke-width="2.2857142857142856"/>
+<text x="604.5" y="258" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="middle">Extrude and Fillet</text>
+<rect x="513" y="266" width="68" height="16" rx="2" fill="#5ac878"/>
+<text x="547.0" y="278" fill="#ffffff" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="middle">Beginner</text>
+<text x="696" y="278" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">8 min</text>
+<text x="604.5" y="316" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Not started</text>
+<rect x="714" y="158" width="199" height="180" rx="3" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="722" y="166" width="183" height="80" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="800.5" y="193" width="5" height="5" fill="none" stroke="#e6e6e6" stroke-width="2.2857142857142856"/>
+<rect x="813.5" y="193" width="5" height="5" fill="none" stroke="#e6e6e6" stroke-width="2.2857142857142856"/>
+<rect x="826.5" y="193" width="5" height="5" fill="none" stroke="#e6e6e6" stroke-width="2.2857142857142856"/>
+<text x="813.5" y="258" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="middle">Holes and Patterns</text>
+<rect x="722" y="266" width="68" height="16" rx="2" fill="#5ac878"/>
+<text x="756.0" y="278" fill="#ffffff" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="middle">Beginner</text>
+<text x="905" y="278" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">15 min</text>
+<text x="813.5" y="316" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Not started</text>
+<rect x="923" y="158" width="199" height="180" rx="3" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="931" y="166" width="183" height="80" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<circle cx="1019.5" cy="202.0" r="5" fill="rgba(230,230,230,0.3)" opacity="1.0" stroke="#e6e6e6" stroke-width="2.2857142857142856"/>
+<circle cx="1025.5" cy="202.0" r="5" fill="rgba(230,230,230,0.3)" opacity="1.0" stroke="#e6e6e6" stroke-width="2.2857142857142856"/>
+<text x="1022.5" y="258" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="middle">Boolean Operations</text>
+<rect x="931" y="266" width="68" height="16" rx="2" fill="#5ac878"/>
+<text x="965.0" y="278" fill="#ffffff" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="middle">Beginner</text>
+<text x="1114" y="278" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">10 min</text>
+<text x="1022.5" y="316" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Not started</text>
+<rect x="296" y="348" width="199" height="180" rx="3" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="304" y="356" width="183" height="80" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<line x1="382.5" y1="407" x2="408.5" y2="381" stroke="#e6e6e6" stroke-width="2.2857142857142856"/>
+<text x="395.5" y="448" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="middle">Sketching: Lines &amp; Circles</text>
+<rect x="304" y="456" width="68" height="16" rx="2" fill="#5ac878"/>
+<text x="338.0" y="468" fill="#ffffff" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="middle">Beginner</text>
+<text x="487" y="468" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">18 min</text>
+<text x="395.5" y="506" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Not started</text>
+<rect x="505" y="348" width="199" height="180" rx="3" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="513" y="356" width="183" height="80" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<path d="M617.3 394.0 A12.8 12.8 0 1 0 591.7 393.0" fill="none" stroke="#e6e6e6" stroke-width="2.2857142857142856" opacity="1.0"/>
+<polygon points="591.7,391.0 591.7,395.0 588.7,393.0" fill="#e6e6e6" opacity="1.0"/>
+<text x="604.5" y="448" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="middle">Revolve a Bottle</text>
+<rect x="513" y="456" width="96" height="16" rx="2" fill="#e2a73a"/>
+<text x="561.0" y="468" fill="#ffffff" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="middle">Intermediate</text>
+<text x="696" y="468" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">25 min</text>
+<text x="604.5" y="506" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Not started</text>
+<rect x="714" y="348" width="199" height="180" rx="3" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="722" y="356" width="183" height="80" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<path d="M813.5 381 L826.5 384 L813.5 387 L800.5 384 Z M813.5 386 L826.5 389 L813.5 392 L800.5 389 Z M813.5 391 L826.5 394 L813.5 397 L800.5 394 Z" fill="none" stroke="#e6e6e6" stroke-width="2.2857142857142856" opacity="1.0"/>
+<text x="813.5" y="448" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="middle">Lofted Surfaces</text>
+<rect x="722" y="456" width="96" height="16" rx="2" fill="#e2a73a"/>
+<text x="770.0" y="468" fill="#ffffff" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="middle">Intermediate</text>
+<text x="905" y="468" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">20 min</text>
+<text x="813.5" y="506" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Not started</text>
+<rect x="923" y="348" width="199" height="180" rx="3" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="931" y="356" width="183" height="80" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<line x1="1009.5" y1="407" x2="1035.5" y2="407" stroke="#e6e6e6" stroke-width="2.2857142857142856"/>
+<line x1="1009.5" y1="407" x2="1009.5" y2="381" stroke="#e6e6e6" stroke-width="2.2857142857142856"/>
+<line x1="1009.5" y1="381" x2="1035.5" y2="381" stroke="#e6e6e6" stroke-width="2.2857142857142856" stroke-dasharray="2 2"/>
+<text x="1022.5" y="448" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="middle">Sweep Along Path</text>
+<rect x="931" y="456" width="96" height="16" rx="2" fill="#e2a73a"/>
+<text x="979.0" y="468" fill="#ffffff" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="middle">Intermediate</text>
+<text x="1114" y="468" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">22 min</text>
+<text x="1022.5" y="506" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Not started</text>
+<rect x="296" y="538" width="199" height="180" rx="3" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="304" y="546" width="183" height="80" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<line x1="382.5" y1="584.0" x2="408.5" y2="584.0" stroke="#e6e6e6" stroke-width="2.2857142857142856"/>
+<path d="M382.5 584.0 Q389.1 568 398.7 580.8" fill="none" stroke="#e6e6e6" stroke-width="2.2857142857142856" opacity="1.0"/>
+<text x="395.5" y="638" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="middle">Sheet Metal Flange</text>
+<rect x="304" y="646" width="96" height="16" rx="2" fill="#e2a73a"/>
+<text x="352.0" y="658" fill="#ffffff" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="middle">Intermediate</text>
+<text x="487" y="658" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">15 min</text>
+<text x="395.5" y="696" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Not started</text>
+<rect x="505" y="538" width="199" height="180" rx="3" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="513" y="546" width="183" height="80" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<line x1="591.5" y1="597" x2="617.5" y2="597" stroke="#e6e6e6" stroke-width="2.2857142857142856"/>
+<path d="M591.5 597 L598.1 571 L610.9 571 L617.5 597" fill="none" stroke="#e6e6e6" stroke-width="2.2857142857142856" opacity="1.0"/>
+<text x="604.5" y="638" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="middle">Unfold &amp; Flat Pattern</text>
+<rect x="513" y="646" width="96" height="16" rx="2" fill="#e2a73a"/>
+<text x="561.0" y="658" fill="#ffffff" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="middle">Intermediate</text>
+<text x="696" y="658" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">12 min</text>
+<text x="604.5" y="696" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Not started</text>
+<rect x="714" y="538" width="199" height="180" rx="3" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="722" y="546" width="183" height="80" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<circle cx="813.5" cy="584.0" r="4" fill="none" opacity="1.0" stroke="#e6e6e6" stroke-width="2.2857142857142856"/>
+<circle cx="813.5" cy="584.0" r="1.2" fill="#e6e6e6" opacity="1.0"/>
+<text x="813.5" y="638" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="middle">Assembly Mates</text>
+<rect x="722" y="646" width="96" height="16" rx="2" fill="#e2a73a"/>
+<text x="770.0" y="658" fill="#ffffff" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="middle">Intermediate</text>
+<text x="905" y="658" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">30 min</text>
+<text x="813.5" y="696" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Not started</text>
+<rect x="923" y="538" width="199" height="180" rx="3" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="931" y="546" width="183" height="80" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<path d="M1009.5 570 L1028.9 570 L1035.5 573 L1035.5 598 L1009.5 598 Z" fill="none" stroke="#e6e6e6" stroke-width="2.2857142857142856" opacity="1.0"/>
+<polyline points="1028.9,570 1028.9,573 1035.5,573" fill="none" stroke="#e6e6e6" stroke-width="2.2857142857142856"/>
+<text x="1022.5" y="638" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="middle">Create BOM</text>
+<rect x="931" y="646" width="96" height="16" rx="2" fill="#e2a73a"/>
+<text x="979.0" y="658" fill="#ffffff" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="middle">Intermediate</text>
+<text x="1114" y="658" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">10 min</text>
+<text x="1022.5" y="696" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Not started</text>
+</svg>

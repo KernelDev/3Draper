@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="500" height="700" viewBox="0 0 500 700">
+<title>Panel: Measure</title>
+<rect x="0" y="0" width="500" height="700" fill="#1f1f1f"/>
+<rect x="0" y="0" width="500" height="36" fill="#262626" stroke="#1a1a1a" stroke-width="1"/>
+<text x="14" y="22" fill="#e6e6e6" font-size="14" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Panel: Measure</text>
+<text x="14" y="32" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Shows measurements between selected entities. Dist / Angle / Area / Volume / Mass / BBox / Center of Mass</text>
+<rect x="0" y="36" width="500" height="664" fill="#2b2b2b"/>
+<rect x="0" y="36" width="500" height="26" fill="#323232" stroke="#1a1a1a" stroke-width="1"/>
+<text x="8" y="52.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Measure</text>
+<circle cx="488.0" cy="45.0" r="1.5" fill="#a8a8a8" opacity="1.0"/>
+<circle cx="488.0" cy="50.0" r="1.5" fill="#a8a8a8" opacity="1.0"/>
+<circle cx="488.0" cy="55.0" r="1.5" fill="#a8a8a8" opacity="1.0"/>
+<rect x="8" y="68" width="78" height="24" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<line x1="17" y1="75.0" x2="27" y2="75.0" stroke="#e6e6e6" stroke-width="1.2" stroke-dasharray="2 2"/>
+<line x1="17" y1="75.0" x2="17" y2="85.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="27" y1="75.0" x2="27" y2="85.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="19" y1="84.0" x2="25" y2="84.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<polygon points="19,84.0 22,82.0 22,86.0" fill="#e6e6e6" opacity="1.0"/>
+<polygon points="25,84.0 22,82.0 22,86.0" fill="#e6e6e6" opacity="1.0"/>
+<text x="34" y="83.96000000000001" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Distance</text>
+<rect x="88" y="68" width="78" height="24" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<line x1="97" y1="75.0" x2="107" y2="75.0" stroke="#e6e6e6" stroke-width="1.2" stroke-dasharray="2 2"/>
+<line x1="97" y1="75.0" x2="97" y2="85.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="107" y1="75.0" x2="107" y2="85.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="99" y1="84.0" x2="105" y2="84.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<polygon points="99,84.0 102,82.0 102,86.0" fill="#e6e6e6" opacity="1.0"/>
+<polygon points="105,84.0 102,82.0 102,86.0" fill="#e6e6e6" opacity="1.0"/>
+<text x="114" y="83.96000000000001" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Angle</text>
+<rect x="168" y="68" width="78" height="24" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<line x1="177" y1="75.0" x2="187" y2="75.0" stroke="#e6e6e6" stroke-width="1.2" stroke-dasharray="2 2"/>
+<line x1="177" y1="75.0" x2="177" y2="85.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="187" y1="75.0" x2="187" y2="85.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="179" y1="84.0" x2="185" y2="84.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<polygon points="179,84.0 182,82.0 182,86.0" fill="#e6e6e6" opacity="1.0"/>
+<polygon points="185,84.0 182,82.0 182,86.0" fill="#e6e6e6" opacity="1.0"/>
+<text x="194" y="83.96000000000001" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Area</text>
+<rect x="248" y="68" width="78" height="24" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<line x1="257" y1="75.0" x2="267" y2="75.0" stroke="#e6e6e6" stroke-width="1.2" stroke-dasharray="2 2"/>
+<line x1="257" y1="75.0" x2="257" y2="85.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="267" y1="75.0" x2="267" y2="85.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="259" y1="84.0" x2="265" y2="84.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<polygon points="259,84.0 262,82.0 262,86.0" fill="#e6e6e6" opacity="1.0"/>
+<polygon points="265,84.0 262,82.0 262,86.0" fill="#e6e6e6" opacity="1.0"/>
+<text x="274" y="83.96000000000001" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Volume</text>
+<rect x="328" y="68" width="78" height="24" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<line x1="337" y1="75.0" x2="347" y2="75.0" stroke="#e6e6e6" stroke-width="1.2" stroke-dasharray="2 2"/>
+<line x1="337" y1="75.0" x2="337" y2="85.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="347" y1="75.0" x2="347" y2="85.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="339" y1="84.0" x2="345" y2="84.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<polygon points="339,84.0 342,82.0 342,86.0" fill="#e6e6e6" opacity="1.0"/>
+<polygon points="345,84.0 342,82.0 342,86.0" fill="#e6e6e6" opacity="1.0"/>
+<text x="354" y="83.96000000000001" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Mass</text>
+<rect x="408" y="68" width="78" height="24" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<line x1="417" y1="75.0" x2="427" y2="75.0" stroke="#e6e6e6" stroke-width="1.2" stroke-dasharray="2 2"/>
+<line x1="417" y1="75.0" x2="417" y2="85.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="427" y1="75.0" x2="427" y2="85.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="419" y1="84.0" x2="425" y2="84.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<polygon points="419,84.0 422,82.0 422,86.0" fill="#e6e6e6" opacity="1.0"/>
+<polygon points="425,84.0 422,82.0 422,86.0" fill="#e6e6e6" opacity="1.0"/>
+<text x="434" y="83.96000000000001" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">BBox</text>
+<rect x="8" y="100" width="484" height="80" rx="3" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="16" y="118" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Selection</text>
+<text x="16" y="134" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Entity 1:  Face (Front of Engine_Block)</text>
+<text x="16" y="150" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Entity 2:  Face (Top of Cylinder_Head)</text>
+<text x="16" y="166" fill="#0a84ff" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">Measurement type:  Distance (min)</text>
+<rect x="8" y="188" width="484" height="80" rx="3" fill="#262626" stroke="#0a84ff" stroke-width="2"/>
+<text x="16" y="206" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Result</text>
+<text x="16" y="230" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Distance:</text>
+<text x="120" y="230" fill="#0a84ff" font-size="16" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="start">47.832 mm</text>
+<text x="16" y="252" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">ΔX:</text>
+<text x="60" y="252" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">+12.500 mm</text>
+<text x="180" y="252" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">ΔY:</text>
+<text x="220" y="252" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">+0.000 mm</text>
+<text x="340" y="252" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">ΔZ:</text>
+<text x="380" y="252" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">+46.100 mm</text>
+<text x="16" y="290" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Recent</text>
+<line x1="16" y1="296" x2="484" y2="296" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="8" y="304" width="484" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="16" y="319" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">Distance: 47.832 mm</text>
+<text x="280" y="319" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Face ↔ Face</text>
+<text x="484" y="319" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">12:34:05</text>
+<rect x="8" y="326" width="484" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="16" y="341" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">Angle: 89.97°</text>
+<text x="280" y="341" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Edge ↔ Edge</text>
+<text x="484" y="341" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">12:33:48</text>
+<rect x="8" y="348" width="484" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="16" y="363" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">Volume: 247.83 cm³</text>
+<text x="280" y="363" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Engine_Block</text>
+<text x="484" y="363" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">12:33:21</text>
+<rect x="8" y="370" width="484" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="16" y="385" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">Mass: 669.14 g</text>
+<text x="280" y="385" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Engine_Block (Al 6061)</text>
+<text x="484" y="385" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">12:33:15</text>
+<rect x="8" y="392" width="484" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="16" y="407" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">Area: 412.50 cm²</text>
+<text x="280" y="407" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Engine_Block surface</text>
+<text x="484" y="407" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">12:32:50</text>
+<rect x="8" y="414" width="484" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="16" y="429" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">Length: 215.40 mm</text>
+<text x="280" y="429" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Edge (Crankshaft axis)</text>
+<text x="484" y="429" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">12:32:32</text>
+<rect x="8" y="436" width="484" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="16" y="451" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">Radius: 4.000 mm</text>
+<text x="280" y="451" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Circle (Bolt Hole A)</text>
+<text x="484" y="451" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">12:32:10</text>
+<rect x="8" y="458" width="484" height="22" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="16" y="473" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">BBox: 200×150×100</text>
+<text x="280" y="473" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Engine_Block</text>
+<text x="484" y="473" fill="#a8a8a8" font-size="9" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">12:31:55</text>
+<rect x="0" y="670" width="500" height="30" fill="#262626" stroke="#1a1a1a" stroke-width="1"/>
+<rect x="8" y="675" width="90" height="22" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="16" y="682.0" width="10" height="10" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<rect x="19" y="680.0" width="10" height="10" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="34" y="689.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Copy</text>
+<rect x="102" y="675" width="90" height="22" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<path d="M111 691.0 L111 681.0 L114.0 681.0 M118.0 681.0 L121 681.0 L121 691.0 Z M116.0 681.0 L116.0 689.0 M113.0 683.0 L116.0 680.0 L119.0 683.0" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<text x="128" y="689.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Save CSV</text>
+<text x="492" y="690" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="end">Snap: EndPoint</text>
+</svg>

@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1100" height="700" viewBox="0 0 1100 700">
+<title>Scripting Menu — List, Load, Record, Debug, Profile</title>
+<rect x="0" y="0" width="1100" height="700" fill="#1f1f1f"/>
+<rect x="0" y="0" width="1100" height="36" fill="#262626" stroke="#1a1a1a" stroke-width="1"/>
+<text x="14" y="22" fill="#e6e6e6" font-size="14" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Scripting Menu — List, Load, Record, Debug, Profile</text>
+<text x="14" y="32" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">PascalScript-based macro/automation library</text>
+<rect x="0" y="36" width="1100" height="22" fill="#1f1f1f" stroke="#1a1a1a" stroke-width="1"/>
+<text x="12" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">File</text>
+<text x="62" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Edit</text>
+<text x="112" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">View</text>
+<text x="162" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Insert</text>
+<text x="226" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Sketch</text>
+<text x="290" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Modify</text>
+<text x="354" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Sheet Metal</text>
+<text x="453" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Assembly</text>
+<text x="531" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">CAM</text>
+<text x="574" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Drawing</text>
+<text x="645" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Simulation</text>
+<text x="737" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Parametric</text>
+<text x="829" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Optimize</text>
+<text x="907" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Generate</text>
+<text x="985" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">GD&amp;T</text>
+<text x="1035" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Heal</text>
+<text x="1085" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Inspect</text>
+<text x="1156" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Mold</text>
+<text x="1206" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Tools</text>
+<rect x="1255" y="38" width="79" height="18" rx="2" fill="#3c3c3c" stroke="#0a84ff" stroke-width="0.8"/>
+<text x="1263" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="500" font-style="normal" text-anchor="start">Scripting</text>
+<text x="1348" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">AI</text>
+<text x="1384" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Window</text>
+<text x="1448" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Help</text>
+<rect x="1259" y="61" width="220" height="294" rx="3" fill="#000000" opacity="0.4"/>
+<rect x="1257" y="58" width="220" height="294" rx="3" fill="#2b2b2b" stroke="#111111" stroke-width="1"/>
+<rect x="1157" y="36" width="100" height="22" fill="#3c3c3c" stroke="#111111" stroke-width="1"/>
+<text x="1165" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="500" font-style="normal" text-anchor="start">Scripting</text>
+<rect x="1259" y="62" width="216" height="26" fill="none"/>
+<path d="M1268 69 L1274 69 L1276 72 L1276 80 L1274 81 L1268 81 L1266 80 L1266 72 Z" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<line x1="1269" y1="75" x2="1273" y2="75" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="1269" y1="79" x2="1273" y2="79" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="1285" y="79.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">List Scripts</text>
+<rect x="1259" y="88" width="216" height="26" fill="none"/>
+<path d="M1265 106 L1265 98 L1269.0 98 L1273.0 95 L1277 95 L1277 106 Z" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<text x="1285" y="105.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Load Script…</text>
+<line x1="1265" y1="118.0" x2="1469" y2="118.0" stroke="#454545" stroke-width="1"/>
+<rect x="1259" y="122" width="216" height="26" fill="none"/>
+<path d="M1268 129 L1274 129 L1276 132 L1276 140 L1274 141 L1268 141 L1266 140 L1266 132 Z" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<line x1="1269" y1="135" x2="1273" y2="135" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="1269" y1="139" x2="1273" y2="139" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="1285" y="139.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Record Start</text>
+<text x="1465" y="138.96" fill="#a8a8a8" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">Ctrl+R</text>
+<rect x="1259" y="148" width="216" height="26" fill="none"/>
+<rect x="1267" y="156" width="3" height="10" fill="#e6e6e6"/>
+<rect x="1272" y="156" width="3" height="10" fill="#e6e6e6"/>
+<text x="1285" y="165.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Record Stop</text>
+<text x="1465" y="164.96" fill="#a8a8a8" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">Ctrl+Shift+R</text>
+<line x1="1265" y1="178.0" x2="1469" y2="178.0" stroke="#454545" stroke-width="1"/>
+<rect x="1259" y="182" width="216" height="26" fill="none"/>
+<polygon points="1268,190 1268,200 1275,195.0" fill="#e6e6e6"/>
+<text x="1285" y="199.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Run with Params…</text>
+<rect x="1259" y="208" width="216" height="26" fill="none"/>
+<polyline points="1268.6,217.0 1273.4,221.0 1268.6,225.0" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="1285" y="225.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Debug Step</text>
+<text x="1465" y="224.96" fill="#a8a8a8" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="end">F10</text>
+<rect x="1259" y="234" width="216" height="26" fill="none"/>
+<circle cx="1271.0" cy="247.0" r="6" fill="none" opacity="1.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="1271.0" y1="245.0" x2="1271.0" y2="248.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<circle cx="1271.0" cy="250.0" r="0.8" fill="#e6e6e6" opacity="1.0"/>
+<text x="1285" y="251.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Profile Script</text>
+<line x1="1265" y1="264.0" x2="1469" y2="264.0" stroke="#454545" stroke-width="1"/>
+<rect x="1259" y="268" width="216" height="26" fill="none"/>
+<path d="M1265 279 L1265 286 L1277 286 L1277 278 L1271.0 278 L1269.0 276 L1265 276 Z" fill="#e6e6e6" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<text x="1285" y="285.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Script Library Browser…</text>
+<rect x="1259" y="294" width="216" height="26" fill="none"/>
+<path d="M1265 305 L1265 312 L1277 312 L1277 304 L1271.0 304 L1269.0 302 L1265 302 Z" fill="#e6e6e6" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<text x="1285" y="311.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Open Scripts Folder</text>
+<rect x="1259" y="320" width="216" height="26" fill="none"/>
+<circle cx="1271.0" cy="333.0" r="6" fill="none" opacity="1.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="1271.0" y1="331.0" x2="1271.0" y2="334.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<circle cx="1271.0" cy="336.0" r="0.8" fill="#e6e6e6" opacity="1.0"/>
+<text x="1285" y="337.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">API Reference…</text>
+<rect x="0" y="670" width="1100" height="30" fill="#262626" stroke="#1a1a1a" stroke-width="1"/>
+<text x="14" y="690" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Menu: Scripting  ·  10 items</text>
+<text x="1086" y="690" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="end">BRepCAD UI Mockup</text>
+</svg>

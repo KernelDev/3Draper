@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1100" height="700" viewBox="0 0 1100 700">
+<title>Dialog: Revision Table Editor (Drawing → Annotations → Revision Table)</title>
+<rect x="0" y="0" width="1100" height="700" fill="#1f1f1f"/>
+<rect x="0" y="0" width="1100" height="36" fill="#262626" stroke="#1a1a1a" stroke-width="1"/>
+<text x="14" y="22" fill="#e6e6e6" font-size="14" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Dialog: Revision Table Editor (Drawing → Annotations → Revision Table)</text>
+<text x="14" y="32" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Revision history with date, author, description, approved checkbox, multi-sheet propagation</text>
+<rect x="0" y="36" width="1100" height="664" fill="#000000" opacity="0.45"/>
+<rect x="0" y="0" width="1100" height="700" fill="#000000" opacity="0.55"/>
+<rect x="83" y="74" width="940" height="560" rx="6" fill="#000000" opacity="0.6"/>
+<rect x="80" y="70" width="940" height="560" rx="6" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="80" y="70" width="940" height="32" rx="6" fill="#323232" stroke="#1a1a1a" stroke-width="1"/>
+<rect x="80" y="85" width="940" height="17" fill="#323232"/>
+<text x="94" y="90.68" fill="#e6e6e6" font-size="13" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Revision Table — ENG-2024-001</text>
+<rect x="992" y="74" width="22" height="22" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<line x1="997" y1="79" x2="1007" y2="89" stroke="#a8a8a8" stroke-width="1.2"/>
+<line x1="1007" y1="79" x2="997" y2="89" stroke="#a8a8a8" stroke-width="1.2"/>
+<rect x="81" y="102" width="938" height="484" fill="#2b2b2b"/>
+<rect x="81" y="586" width="938" height="43" fill="#323232"/>
+<line x1="80" y1="586" x2="1020" y2="586" stroke="#1a1a1a" stroke-width="1"/>
+<rect x="926" y="594" width="72" height="28" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<text x="962.0" y="612.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Close</text>
+<rect x="814" y="594" width="104" height="28" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<text x="866.0" y="612.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Export CSV</text>
+<rect x="686" y="594" width="120" height="28" rx="3" fill="#0a84ff" stroke="#0a84ff" stroke-width="1"/>
+<text x="746.0" y="612.32" fill="#ffffff" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="middle">Add Revision</text>
+<rect x="92" y="110" width="110" height="22" rx="3" fill="#0a84ff" stroke="#0a84ff" stroke-width="1"/>
+<line x1="103.0" y1="121.0" x2="109.0" y2="121.0" stroke="#ffffff" stroke-width="1.2"/>
+<line x1="106.0" y1="118.0" x2="106.0" y2="124.0" stroke="#ffffff" stroke-width="1.2"/>
+<text x="118" y="124.96000000000001" fill="#ffffff" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Add Revision</text>
+<rect x="206" y="110" width="80" height="22" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<circle cx="220.0" cy="121.0" r="3" fill="none" opacity="1.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="224.0" y1="121.0" x2="226.0" y2="121.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="222.82842712474618" y1="123.82842712474618" x2="224.2426406871193" y2="125.24264068711929" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="220.0" y1="125.0" x2="220.0" y2="127.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="217.17157287525382" y1="123.82842712474618" x2="215.7573593128807" y2="125.24264068711929" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="216.0" y1="121.0" x2="214.0" y2="121.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="217.17157287525382" y1="118.17157287525382" x2="215.7573593128807" y2="116.75735931288071" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="220.0" y1="117.0" x2="220.0" y2="115.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="222.82842712474618" y1="118.17157287525382" x2="224.2426406871193" y2="116.75735931288071" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="232" y="124.96000000000001" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Edit</text>
+<rect x="290" y="110" width="80" height="22" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<line x1="299" y1="116.0" x2="309" y2="126.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="309" y1="116.0" x2="299" y2="126.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="316" y="124.96000000000001" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Delete</text>
+<rect x="374" y="110" width="100" height="22" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<circle cx="387.0" cy="120.0" r="4.8" fill="none" opacity="1.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="391.2" y1="124.2" x2="394" y2="127.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="400" y="124.96000000000001" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Compare…</text>
+<rect x="478" y="110" width="110" height="22" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="487.0" y="118.0" width="5" height="5" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<rect x="492.0" y="118.0" width="5" height="5" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<rect x="497.0" y="118.0" width="5" height="5" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="504" y="124.96000000000001" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Apply to All Sheets</text>
+<text x="1004" y="126" fill="#5ac878" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="end">Active: REV D  ·  Approved 2024-12-17</text>
+<rect x="92" y="146" width="50" height="26" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<text x="100" y="162.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Rev</text>
+<rect x="142" y="146" width="110" height="26" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<text x="150" y="162.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Date</text>
+<rect x="252" y="146" width="280" height="26" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<text x="260" y="162.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Description</text>
+<rect x="532" y="146" width="100" height="26" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<text x="540" y="162.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Author</text>
+<rect x="632" y="146" width="100" height="26" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<text x="640" y="162.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Checked</text>
+<rect x="732" y="146" width="100" height="26" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<text x="740" y="162.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Approved</text>
+<rect x="832" y="146" width="80" height="26" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<text x="840" y="162.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Sheets</text>
+<rect x="912" y="146" width="80" height="26" fill="#323232" stroke="#3e3e3e" stroke-width="1"/>
+<text x="920" y="162.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Status</text>
+<rect x="92" y="172" width="50" height="32" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="100" y="191.96" fill="#0a84ff" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="start">A</text>
+<rect x="142" y="172" width="110" height="32" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="150" y="191.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">2024-10-15</text>
+<rect x="252" y="172" width="280" height="32" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="260" y="191.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Initial release</text>
+<rect x="532" y="172" width="100" height="32" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="540" y="191.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">A. Petrov</text>
+<rect x="632" y="172" width="100" height="32" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="640" y="191.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">M. Chen</text>
+<rect x="732" y="172" width="100" height="32" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="740" y="191.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">J. Smith</text>
+<rect x="832" y="172" width="80" height="32" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="840" y="191.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">1-3</text>
+<rect x="912" y="172" width="80" height="32" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="920" y="191.96" fill="#5ac878" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">✓ Approved</text>
+<rect x="92" y="204" width="50" height="50" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="100" y="232.96" fill="#0a84ff" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="start">B</text>
+<rect x="142" y="204" width="110" height="50" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="150" y="232.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">2024-11-02</text>
+<rect x="252" y="204" width="280" height="50" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="260" y="218" fill="#e6e6e6" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Added fillet R3 to all edges</text>
+<text x="260" y="232" fill="#e6e6e6" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Changed material to Al 6061-T6</text>
+<rect x="532" y="204" width="100" height="50" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="540" y="232.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">A. Petrov</text>
+<rect x="632" y="204" width="100" height="50" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="640" y="232.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">M. Chen</text>
+<rect x="732" y="204" width="100" height="50" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="740" y="232.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">J. Smith</text>
+<rect x="832" y="204" width="80" height="50" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="840" y="232.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">1-3</text>
+<rect x="912" y="204" width="80" height="50" fill="#262626" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="920" y="232.96" fill="#5ac878" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">✓ Approved</text>
+<rect x="92" y="254" width="50" height="50" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="100" y="282.96" fill="#0a84ff" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="start">C</text>
+<rect x="142" y="254" width="110" height="50" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="150" y="282.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">2024-11-28</text>
+<rect x="252" y="254" width="280" height="50" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="260" y="268" fill="#e6e6e6" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Added 4× Ø5 bolt holes</text>
+<text x="260" y="282" fill="#e6e6e6" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Updated BOM</text>
+<rect x="532" y="254" width="100" height="50" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="540" y="282.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">A. Petrov</text>
+<rect x="632" y="254" width="100" height="50" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="640" y="282.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">M. Chen</text>
+<rect x="732" y="254" width="100" height="50" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="740" y="282.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">J. Smith</text>
+<rect x="832" y="254" width="80" height="50" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="840" y="282.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">1-3</text>
+<rect x="912" y="254" width="80" height="50" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="920" y="282.96" fill="#5ac878" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">✓ Approved</text>
+<rect x="92" y="304" width="50" height="50" fill="#094771" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="100" y="332.96" fill="#ffffff" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="start">D</text>
+<rect x="142" y="304" width="110" height="50" fill="#094771" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="150" y="332.96" fill="#ffffff" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">2024-12-17</text>
+<rect x="252" y="304" width="280" height="50" fill="#094771" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="260" y="318" fill="#ffffff" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Changed hole pattern to 6× Ø5</text>
+<text x="260" y="332" fill="#ffffff" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Updated tolerance to ISO 2768-mK</text>
+<text x="260" y="346" fill="#ffffff" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Added surface finish Ra 3.2</text>
+<rect x="532" y="304" width="100" height="50" fill="#094771" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="540" y="332.96" fill="#ffffff" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">A. Petrov</text>
+<rect x="632" y="304" width="100" height="50" fill="#094771" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="640" y="332.96" fill="#ffffff" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">M. Chen</text>
+<rect x="732" y="304" width="100" height="50" fill="#094771" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="740" y="332.96" fill="#ffffff" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">(pending)</text>
+<rect x="832" y="304" width="80" height="50" fill="#094771" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="840" y="332.96" fill="#ffffff" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">1-3</text>
+<rect x="912" y="304" width="80" height="50" fill="#094771" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="920" y="332.96" fill="#e2a73a" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">⏳ Pending</text>
+<rect x="92" y="354" width="50" height="32" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="100" y="373.96" fill="#0a84ff" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="bold" font-style="normal" text-anchor="start">E</text>
+<rect x="142" y="354" width="110" height="32" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="150" y="373.96" fill="#e6e6e6" font-size="11" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">(draft)</text>
+<rect x="252" y="354" width="280" height="32" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="260" y="373.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Add weld symbol for cap joints</text>
+<rect x="532" y="354" width="100" height="32" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="540" y="373.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">—</text>
+<rect x="632" y="354" width="100" height="32" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="640" y="373.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">—</text>
+<rect x="732" y="354" width="100" height="32" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="740" y="373.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">—</text>
+<rect x="832" y="354" width="80" height="32" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="840" y="373.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">—</text>
+<rect x="912" y="354" width="80" height="32" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<text x="920" y="373.96" fill="#6e6e6e" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Draft</text>
+<rect x="92" y="398" width="916" height="90" rx="3" fill="#262626" stroke="#0a84ff" stroke-width="1"/>
+<text x="102" y="416" fill="#0a84ff" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Revision D — Details</text>
+<text x="102" y="434" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Description: Changed hole pattern to 6× Ø5  ·  Updated tolerance to ISO 2768-mK  ·  Added surface finish Ra 3.2</text>
+<text x="102" y="452" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">Affected sheets: 1, 2, 3  ·  Affected views: Top, Front, Right</text>
+<text x="102" y="470" fill="#e2a73a" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">Approval workflow: Checked by M. Chen (2024-12-17)  ·  Approval pending from J. Smith</text>
+</svg>

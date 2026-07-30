@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1100" height="750" viewBox="0 0 1100 750">
+<title>Dialog: First-Run Onboarding Wizard (Step 2 of 4)</title>
+<rect x="0" y="0" width="1100" height="750" fill="#1f1f1f"/>
+<rect x="0" y="0" width="1100" height="36" fill="#262626" stroke="#1a1a1a" stroke-width="1"/>
+<text x="14" y="22" fill="#e6e6e6" font-size="14" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Dialog: First-Run Onboarding Wizard (Step 2 of 4)</text>
+<text x="14" y="32" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Welcome → Profile (current) → Workspace → Shortcuts → Done</text>
+<rect x="0" y="36" width="1100" height="714" fill="#000000" opacity="0.7"/>
+<rect x="0" y="0" width="1100" height="750" fill="#000000" opacity="0.55"/>
+<rect x="103" y="74" width="900" height="600" rx="6" fill="#000000" opacity="0.6"/>
+<rect x="100" y="70" width="900" height="600" rx="6" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="100" y="70" width="900" height="32" rx="6" fill="#323232" stroke="#1a1a1a" stroke-width="1"/>
+<rect x="100" y="85" width="900" height="17" fill="#323232"/>
+<text x="114" y="90.68" fill="#e6e6e6" font-size="13" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Welcome to BRepCAD  ·  Step 2 of 4: Your Profile</text>
+<rect x="972" y="74" width="22" height="22" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<line x1="977" y1="79" x2="987" y2="89" stroke="#a8a8a8" stroke-width="1.2"/>
+<line x1="987" y1="79" x2="977" y2="89" stroke="#a8a8a8" stroke-width="1.2"/>
+<rect x="101" y="102" width="898" height="524" fill="#2b2b2b"/>
+<rect x="101" y="626" width="898" height="43" fill="#323232"/>
+<line x1="100" y1="626" x2="1000" y2="626" stroke="#1a1a1a" stroke-width="1"/>
+<rect x="906" y="634" width="72" height="28" rx="3" fill="#0a84ff" stroke="#0a84ff" stroke-width="1"/>
+<text x="942.0" y="652.32" fill="#ffffff" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="middle">Next →</text>
+<rect x="786" y="634" width="112" height="28" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<text x="842.0" y="652.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Skip Wizard</text>
+<rect x="706" y="634" width="72" height="28" rx="3" fill="#3a3a3a" stroke="#3e3e3e" stroke-width="1"/>
+<text x="742.0" y="652.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Back</text>
+<circle cx="128" cy="130" r="10" fill="#5ac878" opacity="1.0" stroke="#5ac878" stroke-width="2"/>
+<text x="128" y="134" fill="#ffffff" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="middle">✓</text>
+<text x="146" y="134" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Welcome</text>
+<line x1="142" y1="130" x2="319" y2="130" stroke="#5ac878" stroke-width="2"/>
+<circle cx="345" cy="130" r="10" fill="#0a84ff" opacity="1.0" stroke="#0a84ff" stroke-width="2"/>
+<text x="345" y="134" fill="#ffffff" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="middle">2</text>
+<text x="363" y="134" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Profile</text>
+<line x1="359" y1="130" x2="536" y2="130" stroke="#3e3e3e" stroke-width="2"/>
+<circle cx="562" cy="130" r="10" fill="#2b2b2b" opacity="1.0" stroke="#3e3e3e" stroke-width="2"/>
+<text x="562" y="134" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">3</text>
+<text x="580" y="134" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Workspace</text>
+<line x1="576" y1="130" x2="753" y2="130" stroke="#3e3e3e" stroke-width="2"/>
+<circle cx="779" cy="130" r="10" fill="#2b2b2b" opacity="1.0" stroke="#3e3e3e" stroke-width="2"/>
+<text x="779" y="134" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">4</text>
+<text x="797" y="134" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Shortcuts</text>
+<text x="116" y="168" fill="#e6e6e6" font-size="22" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="start">Tell us about yourself</text>
+<text x="116" y="190" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">We&#x27;ll customize your workspace, materials, units, and templates.</text>
+<text x="124" y="232" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Your name:</text>
+<rect x="260" y="218" width="280" height="26" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="266" y="234.96" fill="#6e6e6e" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">e.g., Alex Petrov</text>
+<text x="124" y="270" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Email:</text>
+<rect x="260" y="256" width="280" height="26" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="266" y="272.96" fill="#6e6e6e" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">you@company.com</text>
+<text x="124" y="308" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Company:</text>
+<rect x="260" y="294" width="280" height="26" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="266" y="310.96" fill="#6e6e6e" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Your organization</text>
+<text x="124" y="346" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Industry:</text>
+<rect x="260" y="332" width="280" height="26" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="266" y="348.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Mechanical Engineering</text>
+<polyline points="527.6,343.8 530.0,347.4 532.4,343.8" fill="none" stroke="#a8a8a8" stroke-width="1.2"/>
+<text x="124" y="384" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Experience:</text>
+<circle cx="267.0" cy="377.0" r="6.0" fill="none" opacity="1.0" stroke="#a8a8a8" stroke-width="1.2"/>
+<text x="280" y="380.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Beginner</text>
+<circle cx="387.0" cy="377.0" r="6.0" fill="none" opacity="1.0" stroke="#0a84ff" stroke-width="1.2"/>
+<circle cx="387.0" cy="377.0" r="3.5" fill="#0a84ff" opacity="1.0"/>
+<text x="400" y="380.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Intermediate</text>
+<circle cx="507.0" cy="377.0" r="6.0" fill="none" opacity="1.0" stroke="#a8a8a8" stroke-width="1.2"/>
+<text x="520" y="380.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Advanced</text>
+<circle cx="627.0" cy="377.0" r="6.0" fill="none" opacity="1.0" stroke="#a8a8a8" stroke-width="1.2"/>
+<text x="640" y="380.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Expert</text>
+<text x="124" y="422" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Units:</text>
+<circle cx="267.0" cy="415.0" r="6.0" fill="none" opacity="1.0" stroke="#0a84ff" stroke-width="1.2"/>
+<circle cx="267.0" cy="415.0" r="3.5" fill="#0a84ff" opacity="1.0"/>
+<text x="280" y="418.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Metric (mm)</text>
+<circle cx="417.0" cy="415.0" r="6.0" fill="none" opacity="1.0" stroke="#a8a8a8" stroke-width="1.2"/>
+<text x="430" y="418.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Imperial (in)</text>
+<text x="124" y="460" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Standard:</text>
+<rect x="260" y="446" width="280" height="26" rx="2" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="266" y="462.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">ISO (International)</text>
+<polyline points="527.6,457.8 530.0,461.4 532.4,457.8" fill="none" stroke="#a8a8a8" stroke-width="1.2"/>
+<text x="124" y="500" fill="#a8a8a8" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Default workspace:</text>
+<rect x="260" y="486" width="110" height="32" rx="4" fill="#2b2b2b" stroke="#0a84ff" stroke-width="2"/>
+<text x="315" y="505.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="middle">Modeling</text>
+<rect x="380" y="486" width="110" height="32" rx="4" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="435" y="505.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Drawing</text>
+<rect x="500" y="486" width="110" height="32" rx="4" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="555" y="505.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Sheet Metal</text>
+<rect x="620" y="486" width="110" height="32" rx="4" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="675" y="505.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">CAM</text>
+<rect x="740" y="486" width="110" height="32" rx="4" fill="#262626" stroke="#3e3e3e" stroke-width="1"/>
+<text x="795" y="505.96" fill="#e6e6e6" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="middle">Simulation</text>
+<text x="984" y="655" fill="#0a84ff" font-size="11" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="italic" text-anchor="end">Skip this step →</text>
+</svg>

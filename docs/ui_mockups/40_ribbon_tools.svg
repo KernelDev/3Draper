@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1400" height="220" viewBox="0 0 1400 220">
+<title>Ribbon Tab: Tools</title>
+<rect x="0" y="0" width="1400" height="220" fill="#1f1f1f"/>
+<rect x="0" y="0" width="1400" height="36" fill="#262626" stroke="#1a1a1a" stroke-width="1"/>
+<text x="14" y="22" fill="#e6e6e6" font-size="14" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Ribbon Tab: Tools</text>
+<text x="14" y="32" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Ribbon groups shown when &#x27;Tools&#x27; is active</text>
+<rect x="0" y="36" width="1400" height="154" fill="#2b2b2b" stroke="#1a1a1a" stroke-width="1"/>
+<rect x="0" y="36" width="1400" height="22" fill="#1f1f1f"/>
+<text x="13" y="51.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">File</text>
+<text x="59" y="51.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Home</text>
+<text x="105" y="51.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Sketch</text>
+<text x="165" y="51.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Insert</text>
+<text x="225" y="51.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Modify</text>
+<text x="285" y="51.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Sheet Metal</text>
+<text x="380" y="51.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Assembly</text>
+<text x="454" y="51.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">CAM</text>
+<text x="493" y="51.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Drawing</text>
+<text x="560" y="51.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Simulation</text>
+<text x="648" y="51.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Inspect</text>
+<text x="715" y="51.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">AI</text>
+<rect x="738" y="37" width="53" height="22" fill="#2b2b2b" stroke="#0a84ff" stroke-width="0"/>
+<rect x="738" y="56" width="53" height="2" fill="#0a84ff"/>
+<text x="747" y="51.32" fill="#e6e6e6" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="600" font-style="normal" text-anchor="start">Tools</text>
+<text x="800" y="51.32" fill="#a8a8a8" font-size="12" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">View</text>
+<line x1="0" y1="58" x2="1400" y2="58" stroke="#3e3e3e" stroke-width="1"/>
+<rect x="6" y="62" width="140" height="124" rx="2" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="10" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="21" y="77" width="10" height="10" rx="1" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="23" y1="81" x2="29" y2="81" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="23" y1="156.0" x2="29" y2="156.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="23" y1="84" x2="29" y2="84" stroke="#e6e6e6" stroke-width="1.2"/>
+<rect x="46" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<circle cx="62.0" cy="82.0" r="3" fill="none" opacity="1.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="66.0" y1="82.0" x2="68.0" y2="82.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="64.82842712474618" y1="84.82842712474618" x2="66.24264068711929" y2="86.24264068711929" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="62.0" y1="86.0" x2="62.0" y2="88.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="59.17157287525381" y1="84.82842712474618" x2="57.757359312880716" y2="86.24264068711929" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="58.0" y1="82.0" x2="56.0" y2="82.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="59.17157287525381" y1="79.17157287525382" x2="57.757359312880716" y2="77.75735931288071" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="62.0" y1="78.0" x2="62.0" y2="76.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="64.82842712474618" y1="79.17157287525382" x2="66.24264068711929" y2="77.75735931288071" stroke="#e6e6e6" stroke-width="1.2"/>
+<rect x="82" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<path d="M96.0 77 L96.0 80 L100.0 80 L100.0 77 M96.0 80 L96.0 87 L100.0 87 L100.0 80" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<rect x="10" y="102" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<path d="M23 112 L29 112 L31 115 L31 123 L29 124 L23 124 L21 123 L21 115 Z" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<line x1="24" y1="118" x2="28" y2="118" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="24" y1="122" x2="28" y2="122" stroke="#e6e6e6" stroke-width="1.2"/>
+<rect x="46" y="102" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="56" y="112" width="12" height="12" rx="2" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="59" y="122" fill="#e6e6e6" font-size="7" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="bold" font-style="normal" text-anchor="start">AI</text>
+<text x="10" y="183.24" fill="#a8a8a8" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Application</text>
+<rect x="150" y="62" width="90" height="124" rx="2" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="154" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<path d="M167 76 L173 76 L175 79 L175 87 L173 88 L167 88 L165 87 L165 79 Z" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<line x1="168" y1="82" x2="172" y2="82" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="168" y1="86" x2="172" y2="86" stroke="#e6e6e6" stroke-width="1.2"/>
+<rect x="190" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<polygon points="203,77 203,87 210,82.0" fill="#e6e6e6" opacity="1.0"/>
+<text x="154" y="183.24" fill="#a8a8a8" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Macros</text>
+<rect x="244" y="62" width="110" height="124" rx="2" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="248" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<circle cx="264.0" cy="82.0" r="6" fill="none" opacity="1.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="264.0" y1="80.0" x2="264.0" y2="83.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<circle cx="264.0" cy="85.0" r="0.8" fill="#e6e6e6" opacity="1.0"/>
+<rect x="284" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<circle cx="300.0" cy="82.0" r="6" fill="none" opacity="1.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="300.0" y1="80.0" x2="300.0" y2="83.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<circle cx="300.0" cy="85.0" r="0.8" fill="#e6e6e6" opacity="1.0"/>
+<text x="248" y="183.24" fill="#a8a8a8" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Performance</text>
+<rect x="358" y="62" width="110" height="124" rx="2" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="362" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<ellipse cx="378.0" cy="82.0" rx="6" ry="3" fill="none" opacity="1.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<circle cx="378.0" cy="82.0" r="1.5" fill="#e6e6e6" opacity="1.0"/>
+<text x="362" y="183.24" fill="#a8a8a8" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Theme</text>
+<rect x="472" y="62" width="150" height="124" rx="2" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="476" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<path d="M486 88 L486 76 L498 76 L498 88 Z" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<rect x="492.8" y="76" width="4.8" height="6.4" fill="#e6e6e6" stroke="#e6e6e6" stroke-width="1.2"/>
+<rect x="488" y="82.8" width="7.2" height="5.6" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<rect x="512" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<path d="M522 87 L522 79 L526.0 79 L530.0 76 L534 76 L534 87 Z" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<rect x="548" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<circle cx="564.0" cy="82.0" r="3" fill="none" opacity="1.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="568.0" y1="82.0" x2="570.0" y2="82.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="566.8284271247462" y1="84.82842712474618" x2="568.2426406871193" y2="86.24264068711929" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="564.0" y1="86.0" x2="564.0" y2="88.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="561.1715728752538" y1="84.82842712474618" x2="559.7573593128807" y2="86.24264068711929" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="560.0" y1="82.0" x2="558.0" y2="82.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="561.1715728752538" y1="79.17157287525382" x2="559.7573593128807" y2="77.75735931288071" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="564.0" y1="78.0" x2="564.0" y2="76.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="566.8284271247462" y1="79.17157287525382" x2="568.2426406871193" y2="77.75735931288071" stroke="#e6e6e6" stroke-width="1.2"/>
+<rect x="476" y="102" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="486" y="115" width="12" height="10" rx="2" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<circle cx="490" cy="120" r="1.5" fill="#e6e6e6" opacity="1.0"/>
+<line x1="492" y1="120" x2="496" y2="120" stroke="#e6e6e6" stroke-width="1.2"/>
+<text x="476" y="183.24" fill="#a8a8a8" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">UI Layout</text>
+<rect x="626" y="62" width="150" height="124" rx="2" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="630" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="642" y="82" width="8" height="4" rx="1" fill="none" stroke="#e6e6e6" stroke-width="1.2"/>
+<path d="M643 82 L643 79 Q643 75 646.0 75 Q649 75 649 79 L649 82" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<rect x="666" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<path d="M680.0 77 L680.0 80 L684.0 80 L684.0 77 M680.0 80 L680.0 87 L684.0 87 L684.0 80" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<rect x="702" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<path d="M712 80 L712 87 L724 87 L724 79 L718.0 79 L716.0 77 L712 77 Z" fill="#e6e6e6" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<rect x="630" y="102" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<path d="M640 116 L640 123 L652 123 L652 115 L646.0 115 L644.0 113 L640 113 Z" fill="#e6e6e6" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<rect x="666" y="102" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<circle cx="682.0" cy="118.0" r="6" fill="none" opacity="1.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<line x1="682.0" y1="116.0" x2="682.0" y2="119.0" stroke="#e6e6e6" stroke-width="1.2"/>
+<circle cx="682.0" cy="121.0" r="0.8" fill="#e6e6e6" opacity="1.0"/>
+<text x="630" y="183.24" fill="#a8a8a8" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Plugins</text>
+<rect x="780" y="62" width="140" height="124" rx="2" fill="#2b2b2b" stroke="#3e3e3e" stroke-width="0.5"/>
+<rect x="784" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<path d="M795 87 L801.6 80.4 L798.4 83.6 L795 87 M800.8 81.2 L806 76 L804 78 L803.2 82.0" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<rect x="820" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<path d="M831 87 L837.6 80.4 L834.4 83.6 L831 87 M836.8 81.2 L842 76 L840 78 L839.2 82.0" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<rect x="856" y="66" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<path d="M867 87 L873.6 80.4 L870.4 83.6 L867 87 M872.8 81.2 L878 76 L876 78 L875.2 82.0" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<rect x="784" y="102" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<path d="M795 123 L801.6 116.4 L798.4 119.6 L795 123 M800.8 117.2 L806 112 L804 114 L803.2 118.0" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<rect x="820" y="102" width="32" height="32" rx="2" fill="#323232" stroke="#3e3e3e" stroke-width="0.5"/>
+<path d="M831 123 L837.6 116.4 L834.4 119.6 L831 123 M836.8 117.2 L842 112 L840 114 L839.2 118.0" fill="none" stroke="#e6e6e6" stroke-width="1.2" opacity="1.0"/>
+<text x="784" y="183.24" fill="#a8a8a8" font-size="9" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Industrial</text>
+<rect x="0" y="198" width="1400" height="22" fill="#1a1a1a" stroke="#1a1a1a" stroke-width="1"/>
+<line x1="0" y1="198" x2="1400" y2="198" stroke="#3e3e3e" stroke-width="1"/>
+<text x="8" y="212.6" fill="#a8a8a8" font-size="10" font-family="Segoe UI, Inter, Roboto, Arial, sans-serif" font-weight="normal" font-style="normal" text-anchor="start">Ready</text>
+<text x="1332" y="212.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">F8: Ortho</text>
+<text x="1254" y="212.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">F2: Sketch</text>
+<text x="1176" y="212.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">SNAP: Grid</text>
+<text x="1146" y="212.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">mm</text>
+<text x="1080" y="212.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">Z: 0.000</text>
+<text x="1014" y="212.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">Y: 0.000</text>
+<text x="948" y="212.6" fill="#a8a8a8" font-size="10" font-family="Consolas, Menlo, monospace" font-weight="normal" font-style="normal" text-anchor="start">X: 0.000</text>
+</svg>
