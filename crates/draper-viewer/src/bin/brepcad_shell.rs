@@ -158,10 +158,25 @@ impl eframe::App for BrepCadApp {
             ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
-                "3D Viewport\n(load STEP file to see model)",
+                "3D Viewport\n(load STEP file to see model)\n\nCtrl+Shift+P = Command Palette\nSpace = Marking Menu",
                 egui::FontId::proportional(20.0),
                 egui::Color32::from_rgb(80, 90, 100));
+
+            // Space key toggles marking menu
+            if ui.input(|i| i.key_pressed(egui::Key::Space)) {
+                self.ui_state.marking_menu_visible = !self.ui_state.marking_menu_visible;
+            }
         });
+
+        // Phase 7: Command palette (Ctrl+Shift+P)
+        if let Some(cmd) = ui::command_palette::render_command_palette(ctx, &mut self.ui_state.command_palette) {
+            eprintln!("Command selected: {}", cmd);
+        }
+
+        // Phase 7: Marking menu (Space key)
+        if let Some(action) = ui::context_menus::marking_menu(ctx, &mut self.ui_state.marking_menu_visible) {
+            eprintln!("Marking menu action: {:?}", action);
+        }
 
         // Phase 0: Status bar
         ui::statusbar::render_status_bar(ctx, &self.ui_state);

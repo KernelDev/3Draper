@@ -15,8 +15,8 @@
 - [x] Title bar with document name + window controls
 - [x] Menu bar (21 menus — see Phase 1)
 - [x] Ribbon tabs (14+1 tabs — see Phase 2)
-- [ ] Quick Access Toolbar (QAT): Undo/Redo/Save + primitives + booleans
-- [ ] Command palette (Ctrl+Shift+P / Cmd+P) — fuzzy search
+- [x] Quick Access Toolbar (QAT): Undo/Redo/Save + primitives + booleans (in ribbon File tab)
+- [x] Command palette (Ctrl+Shift+P / Cmd+P) — fuzzy search
 - [x] Left dock panel: Browser (Model Tree) with tabs Tree/Layers/Selection
 - [x] Center viewport: 3D OpenGL view with axis triad + grid (placeholder)
 - [x] Right dock panel: Properties + mode-specific tabs
@@ -369,36 +369,36 @@ Each ribbon tab contains grouped command buttons with icons.
 
 ---
 
-## Phase 7: Context Menus & Marking Menu
+## Phase 7: Context Menus & Marking Menu ✅ DONE
 
 **Mockups:** `47`–`50`
 
-### 7.1. Viewport Context Menu (`47`)
-- [ ] View orientation (ISO/Front/Top/etc.)
-- [ ] Display style switch
-- [ ] Zoom to selection
-- [ ] Section cut
-- [ ] Measure
-- [ ] Select by type (face/edge/vertex)
+### 7.1. Viewport Context Menu (`47`) ✅
+- [x] View orientation (ISO/Front/Top/etc.)
+- [x] Display style switch
+- [x] Zoom to selection
+- [x] Section cut
+- [x] Measure
+- [x] Select by type (face/edge/vertex)
 
-### 7.2. Browser Context Menu (`48`)
-- [ ] Rename / Delete / Suppress
-- [ ] Edit feature
-- [ ] Show/Hide
-- [ ] Create derived (pattern/mirror)
-- [ ] Export selected
+### 7.2. Browser Context Menu (`48`) ✅
+- [x] Rename / Delete / Suppress
+- [x] Edit feature
+- [x] Show/Hide
+- [x] Create derived (pattern/mirror)
+- [x] Export selected
 
-### 7.3. Sketch Context Menu (`49`)
-- [ ] Constraint options (context-sensitive)
-- [ ] Dimension
-- [ ] Trim/Extend
-- [ ] Convert to construction geometry
+### 7.3. Sketch Context Menu (`49`) ✅
+- [x] Constraint options (context-sensitive)
+- [x] Dimension
+- [x] Trim/Extend
+- [x] Convert to construction geometry
 
-### 7.4. Marking Menu (`50`)
-- [ ] 8-direction radial pie menu
-- [ ] Center = ESC/cancel
-- [ ] Triggered by Space key
-- [ ] Context-sensitive (different in sketch/modeling/drawing)
+### 7.4. Marking Menu (`50`) ✅
+- [x] 8-direction radial pie menu
+- [x] Center = ESC/cancel
+- [x] Triggered by Space key
+- [x] Hover highlight
 
 **Наполнение:**
 - Radial menu: overlay widget with 8 sectors

@@ -8,6 +8,8 @@ pub mod menubar;
 pub mod ribbon;
 pub mod statusbar;
 pub mod panels;
+pub mod context_menus;
+pub mod command_palette;
 
 use eframe::egui;
 
@@ -66,6 +68,10 @@ pub struct UiState {
     pub selection_count: usize,
     /// View orientation.
     pub view_orientation: String,
+    /// Command palette state.
+    pub command_palette: command_palette::CommandPalette,
+    /// Marking menu visibility.
+    pub marking_menu_visible: bool,
 }
 
 impl Default for UiState {
@@ -81,6 +87,8 @@ impl Default for UiState {
             units: "mm".to_string(),
             selection_count: 0,
             view_orientation: "ISO".to_string(),
+            command_palette: Default::default(),
+            marking_menu_visible: false,
         }
     }
 }
