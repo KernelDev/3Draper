@@ -7,6 +7,10 @@ edition.workspace = true
 name = "draper-viewer"
 path = "src/main.rs"
 
+[[bin]]
+name = "brepcad-shell"
+path = "src/bin/brepcad_shell.rs"
+
 [features]
 default = ["native"]
 native = ["rfd", "env_logger", "draper-mesh/export-3mf", "rayon"]
