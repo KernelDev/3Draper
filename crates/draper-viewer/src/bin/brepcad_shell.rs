@@ -35,6 +35,10 @@ struct BrepCadApp {
     params: ui::core_engine::ParameterTable,
     materials: ui::core_engine::MaterialLibrary,
     layers: ui::core_engine::LayerManager,
+    // Phase 4: Sketch engine
+    sketch: ui::sketch::Sketch,
+    draw_state: ui::sketch::DrawState,
+    in_sketch_mode: bool,
 }
 
 impl BrepCadApp {
@@ -162,16 +166,61 @@ impl eframe::App for BrepCadApp {
                 egui::FontId::proportional(14.0), egui::Color32::from_rgb(80, 255, 80));
 
             // Placeholder text
-            ui.painter().text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "3D Viewport\n(load STEP file to see model)\n\nCtrl+Shift+P = Command Palette\nSpace = Marking Menu",
-                egui::FontId::proportional(20.0),
-                egui::Color32::from_rgb(80, 90, 100));
+            if self.in_sketch_mode {
+                // Phase 4: Sketch mode canvas
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    &format!(
+                        "Sketch Mode — {}\nEntities: {} | Constraints: {} | DOF: {} | {}\nTool: {}\nClick to draw, ESC to exit",
+                        self.sketch.plane.label(),
+                        self.sketch.entity_count(),
+                        self.sketch.constraint_count(),
+                        self.sketch.degrees_of_freedom(),
+                        self.sketch.status(),
+                        self.draw_state.tool.label(),
+                    ),
+                    egui::FontId::proportional(18.0),
+                    egui::Color32::from_rgb(100, 200, 100));
+            } else {
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "3D Viewport\n(load STEP file to see model)\n\nCtrl+Shift+P = Command Palette\nSpace = Marking Menu\nS = Toggle Sketch Mode",
+                    egui::FontId::proportional(20.0),
+                    egui::Color32::from_rgb(80, 90, 100));
+            }
 
             // Space key toggles marking menu
             if ui.input(|i| i.key_pressed(egui::Key::Space)) {
                 self.ui_state.marking_menu_visible = !self.ui_state.marking_menu_visible;
+            }
+
+            // S key toggles sketch mode
+            if ui.input(|i| i.key_pressed(egui::Key::S) && !i.modifiers.ctrl && !i.modifiers.command) {
+                self.in_sketch_mode = !self.in_sketch_mode;
+                self.draw_state.reset();
+                self.ui_state.active_tool = if self.in_sketch_mode {
+                    "Sketch".to_string()
+                } else {
+                    "Select".to_string()
+                };
+            }
+
+            // ESC exits sketch mode
+            if self.in_sketch_mode && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.in_sketch_mode = false;
+                self.draw_state.reset();
+                self.ui_state.active_tool = "Select".to_string();
+            }
+
+            // Number keys select draw tools in sketch mode
+            if self.in_sketch_mode {
+                if ui.input(|i| i.key_pressed(egui::Key::Num1)) { self.draw_state.tool = ui::sketch::DrawTool::Line; self.ui_state.active_tool = "Line".into(); }
+                if ui.input(|i| i.key_pressed(egui::Key::Num2)) { self.draw_state.tool = ui::sketch::DrawTool::Circle; self.ui_state.active_tool = "Circle".into(); }
+                if ui.input(|i| i.key_pressed(egui::Key::Num3)) { self.draw_state.tool = ui::sketch::DrawTool::Rectangle; self.ui_state.active_tool = "Rectangle".into(); }
+                if ui.input(|i| i.key_pressed(egui::Key::Num4)) { self.draw_state.tool = ui::sketch::DrawTool::Point; self.ui_state.active_tool = "Point".into(); }
+                if ui.input(|i| i.key_pressed(egui::Key::Num5)) { self.draw_state.tool = ui::sketch::DrawTool::Arc3Point; self.ui_state.active_tool = "Arc".into(); }
             }
         });
 

@@ -13,6 +13,7 @@ pub mod command_palette;
 pub mod view_modes;
 pub mod dialogs;
 pub mod core_engine;
+pub mod sketch;
 
 use eframe::egui;
 
