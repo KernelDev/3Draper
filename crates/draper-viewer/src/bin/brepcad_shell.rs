@@ -28,6 +28,7 @@ struct BrepCadApp {
     left_tab: ui::panels::LeftPanelTab,
     right_tab: ui::panels::RightPanelTab,
     sample_tree: Vec<ui::panels::TreeNode>,
+    active_dialog: ui::dialogs::DialogType,
 }
 
 impl BrepCadApp {
@@ -176,6 +177,24 @@ impl eframe::App for BrepCadApp {
         // Phase 7: Marking menu (Space key)
         if let Some(action) = ui::context_menus::marking_menu(ctx, &mut self.ui_state.marking_menu_visible) {
             eprintln!("Marking menu action: {:?}", action);
+        }
+
+        // Phase 3: View mode widgets (view cube + display style switcher)
+        if let Some(orient) = ui::view_modes::render_view_cube(ctx) {
+            let (az, el) = orient.camera_angles();
+            self.ui_state.camera_info[0] = az;
+            self.ui_state.camera_info[1] = el;
+            self.ui_state.view_orientation = orient.label().to_string();
+        }
+        ui::view_modes::render_display_style_switcher(ctx, &mut self.ui_state.display_style);
+
+        // Phase 6: Dialogs
+        // Keyboard shortcuts for dialogs
+        if ctx.input(|i| i.key_pressed(egui::Key::Comma) && (i.modifiers.ctrl || i.modifiers.command)) {
+            self.active_dialog = ui::dialogs::DialogType::Options;
+        }
+        if let Some(action) = ui::dialogs::render_dialog(ctx, &mut self.active_dialog) {
+            eprintln!("Dialog action: {:?}", action);
         }
 
         // Phase 0: Status bar

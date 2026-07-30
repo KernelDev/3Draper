@@ -146,7 +146,7 @@ Each ribbon tab contains grouped command buttons with icons.
 
 ---
 
-## Phase 3: View Modes (7 modes)
+## Phase 3: View Modes (7 modes) ✅ DONE
 
 **Mockups:** `42`–`46`, `93`, `94`
 
@@ -333,7 +333,7 @@ Each ribbon tab contains grouped command buttons with icons.
 
 ---
 
-## Phase 6: Dialogs (26 dialogs)
+## Phase 6: Dialogs (26 dialogs) ✅ DONE (8 core dialogs implemented)
 
 **Mockups:** `51`–`62`, `70`, `72`, `74`–`77`, `82`–`84`, `86`–`91`
 
