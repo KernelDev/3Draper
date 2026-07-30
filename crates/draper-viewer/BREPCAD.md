@@ -4,6 +4,15 @@ BRepCAD is a full-featured CAD/CAE/CAM application built on top of the
 [3Draper](https://github.com/KernelDev/3Draper) 3D geometric kernel.
 It runs both as a native desktop application and in the browser via WebAssembly.
 
+## Live Demo
+
+**BRepCAD on GitHub Pages:** https://kerneldev.github.io/3Draper/brepcad.html
+
+**3Draper Viewer (original):** https://kerneldev.github.io/3Draper/
+
+Both apps are deployed from the same `dist/` directory. A floating link in the
+top-right corner lets you switch between them.
+
 ## Quick Start
 
 ### Native (Desktop)

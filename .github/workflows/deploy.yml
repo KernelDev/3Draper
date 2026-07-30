@@ -40,11 +40,28 @@ jobs:
       - name: Install trunk
         uses: jetli/trunk-action@v0.5.0
 
-      - name: Build WASM
+      - name: Build 3Draper Viewer WASM
         working-directory: crates/draper-viewer
         # Trunk.toml specifies --package draper-viewer to avoid building
         # non-WASM crates. The web feature disables export-3mf (zip/bzip2/lzma C deps).
+        # --public-url /3Draper/ makes assets load from the GitHub Pages subpath.
         run: trunk build --release --public-url /3Draper/
+
+      - name: Build BRepCAD WASM
+        working-directory: crates/draper-viewer
+        # Build BRepCAD into dist-brepcad/ using a separate Trunk config.
+        # --public-url /3Draper/ makes assets load from the GitHub Pages subpath.
+        run: trunk build --release --public-url /3Draper/ --config Trunk.brepcad.toml brepcad.html
+
+      - name: Merge BRepCAD into dist
+        working-directory: crates/draper-viewer
+        # Copy BRepCAD build output (brepcad.html + brepcad-shell-*.wasm/.js)
+        # into the main dist/ directory so both apps are served from one site.
+        # The brepcad-shell assets have unique names (brepcad-shell-*) so they
+        # don't collide with the draper-viewer assets.
+        run: |
+          cp -r dist-brepcad/* dist/
+          ls -la dist/
 
       - name: Add .nojekyll
         working-directory: crates/draper-viewer/dist
