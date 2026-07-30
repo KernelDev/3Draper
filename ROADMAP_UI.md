@@ -596,3 +596,102 @@ Each ribbon tab contains grouped command buttons with icons.
 | 7 | Context Menus (4) | 47-50 | Popup menus | Context actions |
 | 8 | Core Engine | — | — | Selection, undo, params, materials, layers, plugins, themes |
 | 9 | Workspaces (10) | 03-06, 78, 80-82 | Workspace switch | Full module implementation |
+
+---
+
+## Phase 10: Backend Wiring (Наполнение) ✅ DONE
+
+**Goal:** Connect all UI actions to the actual 3Draper engine (draper-step, draper-mesh, draper-topology, draper-geometry).
+
+### 10.1. Menu Bar Wiring ✅
+- [x] Refactored `menubar.rs`: every button now returns `Option<MenuAction>` (was: stub `ui.close_menu(); return;`)
+- [x] Extended `MenuAction` enum from ~30 to ~280 variants covering all 21 menus
+- [x] All 21 menu functions now use `let mut action = None;` pattern + capture clicks in closures
+
+### 10.2. Action Dispatcher ✅
+- [x] `dispatcher.rs` extended from 7 actions to **fully wired** actions:
+  - **File**: New, Open, Save, SaveAs, ExportStep, ExportStl, ExportObj, ImportStep, ImportStl, ImportObj, ImportPly, Quit
+  - **Edit**: Undo (snapshot restore), Redo, Cut, Copy, Paste, Duplicate (with offset)
+  - **View**: 8 orientations (ISO/Front/Back/Top/Bottom/Left/Right/Dimetric), Fit, ZoomIn/Out, Wireframe/Shaded/Shaded+Edges, toggles for Grid/Axis/Triad/ViewCube/Shadows/AO/AA/Edges/Normals, Perspective/Ortho
+  - **Insert**: Box, Sphere, Cylinder, Cone, Torus via `ShapeBuilder::make_*`
+  - **Modify**: Union, Subtract, Intersect via `draper_topology::boolean_*`, Move/Rotate/Scale via `Transform::translation/rotation_z/scaling`
+  - **Heal**: All 9 heal actions via `draper_topology::validation::heal_solid`
+  - **Measure**: Area, Volume computed from `TriangleMesh`; Watertight & Manifold checks via edge-pair counting
+  - **Insert dialog** (Box/Sphere/Cylinder/Cone/Torus with parameters) via `dispatch_dialog_action`
+
+### 10.3. Ribbon Wiring ✅
+- [x] Refactored `ribbon.rs::render_ribbon` to return `Option<MenuAction>`
+- [x] All 15 ribbon tabs now emit real MenuAction variants for each button
+- [x] Helper `group()` now accepts a closure returning `Option<MenuAction>`
+
+### 10.4. Viewport 3D Rendering ✅
+- [x] `brepcad_shell.rs::render_mesh` renders `doc.mesh` directly via egui `Painter`:
+  - **Wireframe** mode: triangle edges only (0.5px stroke)
+  - **Shaded** mode: filled triangles with Lambert lighting (per-face normal · light_dir)
+  - **Shaded + Edges** mode: shaded + edge overlay
+  - Painter's algorithm (back-to-front sort by rotated z-mean)
+- [x] Camera projection: azimuth/elevation rotation + orthographic projection
+- [x] Camera controls: Left-drag = rotate, Middle-drag = pan, Scroll = zoom
+
+### 10.5. View Cube → Camera Wiring ✅
+- [x] `render_view_cube` returns `ViewOrientation`
+- [x] Shell applies orientation: `doc.camera_az = az; doc.camera_el = el; doc.fit_view()`
+- [x] Display style switcher syncs `doc.display_style` ↔ `ui_state.display_style`
+
+### 10.6. Sketch Mode Backend ✅
+- [x] `brepcad_shell.rs::unproject_to_sketch` converts screen → 2D world point with grid snap
+- [x] Click handling: `draw_state.click(pt, &mut self.sketch)` adds entities
+- [x] Hover preview: `draw_state.update_preview(pt)` shows live preview entity
+- [x] `render_sketch` paints all 6 entity types (Line/Circle/Arc/Rectangle/Spline/Point) using camera projection
+- [x] Tool switching via keyboard (1=Line, 2=Circle, 3=Rectangle, 4=Point, 5=Arc) and menu/ribbon
+- [x] ESC exits sketch mode
+
+### 10.7. Command Palette → Actions ✅
+- [x] `command_name_to_action()` maps 50+ command names to MenuAction variants
+- [x] Selected command → `do_action()` → dispatcher → 3Draper engine
+
+### 10.8. Snapshot-Based Undo/Redo ✅
+- [x] `Document::undo_stack` and `redo_stack: Vec<DocSnapshot>` added to Document
+- [x] `Document::push_undo(snap)` called BEFORE every mutating action (15 call sites)
+- [x] `Document::undo()` / `redo()` swap snapshots between stacks and restore
+- [x] `Document::snapshot(desc)` captures `solids + name + description`
+- [x] `Document::restore(snap)` re-triangulates after restoring solids
+- [x] Ctrl+Z / Ctrl+Shift+Z wired to `doc.undo()` / `doc.redo()`
+- [x] History limit: 50 snapshots (configurable via `doc.max_history`)
+
+### 10.9. STL/OBJ/PLY Importers ✅
+- [x] `import_stl_file`: uses `draper_mesh::stl::import_stl_from_bytes`
+- [x] `import_obj_file`: custom parser (v/f lines, fan triangulation, supports v/vt/vn format)
+- [x] `import_ply_file`: custom ASCII parser (header parsing + vertex/face sections)
+- [x] All importers call `doc.fit_view()` after load and push undo snapshot
+
+### 10.10. Keyboard Shortcuts ✅
+- [x] Ctrl+N = New, Ctrl+O = Open, Ctrl+S = Save, Ctrl+D = Duplicate
+- [x] Ctrl+Z = Undo, Ctrl+Shift+Z = Redo
+- [x] Ctrl+, = Options dialog
+- [x] Ctrl+Shift+P = Command palette
+- [x] S = Toggle sketch mode (in 3D viewport)
+- [x] 1-5 = Sketch tool select (in sketch mode)
+- [x] ESC = Exit sketch mode
+- [x] F = Fit to view
+- [x] Space = Toggle marking menu
+
+### 10.11. Status Bar Real-time Data ✅
+- [x] Status bar shows real camera_az, camera_el, camera_dist from doc
+- [x] Selection count from `SelectionManager::count()`
+- [x] Tool name updated on every action
+
+### 10.12. What's Still NOT Wired (Future Work)
+- [ ] Boolean Fillet/Chamfer (requires edge selection in viewport)
+- [ ] Pattern operations (Linear/Circular/Mirror) — needs parameter dialog
+- [ ] Sheet Metal module (requires full SM engine implementation)
+- [ ] Assembly mate solver (needs 3D constraint solver)
+- [ ] CAM operations (needs toolpath generation)
+- [ ] Drawing sheet layout (needs 2D drawing engine)
+- [ ] FEA solver (needs CG/direct linear algebra)
+- [ ] Topology optimization (needs FEA + density-based optimization)
+- [ ] AI features (needs LLM/text-to-3D integration)
+- [ ] Plugin system (needs dynamic loading)
+- [ ] Real GL renderer (currently using egui Painter — sufficient for editing, but for production use the existing `draper-viewer::Renderer` should be plugged in)
+
+**Total LOC added in Phase 10:** ~2,800 lines (menubar refactor + dispatcher extension + ribbon rewrite + brepcad_shell rewrite)
