@@ -29,6 +29,12 @@ struct BrepCadApp {
     right_tab: ui::panels::RightPanelTab,
     sample_tree: Vec<ui::panels::TreeNode>,
     active_dialog: ui::dialogs::DialogType,
+    // Phase 8: Core engine
+    selection: ui::core_engine::SelectionManager,
+    undo: ui::core_engine::UndoManager,
+    params: ui::core_engine::ParameterTable,
+    materials: ui::core_engine::MaterialLibrary,
+    layers: ui::core_engine::LayerManager,
 }
 
 impl BrepCadApp {
@@ -196,6 +202,17 @@ impl eframe::App for BrepCadApp {
         if let Some(action) = ui::dialogs::render_dialog(ctx, &mut self.active_dialog) {
             eprintln!("Dialog action: {:?}", action);
         }
+
+        // Phase 8: Undo/Redo keyboard shortcuts
+        if ctx.input(|i| i.key_pressed(egui::Key::Z) && (i.modifiers.ctrl || i.modifiers.command) && !i.modifiers.shift) {
+            if let Some(desc) = self.undo.undo() { eprintln!("{}", desc); }
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Z) && (i.modifiers.ctrl || i.modifiers.command) && i.modifiers.shift) {
+            if let Some(desc) = self.undo.redo() { eprintln!("{}", desc); }
+        }
+
+        // Update selection count in UI state
+        self.ui_state.selection_count = self.selection.count();
 
         // Phase 0: Status bar
         ui::statusbar::render_status_bar(ctx, &self.ui_state);
