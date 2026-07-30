@@ -39,6 +39,9 @@ struct BrepCadApp {
     sketch: ui::sketch::Sketch,
     draw_state: ui::sketch::DrawState,
     in_sketch_mode: bool,
+    // Phase 8+: Document + dispatcher
+    doc: ui::dispatcher::Document,
+    status_msg: String,
 }
 
 impl BrepCadApp {
@@ -112,8 +115,13 @@ impl eframe::App for BrepCadApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.ensure_tree();
 
-        // Phase 1: Menu bar (21 menus)
-        let _action = ui::menubar::render_menu_bar(ctx);
+        // Phase 1: Menu bar (21 menus) — dispatch actions to backend
+        if let Some(action) = ui::menubar::render_menu_bar(ctx) {
+            self.status_msg = ui::dispatcher::dispatch_menu_action(
+                &action, &mut self.doc, &mut self.selection, &mut self.undo,
+            );
+            eprintln!("Menu: {}", self.status_msg);
+        }
 
         // Phase 2: Ribbon bar (15 tabs)
         ui::ribbon::render_ribbon(ctx, &mut self.ui_state.active_ribbon);
@@ -249,7 +257,10 @@ impl eframe::App for BrepCadApp {
             self.active_dialog = ui::dialogs::DialogType::Options;
         }
         if let Some(action) = ui::dialogs::render_dialog(ctx, &mut self.active_dialog) {
-            eprintln!("Dialog action: {:?}", action);
+            self.status_msg = ui::dispatcher::dispatch_dialog_action(
+                &action, &mut self.doc, &mut self.undo,
+            );
+            eprintln!("Dialog: {}", self.status_msg);
         }
 
         // Phase 8: Undo/Redo keyboard shortcuts
@@ -262,6 +273,22 @@ impl eframe::App for BrepCadApp {
 
         // Update selection count in UI state
         self.ui_state.selection_count = self.selection.count();
+
+        // Show status message in status bar area
+        if !self.status_msg.is_empty() {
+            egui::Area::new(egui::Id::new("status_toast"))
+                .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -30.0])
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    egui::Frame::new()
+                        .fill(egui::Color32::from_black_alpha(200))
+                        .corner_radius(6.0)
+                        .inner_margin(egui::Margin::symmetric(12, 6))
+                        .show(ui, |ui| {
+                            ui.label(&self.status_msg);
+                        });
+                });
+        }
 
         // Phase 0: Status bar
         ui::statusbar::render_status_bar(ctx, &self.ui_state);
