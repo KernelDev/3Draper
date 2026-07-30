@@ -732,6 +732,21 @@ pub struct ViewerApp {
     /// Populated when the user opens the GD&T window or when a new file
     /// is loaded.
     gdt_data: Option<draper_step::GdtData>,
+
+    // ─── BRepCAD UI (extended menu/ribbon) ────────────────────────────
+    /// When true, the BRepCAD 21-menu + 15-tab ribbon is rendered at the top
+    /// instead of the simple "File / View" menu. Set by the brepcad-shell binary.
+    pub enable_brepcad_ui: bool,
+    /// Active ribbon tab for BRepCAD UI.
+    pub brepcad_ribbon_tab: crate::ui::ribbon::RibbonTab,
+    /// Active dialog for BRepCAD UI.
+    pub brepcad_dialog: crate::ui::dialogs::DialogType,
+    /// Command palette state for BRepCAD UI.
+    pub brepcad_command_palette: crate::ui::command_palette::CommandPalette,
+    /// Marking menu visibility for BRepCAD UI.
+    pub brepcad_marking_menu_visible: bool,
+    /// Last status message displayed in toast.
+    pub brepcad_status_msg: String,
 }
 
 /// UV breakdown for a single face of a solid — the outer boundary plus
@@ -1258,6 +1273,12 @@ impl ViewerApp {
             solid_uv_breakdown: None,
             pending_solid_uv_svg_export: false,
             gdt_data: None,
+            enable_brepcad_ui: false,
+            brepcad_ribbon_tab: crate::ui::ribbon::RibbonTab::Home,
+            brepcad_dialog: crate::ui::dialogs::DialogType::None,
+            brepcad_command_palette: Default::default(),
+            brepcad_marking_menu_visible: false,
+            brepcad_status_msg: String::new(),
         };
         app.log(&format!("3Draper Viewer started [build: {}]", env!("DRAPER_GIT_HASH")));
         app.log(&format!("Default model: Box 100x100x100 ({} vertices, {} triangles)",
@@ -6094,6 +6115,21 @@ impl eframe::App for ViewerApp {
 
         // === Top menu bar (desktop only — mobile uses overlay buttons) ===
         if !self.is_mobile {
+            if self.enable_brepcad_ui {
+                // === BRepCAD extended UI: 21-menu bar + 15-tab ribbon ===
+                if let Some(action) = crate::ui::menubar::render_menu_bar(ctx) {
+                    let msg = self.handle_brepcad_action(&action);
+                    if !msg.is_empty() {
+                        self.brepcad_status_msg = msg;
+                    }
+                }
+                if let Some(action) = crate::ui::ribbon::render_ribbon(ctx, &mut self.brepcad_ribbon_tab) {
+                    let msg = self.handle_brepcad_action(&action);
+                    if !msg.is_empty() {
+                        self.brepcad_status_msg = msg;
+                    }
+                }
+            } else {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -6260,6 +6296,7 @@ impl eframe::App for ViewerApp {
                 });
             });
         });
+            } // end else (original menu)
         } // end desktop top menu bar
 
         // === Bottom panel: log (collapsible — especially important on mobile) ===
@@ -8017,6 +8054,82 @@ impl eframe::App for ViewerApp {
                 }
             } else {
                 self.log_warning("UV export: no solid loaded");
+            }
+        }
+
+        // ═══ BRepCAD UI: command palette, dialogs, status toast ═════════════════
+        if self.enable_brepcad_ui {
+            // Command palette (Ctrl+Shift+P)
+            if let Some(cmd) = crate::ui::command_palette::render_command_palette(ctx, &mut self.brepcad_command_palette) {
+                if let Some(action) = Self::command_name_to_action(&cmd) {
+                    let msg = self.handle_brepcad_action(&action);
+                    if !msg.is_empty() {
+                        self.brepcad_status_msg = msg;
+                    }
+                }
+            }
+
+            // Keyboard shortcut: Ctrl+, for Options
+            if ctx.input(|i| i.key_pressed(egui::Key::Comma) && (i.modifiers.ctrl || i.modifiers.command)) {
+                self.brepcad_dialog = crate::ui::dialogs::DialogType::Options;
+            }
+
+            // Dialogs
+            if let Some(action) = crate::ui::dialogs::render_dialog(ctx, &mut self.brepcad_dialog) {
+                let msg = self.handle_brepcad_dialog_action(&action);
+                if !msg.is_empty() {
+                    self.brepcad_status_msg = msg;
+                }
+            }
+
+            // Marking menu (Space key)
+            if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+                self.brepcad_marking_menu_visible = !self.brepcad_marking_menu_visible;
+            }
+            if let Some(_action) = crate::ui::context_menus::marking_menu(ctx, &mut self.brepcad_marking_menu_visible) {
+                // Marking menu actions could be wired here
+            }
+
+            // Status toast
+            if !self.brepcad_status_msg.is_empty() {
+                egui::Area::new(egui::Id::new("brepcad_status_toast"))
+                    .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -30.0])
+                    .order(egui::Order::Foreground)
+                    .show(ctx, |ui| {
+                        egui::Frame::new()
+                            .fill(egui::Color32::from_black_alpha(200))
+                            .corner_radius(6.0)
+                            .inner_margin(egui::Margin::symmetric(12, 6))
+                            .show(ui, |ui| {
+                                ui.label(&self.brepcad_status_msg);
+                            });
+                    });
+            }
+
+            // Ctrl+Z = Undo, Ctrl+Shift+Z = Redo (BRepCAD mode)
+            if ctx.input(|i| i.key_pressed(egui::Key::Z) && (i.modifiers.ctrl || i.modifiers.command) && !i.modifiers.shift) {
+                if self.brepcad_undo() {
+                    // status updated by brepcad_undo
+                } else {
+                    self.brepcad_status_msg = "Nothing to undo".to_string();
+                }
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::Z) && (i.modifiers.ctrl || i.modifiers.command) && i.modifiers.shift) {
+                if self.brepcad_redo() {
+                    // status updated by brepcad_redo
+                } else {
+                    self.brepcad_status_msg = "Nothing to redo".to_string();
+                }
+            }
+
+            // F = Fit view
+            if ctx.input(|i| i.key_pressed(egui::Key::F) && !i.modifiers.ctrl && !i.modifiers.command) {
+                let (bbox_min, bbox_max) = self.mesh.bounding_box();
+                self.camera.fit_to_bounding_box(
+                    [bbox_min.x as f32, bbox_min.y as f32, bbox_min.z as f32],
+                    [bbox_max.x as f32, bbox_max.y as f32, bbox_max.z as f32],
+                );
+                self.brepcad_status_msg = "Fit to view".to_string();
             }
         }
     }
@@ -11792,5 +11905,376 @@ fn skip_instance_in_tree(node: &mut AssemblyNode) {
         for child in n.children.iter_mut().rev() {
             stack.push(child);
         }
+    }
+}
+
+// ============================================================
+// BRepCAD UI integration
+// ============================================================
+
+impl ViewerApp {
+    /// Handle a BRepCAD MenuAction by delegating to the existing ViewerApp methods.
+    /// Returns a status message.
+    pub fn handle_brepcad_action(&mut self, action: &crate::ui::menubar::MenuAction) -> String {
+        use crate::ui::menubar::MenuAction;
+        match action {
+            MenuAction::None => String::new(),
+
+            // ── File actions ──
+            MenuAction::FileNew => {
+                self.load_box();
+                "New document created (default Box 100×100×100)".to_string()
+            }
+            MenuAction::FileOpen => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("STEP", &["stp", "step"])
+                        .add_filter("STL", &["stl"])
+                        .add_filter("OBJ", &["obj"])
+                        .add_filter("JSON", &["json"])
+                        .pick_file()
+                    {
+                        let p = path.to_string_lossy().to_string();
+                        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                        match ext.as_str() {
+                            "stp" | "step" => self.import_step_file(&p),
+                            "stl" => self.import_stl_file(&p),
+                            "json" => self.import_json(&p),
+                            _ => self.import_step_file(&p),
+                        }
+                        return format!("Opened: {}", p);
+                    }
+                }
+                "Open cancelled".to_string()
+            }
+            MenuAction::FileSave | MenuAction::FileSaveAs => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("STEP", &["stp"])
+                        .set_file_name(&self.current_model.name)
+                        .save_file()
+                    {
+                        self.export_step(&path.to_string_lossy());
+                        return format!("Saved: {}", path.to_string_lossy());
+                    }
+                }
+                "Save cancelled".to_string()
+            }
+            MenuAction::FileExportStep => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("STEP", &["stp", "step"])
+                        .save_file()
+                    {
+                        self.export_step(&path.to_string_lossy());
+                        return format!("Exported STEP: {}", path.to_string_lossy());
+                    }
+                }
+                "Export cancelled".to_string()
+            }
+            MenuAction::FileExportStl => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("STL", &["stl"])
+                        .save_file()
+                    {
+                        self.export_stl_binary(&path.to_string_lossy());
+                        return format!("Exported STL: {}", path.to_string_lossy());
+                    }
+                }
+                "Export cancelled".to_string()
+            }
+            MenuAction::FileImportStep => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("STEP", &["stp", "step"])
+                        .pick_file()
+                    {
+                        let p = path.to_string_lossy().to_string();
+                        self.import_step_file(&p);
+                        return format!("Imported STEP: {}", p);
+                    }
+                }
+                "Import cancelled".to_string()
+            }
+            MenuAction::FileImportStl => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("STL", &["stl"])
+                        .pick_file()
+                    {
+                        let p = path.to_string_lossy().to_string();
+                        self.import_stl_file(&p);
+                        return format!("Imported STL: {}", p);
+                    }
+                }
+                "Import cancelled".to_string()
+            }
+            MenuAction::FileQuit => {
+                "Quit requested — close window to exit".to_string()
+            }
+            MenuAction::FilePrint => "Print dialog not yet implemented".to_string(),
+            MenuAction::FileExportObj => "OBJ export not yet implemented (use STL)".to_string(),
+            MenuAction::FileExportGltf => "GLTF export not yet implemented".to_string(),
+            MenuAction::FileExportPdf => "PDF export not yet implemented".to_string(),
+            MenuAction::FileExportDxf => "DXF export not yet implemented".to_string(),
+            MenuAction::FileImportObj => "OBJ import not yet implemented (use STL)".to_string(),
+            MenuAction::FileImportPly => "PLY import not yet implemented".to_string(),
+            MenuAction::FileImportDxf => "DXF import not yet implemented".to_string(),
+            MenuAction::FileImportPointCloud => "Point cloud import not yet implemented".to_string(),
+
+            // ── Edit actions ──
+            MenuAction::EditUndo => {
+                if self.brepcad_undo() { String::new() } else { "Nothing to undo".to_string() }
+            }
+            MenuAction::EditRedo => {
+                if self.brepcad_redo() { String::new() } else { "Nothing to redo".to_string() }
+            }
+            MenuAction::EditDuplicate => {
+                // Re-load current solid as a duplicate (offset by ShapeBuilder translation)
+                if let Some(solid) = self.current_solid.clone() {
+                    let mut new_solid = solid;
+                    use draper_geometry::Transform;
+                    draper_topology::ShapeBuilder::transform_solid(&mut new_solid, &Transform::translation(20.0, 0.0, 0.0));
+                    self.current_solid = Some(new_solid);
+                    self.refresh_from_current_solid("Duplicate solid");
+                    "Solid duplicated (+20mm X offset)".to_string()
+                } else {
+                    "No solid to duplicate".to_string()
+                }
+            }
+            MenuAction::EditCut | MenuAction::EditCopy | MenuAction::EditPaste => {
+                "Clipboard operations not yet implemented".to_string()
+            }
+            MenuAction::EditFind => "Find (parameters search) not yet implemented".to_string(),
+
+            // ── View actions ──
+            MenuAction::ViewIso => {
+                let d = 45.0_f32.to_radians();
+                let e = 30.0_f32.to_radians();
+                self.camera.look_from_direction([
+                    -e.cos() * d.sin(),
+                    -e.sin(),
+                    e.cos() * d.cos(),
+                ]);
+                "ISO view".to_string()
+            }
+            MenuAction::ViewFront => {
+                self.camera.look_from_direction([0.0, 0.0, 1.0]);
+                "Front view".to_string()
+            }
+            MenuAction::ViewBack => {
+                self.camera.look_from_direction([0.0, 0.0, -1.0]);
+                "Back view".to_string()
+            }
+            MenuAction::ViewTop => {
+                self.camera.look_from_direction([0.0, -1.0, 0.0]);
+                "Top view".to_string()
+            }
+            MenuAction::ViewBottom => {
+                self.camera.look_from_direction([0.0, 1.0, 0.0]);
+                "Bottom view".to_string()
+            }
+            MenuAction::ViewLeft => {
+                self.camera.look_from_direction([1.0, 0.0, 0.0]);
+                "Left view".to_string()
+            }
+            MenuAction::ViewRight => {
+                self.camera.look_from_direction([-1.0, 0.0, 0.0]);
+                "Right view".to_string()
+            }
+            MenuAction::ViewDimetric => {
+                let d = 20.0_f32.to_radians();
+                let e = 15.0_f32.to_radians();
+                self.camera.look_from_direction([
+                    -e.cos() * d.sin(),
+                    -e.sin(),
+                    e.cos() * d.cos(),
+                ]);
+                "Dimetric view".to_string()
+            }
+            MenuAction::ViewFit => {
+                let (bbox_min, bbox_max) = self.mesh.bounding_box();
+                self.camera.fit_to_bounding_box(
+                    [bbox_min.x as f32, bbox_min.y as f32, bbox_min.z as f32],
+                    [bbox_max.x as f32, bbox_max.y as f32, bbox_max.z as f32],
+                );
+                "Fit to view".to_string()
+            }
+            MenuAction::ViewZoomIn => { self.camera.zoom(-50.0, None); "Zoom in".to_string() }
+            MenuAction::ViewZoomOut => { self.camera.zoom(50.0, None); "Zoom out".to_string() }
+            MenuAction::ViewZoomWindow => "Zoom window: drag in viewport".to_string(),
+            MenuAction::ViewZoomSelection => "Zoom to selection".to_string(),
+            MenuAction::ViewWireframe => { self.wireframe = true; self.show_edges = false; "Wireframe display".to_string() }
+            MenuAction::ViewShaded => { self.wireframe = false; self.show_edges = false; "Shaded display".to_string() }
+            MenuAction::ViewShadedEdges => { self.wireframe = false; self.show_edges = true; "Shaded + Edges display".to_string() }
+            MenuAction::ViewToggleGrid => { self.show_grid = !self.show_grid; format!("Grid: {}", if self.show_grid {"on"} else {"off"}) }
+            MenuAction::ViewToggleAxis => { self.show_axes = !self.show_axes; format!("Axes: {}", if self.show_axes {"on"} else {"off"}) }
+            MenuAction::ViewToggleTriad => { format!("Triad: {}", if self.show_axes {"on"} else {"off"}) }
+            MenuAction::ViewToggleViewCube => "View Cube toggle (always shown)".to_string(),
+            MenuAction::ViewToggleShadows => "Shadows not supported in current renderer".to_string(),
+            MenuAction::ViewToggleAo => "Ambient occlusion not supported in current renderer".to_string(),
+            MenuAction::ViewToggleAa => "Anti-aliasing is always on".to_string(),
+            MenuAction::ViewToggleEdges => { self.show_edges = !self.show_edges; format!("Edges: {}", if self.show_edges {"on"} else {"off"}) }
+            MenuAction::ViewToggleNormals => "Normals display not yet implemented".to_string(),
+            MenuAction::ViewToggleSilhouette => "Silhouette not yet implemented".to_string(),
+            MenuAction::ViewPerspective | MenuAction::ViewOrthographic => "Camera mode toggle not yet implemented".to_string(),
+            MenuAction::ViewSaveLayout | MenuAction::ViewLoadLayout => "Layout save/load not yet implemented".to_string(),
+
+            // ── Insert actions ──
+            MenuAction::InsertBox => { self.brepcad_dialog = crate::ui::dialogs::DialogType::InsertPrimitive(crate::ui::dialogs::PrimitiveType::Box); String::new() }
+            MenuAction::InsertSphere => { self.brepcad_dialog = crate::ui::dialogs::DialogType::InsertPrimitive(crate::ui::dialogs::PrimitiveType::Sphere); String::new() }
+            MenuAction::InsertCylinder => { self.brepcad_dialog = crate::ui::dialogs::DialogType::InsertPrimitive(crate::ui::dialogs::PrimitiveType::Cylinder); String::new() }
+            MenuAction::InsertCone => { self.brepcad_dialog = crate::ui::dialogs::DialogType::InsertPrimitive(crate::ui::dialogs::PrimitiveType::Cone); String::new() }
+            MenuAction::InsertTorus => { self.brepcad_dialog = crate::ui::dialogs::DialogType::InsertPrimitive(crate::ui::dialogs::PrimitiveType::Torus); String::new() }
+            MenuAction::InsertPlane | MenuAction::InsertAxis | MenuAction::InsertPoint
+            | MenuAction::InsertCs => "Reference geometry not yet implemented".to_string(),
+            MenuAction::InsertSketch => "Press S to enter sketch mode (coming soon)".to_string(),
+            MenuAction::InsertMesh | MenuAction::InsertMeshFromSolid | MenuAction::InsertRemesh => {
+                "Mesh operations not yet implemented".to_string()
+            }
+            MenuAction::InsertComponent => "Component insertion not yet implemented".to_string(),
+            MenuAction::InsertLinearPattern => "Linear pattern not yet implemented".to_string(),
+            MenuAction::InsertCircularPattern => { self.model_circular_pattern(); "Circular pattern applied".to_string() }
+            MenuAction::InsertMirror => "Mirror not yet implemented".to_string(),
+
+            // ── Modify: Boolean operations ──
+            MenuAction::ModifyUnion => { self.model_boolean_union(); "Boolean union applied".to_string() }
+            MenuAction::ModifySubtract => { self.model_boolean_subtract(); "Boolean subtract applied".to_string() }
+            MenuAction::ModifyIntersect => { self.model_boolean_intersect(); "Boolean intersect applied".to_string() }
+            MenuAction::ModifyFillet => { self.model_fillet_edge(); "Fillet applied to first manifold edge".to_string() }
+            MenuAction::ModifyChamfer => { self.model_chamfer_edge(); "Chamfer applied to first manifold edge".to_string() }
+            MenuAction::ModifyLoft | MenuAction::ModifySweep => {
+                "Loft/Sweep: requires sketch profiles (not yet implemented)".to_string()
+            }
+            MenuAction::ModifyMove => { self.model_translate(); "Moved +20mm in X".to_string() }
+            MenuAction::ModifyRotate => { self.model_rotate(); "Rotated 15° about Z".to_string() }
+            MenuAction::ModifyScale => { self.model_scale(); "Scaled ×1.1".to_string() }
+            MenuAction::ModifyLinearPattern => "Linear pattern not yet implemented".to_string(),
+            MenuAction::ModifyCircularPattern => { self.model_circular_pattern(); "Circular pattern applied".to_string() }
+            MenuAction::ModifyMirror => "Mirror not yet implemented".to_string(),
+            MenuAction::ModifyMoveFace => { self.model_delete_face(); "Move/Delete face applied".to_string() }
+            MenuAction::ModifyOffsetFace => "Offset face not yet implemented".to_string(),
+            MenuAction::ModifyDeleteFace => { self.model_delete_face(); "Face deleted".to_string() }
+            MenuAction::ModifyReplaceFace | MenuAction::ModifySplitFace
+            | MenuAction::ModifyMergeFaces | MenuAction::ModifySimplify
+            | MenuAction::ModifyThicken => "Direct modeling not yet implemented".to_string(),
+            MenuAction::ModifyBend | MenuAction::ModifyTwist | MenuAction::ModifyTaper
+            | MenuAction::ModifyStretch => "Deform operations not yet implemented".to_string(),
+
+            // ── Sketch actions ──
+            MenuAction::SketchEnter | MenuAction::SketchLine | MenuAction::SketchCircle
+            | MenuAction::SketchArc3 | MenuAction::SketchArcTangent | MenuAction::SketchRectangle
+            | MenuAction::SketchSpline | MenuAction::SketchPolygon | MenuAction::SketchPoint
+            | MenuAction::SketchExit | MenuAction::SketchConstraintCoincident
+            | MenuAction::SketchConstraintCollinear | MenuAction::SketchConstraintConcentric
+            | MenuAction::SketchConstraintParallel | MenuAction::SketchConstraintPerpendicular
+            | MenuAction::SketchConstraintTangent | MenuAction::SketchConstraintHorizontal
+            | MenuAction::SketchConstraintVertical | MenuAction::SketchConstraintEqual
+            | MenuAction::SketchDimLinear | MenuAction::SketchDimAngular
+            | MenuAction::SketchDimRadial | MenuAction::SketchDimDiameter
+            | MenuAction::SketchTrim | MenuAction::SketchExtend | MenuAction::SketchSplit
+            | MenuAction::SketchOffset | MenuAction::SketchMirror | MenuAction::SketchPattern
+            | MenuAction::SketchFillet => "Sketch mode coming soon (use existing NURBS/Curve tests)".to_string(),
+
+            // ── Sheet Metal, Assembly, CAM, Drawing, Simulation, etc. ──
+            _ => format!("{:?} — not yet implemented", action),
+        }
+    }
+
+    /// Handle a BRepCAD dialog action.
+    pub fn handle_brepcad_dialog_action(&mut self, action: &crate::ui::dialogs::DialogAction) -> String {
+        use crate::ui::dialogs::{DialogAction, PrimitiveType};
+        match action {
+            DialogAction::InsertPrimitive(pt, values) => {
+                match pt {
+                    PrimitiveType::Box => self.load_box(),
+                    PrimitiveType::Sphere => self.load_sphere(),
+                    PrimitiveType::Cylinder => self.load_cylinder(),
+                    PrimitiveType::Cone => self.load_cone(),
+                    PrimitiveType::Torus => self.load_torus(),
+                }
+                format!("{} inserted", pt.label())
+            }
+            DialogAction::Close => "Dialog closed".to_string(),
+        }
+    }
+
+    /// Map a command palette name to a MenuAction.
+    pub fn command_name_to_action(name: &str) -> Option<crate::ui::menubar::MenuAction> {
+        use crate::ui::menubar::MenuAction;
+        match name {
+            "New" => Some(MenuAction::FileNew),
+            "Open…" => Some(MenuAction::FileOpen),
+            "Save" => Some(MenuAction::FileSave),
+            "Export STEP" => Some(MenuAction::FileExportStep),
+            "Export STL" => Some(MenuAction::FileExportStl),
+            "Import STEP" => Some(MenuAction::FileImportStep),
+            "Undo" => Some(MenuAction::EditUndo),
+            "Redo" => Some(MenuAction::EditRedo),
+            "Cut" => Some(MenuAction::EditCut),
+            "Copy" => Some(MenuAction::EditCopy),
+            "Paste" => Some(MenuAction::EditPaste),
+            "Duplicate" => Some(MenuAction::EditDuplicate),
+            "Fit to View" => Some(MenuAction::ViewFit),
+            "ISO View" => Some(MenuAction::ViewIso),
+            "Front View" => Some(MenuAction::ViewFront),
+            "Top View" => Some(MenuAction::ViewTop),
+            "Right View" => Some(MenuAction::ViewRight),
+            "Wireframe" => Some(MenuAction::ViewWireframe),
+            "Shaded" => Some(MenuAction::ViewShaded),
+            "Shaded + Edges" => Some(MenuAction::ViewShadedEdges),
+            "Insert Box" => Some(MenuAction::InsertBox),
+            "Insert Sphere" => Some(MenuAction::InsertSphere),
+            "Insert Cylinder" => Some(MenuAction::InsertCylinder),
+            "Insert Cone" => Some(MenuAction::InsertCone),
+            "Insert Torus" => Some(MenuAction::InsertTorus),
+            "Insert Sketch" => Some(MenuAction::InsertSketch),
+            "Boolean Union" => Some(MenuAction::ModifyUnion),
+            "Boolean Subtract" => Some(MenuAction::ModifySubtract),
+            "Boolean Intersect" => Some(MenuAction::ModifyIntersect),
+            "Fillet" => Some(MenuAction::ModifyFillet),
+            "Chamfer" => Some(MenuAction::ModifyChamfer),
+            "Move" => Some(MenuAction::ModifyMove),
+            "Rotate" => Some(MenuAction::ModifyRotate),
+            "Scale" => Some(MenuAction::ModifyScale),
+            "Sketch Mode" => Some(MenuAction::SketchEnter),
+            "Options…" => Some(MenuAction::ToolsOptions),
+            "Customize…" => Some(MenuAction::ToolsCustomize),
+            "Plugins Manager…" => Some(MenuAction::ToolsPlugins),
+            "Scripting Console" => Some(MenuAction::ToolsScriptingConsole),
+            "Performance Monitor" => Some(MenuAction::ToolsPerformance),
+            "Measure Distance" => Some(MenuAction::MeasureDistance),
+            "Measure Angle" => Some(MenuAction::MeasureAngle),
+            "Measure Area" => Some(MenuAction::MeasureArea),
+            "Measure Volume" => Some(MenuAction::MeasureVolume),
+            "Heal: Stitch" => Some(MenuAction::HealStitch),
+            "Heal: Gap Fill" => Some(MenuAction::HealGapFill),
+            "Heal: Fix Orientation" => Some(MenuAction::HealFixOrientation),
+            "Watertight Check" => Some(MenuAction::AnalysisWatertight),
+            "Manifold Check" => Some(MenuAction::AnalysisManifold),
+            _ => None,
+        }
+    }
+
+    /// BRepCAD undo: snapshot-based.
+    /// Currently a stub that returns false (no undo stack maintained yet).
+    /// TODO: maintain a Vec<Solid> undo stack on each mutating operation.
+    pub fn brepcad_undo(&mut self) -> bool {
+        // The existing ViewerApp does not maintain an undo stack.
+        // We return false so the user gets "Nothing to undo".
+        // For a real implementation, we'd need to snapshot current_solid before each mutation.
+        false
+    }
+
+    /// BRepCAD redo: snapshot-based.
+    pub fn brepcad_redo(&mut self) -> bool {
+        false
     }
 }
