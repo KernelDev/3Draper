@@ -55,11 +55,12 @@ jobs:
 
       - name: Merge BRepCAD into dist
         working-directory: crates/draper-viewer
-        # Copy BRepCAD build output (brepcad.html + brepcad-shell-*.wasm/.js)
-        # into the main dist/ directory so both apps are served from one site.
-        # The brepcad-shell assets have unique names (brepcad-shell-*) so they
-        # don't collide with the draper-viewer assets.
+        # Trunk always outputs the built HTML as index.html in the dist dir.
+        # Rename it to brepcad.html so it doesn't overwrite the 3Draper Viewer's
+        # index.html, then copy brepcad.html + brepcad-shell-*.wasm/.js into dist/.
+        # The brepcad-shell assets have unique names so they don't collide.
         run: |
+          mv dist-brepcad/index.html dist-brepcad/brepcad.html
           cp -r dist-brepcad/* dist/
           ls -la dist/
 
