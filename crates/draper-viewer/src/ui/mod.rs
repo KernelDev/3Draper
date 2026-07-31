@@ -15,9 +15,6 @@ pub mod dialogs;
 pub mod core_engine;
 pub mod sketch;
 pub mod workspaces;
-pub mod dispatcher;
-
-use eframe::egui;
 
 /// The active workspace/mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
