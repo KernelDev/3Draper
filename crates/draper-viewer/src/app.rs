@@ -757,6 +757,12 @@ pub struct ViewerApp {
     pub brepcad_active_tool: String,
     /// Current view orientation label (shown in status bar).
     pub brepcad_view_orientation: String,
+    /// Undo stack: snapshots of (solid, model_name) before each mutation.
+    pub brepcad_undo_stack: Vec<(Option<draper_topology::Solid>, String)>,
+    /// Redo stack: snapshots for redo.
+    pub brepcad_redo_stack: Vec<(Option<draper_topology::Solid>, String)>,
+    /// Max undo history depth.
+    pub brepcad_max_history: usize,
 }
 
 /// Left panel tab for BRepCAD Browser.
@@ -1319,6 +1325,9 @@ impl ViewerApp {
             brepcad_tree_filter: String::new(),
             brepcad_active_tool: "Select".to_string(),
             brepcad_view_orientation: "ISO".to_string(),
+            brepcad_undo_stack: Vec::new(),
+            brepcad_redo_stack: Vec::new(),
+            brepcad_max_history: 50,
         };
         app.log(&format!("3Draper Viewer started [build: {}]", env!("DRAPER_GIT_HASH")));
         app.log(&format!("Default model: Box 100x100x100 ({} vertices, {} triangles)",
@@ -12510,14 +12519,15 @@ impl ViewerApp {
 
             // ── Edit actions ──
             MenuAction::EditUndo => {
-                if self.brepcad_undo() { String::new() } else { "Nothing to undo".to_string() }
+                if self.brepcad_undo() { "Undo applied".to_string() } else { "Nothing to undo".to_string() }
             }
             MenuAction::EditRedo => {
-                if self.brepcad_redo() { String::new() } else { "Nothing to redo".to_string() }
+                if self.brepcad_redo() { "Redo applied".to_string() } else { "Nothing to redo".to_string() }
             }
             MenuAction::EditDuplicate => {
                 // Re-load current solid as a duplicate (offset by ShapeBuilder translation)
                 if let Some(solid) = self.current_solid.clone() {
+                    self.brepcad_push_undo();
                     let mut new_solid = solid;
                     use draper_geometry::Transform;
                     draper_topology::ShapeBuilder::transform_solid(&mut new_solid, &Transform::translation(20.0, 0.0, 0.0));
@@ -12624,17 +12634,17 @@ impl ViewerApp {
             MenuAction::InsertMirror => "Mirror not yet implemented".to_string(),
 
             // ── Modify: Boolean operations ──
-            MenuAction::ModifyUnion => { self.model_boolean_union(); "Boolean union applied".to_string() }
-            MenuAction::ModifySubtract => { self.model_boolean_subtract(); "Boolean subtract applied".to_string() }
-            MenuAction::ModifyIntersect => { self.model_boolean_intersect(); "Boolean intersect applied".to_string() }
-            MenuAction::ModifyFillet => { self.model_fillet_edge(); "Fillet applied to first manifold edge".to_string() }
-            MenuAction::ModifyChamfer => { self.model_chamfer_edge(); "Chamfer applied to first manifold edge".to_string() }
+            MenuAction::ModifyUnion => { self.brepcad_push_undo(); self.model_boolean_union(); "Boolean union applied".to_string() }
+            MenuAction::ModifySubtract => { self.brepcad_push_undo(); self.model_boolean_subtract(); "Boolean subtract applied".to_string() }
+            MenuAction::ModifyIntersect => { self.brepcad_push_undo(); self.model_boolean_intersect(); "Boolean intersect applied".to_string() }
+            MenuAction::ModifyFillet => { self.brepcad_push_undo(); self.model_fillet_edge(); "Fillet applied to first manifold edge".to_string() }
+            MenuAction::ModifyChamfer => { self.brepcad_push_undo(); self.model_chamfer_edge(); "Chamfer applied to first manifold edge".to_string() }
             MenuAction::ModifyLoft | MenuAction::ModifySweep => {
                 "Loft/Sweep: requires sketch profiles (not yet implemented)".to_string()
             }
-            MenuAction::ModifyMove => { self.model_translate(); "Moved +20mm in X".to_string() }
-            MenuAction::ModifyRotate => { self.model_rotate(); "Rotated 15° about Z".to_string() }
-            MenuAction::ModifyScale => { self.model_scale(); "Scaled ×1.1".to_string() }
+            MenuAction::ModifyMove => { self.brepcad_push_undo(); self.model_translate(); "Moved +20mm in X".to_string() }
+            MenuAction::ModifyRotate => { self.brepcad_push_undo(); self.model_rotate(); "Rotated 15° about Z".to_string() }
+            MenuAction::ModifyScale => { self.brepcad_push_undo(); self.model_scale(); "Scaled ×1.1".to_string() }
             MenuAction::ModifyLinearPattern => "Linear pattern not yet implemented".to_string(),
             MenuAction::ModifyCircularPattern => { self.model_circular_pattern(); "Circular pattern applied".to_string() }
             MenuAction::ModifyMirror => "Mirror not yet implemented".to_string(),
@@ -12672,13 +12682,55 @@ impl ViewerApp {
         use crate::ui::dialogs::{DialogAction, PrimitiveType};
         match action {
             DialogAction::InsertPrimitive(pt, values) => {
-                match pt {
-                    PrimitiveType::Box => self.load_box(),
-                    PrimitiveType::Sphere => self.load_sphere(),
-                    PrimitiveType::Cylinder => self.load_cylinder(),
-                    PrimitiveType::Cone => self.load_cone(),
-                    PrimitiveType::Torus => self.load_torus(),
-                }
+                self.brepcad_push_undo();
+                let params = pt.params();
+                let v: Vec<f64> = (0..params.len())
+                    .map(|i| values.get(i).copied().unwrap_or(params[i].1))
+                    .collect();
+
+                let solid = match pt {
+                    PrimitiveType::Box => {
+                        let (w, h, d) = (v[0], v[1], v[2]);
+                        let s = ShapeBuilder::make_box(w, h, d);
+                        let m = triangulate_solid(&s, &tri_params_for_lod(self.lod_level));
+                        self.load_mesh(m, &format!("Box {:.0}x{:.0}x{:.0}", w, h, d));
+                        s
+                    }
+                    PrimitiveType::Sphere => {
+                        let r = v[0];
+                        let s = ShapeBuilder::make_sphere(r);
+                        let m = triangulate_solid(&s, &tri_params_for_lod(self.lod_level));
+                        self.load_mesh(m, &format!("Sphere R={:.0}", r));
+                        s
+                    }
+                    PrimitiveType::Cylinder => {
+                        let (r, h) = (v[0], v[1]);
+                        let s = ShapeBuilder::make_cylinder(r, h);
+                        let m = triangulate_solid(&s, &tri_params_for_lod(self.lod_level));
+                        self.load_mesh(m, &format!("Cylinder R={:.0} H={:.0}", r, h));
+                        s
+                    }
+                    PrimitiveType::Cone => {
+                        let (br, _tr, h) = (v[0], v[1], v[2]);
+                        let half_angle = (br / h).atan();
+                        let s = ShapeBuilder::make_cone(br, h, half_angle);
+                        let m = triangulate_solid(&s, &tri_params_for_lod(self.lod_level));
+                        self.load_mesh(m, &format!("Cone R={:.0} H={:.0}", br, h));
+                        s
+                    }
+                    PrimitiveType::Torus => {
+                        let (mr, nr) = (v[0], v[1]);
+                        let s = ShapeBuilder::make_torus(mr, nr);
+                        let m = triangulate_solid(&s, &tri_params_for_lod(self.lod_level));
+                        self.load_mesh(m, &format!("Torus R={:.0} r={:.0}", mr, nr));
+                        s
+                    }
+                };
+                self.current_solid = Some(solid);
+                self.current_nurbs_surface = None;
+                self.detailed_instances.clear();
+                self.instance_triangle_ranges.clear();
+                self.assembly_tree = None;
                 format!("{} inserted", pt.label())
             }
             DialogAction::Close => "Dialog closed".to_string(),
@@ -12742,19 +12794,61 @@ impl ViewerApp {
         }
     }
 
-    /// BRepCAD undo: snapshot-based.
-    /// Currently a stub that returns false (no undo stack maintained yet).
-    /// TODO: maintain a Vec<Solid> undo stack on each mutating operation.
-    pub fn brepcad_undo(&mut self) -> bool {
-        // The existing ViewerApp does not maintain an undo stack.
-        // We return false so the user gets "Nothing to undo".
-        // For a real implementation, we'd need to snapshot current_solid before each mutation.
-        false
+    /// Push current state to undo stack (call BEFORE a mutation).
+    /// Truncates redo stack — branching point.
+    pub fn brepcad_push_undo(&mut self) {
+        self.brepcad_redo_stack.clear();
+        let snapshot = (self.current_solid.clone(), self.current_model.name.clone());
+        self.brepcad_undo_stack.push(snapshot);
+        if self.brepcad_undo_stack.len() > self.brepcad_max_history {
+            self.brepcad_undo_stack.remove(0);
+        }
     }
 
-    /// BRepCAD redo: snapshot-based.
+    /// BRepCAD undo: restore previous solid state.
+    /// Returns true if undone, false if stack empty.
+    pub fn brepcad_undo(&mut self) -> bool {
+        if let Some((solid, name)) = self.brepcad_undo_stack.pop() {
+            // Save current state to redo stack
+            let current = (self.current_solid.clone(), self.current_model.name.clone());
+            self.brepcad_redo_stack.push(current);
+            // Restore from snapshot
+            self.current_solid = solid;
+            self.current_model.name = name;
+            // Re-triangulate
+            if let Some(ref solid) = self.current_solid {
+                self.refresh_from_current_solid("Undo");
+            }
+            self.selected_instance = None;
+            self.selected_face = None;
+            self.highlighted_face = None;
+            self.highlight_dirty = true;
+            self.mesh_dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// BRepCAD redo: re-apply undone state.
     pub fn brepcad_redo(&mut self) -> bool {
-        false
+        if let Some((solid, name)) = self.brepcad_redo_stack.pop() {
+            let current = (self.current_solid.clone(), self.current_model.name.clone());
+            self.brepcad_undo_stack.push(current);
+            self.current_solid = solid;
+            self.current_model.name = name;
+            if let Some(ref solid) = self.current_solid {
+                self.refresh_from_current_solid("Redo");
+            }
+            self.selected_instance = None;
+            self.selected_face = None;
+            self.highlighted_face = None;
+            self.highlight_dirty = true;
+            self.mesh_dirty = true;
+            true
+        } else {
+            false
+        }
     }
 
     // ─── BRepCAD panel rendering methods ────────────────────────────────────
