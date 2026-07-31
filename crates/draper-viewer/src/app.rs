@@ -7629,12 +7629,16 @@ impl eframe::App for ViewerApp {
             let mut pending_instance_select: Option<usize> = None;
             let mut pending_visibility_toggle: Option<usize> = None;
             let mut pending_instance_isolate: Option<usize> = None;
+            let mut pending_face_select: Option<(usize, u64)> = None;
+            let mut pending_face_visibility_toggle: Option<(usize, u64)> = None;
 
             // ── Clone data needed for Browser panel ──
             let assembly_tree_clone = self.assembly_tree.clone();
             let detailed_instances_clone = self.detailed_instances.clone();
             let selected_instance = self.selected_instance;
+            let selected_face_clone = self.selected_face;
             let hidden_instances_clone = self.hidden_instances.clone();
+            let hidden_faces_clone = self.hidden_faces.clone();
             let model_name = self.current_model.name.clone();
             let vert_count = self.mesh.vertex_count();
             let tri_count = self.mesh.triangle_count();
@@ -7680,10 +7684,15 @@ impl eframe::App for ViewerApp {
                                             ui, tree, 0,
                                             &filter_lower, filter_active,
                                             selected_instance,
+                                            selected_face_clone,
                                             &hidden_instances_clone,
+                                            &hidden_faces_clone,
+                                            &detailed_instances_clone,
                                             &mut pending_instance_select,
                                             &mut pending_visibility_toggle,
                                             &mut pending_instance_isolate,
+                                            &mut pending_face_select,
+                                            &mut pending_face_visibility_toggle,
                                         );
                                     } else if !detailed_instances_clone.is_empty() {
                                         // Fallback: flat list of instances
@@ -7944,6 +7953,31 @@ impl eframe::App for ViewerApp {
                     }
                     self.selected_instance = Some(idx);
                     self.brepcad_status_msg = format!("Isolated instance #{}", idx);
+                }
+                self.highlight_dirty = true;
+                self.edge_dirty = true;
+                self.wireframe_overlay_dirty = true;
+            }
+            // ── Apply face selection ──
+            if let Some((inst_idx, fid)) = pending_face_select {
+                self.selected_instance = Some(inst_idx);
+                self.selected_face = Some((inst_idx, fid));
+                self.highlighted_face = Some((inst_idx, fid));
+                self.highlight_dirty = true;
+                self.brepcad_status_msg = format!("Selected face #{} in instance #{}", fid, inst_idx);
+            }
+            // ── Apply face visibility toggle ──
+            if let Some((inst_idx, fid)) = pending_face_visibility_toggle {
+                if self.hidden_faces.contains(&(inst_idx, fid)) {
+                    self.hidden_faces.remove(&(inst_idx, fid));
+                    self.brepcad_status_msg = format!("Face #{} shown", fid);
+                } else {
+                    self.hidden_faces.insert((inst_idx, fid));
+                    self.brepcad_status_msg = format!("Face #{} hidden", fid);
+                    if self.selected_face == Some((inst_idx, fid)) {
+                        self.selected_face = None;
+                        self.highlighted_face = None;
+                    }
                 }
                 self.highlight_dirty = true;
                 self.edge_dirty = true;
@@ -12817,10 +12851,15 @@ fn brepcad_render_assembly_node(
     filter: &str,
     filter_active: bool,
     selected_instance: Option<usize>,
+    selected_face: Option<(usize, u64)>,
     hidden_instances: &std::collections::HashSet<usize>,
+    hidden_faces: &std::collections::HashSet<(usize, u64)>,
+    detailed_instances: &[DetailedMeshInstance],
     pending_instance_select: &mut Option<usize>,
     pending_visibility_toggle: &mut Option<usize>,
     pending_instance_isolate: &mut Option<usize>,
+    pending_face_select: &mut Option<(usize, u64)>,
+    pending_face_visibility_toggle: &mut Option<(usize, u64)>,
 ) {
     // Filter: skip if node doesn't match and no children match
     if filter_active && !node.name.to_lowercase().contains(filter) {
@@ -12859,7 +12898,7 @@ fn brepcad_render_assembly_node(
             if eye_resp.clicked() {
                 *pending_visibility_toggle = Some(idx);
             }
-            eye_resp.on_hover_text(if is_visible { "Click to hide" } else { "Click to show" });
+            eye_resp.on_hover_text(if is_visible { "Click to hide instance" } else { "Click to show instance" });
 
             // Isolate button
             let iso_resp = ui.add(egui::Button::new(
@@ -12868,7 +12907,7 @@ fn brepcad_render_assembly_node(
             if iso_resp.clicked() {
                 *pending_instance_isolate = Some(idx);
             }
-            iso_resp.on_hover_text("Isolate: hide all others");
+            iso_resp.on_hover_text("Isolate: hide all other instances");
         } else {
             ui.add_space(28.0); // align with leaf nodes
         }
@@ -12895,9 +12934,66 @@ fn brepcad_render_assembly_node(
     for child in &node.children {
         brepcad_render_assembly_node(
             ui, child, depth + 1, filter, filter_active,
-            selected_instance, hidden_instances,
+            selected_instance, selected_face, hidden_instances, hidden_faces, detailed_instances,
             pending_instance_select, pending_visibility_toggle, pending_instance_isolate,
+            pending_face_select, pending_face_visibility_toggle,
         );
+    }
+
+    // ─── For leaf nodes: render face list under the instance ───
+    if is_leaf && is_visible {
+        let inst_idx = node.instance_index.unwrap();
+        if let Some(inst) = detailed_instances.get(inst_idx) {
+            // Only show faces if the instance is selected (to avoid huge trees)
+            if is_selected && !inst.faces.is_empty() {
+                for face_info in &inst.faces {
+                    let fid = face_info.face_id;
+                    let face_is_selected = selected_face == Some((inst_idx, fid));
+                    let face_is_visible = !hidden_faces.contains(&(inst_idx, fid));
+                    let tri_count_face = face_info.triangle_range.1.saturating_sub(face_info.triangle_range.0);
+
+                    ui.horizontal(|ui| {
+                        ui.add_space(((depth + 1) * 14) as f32);
+                        ui.add_space(9.0); // align with arrow
+
+                        // Face eye icon
+                        let face_eye_color = if face_is_visible {
+                            egui::Color32::from_rgb(0xa6, 0xe3, 0xa1) // green
+                        } else {
+                            egui::Color32::from_rgb(0xf3, 0x8b, 0xa8) // red
+                        };
+                        let face_eye_text = if face_is_visible { "👁" } else { "🚫" };
+                        let face_eye_resp = ui.add(egui::Label::new(
+                            egui::RichText::new(face_eye_text).size(10.0).color(face_eye_color)
+                        ).sense(egui::Sense::click()));
+                        if face_eye_resp.clicked() {
+                            *pending_face_visibility_toggle = Some((inst_idx, fid));
+                        }
+                        face_eye_resp.on_hover_text(if face_is_visible { "Click to hide face" } else { "Click to show face" });
+
+                        ui.add_space(18.0); // align with isolate button
+
+                        // Face icon + label
+                        let face_bg = if face_is_selected {
+                            egui::Color32::from_rgb(0x09, 0x47, 0x71)
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        };
+                        let face_frame = egui::Frame::new().fill(face_bg)
+                            .inner_margin(egui::Margin::symmetric(2, 1));
+                        face_frame.show(ui, |ui| {
+                            let label = format!("🔷 Face #{} ({}, {} tris)",
+                                fid, face_info.surface_type, tri_count_face);
+                            let resp = ui.selectable_label(face_is_selected,
+                                egui::RichText::new(label).size(10.0));
+                            if resp.clicked() {
+                                *pending_face_select = Some((inst_idx, fid));
+                            }
+                        });
+                    });
+                }
+            }
+        }
     }
 }
 
