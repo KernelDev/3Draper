@@ -215,6 +215,8 @@ struct PickResult {
     face_id: Option<u64>,
     /// Distance along the ray to the hit point (for depth sorting).
     distance: f32,
+    /// 3D intersection point in world space.
+    point: [f32; 3],
 }
 
 /// Möller–Trumbore ray-triangle intersection.
@@ -318,11 +320,18 @@ fn pick_at(
             let dist = best.as_ref().map_or(f32::MAX, |b| b.distance);
             if t < dist {
                 let face_id = face_ids.and_then(|ids| ids.get(i)).copied();
+                // Compute 3D intersection point: origin + t * direction
+                let point = [
+                    ray_origin[0] + ray_dir[0] * t,
+                    ray_origin[1] + ray_dir[1] * t,
+                    ray_origin[2] + ray_dir[2] * t,
+                ];
 
                 best = Some(PickResult {
                     instance_idx,
                     face_id,
                     distance: t,
+                    point,
                 });
             }
         }
@@ -763,6 +772,32 @@ pub struct ViewerApp {
     pub brepcad_redo_stack: Vec<(Option<draper_topology::Solid>, String)>,
     /// Max undo history depth.
     pub brepcad_max_history: usize,
+    /// Measure mode: None / Distance / Angle
+    pub brepcad_measure_mode: BrepcadMeasureMode,
+    /// First picked point for measurement (3D world space).
+    pub brepcad_measure_point1: Option<[f32; 3]>,
+    /// Second picked point for measurement.
+    pub brepcad_measure_point2: Option<[f32; 3]>,
+    /// Third picked point (for angle measurement: vertex + 2 points).
+    pub brepcad_measure_point3: Option<[f32; 3]>,
+    /// Last measurement result string.
+    pub brepcad_measure_result: String,
+    /// Section cut: enabled?
+    pub brepcad_section_enabled: bool,
+    /// Section cut: plane axis (0=X, 1=Y, 2=Z).
+    pub brepcad_section_axis: u8,
+    /// Section cut: plane position along axis.
+    pub brepcad_section_position: f32,
+}
+
+/// Measure mode for the BRepCAD viewport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BrepcadMeasureMode {
+    #[default]
+    None,
+    Distance,
+    Angle,
+    Length,
 }
 
 /// Left panel tab for BRepCAD Browser.
@@ -1328,6 +1363,14 @@ impl ViewerApp {
             brepcad_undo_stack: Vec::new(),
             brepcad_redo_stack: Vec::new(),
             brepcad_max_history: 50,
+            brepcad_measure_mode: BrepcadMeasureMode::None,
+            brepcad_measure_point1: None,
+            brepcad_measure_point2: None,
+            brepcad_measure_point3: None,
+            brepcad_measure_result: String::new(),
+            brepcad_section_enabled: false,
+            brepcad_section_axis: 2, // Z axis by default
+            brepcad_section_position: 0.0,
         };
         app.log(&format!("3Draper Viewer started [build: {}]", env!("DRAPER_GIT_HASH")));
         app.log(&format!("Default model: Box 100x100x100 ({} vertices, {} triangles)",
@@ -8047,7 +8090,57 @@ impl eframe::App for ViewerApp {
                                 [local_x, local_y],
                                 viewport,
                             ) {
-                                if ctrl_held {
+                                // ─── BRepCAD Measure mode ───
+                                if self.enable_brepcad_ui && self.brepcad_measure_mode != BrepcadMeasureMode::None {
+                                    let pt = pick.point;
+                                    match self.brepcad_measure_mode {
+                                        BrepcadMeasureMode::Distance | BrepcadMeasureMode::Length => {
+                                            if self.brepcad_measure_point1.is_none() {
+                                                self.brepcad_measure_point1 = Some(pt);
+                                                self.brepcad_status_msg = "Point 1 set. Click for point 2.".to_string();
+                                            } else if self.brepcad_measure_point2.is_none() {
+                                                self.brepcad_measure_point2 = Some(pt);
+                                                let p1 = self.brepcad_measure_point1.unwrap();
+                                                let dx = pt[0] - p1[0];
+                                                let dy = pt[1] - p1[1];
+                                                let dz = pt[2] - p1[2];
+                                                let dist = (dx*dx + dy*dy + dz*dz).sqrt();
+                                                self.brepcad_measure_result = format!("Distance: {:.3} mm", dist);
+                                                self.brepcad_status_msg = self.brepcad_measure_result.clone();
+                                                self.brepcad_measure_mode = BrepcadMeasureMode::None;
+                                                self.brepcad_active_tool = "Select".to_string();
+                                            }
+                                        }
+                                        BrepcadMeasureMode::Angle => {
+                                            if self.brepcad_measure_point1.is_none() {
+                                                self.brepcad_measure_point1 = Some(pt);
+                                                self.brepcad_status_msg = "Vertex set. Click point 2.".to_string();
+                                            } else if self.brepcad_measure_point2.is_none() {
+                                                self.brepcad_measure_point2 = Some(pt);
+                                                self.brepcad_status_msg = "Point 2 set. Click point 3.".to_string();
+                                            } else if self.brepcad_measure_point3.is_none() {
+                                                self.brepcad_measure_point3 = Some(pt);
+                                                let vertex = self.brepcad_measure_point1.unwrap();
+                                                let p2 = self.brepcad_measure_point2.unwrap();
+                                                let p3 = self.brepcad_measure_point3.unwrap();
+                                                // Vectors from vertex to p2 and p3
+                                                let v1 = [p2[0] - vertex[0], p2[1] - vertex[1], p2[2] - vertex[2]];
+                                                let v2 = [p3[0] - vertex[0], p3[1] - vertex[1], p3[2] - vertex[2]];
+                                                let dot = v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2];
+                                                let len1 = (v1[0]*v1[0] + v1[1]*v1[1] + v1[2]*v1[2]).sqrt();
+                                                let len2 = (v2[0]*v2[0] + v2[1]*v2[1] + v2[2]*v2[2]).sqrt();
+                                                let angle = if len1 > 1e-9 && len2 > 1e-9 {
+                                                    (dot / (len1 * len2)).clamp(-1.0, 1.0).acos().to_degrees()
+                                                } else { 0.0 };
+                                                self.brepcad_measure_result = format!("Angle: {:.2}°", angle);
+                                                self.brepcad_status_msg = self.brepcad_measure_result.clone();
+                                                self.brepcad_measure_mode = BrepcadMeasureMode::None;
+                                                self.brepcad_active_tool = "Select".to_string();
+                                            }
+                                        }
+                                        BrepcadMeasureMode::None => {}
+                                    }
+                                } else if ctrl_held {
                                     // Ctrl+click: select face
                                     if let Some(fid) = pick.face_id {
                                         self.selected_instance = Some(pick.instance_idx);
@@ -8263,6 +8356,36 @@ impl eframe::App for ViewerApp {
 
                 if self.show_axes {
                     self.draw_axes_overlay(ui, rect);
+                }
+
+                // ─── BRepCAD measure overlay ───
+                if self.enable_brepcad_ui && !self.brepcad_measure_result.is_empty() {
+                    let pos = egui::pos2(rect.left() + 10.0, rect.top() + 60.0);
+                    ui.painter().text(
+                        pos,
+                        egui::Align2::LEFT_TOP,
+                        &self.brepcad_measure_result,
+                        egui::FontId::proportional(14.0),
+                        egui::Color32::from_rgb(0xa6, 0xe3, 0xa1),
+                    );
+                }
+
+                // ─── BRepCAD measure mode indicator ───
+                if self.enable_brepcad_ui && self.brepcad_measure_mode != BrepcadMeasureMode::None {
+                    let mode_text = match self.brepcad_measure_mode {
+                        BrepcadMeasureMode::Distance => "📏 Measure Distance — click points in viewport (ESC to cancel)",
+                        BrepcadMeasureMode::Angle => "📐 Measure Angle — click vertex + 2 points (ESC to cancel)",
+                        BrepcadMeasureMode::Length => "📏 Measure Length — click 2 points (ESC to cancel)",
+                        BrepcadMeasureMode::None => "",
+                    };
+                    let pos = egui::pos2(rect.center().x, rect.top() + 40.0);
+                    ui.painter().text(
+                        pos,
+                        egui::Align2::CENTER_TOP,
+                        mode_text,
+                        egui::FontId::proportional(14.0),
+                        egui::Color32::from_rgb(0xf9, 0xe2, 0xaf),
+                    );
                 }
 
                 // ─── GD&T 3D annotations overlay ───
@@ -8580,6 +8703,16 @@ impl eframe::App for ViewerApp {
                     [bbox_max.x as f32, bbox_max.y as f32, bbox_max.z as f32],
                 );
                 self.brepcad_status_msg = "Fit to view".to_string();
+            }
+
+            // ESC = cancel measure mode
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && self.brepcad_measure_mode != BrepcadMeasureMode::None {
+                self.brepcad_measure_mode = BrepcadMeasureMode::None;
+                self.brepcad_measure_point1 = None;
+                self.brepcad_measure_point2 = None;
+                self.brepcad_measure_point3 = None;
+                self.brepcad_active_tool = "Select".to_string();
+                self.brepcad_status_msg = "Measure cancelled".to_string();
             }
         }
     }
@@ -12671,6 +12804,60 @@ impl ViewerApp {
             | MenuAction::SketchTrim | MenuAction::SketchExtend | MenuAction::SketchSplit
             | MenuAction::SketchOffset | MenuAction::SketchMirror | MenuAction::SketchPattern
             | MenuAction::SketchFillet => "Sketch mode coming soon (use existing NURBS/Curve tests)".to_string(),
+
+            // ── Measure actions ──
+            MenuAction::MeasureDistance => {
+                self.brepcad_measure_mode = BrepcadMeasureMode::Distance;
+                self.brepcad_measure_point1 = None;
+                self.brepcad_measure_point2 = None;
+                self.brepcad_measure_result = String::new();
+                self.brepcad_active_tool = "Measure Distance".to_string();
+                "Measure Distance: click 2 points in viewport".to_string()
+            }
+            MenuAction::MeasureAngle => {
+                self.brepcad_measure_mode = BrepcadMeasureMode::Angle;
+                self.brepcad_measure_point1 = None;
+                self.brepcad_measure_point2 = None;
+                self.brepcad_measure_point3 = None;
+                self.brepcad_measure_result = String::new();
+                self.brepcad_active_tool = "Measure Angle".to_string();
+                "Measure Angle: click 3 points (vertex, p1, p2)".to_string()
+            }
+            MenuAction::MeasureLength => {
+                self.brepcad_measure_mode = BrepcadMeasureMode::Length;
+                self.brepcad_measure_point1 = None;
+                self.brepcad_measure_point2 = None;
+                self.brepcad_measure_result = String::new();
+                self.brepcad_active_tool = "Measure Length".to_string();
+                "Measure Length: click 2 points".to_string()
+            }
+            MenuAction::MeasureArea => {
+                let mut area = 0.0_f64;
+                for tri in &self.mesh.triangles {
+                    let v0 = self.mesh.vertices[tri[0] as usize];
+                    let v1 = self.mesh.vertices[tri[1] as usize];
+                    let v2 = self.mesh.vertices[tri[2] as usize];
+                    let ax = v1.x - v0.x; let ay = v1.y - v0.y; let az = v1.z - v0.z;
+                    let bx = v2.x - v0.x; let by = v2.y - v0.y; let bz = v2.z - v0.z;
+                    let cx = ay * bz - az * by;
+                    let cy = az * bx - ax * bz;
+                    let cz = ax * by - ay * bx;
+                    area += 0.5 * (cx * cx + cy * cy + cz * cz).sqrt();
+                }
+                format!("Surface area: {:.3} mm²", area)
+            }
+            MenuAction::MeasureVolume => {
+                let mut vol = 0.0_f64;
+                for tri in &self.mesh.triangles {
+                    let v0 = self.mesh.vertices[tri[0] as usize];
+                    let v1 = self.mesh.vertices[tri[1] as usize];
+                    let v2 = self.mesh.vertices[tri[2] as usize];
+                    vol += (v0.x * (v1.y * v2.z - v1.z * v2.y)
+                          + v0.y * (v1.z * v2.x - v1.x * v2.z)
+                          + v0.z * (v1.x * v2.y - v1.y * v2.x)) / 6.0;
+                }
+                format!("Volume: {:.3} mm³", vol.abs())
+            }
 
             // ── Sheet Metal, Assembly, CAM, Drawing, Simulation, etc. ──
             _ => format!("{:?} — not yet implemented", action),
