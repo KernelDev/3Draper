@@ -6092,6 +6092,11 @@ impl ViewerApp {
 
 impl eframe::App for ViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Apply Catppuccin Mocha dark theme when BRepCAD UI is enabled
+        if self.enable_brepcad_ui {
+            apply_brepcad_theme(ctx);
+        }
+
         // Request repaint for continuous rendering
         ctx.request_repaint();
 
@@ -12277,4 +12282,55 @@ impl ViewerApp {
     pub fn brepcad_redo(&mut self) -> bool {
         false
     }
+}
+
+// ============================================================
+// BRepCAD Catppuccin Mocha dark theme
+// ============================================================
+
+/// Apply Catppuccin Mocha dark theme to match the UI mockups in docs/ui_mockups/.
+/// Colors from docs/ui_mockups/01_main_window.svg:
+///   #1e1e2e base, #181825 mantle, #11111b crust, #313244 surface0,
+///   #45475a surface1, #cdd6f4 text, #a6adc8 subtext, #89b4fa blue accent
+pub fn apply_brepcad_theme(ctx: &egui::Context) {
+    use egui::{Color32, Vec2, Rounding, Stroke};
+
+    let mut style: egui::Style = (*ctx.style()).clone();
+    let mut visuals = egui::Visuals::dark();
+
+    visuals.panel_fill       = Color32::from_rgb(0x1e, 0x1e, 0x2e);
+    visuals.faint_bg_color   = Color32::from_rgb(0x18, 0x18, 0x25);
+    visuals.extreme_bg_color = Color32::from_rgb(0x11, 0x11, 0x1b);
+    visuals.window_fill      = Color32::from_rgb(0x1e, 0x1e, 0x2e);
+    visuals.window_stroke    = Stroke::new(1.0, Color32::from_rgb(0x45, 0x47, 0x5a));
+    visuals.override_text_color = Some(Color32::from_rgb(0xcd, 0xd6, 0xf4));
+
+    let blue = Color32::from_rgb(0x89, 0xb4, 0xfa);
+    visuals.widgets.noninteractive.bg_fill   = Color32::from_rgb(0x18, 0x18, 0x25);
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(0x45, 0x47, 0x5a));
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(0xa6, 0xad, 0xc8));
+    visuals.widgets.inactive.bg_fill   = Color32::from_rgb(0x31, 0x32, 0x44);
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(0x45, 0x47, 0x5a));
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(0xcd, 0xd6, 0xf4));
+    visuals.widgets.hovered.bg_fill   = Color32::from_rgb(0x45, 0x47, 0x5a);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, blue);
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::from_rgb(0xcd, 0xd6, 0xf4));
+    visuals.widgets.active.bg_fill   = Color32::from_rgb(0x58, 0x5b, 0x70);
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0, blue);
+    visuals.widgets.active.fg_stroke = Stroke::new(1.5, Color32::from_rgb(0xff, 0xff, 0xff));
+    visuals.widgets.open.bg_fill = Color32::from_rgb(0x45, 0x47, 0x5a);
+    visuals.selection.bg_fill = Color32::from_rgb(0x09, 0x47, 0x71);
+    visuals.selection.stroke  = Stroke::new(1.0, blue);
+    visuals.hyperlink_color   = blue;
+
+    style.visuals = visuals;
+    style.spacing.item_spacing = Vec2::new(6.0, 4.0);
+    style.spacing.button_padding = Vec2::new(8.0, 4.0);
+    style.visuals.widgets.noninteractive.corner_radius = Rounding::same(4);
+    style.visuals.widgets.inactive.corner_radius = Rounding::same(4);
+    style.visuals.widgets.hovered.corner_radius = Rounding::same(4);
+    style.visuals.widgets.active.corner_radius = Rounding::same(4);
+    style.visuals.window_shadow = egui::epaint::Shadow::NONE;
+
+    ctx.set_style(style);
 }
