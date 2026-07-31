@@ -7620,18 +7620,33 @@ impl eframe::App for ViewerApp {
         } // end desktop left controls panel
 
         // ═══ BRepCAD layout: Browser (left) + Properties (right) + Status bar (bottom) ═══
-        // When enable_brepcad_ui=true, render the mockup-compliant layout:
-        //   Left:   Browser panel (Tree / Layers / Selection tabs + filter + model tree)
-        //   Right:  Properties panel (Props / Constraints / Dimensions / Material tabs)
-        //   Bottom: Status bar (X/Y/Z, Az/El/D, Tool, FPS, Units, Display, View)
+        // When enable_brepcad_ui=true, render the mockup-compliant layout.
+        // Uses the same pending-actions pattern as the existing structure panel
+        // to avoid borrow checker conflicts (clone data before closure, apply
+        // mutations after).
         if self.enable_brepcad_ui && !self.is_mobile {
+            // ── Pending actions (collected during panel rendering, applied after) ──
+            let mut pending_instance_select: Option<usize> = None;
+            let mut pending_visibility_toggle: Option<usize> = None;
+            let mut pending_instance_isolate: Option<usize> = None;
+
+            // ── Clone data needed for Browser panel ──
+            let assembly_tree_clone = self.assembly_tree.clone();
+            let detailed_instances_clone = self.detailed_instances.clone();
+            let selected_instance = self.selected_instance;
+            let hidden_instances_clone = self.hidden_instances.clone();
+            let model_name = self.current_model.name.clone();
+            let vert_count = self.mesh.vertex_count();
+            let tri_count = self.mesh.triangle_count();
+            let tree_filter = self.brepcad_tree_filter.clone();
+
             // ── Left: Browser (Model Tree) ──
             egui::SidePanel::left("brepcad_browser")
                 .default_width(280.0)
                 .min_width(200.0)
                 .resizable(true)
                 .show(ctx, |ui| {
-                    // Tab strip: Tree / Layers / Selection
+                    // Tab strip
                     ui.horizontal(|ui| {
                         ui.selectable_value(&mut self.brepcad_left_tab, BrepcadLeftTab::Tree, "Tree");
                         ui.selectable_value(&mut self.brepcad_left_tab, BrepcadLeftTab::Layers, "Layers");
@@ -7642,29 +7657,125 @@ impl eframe::App for ViewerApp {
                     // Filter box
                     ui.horizontal(|ui| {
                         ui.text_edit_singleline(&mut self.brepcad_tree_filter);
-                        if ui.button("Filter").clicked() {
-                            // Filtering is applied in render_brepcad_tree
-                        }
+                        ui.button("Filter");
                     });
                     ui.separator();
 
                     match self.brepcad_left_tab {
                         BrepcadLeftTab::Tree => {
+                            let filter_lower = tree_filter.to_lowercase();
+                            let filter_active = !filter_lower.is_empty();
+
                             egui::ScrollArea::vertical()
                                 .auto_shrink([false; 2])
                                 .show(ui, |ui| {
-                                    self.render_brepcad_model_tree(ui);
+                                    // Model name header
+                                    ui.label(egui::RichText::new(format!("📁 {}", model_name))
+                                        .size(12.0).color(egui::Color32::from_rgb(0xcd, 0xd6, 0xf4)));
+                                    ui.add_space(2.0);
+
+                                    if let Some(ref tree) = assembly_tree_clone {
+                                        // Render assembly tree recursively
+                                        brepcad_render_assembly_node(
+                                            ui, tree, 0,
+                                            &filter_lower, filter_active,
+                                            selected_instance,
+                                            &hidden_instances_clone,
+                                            &mut pending_instance_select,
+                                            &mut pending_visibility_toggle,
+                                            &mut pending_instance_isolate,
+                                        );
+                                    } else if !detailed_instances_clone.is_empty() {
+                                        // Fallback: flat list of instances
+                                        for (i, inst) in detailed_instances_clone.iter().enumerate() {
+                                            if filter_active && !inst.name.to_lowercase().contains(&filter_lower) {
+                                                continue;
+                                            }
+                                            let is_selected = selected_instance == Some(i);
+                                            let is_visible = !hidden_instances_clone.contains(&i);
+
+                                            ui.horizontal(|ui| {
+                                                // Visibility eye icon
+                                                let eye_color = if is_visible {
+                                                    egui::Color32::from_rgb(0xa6, 0xe3, 0xa1)
+                                                } else {
+                                                    egui::Color32::from_rgb(0xf3, 0x8b, 0xa8)
+                                                };
+                                                let eye_text = if is_visible { "👁" } else { "🚫" };
+                                                let eye_resp = ui.add(egui::Label::new(
+                                                    egui::RichText::new(eye_text).size(11.0).color(eye_color)
+                                                ).sense(egui::Sense::click()));
+                                                if eye_resp.clicked() {
+                                                    pending_visibility_toggle = Some(i);
+                                                }
+
+                                                // Isolate button
+                                                let iso_resp = ui.add(egui::Button::new(
+                                                    egui::RichText::new("◎").size(10.0)
+                                                ).frame(false));
+                                                if iso_resp.clicked() {
+                                                    pending_instance_isolate = Some(i);
+                                                }
+                                                iso_resp.on_hover_text("Isolate: hide all others");
+
+                                                // Selectable label
+                                                let bg = if is_selected {
+                                                    egui::Color32::from_rgb(0x09, 0x47, 0x71)
+                                                } else {
+                                                    egui::Color32::TRANSPARENT
+                                                };
+                                                let frame = egui::Frame::new().fill(bg)
+                                                    .inner_margin(egui::Margin::symmetric(4, 2));
+                                                frame.show(ui, |ui| {
+                                                    let resp = ui.selectable_label(is_selected,
+                                                        egui::RichText::new(format!("📦 {}", inst.name)).size(11.0));
+                                                    if resp.clicked() {
+                                                        pending_instance_select = Some(i);
+                                                    }
+                                                });
+                                            });
+                                        }
+                                    } else {
+                                        ui.label(egui::RichText::new("No model loaded")
+                                            .size(11.0).color(egui::Color32::from_rgb(0x6c, 0x70, 0x86)));
+                                        ui.label(egui::RichText::new("Use File → Open to load a STEP file")
+                                            .size(10.0).color(egui::Color32::from_rgb(0x6c, 0x70, 0x86)));
+                                    }
+
+                                    // Mesh stats at bottom
+                                    ui.add_space(8.0);
+                                    ui.separator();
+                                    ui.label(egui::RichText::new(format!("Vertices: {}", vert_count))
+                                        .size(10.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
+                                    ui.label(egui::RichText::new(format!("Triangles: {}", tri_count))
+                                        .size(10.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
                                 });
                         }
                         BrepcadLeftTab::Layers => {
                             self.render_brepcad_layers(ui);
                         }
                         BrepcadLeftTab::Selection => {
-                            ui.label("No selection");
-                            ui.label("Click entities in viewport or tree");
+                            if selected_instance.is_some() {
+                                ui.label(format!("Selected: Instance #{}", selected_instance.unwrap()));
+                                if let Some(inst) = detailed_instances_clone.get(selected_instance.unwrap()) {
+                                    ui.label(format!("Name: {}", inst.name));
+                                    ui.label(format!("BREP ID: {}", inst.brep_id));
+                                    ui.label(format!("Faces: {}", inst.faces.len()));
+                                }
+                            } else {
+                                ui.label("No selection");
+                                ui.label("Click entities in viewport or tree");
+                            }
                         }
                     }
                 });
+
+            // ── Clone data for Properties panel ──
+            let selected_face = self.selected_face;
+            let detailed_instances_clone2 = self.detailed_instances.clone();
+            let model_name2 = self.current_model.name.clone();
+            let model_vc = self.current_model.vertex_count;
+            let model_tc = self.current_model.triangle_count;
 
             // ── Right: Properties ──
             egui::SidePanel::right("brepcad_properties")
@@ -7682,7 +7793,60 @@ impl eframe::App for ViewerApp {
 
                     match self.brepcad_right_tab {
                         BrepcadRightTab::Properties => {
-                            self.render_brepcad_properties(ui);
+                            // Face properties
+                            if let Some((inst_idx, face_id)) = selected_face {
+                                ui.label(egui::RichText::new("Selected: Face")
+                                    .size(11.0).color(egui::Color32::from_rgb(0x89, 0xb4, 0xfa)));
+                                ui.separator();
+                                ui.collapsing("General", |ui| {
+                                    ui.label(format!("Instance: #{}", inst_idx));
+                                    ui.label(format!("Face ID: {}", face_id));
+                                });
+                                if let Some(inst) = detailed_instances_clone2.get(inst_idx) {
+                                    if let Some(face_info) = inst.faces.iter().find(|f| f.face_id == face_id) {
+                                        let tri_count_face = face_info.triangle_range.1.saturating_sub(face_info.triangle_range.0);
+                                        ui.collapsing("Geometry", |ui| {
+                                            ui.label(format!("Surface: {}", face_info.surface_type));
+                                            ui.label(format!("Triangles: {}", tri_count_face));
+                                            ui.label(format!("Forward: {}", face_info.forward));
+                                            if face_info.is_void {
+                                                ui.label(egui::RichText::new("Void face (internal cavity)")
+                                                    .size(10.0).color(egui::Color32::from_rgb(0xf9, 0xe2, 0xaf)));
+                                            }
+                                        });
+                                        ui.collapsing("Appearance", |ui| {
+                                            ui.color_edit_button_srgb(&mut [100, 150, 200]);
+                                            ui.label("Color");
+                                        });
+                                    }
+                                }
+                            } else if let Some(inst_idx) = selected_instance {
+                                ui.label(egui::RichText::new(format!("Selected: Instance #{}", inst_idx))
+                                    .size(11.0).color(egui::Color32::from_rgb(0x89, 0xb4, 0xfa)));
+                                ui.separator();
+                                if let Some(inst) = detailed_instances_clone2.get(inst_idx) {
+                                    ui.collapsing("General", |ui| {
+                                        ui.label(format!("Name: {}", inst.name));
+                                        ui.label(format!("BREP ID: {}", inst.brep_id));
+                                        ui.label(format!("Faces: {}", inst.faces.len()));
+                                    });
+                                }
+                            } else {
+                                ui.label(egui::RichText::new("No entity selected")
+                                    .size(11.0).color(egui::Color32::from_rgb(0x6c, 0x70, 0x86)));
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new("Click a face or instance in the")
+                                    .size(10.0).color(egui::Color32::from_rgb(0x6c, 0x70, 0x86)));
+                                ui.label(egui::RichText::new("viewport to see its properties.")
+                                    .size(10.0).color(egui::Color32::from_rgb(0x6c, 0x70, 0x86)));
+                            }
+                            ui.add_space(8.0);
+                            ui.separator();
+                            ui.collapsing("Model Info", |ui| {
+                                ui.label(format!("Name: {}", model_name2));
+                                ui.label(format!("Vertices: {}", model_vc));
+                                ui.label(format!("Triangles: {}", model_tc));
+                            });
                         }
                         BrepcadRightTab::Constraints => {
                             ui.label("Constraints (sketch mode)");
@@ -7736,6 +7900,55 @@ impl eframe::App for ViewerApp {
                         }
                     });
                 });
+
+            // ── Apply pending actions (after panels are rendered) ──
+            if let Some(idx) = pending_instance_select {
+                self.selected_instance = Some(idx);
+                self.selected_face = None;
+                self.highlighted_face = None;
+                self.highlight_dirty = true;
+                self.brepcad_status_msg = format!("Selected instance #{} ({})",
+                    idx, self.detailed_instances.get(idx).map(|i| i.name.as_str()).unwrap_or("?"));
+            }
+            if let Some(idx) = pending_visibility_toggle {
+                if self.hidden_instances.contains(&idx) {
+                    self.hidden_instances.remove(&idx);
+                    self.brepcad_status_msg = format!("Instance #{} shown", idx);
+                } else {
+                    self.hidden_instances.insert(idx);
+                    self.brepcad_status_msg = format!("Instance #{} hidden", idx);
+                    if self.selected_instance == Some(idx) {
+                        self.selected_instance = None;
+                        self.selected_face = None;
+                        self.highlighted_face = None;
+                    }
+                }
+                self.highlight_dirty = true;
+                self.edge_dirty = true;
+                self.wireframe_overlay_dirty = true;
+            }
+            if let Some(idx) = pending_instance_isolate {
+                // Isolate: hide all other instances
+                if self.hidden_instances.len() == self.detailed_instances.len() - 1
+                    && !self.hidden_instances.contains(&idx)
+                {
+                    // Already isolated — restore all
+                    self.hidden_instances.clear();
+                    self.brepcad_status_msg = "All instances shown".to_string();
+                } else {
+                    self.hidden_instances.clear();
+                    for i in 0..self.detailed_instances.len() {
+                        if i != idx {
+                            self.hidden_instances.insert(i);
+                        }
+                    }
+                    self.selected_instance = Some(idx);
+                    self.brepcad_status_msg = format!("Isolated instance #{}", idx);
+                }
+                self.highlight_dirty = true;
+                self.edge_dirty = true;
+                self.wireframe_overlay_dirty = true;
+            }
         }
 
         // === Central 3D viewport ===
@@ -8225,8 +8438,34 @@ impl eframe::App for ViewerApp {
             }
         }
 
-        // ═══ BRepCAD UI: command palette, dialogs, status toast ═════════════════
+        // ═══ BRepCAD UI: command palette, dialogs, view cube, status toast ═══════════
         if self.enable_brepcad_ui {
+            // View Cube (top-right corner of viewport)
+            if let Some(orient) = crate::ui::view_modes::render_view_cube(ctx) {
+                self.camera.look_from_direction(orient.direction());
+                self.brepcad_view_orientation = orient.label().to_string();
+                let (bbox_min, bbox_max) = self.mesh.bounding_box();
+                self.camera.fit_to_bounding_box(
+                    [bbox_min.x as f32, bbox_min.y as f32, bbox_min.z as f32],
+                    [bbox_max.x as f32, bbox_max.y as f32, bbox_max.z as f32],
+                );
+                self.brepcad_status_msg = format!("View: {}", orient.label());
+            }
+
+            // Display style switcher (bottom-right corner)
+            {
+                let mut style = if self.wireframe { crate::ui::DisplayStyle::Wireframe }
+                    else if self.show_edges { crate::ui::DisplayStyle::ShadedWithEdges }
+                    else { crate::ui::DisplayStyle::Shaded };
+                crate::ui::view_modes::render_display_style_switcher(ctx, &mut style);
+                let new_wf = matches!(style, crate::ui::DisplayStyle::Wireframe);
+                let new_edges = matches!(style, crate::ui::DisplayStyle::ShadedWithEdges);
+                if new_wf != self.wireframe || new_edges != self.show_edges {
+                    self.wireframe = new_wf;
+                    self.show_edges = new_edges;
+                }
+            }
+
             // Command palette (Ctrl+Shift+P)
             if let Some(cmd) = crate::ui::command_palette::render_command_palette(ctx, &mut self.brepcad_command_palette) {
                 if let Some(action) = Self::command_name_to_action(&cmd) {
@@ -12085,6 +12324,44 @@ impl ViewerApp {
     /// Returns a status message.
     pub fn handle_brepcad_action(&mut self, action: &crate::ui::menubar::MenuAction) -> String {
         use crate::ui::menubar::MenuAction;
+        let msg = self.handle_brepcad_action_inner(action);
+        // Update tool name and view orientation based on action
+        match action {
+            MenuAction::ViewIso => self.brepcad_view_orientation = "ISO".to_string(),
+            MenuAction::ViewFront => self.brepcad_view_orientation = "Front".to_string(),
+            MenuAction::ViewBack => self.brepcad_view_orientation = "Back".to_string(),
+            MenuAction::ViewTop => self.brepcad_view_orientation = "Top".to_string(),
+            MenuAction::ViewBottom => self.brepcad_view_orientation = "Bottom".to_string(),
+            MenuAction::ViewLeft => self.brepcad_view_orientation = "Left".to_string(),
+            MenuAction::ViewRight => self.brepcad_view_orientation = "Right".to_string(),
+            MenuAction::ViewDimetric => self.brepcad_view_orientation = "Dimetric".to_string(),
+            MenuAction::InsertBox => self.brepcad_active_tool = "Insert Box".to_string(),
+            MenuAction::InsertSphere => self.brepcad_active_tool = "Insert Sphere".to_string(),
+            MenuAction::InsertCylinder => self.brepcad_active_tool = "Insert Cylinder".to_string(),
+            MenuAction::InsertCone => self.brepcad_active_tool = "Insert Cone".to_string(),
+            MenuAction::InsertTorus => self.brepcad_active_tool = "Insert Torus".to_string(),
+            MenuAction::ModifyUnion => self.brepcad_active_tool = "Boolean Union".to_string(),
+            MenuAction::ModifySubtract => self.brepcad_active_tool = "Boolean Subtract".to_string(),
+            MenuAction::ModifyIntersect => self.brepcad_active_tool = "Boolean Intersect".to_string(),
+            MenuAction::ModifyFillet => self.brepcad_active_tool = "Fillet".to_string(),
+            MenuAction::ModifyChamfer => self.brepcad_active_tool = "Chamfer".to_string(),
+            MenuAction::ModifyMove => self.brepcad_active_tool = "Move".to_string(),
+            MenuAction::ModifyRotate => self.brepcad_active_tool = "Rotate".to_string(),
+            MenuAction::ModifyScale => self.brepcad_active_tool = "Scale".to_string(),
+            MenuAction::SketchEnter => self.brepcad_active_tool = "Sketch".to_string(),
+            MenuAction::SketchLine => self.brepcad_active_tool = "Line".to_string(),
+            MenuAction::SketchCircle => self.brepcad_active_tool = "Circle".to_string(),
+            MenuAction::SketchRectangle => self.brepcad_active_tool = "Rectangle".to_string(),
+            MenuAction::ViewWireframe => { self.brepcad_active_tool = "Select".to_string(); }
+            MenuAction::ViewShaded => { self.brepcad_active_tool = "Select".to_string(); }
+            MenuAction::ViewShadedEdges => { self.brepcad_active_tool = "Select".to_string(); }
+            _ => {}
+        }
+        msg
+    }
+
+    fn handle_brepcad_action_inner(&mut self, action: &crate::ui::menubar::MenuAction) -> String {
+        use crate::ui::menubar::MenuAction;
         match action {
             MenuAction::None => String::new(),
 
@@ -12448,130 +12725,6 @@ impl ViewerApp {
 
     // ─── BRepCAD panel rendering methods ────────────────────────────────────
 
-    /// Render the model tree (Browser panel, Tree tab).
-    /// Reuses the existing assembly_tree / detailed_instances data.
-    fn render_brepcad_model_tree(&self, ui: &mut egui::Ui) {
-        let filter_lower = self.brepcad_tree_filter.to_lowercase();
-        let filter_active = !filter_lower.is_empty();
-
-        // If we have an assembly tree, render it
-        if let Some(ref tree) = self.assembly_tree {
-            self.render_brepcad_assembly_node(ui, tree, 0, &filter_lower, filter_active);
-        } else if !self.detailed_instances.is_empty() {
-            // Fallback: flat list of instances
-            ui.label(egui::RichText::new(format!("Model: {}", self.current_model.name))
-                .size(11.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
-            ui.add_space(4.0);
-
-            for (i, inst) in self.detailed_instances.iter().enumerate() {
-                if filter_active && !inst.name.to_lowercase().contains(&filter_lower) {
-                    continue;
-                }
-                let is_selected = self.selected_instance == Some(i);
-                let is_visible = !self.hidden_instances.contains(&i);
-
-                ui.horizontal(|ui| {
-                    // Visibility eye icon
-                    let eye_color = if is_visible {
-                        egui::Color32::from_rgb(0xa6, 0xe3, 0xa1) // green
-                    } else {
-                        egui::Color32::from_rgb(0xf3, 0x8b, 0xa8) // red
-                    };
-                    let eye_text = if is_visible { "👁" } else { "🚫" };
-                    let eye_resp = ui.add(egui::Label::new(
-                        egui::RichText::new(eye_text).size(11.0).color(eye_color)
-                    ).sense(egui::Sense::click()));
-                    if eye_resp.clicked() {
-                        // Visibility toggle handled by parent
-                    }
-
-                    // Instance icon + name
-                    let bg = if is_selected {
-                        egui::Color32::from_rgb(0x09, 0x47, 0x71)
-                    } else {
-                        egui::Color32::TRANSPARENT
-                    };
-                    let frame = egui::Frame::new().fill(bg).inner_margin(egui::Margin::symmetric(4, 2));
-                    frame.show(ui, |ui| {
-                        let resp = ui.selectable_label(is_selected,
-                            egui::RichText::new(format!("📦 {} (BREP#{})", inst.name, inst.brep_id))
-                                .size(11.0));
-                        if resp.clicked() {
-                            // Selection handled by parent
-                        }
-                    });
-                });
-            }
-        } else {
-            ui.label(egui::RichText::new("No model loaded").size(11.0).color(egui::Color32::from_rgb(0x6c, 0x70, 0x86)));
-            ui.label(egui::RichText::new("Use File → Open to load a STEP file").size(10.0).color(egui::Color32::from_rgb(0x6c, 0x70, 0x86)));
-        }
-
-        // Show mesh stats at bottom
-        ui.add_space(8.0);
-        ui.separator();
-        ui.label(egui::RichText::new(format!("Vertices: {}", self.mesh.vertex_count())).size(10.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
-        ui.label(egui::RichText::new(format!("Triangles: {}", self.mesh.triangle_count())).size(10.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
-    }
-
-    /// Recursively render an assembly tree node.
-    fn render_brepcad_assembly_node(&self, ui: &mut egui::Ui, node: &AssemblyNode, depth: usize, filter: &str, filter_active: bool) {
-        if filter_active && !node.name.to_lowercase().contains(filter) {
-            // Still check children — a child might match
-            let has_matching_child = node.children.iter().any(|c| self.node_matches_filter(c, filter));
-            if !has_matching_child {
-                return;
-            }
-        }
-
-        ui.horizontal(|ui| {
-            ui.add_space((depth * 14) as f32);
-
-            // Expand/collapse arrow
-            if !node.children.is_empty() {
-                ui.label(egui::RichText::new("▼").size(9.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
-            } else {
-                ui.add_space(9.0);
-            }
-
-            // Node icon based on type
-            let icon = if node.brep_id.is_some() && node.instance_index.is_some() {
-                "📦" // body/solid
-            } else if node.brep_id.is_some() {
-                "🔧" // component
-            } else {
-                "📁" // assembly/folder
-            };
-
-            let is_selected = node.instance_index.is_some() &&
-                self.selected_instance == node.instance_index;
-
-            let bg = if is_selected {
-                egui::Color32::from_rgb(0x09, 0x47, 0x71)
-            } else {
-                egui::Color32::TRANSPARENT
-            };
-
-            let frame = egui::Frame::new().fill(bg).inner_margin(egui::Margin::symmetric(2, 1));
-            frame.show(ui, |ui| {
-                ui.selectable_label(is_selected,
-                    egui::RichText::new(format!("{} {}", icon, node.name)).size(11.0));
-            });
-        });
-
-        for child in &node.children {
-            self.render_brepcad_assembly_node(ui, child, depth + 1, filter, filter_active);
-        }
-    }
-
-    /// Check if a node or any descendant matches the filter.
-    fn node_matches_filter(&self, node: &AssemblyNode, filter: &str) -> bool {
-        if node.name.to_lowercase().contains(filter) {
-            return true;
-        }
-        node.children.iter().any(|c| self.node_matches_filter(c, filter))
-    }
-
     /// Render the Layers tab.
     fn render_brepcad_layers(&self, ui: &mut egui::Ui) {
         ui.label(egui::RichText::new("Layers").size(12.0).color(egui::Color32::from_rgb(0xcd, 0xd6, 0xf4)));
@@ -12587,7 +12740,8 @@ impl ViewerApp {
 
         for (id, name, visible, color) in &layers {
             ui.horizontal(|ui| {
-                ui.checkbox(&mut true, ""); // visibility toggle
+                let mut vis = *visible;
+                ui.checkbox(&mut vis, "");
                 ui.color_edit_button_srgb(&mut color.clone());
                 ui.label(egui::RichText::new(format!("{}: {}", id, name)).size(11.0));
             });
@@ -12596,70 +12750,6 @@ impl ViewerApp {
         ui.add_space(8.0);
         ui.separator();
         if ui.button("+ New Layer").clicked() {}
-    }
-
-    /// Render the Properties tab.
-    fn render_brepcad_properties(&self, ui: &mut egui::Ui) {
-        ui.heading(egui::RichText::new("Properties").size(13.0));
-        ui.separator();
-
-        if let Some((inst_idx, face_id)) = self.selected_face {
-            // Face properties
-            ui.label(egui::RichText::new("Selected: Face").size(11.0).color(egui::Color32::from_rgb(0x89, 0xb4, 0xfa)));
-            ui.separator();
-
-            ui.collapsing("General", |ui| {
-                ui.label(format!("Instance: #{}", inst_idx));
-                ui.label(format!("Face ID: {}", face_id));
-            });
-
-            // Try to get face info from detailed_instances
-            if let Some(inst) = self.detailed_instances.get(inst_idx) {
-                if let Some(face_info) = inst.faces.iter().find(|f| f.face_id == face_id) {
-                    let tri_count = face_info.triangle_range.1.saturating_sub(face_info.triangle_range.0);
-                    ui.collapsing("Geometry", |ui| {
-                        ui.label(format!("Surface: {}", face_info.surface_type));
-                        ui.label(format!("Triangles: {}", tri_count));
-                        ui.label(format!("Forward: {}", face_info.forward));
-                        if face_info.is_void {
-                            ui.label(egui::RichText::new("Void face (internal cavity)").size(10.0).color(egui::Color32::from_rgb(0xf9, 0xe2, 0xaf)));
-                        }
-                    });
-                    ui.collapsing("Appearance", |ui| {
-                        ui.color_edit_button_srgb(&mut [100, 150, 200]);
-                        ui.label("Color");
-                    });
-                }
-            }
-        } else if let Some(inst_idx) = self.selected_instance {
-            // Instance properties
-            ui.label(egui::RichText::new(format!("Selected: Instance #{}", inst_idx)).size(11.0).color(egui::Color32::from_rgb(0x89, 0xb4, 0xfa)));
-            ui.separator();
-
-            if let Some(inst) = self.detailed_instances.get(inst_idx) {
-                ui.collapsing("General", |ui| {
-                    ui.label(format!("Name: {}", inst.name));
-                    ui.label(format!("BREP ID: {}", inst.brep_id));
-                    ui.label(format!("Faces: {}", inst.faces.len()));
-                });
-            }
-        } else {
-            ui.label(egui::RichText::new("No entity selected").size(11.0).color(egui::Color32::from_rgb(0x6c, 0x70, 0x86)));
-            ui.add_space(4.0);
-            ui.label(egui::RichText::new("Click a face or instance").size(10.0).color(egui::Color32::from_rgb(0x6c, 0x70, 0x86)));
-            ui.label(egui::RichText::new("in the viewport to see its").size(10.0).color(egui::Color32::from_rgb(0x6c, 0x70, 0x86)));
-            ui.label(egui::RichText::new("properties here.").size(10.0).color(egui::Color32::from_rgb(0x6c, 0x70, 0x86)));
-        }
-
-        ui.add_space(8.0);
-        ui.separator();
-
-        // Model info
-        ui.collapsing("Model Info", |ui| {
-            ui.label(format!("Name: {}", self.current_model.name));
-            ui.label(format!("Vertices: {}", self.current_model.vertex_count));
-            ui.label(format!("Triangles: {}", self.current_model.triangle_count));
-        });
     }
 }
 
@@ -12712,4 +12802,109 @@ pub fn apply_brepcad_theme(ctx: &egui::Context) {
     style.visuals.window_shadow = egui::epaint::Shadow::NONE;
 
     ctx.set_style(style);
+}
+
+// ============================================================
+// BRepCAD free functions (for tree rendering with pending actions)
+// ============================================================
+
+/// Recursively render an assembly tree node for the BRepCAD Browser panel.
+/// Sets pending actions on click — applied by the caller after the panel.
+fn brepcad_render_assembly_node(
+    ui: &mut egui::Ui,
+    node: &AssemblyNode,
+    depth: usize,
+    filter: &str,
+    filter_active: bool,
+    selected_instance: Option<usize>,
+    hidden_instances: &std::collections::HashSet<usize>,
+    pending_instance_select: &mut Option<usize>,
+    pending_visibility_toggle: &mut Option<usize>,
+    pending_instance_isolate: &mut Option<usize>,
+) {
+    // Filter: skip if node doesn't match and no children match
+    if filter_active && !node.name.to_lowercase().contains(filter) {
+        let has_matching_child = node.children.iter().any(|c| brepcad_node_matches_filter(c, filter));
+        if !has_matching_child {
+            return;
+        }
+    }
+
+    let is_leaf = node.instance_index.is_some();
+    let is_selected = node.instance_index.is_some() && selected_instance == node.instance_index;
+    let is_visible = node.instance_index.map(|i| !hidden_instances.contains(&i)).unwrap_or(true);
+
+    ui.horizontal(|ui| {
+        ui.add_space((depth * 14) as f32);
+
+        // Expand/collapse arrow (non-leaf nodes)
+        if !node.children.is_empty() {
+            ui.label(egui::RichText::new("▼").size(9.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
+        } else {
+            ui.add_space(9.0);
+        }
+
+        // For leaf nodes with instance_index: eye icon + isolate button
+        if is_leaf {
+            let idx = node.instance_index.unwrap();
+            let eye_color = if is_visible {
+                egui::Color32::from_rgb(0xa6, 0xe3, 0xa1) // green
+            } else {
+                egui::Color32::from_rgb(0xf3, 0x8b, 0xa8) // red
+            };
+            let eye_text = if is_visible { "👁" } else { "🚫" };
+            let eye_resp = ui.add(egui::Label::new(
+                egui::RichText::new(eye_text).size(11.0).color(eye_color)
+            ).sense(egui::Sense::click()));
+            if eye_resp.clicked() {
+                *pending_visibility_toggle = Some(idx);
+            }
+            eye_resp.on_hover_text(if is_visible { "Click to hide" } else { "Click to show" });
+
+            // Isolate button
+            let iso_resp = ui.add(egui::Button::new(
+                egui::RichText::new("◎").size(10.0)
+            ).frame(false));
+            if iso_resp.clicked() {
+                *pending_instance_isolate = Some(idx);
+            }
+            iso_resp.on_hover_text("Isolate: hide all others");
+        } else {
+            ui.add_space(28.0); // align with leaf nodes
+        }
+
+        // Node icon + name
+        let icon = if is_leaf { "📦" } else if node.brep_id.is_some() { "🔧" } else { "📁" };
+        let bg = if is_selected {
+            egui::Color32::from_rgb(0x09, 0x47, 0x71)
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        let frame = egui::Frame::new().fill(bg).inner_margin(egui::Margin::symmetric(2, 1));
+        frame.show(ui, |ui| {
+            let label_text = format!("{} {}", icon, node.name);
+            let resp = ui.selectable_label(is_selected,
+                egui::RichText::new(label_text).size(11.0));
+            if resp.clicked() && is_leaf {
+                *pending_instance_select = node.instance_index;
+            }
+        });
+    });
+
+    // Render children
+    for child in &node.children {
+        brepcad_render_assembly_node(
+            ui, child, depth + 1, filter, filter_active,
+            selected_instance, hidden_instances,
+            pending_instance_select, pending_visibility_toggle, pending_instance_isolate,
+        );
+    }
+}
+
+/// Check if a node or any descendant matches the filter.
+fn brepcad_node_matches_filter(node: &AssemblyNode, filter: &str) -> bool {
+    if node.name.to_lowercase().contains(filter) {
+        return true;
+    }
+    node.children.iter().any(|c| brepcad_node_matches_filter(c, filter))
 }

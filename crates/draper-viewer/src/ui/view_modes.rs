@@ -49,6 +49,29 @@ impl ViewOrientation {
         }
     }
 
+    /// Camera direction vector (looking FROM this direction TO origin).
+    /// Used by OrbitCamera::look_from_direction().
+    pub fn direction(&self) -> [f32; 3] {
+        match self {
+            ViewOrientation::Iso => {
+                let d = 45.0_f32.to_radians();
+                let e = 30.0_f32.to_radians();
+                [-e.cos() * d.sin(), -e.sin(), e.cos() * d.cos()]
+            }
+            ViewOrientation::Front => [0.0, 0.0, 1.0],
+            ViewOrientation::Back => [0.0, 0.0, -1.0],
+            ViewOrientation::Top => [0.0, -1.0, 0.0],
+            ViewOrientation::Bottom => [0.0, 1.0, 0.0],
+            ViewOrientation::Left => [1.0, 0.0, 0.0],
+            ViewOrientation::Right => [-1.0, 0.0, 0.0],
+            ViewOrientation::Dimetric => {
+                let d = 20.0_f32.to_radians();
+                let e = 15.0_f32.to_radians();
+                [-e.cos() * d.sin(), -e.sin(), e.cos() * d.cos()]
+            }
+        }
+    }
+
     pub const ALL: &'static [ViewOrientation] = &[
         ViewOrientation::Iso,
         ViewOrientation::Front,
