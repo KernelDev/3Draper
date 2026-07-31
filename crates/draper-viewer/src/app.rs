@@ -747,6 +747,41 @@ pub struct ViewerApp {
     pub brepcad_marking_menu_visible: bool,
     /// Last status message displayed in toast.
     pub brepcad_status_msg: String,
+    /// Left panel active tab (Tree/Layers/Selection).
+    pub brepcad_left_tab: BrepcadLeftTab,
+    /// Right panel active tab (Properties/Constraints/Dimensions/Material).
+    pub brepcad_right_tab: BrepcadRightTab,
+    /// Tree filter text.
+    pub brepcad_tree_filter: String,
+    /// Active tool name (shown in status bar).
+    pub brepcad_active_tool: String,
+    /// Current view orientation label (shown in status bar).
+    pub brepcad_view_orientation: String,
+}
+
+/// Left panel tab for BRepCAD Browser.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrepcadLeftTab {
+    Tree,
+    Layers,
+    Selection,
+}
+
+impl Default for BrepcadLeftTab {
+    fn default() -> Self { BrepcadLeftTab::Tree }
+}
+
+/// Right panel tab for BRepCAD Properties.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrepcadRightTab {
+    Properties,
+    Constraints,
+    Dimensions,
+    Material,
+}
+
+impl Default for BrepcadRightTab {
+    fn default() -> Self { BrepcadRightTab::Properties }
 }
 
 /// UV breakdown for a single face of a solid — the outer boundary plus
@@ -1279,6 +1314,11 @@ impl ViewerApp {
             brepcad_command_palette: Default::default(),
             brepcad_marking_menu_visible: false,
             brepcad_status_msg: String::new(),
+            brepcad_left_tab: BrepcadLeftTab::Tree,
+            brepcad_right_tab: BrepcadRightTab::Properties,
+            brepcad_tree_filter: String::new(),
+            brepcad_active_tool: "Select".to_string(),
+            brepcad_view_orientation: "ISO".to_string(),
         };
         app.log(&format!("3Draper Viewer started [build: {}]", env!("DRAPER_GIT_HASH")));
         app.log(&format!("Default model: Box 100x100x100 ({} vertices, {} triangles)",
@@ -6308,6 +6348,8 @@ impl eframe::App for ViewerApp {
         // On mobile, the log panel can cover the entire viewport when expanded,
         // so it MUST have a collapse/expand toggle. On desktop the toggle is also
         // useful for users who want more 3D viewport space.
+        // When BRepCAD UI is enabled, skip the log panel — a status bar is rendered instead.
+        if !self.enable_brepcad_ui {
         if self.log_panel_open {
             egui::TopBottomPanel::bottom("log_panel")
                 .min_height(60.0)
@@ -6413,6 +6455,7 @@ impl eframe::App for ViewerApp {
                     });
                 });
         }
+        } // end if !enable_brepcad_ui (skip log panel)
 
         // === Right panel: Structure / Faces / UV (desktop only) ===
         // Collect pending UI actions to avoid borrow checker conflicts
@@ -6428,7 +6471,7 @@ impl eframe::App for ViewerApp {
         let mut pending_subtree_show: Option<Vec<usize>> = None;
         let mut pending_subtree_isolate: Option<Vec<usize>> = None;
 
-        if self.show_structure && !self.is_mobile {
+        if self.show_structure && !self.is_mobile && !self.enable_brepcad_ui {
             // Clone data needed for drawing to avoid borrow conflicts
             let assembly_tree_clone = self.assembly_tree.clone();
             let detailed_instances_clone = self.detailed_instances.clone();
@@ -6927,7 +6970,8 @@ impl eframe::App for ViewerApp {
         }
 
         // === Left side panel (controls) — desktop only ===
-        if !self.is_mobile {
+        // When BRepCAD UI is enabled, skip this — a Browser panel is rendered instead.
+        if !self.is_mobile && !self.enable_brepcad_ui {
         egui::SidePanel::left("controls")
             .min_width(150.0)
             .default_width(200.0)
@@ -7574,6 +7618,125 @@ impl eframe::App for ViewerApp {
                     }); // close ScrollArea
             });
         } // end desktop left controls panel
+
+        // ═══ BRepCAD layout: Browser (left) + Properties (right) + Status bar (bottom) ═══
+        // When enable_brepcad_ui=true, render the mockup-compliant layout:
+        //   Left:   Browser panel (Tree / Layers / Selection tabs + filter + model tree)
+        //   Right:  Properties panel (Props / Constraints / Dimensions / Material tabs)
+        //   Bottom: Status bar (X/Y/Z, Az/El/D, Tool, FPS, Units, Display, View)
+        if self.enable_brepcad_ui && !self.is_mobile {
+            // ── Left: Browser (Model Tree) ──
+            egui::SidePanel::left("brepcad_browser")
+                .default_width(280.0)
+                .min_width(200.0)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    // Tab strip: Tree / Layers / Selection
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut self.brepcad_left_tab, BrepcadLeftTab::Tree, "Tree");
+                        ui.selectable_value(&mut self.brepcad_left_tab, BrepcadLeftTab::Layers, "Layers");
+                        ui.selectable_value(&mut self.brepcad_left_tab, BrepcadLeftTab::Selection, "Selection");
+                    });
+                    ui.separator();
+
+                    // Filter box
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut self.brepcad_tree_filter);
+                        if ui.button("Filter").clicked() {
+                            // Filtering is applied in render_brepcad_tree
+                        }
+                    });
+                    ui.separator();
+
+                    match self.brepcad_left_tab {
+                        BrepcadLeftTab::Tree => {
+                            egui::ScrollArea::vertical()
+                                .auto_shrink([false; 2])
+                                .show(ui, |ui| {
+                                    self.render_brepcad_model_tree(ui);
+                                });
+                        }
+                        BrepcadLeftTab::Layers => {
+                            self.render_brepcad_layers(ui);
+                        }
+                        BrepcadLeftTab::Selection => {
+                            ui.label("No selection");
+                            ui.label("Click entities in viewport or tree");
+                        }
+                    }
+                });
+
+            // ── Right: Properties ──
+            egui::SidePanel::right("brepcad_properties")
+                .default_width(280.0)
+                .min_width(200.0)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut self.brepcad_right_tab, BrepcadRightTab::Properties, "Props");
+                        ui.selectable_value(&mut self.brepcad_right_tab, BrepcadRightTab::Constraints, "Constraints");
+                        ui.selectable_value(&mut self.brepcad_right_tab, BrepcadRightTab::Dimensions, "Dimensions");
+                        ui.selectable_value(&mut self.brepcad_right_tab, BrepcadRightTab::Material, "Material");
+                    });
+                    ui.separator();
+
+                    match self.brepcad_right_tab {
+                        BrepcadRightTab::Properties => {
+                            self.render_brepcad_properties(ui);
+                        }
+                        BrepcadRightTab::Constraints => {
+                            ui.label("Constraints (sketch mode)");
+                        }
+                        BrepcadRightTab::Dimensions => {
+                            ui.label("Dimensions (sketch mode)");
+                        }
+                        BrepcadRightTab::Material => {
+                            ui.label("No material assigned");
+                            if ui.button("Assign Material…").clicked() {}
+                            ui.separator();
+                            ui.collapsing("Library", |ui| {
+                                for cat in &["Metals", "Plastics", "Ceramics", "Composites", "Wood", "Glass", "Custom"] {
+                                    ui.label(*cat);
+                                }
+                            });
+                        }
+                    }
+                });
+
+            // ── Bottom: Status bar ──
+            egui::TopBottomPanel::bottom("brepcad_status_bar")
+                .exact_height(24.0)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        let cam_pos = self.camera.position();
+                        ui.label(format!("X {:.1}  Y {:.1}  Z {:.1}", cam_pos[0], cam_pos[1], cam_pos[2]));
+                        ui.separator();
+                        ui.label(format!("D {:.0}", self.camera.distance));
+                        ui.separator();
+                        ui.label(format!("Tool: {}", self.brepcad_active_tool));
+                        ui.separator();
+                        ui.label(format!("FPS: {:.0}", 1.0 / ui.input(|i| i.stable_dt).max(0.001)));
+                        ui.separator();
+                        ui.label("mm");
+                        ui.separator();
+                        ui.label(match (self.wireframe, self.show_edges) {
+                            (true, _) => "Wireframe",
+                            (false, false) => "Shaded",
+                            (false, true) => "Shaded+Edges",
+                        });
+                        ui.separator();
+                        ui.label(&self.brepcad_view_orientation);
+                        ui.separator();
+                        if self.selected_instance.is_some() || self.selected_face.is_some() {
+                            ui.label(format!("Sel: {} item(s)",
+                                self.selected_instance.map(|_| 1).unwrap_or(0) +
+                                self.selected_face.map(|_| 1).unwrap_or(0)));
+                        } else {
+                            ui.label("Ready");
+                        }
+                    });
+                });
+        }
 
         // === Central 3D viewport ===
         egui::CentralPanel::default()
@@ -12281,6 +12444,222 @@ impl ViewerApp {
     /// BRepCAD redo: snapshot-based.
     pub fn brepcad_redo(&mut self) -> bool {
         false
+    }
+
+    // ─── BRepCAD panel rendering methods ────────────────────────────────────
+
+    /// Render the model tree (Browser panel, Tree tab).
+    /// Reuses the existing assembly_tree / detailed_instances data.
+    fn render_brepcad_model_tree(&self, ui: &mut egui::Ui) {
+        let filter_lower = self.brepcad_tree_filter.to_lowercase();
+        let filter_active = !filter_lower.is_empty();
+
+        // If we have an assembly tree, render it
+        if let Some(ref tree) = self.assembly_tree {
+            self.render_brepcad_assembly_node(ui, tree, 0, &filter_lower, filter_active);
+        } else if !self.detailed_instances.is_empty() {
+            // Fallback: flat list of instances
+            ui.label(egui::RichText::new(format!("Model: {}", self.current_model.name))
+                .size(11.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
+            ui.add_space(4.0);
+
+            for (i, inst) in self.detailed_instances.iter().enumerate() {
+                if filter_active && !inst.name.to_lowercase().contains(&filter_lower) {
+                    continue;
+                }
+                let is_selected = self.selected_instance == Some(i);
+                let is_visible = !self.hidden_instances.contains(&i);
+
+                ui.horizontal(|ui| {
+                    // Visibility eye icon
+                    let eye_color = if is_visible {
+                        egui::Color32::from_rgb(0xa6, 0xe3, 0xa1) // green
+                    } else {
+                        egui::Color32::from_rgb(0xf3, 0x8b, 0xa8) // red
+                    };
+                    let eye_text = if is_visible { "👁" } else { "🚫" };
+                    let eye_resp = ui.add(egui::Label::new(
+                        egui::RichText::new(eye_text).size(11.0).color(eye_color)
+                    ).sense(egui::Sense::click()));
+                    if eye_resp.clicked() {
+                        // Visibility toggle handled by parent
+                    }
+
+                    // Instance icon + name
+                    let bg = if is_selected {
+                        egui::Color32::from_rgb(0x09, 0x47, 0x71)
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    };
+                    let frame = egui::Frame::new().fill(bg).inner_margin(egui::Margin::symmetric(4, 2));
+                    frame.show(ui, |ui| {
+                        let resp = ui.selectable_label(is_selected,
+                            egui::RichText::new(format!("📦 {} (BREP#{})", inst.name, inst.brep_id))
+                                .size(11.0));
+                        if resp.clicked() {
+                            // Selection handled by parent
+                        }
+                    });
+                });
+            }
+        } else {
+            ui.label(egui::RichText::new("No model loaded").size(11.0).color(egui::Color32::from_rgb(0x6c, 0x70, 0x86)));
+            ui.label(egui::RichText::new("Use File → Open to load a STEP file").size(10.0).color(egui::Color32::from_rgb(0x6c, 0x70, 0x86)));
+        }
+
+        // Show mesh stats at bottom
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label(egui::RichText::new(format!("Vertices: {}", self.mesh.vertex_count())).size(10.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
+        ui.label(egui::RichText::new(format!("Triangles: {}", self.mesh.triangle_count())).size(10.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
+    }
+
+    /// Recursively render an assembly tree node.
+    fn render_brepcad_assembly_node(&self, ui: &mut egui::Ui, node: &AssemblyNode, depth: usize, filter: &str, filter_active: bool) {
+        if filter_active && !node.name.to_lowercase().contains(filter) {
+            // Still check children — a child might match
+            let has_matching_child = node.children.iter().any(|c| self.node_matches_filter(c, filter));
+            if !has_matching_child {
+                return;
+            }
+        }
+
+        ui.horizontal(|ui| {
+            ui.add_space((depth * 14) as f32);
+
+            // Expand/collapse arrow
+            if !node.children.is_empty() {
+                ui.label(egui::RichText::new("▼").size(9.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
+            } else {
+                ui.add_space(9.0);
+            }
+
+            // Node icon based on type
+            let icon = if node.brep_id.is_some() && node.instance_index.is_some() {
+                "📦" // body/solid
+            } else if node.brep_id.is_some() {
+                "🔧" // component
+            } else {
+                "📁" // assembly/folder
+            };
+
+            let is_selected = node.instance_index.is_some() &&
+                self.selected_instance == node.instance_index;
+
+            let bg = if is_selected {
+                egui::Color32::from_rgb(0x09, 0x47, 0x71)
+            } else {
+                egui::Color32::TRANSPARENT
+            };
+
+            let frame = egui::Frame::new().fill(bg).inner_margin(egui::Margin::symmetric(2, 1));
+            frame.show(ui, |ui| {
+                ui.selectable_label(is_selected,
+                    egui::RichText::new(format!("{} {}", icon, node.name)).size(11.0));
+            });
+        });
+
+        for child in &node.children {
+            self.render_brepcad_assembly_node(ui, child, depth + 1, filter, filter_active);
+        }
+    }
+
+    /// Check if a node or any descendant matches the filter.
+    fn node_matches_filter(&self, node: &AssemblyNode, filter: &str) -> bool {
+        if node.name.to_lowercase().contains(filter) {
+            return true;
+        }
+        node.children.iter().any(|c| self.node_matches_filter(c, filter))
+    }
+
+    /// Render the Layers tab.
+    fn render_brepcad_layers(&self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("Layers").size(12.0).color(egui::Color32::from_rgb(0xcd, 0xd6, 0xf4)));
+        ui.separator();
+
+        let layers = [
+            ("0", "Default", true, [0xff, 0xff, 0xff]),
+            ("1", "Construction", true, [0xa6, 0xe3, 0xa1]),
+            ("2", "Dimensions", true, [0x89, 0xb4, 0xfa]),
+            ("3", "Annotations", true, [0xf9, 0xe2, 0xaf]),
+            ("4", "Hidden Lines", false, [0x6c, 0x70, 0x86]),
+        ];
+
+        for (id, name, visible, color) in &layers {
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut true, ""); // visibility toggle
+                ui.color_edit_button_srgb(&mut color.clone());
+                ui.label(egui::RichText::new(format!("{}: {}", id, name)).size(11.0));
+            });
+        }
+
+        ui.add_space(8.0);
+        ui.separator();
+        if ui.button("+ New Layer").clicked() {}
+    }
+
+    /// Render the Properties tab.
+    fn render_brepcad_properties(&self, ui: &mut egui::Ui) {
+        ui.heading(egui::RichText::new("Properties").size(13.0));
+        ui.separator();
+
+        if let Some((inst_idx, face_id)) = self.selected_face {
+            // Face properties
+            ui.label(egui::RichText::new("Selected: Face").size(11.0).color(egui::Color32::from_rgb(0x89, 0xb4, 0xfa)));
+            ui.separator();
+
+            ui.collapsing("General", |ui| {
+                ui.label(format!("Instance: #{}", inst_idx));
+                ui.label(format!("Face ID: {}", face_id));
+            });
+
+            // Try to get face info from detailed_instances
+            if let Some(inst) = self.detailed_instances.get(inst_idx) {
+                if let Some(face_info) = inst.faces.iter().find(|f| f.face_id == face_id) {
+                    let tri_count = face_info.triangle_range.1.saturating_sub(face_info.triangle_range.0);
+                    ui.collapsing("Geometry", |ui| {
+                        ui.label(format!("Surface: {}", face_info.surface_type));
+                        ui.label(format!("Triangles: {}", tri_count));
+                        ui.label(format!("Forward: {}", face_info.forward));
+                        if face_info.is_void {
+                            ui.label(egui::RichText::new("Void face (internal cavity)").size(10.0).color(egui::Color32::from_rgb(0xf9, 0xe2, 0xaf)));
+                        }
+                    });
+                    ui.collapsing("Appearance", |ui| {
+                        ui.color_edit_button_srgb(&mut [100, 150, 200]);
+                        ui.label("Color");
+                    });
+                }
+            }
+        } else if let Some(inst_idx) = self.selected_instance {
+            // Instance properties
+            ui.label(egui::RichText::new(format!("Selected: Instance #{}", inst_idx)).size(11.0).color(egui::Color32::from_rgb(0x89, 0xb4, 0xfa)));
+            ui.separator();
+
+            if let Some(inst) = self.detailed_instances.get(inst_idx) {
+                ui.collapsing("General", |ui| {
+                    ui.label(format!("Name: {}", inst.name));
+                    ui.label(format!("BREP ID: {}", inst.brep_id));
+                    ui.label(format!("Faces: {}", inst.faces.len()));
+                });
+            }
+        } else {
+            ui.label(egui::RichText::new("No entity selected").size(11.0).color(egui::Color32::from_rgb(0x6c, 0x70, 0x86)));
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new("Click a face or instance").size(10.0).color(egui::Color32::from_rgb(0x6c, 0x70, 0x86)));
+            ui.label(egui::RichText::new("in the viewport to see its").size(10.0).color(egui::Color32::from_rgb(0x6c, 0x70, 0x86)));
+            ui.label(egui::RichText::new("properties here.").size(10.0).color(egui::Color32::from_rgb(0x6c, 0x70, 0x86)));
+        }
+
+        ui.add_space(8.0);
+        ui.separator();
+
+        // Model info
+        ui.collapsing("Model Info", |ui| {
+            ui.label(format!("Name: {}", self.current_model.name));
+            ui.label(format!("Vertices: {}", self.current_model.vertex_count));
+            ui.label(format!("Triangles: {}", self.current_model.triangle_count));
+        });
     }
 }
 
