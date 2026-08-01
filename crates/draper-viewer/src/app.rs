@@ -806,6 +806,14 @@ pub struct ViewerApp {
     pub brepcad_section_axis: u8,
     /// Section cut: plane position along axis.
     pub brepcad_section_position: f32,
+    /// Parameter table: HashMap<name, (value, formula, unit)>.
+    pub brepcad_parameters: std::collections::HashMap<String, (f64, Option<String>, String)>,
+    /// Parameter dialog visible?
+    pub brepcad_param_dialog_open: bool,
+    /// New parameter name input.
+    pub brepcad_new_param_name: String,
+    /// New parameter formula input.
+    pub brepcad_new_param_formula: String,
 }
 
 /// Measure mode for the BRepCAD viewport.
@@ -1389,6 +1397,10 @@ impl ViewerApp {
             brepcad_section_enabled: false,
             brepcad_section_axis: 2, // Z axis by default
             brepcad_section_position: 0.0,
+            brepcad_parameters: std::collections::HashMap::new(),
+            brepcad_param_dialog_open: false,
+            brepcad_new_param_name: String::new(),
+            brepcad_new_param_formula: String::new(),
         };
         app.log(&format!("3Draper Viewer started [build: {}]", env!("DRAPER_GIT_HASH")));
         app.log(&format!("Default model: Box 100x100x100 ({} vertices, {} triangles)",
@@ -8781,6 +8793,126 @@ impl eframe::App for ViewerApp {
                 self.brepcad_active_tool = "Select".to_string();
                 self.brepcad_status_msg = "Measure cancelled".to_string();
             }
+
+            // ─── Parameter dialog ───
+            if self.brepcad_param_dialog_open {
+                let mut open = self.brepcad_param_dialog_open;
+                egui::Window::new("Parameters")
+                    .open(&mut open)
+                    .resizable(true)
+                    .default_width(500.0)
+                    .default_height(400.0)
+                    .show(ctx, |ui| {
+                        // Add new parameter
+                        ui.horizontal(|ui| {
+                            ui.label("Name:");
+                            ui.text_edit_singleline(&mut self.brepcad_new_param_name);
+                            ui.label("Formula:");
+                            ui.text_edit_singleline(&mut self.brepcad_new_param_formula);
+                            if ui.button("Add").clicked() && !self.brepcad_new_param_name.is_empty() {
+                                let name = self.brepcad_new_param_name.clone();
+                                let formula = self.brepcad_new_param_formula.clone();
+                                if formula.is_empty() {
+                                    self.brepcad_set_param(&name, 0.0);
+                                } else {
+                                    self.brepcad_set_param_formula(&name, &formula, "mm");
+                                }
+                                self.brepcad_new_param_name.clear();
+                                self.brepcad_new_param_formula.clear();
+                                self.brepcad_eval_params();
+                            }
+                        });
+                        ui.separator();
+
+                        // Parameter table
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            let mut params_to_remove = Vec::new();
+                            let mut params_to_update: Vec<(String, f64, Option<String>)> = Vec::new();
+
+                            // Collect names first to avoid borrow issues
+                            let names: Vec<String> = self.brepcad_parameters.keys().cloned().collect();
+
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("Name").size(11.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
+                                ui.add_space(80.0);
+                                ui.label(egui::RichText::new("Value").size(11.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
+                                ui.add_space(60.0);
+                                ui.label(egui::RichText::new("Formula").size(11.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
+                                ui.add_space(80.0);
+                                ui.label(egui::RichText::new("Unit").size(11.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
+                            });
+                            ui.separator();
+
+                            for name in &names {
+                                let entry = self.brepcad_parameters.get(name).cloned();
+                                if let Some((value, formula, unit)) = entry {
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(name).size(11.0));
+                                        ui.add_space(20.0);
+
+                                        let mut val_str = format!("{:.3}", value);
+                                        ui.add(egui::TextEdit::singleline(&mut val_str).desired_width(60.0));
+                                        if let Ok(new_val) = val_str.parse::<f64>() {
+                                            if (new_val - value).abs() > 1e-9 {
+                                                params_to_update.push((name.clone(), new_val, None));
+                                            }
+                                        }
+
+                                        ui.add_space(10.0);
+                                        let mut formula_str = formula.clone().unwrap_or_default();
+                                        ui.add(egui::TextEdit::singleline(&mut formula_str).desired_width(80.0));
+                                        if !formula_str.is_empty() && Some(formula_str.clone()) != formula {
+                                            params_to_update.push((name.clone(), 0.0, Some(formula_str)));
+                                        }
+
+                                        ui.add_space(10.0);
+                                        ui.label(egui::RichText::new(&unit).size(10.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
+
+                                        ui.add_space(10.0);
+                                        if ui.small_button("✕").clicked() {
+                                            params_to_remove.push(name.clone());
+                                        }
+                                    });
+                                }
+                            }
+
+                            // Apply updates
+                            for (name, new_val, new_formula) in params_to_update {
+                                if let Some(entry) = self.brepcad_parameters.get_mut(&name) {
+                                    if let Some(f) = new_formula {
+                                        entry.1 = Some(f);
+                                    } else {
+                                        entry.1 = None;
+                                        entry.0 = new_val;
+                                    }
+                                }
+                            }
+                            self.brepcad_eval_params();
+
+                            // Apply removals
+                            for name in params_to_remove {
+                                self.brepcad_parameters.remove(&name);
+                            }
+                        });
+
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if ui.button("Add Defaults (W, H, D, R)").clicked() {
+                                self.brepcad_set_param("Width", 100.0);
+                                self.brepcad_set_param("Height", 80.0);
+                                self.brepcad_set_param("Depth", 60.0);
+                                self.brepcad_set_param("Radius", 50.0);
+                                self.brepcad_set_param_formula("Diameter", "Radius * 2", "mm");
+                                self.brepcad_set_param_formula("Volume", "Width * Height * Depth", "mm³");
+                            }
+                            if ui.button("Clear All").clicked() {
+                                self.brepcad_parameters.clear();
+                            }
+                            ui.label(format!("({} params)", self.brepcad_parameters.len()));
+                        });
+                    });
+                self.brepcad_param_dialog_open = open;
+            }
         }
     }
 }
@@ -12942,6 +13074,15 @@ impl ViewerApp {
                 format!("Volume: {:.3} mm³", vol.abs())
             }
 
+            // ── Parametric actions ──
+            MenuAction::ParamParameters => {
+                self.brepcad_param_dialog_open = !self.brepcad_param_dialog_open;
+                if self.brepcad_param_dialog_open { "Parameters dialog opened".to_string() } else { String::new() }
+            }
+            MenuAction::ParamEquations => "Use Parameters dialog to edit formulas".to_string(),
+            MenuAction::ParamDesignTable | MenuAction::ParamDependencyGraph
+            | MenuAction::ParamVariants => "Parametric feature not yet implemented".to_string(),
+
             // ── Sheet Metal, Assembly, CAM, Drawing, Simulation, etc. ──
             _ => format!("{:?} — not yet implemented", action),
         }
@@ -13073,6 +13214,186 @@ impl ViewerApp {
         if self.brepcad_undo_stack.len() > self.brepcad_max_history {
             self.brepcad_undo_stack.remove(0);
         }
+    }
+
+    // ─── Parameter system ──────────────────────────────────────────────
+
+    /// Add or update a parameter with a numeric value.
+    pub fn brepcad_set_param(&mut self, name: &str, value: f64) {
+        self.brepcad_parameters.insert(name.to_string(), (value, None, "mm".to_string()));
+    }
+
+    /// Add or update a parameter with a formula.
+    pub fn brepcad_set_param_formula(&mut self, name: &str, formula: &str, unit: &str) {
+        let value = Self::brepcad_eval_formula(formula);
+        self.brepcad_parameters.insert(name.to_string(), (value, Some(formula.to_string()), unit.to_string()));
+    }
+
+    /// Get a parameter value by name.
+    pub fn brepcad_get_param(&self, name: &str) -> Option<f64> {
+        self.brepcad_parameters.get(name).map(|(v, _, _)| *v)
+    }
+
+    /// Remove a parameter.
+    pub fn brepcad_remove_param(&mut self, name: &str) -> bool {
+        self.brepcad_parameters.remove(name).is_some()
+    }
+
+    /// Re-evaluate all formula-based parameters.
+    pub fn brepcad_eval_params(&mut self) {
+        let params = self.brepcad_parameters.clone();
+        let mut updates: Vec<(String, f64)> = Vec::new();
+        for (name, (_, formula, _)) in &params {
+            if let Some(f) = formula {
+                let value = Self::brepcad_eval_formula_with_params(f, &params);
+                updates.push((name.clone(), value));
+            }
+        }
+        for (name, value) in updates {
+            if let Some(entry) = self.brepcad_parameters.get_mut(&name) {
+                entry.0 = value;
+            }
+        }
+    }
+
+    /// Simple formula evaluator (supports: number, name, a+b, a-b, a*b, a/b, a*b+c, parentheses).
+    pub fn brepcad_eval_formula(formula: &str) -> f64 {
+        Self::brepcad_eval_formula_with_params(formula, &std::collections::HashMap::new())
+    }
+
+    /// Evaluate a formula with access to the parameter table.
+    /// Supports: numbers, parameter names, +, -, *, /, parentheses.
+    fn brepcad_eval_formula_with_params(
+        formula: &str,
+        params: &std::collections::HashMap<String, (f64, Option<String>, String)>,
+    ) -> f64 {
+        let formula = formula.trim();
+        // Try to parse as a plain number first
+        if let Ok(val) = formula.parse::<f64>() {
+            return val;
+        }
+
+        // Tokenize: split by operators while keeping them
+        let tokens = Self::tokenize_formula(formula);
+        if tokens.is_empty() {
+            return 0.0;
+        }
+
+        // Simple recursive descent parser: expr = term (('+'|'-') term)*
+        // term = factor (('*'|'/') factor)*
+        // factor = number | name | '(' expr ')'
+        let mut pos = 0;
+        Self::parse_expr(&tokens, &mut pos, params).unwrap_or(0.0)
+    }
+
+    /// Tokenize a formula into numbers, identifiers, and operators.
+    fn tokenize_formula(formula: &str) -> Vec<String> {
+        let mut tokens = Vec::new();
+        let mut current = String::new();
+        for ch in formula.chars() {
+            if ch.is_whitespace() {
+                if !current.is_empty() {
+                    tokens.push(current.clone());
+                    current.clear();
+                }
+                continue;
+            }
+            if "+-*/()".contains(ch) {
+                if !current.is_empty() {
+                    tokens.push(current.clone());
+                    current.clear();
+                }
+                tokens.push(ch.to_string());
+            } else {
+                current.push(ch);
+            }
+        }
+        if !current.is_empty() {
+            tokens.push(current);
+        }
+        tokens
+    }
+
+    /// Parse expression: term (('+'|'-') term)*
+    fn parse_expr(
+        tokens: &[String],
+        pos: &mut usize,
+        params: &std::collections::HashMap<String, (f64, Option<String>, String)>,
+    ) -> Option<f64> {
+        let mut left = Self::parse_term(tokens, pos, params)?;
+        while *pos < tokens.len() {
+            let op = &tokens[*pos];
+            if op == "+" || op == "-" {
+                *pos += 1;
+                let right = Self::parse_term(tokens, pos, params)?;
+                left = if op == "+" { left + right } else { left - right };
+            } else {
+                break;
+            }
+        }
+        Some(left)
+    }
+
+    /// Parse term: factor (('*'|'/') factor)*
+    fn parse_term(
+        tokens: &[String],
+        pos: &mut usize,
+        params: &std::collections::HashMap<String, (f64, Option<String>, String)>,
+    ) -> Option<f64> {
+        let mut left = Self::parse_factor(tokens, pos, params)?;
+        while *pos < tokens.len() {
+            let op = &tokens[*pos];
+            if op == "*" || op == "/" {
+                *pos += 1;
+                let right = Self::parse_factor(tokens, pos, params)?;
+                left = if op == "*" {
+                    left * right
+                } else {
+                    if right.abs() < 1e-12 { 0.0 } else { left / right }
+                };
+            } else {
+                break;
+            }
+        }
+        Some(left)
+    }
+
+    /// Parse factor: number | name | '(' expr ')'
+    fn parse_factor(
+        tokens: &[String],
+        pos: &mut usize,
+        params: &std::collections::HashMap<String, (f64, Option<String>, String)>,
+    ) -> Option<f64> {
+        if *pos >= tokens.len() {
+            return None;
+        }
+        let token = &tokens[*pos];
+        *pos += 1;
+
+        if token == "(" {
+            let val = Self::parse_expr(tokens, pos, params)?;
+            // Expect closing paren
+            if *pos < tokens.len() && tokens[*pos] == ")" {
+                *pos += 1;
+            }
+            return Some(val);
+        }
+        if token == ")" {
+            return None;
+        }
+
+        // Try to parse as number
+        if let Ok(val) = token.parse::<f64>() {
+            return Some(val);
+        }
+
+        // Try to look up as parameter name
+        if let Some((val, _, _)) = params.get(token) {
+            return Some(*val);
+        }
+
+        // Unknown token — return 0
+        Some(0.0)
     }
 
     /// BRepCAD undo: restore previous solid state.
