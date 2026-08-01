@@ -820,6 +820,35 @@ pub struct ViewerApp {
     pub brepcad_timeline_open: bool,
     /// Current rollback position (index into timeline). None = latest.
     pub brepcad_timeline_rollback: Option<usize>,
+    /// Sketch mode active?
+    pub brepcad_sketch_mode: bool,
+    /// Sketch plane: 0=XY, 1=XZ, 2=YZ.
+    pub brepcad_sketch_plane: u8,
+    /// Sketch tool: 0=Select, 1=Line, 2=Circle, 3=Rectangle, 4=Point, 5=Arc.
+    pub brepcad_sketch_tool: u8,
+    /// Sketch entities: Vec of (type, points, radius/extra).
+    pub brepcad_sketch_entities: Vec<BrepcadSketchEntity>,
+    /// Sketch click points buffer (for multi-click tools).
+    pub brepcad_sketch_points: Vec<[f64; 2]>,
+    /// Sketch grid size.
+    pub brepcad_sketch_grid: f64,
+    /// Sketch snap to grid?
+    pub brepcad_sketch_snap: bool,
+}
+
+/// Sketch entity for BRepCAD sketch mode.
+#[derive(Clone, Debug)]
+pub enum BrepcadSketchEntity {
+    /// Line: p1, p2 (2D on sketch plane).
+    Line { p1: [f64; 2], p2: [f64; 2] },
+    /// Circle: center, radius.
+    Circle { center: [f64; 2], radius: f64 },
+    /// Rectangle: corner1, corner2.
+    Rectangle { p1: [f64; 2], p2: [f64; 2] },
+    /// Point.
+    Point { p: [f64; 2] },
+    /// Arc: center, start_angle, end_angle, radius.
+    Arc { center: [f64; 2], radius: f64, start: f64, end: f64 },
 }
 
 /// Measure mode for the BRepCAD viewport.
@@ -1410,6 +1439,13 @@ impl ViewerApp {
             brepcad_timeline: Vec::new(),
             brepcad_timeline_open: false,
             brepcad_timeline_rollback: None,
+            brepcad_sketch_mode: false,
+            brepcad_sketch_plane: 0, // XY
+            brepcad_sketch_tool: 0, // Select
+            brepcad_sketch_entities: Vec::new(),
+            brepcad_sketch_points: Vec::new(),
+            brepcad_sketch_grid: 10.0,
+            brepcad_sketch_snap: true,
         };
         app.log(&format!("3Draper Viewer started [build: {}]", env!("DRAPER_GIT_HASH")));
         app.log(&format!("Default model: Box 100x100x100 ({} vertices, {} triangles)",
@@ -8120,7 +8156,102 @@ impl eframe::App for ViewerApp {
                             let local_y = pos.y - rect.min.y;
                             let viewport = (0.0, 0.0, rect.width(), rect.height());
 
-                            if let Some(pick) = pick_at(
+                            // ─── BRepCAD Sketch mode ───
+                            if self.enable_brepcad_ui && self.brepcad_sketch_mode {
+                                // Project mouse onto sketch plane using camera ray
+                                let (ray_origin, ray_dir) = self.camera.screen_to_ray([local_x, local_y], viewport);
+                                // Intersect ray with sketch plane (Z=0 for XY, Y=0 for XZ, X=0 for YZ)
+                                let plane_normal_axis = self.brepcad_sketch_plane;
+                                let (plane_axis_val, plane_normal_idx) = match plane_normal_axis {
+                                    0 => (0.0, 2), // XY plane, Z=0
+                                    1 => (0.0, 1), // XZ plane, Y=0
+                                    _ => (0.0, 0), // YZ plane, X=0
+                                };
+                                let ray_axis = match plane_normal_idx { 0 => ray_dir[0], 1 => ray_dir[1], _ => ray_dir[2] };
+                                let ray_origin_axis = match plane_normal_idx { 0 => ray_origin[0], 1 => ray_origin[1], _ => ray_origin[2] };
+                                if ray_axis.abs() > 1e-9 {
+                                    let t = (plane_axis_val - ray_origin_axis) / ray_axis;
+                                    if t > 0.0 {
+                                        let hit = [
+                                            ray_origin[0] + ray_dir[0] * t,
+                                            ray_origin[1] + ray_dir[1] * t,
+                                            ray_origin[2] + ray_dir[2] * t,
+                                        ];
+                                        // Convert to 2D on sketch plane
+                                        let p2d: [f64; 2] = match plane_normal_axis {
+                                            0 => [hit[0] as f64, hit[1] as f64], // XY: take X, Y
+                                            1 => [hit[0] as f64, hit[2] as f64], // XZ: take X, Z
+                                            _ => [hit[1] as f64, hit[2] as f64], // YZ: take Y, Z
+                                        };
+                                        // Snap to grid
+                                        let p2d = if self.brepcad_sketch_snap {
+                                            let g = self.brepcad_sketch_grid;
+                                            [(p2d[0] / g).round() * g, (p2d[1] / g).round() * g]
+                                        } else { p2d };
+
+                                        let tool = self.brepcad_sketch_tool;
+                                        self.brepcad_sketch_points.push(p2d);
+
+                                        match tool {
+                                            1 => { // Line: 2 points
+                                                if self.brepcad_sketch_points.len() >= 2 {
+                                                    let p1 = self.brepcad_sketch_points[0];
+                                                    let p2 = self.brepcad_sketch_points[1];
+                                                    self.brepcad_sketch_entities.push(BrepcadSketchEntity::Line { p1, p2 });
+                                                    self.brepcad_sketch_points.clear();
+                                                    self.brepcad_status_msg = format!("Line added ({} entities)", self.brepcad_sketch_entities.len());
+                                                }
+                                            }
+                                            2 => { // Circle: 2 points (center + radius)
+                                                if self.brepcad_sketch_points.len() >= 2 {
+                                                    let center = self.brepcad_sketch_points[0];
+                                                    let p2 = self.brepcad_sketch_points[1];
+                                                    let dx = p2[0] - center[0];
+                                                    let dy = p2[1] - center[1];
+                                                    let radius = (dx*dx + dy*dy).sqrt();
+                                                    self.brepcad_sketch_entities.push(BrepcadSketchEntity::Circle { center, radius });
+                                                    self.brepcad_sketch_points.clear();
+                                                    self.brepcad_status_msg = format!("Circle added ({} entities)", self.brepcad_sketch_entities.len());
+                                                }
+                                            }
+                                            3 => { // Rectangle: 2 points
+                                                if self.brepcad_sketch_points.len() >= 2 {
+                                                    let p1 = self.brepcad_sketch_points[0];
+                                                    let p2 = self.brepcad_sketch_points[1];
+                                                    self.brepcad_sketch_entities.push(BrepcadSketchEntity::Rectangle { p1, p2 });
+                                                    self.brepcad_sketch_points.clear();
+                                                    self.brepcad_status_msg = format!("Rectangle added ({} entities)", self.brepcad_sketch_entities.len());
+                                                }
+                                            }
+                                            4 => { // Point: 1 click
+                                                self.brepcad_sketch_entities.push(BrepcadSketchEntity::Point { p: p2d });
+                                                self.brepcad_sketch_points.clear();
+                                                self.brepcad_status_msg = format!("Point added ({} entities)", self.brepcad_sketch_entities.len());
+                                            }
+                                            5 => { // Arc: 3 points (start, mid, end → center+radius+angles)
+                                                if self.brepcad_sketch_points.len() >= 3 {
+                                                    let p1 = self.brepcad_sketch_points[0];
+                                                    let _p2 = self.brepcad_sketch_points[1];
+                                                    let p3 = self.brepcad_sketch_points[2];
+                                                    // Simplified: center = midpoint of p1-p3
+                                                    let center = [(p1[0]+p3[0])/2.0, (p1[1]+p3[1])/2.0];
+                                                    let dx = p1[0] - center[0];
+                                                    let dy = p1[1] - center[1];
+                                                    let radius = (dx*dx + dy*dy).sqrt();
+                                                    let start = dy.atan2(dx);
+                                                    let dx2 = p3[0] - center[0];
+                                                    let dy2 = p3[1] - center[1];
+                                                    let end = dy2.atan2(dx2);
+                                                    self.brepcad_sketch_entities.push(BrepcadSketchEntity::Arc { center, radius, start, end });
+                                                    self.brepcad_sketch_points.clear();
+                                                    self.brepcad_status_msg = format!("Arc added ({} entities)", self.brepcad_sketch_entities.len());
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            } else if let Some(pick) = pick_at(
                                 &self.mesh,
                                 &self.instance_triangle_ranges,
                                 &self.hidden_instances,
@@ -8400,6 +8531,110 @@ impl eframe::App for ViewerApp {
 
                 if self.show_axes {
                     self.draw_axes_overlay(ui, rect);
+                }
+
+                // ─── BRepCAD sketch overlay ───
+                if self.enable_brepcad_ui && self.brepcad_sketch_mode {
+                    // Draw sketch grid
+                    let grid_color = egui::Color32::from_rgb(0x31, 0x32, 0x44);
+                    let grid_step = self.brepcad_sketch_grid as f32;
+                    let cam_dist = self.camera.distance;
+                    let scale = rect.size().min_elem() / (cam_dist.max(1.0) * 2.0);
+                    let cx = rect.center().x;
+                    let cy = rect.center().y;
+
+                    // Draw grid lines
+                    let grid_range = 20;
+                    for i in -grid_range..=grid_range {
+                        let offset = i as f32 * grid_step * scale;
+                        ui.painter().line_segment(
+                            [egui::pos2(cx + offset, rect.top()), egui::pos2(cx + offset, rect.bottom())],
+                            egui::Stroke::new(0.5_f32, grid_color));
+                        ui.painter().line_segment(
+                            [egui::pos2(rect.left(), cy + offset), egui::pos2(rect.right(), cy + offset)],
+                            egui::Stroke::new(0.5_f32, grid_color));
+                    }
+
+                    // Draw sketch entities
+                    let entity_color = egui::Color32::from_rgb(0xa6, 0xe3, 0xa1);
+                    let point_color = egui::Color32::from_rgb(0xf9, 0xe2, 0xaf);
+                    let stroke = egui::Stroke::new(2.0_f32, entity_color);
+
+                    let plane = self.brepcad_sketch_plane;
+                    for entity in &self.brepcad_sketch_entities {
+                        match entity {
+                            BrepcadSketchEntity::Line { p1, p2 } => {
+                                let (x1, y1) = match plane { 0 => (p1[0], p1[1]), 1 => (p1[0], p1[1]), _ => (p1[0], p1[1]) };
+                                let (x2, y2) = match plane { 0 => (p2[0], p2[1]), 1 => (p2[0], p2[1]), _ => (p2[0], p2[1]) };
+                                let s1 = egui::pos2(cx + x1 as f32 * scale, cy - y1 as f32 * scale);
+                                let s2 = egui::pos2(cx + x2 as f32 * scale, cy - y2 as f32 * scale);
+                                ui.painter().line_segment([s1, s2], stroke);
+                                ui.painter().circle_filled(s1, 3.0, point_color);
+                                ui.painter().circle_filled(s2, 3.0, point_color);
+                            }
+                            BrepcadSketchEntity::Circle { center, radius } => {
+                                let sc = egui::pos2(cx + center[0] as f32 * scale, cy - center[1] as f32 * scale);
+                                let r = *radius as f32 * scale;
+                                ui.painter().circle_stroke(sc, r, stroke);
+                                ui.painter().circle_filled(sc, 3.0, point_color);
+                            }
+                            BrepcadSketchEntity::Rectangle { p1, p2 } => {
+                                let s1 = egui::pos2(cx + p1[0] as f32 * scale, cy - p1[1] as f32 * scale);
+                                let s2 = egui::pos2(cx + p2[0] as f32 * scale, cy - p2[1] as f32 * scale);
+                                let tl = egui::pos2(s1.x, s2.y);
+                                let br = egui::pos2(s2.x, s1.y);
+                                ui.painter().line_segment([s1, tl], stroke);
+                                ui.painter().line_segment([tl, s2], stroke);
+                                ui.painter().line_segment([s2, br], stroke);
+                                ui.painter().line_segment([br, s1], stroke);
+                            }
+                            BrepcadSketchEntity::Point { p } => {
+                                let s = egui::pos2(cx + p[0] as f32 * scale, cy - p[1] as f32 * scale);
+                                ui.painter().circle_filled(s, 4.0, point_color);
+                            }
+                            BrepcadSketchEntity::Arc { center, radius, start, end } => {
+                                let sc = egui::pos2(cx + center[0] as f32 * scale, cy - center[1] as f32 * scale);
+                                let r = *radius as f32 * scale;
+                                let steps = 32;
+                                let mut prev = egui::pos2(
+                                    sc.x + r * (*start as f32).cos(),
+                                    sc.y + r * (*start as f32).sin(),
+                                );
+                                for i in 1..=steps {
+                                    let t = *start + (*end - *start) * (i as f64 / steps as f64);
+                                    let next = egui::pos2(
+                                        sc.x + r * (t as f32).cos(),
+                                        sc.y + r * (t as f32).sin(),
+                                    );
+                                    ui.painter().line_segment([prev, next], stroke);
+                                    prev = next;
+                                }
+                            }
+                        }
+                    }
+
+                    // Draw pending click points
+                    for p in &self.brepcad_sketch_points {
+                        let s = egui::pos2(cx + p[0] as f32 * scale, cy - p[1] as f32 * scale);
+                        ui.painter().circle_filled(s, 5.0, egui::Color32::from_rgb(0x89, 0xb4, 0xfa));
+                    }
+
+                    // Sketch mode indicator
+                    let mode_text = match self.brepcad_sketch_tool {
+                        1 => "✏ Sketch: Line — click 2 points (1-5 tools, ESC=exit)",
+                        2 => "✏ Sketch: Circle — click center + radius (1-5 tools, ESC=exit)",
+                        3 => "✏ Sketch: Rectangle — click 2 corners (1-5 tools, ESC=exit)",
+                        4 => "✏ Sketch: Point — click to place (1-5 tools, ESC=exit)",
+                        5 => "✏ Sketch: Arc — click 3 points (1-5 tools, ESC=exit)",
+                        _ => "✏ Sketch Mode — press 1-5 for tools, ESC=exit",
+                    };
+                    ui.painter().text(
+                        egui::pos2(rect.center().x, rect.top() + 40.0),
+                        egui::Align2::CENTER_TOP,
+                        mode_text,
+                        egui::FontId::proportional(14.0),
+                        egui::Color32::from_rgb(0xa6, 0xe3, 0xa1),
+                    );
                 }
 
                 // ─── BRepCAD measure overlay ───
@@ -8801,6 +9036,44 @@ impl eframe::App for ViewerApp {
                 self.brepcad_measure_point3 = None;
                 self.brepcad_active_tool = "Select".to_string();
                 self.brepcad_status_msg = "Measure cancelled".to_string();
+            }
+
+            // ESC = exit sketch mode
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && self.brepcad_sketch_mode {
+                self.brepcad_sketch_mode = false;
+                self.brepcad_sketch_points.clear();
+                self.brepcad_sketch_tool = 0;
+                self.brepcad_active_tool = "Select".to_string();
+                self.brepcad_status_msg = "Sketch mode: OFF".to_string();
+            }
+
+            // Number keys 1-5 select sketch tools (only in sketch mode)
+            if self.brepcad_sketch_mode {
+                if ctx.input(|i| i.key_pressed(egui::Key::Num1)) {
+                    self.brepcad_sketch_tool = 1; self.brepcad_sketch_points.clear();
+                    self.brepcad_active_tool = "Line".to_string();
+                    self.brepcad_status_msg = "Line tool: click 2 points".to_string();
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::Num2)) {
+                    self.brepcad_sketch_tool = 2; self.brepcad_sketch_points.clear();
+                    self.brepcad_active_tool = "Circle".to_string();
+                    self.brepcad_status_msg = "Circle tool: click center + radius".to_string();
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::Num3)) {
+                    self.brepcad_sketch_tool = 3; self.brepcad_sketch_points.clear();
+                    self.brepcad_active_tool = "Rectangle".to_string();
+                    self.brepcad_status_msg = "Rectangle tool: click 2 corners".to_string();
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::Num4)) {
+                    self.brepcad_sketch_tool = 4; self.brepcad_sketch_points.clear();
+                    self.brepcad_active_tool = "Point".to_string();
+                    self.brepcad_status_msg = "Point tool: click to place".to_string();
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::Num5)) {
+                    self.brepcad_sketch_tool = 5; self.brepcad_sketch_points.clear();
+                    self.brepcad_active_tool = "Arc".to_string();
+                    self.brepcad_status_msg = "Arc tool: click 3 points".to_string();
+                }
             }
 
             // ─── Parameter dialog ───
@@ -13094,19 +13367,77 @@ impl ViewerApp {
             | MenuAction::ModifyStretch => "Deform operations not yet implemented".to_string(),
 
             // ── Sketch actions ──
-            MenuAction::SketchEnter | MenuAction::SketchLine | MenuAction::SketchCircle
-            | MenuAction::SketchArc3 | MenuAction::SketchArcTangent | MenuAction::SketchRectangle
-            | MenuAction::SketchSpline | MenuAction::SketchPolygon | MenuAction::SketchPoint
-            | MenuAction::SketchExit | MenuAction::SketchConstraintCoincident
-            | MenuAction::SketchConstraintCollinear | MenuAction::SketchConstraintConcentric
+            MenuAction::SketchEnter => {
+                self.brepcad_sketch_mode = !self.brepcad_sketch_mode;
+                self.brepcad_sketch_points.clear();
+                self.brepcad_sketch_tool = 0;
+                if self.brepcad_sketch_mode {
+                    self.brepcad_active_tool = "Sketch".to_string();
+                    // Set camera to top-down view for sketch plane
+                    match self.brepcad_sketch_plane {
+                        0 => self.camera.look_from_direction([0.0, -1.0, 0.0]), // XY = top
+                        1 => self.camera.look_from_direction([0.0, 0.0, 1.0]),  // XZ = front
+                        _ => self.camera.look_from_direction([1.0, 0.0, 0.0]),  // YZ = right
+                    }
+                    "Sketch mode: ON (1=Line, 2=Circle, 3=Rect, 4=Point, ESC=Exit)".to_string()
+                } else {
+                    self.brepcad_active_tool = "Select".to_string();
+                    "Sketch mode: OFF".to_string()
+                }
+            }
+            MenuAction::SketchLine => {
+                self.brepcad_sketch_mode = true;
+                self.brepcad_sketch_tool = 1;
+                self.brepcad_sketch_points.clear();
+                self.brepcad_active_tool = "Line".to_string();
+                "Line tool: click 2 points".to_string()
+            }
+            MenuAction::SketchCircle => {
+                self.brepcad_sketch_mode = true;
+                self.brepcad_sketch_tool = 2;
+                self.brepcad_sketch_points.clear();
+                self.brepcad_active_tool = "Circle".to_string();
+                "Circle tool: click center + radius point".to_string()
+            }
+            MenuAction::SketchRectangle => {
+                self.brepcad_sketch_mode = true;
+                self.brepcad_sketch_tool = 3;
+                self.brepcad_sketch_points.clear();
+                self.brepcad_active_tool = "Rectangle".to_string();
+                "Rectangle tool: click 2 corners".to_string()
+            }
+            MenuAction::SketchPoint => {
+                self.brepcad_sketch_mode = true;
+                self.brepcad_sketch_tool = 4;
+                self.brepcad_sketch_points.clear();
+                self.brepcad_active_tool = "Point".to_string();
+                "Point tool: click to place".to_string()
+            }
+            MenuAction::SketchArc3 => {
+                self.brepcad_sketch_mode = true;
+                self.brepcad_sketch_tool = 5;
+                self.brepcad_sketch_points.clear();
+                self.brepcad_active_tool = "Arc".to_string();
+                "Arc tool: click 3 points (start, mid, end)".to_string()
+            }
+            MenuAction::SketchExit => {
+                self.brepcad_sketch_mode = false;
+                self.brepcad_sketch_points.clear();
+                self.brepcad_sketch_tool = 0;
+                self.brepcad_active_tool = "Select".to_string();
+                "Sketch mode: OFF".to_string()
+            }
+            MenuAction::SketchConstraintCollinear | MenuAction::SketchConstraintConcentric
             | MenuAction::SketchConstraintParallel | MenuAction::SketchConstraintPerpendicular
             | MenuAction::SketchConstraintTangent | MenuAction::SketchConstraintHorizontal
             | MenuAction::SketchConstraintVertical | MenuAction::SketchConstraintEqual
+            | MenuAction::SketchConstraintCoincident
             | MenuAction::SketchDimLinear | MenuAction::SketchDimAngular
             | MenuAction::SketchDimRadial | MenuAction::SketchDimDiameter
             | MenuAction::SketchTrim | MenuAction::SketchExtend | MenuAction::SketchSplit
             | MenuAction::SketchOffset | MenuAction::SketchMirror | MenuAction::SketchPattern
-            | MenuAction::SketchFillet => "Sketch mode coming soon (use existing NURBS/Curve tests)".to_string(),
+            | MenuAction::SketchFillet | MenuAction::SketchSpline | MenuAction::SketchPolygon
+            | MenuAction::SketchArcTangent => "Sketch constraint/modify not yet implemented".to_string(),
 
             // ── Measure actions ──
             MenuAction::MeasureDistance => {
