@@ -65,6 +65,7 @@ fn mesh_to_gpu_data(
     instance_triangle_ranges: &[(usize, usize)],
     hidden_instances: &std::collections::HashSet<usize>,
     hidden_faces: &std::collections::HashSet<(usize, u64)>,
+    section_plane: Option<(usize, f32)>,
 ) -> (Vec<MeshVertex>, Vec<u32>, Vec<(usize, usize)>) {
     // NOTE: compute_face_normals() and ensure_colors() must be called on the mesh
     // BEFORE calling this function, to avoid cloning the entire mesh here.
@@ -113,6 +114,23 @@ fn mesh_to_gpu_data(
                 if hidden_faces.contains(&(idx, fid)) {
                     continue;
                 }
+            }
+        }
+
+        // ─── Section cut: skip triangles behind the plane ───
+        // section_plane = (axis, position): keep triangles where ALL vertices
+        // are on the positive side (>= position) of the plane.
+        if let Some((axis, pos)) = section_plane {
+            let pos = pos as f64;
+            let v0 = mesh.vertices[tri[0] as usize];
+            let v1 = mesh.vertices[tri[1] as usize];
+            let v2 = mesh.vertices[tri[2] as usize];
+            let c0 = match axis { 0 => v0.x, 1 => v0.y, _ => v0.z };
+            let c1 = match axis { 0 => v1.x, 1 => v1.y, _ => v1.z };
+            let c2 = match axis { 0 => v2.x, 1 => v2.y, _ => v2.z };
+            // Skip if all 3 vertices are behind the plane (< pos)
+            if c0 < pos && c1 < pos && c2 < pos {
+                continue;
             }
         }
 
@@ -1200,7 +1218,7 @@ impl ViewerApp {
                 mesh.compute_face_normals();
             }
             mesh.ensure_colors([0.62, 0.65, 0.70, 1.0]);
-            let (vertices, indices, _new_ranges) = mesh_to_gpu_data(&mesh, None, None, &[], &std::collections::HashSet::new(), &std::collections::HashSet::new());
+            let (vertices, indices, _new_ranges) = mesh_to_gpu_data(&mesh, None, None, &[], &std::collections::HashSet::new(), &std::collections::HashSet::new(), None);
             let resources = create_scene_resources(rs, &vertices, &indices);
             *gpu_resources.lock().unwrap() = Some(resources);
         }
@@ -8276,7 +8294,12 @@ impl eframe::App for ViewerApp {
                     self.mesh.ensure_colors([0.62, 0.65, 0.70, 1.0]);
 
                     if let Some(ref rs) = self.render_state {
-                        let (vertices, indices, _new_ranges) = mesh_to_gpu_data(&self.mesh, self.highlighted_face, self.selected_instance, &self.instance_triangle_ranges, &self.hidden_instances, &self.hidden_faces);
+                        let section_plane = if self.enable_brepcad_ui && self.brepcad_section_enabled {
+                            Some((self.brepcad_section_axis as usize, self.brepcad_section_position))
+                        } else {
+                            None
+                        };
+                        let (vertices, indices, _new_ranges) = mesh_to_gpu_data(&self.mesh, self.highlighted_face, self.selected_instance, &self.instance_triangle_ranges, &self.hidden_instances, &self.hidden_faces, section_plane);
                         // NOTE: We intentionally do NOT overwrite instance_triangle_ranges with new_ranges.
                         // The new_ranges map instance indices to triangle ranges in the GPU output buffer
                         // (with hidden instances removed, so indices shift). But self.mesh.triangles still
@@ -8630,6 +8653,50 @@ impl eframe::App for ViewerApp {
                     self.wireframe = new_wf;
                     self.show_edges = new_edges;
                 }
+            }
+
+            // Section cut panel (floating, top-left of viewport when enabled)
+            if self.brepcad_section_enabled {
+                egui::Area::new(egui::Id::new("brepcad_section_panel"))
+                    .anchor(egui::Align2::LEFT_TOP, egui::vec2(10.0, 60.0))
+                    .order(egui::Order::Foreground)
+                    .show(ctx, |ui| {
+                        egui::Frame::new()
+                            .fill(egui::Color32::from_black_alpha(200))
+                            .corner_radius(6.0)
+                            .inner_margin(egui::Margin::symmetric(10, 8))
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new("📐 Section Cut").size(12.0).color(egui::Color32::from_rgb(0xf9, 0xe2, 0xaf)));
+                                ui.separator();
+                                ui.horizontal(|ui| {
+                                    ui.label("Axis:");
+                                    if ui.radio_value(&mut self.brepcad_section_axis, 0, "X").clicked() { self.mesh_dirty = true; }
+                                    if ui.radio_value(&mut self.brepcad_section_axis, 1, "Y").clicked() { self.mesh_dirty = true; }
+                                    if ui.radio_value(&mut self.brepcad_section_axis, 2, "Z").clicked() { self.mesh_dirty = true; }
+                                });
+                                let (bbox_min, bbox_max) = self.mesh.bounding_box();
+                                let min_val = match self.brepcad_section_axis { 0 => bbox_min.x, 1 => bbox_min.y, _ => bbox_min.z } as f32;
+                                let max_val = match self.brepcad_section_axis { 0 => bbox_max.x, 1 => bbox_max.y, _ => bbox_max.z } as f32;
+                                ui.horizontal(|ui| {
+                                    ui.label("Position:");
+                                    let slider = egui::Slider::new(&mut self.brepcad_section_position, min_val..=max_val)
+                                        .suffix(" mm");
+                                    if ui.add(slider).changed() {
+                                        self.mesh_dirty = true;
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    if ui.button("Fit").clicked() {
+                                        self.brepcad_section_position = (min_val + max_val) * 0.5;
+                                        self.mesh_dirty = true;
+                                    }
+                                    if ui.button("Close").clicked() {
+                                        self.brepcad_section_enabled = false;
+                                        self.mesh_dirty = true;
+                                    }
+                                });
+                            });
+                    });
             }
 
             // Command palette (Ctrl+Shift+P)
@@ -12746,6 +12813,22 @@ impl ViewerApp {
             MenuAction::ViewToggleEdges => { self.show_edges = !self.show_edges; format!("Edges: {}", if self.show_edges {"on"} else {"off"}) }
             MenuAction::ViewToggleNormals => "Normals display not yet implemented".to_string(),
             MenuAction::ViewToggleSilhouette => "Silhouette not yet implemented".to_string(),
+            MenuAction::ViewSectionCut => {
+                self.brepcad_section_enabled = !self.brepcad_section_enabled;
+                if self.brepcad_section_enabled {
+                    let (bbox_min, bbox_max) = self.mesh.bounding_box();
+                    self.brepcad_section_position = match self.brepcad_section_axis {
+                        0 => ((bbox_min.x + bbox_max.x) * 0.5) as f32,
+                        1 => ((bbox_min.y + bbox_max.y) * 0.5) as f32,
+                        _ => ((bbox_min.z + bbox_max.z) * 0.5) as f32,
+                    };
+                    self.mesh_dirty = true;
+                    "Section cut enabled".to_string()
+                } else {
+                    self.mesh_dirty = true;
+                    "Section cut disabled".to_string()
+                }
+            }
             MenuAction::ViewPerspective | MenuAction::ViewOrthographic => "Camera mode toggle not yet implemented".to_string(),
             MenuAction::ViewSaveLayout | MenuAction::ViewLoadLayout => "Layout save/load not yet implemented".to_string(),
 
