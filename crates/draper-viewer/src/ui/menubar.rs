@@ -70,6 +70,7 @@ pub enum MenuAction {
     ViewToggleNormals,
     ViewToggleSilhouette,
     ViewSectionCut,
+    ViewTimeline,
     ViewPerspective,
     ViewOrthographic,
     ViewSaveLayout,
@@ -535,6 +536,7 @@ fn render_view_menu(ui: &mut egui::Ui) -> Option<MenuAction> {
             if ui.button("Toggle Silhouette").clicked() { action = Some(MenuAction::ViewToggleSilhouette); ui.close_menu(); return; }
             ui.separator();
             if ui.button("Section Cut…").clicked() { action = Some(MenuAction::ViewSectionCut); ui.close_menu(); return; }
+            if ui.button("Feature Timeline…").clicked() { action = Some(MenuAction::ViewTimeline); ui.close_menu(); return; }
         });
         ui.menu_button("Camera", |ui| {
             if ui.button("Perspective").clicked() { action = Some(MenuAction::ViewPerspective); ui.close_menu(); return; }

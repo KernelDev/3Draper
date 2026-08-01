@@ -814,6 +814,12 @@ pub struct ViewerApp {
     pub brepcad_new_param_name: String,
     /// New parameter formula input.
     pub brepcad_new_param_formula: String,
+    /// Feature timeline: list of (operation_name, solid_snapshot).
+    pub brepcad_timeline: Vec<(String, Option<draper_topology::Solid>)>,
+    /// Timeline panel visible?
+    pub brepcad_timeline_open: bool,
+    /// Current rollback position (index into timeline). None = latest.
+    pub brepcad_timeline_rollback: Option<usize>,
 }
 
 /// Measure mode for the BRepCAD viewport.
@@ -1401,6 +1407,9 @@ impl ViewerApp {
             brepcad_param_dialog_open: false,
             brepcad_new_param_name: String::new(),
             brepcad_new_param_formula: String::new(),
+            brepcad_timeline: Vec::new(),
+            brepcad_timeline_open: false,
+            brepcad_timeline_rollback: None,
         };
         app.log(&format!("3Draper Viewer started [build: {}]", env!("DRAPER_GIT_HASH")));
         app.log(&format!("Default model: Box 100x100x100 ({} vertices, {} triangles)",
@@ -8913,6 +8922,81 @@ impl eframe::App for ViewerApp {
                     });
                 self.brepcad_param_dialog_open = open;
             }
+
+            // ─── Feature Timeline panel ───
+            if self.brepcad_timeline_open {
+                let mut timeline_open = self.brepcad_timeline_open;
+                egui::Window::new("Feature Timeline")
+                    .open(&mut timeline_open)
+                    .resizable(true)
+                    .default_width(350.0)
+                    .default_height(300.0)
+                    .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -30.0])
+                    .show(ctx, |ui| {
+                        if self.brepcad_timeline.is_empty() {
+                            ui.label(egui::RichText::new("No operations yet. Insert a primitive or modify the model to build the timeline.")
+                                .size(11.0).color(egui::Color32::from_rgb(0x6c, 0x70, 0x86)));
+                        } else {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(format!("{} operations", self.brepcad_timeline.len()))
+                                    .size(11.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
+                                if ui.small_button("Clear").clicked() {
+                                    self.brepcad_timeline.clear();
+                                    self.brepcad_timeline_rollback = None;
+                                }
+                            });
+                            ui.separator();
+
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                let rollback = self.brepcad_timeline_rollback;
+                                let total = self.brepcad_timeline.len();
+                                // Collect pending rollback target
+                                let mut rollback_target: Option<usize> = None;
+                                let entries: Vec<(usize, String)> = self.brepcad_timeline
+                                    .iter().enumerate().rev()
+                                    .map(|(i, (name, _))| (i, name.clone()))
+                                    .collect();
+                                for (i, name) in &entries {
+                                    let is_current = rollback == Some(*i);
+                                    let is_rolled_back = rollback.is_some() && *i > rollback.unwrap();
+                                    let bg = if is_current {
+                                        egui::Color32::from_rgb(0x09, 0x47, 0x71)
+                                    } else if is_rolled_back {
+                                        egui::Color32::from_rgb(0x1e, 0x1e, 0x2e)
+                                    } else {
+                                        egui::Color32::TRANSPARENT
+                                    };
+                                    let frame = egui::Frame::new().fill(bg).inner_margin(egui::Margin::symmetric(6, 3));
+                                    frame.show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            let num = total - i;
+                                            let icon = if is_rolled_back { "○" } else { "●" };
+                                            let color = if is_rolled_back {
+                                                egui::Color32::from_rgb(0x6c, 0x70, 0x86)
+                                            } else {
+                                                egui::Color32::from_rgb(0xa6, 0xe3, 0xa1)
+                                            };
+                                            ui.label(egui::RichText::new(format!("{} #{}", icon, num))
+                                                .size(10.0).color(color));
+                                            ui.label(egui::RichText::new(name).size(11.0));
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                if ui.small_button("↩").clicked() {
+                                                    rollback_target = Some(*i);
+                                                }
+                                            });
+                                        });
+                                    });
+                                }
+                                if let Some(idx) = rollback_target {
+                                    self.brepcad_timeline_rollback_to(idx);
+                                    let num = total - idx;
+                                    self.brepcad_status_msg = format!("Rolled back to #{}", num);
+                                }
+                            });
+                        }
+                    });
+                self.brepcad_timeline_open = timeline_open;
+            }
         }
     }
 }
@@ -12859,7 +12943,7 @@ impl ViewerApp {
             MenuAction::EditDuplicate => {
                 // Re-load current solid as a duplicate (offset by ShapeBuilder translation)
                 if let Some(solid) = self.current_solid.clone() {
-                    self.brepcad_push_undo();
+                    self.brepcad_push_undo_named("Duplicate Solid");
                     let mut new_solid = solid;
                     use draper_geometry::Transform;
                     draper_topology::ShapeBuilder::transform_solid(&mut new_solid, &Transform::translation(20.0, 0.0, 0.0));
@@ -12961,6 +13045,10 @@ impl ViewerApp {
                     "Section cut disabled".to_string()
                 }
             }
+            MenuAction::ViewTimeline => {
+                self.brepcad_timeline_open = !self.brepcad_timeline_open;
+                if self.brepcad_timeline_open { "Timeline opened".to_string() } else { String::new() }
+            }
             MenuAction::ViewPerspective | MenuAction::ViewOrthographic => "Camera mode toggle not yet implemented".to_string(),
             MenuAction::ViewSaveLayout | MenuAction::ViewLoadLayout => "Layout save/load not yet implemented".to_string(),
 
@@ -12982,17 +13070,17 @@ impl ViewerApp {
             MenuAction::InsertMirror => "Mirror not yet implemented".to_string(),
 
             // ── Modify: Boolean operations ──
-            MenuAction::ModifyUnion => { self.brepcad_push_undo(); self.model_boolean_union(); "Boolean union applied".to_string() }
-            MenuAction::ModifySubtract => { self.brepcad_push_undo(); self.model_boolean_subtract(); "Boolean subtract applied".to_string() }
-            MenuAction::ModifyIntersect => { self.brepcad_push_undo(); self.model_boolean_intersect(); "Boolean intersect applied".to_string() }
-            MenuAction::ModifyFillet => { self.brepcad_push_undo(); self.model_fillet_edge(); "Fillet applied to first manifold edge".to_string() }
-            MenuAction::ModifyChamfer => { self.brepcad_push_undo(); self.model_chamfer_edge(); "Chamfer applied to first manifold edge".to_string() }
+            MenuAction::ModifyUnion => { self.brepcad_push_undo_named("Boolean Union"); self.model_boolean_union(); "Boolean union applied".to_string() }
+            MenuAction::ModifySubtract => { self.brepcad_push_undo_named("Boolean Subtract"); self.model_boolean_subtract(); "Boolean subtract applied".to_string() }
+            MenuAction::ModifyIntersect => { self.brepcad_push_undo_named("Boolean Intersect"); self.model_boolean_intersect(); "Boolean intersect applied".to_string() }
+            MenuAction::ModifyFillet => { self.brepcad_push_undo_named("Fillet Edge"); self.model_fillet_edge(); "Fillet applied to first manifold edge".to_string() }
+            MenuAction::ModifyChamfer => { self.brepcad_push_undo_named("Chamfer Edge"); self.model_chamfer_edge(); "Chamfer applied to first manifold edge".to_string() }
             MenuAction::ModifyLoft | MenuAction::ModifySweep => {
                 "Loft/Sweep: requires sketch profiles (not yet implemented)".to_string()
             }
-            MenuAction::ModifyMove => { self.brepcad_push_undo(); self.model_translate(); "Moved +20mm in X".to_string() }
-            MenuAction::ModifyRotate => { self.brepcad_push_undo(); self.model_rotate(); "Rotated 15° about Z".to_string() }
-            MenuAction::ModifyScale => { self.brepcad_push_undo(); self.model_scale(); "Scaled ×1.1".to_string() }
+            MenuAction::ModifyMove => { self.brepcad_push_undo_named("Move +20 X"); self.model_translate(); "Moved +20mm in X".to_string() }
+            MenuAction::ModifyRotate => { self.brepcad_push_undo_named("Rotate 15° Z"); self.model_rotate(); "Rotated 15° about Z".to_string() }
+            MenuAction::ModifyScale => { self.brepcad_push_undo_named("Scale ×1.1"); self.model_scale(); "Scaled ×1.1".to_string() }
             MenuAction::ModifyLinearPattern => "Linear pattern not yet implemented".to_string(),
             MenuAction::ModifyCircularPattern => { self.model_circular_pattern(); "Circular pattern applied".to_string() }
             MenuAction::ModifyMirror => "Mirror not yet implemented".to_string(),
@@ -13093,7 +13181,7 @@ impl ViewerApp {
         use crate::ui::dialogs::{DialogAction, PrimitiveType};
         match action {
             DialogAction::InsertPrimitive(pt, values) => {
-                self.brepcad_push_undo();
+                self.brepcad_push_undo_named(&format!("Insert {}", pt.label()));
                 let params = pt.params();
                 let v: Vec<f64> = (0..params.len())
                     .map(|i| values.get(i).copied().unwrap_or(params[i].1))
@@ -13207,13 +13295,44 @@ impl ViewerApp {
 
     /// Push current state to undo stack (call BEFORE a mutation).
     /// Truncates redo stack — branching point.
+    /// Also records a timeline entry with the operation name.
     pub fn brepcad_push_undo(&mut self) {
+        self.brepcad_push_undo_named("Operation");
+    }
+
+    /// Push current state to undo stack with a named operation.
+    pub fn brepcad_push_undo_named(&mut self, op_name: &str) {
         self.brepcad_redo_stack.clear();
         let snapshot = (self.current_solid.clone(), self.current_model.name.clone());
         self.brepcad_undo_stack.push(snapshot);
         if self.brepcad_undo_stack.len() > self.brepcad_max_history {
             self.brepcad_undo_stack.remove(0);
         }
+        // Add to timeline
+        self.brepcad_timeline.push((op_name.to_string(), self.current_solid.clone()));
+        if self.brepcad_timeline.len() > self.brepcad_max_history {
+            self.brepcad_timeline.remove(0);
+        }
+        self.brepcad_timeline_rollback = None; // latest
+    }
+
+    /// Rollback to a specific point in the timeline.
+    pub fn brepcad_timeline_rollback_to(&mut self, idx: usize) -> bool {
+        if idx >= self.brepcad_timeline.len() {
+            return false;
+        }
+        let (_, solid) = &self.brepcad_timeline[idx];
+        self.current_solid = solid.clone();
+        if let Some(ref s) = self.current_solid {
+            self.refresh_from_current_solid("Rollback");
+        }
+        self.selected_instance = None;
+        self.selected_face = None;
+        self.highlighted_face = None;
+        self.highlight_dirty = true;
+        self.mesh_dirty = true;
+        self.brepcad_timeline_rollback = Some(idx);
+        true
     }
 
     // ─── Parameter system ──────────────────────────────────────────────
