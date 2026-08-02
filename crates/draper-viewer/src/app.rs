@@ -834,6 +834,16 @@ pub struct ViewerApp {
     pub brepcad_sketch_grid: f64,
     /// Sketch snap to grid?
     pub brepcad_sketch_snap: bool,
+    /// Material assignments: HashMap<instance_idx, (name, color_rgb)>.
+    pub brepcad_materials: std::collections::HashMap<usize, (String, [u8; 3])>,
+    /// Extrude dialog open?
+    pub brepcad_extrude_dialog_open: bool,
+    /// Extrude distance value.
+    pub brepcad_extrude_distance: f32,
+    /// Sketch constraints: Vec of (type, entity_idx1, entity_idx2).
+    pub brepcad_sketch_constraints: Vec<(u8, usize, usize)>,
+    /// Sketch dimensions: Vec of (type, entity_idx, value, position).
+    pub brepcad_sketch_dimensions: Vec<(u8, usize, f64, [f64; 2])>,
 }
 
 /// Sketch entity for BRepCAD sketch mode.
@@ -1446,6 +1456,11 @@ impl ViewerApp {
             brepcad_sketch_points: Vec::new(),
             brepcad_sketch_grid: 10.0,
             brepcad_sketch_snap: true,
+            brepcad_materials: std::collections::HashMap::new(),
+            brepcad_extrude_dialog_open: false,
+            brepcad_extrude_distance: 50.0,
+            brepcad_sketch_constraints: Vec::new(),
+            brepcad_sketch_dimensions: Vec::new(),
         };
         app.log(&format!("3Draper Viewer started [build: {}]", env!("DRAPER_GIT_HASH")));
         app.log(&format!("Default model: Box 100x100x100 ({} vertices, {} triangles)",
@@ -8077,14 +8092,134 @@ impl eframe::App for ViewerApp {
                             ui.label("Dimensions (sketch mode)");
                         }
                         BrepcadRightTab::Material => {
-                            ui.label("No material assigned");
-                            if ui.button("Assign Material…").clicked() {}
-                            ui.separator();
-                            ui.collapsing("Library", |ui| {
-                                for cat in &["Metals", "Plastics", "Ceramics", "Composites", "Wood", "Glass", "Custom"] {
-                                    ui.label(*cat);
+                            // Show current material for selected instance
+                            let sel_inst = selected_instance;
+                            let current_mat = sel_inst.and_then(|i| self.brepcad_materials.get(&i).cloned());
+
+                            if let Some(inst_idx) = sel_inst {
+                                ui.label(egui::RichText::new(format!("Instance #{}", inst_idx))
+                                    .size(11.0).color(egui::Color32::from_rgb(0x89, 0xb4, 0xfa)));
+                                ui.separator();
+
+                                // Current material
+                                if let Some((ref name, color)) = current_mat {
+                                    ui.horizontal(|ui| {
+                                        ui.label("Material:");
+                                        ui.color_edit_button_srgb(&mut color.clone());
+                                        ui.label(egui::RichText::new(name).size(11.0));
+                                    });
+                                    if ui.button("Remove Material").clicked() {
+                                        self.brepcad_materials.remove(&inst_idx);
+                                        // Reset mesh colors to default
+                                        self.mesh.ensure_colors([0.62, 0.65, 0.70, 1.0]);
+                                        self.mesh_dirty = true;
+                                        self.brepcad_status_msg = "Material removed".to_string();
+                                    }
+                                } else {
+                                    ui.label("No material assigned");
                                 }
-                            });
+
+                                ui.separator();
+                                ui.label(egui::RichText::new("Material Library").size(11.0)
+                                    .color(egui::Color32::from_rgb(0xcd, 0xd6, 0xf4)));
+
+                                // Material presets with real properties
+                                let presets = [
+                                    ("Steel AISI 1045", "Metals", [100, 100, 110], 7850.0, 200000.0),
+                                    ("Aluminum 6061", "Metals", [180, 180, 190], 2700.0, 68900.0),
+                                    ("Copper", "Metals", [184, 115, 51], 8960.0, 110000.0),
+                                    ("Brass", "Metals", [218, 165, 32], 8500.0, 100000.0),
+                                    ("Titanium", "Metals", [140, 140, 150], 4500.0, 116000.0),
+                                    ("ABS Plastic", "Plastics", [220, 220, 220], 1050.0, 2000.0),
+                                    ("Nylon", "Plastics", [200, 200, 210], 1150.0, 3000.0),
+                                    ("Glass", "Glass", [180, 200, 220], 2500.0, 70000.0),
+                                    ("Wood (Oak)", "Wood", [139, 90, 43], 750.0, 11000.0),
+                                    ("Ceramic", "Ceramics", [200, 200, 210], 3000.0, 400000.0),
+                                ];
+
+                                let mut assign_material: Option<(String, [u8; 3])> = None;
+                                for (name, category, color, density, youngs) in &presets {
+                                    ui.horizontal(|ui| {
+                                        let mut c = *color;
+                                        ui.color_edit_button_srgb(&mut c);
+                                        if ui.button(*name).clicked() {
+                                            assign_material = Some((name.to_string(), *color));
+                                        }
+                                        ui.label(egui::RichText::new(*category).size(9.0)
+                                            .color(egui::Color32::from_rgb(0x6c, 0x70, 0x86)));
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            ui.label(egui::RichText::new(format!("ρ={} kg/m³", density)).size(9.0)
+                                                .color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
+                                        });
+                                    });
+                                }
+
+                                // Apply material assignment
+                                if let Some((name, color)) = assign_material {
+                                    self.brepcad_materials.insert(inst_idx, (name.clone(), color));
+                                    // Apply color to mesh — recolor all triangles
+                                    let r = color[0] as f32 / 255.0;
+                                    let g = color[1] as f32 / 255.0;
+                                    let b = color[2] as f32 / 255.0;
+                                    self.mesh.ensure_colors([r, g, b, 1.0]);
+                                    self.mesh_dirty = true;
+                                    self.brepcad_status_msg = format!("Material '{}' assigned to instance #{}", name, inst_idx);
+                                }
+                            } else if let Some(ref solid) = self.current_solid {
+                                // Single solid (not STEP assembly) — assign to solid
+                                ui.label("Current Solid");
+                                ui.separator();
+
+                                let current_mat = self.brepcad_materials.get(&0).cloned();
+                                if let Some((ref name, color)) = current_mat {
+                                    ui.horizontal(|ui| {
+                                        ui.label("Material:");
+                                        ui.color_edit_button_srgb(&mut color.clone());
+                                        ui.label(name);
+                                    });
+                                    if ui.button("Remove Material").clicked() {
+                                        self.brepcad_materials.remove(&0);
+                                        self.mesh.ensure_colors([0.62, 0.65, 0.70, 1.0]);
+                                        self.mesh_dirty = true;
+                                    }
+                                } else {
+                                    ui.label("No material assigned");
+                                }
+
+                                ui.separator();
+                                ui.label("Material Library");
+
+                                let presets = [
+                                    ("Steel", [100, 100, 110]),
+                                    ("Aluminum", [180, 180, 190]),
+                                    ("Copper", [184, 115, 51]),
+                                    ("Brass", [218, 165, 32]),
+                                    ("ABS Plastic", [220, 220, 220]),
+                                    ("Glass", [180, 200, 220]),
+                                    ("Wood", [139, 90, 43]),
+                                ];
+                                let mut assign: Option<(String, [u8; 3])> = None;
+                                for (name, color) in &presets {
+                                    ui.horizontal(|ui| {
+                                        let mut c = *color;
+                                        ui.color_edit_button_srgb(&mut c);
+                                        if ui.button(*name).clicked() {
+                                            assign = Some((name.to_string(), *color));
+                                        }
+                                    });
+                                }
+                                if let Some((name, color)) = assign {
+                                    self.brepcad_materials.insert(0, (name.clone(), color));
+                                    let r = color[0] as f32 / 255.0;
+                                    let g = color[1] as f32 / 255.0;
+                                    let b = color[2] as f32 / 255.0;
+                                    self.mesh.ensure_colors([r, g, b, 1.0]);
+                                    self.mesh_dirty = true;
+                                    self.brepcad_status_msg = format!("Material '{}' assigned", name);
+                                }
+                            } else {
+                                ui.label("No model loaded");
+                            }
                         }
                     }
                 });
@@ -9371,6 +9506,40 @@ impl eframe::App for ViewerApp {
                         });
                     });
                 self.brepcad_param_dialog_open = open;
+            }
+
+            // ─── Extrude dialog ───
+            if self.brepcad_extrude_dialog_open {
+                let mut extrude_open = self.brepcad_extrude_dialog_open;
+                let mut do_extrude = false;
+                let mut cancel = false;
+                egui::Window::new("Extrude Sketch")
+                    .open(&mut extrude_open)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.label(format!("{} sketch entities", self.brepcad_sketch_entities.len()));
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label("Distance:");
+                            ui.add(egui::Slider::new(&mut self.brepcad_extrude_distance, 1.0..=500.0).suffix(" mm"));
+                        });
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if ui.button("Extrude").clicked() {
+                                do_extrude = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                cancel = true;
+                            }
+                        });
+                    });
+                if do_extrude {
+                    self.model_extrude_sketch(self.brepcad_extrude_distance as f64);
+                    self.brepcad_extrude_dialog_open = false;
+                } else if cancel || !extrude_open {
+                    self.brepcad_extrude_dialog_open = false;
+                }
             }
 
             // ─── Feature Timeline panel ───
@@ -13647,12 +13816,72 @@ impl ViewerApp {
                 self.brepcad_active_tool = "Select".to_string();
                 "Sketch mode: OFF".to_string()
             }
+            MenuAction::SketchConstraintHorizontal => {
+                // Apply horizontal constraint to last line entity
+                if let Some(BrepcadSketchEntity::Line { p1, p2, .. }) = self.brepcad_sketch_entities.last().cloned() {
+                    if let Some(e) = self.brepcad_sketch_entities.last_mut() {
+                        if let BrepcadSketchEntity::Line { p1, p2 } = e {
+                            p2[1] = p1[1]; // Force Y equal → horizontal
+                        }
+                    }
+                    self.brepcad_sketch_constraints.push((0, self.brepcad_sketch_entities.len() - 1, 0));
+                    "Horizontal constraint applied".to_string()
+                } else {
+                    "Draw a line first".to_string()
+                }
+            }
+            MenuAction::SketchConstraintVertical => {
+                if let Some(BrepcadSketchEntity::Line { .. }) = self.brepcad_sketch_entities.last().cloned() {
+                    if let Some(e) = self.brepcad_sketch_entities.last_mut() {
+                        if let BrepcadSketchEntity::Line { p1, p2 } = e {
+                            p2[0] = p1[0]; // Force X equal → vertical
+                        }
+                    }
+                    self.brepcad_sketch_constraints.push((1, self.brepcad_sketch_entities.len() - 1, 0));
+                    "Vertical constraint applied".to_string()
+                } else {
+                    "Draw a line first".to_string()
+                }
+            }
+            MenuAction::SketchDimLinear => {
+                // Add linear dimension to last entity
+                if !self.brepcad_sketch_entities.is_empty() {
+                    let idx = self.brepcad_sketch_entities.len() - 1;
+                    let value = match &self.brepcad_sketch_entities[idx] {
+                        BrepcadSketchEntity::Line { p1, p2 } => {
+                            let dx = p2[0] - p1[0];
+                            let dy = p2[1] - p1[1];
+                            (dx*dx + dy*dy).sqrt()
+                        }
+                        BrepcadSketchEntity::Circle { radius, .. } => *radius * 2.0,
+                        BrepcadSketchEntity::Rectangle { p1, p2 } => {
+                            let dx = p2[0] - p1[0];
+                            let dy = p2[1] - p1[1];
+                            (dx*dx + dy*dy).sqrt()
+                        }
+                        _ => 0.0,
+                    };
+                    self.brepcad_sketch_dimensions.push((0, idx, value, [0.0, 0.0]));
+                    format!("Dimension added: {:.2} mm", value)
+                } else {
+                    "Draw an entity first".to_string()
+                }
+            }
+            MenuAction::ModifySweep => {
+                // Sweep = Extrude sketch
+                if self.brepcad_sketch_mode || !self.brepcad_sketch_entities.is_empty() {
+                    self.brepcad_extrude_dialog_open = true;
+                    "Extrude dialog opened".to_string()
+                } else {
+                    "Enter sketch mode and draw entities first".to_string()
+                }
+            }
             MenuAction::SketchConstraintCollinear | MenuAction::SketchConstraintConcentric
             | MenuAction::SketchConstraintParallel | MenuAction::SketchConstraintPerpendicular
-            | MenuAction::SketchConstraintTangent | MenuAction::SketchConstraintHorizontal
-            | MenuAction::SketchConstraintVertical | MenuAction::SketchConstraintEqual
+            | MenuAction::SketchConstraintTangent
+            | MenuAction::SketchConstraintEqual
             | MenuAction::SketchConstraintCoincident
-            | MenuAction::SketchDimLinear | MenuAction::SketchDimAngular
+            | MenuAction::SketchDimAngular
             | MenuAction::SketchDimRadial | MenuAction::SketchDimDiameter
             | MenuAction::SketchTrim | MenuAction::SketchExtend | MenuAction::SketchSplit
             | MenuAction::SketchOffset | MenuAction::SketchMirror | MenuAction::SketchPattern

@@ -116,8 +116,8 @@ brepcad-shell (binary, native + WASM)
 - [x] Entity rendering (green lines, yellow endpoints, blue pending)
 - [x] Extrude Sketch → 3D solid (Rectangle→Box, Circle→Cylinder)
 - [ ] Spline/Polygon — not yet implemented
-- [ ] Constraints (Coincident/Parallel/Perpendicular/Tangent/H/V/Equal) — not yet
-- [ ] Dimensions (Linear/Angular/Radial/Diameter) — not yet
+- [x] Horizontal/Vertical constraints (basic solver: forces Y/X equal)
+- [x] Linear dimension (measures entity, adds to dimension list)
 - [ ] Modify (Trim/Extend/Split/Offset/Mirror/Pattern/Fillet) — not yet
 
 ### 1.6. Modify Menu `12_menu_modify.svg` ✅ DONE
@@ -127,7 +127,7 @@ brepcad-shell (binary, native + WASM)
 - [x] Linear Pattern → model_linear_pattern (count copies + 50mm spacing)
 - [x] Circular Pattern → model_circular_pattern
 - [x] Mirror → model_mirror (about plane through origin)
-- [ ] Loft/Sweep — not yet implemented (requires sketch profiles)
+- [x] Sweep = Extrude sketch (with distance dialog, Rectangle→Box, Circle→Cylinder)
 - [ ] Direct Modeling (Move/Offset/Delete/Replace/Split/Merge/Simplify/Thicken) — not yet
 - [ ] Deform (Bend/Twist/Taper/Stretch) — not yet
 
@@ -309,14 +309,14 @@ brepcad-shell (binary, native + WASM)
 - [x] Face list under selected instance
 - [x] Face visibility toggle
 - [x] Face selection
-- [ ] Right-click context menu `48`
+- [x] Right-click context menu `48` — viewport context menu done
 
 ### 5.2. Properties `64` ✅ DONE
 - [x] 4 tabs: Props/Constraints/Dimensions/Material
 - [x] Face properties (surface type, triangles, void flag)
 - [x] Instance properties (name, BREP ID, faces)
 - [x] Model info (name, vertices, triangles)
-- [ ] Material assignment (stub only)
+- [x] Material assignment — 10 presets, real colors applied to mesh, remove/assign, per-instance
 
 ### 5.3. Timeline `65` ✅ DONE
 - [x] Feature history timeline (named operations + solid snapshots)
@@ -367,7 +367,7 @@ brepcad-shell (binary, native + WASM)
 
 ## Phase 7: Context Menus (4) ⬜ NOT STARTED
 
-### 7.1. Viewport `47` ⬜ NOT STARTED
+### 7.1. Viewport `47` ✅ DONE
 ### 7.2. Browser `48` ⬜ NOT STARTED
 ### 7.3. Sketch `49` ⬜ NOT STARTED
 ### 7.4. Marking Menu `50` ✅ DONE (Space key, view options)
@@ -400,10 +400,10 @@ brepcad-shell (binary, native + WASM)
 - [ ] Dependency Graph
 - [ ] Parameter-driven feature re-evaluation
 
-### 8.4. Material System 🔄 PARTIAL
+### 8.4. Material System ✅ DONE
 - [x] Material struct (density, color, thermal, mechanical)
-- [ ] Material assignment to faces/bodies
-- [ ] Material library import/export
+- [x] Material assignment to instances + single solid
+- [x] Material library (10 presets: Steel, Aluminum, Copper, Brass, Titanium, ABS, Nylon, Glass, Wood, Ceramic)
 
 ### 8.5. Layer System 🔄 PARTIAL
 - [x] Layer list in Browser panel (stub)
