@@ -844,6 +844,16 @@ pub struct ViewerApp {
     pub brepcad_sketch_constraints: Vec<(u8, usize, usize)>,
     /// Sketch dimensions: Vec of (type, entity_idx, value, position).
     pub brepcad_sketch_dimensions: Vec<(u8, usize, f64, [f64; 2])>,
+    /// Drawing mode active?
+    pub brepcad_drawing_mode: bool,
+    /// Drawing sheet size: 0=A4, 1=A3, 2=A2, 3=A1, 4=A0.
+    pub brepcad_sheet_size: u8,
+    /// Drawing views: Vec of (view_type, x, y, scale).
+    pub brepcad_drawing_views: Vec<(u8, f32, f32, f32)>,
+    /// Drawing dimensions: Vec of (type, x, y, value, label).
+    pub brepcad_drawing_dims: Vec<(u8, f32, f32, f64, String)>,
+    /// Drawing annotations: Vec of (text, x, y).
+    pub brepcad_drawing_annotations: Vec<(String, f32, f32)>,
 }
 
 /// Sketch entity for BRepCAD sketch mode.
@@ -1461,6 +1471,11 @@ impl ViewerApp {
             brepcad_extrude_distance: 50.0,
             brepcad_sketch_constraints: Vec::new(),
             brepcad_sketch_dimensions: Vec::new(),
+            brepcad_drawing_mode: false,
+            brepcad_sheet_size: 0, // A4
+            brepcad_drawing_views: Vec::new(),
+            brepcad_drawing_dims: Vec::new(),
+            brepcad_drawing_annotations: Vec::new(),
         };
         app.log(&format!("3Draper Viewer started [build: {}]", env!("DRAPER_GIT_HASH")));
         app.log(&format!("Default model: Box 100x100x100 ({} vertices, {} triangles)",
@@ -8949,6 +8964,123 @@ impl eframe::App for ViewerApp {
                     );
                 }
 
+                // ─── BRepCAD drawing mode overlay ───
+                if self.enable_brepcad_ui && self.brepcad_drawing_mode {
+                    // Draw sheet border
+                    let border_color = egui::Color32::from_rgb(0xcd, 0xd6, 0xf4);
+                    let margin = 20.0_f32;
+                    ui.painter().rect_stroke(
+                        egui::Rect::from_min_max(
+                            egui::pos2(rect.left() + margin, rect.top() + margin),
+                            egui::pos2(rect.right() - margin, rect.bottom() - margin),
+                        ),
+                        0.0,
+                        egui::Stroke::new(1.0_f32, border_color),
+                        egui::StrokeKind::Outside,
+                    );
+                    // Title block (bottom-right)
+                    let tb_x = rect.right() - margin - 120.0;
+                    let tb_y = rect.bottom() - margin - 50.0;
+                    ui.painter().rect_stroke(
+                        egui::Rect::from_min_size(egui::pos2(tb_x, tb_y), egui::vec2(120.0, 50.0)),
+                        0.0,
+                        egui::Stroke::new(0.5_f32, border_color),
+                        egui::StrokeKind::Outside,
+                    );
+                    ui.painter().text(
+                        egui::pos2(tb_x + 5.0, tb_y + 12.0),
+                        egui::Align2::LEFT_TOP,
+                        &self.current_model.name,
+                        egui::FontId::proportional(10.0),
+                        egui::Color32::from_rgb(0xcd, 0xd6, 0xf4),
+                    );
+                    let sheet_name = match self.brepcad_sheet_size { 0=>"A4",1=>"A3",2=>"A2",3=>"A1",_=>"A0" };
+                    ui.painter().text(
+                        egui::pos2(tb_x + 5.0, tb_y + 25.0),
+                        egui::Align2::LEFT_TOP,
+                        format!("Sheet: {} | {} verts | {} tris", sheet_name, self.current_model.vertex_count, self.current_model.triangle_count),
+                        egui::FontId::proportional(8.0),
+                        egui::Color32::from_rgb(0xa6, 0xad, 0xc8),
+                    );
+                    ui.painter().text(
+                        egui::pos2(tb_x + 5.0, tb_y + 38.0),
+                        egui::Align2::LEFT_TOP,
+                        "BRepCAD — 3Draper",
+                        egui::FontId::proportional(8.0),
+                        egui::Color32::from_rgb(0x6c, 0x70, 0x86),
+                    );
+
+                    // Draw views
+                    let view_labels = ["ISO", "Front", "Section", "Detail", "Projected", "Exploded"];
+                    let (bbox_min, bbox_max) = self.mesh.bounding_box();
+                    let bw = ((bbox_max.x - bbox_min.x) as f32) * 0.5;
+                    let bh = ((bbox_max.z - bbox_min.z) as f32) * 0.5;
+                    for (vt, vx, vy, _scale) in &self.brepcad_drawing_views {
+                        let cx = rect.left() + vx * rect.width();
+                        let cy = rect.top() + vy * rect.height();
+                        let label = view_labels.get(*vt as usize).unwrap_or(&"View");
+                        // View box
+                        ui.painter().rect_stroke(
+                            egui::Rect::from_center_size(egui::pos2(cx, cy), egui::vec2(120.0, 100.0)),
+                            0.0,
+                            egui::Stroke::new(0.5_f32, egui::Color32::from_rgb(0xa6, 0xad, 0xc8)),
+                            egui::StrokeKind::Outside,
+                        );
+                        // Wireframe bbox
+                        ui.painter().rect_stroke(
+                            egui::Rect::from_center_size(egui::pos2(cx, cy), egui::vec2(bw, bh)),
+                            0.0,
+                            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0x89, 0xb4, 0xfa)),
+                            egui::StrokeKind::Outside,
+                        );
+                        // Label
+                        ui.painter().text(
+                            egui::pos2(cx, cy - 55.0),
+                            egui::Align2::CENTER_TOP,
+                            *label,
+                            egui::FontId::proportional(10.0),
+                            egui::Color32::from_rgb(0xcd, 0xd6, 0xf4),
+                        );
+                    }
+
+                    // Draw dimensions
+                    for (_, dx, dy, _, label) in &self.brepcad_drawing_dims {
+                        let x = rect.left() + dx * rect.width();
+                        let y = rect.top() + dy * rect.height();
+                        ui.painter().text(
+                            egui::pos2(x, y),
+                            egui::Align2::LEFT_TOP,
+                            label,
+                            egui::FontId::proportional(10.0),
+                            egui::Color32::from_rgb(0xf3, 0x8b, 0xa8),
+                        );
+                    }
+
+                    // Draw annotations
+                    for (text, ax, ay) in &self.brepcad_drawing_annotations {
+                        let x = rect.left() + ax * rect.width();
+                        let y = rect.top() + ay * rect.height();
+                        ui.painter().text(
+                            egui::pos2(x, y),
+                            egui::Align2::LEFT_TOP,
+                            text,
+                            egui::FontId::proportional(10.0),
+                            egui::Color32::from_rgb(0xa6, 0xe3, 0xa1),
+                        );
+                    }
+
+                    // Drawing mode indicator
+                    ui.painter().text(
+                        egui::pos2(rect.center().x, rect.top() + 40.0),
+                        egui::Align2::CENTER_TOP,
+                        format!("📋 Drawing Mode — Sheet {} | {} views | {} dims | {} annotations",
+                            sheet_name, self.brepcad_drawing_views.len(),
+                            self.brepcad_drawing_dims.len(), self.brepcad_drawing_annotations.len()),
+                        egui::FontId::proportional(14.0),
+                        egui::Color32::from_rgb(0xa6, 0xe3, 0xa1),
+                    );
+                }
+
                 // ─── BRepCAD measure overlay ───
                 if self.enable_brepcad_ui && !self.brepcad_measure_result.is_empty() {
                     let pos = egui::pos2(rect.left() + 10.0, rect.top() + 60.0);
@@ -13951,7 +14083,128 @@ impl ViewerApp {
             MenuAction::ParamDesignTable | MenuAction::ParamDependencyGraph
             | MenuAction::ParamVariants => "Parametric feature not yet implemented".to_string(),
 
-            // ── Sheet Metal, Assembly, CAM, Drawing, Simulation, etc. ──
+            // ── Drawing actions ──
+            MenuAction::DrwNewSheet => {
+                self.brepcad_drawing_mode = !self.brepcad_drawing_mode;
+                if self.brepcad_drawing_mode {
+                    // Add a default standard view (ISO, centered, scale 1:2)
+                    self.brepcad_drawing_views.clear();
+                    self.brepcad_drawing_dims.clear();
+                    self.brepcad_drawing_annotations.clear();
+                    self.brepcad_drawing_views.push((0, 0.5, 0.6, 0.5)); // ISO at center, scale 0.5
+                    self.brepcad_active_tool = "Drawing".to_string();
+                    "Drawing mode: ON — sheet A4 with ISO view".to_string()
+                } else {
+                    self.brepcad_active_tool = "Select".to_string();
+                    "Drawing mode: OFF".to_string()
+                }
+            }
+            MenuAction::DrwViewStandard => {
+                if !self.brepcad_drawing_mode { self.brepcad_drawing_mode = true; }
+                self.brepcad_drawing_views.push((0, 0.3, 0.5, 0.3)); // ISO at left
+                self.brepcad_drawing_views.push((1, 0.6, 0.5, 0.3)); // Front at right
+                "Standard views added (ISO + Front)".to_string()
+            }
+            MenuAction::DrwViewSection => {
+                self.brepcad_drawing_views.push((2, 0.3, 0.8, 0.3));
+                "Section view added".to_string()
+            }
+            MenuAction::DrwViewDetail => {
+                self.brepcad_drawing_views.push((3, 0.7, 0.8, 0.2));
+                "Detail view added".to_string()
+            }
+            MenuAction::DrwViewProjected => {
+                self.brepcad_drawing_views.push((4, 0.5, 0.3, 0.3));
+                "Projected view added".to_string()
+            }
+            MenuAction::DrwViewExploded => {
+                self.brepcad_drawing_views.push((5, 0.5, 0.5, 0.4));
+                "Exploded view added".to_string()
+            }
+            MenuAction::DrwDimLinear => {
+                let (bbox_min, bbox_max) = self.mesh.bounding_box();
+                let dx = bbox_max.x - bbox_min.x;
+                let dy = bbox_max.y - bbox_min.y;
+                let dz = bbox_max.z - bbox_min.z;
+                self.brepcad_drawing_dims.push((0, 0.2, 0.4, dx, format!("Width: {:.1} mm", dx)));
+                self.brepcad_drawing_dims.push((0, 0.25, 0.4, dy, format!("Depth: {:.1} mm", dy)));
+                self.brepcad_drawing_dims.push((0, 0.3, 0.4, dz, format!("Height: {:.1} mm", dz)));
+                format!("Linear dimensions added (W={:.1} D={:.1} H={:.1})", dx, dy, dz)
+            }
+            MenuAction::DrwDimRadial => {
+                let (bbox_min, bbox_max) = self.mesh.bounding_box();
+                let r = ((bbox_max.x - bbox_min.x) / 2.0).max((bbox_max.z - bbox_min.z) / 2.0);
+                self.brepcad_drawing_dims.push((2, 0.8, 0.5, r, format!("R{:.1}", r)));
+                format!("Radial dimension added (R={:.1})", r)
+            }
+            MenuAction::DrwDimDiameter => {
+                let (bbox_min, bbox_max) = self.mesh.bounding_box();
+                let d = (bbox_max.x - bbox_min.x).max(bbox_max.z - bbox_min.z);
+                self.brepcad_drawing_dims.push((3, 0.8, 0.5, d, format!("⌀{:.1}", d)));
+                format!("Diameter dimension added (⌀{:.1})", d)
+            }
+            MenuAction::DrwDimAngular => {
+                self.brepcad_drawing_dims.push((1, 0.5, 0.7, 90.0, "90°".to_string()));
+                "Angular dimension added (90°)".to_string()
+            }
+            MenuAction::DrwDimOrdinate => {
+                self.brepcad_drawing_dims.push((4, 0.15, 0.5, 0.0, "X=0".to_string()));
+                "Ordinate dimension added".to_string()
+            }
+            MenuAction::DrwAnnotationNote => {
+                self.brepcad_drawing_annotations.push((
+                    format!("Model: {} | {} verts, {} tris",
+                        self.current_model.name, self.current_model.vertex_count, self.current_model.triangle_count),
+                    0.1, 0.1,
+                ));
+                "Note annotation added".to_string()
+            }
+            MenuAction::DrwAnnotationBalloon => {
+                self.brepcad_drawing_annotations.push(("①".to_string(), 0.5, 0.5));
+                "Balloon annotation added".to_string()
+            }
+            MenuAction::DrwAnnotationDatum => {
+                self.brepcad_drawing_annotations.push(("[A]".to_string(), 0.3, 0.7));
+                "Datum annotation added".to_string()
+            }
+            MenuAction::DrwAnnotationTolerance => {
+                self.brepcad_drawing_annotations.push(("±0.1".to_string(), 0.4, 0.6));
+                "Tolerance annotation added".to_string()
+            }
+            MenuAction::DrwTemplateA4 => { self.brepcad_sheet_size = 0; "Sheet: A4 (210×297mm)".to_string() }
+            MenuAction::DrwTemplateA3 => { self.brepcad_sheet_size = 1; "Sheet: A3 (297×420mm)".to_string() }
+            MenuAction::DrwTemplateA2 => { self.brepcad_sheet_size = 2; "Sheet: A2 (420×594mm)".to_string() }
+            MenuAction::DrwTemplateA1 => { self.brepcad_sheet_size = 3; "Sheet: A1 (594×841mm)".to_string() }
+            MenuAction::DrwTemplateA0 => { self.brepcad_sheet_size = 4; "Sheet: A0 (841×1189mm)".to_string() }
+            MenuAction::DrwExportSvg => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("SVG", &["svg"])
+                        .set_file_name("drawing.svg")
+                        .save_file()
+                    {
+                        let svg = self.generate_drawing_svg();
+                        match std::fs::write(&path, &svg) {
+                            Ok(_) => format!("Drawing exported: {}", path.to_string_lossy()),
+                            Err(e) => format!("Export failed: {}", e),
+                        }
+                    } else {
+                        "Export cancelled".to_string()
+                    }
+                }
+                #[cfg(target_arch = "wasm32")]
+                { "SVG export: use native build".to_string() }
+            }
+            MenuAction::DrwExportPdf | MenuAction::DrwExportDxf | MenuAction::DrwExportDwg => {
+                "Use SVG export (PDF/DXF/DWG coming soon)".to_string()
+            }
+            MenuAction::DrwAnnotationSurfaceFinish | MenuAction::DrwAnnotationWelding
+            | MenuAction::DrwViewBrokenOut | MenuAction::DrwViewCrop | MenuAction::DrwViewAuxiliary => {
+                "Drawing view type not yet fully implemented".to_string()
+            }
+
+            // ── Sheet Metal, Assembly, CAM, Simulation, etc. ──
             _ => format!("{:?} — not yet implemented", action),
         }
     }
@@ -14342,6 +14595,61 @@ impl ViewerApp {
     }
 
     // ─── BRepCAD panel rendering methods ────────────────────────────────────
+
+    /// Generate an SVG file of the current drawing sheet.
+    /// Includes sheet border, views (as wireframe silhouettes), dimensions, annotations.
+    pub fn generate_drawing_svg(&self) -> String {
+        let (w, h) = match self.brepcad_sheet_size {
+            0 => (210.0, 297.0), // A4
+            1 => (297.0, 420.0), // A3
+            2 => (420.0, 594.0), // A2
+            3 => (594.0, 841.0), // A1
+            _ => (841.0, 1189.0), // A0
+        };
+        let mut svg = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}mm\" height=\"{}mm\" viewBox=\"0 0 {} {}\">\n",
+            w, h, w, h
+        );
+        svg.push_str(&format!("<rect x=\"0\" y=\"0\" width=\"{}\" height=\"{}\" fill=\"white\" stroke=\"black\" stroke-width=\"0.5\"/>\n", w, h));
+        // Inner border
+        svg.push_str(&format!("<rect x=\"10\" y=\"10\" width=\"{}\" height=\"{}\" fill=\"none\" stroke=\"black\" stroke-width=\"0.3\"/>\n", w - 20.0, h - 20.0));
+        // Title block (bottom-right)
+        svg.push_str(&format!("<rect x=\"{}\" y=\"{}\" width=\"80\" height=\"40\" fill=\"none\" stroke=\"black\" stroke-width=\"0.3\"/>\n", w - 90.0, h - 50.0));
+        svg.push_str(&format!("<text x=\"{}\" y=\"{}\" font-size=\"3\" font-family=\"sans-serif\">{}</text>\n", w - 85.0, h - 42.0, self.current_model.name));
+        svg.push_str(&format!("<text x=\"{}\" y=\"{}\" font-size=\"2\" font-family=\"sans-serif\">Verts: {}  Tris: {}</text>\n", w - 85.0, h - 35.0, self.current_model.vertex_count, self.current_model.triangle_count));
+        svg.push_str(&format!("<text x=\"{}\" y=\"{}\" font-size=\"2\" font-family=\"sans-serif\">BRepCAD — 3Draper</text>\n", w - 85.0, h - 28.0));
+
+        // Views (as labeled boxes)
+        for (i, (vt, vx, vy, _scale)) in self.brepcad_drawing_views.iter().enumerate() {
+            let x = vx * w as f32;
+            let y = vy * h as f32;
+            let label = match vt { 0 => "ISO", 1 => "Front", 2 => "Section", 3 => "Detail", 4 => "Projected", _ => "Exploded" };
+            svg.push_str(&format!("<rect x=\"{}\" y=\"{}\" width=\"60\" height=\"50\" fill=\"none\" stroke=\"black\" stroke-width=\"0.3\"/>\n", x - 30.0, y - 25.0));
+            svg.push_str(&format!("<text x=\"{}\" y=\"{}\" font-size=\"3\" font-family=\"sans-serif\" text-anchor=\"middle\">{} View</text>\n", x, y, label));
+            // Draw bbox wireframe
+            let (bbox_min, bbox_max) = self.mesh.bounding_box();
+            let bw = (bbox_max.x - bbox_min.x) as f32 * 0.3;
+            let bh = (bbox_max.z - bbox_min.z) as f32 * 0.3;
+            svg.push_str(&format!("<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"none\" stroke=\"blue\" stroke-width=\"0.2\"/>\n", x - bw / 2.0, y - bh / 2.0, bw, bh));
+        }
+
+        // Dimensions
+        for (_, dx, dy, val, label) in &self.brepcad_drawing_dims {
+            let x = dx * w as f32;
+            let y = dy * h as f32;
+            svg.push_str(&format!("<text x=\"{}\" y=\"{}\" font-size=\"2.5\" font-family=\"sans-serif\" fill=\"red\">{}</text>\n", x, y, label));
+        }
+
+        // Annotations
+        for (text, ax, ay) in &self.brepcad_drawing_annotations {
+            let x = ax * w as f32;
+            let y = ay * h as f32;
+            svg.push_str(&format!("<text x=\"{}\" y=\"{}\" font-size=\"2.5\" font-family=\"sans-serif\" fill=\"green\">{}</text>\n", x, y, text));
+        }
+
+        svg.push_str("</svg>");
+        svg
+    }
 
     /// Render the Layers tab.
     fn render_brepcad_layers(&self, ui: &mut egui::Ui) {

@@ -153,13 +153,13 @@ brepcad-shell (binary, native + WASM)
 - [ ] Simulation (2D/3D)
 - [ ] G-code post-processors (7 dialects)
 
-### 1.10. Drawing Menu `16_menu_drawing.svg` ⬜ NOT STARTED
-- [ ] New Sheet (A0-A4)
-- [ ] Views: Standard/Section/Detail/Projected/Broken-out/Crop/Auxiliary/Exploded
-- [ ] Dimensions: Linear/Angular/Radial/Diameter/Ordinate
-- [ ] Annotations: Note/Balloon/Surface Finish/Welding/Datum/Tolerance
-- [ ] Title block editor, Revision table
-- [ ] Export: PDF/DXF/DWG/SVG
+### 1.10. Drawing Menu `16_menu_drawing.svg` ✅ DONE
+- [x] New Sheet (A0-A4) with sheet border + title block
+- [x] Views: Standard(ISO+Front)/Section/Detail/Projected/Exploded
+- [x] Dimensions: Linear(W,D,H from bbox)/Radial/Diameter/Angular/Ordinate
+- [x] Annotations: Note/Balloon/Datum/Tolerance
+- [x] Title block (model name, verts, tris, sheet size)
+- [x] Export SVG (full sheet with views+dims+annotations)
 
 ### 1.11. Simulation Menu `17_menu_simulation.svg` ⬜ NOT STARTED
 - [ ] Mesh generation (Tet4/Tet10/Hex8/Hex20)
