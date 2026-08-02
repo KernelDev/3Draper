@@ -8226,6 +8226,97 @@ impl eframe::App for ViewerApp {
                         self.camera.rotate(touch.rotation_delta * 50.0, 0.0);
                     }
                 } else {
+                    // ─── BRepCAD viewport context menu (right-click) ───
+                    if self.enable_brepcad_ui && response.secondary_clicked() {
+                        let mouse_pos = ui.input(|i| i.pointer.latest_pos());
+                        if let Some(pos) = mouse_pos {
+                            // Show context menu at mouse position
+                            egui::Area::new(egui::Id::new("brepcad_viewport_ctx_menu"))
+                                .fixed_pos(pos)
+                                .order(egui::Order::Foreground)
+                                .show(ctx, |ui| {
+                                    egui::Frame::popup(ui.style())
+                                        .fill(egui::Color32::from_rgb(0x1e, 0x1e, 0x2e))
+                                        .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0x45, 0x47, 0x5a)))
+                                        .show(ui, |ui| {
+                                            ui.set_width(180.0);
+                                            if ui.button("🔍 Fit View").clicked() {
+                                                let (bbox_min, bbox_max) = self.mesh.bounding_box();
+                                                self.camera.fit_to_bounding_box(
+                                                    [bbox_min.x as f32, bbox_min.y as f32, bbox_min.z as f32],
+                                                    [bbox_max.x as f32, bbox_max.y as f32, bbox_max.z as f32],
+                                                );
+                                                self.brepcad_status_msg = "Fit to view".to_string();
+                                            }
+                                            ui.separator();
+                                            if ui.button("📐 ISO View").clicked() {
+                                                self.camera.look_from_direction(
+                                                    crate::ui::view_modes::ViewOrientation::Iso.direction());
+                                                self.brepcad_view_orientation = "ISO".to_string();
+                                            }
+                                            if ui.button("Top View").clicked() {
+                                                self.camera.look_from_direction([0.0, -1.0, 0.0]);
+                                                self.brepcad_view_orientation = "Top".to_string();
+                                            }
+                                            if ui.button("Front View").clicked() {
+                                                self.camera.look_from_direction([0.0, 0.0, 1.0]);
+                                                self.brepcad_view_orientation = "Front".to_string();
+                                            }
+                                            if ui.button("Right View").clicked() {
+                                                self.camera.look_from_direction([-1.0, 0.0, 0.0]);
+                                                self.brepcad_view_orientation = "Right".to_string();
+                                            }
+                                            ui.separator();
+                                            if ui.button("📏 Measure Distance").clicked() {
+                                                self.brepcad_measure_mode = BrepcadMeasureMode::Distance;
+                                                self.brepcad_measure_point1 = None;
+                                                self.brepcad_measure_point2 = None;
+                                                self.brepcad_measure_result = String::new();
+                                                self.brepcad_active_tool = "Measure Distance".to_string();
+                                            }
+                                            ui.separator();
+                                            if ui.button("🔲 Wireframe").clicked() {
+                                                self.wireframe = true;
+                                                self.show_edges = false;
+                                            }
+                                            if ui.button("🎨 Shaded").clicked() {
+                                                self.wireframe = false;
+                                                self.show_edges = false;
+                                            }
+                                            if ui.button("🎨 Shaded + Edges").clicked() {
+                                                self.wireframe = false;
+                                                self.show_edges = true;
+                                            }
+                                            ui.separator();
+                                            if ui.button("📐 Section Cut…").clicked() {
+                                                self.brepcad_section_enabled = !self.brepcad_section_enabled;
+                                                if self.brepcad_section_enabled {
+                                                    let (bbox_min, bbox_max) = self.mesh.bounding_box();
+                                                    self.brepcad_section_position = ((bbox_min.z + bbox_max.z) * 0.5) as f32;
+                                                    self.mesh_dirty = true;
+                                                }
+                                            }
+                                            ui.separator();
+                                            if ui.button("✏ Sketch Mode").clicked() {
+                                                self.brepcad_sketch_mode = !self.brepcad_sketch_mode;
+                                                if self.brepcad_sketch_mode {
+                                                    self.camera.look_from_direction([0.0, -1.0, 0.0]);
+                                                    self.brepcad_active_tool = "Sketch".to_string();
+                                                } else {
+                                                    self.brepcad_active_tool = "Select".to_string();
+                                                }
+                                            }
+                                            ui.separator();
+                                            if ui.button("Deselect All").clicked() {
+                                                self.selected_instance = None;
+                                                self.selected_face = None;
+                                                self.highlighted_face = None;
+                                                self.highlight_dirty = true;
+                                            }
+                                        });
+                                });
+                        }
+                    }
                     let is_hovering = response.hovered();
 
                     // ─── Mouse/touch picking: click = select solid, Ctrl+click = select face ───
@@ -13417,8 +13508,51 @@ impl ViewerApp {
             MenuAction::InsertCylinder => { self.brepcad_dialog = crate::ui::dialogs::DialogType::InsertPrimitive(crate::ui::dialogs::PrimitiveType::Cylinder); String::new() }
             MenuAction::InsertCone => { self.brepcad_dialog = crate::ui::dialogs::DialogType::InsertPrimitive(crate::ui::dialogs::PrimitiveType::Cone); String::new() }
             MenuAction::InsertTorus => { self.brepcad_dialog = crate::ui::dialogs::DialogType::InsertPrimitive(crate::ui::dialogs::PrimitiveType::Torus); String::new() }
-            MenuAction::InsertPlane | MenuAction::InsertAxis | MenuAction::InsertPoint
-            | MenuAction::InsertCs => "Reference geometry not yet implemented".to_string(),
+            MenuAction::InsertPlane => {
+                // Create a reference plane as a thin box at origin
+                self.brepcad_push_undo_named("Insert Plane");
+                let plane = draper_topology::ShapeBuilder::make_box(200.0, 200.0, 0.1);
+                let mut mesh = triangulate_solid(&plane, &tri_params_for_lod(self.lod_level));
+                self.current_solid = Some(plane);
+                self.current_nurbs_surface = None;
+                self.detailed_instances.clear();
+                self.instance_triangle_ranges.clear();
+                self.assembly_tree = None;
+                self.load_mesh(mesh, "Reference Plane (XY, 200×200)");
+                "Reference plane inserted (XY, 200×200mm)".to_string()
+            }
+            MenuAction::InsertAxis => {
+                // Create a reference axis as a thin cylinder along Z
+                self.brepcad_push_undo_named("Insert Axis");
+                let axis = draper_topology::ShapeBuilder::make_cylinder(1.0, 200.0);
+                let mut mesh = triangulate_solid(&axis, &tri_params_for_lod(self.lod_level));
+                // Offset so it's centered at origin
+                use draper_geometry::Transform;
+                let mut s = axis;
+                ShapeBuilder::transform_solid(&mut s, &Transform::translation(0.0, 0.0, -100.0));
+                mesh = triangulate_solid(&s, &tri_params_for_lod(self.lod_level));
+                self.current_solid = Some(s);
+                self.current_nurbs_surface = None;
+                self.detailed_instances.clear();
+                self.instance_triangle_ranges.clear();
+                self.assembly_tree = None;
+                self.load_mesh(mesh, "Reference Axis (Z, 200mm)");
+                "Reference axis inserted (Z, 200mm)".to_string()
+            }
+            MenuAction::InsertPoint => {
+                // Create a small sphere as a reference point at origin
+                self.brepcad_push_undo_named("Insert Point");
+                let point = draper_topology::ShapeBuilder::make_sphere(2.0);
+                let mesh = triangulate_solid(&point, &tri_params_for_lod(self.lod_level));
+                self.current_solid = Some(point);
+                self.current_nurbs_surface = None;
+                self.detailed_instances.clear();
+                self.instance_triangle_ranges.clear();
+                self.assembly_tree = None;
+                self.load_mesh(mesh, "Reference Point (origin)");
+                "Reference point inserted (origin, R=2mm)".to_string()
+            }
+            MenuAction::InsertCs => "Coordinate System: use Insert Plane + Insert Axis".to_string(),
             MenuAction::InsertSketch => "Press S to enter sketch mode (coming soon)".to_string(),
             MenuAction::InsertMesh | MenuAction::InsertMeshFromSolid | MenuAction::InsertRemesh => {
                 "Mesh operations not yet implemented".to_string()
