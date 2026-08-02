@@ -23,16 +23,21 @@ brepcad-shell (binary, native + WASM)
        │    6. Status bar (bottom)               — X/Y/Z, D, Tool, FPS, Display, View
        │    7. CentralPanel (3D viewport)        — wgpu SceneCallback (GL)
        │    8. View Cube + Display style switcher
-       │    9. Command palette + dialogs + status toast
+       │    9. Section Cut panel (floating)
+       │   10. Sketch overlay (grid + entities)
+       │   11. Measure overlay (result text)
+       │   12. Command palette + dialogs + status toast
+       │   13. Parameter dialog
+       │   14. Feature Timeline panel
        └─ handle_brepcad_action()                — delegates to ViewerApp methods
 ```
 
 **Key files:**
-- `crates/draper-viewer/src/app.rs` — ViewerApp (12000+ lines), BRepCAD layout + theme
+- `crates/draper-viewer/src/app.rs` — ViewerApp (14000+ lines), BRepCAD layout + theme + all features
 - `crates/draper-viewer/src/bin/brepcad_shell.rs` — thin wrapper (native + WASM)
 - `crates/draper-viewer/src/ui/menubar.rs` — 21 menus, MenuAction enum
 - `crates/draper-viewer/src/ui/ribbon.rs` — 15 ribbon tabs
-- `crates/draper-viewer/src/ui/dialogs.rs` — 5 dialogs
+- `crates/draper-viewer/src/ui/dialogs.rs` — 5 dialogs with custom primitive dimensions
 - `crates/draper-viewer/src/ui/command_palette.rs` — 38 commands
 - `crates/draper-viewer/src/ui/view_modes.rs` — View Cube + Display style
 
@@ -57,9 +62,7 @@ brepcad-shell (binary, native + WASM)
 
 ---
 
-## Phase 1: Menu Bar (21 menus) ✅ DONE (form) / 🔄 Наполнение (in progress)
-
-All 21 menus implemented. Status of each menu's functional wiring:
+## Phase 1: Menu Bar (21 menus) ✅ DONE (form) / 🔄 Наполнение
 
 ### 1.1. File Menu `07_menu_file.svg` ✅ DONE
 - [x] New → load_box() (default model)
@@ -73,7 +76,7 @@ All 21 menus implemented. Status of each menu's functional wiring:
 - [ ] Print/Plot dialog — not yet implemented
 
 ### 1.2. Edit Menu `08_menu_edit.svg` ✅ DONE
-- [x] Undo/Redo — stub (returns "not yet implemented")
+- [x] Undo/Redo — snapshot-based (Vec<(Solid, name)> stack, 50 max)
 - [x] Duplicate — works (translate +20 X, push_undo)
 - [ ] Cut/Copy/Paste — clipboard not yet implemented
 - [ ] Find/Replace in parameters — not yet implemented
@@ -84,33 +87,46 @@ All 21 menus implemented. Status of each menu's functional wiring:
 - [x] Fit/Zoom In/Out
 - [x] Wireframe/Shaded/Shaded+Edges
 - [x] Toggle Grid/Axis/Edges
+- [x] Section Cut (plane X/Y/Z + position slider)
+- [x] Feature Timeline panel
 - [ ] Zoom Window/Selection — not yet implemented
 - [ ] Toggle Shadows/AO/AA/Normals/Silhouette — not yet implemented
 - [ ] Perspective/Orthographic toggle — not yet implemented
 - [ ] Save/Load Layout — not yet implemented
 
 ### 1.4. Insert Menu `10_menu_insert.svg` ✅ DONE
-- [x] Box/Sphere/Cylinder/Cone/Torus → InsertPrimitive dialog → load_*
+- [x] Box/Sphere/Cylinder/Cone/Torus → InsertPrimitive dialog with custom dimensions
 - [ ] Reference Geometry (Plane/Axis/Point/CS) — not yet implemented
-- [ ] Sketch — not yet implemented (press S for sketch mode)
+- [x] Sketch → enters sketch mode
 - [ ] Mesh operations (Import/From Solid/Remesh) — not yet implemented
 - [ ] Component insertion — not yet implemented
-- [ ] Pattern (Linear/Circular/Mirror) — Circular works, Linear/Mirror not yet
+- [x] Linear Pattern → model_linear_pattern
+- [x] Circular Pattern → model_circular_pattern
+- [x] Mirror → model_mirror
 
-### 1.5. Sketch Menu `11_menu_sketch.svg` ⬜ NOT STARTED
-- [ ] Enter/Exit sketch mode
-- [ ] Draw tools: Line/Circle/Arc/Rectangle/Spline/Polygon/Point
-- [ ] Constraints: Coincident/Collinear/Concentric/Parallel/Perpendicular/Tangent/Horizontal/Vertical/Equal
-- [ ] Dimensions: Linear/Angular/Radial/Diameter
-- [ ] Modify: Trim/Extend/Split/Offset/Mirror/Pattern/Fillet
-- [ ] Sketch engine exists (ui/sketch.rs) but not wired to viewport
+### 1.5. Sketch Menu `11_menu_sketch.svg` ✅ DONE
+- [x] Enter/Exit sketch mode (S key or menu)
+- [x] 3 sketch planes (XY/XZ/YZ) with camera auto-align
+- [x] Line (2 clicks)
+- [x] Circle (2 clicks: center + radius)
+- [x] Arc 3-Point (3 clicks)
+- [x] Rectangle (2 clicks)
+- [x] Point (1 click)
+- [x] Grid overlay + snap to grid
+- [x] Entity rendering (green lines, yellow endpoints, blue pending)
+- [x] Extrude Sketch → 3D solid (Rectangle→Box, Circle→Cylinder)
+- [ ] Spline/Polygon — not yet implemented
+- [ ] Constraints (Coincident/Parallel/Perpendicular/Tangent/H/V/Equal) — not yet
+- [ ] Dimensions (Linear/Angular/Radial/Diameter) — not yet
+- [ ] Modify (Trim/Extend/Split/Offset/Mirror/Pattern/Fillet) — not yet
 
-### 1.6. Modify Menu `12_menu_modify.svg` 🔄 PARTIAL
+### 1.6. Modify Menu `12_menu_modify.svg` ✅ DONE
 - [x] Boolean Union/Subtract/Intersect → model_boolean_*
 - [x] Fillet/Chamfer → model_fillet_edge/model_chamfer_edge
 - [x] Move/Rotate/Scale → model_translate/rotate/scale
+- [x] Linear Pattern → model_linear_pattern (count copies + 50mm spacing)
 - [x] Circular Pattern → model_circular_pattern
-- [ ] Linear Pattern/Mirror — not yet implemented
+- [x] Mirror → model_mirror (about plane through origin)
 - [ ] Loft/Sweep — not yet implemented (requires sketch profiles)
 - [ ] Direct Modeling (Move/Offset/Delete/Replace/Split/Merge/Simplify/Thicken) — not yet
 - [ ] Deform (Bend/Twist/Taper/Stretch) — not yet
@@ -152,12 +168,15 @@ All 21 menus implemented. Status of each menu's functional wiring:
 - [ ] Solver (CG/direct)
 - [ ] Results: Von Mises/Displacement/Strain/Stress/Animate
 
-### 1.12. Parametric Menu `18_menu_parametric.svg` ⬜ NOT STARTED
-- [ ] Parameters table (named params + formulas)
-- [ ] Equations, Design Table
-- [ ] Dependency Graph
-- [ ] Variants
-- [ ] Parameter-driven feature re-evaluation
+### 1.12. Parametric Menu `18_menu_parametric.svg` ✅ DONE
+- [x] Parameters table (named params + formulas) — dialog with add/edit/delete
+- [x] Formula evaluator (recursive descent: +,-,*,/, parentheses, param refs)
+- [x] "Add Defaults" (Width, Height, Depth, Radius, Diameter=Radius*2, Volume=W*H*D)
+- [x] Re-evaluate formulas on change
+- [ ] Equations, Design Table — not yet
+- [ ] Dependency Graph — not yet
+- [ ] Variants — not yet
+- [ ] Parameter-driven feature re-evaluation — not yet
 
 ### 1.13. Optimize Menu `19_menu_optimize_generate.svg` ⬜ NOT STARTED
 - [ ] Topology Optimization (Lightweight/Stiff/Balanced)
@@ -167,11 +186,12 @@ All 21 menus implemented. Status of each menu's functional wiring:
 - [ ] Datum, Form, Orientation, Position, Profile, Runout
 - [ ] Analyze, Reports, Stackup Analysis
 
-### 1.15. Heal Menu `21_menu_heal_inspect.svg` 🔄 PARTIAL
+### 1.15. Heal Menu `21_menu_heal_inspect.svg` ✅ DONE
 - [x] Heal (Stitch/Gap Fill/Remove Duplicates/Fix Orientation/Fix Degenerate/Simplify/Remove Sliver/Close Holes/Repair T-Junctions) → validation::heal_solid
+- [x] Measure Distance/Angle/Length — 2-point/3-point picking in viewport
 - [x] Measure Area/Volume — computed from mesh
 - [x] Analysis Watertight/Manifold — from manifold_report
-- [ ] Measure Distance/Angle/Length/Diameter/Radius/Center — not yet
+- [ ] Measure Diameter/Radius/Center — not yet
 - [ ] Analysis Curvature/Draft/Thickness/Interference/Edge Consistency/Gaussian Curvature — not yet
 
 ### 1.16. Mold Menu `22_menu_mold.svg` ⬜ NOT STARTED
@@ -179,7 +199,7 @@ All 21 menus implemented. Status of each menu's functional wiring:
 - [ ] Flow/Cooling/Warpage Analysis
 
 ### 1.17. Tools Menu `23_menu_tools.svg` 🔄 PARTIAL
-- [x] Options dialog (stub)
+- [x] Options dialog (10 sections)
 - [x] Plugins Manager dialog (stub)
 - [x] Performance Monitor dialog (stub)
 - [ ] Customize dialog — not yet
@@ -190,18 +210,8 @@ All 21 menus implemented. Status of each menu's functional wiring:
 - [ ] UI Layout editor — not yet
 
 ### 1.18. Scripting Menu `24_menu_scripting.svg` ⬜ NOT STARTED
-- [ ] Script List, Load Script, Record Macro, Run with Parameters
-- [ ] Debug Step, Profile, Library Browser, API Reference
-
 ### 1.19. AI Menu `25_menu_ai.svg` ⬜ NOT STARTED
-- [ ] Shape from Text, AI Assistant (Chat/Review/Cost/Suggest)
-- [ ] Smart features (Auto-Fillet/Pattern/Repair/Dimension/Constrain)
-- [ ] Generative design (4 variants)
-- [ ] Topology optimization (4 presets)
-
 ### 1.20. Window Menu `26_menu_window.svg` ⬜ NOT STARTED
-- [ ] Multiple document tabs, Close All/Cascade/Tile H/V
-- [ ] Next/Prev tab, Save Layout
 
 ### 1.21. Help Menu `27_menu_help.svg` 🔄 PARTIAL
 - [x] About dialog
@@ -210,118 +220,86 @@ All 21 menus implemented. Status of each menu's functional wiring:
 
 ---
 
-## Phase 2: Ribbon (15 tabs) ✅ DONE (form) / 🔄 Наполнение (in progress)
+## Phase 2: Ribbon (15 tabs) ✅ DONE (form) / 🔄 Наполнение
 
-All 15 ribbon tabs implemented. Buttons emit MenuAction.
-
-### 2.1. File `28_ribbon_file.svg` ✅ DONE
-- [x] New/Open/Save, Import STEP/STL, Export STEP/STL/OBJ
-
-### 2.2. Home `29_ribbon_home.svg` ✅ DONE
-- [x] Undo/Redo, Fit/ISO, Wireframe/Shaded/Shaded+Edges
-
-### 2.3. Sketch `30_ribbon_sketch.svg` ⬜ NOT STARTED
-- [ ] Enter/Exit, Line/Circle/Arc/Rect/Spline
-- [ ] Constraints: Coincident/Parallel/Perpendicular/Tangent/H/V
-- [ ] Dimensions: Linear/Angular/Radial
-
-### 2.4. Insert `31_ribbon_insert.svg` ✅ DONE
-- [x] Box/Sphere/Cylinder/Cone/Torus, Plane/Axis/Point, Import/Remesh, Pattern
-
-### 2.5. Modify `32_ribbon_modify.svg` ✅ DONE
-- [x] Union/Subtract/Intersect, Fillet/Chamfer, Move/Rotate/Scale, Direct Face ops
-
-### 2.6. Sheet Metal `33_ribbon_sheetmetal.svg` ⬜ NOT STARTED
-- [ ] Base/Edge Flange, Bend/Hem/Jog, Unfold/Fold/Flat/DXF, Gauge/K-Factor
-
-### 2.7. Assembly `34_ribbon_assembly.svg` ⬜ NOT STARTED
-- [ ] Insert/Replace Component, Mate Coincident/Concentric, Solve/Diagnose
-- [ ] Explode/Motion, BOM
-
-### 2.8. CAM `35_ribbon_cam.svg` ⬜ NOT STARTED
-- [ ] Stock/Origin, Tool Library, 2.5-Axis ops, Simulate, G-code/NC View
-
-### 2.9. Drawing `36_ribbon_drawing.svg` ⬜ NOT STARTED
-- [ ] New Sheet, Views, Dimensions, Annotations, Export PDF/DXF
-
-### 2.10. Simulation `37_ribbon_simulation.svg` ⬜ NOT STARTED
-- [ ] Mesh/Material/BC/Load, Study types, Solve/Validate, Results/Animate
-
-### 2.11. Inspect `38_ribbon_inspect.svg` 🔄 PARTIAL
-- [x] Distance/Angle/Length/Area/Volume
-- [x] Watertight/Manifold
-- [ ] Curvature/Draft/Thickness — not yet
-- [ ] Section/Compare/Heal — Heal works, Section/Compare not yet
-
-### 2.12. AI `39_ribbon_ai.svg` ⬜ NOT STARTED
-- [ ] Shape from Text, Variants, Optimize, Assistant, Smart
-
-### 2.13. Tools `40_ribbon_tools.svg` ✅ DONE
-- [x] Options/Customize/Plugins/Theme, Console/Macro, Monitor, Layout
-
-### 2.14. View `41_ribbon_view.svg` ✅ DONE
-- [x] ISO/Front/Top/Right, Fit/In/Out, Wireframe/Shaded/Edges, Persp/Ortho
-
-### 2.15. Surface `95_ribbon_surface.svg` ⬜ NOT STARTED
-- [ ] Loft/Sweep/Boundary/Fill/Network, G0/G1/G2 continuity
+### 2.1. File `28` ✅ DONE
+### 2.2. Home `29` ✅ DONE
+### 2.3. Sketch `30` ✅ DONE (5 tools + enter/exit)
+### 2.4. Insert `31` ✅ DONE (primitives + patterns + mirror)
+### 2.5. Modify `32` ✅ DONE (boolean + fillet/chamfer + transform + patterns)
+### 2.6. Sheet Metal `33` ⬜ NOT STARTED
+### 2.7. Assembly `34` ⬜ NOT STARTED
+### 2.8. CAM `35` ⬜ NOT STARTED
+### 2.9. Drawing `36` ⬜ NOT STARTED
+### 2.10. Simulation `37` ⬜ NOT STARTED
+### 2.11. Inspect `38` ✅ DONE (measure + watertight/manifold + heal + section)
+### 2.12. AI `39` ⬜ NOT STARTED
+### 2.13. Tools `40` ✅ DONE
+### 2.14. View `41` ✅ DONE
+### 2.15. Surface `95` ⬜ NOT STARTED
 
 ---
 
 ## Phase 3: View Modes ✅ DONE
 
-- [x] Wireframe `42_mode_wireframe.svg`
-- [x] Shaded `43_mode_shaded.svg`
-- [x] Shaded + Edges `44_mode_shaded_edges.svg`
-- [ ] Direct Modeling mode `45_mode_direct_modeling.svg`
-- [ ] Drawing mode `46_mode_drawing.svg`
-- [ ] Walkthrough mode `93_mode_walkthrough.svg`
-- [ ] VR/AR mode `94_mode_vr_ar.svg`
+- [x] Wireframe `42`
+- [x] Shaded `43`
+- [x] Shaded + Edges `44`
+- [ ] Direct Modeling mode `45`
+- [ ] Drawing mode `46`
+- [ ] Walkthrough mode `93`
+- [ ] VR/AR mode `94`
 
 ---
 
-## Phase 4: Sketch Engine ⬜ NOT STARTED
+## Phase 4: Sketch Engine ✅ DONE (core)
 
 **Mockups:** `02_sketch_mode.svg`, `11_menu_sketch.svg`, `30_ribbon_sketch.svg`, `49_context_menu_sketch.svg`
 
-**Existing code:** `ui/sketch.rs` (566 lines) — SketchEntity, DrawTool, Constraint, Dimension, Sketch, DrawState. NOT wired to viewport.
+### 4.1. Sketch Mode Entry/Exit ✅ DONE
+- [x] Press S or menu/ribbon to enter sketch mode
+- [x] Select sketch plane (XY/XZ/YZ)
+- [x] Camera auto-aligns to sketch plane
+- [x] 2D canvas overlay on 3D viewport
+- [x] ESC to exit
 
-### 4.1. Sketch Mode Entry/Exit
-- [ ] Press S or menu/ribbon to enter sketch mode
-- [ ] Select sketch plane (XY/XZ/YZ/Custom)
-- [ ] 2D canvas overlay on 3D viewport
-- [ ] ESC to exit
-
-### 4.2. Drawing Tools (8)
-- [ ] Line (2 clicks)
-- [ ] Circle (2 clicks: center + radius)
-- [ ] Arc 3-Point (3 clicks)
-- [ ] Arc Tangent
-- [ ] Rectangle (2 clicks)
+### 4.2. Drawing Tools ✅ DONE (5/8)
+- [x] Line (2 clicks)
+- [x] Circle (2 clicks: center + radius)
+- [x] Arc 3-Point (3 clicks)
+- [x] Rectangle (2 clicks)
+- [x] Point (1 click)
 - [ ] Spline (N clicks, finish on Enter)
 - [ ] Polygon (N sides)
-- [ ] Point (1 click)
+- [ ] Arc Tangent
 
-### 4.3. Constraints (9)
+### 4.3. Grid + Snap ✅ DONE
+- [x] Grid overlay (20×20 lines, 10mm step)
+- [x] Snap to grid (configurable)
+- [x] Entity rendering (green lines, yellow endpoints, blue pending)
+
+### 4.4. Extrude ✅ DONE
+- [x] Rectangle → Box
+- [x] Circle → Cylinder
+- [x] Positions on sketch plane (XY/XZ/YZ)
+
+### 4.5. Constraints ⬜ NOT STARTED
 - [ ] Coincident, Collinear, Concentric
 - [ ] Parallel, Perpendicular, Tangent
 - [ ] Horizontal, Vertical, Equal
-- [ ] Constraint solver (simplified: sequential)
+- [ ] Constraint solver
 
-### 4.4. Dimensions (4)
+### 4.6. Dimensions ⬜ NOT STARTED
 - [ ] Linear, Angular, Radial, Diameter
-- [ ] Dimension display + editing
 
-### 4.5. Modify (7)
+### 4.7. Modify ⬜ NOT STARTED
 - [ ] Trim, Extend, Split, Offset, Mirror, Pattern, Fillet
-
-### 4.6. Context Menu `49_context_menu_sketch.svg`
-- [ ] Right-click in sketch → context menu
 
 ---
 
 ## Phase 5: Panels (12) 🔄 PARTIAL
 
-### 5.1. Browser `63_panel_browser.svg` ✅ DONE
+### 5.1. Browser `63` ✅ DONE
 - [x] 3 tabs: Tree/Layers/Selection
 - [x] Filter input
 - [x] Model tree (assembly tree + detailed_instances)
@@ -331,159 +309,68 @@ All 15 ribbon tabs implemented. Buttons emit MenuAction.
 - [x] Face list under selected instance
 - [x] Face visibility toggle
 - [x] Face selection
-- [ ] Right-click context menu `48_context_menu_browser.svg`
+- [ ] Right-click context menu `48`
 
-### 5.2. Properties `64_panel_properties.svg` ✅ DONE
+### 5.2. Properties `64` ✅ DONE
 - [x] 4 tabs: Props/Constraints/Dimensions/Material
 - [x] Face properties (surface type, triangles, void flag)
 - [x] Instance properties (name, BREP ID, faces)
 - [x] Model info (name, vertices, triangles)
 - [ ] Material assignment (stub only)
 
-### 5.3. Timeline `65_panel_timeline.svg` ⬜ NOT STARTED
-- [ ] Feature history timeline
-- [ ] Rollback bar
+### 5.3. Timeline `65` ✅ DONE
+- [x] Feature history timeline (named operations + solid snapshots)
+- [x] Rollback bar (click ↩ to restore any point)
+- [x] Visual state (● active, ○ rolled-back)
+- [x] Clear timeline
 - [ ] Reorder features
 
-### 5.4. Measure `66_panel_measure.svg` 🔄 PARTIAL
-- [x] Area/Volume (computed from mesh)
-- [ ] Distance/Angle/Length (requires 2-point picking)
-- [ ] Persistent measurement display
+### 5.4. Measure `66` ✅ DONE
+- [x] Distance (2-point picking)
+- [x] Angle (3-point picking: vertex + 2 points)
+- [x] Length (2-point)
+- [x] Area (computed from mesh)
+- [x] Volume (computed from mesh)
+- [x] Result overlay in viewport
+- [x] ESC to cancel
 
-### 5.5. Section `67_panel_section.svg` ⬜ NOT STARTED
-- [ ] Section plane (X/Y/Z/custom)
+### 5.5. Section `67` ✅ DONE
+- [x] Section plane (X/Y/Z)
+- [x] Position slider (bbox min..max)
+- [x] Fit button (center)
+- [x] Real-time triangle filtering
+- [x] Floating panel UI
 - [ ] Section cap fill
 - [ ] Section measurements
 
-### 5.6. AI Chat `68_panel_ai_chat.svg` ⬜ NOT STARTED
-- [ ] Chat interface
-- [ ] Design review, cost estimate
-
-### 5.7. Scripting Console `69_panel_scripting_console.svg` ⬜ NOT STARTED
-- [ ] Python/Lua console
-- [ ] Command history
-- [ ] Script execution
-
-### 5.8. Performance Monitor `71_panel_performance_monitor.svg` ✅ DONE (stub)
-- [x] FPS, draw calls, vertices, triangles (dialog)
-- [ ] Real-time graphs
-
-### 5.9. Cloud Collaboration `73_panel_cloud_collaboration.svg` ⬜ NOT STARTED
-- [ ] Multi-user editing
-- [ ] Comments, versions
-
-### 5.10. FEA Mesh Control `85_panel_fea_mesh_control.svg` ⬜ NOT STARTED
-- [ ] Element size, type, refinement
-
-### 5.11. Animation Timeline `92_panel_animation_timeline.svg` ⬜ NOT STARTED
-- [ ] Keyframe animation
-- [ ] Play/pause/scrub
+### 5.6. AI Chat `68` ⬜ NOT STARTED
+### 5.7. Scripting Console `69` ⬜ NOT STARTED
+### 5.8. Performance Monitor `71` ✅ DONE (stub)
+### 5.9. Cloud Collaboration `73` ⬜ NOT STARTED
+### 5.10. FEA Mesh Control `85` ⬜ NOT STARTED
+### 5.11. Animation Timeline `92` ⬜ NOT STARTED
 
 ---
 
-## Phase 6: Dialogs (26) 🔄 PARTIAL
+## Phase 6: Dialogs (27) 🔄 PARTIAL
 
-### 6.1. Options `51_dialog_options.svg` ✅ DONE (stub)
-- [x] 10 sections (General/Display/File Locations/Hotkeys/Theme/Advanced/Plugins/AI/Performance/Cloud)
-- [ ] Settings persistence (JSON file)
-
-### 6.2. Customize `52_dialog_customize.svg` ⬜ NOT STARTED
-- [ ] Ribbon customization, shortcut editor, command reassignment
-
-### 6.3. Insert Primitives `53_dialog_primitives.svg` ✅ DONE (custom dimensions)
-- [x] Box/Sphere/Cylinder/Cone/Torus with parameters
-- [x] Custom dimensions (sliders persist via egui memory)
-
-### 6.4. Shortcut Editor `54_dialog_shortcut_editor.svg` ⬜ NOT STARTED
-- [ ] 245+ commands, editable shortcuts
-
-### 6.5. Command Search `55_dialog_command_search.svg` ✅ DONE
-- [x] Fuzzy search palette (Ctrl+Shift+P)
-
-### 6.6. Plugin Manager `56_dialog_plugin_manager.svg` ✅ DONE (stub)
-- [x] Installed/Marketplace/Settings tabs
-- [ ] Plugin loading/management
-
-### 6.7. About `57_dialog_about.svg` ✅ DONE
-- [x] Version, engine info
-
-### 6.8. Check for Updates `58_dialog_update.svg` ⬜ NOT STARTED
-- [ ] Version check, download
-
-### 6.9. Material Editor `59_dialog_material_editor.svg` ⬜ NOT STARTED
-- [ ] Density, Young's modulus, Poisson's ratio, color, thermal
-- [ ] Material library import/export
-
-### 6.10. Constraint Diagnostics `60_dialog_constraint_diagnostics.svg` ⬜ NOT STARTED
-- [ ] Sketch constraint conflicts
-
-### 6.11. Mold Catalog `61_dialog_mold_catalog.svg` ⬜ NOT STARTED
-- [ ] Misumi/HASCO/DME/LKM
-
-### 6.12. Render Settings `62_dialog_render_settings.svg` ⬜ NOT STARTED
-- [ ] POV-Ray/Blender/LuxCore/Octane integration
-
-### 6.13. Macro Recorder `70_dialog_macro_recorder.svg` ⬜ NOT STARTED
-- [ ] Record/playback macros
-
-### 6.14. Tutorial Browser `72_dialog_tutorial_browser.svg` ⬜ NOT STARTED
-- [ ] Getting Started, Sketch, Assembly tutorials
-
-### 6.15. Print/Plot `74_dialog_print_plot.svg` ⬜ NOT STARTED
-- [ ] Print preview, paper size, orientation
-
-### 6.16. License `75_dialog_license.svg` ⬜ NOT STARTED
-- [ ] License management
-
-### 6.17. Crash Recovery `76_dialog_crash_recovery.svg` ⬜ NOT STARTED
-- [ ] Auto-save recovery
-
-### 6.18. Onboarding `77_dialog_onboarding.svg` ⬜ NOT STARTED
-- [ ] First-run wizard
-
-### 6.19. CAM Stock Setup `82_wizard_cam_stock.svg` ⬜ NOT STARTED
-- [ ] Stock dimensions, material
-
-### 6.20. Tool Library `83_dialog_tool_library.svg` ⬜ NOT STARTED
-- [ ] Tool types, parameters
-
-### 6.21. NC Code Viewer `84_dialog_nc_code_viewer.svg` ⬜ NOT STARTED
-- [ ] G-code display, syntax highlight
-
-### 6.22. Modal Plotter `86_dialog_modal_plotter.svg` ⬜ NOT STARTED
-- [ ] Frequency/mode visualization
-
-### 6.23. Title Block Editor `87_dialog_title_block_editor.svg` ⬜ NOT STARTED
-- [ ] Drawing title block fields
-
-### 6.24. Revision Table `88_dialog_revision_table.svg` ⬜ NOT STARTED
-- [ ] Drawing revision history
-
-### 6.25. Layer Manager `89_dialog_layer_manager.svg` ✅ DONE (stub)
-- [x] Layer list in Browser panel
-- [ ] Full manager dialog
-
-### 6.26. BOM Editor `90_dialog_bom_editor.svg` ⬜ NOT STARTED
-- [ ] Bill of materials
-
-### 6.27. Parameter Search/Replace `91_dialog_param_search_replace.svg` ⬜ NOT STARTED
-- [ ] Find/replace in parameter table
+### 6.1. Options `51` ✅ DONE (stub, 10 sections)
+### 6.2. Customize `52` ⬜ NOT STARTED
+### 6.3. Insert Primitives `53` ✅ DONE (custom dimensions, persistent sliders)
+### 6.4. Shortcut Editor `54` ⬜ NOT STARTED
+### 6.5. Command Search `55` ✅ DONE (Ctrl+Shift+P)
+### 6.6. Plugin Manager `56` ✅ DONE (stub)
+### 6.7. About `57` ✅ DONE
+### 6.8-6.27: ⬜ NOT STARTED (Update/Material/Constraint/Mold/Render/Macro/Tutorial/Print/License/Crash/Onboarding/CAM Stock/Tool Library/NC Viewer/Modal Plotter/Title Block/Revision Table/Layer Manager/BOM/Param Search)
 
 ---
 
 ## Phase 7: Context Menus (4) ⬜ NOT STARTED
 
-### 7.1. Viewport `47_context_menu_viewport.svg`
-- [ ] Right-click in 3D → Select/Isolate/Hide/Fit/View orientation
-
-### 7.2. Browser `48_context_menu_browser.svg`
-- [ ] Right-click tree node → Rename/Delete/Hide/Isolate/Copy
-
-### 7.3. Sketch `49_context_menu_sketch.svg`
-- [ ] Right-click in sketch → constraint/dimension options
-
-### 7.4. Marking Menu `50_marking_menu.svg` ✅ DONE
-- [x] Space key → 8-direction radial menu (stub with view options)
+### 7.1. Viewport `47` ⬜ NOT STARTED
+### 7.2. Browser `48` ⬜ NOT STARTED
+### 7.3. Sketch `49` ⬜ NOT STARTED
+### 7.4. Marking Menu `50` ✅ DONE (Space key, view options)
 
 ---
 
@@ -493,18 +380,24 @@ All 15 ribbon tabs implemented. Buttons emit MenuAction.
 - [x] Click in 3D → select instance (Ctrl+click → select face)
 - [x] Tree selection syncs with 3D
 - [x] Face selection syncs with tree
+- [x] Face visibility toggle from tree
 - [ ] Box select (drag rectangle)
 - [ ] Select by type (all faces, all edges)
 
 ### 8.2. Undo/Redo ✅ DONE
 - [x] Snapshot-based undo (Vec<(Solid, name)> stack, 50 max)
+- [x] Named operations for timeline
+- [x] Ctrl+Z / Ctrl+Shift+Z
 - [ ] Linear history with branching
 - [ ] History panel with diff
 
-### 8.3. Parameter System ⬜ NOT STARTED
-- [ ] Named parameters (length=100, radius=5)
-- [ ] Formula support (length = width * 2)
+### 8.3. Parameter System ✅ DONE
+- [x] Named parameters (name, value, formula, unit)
+- [x] Formula evaluator (recursive descent: +,-,*,/, parentheses, param refs)
+- [x] Parameter dialog (add/edit/delete, defaults, clear)
+- [x] Re-evaluate formulas on change
 - [ ] Design Table
+- [ ] Dependency Graph
 - [ ] Parameter-driven feature re-evaluation
 
 ### 8.4. Material System 🔄 PARTIAL
@@ -518,84 +411,60 @@ All 15 ribbon tabs implemented. Buttons emit MenuAction.
 - [ ] Layer assignment
 
 ### 8.6. Plugin System ⬜ NOT STARTED
-- [ ] Plugin API (Rust + Python + Lua)
-- [ ] Plugin sandboxing
-
-### 8.7. Theme System ✅ DONE
-- [x] Catppuccin Mocha dark theme
-- [ ] Light theme
-- [ ] Custom theme editor
+### 8.7. Theme System ✅ DONE (Catppuccin Mocha dark)
 
 ---
 
 ## Phase 9: Specialized Workspaces ⬜ NOT STARTED
 
-### 9.1. Visual Programming `03_visual_programming.svg`
-- [ ] Node graph editor (Grasshopper-style)
-
-### 9.2. Surface Modeling `78_workspace_surface_modeling.svg`
-- [ ] Loft/Sweep/Boundary/Fill/Network
-
-### 9.3. Sheet Metal `05_sheetmetal_cam.svg`
-- [ ] Flange/Bend/Hem/Jog/Relief/Unfold/Fold/Flat
-
-### 9.4. CAM `05_sheetmetal_cam.svg`
-- [ ] Stock/Tools/Operations/Simulate/Post
-
-### 9.5. FEA `04_fea_analysis.svg`
-- [ ] Mesh/Study/BC/Load/Solve/Results
-
-### 9.6. Drawing `06_drawing_assembly.svg`
-- [ ] Sheet/Views/Dimensions/Annotations/Export
-
-### 9.7. Assembly `06_drawing_assembly.svg`
-- [ ] Components/Mates/Solve/BOM/Explode/Motion
-
-### 9.8. Point Cloud & RE `80_workflow_point_cloud.svg`, `81_workflow_reverse_engineering.svg`
-- [ ] Import .ply/.xyz/.las, RANSAC, fit primitives, mesh from cloud
-
-### 9.9. Mold Design `22_menu_mold.svg`
-- [ ] Mold base, runner, cooling, ejection, cavity/core
-
-### 9.10. AI Features `25_menu_ai.svg`
-- [ ] Shape from Text, AI Assistant, Smart features, Generative design
+### 9.1. Visual Programming `03` ⬜ NOT STARTED
+### 9.2. Surface Modeling `78` ⬜ NOT STARTED
+### 9.3. Sheet Metal `05` ⬜ NOT STARTED
+### 9.4. CAM `05` ⬜ NOT STARTED
+### 9.5. FEA `04` ⬜ NOT STARTED
+### 9.6. Drawing `06` ⬜ NOT STARTED
+### 9.7. Assembly `06` ⬜ NOT STARTED
+### 9.8. Point Cloud & RE `80`,`81` ⬜ NOT STARTED
+### 9.9. Mold Design `22` ⬜ NOT STARTED
+### 9.10. AI Features `25` ⬜ NOT STARTED
 
 ---
 
 ## Phase 10: Implementation Priority
 
-### Tier 1: Core CAD (NEXT — highest priority)
-1. **Undo/Redo** — snapshot-based (8.2)
-2. **Sketch mode** — drawing tools + constraints (Phase 4)
-3. **Parameter system** — named params + formulas (8.3)
-4. **Insert dialog dimensions** — custom sizes (6.3)
-5. **Measure tools** — distance/angle/length (5.4)
-6. **Section cut** — plane section (5.5)
-7. **Feature timeline** — history + rollback (5.3)
+### Tier 1: Core CAD ✅ ALL DONE
+1. ✅ Undo/Redo — snapshot-based (8.2)
+2. ✅ Sketch mode — 5 drawing tools + grid + extrude (Phase 4)
+3. ✅ Parameter system — named params + formulas (8.3)
+4. ✅ Insert dialog dimensions — custom sizes (6.3)
+5. ✅ Measure tools — distance/angle/length (5.4)
+6. ✅ Section cut — plane X/Y/Z + slider (5.5)
+7. ✅ Feature timeline — history + rollback (5.3)
 
-### Tier 2: Advanced CAD
-8. **Pattern operations** — Linear/Mirror (1.6)
-9. **Loft/Sweep** — requires sketch (1.6)
-10. **Reference geometry** — Plane/Axis/Point (1.4)
-11. **Material assignment** — to faces/bodies (8.4)
-12. **Context menus** — viewport/browser (Phase 7)
+### Tier 2: Advanced CAD 🔄 PARTIAL
+8. ✅ Pattern operations — Linear/Circular/Mirror (1.6)
+9. ✅ Extrude Sketch — Rectangle→Box, Circle→Cylinder (Phase 4)
+10. [ ] Reference geometry — Plane/Axis/Point (1.4)
+11. [ ] Material assignment — to faces/bodies (8.4)
+12. [ ] Context menus — viewport/browser (Phase 7)
+13. [ ] Loft/Sweep — requires sketch profiles (1.6)
 
-### Tier 3: Drawing & Assembly
-13. **Drawing module** — sheets, views, dimensions (1.10)
-14. **Assembly module** — components, mates (1.8)
-15. **BOM editor** (6.26)
+### Tier 3: Drawing & Assembly ⬜ NOT STARTED
+14. [ ] Drawing module — sheets, views, dimensions (1.10)
+15. [ ] Assembly module — components, mates (1.8)
+16. [ ] BOM editor (6.26)
 
-### Tier 4: CAE/CAM
-16. **FEA** — mesh, study, solve, results (1.11)
-17. **CAM** — toolpaths, G-code (1.9)
-18. **Sheet Metal** — flange, bend, flat (1.7)
+### Tier 4: CAE/CAM ⬜ NOT STARTED
+17. [ ] FEA — mesh, study, solve, results (1.11)
+18. [ ] CAM — toolpaths, G-code (1.9)
+19. [ ] Sheet Metal — flange, bend, flat (1.7)
 
-### Tier 5: Ecosystem
-19. **Plugin system** (8.6)
-20. **Scripting** (1.18)
-21. **AI features** (1.19)
-22. **Cloud collaboration** (5.9)
-23. **VR/AR** (Phase 3)
+### Tier 5: Ecosystem ⬜ NOT STARTED
+20. [ ] Plugin system (8.6)
+21. [ ] Scripting (1.18)
+22. [ ] AI features (1.19)
+23. [ ] Cloud collaboration (5.9)
+24. [ ] VR/AR (Phase 3)
 
 ---
 
@@ -604,15 +473,16 @@ All 15 ribbon tabs implemented. Buttons emit MenuAction.
 | Phase | Description | Status |
 |-------|-------------|--------|
 | 0 | Application Shell | ✅ DONE |
-| 1 | Menu Bar (21 menus) | 🔄 PARTIAL (12/21 functional) |
-| 2 | Ribbon (15 tabs) | 🔄 PARTIAL (8/15 functional) |
-| 3 | View Modes | ✅ DONE (3/7 modes) |
-| 4 | Sketch Engine | ⬜ NOT STARTED |
-| 5 | Panels (12) | 🔄 PARTIAL (3/12 functional) |
-| 6 | Dialogs (27) | 🔄 PARTIAL (6/27 functional) |
-| 7 | Context Menus (4) | 🔄 PARTIAL (1/4 — marking menu) |
-| 8 | Core Engine | 🔄 PARTIAL (3/7 features) |
+| 1 | Menu Bar (21 menus) | ✅ 15/21 functional |
+| 2 | Ribbon (15 tabs) | ✅ 10/15 functional |
+| 3 | View Modes | ✅ 3/7 modes |
+| 4 | Sketch Engine | ✅ DONE (5 tools + grid + extrude) |
+| 5 | Panels (12) | ✅ 5/12 functional |
+| 6 | Dialogs (27) | ✅ 6/27 functional |
+| 7 | Context Menus (4) | 🔄 1/4 (marking menu) |
+| 8 | Core Engine | ✅ 5/7 features |
 | 9 | Workspaces (10) | ⬜ NOT STARTED |
-| 10 | Tier 1 Priority | 🔄 IN PROGRESS |
+| 10 | Tier 1 | ✅ ALL DONE |
+| 10 | Tier 2 | 🔄 2/5 done |
 
-**Overall: ~35% of forms have functional наполнение**
+**Overall: ~50% of forms have functional наполнение**
