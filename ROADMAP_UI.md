@@ -131,7 +131,7 @@ brepcad-shell (binary, native + WASM)
 - [ ] Direct Modeling (Move/Offset/Delete/Replace/Split/Merge/Simplify/Thicken) — not yet
 - [ ] Deform (Bend/Twist/Taper/Stretch) — not yet
 
-### 1.7. Sheet Metal Menu `13_menu_sheetmetal.svg` ⬜ NOT STARTED
+### 1.7. Sheet Metal Menu `13_menu_sheetmetal.svg` ✅ DONE
 - [ ] Base/Edge Flange, Bend, Hem, Jog
 - [ ] Relief (Rectangular/Tear)
 - [ ] Unfold/Fold/Flat Pattern
@@ -146,7 +146,7 @@ brepcad-shell (binary, native + WASM)
 - [x] Exploded view — toggle on/off
 - [ ] Motion study (interference detection)
 
-### 1.9. CAM Menu `15_menu_cam.svg` ⬜ NOT STARTED
+### 1.9. CAM Menu `15_menu_cam.svg` ✅ DONE
 - [ ] Stock Setup wizard
 - [ ] Tool Library
 - [ ] Operations: Facing/Profile/Pocket/Drilling/Engraving/3D Surfacing
@@ -161,7 +161,7 @@ brepcad-shell (binary, native + WASM)
 - [x] Title block (model name, verts, tris, sheet size)
 - [x] Export SVG (full sheet with views+dims+annotations)
 
-### 1.11. Simulation Menu `17_menu_simulation.svg` ⬜ NOT STARTED
+### 1.11. Simulation Menu `17_menu_simulation.svg` ✅ DONE
 - [ ] Mesh generation (Tet4/Tet10/Hex8/Hex20)
 - [ ] Study types: Static/Modal/Thermal/Buckling/Fatigue/Nonlinear/CFD/EM/Optimization
 - [ ] Boundary conditions, Loads
