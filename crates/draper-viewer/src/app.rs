@@ -2148,6 +2148,92 @@ impl ViewerApp {
         }
     }
 
+    /// Linear pattern: replicate solid along X axis with count copies + spacing.
+    fn model_linear_pattern(&mut self) {
+        let count = self.pattern_count.max(1).min(20);
+        let spacing = 50.0; // 50mm between copies
+        if let Some(ref solid) = self.current_solid {
+            let mut merged_mesh = triangulate_solid(solid, &tri_params_for_lod(self.lod_level));
+            for i in 1..count {
+                let offset = spacing * i as f64;
+                let mut copy = solid.clone();
+                draper_topology::ShapeBuilder::transform_solid(
+                    &mut copy,
+                    &draper_geometry::Transform::translation(offset, 0.0, 0.0),
+                );
+                let m = triangulate_solid(&copy, &tri_params_for_lod(self.lod_level));
+                merged_mesh.merge(&m);
+            }
+            self.current_nurbs_surface = None;
+            self.detailed_instances.clear();
+            self.instance_triangle_ranges.clear();
+            self.assembly_tree = None;
+            self.load_mesh(merged_mesh, &format!("Linear pattern ×{} ({}mm)", count, spacing));
+        }
+    }
+
+    /// Extrude sketch entities into a 3D solid.
+    /// Creates a box from each rectangle, a cylinder from each circle, etc.
+    fn model_extrude_sketch(&mut self, distance: f64) {
+        if self.brepcad_sketch_entities.is_empty() {
+            self.brepcad_status_msg = "No sketch entities to extrude".to_string();
+            return;
+        }
+        self.brepcad_push_undo_named("Extrude Sketch");
+        let mut merged_mesh = TriangleMesh::new();
+        let plane = self.brepcad_sketch_plane;
+
+        for entity in &self.brepcad_sketch_entities {
+            match entity {
+                BrepcadSketchEntity::Rectangle { p1, p2 } => {
+                    let w = (p2[0] - p1[0]).abs();
+                    let h = (p2[1] - p1[1]).abs();
+                    if w > 1e-6 && h > 1e-6 {
+                        let solid = draper_topology::ShapeBuilder::make_box(w, h, distance);
+                        // Translate to position on sketch plane
+                        let cx = (p1[0] + p2[0]) / 2.0;
+                        let cy = (p1[1] + p2[1]) / 2.0;
+                        let mut s = solid;
+                        let offset = match plane {
+                            0 => draper_geometry::Transform::translation(cx, cy, 0.0),
+                            1 => draper_geometry::Transform::translation(cx, 0.0, cy),
+                            _ => draper_geometry::Transform::translation(0.0, cx, cy),
+                        };
+                        draper_topology::ShapeBuilder::transform_solid(&mut s, &offset);
+                        let m = triangulate_solid(&s, &tri_params_for_lod(self.lod_level));
+                        merged_mesh.merge(&m);
+                        self.current_solid = Some(s);
+                    }
+                }
+                BrepcadSketchEntity::Circle { center, radius } => {
+                    if *radius > 1e-6 {
+                        let solid = draper_topology::ShapeBuilder::make_cylinder(*radius, distance);
+                        let mut s = solid;
+                        let offset = match plane {
+                            0 => draper_geometry::Transform::translation(center[0], center[1], 0.0),
+                            1 => draper_geometry::Transform::translation(center[0], 0.0, center[1]),
+                            _ => draper_geometry::Transform::translation(0.0, center[0], center[1]),
+                        };
+                        draper_topology::ShapeBuilder::transform_solid(&mut s, &offset);
+                        let m = triangulate_solid(&s, &tri_params_for_lod(self.lod_level));
+                        merged_mesh.merge(&m);
+                        self.current_solid = Some(s);
+                    }
+                }
+                _ => {} // Lines/Points/Arcs not extruded in this version
+            }
+        }
+
+        if merged_mesh.triangle_count() > 0 {
+            self.current_nurbs_surface = None;
+            self.detailed_instances.clear();
+            self.instance_triangle_ranges.clear();
+            self.assembly_tree = None;
+            self.load_mesh(merged_mesh, &format!("Extruded sketch ({}mm)", distance));
+            self.brepcad_status_msg = format!("Sketch extruded {}mm", distance);
+        }
+    }
+
     /// Run a GDT check on the current solid's mesh.
     fn model_gdt_check(&mut self) {
         let solid = match &self.current_solid {
@@ -13338,9 +13424,9 @@ impl ViewerApp {
                 "Mesh operations not yet implemented".to_string()
             }
             MenuAction::InsertComponent => "Component insertion not yet implemented".to_string(),
-            MenuAction::InsertLinearPattern => "Linear pattern not yet implemented".to_string(),
-            MenuAction::InsertCircularPattern => { self.model_circular_pattern(); "Circular pattern applied".to_string() }
-            MenuAction::InsertMirror => "Mirror not yet implemented".to_string(),
+            MenuAction::InsertLinearPattern => { self.brepcad_push_undo_named("Linear Pattern"); self.model_linear_pattern(); "Linear pattern applied".to_string() }
+            MenuAction::InsertCircularPattern => { self.brepcad_push_undo_named("Circular Pattern"); self.model_circular_pattern(); "Circular pattern applied".to_string() }
+            MenuAction::InsertMirror => "Mirror: use Modify → Mirror".to_string(),
 
             // ── Modify: Boolean operations ──
             MenuAction::ModifyUnion => { self.brepcad_push_undo_named("Boolean Union"); self.model_boolean_union(); "Boolean union applied".to_string() }
@@ -13354,9 +13440,9 @@ impl ViewerApp {
             MenuAction::ModifyMove => { self.brepcad_push_undo_named("Move +20 X"); self.model_translate(); "Moved +20mm in X".to_string() }
             MenuAction::ModifyRotate => { self.brepcad_push_undo_named("Rotate 15° Z"); self.model_rotate(); "Rotated 15° about Z".to_string() }
             MenuAction::ModifyScale => { self.brepcad_push_undo_named("Scale ×1.1"); self.model_scale(); "Scaled ×1.1".to_string() }
-            MenuAction::ModifyLinearPattern => "Linear pattern not yet implemented".to_string(),
-            MenuAction::ModifyCircularPattern => { self.model_circular_pattern(); "Circular pattern applied".to_string() }
-            MenuAction::ModifyMirror => "Mirror not yet implemented".to_string(),
+            MenuAction::ModifyLinearPattern => { self.brepcad_push_undo_named("Linear Pattern"); self.model_linear_pattern(); "Linear pattern applied".to_string() }
+            MenuAction::ModifyCircularPattern => { self.brepcad_push_undo_named("Circular Pattern"); self.model_circular_pattern(); "Circular pattern applied".to_string() }
+            MenuAction::ModifyMirror => { self.brepcad_push_undo_named("Mirror"); self.model_mirror(); "Mirror applied (YZ plane)".to_string() }
             MenuAction::ModifyMoveFace => { self.model_delete_face(); "Move/Delete face applied".to_string() }
             MenuAction::ModifyOffsetFace => "Offset face not yet implemented".to_string(),
             MenuAction::ModifyDeleteFace => { self.model_delete_face(); "Face deleted".to_string() }
