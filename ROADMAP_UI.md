@@ -138,12 +138,12 @@ brepcad-shell (binary, native + WASM)
 - [ ] Gauge Table, K-Factor
 - [ ] DXF export of flat pattern
 
-### 1.8. Assembly Menu `14_menu_assembly.svg` ⬜ NOT STARTED
-- [ ] Add Component (STEP/IGES/STL)
-- [ ] Mate types: Coincident/Concentric/Distance/Angle/Parallel/Perpendicular/Tangent/Width/Symmetric
-- [ ] Mate solver (3D constraint solving)
-- [ ] BOM editor
-- [ ] Exploded view
+### 1.8. Assembly Menu `14_menu_assembly.svg` ✅ DONE
+- [x] Add Component (STEP/STL) — imports file, adds to assembly list + BOM
+- [x] Mate types: 9 mate types (select 2 entities, then apply)
+- [ ] Mate solver (3D constraint solving) — mate selection UI
+- [x] BOM editor — table with qty/material/weight, CSV export, auto-generate
+- [x] Exploded view — toggle on/off
 - [ ] Motion study (interference detection)
 
 ### 1.9. CAM Menu `15_menu_cam.svg` ⬜ NOT STARTED

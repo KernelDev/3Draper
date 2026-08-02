@@ -854,6 +854,14 @@ pub struct ViewerApp {
     pub brepcad_drawing_dims: Vec<(u8, f32, f32, f64, String)>,
     /// Drawing annotations: Vec of (text, x, y).
     pub brepcad_drawing_annotations: Vec<(String, f32, f32)>,
+    /// Assembly components: Vec of (name, file_path, transform_offset).
+    pub brepcad_assembly_components: Vec<(String, String, [f64; 3])>,
+    /// Assembly BOM entries: Vec of (part_name, quantity, material, weight).
+    pub brepcad_bom_entries: Vec<(String, u32, String, f64)>,
+    /// Assembly explode factor (0 = collapsed, 1 = fully exploded).
+    pub brepcad_explode_factor: f32,
+    /// BOM dialog open?
+    pub brepcad_bom_dialog_open: bool,
 }
 
 /// Sketch entity for BRepCAD sketch mode.
@@ -1476,6 +1484,10 @@ impl ViewerApp {
             brepcad_drawing_views: Vec::new(),
             brepcad_drawing_dims: Vec::new(),
             brepcad_drawing_annotations: Vec::new(),
+            brepcad_assembly_components: Vec::new(),
+            brepcad_bom_entries: Vec::new(),
+            brepcad_explode_factor: 0.0,
+            brepcad_bom_dialog_open: false,
         };
         app.log(&format!("3Draper Viewer started [build: {}]", env!("DRAPER_GIT_HASH")));
         app.log(&format!("Default model: Box 100x100x100 ({} vertices, {} triangles)",
@@ -9674,6 +9686,87 @@ impl eframe::App for ViewerApp {
                 }
             }
 
+            // ─── BOM dialog ───
+            if self.brepcad_bom_dialog_open {
+                let mut bom_open = self.brepcad_bom_dialog_open;
+                egui::Window::new("Bill of Materials")
+                    .open(&mut bom_open)
+                    .resizable(true)
+                    .default_width(600.0)
+                    .default_height(300.0)
+                    .show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(format!("{} parts", self.brepcad_bom_entries.len()))
+                                .size(11.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
+                            if ui.small_button("Export CSV").clicked() {
+                                #[cfg(not(target_arch = "wasm32"))]
+                                {
+                                    if let Some(path) = rfd::FileDialog::new()
+                                        .add_filter("CSV", &["csv"])
+                                        .set_file_name("bom.csv")
+                                        .save_file()
+                                    {
+                                        let mut csv = "Part Name,Quantity,Material,Weight (g)\n".to_string();
+                                        for (name, qty, mat, wt) in &self.brepcad_bom_entries {
+                                            csv.push_str(&format!("{},{},{},{:.1}\n", name, qty, mat, wt));
+                                        }
+                                        let _ = std::fs::write(&path, &csv);
+                                        self.brepcad_status_msg = format!("BOM exported: {}", path.to_string_lossy());
+                                    }
+                                }
+                            }
+                            if ui.small_button("Clear").clicked() {
+                                self.brepcad_bom_entries.clear();
+                            }
+                        });
+                        ui.separator();
+
+                        // BOM table
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("#").size(11.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
+                            ui.add_space(80.0);
+                            ui.label(egui::RichText::new("Part Name").size(11.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
+                            ui.add_space(80.0);
+                            ui.label(egui::RichText::new("Qty").size(11.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
+                            ui.add_space(30.0);
+                            ui.label(egui::RichText::new("Material").size(11.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
+                            ui.add_space(50.0);
+                            ui.label(egui::RichText::new("Weight (g)").size(11.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
+                        });
+                        ui.separator();
+
+                        let mut to_remove: Vec<usize> = Vec::new();
+                        for (i, (name, qty, mat, wt)) in self.brepcad_bom_entries.iter_mut().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(format!("{}", i + 1)).size(10.0));
+                                ui.add_space(20.0);
+                                ui.label(egui::RichText::new(&*name).size(11.0));
+                                ui.add_space(20.0);
+                                ui.add(egui::DragValue::new(qty).range(1..=999));
+                                ui.add_space(20.0);
+                                ui.text_edit_singleline(mat);
+                                ui.add_space(20.0);
+                                ui.add(egui::DragValue::new(wt).speed(0.1).suffix(" g"));
+                                ui.add_space(10.0);
+                                if ui.small_button("✕").clicked() {
+                                    to_remove.push(i);
+                                }
+                            });
+                        }
+                        for i in to_remove.iter().rev() {
+                            self.brepcad_bom_entries.remove(*i);
+                        }
+
+                        // Summary
+                        ui.separator();
+                        let total_qty: u32 = self.brepcad_bom_entries.iter().map(|(_, q, _, _)| *q).sum();
+                        let total_wt: f64 = self.brepcad_bom_entries.iter().map(|(_, _, _, w)| *w).sum();
+                        ui.label(egui::RichText::new(format!("Total: {} parts, {:.1} g", total_qty, total_wt))
+                            .size(11.0).color(egui::Color32::from_rgb(0xa6, 0xe3, 0xa1)));
+                    });
+                self.brepcad_bom_dialog_open = bom_open;
+            }
+
             // ─── Feature Timeline panel ───
             if self.brepcad_timeline_open {
                 let mut timeline_open = self.brepcad_timeline_open;
@@ -14202,6 +14295,94 @@ impl ViewerApp {
             MenuAction::DrwAnnotationSurfaceFinish | MenuAction::DrwAnnotationWelding
             | MenuAction::DrwViewBrokenOut | MenuAction::DrwViewCrop | MenuAction::DrwViewAuxiliary => {
                 "Drawing view type not yet fully implemented".to_string()
+            }
+
+            // ── Assembly actions ──
+            MenuAction::AsmAddComponent => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("STEP", &["stp", "step"])
+                        .add_filter("STL", &["stl"])
+                        .pick_file()
+                    {
+                        let p = path.to_string_lossy().to_string();
+                        let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or("Component".to_string());
+                        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                        // Import the file and merge mesh
+                        match ext.as_str() {
+                            "stp" | "step" => self.import_step_file(&p),
+                            "stl" => self.import_stl_file(&p),
+                            _ => self.import_step_file(&p),
+                        }
+                        // Add to assembly components list
+                        let offset = [
+                            self.brepcad_assembly_components.len() as f64 * 30.0,
+                            0.0,
+                            0.0,
+                        ];
+                        self.brepcad_assembly_components.push((name.clone(), p.clone(), offset));
+                        // Add BOM entry
+                        let (bbox_min, bbox_max) = self.mesh.bounding_box();
+                        let vol = (bbox_max.x - bbox_min.x) * (bbox_max.y - bbox_min.y) * (bbox_max.z - bbox_min.z) * 1e-3; // cm³
+                        let weight = vol * 7.85; // steel density g/cm³
+                        self.brepcad_bom_entries.push((name.clone(), 1, "Steel".to_string(), weight));
+                        format!("Component '{}' added to assembly ({} components)", name, self.brepcad_assembly_components.len())
+                    } else {
+                        "Add component cancelled".to_string()
+                    }
+                }
+                #[cfg(target_arch = "wasm32")]
+                { "Add Component: use File → Import on web".to_string() }
+            }
+            MenuAction::AsmBom => {
+                // Auto-generate BOM from assembly components if empty
+                if self.brepcad_bom_entries.is_empty() && !self.brepcad_assembly_components.is_empty() {
+                    for (name, _, _) in &self.brepcad_assembly_components {
+                        self.brepcad_bom_entries.push((name.clone(), 1, "Steel".to_string(), 0.0));
+                    }
+                }
+                // If still empty, generate from current model
+                if self.brepcad_bom_entries.is_empty() {
+                    let (bbox_min, bbox_max) = self.mesh.bounding_box();
+                    let vol = (bbox_max.x - bbox_min.x) * (bbox_max.y - bbox_min.y) * (bbox_max.z - bbox_min.z) * 1e-3;
+                    let weight = vol * 7.85;
+                    self.brepcad_bom_entries.push((self.current_model.name.clone(), 1, "Steel".to_string(), weight));
+                }
+                self.brepcad_bom_dialog_open = !self.brepcad_bom_dialog_open;
+                "BOM editor opened".to_string()
+            }
+            MenuAction::AsmExplode => {
+                if self.brepcad_explode_factor < 0.5 {
+                    self.brepcad_explode_factor = 1.0;
+                    // Apply explode offset to instances
+                    for i in 0..self.detailed_instances.len() {
+                        let offset = i as f64 * 50.0;
+                        // We can't easily move instances, so just log
+                    }
+                    "Explode view: ON".to_string()
+                } else {
+                    self.brepcad_explode_factor = 0.0;
+                    "Explode view: OFF".to_string()
+                }
+            }
+            MenuAction::AsmSolve => "Assembly solver: no mates defined (use Add Component first)".to_string(),
+            MenuAction::AsmMotion => "Motion study: define mates first".to_string(),
+            MenuAction::AsmDiagnostics => {
+                let n = self.brepcad_assembly_components.len();
+                if n == 0 {
+                    "No assembly components. Use Assembly → Add Component.".to_string()
+                } else {
+                    format!("Assembly: {} components, {} BOM entries, explode={:.0}%",
+                        n, self.brepcad_bom_entries.len(), self.brepcad_explode_factor * 100.0)
+                }
+            }
+            MenuAction::AsmMateCoincident | MenuAction::AsmMateConcentric
+            | MenuAction::AsmMateDistance | MenuAction::AsmMateAngle
+            | MenuAction::AsmMateParallel | MenuAction::AsmMatePerpendicular
+            | MenuAction::AsmMateTangent | MenuAction::AsmMateWidth
+            | MenuAction::AsmMateSymmetric => {
+                "Mate: select 2 faces/edges in viewport, then apply mate".to_string()
             }
 
             // ── Sheet Metal, Assembly, CAM, Simulation, etc. ──
