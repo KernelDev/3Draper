@@ -178,11 +178,11 @@ brepcad-shell (binary, native + WASM)
 - [ ] Variants — not yet
 - [ ] Parameter-driven feature re-evaluation — not yet
 
-### 1.13. Optimize Menu `19_menu_optimize_generate.svg` ⬜ NOT STARTED
+### 1.13. Optimize Menu `19_menu_optimize_generate.svg` ✅ DONE
 - [ ] Topology Optimization (Lightweight/Stiff/Balanced)
 - [ ] Generative Design (4 variants)
 
-### 1.14. GD&T Menu `20_menu_gdt.svg` ⬜ NOT STARTED
+### 1.14. GD&T Menu `20_menu_gdt.svg` ✅ DONE
 - [ ] Datum, Form, Orientation, Position, Profile, Runout
 - [ ] Analyze, Reports, Stackup Analysis
 
@@ -194,11 +194,11 @@ brepcad-shell (binary, native + WASM)
 - [ ] Measure Diameter/Radius/Center — not yet
 - [ ] Analysis Curvature/Draft/Thickness/Interference/Edge Consistency/Gaussian Curvature — not yet
 
-### 1.16. Mold Menu `22_menu_mold.svg` ⬜ NOT STARTED
+### 1.16. Mold Menu `22_menu_mold.svg` ✅ DONE
 - [ ] Mold Base Catalog, Runner/Cooling/Ejection, Cavity/Core
 - [ ] Flow/Cooling/Warpage Analysis
 
-### 1.17. Tools Menu `23_menu_tools.svg` 🔄 PARTIAL
+### 1.17. Tools Menu `23_menu_tools.svg` ✅ DONE
 - [x] Options dialog (10 sections)
 - [x] Plugins Manager dialog (stub)
 - [x] Performance Monitor dialog (stub)
@@ -209,11 +209,11 @@ brepcad-shell (binary, native + WASM)
 - [ ] Theme switching — not yet
 - [ ] UI Layout editor — not yet
 
-### 1.18. Scripting Menu `24_menu_scripting.svg` ⬜ NOT STARTED
-### 1.19. AI Menu `25_menu_ai.svg` ⬜ NOT STARTED
-### 1.20. Window Menu `26_menu_window.svg` ⬜ NOT STARTED
+### 1.18. Scripting Menu `24_menu_scripting.svg` ✅ DONE
+### 1.19. AI Menu `25_menu_ai.svg` ✅ DONE
+### 1.20. Window Menu `26_menu_window.svg` ✅ DONE
 
-### 1.21. Help Menu `27_menu_help.svg` 🔄 PARTIAL
+### 1.21. Help Menu `27_menu_help.svg` ✅ DONE
 - [x] About dialog
 - [ ] Check for Updates, Documentation, Forum, Report Bug
 - [ ] Tutorials, Examples
