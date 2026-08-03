@@ -20,11 +20,16 @@ impl ViewOrientation {
             ViewOrientation::Right => "RIGHT", ViewOrientation::Dimetric => "DIM",
         }
     }
+    /// Direction FROM camera TO target for `look_from_direction`.
+    /// The cube widget labels the face at +Z as "FRONT", so clicking FRONT
+    /// must place the camera at +Z looking toward -Z → direction = [0,0,-1].
+    /// The previous values had Front/Back inverted (Front returned [0,0,1]
+    /// which placed the camera at -Z, looking at the BACK face).
     pub fn direction(&self) -> [f32; 3] {
         match self {
             ViewOrientation::Iso => { let d=45.0_f32.to_radians(); let e=35.264_f32.to_radians(); [-e.cos()*d.sin(), -e.sin(), e.cos()*d.cos()] }
-            ViewOrientation::Front => [0.0, 0.0, 1.0],
-            ViewOrientation::Back => [0.0, 0.0, -1.0],
+            ViewOrientation::Front => [0.0, 0.0, -1.0],
+            ViewOrientation::Back => [0.0, 0.0, 1.0],
             ViewOrientation::Top => [0.0, -1.0, 0.0],
             ViewOrientation::Bottom => [0.0, 1.0, 0.0],
             ViewOrientation::Left => [1.0, 0.0, 0.0],
@@ -115,7 +120,10 @@ pub fn render_view_cube_in_viewport(
         let delta = dr.drag_delta();
         if delta.length_sq() > 0.5 {
             state.azimuth += delta.x * 0.7;
-            state.elevation = (state.elevation + delta.y * 0.7).max(-85.0).min(85.0);
+            // Negate delta.y so dragging UP increases elevation (camera goes
+            // higher, sees more of TOP) and dragging DOWN decreases it.
+            // Without this, the vertical drag direction is inverted.
+            state.elevation = (state.elevation - delta.y * 0.7).max(-85.0).min(85.0);
             state.dragging = true;
         }
     }
@@ -156,28 +164,42 @@ pub fn render_view_cube_in_viewport(
             egui::FontId::proportional(8.0), tc);
     }
 
-    // ─── 3D CUBE (correct isometric projection) ───
-    // Use rotation matrices: first rotate around Y (azimuth), then around X (elevation)
+    // ─── 3D CUBE (isometric projection matching main camera convention) ───
+    //
+    // The cube widget must show the SAME faces that the main camera sees.
+    // The main camera for ISO (az=45, el=35.264) is at position [+X, +Y, -Z]
+    // and sees TOP(+Y), BACK(-Z), RIGHT(+X).
+    //
+    // The widget's internal camera is at +Z looking toward -Z. Without
+    // correction, rotating the cube by +az/+el makes the widget show
+    // TOP/FRONT/LEFT — the OPPOSITE of what the main camera sees — because
+    // the widget's camera is on the opposite side of the cube from the main
+    // camera.
+    //
+    // Fix: negate X and Z of every vertex/normal before rotating. This is
+    // equivalent to rotating the cube 180° around Y, which swaps FRONT↔BACK
+    // and LEFT↔RIGHT, aligning the widget's visible faces with the main
+    // camera's view.
     let az_rad = state.azimuth.to_radians();
     let el_rad = state.elevation.to_radians();
 
-    // Proper 3D rotation: Y-azimuth then X-elevation, then orthographic project (drop Z)
     let project = |x: f32, y: f32, z: f32| -> egui::Pos2 {
+        // Negate X and Z to match main camera convention (see comment above)
+        let x = -x;
+        let z = -z;
         // Rotate around Y axis (azimuth)
         let cos_a = az_rad.cos();
         let sin_a = az_rad.sin();
         let x1 = x * cos_a + z * sin_a;
         let z1 = -x * sin_a + z * cos_a;
         let y1 = y;
-
         // Rotate around X axis (elevation)
         let cos_e = el_rad.cos();
         let sin_e = el_rad.sin();
         let y2 = y1 * cos_e - z1 * sin_e;
-        let z2 = y1 * sin_e + z1 * cos_e;
+        let _z2 = y1 * sin_e + z1 * cos_e;
         let x2 = x1;
-
-        // Orthographic projection: x → screen_x, y → screen_y (z is depth, ignored)
+        // Orthographic projection: x → screen_x, y → screen_y (z is depth, dropped)
         egui::pos2(center.x + x2 * cube_half, center.y - y2 * cube_half)
     };
 
@@ -203,27 +225,23 @@ pub fn render_view_cube_in_viewport(
     let c_text_h  = egui::Color32::WHITE;
     let edge_stroke = egui::Stroke::new(1.5_f32, c_edge);
 
-    // Determine which faces are visible based on current rotation.
-    // The camera sits at +Z looking toward -Z (orthographic projection drops Z).
-    // A face is visible (front-facing) iff its rotated normal points TOWARD the
-    // camera, i.e. the normal's rotated Z-component is POSITIVE (z2 > 0).
-    // Face normals (before rotation):
-    // Top: (0,1,0), Bottom: (0,-1,0), Front: (0,0,1), Back: (0,0,-1), Left: (-1,0,0), Right: (1,0,0)
+    // Determine which faces are visible. The widget camera is at +Z looking
+    // toward -Z. A face is visible iff its rotated normal points toward +Z
+    // (z2 > 0). We negate nx and nz (same as in `project`) to align the
+    // widget's visible faces with the main camera's view.
+    // Face normals (before negation):
+    // Top: (0,1,0), Bottom: (0,-1,0), Front: (0,0,1), Back: (0,0,-1),
+    // Left: (-1,0,0), Right: (1,0,0)
     let face_visibility = |nx: f32, ny: f32, nz: f32| -> bool {
-        // Rotate normal the same way as vertices (Y-azimuth then X-elevation)
+        let nx = -nx;
+        let nz = -nz;
         let cos_a = az_rad.cos();
         let sin_a = az_rad.sin();
-        let x1 = nx * cos_a + nz * sin_a;
         let z1 = -nx * sin_a + nz * cos_a;
         let y1 = ny;
         let cos_e = el_rad.cos();
         let sin_e = el_rad.sin();
         let z2 = y1 * sin_e + z1 * cos_e;
-        // Camera at +Z: visible iff normal's Z-component points toward +Z (z2 > 0).
-        // The previous `z2 < 0.0` was inverted, which caused the cube to render
-        // "inside-out" — back faces were drawn with labels/hover while front
-        // faces were treated as hidden, making the cube appear transparent and
-        // clicks miss the visible faces.
         z2 > 0.0
     };
 
@@ -254,6 +272,9 @@ pub fn render_view_cube_in_viewport(
                     6 => (1.0, -1.0, 1.0),   7 => (-1.0, -1.0, 1.0),
                     _ => (0.0, 0.0, 0.0),
                 };
+                // Negate X and Z to match the project / face_visibility convention
+                let x = -x;
+                let z = -z;
                 let x1 = x * cos_a + z * sin_a;
                 let z1 = -x * sin_a + z * cos_a;
                 let y1 = y;
