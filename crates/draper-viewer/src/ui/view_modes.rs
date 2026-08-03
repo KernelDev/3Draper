@@ -68,11 +68,20 @@ pub fn render_view_cube_in_viewport(
         viewport_rect.top() + ring_r + margin,
     );
 
-    // Allocate interaction areas
+    // Allocate interaction areas.
+    //
+    // IMPORTANT: allocate the LARGER ring_resp FIRST and the smaller cube_resp
+    // SECOND. In egui, a later `allocate_rect` is layered ON TOP and claims
+    // pointer interaction over earlier ones. Previously the order was reversed
+    // (cube first, then ring), so the ring — which fully contains the cube —
+    // was on top and intercepted every click over the cube. That made
+    // `cube_resp.clicked()` always return false, so clicking a face did
+    // nothing. Allocating cube_resp last lets it receive clicks over its area,
+    // while ring_resp still gets drags starting in the ring (outside the cube).
     let cube_rect = egui::Rect::from_center_size(center, egui::vec2(cube_half * 3.0, cube_half * 3.0));
-    let cube_resp = ui.allocate_rect(cube_rect, egui::Sense::click_and_drag());
     let ring_rect = egui::Rect::from_center_size(center, egui::vec2(ring_r * 2.2, ring_r * 2.2));
     let ring_resp = ui.allocate_rect(ring_rect, egui::Sense::click_and_drag());
+    let cube_resp = ui.allocate_rect(cube_rect, egui::Sense::click_and_drag());
     let home_rect = egui::Rect::from_center_size(
         egui::pos2(center.x, center.y + ring_r + 16.0),
         egui::vec2(55.0, 18.0),
@@ -194,13 +203,14 @@ pub fn render_view_cube_in_viewport(
     let c_text_h  = egui::Color32::WHITE;
     let edge_stroke = egui::Stroke::new(1.5_f32, c_edge);
 
-    // Determine which faces are visible based on current rotation
-    // Compute face normals and check if they point toward viewer
+    // Determine which faces are visible based on current rotation.
+    // The camera sits at +Z looking toward -Z (orthographic projection drops Z).
+    // A face is visible (front-facing) iff its rotated normal points TOWARD the
+    // camera, i.e. the normal's rotated Z-component is POSITIVE (z2 > 0).
     // Face normals (before rotation):
     // Top: (0,1,0), Bottom: (0,-1,0), Front: (0,0,1), Back: (0,0,-1), Left: (-1,0,0), Right: (1,0,0)
-    // After rotation, the Z-component of the normal determines visibility (positive = visible)
     let face_visibility = |nx: f32, ny: f32, nz: f32| -> bool {
-        // Rotate normal the same way as vertices
+        // Rotate normal the same way as vertices (Y-azimuth then X-elevation)
         let cos_a = az_rad.cos();
         let sin_a = az_rad.sin();
         let x1 = nx * cos_a + nz * sin_a;
@@ -208,13 +218,13 @@ pub fn render_view_cube_in_viewport(
         let y1 = ny;
         let cos_e = el_rad.cos();
         let sin_e = el_rad.sin();
-        let _y2 = y1 * cos_e - z1 * sin_e;
         let z2 = y1 * sin_e + z1 * cos_e;
-        let _x2 = x1;
-        // After rotation, z2 > 0 means the face normal points toward viewer
-        // But our projection drops z, so viewer looks along -z (into screen)
-        // Face is visible if its normal has z2 > 0 (points toward camera)
-        z2 < 0.0 // Camera looks from +z toward -z, so visible faces have z2 < 0
+        // Camera at +Z: visible iff normal's Z-component points toward +Z (z2 > 0).
+        // The previous `z2 < 0.0` was inverted, which caused the cube to render
+        // "inside-out" — back faces were drawn with labels/hover while front
+        // faces were treated as hidden, making the cube appear transparent and
+        // clicks miss the visible faces.
+        z2 > 0.0
     };
 
     let faces = [
@@ -254,8 +264,12 @@ pub fn render_view_cube_in_viewport(
             visible_faces.push((i, *idx, *label, *color, *orient, avg_z));
         }
     }
-    // Sort back to front (higher z2 = farther = drawn first)
-    visible_faces.sort_by(|a, b| b.5.partial_cmp(&a.5).unwrap_or(std::cmp::Ordering::Equal));
+    // Sort visible faces ASCENDING by depth (z2) so the FARTHEST face is drawn
+    // first and the NEAREST face is drawn LAST (painter's algorithm).
+    // Camera is at +Z, so higher z2 = closer to camera. Drawing far-first lets
+    // near faces correctly overlay far faces. The previous descending sort
+    // drew near faces first, causing them to be covered by far faces.
+    visible_faces.sort_by(|a, b| a.5.partial_cmp(&b.5).unwrap_or(std::cmp::Ordering::Equal));
 
     // Draw hidden faces first (dimmed)
     let hidden_indices: Vec<usize> = faces.iter().enumerate()
