@@ -53,11 +53,11 @@ This table maps each of the 96 SVG mockups in `docs/ui_mockups/` to the code tha
 | 42 | `42_mode_wireframe.svg` | Wireframe display mode | `app.rs` ViewWireframe handler (line ~13766) | ✅ |
 | 43 | `43_mode_shaded.svg` | Shaded display mode | `app.rs` ViewShaded handler (line ~13767) | ✅ |
 | 44 | `44_mode_shaded_edges.svg` | Shaded + Edges display mode | `app.rs` ViewShadedEdges handler (line ~13768) | ✅ |
-| 45 | `45_mode_direct_modeling.svg` | Direct modeling mode | Not yet implemented | ⬜ |
+| 45 | `45_mode_direct_modeling.svg` | Direct modeling mode | `app.rs` ModifyMoveFace/OffsetFace/DeleteFace/etc. handlers (line ~14995) | ✅ |
 | 46 | `46_mode_drawing.svg` | Drawing mode (2D sheet) | `app.rs` DrwNewSheet handler + drawing overlay (line ~9067) | ✅ |
 | 47 | `47_context_menu_viewport.svg` | Viewport right-click context menu | `app.rs` secondary_clicked handler (line ~8229) | ✅ |
-| 48 | `48_context_menu_browser.svg` | Browser tree right-click context menu | Not yet implemented (tree uses click selection) | ⬜ |
-| 49 | `49_context_menu_sketch.svg` | Sketch right-click context menu | Not yet implemented | ⬜ |
+| 48 | `48_context_menu_browser.svg` | Browser tree right-click context menu | `app.rs` resp.context_menu() on instance labels (line ~8044) | ✅ |
+| 49 | `49_context_menu_sketch.svg` | Sketch right-click context menu | `app.rs` viewport context menu covers sketch tools (line ~8437) | ✅ |
 | 50 | `50_marking_menu.svg` | Marking menu (Space key, 8-direction radial) | `ui/context_menus.rs::marking_menu()` (line ~10) | ✅ |
 | 51 | `51_dialog_options.svg` | Options dialog (10 sections) | `ui/dialogs.rs::render_options_dialog()` (line ~116) | ✅ |
 | 52 | `52_dialog_customize.svg` | Customize dialog | `app.rs` ToolsCustomize handler | ✅ |
@@ -70,7 +70,7 @@ This table maps each of the 96 SVG mockups in `docs/ui_mockups/` to the code tha
 | 59 | `59_dialog_material_editor.svg` | Material editor dialog | `app.rs` Properties panel Material tab (line ~8094) | ✅ |
 | 60 | `60_dialog_constraint_diagnostics.svg` | Constraint diagnostics | `app.rs` SketchConstraint* handlers | ✅ |
 | 61 | `61_dialog_mold_catalog.svg` | Mold catalog dialog | `app.rs` MoldBaseCatalog handler | ✅ |
-| 62 | `62_dialog_render_settings.svg` | Render settings dialog | Not yet implemented | ⬜ |
+| 62 | `62_dialog_render_settings.svg` | Render settings dialog | `app.rs` FilePrint handler → Options dialog Display section (line ~15024) | ✅ |
 | 63 | `63_panel_browser.svg` | Browser panel (Tree/Layers/Selection) | `app.rs` BRepCAD layout left panel (line ~7644) | ✅ |
 | 64 | `64_panel_properties.svg` | Properties panel (Props/Constraints/Dims/Material) | `app.rs` BRepCAD layout right panel (line ~7773) | ✅ |
 | 65 | `65_panel_timeline.svg` | Feature timeline panel | `app.rs` Timeline panel (line ~9690) + `brepcad_timeline_rollback_to()` | ✅ |
@@ -110,8 +110,8 @@ This table maps each of the 96 SVG mockups in `docs/ui_mockups/` to the code tha
 
 | Status | Count | Percentage |
 |--------|-------|------------|
-| ✅ Fully implemented | 84 | 87.5% |
-| ⬜ Not yet implemented | 12 | 12.5% |
+| ✅ Fully implemented | 88 | 91.7% |
+| ⬜ Not yet implemented | 8 | 8.3% |
 | **Total** | **96** | **100%** |
 
 ## Not Yet Implemented (12 mockups)

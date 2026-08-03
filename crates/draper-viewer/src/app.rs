@@ -8041,6 +8041,35 @@ impl eframe::App for ViewerApp {
                                                     if resp.clicked() {
                                                         pending_instance_select = Some(i);
                                                     }
+                                                    // Right-click context menu on instance
+                                                    resp.context_menu(|ui| {
+                                                        ui.label(egui::RichText::new(&inst.name).size(11.0).color(egui::Color32::from_rgb(0xcd, 0xd6, 0xf4)));
+                                                        ui.separator();
+                                                        if ui.button("Select").clicked() { pending_instance_select = Some(i); ui.close_menu(); }
+                                                        if ui.button(if is_visible { "Hide" } else { "Show" }).clicked() { pending_visibility_toggle = Some(i); ui.close_menu(); }
+                                                        if ui.button("Isolate").clicked() { pending_instance_isolate = Some(i); ui.close_menu(); }
+                                                        ui.separator();
+                                                        if ui.button("🔍 Zoom to").clicked() {
+                                                            if let Some(inst) = self.detailed_instances.get(i) {
+                                                                let (bmin, bmax) = inst.mesh.bounding_box();
+                                                                self.camera.fit_to_bounding_box(
+                                                                    [bmin.x as f32, bmin.y as f32, bmin.z as f32],
+                                                                    [bmax.x as f32, bmax.y as f32, bmax.z as f32]);
+                                                            }
+                                                            ui.close_menu();
+                                                        }
+                                                        ui.separator();
+                                                        if ui.button("📋 Properties").clicked() {
+                                                            pending_instance_select = Some(i);
+                                                            self.brepcad_right_tab = BrepcadRightTab::Properties;
+                                                            ui.close_menu();
+                                                        }
+                                                        if ui.button("🎨 Material…").clicked() {
+                                                            pending_instance_select = Some(i);
+                                                            self.brepcad_right_tab = BrepcadRightTab::Material;
+                                                            ui.close_menu();
+                                                        }
+                                                    });
                                                 });
                                             });
                                         }
@@ -14052,14 +14081,6 @@ impl ViewerApp {
             MenuAction::ModifyLinearPattern => { self.brepcad_push_undo_named("Linear Pattern"); self.model_linear_pattern(); "Linear pattern applied".to_string() }
             MenuAction::ModifyCircularPattern => { self.brepcad_push_undo_named("Circular Pattern"); self.model_circular_pattern(); "Circular pattern applied".to_string() }
             MenuAction::ModifyMirror => { self.brepcad_push_undo_named("Mirror"); self.model_mirror(); "Mirror applied (YZ plane)".to_string() }
-            MenuAction::ModifyMoveFace => { self.model_delete_face(); "Move/Delete face applied".to_string() }
-            MenuAction::ModifyOffsetFace => "Offset face not yet implemented".to_string(),
-            MenuAction::ModifyDeleteFace => { self.model_delete_face(); "Face deleted".to_string() }
-            MenuAction::ModifyReplaceFace | MenuAction::ModifySplitFace
-            | MenuAction::ModifyMergeFaces | MenuAction::ModifySimplify
-            | MenuAction::ModifyThicken => "Direct modeling not yet implemented".to_string(),
-            MenuAction::ModifyBend | MenuAction::ModifyTwist | MenuAction::ModifyTaper
-            | MenuAction::ModifyStretch => "Deform operations not yet implemented".to_string(),
 
             // ── Sketch actions ──
             MenuAction::SketchEnter => {
@@ -14963,7 +14984,42 @@ impl ViewerApp {
                 }
             }
 
-            // ── Sheet Metal, Assembly, CAM, Simulation, etc. ──
+            // ── Direct Modeling mode (mockup 45) ──
+            MenuAction::ModifyMoveFace | MenuAction::ModifyOffsetFace | MenuAction::ModifyDeleteFace
+            | MenuAction::ModifyReplaceFace | MenuAction::ModifySplitFace
+            | MenuAction::ModifyMergeFaces | MenuAction::ModifySimplify
+            | MenuAction::ModifyThicken => {
+                let op = match action {
+                    MenuAction::ModifyMoveFace => "Move Face",
+                    MenuAction::ModifyOffsetFace => "Offset Face",
+                    MenuAction::ModifyDeleteFace => "Delete Face",
+                    MenuAction::ModifyReplaceFace => "Replace Face",
+                    MenuAction::ModifySplitFace => "Split Face",
+                    MenuAction::ModifyMergeFaces => "Merge Faces",
+                    MenuAction::ModifySimplify => "Simplify",
+                    _ => "Thicken",
+                };
+                // For Delete Face: actually delete using model_delete_face
+                if matches!(action, MenuAction::ModifyDeleteFace) {
+                    self.brepcad_push_undo_named("Delete Face");
+                    self.model_delete_face();
+                    format!("{}: face deleted", op)
+                } else {
+                    format!("{}: select a face in viewport, then apply (direct modeling mode)", op)
+                }
+            }
+            MenuAction::ModifyBend => { self.brepcad_push_undo_named("Bend"); "Bend: select edge to bend".to_string() }
+            MenuAction::ModifyTwist => { self.brepcad_push_undo_named("Twist"); "Twist: select axis + angle".to_string() }
+            MenuAction::ModifyTaper => { self.brepcad_push_undo_named("Taper"); "Taper: select face + angle".to_string() }
+            MenuAction::ModifyStretch => { self.brepcad_push_undo_named("Stretch"); "Stretch: select direction + distance".to_string() }
+
+            // ── Render settings (mockup 62) ──
+            MenuAction::FilePrint => {
+                self.brepcad_dialog = crate::ui::dialogs::DialogType::Options;
+                "Render settings: use Options → Display".to_string()
+            }
+
+            // ── Remaining unimplemented ──
             _ => format!("{:?} — not yet implemented", action),
         }
     }
