@@ -14002,9 +14002,45 @@ impl ViewerApp {
             MenuAction::InsertMirror => "Mirror: use Modify → Mirror".to_string(),
 
             // ── Modify: Boolean operations ──
-            MenuAction::ModifyUnion => { self.brepcad_push_undo_named("Boolean Union"); self.model_boolean_union(); "Boolean union applied".to_string() }
-            MenuAction::ModifySubtract => { self.brepcad_push_undo_named("Boolean Subtract"); self.model_boolean_subtract(); "Boolean subtract applied".to_string() }
-            MenuAction::ModifyIntersect => { self.brepcad_push_undo_named("Boolean Intersect"); self.model_boolean_intersect(); "Boolean intersect applied".to_string() }
+            MenuAction::ModifyUnion => {
+                self.brepcad_push_undo_named("Boolean Union");
+                if self.secondary_solid.is_none() && self.current_solid.is_some() {
+                    "Boolean Union: insert a second primitive first, then Union".to_string()
+                } else {
+                    self.model_boolean_union();
+                    if self.current_solid.is_some() {
+                        "Boolean union: A ∪ B completed".to_string()
+                    } else {
+                        "Boolean union: failed (check solids overlap)".to_string()
+                    }
+                }
+            }
+            MenuAction::ModifySubtract => {
+                self.brepcad_push_undo_named("Boolean Subtract");
+                if self.secondary_solid.is_none() && self.current_solid.is_some() {
+                    "Boolean Subtract: insert a second primitive first, then Subtract".to_string()
+                } else {
+                    self.model_boolean_subtract();
+                    if self.current_solid.is_some() {
+                        "Boolean subtract: A − B completed".to_string()
+                    } else {
+                        "Boolean subtract: failed (check solids overlap)".to_string()
+                    }
+                }
+            }
+            MenuAction::ModifyIntersect => {
+                self.brepcad_push_undo_named("Boolean Intersect");
+                if self.secondary_solid.is_none() && self.current_solid.is_some() {
+                    "Boolean Intersect: insert a second primitive first, then Intersect".to_string()
+                } else {
+                    self.model_boolean_intersect();
+                    if self.current_solid.is_some() {
+                        "Boolean intersect: A ∩ B completed".to_string()
+                    } else {
+                        "Boolean intersect: failed (check solids overlap)".to_string()
+                    }
+                }
+            }
             MenuAction::ModifyFillet => { self.brepcad_push_undo_named("Fillet Edge"); self.model_fillet_edge(); "Fillet applied to first manifold edge".to_string() }
             MenuAction::ModifyChamfer => { self.brepcad_push_undo_named("Chamfer Edge"); self.model_chamfer_edge(); "Chamfer applied to first manifold edge".to_string() }
             MenuAction::ModifyLoft | MenuAction::ModifySweep => {
@@ -14943,50 +14979,67 @@ impl ViewerApp {
                     .map(|i| values.get(i).copied().unwrap_or(params[i].1))
                     .collect();
 
-                let solid = match pt {
+                // Create the new solid
+                let (solid, label) = match pt {
                     PrimitiveType::Box => {
                         let (w, h, d) = (v[0], v[1], v[2]);
-                        let s = ShapeBuilder::make_box(w, h, d);
-                        let m = triangulate_solid(&s, &tri_params_for_lod(self.lod_level));
-                        self.load_mesh(m, &format!("Box {:.0}x{:.0}x{:.0}", w, h, d));
-                        s
+                        (ShapeBuilder::make_box(w, h, d), format!("Box {:.0}x{:.0}x{:.0}", w, h, d))
                     }
                     PrimitiveType::Sphere => {
                         let r = v[0];
-                        let s = ShapeBuilder::make_sphere(r);
-                        let m = triangulate_solid(&s, &tri_params_for_lod(self.lod_level));
-                        self.load_mesh(m, &format!("Sphere R={:.0}", r));
-                        s
+                        (ShapeBuilder::make_sphere(r), format!("Sphere R={:.0}", r))
                     }
                     PrimitiveType::Cylinder => {
                         let (r, h) = (v[0], v[1]);
-                        let s = ShapeBuilder::make_cylinder(r, h);
-                        let m = triangulate_solid(&s, &tri_params_for_lod(self.lod_level));
-                        self.load_mesh(m, &format!("Cylinder R={:.0} H={:.0}", r, h));
-                        s
+                        (ShapeBuilder::make_cylinder(r, h), format!("Cylinder R={:.0} H={:.0}", r, h))
                     }
                     PrimitiveType::Cone => {
                         let (br, _tr, h) = (v[0], v[1], v[2]);
                         let half_angle = (br / h).atan();
-                        let s = ShapeBuilder::make_cone(br, h, half_angle);
-                        let m = triangulate_solid(&s, &tri_params_for_lod(self.lod_level));
-                        self.load_mesh(m, &format!("Cone R={:.0} H={:.0}", br, h));
-                        s
+                        (ShapeBuilder::make_cone(br, h, half_angle), format!("Cone R={:.0} H={:.0}", br, h))
                     }
                     PrimitiveType::Torus => {
                         let (mr, nr) = (v[0], v[1]);
-                        let s = ShapeBuilder::make_torus(mr, nr);
-                        let m = triangulate_solid(&s, &tri_params_for_lod(self.lod_level));
-                        self.load_mesh(m, &format!("Torus R={:.0} r={:.0}", mr, nr));
-                        s
+                        (ShapeBuilder::make_torus(mr, nr), format!("Torus R={:.0} r={:.0}", mr, nr))
                     }
                 };
+
+                // Triangulate the new solid
+                let new_mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
+
+                // If there's an existing solid, MERGE meshes (don't replace!)
+                // and capture the old solid as secondary for boolean ops
+                if self.current_solid.is_some() {
+                    // Capture old solid as secondary (for boolean operations)
+                    self.secondary_solid = self.current_solid.clone();
+
+                    // Merge new mesh into existing mesh
+                    self.mesh.merge(&new_mesh);
+                    self.current_model.vertex_count = self.mesh.vertex_count();
+                    self.current_model.triangle_count = self.mesh.triangle_count();
+                    self.current_model.name = format!("{} + {}", self.current_model.name, label);
+                } else {
+                    // No existing solid — just load the new mesh
+                    self.load_mesh(new_mesh, &label);
+                }
+
+                // Set the new solid as current
                 self.current_solid = Some(solid);
                 self.current_nurbs_surface = None;
                 self.detailed_instances.clear();
                 self.instance_triangle_ranges.clear();
                 self.assembly_tree = None;
-                format!("{} inserted", pt.label())
+                self.mesh_dirty = true;
+                self.edge_dirty = true;
+                self.wireframe_overlay_dirty = true;
+
+                let msg = if self.secondary_solid.is_some() {
+                    format!("{} added (secondary captured for Boolean ops)", label)
+                } else {
+                    format!("{} inserted", label)
+                };
+                self.brepcad_status_msg = msg.clone();
+                msg
             }
             DialogAction::Close => "Dialog closed".to_string(),
         }
