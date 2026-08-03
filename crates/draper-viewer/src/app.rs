@@ -8946,6 +8946,32 @@ impl eframe::App for ViewerApp {
                     self.draw_axes_overlay(ui, rect);
                 }
 
+                // ─── BRepCAD View Cube (top-right corner of VIEWPORT) ───
+                if self.enable_brepcad_ui {
+                    if let Some(orient) = crate::ui::view_modes::render_view_cube_in_viewport(ui, &rect) {
+                        self.camera.look_from_direction(orient.direction());
+                        self.brepcad_view_orientation = orient.label().to_string();
+                        let (bbox_min, bbox_max) = self.mesh.bounding_box();
+                        self.camera.fit_to_bounding_box(
+                            [bbox_min.x as f32, bbox_min.y as f32, bbox_min.z as f32],
+                            [bbox_max.x as f32, bbox_max.y as f32, bbox_max.z as f32],
+                        );
+                        self.brepcad_status_msg = format!("View: {}", orient.label());
+                    }
+
+                    // ─── Display Style switcher (bottom-right corner of VIEWPORT) ───
+                    let mut style = if self.wireframe { crate::ui::DisplayStyle::Wireframe }
+                        else if self.show_edges { crate::ui::DisplayStyle::ShadedWithEdges }
+                        else { crate::ui::DisplayStyle::Shaded };
+                    crate::ui::view_modes::render_display_style_in_viewport(ui, &rect, &mut style);
+                    let new_wf = matches!(style, crate::ui::DisplayStyle::Wireframe);
+                    let new_edges = matches!(style, crate::ui::DisplayStyle::ShadedWithEdges);
+                    if new_wf != self.wireframe || new_edges != self.show_edges {
+                        self.wireframe = new_wf;
+                        self.show_edges = new_edges;
+                    }
+                }
+
                 // ─── BRepCAD sketch overlay ───
                 if self.enable_brepcad_ui && self.brepcad_sketch_mode {
                     // Draw sketch grid
@@ -9415,31 +9441,9 @@ impl eframe::App for ViewerApp {
 
         // ═══ BRepCAD UI: command palette, dialogs, view cube, status toast ═══════════
         if self.enable_brepcad_ui {
-            // View Cube (top-right corner of viewport)
-            if let Some(orient) = crate::ui::view_modes::render_view_cube(ctx) {
-                self.camera.look_from_direction(orient.direction());
-                self.brepcad_view_orientation = orient.label().to_string();
-                let (bbox_min, bbox_max) = self.mesh.bounding_box();
-                self.camera.fit_to_bounding_box(
-                    [bbox_min.x as f32, bbox_min.y as f32, bbox_min.z as f32],
-                    [bbox_max.x as f32, bbox_max.y as f32, bbox_max.z as f32],
-                );
-                self.brepcad_status_msg = format!("View: {}", orient.label());
-            }
-
-            // Display style switcher (bottom-right corner)
-            {
-                let mut style = if self.wireframe { crate::ui::DisplayStyle::Wireframe }
-                    else if self.show_edges { crate::ui::DisplayStyle::ShadedWithEdges }
-                    else { crate::ui::DisplayStyle::Shaded };
-                crate::ui::view_modes::render_display_style_switcher(ctx, &mut style);
-                let new_wf = matches!(style, crate::ui::DisplayStyle::Wireframe);
-                let new_edges = matches!(style, crate::ui::DisplayStyle::ShadedWithEdges);
-                if new_wf != self.wireframe || new_edges != self.show_edges {
-                    self.wireframe = new_wf;
-                    self.show_edges = new_edges;
-                }
-            }
+            // View Cube and Display Style are now rendered INSIDE the viewport
+            // (in the CentralPanel section above, using rect coordinates)
+            // Nothing to do here — they use the new in-viewport functions.
 
             // Section cut panel (floating, top-left of viewport when enabled)
             if self.brepcad_section_enabled {
