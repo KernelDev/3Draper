@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 KernelDev
-//! ViewCube — 3D orientation indicator and controller.
-//! Based on: "ViewCube: A 3D Orientation Indicator and Controller"
-//! (Khan et al., Autodesk).
+//! ViewCube — 3D orientation indicator and controller (Autodesk-style).
 //!
 //! Features:
-//! - 6 clickable faces (Front/Back/Top/Bottom/Left/Right) with hover highlight
-//! - 8 clickable corners (ISO views from each octant)
-//! - 12 clickable edges (view along edge direction)
-//! - Compass ring around cube (rotate 90° per click)
-//! - Home button (return to default ISO)
-//! - Drag cube to orbit camera
-//! - Smooth animated transitions
+//! - Large 3D cube with 3 visible faces (Top/Front/Right)
+//! - Right face is light-blue, Top is dark-grey, Front is near-black
+//! - Green corner dots on visible vertices
+//! - Compass ring with N/S/W/E in rounded-rect badges
+//! - Home button (□ Home) below ring
+//! - DRAG cube or ring → orbit camera (live rotation)
+//! - Click face → snap to that view
+//! - Click corner → ISO view
+//! - Click compass → rotate to that cardinal direction
 
 use eframe::egui;
 use super::DisplayStyle;
@@ -32,7 +32,7 @@ impl ViewOrientation {
     }
     pub fn direction(&self) -> [f32; 3] {
         match self {
-            ViewOrientation::Iso => { let d=45.0_f32.to_radians(); let e=30.0_f32.to_radians(); [-e.cos()*d.sin(), -e.sin(), e.cos()*d.cos()] }
+            ViewOrientation::Iso => { let d=45.0_f32.to_radians(); let e=35.264_f32.to_radians(); [-e.cos()*d.sin(), -e.sin(), e.cos()*d.cos()] }
             ViewOrientation::Front => [0.0, 0.0, 1.0],
             ViewOrientation::Back => [0.0, 0.0, -1.0],
             ViewOrientation::Top => [0.0, -1.0, 0.0],
@@ -49,312 +49,341 @@ impl ViewOrientation {
     ];
 }
 
-/// 3D point for cube geometry
-#[derive(Clone, Copy, Debug)]
-struct V3 { x: f32, y: f32, z: f32 }
-
-impl V3 {
-    fn new(x: f32, y: f32, z: f32) -> Self { Self { x, y, z } }
+/// Persistent state for ViewCube drag rotation.
+#[derive(Clone, Debug, Default)]
+pub struct ViewCubeState {
+    /// Current azimuth angle (degrees) — rotated by dragging.
+    pub azimuth: f32,
+    /// Current elevation angle (degrees).
+    pub elevation: f32,
+    /// Is the cube being dragged?
+    pub dragging: bool,
+    /// Last drag position.
+    pub last_pos: Option<egui::Pos2>,
 }
 
-/// A face of the ViewCube: 4 vertices + label + orientation
-struct CubeFace {
-    verts: [V3; 4],
-    label: &'static str,
-    orient: ViewOrientation,
-    color: egui::Color32,
-}
-
-/// An edge of the ViewCube: 2 vertices + orientation
-struct CubeEdge {
-    v1: V3, v2: V3,
-    orient: ViewOrientation,
+impl ViewCubeState {
+    pub fn new() -> Self {
+        Self {
+            azimuth: 45.0,
+            elevation: 35.264,
+            dragging: false,
+            last_pos: None,
+        }
+    }
 }
 
 /// Render the ViewCube inside the viewport (top-right corner).
-/// Implements: faces, corners, edges, compass ring, home button, drag.
-pub fn render_view_cube_in_viewport(ui: &mut egui::Ui, viewport_rect: &egui::Rect) -> Option<ViewOrientation> {
+/// Supports drag-to-rotate on both cube and compass ring.
+pub fn render_view_cube_in_viewport(
+    ui: &mut egui::Ui,
+    viewport_rect: &egui::Rect,
+    state: &mut ViewCubeState,
+) -> Option<ViewOrientation> {
     let mut selected = None;
 
-    // Layout
-    let cube_size = 90.0_f32;
+    // Layout — cube is large, ring around it
+    let ring_radius = 55.0_f32; // outer ring radius
     let margin = 10.0_f32;
-    let ring_extra = 20.0_f32; // compass ring + home button space
-    let total_w = cube_size + ring_extra * 2.0;
-    let total_h = cube_size + ring_extra + 20.0; // extra for home button
+    let total_size = ring_radius * 2.0 + 10.0;
+    let home_h = 20.0_f32;
 
-    let origin = egui::pos2(
-        viewport_rect.right() - total_w - margin,
-        viewport_rect.top() + margin,
+    let center = egui::pos2(
+        viewport_rect.right() - ring_radius - margin - 5.0,
+        viewport_rect.top() + ring_radius + margin + 5.0,
     );
-    let cube_center = egui::pos2(origin.x + total_w / 2.0, origin.y + cube_size / 2.0 + ring_extra / 2.0);
-    let s = 20.0_f32; // half cube edge length in screen pixels
 
-    // Isometric projection parameters
-    let az = 45.0_f32.to_radians();
-    let el = 35.264_f32.to_radians(); // true isometric elevation
+    let cube_half = 24.0_f32; // half-edge of cube in pixels (large!)
 
-    let project = |v: V3| -> egui::Pos2 {
-        // Rotate Y (azimuth), then X (elevation)
-        let x1 = v.x * az.cos() + v.z * az.sin();
-        let z1 = -v.x * az.sin() + v.z * az.cos();
-        let y2 = v.y * el.cos() - z1 * el.sin();
-        egui::pos2(cube_center.x + x1 * s, cube_center.y - y2 * s)
-    };
+    // Allocate interaction areas
+    // 1. Cube area (for drag + click)
+    let cube_rect = egui::Rect::from_center_size(center, egui::vec2(cube_half * 2.5, cube_half * 2.5));
+    let cube_resp = ui.allocate_rect(cube_rect, egui::Sense::click_and_drag());
 
-    // Build cube geometry: 8 vertices at ±1
-    let cube_v = [
-        V3::new(-1.0,  1.0, -1.0), // 0: TLB (top-left-back)
-        V3::new( 1.0,  1.0, -1.0), // 1: TRB
-        V3::new( 1.0,  1.0,  1.0), // 2: TRF
-        V3::new(-1.0,  1.0,  1.0), // 3: TLF
-        V3::new(-1.0, -1.0, -1.0), // 4: BLB
-        V3::new( 1.0, -1.0, -1.0), // 5: BRF... wait let me be consistent
-        V3::new( 1.0, -1.0,  1.0), // 6: BRF (bottom-right-front)
-        V3::new(-1.0, -1.0,  1.0), // 7: BLF
-    ];
+    // 2. Ring area (for drag + compass clicks)
+    let ring_rect = egui::Rect::from_center_size(center, egui::vec2(ring_radius * 2.0, ring_radius * 2.0));
+    let ring_resp = ui.allocate_rect(ring_rect, egui::Sense::click_and_drag());
 
-    // Project all 8 vertices
-    let pv: Vec<egui::Pos2> = cube_v.iter().map(|&v| project(v)).collect();
+    // 3. Home button
+    let home_rect = egui::Rect::from_center_size(
+        egui::pos2(center.x, center.y + ring_radius + 12.0),
+        egui::vec2(60.0, home_h),
+    );
+    let home_resp = ui.allocate_rect(home_rect, egui::Sense::click());
 
-    // Face colors (Catppuccin Mocha palette)
-    let c_face   = egui::Color32::from_rgb(0x31, 0x32, 0x44); // surface0
-    let c_top    = egui::Color32::from_rgb(0x45, 0x47, 0x5a); // surface1
-    let c_side   = egui::Color32::from_rgb(0x1e, 0x1e, 0x2e); // base
-    let c_hover  = egui::Color32::from_rgb(0x89, 0xb4, 0xfa); // blue
-    let c_edge   = egui::Color32::from_rgb(0x6c, 0x70, 0x86); // overlay2
-    let c_text   = egui::Color32::from_rgb(0xcd, 0xd6, 0xf4); // text
-    let c_corner = egui::Color32::from_rgb(0xa6, 0xe3, 0xa1); // green
-    let c_ring   = egui::Color32::from_rgb(0x45, 0x47, 0x5a); // surface1
-    let c_home   = egui::Color32::from_rgb(0xf9, 0xe2, 0xaf); // yellow
-
-    let edge_stroke = egui::Stroke::new(1.0_f32, c_edge);
-
-    // 6 faces with labels
-    let faces = [
-        CubeFace { verts: [cube_v[0], cube_v[1], cube_v[2], cube_v[3]], label: "Top",    orient: ViewOrientation::Top,    color: c_top },
-        CubeFace { verts: [cube_v[4], cube_v[7], cube_v[6], cube_v[5]], label: "Bot",    orient: ViewOrientation::Bottom, color: c_face },
-        CubeFace { verts: [cube_v[3], cube_v[2], cube_v[6], cube_v[7]], label: "Front",  orient: ViewOrientation::Front,  color: c_side },
-        CubeFace { verts: [cube_v[1], cube_v[0], cube_v[4], cube_v[5]], label: "Back",   orient: ViewOrientation::Back,   color: c_face },
-        CubeFace { verts: [cube_v[0], cube_v[3], cube_v[7], cube_v[4]], label: "Left",   orient: ViewOrientation::Left,   color: c_face },
-        CubeFace { verts: [cube_v[2], cube_v[1], cube_v[5], cube_v[6]], label: "Right",  orient: ViewOrientation::Right,  color: c_side },
-    ];
-
-    // 12 edges
-    let edges = [
-        CubeEdge { v1: cube_v[0], v2: cube_v[1], orient: ViewOrientation::Top },    // top-back
-        CubeEdge { v1: cube_v[1], v2: cube_v[2], orient: ViewOrientation::Right },  // top-right
-        CubeEdge { v1: cube_v[2], v2: cube_v[3], orient: ViewOrientation::Top },    // top-front
-        CubeEdge { v1: cube_v[3], v2: cube_v[0], orient: ViewOrientation::Left },   // top-left
-        CubeEdge { v1: cube_v[4], v2: cube_v[5], orient: ViewOrientation::Bottom }, // bottom-back
-        CubeEdge { v1: cube_v[5], v2: cube_v[6], orient: ViewOrientation::Right },  // bottom-right
-        CubeEdge { v1: cube_v[6], v2: cube_v[7], orient: ViewOrientation::Bottom }, // bottom-front
-        CubeEdge { v1: cube_v[7], v2: cube_v[4], orient: ViewOrientation::Left },   // bottom-left
-        CubeEdge { v1: cube_v[0], v2: cube_v[4], orient: ViewOrientation::Back },   // left-back-vertical
-        CubeEdge { v1: cube_v[1], v2: cube_v[5], orient: ViewOrientation::Back },   // right-back-vertical
-        CubeEdge { v1: cube_v[2], v2: cube_v[6], orient: ViewOrientation::Front },  // right-front-vertical
-        CubeEdge { v1: cube_v[3], v2: cube_v[7], orient: ViewOrientation::Front },  // left-front-vertical
-    ];
-
-    // Determine which faces are visible (front-facing)
-    // In our isometric view, visible faces are: Top, Front, Right
-    let visible_face_indices = [0usize, 2, 5]; // Top, Front, Right
-
-    // Mouse position for hover detection
-    let mouse_pos = ui.input(|i| i.pointer.latest_pos());
-
-    // Allocate the cube interaction area
-    let cube_area = egui::Rect::from_center_size(cube_center, egui::vec2(cube_size, cube_size));
-    let cube_resp = ui.allocate_rect(cube_area, egui::Sense::click_and_drag());
-
-    // Detect hover on each visible face
-    let mut hovered_face: Option<usize> = None;
-    if let Some(mp) = mouse_pos {
-        if cube_area.contains(mp) {
-            // Check faces in reverse order (front-most first)
-            for &fi in visible_face_indices.iter().rev() {
-                let face = &faces[fi];
-                let pverts: Vec<egui::Pos2> = face.verts.iter().map(|&v| project(v)).collect();
-                if point_in_polygon(mp, &pverts) {
-                    hovered_face = Some(fi);
-                    break;
-                }
-            }
-        }
-    }
-
-    // Detect hover on corners (8 corners)
-    let mut hovered_corner: Option<usize> = None;
-    if let Some(mp) = mouse_pos {
-        for (i, &p) in pv.iter().enumerate() {
-            if (mp - p).length() < 8.0 {
-                hovered_corner = Some(i);
-                break;
-            }
-        }
-    }
-
-    // Detect hover on edges
-    let mut hovered_edge: Option<usize> = None;
-    if let Some(mp) = mouse_pos {
-        if hovered_face.is_none() && hovered_corner.is_none() {
-            for (i, e) in edges.iter().enumerate() {
-                let p1 = project(e.v1);
-                let p2 = project(e.v2);
-                if dist_to_segment(mp, p1, p2) < 5.0 {
-                    hovered_edge = Some(i);
-                    break;
-                }
-            }
-        }
-    }
-
-    // Handle clicks
-    if cube_resp.clicked() {
-        if let Some(ci) = hovered_corner {
-            // Corner click → ISO from that octant
-            match ci {
-                2 => selected = Some(ViewOrientation::Iso),      // TRF
-                0 => selected = Some(ViewOrientation::Dimetric),  // TLB
-                3 => selected = Some(ViewOrientation::Dimetric),  // TLF
-                1 => selected = Some(ViewOrientation::Dimetric),  // TRB
-                _ => selected = Some(ViewOrientation::Iso),
-            }
-        } else if let Some(fi) = hovered_face {
-            selected = Some(faces[fi].orient);
-        } else if let Some(ei) = hovered_edge {
-            selected = Some(edges[ei].orient);
-        }
-    }
-
-    // Compass ring: 4 buttons (N/E/S/W) around cube for 90° rotations
-    let ring_r = 42.0_f32; // ring radius from center
+    // 4. Compass buttons (N/S/W/E)
+    let compass_r = ring_radius - 6.0;
     let compass = [
-        ("N", ViewOrientation::Back,  0.0_f32),    // top = Back
-        ("E", ViewOrientation::Right, 90.0_f32),   // right = Right
-        ("S", ViewOrientation::Front, 180.0_f32),  // bottom = Front
-        ("W", ViewOrientation::Left,  270.0_f32),  // left = Left
+        ("N", ViewOrientation::Back,  0.0_f32),
+        ("E", ViewOrientation::Right, 90.0_f32),
+        ("S", ViewOrientation::Front, 180.0_f32),
+        ("W", ViewOrientation::Left,  270.0_f32),
     ];
-
-    // Allocate compass buttons
     let mut compass_results: Vec<(egui::Rect, bool, ViewOrientation, &str)> = Vec::new();
     for (label, orient, angle) in &compass {
-        let px = cube_center.x + angle.to_radians().sin() * ring_r;
-        let py = cube_center.y - angle.to_radians().cos() * ring_r;
-        let br = egui::Rect::from_center_size(egui::pos2(px, py), egui::vec2(18.0, 18.0));
+        let rad = angle.to_radians();
+        let px = center.x + rad.sin() * compass_r;
+        let py = center.y - rad.cos() * compass_r;
+        let br = egui::Rect::from_center_size(egui::pos2(px, py), egui::vec2(16.0, 16.0));
         let resp = ui.allocate_rect(br, egui::Sense::click());
         compass_results.push((br, resp.hovered(), *orient, *label));
         if resp.clicked() { selected = Some(*orient); }
     }
 
-    // Home button (below cube)
-    let home_rect = egui::Rect::from_center_size(
-        egui::pos2(cube_center.x, origin.y + total_h - 8.0),
-        egui::vec2(50.0, 16.0),
-    );
-    let home_resp = ui.allocate_rect(home_rect, egui::Sense::click());
+    // Handle drag rotation (cube or ring)
+    let drag_resp = if cube_resp.dragged_by(egui::PointerButton::Primary) {
+        Some(&cube_resp)
+    } else if ring_resp.dragged_by(egui::PointerButton::Primary) {
+        Some(&ring_resp)
+    } else {
+        None
+    };
 
-    // ─── DRAWING (all immutable borrows from here) ───
+    if let Some(dr) = drag_resp {
+        let delta = dr.drag_delta();
+        if delta.length_sq() > 0.5 {
+            state.azimuth += delta.x * 0.8;
+            state.elevation = (state.elevation - delta.y * 0.8).max(-89.0).min(89.0);
+            state.dragging = true;
+        }
+    }
+
+    // Handle cube click (not drag)
+    if cube_resp.clicked() && !state.dragging {
+        // Determine which face was clicked based on mouse position relative to cube center
+        let mp = ui.input(|i| i.pointer.latest_pos());
+        if let Some(mp) = mp {
+            let dx = mp.x - center.x;
+            let dy = mp.y - center.y;
+            // Project mouse onto cube faces using current azimuth/elevation
+            // Simplified: check which region of the cube was clicked
+            if dy < -cube_half * 0.5 {
+                selected = Some(ViewOrientation::Top);
+            } else if dx > cube_half * 0.3 {
+                selected = Some(ViewOrientation::Right);
+            } else if dx < -cube_half * 0.3 {
+                selected = Some(ViewOrientation::Left);
+            } else {
+                selected = Some(ViewOrientation::Front);
+            }
+        }
+    }
+
+    // Reset dragging state when drag ends
+    if !cube_resp.dragged() && !ring_resp.dragged() {
+        state.dragging = false;
+    }
+
+    // ─── DRAWING ───
     let painter = ui.painter();
 
-    // Draw compass ring background
-    painter.circle_stroke(cube_center, ring_r + 2.0, egui::Stroke::new(1.0_f32, c_ring));
-    painter.circle_stroke(cube_center, ring_r - 10.0, egui::Stroke::new(0.5_f32, egui::Color32::from_rgb(0x31, 0x32, 0x44)));
+    // Background circle (dark, semi-transparent)
+    let bg_rect = egui::Rect::from_center_size(center, egui::vec2(ring_radius * 2.0 + 8.0, ring_radius * 2.0 + 8.0));
+    painter.rect_filled(bg_rect, ring_radius + 4.0, egui::Color32::from_black_alpha(160));
 
-    // Draw compass buttons
+    // Compass ring (thin dark circle)
+    painter.circle_stroke(center, ring_radius, egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(0x45, 0x47, 0x5a)));
+    painter.circle_stroke(center, ring_radius - 12.0, egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0x31, 0x32, 0x44)));
+
+    // Compass tick marks (every 90°)
+    for i in 0..4 {
+        let angle = (i as f32 * 90.0).to_radians();
+        let x1 = center.x + angle.sin() * (ring_radius - 12.0);
+        let y1 = center.y - angle.cos() * (ring_radius - 12.0);
+        let x2 = center.x + angle.sin() * ring_radius;
+        let y2 = center.y - angle.cos() * ring_radius;
+        painter.line_segment(
+            [egui::pos2(x1, y1), egui::pos2(x2, y2)],
+            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0x6c, 0x70, 0x86)),
+        );
+    }
+
+    // Compass buttons (N/S/W/E in rounded rects)
     for (br, hovered, _orient, label) in &compass_results {
-        let bg = if *hovered { c_hover } else { egui::Color32::from_black_alpha(120) };
+        let bg = if *hovered {
+            egui::Color32::from_rgb(0x89, 0xb4, 0xfa)
+        } else {
+            egui::Color32::from_rgb(0x31, 0x32, 0x44)
+        };
         painter.rect_filled(*br, 4.0, bg);
-        let tc = if *hovered { egui::Color32::from_rgb(0x1e, 0x1e, 0x2e) } else { c_text };
+        let tc = if *hovered { egui::Color32::from_rgb(0x1e, 0x1e, 0x2e) } else { egui::Color32::WHITE };
         painter.text(br.center(), egui::Align2::CENTER_CENTER, *label,
             egui::FontId::proportional(9.0), tc);
     }
 
-    // Draw faces (back to front: Bottom, Back, Left are hidden; Top, Front, Right visible)
-    // Draw hidden faces first (dimmed), then visible faces
-    let hidden_faces = [1usize, 3, 4]; // Bottom, Back, Left
-    for &fi in &hidden_faces {
-        let face = &faces[fi];
-        let pverts: Vec<egui::Pos2> = face.verts.iter().map(|&v| project(v)).collect();
+    // ─── 3D CUBE ───
+    // Use current azimuth/elevation from state (allows drag rotation)
+    let az = state.azimuth.to_radians();
+    let el = state.elevation.to_radians();
+
+    let project = |x: f32, y: f32, z: f32| -> egui::Pos2 {
+        // Rotate around Y (azimuth), then around X (elevation)
+        let x1 = x * az.cos() + z * az.sin();
+        let z1 = -x * az.sin() + z * az.cos();
+        let y2 = y * el.cos() - z1 * el.sin();
+        egui::pos2(center.x + x1 * cube_half, center.y - y2 * cube_half)
+    };
+
+    // 8 cube vertices
+    let v = [
+        project(-1.0,  1.0, -1.0), // 0: top-left-back
+        project( 1.0,  1.0, -1.0), // 1: top-right-back
+        project( 1.0,  1.0,  1.0), // 2: top-right-front
+        project(-1.0,  1.0,  1.0), // 3: top-left-front
+        project(-1.0, -1.0, -1.0), // 4: bottom-left-back
+        project( 1.0, -1.0, -1.0), // 5: bottom-right-back
+        project( 1.0, -1.0,  1.0), // 6: bottom-right-front
+        project(-1.0, -1.0,  1.0), // 7: bottom-left-front
+    ];
+
+    // Colors matching the reference image
+    let c_right  = egui::Color32::from_rgb(0x6c, 0xb4, 0xe8); // light blue (azure)
+    let c_top    = egui::Color32::from_rgb(0x2a, 0x2a, 0x35); // dark grey
+    let c_front  = egui::Color32::from_rgb(0x1a, 0x1a, 0x22); // near black
+    let c_hidden = egui::Color32::from_rgb(0x11, 0x11, 0x16); // very dark (hidden faces)
+    let c_edge   = egui::Color32::from_rgb(0x6c, 0x70, 0x86); // edge lines
+    let c_corner = egui::Color32::from_rgb(0xa6, 0xe3, 0xa1); // green corners
+    let c_hover  = egui::Color32::from_rgb(0x89, 0xb4, 0xfa); // blue hover
+    let c_text   = egui::Color32::WHITE;
+
+    let edge_stroke = egui::Stroke::new(1.5_f32, c_edge);
+
+    // Determine visible faces based on azimuth/elevation
+    // We check the normal of each face after projection
+    // For simplicity, always draw in order: hidden first, then visible
+    // Visible faces (when az=45, el=35): Top (0,1,2,3), Front (3,2,6,7), Right (2,1,5,6)
+
+    // Hidden faces (drawn first, very dark)
+    let hidden_faces = [
+        ([4, 5, 6, 7], "Bot"),   // Bottom
+        ([0, 1, 5, 4], "Back"),  // Back
+        ([0, 3, 7, 4], "Left"),  // Left
+    ];
+    for (idx, _label) in &hidden_faces {
+        let pts: Vec<egui::Pos2> = idx.iter().map(|&i| v[i]).collect();
         painter.add(egui::Shape::convex_polygon(
-            pverts.clone(),
-            egui::Color32::from_rgb(0x11, 0x11, 0x1b), // very dark for hidden
+            pts,
+            c_hidden,
             egui::Stroke::new(0.5_f32, egui::Color32::from_rgb(0x31, 0x32, 0x44)),
         ));
     }
 
-    // Draw visible faces with hover highlight
-    for &fi in &visible_face_indices {
-        let face = &faces[fi];
-        let pverts: Vec<egui::Pos2> = face.verts.iter().map(|&v| project(v)).collect();
-        let fill = if hovered_face == Some(fi) { c_hover } else { face.color };
+    // Detect hover on visible faces
+    let mouse_pos = ui.input(|i| i.pointer.latest_pos());
+    let mut hovered_face: Option<usize> = None; // 0=Top, 1=Front, 2=Right
+
+    let visible_faces = [
+        ([0, 1, 2, 3], "Top",   c_top,   ViewOrientation::Top,   0),
+        ([3, 2, 6, 7], "Front", c_front, ViewOrientation::Front, 1),
+        ([2, 1, 5, 6], "Right", c_right, ViewOrientation::Right, 2),
+    ];
+
+    if let Some(mp) = mouse_pos {
+        if cube_rect.contains(mp) && !state.dragging {
+            // Check faces in reverse order (front-most first)
+            for (_, _, _, _, fi) in visible_faces.iter().rev() {
+                let face = &visible_faces[*fi];
+                let pts: Vec<egui::Pos2> = face.0.iter().map(|&i| v[i]).collect();
+                if point_in_polygon(mp, &pts) {
+                    hovered_face = Some(face.4);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Draw visible faces
+    for (idx, label, color, orient, _fi) in &visible_faces {
+        let pts: Vec<egui::Pos2> = idx.iter().map(|&i| v[i]).collect();
+        let fill = if hovered_face == Some(*_fi) { c_hover } else { *color };
         painter.add(egui::Shape::convex_polygon(
-            pverts.clone(),
+            pts.clone(),
             fill,
             edge_stroke,
         ));
-        // Face label
-        let cx = pverts.iter().map(|p| p.x).sum::<f32>() / pverts.len() as f32;
-        let cy = pverts.iter().map(|p| p.y).sum::<f32>() / pverts.len() as f32;
-        let tc = if hovered_face == Some(fi) {
-            egui::Color32::from_rgb(0x1e, 0x1e, 0x2e) // dark text on bright hover
+        // Face label (centered on face)
+        let cx = pts.iter().map(|p| p.x).sum::<f32>() / pts.len() as f32;
+        let cy = pts.iter().map(|p| p.y).sum::<f32>() / pts.len() as f32;
+        let tc = if hovered_face == Some(*_fi) {
+            egui::Color32::from_rgb(0x1e, 0x1e, 0x2e)
         } else {
             c_text
         };
         painter.text(egui::pos2(cx, cy), egui::Align2::CENTER_CENTER,
-            face.label, egui::FontId::proportional(8.0), tc);
+            *label, egui::FontId::proportional(9.0), tc);
     }
 
-    // Draw edges (visible ones thicker)
-    for (i, e) in edges.iter().enumerate() {
-        let p1 = project(e.v1);
-        let p2 = project(e.v2);
-        let is_hovered = hovered_edge == Some(i);
-        let stroke = if is_hovered {
-            egui::Stroke::new(3.0_f32, c_hover)
-        } else {
-            egui::Stroke::new(1.0_f32, c_edge)
-        };
-        painter.line_segment([p1, p2], stroke);
+    // Draw edges (all 12, visible ones thicker)
+    let edges = [
+        (0, 1), (1, 2), (2, 3), (3, 0), // top
+        (4, 5), (5, 6), (6, 7), (7, 4), // bottom
+        (0, 4), (1, 5), (2, 6), (3, 7), // verticals
+    ];
+    for &(a, b) in &edges {
+        painter.line_segment([v[a], v[b]], edge_stroke);
     }
 
-    // Draw corners
-    for (i, &p) in pv.iter().enumerate() {
-        let is_hovered = hovered_corner == Some(i);
-        let r = if is_hovered { 5.0 } else { 3.0 };
-        let color = if is_hovered { egui::Color32::WHITE } else { c_corner };
-        painter.circle_filled(p, r, color);
-        if is_hovered {
-            painter.circle_stroke(p, 7.0, egui::Stroke::new(1.5_f32, egui::Color32::WHITE));
+    // Draw corner dots (green) on visible corners
+    // Visible corners: 2 (TRF), 3 (TLF), 6 (BRF), 7 (BLF)
+    let visible_corners = [2, 3, 6, 7];
+    for &ci in &visible_corners {
+        let is_hover = mouse_pos.map(|mp| (mp - v[ci]).length() < 8.0).unwrap_or(false);
+        let r = if is_hover { 5.0 } else { 3.5 };
+        let color = if is_hover { egui::Color32::WHITE } else { c_corner };
+        painter.circle_filled(v[ci], r, color);
+        if is_hover {
+            painter.circle_stroke(v[ci], 7.0, egui::Stroke::new(2.0_f32, egui::Color32::WHITE));
+        }
+    }
+
+    // Handle corner click
+    if cube_resp.clicked() && !state.dragging {
+        if let Some(mp) = mouse_pos {
+            for &ci in &visible_corners {
+                if (mp - v[ci]).length() < 8.0 {
+                    selected = Some(ViewOrientation::Iso);
+                    break;
+                }
+            }
         }
     }
 
     // Home button
-    let home_bg = if home_resp.hovered() { c_hover } else { egui::Color32::from_black_alpha(120) };
+    let home_bg = if home_resp.hovered() {
+        egui::Color32::from_rgb(0x45, 0x47, 0x5a)
+    } else {
+        egui::Color32::from_rgb(0x31, 0x32, 0x44)
+    };
     painter.rect_filled(home_rect, 4.0, home_bg);
-    let home_tc = if home_resp.hovered() { egui::Color32::from_rgb(0x1e, 0x1e, 0x2e) } else { c_home };
-    // Draw house icon (simple)
-    painter.text(home_rect.center(), egui::Align2::CENTER_CENTER, "⌂ Home",
-        egui::FontId::proportional(9.0), home_tc);
+    let home_tc = if home_resp.hovered() {
+        egui::Color32::from_rgb(0x89, 0xb4, 0xfa)
+    } else {
+        egui::Color32::from_rgb(0xcd, 0xd6, 0xf4)
+    };
+    // Draw □ symbol + "Home" text
+    let symbol_rect = egui::Rect::from_center_size(
+        egui::pos2(home_rect.left() + 12.0, home_rect.center().y),
+        egui::vec2(8.0, 8.0),
+    );
+    painter.rect_stroke(symbol_rect, 1.0, egui::Stroke::new(1.0_f32, home_tc), egui::StrokeKind::Outside);
+    painter.text(
+        egui::pos2(home_rect.left() + 20.0, home_rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        "Home",
+        egui::FontId::proportional(10.0),
+        home_tc,
+    );
     if home_resp.clicked() {
         selected = Some(ViewOrientation::Iso);
-    }
-
-    // Handle drag for orbit
-    if cube_resp.dragged_by(egui::PointerButton::Primary) {
-        let delta = cube_resp.drag_delta();
-        if delta.length_sq() > 1.0 {
-            // Signal to parent: rotate camera
-            // We can't directly rotate camera here, but we can store the delta
-            // and let the parent apply it. For now, we'll emit a special signal.
-            // The parent checks if cube is being dragged and applies delta to camera.
-        }
+        // Reset drag state
+        state.azimuth = 45.0;
+        state.elevation = 35.264;
     }
 
     selected
 }
 
-/// Point-in-polygon test (ray casting algorithm).
+/// Point-in-polygon test (ray casting).
 fn point_in_polygon(p: egui::Pos2, polygon: &[egui::Pos2]) -> bool {
     let n = polygon.len();
     if n < 3 { return false; }
@@ -373,17 +402,6 @@ fn point_in_polygon(p: egui::Pos2, polygon: &[egui::Pos2]) -> bool {
     inside
 }
 
-/// Distance from point to line segment.
-fn dist_to_segment(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
-    let dx = b.x - a.x;
-    let dy = b.y - a.y;
-    let len_sq = dx * dx + dy * dy;
-    if len_sq < 1e-6 { return (p - a).length(); }
-    let t = ((p.x - a.x) * dx + (p.y - a.y) * dy / len_sq).max(0.0).min(1.0);
-    let proj = egui::pos2(a.x + t * dx, a.y + t * dy);
-    (p - proj).length()
-}
-
 /// Display style switcher inside viewport (bottom-right corner).
 pub fn render_display_style_in_viewport(ui: &mut egui::Ui, viewport_rect: &egui::Rect, style: &mut DisplayStyle) {
     let margin = 10.0_f32;
@@ -397,7 +415,6 @@ pub fn render_display_style_in_viewport(ui: &mut egui::Ui, viewport_rect: &egui:
     let btn_w = pw / 3.0;
     let labels = [(" Wire", DisplayStyle::Wireframe), (" Solid", DisplayStyle::Shaded), (" Both", DisplayStyle::ShadedWithEdges)];
 
-    // Allocate buttons first (mutable borrow)
     let mut btns: Vec<(egui::Rect, bool, &str, DisplayStyle)> = Vec::new();
     for (i, (label, ds)) in labels.iter().enumerate() {
         let br = egui::Rect::from_min_size(
@@ -409,7 +426,6 @@ pub fn render_display_style_in_viewport(ui: &mut egui::Ui, viewport_rect: &egui:
         btns.push((br, resp.hovered(), *label, *ds));
     }
 
-    // Draw (immutable borrow)
     let painter = ui.painter();
     painter.rect_filled(pr, 6.0, egui::Color32::from_black_alpha(180));
     for (br, hovered, label, ds) in &btns {
@@ -423,7 +439,7 @@ pub fn render_display_style_in_viewport(ui: &mut egui::Ui, viewport_rect: &egui:
     }
 }
 
-// Old API for backward compat (used by 3Draper Viewer)
+// Old API for backward compat (3Draper Viewer)
 pub fn render_view_cube(ctx: &egui::Context) -> Option<ViewOrientation> {
     let mut selected = None;
     egui::Area::new(egui::Id::new("view_cube"))

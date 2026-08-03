@@ -784,6 +784,8 @@ pub struct ViewerApp {
     pub brepcad_active_tool: String,
     /// Current view orientation label (shown in status bar).
     pub brepcad_view_orientation: String,
+    /// ViewCube drag state (azimuth, elevation, dragging).
+    pub brepcad_viewcube_state: crate::ui::view_modes::ViewCubeState,
     /// Undo stack: snapshots of (solid, model_name) before each mutation.
     pub brepcad_undo_stack: Vec<(Option<draper_topology::Solid>, String)>,
     /// Redo stack: snapshots for redo.
@@ -1479,6 +1481,7 @@ impl ViewerApp {
             brepcad_tree_filter: String::new(),
             brepcad_active_tool: "Select".to_string(),
             brepcad_view_orientation: "ISO".to_string(),
+            brepcad_viewcube_state: crate::ui::view_modes::ViewCubeState::new(),
             brepcad_undo_stack: Vec::new(),
             brepcad_redo_stack: Vec::new(),
             brepcad_max_history: 50,
@@ -8948,7 +8951,7 @@ impl eframe::App for ViewerApp {
 
                 // ─── BRepCAD View Cube (top-right corner of VIEWPORT) ───
                 if self.enable_brepcad_ui {
-                    if let Some(orient) = crate::ui::view_modes::render_view_cube_in_viewport(ui, &rect) {
+                    if let Some(orient) = crate::ui::view_modes::render_view_cube_in_viewport(ui, &rect, &mut self.brepcad_viewcube_state) {
                         self.camera.look_from_direction(orient.direction());
                         self.brepcad_view_orientation = orient.label().to_string();
                         let (bbox_min, bbox_max) = self.mesh.bounding_box();
@@ -8957,6 +8960,25 @@ impl eframe::App for ViewerApp {
                             [bbox_max.x as f32, bbox_max.y as f32, bbox_max.z as f32],
                         );
                         self.brepcad_status_msg = format!("View: {}", orient.label());
+                        // Sync state azimuth/elevation to the selected orientation
+                        let dir = orient.direction();
+                        let _az = dir[0]; let _el = dir[1];
+                        // Reset to default ISO angles
+                        self.brepcad_viewcube_state.azimuth = 45.0;
+                        self.brepcad_viewcube_state.elevation = 35.264;
+                    }
+
+                    // Apply drag rotation from ViewCube to camera
+                    if self.brepcad_viewcube_state.dragging {
+                        // Compute direction from azimuth/elevation
+                        let az = self.brepcad_viewcube_state.azimuth.to_radians();
+                        let el = self.brepcad_viewcube_state.elevation.to_radians();
+                        let dir = [
+                            -el.cos() * az.sin(),
+                            -el.sin(),
+                            el.cos() * az.cos(),
+                        ];
+                        self.camera.look_from_direction(dir);
                     }
 
                     // ─── Display Style switcher (bottom-right corner of VIEWPORT) ───
