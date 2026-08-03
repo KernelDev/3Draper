@@ -8960,17 +8960,13 @@ impl eframe::App for ViewerApp {
                             [bbox_max.x as f32, bbox_max.y as f32, bbox_max.z as f32],
                         );
                         self.brepcad_status_msg = format!("View: {}", orient.label());
-                        // Sync state azimuth/elevation to the selected orientation
-                        let dir = orient.direction();
-                        let _az = dir[0]; let _el = dir[1];
-                        // Reset to default ISO angles
+                        // Reset state to default ISO on snap
                         self.brepcad_viewcube_state.azimuth = 45.0;
                         self.brepcad_viewcube_state.elevation = 35.264;
                     }
 
                     // Apply drag rotation from ViewCube to camera
                     if self.brepcad_viewcube_state.dragging {
-                        // Compute direction from azimuth/elevation
                         let az = self.brepcad_viewcube_state.azimuth.to_radians();
                         let el = self.brepcad_viewcube_state.elevation.to_radians();
                         let dir = [
