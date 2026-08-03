@@ -239,38 +239,66 @@ pub fn render_view_cube_in_viewport(
         project(-1.0, -1.0,  1.0), // 7: bot-left-front
     ];
 
-    // Colors — WHITE cube
-    let c_face    = egui::Color32::from_rgb(0xe0, 0xe0, 0xe6);
-    let c_top     = egui::Color32::from_rgb(0xf2, 0xf2, 0xf6);
-    let c_edge    = egui::Color32::from_rgb(0x50, 0x50, 0x5a);
+    // ─── Lambertian shading (matches the FreeCAD-style preview render) ───
+    // Per-face brightness = ambient + diffuse_key + diffuse_fill
+    //   light_dir_key = (0.6, 0.8, 0.9) normalized  — strong, from top-front-right
+    //   light_dir_fill = (-0.4, -0.3, 0.3) normalized — soft fill from opposite
+    //   ambient = 0.25, diffuse_key = 0.65, diffuse_fill = 0.10
+    // Lower ambient → more contrast between top/sides, mimicking FreeCAD look.
+    let base_color = [0.90_f32, 0.91, 0.94]; // light gray
+    let ambient = 0.25_f32;
+    let light_key = {
+        let v = [0.6_f32, 0.8, 0.9];
+        let n = (v[0]*v[0] + v[1]*v[1] + v[2]*v[2]).sqrt();
+        [v[0]/n, v[1]/n, v[2]/n]
+    };
+    let light_fill = {
+        let v = [-0.4_f32, -0.3, 0.3];
+        let n = (v[0]*v[0] + v[1]*v[1] + v[2]*v[2]).sqrt();
+        [v[0]/n, v[1]/n, v[2]/n]
+    };
+    let diffuse_key_w = 0.65_f32;
+    let diffuse_fill_w = 0.10_f32;
+
+    let shade = |nx: f32, ny: f32, nz: f32| -> egui::Color32 {
+        let d_key = (nx*light_key[0] + ny*light_key[1] + nz*light_key[2]).max(0.0) * diffuse_key_w;
+        let d_fill = (nx*light_fill[0] + ny*light_fill[1] + nz*light_fill[2]).max(0.0) * diffuse_fill_w;
+        let b = (ambient + d_key + d_fill).clamp(0.0, 1.0);
+        let r = (base_color[0] * b * 255.0) as u8;
+        let g = (base_color[1] * b * 255.0) as u8;
+        let bl = (base_color[2] * b * 255.0) as u8;
+        egui::Color32::from_rgb(r, g, bl)
+    };
+
+    // Hover color: translucent blue overlay
     let c_hover_a = egui::Color32::from_rgba_premultiplied(108, 180, 232, 200);
-    let c_text    = egui::Color32::from_rgb(0x2a, 0x2a, 0x30);
+    let c_text    = egui::Color32::from_rgb(0x1a, 0x1a, 0x22);
     let c_text_h  = egui::Color32::WHITE;
-    let edge_stroke = egui::Stroke::new(1.5_f32, c_edge);
+    let c_edge    = egui::Color32::from_rgb(0x2a, 0x2a, 0x3a);
+    let edge_stroke = egui::Stroke::new(1.0_f32, c_edge);
+    let no_stroke = egui::Stroke::NONE;
 
     // Face is visible iff its outward normal points toward the camera,
-    // i.e. dot(normal, cam_pos) > 0  (equivalently, dot(normal, -cam_dir) > 0).
+    // i.e. dot(normal, cam_pos) > 0.
     let face_visibility = |nx: f32, ny: f32, nz: f32| -> bool {
-        // dot(normal, cam_pos) > 0
         nx*cam_pos[0] + ny*cam_pos[1] + nz*cam_pos[2] > 0.0
     };
 
-    // Faces: (vertex indices, label, color, orientation, outward normal)
-    let faces = [
-        ([0, 1, 2, 3], "TOP",   c_top,  ViewOrientation::Top,    0.0, 1.0, 0.0),
-        ([4, 5, 6, 7], "BOT",   c_face, ViewOrientation::Bottom, 0.0, -1.0, 0.0),
-        ([3, 2, 6, 7], "FRONT", c_face, ViewOrientation::Front,  0.0, 0.0, 1.0),
-        ([1, 0, 4, 5], "BACK",  c_face, ViewOrientation::Back,   0.0, 0.0, -1.0),
-        ([0, 3, 7, 4], "LEFT",  c_face, ViewOrientation::Left,  -1.0, 0.0, 0.0),
-        ([2, 1, 5, 6], "RIGHT", c_face, ViewOrientation::Right,  1.0, 0.0, 0.0),
+    // Faces: (vertex indices, label, orientation, outward normal)
+    let faces: [([usize; 4], &'static str, ViewOrientation, f32, f32, f32); 6] = [
+        ([0, 1, 2, 3], "TOP",   ViewOrientation::Top,    0.0, 1.0, 0.0),
+        ([4, 5, 6, 7], "BOT",   ViewOrientation::Bottom, 0.0, -1.0, 0.0),
+        ([3, 2, 6, 7], "FRONT", ViewOrientation::Front,  0.0, 0.0, 1.0),
+        ([1, 0, 4, 5], "BACK",  ViewOrientation::Back,   0.0, 0.0, -1.0),
+        ([0, 3, 7, 4], "LEFT",  ViewOrientation::Left,  -1.0, 0.0, 0.0),
+        ([2, 1, 5, 6], "RIGHT", ViewOrientation::Right,  1.0, 0.0, 0.0),
     ];
 
     // Collect visible faces with their average depth (for painter's algorithm)
-    let mut visible_faces: Vec<(usize, [usize; 4], &'static str, egui::Color32, ViewOrientation, f32)> = Vec::new();
-    for (i, (idx, label, color, orient, nx, ny, nz)) in faces.iter().enumerate() {
+    let mut visible_faces: Vec<(usize, [usize; 4], &'static str, ViewOrientation, f32)> = Vec::new();
+    for (i, (idx, label, orient, nx, ny, nz)) in faces.iter().enumerate() {
         if face_visibility(*nx, *ny, *nz) {
-            // Compute average depth = -dot(vertex, cam_dir); larger = closer to camera
-            let mut avg_depth = 0.0;
+            let mut avg_depth = 0.0_f32;
             for &vi in idx.iter() {
                 let (x, y, z) = match vi {
                     0 => (-1.0, 1.0, -1.0), 1 => (1.0, 1.0, -1.0),
@@ -283,18 +311,17 @@ pub fn render_view_cube_in_viewport(
                 avg_depth += depth;
             }
             avg_depth /= 4.0;
-            visible_faces.push((i, *idx, *label, *color, *orient, avg_depth));
+            visible_faces.push((i, *idx, *label, *orient, avg_depth));
         }
     }
     // Sort ASCENDING by depth (farthest first, nearest last) for painter's algorithm
-    visible_faces.sort_by(|a, b| a.5.partial_cmp(&b.5).unwrap_or(std::cmp::Ordering::Equal));
+    visible_faces.sort_by(|a, b| a.4.partial_cmp(&b.4).unwrap_or(std::cmp::Ordering::Equal));
 
     // Detect hover on visible faces
     let mut hovered_face: Option<usize> = None;
     if let Some(mp) = mouse_pos {
         if cube_rect.contains(mp) && !state.dragging {
-            // Check front-most face first (last in sorted list = nearest to camera)
-            for (orig_idx, idx, _, _, _, _) in visible_faces.iter().rev() {
+            for (orig_idx, idx, _, _, _) in visible_faces.iter().rev() {
                 let pts: Vec<egui::Pos2> = idx.iter().map(|&i| v[i]).collect();
                 if point_in_polygon(mp, &pts) {
                     hovered_face = Some(*orig_idx);
@@ -304,34 +331,39 @@ pub fn render_view_cube_in_viewport(
         }
     }
 
-    // Draw visible faces (back to front — painter's algorithm).
-    // Only visible faces are drawn; hidden faces are NOT drawn at all, so
-    // the cube renders as a solid opaque shape (no transparency, no see-through).
-    for (orig_idx, idx, label, color, orient, _depth) in &visible_faces {
+    // ─── Draw visible faces (back to front — painter's algorithm) ───
+    // No stroke on the polygon itself; edges are drawn separately below so
+    // we have full control over which edges appear (only real cube edges,
+    // not the diagonal that splits each quad into two triangles).
+    for (orig_idx, idx, label, orient, _depth) in &visible_faces {
         let pts: Vec<egui::Pos2> = idx.iter().map(|&i| v[i]).collect();
-        let fill = if hovered_face == Some(*orig_idx) { c_hover_a } else { *color };
-        painter.add(egui::Shape::convex_polygon(pts.clone(), fill, edge_stroke));
-        // Label
+        // Look up the face normal to compute Lambertian color
+        let (_, _, _, nx, ny, nz) = faces[*orig_idx];
+        let base_fill = shade(nx, ny, nz);
+        let fill = if hovered_face == Some(*orig_idx) { c_hover_a } else { base_fill };
+        painter.add(egui::Shape::convex_polygon(pts.clone(), fill, no_stroke));
+        // Label at face centroid
         let cx = pts.iter().map(|p| p.x).sum::<f32>() / pts.len() as f32;
         let cy = pts.iter().map(|p| p.y).sum::<f32>() / pts.len() as f32;
         let tc = if hovered_face == Some(*orig_idx) { c_text_h } else { c_text };
         painter.text(egui::pos2(cx, cy), egui::Align2::CENTER_CENTER,
-            *label, egui::FontId::proportional(8.0), tc);
+            *label, egui::FontId::proportional(9.0), tc);
     }
 
-    // Draw visible edges only (edges between visible faces).
-    // Drawing all 12 edges would make hidden edges bleed through the solid
-    // cube, breaking the opaque appearance.
-    let visible_set: std::collections::HashSet<usize> = visible_faces.iter().map(|(i, _, _, _, _, _)| *i).collect();
-    // Each edge belongs to exactly 2 faces; only draw it if at least one is visible.
-    // Edge -> (face_a, face_b) mapping (manually computed for a cube).
+    // ─── Draw cube edges (only edges between two visible faces) ───
+    // Drawing all 12 edges would make hidden edges bleed through the cube.
+    // Each cube edge belongs to exactly 2 faces; draw it only if BOTH are
+    // visible, so the silhouette of the cube is drawn cleanly without
+    // showing internal diagonals or hidden edges.
+    let visible_set: std::collections::HashSet<usize> = visible_faces.iter().map(|(i, _, _, _, _)| *i).collect();
+    // Edge -> (face_a, face_b) pairs (manually verified for our face indexing).
     let edge_face_pairs: [((usize, usize), (usize, usize)); 12] = [
-        ((0,1),(0,2)), ((1,2),(0,5)), ((2,3),(0,3)), ((3,0),(0,4)), // top face edges
-        ((4,5),(1,2)), ((5,6),(1,5)), ((6,7),(1,3)), ((7,4),(1,4)), // bottom face edges
-        ((0,4),(2,4)), ((1,5),(2,5)), ((2,6),(3,5)), ((3,7),(3,4)), // vertical edges
+        ((0,1),(0,4)), ((1,2),(0,5)), ((2,3),(0,3)), ((3,0),(0,2)), // top face edges
+        ((4,5),(1,4)), ((5,6),(1,5)), ((6,7),(1,3)), ((7,4),(1,2)), // bottom face edges
+        ((0,4),(2,4)), ((1,5),(4,5)), ((2,6),(3,5)), ((3,7),(2,3)), // vertical edges
     ];
     for &((a, b), (f1, f2)) in &edge_face_pairs {
-        if visible_set.contains(&f1) || visible_set.contains(&f2) {
+        if visible_set.contains(&f1) && visible_set.contains(&f2) {
             painter.line_segment([v[a], v[b]], edge_stroke);
         }
     }
@@ -340,7 +372,7 @@ pub fn render_view_cube_in_viewport(
     if cube_resp.clicked() && !state.dragging {
         if let Some(mp) = mouse_pos {
             // Check visible faces (nearest to camera first)
-            for (orig_idx, idx, _, _, orient, _) in visible_faces.iter().rev() {
+            for (orig_idx, idx, _, orient, _) in visible_faces.iter().rev() {
                 let pts: Vec<egui::Pos2> = idx.iter().map(|&i| v[i]).collect();
                 if point_in_polygon(mp, &pts) {
                     selected = Some(*orient);
