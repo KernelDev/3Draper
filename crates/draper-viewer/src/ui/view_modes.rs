@@ -53,7 +53,8 @@ pub struct ViewCubeState {
 
 impl ViewCubeState {
     pub fn new() -> Self {
-        Self { azimuth: 35.0, elevation: 25.0, dragging: false }
+        // Match the main camera's default ISO orientation
+        Self { azimuth: 45.0, elevation: 35.264, dragging: false }
     }
 }
 
@@ -164,46 +165,69 @@ pub fn render_view_cube_in_viewport(
             egui::FontId::proportional(8.0), tc);
     }
 
-    // ─── 3D CUBE (isometric projection matching main camera convention) ───
+    // ─── 3D CUBE — explicit camera-based projection ───
     //
-    // The cube widget must show the SAME faces that the main camera sees.
-    // The main camera for ISO (az=45, el=35.264) is at position [+X, +Y, -Z]
-    // and sees TOP(+Y), BACK(-Z), RIGHT(+X).
+    // The widget cube must show the SAME faces the main camera sees.
+    // The main camera for ISO (az=45, el=35.264) sits at (+X, +Y, -Z) and
+    // sees TOP(+Y), BACK(-Z), RIGHT(+X).
     //
-    // The widget's internal camera is at +Z looking toward -Z. Without
-    // correction, rotating the cube by +az/+el makes the widget show
-    // TOP/FRONT/LEFT — the OPPOSITE of what the main camera sees — because
-    // the widget's camera is on the opposite side of the cube from the main
-    // camera.
+    // We replicate this by placing a virtual camera at the SAME position as
+    // the main camera (relative to the cube), then ortho-projecting the cube
+    // onto the camera's right/up plane. This guarantees:
+    //   - Visible faces = faces whose normals point toward the camera
+    //   - Screen positions match what the main viewport shows
+    //   - Labels stay attached to the physically-correct face
+    //   - Clicking a face label snaps the main camera to that face
     //
-    // Fix: negate X and Z of every vertex/normal before rotating. This is
-    // equivalent to rotating the cube 180° around Y, which swaps FRONT↔BACK
-    // and LEFT↔RIGHT, aligning the widget's visible faces with the main
-    // camera's view.
+    // cam_dir = direction FROM camera TO target (target at origin)
+    //         = [-cos(el)*sin(az), -sin(el), cos(el)*cos(az)]
+    // cam_pos = -cam_dir (target at origin, camera at -cam_dir*distance)
+    //
+    // Camera basis vectors:
+    //   right = normalize(cross(world_up, cam_dir))   (world_up = +Y)
+    //   up    = cross(cam_dir, right)
+    //
+    // Face is visible iff dot(normal, cam_pos) > 0  (normal points toward camera)
+    // Screen coords of vertex v: (dot(v, right), dot(v, up))
+    // Depth of vertex v: -dot(v, cam_dir)  (larger = closer to camera)
     let az_rad = state.azimuth.to_radians();
     let el_rad = state.elevation.to_radians();
 
+    let cos_a = az_rad.cos();
+    let sin_a = az_rad.sin();
+    let cos_e = el_rad.cos();
+    let sin_e = el_rad.sin();
+
+    // cam_dir = direction from camera to target (target at origin)
+    let cam_dir = [-cos_e * sin_a, -sin_e, cos_e * cos_a];
+    // cam_pos = -cam_dir (camera position; target at origin)
+    let cam_pos = [-cam_dir[0], -cam_dir[1], -cam_dir[2]];
+
+    // right = normalize(cross(world_up, cam_dir))
+    // cross((0,1,0), (cx,cy,cz)) = (1*cz - 0*cy, 0*cx - 0*cz, 0*cy - 1*cx) = (cz, 0, -cx)
+    let right_unnorm = [cam_dir[2], 0.0, -cam_dir[0]];
+    let right_len = (right_unnorm[0]*right_unnorm[0] + right_unnorm[1]*right_unnorm[1] + right_unnorm[2]*right_unnorm[2]).sqrt();
+    let right = if right_len > 1e-6 {
+        [right_unnorm[0]/right_len, right_unnorm[1]/right_len, right_unnorm[2]/right_len]
+    } else {
+        // Camera looking straight up/down — fall back to world +X as "right"
+        [1.0, 0.0, 0.0]
+    };
+    // up = cross(cam_dir, right)
+    let up = [
+        cam_dir[1]*right[2] - cam_dir[2]*right[1],
+        cam_dir[2]*right[0] - cam_dir[0]*right[2],
+        cam_dir[0]*right[1] - cam_dir[1]*right[0],
+    ];
+
+    // Project a 3D vertex to 2D screen coords (orthographic, using camera basis)
     let project = |x: f32, y: f32, z: f32| -> egui::Pos2 {
-        // Negate X and Z to match main camera convention (see comment above)
-        let x = -x;
-        let z = -z;
-        // Rotate around Y axis (azimuth)
-        let cos_a = az_rad.cos();
-        let sin_a = az_rad.sin();
-        let x1 = x * cos_a + z * sin_a;
-        let z1 = -x * sin_a + z * cos_a;
-        let y1 = y;
-        // Rotate around X axis (elevation)
-        let cos_e = el_rad.cos();
-        let sin_e = el_rad.sin();
-        let y2 = y1 * cos_e - z1 * sin_e;
-        let _z2 = y1 * sin_e + z1 * cos_e;
-        let x2 = x1;
-        // Orthographic projection: x → screen_x, y → screen_y (z is depth, dropped)
-        egui::pos2(center.x + x2 * cube_half, center.y - y2 * cube_half)
+        let sx = x*right[0] + y*right[1] + z*right[2];
+        let sy = x*up[0]    + y*up[1]    + z*up[2];
+        egui::pos2(center.x + sx * cube_half, center.y - sy * cube_half)
     };
 
-    // 8 cube vertices
+    // 8 cube vertices (standard cube, +X right, +Y up, +Z toward viewer by convention)
     let v = [
         project(-1.0,  1.0, -1.0), // 0: top-left-back
         project( 1.0,  1.0, -1.0), // 1: top-right-back
@@ -218,33 +242,20 @@ pub fn render_view_cube_in_viewport(
     // Colors — WHITE cube
     let c_face    = egui::Color32::from_rgb(0xe0, 0xe0, 0xe6);
     let c_top     = egui::Color32::from_rgb(0xf2, 0xf2, 0xf6);
-    let c_hidden  = egui::Color32::from_rgb(0x2a, 0x2a, 0x30);
     let c_edge    = egui::Color32::from_rgb(0x50, 0x50, 0x5a);
-    let c_hover_a = egui::Color32::from_rgba_premultiplied(108, 180, 232, 160);
+    let c_hover_a = egui::Color32::from_rgba_premultiplied(108, 180, 232, 200);
     let c_text    = egui::Color32::from_rgb(0x2a, 0x2a, 0x30);
     let c_text_h  = egui::Color32::WHITE;
     let edge_stroke = egui::Stroke::new(1.5_f32, c_edge);
 
-    // Determine which faces are visible. The widget camera is at +Z looking
-    // toward -Z. A face is visible iff its rotated normal points toward +Z
-    // (z2 > 0). We negate nx and nz (same as in `project`) to align the
-    // widget's visible faces with the main camera's view.
-    // Face normals (before negation):
-    // Top: (0,1,0), Bottom: (0,-1,0), Front: (0,0,1), Back: (0,0,-1),
-    // Left: (-1,0,0), Right: (1,0,0)
+    // Face is visible iff its outward normal points toward the camera,
+    // i.e. dot(normal, cam_pos) > 0  (equivalently, dot(normal, -cam_dir) > 0).
     let face_visibility = |nx: f32, ny: f32, nz: f32| -> bool {
-        let nx = -nx;
-        let nz = -nz;
-        let cos_a = az_rad.cos();
-        let sin_a = az_rad.sin();
-        let z1 = -nx * sin_a + nz * cos_a;
-        let y1 = ny;
-        let cos_e = el_rad.cos();
-        let sin_e = el_rad.sin();
-        let z2 = y1 * sin_e + z1 * cos_e;
-        z2 > 0.0
+        // dot(normal, cam_pos) > 0
+        nx*cam_pos[0] + ny*cam_pos[1] + nz*cam_pos[2] > 0.0
     };
 
+    // Faces: (vertex indices, label, color, orientation, outward normal)
     let faces = [
         ([0, 1, 2, 3], "TOP",   c_top,  ViewOrientation::Top,    0.0, 1.0, 0.0),
         ([4, 5, 6, 7], "BOT",   c_face, ViewOrientation::Bottom, 0.0, -1.0, 0.0),
@@ -254,16 +265,12 @@ pub fn render_view_cube_in_viewport(
         ([2, 1, 5, 6], "RIGHT", c_face, ViewOrientation::Right,  1.0, 0.0, 0.0),
     ];
 
-    // Determine visible faces and sort by depth (back to front)
+    // Collect visible faces with their average depth (for painter's algorithm)
     let mut visible_faces: Vec<(usize, [usize; 4], &'static str, egui::Color32, ViewOrientation, f32)> = Vec::new();
     for (i, (idx, label, color, orient, nx, ny, nz)) in faces.iter().enumerate() {
         if face_visibility(*nx, *ny, *nz) {
-            // Compute average depth (z2) for sorting
-            let cos_a = az_rad.cos();
-            let sin_a = az_rad.sin();
-            let cos_e = el_rad.cos();
-            let sin_e = el_rad.sin();
-            let mut avg_z = 0.0;
+            // Compute average depth = -dot(vertex, cam_dir); larger = closer to camera
+            let mut avg_depth = 0.0;
             for &vi in idx.iter() {
                 let (x, y, z) = match vi {
                     0 => (-1.0, 1.0, -1.0), 1 => (1.0, 1.0, -1.0),
@@ -272,43 +279,21 @@ pub fn render_view_cube_in_viewport(
                     6 => (1.0, -1.0, 1.0),   7 => (-1.0, -1.0, 1.0),
                     _ => (0.0, 0.0, 0.0),
                 };
-                // Negate X and Z to match the project / face_visibility convention
-                let x = -x;
-                let z = -z;
-                let x1 = x * cos_a + z * sin_a;
-                let z1 = -x * sin_a + z * cos_a;
-                let y1 = y;
-                let z2 = y1 * sin_e + z1 * cos_e;
-                avg_z += z2;
+                let depth = -(x*cam_dir[0] + y*cam_dir[1] + z*cam_dir[2]);
+                avg_depth += depth;
             }
-            avg_z /= 4.0;
-            visible_faces.push((i, *idx, *label, *color, *orient, avg_z));
+            avg_depth /= 4.0;
+            visible_faces.push((i, *idx, *label, *color, *orient, avg_depth));
         }
     }
-    // Sort visible faces ASCENDING by depth (z2) so the FARTHEST face is drawn
-    // first and the NEAREST face is drawn LAST (painter's algorithm).
-    // Camera is at +Z, so higher z2 = closer to camera. Drawing far-first lets
-    // near faces correctly overlay far faces. The previous descending sort
-    // drew near faces first, causing them to be covered by far faces.
+    // Sort ASCENDING by depth (farthest first, nearest last) for painter's algorithm
     visible_faces.sort_by(|a, b| a.5.partial_cmp(&b.5).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Draw hidden faces first (dimmed)
-    let hidden_indices: Vec<usize> = faces.iter().enumerate()
-        .filter(|(_, (_, _, _, _, nx, ny, nz))| !face_visibility(*nx, *ny, *nz))
-        .map(|(i, _)| i)
-        .collect();
-    for &hi in &hidden_indices {
-        let (idx, _label, _color, _orient, _, _, _) = &faces[hi];
-        let pts: Vec<egui::Pos2> = idx.iter().map(|&i| v[i]).collect();
-        painter.add(egui::Shape::convex_polygon(pts, c_hidden,
-            egui::Stroke::new(0.5_f32, egui::Color32::from_rgb(0x31, 0x32, 0x44))));
-    }
 
     // Detect hover on visible faces
     let mut hovered_face: Option<usize> = None;
     if let Some(mp) = mouse_pos {
         if cube_rect.contains(mp) && !state.dragging {
-            // Check front-most face first (last in sorted list = front)
+            // Check front-most face first (last in sorted list = nearest to camera)
             for (orig_idx, idx, _, _, _, _) in visible_faces.iter().rev() {
                 let pts: Vec<egui::Pos2> = idx.iter().map(|&i| v[i]).collect();
                 if point_in_polygon(mp, &pts) {
@@ -319,7 +304,9 @@ pub fn render_view_cube_in_viewport(
         }
     }
 
-    // Draw visible faces (back to front)
+    // Draw visible faces (back to front — painter's algorithm).
+    // Only visible faces are drawn; hidden faces are NOT drawn at all, so
+    // the cube renders as a solid opaque shape (no transparency, no see-through).
     for (orig_idx, idx, label, color, orient, _depth) in &visible_faces {
         let pts: Vec<egui::Pos2> = idx.iter().map(|&i| v[i]).collect();
         let fill = if hovered_face == Some(*orig_idx) { c_hover_a } else { *color };
@@ -332,22 +319,34 @@ pub fn render_view_cube_in_viewport(
             *label, egui::FontId::proportional(8.0), tc);
     }
 
-    // Draw all edges
-    let edges = [(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)];
-    for &(a, b) in &edges {
-        painter.line_segment([v[a], v[b]], edge_stroke);
+    // Draw visible edges only (edges between visible faces).
+    // Drawing all 12 edges would make hidden edges bleed through the solid
+    // cube, breaking the opaque appearance.
+    let visible_set: std::collections::HashSet<usize> = visible_faces.iter().map(|(i, _, _, _, _, _)| *i).collect();
+    // Each edge belongs to exactly 2 faces; only draw it if at least one is visible.
+    // Edge -> (face_a, face_b) mapping (manually computed for a cube).
+    let edge_face_pairs: [((usize, usize), (usize, usize)); 12] = [
+        ((0,1),(0,2)), ((1,2),(0,5)), ((2,3),(0,3)), ((3,0),(0,4)), // top face edges
+        ((4,5),(1,2)), ((5,6),(1,5)), ((6,7),(1,3)), ((7,4),(1,4)), // bottom face edges
+        ((0,4),(2,4)), ((1,5),(2,5)), ((2,6),(3,5)), ((3,7),(3,4)), // vertical edges
+    ];
+    for &((a, b), (f1, f2)) in &edge_face_pairs {
+        if visible_set.contains(&f1) || visible_set.contains(&f2) {
+            painter.line_segment([v[a], v[b]], edge_stroke);
+        }
     }
 
     // Handle clicks
     if cube_resp.clicked() && !state.dragging {
         if let Some(mp) = mouse_pos {
-            // Check visible faces (front first)
+            // Check visible faces (nearest to camera first)
             for (orig_idx, idx, _, _, orient, _) in visible_faces.iter().rev() {
                 let pts: Vec<egui::Pos2> = idx.iter().map(|&i| v[i]).collect();
                 if point_in_polygon(mp, &pts) {
                     selected = Some(*orient);
-                    state.azimuth = 35.0;
-                    state.elevation = 25.0;
+                    // Snap widget to ISO after click (matches main camera reset)
+                    state.azimuth = 45.0;
+                    state.elevation = 35.264;
                     break;
                 }
             }
@@ -368,8 +367,8 @@ pub fn render_view_cube_in_viewport(
         egui::FontId::proportional(9.0), home_tc);
     if home_resp.clicked() {
         selected = Some(ViewOrientation::Iso);
-        state.azimuth = 35.0;
-        state.elevation = 25.0;
+        state.azimuth = 45.0;
+        state.elevation = 35.264;
     }
 
     // Reset dragging
