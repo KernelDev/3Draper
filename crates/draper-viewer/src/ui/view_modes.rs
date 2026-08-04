@@ -119,10 +119,17 @@ pub fn render_view_cube_in_viewport(
     let mut selected: Option<ViewCubeAction> = None;
 
     // ═══ Layout ═══════════════════════════════════════════════════════════════
-    let ring_r = 60.0_f32;          // compass disc radius
-    let margin = 14.0_f32;
-    let cube_half = 28.0_f32;       // cube edge half-length (orthographic, fixed scale)
-    let chamfer = 0.18_f32;         // chamfer size as fraction of cube_half
+    // DPI-aware sizing: scale cube and font by the egui pixels_per_point.
+    // On a 2x DPI display, cube_half doubles so the cube stays the same
+    // physical size, and font scales to match.
+    let ppi = ui.ctx().pixels_per_point().max(1.0);
+    let ring_r = 60.0_f32 * ppi;       // compass disc radius
+    let margin = 14.0_f32 * ppi;
+    let cube_half = 28.0_f32 * ppi;    // cube edge half-length (orthographic, fixed scale)
+    let chamfer = 0.18_f32;            // chamfer size as fraction of cube_half
+    // Dynamic font size: scales with cube size and DPI
+    let label_font_size = (cube_half * 0.32).max(8.0); // ~9pt at 1x DPI, 18pt at 2x
+    let small_font_size = (cube_half * 0.22).max(6.0);
     let center = egui::pos2(
         viewport_rect.right() - ring_r - margin,
         viewport_rect.top() + ring_r + margin,
@@ -298,7 +305,8 @@ pub fn render_view_cube_in_viewport(
             }
         }
     }
-    let v2d: Vec<egui::Pos2> = verts_3d.iter().map(|&p| project(p[0], p[1], p[2])).collect();
+    // Note: v2d (projected 2D vertices) is computed AFTER all zones are built,
+    // because corner hexagons add extra midpoint vertices to verts_3d.
 
     // Helper: vertex index for corner (sx,sy,sz) along axis (0=X, 1=Y, 2=Z)
     // Corner order in verts_3d: outer loop sx(-1,+1), middle sy(-1,+1), inner sz(-1,+1)
@@ -524,19 +532,60 @@ pub fn render_view_cube_in_viewport(
         }
     }
 
-    // ── 8 corner triangles ──
-    // Each corner triangle uses the 3 edge-vertices (v_x, v_y, v_z) of that corner.
-    // Normal is in direction (sx, sy, sz) normalized.
+    // ── 8 corner zones as CONVEX HEXAGONS ──
+    // Per spec: corner zones should be hexagonal (not triangular) to increase
+    // hit-target area. Each corner hexagon is formed by the 3 edge-vertices
+    // (v_x, v_y, v_z) of that corner PLUS 3 intermediate points placed at the
+    // midpoints between adjacent edge-vertices, pushed slightly outward.
+    // This makes the corner zone ~2x larger than a triangle and easier to click.
+    //
+    // Vertex layout (CCW from outside):
+    //   v_x, mid_xy, v_y, mid_yz, v_z, mid_zx
+    // where mid_xy = midpoint of (v_x, v_y) pushed outward along corner normal.
     for sx in [-1.0_f32, 1.0] {
         for sy in [-1.0_f32, 1.0] {
             for sz in [-1.0_f32, 1.0] {
                 let cv = corner_verts(sx, sy, sz);
+                let v_x = verts_3d[cv[0]]; // (sx*h - sx*c, sy*h, sz*h)
+                let v_y = verts_3d[cv[1]]; // (sx*h, sy*h - sy*c, sz*h)
+                let v_z = verts_3d[cv[2]]; // (sx*h, sy*h, sz*h - sz*c)
+
+                // Midpoints between adjacent edge-vertices, pushed outward
+                // along the corner direction (sx, sy, sz) to enlarge the hexagon.
+                let push = chamfer * 0.5; // how much to push midpoints outward
+                let mid_xy = [
+                    (v_x[0] + v_y[0]) * 0.5 + sx * push,
+                    (v_x[1] + v_y[1]) * 0.5 + sy * push,
+                    (v_x[2] + v_y[2]) * 0.5 + sz * push,
+                ];
+                let mid_yz = [
+                    (v_y[0] + v_z[0]) * 0.5 + sx * push,
+                    (v_y[1] + v_z[1]) * 0.5 + sy * push,
+                    (v_y[2] + v_z[2]) * 0.5 + sz * push,
+                ];
+                let mid_zx = [
+                    (v_z[0] + v_x[0]) * 0.5 + sx * push,
+                    (v_z[1] + v_x[1]) * 0.5 + sy * push,
+                    (v_z[2] + v_x[2]) * 0.5 + sz * push,
+                ];
+
+                // Add the 3 midpoint vertices to the vertex list
+                let mid_xy_idx = verts_3d.len();
+                verts_3d.push(mid_xy);
+                let mid_yz_idx = verts_3d.len();
+                verts_3d.push(mid_yz);
+                let mid_zx_idx = verts_3d.len();
+                verts_3d.push(mid_zx);
+
+                // Project the new vertices (they were added after v2d was computed)
+                // We'll handle this by re-projecting all verts after the loop.
+                // For now, store the hexagon vertex indices.
                 let nx = sx;
                 let ny = sy;
                 let nz = sz;
                 let nlen = (nx*nx + ny*ny + nz*nz).sqrt();
                 zones.push(Zone {
-                    verts: vec![cv[0], cv[1], cv[2]],
+                    verts: vec![cv[0], mid_xy_idx, cv[1], mid_yz_idx, cv[2], mid_zx_idx],
                     normal: [nx/nlen, ny/nlen, nz/nlen],
                     label: None,
                     snap: ViewOrientation::Iso,
@@ -546,6 +595,11 @@ pub fn render_view_cube_in_viewport(
             }
         }
     }
+
+    // Re-project all vertices (including the newly added midpoint vertices)
+    // v2d was computed earlier before the corner hexagon midpoints were added.
+    // Recompute it now so all 48 vertices (24 original + 24 midpoints) are projected.
+    let v2d: Vec<egui::Pos2> = verts_3d.iter().map(|&p| project(p[0], p[1], p[2])).collect();
 
     debug_assert_eq!(zones.len(), 26, "Expected 26 zones, got {}", zones.len());
 
@@ -613,8 +667,9 @@ pub fn render_view_cube_in_viewport(
     let c_hover = egui::Color32::from_rgba_premultiplied(108, 180, 232, 220);
     let c_text = egui::Color32::from_rgb(0x1a, 0x1a, 0x22);
     let c_text_h = egui::Color32::WHITE;
-    let c_edge = egui::Color32::from_rgb(0x2a, 0x2a, 0x3a);
-    let edge_stroke = egui::Stroke::new(1.0_f32, c_edge);
+    let c_edge = egui::Color32::from_rgb(0x1a, 0x1a, 0x28);
+    // Borders scale with DPI for consistent visual weight
+    let edge_stroke = egui::Stroke::new(1.2_f32 * ppi, c_edge);
 
     // ═══ Draw zones back-to-front ═════════════════════════════════════════════
     for (zid, vidx, n, label, _snap, _depth) in &visible_zones {
@@ -628,7 +683,7 @@ pub fn render_view_cube_in_viewport(
             let cy = pts.iter().map(|p| p.y).sum::<f32>() / pts.len() as f32;
             let tc = if hovered_zone_id == Some(*zid) { c_text_h } else { c_text };
             painter.text(egui::pos2(cx, cy), egui::Align2::CENTER_CENTER,
-                lbl, egui::FontId::proportional(9.0), tc);
+                lbl, egui::FontId::proportional(label_font_size), tc);
         }
         // Draw thin edge around each zone
         for w in pts.windows(2) {
@@ -656,9 +711,9 @@ pub fn render_view_cube_in_viewport(
     painter.line_segment([axes_origin, ax_x_end], egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(0xE0, 0x40, 0x40)));
     painter.line_segment([axes_origin, ax_y_end], egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(0x40, 0xC0, 0x40)));
     painter.line_segment([axes_origin, ax_z_end], egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(0x40, 0x80, 0xE0)));
-    painter.text(ax_x_end, egui::Align2::CENTER_CENTER, "X", egui::FontId::proportional(8.0), egui::Color32::from_rgb(0xE0, 0x40, 0x40));
-    painter.text(ax_y_end, egui::Align2::CENTER_CENTER, "Y", egui::FontId::proportional(8.0), egui::Color32::from_rgb(0x40, 0xC0, 0x40));
-    painter.text(ax_z_end, egui::Align2::CENTER_CENTER, "Z", egui::FontId::proportional(8.0), egui::Color32::from_rgb(0x40, 0x80, 0xE0));
+    painter.text(ax_x_end, egui::Align2::CENTER_CENTER, "X", egui::FontId::proportional(small_font_size), egui::Color32::from_rgb(0xE0, 0x40, 0x40));
+    painter.text(ax_y_end, egui::Align2::CENTER_CENTER, "Y", egui::FontId::proportional(small_font_size), egui::Color32::from_rgb(0x40, 0xC0, 0x40));
+    painter.text(ax_z_end, egui::Align2::CENTER_CENTER, "Z", egui::FontId::proportional(small_font_size), egui::Color32::from_rgb(0x40, 0x80, 0xE0));
 
     // ═══ Draw rotation arrows (4 triangles) ═══════════════════════════════════
     let arrow_color = |hovered: bool| {
@@ -747,7 +802,7 @@ pub fn render_view_cube_in_viewport(
     let home_tc = if home_resp.hovered() { egui::Color32::from_rgb(0x89, 0xb4, 0xfa) }
         else { egui::Color32::from_rgb(0xc8, 0xc8, 0xd0) };
     painter.text(home_rect.center(), egui::Align2::CENTER_CENTER, "\u{2302}",
-        egui::FontId::proportional(14.0), home_tc);
+        egui::FontId::proportional(label_font_size * 1.4), home_tc);
     if home_resp.clicked() {
         selected = Some(ViewCubeAction::Home);
         state.azimuth = 45.0;
