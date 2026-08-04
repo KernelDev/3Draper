@@ -11,7 +11,7 @@
 // We avoid pulling in a full math crate just for quaternion ops.
 
 /// Quaternion represented as [w, x, y, z].
-type Quat = [f32; 4];
+pub type Quat = [f32; 4];
 
 #[inline]
 fn quat_identity() -> Quat {
@@ -119,7 +119,7 @@ pub struct OrbitCamera {
     pub target: [f32; 3],
     /// Quaternion encoding the camera orientation.
     /// Default orientation: looking along world -Z (forward), local +Y is up.
-    orientation: Quat,
+    pub orientation: Quat,
     /// Distance from target to camera.
     pub distance: f32,
     /// Field of view in degrees.
@@ -307,7 +307,6 @@ impl OrbitCamera {
         // Using the "from-to" rotation approach.
         let default_fwd: [f32; 3] = [0.0, 0.0, -1.0];
         let default_up: [f32; 3] = [0.0, 1.0, 0.0];
-
         // Check if fwd is nearly parallel or antiparallel to default_fwd
         let d = dot(default_fwd, fwd);
         if d > 0.9999 {
@@ -346,6 +345,79 @@ impl OrbitCamera {
             self.orientation = quat_normalize(&quat_mul(&q_roll, &q_forward));
         } else {
             self.orientation = q_forward;
+        }
+    }
+
+    /// Set the camera orientation directly from a quaternion.
+    /// Used by the ViewCube for smooth slerp animation: the ViewCube computes
+    /// a target quaternion and the app interpolates toward it.
+    pub fn set_orientation(&mut self, q: Quat) {
+        self.orientation = quat_normalize(&q);
+    }
+
+    /// Spherical linear interpolation between two quaternions.
+    /// `t` is in [0, 1] where 0 returns `from` and 1 returns `to`.
+    /// Uses the shortest-arc path (negates `to` if dot < 0).
+    /// Quat layout: [w, x, y, z].
+    pub fn slerp_quat(from: &Quat, to: &Quat, t: f32) -> Quat {
+        let mut cos_half_theta = from[0]*to[0] + from[1]*to[1] + from[2]*to[2] + from[3]*to[3];
+        let mut to2 = *to;
+        // If dot < 0, negate `to` to take the shorter arc
+        if cos_half_theta < 0.0 {
+            to2 = [-to[0], -to[1], -to[2], -to[3]];
+            cos_half_theta = -cos_half_theta;
+        }
+        // If quaternions are very close, use linear interpolation to avoid NaN
+        if cos_half_theta >= 1.0 {
+            return quat_normalize(&[
+                from[0] + t * (to2[0] - from[0]),
+                from[1] + t * (to2[1] - from[1]),
+                from[2] + t * (to2[2] - from[2]),
+                from[3] + t * (to2[3] - from[3]),
+            ]);
+        }
+        let half_theta = cos_half_theta.acos();
+        let sin_half_theta = (1.0 - cos_half_theta * cos_half_theta).sqrt().max(1e-10);
+        let ratio_a = ((1.0 - t) * half_theta).sin() / sin_half_theta;
+        let ratio_b = (t * half_theta).sin() / sin_half_theta;
+        [
+            from[0] * ratio_a + to2[0] * ratio_b,
+            from[1] * ratio_a + to2[1] * ratio_b,
+            from[2] * ratio_a + to2[2] * ratio_b,
+            from[3] * ratio_a + to2[3] * ratio_b,
+        ]
+    }
+
+    /// Compute the target quaternion for looking from a given direction
+    /// (without mutating the camera). Used by the ViewCube to compute the
+    /// slerp target before interpolation starts.
+    pub fn orientation_for_direction(direction: [f32; 3]) -> Quat {
+        let fwd = normalize(direction);
+        let default_fwd: [f32; 3] = [0.0, 0.0, -1.0];
+        let default_up: [f32; 3] = [0.0, 1.0, 0.0];
+        let d = dot(default_fwd, fwd);
+        if d > 0.9999 {
+            return quat_identity();
+        }
+        if d < -0.9999 {
+            return quat_from_axis_angle([0.0, 1.0, 0.0], std::f32::consts::PI);
+        }
+        let axis = normalize(cross(default_fwd, fwd));
+        let angle = d.acos();
+        let q_forward = quat_from_axis_angle(axis, angle);
+        let rotated_up = quat_rotate_vec(&q_forward, default_up);
+        let world_up: [f32; 3] = [0.0, 1.0, 0.0];
+        let right = normalize(cross(fwd, world_up));
+        let projected_up = normalize(cross(right, fwd));
+        let up_dot = dot(rotated_up, projected_up);
+        if up_dot.abs() < 0.9999 {
+            let roll_axis = fwd;
+            let roll_angle = dot(rotated_up, projected_up).acos()
+                * if dot(cross(rotated_up, projected_up), fwd) >= 0.0 { 1.0 } else { -1.0 };
+            let q_roll = quat_from_axis_angle(roll_axis, roll_angle);
+            quat_normalize(&quat_mul(&q_roll, &q_forward))
+        } else {
+            q_forward
         }
     }
 
