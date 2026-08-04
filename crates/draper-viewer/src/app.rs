@@ -8960,11 +8960,23 @@ impl eframe::App for ViewerApp {
 
                 // ─── BRepCAD View Cube (top-right corner of VIEWPORT) ───
                 if self.enable_brepcad_ui {
-                    if let Some(action) = crate::ui::view_modes::render_view_cube_in_viewport(ui, &rect, &mut self.brepcad_viewcube_state) {
+                    // Pass camera.forward() to the cube so it ALWAYS shows the
+                    // same faces as the main camera (quaternion-derived, no
+                    // separate Euler angle state).
+                    let cam_fwd = self.camera.forward();
+                    if let Some(action) = crate::ui::view_modes::render_view_cube_in_viewport(
+                        ui, &rect, cam_fwd, &mut self.brepcad_viewcube_state
+                    ) {
                         use crate::ui::view_modes::ViewCubeAction;
                         match action {
+                            ViewCubeAction::Drag { delta_x, delta_y } => {
+                                // Use the SAME quaternion rotation as the main viewport.
+                                // camera.rotate() does: yaw around world Y, then pitch
+                                // around camera's local right axis — both via quaternion
+                                // multiplication. No Euler angles, no gimbal lock.
+                                self.camera.rotate(delta_x, delta_y);
+                            }
                             ViewCubeAction::SnapTo(orient) => {
-                                // Smooth slerp to target orientation
                                 let target_q = crate::camera::OrbitCamera::orientation_for_direction(orient.direction());
                                 self.brepcad_viewcube_target_quat = Some(target_q);
                                 self.brepcad_viewcube_anim_start = Some(std::time::Instant::now());
@@ -8983,32 +8995,16 @@ impl eframe::App for ViewerApp {
                                 self.brepcad_status_msg = "Home (ISO)".to_string();
                             }
                             ViewCubeAction::RotateStep { axis, angle_rad } => {
-                                // Apply rotation step to current camera orientation
-                                let (right, up, fwd) = {
-                                    let q = self.camera.orientation;
-                                    // Get camera basis vectors from quaternion
-                                    let qr = [q[1], q[2], q[3], q[0]];
-                                    // right = q * (1,0,0)
-                                    let right = crate::camera::OrbitCamera::slerp_quat(
-                                        &[1.0, 0.0, 0.0, 0.0], &[1.0, 0.0, 0.0, 0.0], 0.0
-                                    );
-                                    let _ = (right, qr);
-                                    // Use camera's right/up/forward methods
-                                    (self.camera.right(), self.camera.up(), self.camera.forward())
-                                };
+                                let (right, up, fwd) = (self.camera.right(), self.camera.up(), self.camera.forward());
                                 let rot_axis = match axis {
-                                    0 => right,  // screen-X = pitch
-                                    1 => up,     // screen-Y = yaw
-                                    2 => fwd,    // screen-Z = roll
+                                    0 => right,
+                                    1 => up,
+                                    2 => fwd,
                                     _ => right,
                                 };
-                                // Build rotation quaternion and apply to current orientation
-                                let _ = (angle_rad, rot_axis, fwd);
-                                // For simplicity, use look_from_direction with rotated direction
                                 let cur_fwd = self.camera.forward();
                                 let cos_a = angle_rad.cos();
                                 let sin_a = angle_rad.sin();
-                                // Rotate cur_fwd around rot_axis by angle_rad using Rodrigues
                                 let dot = cur_fwd[0]*rot_axis[0] + cur_fwd[1]*rot_axis[1] + cur_fwd[2]*rot_axis[2];
                                 let new_dir = [
                                     cur_fwd[0]*cos_a + (rot_axis[1]*cur_fwd[2] - rot_axis[2]*cur_fwd[1])*sin_a + rot_axis[0]*dot*(1.0-cos_a),
@@ -9022,14 +9018,8 @@ impl eframe::App for ViewerApp {
                                 self.brepcad_status_msg = format!("Rotated {}°", angle_rad.to_degrees() as i32);
                             }
                             ViewCubeAction::ToggleProjection => {
-                                // Toggle perspective/orthographic (not yet implemented in camera)
                                 self.brepcad_status_msg = "Projection toggle (TODO)".to_string();
                             }
-                        }
-                        // Reset widget to ISO after snap (visual feedback)
-                        if matches!(action, ViewCubeAction::SnapTo(_) | ViewCubeAction::Home) {
-                            self.brepcad_viewcube_state.azimuth = 45.0;
-                            self.brepcad_viewcube_state.elevation = 35.264;
                         }
                     }
 
@@ -9044,31 +9034,12 @@ impl eframe::App for ViewerApp {
                             self.brepcad_viewcube_target_quat = None;
                             self.brepcad_viewcube_anim_start = None;
                             self.brepcad_viewcube_anim_from = None;
-                            // Sync widget azimuth/elevation with final camera orientation
-                            let fwd = self.camera.forward();
-                            let el = (-fwd[1]).asin().to_degrees();
-                            let az = (-fwd[0]).atan2(fwd[2]).to_degrees();
-                            self.brepcad_viewcube_state.azimuth = az;
-                            self.brepcad_viewcube_state.elevation = el;
                         } else {
                             let t = elapsed / duration;
-                            // Ease in-out (smoothstep)
                             let t_smooth = t * t * (3.0 - 2.0 * t);
                             let q = crate::camera::OrbitCamera::slerp_quat(&from_q, &target_q, t_smooth);
                             self.camera.set_orientation(q);
                         }
-                    }
-
-                    // Apply drag rotation from ViewCube to camera (no animation, immediate)
-                    if self.brepcad_viewcube_state.dragging {
-                        let az = self.brepcad_viewcube_state.azimuth.to_radians();
-                        let el = self.brepcad_viewcube_state.elevation.to_radians();
-                        let dir = [
-                            -el.cos() * az.sin(),
-                            -el.sin(),
-                            el.cos() * az.cos(),
-                        ];
-                        self.camera.look_from_direction(dir);
                     }
 
                     // ─── Display Style switcher (bottom-right corner of VIEWPORT) ───

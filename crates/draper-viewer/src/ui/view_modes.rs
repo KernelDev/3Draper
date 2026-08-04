@@ -65,6 +65,10 @@ pub enum ViewCubeAction {
     /// Axis: 0=screen-X (pitch), 1=screen-Y (yaw), 2=screen-Z (roll).
     /// Angle is in radians.
     RotateStep { axis: u8, angle_rad: f32 },
+    /// Drag-rotate the camera (same as dragging in the main viewport).
+    /// The app should call camera.rotate(delta_x, delta_y) — this uses
+    /// quaternion-based rotation, identical to the main viewport drag.
+    Drag { delta_x: f32, delta_y: f32 },
     /// Reset to default ISO view.
     Home,
     /// Toggle projection mode (perspective ↔ orthographic).
@@ -106,6 +110,10 @@ impl ViewCubeState {
 pub fn render_view_cube_in_viewport(
     ui: &mut egui::Ui,
     viewport_rect: &egui::Rect,
+    // Camera forward direction (FROM camera TO target), from camera.orientation quaternion.
+    // The cube uses this instead of its own Euler angles, so it always
+    // shows the same faces as the main camera.
+    camera_forward: [f32; 3],
     state: &mut ViewCubeState,
 ) -> Option<ViewCubeAction> {
     let mut selected: Option<ViewCubeAction> = None;
@@ -188,16 +196,18 @@ pub fn render_view_cube_in_viewport(
         selected = Some(ViewCubeAction::RotateStep { axis: 2, angle_rad: std::f32::consts::FRAC_PI_4 });
     }
 
-    // Handle drag on cube/ring to rotate the widget
+    // Handle drag on cube/ring — return Drag action so the app can call
+    // camera.rotate() (quaternion-based, same as main viewport drag).
     let drag_resp = if cube_resp.dragged_by(egui::PointerButton::Primary) { Some(&cube_resp) }
         else if ring_resp.dragged_by(egui::PointerButton::Primary) { Some(&ring_resp) }
         else { None };
     if let Some(dr) = drag_resp {
         let delta = dr.drag_delta();
         if delta.length_sq() > 0.5 {
-            state.azimuth += delta.x * 0.7;
-            state.elevation = (state.elevation - delta.y * 0.7).max(-85.0).min(85.0);
             state.dragging = true;
+            // Return Drag action — app.rs will call camera.rotate(delta.x, delta.y)
+            // which uses the SAME quaternion rotation as the main viewport.
+            selected = Some(ViewCubeAction::Drag { delta_x: delta.x, delta_y: delta.y });
         }
     }
 
@@ -227,15 +237,18 @@ pub fn render_view_cube_in_viewport(
     }
 
     // ═══ 3D CUBE — camera-based orthographic projection ═══════════════════════
-    let az_rad = state.azimuth.to_radians();
-    let el_rad = state.elevation.to_radians();
-    let cos_a = az_rad.cos();
-    let sin_a = az_rad.sin();
-    let cos_e = el_rad.cos();
-    let sin_e = el_rad.sin();
-
-    // cam_dir = direction FROM camera TO target (target at origin)
-    let cam_dir = [-cos_e * sin_a, -sin_e, cos_e * cos_a];
+    // Use the camera's actual forward direction (derived from its orientation
+    // quaternion) instead of separate Euler angles. This ensures the cube
+    // ALWAYS shows the same faces as the main camera, and quaternion-based
+    // rotation is used throughout (no gimbal lock, smooth orbit).
+    let cam_dir = {
+        let len = (camera_forward[0]*camera_forward[0] + camera_forward[1]*camera_forward[1] + camera_forward[2]*camera_forward[2]).sqrt();
+        if len > 1e-6 {
+            [camera_forward[0]/len, camera_forward[1]/len, camera_forward[2]/len]
+        } else {
+            [0.0, 0.0, -1.0]
+        }
+    };
     let cam_pos = [-cam_dir[0], -cam_dir[1], -cam_dir[2]];
 
     // Camera basis: right = normalize(cross(world_up, cam_dir)), up = cross(cam_dir, right)
@@ -343,23 +356,22 @@ pub fn render_view_cube_in_viewport(
         zones.push(Zone { verts: oct, normal: [0.0, -1.0, 0.0], label: Some("BOT"), snap: ViewOrientation::Bottom, id: next_id }); next_id += 1;
     }
     {
-        // FRONT (z=+1)
-        let c1 = corner_verts(-1.0, -1.0, 1.0);
-        let c2 = corner_verts( 1.0, -1.0, 1.0);
-        let c3 = corner_verts( 1.0,  1.0, 1.0);
-        let c4 = corner_verts(-1.0,  1.0, 1.0);
-        // CCW from +Z: take X-edge and Y-edge vertices
-        let oct = vec![c1[0], c1[1], c2[1], c2[0], c3[0], c3[1], c4[1], c4[0]];
-        zones.push(Zone { verts: oct, normal: [0.0, 0.0, 1.0], label: Some("FRONT"), snap: ViewOrientation::Front, id: next_id }); next_id += 1;
-    }
-    {
-        // BACK (z=-1)
+        // FRONT (z=-1, normal -Z) — camera at +X,+Y,-Z for ISO sees this face
         let c1 = corner_verts(-1.0, -1.0, -1.0);
         let c2 = corner_verts( 1.0, -1.0, -1.0);
         let c3 = corner_verts( 1.0,  1.0, -1.0);
         let c4 = corner_verts(-1.0,  1.0, -1.0);
         let oct = vec![c1[0], c1[1], c4[1], c4[0], c3[0], c3[1], c2[1], c2[0]];
-        zones.push(Zone { verts: oct, normal: [0.0, 0.0, -1.0], label: Some("BACK"), snap: ViewOrientation::Back, id: next_id }); next_id += 1;
+        zones.push(Zone { verts: oct, normal: [0.0, 0.0, -1.0], label: Some("FRONT"), snap: ViewOrientation::Front, id: next_id }); next_id += 1;
+    }
+    {
+        // BACK (z=+1, normal +Z)
+        let c1 = corner_verts(-1.0, -1.0, 1.0);
+        let c2 = corner_verts( 1.0, -1.0, 1.0);
+        let c3 = corner_verts( 1.0,  1.0, 1.0);
+        let c4 = corner_verts(-1.0,  1.0, 1.0);
+        let oct = vec![c1[0], c1[1], c2[1], c2[0], c3[0], c3[1], c4[1], c4[0]];
+        zones.push(Zone { verts: oct, normal: [0.0, 0.0, 1.0], label: Some("BACK"), snap: ViewOrientation::Back, id: next_id }); next_id += 1;
     }
     {
         // LEFT (x=-1)
