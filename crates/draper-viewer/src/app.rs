@@ -8971,23 +8971,23 @@ impl eframe::App for ViewerApp {
                         match action {
                             ViewCubeAction::Drag { delta_x, delta_y } => {
                                 // Use the SAME quaternion rotation as the main viewport.
-                                // camera.rotate() does: yaw around world Y, then pitch
-                                // around camera's local right axis — both via quaternion
-                                // multiplication. No Euler angles, no gimbal lock.
                                 self.camera.rotate(delta_x, delta_y);
                             }
-                            ViewCubeAction::SnapTo(orient) => {
-                                let target_q = crate::camera::OrbitCamera::orientation_for_direction(orient.direction());
+                            ViewCubeAction::SnapToDirection(dir) => {
+                                // Smooth slerp to look along `dir` (FROM camera TO target).
+                                // The direction comes directly from the clicked zone's normal
+                                // (negated), so the camera ends up perpendicular to that face.
+                                let target_q = crate::camera::OrbitCamera::orientation_for_direction(dir);
                                 self.brepcad_viewcube_target_quat = Some(target_q);
                                 self.brepcad_viewcube_anim_start = Some(std::time::Instant::now());
                                 self.brepcad_viewcube_anim_from = Some(self.camera.orientation);
-                                self.brepcad_view_orientation = orient.label().to_string();
-                                self.brepcad_status_msg = format!("View: {}", orient.label());
+                                self.brepcad_view_orientation = "Snap".to_string();
+                                self.brepcad_status_msg = format!("View: snap to [{:.1},{:.1},{:.1}]", dir[0], dir[1], dir[2]);
                             }
                             ViewCubeAction::Home => {
-                                let target_q = crate::camera::OrbitCamera::orientation_for_direction(
-                                    crate::ui::view_modes::ViewOrientation::Iso.direction()
-                                );
+                                // Reset to default ISO view using NAVICUBE_ISO_DIRECTION
+                                let dir = crate::ui::view_modes::NAVICUBE_ISO_DIRECTION;
+                                let target_q = crate::camera::OrbitCamera::orientation_for_direction(dir);
                                 self.brepcad_viewcube_target_quat = Some(target_q);
                                 self.brepcad_viewcube_anim_start = Some(std::time::Instant::now());
                                 self.brepcad_viewcube_anim_from = Some(self.camera.orientation);

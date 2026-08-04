@@ -59,8 +59,11 @@ impl ViewOrientation {
 /// The app is responsible for actually rotating the camera (with slerp).
 #[derive(Clone, Debug)]
 pub enum ViewCubeAction {
-    /// Snap camera to this orientation (with smooth slerp animation).
-    SnapTo(ViewOrientation),
+    /// Snap camera to look along this direction (FROM camera TO target).
+    /// The app should compute target_quat = orientation_for_direction(dir)
+    /// and slerp the camera to it. This is direction-based, not orientation-
+    /// enum-based, so it works with any mesh's face normals directly.
+    SnapToDirection([f32; 3]),
     /// Rotate camera by a fixed step around a screen axis.
     /// Axis: 0=screen-X (pitch), 1=screen-Y (yaw), 2=screen-Z (roll).
     /// Angle is in radians.
@@ -107,112 +110,94 @@ impl ViewCubeState {
     }
 }
 
-// ═══ Chamfered cube mesh data ═══════════════════════════════════════════════
-// 24 vertices, 44 triangles. Generated from convex hull of edge-vertices.
-// CUBE_HALF=1.0, CHAMFER=0.18.
-// This mesh has 26 distinct face-normal directions:
-//   - 6 face normals (±X, ±Y, ±Z) → 8 triangles each (octagonal faces)
-//   - 12 edge normals (±X±Y, ±X±Z, ±Y±Z) → 2 triangles each (edge chamfers)
-//   - 8 corner normals (±X±Y±Z) → 1 triangle each (corner triangles)
-pub const CHAMFERED_CUBE_VERTS: [[f32; 3]; 24] = [
-    [-0.82, -1.0, -1.0], [-1.0, -0.82, -1.0], [-1.0, -1.0, -0.82],
-    [-0.82, -1.0,  1.0], [-1.0, -0.82,  1.0], [-1.0, -1.0,  0.82],
-    [-0.82,  1.0, -1.0], [-1.0,  0.82, -1.0], [-1.0,  1.0, -0.82],
-    [-0.82,  1.0,  1.0], [-1.0,  0.82,  1.0], [-1.0,  1.0,  0.82],
-    [ 0.82, -1.0, -1.0], [ 1.0, -0.82, -1.0], [ 1.0, -1.0, -0.82],
-    [ 0.82, -1.0,  1.0], [ 1.0, -0.82,  1.0], [ 1.0, -1.0,  0.82],
-    [ 0.82,  1.0, -1.0], [ 1.0,  0.82, -1.0], [ 1.0,  1.0, -0.82],
-    [ 0.82,  1.0,  1.0], [ 1.0,  0.82,  1.0], [ 1.0,  1.0,  0.82],
+// ═══ Navigation cube mesh data (from navicube.obj) ═════════════════════════
+// FreeCAD 0.21-style chamfered navigation cube.
+// 48 vertices, 26 named zones (6 faces + 12 edges + 8 corners), 92 triangles.
+// Each zone has: name, optional label, snap direction, outward normal.
+// Auto-generated from navicube.obj by scripts/parse_navicube_obj.py.
+
+pub const NAVICUBE_VERTS: [[f32; 3]; 48] = [
+    [0.5, 0.3, 0.2], [0.5, 0.2, 0.3], [0.5, -0.2, 0.3], [0.5, -0.3, 0.2],
+    [0.5, -0.3, -0.2], [0.5, -0.2, -0.3], [0.5, 0.2, -0.3], [0.5, 0.3, -0.2],
+    [-0.5, 0.3, -0.2], [-0.5, 0.2, -0.3], [-0.5, -0.2, -0.3], [-0.5, -0.3, -0.2],
+    [-0.5, -0.3, 0.2], [-0.5, -0.2, 0.3], [-0.5, 0.2, 0.3], [-0.5, 0.3, 0.2],
+    [0.3, 0.5, -0.2], [0.2, 0.5, -0.3], [-0.2, 0.5, -0.3], [-0.3, 0.5, -0.2],
+    [-0.3, 0.5, 0.2], [-0.2, 0.5, 0.3], [0.2, 0.5, 0.3], [0.3, 0.5, 0.2],
+    [0.3, -0.5, 0.2], [0.2, -0.5, 0.3], [-0.2, -0.5, 0.3], [-0.3, -0.5, 0.2],
+    [-0.3, -0.5, -0.2], [-0.2, -0.5, -0.3], [0.2, -0.5, -0.3], [0.3, -0.5, -0.2],
+    [0.3, 0.2, 0.5], [0.2, 0.3, 0.5], [-0.2, 0.3, 0.5], [-0.3, 0.2, 0.5],
+    [-0.3, -0.2, 0.5], [-0.2, -0.3, 0.5], [0.2, -0.3, 0.5], [0.3, -0.2, 0.5],
+    [0.3, -0.2, -0.5], [0.2, -0.3, -0.5], [-0.2, -0.3, -0.5], [-0.3, -0.2, -0.5],
+    [-0.3, 0.2, -0.5], [-0.2, 0.3, -0.5], [0.2, 0.3, -0.5], [0.3, 0.2, -0.5],
 ];
 
-pub const CHAMFERED_CUBE_TRIS: [[u32; 3]; 44] = [
-    [1, 0, 2], [7, 8, 6], [20, 19, 18], [21, 22, 23],
-    [13, 14, 12], [4, 5, 3], [9, 11, 10], [15, 17, 16],
-    [12, 0, 1], [12, 19, 13], [6, 18, 12], [1, 7, 12],
-    [12, 7, 6], [12, 18, 19], [17, 22, 16], [13, 19, 17],
-    [17, 19, 20], [17, 14, 13], [20, 23, 17], [17, 23, 22],
-    [10, 11, 4], [1, 2, 4], [4, 7, 1], [2, 5, 4],
-    [8, 7, 4], [4, 11, 8], [9, 18, 6], [8, 11, 9],
-    [6, 8, 9], [21, 23, 9], [20, 18, 9], [9, 23, 20],
-    [21, 9, 15], [15, 22, 21], [15, 4, 3], [16, 22, 15],
-    [10, 4, 15], [15, 9, 10], [15, 2, 0], [0, 12, 15],
-    [15, 5, 2], [3, 5, 15], [15, 12, 14], [14, 17, 15],
+/// All triangles as (v0, v1, v2, zone_id). zone_id indexes NAVICUBE_ZONES.
+pub const NAVICUBE_TRIS: [(u32, u32, u32, u8); 92] = [
+    (0, 1, 2, 0), (0, 2, 3, 0), (0, 3, 4, 0), (0, 4, 5, 0), (0, 5, 6, 0), (0, 6, 7, 0),
+    (8, 9, 10, 1), (8, 10, 11, 1), (8, 11, 12, 1), (8, 12, 13, 1), (8, 13, 14, 1), (8, 14, 15, 1),
+    (16, 17, 18, 2), (16, 18, 19, 2), (16, 19, 20, 2), (16, 20, 21, 2), (16, 21, 22, 2), (16, 22, 23, 2),
+    (24, 25, 26, 3), (24, 26, 27, 3), (24, 27, 28, 3), (24, 28, 29, 3), (24, 29, 30, 3), (24, 30, 31, 3),
+    (32, 33, 34, 4), (32, 34, 35, 4), (32, 35, 36, 4), (32, 36, 37, 4), (32, 37, 38, 4), (32, 38, 39, 4),
+    (40, 41, 42, 5), (40, 42, 43, 5), (40, 43, 44, 5), (40, 44, 45, 5), (40, 45, 46, 5), (40, 46, 47, 5),
+    (7, 16, 23, 6), (7, 23, 0, 6),
+    (3, 24, 31, 7), (3, 31, 4, 7),
+    (1, 32, 39, 8), (1, 39, 2, 8),
+    (5, 40, 47, 9), (5, 47, 6, 9),
+    (15, 20, 19, 10), (15, 19, 8, 10),
+    (11, 28, 27, 11), (11, 27, 12, 11),
+    (13, 36, 35, 12), (13, 35, 14, 12),
+    (9, 44, 43, 13), (9, 43, 10, 13),
+    (21, 34, 33, 14), (21, 33, 22, 14),
+    (17, 46, 45, 15), (17, 45, 18, 15),
+    (25, 38, 37, 16), (25, 37, 26, 16),
+    (29, 42, 41, 17), (29, 41, 30, 17),
+    (0, 23, 22, 18), (0, 22, 33, 18), (0, 33, 32, 18), (0, 32, 1, 18),
+    (6, 47, 46, 19), (6, 46, 17, 19), (6, 17, 16, 19), (6, 16, 7, 19),
+    (2, 39, 38, 20), (2, 38, 25, 20), (2, 25, 24, 20), (2, 24, 3, 20),
+    (4, 31, 30, 21), (4, 30, 41, 21), (4, 41, 40, 21), (4, 40, 5, 21),
+    (14, 35, 34, 22), (14, 34, 21, 22), (14, 21, 20, 22), (14, 20, 15, 22),
+    (8, 19, 18, 23), (8, 18, 45, 23), (8, 45, 44, 23), (8, 44, 9, 23),
+    (12, 27, 26, 24), (12, 26, 37, 24), (12, 37, 36, 24), (12, 36, 13, 24),
+    (10, 43, 42, 25), (10, 42, 29, 25), (10, 29, 28, 25), (10, 28, 11, 25),
 ];
 
-pub const CHAMFERED_CUBE_FACE_NORMALS: [[f32; 3]; 44] = [
-    [-0.57735, -0.57735, -0.57735], [-0.57735, 0.57735, -0.57735],
-    [ 0.57735,  0.57735, -0.57735], [ 0.57735, 0.57735,  0.57735],
-    [ 0.57735, -0.57735, -0.57735], [-0.57735, -0.57735, 0.57735],
-    [-0.57735,  0.57735,  0.57735], [ 0.57735, -0.57735, 0.57735],
-    [ 0.0,  0.0, -1.0], [ 0.0,  0.0, -1.0], [ 0.0,  0.0, -1.0],
-    [ 0.0,  0.0, -1.0], [ 0.0,  0.0, -1.0], [ 0.0,  0.0, -1.0],
-    [ 1.0,  0.0,  0.0], [ 1.0,  0.0,  0.0], [ 1.0,  0.0,  0.0],
-    [ 1.0,  0.0,  0.0], [ 1.0,  0.0,  0.0], [ 1.0,  0.0,  0.0],
-    [-1.0,  0.0,  0.0], [-1.0,  0.0,  0.0], [-1.0,  0.0,  0.0],
-    [-1.0,  0.0,  0.0], [-1.0,  0.0,  0.0], [-1.0,  0.0,  0.0],
-    [ 0.0,  1.0,  0.0], [ 0.0,  1.0,  0.0], [ 0.0,  1.0,  0.0],
-    [ 0.0,  1.0,  0.0], [ 0.0,  1.0,  0.0], [ 0.0,  1.0,  0.0],
-    [ 0.0,  0.0,  1.0], [ 0.0,  0.0,  1.0], [ 0.0,  0.0,  1.0],
-    [ 0.0,  0.0,  1.0], [ 0.0,  0.0,  1.0], [ 0.0,  0.0,  1.0],
-    [ 0.0, -1.0,  0.0], [ 0.0, -1.0,  0.0], [ 0.0, -1.0,  0.0],
-    [ 0.0, -1.0,  0.0], [ 0.0, -1.0,  0.0], [ 0.0, -1.0,  0.0],
+/// Zone metadata: (name, optional label, snap_direction, outward_normal).
+/// snap_direction = direction FROM camera TO target when this zone is clicked.
+/// For face zones, snap_direction = -normal (camera looks straight at the face).
+/// For edge/corner zones, snap_direction = -normal (camera looks at edge/corner
+/// from outside, giving a 2-face or 3-face ISO view).
+pub const NAVICUBE_ZONES: [(&str, Option<&str>, [f32; 3], [f32; 3]); 26] = [
+    ("Right_Face",            Some("RIGHT"),  [-1.0,  0.0,  0.0], [ 1.0,  0.0,  0.0]), // 0
+    ("Left_Face",             Some("LEFT"),   [ 1.0,  0.0,  0.0], [-1.0,  0.0,  0.0]), // 1
+    ("Front_Face",            Some("FRONT"),  [ 0.0, -1.0,  0.0], [ 0.0,  1.0,  0.0]), // 2
+    ("Back_Face",             Some("BACK"),   [ 0.0,  1.0,  0.0], [ 0.0, -1.0,  0.0]), // 3
+    ("Top_Face",              Some("TOP"),    [ 0.0,  0.0, -1.0], [ 0.0,  0.0,  1.0]), // 4
+    ("Bottom_Face",           Some("BOT"),    [ 0.0,  0.0,  1.0], [ 0.0,  0.0, -1.0]), // 5
+    ("Right_Front_Edge",      None,           [-0.7071, -0.7071, 0.0],   [ 0.7071,  0.7071, 0.0]),   // 6
+    ("Right_Back_Edge",       None,           [-0.7071,  0.7071, 0.0],   [ 0.7071, -0.7071, 0.0]),   // 7
+    ("Right_Top_Edge",        None,           [-0.7071, 0.0, -0.7071],   [ 0.7071, 0.0,  0.7071]),   // 8
+    ("Right_Bottom_Edge",     None,           [-0.7071, 0.0,  0.7071],   [ 0.7071, 0.0, -0.7071]),   // 9
+    ("Left_Front_Edge",       None,           [ 0.7071, -0.7071, 0.0],   [-0.7071,  0.7071, 0.0]),   // 10
+    ("Left_Back_Edge",        None,           [ 0.7071,  0.7071, 0.0],   [-0.7071, -0.7071, 0.0]),   // 11
+    ("Left_Top_Edge",         None,           [ 0.7071, 0.0, -0.7071],   [-0.7071, 0.0,  0.7071]),   // 12
+    ("Left_Bottom_Edge",      None,           [ 0.7071, 0.0,  0.7071],   [-0.7071, 0.0, -0.7071]),   // 13
+    ("Front_Top_Edge",        None,           [ 0.0, -0.7071, -0.7071],  [ 0.0,  0.7071,  0.7071]),  // 14
+    ("Front_Bottom_Edge",     None,           [ 0.0, -0.7071,  0.7071],  [ 0.0,  0.7071, -0.7071]),  // 15
+    ("Back_Top_Edge",         None,           [ 0.0,  0.7071, -0.7071],  [ 0.0, -0.7071,  0.7071]),  // 16
+    ("Back_Bottom_Edge",      None,           [ 0.0,  0.7071,  0.7071],  [ 0.0, -0.7071, -0.7071]),  // 17
+    ("TopFrontRight_Corner",  None,           [-0.5774, -0.5774, -0.5774], [ 0.5774,  0.5774,  0.5774]), // 18
+    ("BottomFrontRight_Corner", None,         [-0.5774, -0.5774,  0.5774], [ 0.5774,  0.5774, -0.5774]), // 19
+    ("TopBackRight_Corner",   None,           [-0.5774,  0.5774, -0.5774], [ 0.5774, -0.5774,  0.5774]), // 20
+    ("BottomBackRight_Corner", None,          [-0.5774,  0.5774,  0.5774], [ 0.5774, -0.5774, -0.5774]), // 21
+    ("TopFrontLeft_Corner",   None,           [ 0.5774, -0.5774, -0.5774], [-0.5774,  0.5774,  0.5774]), // 22
+    ("BottomFrontLeft_Corner", None,          [ 0.5774, -0.5774,  0.5774], [-0.5774,  0.5774, -0.5774]), // 23
+    ("TopBackLeft_Corner",    None,           [ 0.5774,  0.5774, -0.5774], [-0.5774, -0.5774,  0.5774]), // 24
+    ("BottomBackLeft_Corner", None,           [ 0.5774,  0.5774,  0.5774], [-0.5774, -0.5774, -0.5774]), // 25
 ];
 
-/// Classify a face normal into one of 26 zone IDs:
-///   0-5: face zones (±X, ±Y, ±Z)
-///   6-17: edge zones (12 edges)
-///   18-25: corner zones (8 corners)
-/// Returns None if the normal doesn't match any zone.
-fn classify_normal(n: [f32; 3]) -> Option<usize> {
-    let ax = n[0].abs();
-    let ay = n[1].abs();
-    let az = n[2].abs();
-    let eps = 0.3;
-    let nz = |x: f32| x.abs() < eps;
-    let one = |x: f32| x.abs() > 0.9;
-
-    // Face zones (one component is ±1, others ≈ 0)
-    if one(n[0]) && nz(n[1]) && nz(n[2]) {
-        return Some(if n[0] > 0.0 { 0 } else { 1 }); // +X=0, -X=1
-    }
-    if one(n[1]) && nz(n[0]) && nz(n[2]) {
-        return Some(if n[1] > 0.0 { 2 } else { 3 }); // +Y=2, -Y=3
-    }
-    if one(n[2]) && nz(n[0]) && nz(n[1]) {
-        return Some(if n[2] > 0.0 { 4 } else { 5 }); // +Z=4, -Z=5
-    }
-
-    // Edge zones (two components non-zero, one ≈ 0) — 12 edges
-    if nz(n[2]) {
-        // Edge in XY plane
-        return Some(6 + (if n[0] > 0.0 { 1 } else { 0 }) * 2 + (if n[1] > 0.0 { 1 } else { 0 }));
-    }
-    if nz(n[1]) {
-        // Edge in XZ plane
-        return Some(10 + (if n[0] > 0.0 { 1 } else { 0 }) * 2 + (if n[2] > 0.0 { 1 } else { 0 }));
-    }
-    if nz(n[0]) {
-        // Edge in YZ plane
-        return Some(14 + (if n[1] > 0.0 { 1 } else { 0 }) * 2 + (if n[2] > 0.0 { 1 } else { 0 }));
-    }
-
-    // Corner zones (all three non-zero) — 8 corners
-    Some(18 + (if n[0] > 0.0 { 1 } else { 0 }) * 4
-           + (if n[1] > 0.0 { 1 } else { 0 }) * 2
-           + (if n[2] > 0.0 { 1 } else { 0 }))
-}
-
-/// Map a zone ID to the ViewOrientation for camera snapping.
-fn zone_to_orientation(zone_id: usize) -> ViewOrientation {
-    match zone_id {
-        0 | 1 => ViewOrientation::Right,  // ±X
-        2 => ViewOrientation::Top,        // +Y
-        3 => ViewOrientation::Bottom,     // -Y
-        4 => ViewOrientation::Back,       // +Z
-        5 => ViewOrientation::Front,      // -Z
-        _ => ViewOrientation::Iso,        // edges and corners → ISO
-    }
-}
+/// Default ISO direction (from camera to target) for the Home button.
+/// This looks at the cube from the TopFrontRight corner direction.
+pub const NAVICUBE_ISO_DIRECTION: [f32; 3] = [-0.5774, -0.5774, -0.5774];
 
 pub fn render_view_cube_in_viewport(
     ui: &mut egui::Ui,
@@ -385,8 +370,10 @@ pub fn render_view_cube_in_viewport(
     };
 
 
-    // ═══ Chamfered cube — mesh-based rendering ════════════════════════════════
-    let v2d: Vec<egui::Pos2> = CHAMFERED_CUBE_VERTS.iter().map(|&p| {
+    // ═══ Navigation cube — mesh-based rendering from navicube.obj ═════════════
+    // 48 vertices, 92 triangles, 26 named zones (6 faces + 12 edges + 8 corners).
+    // Each triangle knows its zone_id (index into NAVICUBE_ZONES).
+    let v2d: Vec<egui::Pos2> = NAVICUBE_VERTS.iter().map(|&p| {
         project(p[0], p[1], p[2])
     }).collect();
 
@@ -394,28 +381,33 @@ pub fn render_view_cube_in_viewport(
         n[0]*cam_pos[0] + n[1]*cam_pos[1] + n[2]*cam_pos[2] > 0.0
     };
 
-    let mut visible_tris: Vec<(usize, [f32; 3], f32)> = Vec::new();
-    for (i, tri) in CHAMFERED_CUBE_TRIS.iter().enumerate() {
-        let n = CHAMFERED_CUBE_FACE_NORMALS[i];
+    // Collect visible triangles with depth for painter's algorithm.
+    // Each entry: (tri_index_in_NAVICUBE_TRIS, zone_id, normal, avg_depth)
+    let mut visible_tris: Vec<(usize, usize, [f32; 3], f32)> = Vec::new();
+    for (i, &(v0, v1, v2, zone_id)) in NAVICUBE_TRIS.iter().enumerate() {
+        let n = NAVICUBE_ZONES[zone_id as usize].3; // normal is 4th field
         if !face_visible(n) { continue; }
-        let mut avg_depth = 0.0_f32;
-        for &vi in tri {
-            let p = CHAMFERED_CUBE_VERTS[vi as usize];
-            avg_depth -= (p[0]*cam_dir[0] + p[1]*cam_dir[1] + p[2]*cam_dir[2]) / 3.0;
-        }
-        visible_tris.push((i, n, avg_depth));
+        let p0 = NAVICUBE_VERTS[v0 as usize];
+        let p1 = NAVICUBE_VERTS[v1 as usize];
+        let p2 = NAVICUBE_VERTS[v2 as usize];
+        let depth = -(
+            (p0[0]*cam_dir[0] + p0[1]*cam_dir[1] + p0[2]*cam_dir[2]) +
+            (p1[0]*cam_dir[0] + p1[1]*cam_dir[1] + p1[2]*cam_dir[2]) +
+            (p2[0]*cam_dir[0] + p2[1]*cam_dir[1] + p2[2]*cam_dir[2])
+        ) / 3.0;
+        visible_tris.push((i, zone_id as usize, n, depth));
     }
-    visible_tris.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+    visible_tris.sort_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal));
 
-    // ═══ Hover detection ══════════════════════════════════════════════════════
+    // ═══ Hover detection — find which zone is under the cursor ════════════════
     let mut hovered_zone: Option<usize> = None;
     if let Some(mp) = mouse_pos {
         if cube_rect.contains(mp) && !state.dragging {
-            for &(tri_idx, _n, _depth) in visible_tris.iter().rev() {
-                let tri = CHAMFERED_CUBE_TRIS[tri_idx];
-                let pts = [v2d[tri[0] as usize], v2d[tri[1] as usize], v2d[tri[2] as usize]];
+            for &(tri_idx, zone_id, _n, _depth) in visible_tris.iter().rev() {
+                let (v0, v1, v2, _) = NAVICUBE_TRIS[tri_idx];
+                let pts = [v2d[v0 as usize], v2d[v1 as usize], v2d[v2 as usize]];
                 if point_in_polygon(mp, &pts) {
-                    hovered_zone = classify_normal(CHAMFERED_CUBE_FACE_NORMALS[tri_idx]);
+                    hovered_zone = Some(zone_id);
                     break;
                 }
             }
@@ -441,40 +433,36 @@ pub fn render_view_cube_in_viewport(
     let edge_stroke = egui::Stroke::new(1.2_f32 * ppi, c_edge);
 
     // ═══ Draw triangles back-to-front ═════════════════════════════════════════
-    for &(tri_idx, n, _depth) in &visible_tris {
-        let tri = CHAMFERED_CUBE_TRIS[tri_idx];
-        let pts = vec![v2d[tri[0] as usize], v2d[tri[1] as usize], v2d[tri[2] as usize]];
-        let zone = classify_normal(n);
-        let is_hovered = hovered_zone.is_some() && hovered_zone == zone;
+    for &(tri_idx, zone_id, n, _depth) in &visible_tris {
+        let (v0, v1, v2, _) = NAVICUBE_TRIS[tri_idx];
+        let pts = vec![v2d[v0 as usize], v2d[v1 as usize], v2d[v2 as usize]];
+        let is_hovered = hovered_zone == Some(zone_id);
         let fill = if is_hovered { c_hover } else { shade(n) };
         painter.add(egui::Shape::convex_polygon(pts, fill, edge_stroke));
     }
 
-    // ═══ Draw labels on the 6 main faces ══════════════════════════════════════
-    let face_labels = [
-        (0usize, "RIGHT", [1.0_f32, 0.0, 0.0]),
-        (1, "LEFT",  [-1.0_f32, 0.0, 0.0]),
-        (2, "TOP",   [0.0_f32, 1.0, 0.0]),
-        (3, "BOT",   [0.0_f32, -1.0, 0.0]),
-        (4, "BACK",  [0.0_f32, 0.0, 1.0]),
-        (5, "FRONT", [0.0_f32, 0.0, -1.0]),
-    ];
-    for (zone_id, label, normal) in &face_labels {
-        if !face_visible(*normal) { continue; }
+    // ═══ Draw labels on face zones (zones 0-5) ═══════════════════════════════
+    for zone_id in 0..6usize {
+        let (_, label, _dir, normal) = NAVICUBE_ZONES[zone_id];
+        if label.is_none() || !face_visible(normal) { continue; }
+        // Compute centroid of all visible triangles in this zone
         let mut cx = 0.0_f32; let mut cy = 0.0_f32; let mut count = 0u32;
-        for &(tri_idx, n, _depth) in &visible_tris {
-            if classify_normal(n) == Some(*zone_id) {
-                let tri = CHAMFERED_CUBE_TRIS[tri_idx];
-                for &vi in &tri { cx += v2d[vi as usize].x; cy += v2d[vi as usize].y; count += 1; }
+        for &(tri_idx, zid, _n, _depth) in &visible_tris {
+            if zid == zone_id {
+                let (v0, v1, v2, _) = NAVICUBE_TRIS[tri_idx];
+                cx += v2d[v0 as usize].x + v2d[v1 as usize].x + v2d[v2 as usize].x;
+                cy += v2d[v0 as usize].y + v2d[v1 as usize].y + v2d[v2 as usize].y;
+                count += 3;
             }
         }
         if count > 0 {
             cx /= count as f32; cy /= count as f32;
-            let tc = if hovered_zone == Some(*zone_id) { c_text_h } else { c_text };
+            let tc = if hovered_zone == Some(zone_id) { c_text_h } else { c_text };
             painter.text(egui::pos2(cx, cy), egui::Align2::CENTER_CENTER,
-                label, egui::FontId::proportional(label_font_size), tc);
+                label.unwrap(), egui::FontId::proportional(label_font_size), tc);
         }
     }
+
 
     // ═══ Coordinate axes (X red, Y green, Z blue) — bottom-left of widget ═══
     let axes_origin = egui::pos2(center.x - ring_r - 4.0, center.y + ring_r + 4.0);
@@ -612,15 +600,13 @@ pub fn render_view_cube_in_viewport(
     if cube_resp.clicked() && !state.dragging {
         if let Some(mp) = mouse_pos {
             // Check front-most triangles first (last in sorted list = nearest)
-            for &(tri_idx, _n, _depth) in visible_tris.iter().rev() {
-                let tri = CHAMFERED_CUBE_TRIS[tri_idx];
-                let pts = [v2d[tri[0] as usize], v2d[tri[1] as usize], v2d[tri[2] as usize]];
+            for &(tri_idx, zone_id, _n, _depth) in visible_tris.iter().rev() {
+                let (v0, v1, v2, _) = NAVICUBE_TRIS[tri_idx];
+                let pts = [v2d[v0 as usize], v2d[v1 as usize], v2d[v2 as usize]];
                 if point_in_polygon(mp, &pts) {
-                    let zone = classify_normal(CHAMFERED_CUBE_FACE_NORMALS[tri_idx]);
-                    if let Some(zid) = zone {
-                        let orient = zone_to_orientation(zid);
-                        selected = Some(ViewCubeAction::SnapTo(orient));
-                    }
+                    // Look up snap direction for this zone
+                    let (_, _label, snap_dir, _normal) = NAVICUBE_ZONES[zone_id];
+                    selected = Some(ViewCubeAction::SnapToDirection(snap_dir));
                     break;
                 }
             }
