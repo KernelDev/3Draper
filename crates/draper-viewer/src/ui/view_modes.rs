@@ -215,9 +215,9 @@ pub fn render_view_cube_in_viewport(
     // On a 2x DPI display, cube_half doubles so the cube stays the same
     // physical size, and font scales to match.
     let ppi = ui.ctx().pixels_per_point().max(1.0);
-    let ring_r = 60.0_f32 * ppi;       // compass disc radius
+    let ring_r = 80.0_f32 * ppi;       // compass disc radius — larger to fit bigger cube
     let margin = 14.0_f32 * ppi;
-    let cube_half = 28.0_f32 * ppi;    // cube edge half-length (orthographic, fixed scale)
+    let cube_half = 38.0_f32 * ppi;    // cube edge half-length (orthographic, fixed scale)
     let chamfer = 0.18_f32;            // chamfer size as fraction of cube_half
     // Dynamic font size: scales with cube size and DPI
     let label_font_size = (cube_half * 0.32).max(8.0); // ~9pt at 1x DPI, 18pt at 2x
@@ -362,11 +362,14 @@ pub fn render_view_cube_in_viewport(
         cam_dir[0]*right[1] - cam_dir[1]*right[0],
     ];
 
-    // Project a 3D point to 2D screen coords
+    // Project a 3D point to 2D screen coords.
+    // NAVICUBE_VERTS range is [-0.5, +0.5] (cube half-size = 0.5 in model space).
+    // We scale so the full model (extent 1.0) maps to 2*cube_half pixels,
+    // i.e. multiply by 2*cube_half so the cube fills its intended area.
     let project = |x: f32, y: f32, z: f32| -> egui::Pos2 {
         let sx = x*right[0] + y*right[1] + z*right[2];
         let sy = x*up[0]    + y*up[1]    + z*up[2];
-        egui::pos2(center.x + sx * cube_half, center.y - sy * cube_half)
+        egui::pos2(center.x + sx * 2.0 * cube_half, center.y - sy * 2.0 * cube_half)
     };
 
 
@@ -432,13 +435,40 @@ pub fn render_view_cube_in_viewport(
     let c_edge = egui::Color32::from_rgb(0x1a, 0x1a, 0x28);
     let edge_stroke = egui::Stroke::new(1.2_f32 * ppi, c_edge);
 
-    // ═══ Draw triangles back-to-front ═════════════════════════════════════════
+    // ═══ Draw triangles back-to-front (NO per-triangle stroke — edges drawn
+    // separately below as zone contours to avoid internal diagonals) ══════════
+    let no_stroke = egui::Stroke::NONE;
     for &(tri_idx, zone_id, n, _depth) in &visible_tris {
         let (v0, v1, v2, _) = NAVICUBE_TRIS[tri_idx];
         let pts = vec![v2d[v0 as usize], v2d[v1 as usize], v2d[v2 as usize]];
         let is_hovered = hovered_zone == Some(zone_id);
         let fill = if is_hovered { c_hover } else { shade(n) };
-        painter.add(egui::Shape::convex_polygon(pts, fill, edge_stroke));
+        painter.add(egui::Shape::convex_polygon(pts, fill, no_stroke));
+    }
+
+    // ═══ Draw zone boundary contours (only outer edges of each zone) ═════════
+    // For each visible zone, collect all its triangle edges, then draw only
+    // edges that appear ONCE (boundary edges). Edges shared between two
+    // triangles of the same zone are internal and skipped.
+    let mut drawn_zones: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for &(_tri_idx, zone_id, _n, _depth) in &visible_tris {
+        if !drawn_zones.insert(zone_id) { continue; } // already drawn
+        // Collect all edges of triangles in this zone
+        let mut edge_count: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
+        for &(t_idx, zid, _n, _d) in &visible_tris {
+            if zid != zone_id { continue; }
+            let (v0, v1, v2, _) = NAVICUBE_TRIS[t_idx];
+            for &(a, b) in &[(v0, v1), (v1, v2), (v2, v0)] {
+                let key = if a < b { (a, b) } else { (b, a) };
+                *edge_count.entry(key).or_insert(0) += 1;
+            }
+        }
+        // Draw edges that appear exactly once (zone boundary)
+        for ((a, b), count) in &edge_count {
+            if *count == 1 {
+                painter.line_segment([v2d[*a as usize], v2d[*b as usize]], edge_stroke);
+            }
+        }
     }
 
     // ═══ Draw labels on face zones (zones 0-5) ═══════════════════════════════
@@ -465,18 +495,31 @@ pub fn render_view_cube_in_viewport(
 
 
     // ═══ Coordinate axes (X red, Y green, Z blue) — bottom-left of widget ═══
-    let axes_origin = egui::pos2(center.x - ring_r - 4.0, center.y + ring_r + 4.0);
-    let axis_len = 18.0_f32;
-    let ax_x = project(1.0, 0.0, 0.0); // X axis end
-    let ax_y = project(0.0, 1.0, 0.0);
-    let ax_z = project(0.0, 0.0, 1.0);
-    // Convert to local axes from axes_origin
-    let ax_x_end = egui::pos2(axes_origin.x + (ax_x.x - center.x) * axis_len / cube_half,
-                               axes_origin.y + (ax_x.y - center.y) * axis_len / cube_half);
-    let ax_y_end = egui::pos2(axes_origin.x + (ax_y.x - center.x) * axis_len / cube_half,
-                               axes_origin.y + (ax_y.y - center.y) * axis_len / cube_half);
-    let ax_z_end = egui::pos2(axes_origin.x + (ax_z.x - center.x) * axis_len / cube_half,
-                               axes_origin.y + (ax_z.y - center.y) * axis_len / cube_half);
+    // Axes use unit vectors projected through the same camera basis as the
+    // cube, then scaled to a fixed pixel length (axis_len) independent of
+    // cube_half so they don't bleed outside the widget.
+    let axes_origin = egui::pos2(center.x - ring_r - 8.0, center.y + ring_r + 8.0);
+    let axis_len = 16.0_f32 * ppi;
+    // Project unit vectors (1,0,0), (0,1,0), (0,0,1) — these give direction
+    // in screen space (relative to center). We normalize to axis_len pixels.
+    let dir_x = {
+        let sx = right[0]; let sy = up[0];
+        let len = (sx*sx + sy*sy).sqrt().max(1e-6);
+        (sx/len, -sy/len)  // screen Y is flipped
+    };
+    let dir_y = {
+        let sx = right[1]; let sy = up[1];
+        let len = (sx*sx + sy*sy).sqrt().max(1e-6);
+        (sx/len, -sy/len)
+    };
+    let dir_z = {
+        let sx = right[2]; let sy = up[2];
+        let len = (sx*sx + sy*sy).sqrt().max(1e-6);
+        (sx/len, -sy/len)
+    };
+    let ax_x_end = egui::pos2(axes_origin.x + dir_x.0 * axis_len, axes_origin.y + dir_x.1 * axis_len);
+    let ax_y_end = egui::pos2(axes_origin.x + dir_y.0 * axis_len, axes_origin.y + dir_y.1 * axis_len);
+    let ax_z_end = egui::pos2(axes_origin.x + dir_z.0 * axis_len, axes_origin.y + dir_z.1 * axis_len);
     painter.line_segment([axes_origin, ax_x_end], egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(0xE0, 0x40, 0x40)));
     painter.line_segment([axes_origin, ax_y_end], egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(0x40, 0xC0, 0x40)));
     painter.line_segment([axes_origin, ax_z_end], egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(0x40, 0x80, 0xE0)));
