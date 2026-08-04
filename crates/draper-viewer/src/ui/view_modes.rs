@@ -107,6 +107,113 @@ impl ViewCubeState {
     }
 }
 
+// ═══ Chamfered cube mesh data ═══════════════════════════════════════════════
+// 24 vertices, 44 triangles. Generated from convex hull of edge-vertices.
+// CUBE_HALF=1.0, CHAMFER=0.18.
+// This mesh has 26 distinct face-normal directions:
+//   - 6 face normals (±X, ±Y, ±Z) → 8 triangles each (octagonal faces)
+//   - 12 edge normals (±X±Y, ±X±Z, ±Y±Z) → 2 triangles each (edge chamfers)
+//   - 8 corner normals (±X±Y±Z) → 1 triangle each (corner triangles)
+pub const CHAMFERED_CUBE_VERTS: [[f32; 3]; 24] = [
+    [-0.82, -1.0, -1.0], [-1.0, -0.82, -1.0], [-1.0, -1.0, -0.82],
+    [-0.82, -1.0,  1.0], [-1.0, -0.82,  1.0], [-1.0, -1.0,  0.82],
+    [-0.82,  1.0, -1.0], [-1.0,  0.82, -1.0], [-1.0,  1.0, -0.82],
+    [-0.82,  1.0,  1.0], [-1.0,  0.82,  1.0], [-1.0,  1.0,  0.82],
+    [ 0.82, -1.0, -1.0], [ 1.0, -0.82, -1.0], [ 1.0, -1.0, -0.82],
+    [ 0.82, -1.0,  1.0], [ 1.0, -0.82,  1.0], [ 1.0, -1.0,  0.82],
+    [ 0.82,  1.0, -1.0], [ 1.0,  0.82, -1.0], [ 1.0,  1.0, -0.82],
+    [ 0.82,  1.0,  1.0], [ 1.0,  0.82,  1.0], [ 1.0,  1.0,  0.82],
+];
+
+pub const CHAMFERED_CUBE_TRIS: [[u32; 3]; 44] = [
+    [1, 0, 2], [7, 8, 6], [20, 19, 18], [21, 22, 23],
+    [13, 14, 12], [4, 5, 3], [9, 11, 10], [15, 17, 16],
+    [12, 0, 1], [12, 19, 13], [6, 18, 12], [1, 7, 12],
+    [12, 7, 6], [12, 18, 19], [17, 22, 16], [13, 19, 17],
+    [17, 19, 20], [17, 14, 13], [20, 23, 17], [17, 23, 22],
+    [10, 11, 4], [1, 2, 4], [4, 7, 1], [2, 5, 4],
+    [8, 7, 4], [4, 11, 8], [9, 18, 6], [8, 11, 9],
+    [6, 8, 9], [21, 23, 9], [20, 18, 9], [9, 23, 20],
+    [21, 9, 15], [15, 22, 21], [15, 4, 3], [16, 22, 15],
+    [10, 4, 15], [15, 9, 10], [15, 2, 0], [0, 12, 15],
+    [15, 5, 2], [3, 5, 15], [15, 12, 14], [14, 17, 15],
+];
+
+pub const CHAMFERED_CUBE_FACE_NORMALS: [[f32; 3]; 44] = [
+    [-0.57735, -0.57735, -0.57735], [-0.57735, 0.57735, -0.57735],
+    [ 0.57735,  0.57735, -0.57735], [ 0.57735, 0.57735,  0.57735],
+    [ 0.57735, -0.57735, -0.57735], [-0.57735, -0.57735, 0.57735],
+    [-0.57735,  0.57735,  0.57735], [ 0.57735, -0.57735, 0.57735],
+    [ 0.0,  0.0, -1.0], [ 0.0,  0.0, -1.0], [ 0.0,  0.0, -1.0],
+    [ 0.0,  0.0, -1.0], [ 0.0,  0.0, -1.0], [ 0.0,  0.0, -1.0],
+    [ 1.0,  0.0,  0.0], [ 1.0,  0.0,  0.0], [ 1.0,  0.0,  0.0],
+    [ 1.0,  0.0,  0.0], [ 1.0,  0.0,  0.0], [ 1.0,  0.0,  0.0],
+    [-1.0,  0.0,  0.0], [-1.0,  0.0,  0.0], [-1.0,  0.0,  0.0],
+    [-1.0,  0.0,  0.0], [-1.0,  0.0,  0.0], [-1.0,  0.0,  0.0],
+    [ 0.0,  1.0,  0.0], [ 0.0,  1.0,  0.0], [ 0.0,  1.0,  0.0],
+    [ 0.0,  1.0,  0.0], [ 0.0,  1.0,  0.0], [ 0.0,  1.0,  0.0],
+    [ 0.0,  0.0,  1.0], [ 0.0,  0.0,  1.0], [ 0.0,  0.0,  1.0],
+    [ 0.0,  0.0,  1.0], [ 0.0,  0.0,  1.0], [ 0.0,  0.0,  1.0],
+    [ 0.0, -1.0,  0.0], [ 0.0, -1.0,  0.0], [ 0.0, -1.0,  0.0],
+    [ 0.0, -1.0,  0.0], [ 0.0, -1.0,  0.0], [ 0.0, -1.0,  0.0],
+];
+
+/// Classify a face normal into one of 26 zone IDs:
+///   0-5: face zones (±X, ±Y, ±Z)
+///   6-17: edge zones (12 edges)
+///   18-25: corner zones (8 corners)
+/// Returns None if the normal doesn't match any zone.
+fn classify_normal(n: [f32; 3]) -> Option<usize> {
+    let ax = n[0].abs();
+    let ay = n[1].abs();
+    let az = n[2].abs();
+    let eps = 0.3;
+    let nz = |x: f32| x.abs() < eps;
+    let one = |x: f32| x.abs() > 0.9;
+
+    // Face zones (one component is ±1, others ≈ 0)
+    if one(n[0]) && nz(n[1]) && nz(n[2]) {
+        return Some(if n[0] > 0.0 { 0 } else { 1 }); // +X=0, -X=1
+    }
+    if one(n[1]) && nz(n[0]) && nz(n[2]) {
+        return Some(if n[1] > 0.0 { 2 } else { 3 }); // +Y=2, -Y=3
+    }
+    if one(n[2]) && nz(n[0]) && nz(n[1]) {
+        return Some(if n[2] > 0.0 { 4 } else { 5 }); // +Z=4, -Z=5
+    }
+
+    // Edge zones (two components non-zero, one ≈ 0) — 12 edges
+    if nz(n[2]) {
+        // Edge in XY plane
+        return Some(6 + (if n[0] > 0.0 { 1 } else { 0 }) * 2 + (if n[1] > 0.0 { 1 } else { 0 }));
+    }
+    if nz(n[1]) {
+        // Edge in XZ plane
+        return Some(10 + (if n[0] > 0.0 { 1 } else { 0 }) * 2 + (if n[2] > 0.0 { 1 } else { 0 }));
+    }
+    if nz(n[0]) {
+        // Edge in YZ plane
+        return Some(14 + (if n[1] > 0.0 { 1 } else { 0 }) * 2 + (if n[2] > 0.0 { 1 } else { 0 }));
+    }
+
+    // Corner zones (all three non-zero) — 8 corners
+    Some(18 + (if n[0] > 0.0 { 1 } else { 0 }) * 4
+           + (if n[1] > 0.0 { 1 } else { 0 }) * 2
+           + (if n[2] > 0.0 { 1 } else { 0 }))
+}
+
+/// Map a zone ID to the ViewOrientation for camera snapping.
+fn zone_to_orientation(zone_id: usize) -> ViewOrientation {
+    match zone_id {
+        0 | 1 => ViewOrientation::Right,  // ±X
+        2 => ViewOrientation::Top,        // +Y
+        3 => ViewOrientation::Bottom,     // -Y
+        4 => ViewOrientation::Back,       // +Z
+        5 => ViewOrientation::Front,      // -Z
+        _ => ViewOrientation::Iso,        // edges and corners → ISO
+    }
+}
+
 pub fn render_view_cube_in_viewport(
     ui: &mut egui::Ui,
     viewport_rect: &egui::Rect,
@@ -277,421 +384,95 @@ pub fn render_view_cube_in_viewport(
         egui::pos2(center.x + sx * cube_half, center.y - sy * cube_half)
     };
 
-    // ═══ Chamfered cube geometry ═════════════════════════════════════════════
-    // A chamfered cube is a cube with each edge cut at 45°.
-    // Vertices: 8 corners × 3 edge-vertices per corner = 24 vertices.
-    // Faces: 6 octagons (main faces, with corners cut) + 12 rectangles (edge
-    // chamfers) + 8 triangles (corner chamfers) = 26 faces.
-    //
-    // The 26 faces map directly to the 26 interactive zones:
-    //   - 6 face octagons → ortho views (TOP/BOT/FRONT/BACK/LEFT/RIGHT)
-    //   - 12 edge rectangles → 2-face ISO views
-    //   - 8 corner triangles → 3-face ISO views
-    let h = 1.0_f32;
-    let c = chamfer;
 
-    // Generate 24 vertices: for each of 8 corners, 3 vertices (one per edge direction)
-    // Corner (sx,sy,sz) where sx,sy,sz ∈ {-1,+1}:
-    //   v_x = (sx*h - sx*c, sy*h, sz*h) — moved along X edge
-    //   v_y = (sx*h, sy*h - sy*c, sz*h) — moved along Y edge
-    //   v_z = (sx*h, sy*h, sz*h - sz*c) — moved along Z edge
-    let mut verts_3d: Vec<[f32; 3]> = Vec::with_capacity(24);
-    for sx in [-1.0_f32, 1.0] {
-        for sy in [-1.0_f32, 1.0] {
-            for sz in [-1.0_f32, 1.0] {
-                verts_3d.push([sx*h - sx*c, sy*h, sz*h]);   // along X
-                verts_3d.push([sx*h, sy*h - sy*c, sz*h]);   // along Y
-                verts_3d.push([sx*h, sy*h, sz*h - sz*c]);   // along Z
-            }
-        }
-    }
-    // Note: v2d (projected 2D vertices) is computed AFTER all zones are built,
-    // because corner hexagons add extra midpoint vertices to verts_3d.
+    // ═══ Chamfered cube — mesh-based rendering ════════════════════════════════
+    let v2d: Vec<egui::Pos2> = CHAMFERED_CUBE_VERTS.iter().map(|&p| {
+        project(p[0], p[1], p[2])
+    }).collect();
 
-    // Helper: vertex index for corner (sx,sy,sz) along axis (0=X, 1=Y, 2=Z)
-    // Corner order in verts_3d: outer loop sx(-1,+1), middle sy(-1,+1), inner sz(-1,+1)
-    // Each corner generates 3 vertices in order X, Y, Z.
-    let corner_idx = |sx: f32, sy: f32, sz: f32| -> usize {
-        let i = if sx < 0.0 { 0 } else { 1 };
-        let j = if sy < 0.0 { 0 } else { 1 };
-        let k = if sz < 0.0 { 0 } else { 1 };
-        (i * 4 + j * 2 + k) * 3
-    };
-    // Returns the 3 vertex indices for corner (sx,sy,sz): [v_x, v_y, v_z]
-    let corner_verts = |sx: f32, sy: f32, sz: f32| -> [usize; 3] {
-        let base = corner_idx(sx, sy, sz);
-        [base, base + 1, base + 2]
-    };
-
-    // ═══ Build 26 face zones ═════════════════════════════════════════════════
-    // Each zone: (vertex indices in CCW order from outside, normal, label_or_None,
-    //             ViewOrientation_for_snap)
-    #[derive(Clone)]
-    struct Zone {
-        verts: Vec<usize>,
-        normal: [f32; 3],
-        label: Option<&'static str>,
-        snap: ViewOrientation,
-        // Zone ID 0..25 for hover tracking
-        id: usize,
-    }
-
-    let mut zones: Vec<Zone> = Vec::with_capacity(26);
-    let mut next_id = 0usize;
-
-    // ── 6 face octagons ──
-    // TOP face (y=+1): 8 vertices from 4 corners' X and Z edge-vertices
-    // Corners of top face: (-1,+1,-1), (+1,+1,-1), (+1,+1,+1), (-1,+1,+1)
-    // For each corner, we take the X-edge and Z-edge vertices (not Y-edge, which goes down)
-    {
-        let c1 = corner_verts(-1.0, 1.0, -1.0); // [-1,+1,-1]
-        let c2 = corner_verts( 1.0, 1.0, -1.0); // [+1,+1,-1]
-        let c3 = corner_verts( 1.0, 1.0,  1.0); // [+1,+1,+1]
-        let c4 = corner_verts(-1.0, 1.0,  1.0); // [-1,+1,+1]
-        // Octagon vertices in CCW order (viewed from +Y, looking down -Y):
-        // c1.x, c1.z, c2.z, c2.x, c3.x, c3.z, c4.z, c4.x
-        let oct = vec![c1[0], c1[2], c2[2], c2[0], c3[0], c3[2], c4[2], c4[0]];
-        zones.push(Zone { verts: oct, normal: [0.0, 1.0, 0.0], label: Some("TOP"), snap: ViewOrientation::Top, id: next_id }); next_id += 1;
-    }
-    {
-        // BOTTOM (y=-1): mirror of top
-        let c1 = corner_verts(-1.0, -1.0, -1.0);
-        let c2 = corner_verts( 1.0, -1.0, -1.0);
-        let c3 = corner_verts( 1.0, -1.0,  1.0);
-        let c4 = corner_verts(-1.0, -1.0,  1.0);
-        // CCW from -Y (looking up +Y): reverse of top
-        let oct = vec![c1[0], c1[2], c4[2], c4[0], c3[0], c3[2], c2[2], c2[0]];
-        zones.push(Zone { verts: oct, normal: [0.0, -1.0, 0.0], label: Some("BOT"), snap: ViewOrientation::Bottom, id: next_id }); next_id += 1;
-    }
-    {
-        // FRONT (z=-1, normal -Z) — camera at +X,+Y,-Z for ISO sees this face
-        let c1 = corner_verts(-1.0, -1.0, -1.0);
-        let c2 = corner_verts( 1.0, -1.0, -1.0);
-        let c3 = corner_verts( 1.0,  1.0, -1.0);
-        let c4 = corner_verts(-1.0,  1.0, -1.0);
-        let oct = vec![c1[0], c1[1], c4[1], c4[0], c3[0], c3[1], c2[1], c2[0]];
-        zones.push(Zone { verts: oct, normal: [0.0, 0.0, -1.0], label: Some("FRONT"), snap: ViewOrientation::Front, id: next_id }); next_id += 1;
-    }
-    {
-        // BACK (z=+1, normal +Z)
-        let c1 = corner_verts(-1.0, -1.0, 1.0);
-        let c2 = corner_verts( 1.0, -1.0, 1.0);
-        let c3 = corner_verts( 1.0,  1.0, 1.0);
-        let c4 = corner_verts(-1.0,  1.0, 1.0);
-        let oct = vec![c1[0], c1[1], c2[1], c2[0], c3[0], c3[1], c4[1], c4[0]];
-        zones.push(Zone { verts: oct, normal: [0.0, 0.0, 1.0], label: Some("BACK"), snap: ViewOrientation::Back, id: next_id }); next_id += 1;
-    }
-    {
-        // LEFT (x=-1)
-        let c1 = corner_verts(-1.0, -1.0, -1.0);
-        let c2 = corner_verts(-1.0, -1.0,  1.0);
-        let c3 = corner_verts(-1.0,  1.0,  1.0);
-        let c4 = corner_verts(-1.0,  1.0, -1.0);
-        // CCW from -X: take Y-edge and Z-edge vertices
-        let oct = vec![c1[1], c1[2], c2[2], c2[1], c3[1], c3[2], c4[2], c4[1]];
-        zones.push(Zone { verts: oct, normal: [-1.0, 0.0, 0.0], label: Some("LEFT"), snap: ViewOrientation::Left, id: next_id }); next_id += 1;
-    }
-    {
-        // RIGHT (x=+1)
-        let c1 = corner_verts( 1.0, -1.0, -1.0);
-        let c2 = corner_verts( 1.0, -1.0,  1.0);
-        let c3 = corner_verts( 1.0,  1.0,  1.0);
-        let c4 = corner_verts( 1.0,  1.0, -1.0);
-        let oct = vec![c1[1], c1[2], c4[2], c4[1], c3[1], c3[2], c2[2], c2[1]];
-        zones.push(Zone { verts: oct, normal: [1.0, 0.0, 0.0], label: Some("RIGHT"), snap: ViewOrientation::Right, id: next_id }); next_id += 1;
-    }
-
-    // ── 12 edge rectangles ──
-    // Each edge is between two adjacent corners along one axis.
-    // The chamfer rectangle uses the edge-vertices from both corners.
-    // Edge rectangles snap to ISO (2-face view).
-    //
-    // Helper macro to add an edge zone.
-    // (corner_a, corner_b, axis, snap_orient)
-    // axis = the axis the edge runs along (0=X, 1=Y, 2=Z)
-    // For an X-edge between (sx1,sy,sz) and (sx2,sy,sz) where sx1≠sx2:
-    //   the chamfer face is on the side facing the edge direction (perpendicular to Y or Z)
-    //   Actually each edge has ONE chamfer face perpendicular to the edge axis,
-    //   oriented at 45° between the two adjacent main faces.
-    //
-    // We'll add all 12 edges:
-    // 4 edges along X (top-front, top-back, bot-front, bot-back)
-    // 4 edges along Y (left-front, right-front, left-back, right-back)
-    // 4 edges along Z (top-left, top-right, bot-left, bot-right)
-
-    // X-direction edges (varying sx, fixed sy, sz)
-    for sy in [-1.0_f32, 1.0] {
-        for sz in [-1.0_f32, 1.0] {
-            // Two corners: (-1, sy, sz) and (+1, sy, sz)
-            // The X-edge chamfer face has normal in (0, sy_sign, sz_sign) direction (45°)
-            let c_neg = corner_verts(-1.0, sy, sz);
-            let c_pos = corner_verts( 1.0, sy, sz);
-            // The chamfer face is a rectangle formed by the X-edge vertices of both corners
-            // X-edge vertex of corner (sx,sy,sz) is at index 0 of corner_verts()
-            // Rectangle: c_neg[0], c_pos[0], c_pos[0], c_neg[0] — but we need 4 distinct verts
-            // Actually the chamfer face is the beveled strip between the two main faces.
-            // For an X-edge at (sy, sz), the chamfer face normal is (0, sy, sz)/sqrt(2).
-            // Vertices: the two X-edge vertices from both corners + the X-edge vertices
-            // but that's only 2 unique points (the edge itself).
-            //
-            // Wait — a chamfered cube's edge face is a RECTANGLE perpendicular to the
-            // edge direction, sitting where the original edge was. The 4 vertices of
-            // this rectangle are the 4 edge-vertices created by cutting the corner.
-            // For X-edge at fixed (sy, sz): the rectangle is in the Y-Z plane (mostly),
-            // with vertices at:
-            //   (0, sy*h, sz*h - sz*c), (0, sy*h - sy*c, sz*h),  — corner (-1,sy,sz) X-vert and Y-vert... no
-            //
-            // Let me reconsider. The chamfer cut at corner (sx,sy,sz) creates 3 new vertices:
-            //   v_x = (sx*h - sx*c, sy*h, sz*h)  — moved in X
-            //   v_y = (sx*h, sy*h - sy*c, sz*h)  — moved in Y
-            //   v_z = (sx*h, sy*h, sz*h - sz*c)  — moved in Z
-            // The 3 new vertices form a triangle (the corner cut).
-            // The edge between v_x and v_y is the new edge between the X-face and Y-face chamfers.
-            //
-            // For an X-direction edge (between corners (-1,sy,sz) and (+1,sy,sz)):
-            // The original edge ran along X at (sy, sz).
-            // After chamfering, this edge becomes a RECTANGLE face with 4 vertices:
-            //   corner (-1,sy,sz): v_y and v_z (the two edge-vertices NOT on the X-edge)
-            //   corner (+1,sy,sz): v_y and v_z
-            // Wait, that's not right either. Let me think again.
-            //
-            // A chamfered cube edge face is the rectangle that replaces the original edge.
-            // For the X-edge at (sy, sz):
-            //   The original edge had 2 endpoints: (-h, sy*h, sz*h) and (+h, sy*h, sz*h).
-            //   After chamfering, each endpoint is split into 3 vertices (one per axis cut).
-            //   The edge face uses:
-            //     from corner (-1,sy,sz): v_y (-h, sy*h - sy*c, sz*h) and v_z (-h, sy*h, sz*h - sz*c)
-            //     from corner (+1,sy,sz): v_y (+h, sy*h - sy*c, sz*h) and v_z (+h, sy*h, sz*h - sz*c)
-            //   These 4 points form a rectangle.
-            //   The normal of this face is in direction (0, sy, sz) normalized (45° between Y and Z faces).
-            let v1 = c_neg[1]; // (-1,sy,sz).v_y
-            let v2 = c_neg[2]; // (-1,sy,sz).v_z
-            let v3 = c_pos[2]; // (+1,sy,sz).v_z
-            let v4 = c_pos[1]; // (+1,sy,sz).v_y
-            let nx = 0.0_f32;
-            let ny = sy;
-            let nz = sz;
-            let nlen = (ny*ny + nz*nz).sqrt();
-            let normal = [nx, ny/nlen, nz/nlen];
-            zones.push(Zone {
-                verts: vec![v1, v2, v3, v4],
-                normal,
-                label: None,
-                snap: ViewOrientation::Iso,
-                id: next_id,
-            });
-            next_id += 1;
-        }
-    }
-
-    // Y-direction edges (fixed sx, sz; varying sy)
-    for sx in [-1.0_f32, 1.0] {
-        for sz in [-1.0_f32, 1.0] {
-            let c_neg = corner_verts(sx, -1.0, sz);
-            let c_pos = corner_verts(sx,  1.0, sz);
-            // Y-edge face uses v_x and v_z from each corner
-            let v1 = c_neg[0]; // v_x
-            let v2 = c_neg[2]; // v_z
-            let v3 = c_pos[2];
-            let v4 = c_pos[0];
-            let nx = sx;
-            let nz = sz;
-            let nlen = (nx*nx + nz*nz).sqrt();
-            zones.push(Zone {
-                verts: vec![v1, v2, v3, v4],
-                normal: [nx/nlen, 0.0, nz/nlen],
-                label: None,
-                snap: ViewOrientation::Iso,
-                id: next_id,
-            });
-            next_id += 1;
-        }
-    }
-
-    // Z-direction edges (fixed sx, sy; varying sz)
-    for sx in [-1.0_f32, 1.0] {
-        for sy in [-1.0_f32, 1.0] {
-            let c_neg = corner_verts(sx, sy, -1.0);
-            let c_pos = corner_verts(sx, sy,  1.0);
-            // Z-edge face uses v_x and v_y from each corner
-            let v1 = c_neg[0]; // v_x
-            let v2 = c_neg[1]; // v_y
-            let v3 = c_pos[1];
-            let v4 = c_pos[0];
-            let nx = sx;
-            let ny = sy;
-            let nlen = (nx*nx + ny*ny).sqrt();
-            zones.push(Zone {
-                verts: vec![v1, v2, v3, v4],
-                normal: [nx/nlen, ny/nlen, 0.0],
-                label: None,
-                snap: ViewOrientation::Iso,
-                id: next_id,
-            });
-            next_id += 1;
-        }
-    }
-
-    // ── 8 corner zones as CONVEX HEXAGONS ──
-    // Per spec: corner zones should be hexagonal (not triangular) to increase
-    // hit-target area. Each corner hexagon is formed by the 3 edge-vertices
-    // (v_x, v_y, v_z) of that corner PLUS 3 intermediate points placed at the
-    // midpoints between adjacent edge-vertices, pushed slightly outward.
-    // This makes the corner zone ~2x larger than a triangle and easier to click.
-    //
-    // Vertex layout (CCW from outside):
-    //   v_x, mid_xy, v_y, mid_yz, v_z, mid_zx
-    // where mid_xy = midpoint of (v_x, v_y) pushed outward along corner normal.
-    for sx in [-1.0_f32, 1.0] {
-        for sy in [-1.0_f32, 1.0] {
-            for sz in [-1.0_f32, 1.0] {
-                let cv = corner_verts(sx, sy, sz);
-                let v_x = verts_3d[cv[0]]; // (sx*h - sx*c, sy*h, sz*h)
-                let v_y = verts_3d[cv[1]]; // (sx*h, sy*h - sy*c, sz*h)
-                let v_z = verts_3d[cv[2]]; // (sx*h, sy*h, sz*h - sz*c)
-
-                // Midpoints between adjacent edge-vertices, pushed outward
-                // along the corner direction (sx, sy, sz) to enlarge the hexagon.
-                let push = chamfer * 0.5; // how much to push midpoints outward
-                let mid_xy = [
-                    (v_x[0] + v_y[0]) * 0.5 + sx * push,
-                    (v_x[1] + v_y[1]) * 0.5 + sy * push,
-                    (v_x[2] + v_y[2]) * 0.5 + sz * push,
-                ];
-                let mid_yz = [
-                    (v_y[0] + v_z[0]) * 0.5 + sx * push,
-                    (v_y[1] + v_z[1]) * 0.5 + sy * push,
-                    (v_y[2] + v_z[2]) * 0.5 + sz * push,
-                ];
-                let mid_zx = [
-                    (v_z[0] + v_x[0]) * 0.5 + sx * push,
-                    (v_z[1] + v_x[1]) * 0.5 + sy * push,
-                    (v_z[2] + v_x[2]) * 0.5 + sz * push,
-                ];
-
-                // Add the 3 midpoint vertices to the vertex list
-                let mid_xy_idx = verts_3d.len();
-                verts_3d.push(mid_xy);
-                let mid_yz_idx = verts_3d.len();
-                verts_3d.push(mid_yz);
-                let mid_zx_idx = verts_3d.len();
-                verts_3d.push(mid_zx);
-
-                // Project the new vertices (they were added after v2d was computed)
-                // We'll handle this by re-projecting all verts after the loop.
-                // For now, store the hexagon vertex indices.
-                let nx = sx;
-                let ny = sy;
-                let nz = sz;
-                let nlen = (nx*nx + ny*ny + nz*nz).sqrt();
-                zones.push(Zone {
-                    verts: vec![cv[0], mid_xy_idx, cv[1], mid_yz_idx, cv[2], mid_zx_idx],
-                    normal: [nx/nlen, ny/nlen, nz/nlen],
-                    label: None,
-                    snap: ViewOrientation::Iso,
-                    id: next_id,
-                });
-                next_id += 1;
-            }
-        }
-    }
-
-    // Re-project all vertices (including the newly added midpoint vertices)
-    // v2d was computed earlier before the corner hexagon midpoints were added.
-    // Recompute it now so all 48 vertices (24 original + 24 midpoints) are projected.
-    let v2d: Vec<egui::Pos2> = verts_3d.iter().map(|&p| project(p[0], p[1], p[2])).collect();
-
-    debug_assert_eq!(zones.len(), 26, "Expected 26 zones, got {}", zones.len());
-
-    // ═══ Visibility test + depth sort (painter's algorithm = own depth buffer) ═
     let face_visible = |n: [f32; 3]| -> bool {
         n[0]*cam_pos[0] + n[1]*cam_pos[1] + n[2]*cam_pos[2] > 0.0
     };
 
-    // Compute average depth for each visible zone (for back-to-front sorting)
-    let mut visible_zones: Vec<(usize, &[usize], [f32; 3], Option<&'static str>, ViewOrientation, f32)> = Vec::new();
-    for z in &zones {
-        if face_visible(z.normal) {
-            let mut avg_depth = 0.0_f32;
-            for &vi in &z.verts {
-                let p = verts_3d[vi];
-                let depth = -(p[0]*cam_dir[0] + p[1]*cam_dir[1] + p[2]*cam_dir[2]);
-                avg_depth += depth;
-            }
-            avg_depth /= z.verts.len() as f32;
-            visible_zones.push((z.id, &z.verts, z.normal, z.label, z.snap, avg_depth));
+    let mut visible_tris: Vec<(usize, [f32; 3], f32)> = Vec::new();
+    for (i, tri) in CHAMFERED_CUBE_TRIS.iter().enumerate() {
+        let n = CHAMFERED_CUBE_FACE_NORMALS[i];
+        if !face_visible(n) { continue; }
+        let mut avg_depth = 0.0_f32;
+        for &vi in tri {
+            let p = CHAMFERED_CUBE_VERTS[vi as usize];
+            avg_depth -= (p[0]*cam_dir[0] + p[1]*cam_dir[1] + p[2]*cam_dir[2]) / 3.0;
         }
+        visible_tris.push((i, n, avg_depth));
     }
-    // Sort ASCENDING by depth (farthest first = drawn first)
-    visible_zones.sort_by(|a, b| a.5.partial_cmp(&b.5).unwrap_or(std::cmp::Ordering::Equal));
+    visible_tris.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
 
-    // ═══ Hover detection (raycast via point-in-polygon on projected zones) ═══
-    let mut hovered_zone_id: Option<usize> = None;
+    // ═══ Hover detection ══════════════════════════════════════════════════════
+    let mut hovered_zone: Option<usize> = None;
     if let Some(mp) = mouse_pos {
         if cube_rect.contains(mp) && !state.dragging {
-            // Check nearest zones first (last in sorted list)
-            for (zid, vidx, _n, _lbl, _snap, _depth) in visible_zones.iter().rev() {
-                let pts: Vec<egui::Pos2> = vidx.iter().map(|&i| v2d[i]).collect();
+            for &(tri_idx, _n, _depth) in visible_tris.iter().rev() {
+                let tri = CHAMFERED_CUBE_TRIS[tri_idx];
+                let pts = [v2d[tri[0] as usize], v2d[tri[1] as usize], v2d[tri[2] as usize]];
                 if point_in_polygon(mp, &pts) {
-                    hovered_zone_id = Some(*zid);
+                    hovered_zone = classify_normal(CHAMFERED_CUBE_FACE_NORMALS[tri_idx]);
                     break;
                 }
             }
         }
     }
-    state.hovered_zone = hovered_zone_id;
+    state.hovered_zone = hovered_zone;
 
     // ═══ Lambertian shading ═══════════════════════════════════════════════════
     let base_color = [0.90_f32, 0.91, 0.94];
     let ambient = 0.25_f32;
-    let light_key = {
-        let v = [0.6_f32, 0.8, 0.9];
-        let n = (v[0]*v[0] + v[1]*v[1] + v[2]*v[2]).sqrt();
-        [v[0]/n, v[1]/n, v[2]/n]
-    };
-    let light_fill = {
-        let v = [-0.4_f32, -0.3, 0.3];
-        let n = (v[0]*v[0] + v[1]*v[1] + v[2]*v[2]).sqrt();
-        [v[0]/n, v[1]/n, v[2]/n]
-    };
+    let light_key = { let v = [0.6_f32, 0.8, 0.9]; let n = (v[0]*v[0]+v[1]*v[1]+v[2]*v[2]).sqrt(); [v[0]/n, v[1]/n, v[2]/n] };
+    let light_fill = { let v = [-0.4_f32, -0.3, 0.3]; let n = (v[0]*v[0]+v[1]*v[1]+v[2]*v[2]).sqrt(); [v[0]/n, v[1]/n, v[2]/n] };
     let shade = |n: [f32; 3]| -> egui::Color32 {
-        let d_key = (n[0]*light_key[0] + n[1]*light_key[1] + n[2]*light_key[2]).max(0.0) * 0.65;
-        let d_fill = (n[0]*light_fill[0] + n[1]*light_fill[1] + n[2]*light_fill[2]).max(0.0) * 0.10;
-        let b = (ambient + d_key + d_fill).clamp(0.0, 1.0);
-        egui::Color32::from_rgb(
-            (base_color[0] * b * 255.0) as u8,
-            (base_color[1] * b * 255.0) as u8,
-            (base_color[2] * b * 255.0) as u8,
-        )
+        let dk = (n[0]*light_key[0]+n[1]*light_key[1]+n[2]*light_key[2]).max(0.0) * 0.65;
+        let df = (n[0]*light_fill[0]+n[1]*light_fill[1]+n[2]*light_fill[2]).max(0.0) * 0.10;
+        let b = (ambient + dk + df).clamp(0.0, 1.0);
+        egui::Color32::from_rgb((base_color[0]*b*255.0) as u8, (base_color[1]*b*255.0) as u8, (base_color[2]*b*255.0) as u8)
     };
     let c_hover = egui::Color32::from_rgba_premultiplied(108, 180, 232, 220);
     let c_text = egui::Color32::from_rgb(0x1a, 0x1a, 0x22);
     let c_text_h = egui::Color32::WHITE;
     let c_edge = egui::Color32::from_rgb(0x1a, 0x1a, 0x28);
-    // Borders scale with DPI for consistent visual weight
     let edge_stroke = egui::Stroke::new(1.2_f32 * ppi, c_edge);
 
-    // ═══ Draw zones back-to-front ═════════════════════════════════════════════
-    for (zid, vidx, n, label, _snap, _depth) in &visible_zones {
-        let pts: Vec<egui::Pos2> = vidx.iter().map(|&i| v2d[i]).collect();
-        let base_fill = shade(*n);
-        let fill = if hovered_zone_id == Some(*zid) { c_hover } else { base_fill };
-        painter.add(egui::Shape::convex_polygon(pts.clone(), fill, egui::Stroke::NONE));
-        // Draw label only on face zones (octagons), not on edge/corner chamfers
-        if let Some(lbl) = label {
-            let cx = pts.iter().map(|p| p.x).sum::<f32>() / pts.len() as f32;
-            let cy = pts.iter().map(|p| p.y).sum::<f32>() / pts.len() as f32;
-            let tc = if hovered_zone_id == Some(*zid) { c_text_h } else { c_text };
+    // ═══ Draw triangles back-to-front ═════════════════════════════════════════
+    for &(tri_idx, n, _depth) in &visible_tris {
+        let tri = CHAMFERED_CUBE_TRIS[tri_idx];
+        let pts = vec![v2d[tri[0] as usize], v2d[tri[1] as usize], v2d[tri[2] as usize]];
+        let zone = classify_normal(n);
+        let is_hovered = hovered_zone.is_some() && hovered_zone == zone;
+        let fill = if is_hovered { c_hover } else { shade(n) };
+        painter.add(egui::Shape::convex_polygon(pts, fill, edge_stroke));
+    }
+
+    // ═══ Draw labels on the 6 main faces ══════════════════════════════════════
+    let face_labels = [
+        (0usize, "RIGHT", [1.0_f32, 0.0, 0.0]),
+        (1, "LEFT",  [-1.0_f32, 0.0, 0.0]),
+        (2, "TOP",   [0.0_f32, 1.0, 0.0]),
+        (3, "BOT",   [0.0_f32, -1.0, 0.0]),
+        (4, "BACK",  [0.0_f32, 0.0, 1.0]),
+        (5, "FRONT", [0.0_f32, 0.0, -1.0]),
+    ];
+    for (zone_id, label, normal) in &face_labels {
+        if !face_visible(*normal) { continue; }
+        let mut cx = 0.0_f32; let mut cy = 0.0_f32; let mut count = 0u32;
+        for &(tri_idx, n, _depth) in &visible_tris {
+            if classify_normal(n) == Some(*zone_id) {
+                let tri = CHAMFERED_CUBE_TRIS[tri_idx];
+                for &vi in &tri { cx += v2d[vi as usize].x; cy += v2d[vi as usize].y; count += 1; }
+            }
+        }
+        if count > 0 {
+            cx /= count as f32; cy /= count as f32;
+            let tc = if hovered_zone == Some(*zone_id) { c_text_h } else { c_text };
             painter.text(egui::pos2(cx, cy), egui::Align2::CENTER_CENTER,
-                lbl, egui::FontId::proportional(label_font_size), tc);
-        }
-        // Draw thin edge around each zone
-        for w in pts.windows(2) {
-            painter.line_segment([w[0], w[1]], edge_stroke);
-        }
-        // Close the loop
-        if pts.len() >= 2 {
-            painter.line_segment([pts[pts.len()-1], pts[0]], edge_stroke);
+                label, egui::FontId::proportional(label_font_size), tc);
         }
     }
 
@@ -827,17 +608,19 @@ pub fn render_view_cube_in_viewport(
         selected = Some(ViewCubeAction::ToggleProjection);
     }
 
-    // ═══ Handle cube clicks (26-zone raycast) ═════════════════════════════════
+    // ═══ Handle cube clicks (mesh-based raycast) ══════════════════════════════
     if cube_resp.clicked() && !state.dragging {
         if let Some(mp) = mouse_pos {
-            // Check nearest zones first (front-most)
-            for (_zid, vidx, _n, _lbl, snap, _depth) in visible_zones.iter().rev() {
-                let pts: Vec<egui::Pos2> = vidx.iter().map(|&i| v2d[i]).collect();
+            // Check front-most triangles first (last in sorted list = nearest)
+            for &(tri_idx, _n, _depth) in visible_tris.iter().rev() {
+                let tri = CHAMFERED_CUBE_TRIS[tri_idx];
+                let pts = [v2d[tri[0] as usize], v2d[tri[1] as usize], v2d[tri[2] as usize]];
                 if point_in_polygon(mp, &pts) {
-                    selected = Some(ViewCubeAction::SnapTo(*snap));
-                    // Snap widget to match main camera after click
-                    state.azimuth = 45.0;
-                    state.elevation = 35.264;
+                    let zone = classify_normal(CHAMFERED_CUBE_FACE_NORMALS[tri_idx]);
+                    if let Some(zid) = zone {
+                        let orient = zone_to_orientation(zid);
+                        selected = Some(ViewCubeAction::SnapTo(orient));
+                    }
                     break;
                 }
             }
