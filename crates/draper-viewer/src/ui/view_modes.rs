@@ -373,9 +373,13 @@ pub fn render_view_cube_in_viewport(
     };
 
 
-    // ═══ Navigation cube — mesh-based rendering from navicube.obj ═════════════
-    // 48 vertices, 92 triangles, 26 named zones (6 faces + 12 edges + 8 corners).
-    // Each triangle knows its zone_id (index into NAVICUBE_ZONES).
+    // ═══ Group visible triangles by zone, compute zone depth + convex hull ═══
+    // Instead of sorting/drawing individual triangles, we group all triangles
+    // of each zone together, compute a single convex hull polygon for the zone,
+    // and draw it as ONE shape. This:
+    //   1. Eliminates internal triangle edges (no anti-aliasing artifacts)
+    //   2. Fixes depth sorting (zones sorted as units, not individual tris)
+    //   3. Produces clean zone boundaries (convex hull = outer contour)
     let v2d: Vec<egui::Pos2> = NAVICUBE_VERTS.iter().map(|&p| {
         project(p[0], p[1], p[2])
     }).collect();
@@ -384,33 +388,49 @@ pub fn render_view_cube_in_viewport(
         n[0]*cam_pos[0] + n[1]*cam_pos[1] + n[2]*cam_pos[2] > 0.0
     };
 
-    // Collect visible triangles with depth for painter's algorithm.
-    // Each entry: (tri_index_in_NAVICUBE_TRIS, zone_id, normal, avg_depth)
-    let mut visible_tris: Vec<(usize, usize, [f32; 3], f32)> = Vec::new();
-    for (i, &(v0, v1, v2, zone_id)) in NAVICUBE_TRIS.iter().enumerate() {
-        let n = NAVICUBE_ZONES[zone_id as usize].3; // normal is 4th field
+    // Map: zone_id → (normal, sum_of_depths, tri_count, set_of_vertex_indices)
+    let mut zone_data: std::collections::BTreeMap<usize, ([f32;3], f32, u32, std::collections::HashSet<u32>)> = std::collections::BTreeMap::new();
+    for &(v0, v1, v2, zone_id) in NAVICUBE_TRIS.iter() {
+        let n = NAVICUBE_ZONES[zone_id as usize].3;
         if !face_visible(n) { continue; }
         let p0 = NAVICUBE_VERTS[v0 as usize];
         let p1 = NAVICUBE_VERTS[v1 as usize];
         let p2 = NAVICUBE_VERTS[v2 as usize];
-        let depth = -(
+        let depth = (
             (p0[0]*cam_dir[0] + p0[1]*cam_dir[1] + p0[2]*cam_dir[2]) +
             (p1[0]*cam_dir[0] + p1[1]*cam_dir[1] + p1[2]*cam_dir[2]) +
             (p2[0]*cam_dir[0] + p2[1]*cam_dir[1] + p2[2]*cam_dir[2])
         ) / 3.0;
-        visible_tris.push((i, zone_id as usize, n, depth));
+        let entry = zone_data.entry(zone_id as usize).or_insert((n, 0.0, 0, std::collections::HashSet::new()));
+        entry.1 += depth;
+        entry.2 += 1;
+        entry.3.insert(v0);
+        entry.3.insert(v1);
+        entry.3.insert(v2);
     }
-    visible_tris.sort_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Build sorted list of visible zones: (zone_id, normal, avg_depth, convex_hull_pts)
+    let mut visible_zones: Vec<(usize, [f32;3], f32, Vec<egui::Pos2>)> = Vec::new();
+    for (zone_id, (n, depth_sum, tri_count, vert_set)) in &zone_data {
+        let avg_depth = -depth_sum / *tri_count as f32;
+        // Collect 2D projected points for this zone's unique vertices
+        let pts_2d: Vec<egui::Pos2> = vert_set.iter().map(|&vi| v2d[vi as usize]).collect();
+        // Compute convex hull (all zones are convex: octagons, rectangles, triangles)
+        let hull = convex_hull_2d(&pts_2d);
+        visible_zones.push((*zone_id, *n, avg_depth, hull));
+    }
+    // Sort back-to-front (farthest first = smallest avg_depth first, since
+    // avg_depth = -dot(v,cam_dir), smaller = farther from camera)
+    visible_zones.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
 
     // ═══ Hover detection — find which zone is under the cursor ════════════════
     let mut hovered_zone: Option<usize> = None;
     if let Some(mp) = mouse_pos {
         if cube_rect.contains(mp) && !state.dragging {
-            for &(tri_idx, zone_id, _n, _depth) in visible_tris.iter().rev() {
-                let (v0, v1, v2, _) = NAVICUBE_TRIS[tri_idx];
-                let pts = [v2d[v0 as usize], v2d[v1 as usize], v2d[v2 as usize]];
-                if point_in_polygon(mp, &pts) {
-                    hovered_zone = Some(zone_id);
+            // Check front-most zones first (last in sorted list = nearest)
+            for (zone_id, _n, _depth, hull) in visible_zones.iter().rev() {
+                if point_in_polygon(mp, hull) {
+                    hovered_zone = Some(*zone_id);
                     break;
                 }
             }
@@ -435,62 +455,26 @@ pub fn render_view_cube_in_viewport(
     let c_edge = egui::Color32::from_rgb(0x1a, 0x1a, 0x28);
     let edge_stroke = egui::Stroke::new(1.2_f32 * ppi, c_edge);
 
-    // ═══ Draw triangles back-to-front (NO per-triangle stroke — edges drawn
-    // separately below as zone contours to avoid internal diagonals) ══════════
-    let no_stroke = egui::Stroke::NONE;
-    for &(tri_idx, zone_id, n, _depth) in &visible_tris {
-        let (v0, v1, v2, _) = NAVICUBE_TRIS[tri_idx];
-        let pts = vec![v2d[v0 as usize], v2d[v1 as usize], v2d[v2 as usize]];
-        let is_hovered = hovered_zone == Some(zone_id);
-        let fill = if is_hovered { c_hover } else { shade(n) };
-        painter.add(egui::Shape::convex_polygon(pts, fill, no_stroke));
-    }
-
-    // ═══ Draw zone boundary contours (only outer edges of each zone) ═════════
-    // For each visible zone, collect all its triangle edges, then draw only
-    // edges that appear ONCE (boundary edges). Edges shared between two
-    // triangles of the same zone are internal and skipped.
-    let mut drawn_zones: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    for &(_tri_idx, zone_id, _n, _depth) in &visible_tris {
-        if !drawn_zones.insert(zone_id) { continue; } // already drawn
-        // Collect all edges of triangles in this zone
-        let mut edge_count: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
-        for &(t_idx, zid, _n, _d) in &visible_tris {
-            if zid != zone_id { continue; }
-            let (v0, v1, v2, _) = NAVICUBE_TRIS[t_idx];
-            for &(a, b) in &[(v0, v1), (v1, v2), (v2, v0)] {
-                let key = if a < b { (a, b) } else { (b, a) };
-                *edge_count.entry(key).or_insert(0) += 1;
-            }
-        }
-        // Draw edges that appear exactly once (zone boundary)
-        for ((a, b), count) in &edge_count {
-            if *count == 1 {
-                painter.line_segment([v2d[*a as usize], v2d[*b as usize]], edge_stroke);
-            }
-        }
+    // ═══ Draw zones back-to-front as single convex polygons ═══════════════════
+    // Each zone is drawn as ONE convex polygon with its boundary as the stroke.
+    // No internal triangle edges, no anti-aliasing artifacts between triangles.
+    for (zone_id, n, _depth, hull) in &visible_zones {
+        let is_hovered = hovered_zone == Some(*zone_id);
+        let fill = if is_hovered { c_hover } else { shade(*n) };
+        painter.add(egui::Shape::convex_polygon(hull.clone(), fill, edge_stroke));
     }
 
     // ═══ Draw labels on face zones (zones 0-5) ═══════════════════════════════
-    for zone_id in 0..6usize {
-        let (_, label, _dir, normal) = NAVICUBE_ZONES[zone_id];
-        if label.is_none() || !face_visible(normal) { continue; }
-        // Compute centroid of all visible triangles in this zone
-        let mut cx = 0.0_f32; let mut cy = 0.0_f32; let mut count = 0u32;
-        for &(tri_idx, zid, _n, _depth) in &visible_tris {
-            if zid == zone_id {
-                let (v0, v1, v2, _) = NAVICUBE_TRIS[tri_idx];
-                cx += v2d[v0 as usize].x + v2d[v1 as usize].x + v2d[v2 as usize].x;
-                cy += v2d[v0 as usize].y + v2d[v1 as usize].y + v2d[v2 as usize].y;
-                count += 3;
-            }
-        }
-        if count > 0 {
-            cx /= count as f32; cy /= count as f32;
-            let tc = if hovered_zone == Some(zone_id) { c_text_h } else { c_text };
-            painter.text(egui::pos2(cx, cy), egui::Align2::CENTER_CENTER,
-                label.unwrap(), egui::FontId::proportional(label_font_size), tc);
-        }
+    for (zone_id, _n, _depth, hull) in &visible_zones {
+        if *zone_id >= 6 { continue; } // only face zones have labels
+        let (_, label, _dir, _normal) = NAVICUBE_ZONES[*zone_id];
+        if label.is_none() { continue; }
+        // Label at centroid of the convex hull
+        let cx: f32 = hull.iter().map(|p| p.x).sum::<f32>() / hull.len() as f32;
+        let cy: f32 = hull.iter().map(|p| p.y).sum::<f32>() / hull.len() as f32;
+        let tc = if hovered_zone == Some(*zone_id) { c_text_h } else { c_text };
+        painter.text(egui::pos2(cx, cy), egui::Align2::CENTER_CENTER,
+            label.unwrap(), egui::FontId::proportional(label_font_size), tc);
     }
 
 
@@ -639,16 +623,13 @@ pub fn render_view_cube_in_viewport(
         selected = Some(ViewCubeAction::ToggleProjection);
     }
 
-    // ═══ Handle cube clicks (mesh-based raycast) ══════════════════════════════
+    // ═══ Handle cube clicks (zone-based raycast) ══════════════════════════════
     if cube_resp.clicked() && !state.dragging {
         if let Some(mp) = mouse_pos {
-            // Check front-most triangles first (last in sorted list = nearest)
-            for &(tri_idx, zone_id, _n, _depth) in visible_tris.iter().rev() {
-                let (v0, v1, v2, _) = NAVICUBE_TRIS[tri_idx];
-                let pts = [v2d[v0 as usize], v2d[v1 as usize], v2d[v2 as usize]];
-                if point_in_polygon(mp, &pts) {
-                    // Look up snap direction for this zone
-                    let (_, _label, snap_dir, _normal) = NAVICUBE_ZONES[zone_id];
+            // Check front-most zones first (last in sorted list = nearest)
+            for (zone_id, _n, _depth, hull) in visible_zones.iter().rev() {
+                if point_in_polygon(mp, hull) {
+                    let (_, _label, snap_dir, _normal) = NAVICUBE_ZONES[*zone_id];
                     selected = Some(ViewCubeAction::SnapToDirection(snap_dir));
                     break;
                 }
@@ -679,6 +660,55 @@ fn point_in_polygon(p: egui::Pos2, polygon: &[egui::Pos2]) -> bool {
         j = i;
     }
     inside
+}
+
+/// Compute the convex hull of a set of 2D points using Andrew's monotone chain.
+/// Returns points in CCW order. All navigation cube zones are convex
+/// (octagons, rectangles, triangles), so the convex hull exactly matches
+/// the zone's outer boundary — no internal triangle edges.
+fn convex_hull_2d(points: &[egui::Pos2]) -> Vec<egui::Pos2> {
+    let n = points.len();
+    if n < 3 { return points.to_vec(); }
+
+    // Sort points by (x, y)
+    let mut pts: Vec<egui::Pos2> = points.to_vec();
+    pts.sort_by(|a, b| {
+        a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal))
+    });
+
+    // Remove duplicates
+    pts.dedup_by(|a, b| (a.x - b.x).abs() < 1e-6 && (a.y - b.y).abs() < 1e-6);
+    if pts.len() < 3 { return pts; }
+
+    let n = pts.len();
+    let mut hull = Vec::with_capacity(2 * n);
+
+    // Lower hull
+    for &p in &pts {
+        while hull.len() >= 2 && cross2d(hull[hull.len()-2], hull[hull.len()-1], p) <= 0.0 {
+            hull.pop();
+        }
+        hull.push(p);
+    }
+
+    // Upper hull
+    let lower_len = hull.len() + 1;
+    for &p in pts.iter().rev() {
+        while hull.len() >= lower_len && cross2d(hull[hull.len()-2], hull[hull.len()-1], p) <= 0.0 {
+            hull.pop();
+        }
+        hull.push(p);
+    }
+
+    hull.pop(); // remove last point (duplicate of first)
+    hull
+}
+
+/// 2D cross product of vectors OA × OB.
+/// Positive = OAB is CCW (left turn), Negative = CW (right turn), 0 = colinear.
+fn cross2d(o: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
+    (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x)
 }
 
 pub fn render_display_style_in_viewport(ui: &mut egui::Ui, viewport_rect: &egui::Rect, style: &mut DisplayStyle) {
