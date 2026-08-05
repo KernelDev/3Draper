@@ -510,10 +510,13 @@ Independent face triangulation with post-facto welding is deprecated.
 
 | Phase | Milestone | Status | Commit |
 |-------|-----------|--------|--------|
-| 1 | Remove global TOLERANCE constants | Pending | — |
-| 1 | Parse UNCERTAINTY_MEASURE_WITH_UNIT | Done (partial) | `ece246d` |
+| 1 | Remove global TOLERANCE constants | Done | `065b9e2` |
+| 1 | Parse UNCERTAINTY_MEASURE_WITH_UNIT | Done | `93df2de` |
 | 1 | Contextual hierarchical tolerances | In Progress | `dd99d0a` |
 | 1 | NURBS healing guards | Done | `eb46eb1` |
+| 1 | ManifoldChecker::is_watertight() | Done | `f8f023c` |
+| 1 | GeometryError + panic-free production code | Done | `9d7ad7f` |
+| 1 | NaN/Inf guards in NURBS evaluation | Done | `0da6e6e` |
 | 1 | Edge Discretization Bus | Pending | — |
 | 1 | BREP validation before triangulation | Pending | — |
 | 1 | Analytical PCURVE | Pending | — |
