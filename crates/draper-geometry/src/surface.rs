@@ -1438,6 +1438,12 @@ impl NurbsSurface {
         // Compute the 3D point: S = (wx/w, wy/w, wz/w)
         let point = Point3d::new(wx / w, wy / w, wz / w);
 
+        // NaN/Inf guard: if the point is not finite, fall back to numerical.
+        if !point.x.is_finite() || !point.y.is_finite() || !point.z.is_finite() {
+            log::warn!("NURBS derivatives_at: non-finite point ({}, {}, {}) at u={}, v={} — falling back to numerical", point.x, point.y, point.z, u, v);
+            return self.derivatives_at_numerical(u, v);
+        }
+
         // Step 3: Compute derivatives using degree-reduced control points
         // dS_w/du is computed from the p control points of degree p-1 B-spline
         // For each v-row, the derivative in u is:
@@ -2816,7 +2822,18 @@ fn nurbs_surface_eval(nurbs: &NurbsSurface, u: f64, v: f64) -> Point3d {
         if w.abs() < 1e-15 {
             Point3d::ORIGIN
         } else {
-            Point3d::new(result.0 / w, result.1 / w, result.2 / w)
+            let px = result.0 / w;
+            let py = result.1 / w;
+            let pz = result.2 / w;
+            // NaN/Inf guard: if any coordinate is not finite, return ORIGIN.
+            // This can happen with degenerate control points or numerical
+            // instability in the De Boor algorithm.
+            if px.is_finite() && py.is_finite() && pz.is_finite() {
+                Point3d::new(px, py, pz)
+            } else {
+                log::warn!("NURBS surface eval: non-finite result ({}, {}, {}) at u={}, v={} — returning ORIGIN", px, py, pz, u, v);
+                Point3d::ORIGIN
+            }
         }
     } else {
         Point3d::ORIGIN
