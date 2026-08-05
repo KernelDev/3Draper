@@ -8852,12 +8852,12 @@ impl<'a> StepConverter<'a> {
         }
 
         // ── Step 4: Compute sewing tolerance with 2x safety margin ──────
-        // Default tolerance uses STEP uncertainty when available (×100,
-        // matching OpenCascade Shape Healing). Falls back to model_scale * 1e-4.
+        // Default tolerance uses STEP uncertainty when available (×10,
+        // matching vertex_merge_tolerance). Falls back to model_scale * 1e-4.
         let default_tol = match tol_ctx.step_uncertainty {
             Some(u) if u > 0.0 && u.is_finite() => {
-                // STEP uncertainty × 100 — matches vertex_merge_tolerance()
-                (u * 100.0).max(tol_ctx.absolute * 10.0)
+                // STEP uncertainty × 10 — matches vertex_merge_tolerance()
+                (u * 10.0).max(tol_ctx.absolute * 10.0)
             }
             _ => (tol_ctx.model_scale * 1e-4).max(tol_ctx.absolute * 10.0),
         };
@@ -8869,9 +8869,12 @@ impl<'a> StepConverter<'a> {
             default_tol
         };
 
-        // ── Step 5: Cap to [1e-7, 5e-3] of model_scale for sanity ──────
+        // ── Step 5: Cap to [1e-7, 1e-3] of model_scale for sanity ──────
+        // Reduced max cap from 0.5% to 0.1% to prevent over-merging on models
+        // with large vertex gaps (e.g., bolt with 0.01mm uncertainty produces
+        // sewing_tol > 0.5mm, which merges cylinder vertices 0.5mm apart).
         let min_tol = (tol_ctx.model_scale * 1e-7).max(1e-12);
-        let max_tol = tol_ctx.model_scale * 5e-3; // 0.5% — prevents over-merging thin features
+        let max_tol = tol_ctx.model_scale * 1e-3; // 0.1% — prevents over-merging
         // Use sewing_tol, but don't let it go below default_tol (which may be
         // STEP uncertainty-based) or above max_tol.
         let final_tol = sewing_tol.max(default_tol).min(max_tol).max(min_tol);
