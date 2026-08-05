@@ -1511,10 +1511,26 @@ fn fix_self_intersections_heal(shell: &mut Shell, params: &HealingParams, report
 
     // Collect the set of face indices to remove: for each intersection,
     // remove the face with fewer edges (it's likely the "intruder").
+    // NEVER remove NURBS faces — they represent complex geometry (fillets,
+    // threads, organic shapes) that may appear self-intersecting due to
+    // tight curvature but are topologically valid.
     let mut faces_to_remove: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for si in &intersections {
         if faces_to_remove.contains(&si.face_a) || faces_to_remove.contains(&si.face_b) {
             continue; // Already removing one of the faces
+        }
+
+        // Check if either face is a NURBS surface — if so, skip this intersection
+        let is_nurbs_a = shell.faces.get(si.face_a)
+            .and_then(|f| f.surface.as_ref())
+            .map(|s| matches!(s, Surface::Nurbs(_)))
+            .unwrap_or(false);
+        let is_nurbs_b = shell.faces.get(si.face_b)
+            .and_then(|f| f.surface.as_ref())
+            .map(|s| matches!(s, Surface::Nurbs(_)))
+            .unwrap_or(false);
+        if is_nurbs_a || is_nurbs_b {
+            continue; // Don't remove NURBS faces
         }
 
         let edges_a = shell.faces.get(si.face_a).map(|f| f.edges.len()).unwrap_or(0);
@@ -1570,6 +1586,13 @@ fn remove_inconsistent_normal_faces(shell: &mut Shell, _params: &HealingParams, 
             Some(ref s) => s,
             None => continue,
         };
+
+        // NEVER remove NURBS faces — their normals at (0,0) may not be
+        // representative of the actual surface orientation, leading to
+        // false-positive "inconsistent normal" detection.
+        if matches!(surface, Surface::Nurbs(_)) {
+            continue;
+        }
 
         // Get this face's normal at center
         let this_normal = if face.forward {
