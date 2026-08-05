@@ -276,32 +276,42 @@ impl ToleranceContext {
     }
 }
 
-// Keep backward-compatible constants for gradual migration
+// ─── Deprecated global constants ───────────────────────────────────────────
+// These are kept for backward compatibility during the migration to
+// ToleranceContext. New code MUST NOT use them — use ToleranceContext instead.
+// The #[deprecated] attribute produces a compile warning to flag remaining usages.
+
 /// Default geometric tolerance (1e-6 mm = 1 nanometer).
-/// DEPRECATED: Use ToleranceContext instead.
+/// DEPRECATED: Use `ToleranceContext::coincidence_tolerance()` instead.
+#[deprecated(since = "0.2.0", note = "Use ToleranceContext::coincidence_tolerance() instead")]
 pub const TOLERANCE: f64 = DEFAULT_ABSOLUTE_TOLERANCE;
 
 /// Squared tolerance for efficient distance comparisons.
-/// DEPRECATED: Use ToleranceContext::coincidence_tolerance_sq() instead.
+/// DEPRECATED: Use `ToleranceContext::coincidence_tolerance_sq()` instead.
+#[deprecated(since = "0.2.0", note = "Use ToleranceContext::coincidence_tolerance_sq() instead")]
 pub const TOLERANCE_SQ: f64 = TOLERANCE * TOLERANCE;
 
 /// Angular tolerance in radians.
-/// DEPRECATED: Use ToleranceContext::angular instead.
+/// DEPRECATED: Use `ToleranceContext::angular_tolerance()` instead.
+#[deprecated(since = "0.2.0", note = "Use ToleranceContext::angular_tolerance() instead")]
 pub const ANGULAR_TOLERANCE: f64 = DEFAULT_ANGULAR_TOLERANCE;
 
 /// Parametric tolerance for curve/surface parameter comparisons.
-/// DEPRECATED: Use ToleranceContext::parametric instead.
+/// DEPRECATED: Use `ToleranceContext::parametric_tolerance()` instead.
+#[deprecated(since = "0.2.0", note = "Use ToleranceContext::parametric_tolerance() instead")]
 pub const PARAMETRIC_TOLERANCE: f64 = DEFAULT_PARAMETRIC_TOLERANCE;
 
 /// Check if two values are within geometric tolerance.
-/// DEPRECATED: Use ToleranceContext::is_coincident() instead.
+/// DEPRECATED: Use `ToleranceContext::is_coincident()` instead.
+#[deprecated(since = "0.2.0", note = "Use ToleranceContext::is_coincident() instead")]
 #[inline]
 pub fn is_coincident(a: f64, b: f64) -> bool {
     (a - b).abs() < TOLERANCE
 }
 
 /// Check if a value is approximately zero.
-/// DEPRECATED: Use ToleranceContext::is_zero() instead.
+/// DEPRECATED: Use `ToleranceContext::is_zero()` instead.
+#[deprecated(since = "0.2.0", note = "Use ToleranceContext::is_zero() instead")]
 #[inline]
 pub fn is_zero(a: f64) -> bool {
     a.abs() < TOLERANCE

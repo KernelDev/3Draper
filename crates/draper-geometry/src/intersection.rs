@@ -2,7 +2,7 @@
 // Copyright (c) 2026 KernelDev
 //! Geometric intersection algorithms.
 
-use crate::{Point3d, Vec3d, curve::*, surface::*, tolerance::TOLERANCE};
+use crate::{Point3d, Vec3d, curve::*, surface::*, tolerance::ToleranceContext};
 
 /// Result of a curve-curve intersection.
 #[derive(Clone, Debug)]
@@ -29,11 +29,19 @@ pub struct SurfaceSurfaceIntersection {
 }
 
 /// Intersect a line with a plane.
+/// Uses the default ToleranceContext for parallel-line detection.
+/// For context-aware tolerance, use `intersect_line_plane_with_tolerance()`.
+#[deprecated(since = "0.2.0", note = "Use intersect_line_plane_with_tolerance() with a ToleranceContext")]
 pub fn intersect_line_plane(line: &Line, plane: &Plane) -> Option<Point3d> {
+    intersect_line_plane_with_tolerance(line, plane, &ToleranceContext::default())
+}
+
+/// Intersect a line with a plane, using a ToleranceContext for parallel detection.
+pub fn intersect_line_plane_with_tolerance(line: &Line, plane: &Plane, ctx: &ToleranceContext) -> Option<Point3d> {
     let denom = plane.normal.x * line.direction.x
         + plane.normal.y * line.direction.y
         + plane.normal.z * line.direction.z;
-    if denom.abs() < TOLERANCE {
+    if denom.abs() < ctx.coincidence_tolerance() {
         return None; // Parallel
     }
     let dx = plane.origin.x - line.origin.x;
@@ -101,19 +109,21 @@ pub fn intersect_line_sphere(line: &Line, sphere: &SphereSurface) -> Vec<Point3d
 }
 
 /// Solve quadratic equation a*t^2 + b*t + c = 0.
+/// Uses the default ToleranceContext for degenerate-case detection.
 fn solve_quadratic(a: f64, b: f64, c: f64) -> Vec<f64> {
-    if a.abs() < TOLERANCE {
+    let tol = ToleranceContext::default().coincidence_tolerance();
+    if a.abs() < tol {
         // Linear: b*t + c = 0
-        if b.abs() < TOLERANCE {
+        if b.abs() < tol {
             return vec![];
         }
         return vec![-c / b];
     }
     let disc = b * b - 4.0 * a * c;
-    if disc < -TOLERANCE {
+    if disc < -tol {
         return vec![];
     }
-    if disc.abs() < TOLERANCE {
+    if disc.abs() < tol {
         return vec![-b / (2.0 * a)];
     }
     let sqrt_disc = disc.sqrt();

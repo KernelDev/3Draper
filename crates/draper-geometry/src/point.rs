@@ -2,7 +2,7 @@
 // Copyright (c) 2026 KernelDev
 //! 2D and 3D point types.
 
-use crate::tolerance::{ToleranceContext, TOLERANCE};
+use crate::tolerance::ToleranceContext;
 use nalgebra::Point3;
 use std::fmt;
 
@@ -42,11 +42,12 @@ impl Point3d {
     }
 
     /// Check if two points are within geometric tolerance.
-    /// Uses the global TOLERANCE constant.
+    /// Uses the default ToleranceContext.
     /// DEPRECATED: Use `is_coincident_with_tolerance()` with a ToleranceContext instead.
+    #[deprecated(since = "0.2.0", note = "Use is_coincident_with_tolerance() with a ToleranceContext")]
     #[inline]
     pub fn is_coincident_with(&self, other: &Point3d) -> bool {
-        self.distance_sq_to(other) < TOLERANCE * TOLERANCE
+        self.distance_sq_to(other) < ToleranceContext::default().coincidence_tolerance_sq()
     }
 
     /// Check if two points are coincident within the given tolerance context.
@@ -138,11 +139,12 @@ impl Point2d {
     }
 
     /// Check if two 2D points are within geometric tolerance.
-    /// Uses the global TOLERANCE constant.
+    /// Uses the default ToleranceContext.
     /// DEPRECATED: Use `is_coincident_with_tolerance()` with a ToleranceContext instead.
+    #[deprecated(since = "0.2.0", note = "Use is_coincident_with_tolerance() with a ToleranceContext")]
     #[inline]
     pub fn is_coincident_with(&self, other: &Point2d) -> bool {
-        self.distance_sq_to(other) < TOLERANCE * TOLERANCE
+        self.distance_sq_to(other) < ToleranceContext::default().coincidence_tolerance_sq()
     }
 
     /// Check if two 2D points are coincident within the given tolerance context.
