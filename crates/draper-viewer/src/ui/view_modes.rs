@@ -169,10 +169,12 @@ pub const NAVICUBE_TRIS: [(u32, u32, u32, u8); 92] = [
 pub const NAVICUBE_ZONES: [(&str, Option<&str>, [f32; 3], [f32; 3]); 26] = [
     ("Right_Face",            Some("RIGHT"),  [-1.0,  0.0,  0.0], [ 1.0,  0.0,  0.0]), // 0
     ("Left_Face",             Some("LEFT"),   [ 1.0,  0.0,  0.0], [-1.0,  0.0,  0.0]), // 1
-    ("Front_Face",            Some("FRONT"),  [ 0.0, -1.0,  0.0], [ 0.0,  1.0,  0.0]), // 2
-    ("Back_Face",             Some("BACK"),   [ 0.0,  1.0,  0.0], [ 0.0, -1.0,  0.0]), // 3
-    ("Top_Face",              Some("TOP"),    [ 0.0,  0.0, -1.0], [ 0.0,  0.0,  1.0]), // 4
-    ("Bottom_Face",           Some("BOT"),    [ 0.0,  0.0,  1.0], [ 0.0,  0.0, -1.0]), // 5
+    // Labels swapped to match main viewport Y-up convention:
+    //   Y+ = TOP, Y- = BOT, Z- = FRONT, Z+ = BACK (main viewport uses Y-up)
+    ("Front_Face",            Some("TOP"),    [ 0.0, -1.0,  0.0], [ 0.0,  1.0,  0.0]), // 2  (Y+ face → TOP)
+    ("Back_Face",             Some("BOT"),    [ 0.0,  1.0,  0.0], [ 0.0, -1.0,  0.0]), // 3  (Y- face → BOT)
+    ("Top_Face",              Some("BACK"),   [ 0.0,  0.0, -1.0], [ 0.0,  0.0,  1.0]), // 4  (Z+ face → BACK)
+    ("Bottom_Face",           Some("FRONT"),  [ 0.0,  0.0,  1.0], [ 0.0,  0.0, -1.0]), // 5  (Z- face → FRONT)
     ("Right_Front_Edge",      None,           [-0.7071, -0.7071, 0.0],   [ 0.7071,  0.7071, 0.0]),   // 6
     ("Right_Back_Edge",       None,           [-0.7071,  0.7071, 0.0],   [ 0.7071, -0.7071, 0.0]),   // 7
     ("Right_Top_Edge",        None,           [-0.7071, 0.0, -0.7071],   [ 0.7071, 0.0,  0.7071]),   // 8
@@ -196,8 +198,11 @@ pub const NAVICUBE_ZONES: [(&str, Option<&str>, [f32; 3], [f32; 3]); 26] = [
 ];
 
 /// Default ISO direction (from camera to target) for the Home button.
-/// This looks at the cube from the TopFrontRight corner direction.
-pub const NAVICUBE_ISO_DIRECTION: [f32; 3] = [-0.5774, -0.5774, -0.5774];
+/// Matches main viewport's ViewOrientation::Iso direction:
+///   [-cos(35.264)*sin(45), -sin(35.264), cos(35.264)*cos(45)]
+///   = [-0.5, -0.577, 0.5]
+/// Camera at (+X, +Y, -Z) looking toward origin — sees TOP(Y+), FRONT(Z-), RIGHT(X+).
+pub const NAVICUBE_ISO_DIRECTION: [f32; 3] = [-0.5774, -0.5774, 0.5774];
 
 pub fn render_view_cube_in_viewport(
     ui: &mut egui::Ui,
@@ -215,13 +220,13 @@ pub fn render_view_cube_in_viewport(
     // On a 2x DPI display, cube_half doubles so the cube stays the same
     // physical size, and font scales to match.
     let ppi = ui.ctx().pixels_per_point().max(1.0);
-    let ring_r = 80.0_f32 * ppi;       // compass disc radius — larger to fit bigger cube
-    let margin = 14.0_f32 * ppi;
-    let cube_half = 38.0_f32 * ppi;    // cube edge half-length (orthographic, fixed scale)
+    let ring_r = 40.0_f32 * ppi;       // compass disc radius (halved from 80)
+    let margin = 7.0_f32 * ppi;        // margin (halved from 14)
+    let cube_half = 19.0_f32 * ppi;    // cube edge half-length (halved from 38)
     let chamfer = 0.18_f32;            // chamfer size as fraction of cube_half
     // Dynamic font size: scales with cube size and DPI
-    let label_font_size = (cube_half * 0.32).max(8.0); // ~9pt at 1x DPI, 18pt at 2x
-    let small_font_size = (cube_half * 0.22).max(6.0);
+    let label_font_size = (cube_half * 0.32).max(6.0); // min 6pt
+    let small_font_size = (cube_half * 0.22).max(5.0);
     let center = egui::pos2(
         viewport_rect.right() - ring_r - margin,
         viewport_rect.top() + ring_r + margin,
@@ -235,21 +240,21 @@ pub fn render_view_cube_in_viewport(
 
     // Home button (top-right, outside the ring)
     let home_rect = egui::Rect::from_center_size(
-        egui::pos2(center.x + ring_r + 16.0, center.y - ring_r - 16.0),
-        egui::vec2(22.0, 22.0),
+        egui::pos2(center.x + ring_r + 8.0, center.y - ring_r - 8.0),
+        egui::vec2(14.0, 14.0),
     );
     let home_resp = ui.allocate_rect(home_rect, egui::Sense::click());
 
     // Menu button (bottom-right, outside the ring)
     let menu_rect = egui::Rect::from_center_size(
-        egui::pos2(center.x + ring_r + 16.0, center.y + ring_r + 16.0),
-        egui::vec2(22.0, 22.0),
+        egui::pos2(center.x + ring_r + 8.0, center.y + ring_r + 8.0),
+        egui::vec2(14.0, 14.0),
     );
     let menu_resp = ui.allocate_rect(menu_rect, egui::Sense::click());
 
     // 4 rotation arrows (top/bottom/left/right of cube, outside cube_rect but inside ring)
     let arrow_dist = cube_half * 1.5;
-    let arrow_size = 14.0_f32;
+    let arrow_size = 8.0_f32;
     let arrow_rects = [
         egui::Rect::from_center_size(egui::pos2(center.x, center.y - arrow_dist), egui::vec2(arrow_size*2.0, arrow_size)),
         egui::Rect::from_center_size(egui::pos2(center.x, center.y + arrow_dist), egui::vec2(arrow_size*2.0, arrow_size)),
@@ -263,7 +268,7 @@ pub fn render_view_cube_in_viewport(
 
     // 2 roll arrows (curved, top of cube — represented as small circles)
     let roll_dist = cube_half * 1.9;
-    let roll_r = 10.0_f32;
+    let roll_r = 6.0_f32;
     let roll_rects = [
         egui::Rect::from_center_size(egui::pos2(center.x - roll_dist*0.7, center.y - roll_dist), egui::vec2(roll_r*2.0, roll_r*2.0)),
         egui::Rect::from_center_size(egui::pos2(center.x + roll_dist*0.7, center.y - roll_dist), egui::vec2(roll_r*2.0, roll_r*2.0)),
@@ -490,8 +495,8 @@ pub fn render_view_cube_in_viewport(
     // Axes use unit vectors projected through the same camera basis as the
     // cube, then scaled to a fixed pixel length (axis_len) independent of
     // cube_half so they don't bleed outside the widget.
-    let axes_origin = egui::pos2(center.x - ring_r - 8.0, center.y + ring_r + 8.0);
-    let axis_len = 16.0_f32 * ppi;
+    let axes_origin = egui::pos2(center.x - ring_r - 4.0, center.y + ring_r + 4.0);
+    let axis_len = 10.0_f32 * ppi;
     // Project unit vectors (1,0,0), (0,1,0), (0,0,1) — these give direction
     // in screen space (relative to center). We normalize to axis_len pixels.
     let dir_x = {

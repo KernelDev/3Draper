@@ -171,7 +171,9 @@ impl OrbitCamera {
         self.model_size = max_dim;
         self.target = center;
         let fov_rad = self.fov.to_radians();
-        self.distance = max_dim / (2.0 * (fov_rad * 0.5).tan()) * 1.5;
+        // Use 2.0x margin (was 1.5x) to ensure the entire model is visible
+        // even with perspective distortion at the edges of the viewport.
+        self.distance = max_dim / (2.0 * (fov_rad * 0.5).tan()) * 2.0;
         self.distance = self.distance.max(max_dim * 0.5);
         // Adjust near/far planes to model size
         self.near = (max_dim * 0.001).max(0.0001);
