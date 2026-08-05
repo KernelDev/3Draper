@@ -385,7 +385,15 @@ pub fn render_view_cube_in_viewport(
     }).collect();
 
     let face_visible = |n: [f32; 3]| -> bool {
-        n[0]*cam_pos[0] + n[1]*cam_pos[1] + n[2]*cam_pos[2] > 0.0
+        // Use threshold 0.1 instead of 0.0 to cull faces that are nearly
+        // edge-on. When a face is viewed at a grazing angle, its projected
+        // vertices span a huge elongated area that covers the screen and
+        // hides the compass ring. Also, after slerp animation the camera
+        // direction may not be perfectly aligned, so a face that should be
+        // exactly edge-on (dot=0) might have dot=0.01 and wrongly pass
+        // the >0.0 test — causing labels like LEFT to appear when looking
+        // straight at BOT. The 0.1 threshold (~5.7°) culls these cases.
+        n[0]*cam_pos[0] + n[1]*cam_pos[1] + n[2]*cam_pos[2] > 0.1
     };
 
     // Map: zone_id → (normal, sum_of_depths, tri_count, set_of_vertex_indices)
