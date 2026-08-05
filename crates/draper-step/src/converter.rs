@@ -2247,7 +2247,11 @@ pub fn extract_step_tolerance(step_file: &StepFile) -> Option<f64> {
             // The value is inside a TypedValue wrapper (LENGTH_MEASURE).
             for param in &entity.params {
                 if let Some(val) = extract_float_from_step_value(param) {
-                    if val > 0.0 && val < 1.0 {
+                    if val > 0.0 && val.is_finite() {
+                        // Accept any positive uncertainty value (was: val < 1.0).
+                        // Some CAD systems report uncertainty >= 1mm for large
+                        // models (e.g., automotive assemblies in meters).
+                        // ToleranceContext caps it relative to model_scale.
                         best_tolerance = Some(match best_tolerance {
                             Some(existing) => existing.min(val),
                             None => val,
@@ -2271,6 +2275,12 @@ pub fn extract_step_tolerance(step_file: &StepFile) -> Option<f64> {
                 }
             }
         }
+    }
+
+    if let Some(tol) = best_tolerance {
+        log::info!("STEP tolerance extracted: UNCERTAINTY_MEASURE_WITH_UNIT = {:.2e}", tol);
+    } else {
+        log::info!("STEP tolerance: no UNCERTAINTY_MEASURE_WITH_UNIT found — using model_scale fallback");
     }
 
     best_tolerance
