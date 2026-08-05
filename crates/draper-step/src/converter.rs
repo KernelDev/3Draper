@@ -5236,6 +5236,28 @@ impl<'a> StepConverter<'a> {
         let mut skipped_faces = 0;
         let _timed_out_faces = 0;
 
+        log::info!(
+            "ENTER triangulate_brep_detailed: BREP #{} — face_data_list has {} faces",
+            brep_id, face_data_list.len()
+        );
+        for (fi, fd) in face_data_list.iter().enumerate() {
+            let stype = match &fd.surface {
+                draper_geometry::Surface::Plane(_) => "Plane",
+                draper_geometry::Surface::Cylinder(_) => "Cylinder",
+                draper_geometry::Surface::Cone(_) => "Cone",
+                draper_geometry::Surface::Sphere(_) => "Sphere",
+                draper_geometry::Surface::Torus(_) => "Torus",
+                draper_geometry::Surface::Nurbs(_) => "Nurbs",
+                draper_geometry::Surface::Revolution(_) => "Revolution",
+                draper_geometry::Surface::Extrusion(_) => "Extrusion",
+                draper_geometry::Surface::Offset(_) => "Offset",
+                draper_geometry::Surface::Ruled(_) => "Ruled",
+            };
+            log::info!(
+                "  face_data[{}]: STEP #{}, type={}", fi, fd.step_face_id, stype
+            );
+        }
+
         // Sequential face triangulation (intra-BREP parallelism disabled —
         // StepFile uses RefCell which is not Sync, causing panics when
         // multiple threads call StepConverter::new(step) simultaneously).

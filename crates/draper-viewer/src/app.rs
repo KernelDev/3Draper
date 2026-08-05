@@ -8970,6 +8970,13 @@ impl eframe::App for ViewerApp {
                         use crate::ui::view_modes::ViewCubeAction;
                         match action {
                             ViewCubeAction::Drag { delta_x, delta_y } => {
+                                // Cancel any active slerp animation — drag takes over.
+                                // Without this, a previous SnapTo/Home slerp would
+                                // keep running and override the drag every frame,
+                                // making it impossible to do full rotations.
+                                self.brepcad_viewcube_target_quat = None;
+                                self.brepcad_viewcube_anim_start = None;
+                                self.brepcad_viewcube_anim_from = None;
                                 // Use the SAME quaternion rotation as the main viewport.
                                 self.camera.rotate(delta_x, delta_y);
                             }
