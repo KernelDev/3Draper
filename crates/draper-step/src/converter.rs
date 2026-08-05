@@ -7661,6 +7661,7 @@ impl<'a> StepConverter<'a> {
     /// This is the surface-only extraction logic (previously extract_face_surface).
     fn extract_face_surface_from_entity(&self, face: &crate::schema::StepEntity) -> Option<Surface> {
         // Format: #N = ADVANCED_FACE('', (bounds), #surface_ref, .T.);
+        // Format: #N = FACE_SURFACE('name', (bounds), #surface_ref, .T.);
         // The surface reference is typically the 3rd parameter (index 2).
         // But bounds can be complex (lists of lists), so we need to be smart.
 
@@ -7670,15 +7671,30 @@ impl<'a> StepConverter<'a> {
                 if let Some(surface) = self.extract_surface(surface_id, 0) {
                     return Some(surface);
                 } else {
-                    // Log when surface extraction fails for an ADVANCED_FACE
+                    // Log when surface extraction fails for an ADVANCED_FACE / FACE_SURFACE
                     if let Some(surface_entity) = self.step.find_entity(surface_id) {
                         log::warn!(
-                            "FACE_SURFACE_FAIL: ADVANCED_FACE #{} → surface ref #{} type='{}' — extract_surface returned None",
+                            "FACE_SURFACE_FAIL: face #{} → surface ref #{} type='{}' — extract_surface returned None",
                             face.id, surface_id, surface_entity.type_name,
+                        );
+                    } else {
+                        log::warn!(
+                            "FACE_SURFACE_FAIL: face #{} → surface ref #{} NOT FOUND in step entities",
+                            face.id, surface_id,
                         );
                     }
                 }
+            } else {
+                log::warn!(
+                    "FACE_SURFACE_FAIL: face #{} param[2] is not a ref: {:?}",
+                    face.id, param,
+                );
             }
+        } else {
+            log::warn!(
+                "FACE_SURFACE_FAIL: face #{} has only {} params (expected ≥3)",
+                face.id, face.params.len(),
+            );
         }
 
         // If index 2 didn't work, scan all params for the surface ref
