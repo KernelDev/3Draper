@@ -1507,6 +1507,24 @@ impl OwnedStepConversionContext {
                 "BREP #{}: started chunked session — {} faces, max_chunk_time={:?}",
                 pending.brep_id, session.face_data_list.len(), max_chunk_time
             );
+            // Log each face's surface type for diagnostics
+            for (fi, fd) in session.face_data_list.iter().enumerate() {
+                let stype = match &fd.surface {
+                    Surface::Plane(_) => "Plane",
+                    Surface::Cylinder(_) => "Cylinder",
+                    Surface::Cone(_) => "Cone",
+                    Surface::Sphere(_) => "Sphere",
+                    Surface::Torus(_) => "Torus",
+                    Surface::Nurbs(_) => "Nurbs",
+                    Surface::Revolution(_) => "Revolution",
+                    Surface::Extrusion(_) => "Extrusion",
+                    Surface::Offset(_) => "Offset",
+                    Surface::Ruled(_) => "Ruled",
+                };
+                log::info!(
+                    "  face_data[{}]: STEP #{}, type={}", fi, fd.step_face_id, stype
+                );
+            }
             self.active_session = Some(Box::new(session));
         }
 
