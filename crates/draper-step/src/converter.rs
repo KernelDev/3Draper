@@ -5233,6 +5233,19 @@ impl<'a> StepConverter<'a> {
                 "BREP #{}: Phase 2 alias: {} coord groups, {} with multiple step_ids, {} aliases registered, {} skipped different curves (tol={:.2e})",
                 brep_id, coord_pair_to_step_ids.len(), coord_groups_with_multiple, coord_alias_count, coord_skipped_different_curves, coord_tol,
             );
+
+            // ── Seam edge topological gluing (ROADMAP_VISION_2036 §3.3) ──
+            // For periodic surfaces (cylinder, sphere, torus, revolution, closed NURBS),
+            // edges at u=0 and u=u_max represent the same geometric boundary (seam).
+            // We detect these and register them as aliases BEFORE triangulation,
+            // so the edge cache produces bit-identical 3D points for both sides.
+            let seam_count = self.register_seam_aliases(&face_data_list, &mut edge_cache);
+            if seam_count > 0 {
+                log::info!(
+                    "BREP #{}: registered {} seam edge aliases (topological gluing before triangulation)",
+                    brep_id, seam_count
+                );
+            }
         }
 
         // Time guard: limit per-BREP triangulation time.
@@ -9096,6 +9109,82 @@ impl<'a> StepConverter<'a> {
         }
 
         report
+    }
+
+    /// Detect and register seam edge aliases for periodic surfaces
+    /// (ROADMAP_VISION_2036 §3.3 — topological gluing before coordinate generation).
+    ///
+    /// For periodic surfaces (cylinder, sphere, torus, revolution, closed NURBS),
+    /// edges at u=0 and u=u_max (or v=0 and v=v_max) represent the same geometric
+    /// boundary — the "seam". When two different STEP EDGE_CURVE entities are used
+    /// for the two sides of the seam, the edge cache produces near-identical but
+    /// not bit-identical vertices, creating boundary edges.
+    ///
+    /// This function detects seam edges by comparing vertex 3D coordinates of
+    /// edges on periodic surfaces and registers them as aliases so the edge
+    /// cache treats them as one canonical edge.
+    ///
+    /// Returns the number of seam aliases registered.
+    fn register_seam_aliases(
+        &self,
+        face_data_list: &[FaceData],
+        edge_cache: &mut EdgeDiscretizationCache,
+    ) -> usize {
+        let mut seam_count = 0;
+
+        // Collect edges from periodic surfaces, keyed by surface type
+        // and vertex-pair coordinates (canonical).
+        let mut edges_by_surface: HashMap<usize, Vec<(i64, Point3d, Point3d)>> = HashMap::new();
+
+        for (fi, fd) in face_data_list.iter().enumerate() {
+            if !fd.surface.is_u_periodic() && !fd.surface.is_v_periodic() {
+                continue;
+            }
+
+            for (ei, &step_id) in fd.edge_step_ids.iter().enumerate() {
+                if step_id <= 0 {
+                    continue;
+                }
+                if let Some((p1, p2)) = self.get_edge_curve_vertex_pair_3d(step_id) {
+                    // Canonicalize vertex order (smaller point first)
+                    let (a, b) = if (p1.x, p1.y, p1.z) <= (p2.x, p2.y, p2.z) {
+                        (p1, p2)
+                    } else {
+                        (p2, p1)
+                    };
+                    edges_by_surface.entry(fi).or_default().push((step_id, a, b));
+                }
+            }
+        }
+
+        // For each face with a periodic surface, find pairs of edges that share
+        // the same vertex-pair coordinates (these are seam edges).
+        for (_fi, edges) in &edges_by_surface {
+            for i in 0..edges.len() {
+                for j in (i + 1)..edges.len() {
+                    let (sid_i, ai, bi) = &edges[i];
+                    let (sid_j, aj, bj) = &edges[j];
+
+                    // Skip if same step_id
+                    if sid_i == sid_j {
+                        continue;
+                    }
+
+                    // Check if vertex pairs match (within tolerance)
+                    let dist_a = ((ai.x - aj.x).powi(2) + (ai.y - aj.y).powi(2) + (ai.z - aj.z).powi(2)).sqrt();
+                    let dist_b = ((bi.x - bj.x).powi(2) + (bi.y - bj.y).powi(2) + (bi.z - bj.z).powi(2)).sqrt();
+
+                    if dist_a < 0.01 && dist_b < 0.01 {
+                        // These are likely seam edges — register alias
+                        edge_cache.register_step_id_alias(*sid_j, *sid_i);
+                        seam_count += 1;
+                        break; // Each edge only needs one alias
+                    }
+                }
+            }
+        }
+
+        seam_count
     }
 
     /// Evaluate a B_SPLINE_CURVE at its parameter midpoint.
