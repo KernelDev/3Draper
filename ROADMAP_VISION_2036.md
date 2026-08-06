@@ -517,8 +517,9 @@ Independent face triangulation with post-facto welding is deprecated.
 | 1 | ManifoldChecker::is_watertight() | Done | `f8f023c` |
 | 1 | GeometryError + panic-free production code | Done | `9d7ad7f` |
 | 1 | NaN/Inf guards in NURBS evaluation | Done | `0da6e6e` |
-| 1 | Edge Discretization Bus | Pending | — |
-| 1 | BREP validation before triangulation | Pending | — |
+| 1 | Edge Discretization Bus | Existing (verified) | — |
+| 1 | BREP validation before triangulation | Done | `9244a7b` |
+| 1 | Seam edge topological gluing | Done | `058805c` |
 | 1 | Analytical PCURVE | Pending | — |
 | 1 | Exact B-spline SSI | Pending | — |
 | 1 | Fuzz testing setup | Pending | — |
