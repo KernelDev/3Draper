@@ -1712,6 +1712,18 @@ impl OwnedStepConversionContext {
     /// MORE boundary edges than before, reverts to the original mesh.
     /// This prevents the "decimation breaks watertightness" bug.
     fn safe_decimate(&self, mesh: &mut TriangleMesh, keep_ratio: f64, brep_id: i64) {
+        // ROADMAP_VISION_2036 §4.2: Adaptive LOD skips post-decimation.
+        // When adaptive_lod_enabled is true, each face already respects
+        // its triangle budget at generation time, so global decimation
+        // is unnecessary and only risks breaking watertightness.
+        if self.params.adaptive_lod_enabled {
+            log::debug!(
+                "BREP #{}: skipping post-decimation (adaptive_lod_enabled, keep_ratio={:.2})",
+                brep_id, keep_ratio
+            );
+            return;
+        }
+
         // Skip decimation on WASM — validate_watertight + mesh.clone() are
         // too expensive on the browser main thread and cause UI hangs.
         #[cfg(target_arch = "wasm32")]
