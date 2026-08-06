@@ -15,6 +15,8 @@
 //! - No pointers in CSG tree nodes (use enum + Box)
 //! - f32 precision for GPU compatibility
 
+pub mod generative;
+
 use draper_geometry::Point3d;
 
 // ============================================================
