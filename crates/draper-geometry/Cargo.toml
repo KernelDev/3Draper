@@ -18,3 +18,5 @@ serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+quickcheck = { workspace = true }
+quickcheck_macros = "1"
