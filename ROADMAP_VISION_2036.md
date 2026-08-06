@@ -522,8 +522,8 @@ Independent face triangulation with post-facto welding is deprecated.
 | 1 | Seam edge topological gluing | Done | `058805c` |
 | 1 | Analytical PCURVE (derive_pcurve) | Done | `830f782` |
 | 1 | Exact B-spline SSI (fit_b_spline) | Done | `e03d758` |
+| 1 | Property-based testing (proptest) | Done | `2d74d8c` |
 | 1 | Fuzz testing setup | Pending | — |
-| 1 | Property-based testing | Pending | — |
 | 2 | WebGPU compute shaders | Pending | — |
 | 2 | Adaptive LOD at generation | Pending | — |
 | 3 | ImplicitSolid (SDF) | Pending | — |
