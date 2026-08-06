@@ -19,6 +19,7 @@ pub mod nurbs_tools;
 pub mod intersection_curve;
 pub mod tolerance;
 pub mod error;
+pub mod gpu_batch;
 
 pub use error::{GeometryError, GeometryResult, check_finite, check_point_finite};
 
