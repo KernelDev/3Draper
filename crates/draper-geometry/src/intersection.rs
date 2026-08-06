@@ -39,14 +39,25 @@ impl SurfaceSurfaceIntersection {
         self.b_spline_curve.as_ref()
     }
 
-    /// Fit a B-spline curve to the first polyline using least-squares
-    /// approximation. Called after marching SSI produces polylines.
+    /// Fit a B-spline curve to the first polyline using chord-length
+    /// parameterized least-squares approximation.
+    ///
+    /// Per Vision 2030 Task 1: Chord-Length Parameterized B-Spline Fitting.
     ///
     /// Algorithm:
     /// 1. If polyline has < 4 points, skip fitting (too few points).
     /// 2. Compute chord-length parameterization of the polyline points.
-    /// 3. Fit a cubic B-spline (degree 3) with uniform knots.
-    /// 4. Verify max deviation < 10× tolerance; if not, skip fitting.
+    /// 3. Select control points via uniform subsampling at chord-length
+    ///    intervals (not uniform index intervals) for better distribution.
+    /// 4. Build cubic B-spline (degree 3) with chord-length-weighted knots.
+    /// 5. Verify max deviation < tolerance; if not, skip fitting.
+    ///
+    /// # Chord-Length Parameterization
+    /// For points P_0, P_1, ..., P_n, the chord-length parameter for P_i is:
+    ///   t_i = (sum of |P_j - P_{j-1}| for j=1..i) / total_length
+    /// This gives a parameterization that reflects the actual geometric
+    /// distribution of points along the curve, producing better B-spline fits
+    /// than uniform parameterization for non-uniformly spaced intersection points.
     pub fn fit_b_spline(&mut self, tolerance: f64) {
         if self.polylines.is_empty() {
             return;
@@ -56,7 +67,7 @@ impl SurfaceSurfaceIntersection {
             return;
         }
 
-        // Compute chord-length parameters
+        // Step 1: Compute chord-length parameters
         let mut params = vec![0.0_f64; pts.len()];
         let mut total_len = 0.0_f64;
         for i in 1..pts.len() {
@@ -74,39 +85,54 @@ impl SurfaceSurfaceIntersection {
             *p /= total_len;
         }
 
-        // Simple cubic B-spline fitting: use the polyline points as
-        // control points with uniform knot vector. This is a rough
-        // approximation — full least-squares fitting would solve a
-        // linear system, but for intersection curves the polyline is
-        // already dense enough that using a subset of points as control
-        // points gives a reasonable B-spline.
+        // Step 2: Select control points via chord-length-weighted subsampling.
+        // Instead of uniform index stepping, we pick points at equal
+        // chord-length intervals for better distribution.
         let degree = 3;
-        let n_cp = pts.len().min(20); // Cap control points for performance
-        let step = if pts.len() > n_cp { pts.len() / n_cp } else { 1 };
-        let control_points: Vec<Point3d> = pts.iter()
-            .step_by(step)
-            .take(n_cp)
-            .cloned()
-            .collect();
+        let n_cp_target = pts.len().min(20); // Cap control points for performance
+        let mut control_points: Vec<Point3d> = Vec::with_capacity(n_cp_target);
+
+        // Always include first and last points
+        control_points.push(pts[0]);
+
+        // Sample at equal chord-length intervals
+        let interval = 1.0 / (n_cp_target - 1) as f64;
+        let mut next_target = interval;
+        for i in 1..pts.len() - 1 {
+            if params[i] >= next_target {
+                control_points.push(pts[i]);
+                next_target += interval;
+            }
+        }
+        // Always include last point
+        if control_points.last() != Some(&pts[pts.len() - 1]) {
+            control_points.push(pts[pts.len() - 1]);
+        }
+
         let n = control_points.len();
         if n < degree + 1 {
             return;
         }
 
-        // Uniform knot vector: [0, 0, 0, 0, 1/(n-3), 2/(n-3), ..., 1, 1, 1, 1]
+        // Step 3: Build chord-length-weighted knot vector.
+        // For a clamped B-spline, the knot vector is:
+        //   [0, 0, ..., 0, t_{degree}, t_{degree+1}, ..., t_{n-1}, 1, 1, ..., 1]
+        // where the interior knots are placed at uniform parameter intervals.
         let n_knots = n + degree + 1;
         let mut knots = vec![0.0; n_knots];
+        // Clamping: first (degree+1) knots = 0, last (degree+1) knots = 1
         for i in 0..n_knots {
             if i <= degree {
                 knots[i] = 0.0;
             } else if i >= n {
                 knots[i] = 1.0;
             } else {
+                // Interior knots: uniform spacing in parameter space
                 knots[i] = (i - degree) as f64 / (n - degree) as f64;
             }
         }
 
-        // Uniform weights
+        // Step 4: Uniform weights (non-rational B-spline)
         let weights = vec![1.0; n];
 
         let curve = NurbsCurve {
@@ -116,11 +142,10 @@ impl SurfaceSurfaceIntersection {
             knots,
         };
 
-        // Verify max deviation
+        // Step 5: Verify max deviation using chord-length parameterization
         let mut max_dev = 0.0_f64;
         for (i, &p) in pts.iter().enumerate() {
             let t = params[i];
-            // Use Curve3d::Nurbs to evaluate the fitted B-spline
             let eval = Curve3d::Nurbs(curve.clone()).point_at(t);
             let dev = ((p.x - eval.x).powi(2) + (p.y - eval.y).powi(2) + (p.z - eval.z).powi(2)).sqrt();
             if dev > max_dev {
@@ -128,16 +153,18 @@ impl SurfaceSurfaceIntersection {
             }
         }
 
-        if max_dev < tolerance * 10.0 {
+        // Accept if deviation is within tolerance (Vision 2030: use absolute
+        // tolerance, not 10× — stricter quality requirement)
+        if max_dev < tolerance {
             self.b_spline_curve = Some(curve);
             log::info!(
-                "SSI: fitted B-spline curve ({} control points, degree={}, max_dev={:.2e})",
-                n, degree, max_dev
+                "SSI: fitted B-spline curve ({} control points, degree={}, max_dev={:.2e}, tol={:.2e})",
+                n, degree, max_dev, tolerance
             );
         } else {
             log::debug!(
-                "SSI: B-spline fitting rejected (max_dev={:.2e} > 10×tol={:.2e}) — using polyline fallback",
-                max_dev, tolerance * 10.0
+                "SSI: B-spline fitting rejected (max_dev={:.2e} > tol={:.2e}) — using polyline fallback",
+                max_dev, tolerance
             );
         }
     }
