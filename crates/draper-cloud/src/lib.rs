@@ -20,6 +20,7 @@ pub mod stream;
 pub mod incremental;
 pub mod server;
 pub mod collab;
+pub mod crdt;
 
 // Re-export primary types from each module for convenience.
 pub use stream::{
@@ -39,4 +40,9 @@ pub use server::{
 pub use collab::{
     CollabSession, ConflictResolution, Operation, OperationalTransform,
     PendingOperation, TransformedOperation, VersionVector,
+};
+
+pub use crdt::{
+    LamportTimestamp, CrdtOp, EntityState, CrdtReplica,
+    CollabSession as CrdtCollabSession, EntityId,
 };
