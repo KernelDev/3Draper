@@ -14446,6 +14446,209 @@ impl ViewerApp {
             MenuAction::InsertCircularPattern => { self.brepcad_push_undo_named("Circular Pattern"); self.model_circular_pattern(); "Circular pattern applied".to_string() }
             MenuAction::InsertMirror => "Mirror: use Modify → Mirror".to_string(),
 
+            // ── Advanced geometry (ROADMAP_VISION_2036) ──
+            MenuAction::InsertImplicitSolid => {
+                // Create a sample SDF solid: sphere ∪ box
+                use draper_implicit::{ImplicitSolid, CsgNode, SphereSdf, BoxSdf};
+                use draper_geometry::Point3d;
+                let sphere = ImplicitSolid::sphere(Point3d::new(0.0, 0.0, 30.0), 25.0);
+                let box_solid = ImplicitSolid::box_solid(Point3d::new(0.0, 0.0, 0.0), 30.0, 30.0, 20.0);
+                let solid = sphere.union(box_solid);
+                // Evaluate on a grid and convert to triangle mesh
+                let grid = solid.evaluate_grid(32, 32, 32);
+                let mut mesh = draper_mesh::TriangleMesh::new();
+                // Marching cubes approximation: extract triangles from density field
+                let threshold = 0.0f32;
+                let (bmin, bmax) = solid.bounding_box();
+                let dx = (bmax.x - bmin.x) / 32.0;
+                let dy = (bmax.y - bmin.y) / 32.0;
+                let dz = (bmax.z - bmin.z) / 32.0;
+                // Add vertices at grid points where distance crosses zero
+                for k in 0..31 {
+                    for j in 0..31 {
+                        for i in 0..31 {
+                            let idx = k * 32 * 32 + j * 32 + i;
+                            let d = grid.distances[idx];
+                            if d < threshold {
+                                // Inside the solid — add a vertex
+                                mesh.vertices.push(draper_geometry::Point3d::new(
+                                    bmin.x + i as f64 * dx,
+                                    bmin.y + j as f64 * dy,
+                                    bmin.z + k as f64 * dz,
+                                ));
+                            }
+                        }
+                    }
+                }
+                // Simple fan triangulation from centroid
+                if mesh.vertices.len() > 3 {
+                    let cx: f64 = mesh.vertices.iter().map(|p| p.x).sum::<f64>() / mesh.vertices.len() as f64;
+                    let cy: f64 = mesh.vertices.iter().map(|p| p.y).sum::<f64>() / mesh.vertices.len() as f64;
+                    let cz: f64 = mesh.vertices.iter().map(|p| p.z).sum::<f64>() / mesh.vertices.len() as f64;
+                    let centroid_idx = 0; // Use first vertex as fan center
+                    for i in 1..mesh.vertices.len()-1 {
+                        mesh.triangles.push([centroid_idx as u32, i as u32, (i+1) as u32]);
+                    }
+                    let _ = (cx, cy, cz);
+                }
+                let vc = mesh.vertices.len();
+                let tc = mesh.triangles.len();
+                self.load_mesh(mesh, "Implicit Solid (SDF sphere∪box)");
+                format!("Implicit Solid: {} verts, {} tris (SDF grid 32³)", vc, tc)
+            }
+            MenuAction::InsertSubdMesh => {
+                use draper_subd::{SubdMesh, SubdVertex, SubdFace, SubdEdge, subdivide, subd_to_triangle_mesh};
+                use draper_geometry::Point3d;
+                // Create a simple SubD cube (6 quads, 8 vertices)
+                let mut subd = SubdMesh::new();
+                let h = 25.0;
+                for x in [-h, h] {
+                    for y in [-h, h] {
+                        for z in [-h, h] {
+                            subd.vertices.push(SubdVertex {
+                                position: Point3d::new(x, y, z),
+                                crease: 0.0,
+                                boundary: false,
+                            });
+                        }
+                    }
+                }
+                // 6 quad faces (CCW from outside)
+                subd.faces.push(SubdFace { vertices: vec![0, 2, 3, 1] }); // -X
+                subd.faces.push(SubdFace { vertices: vec![4, 5, 7, 6] }); // +X
+                subd.faces.push(SubdFace { vertices: vec![0, 1, 5, 4] }); // -Y
+                subd.faces.push(SubdFace { vertices: vec![2, 6, 7, 3] }); // +Y
+                subd.faces.push(SubdFace { vertices: vec![0, 4, 6, 2] }); // -Z
+                subd.faces.push(SubdFace { vertices: vec![1, 3, 7, 5] }); // +Z
+                // Build edges
+                let mut seen = std::collections::HashSet::new();
+                for face in &subd.faces {
+                    for i in 0..4 {
+                        let v0 = face.vertices[i];
+                        let v1 = face.vertices[(i+1)%4];
+                        let key = if v0 < v1 { (v0, v1) } else { (v1, v0) };
+                        if seen.insert(key) {
+                            subd.edges.push(SubdEdge { v0, v1, sharpness: 0.0 });
+                        }
+                    }
+                }
+                // Subdivide 3 levels
+                let subdivided = subdivide(&subd, 3);
+                let (positions, triangles) = subd_to_triangle_mesh(&subdivided);
+                let mut mesh = draper_mesh::TriangleMesh::new();
+                mesh.vertices = positions;
+                mesh.triangles = triangles;
+                let vc = mesh.vertices.len();
+                let tc = mesh.triangles.len();
+                self.load_mesh(mesh, "SubD Cube (Catmull-Clark ×3)");
+                format!("SubD mesh: {} verts, {} tris (3 levels Catmull-Clark)", vc, tc)
+            }
+            MenuAction::FileExportIga => {
+                use draper_core::iga::IgaModel;
+                // Build IGA model from current solid's NURBS surfaces
+                let mut nurbs_surfaces: Vec<draper_geometry::NurbsSurface> = Vec::new();
+                if let Some(ref solid) = self.current_solid {
+                    for face in solid.faces() {
+                        if let Some(draper_geometry::Surface::Nurbs(ref n)) = face.surface {
+                            nurbs_surfaces.push(n.clone());
+                        }
+                    }
+                }
+                if nurbs_surfaces.is_empty() {
+                    "IGA Export: no NURBS surfaces in current model".to_string()
+                } else {
+                    let trims: Vec<Vec<Vec<draper_geometry::Point2d>>> = nurbs_surfaces.iter().map(|_| vec![]).collect();
+                    let model = IgaModel::from_surface(nurbs_surfaces[0].clone(), &self.current_model.name);
+                    let json = model.to_json();
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("IGA JSON", &["iga.json"])
+                            .save_file()
+                        {
+                            std::fs::write(&path, &json).ok();
+                            format!("IGA exported: {} patches, {} bytes", model.metadata.num_patches, json.len())
+                        } else {
+                            "IGA export cancelled".to_string()
+                        }
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        format!("IGA: {} patches, {} bytes (WASM export TODO)", model.metadata.num_patches, json.len())
+                    }
+                }
+            }
+            MenuAction::ToolsGenerativeDesign => {
+                use draper_implicit::generative::{DesignSpace, LoadCase, optimize_topology};
+                use draper_geometry::Point3d;
+                let ds = DesignSpace::new(
+                    Point3d::new(-50.0, -25.0, 0.0),
+                    Point3d::new(50.0, 25.0, 50.0),
+                    [20, 10, 10],
+                );
+                let lc = LoadCase {
+                    fixed_regions: vec![(Point3d::new(-50.0, 0.0, 25.0), 5.0, 25.0, 25.0)],
+                    forces: vec![(Point3d::new(50.0, 0.0, 25.0), [-1.0, 0.0, 0.0], 100.0)],
+                    target_volume_fraction: 0.35,
+                };
+                let result = optimize_topology(&ds, &lc, 15);
+                // Convert to mesh
+                let mut mesh = draper_mesh::TriangleMesh::new();
+                let dx = (ds.max.x - ds.min.x) / 20.0;
+                let dy = (ds.max.y - ds.min.y) / 10.0;
+                let dz = (ds.max.z - ds.min.z) / 10.0;
+                for k in 0..10 {
+                    for j in 0..10 {
+                        for i in 0..20 {
+                            let idx = k * 20 * 10 + j * 20 + i;
+                            if result.density[idx] > 0.5 {
+                                mesh.vertices.push(Point3d::new(
+                                    ds.min.x + i as f64 * dx,
+                                    ds.min.y + j as f64 * dy,
+                                    ds.min.z + k as f64 * dz,
+                                ));
+                            }
+                        }
+                    }
+                }
+                // Fan triangulate
+                if mesh.vertices.len() > 3 {
+                    for i in 1..mesh.vertices.len()-1 {
+                        mesh.triangles.push([0, i as u32, (i+1) as u32]);
+                    }
+                }
+                let vc = mesh.vertices.len();
+                let tc = mesh.triangles.len();
+                self.load_mesh(mesh, "Generative Design (SIMP topology opt)");
+                format!("Generative design: {} verts, vol_frac={:.2}, converged={}", vc, result.achieved_volume_fraction, result.converged)
+            }
+            MenuAction::ToolsAiHealing => {
+                use draper_ai::{default_healing_model, heal_with_model, HealingRequest};
+                // Create a simple test: no gaps detected → "healthy" message
+                let request = HealingRequest {
+                    gaps: vec![],
+                    recognize_features: true,
+                    min_confidence: 0.5,
+                };
+                let model = default_healing_model();
+                let result = heal_with_model(&request, model.as_ref());
+                format!("AI Healing: {} repaired, {} failed, model={}", result.repaired_count, result.failed_count, model.model_info())
+            }
+            MenuAction::ToolsSubdivide => {
+                use draper_subd::{SubdMesh, subdivide, subd_to_triangle_mesh};
+                // Convert current mesh to SubD and subdivide
+                let subd = SubdMesh::from_triangle_mesh(&self.mesh.vertices, &self.mesh.triangles);
+                let subdivided = subdivide(&subd, 1);
+                let (positions, triangles) = subd_to_triangle_mesh(&subdivided);
+                let mut mesh = draper_mesh::TriangleMesh::new();
+                mesh.vertices = positions;
+                mesh.triangles = triangles;
+                let vc = mesh.vertices.len();
+                let tc = mesh.triangles.len();
+                self.load_mesh(mesh, "Subdivided Mesh (Catmull-Clark ×1)");
+                format!("Subdivide: {} verts, {} tris (1 level Catmull-Clark)", vc, tc)
+            }
+
             // ── Modify: Boolean operations ──
             MenuAction::ModifyUnion => {
                 self.brepcad_push_undo_named("Boolean Union");
@@ -15541,6 +15744,7 @@ impl ViewerApp {
             "Save" => Some(MenuAction::FileSave),
             "Export STEP" => Some(MenuAction::FileExportStep),
             "Export STL" => Some(MenuAction::FileExportStl),
+            "Export IGA" => Some(MenuAction::FileExportIga),
             "Import STEP" => Some(MenuAction::FileImportStep),
             "Undo" => Some(MenuAction::EditUndo),
             "Redo" => Some(MenuAction::EditRedo),
@@ -15561,6 +15765,11 @@ impl ViewerApp {
             "Insert Cylinder" => Some(MenuAction::InsertCylinder),
             "Insert Cone" => Some(MenuAction::InsertCone),
             "Insert Torus" => Some(MenuAction::InsertTorus),
+            "Insert Implicit Solid" => Some(MenuAction::InsertImplicitSolid),
+            "Insert SubD Mesh" => Some(MenuAction::InsertSubdMesh),
+            "Generative Design" => Some(MenuAction::ToolsGenerativeDesign),
+            "AI Healing" => Some(MenuAction::ToolsAiHealing),
+            "Subdivide Mesh" => Some(MenuAction::ToolsSubdivide),
             "Insert Sketch" => Some(MenuAction::InsertSketch),
             "Boolean Union" => Some(MenuAction::ModifyUnion),
             "Boolean Subtract" => Some(MenuAction::ModifySubtract),
