@@ -530,8 +530,8 @@ Independent face triangulation with post-facto welding is deprecated.
 | 3 | ImplicitSolid (SDF) | Done | `6fbd4f2` |
 | 3 | SubD/T-Splines | Done | `e00159f` |
 | 3 | AI-driven healing | Done | `d7e8583` |
-| 4 | IGA export | Pending | — |
-| 4 | Full AP242 PMI/GD&T | Pending | — |
+| 4 | IGA export | Done | `248ee65` |
+| 4 | Full AP242 PMI/GD&T | Done | `e2bb8cb` |
 | 5 | CRDT collaborative editing | Pending | — |
 | 5 | Generative design | Pending | — |
 
