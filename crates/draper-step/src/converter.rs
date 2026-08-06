@@ -14834,6 +14834,8 @@ mod diag_tests {
                     Surface::Revolution(_) => "REVOLUTION",
                     Surface::Extrusion(_) => "EXTRUSION",
                     Surface::Nurbs(_) => "NURBS",
+                    Surface::Offset(_) => "OFFSET",
+                    Surface::Ruled(_) => "RULED",
                 };
                 *surface_types.entry(tn.to_string()).or_insert(0) += 1;
             } else {
