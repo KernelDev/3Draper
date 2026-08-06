@@ -520,8 +520,8 @@ Independent face triangulation with post-facto welding is deprecated.
 | 1 | Edge Discretization Bus | Existing (verified) | — |
 | 1 | BREP validation before triangulation | Done | `9244a7b` |
 | 1 | Seam edge topological gluing | Done | `058805c` |
-| 1 | Analytical PCURVE | Pending | — |
-| 1 | Exact B-spline SSI | Pending | — |
+| 1 | Analytical PCURVE (derive_pcurve) | Done | `830f782` |
+| 1 | Exact B-spline SSI (fit_b_spline) | Done | `e03d758` |
 | 1 | Fuzz testing setup | Pending | — |
 | 1 | Property-based testing | Pending | — |
 | 2 | WebGPU compute shaders | Pending | — |
