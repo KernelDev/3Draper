@@ -16,7 +16,9 @@
 pub mod classifier;
 pub mod strategy;
 pub mod predictive;
+pub mod healing_ml;
 
 pub use classifier::*;
 pub use strategy::*;
 pub use predictive::*;
+pub use healing_ml::*;
