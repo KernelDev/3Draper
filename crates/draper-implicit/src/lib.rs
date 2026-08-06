@@ -144,6 +144,80 @@ impl Sdf for CylinderSdf {
     }
 }
 
+/// Gyroid SDF — a triply-periodic minimal surface (TPMS).
+///
+/// Per Vision 2030 Task 3: SdfGyroid for lattice structures.
+///
+/// The gyroid surface is defined by the implicit equation:
+///   sin(x)cos(y) + sin(y)cos(z) + sin(z)cos(x) = 0
+///
+/// The SDF approximates the distance to this surface. The gyroid creates
+/// a bicontinuous lattice structure — useful for:
+/// - Lightweighting (aerospace, automotive)
+/// - Heat exchangers (maximizing surface area)
+/// - Bone scaffolds (biomedical)
+/// - Metamaterials (tunable mechanical properties)
+///
+/// The `scale` parameter controls the period of the lattice.
+/// The `thickness` parameter controls how much solid material surrounds
+/// the gyroid surface (0 = infinitely thin surface, positive = thick walls).
+pub struct GyroidSdf {
+    /// Scaling factor — controls lattice period.
+    /// At scale=1.0, the period is 2π in each direction.
+    pub scale: f64,
+    /// Wall thickness — how far inside the gyroid surface is "solid".
+    /// 0.0 = infinitely thin surface (no volume).
+    /// Positive = solid region within `thickness` of the surface.
+    pub thickness: f64,
+    /// Bounding box half-size (the gyroid is clipped to this region).
+    pub half_size: [f64; 3],
+}
+
+impl GyroidSdf {
+    pub fn new(scale: f64, thickness: f64, half_size: [f64; 3]) -> Self {
+        Self { scale, thickness, half_size }
+    }
+}
+
+impl Sdf for GyroidSdf {
+    fn signed_distance(&self, p: &Point3d) -> f64 {
+        let s = self.scale;
+        let x = p.x * s;
+        let y = p.y * s;
+        let z = p.z * s;
+
+        // Gyroid implicit function
+        let g = x.sin() * y.cos() + y.sin() * z.cos() + z.sin() * x.cos();
+
+        // The gyroid surface is at g=0. The signed distance is approximately
+        // g / |∇g|. For the gyroid, |∇g| varies but is roughly constant (~1.5).
+        // We use a simplified distance: g / 1.5 (approximate gradient magnitude).
+        let gradient_mag = 1.5; // Approximate average |∇g|
+        let dist_to_surface = g / gradient_mag;
+
+        // Offset by thickness: positive thickness = solid within `thickness` of surface
+        let dist = dist_to_surface.abs() - self.thickness;
+
+        // Also clip to bounding box
+        let bx = (p.x.abs() - self.half_size[0]).max(0.0);
+        let by = (p.y.abs() - self.half_size[1]).max(0.0);
+        let bz = (p.z.abs() - self.half_size[2]).max(0.0);
+        let box_dist = (bx * bx + by * by + bz * bz).sqrt();
+
+        // Intersection: inside gyroid AND inside box
+        // Use max() for intersection
+        let signed_box = -(bx.max(by).max(bz)); // Negative inside box
+        dist.max(signed_box)
+    }
+
+    fn bounding_box(&self) -> (Point3d, Point3d) {
+        (
+            Point3d::new(-self.half_size[0], -self.half_size[1], -self.half_size[2]),
+            Point3d::new(self.half_size[0], self.half_size[1], self.half_size[2]),
+        )
+    }
+}
+
 // ============================================================
 // CSG operations (lazy evaluation)
 // ============================================================

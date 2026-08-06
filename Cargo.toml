@@ -14,6 +14,7 @@ members = [
     "crates/draper-ai",
     "crates/draper-implicit",
     "crates/draper-subd",
+    "crates/draper-compute",
     "crates/draper-testing",
     "crates/draper-json",
     "tools",
@@ -51,6 +52,7 @@ draper-cloud = { path = "crates/draper-cloud" }
 draper-ai = { path = "crates/draper-ai" }
 draper-implicit = { path = "crates/draper-implicit" }
 draper-subd = { path = "crates/draper-subd" }
+draper-compute = { path = "crates/draper-compute" }
 draper-testing = { path = "crates/draper-testing" }
 draper-json = { path = "crates/draper-json" }
 draper-wasm = { path = "crates/draper-wasm" }
@@ -72,6 +74,8 @@ anyhow = "1"
 egui = "0.31"
 eframe = { version = "0.31", features = ["wgpu", "default_fonts"] }
 wgpu = "24"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
 
 # FFI
 cbindgen = "0.27"
