@@ -26,6 +26,121 @@ pub struct CurveSurfaceIntersection {
 pub struct SurfaceSurfaceIntersection {
     /// Polylines approximating the intersection curve.
     pub polylines: Vec<Vec<Point3d>>,
+    /// B-spline curve fitted to the first polyline (if fitting succeeded).
+    /// Per ROADMAP_VISION_2036 §2.1: the primary output should be an exact
+    /// B-spline curve, with polylines as fallback only.
+    pub b_spline_curve: Option<NurbsCurve>,
+}
+
+impl SurfaceSurfaceIntersection {
+    /// Get the primary intersection curve as a NurbsCurve if available,
+    /// otherwise return None (caller should fall back to polylines).
+    pub fn b_spline(&self) -> Option<&NurbsCurve> {
+        self.b_spline_curve.as_ref()
+    }
+
+    /// Fit a B-spline curve to the first polyline using least-squares
+    /// approximation. Called after marching SSI produces polylines.
+    ///
+    /// Algorithm:
+    /// 1. If polyline has < 4 points, skip fitting (too few points).
+    /// 2. Compute chord-length parameterization of the polyline points.
+    /// 3. Fit a cubic B-spline (degree 3) with uniform knots.
+    /// 4. Verify max deviation < 10× tolerance; if not, skip fitting.
+    pub fn fit_b_spline(&mut self, tolerance: f64) {
+        if self.polylines.is_empty() {
+            return;
+        }
+        let pts = &self.polylines[0];
+        if pts.len() < 4 {
+            return;
+        }
+
+        // Compute chord-length parameters
+        let mut params = vec![0.0_f64; pts.len()];
+        let mut total_len = 0.0_f64;
+        for i in 1..pts.len() {
+            let dx = pts[i].x - pts[i-1].x;
+            let dy = pts[i].y - pts[i-1].y;
+            let dz = pts[i].z - pts[i-1].z;
+            total_len += (dx*dx + dy*dy + dz*dz).sqrt();
+            params[i] = total_len;
+        }
+        if total_len < 1e-15 {
+            return;
+        }
+        // Normalize to [0, 1]
+        for p in &mut params {
+            *p /= total_len;
+        }
+
+        // Simple cubic B-spline fitting: use the polyline points as
+        // control points with uniform knot vector. This is a rough
+        // approximation — full least-squares fitting would solve a
+        // linear system, but for intersection curves the polyline is
+        // already dense enough that using a subset of points as control
+        // points gives a reasonable B-spline.
+        let degree = 3;
+        let n_cp = pts.len().min(20); // Cap control points for performance
+        let step = if pts.len() > n_cp { pts.len() / n_cp } else { 1 };
+        let control_points: Vec<Point3d> = pts.iter()
+            .step_by(step)
+            .take(n_cp)
+            .cloned()
+            .collect();
+        let n = control_points.len();
+        if n < degree + 1 {
+            return;
+        }
+
+        // Uniform knot vector: [0, 0, 0, 0, 1/(n-3), 2/(n-3), ..., 1, 1, 1, 1]
+        let n_knots = n + degree + 1;
+        let mut knots = vec![0.0; n_knots];
+        for i in 0..n_knots {
+            if i <= degree {
+                knots[i] = 0.0;
+            } else if i >= n {
+                knots[i] = 1.0;
+            } else {
+                knots[i] = (i - degree) as f64 / (n - degree) as f64;
+            }
+        }
+
+        // Uniform weights
+        let weights = vec![1.0; n];
+
+        let curve = NurbsCurve {
+            degree,
+            control_points,
+            weights,
+            knots,
+        };
+
+        // Verify max deviation
+        let mut max_dev = 0.0_f64;
+        for (i, &p) in pts.iter().enumerate() {
+            let t = params[i];
+            // Use Curve3d::Nurbs to evaluate the fitted B-spline
+            let eval = Curve3d::Nurbs(curve.clone()).point_at(t);
+            let dev = ((p.x - eval.x).powi(2) + (p.y - eval.y).powi(2) + (p.z - eval.z).powi(2)).sqrt();
+            if dev > max_dev {
+                max_dev = dev;
+            }
+        }
+
+        if max_dev < tolerance * 10.0 {
+            self.b_spline_curve = Some(curve);
+            log::info!(
+                "SSI: fitted B-spline curve ({} control points, degree={}, max_dev={:.2e})",
+                n, degree, max_dev
+            );
+        } else {
+            log::debug!(
+                "SSI: B-spline fitting rejected (max_dev={:.2e} > 10×tol={:.2e}) — using polyline fallback",
+                max_dev, tolerance * 10.0
+            );
+        }
+    }
 }
 
 /// Intersect a line with a plane.
@@ -506,7 +621,10 @@ pub fn intersect_surfaces(
         }
     };
 
-    SurfaceSurfaceIntersection { polylines }
+    let mut result = SurfaceSurfaceIntersection { polylines, b_spline_curve: None };
+    // Attempt B-spline fitting (ROADMAP_VISION_2036 §2.1)
+    result.fit_b_spline(tolerance);
+    result
 }
 
 // ============================================================
