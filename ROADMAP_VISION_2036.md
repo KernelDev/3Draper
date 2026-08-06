@@ -528,7 +528,7 @@ Independent face triangulation with post-facto welding is deprecated.
 | 2 | WebGPU compute shaders | Pending (API ready) | — |
 | 2 | Adaptive LOD at generation | Done | `dea581e` |
 | 3 | ImplicitSolid (SDF) | Done | `6fbd4f2` |
-| 3 | SubD/T-Splines | Pending | — |
+| 3 | SubD/T-Splines | Done | `e00159f` |
 | 3 | AI-driven healing | Pending | — |
 | 4 | IGA export | Pending | — |
 | 4 | Full AP242 PMI/GD&T | Pending | — |
