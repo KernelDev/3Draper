@@ -766,6 +766,287 @@ fn offset_point_for_draft(
 }
 
 // ============================================================
+// Extrude and Revolve (BREPCAD Phase 1.2)
+// ============================================================
+
+/// Errors that can occur during extrude/revolve operations.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum ModelingError {
+    /// The input wire is not closed (needed for extrude/revolve to form a solid).
+    #[error("Wire is not closed — cannot form a solid")]
+    OpenWire,
+
+    /// The wire has fewer than 3 points (degenerate).
+    #[error("Wire has too few points: {0} (need at least 3)")]
+    TooFewPoints(usize),
+
+    /// The wire intersects the revolution axis (invalid for revolve).
+    #[error("Wire intersects the revolution axis")]
+    WireIntersectsAxis,
+
+    /// The extrude direction is zero-length.
+    #[error("Extrude direction is zero-length")]
+    ZeroDirection,
+
+    /// The revolution angle must be positive.
+    #[error("Revolution angle must be positive, got {0}")]
+    InvalidAngle(f64),
+}
+
+/// A 2D polyline (sequence of 2D points) representing a sketch profile.
+///
+/// Per BREPCAD_IMPLEMENTATION_PLAN.md Phase 1.2: this is the bridge
+/// between `draper-sketch` (2D) and `draper-topology` (3D). The sketch
+/// produces a `Polyline2d`, which `extrude_polyline` and
+/// `revolve_polyline` consume to create 3D solids.
+#[derive(Debug, Clone)]
+pub struct Polyline2d {
+    /// Ordered 2D points (x, y). The polyline is assumed closed if
+    /// the first and last points are approximately equal.
+    pub points: Vec<(f64, f64)>,
+}
+
+impl Polyline2d {
+    /// Create a new polyline from 2D points.
+    pub fn new(points: Vec<(f64, f64)>) -> Self {
+        Self { points }
+    }
+
+    /// Create a rectangular polyline with the given width and height.
+    pub fn rectangle(width: f64, height: f64) -> Self {
+        let w = width * 0.5;
+        let h = height * 0.5;
+        Self::new(vec![(-w, -h), (w, -h), (w, h), (-w, h), (-w, -h)])
+    }
+
+    /// Create a circular polyline (regular polygon approximation).
+    pub fn circle(radius: f64, segments: usize) -> Self {
+        let mut pts = Vec::with_capacity(segments + 1);
+        for i in 0..segments {
+            let angle = 2.0 * PI * i as f64 / segments as f64;
+            pts.push((radius * angle.cos(), radius * angle.sin()));
+        }
+        // Close the loop
+        pts.push(pts[0]);
+        Self::new(pts)
+    }
+
+    /// Check if the polyline is closed (first ≈ last point).
+    pub fn is_closed(&self) -> bool {
+        if self.points.len() < 2 {
+            return false;
+        }
+        let first = self.points[0];
+        let last = *self.points.last().unwrap();
+        let dx = first.0 - last.0;
+        let dy = first.1 - last.1;
+        (dx * dx + dy * dy).sqrt() < 1e-10
+    }
+
+    /// Number of unique points (excluding the closing duplicate if closed).
+    pub fn point_count(&self) -> usize {
+        if self.is_closed() && self.points.len() > 1 {
+            self.points.len() - 1
+        } else {
+            self.points.len()
+        }
+    }
+}
+
+/// Extrude a closed 2D polyline along a 3D direction to create a solid.
+///
+/// Per BREPCAD_IMPLEMENTATION_PLAN.md Phase 1.2: creates a prism-like
+/// solid from a sketch profile. The polyline is assumed to lie in the
+/// XY plane (z=0); the extrude direction can be any 3D vector.
+///
+/// **Algorithm:**
+/// 1. Create the base face (planar face from the polyline in XY plane).
+/// 2. Create the top face (base translated by direction × distance).
+/// 3. Create side faces (one ruled face per polyline edge).
+/// 4. Assemble into a closed shell → solid.
+///
+/// # Arguments
+/// * `polyline` — closed 2D polyline (sketch profile)
+/// * `direction` — 3D extrude direction (need not be normalized)
+/// * `distance` — extrude distance (along direction)
+///
+/// # Returns
+/// A `Solid` with 2 + N faces (2 caps + N sides), or an error.
+pub fn extrude_polyline(
+    polyline: &Polyline2d,
+    direction: Vec3d,
+    distance: f64,
+) -> Result<Solid, ModelingError> {
+    if polyline.points.len() < 3 {
+        return Err(ModelingError::TooFewPoints(polyline.points.len()));
+    }
+    if !polyline.is_closed() {
+        return Err(ModelingError::OpenWire);
+    }
+    let dir_len = (direction.x * direction.x + direction.y * direction.y + direction.z * direction.z).sqrt();
+    if dir_len < 1e-15 {
+        return Err(ModelingError::ZeroDirection);
+    }
+    let norm_dir = Vec3d::new(
+        direction.x / dir_len,
+        direction.y / dir_len,
+        direction.z / dir_len,
+    );
+    let offset = Vec3d::new(
+        norm_dir.x * distance,
+        norm_dir.y * distance,
+        norm_dir.z * distance,
+    );
+
+    // Build 3D points for base (z=0) and top (translated by offset)
+    let n = polyline.point_count();
+    let base_pts: Vec<Point3d> = (0..n)
+        .map(|i| {
+            let (x, y) = polyline.points[i];
+            Point3d::new(x, y, 0.0)
+        })
+        .collect();
+    let top_pts: Vec<Point3d> = base_pts
+        .iter()
+        .map(|p| Point3d::new(p.x + offset.x, p.y + offset.y, p.z + offset.z))
+        .collect();
+
+    // Build faces using ShapeBuilder
+    // Base face: planar face in XY plane
+    let base_face = ShapeBuilder::make_polygon_face(&base_pts)
+        .ok_or(ModelingError::TooFewPoints(base_pts.len()))?;
+
+    // Top face: planar face translated by offset (reversed orientation)
+    let top_face = ShapeBuilder::make_polygon_face(&top_pts)
+        .ok_or(ModelingError::TooFewPoints(top_pts.len()))?;
+
+    // Side faces: one quadrilateral per edge
+    let mut side_faces = Vec::with_capacity(n);
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let quad_pts = vec![
+            base_pts[i],
+            base_pts[j],
+            top_pts[j],
+            top_pts[i],
+        ];
+        let side_face = ShapeBuilder::make_polygon_face(&quad_pts)
+            .ok_or(ModelingError::TooFewPoints(quad_pts.len()))?;
+        side_faces.push(side_face);
+    }
+
+    // Assemble shell
+    let mut all_faces = vec![base_face, top_face];
+    all_faces.extend(side_faces);
+    let shell = Shell::new_closed(all_faces);
+    Ok(Solid::new(shell))
+}
+
+/// Revolve a closed 2D polyline around the Z axis to create a solid of revolution.
+///
+/// Per BREPCAD_IMPLEMENTATION_PLAN.md Phase 1.2: creates a lathe-like
+/// solid from a sketch profile. The polyline is in the XZ plane (y=0),
+/// revolved around the Z axis.
+///
+/// **Algorithm:**
+/// 1. For each segment of the polyline, create a surface of revolution.
+/// 2. If angle < 2π, add start and end cap faces.
+/// 3. Assemble into a closed shell → solid.
+///
+/// # Arguments
+/// * `polyline` — closed 2D polyline (in XZ plane: point.x = radius, point.y = z)
+/// * `angle` — revolution angle in radians (0 < angle ≤ 2π)
+///
+/// # Returns
+/// A `Solid`, or an error.
+pub fn revolve_polyline(
+    polyline: &Polyline2d,
+    angle: f64,
+) -> Result<Solid, ModelingError> {
+    if polyline.points.len() < 2 {
+        return Err(ModelingError::TooFewPoints(polyline.points.len()));
+    }
+    if angle <= 0.0 {
+        return Err(ModelingError::InvalidAngle(angle));
+    }
+    if angle > 2.0 * PI + 1e-10 {
+        return Err(ModelingError::InvalidAngle(angle));
+    }
+
+    let full_circle = (angle - 2.0 * PI).abs() < 1e-6;
+    let n = polyline.point_count();
+    if n < 2 {
+        return Err(ModelingError::TooFewPoints(n));
+    }
+
+    // Build the solid by approximating the revolution with discrete segments.
+    // Number of angular segments for the approximation.
+    let n_segments = ((angle / (PI / 12.0)).ceil() as usize).max(8); // ~15° per segment
+    let d_angle = angle / n_segments as f64;
+
+    // Convert 2D polyline points to 3D (in XZ plane: x=radius, y=z, z=0)
+    // Wait — the polyline is (x, y) where x=radius, y=height (z in 3D).
+    let profile_3d: Vec<Point3d> = (0..n)
+        .map(|i| {
+            let (r, h) = polyline.points[i];
+            Point3d::new(r, 0.0, h) // in XZ plane
+        })
+        .collect();
+
+    // Build faces: for each angular slice, create quads between consecutive profiles.
+    let mut all_faces = Vec::new();
+
+    // Generate all profile rings: ring[i] is the profile at angle i*d_angle
+    let mut rings: Vec<Vec<Point3d>> = Vec::with_capacity(n_segments + 1);
+    for i in 0..=n_segments {
+        let theta = i as f64 * d_angle;
+        let cos_t = theta.cos();
+        let sin_t = theta.sin();
+        let ring: Vec<Point3d> = profile_3d
+            .iter()
+            .map(|p| {
+                let r = (p.x * p.x).sqrt(); // radius = |x|
+                Point3d::new(r * cos_t, r * sin_t, p.z)
+            })
+            .collect();
+        rings.push(ring);
+    }
+
+    // Side faces: quads connecting consecutive rings
+    for i in 0..n_segments {
+        let ring_a = &rings[i];
+        let ring_b = &rings[i + 1];
+        for j in 0..n {
+            let k = (j + 1) % n;
+            let quad_pts = vec![
+                ring_a[j],
+                ring_a[k],
+                ring_b[k],
+                ring_b[j],
+            ];
+            let face = ShapeBuilder::make_polygon_face(&quad_pts)
+                .ok_or(ModelingError::TooFewPoints(quad_pts.len()))?;
+            all_faces.push(face);
+        }
+    }
+
+    // Cap faces (only if not full circle)
+    if !full_circle {
+        // Start cap: profile at angle 0
+        let start_face = ShapeBuilder::make_polygon_face(&rings[0])
+            .ok_or(ModelingError::TooFewPoints(rings[0].len()))?;
+        all_faces.push(start_face);
+        // End cap: profile at angle (reversed)
+        let end_face = ShapeBuilder::make_polygon_face(&rings[n_segments])
+            .ok_or(ModelingError::TooFewPoints(rings[n_segments].len()))?;
+        all_faces.push(end_face);
+    }
+
+    let shell = Shell::new_closed(all_faces);
+    Ok(Solid::new(shell))
+}
+
+// ============================================================
 // Tests
 // ============================================================
 
@@ -1105,5 +1386,153 @@ mod tests {
                 panic!("Negative draft should work: {}", e);
             }
         }
+    }
+
+    // ============================================================
+    // Extrude / Revolve tests (BREPCAD Phase 1.2)
+    // ============================================================
+
+    #[test]
+    fn test_extrude_rectangle() {
+        // Extrude a 10×20 rectangle by 5 units in Z → should create a box
+        let rect = Polyline2d::rectangle(10.0, 20.0);
+        let solid = extrude_polyline(&rect, Vec3d::new(0.0, 0.0, 1.0), 5.0).unwrap();
+
+        // A rectangle extruded should have 6 faces (2 caps + 4 sides)
+        let faces = count_faces(&solid);
+        assert_eq!(faces, 6, "Extruded rectangle should have 6 faces, got {}", faces);
+    }
+
+    #[test]
+    fn test_extrude_circle() {
+        // Extrude a circle (16-segment polygon) by 10 units
+        let circ = Polyline2d::circle(5.0, 16);
+        let solid = extrude_polyline(&circ, Vec3d::new(0.0, 0.0, 1.0), 10.0).unwrap();
+
+        // 2 caps + 16 sides = 18 faces
+        let faces = count_faces(&solid);
+        assert_eq!(faces, 18, "Extruded 16-segment circle should have 18 faces, got {}", faces);
+    }
+
+    #[test]
+    fn test_extrude_open_wire_fails() {
+        // Open polyline (not closed) should fail
+        let open = Polyline2d::new(vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)]);
+        let result = extrude_polyline(&open, Vec3d::new(0.0, 0.0, 1.0), 1.0);
+        assert!(matches!(result, Err(ModelingError::OpenWire)));
+    }
+
+    #[test]
+    fn test_extrude_too_few_points_fails() {
+        let too_few = Polyline2d::new(vec![(0.0, 0.0), (1.0, 0.0)]);
+        let result = extrude_polyline(&too_few, Vec3d::new(0.0, 0.0, 1.0), 1.0);
+        assert!(matches!(result, Err(ModelingError::TooFewPoints(_))));
+    }
+
+    #[test]
+    fn test_extrude_zero_direction_fails() {
+        let rect = Polyline2d::rectangle(10.0, 10.0);
+        let result = extrude_polyline(&rect, Vec3d::new(0.0, 0.0, 0.0), 1.0);
+        assert!(matches!(result, Err(ModelingError::ZeroDirection)));
+    }
+
+    #[test]
+    fn test_extrude_in_x_direction() {
+        // Extrude in X direction instead of Z
+        let rect = Polyline2d::rectangle(10.0, 10.0);
+        let solid = extrude_polyline(&rect, Vec3d::new(1.0, 0.0, 0.0), 5.0).unwrap();
+        assert_eq!(count_faces(&solid), 6);
+    }
+
+    #[test]
+    fn test_revolve_full_circle() {
+        // Revolve a rectangle (in XZ plane) 360° around Z → creates a tube/ring
+        // Rectangle: width=10 (radius 5..15), height=5 (z 0..5)
+        let rect = Polyline2d::rectangle(10.0, 5.0);
+        // Translate so it doesn't intersect the axis: x → x+10
+        let pts: Vec<(f64, f64)> = rect.points.iter().map(|(x, y)| (x + 10.0, *y)).collect();
+        let profile = Polyline2d::new(pts);
+        let solid = revolve_polyline(&profile, 2.0 * PI).unwrap();
+
+        // Full circle, 4-point profile, 24 segments (360/15=24)
+        // Side faces: 24 segments × 4 profile edges = 96
+        // Cap faces: 0 (full circle)
+        let faces = count_faces(&solid);
+        assert!(faces > 0, "Revolved solid should have faces");
+        // Should NOT have cap faces (full circle)
+        // 24 segments × 4 = 96 side faces
+        assert_eq!(faces, 96, "Full revolution should have 96 side faces (24 seg × 4 edges), got {}", faces);
+    }
+
+    #[test]
+    fn test_revolve_partial_angle() {
+        // Revolve 180° — should add 2 cap faces
+        let rect = Polyline2d::rectangle(10.0, 5.0);
+        let pts: Vec<(f64, f64)> = rect.points.iter().map(|(x, y)| (x + 10.0, *y)).collect();
+        let profile = Polyline2d::new(pts);
+        let solid = revolve_polyline(&profile, PI).unwrap();
+
+        // 180° / 15° = 12 segments, 4 profile edges
+        // Side: 12 × 4 = 48, + 2 caps = 50
+        let faces = count_faces(&solid);
+        assert_eq!(faces, 50, "Half revolution should have 50 faces (48 sides + 2 caps), got {}", faces);
+    }
+
+    #[test]
+    fn test_revolve_invalid_angle_fails() {
+        let rect = Polyline2d::rectangle(10.0, 5.0);
+        let pts: Vec<(f64, f64)> = rect.points.iter().map(|(x, y)| (x + 10.0, *y)).collect();
+        let profile = Polyline2d::new(pts);
+
+        // Zero angle
+        assert!(matches!(
+            revolve_polyline(&profile, 0.0),
+            Err(ModelingError::InvalidAngle(_))
+        ));
+        // Negative angle
+        assert!(matches!(
+            revolve_polyline(&profile, -1.0),
+            Err(ModelingError::InvalidAngle(_))
+        ));
+        // > 2π
+        assert!(matches!(
+            revolve_polyline(&profile, 7.0),
+            Err(ModelingError::InvalidAngle(_))
+        ));
+    }
+
+    #[test]
+    fn test_polyline_is_closed() {
+        // Closed: first == last
+        let closed = Polyline2d::new(vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 0.0)]);
+        assert!(closed.is_closed());
+        assert_eq!(closed.point_count(), 3);
+
+        // Open: first != last
+        let open = Polyline2d::new(vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)]);
+        assert!(!open.is_closed());
+        assert_eq!(open.point_count(), 3);
+    }
+
+    #[test]
+    fn test_polyline_rectangle_constructor() {
+        let rect = Polyline2d::rectangle(10.0, 20.0);
+        assert!(rect.is_closed());
+        assert_eq!(rect.point_count(), 4);
+        // Corners: (-5,-10), (5,-10), (5,10), (-5,10)
+        assert_eq!(rect.points[0], (-5.0, -10.0));
+        assert_eq!(rect.points[1], (5.0, -10.0));
+        assert_eq!(rect.points[2], (5.0, 10.0));
+        assert_eq!(rect.points[3], (-5.0, 10.0));
+    }
+
+    #[test]
+    fn test_polyline_circle_constructor() {
+        let circ = Polyline2d::circle(5.0, 8);
+        assert!(circ.is_closed());
+        assert_eq!(circ.point_count(), 8);
+        // First point at angle 0: (5, 0)
+        assert!((circ.points[0].0 - 5.0).abs() < 1e-10);
+        assert!((circ.points[0].1 - 0.0).abs() < 1e-10);
     }
 }

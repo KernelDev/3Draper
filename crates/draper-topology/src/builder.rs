@@ -4,7 +4,7 @@
 
 use crate::entity::*;
 use draper_geometry::{
-    Point3d, Direction3d,
+    Point3d, Direction3d, Vec3d,
     Curve3d, Circle,
     Surface, Plane, CylinderSurface, SphereSurface, ConeSurface, TorusSurface,
     Transform,
@@ -352,7 +352,61 @@ impl ShapeBuilder {
         let coedges: Vec<CoEdge> = edges.iter().map(|e| CoEdge::new(e.id, true)).collect();
         let wire = Wire::new(coedges);
 
-        let plane = Plane::from_three_points(&points[0], &points[1], &points[2])?;
+        // Try to build a plane from three points; if that fails (collinear),
+        // try other point triples or construct from a best-fit normal.
+        let plane = Plane::from_three_points(&points[0], &points[1], &points[2])
+            .or_else(|| {
+                // Try points 0, 2, 3 (skip the middle one)
+                if points.len() >= 4 {
+                    Plane::from_three_points(&points[0], &points[2], &points[3])
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                // Last resort: construct a plane from the best-fit normal
+                // computed via cross product of non-parallel edges.
+                let mut normal = Vec3d::new(0.0, 0.0, 1.0);
+                let mut found = false;
+                for i in 1..n {
+                    let e1 = Vec3d::new(
+                        points[i].x - points[0].x,
+                        points[i].y - points[0].y,
+                        points[i].z - points[0].z,
+                    );
+                    for j in (i + 1)..n {
+                        let e2 = Vec3d::new(
+                            points[j].x - points[0].x,
+                            points[j].y - points[0].y,
+                            points[j].z - points[0].z,
+                        );
+                        let cross = Vec3d::new(
+                            e1.y * e2.z - e1.z * e2.y,
+                            e1.z * e2.x - e1.x * e2.z,
+                            e1.x * e2.y - e1.y * e2.x,
+                        );
+                        let len = (cross.x * cross.x + cross.y * cross.y + cross.z * cross.z).sqrt();
+                        if len > 1e-10 {
+                            normal = Vec3d::new(cross.x / len, cross.y / len, cross.z / len);
+                            found = true;
+                            break;
+                        }
+                    }
+                    if found {
+                        break;
+                    }
+                }
+                if found {
+                    // Construct a plane with this normal through points[0]
+                    Plane::from_normal_and_point(
+                        &draper_geometry::Direction3d::new(normal.x, normal.y, normal.z)?,
+                        &points[0],
+                    )
+                } else {
+                    None
+                }
+            })?;
+
         let mut face = Face::new(Surface::Plane(plane), wire);
         face.edges = edges;
         Some(face)
