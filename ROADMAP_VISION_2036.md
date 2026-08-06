@@ -532,8 +532,8 @@ Independent face triangulation with post-facto welding is deprecated.
 | 3 | AI-driven healing | Done | `d7e8583` |
 | 4 | IGA export | Done | `248ee65` |
 | 4 | Full AP242 PMI/GD&T | Done | `e2bb8cb` |
-| 5 | CRDT collaborative editing | Pending | — |
-| 5 | Generative design | Pending | — |
+| 5 | CRDT collaborative editing | Done | `486f6a5` |
+| 5 | Generative design | Done | `d3a092f` |
 
 ---
 
