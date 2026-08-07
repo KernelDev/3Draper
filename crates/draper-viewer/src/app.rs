@@ -832,6 +832,11 @@ pub struct ViewerApp {
     /// Stores the actual feature DAG with parameters, enabling
     /// edit_parameter and rollback_to operations.
     pub brepcad_feature_tree: draper_topology::feature_history::FeatureTree,
+    /// Edit feature dialog: index into brepcad_timeline being edited.
+    pub brepcad_edit_feature_idx: Option<usize>,
+    /// Edit feature dialog: new extrude distance value.
+    pub brepcad_edit_distance_dialog_open: bool,
+    pub brepcad_edit_distance_value: f32,
     /// Sketch mode active?
     pub brepcad_sketch_mode: bool,
     /// Sketch plane: 0=XY, 1=XZ, 2=YZ.
@@ -1514,6 +1519,9 @@ impl ViewerApp {
             brepcad_timeline_open: false,
             brepcad_timeline_rollback: None,
             brepcad_feature_tree: draper_topology::feature_history::FeatureTree::new(),
+            brepcad_edit_feature_idx: None,
+            brepcad_edit_distance_dialog_open: false,
+            brepcad_edit_distance_value: 50.0,
             brepcad_sketch_mode: false,
             brepcad_sketch_plane: 0, // XY
             brepcad_sketch_tool: 0, // Select
@@ -10039,6 +10047,12 @@ impl eframe::App for ViewerApp {
                                                 if ui.small_button("↩").clicked() {
                                                     rollback_target = Some(*i);
                                                 }
+                                                // Edit button: opens parameter edit dialog
+                                                // (uses FeatureTree for parametric rebuild)
+                                                if ui.small_button("✎").clicked() {
+                                                    self.brepcad_edit_feature_idx = Some(*i);
+                                                    self.brepcad_edit_distance_dialog_open = true;
+                                                }
                                             });
                                         });
                                     });
@@ -10052,6 +10066,60 @@ impl eframe::App for ViewerApp {
                         }
                     });
                 self.brepcad_timeline_open = timeline_open;
+            }
+
+            // ─── Edit Feature Dialog (Phase 1.5) ───
+            // Real parametric edit: changes the extrude distance in the
+            // FeatureTree and rebuilds the model.
+            if self.brepcad_edit_distance_dialog_open {
+                let mut dialog_open = self.brepcad_edit_distance_dialog_open;
+                egui::Window::new("Edit Feature")
+                    .open(&mut dialog_open)
+                    .resizable(false)
+                    .default_width(300.0)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.label("Edit Extrude Distance:");
+                        ui.add(egui::Slider::new(&mut self.brepcad_edit_distance_value, 1.0..=500.0).suffix(" mm"));
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if ui.button("Apply").clicked() {
+                                // Real parametric rebuild via FeatureTree
+                                let new_distance = self.brepcad_edit_distance_value as f64;
+                                // Find the extrude feature in the tree and edit it
+                                let root_id = self.brepcad_feature_tree.root();
+                                if let Some(root) = root_id {
+                                    // Get the sketch dependency
+                                    if let Some(root_feature) = self.brepcad_feature_tree.get(root) {
+                                        if let draper_topology::feature_history::FeatureParams::Extrude { sketch, direction, .. } = &root_feature.params {
+                                            let sketch = *sketch;
+                                            let direction = *direction;
+                                            let new_params = draper_topology::feature_history::FeatureParams::Extrude {
+                                                sketch,
+                                                distance: new_distance,
+                                                direction,
+                                            };
+                                            match self.brepcad_feature_tree.edit_parameter(root, new_params) {
+                                                Ok(()) => {
+                                                    self.brepcad_status_msg = format!("Rebuilt with distance={:.1}mm", new_distance);
+                                                    log::info!("FeatureTree: rebuilt with distance={}", new_distance);
+                                                }
+                                                Err(e) => {
+                                                    self.brepcad_status_msg = format!("Edit failed: {}", e);
+                                                    log::error!("FeatureTree edit failed: {}", e);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                self.brepcad_edit_distance_dialog_open = false;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                self.brepcad_edit_distance_dialog_open = false;
+                            }
+                        });
+                    });
+                self.brepcad_edit_distance_dialog_open = dialog_open;
             }
 
             // ═══ Advanced dialogs (mockups 03, 73, 75, 76, 77, 79, 81, 88, 93, 94) ═══
