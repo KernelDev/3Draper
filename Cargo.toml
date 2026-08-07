@@ -19,6 +19,7 @@ members = [
     "crates/draper-fea",
     "crates/draper-drawing",
     "crates/draper-assembly",
+    "crates/draper-sheetmetal",
     "crates/draper-testing",
     "crates/draper-json",
     "tools",
@@ -61,6 +62,7 @@ draper-sketch = { path = "crates/draper-sketch" }
 draper-fea = { path = "crates/draper-fea" }
 draper-drawing = { path = "crates/draper-drawing" }
 draper-assembly = { path = "crates/draper-assembly" }
+draper-sheetmetal = { path = "crates/draper-sheetmetal" }
 draper-testing = { path = "crates/draper-testing" }
 draper-json = { path = "crates/draper-json" }
 draper-wasm = { path = "crates/draper-wasm" }
