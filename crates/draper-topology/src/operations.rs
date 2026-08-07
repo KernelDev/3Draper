@@ -1047,6 +1047,268 @@ pub fn revolve_polyline(
 }
 
 // ============================================================
+// Sweep (Phase 1.3: MASTER_PLAN_100.md)
+// ============================================================
+
+/// Sweep a closed 2D profile along a 3D path curve.
+///
+/// Per MASTER_PLAN_100.md Phase 1.3: sweeps a profile polyline along
+/// a path defined by sampled 3D points, using Frenet-Serret frames
+/// for profile orientation.
+///
+/// **Algorithm:**
+/// 1. Sample the path at N points.
+/// 2. At each point, compute the Frenet frame (tangent, normal, binormal).
+/// 3. Transform the 2D profile into the local frame at each point.
+/// 4. Create side faces (quads) between consecutive cross-sections.
+/// 5. Add start and end cap faces.
+///
+/// # Arguments
+/// * `profile` — closed 2D polyline (cross-section to sweep).
+/// * `path_points` — ordered 3D points defining the sweep path.
+///
+/// # Returns
+/// A `Solid`, or an error.
+pub fn sweep_polyline(
+    profile: &Polyline2d,
+    path_points: &[Point3d],
+) -> Result<Solid, ModelingError> {
+    if profile.points.len() < 3 {
+        return Err(ModelingError::TooFewPoints(profile.points.len()));
+    }
+    if path_points.len() < 2 {
+        return Err(ModelingError::TooFewPoints(path_points.len()));
+    }
+
+    let n_profile = profile.point_count();
+    let n_path = path_points.len();
+
+    // Compute Frenet frames at each path point
+    let frames = compute_frenet_frames(path_points);
+
+    // Generate cross-sections: transform profile into each frame
+    let mut cross_sections: Vec<Vec<Point3d>> = Vec::with_capacity(n_path);
+    for (i, frame) in frames.iter().enumerate() {
+        let center = &path_points[i];
+        let section: Vec<Point3d> = (0..n_profile)
+            .map(|j| {
+                let (u, v) = profile.points[j];
+                Point3d::new(
+                    center.x + u * frame[0] + v * frame[3],
+                    center.y + u * frame[1] + v * frame[4],
+                    center.z + u * frame[2] + v * frame[5],
+                )
+            })
+            .collect();
+        cross_sections.push(section);
+    }
+
+    // Create side faces (quads between consecutive cross-sections)
+    let mut all_faces = Vec::new();
+    for i in 0..n_path - 1 {
+        let section_a = &cross_sections[i];
+        let section_b = &cross_sections[i + 1];
+        for j in 0..n_profile {
+            let k = (j + 1) % n_profile;
+            let quad_pts = vec![
+                section_a[j],
+                section_a[k],
+                section_b[k],
+                section_b[j],
+            ];
+            let face = ShapeBuilder::make_polygon_face(&quad_pts)
+                .ok_or(ModelingError::TooFewPoints(4))?;
+            all_faces.push(face);
+        }
+    }
+
+    // Add start and end caps
+    let start_face = ShapeBuilder::make_polygon_face(&cross_sections[0])
+        .ok_or(ModelingError::TooFewPoints(cross_sections[0].len()))?;
+    all_faces.push(start_face);
+
+    let end_face = ShapeBuilder::make_polygon_face(&cross_sections[n_path - 1])
+        .ok_or(ModelingError::TooFewPoints(cross_sections[n_path - 1].len()))?;
+    all_faces.push(end_face);
+
+    let shell = Shell::new_closed(all_faces);
+    Ok(Solid::new(shell))
+}
+
+/// Compute Frenet-Serret frames at each point of a path.
+///
+/// Returns a Vec of [tangent_x, tangent_y, tangent_z, normal_x, normal_y, normal_z]
+/// for each path point.
+fn compute_frenet_frames(path: &[Point3d]) -> Vec<[f64; 6]> {
+    let n = path.len();
+    let mut frames = Vec::with_capacity(n);
+
+    // Compute tangents
+    let mut tangents: Vec<[f64; 3]> = Vec::with_capacity(n);
+    for i in 0..n {
+        let (prev, next) = if i == 0 {
+            (0, 1)
+        } else if i == n - 1 {
+            (n - 2, n - 1)
+        } else {
+            (i - 1, i + 1)
+        };
+        let tx = path[next].x - path[prev].x;
+        let ty = path[next].y - path[prev].y;
+        let tz = path[next].z - path[prev].z;
+        let len = (tx * tx + ty * ty + tz * tz).sqrt();
+        if len > 1e-15 {
+            tangents.push([tx / len, ty / len, tz / len]);
+        } else {
+            tangents.push([0.0, 0.0, 1.0]);
+        }
+    }
+
+    // Compute normals using parallel transport
+    let mut prev_normal = if tangents[0][0].abs() < 0.9 {
+        // Cross with X axis
+        let n = [
+            tangents[0][1] * 1.0 - tangents[0][2] * 0.0,
+            tangents[0][2] * 0.0 - tangents[0][0] * 0.0,
+            tangents[0][0] * 0.0 - tangents[0][1] * 1.0,
+        ]
+    } else {
+        // Cross with Y axis
+        let n = [
+            tangents[0][1] * 0.0 - tangents[0][2] * 1.0,
+            tangents[0][2] * 1.0 - tangents[0][0] * 0.0,
+            tangents[0][0] * 0.0 - tangents[0][1] * 0.0,
+        ]
+    };
+    let len = (prev_normal[0] * prev_normal[0] + prev_normal[1] * prev_normal[1] + prev_normal[2] * prev_normal[2]).sqrt();
+    if len > 1e-15 {
+        prev_normal[0] /= len;
+        prev_normal[1] /= len;
+        prev_normal[2] /= len;
+    }
+
+    for i in 0..n {
+        let t = &tangents[i];
+        // Project previous normal onto plane perpendicular to tangent
+        let dot = prev_normal[0] * t[0] + prev_normal[1] * t[1] + prev_normal[2] * t[2];
+        let mut normal = [
+            prev_normal[0] - dot * t[0],
+            prev_normal[1] - dot * t[1],
+            prev_normal[2] - dot * t[2],
+        ];
+        let len = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
+        if len > 1e-15 {
+            normal[0] /= len;
+            normal[1] /= len;
+            normal[2] /= len;
+        } else {
+            normal = prev_normal;
+        }
+
+        // Binormal = tangent × normal
+        let binormal = [
+            t[1] * normal[2] - t[2] * normal[1],
+            t[2] * normal[0] - t[0] * normal[2],
+            t[0] * normal[1] - t[1] * normal[0],
+        ];
+
+        frames.push([normal[0], normal[1], normal[2], binormal[0], binormal[1], binormal[2]]);
+        prev_normal = normal;
+    }
+
+    frames
+}
+
+// ============================================================
+// Loft (Phase 1.3: MASTER_PLAN_100.md)
+// ============================================================
+
+/// Loft (skin) through multiple 2D profiles to create a solid.
+///
+/// Per MASTER_PLAN_100.md Phase 1.3: creates a solid by interpolating
+/// between multiple cross-section profiles. Each profile is a closed
+/// 2D polyline, and they are stacked in 3D along the Z axis (or a
+/// custom direction).
+///
+/// **Algorithm:**
+/// 1. Place each profile at its Z height (or along a custom axis).
+/// 2. Create side faces (quads) between corresponding points of
+///    consecutive profiles.
+/// 3. Add start and end cap faces.
+///
+/// # Arguments
+/// * `profiles` — list of closed 2D polylines (cross-sections).
+/// * `z_positions` — Z height for each profile (or custom axis offsets).
+///
+/// # Returns
+/// A `Solid`, or an error.
+pub fn loft_polylines(
+    profiles: &[Polyline2d],
+    z_positions: &[f64],
+) -> Result<Solid, ModelingError> {
+    if profiles.len() < 2 {
+        return Err(ModelingError::TooFewPoints(profiles.len()));
+    }
+    if profiles.len() != z_positions.len() {
+        return Err(ModelingError::TooFewPoints(0));
+    }
+
+    let n_profiles = profiles.len();
+    let n_points = profiles[0].point_count();
+
+    // Verify all profiles have the same number of points
+    for p in profiles {
+        if p.point_count() != n_points {
+            return Err(ModelingError::TooFewPoints(p.point_count()));
+        }
+    }
+
+    // Convert profiles to 3D cross-sections at their Z heights
+    let cross_sections: Vec<Vec<Point3d>> = (0..n_profiles)
+        .map(|i| {
+            let z = z_positions[i];
+            (0..n_points)
+                .map(|j| {
+                    let (x, y) = profiles[i].points[j];
+                    Point3d::new(x, y, z)
+                })
+                .collect()
+        })
+        .collect();
+
+    // Create side faces (quads between consecutive profiles)
+    let mut all_faces = Vec::new();
+    for i in 0..n_profiles - 1 {
+        let section_a = &cross_sections[i];
+        let section_b = &cross_sections[i + 1];
+        for j in 0..n_points {
+            let k = (j + 1) % n_points;
+            let quad_pts = vec![
+                section_a[j],
+                section_a[k],
+                section_b[k],
+                section_b[j],
+            ];
+            let face = ShapeBuilder::make_polygon_face(&quad_pts)
+                .ok_or(ModelingError::TooFewPoints(4))?;
+            all_faces.push(face);
+        }
+    }
+
+    // Add start and end caps
+    let start_face = ShapeBuilder::make_polygon_face(&cross_sections[0])
+        .ok_or(ModelingError::TooFewPoints(cross_sections[0].len()))?;
+    all_faces.push(start_face);
+
+    let end_face = ShapeBuilder::make_polygon_face(&cross_sections[n_profiles - 1])
+        .ok_or(ModelingError::TooFewPoints(cross_sections[n_profiles - 1].len()))?;
+    all_faces.push(end_face);
+
+    let shell = Shell::new_closed(all_faces);
+    Ok(Solid::new(shell))
+}
+
+// ============================================================
 // Tests
 // ============================================================
 
@@ -1534,5 +1796,132 @@ mod tests {
         // First point at angle 0: (5, 0)
         assert!((circ.points[0].0 - 5.0).abs() < 1e-10);
         assert!((circ.points[0].1 - 0.0).abs() < 1e-10);
+    }
+
+    // ============================================================
+    // Sweep tests (Phase 1.3)
+    // ============================================================
+
+    #[test]
+    fn test_sweep_straight_line() {
+        // Sweep a rectangle along a straight Z path
+        let profile = Polyline2d::rectangle(10.0, 10.0);
+        let path = vec![
+            Point3d::new(0.0, 0.0, 0.0),
+            Point3d::new(0.0, 0.0, 50.0),
+        ];
+        let solid = sweep_polyline(&profile, &path).unwrap();
+        // 4 side faces + 2 caps = 6
+        assert_eq!(count_faces(&solid), 6);
+    }
+
+    #[test]
+    fn test_sweep_curved_path() {
+        // Sweep along a curved path (quarter circle in XZ plane)
+        let profile = Polyline2d::circle(5.0, 8);
+        let n = 10;
+        let path: Vec<Point3d> = (0..n)
+            .map(|i| {
+                let angle = std::f64::consts::FRAC_PI_2 * i as f64 / (n - 1) as f64;
+                Point3d::new(50.0 * angle.sin(), 0.0, 50.0 * angle.cos())
+            })
+            .collect();
+        let solid = sweep_polyline(&profile, &path).unwrap();
+        // Should have faces (sides + 2 caps)
+        assert!(count_faces(&solid) > 2, "Sweep should produce faces");
+    }
+
+    #[test]
+    fn test_sweep_helical_path() {
+        // Sweep along a helical path
+        let profile = Polyline2d::circle(3.0, 6);
+        let n = 20;
+        let path: Vec<Point3d> = (0..n)
+            .map(|i| {
+                let t = i as f64 * 0.3;
+                Point3d::new(20.0 * t.cos(), 20.0 * t.sin(), t * 5.0)
+            })
+            .collect();
+        let solid = sweep_polyline(&profile, &path).unwrap();
+        assert!(count_faces(&solid) > 10, "Helical sweep should produce many faces");
+    }
+
+    #[test]
+    fn test_sweep_too_few_profile_points() {
+        let profile = Polyline2d::new(vec![(0.0, 0.0), (1.0, 0.0)]);
+        let path = vec![Point3d::new(0.0, 0.0, 0.0), Point3d::new(0.0, 0.0, 10.0)];
+        let result = sweep_polyline(&profile, &path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sweep_too_few_path_points() {
+        let profile = Polyline2d::rectangle(10.0, 10.0);
+        let path = vec![Point3d::new(0.0, 0.0, 0.0)];
+        let result = sweep_polyline(&profile, &path);
+        assert!(result.is_err());
+    }
+
+    // ============================================================
+    // Loft tests (Phase 1.3)
+    // ============================================================
+
+    #[test]
+    fn test_loft_two_rectangles() {
+        // Loft between two rectangles at different Z heights
+        let profiles = vec![
+            Polyline2d::rectangle(10.0, 10.0),
+            Polyline2d::rectangle(20.0, 20.0),
+        ];
+        let z_positions = vec![0.0, 30.0];
+        let solid = loft_polylines(&profiles, &z_positions).unwrap();
+        // 4 side faces + 2 caps = 6
+        assert_eq!(count_faces(&solid), 6);
+    }
+
+    #[test]
+    fn test_loft_three_profiles() {
+        // Loft through 3 profiles (square → larger square → circle-ish)
+        let profiles = vec![
+            Polyline2d::rectangle(10.0, 10.0),
+            Polyline2d::rectangle(15.0, 15.0),
+            Polyline2d::rectangle(8.0, 8.0),
+        ];
+        let z_positions = vec![0.0, 15.0, 30.0];
+        let solid = loft_polylines(&profiles, &z_positions).unwrap();
+        // 4 sides × 2 transitions + 2 caps = 10
+        assert_eq!(count_faces(&solid), 10);
+    }
+
+    #[test]
+    fn test_loft_square_to_circle() {
+        // Loft between a square (4 points) and a circle (8 points)
+        // This should fail because profiles have different point counts
+        let profiles = vec![
+            Polyline2d::rectangle(10.0, 10.0),  // 4 points
+            Polyline2d::circle(8.0, 8),          // 8 points
+        ];
+        let z_positions = vec![0.0, 20.0];
+        let result = loft_polylines(&profiles, &z_positions);
+        assert!(result.is_err(), "Loft with mismatched point counts should fail");
+    }
+
+    #[test]
+    fn test_loft_too_few_profiles() {
+        let profiles = vec![Polyline2d::rectangle(10.0, 10.0)];
+        let z_positions = vec![0.0];
+        let result = loft_polylines(&profiles, &z_positions);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_loft_mismatched_lengths() {
+        let profiles = vec![
+            Polyline2d::rectangle(10.0, 10.0),
+            Polyline2d::rectangle(20.0, 20.0),
+        ];
+        let z_positions = vec![0.0]; // Only 1 position for 2 profiles
+        let result = loft_polylines(&profiles, &z_positions);
+        assert!(result.is_err());
     }
 }

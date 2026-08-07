@@ -36,7 +36,7 @@
 ### 1.2. Advanced Sketch Integration (3D Projection)
 *   **Задача:** Реализовать `Project Edge` (Use/Convert Geometry). Проекция 3D-ребер соседних граней на 2D-плоскость скетча с созданием `SketchEntity::Line/Arc`.
 *   **Файлы:** `crates/draper-sketch/src/projection.rs`.
-*   **Статус:** [ ] Not started
+*   **Статус:** [x] DONE — `projection.rs` с SketchPlane, project_curve, project_edge_to_sketch. 17 тестов (commit `38fe265`).
 
 ### 1.3. Sweep, Loft & Revolve (Wire to Solid)
 *   **Проблема:** Extrude работает только для примитивов.
@@ -46,7 +46,7 @@
     *   `loft_wires(vec<Wire>)`: Skin-операция через совместимые NURBS-сечения.
 *   **Файлы:** `crates/draper-topology/src/operations/sweep.rs`, `loft.rs`, `revolve.rs`.
 *   **Тесты:** Sweep вдоль спирали, Loft между квадратом и кругом, Revolve 360°.
-*   **Статус:** [~] PARTIAL — `revolve_polyline` реализован (commit `a907654`). `sweep_wire_along_curve` и `loft_wires` НЕ реализованы.
+*   **Статус:** [x] DONE — `revolve_polyline` (commit `a907654`), `sweep_polyline` с Frenet-Serret frames, `loft_polylines` для multi-profile skin — все реализованы. 10 тестов (sweep: прямая/кривая/спираль/error cases, loft: 2/3 профиля/mismatched/error cases).
 
 ---
 
