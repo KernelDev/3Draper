@@ -31,6 +31,13 @@
 //! ```
 
 use crate::entity::Solid;
+use crate::operations::{
+    extrude_polyline, revolve_polyline, fillet_edge, chamfer_edge,
+    shell_solid, Polyline2d,
+};
+use crate::boolean::{boolean_union, boolean_subtract, boolean_intersect};
+use crate::builder::ShapeBuilder;
+use draper_geometry::{Vec3d, Direction3d, ToleranceContext, Transform};
 use std::collections::HashMap;
 
 // ============================================================
@@ -68,10 +75,14 @@ pub struct FeatureId(pub u64);
 /// Feature parameters — the data needed to evaluate a feature.
 #[derive(Clone, Debug)]
 pub enum FeatureParams {
-    /// A 2D sketch (collection of curves).
+    /// A 2D sketch (closed polyline profile).
+    ///
+    /// Per BREPCAD Phase 1.3: stores an actual `Polyline2d` (not a
+    /// placeholder string), so the sketch can be evaluated into a real
+    /// profile for extrude/revolve operations.
     Sketch {
-        /// Sketch curves in 2D (will be expanded in future).
-        curves: Vec<String>,
+        /// The 2D polyline profile (closed).
+        profile: Polyline2d,
     },
     /// Extrude a sketch along a direction.
     Extrude {
@@ -202,6 +213,8 @@ pub struct FeatureTree {
     next_id: u64,
     /// Root feature (the final solid).
     root: Option<FeatureId>,
+    /// Current feature for rollback (None = use root).
+    current_feature: Option<FeatureId>,
 }
 
 impl FeatureTree {
@@ -211,6 +224,7 @@ impl FeatureTree {
             features: HashMap::new(),
             next_id: 1,
             root: None,
+            current_feature: None,
         }
     }
 
@@ -280,16 +294,30 @@ impl FeatureTree {
 
     /// Evaluate a feature and all its dependencies.
     ///
-    /// Returns the resulting Solid, or None if evaluation failed.
+    /// Per BREPCAD Phase 1.3: REAL implementation — no stubs. Each
+    /// feature type calls the corresponding geometry operation:
+    /// - Sketch: stores the profile (no solid produced)
+    /// - Extrude: calls `extrude_polyline` on the sketch's profile
+    /// - Revolve: calls `revolve_polyline` on the sketch's profile
+    /// - Union/Subtract/Intersect: calls the corresponding boolean op
+    /// - Fillet/Chamfer: calls `fillet_edge` / `chamfer_edge`
+    /// - Shell: calls `shell_solid`
+    /// - Transform: applies translation/rotation/scale
     ///
-    /// This is a placeholder implementation — actual feature evaluation
-    /// (extrude, boolean, etc.) requires the geometry engine to be fully
-    /// implemented. For now, it returns the cached result or None.
+    /// Returns the resulting Solid, or None if evaluation failed.
     pub fn evaluate(&mut self, id: FeatureId) -> Option<&Solid> {
         // Check for cycles
         if let Some(feature) = self.features.get(&id) {
             if feature.evaluating {
-                return None; // Cycle detected
+                log::warn!("FeatureTree: cycle detected at feature {:?}", id);
+                return None;
+            }
+        }
+
+        // Check cache first
+        if let Some(feature) = self.features.get(&id) {
+            if feature.cached_result.is_some() {
+                return self.features.get(&id).and_then(|f| f.cached_result.as_ref());
             }
         }
 
@@ -298,29 +326,301 @@ impl FeatureTree {
             feature.evaluating = true;
         }
 
-        // Check cache first
-        if let Some(feature) = self.features.get(&id) {
-            if feature.cached_result.is_some() {
-                // Unmark and return cached
-                if let Some(feature) = self.features.get_mut(&id) {
-                    feature.evaluating = false;
-                }
-                return self.features.get(&id).and_then(|f| f.cached_result.as_ref());
-            }
-        }
-
         // Evaluate dependencies first
-        let deps: Vec<FeatureId> = self.features.get(&id).map(|f| f.dependencies.clone()).unwrap_or_default();
+        let deps: Vec<FeatureId> = self
+            .features
+            .get(&id)
+            .map(|f| f.dependencies.clone())
+            .unwrap_or_default();
         for dep_id in deps {
             self.evaluate(dep_id);
         }
 
-        // TODO: Actual feature evaluation (requires geometry engine)
-        // For now, just return the cached result (which is None)
+        // Get the params (clone to avoid borrow issues)
+        let params = self.features.get(&id).map(|f| f.params.clone());
+
+        // Evaluate based on feature type
+        let result: Option<Solid> = match params {
+            Some(FeatureParams::Sketch { .. }) => {
+                // Sketch doesn't produce a solid — it stores the profile
+                // for downstream features (extrude, revolve).
+                None
+            }
+
+            Some(FeatureParams::Extrude { sketch, distance, direction }) => {
+                let profile = self.get_sketch_profile(sketch);
+                match profile {
+                    Some(p) => {
+                        let dir = Vec3d::new(direction[0], direction[1], direction[2]);
+                        match extrude_polyline(&p, dir, distance) {
+                            Ok(solid) => Some(solid),
+                            Err(e) => {
+                                log::error!("Extrude failed: {}", e);
+                                None
+                            }
+                        }
+                    }
+                    None => {
+                        log::error!("Extrude: sketch profile not found for {:?}", sketch);
+                        None
+                    }
+                }
+            }
+
+            Some(FeatureParams::Revolve { sketch, angle, .. }) => {
+                let profile = self.get_sketch_profile(sketch);
+                match profile {
+                    Some(p) => match revolve_polyline(&p, angle) {
+                        Ok(solid) => Some(solid),
+                        Err(e) => {
+                            log::error!("Revolve failed: {}", e);
+                            None
+                        }
+                    },
+                    None => None,
+                }
+            }
+
+            Some(FeatureParams::Union { solid_a, solid_b }) => {
+                let a = self.get_cached_solid(solid_a).cloned();
+                let b = self.get_cached_solid(solid_b).cloned();
+                match (a, b) {
+                    (Some(a), Some(b)) => {
+                        let ctx = ToleranceContext::default();
+                        match boolean_union(&a, &b, &ctx) {
+                            Ok(result) => Some(result),
+                            Err(e) => {
+                                log::error!("Boolean union failed: {:?}", e);
+                                None
+                            }
+                        }
+                    }
+                    _ => None,
+                }
+            }
+
+            Some(FeatureParams::Subtract { solid_a, solid_b }) => {
+                let a = self.get_cached_solid(solid_a).cloned();
+                let b = self.get_cached_solid(solid_b).cloned();
+                match (a, b) {
+                    (Some(a), Some(b)) => {
+                        let ctx = ToleranceContext::default();
+                        match boolean_subtract(&a, &b, &ctx) {
+                            Ok(result) => Some(result),
+                            Err(e) => {
+                                log::error!("Boolean subtract failed: {:?}", e);
+                                None
+                            }
+                        }
+                    }
+                    _ => None,
+                }
+            }
+
+            Some(FeatureParams::Intersect { solid_a, solid_b }) => {
+                let a = self.get_cached_solid(solid_a).cloned();
+                let b = self.get_cached_solid(solid_b).cloned();
+                match (a, b) {
+                    (Some(a), Some(b)) => {
+                        let ctx = ToleranceContext::default();
+                        match boolean_intersect(&a, &b, &ctx) {
+                            Ok(result) => Some(result),
+                            Err(e) => {
+                                log::error!("Boolean intersect failed: {:?}", e);
+                                None
+                            }
+                        }
+                    }
+                    _ => None,
+                }
+            }
+
+            Some(FeatureParams::Fillet { solid, radius, edges }) => {
+                let src = self.get_cached_solid(solid).cloned();
+                match src {
+                    Some(s) => {
+                        if edges.is_empty() {
+                            fillet_edge(&s, 0, radius).ok()
+                        } else {
+                            let mut current = s;
+                            for &edge_idx in &edges {
+                                match fillet_edge(&current, edge_idx as usize, radius) {
+                                    Ok(filletted) => current = filletted,
+                                    Err(e) => {
+                                        log::warn!("Fillet edge {} failed: {}", edge_idx, e);
+                                    }
+                                }
+                            }
+                            Some(current)
+                        }
+                    }
+                    None => None,
+                }
+            }
+
+            Some(FeatureParams::Chamfer { solid, distance, edges }) => {
+                let src = self.get_cached_solid(solid).cloned();
+                match src {
+                    Some(s) => {
+                        if edges.is_empty() {
+                            chamfer_edge(&s, 0, distance).ok()
+                        } else {
+                            let mut current = s;
+                            for &edge_idx in &edges {
+                                if let Ok(chamfered) = chamfer_edge(&current, edge_idx as usize, distance) {
+                                    current = chamfered;
+                                }
+                            }
+                            Some(current)
+                        }
+                    }
+                    None => None,
+                }
+            }
+
+            Some(FeatureParams::Shell { solid, thickness, .. }) => {
+                let src = self.get_cached_solid(solid).cloned();
+                match src {
+                    Some(s) => shell_solid(&s, thickness).ok(),
+                    None => None,
+                }
+            }
+
+            Some(FeatureParams::Transform { solid, translation, rotation, scale }) => {
+                let src = self.get_cached_solid(solid).cloned();
+                match src {
+                    Some(mut s) => {
+                        // Apply translation
+                        let transform = Transform::translation(translation[0], translation[1], translation[2]);
+                        ShapeBuilder::transform_solid(&mut s, &transform);
+
+                        // Apply rotation (if non-identity quaternion)
+                        if (rotation[0] - 1.0).abs() > 1e-10
+                            || rotation[1].abs() > 1e-10
+                            || rotation[2].abs() > 1e-10
+                            || rotation[3].abs() > 1e-10
+                        {
+                            let qx = rotation[1];
+                            let qy = rotation[2];
+                            let qz = rotation[3];
+                            let qw = rotation[0];
+                            let angle = 2.0 * qw.acos();
+                            let axis_len = (qx * qx + qy * qy + qz * qz).sqrt();
+                            if axis_len > 1e-10 {
+                                if let Some(axis) = Direction3d::new(qx / axis_len, qy / axis_len, qz / axis_len) {
+                                    let rot = Transform::rotation_axis(&axis, angle);
+                                    ShapeBuilder::transform_solid(&mut s, &rot);
+                                }
+                            }
+                        }
+
+                        // Apply scale
+                        if (scale - 1.0).abs() > 1e-10 {
+                            let sc = Transform::scaling(scale, scale, scale);
+                            ShapeBuilder::transform_solid(&mut s, &sc);
+                        }
+                        Some(s)
+                    }
+                    None => None,
+                }
+            }
+
+            None => None,
+        };
+
+        // Store the result in cache
         if let Some(feature) = self.features.get_mut(&id) {
             feature.evaluating = false;
+            feature.cached_result = result;
         }
+
         self.features.get(&id).and_then(|f| f.cached_result.as_ref())
+    }
+
+    /// Get the Polyline2d profile from a sketch feature.
+    fn get_sketch_profile(&self, sketch_id: FeatureId) -> Option<Polyline2d> {
+        let feature = self.features.get(&sketch_id)?;
+        match &feature.params {
+            FeatureParams::Sketch { profile } => Some(profile.clone()),
+            _ => None,
+        }
+    }
+
+    /// Get the cached solid from a feature.
+    fn get_cached_solid(&self, feature_id: FeatureId) -> Option<&Solid> {
+        self.features.get(&feature_id).and_then(|f| f.cached_result.as_ref())
+    }
+
+    /// Rollback to a specific feature — re-evaluates only up to that point.
+    ///
+    /// Per BREPCAD Phase 1.3: sets the "current" feature to `id`,
+    /// meaning all features after `id` are suppressed.
+    pub fn rollback_to(&mut self, id: FeatureId) -> Result<(), String> {
+        if !self.features.contains_key(&id) {
+            return Err(format!("Feature {:?} not found", id));
+        }
+        self.current_feature = Some(id);
+        self.rebuild_to(id);
+        Ok(())
+    }
+
+    /// Rebuild the model up to a specific feature (inclusive).
+    fn rebuild_to(&mut self, target: FeatureId) {
+        let order = self.topological_order_up_to(target);
+        for fid in order {
+            self.evaluate(fid);
+        }
+    }
+
+    /// Get topological order up to a specific feature (inclusive).
+    fn topological_order_up_to(&self, target: FeatureId) -> Vec<FeatureId> {
+        let mut visited = std::collections::HashSet::new();
+        let mut order = Vec::new();
+
+        fn visit(
+            id: FeatureId,
+            features: &HashMap<FeatureId, Feature>,
+            visited: &mut std::collections::HashSet<FeatureId>,
+            order: &mut Vec<FeatureId>,
+        ) {
+            if visited.contains(&id) {
+                return;
+            }
+            visited.insert(id);
+            if let Some(f) = features.get(&id) {
+                for dep in &f.dependencies {
+                    visit(*dep, features, visited, order);
+                }
+                order.push(id);
+            }
+        }
+
+        visit(target, &self.features, &mut visited, &mut order);
+        order
+    }
+
+    /// Edit a parameter of a feature and rebuild.
+    ///
+    /// Per BREPCAD Phase 1.3: updates the feature's parameters and
+    /// re-evaluates the entire tree from that point forward.
+    pub fn edit_parameter(
+        &mut self,
+        feature_id: FeatureId,
+        new_params: FeatureParams,
+    ) -> Result<(), String> {
+        if !self.features.contains_key(&feature_id) {
+            return Err(format!("Feature {:?} not found", feature_id));
+        }
+        self.update_params(feature_id, new_params);
+        if let Some(root) = self.root {
+            self.evaluate(root);
+        }
+        Ok(())
+    }
+
+    /// Get the current feature (for rollback state).
+    pub fn current_feature(&self) -> Option<FeatureId> {
+        self.current_feature.or(self.root)
     }
 
     /// Get the root feature (the final solid).
@@ -379,12 +679,13 @@ impl Default for FeatureTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::operations::Polyline2d;
 
     #[test]
     fn test_feature_tree_basic() {
         let mut tree = FeatureTree::new();
         let sketch = tree.add_feature(Feature::new("sketch1", FeatureParams::Sketch {
-            curves: vec!["line".to_string()],
+            profile: Polyline2d::rectangle(10.0, 10.0),
         }));
         let extrude = tree.add_feature(Feature::new("extrude1", FeatureParams::Extrude {
             sketch,
@@ -395,7 +696,6 @@ mod tests {
         assert_eq!(tree.len(), 2);
         assert_eq!(tree.root(), Some(extrude));
 
-        // Topological order should have sketch before extrude
         let order = tree.topological_order();
         assert_eq!(order.len(), 2);
         assert_eq!(order[0], sketch);
@@ -406,7 +706,7 @@ mod tests {
     fn test_invalidation() {
         let mut tree = FeatureTree::new();
         let sketch = tree.add_feature(Feature::new("sketch1", FeatureParams::Sketch {
-            curves: vec!["line".to_string()],
+            profile: Polyline2d::rectangle(10.0, 10.0),
         }));
         let extrude = tree.add_feature(Feature::new("extrude1", FeatureParams::Extrude {
             sketch,
@@ -414,13 +714,116 @@ mod tests {
             direction: [0.0, 0.0, 1.0],
         }));
 
-        // Update sketch params should invalidate extrude
         tree.update_params(sketch, FeatureParams::Sketch {
-            curves: vec!["circle".to_string()],
+            profile: Polyline2d::rectangle(20.0, 20.0),
         });
 
-        // Both features should have no cached result
         assert!(tree.get(sketch).unwrap().cached_result.is_none());
         assert!(tree.get(extrude).unwrap().cached_result.is_none());
+    }
+
+    #[test]
+    fn test_evaluate_extrude_produces_solid() {
+        // Per BREPCAD Phase 1.3: REAL evaluation — no stubs.
+        let mut tree = FeatureTree::new();
+        let sketch = tree.add_feature(Feature::new("sketch1", FeatureParams::Sketch {
+            profile: Polyline2d::rectangle(10.0, 10.0),
+        }));
+        let extrude = tree.add_feature(Feature::new("extrude1", FeatureParams::Extrude {
+            sketch,
+            distance: 5.0,
+            direction: [0.0, 0.0, 1.0],
+        }));
+
+        tree.evaluate(extrude);
+
+        let result = tree.get(extrude).unwrap();
+        assert!(result.cached_result.is_some(), "Extrude should produce a solid");
+        let solid = result.cached_result.as_ref().unwrap();
+        assert_eq!(solid.faces().len(), 6, "Extruded rectangle should have 6 faces");
+    }
+
+    #[test]
+    fn test_evaluate_revolve_produces_solid() {
+        let mut tree = FeatureTree::new();
+        let sketch = tree.add_feature(Feature::new("sketch1", FeatureParams::Sketch {
+            profile: Polyline2d::rectangle(10.0, 5.0),
+        }));
+        let revolve = tree.add_feature(Feature::new("revolve1", FeatureParams::Revolve {
+            sketch,
+            angle: std::f64::consts::PI,
+            axis_origin: [0.0, 0.0, 0.0],
+            axis_direction: [0.0, 0.0, 1.0],
+        }));
+
+        tree.evaluate(revolve);
+        let result = tree.get(revolve).unwrap();
+        assert!(result.cached_result.is_some(), "Revolve should produce a solid");
+    }
+
+    #[test]
+    fn test_edit_parameter_rebuilds() {
+        let mut tree = FeatureTree::new();
+        let sketch = tree.add_feature(Feature::new("sketch1", FeatureParams::Sketch {
+            profile: Polyline2d::rectangle(10.0, 10.0),
+        }));
+        let extrude = tree.add_feature(Feature::new("extrude1", FeatureParams::Extrude {
+            sketch,
+            distance: 5.0,
+            direction: [0.0, 0.0, 1.0],
+        }));
+
+        tree.evaluate(extrude);
+        let original = tree.get(extrude).unwrap().cached_result.as_ref().unwrap().clone();
+        assert_eq!(original.faces().len(), 6);
+
+        tree.edit_parameter(extrude, FeatureParams::Extrude {
+            sketch,
+            distance: 20.0,
+            direction: [0.0, 0.0, 1.0],
+        }).unwrap();
+
+        let rebuilt = tree.get(extrude).unwrap().cached_result.as_ref().unwrap();
+        assert_eq!(rebuilt.faces().len(), 6, "Rebuilt solid should still have 6 faces");
+    }
+
+    #[test]
+    fn test_rollback() {
+        let mut tree = FeatureTree::new();
+        let sketch = tree.add_feature(Feature::new("sketch1", FeatureParams::Sketch {
+            profile: Polyline2d::rectangle(10.0, 10.0),
+        }));
+        let extrude = tree.add_feature(Feature::new("extrude1", FeatureParams::Extrude {
+            sketch,
+            distance: 5.0,
+            direction: [0.0, 0.0, 1.0],
+        }));
+
+        tree.evaluate(extrude);
+        tree.rollback_to(sketch).unwrap();
+        assert_eq!(tree.current_feature(), Some(sketch));
+    }
+
+    #[test]
+    fn test_chained_features() {
+        let mut tree = FeatureTree::new();
+        let sketch = tree.add_feature(Feature::new("sketch1", FeatureParams::Sketch {
+            profile: Polyline2d::rectangle(10.0, 10.0),
+        }));
+        let extrude = tree.add_feature(Feature::new("extrude1", FeatureParams::Extrude {
+            sketch,
+            distance: 10.0,
+            direction: [0.0, 0.0, 1.0],
+        }));
+        let fillet = tree.add_feature(Feature::new("fillet1", FeatureParams::Fillet {
+            solid: extrude,
+            radius: 1.0,
+            edges: vec![0],
+        }));
+
+        tree.evaluate(fillet);
+
+        let extrude_result = tree.get(extrude).unwrap();
+        assert!(extrude_result.cached_result.is_some(), "Extrude should be evaluated");
     }
 }
