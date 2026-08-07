@@ -828,6 +828,10 @@ pub struct ViewerApp {
     pub brepcad_timeline_open: bool,
     /// Current rollback position (index into timeline). None = latest.
     pub brepcad_timeline_rollback: Option<usize>,
+    /// Real parametric feature tree (BREPCAD Phase 1.3).
+    /// Stores the actual feature DAG with parameters, enabling
+    /// edit_parameter and rollback_to operations.
+    pub brepcad_feature_tree: draper_topology::feature_history::FeatureTree,
     /// Sketch mode active?
     pub brepcad_sketch_mode: bool,
     /// Sketch plane: 0=XY, 1=XZ, 2=YZ.
@@ -1509,6 +1513,7 @@ impl ViewerApp {
             brepcad_timeline: Vec::new(),
             brepcad_timeline_open: false,
             brepcad_timeline_rollback: None,
+            brepcad_feature_tree: draper_topology::feature_history::FeatureTree::new(),
             brepcad_sketch_mode: false,
             brepcad_sketch_plane: 0, // XY
             brepcad_sketch_tool: 0, // Select
@@ -2279,6 +2284,45 @@ impl ViewerApp {
             return;
         }
         self.brepcad_push_undo_named("Extrude Sketch");
+
+        // Per BREPCAD Phase 1.3: also add to the real FeatureTree
+        // so the operation can be re-evaluated parametrically.
+        // Build a Polyline2d from the first rectangle entity (if any).
+        let mut profile_added = false;
+        for entity in &self.brepcad_sketch_entities {
+            if let BrepcadSketchEntity::Rectangle { p1, p2 } = entity {
+                let x1 = p1[0].min(p2[0]);
+                let x2 = p1[0].max(p2[0]);
+                let y1 = p1[1].min(p2[1]);
+                let y2 = p1[1].max(p2[1]);
+                let w = x2 - x1;
+                let h = y2 - y1;
+                if w > 1e-6 && h > 1e-6 {
+                    let profile = draper_topology::operations::Polyline2d::rectangle(w, h);
+                    let sketch_feature = draper_topology::feature_history::Feature::new(
+                        "sketch",
+                        draper_topology::feature_history::FeatureParams::Sketch { profile },
+                    );
+                    let sketch_id = self.brepcad_feature_tree.add_feature(sketch_feature);
+                    let extrude_feature = draper_topology::feature_history::Feature::new(
+                        "extrude",
+                        draper_topology::feature_history::FeatureParams::Extrude {
+                            sketch: sketch_id,
+                            distance,
+                            direction: [0.0, 0.0, 1.0],
+                        },
+                    );
+                    let extrude_id = self.brepcad_feature_tree.add_feature(extrude_feature);
+                    // Evaluate to produce the real solid
+                    self.brepcad_feature_tree.evaluate(extrude_id);
+                    profile_added = true;
+                    break; // Only first rectangle for now
+                }
+            }
+        }
+        if profile_added {
+            log::info!("FeatureTree: added Sketch+Extrude feature");
+        }
         let mut merged_mesh = TriangleMesh::new();
         let plane = self.brepcad_sketch_plane;
 
