@@ -6550,8 +6550,11 @@ impl eframe::App for ViewerApp {
 
                 // === Workspace switcher (left sidebar, mockup-style) ===
                 egui::SidePanel::left("brepcad_workspace_sidebar")
-                    .default_width(48.0)
+                    .default_width(44.0)
                     .resizable(false)
+                    .frame(egui::Frame::default()
+                        .fill(egui::Color32::from_rgb(0x11, 0x11, 0x1b))
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x31, 0x32, 0x44))))
                     .show(ctx, |ui| {
                         ui.vertical_centered(|ui| {
                             ui.add_space(4.0);
@@ -6583,6 +6586,9 @@ impl eframe::App for ViewerApp {
                     // ── VP Toolbar (below ribbon) ──
                     egui::TopBottomPanel::top("brepcad_vp_toolbar")
                         .exact_height(32.0)
+                        .frame(egui::Frame::default()
+                            .fill(egui::Color32::from_rgb(0x18, 0x18, 0x25))
+                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x31, 0x32, 0x44))))
                         .show(ctx, |ui| {
                             ui.horizontal(|ui| {
                                 if ui.button("Compute").clicked() {
@@ -6653,7 +6659,11 @@ impl eframe::App for ViewerApp {
                     egui::SidePanel::right("brepcad_vp_palette")
                         .default_width(220.0)
                         .min_width(180.0)
+                        .max_width(400.0)
                         .resizable(true)
+                        .frame(egui::Frame::default()
+                            .fill(egui::Color32::from_rgb(0x18, 0x18, 0x25))
+                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x31, 0x32, 0x44))))
                         .show(ctx, |ui| {
                             ui.heading("Node Palette");
                             ui.separator();
@@ -8370,8 +8380,12 @@ impl eframe::App for ViewerApp {
             // ── Left: Browser (Model Tree) ──
             egui::SidePanel::left("brepcad_browser")
                 .default_width(280.0)
-                .min_width(200.0)
+                .min_width(180.0)
+                .max_width(500.0)
                 .resizable(true)
+                .frame(egui::Frame::default()
+                    .fill(egui::Color32::from_rgb(0x18, 0x18, 0x25))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x31, 0x32, 0x44))))
                 .show(ctx, |ui| {
                     // Tab strip
                     ui.horizontal(|ui| {
@@ -8541,8 +8555,12 @@ impl eframe::App for ViewerApp {
             // ── Right: Properties ──
             egui::SidePanel::right("brepcad_properties")
                 .default_width(280.0)
-                .min_width(200.0)
+                .min_width(180.0)
+                .max_width(500.0)
                 .resizable(true)
+                .frame(egui::Frame::default()
+                    .fill(egui::Color32::from_rgb(0x18, 0x18, 0x25))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x31, 0x32, 0x44))))
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         ui.selectable_value(&mut self.brepcad_right_tab, BrepcadRightTab::Properties, "Props");
@@ -8751,6 +8769,9 @@ impl eframe::App for ViewerApp {
             // ── Bottom: Status bar ──
             egui::TopBottomPanel::bottom("brepcad_status_bar")
                 .exact_height(24.0)
+                .frame(egui::Frame::default()
+                    .fill(egui::Color32::from_rgb(0x11, 0x11, 0x1b))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x31, 0x32, 0x44))))
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         let cam_pos = self.camera.position();
@@ -8859,7 +8880,10 @@ impl eframe::App for ViewerApp {
 
         // === Central 3D viewport ===
         egui::CentralPanel::default()
-            .frame(egui::Frame::default().fill(egui::Color32::from_rgb(230, 230, 230)))
+            .frame(egui::Frame::default()
+                .fill(egui::Color32::from_rgb(0x1a, 0x1a, 0x2a))
+                .inner_margin(0)
+                .stroke(egui::Stroke::NONE))
             .show(ctx, |ui| {
                 let (rect, response) = ui.allocate_exact_size(
                     ui.available_size(),
