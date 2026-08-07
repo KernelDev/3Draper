@@ -16,6 +16,7 @@ members = [
     "crates/draper-subd",
     "crates/draper-compute",
     "crates/draper-sketch",
+    "crates/draper-fea",
     "crates/draper-testing",
     "crates/draper-json",
     "tools",
@@ -55,6 +56,7 @@ draper-implicit = { path = "crates/draper-implicit" }
 draper-subd = { path = "crates/draper-subd" }
 draper-compute = { path = "crates/draper-compute" }
 draper-sketch = { path = "crates/draper-sketch" }
+draper-fea = { path = "crates/draper-fea" }
 draper-testing = { path = "crates/draper-testing" }
 draper-json = { path = "crates/draper-json" }
 draper-wasm = { path = "crates/draper-wasm" }
