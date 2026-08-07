@@ -84,6 +84,7 @@ anyhow = "1"
 
 # Rendering
 egui = "0.31"
+egui_dock = "0.16"
 eframe = { version = "0.31", features = ["wgpu", "default_fonts"] }
 wgpu = "24"
 bytemuck = { version = "1", features = ["derive"] }

@@ -15,6 +15,7 @@ pub mod dialogs;
 pub mod core_engine;
 pub mod sketch;
 pub mod workspaces;
+pub mod dock;
 
 /// The active workspace/mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
