@@ -33,6 +33,11 @@ draper-json = { workspace = true }
 draper-implicit = { workspace = true }
 draper-subd = { workspace = true }
 draper-ai = { workspace = true }
+draper-sketch = { workspace = true }
+draper-fea = { workspace = true }
+draper-drawing = { workspace = true }
+draper-cam = { workspace = true }
+draper-sheetmetal = { workspace = true }
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu", "x11", "wayland"] }
 egui = { workspace = true }
 egui-wgpu = { version = "0.31" }
