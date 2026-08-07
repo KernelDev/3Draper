@@ -11,3 +11,4 @@ draper-topology = { workspace = true }
 draper-mesh = { workspace = true }
 draper-core = { workspace = true }
 log = { workspace = true }
+thiserror = { workspace = true }

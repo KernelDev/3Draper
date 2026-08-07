@@ -17,8 +17,12 @@ pub mod classifier;
 pub mod strategy;
 pub mod predictive;
 pub mod healing_ml;
+pub mod shape_from_text;
+pub mod design_review;
 
 pub use classifier::*;
 pub use strategy::*;
 pub use predictive::*;
 pub use healing_ml::*;
+pub use shape_from_text::*;
+pub use design_review::*;
