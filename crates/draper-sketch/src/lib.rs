@@ -44,6 +44,8 @@
 //! assert!((p2_final.y - 0.0).abs() < 1e-6); // p2.y forced to 0
 //! ```
 
+pub mod projection;
+
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 

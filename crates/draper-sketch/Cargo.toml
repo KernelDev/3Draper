@@ -9,6 +9,7 @@ repository.workspace = true
 nalgebra = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
+draper-geometry = { workspace = true }
 
 [dev-dependencies]
 approx = { workspace = true }
