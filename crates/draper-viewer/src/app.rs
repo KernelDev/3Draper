@@ -6571,119 +6571,301 @@ impl eframe::App for ViewerApp {
                                 if ui.add(btn).on_hover_text(*name).clicked() {
                                     self.brepcad_workspace = *ws;
                                     self.brepcad_status_msg = format!("Workspace: {}", name);
-                                    if *ws == crate::ui::Workspace::VisualProgramming {
-                                        self.brepcad_vp_panel_open = true;
-                                    }
                                 }
-                                ui.add_space(2.0);
                             }
                         });
                     });
 
-                // === Visual Programming Panel (mockup 03) ===
-                if self.brepcad_vp_panel_open || self.brepcad_workspace == crate::ui::Workspace::VisualProgramming {
-                    egui::SidePanel::left("brepcad_vp_panel")
-                        .default_width(280.0)
+                // === Visual Programming Workspace (mockup 03) ===
+                // Full-screen VP layout: Node Palette (right) + Canvas (center) + Toolbar (top)
+                if self.brepcad_workspace == crate::ui::Workspace::VisualProgramming {
+
+                    // ── VP Toolbar (below ribbon) ──
+                    egui::TopBottomPanel::top("brepcad_vp_toolbar")
+                        .exact_height(32.0)
+                        .show(ctx, |ui| {
+                            ui.horizontal(|ui| {
+                                if ui.button("Compute").clicked() {
+                                    self.brepcad_status_msg = format!("VP: computed {} nodes", self.brepcad_vp_graph.node_count());
+                                }
+                                if ui.button("Clear").clicked() {
+                                    self.brepcad_vp_graph = crate::ui::workspaces::VpGraph::new();
+                                    self.brepcad_status_msg = "VP: graph cleared".to_string();
+                                }
+                                ui.separator();
+                                if ui.button("Bake to Document").clicked() {
+                                    let mut created = 0;
+                                    for node in &self.brepcad_vp_graph.nodes {
+                                        match &node.node_type {
+                                            crate::ui::workspaces::NodeType::Box { width, height, depth } => {
+                                                let solid = draper_topology::ShapeBuilder::make_box(*width, *height, *depth);
+                                                self.current_solid = Some(solid);
+                                                created += 1;
+                                            }
+                                            crate::ui::workspaces::NodeType::Sphere { radius } => {
+                                                let solid = draper_topology::ShapeBuilder::make_sphere(*radius);
+                                                self.current_solid = Some(solid);
+                                                created += 1;
+                                            }
+                                            crate::ui::workspaces::NodeType::Cylinder { radius, height } => {
+                                                let solid = draper_topology::ShapeBuilder::make_cylinder(*radius, *height);
+                                                self.current_solid = Some(solid);
+                                                created += 1;
+                                            }
+                                            crate::ui::workspaces::NodeType::Cone { bottom_radius, height, .. } => {
+                                                let solid = draper_topology::ShapeBuilder::make_cone(*bottom_radius, *height, 0.5);
+                                                self.current_solid = Some(solid);
+                                                created += 1;
+                                            }
+                                            crate::ui::workspaces::NodeType::Torus { major_radius, minor_radius } => {
+                                                let solid = draper_topology::ShapeBuilder::make_torus(*major_radius, *minor_radius);
+                                                self.current_solid = Some(solid);
+                                                created += 1;
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    if created > 0 {
+                                        if let Some(ref solid) = self.current_solid {
+                                            let params = tri_params_for_lod(self.lod_level);
+                                            let mesh = triangulate_solid(solid, &params);
+                                            self.load_mesh(mesh, "VP Bake");
+                                        }
+                                        self.brepcad_status_msg = format!("VP: baked {} nodes to document", created);
+                                    } else {
+                                        self.brepcad_status_msg = "VP: no primitive nodes to bake".to_string();
+                                    }
+                                }
+                                ui.separator();
+                                ui.label(egui::RichText::new(format!("Nodes: {} | Connections: {}",
+                                    self.brepcad_vp_graph.node_count(),
+                                    self.brepcad_vp_graph.connection_count()))
+                                    .size(11.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
+                            });
+                        });
+
+                    // ── Node Palette (right side, per mockup 03) ──
+                    egui::SidePanel::right("brepcad_vp_palette")
+                        .default_width(250.0)
+                        .min_width(200.0)
                         .resizable(true)
                         .show(ctx, |ui| {
-                            ui.heading("Visual Programming");
+                            ui.heading("Node Palette");
                             ui.separator();
 
-                            ui.label(egui::RichText::new("Node Library").size(11.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
+                            // Search box
+                            ui.text_edit_singleline(&mut self.brepcad_tree_filter);
                             ui.separator();
 
-                            let node_types = [
-                                ("Box", crate::ui::workspaces::NodeType::Box { width: 50.0, height: 50.0, depth: 50.0 }),
-                                ("Sphere", crate::ui::workspaces::NodeType::Sphere { radius: 25.0 }),
-                                ("Cylinder", crate::ui::workspaces::NodeType::Cylinder { radius: 15.0, height: 50.0 }),
-                                ("Cone", crate::ui::workspaces::NodeType::Cone { bottom_radius: 20.0, top_radius: 0.0, height: 40.0 }),
-                                ("Torus", crate::ui::workspaces::NodeType::Torus { major_radius: 20.0, minor_radius: 5.0 }),
-                                ("Union", crate::ui::workspaces::NodeType::BooleanUnion),
-                                ("Subtract", crate::ui::workspaces::NodeType::BooleanSubtract),
-                                ("Intersect", crate::ui::workspaces::NodeType::BooleanIntersect),
-                                ("Fillet", crate::ui::workspaces::NodeType::Fillet { radius: 5.0, edges: "all".to_string() }),
-                                ("Chamfer", crate::ui::workspaces::NodeType::Chamfer { distance: 2.0, edges: "all".to_string() }),
-                                ("Linear Array", crate::ui::workspaces::NodeType::LinearArray { count: 3, spacing: 60.0, direction: [1.0, 0.0, 0.0] }),
-                                ("Circular Array", crate::ui::workspaces::NodeType::CircularArray { count: 6, axis: [0.0, 0.0, 1.0], angle: 360.0 }),
-                                ("Mirror", crate::ui::workspaces::NodeType::Mirror { plane: "YZ".to_string() }),
-                                ("Bake to Doc", crate::ui::workspaces::NodeType::BakeToDoc),
-                            ];
-
-                            for (label, node_type) in &node_types {
-                                if ui.small_button(*label).clicked() {
-                                    let id = self.brepcad_vp_graph.add_node(node_type.clone(),
-                                        50.0 + (self.brepcad_vp_graph.node_count() as f32) * 30.0,
-                                        50.0);
-                                    self.brepcad_status_msg = format!("Added node: {} (id={})", label, id);
-                                }
-                            }
-
-                            ui.separator();
-                            ui.label(egui::RichText::new("Graph").size(11.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
-                            ui.label(format!("Nodes: {}", self.brepcad_vp_graph.node_count()));
-                            ui.label(format!("Connections: {}", self.brepcad_vp_graph.connection_count()));
-
-                            ui.separator();
+                            // Categories with nodes (matching mockup 03 layout)
                             egui::ScrollArea::vertical().show(ui, |ui| {
-                                for node in &self.brepcad_vp_graph.nodes {
-                                    let label = node.node_type.label();
-                                    ui.horizontal(|ui| {
-                                        ui.label(format!("#{} {}", node.id, label));
-                                    });
+                                // Primitives
+                                ui.label(egui::RichText::new("Primitives").size(11.0).color(egui::Color32::from_rgb(0x89, 0xb4, 0xfa)).strong());
+                                let prims = [
+                                    ("Box", crate::ui::workspaces::NodeType::Box { width: 100.0, height: 100.0, depth: 100.0 }),
+                                    ("Sphere", crate::ui::workspaces::NodeType::Sphere { radius: 50.0 }),
+                                    ("Cylinder", crate::ui::workspaces::NodeType::Cylinder { radius: 25.0, height: 100.0 }),
+                                    ("Cone", crate::ui::workspaces::NodeType::Cone { bottom_radius: 30.0, top_radius: 0.0, height: 80.0 }),
+                                    ("Torus", crate::ui::workspaces::NodeType::Torus { major_radius: 30.0, minor_radius: 8.0 }),
+                                ];
+                                for (label, nt) in &prims {
+                                    let filtered = !self.brepcad_tree_filter.is_empty()
+                                        && !label.to_lowercase().contains(&self.brepcad_tree_filter.to_lowercase());
+                                    if !filtered && ui.add(egui::Button::new(*label).min_size(egui::vec2(200.0, 22.0))).clicked() {
+                                        let id = self.brepcad_vp_graph.add_node(nt.clone(),
+                                            60.0 + (self.brepcad_vp_graph.node_count() as f32 % 3.0) * 180.0,
+                                            160.0 + (self.brepcad_vp_graph.node_count() as f32 / 3.0).floor() * 120.0);
+                                        self.brepcad_status_msg = format!("VP: added {} (id={})", label, id);
+                                    }
                                 }
+
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new("Modify").size(11.0).color(egui::Color32::from_rgb(0xf9, 0xe2, 0xaf)).strong());
+                                let mods = [
+                                    ("Fillet", crate::ui::workspaces::NodeType::Fillet { radius: 5.0, edges: "all".to_string() }),
+                                    ("Chamfer", crate::ui::workspaces::NodeType::Chamfer { distance: 2.0, edges: "all".to_string() }),
+                                    ("Linear Array", crate::ui::workspaces::NodeType::LinearArray { count: 3, spacing: 120.0, direction: [1.0, 0.0, 0.0] }),
+                                    ("Circular Array", crate::ui::workspaces::NodeType::CircularArray { count: 6, axis: [0.0, 0.0, 1.0], angle: 360.0 }),
+                                    ("Mirror", crate::ui::workspaces::NodeType::Mirror { plane: "YZ".to_string() }),
+                                ];
+                                for (label, nt) in &mods {
+                                    let filtered = !self.brepcad_tree_filter.is_empty()
+                                        && !label.to_lowercase().contains(&self.brepcad_tree_filter.to_lowercase());
+                                    if !filtered && ui.add(egui::Button::new(*label).min_size(egui::vec2(200.0, 22.0))).clicked() {
+                                        let id = self.brepcad_vp_graph.add_node(nt.clone(),
+                                            60.0 + (self.brepcad_vp_graph.node_count() as f32 % 3.0) * 180.0,
+                                            160.0 + (self.brepcad_vp_graph.node_count() as f32 / 3.0).floor() * 120.0);
+                                        self.brepcad_status_msg = format!("VP: added {} (id={})", label, id);
+                                    }
+                                }
+
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new("Boolean").size(11.0).color(egui::Color32::from_rgb(0xcb, 0xa6, 0xf7)).strong());
+                                let bools = [
+                                    ("Union", crate::ui::workspaces::NodeType::BooleanUnion),
+                                    ("Subtract", crate::ui::workspaces::NodeType::BooleanSubtract),
+                                    ("Intersect", crate::ui::workspaces::NodeType::BooleanIntersect),
+                                ];
+                                for (label, nt) in &bools {
+                                    let filtered = !self.brepcad_tree_filter.is_empty()
+                                        && !label.to_lowercase().contains(&self.brepcad_tree_filter.to_lowercase());
+                                    if !filtered && ui.add(egui::Button::new(*label).min_size(egui::vec2(200.0, 22.0))).clicked() {
+                                        let id = self.brepcad_vp_graph.add_node(nt.clone(),
+                                            60.0 + (self.brepcad_vp_graph.node_count() as f32 % 3.0) * 180.0,
+                                            160.0 + (self.brepcad_vp_graph.node_count() as f32 / 3.0).floor() * 120.0);
+                                        self.brepcad_status_msg = format!("VP: added {} (id={})", label, id);
+                                    }
+                                }
+
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new("Output").size(11.0).color(egui::Color32::from_rgb(0xf3, 0x8b, 0xa8)).strong());
+                                if ui.add(egui::Button::new("Bake to Doc").min_size(egui::vec2(200.0, 22.0))).clicked() {
+                                    let id = self.brepcad_vp_graph.add_node(
+                                        crate::ui::workspaces::NodeType::BakeToDoc, 900.0, 520.0);
+                                    self.brepcad_status_msg = format!("VP: added Bake to Doc (id={})", id);
+                                }
+
+                                ui.add_space(8.0);
+                                // Live preview indicator
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("Live Preview: ON")
+                                        .size(10.0).color(egui::Color32::from_rgb(0xa6, 0xe3, 0xa1)).strong());
+                                });
                             });
-
-                            ui.separator();
-
-                            if ui.button("Bake to Document").clicked() {
-                                let mut created = 0;
-                                for node in &self.brepcad_vp_graph.nodes {
-                                    match &node.node_type {
-                                        crate::ui::workspaces::NodeType::Box { width, height, depth } => {
-                                            let solid = draper_topology::ShapeBuilder::make_box(*width, *height, *depth);
-                                            self.current_solid = Some(solid);
-                                            created += 1;
-                                        }
-                                        crate::ui::workspaces::NodeType::Sphere { radius } => {
-                                            let solid = draper_topology::ShapeBuilder::make_sphere(*radius);
-                                            self.current_solid = Some(solid);
-                                            created += 1;
-                                        }
-                                        crate::ui::workspaces::NodeType::Cylinder { radius, height } => {
-                                            let solid = draper_topology::ShapeBuilder::make_cylinder(*radius, *height);
-                                            self.current_solid = Some(solid);
-                                            created += 1;
-                                        }
-                                        crate::ui::workspaces::NodeType::Cone { bottom_radius, height, .. } => {
-                                            let solid = draper_topology::ShapeBuilder::make_cone(*bottom_radius, *height, 0.5);
-                                            self.current_solid = Some(solid);
-                                            created += 1;
-                                        }
-                                        crate::ui::workspaces::NodeType::Torus { major_radius, minor_radius } => {
-                                            let solid = draper_topology::ShapeBuilder::make_torus(*major_radius, *minor_radius);
-                                            self.current_solid = Some(solid);
-                                            created += 1;
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                if created > 0 {
-                                    if let Some(ref solid) = self.current_solid {
-                                        let params = tri_params_for_lod(self.lod_level);
-                                        let mesh = triangulate_solid(solid, &params);
-                                        self.load_mesh(mesh, "VP Bake");
-                                    }
-                                    self.brepcad_status_msg = format!("Baked {} nodes to document", created);
-                                } else {
-                                    self.brepcad_status_msg = "No primitive nodes to bake".to_string();
-                                }
-                            }
-
-                            if ui.small_button("Clear Graph").clicked() {
-                                self.brepcad_vp_graph = crate::ui::workspaces::VpGraph::new();
-                                self.brepcad_status_msg = "Graph cleared".to_string();
-                            }
                         });
+
+                    // ── VP Canvas (center area — draws nodes) ──
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let (rect, _response) = ui.allocate_at_least(ui.available_size(), egui::Sense::drag());
+
+                        // Draw grid background (dotted)
+                        let painter = ui.painter();
+                        let grid_spacing = 40.0;
+                        let mut x = rect.min.x;
+                        while x < rect.max.x {
+                            let mut y = rect.min.y;
+                            while y < rect.max.y {
+                                painter.circle_filled(egui::pos2(x, y), 1.0,
+                                    egui::Color32::from_rgba_premultiplied(0x89, 0xb4, 0xfa, 10));
+                                y += grid_spacing;
+                            }
+                            x += grid_spacing;
+                        }
+
+                        // Draw nodes as colored rectangles (matching mockup 03 style)
+                        let node_w = 140.0_f32;
+                        let node_h = 80.0_f32;
+                        for node in &self.brepcad_vp_graph.nodes {
+                            let pos = egui::pos2(rect.min.x + node.x, rect.min.y + node.y);
+                            let node_rect = egui::Rect::from_min_size(pos, egui::vec2(node_w, node_h));
+
+                            // Color by category
+                            let (header_color, border_color) = match &node.node_type {
+                                crate::ui::workspaces::NodeType::Box { .. }
+                                | crate::ui::workspaces::NodeType::Sphere { .. }
+                                | crate::ui::workspaces::NodeType::Cylinder { .. }
+                                | crate::ui::workspaces::NodeType::Cone { .. }
+                                | crate::ui::workspaces::NodeType::Torus { .. } => {
+                                    (egui::Color32::from_rgb(0x89, 0xb4, 0xfa), egui::Color32::from_rgb(0x89, 0xb4, 0xfa))
+                                }
+                                crate::ui::workspaces::NodeType::Fillet { .. }
+                                | crate::ui::workspaces::NodeType::Chamfer { .. }
+                                | crate::ui::workspaces::NodeType::LinearArray { .. }
+                                | crate::ui::workspaces::NodeType::CircularArray { .. }
+                                | crate::ui::workspaces::NodeType::Mirror { .. } => {
+                                    (egui::Color32::from_rgb(0xf9, 0xe2, 0xaf), egui::Color32::from_rgb(0xf9, 0xe2, 0xaf))
+                                }
+                                crate::ui::workspaces::NodeType::BooleanUnion
+                                | crate::ui::workspaces::NodeType::BooleanSubtract
+                                | crate::ui::workspaces::NodeType::BooleanIntersect => {
+                                    (egui::Color32::from_rgb(0xcb, 0xa6, 0xf7), egui::Color32::from_rgb(0xcb, 0xa6, 0xf7))
+                                }
+                                crate::ui::workspaces::NodeType::BakeToDoc => {
+                                    (egui::Color32::from_rgb(0xf3, 0x8b, 0xa8), egui::Color32::from_rgb(0xf3, 0x8b, 0xa8))
+                                }
+                                _ => {
+                                    (egui::Color32::from_rgb(0xa6, 0xe3, 0xa1), egui::Color32::from_rgb(0xa6, 0xe3, 0xa1))
+                                }
+                            };
+
+                            // Node body
+                            painter.rect_filled(node_rect, 8.0, egui::Color32::from_rgb(0x31, 0x32, 0x44));
+                            painter.rect_stroke(node_rect, 8.0, egui::Stroke::new(2.0, border_color), egui::StrokeKind::Outside);
+
+                            // Header bar
+                            let header_rect = egui::Rect::from_min_size(pos, egui::vec2(node_w, 24.0));
+                            painter.rect_filled(header_rect, 8.0, header_color);
+
+                            // Node title
+                            let label = node.node_type.label();
+                            painter.text(
+                                node_rect.center_top() + egui::vec2(0.0, 16.0),
+                                egui::Align2::CENTER_CENTER,
+                                label,
+                                egui::FontId::proportional(11.0),
+                                egui::Color32::from_rgb(0x1e, 0x1e, 0x2e),
+                            );
+
+                            // Node params (simplified)
+                            let params_text = match &node.node_type {
+                                crate::ui::workspaces::NodeType::Box { width, height, depth } => {
+                                    format!("W:{} H:{} D:{}", *width as u32, *height as u32, *depth as u32)
+                                }
+                                crate::ui::workspaces::NodeType::Sphere { radius } => format!("R:{}", *radius as u32),
+                                crate::ui::workspaces::NodeType::Cylinder { radius, height } => format!("R:{} H:{}", *radius as u32, *height as u32),
+                                _ => String::new(),
+                            };
+                            if !params_text.is_empty() {
+                                painter.text(
+                                    node_rect.left_top() + egui::vec2(10.0, 40.0),
+                                    egui::Align2::LEFT_TOP,
+                                    &params_text,
+                                    egui::FontId::proportional(9.0),
+                                    egui::Color32::from_rgb(0xa6, 0xad, 0xc8),
+                                );
+                            }
+
+                            // Output port (right side)
+                            let port_pos = egui::pos2(node_rect.right(), node_rect.center().y);
+                            painter.circle_filled(port_pos, 6.0, header_color);
+                            painter.circle_stroke(port_pos, 6.0, egui::Stroke::new(2.0, egui::Color32::from_rgb(0x1e, 0x1e, 0x2e)));
+
+                            // Node ID
+                            painter.text(
+                                node_rect.left_top() + egui::vec2(10.0, 28.0),
+                                egui::Align2::LEFT_TOP,
+                                format!("#{}", node.id),
+                                egui::FontId::proportional(8.0),
+                                egui::Color32::from_rgb(0x6c, 0x70, 0x86),
+                            );
+                        }
+
+                        // Draw connections as bezier curves
+                        for conn in &self.brepcad_vp_graph.connections {
+                            let from_node = self.brepcad_vp_graph.nodes.iter().find(|n| n.id == conn.from_node);
+                            let to_node = self.brepcad_vp_graph.nodes.iter().find(|n| n.id == conn.to_node);
+                            if let (Some(from), Some(to)) = (from_node, to_node) {
+                                let from_pos = egui::pos2(rect.min.x + from.x + node_w, rect.min.y + from.y + node_h * 0.5);
+                                let to_pos = egui::pos2(rect.min.x + to.x, rect.min.y + to.y + node_h * 0.5);
+                                let mid_x = (from_pos.x + to_pos.x) * 0.5;
+                                let ctrl1 = egui::pos2(mid_x, from_pos.y);
+                                let ctrl2 = egui::pos2(mid_x, to_pos.y);
+                        // Draw connection as simple line for now
+                        painter.line_segment([from_pos, to_pos], egui::Stroke::new(2.0, egui::Color32::from_rgba_premultiplied(0x89, 0xb4, 0xfa, 180)));
+                            }
+                        }
+
+                        // Help text when empty
+                        if self.brepcad_vp_graph.nodes.is_empty() {
+                            painter.text(
+                                rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "Double-click a node in the palette to add it to the canvas",
+                                egui::FontId::proportional(14.0),
+                                egui::Color32::from_rgb(0x6c, 0x70, 0x86),
+                            );
+                        }
+                    });
                 }
             } else {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
