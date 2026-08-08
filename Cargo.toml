@@ -12,6 +12,7 @@ members = [
     "crates/draper-viewer",
     "crates/draper-cloud",
     "crates/draper-ai",
+    "crates/draper-compute",
     "crates/draper-testing",
     "crates/draper-json",
     "tools",
@@ -47,6 +48,7 @@ draper-mesh = { path = "crates/draper-mesh", default-features = false }
 draper-core = { path = "crates/draper-core" }
 draper-cloud = { path = "crates/draper-cloud" }
 draper-ai = { path = "crates/draper-ai" }
+draper-compute = { path = "crates/draper-compute" }
 draper-testing = { path = "crates/draper-testing" }
 draper-json = { path = "crates/draper-json" }
 draper-wasm = { path = "crates/draper-wasm" }

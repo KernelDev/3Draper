@@ -20,6 +20,7 @@ pub mod stream;
 pub mod incremental;
 pub mod server;
 pub mod collab;
+pub mod ws_sync;
 
 // Re-export primary types from each module for convenience.
 pub use stream::{
@@ -39,4 +40,9 @@ pub use server::{
 pub use collab::{
     CollabSession, ConflictResolution, Operation, OperationalTransform,
     PendingOperation, TransformedOperation, VersionVector,
+};
+
+pub use ws_sync::{
+    CollabServer, SyncMessage, WebSocketError, WebSocketFrame,
+    parse_frame, write_close_frame, write_text_frame,
 };
