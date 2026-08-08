@@ -310,6 +310,232 @@ impl Drawing {
             dimensions: (max_x - min_x, max_y - min_y, max_z - min_z),
         })
     }
+
+    /// Create a drawing with HLR (Hidden Line Removal) applied to all views.
+    ///
+    /// Per FLEXIBLE_EXECUTION_PLAN task B2: uses ray-triangle intersection
+    /// to determine which edges are occluded.
+    pub fn from_mesh_with_hlr(
+        mesh: &TriangleMesh,
+        title: &str,
+        config: &hlr::HlrConfig,
+    ) -> Result<Self, DrawingError> {
+        let front = hlr::drawing_view_with_hlr(mesh, ViewType::Front, config)?;
+        let top = hlr::drawing_view_with_hlr(mesh, ViewType::Top, config)?;
+        let right = hlr::drawing_view_with_hlr(mesh, ViewType::Right, config)?;
+        let iso = hlr::drawing_view_with_hlr(mesh, ViewType::Isometric, config)?;
+
+        let mut min_x = f64::INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut min_z = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+        let mut max_z = f64::NEG_INFINITY;
+        for v in &mesh.vertices {
+            if v.x < min_x { min_x = v.x; }
+            if v.x > max_x { max_x = v.x; }
+            if v.y < min_y { min_y = v.y; }
+            if v.y > max_y { max_y = v.y; }
+            if v.z < min_z { min_z = v.z; }
+            if v.z > max_z { max_z = v.z; }
+        }
+
+        Ok(Drawing {
+            views: vec![front, top, right, iso],
+            title: title.to_string(),
+            scale: 1.0,
+            paper_size: PaperSize::A3,
+            dimensions: (max_x - min_x, max_y - min_y, max_z - min_z),
+        })
+    }
+
+    /// Re-compute dimensions from a (possibly updated) mesh.
+    ///
+    /// Per FLEXIBLE_EXECUTION_PLAN task B3: implements **associative
+    /// dimensions** — when the 3D model changes, calling this method
+    /// updates the drawing's overall dimensions to match.
+    pub fn update_dimensions_from_mesh(&mut self, mesh: &TriangleMesh) {
+        let mut min_x = f64::INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut min_z = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+        let mut max_z = f64::NEG_INFINITY;
+        for v in &mesh.vertices {
+            if v.x < min_x { min_x = v.x; }
+            if v.x > max_x { max_x = v.x; }
+            if v.y < min_y { min_y = v.y; }
+            if v.y > max_y { max_y = v.y; }
+            if v.z < min_z { min_z = v.z; }
+            if v.z > max_z { max_z = v.z; }
+        }
+        self.dimensions = (max_x - min_x, max_y - min_y, max_z - min_z);
+    }
+
+    /// Re-generate all views from a (possibly updated) mesh, preserving
+    /// the drawing's title, scale, and paper size.
+    ///
+    /// Per FLEXIBLE_EXECUTION_PLAN task B3: this is the full
+    /// **associative update** — when the 3D model changes, calling
+    /// this method regenerates all projected views (including HLR if
+    /// `use_hlr` is true) and updates the overall dimensions.
+    pub fn regenerate_views(
+        &mut self,
+        mesh: &TriangleMesh,
+        use_hlr: bool,
+        hlr_config: &hlr::HlrConfig,
+    ) -> Result<(), DrawingError> {
+        let mut new_views = Vec::with_capacity(self.views.len());
+        for view in &self.views {
+            let vt = view.view_type;
+            let new_view = if use_hlr {
+                hlr::drawing_view_with_hlr(mesh, vt, hlr_config)?
+            } else {
+                DrawingView::from_mesh(mesh, vt)?
+            };
+            new_views.push(new_view);
+        }
+        self.views = new_views;
+        self.update_dimensions_from_mesh(mesh);
+        Ok(())
+    }
+
+    /// Export the drawing to PDF format.
+    ///
+    /// Per FLEXIBLE_EXECUTION_PLAN task B4: generates a minimal PDF 1.4
+    /// file with vector graphics (lines, text) for printing.
+    /// No external dependencies required.
+    pub fn to_pdf(&self) -> Result<String, DrawingError> {
+        let (paper_w_mm, paper_h_mm) = self.paper_size.dimensions();
+        let paper_w = mm_to_pt(paper_w_mm);
+        let paper_h = mm_to_pt(paper_h_mm);
+        let scale = self.scale;
+        let mm_to_pt_scaled = |mm: f64| -> f64 { mm_to_pt(mm) * scale };
+
+        // Build the content stream
+        let mut content = String::new();
+        content.push_str("q\n");
+
+        // Background
+        content.push_str(&format!("0 0 {} {} re\n", paper_w, paper_h));
+        content.push_str("1 1 1 rg\nf\n");
+        content.push_str("0 0 0 RG\n0.5 w\nS\n");
+
+        // Title block
+        let tb_w = mm_to_pt(120.0);
+        let tb_h = mm_to_pt(40.0);
+        let tb_x = paper_w - tb_w - mm_to_pt(20.0);
+        let tb_y = mm_to_pt(20.0);
+        content.push_str(&format!("{} {} {} {} re\n0.25 w\nS\n", tb_x, tb_y, tb_w, tb_h));
+
+        // Title text
+        content.push_str("BT\n/F1 7 Tf\n");
+        content.push_str(&format!("{} {} Td\n", tb_x + 3.0, tb_y + tb_h - 10.0));
+        content.push_str(&format!("(Title: {}) Tj\nET\n", escape_pdf_string(&self.title)));
+
+        content.push_str("BT\n/F1 5 Tf\n");
+        content.push_str(&format!("{} {} Td\n", tb_x + 3.0, tb_y + tb_h - 20.0));
+        content.push_str(&format!("(Scale: 1:{}) Tj\nET\n", (1.0 / scale).round() as i64));
+        content.push_str("BT\n/F1 5 Tf\n");
+        content.push_str(&format!("{} {} Td\n", tb_x + 3.0, tb_y + tb_h - 30.0));
+        content.push_str(&format!(
+            "(Dimensions: {:.1} x {:.1} x {:.1} mm) Tj\nET\n",
+            self.dimensions.0, self.dimensions.1, self.dimensions.2
+        ));
+
+        // Layout views
+        let view_spacing = mm_to_pt(10.0);
+        let center_x = paper_w * 0.4;
+        let center_y = paper_h * 0.5;
+
+        for view in &self.views {
+            let (offset_x, offset_y) = match view.view_type {
+                ViewType::Front => (0.0, 0.0),
+                ViewType::Top => (0.0, mm_to_pt_scaled(view.height()) + view_spacing),
+                ViewType::Right => (mm_to_pt_scaled(view.width()) + view_spacing, 0.0),
+                ViewType::Isometric => (mm_to_pt(80.0), mm_to_pt_scaled(view.height()) + view_spacing),
+            };
+
+            let tx = center_x + offset_x - mm_to_pt_scaled(view.bbox.0);
+            let ty = center_y + offset_y - mm_to_pt_scaled(view.bbox.1);
+
+            // Visible edges (solid)
+            content.push_str("0 0 0 RG\n0.5 w\n");
+            for &((x1, y1), (x2, y2)) in &view.visible_edges {
+                let px1 = tx + mm_to_pt_scaled(x1);
+                let py1 = ty + mm_to_pt_scaled(y1);
+                let px2 = tx + mm_to_pt_scaled(x2);
+                let py2 = ty + mm_to_pt_scaled(y2);
+                content.push_str(&format!("{:.2} {:.2} m\n{:.2} {:.2} l\nS\n", px1, py1, px2, py2));
+            }
+
+            // Hidden edges (dashed)
+            content.push_str("[2 1] 0 d\n0.25 w\n");
+            for &((x1, y1), (x2, y2)) in &view.hidden_edges {
+                let px1 = tx + mm_to_pt_scaled(x1);
+                let py1 = ty + mm_to_pt_scaled(y1);
+                let px2 = tx + mm_to_pt_scaled(x2);
+                let py2 = ty + mm_to_pt_scaled(y2);
+                content.push_str(&format!("{:.2} {:.2} m\n{:.2} {:.2} l\nS\n", px1, py1, px2, py2));
+            }
+            content.push_str("[] 0 d\n");
+        }
+
+        content.push_str("Q\n");
+
+        // Build PDF objects
+        let mut objects = Vec::new();
+        objects.push("<< /Type /Catalog /Pages 2 0 R >>\n".to_string());
+        objects.push("<< /Type /Pages /Kids [3 0 R] /Count 1 >>\n".to_string());
+        objects.push(format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\n",
+            paper_w, paper_h
+        ));
+        objects.push(format!("<< /Length {} >>\nstream\n{}\nendstream\n", content.len(), content));
+        objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\n".to_string());
+
+        // Assemble PDF
+        let mut pdf = String::new();
+        pdf.push_str("%PDF-1.4\n%\u{E2}\u{E3}\u{CF}\u{D3}\n");
+        let mut offsets = Vec::new();
+        let mut current_offset = pdf.len();
+        for (i, obj) in objects.iter().enumerate() {
+            offsets.push(current_offset);
+            let obj_str = format!("{} 0 obj\n{}endobj\n", i + 1, obj);
+            pdf.push_str(&obj_str);
+            current_offset += obj_str.len();
+        }
+        let xref_offset = pdf.len();
+        pdf.push_str(&format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1));
+        for offset in &offsets {
+            pdf.push_str(&format!("{:010} 00000 n \n", offset));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+            objects.len() + 1, xref_offset
+        ));
+        Ok(pdf)
+    }
+}
+
+/// Convert millimeters to PDF points (1 pt = 1/72 inch, 1 inch = 25.4 mm).
+fn mm_to_pt(mm: f64) -> f64 {
+    mm * 72.0 / 25.4
+}
+
+/// Escape a string for use inside a PDF literal string `(...)`.
+fn escape_pdf_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for c in s.chars() {
+        match c {
+            '(' | ')' | '\\' => { out.push('\\'); out.push(c); }
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 // ============================================================
@@ -627,5 +853,89 @@ mod tests {
         // Right view: Y × Z = 20 × 5
         assert!((view.width() - 20.0).abs() < 1e-6);
         assert!((view.height() - 5.0).abs() < 1e-6);
+    }
+
+    // ─── B3: Associative Dimensions tests ───
+
+    #[test]
+    fn test_drawing_with_hlr() {
+        let mesh = make_box_mesh(10.0, 20.0, 5.0);
+        let config = hlr::HlrConfig::default();
+        let drawing = Drawing::from_mesh_with_hlr(&mesh, "HLR Drawing", &config).unwrap();
+        assert_eq!(drawing.views.len(), 4);
+        for view in &drawing.views {
+            assert!(!view.hidden_edges.is_empty(),
+                "View {:?} should have hidden edges", view.view_type);
+        }
+    }
+
+    #[test]
+    fn test_associative_dimension_update() {
+        let mesh = make_box_mesh(10.0, 20.0, 5.0);
+        let mut drawing = Drawing::from_mesh(&mesh, "Test").unwrap();
+        assert!((drawing.dimensions.0 - 10.0).abs() < 1e-6);
+        let new_mesh = make_box_mesh(30.0, 40.0, 15.0);
+        drawing.update_dimensions_from_mesh(&new_mesh);
+        assert!((drawing.dimensions.0 - 30.0).abs() < 1e-6);
+        assert!((drawing.dimensions.1 - 40.0).abs() < 1e-6);
+        assert!((drawing.dimensions.2 - 15.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_regenerate_views_with_new_mesh() {
+        let mesh = make_box_mesh(10.0, 20.0, 5.0);
+        let mut drawing = Drawing::from_mesh(&mesh, "Original").unwrap();
+        assert!((drawing.views[0].width() - 10.0).abs() < 1e-6);
+        let new_mesh = make_box_mesh(50.0, 60.0, 25.0);
+        let config = hlr::HlrConfig::default();
+        drawing.regenerate_views(&new_mesh, false, &config).unwrap();
+        assert!((drawing.views[0].width() - 50.0).abs() < 1e-6);
+        assert!((drawing.dimensions.0 - 50.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_regenerate_views_with_hlr() {
+        let mesh = make_box_mesh(10.0, 20.0, 5.0);
+        let mut drawing = Drawing::from_mesh(&mesh, "Original").unwrap();
+        assert!(drawing.views[0].hidden_edges.is_empty());
+        let new_mesh = make_box_mesh(10.0, 20.0, 5.0);
+        let config = hlr::HlrConfig::default();
+        drawing.regenerate_views(&new_mesh, true, &config).unwrap();
+        assert!(!drawing.views[0].hidden_edges.is_empty(),
+            "Regenerated view with HLR should have hidden edges");
+    }
+
+    // ─── B4: PDF Export tests ───
+
+    #[test]
+    fn test_pdf_export_basic() {
+        let mesh = make_box_mesh(10.0, 20.0, 5.0);
+        let drawing = Drawing::from_mesh(&mesh, "PDF Test").unwrap();
+        let pdf = drawing.to_pdf().unwrap();
+        assert!(pdf.starts_with("%PDF-1.4"));
+        assert!(pdf.contains("%%EOF"));
+        assert!(pdf.contains("xref"));
+        assert!(pdf.contains("/Type /Catalog"));
+        assert!(pdf.contains("/Type /Page"));
+        assert!(pdf.contains("PDF Test"));
+    }
+
+    #[test]
+    fn test_pdf_has_dashed_hidden_lines() {
+        let mesh = make_box_mesh(10.0, 20.0, 5.0);
+        let config = hlr::HlrConfig::default();
+        let drawing = Drawing::from_mesh_with_hlr(&mesh, "HLR PDF", &config).unwrap();
+        let pdf = drawing.to_pdf().unwrap();
+        assert!(pdf.contains("[2 1] 0 d"), "PDF should have dashed lines for hidden edges");
+    }
+
+    #[test]
+    fn test_pdf_dimensions_in_title_block() {
+        let mesh = make_box_mesh(15.0, 25.0, 8.0);
+        let drawing = Drawing::from_mesh(&mesh, "Dim Test").unwrap();
+        let pdf = drawing.to_pdf().unwrap();
+        assert!(pdf.contains("15.0"));
+        assert!(pdf.contains("25.0"));
+        assert!(pdf.contains("8.0"));
     }
 }
