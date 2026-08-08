@@ -489,13 +489,13 @@ START
 
 ## Progress Tracking
 
-- [ ] A1: Timeline Real Rebuild (P0)
-- [ ] A2: Sketch 3D Projection (P0)
-- [ ] A3: Sweep Wire Along Curve (P0)
-- [ ] A4: Loft Between Wires (P1)
-- [ ] A5: Revolve Wire (P1)
-- [ ] B1: Assembly Rotations Fix (P0)
-- [ ] B2: Drawing HLR (P0)
+- [x] A1: Timeline Real Rebuild (P0) — already implemented (evaluate() calls real operations)
+- [x] A2: Sketch 3D Projection (P0) — already implemented (projection.rs with project_curve, project_edge_to_sketch)
+- [x] A3: Sweep Wire Along Curve (P0) — already implemented (sweep_polyline with Frenet-Serret frames)
+- [x] A4: Loft Between Wires (P1) — already implemented (loft_polylines)
+- [x] A5: Revolve Wire (P1) — already implemented (revolve_polyline)
+- [x] B1: Assembly Rotations Fix (P0) — apply_state() now applies rotation via set_rotation_vec()
+- [x] B2: Drawing HLR (P0) — hlr.rs with Möller-Trumbore ray casting, 7 tests
 - [ ] B3: Associative Dimensions (P1)
 - [ ] B4: PDF Export (P2)
 - [ ] C1: LLM Backend Integration (P1)

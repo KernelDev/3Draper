@@ -22,6 +22,10 @@
 use draper_geometry::{Point3d, Vec3d, Direction3d, Transform};
 use nalgebra::{DMatrix, DVector};
 
+pub mod rotation;
+
+use rotation::{RotationVec, rotation_matrix_to_vec};
+
 // ============================================================
 // Error types
 // ============================================================
@@ -93,6 +97,35 @@ impl Component {
         self.transform.m[0][3] = x;
         self.transform.m[1][3] = y;
         self.transform.m[2][3] = z;
+    }
+
+    /// Set the rotation part of the transform from a rotation vector
+    /// `(rx, ry, rz)` (axis × angle). Translation is preserved.
+    pub fn set_rotation_vec(&mut self, rx: f64, ry: f64, rz: f64) {
+        let r = RotationVec::new(rx, ry, rz);
+        let m = r.to_matrix();
+        // Preserve translation column
+        let tx = self.transform.m[0][3];
+        let ty = self.transform.m[1][3];
+        let tz = self.transform.m[2][3];
+        self.transform.m = [
+            [m[0][0], m[0][1], m[0][2], tx],
+            [m[1][0], m[1][1], m[1][2], ty],
+            [m[2][0], m[2][1], m[2][2], tz],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+    }
+
+    /// Extract the rotation vector from the current transform.
+    pub fn rotation_vec(&self) -> (f64, f64, f64) {
+        rotation_matrix_to_vec(&self.transform.m)
+    }
+
+    /// Set pose from a 6-element state vector `[tx, ty, tz, rx, ry, rz]`.
+    pub fn set_pose(&mut self, state: &[f64]) {
+        debug_assert!(state.len() >= 6, "state vector must have at least 6 elements");
+        self.set_translation(state[0], state[1], state[2]);
+        self.set_rotation_vec(state[3], state[4], state[5]);
     }
 }
 
@@ -326,14 +359,14 @@ impl AssemblySolver {
         for &(comp_id, base) in &free_indices {
             let comp = &assembly.components[comp_id];
             let (tx, ty, tz) = comp.translation();
+            let (rx, ry, rz) = comp.rotation_vec();
             state[base] = tx;
             state[base + 1] = ty;
             state[base + 2] = tz;
-            // Rotation: extract from transform (simplified — use Euler angles)
-            // For now, assume identity rotation (0, 0, 0)
-            state[base + 3] = 0.0;
-            state[base + 4] = 0.0;
-            state[base + 5] = 0.0;
+            // Rotation: extract rotation vector from current transform
+            state[base + 3] = rx;
+            state[base + 4] = ry;
+            state[base + 5] = rz;
         }
 
         // Newton-Raphson iteration
@@ -523,7 +556,8 @@ impl AssemblySolver {
         for &(comp_id, base) in free_indices {
             let comp = &mut assembly.components[comp_id];
             comp.set_translation(state[base], state[base + 1], state[base + 2]);
-            // Rotation application would go here (Euler angles → quaternion → Transform)
+            // Apply rotation from state vector (rx, ry, rz = rotation vector)
+            comp.set_rotation_vec(state[base + 3], state[base + 4], state[base + 5]);
         }
     }
 }
@@ -678,5 +712,52 @@ mod tests {
         let mut solver = AssemblySolver::new();
         let _ = solver.solve(&mut asm);
         // Should not panic
+    }
+
+    #[test]
+    fn test_rotation_vec_set_and_get() {
+        let mut comp = Component::new(0, "Test");
+        // Set rotation by π/4 around Z
+        let angle = std::f64::consts::FRAC_PI_4;
+        comp.set_rotation_vec(0.0, 0.0, angle);
+        let (rx, ry, rz) = comp.rotation_vec();
+        // Round-trip should preserve the rotation
+        assert_relative_eq!(rz, angle, epsilon = 1e-8);
+        assert_relative_eq!(rx, 0.0, epsilon = 1e-8);
+        assert_relative_eq!(ry, 0.0, epsilon = 1e-8);
+    }
+
+    #[test]
+    fn test_rotation_preserves_translation() {
+        let mut comp = Component::new(0, "Test");
+        comp.set_translation(10.0, 20.0, 30.0);
+        comp.set_rotation_vec(0.0, 0.0, std::f64::consts::FRAC_PI_2);
+        let (tx, ty, tz) = comp.translation();
+        assert_relative_eq!(tx, 10.0, epsilon = 1e-10);
+        assert_relative_eq!(ty, 20.0, epsilon = 1e-10);
+        assert_relative_eq!(tz, 30.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_rotation_transforms_point() {
+        let mut comp = Component::new(0, "Test");
+        // Rotate 90° around Z: (1, 0, 0) → (0, 1, 0)
+        comp.set_rotation_vec(0.0, 0.0, std::f64::consts::FRAC_PI_2);
+        let p = comp.transform.transform_point(&Point3d::new(1.0, 0.0, 0.0));
+        assert_relative_eq!(p.x, 0.0, epsilon = 1e-8);
+        assert_relative_eq!(p.y, 1.0, epsilon = 1e-8);
+        assert_relative_eq!(p.z, 0.0, epsilon = 1e-8);
+    }
+
+    #[test]
+    fn test_set_pose_sets_both() {
+        let mut comp = Component::new(0, "Test");
+        comp.set_pose(&[5.0, 10.0, 15.0, 0.0, 0.0, std::f64::consts::FRAC_PI_2]);
+        let (tx, ty, tz) = comp.translation();
+        let (_, _, rz) = comp.rotation_vec();
+        assert_relative_eq!(tx, 5.0, epsilon = 1e-10);
+        assert_relative_eq!(ty, 10.0, epsilon = 1e-10);
+        assert_relative_eq!(tz, 15.0, epsilon = 1e-10);
+        assert_relative_eq!(rz, std::f64::consts::FRAC_PI_2, epsilon = 1e-8);
     }
 }

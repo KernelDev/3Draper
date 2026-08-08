@@ -25,6 +25,8 @@
 use draper_geometry::Point3d;
 use draper_mesh::TriangleMesh;
 
+pub mod hlr;
+
 // ============================================================
 // Error types
 // ============================================================
