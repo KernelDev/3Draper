@@ -2734,6 +2734,7 @@ mod tests {
     #[test]
     fn test_heal_no_outer_shell() {
         let solid = Solid {
+            tolerance: 0.0,
             id: TopoId::new(),
             outer_shell: None,
             inner_shells: vec![],
@@ -2819,6 +2820,8 @@ mod tests {
         // Add a degenerate edge manually: an edge with no curve and no
         // evaluable geometry should be detected as degenerate.
         let degenerate_edge = Edge {
+            start_vertex_point: None,
+            end_vertex_point: None,
             id: TopoId::new(),
             curve: None,
             param_range: (0.0, 0.0),
@@ -2834,6 +2837,8 @@ mod tests {
         // Also add a zero-radius circle edge (also degenerate)
         let zero_circle = draper_geometry::Circle::new_xy(Point3d::ORIGIN, 0.0);
         let degen_circle_edge = Edge {
+            start_vertex_point: None,
+            end_vertex_point: None,
             id: TopoId::new(),
             curve: Some(Curve3d::Circle(zero_circle)),
             param_range: (0.0, 2.0 * std::f64::consts::PI),
@@ -3301,6 +3306,7 @@ mod tests {
 
         // Use a context with a much larger coincidence tolerance
         let ctx = ToleranceContext {
+            step_uncertainty: Some(0.0),
             absolute: 1e-3,
             relative: 1e-6,
             angular: 1e-5,

@@ -13,7 +13,7 @@ use crate::builder::ShapeBuilder;
 use crate::boolean::boolean_subtract;
 use draper_geometry::{
     Point3d, Direction3d, Vec3d,
-    Curve3d, Line, Surface,
+    Curve3d, Line, Surface, NurbsCurve,
     Transform, ToleranceContext,
 };
 use std::f64::consts::PI;
@@ -1361,6 +1361,99 @@ pub fn loft_polylines(
 }
 
 // ============================================================
+// NURBS sweep + 3D wire loft (extended API)
+// ============================================================
+
+/// Sweep a 2D profile along a NURBS curve path.
+///
+/// Samples the NURBS curve at `n_samples` points, then delegates to
+/// `sweep_polyline` with Frenet-Serret frames for cross-section orientation.
+///
+/// This extends the polyline-based `sweep_polyline` to support arbitrary
+/// NURBS paths (circles, ellipses, B-splines, helices).
+pub fn sweep_wire_along_curve(
+    profile: &Polyline2d,
+    curve: &Curve3d,
+    n_samples: usize,
+) -> Result<Solid, ModelingError> {
+    if profile.points.len() < 3 {
+        return Err(ModelingError::TooFewPoints(profile.points.len()));
+    }
+    if n_samples < 2 {
+        return Err(ModelingError::TooFewPoints(n_samples));
+    }
+
+    // Sample the NURBS curve at n_samples points
+    let path: Vec<Point3d> = (0..n_samples).map(|i| {
+        let t = i as f64 / (n_samples - 1) as f64;
+        curve.point_at(t)
+    }).collect();
+
+    // Delegate to existing sweep_polyline
+    sweep_polyline(profile, &path)
+}
+
+/// Loft (skin) between multiple 3D wire profiles.
+///
+/// Each wire is a closed polygon defined by 3D points. All wires must
+/// have the same number of points. Side faces connect corresponding
+/// points between consecutive wires, and cap faces close the start/end.
+///
+/// This extends the 2D `loft_polylines` to support arbitrary 3D wires
+/// (not restricted to XY plane, each wire can be at any position/orientation).
+pub fn loft_wires(wires: &[Vec<Point3d>]) -> Result<Solid, ModelingError> {
+    if wires.len() < 2 {
+        return Err(ModelingError::TooFewPoints(wires.len()));
+    }
+
+    let n_points = wires[0].len();
+    if n_points < 3 {
+        return Err(ModelingError::TooFewPoints(n_points));
+    }
+
+    // Validate all wires have the same point count
+    for (i, wire) in wires.iter().enumerate() {
+        if wire.len() != n_points {
+            return Err(ModelingError::TooFewPoints(wire.len()));
+        }
+    }
+
+    let n_wires = wires.len();
+
+    // Build side faces: one quad per edge per transition
+    let mut side_faces = Vec::with_capacity(n_points * (n_wires - 1));
+    for w in 0..(n_wires - 1) {
+        for i in 0..n_points {
+            let j = (i + 1) % n_points;
+            let quad_pts = vec![
+                wires[w][i].clone(),
+                wires[w][j].clone(),
+                wires[w + 1][j].clone(),
+                wires[w + 1][i].clone(),
+            ];
+            if let Some(face) = ShapeBuilder::make_polygon_face(&quad_pts) {
+                side_faces.push(face);
+            }
+        }
+    }
+
+    // Cap faces (start and end)
+    let start_pts: Vec<Point3d> = wires[0].iter().cloned().collect();
+    let end_pts: Vec<Point3d> = wires[n_wires - 1].iter().cloned().collect();
+
+    let mut all_faces = side_faces;
+    if let Some(start_face) = ShapeBuilder::make_polygon_face(&start_pts) {
+        all_faces.push(start_face);
+    }
+    if let Some(end_face) = ShapeBuilder::make_polygon_face(&end_pts) {
+        all_faces.push(end_face);
+    }
+
+    let shell = Shell::new_closed(all_faces);
+    Ok(Solid::new(shell))
+}
+
+// ============================================================
 // Tests
 // ============================================================
 
@@ -1997,6 +2090,126 @@ mod tests {
         ];
         let z_positions = vec![0.0]; // Only 1 position for 2 profiles
         let result = loft_polylines(&profiles, &z_positions);
+        assert!(result.is_err());
+    }
+
+    // ============================================================
+    // NURBS sweep + 3D wire loft tests
+    // ============================================================
+
+    #[test]
+    fn test_sweep_along_nurbs_curve() {
+        // Sweep a rectangle profile along a NURBS circle path
+        let profile = Polyline2d::rectangle(2.0, 2.0);
+        // Sample a NURBS circle curve at 16 points
+        let nurbs = NurbsCurve {
+            degree: 3,
+            control_points: vec![
+                Point3d::new(10.0, 0.0, 0.0),
+                Point3d::new(10.0, 5.0, 0.0),
+                Point3d::new(5.0, 10.0, 0.0),
+                Point3d::new(0.0, 10.0, 0.0),
+                Point3d::new(-5.0, 10.0, 0.0),
+                Point3d::new(-10.0, 5.0, 0.0),
+                Point3d::new(-10.0, 0.0, 0.0),
+                Point3d::new(-10.0, -5.0, 0.0),
+                Point3d::new(-5.0, -10.0, 0.0),
+                Point3d::new(0.0, -10.0, 0.0),
+                Point3d::new(5.0, -10.0, 0.0),
+                Point3d::new(10.0, -5.0, 0.0),
+                Point3d::new(10.0, 0.0, 0.0),
+            ],
+            weights: vec![1.0; 13],
+            knots: vec![0.0, 0.0, 0.0, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.0, 1.0, 1.0],
+        };
+        let curve = Curve3d::Nurbs(nurbs);
+        let path: Vec<Point3d> = (0..17).map(|i| {
+            let t = i as f64 / 16.0;
+            curve.point_at(t)
+        }).collect();
+        let result = sweep_polyline(&profile, &path);
+        assert!(result.is_ok(), "Sweep along NURBS path should succeed: {:?}", result);
+        let solid = result.unwrap();
+        assert!(count_faces(&solid) > 0);
+    }
+
+    #[test]
+    fn test_loft_3d_wires() {
+        // Loft between two 3D wire profiles (polygons in 3D space)
+        let wire1 = vec![
+            Point3d::new(-5.0, -5.0, 0.0),
+            Point3d::new(5.0, -5.0, 0.0),
+            Point3d::new(5.0, 5.0, 0.0),
+            Point3d::new(-5.0, 5.0, 0.0),
+        ];
+        let wire2 = vec![
+            Point3d::new(-8.0, -8.0, 10.0),
+            Point3d::new(8.0, -8.0, 10.0),
+            Point3d::new(8.0, 8.0, 10.0),
+            Point3d::new(-8.0, 8.0, 10.0),
+        ];
+        let wires = vec![wire1, wire2];
+        let result = loft_wires(&wires);
+        assert!(result.is_ok(), "Loft 3D wires should succeed: {:?}", result);
+        let solid = result.unwrap();
+        assert!(count_faces(&solid) > 0);
+    }
+
+    #[test]
+    fn test_loft_3d_wires_three_profiles() {
+        let wire1 = vec![
+            Point3d::new(-5.0, -5.0, 0.0),
+            Point3d::new(5.0, -5.0, 0.0),
+            Point3d::new(5.0, 5.0, 0.0),
+            Point3d::new(-5.0, 5.0, 0.0),
+        ];
+        let wire2 = vec![
+            Point3d::new(-7.0, -7.0, 5.0),
+            Point3d::new(7.0, -7.0, 5.0),
+            Point3d::new(7.0, 7.0, 5.0),
+            Point3d::new(-7.0, 7.0, 5.0),
+        ];
+        let wire3 = vec![
+            Point3d::new(-3.0, -3.0, 10.0),
+            Point3d::new(3.0, -3.0, 10.0),
+            Point3d::new(3.0, 3.0, 10.0),
+            Point3d::new(-3.0, 3.0, 10.0),
+        ];
+        let wires = vec![wire1, wire2, wire3];
+        let result = loft_wires(&wires);
+        assert!(result.is_ok());
+        let solid = result.unwrap();
+        assert!(count_faces(&solid) > 0);
+    }
+
+    #[test]
+    fn test_loft_3d_wires_mismatched() {
+        let wire1 = vec![
+            Point3d::new(-5.0, -5.0, 0.0),
+            Point3d::new(5.0, -5.0, 0.0),
+            Point3d::new(5.0, 5.0, 0.0),
+            Point3d::new(-5.0, 5.0, 0.0),
+        ];
+        let wire2 = vec![
+            Point3d::new(-8.0, -8.0, 10.0),
+            Point3d::new(8.0, -8.0, 10.0),
+            Point3d::new(8.0, 8.0, 10.0),
+        ]; // 3 points, not 4
+        let wires = vec![wire1, wire2];
+        let result = loft_wires(&wires);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_loft_3d_wires_too_few() {
+        let wire1 = vec![
+            Point3d::new(-5.0, -5.0, 0.0),
+            Point3d::new(5.0, -5.0, 0.0),
+            Point3d::new(5.0, 5.0, 0.0),
+            Point3d::new(-5.0, 5.0, 0.0),
+        ];
+        let wires = vec![wire1];
+        let result = loft_wires(&wires);
         assert!(result.is_err());
     }
 }

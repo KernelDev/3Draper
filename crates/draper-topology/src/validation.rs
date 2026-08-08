@@ -1722,6 +1722,7 @@ mod tests {
         }
 
         let open_shell = Shell {
+            tolerance: 0.0,
             id: TopoId::new(),
             faces,
             closed: false, // Not closed since we have extra face
