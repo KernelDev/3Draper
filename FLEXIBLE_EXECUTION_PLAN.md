@@ -498,6 +498,6 @@ START
 - [x] B2: Drawing HLR (P0) — hlr.rs with Möller-Trumbore ray casting, 7 tests
 - [x] B3: Associative Dimensions (P1) — update_dimensions_from_mesh, regenerate_views, from_mesh_with_hlr
 - [x] B4: PDF Export (P2) — to_pdf() with PDF 1.4 vector graphics, no external deps
-- [ ] C1: LLM Backend Integration (P1) — MockLlmClient + trait + HttpLlmConfig exist, HTTP client not wired
+- [x] C1: LLM Backend Integration (P1) — HttpLlmClient with TcpStream HTTP POST, chunked decoding, JSON parsing, 8 tests
 - [x] C2: WebGPU Triangulate Shader (P2) — already implemented (MarchingCubes + EarClipping WGSL, 787 lines)
 - [ ] C3: Kinematic Drag & Collision (P2) — not started

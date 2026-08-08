@@ -35,7 +35,7 @@ pub use design_reviewer::{
     ReviewSeverity, ReviewStats,
 };
 pub use llm::{
-    HttpLlmConfig, LlmClient, LlmError, LlmResponse, MockLlmClient, SYSTEM_PROMPT,
+    HttpLlmClient, HttpLlmConfig, LlmClient, LlmError, LlmResponse, MockLlmClient, SYSTEM_PROMPT,
     parse_with_llm,
 };
 pub use healing_ml::*;
