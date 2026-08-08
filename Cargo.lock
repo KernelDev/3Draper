@@ -881,17 +881,23 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 name = "draper-ai"
 version = "0.1.0"
 dependencies = [
+ "approx",
  "draper-core",
  "draper-geometry",
  "draper-mesh",
  "draper-topology",
  "log",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
 name = "draper-cloud"
 version = "0.1.0"
 dependencies = [
+ "approx",
  "draper-core",
  "draper-geometry",
  "draper-mesh",
@@ -902,6 +908,19 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "draper-compute"
+version = "0.1.0"
+dependencies = [
+ "approx",
+ "draper-geometry",
+ "draper-mesh",
+ "log",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1042,6 +1061,7 @@ dependencies = [
  "bytemuck",
  "console_error_panic_hook",
  "console_log",
+ "draper-ai",
  "draper-core",
  "draper-geometry",
  "draper-json",
@@ -1059,6 +1079,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "tokio",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

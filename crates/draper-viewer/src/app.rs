@@ -745,6 +745,8 @@ pub struct ViewerApp {
     pub brepcad_command_palette: crate::ui::command_palette::CommandPalette,
     /// Marking menu visibility for BRepCAD UI.
     pub brepcad_marking_menu_visible: bool,
+    /// AI panel state (ShapeParser, DesignReviewer, LLM).
+    pub ai_panel: crate::ui::ai_panel::AiPanelState,
     /// Last status message displayed in toast.
     pub brepcad_status_msg: String,
 }
@@ -1278,6 +1280,7 @@ impl ViewerApp {
             brepcad_dialog: crate::ui::dialogs::DialogType::None,
             brepcad_command_palette: Default::default(),
             brepcad_marking_menu_visible: false,
+            ai_panel: Default::default(),
             brepcad_status_msg: String::new(),
         };
         app.log(&format!("3Draper Viewer started [build: {}]", env!("DRAPER_GIT_HASH")));
@@ -8090,6 +8093,47 @@ impl eframe::App for ViewerApp {
                 // Marking menu actions could be wired here
             }
 
+            // ═══ AI Panel (Phase 5.2 integration) ═══
+            // The AI panel is shown on the right side as a collapsible window.
+            // It provides natural-language → geometry parsing, design review,
+            // and LLM-based prompt expansion.
+            egui::SidePanel::right("ai_panel")
+                .min_width(240.0)
+                .default_width(300.0)
+                .max_width(400.0)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false; 2])
+                        .show(ui, |ui| {
+                            if let Some(actions) = crate::ui::ai_panel::render_ai_panel(ui, &mut self.ai_panel) {
+                                // User clicked "Apply to Scene" — convert actions to solids
+                                let solids = crate::ui::ai_panel::actions_to_solids(&actions);
+                                if !solids.is_empty() {
+                                    // Use the last solid as the current model (final result after booleans)
+                                    if let Some(last_solid) = solids.last() {
+                                        let tri_params = tri_params_for_lod(self.lod_level);
+                                        let mesh = triangulate_solid(last_solid, &tri_params);
+                                        self.current_solid = Some(last_solid.clone());
+                                        self.current_nurbs_surface = None;
+                                        self.detailed_instances.clear();
+                                        self.instance_triangle_ranges.clear();
+                                        self.assembly_tree = None;
+                                        let action_desc = if actions.len() == 1 {
+                                            actions[0].describe()
+                                        } else {
+                                            format!("{} actions", actions.len())
+                                        };
+                                        self.load_mesh(mesh, &format!("AI: {}", action_desc));
+                                        self.brepcad_status_msg = format!("AI: applied {} action(s) to scene", actions.len());
+                                    }
+                                } else {
+                                    self.brepcad_status_msg = "AI: no solids generated (parse error?)".to_string();
+                                }
+                            }
+                        });
+                });
+
             // Status toast
             if !self.brepcad_status_msg.is_empty() {
                 egui::Area::new(egui::Id::new("brepcad_status_toast"))
@@ -12182,6 +12226,55 @@ impl ViewerApp {
             | MenuAction::SketchTrim | MenuAction::SketchExtend | MenuAction::SketchSplit
             | MenuAction::SketchOffset | MenuAction::SketchMirror | MenuAction::SketchPattern
             | MenuAction::SketchFillet => "Sketch mode coming soon (use existing NURBS/Curve tests)".to_string(),
+
+            // ── AI actions (Phase 5.2 integration) ──
+            MenuAction::AiShapeFromText => {
+                // Open the AI panel by switching to the AI workspace.
+                // The panel itself handles prompt input, parsing, and review.
+                self.brepcad_status_msg = "AI Shape-from-Text: type a prompt in the AI panel (right side)".to_string();
+                "AI Shape-from-Text: use the AI panel on the right".to_string()
+            }
+            MenuAction::AiDesignReview => {
+                // Run design review on the current AI panel actions.
+                if self.ai_panel.actions.is_empty() {
+                    "No actions to review — parse a prompt in the AI panel first".to_string()
+                } else {
+                    self.ai_panel.run_review();
+                    if let Some(report) = &self.ai_panel.review {
+                        format!("Design review: score {:.0}/100, {} error(s), {} warning(s)",
+                            report.score, report.stats.error_count, report.stats.warning_count)
+                    } else {
+                        "Design review failed".to_string()
+                    }
+                }
+            }
+            MenuAction::AiChat => {
+                self.ai_panel.status = "Chat mode: type a design prompt".to_string();
+                "AI Chat: type a prompt in the AI panel".to_string()
+            }
+            MenuAction::AiCostEstimate => {
+                if self.ai_panel.actions.is_empty() {
+                    "No actions — parse a prompt first".to_string()
+                } else {
+                    let report = self.ai_panel.reviewer.review(&self.ai_panel.actions);
+                    let vol = report.stats.estimated_material_volume;
+                    format!("Estimated material volume: {:.1} mm³ ({} boolean ops)",
+                        vol, report.stats.boolean_operation_count)
+                }
+            }
+            MenuAction::AiAutoFillet => {
+                // Add a fillet action to the AI panel
+                self.ai_panel.actions.push(draper_ai::GeometryAction::FilletAllEdges { radius: 2.0 });
+                "Added FilletAllEdges (R=2mm) to AI actions".to_string()
+            }
+            MenuAction::AiAutoConstrain | MenuAction::AiAutoDimension
+            | MenuAction::AiAutoPattern | MenuAction::AiAutoRepair
+            | MenuAction::AiSuggestFeature | MenuAction::AiGenVariantA
+            | MenuAction::AiGenVariantB | MenuAction::AiGenVariantC | MenuAction::AiGenVariantD
+            | MenuAction::AiOptLightweight | MenuAction::AiOptStiff
+            | MenuAction::AiOptBalanced | MenuAction::AiOptCustom | MenuAction::AiSettings => {
+                "AI feature: use the AI panel for prompt-based shape generation".to_string()
+            }
 
             // ── Sheet Metal, Assembly, CAM, Drawing, Simulation, etc. ──
             _ => format!("{:?} — not yet implemented", action),

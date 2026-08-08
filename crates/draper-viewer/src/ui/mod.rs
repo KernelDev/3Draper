@@ -16,6 +16,7 @@ pub mod core_engine;
 pub mod sketch;
 pub mod workspaces;
 pub mod dispatcher;
+pub mod ai_panel;
 
 use eframe::egui;
 
