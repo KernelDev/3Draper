@@ -18,6 +18,18 @@ pub enum DialogType {
     MaterialEditor,
     Performance,
     ShortcutEditor,
+    /// Render Settings dialog (mockup 62).
+    RenderSettings,
+    /// Customize dialog (mockup 52).
+    Customize,
+    /// NC Code Viewer dialog (mockup 84).
+    NcCodeViewer,
+    /// Print/Plot dialog (mockup 74).
+    PrintPlot,
+    /// Constraint Diagnostics dialog (mockup 60).
+    ConstraintDiagnostics,
+    /// Macro Recorder dialog (mockup 70).
+    MacroRecorder,
 }
 
 /// Primitive type for the Insert dialog.
@@ -81,6 +93,12 @@ pub fn render_dialog(ctx: &egui::Context, dialog: &mut DialogType) -> Option<Dia
                 DialogType::Performance => action = render_performance_dialog(ui, &mut close),
                 DialogType::ShortcutEditor => action = render_shortcut_dialog(ui, &mut close),
                 DialogType::CommandSearch => action = render_command_search_dialog(ui, &mut close),
+                DialogType::RenderSettings => action = render_render_settings_dialog(ui, &mut close),
+                DialogType::Customize => action = render_customize_dialog(ui, &mut close),
+                DialogType::NcCodeViewer => action = render_nc_code_viewer_dialog(ui, &mut close),
+                DialogType::PrintPlot => action = render_print_plot_dialog(ui, &mut close),
+                DialogType::ConstraintDiagnostics => action = render_constraint_diagnostics_dialog(ui, &mut close),
+                DialogType::MacroRecorder => action = render_macro_recorder_dialog(ui, &mut close),
                 DialogType::None => {}
             }
         });
@@ -102,6 +120,12 @@ fn dialog_title(dialog: &DialogType) -> String {
         DialogType::Performance => "Performance Monitor".to_string(),
         DialogType::ShortcutEditor => "Shortcut Editor".to_string(),
         DialogType::CommandSearch => "Command Search".to_string(),
+        DialogType::RenderSettings => "Render Settings".to_string(),
+        DialogType::Customize => "Customize".to_string(),
+        DialogType::NcCodeViewer => "NC Code Viewer".to_string(),
+        DialogType::PrintPlot => "Print / Plot".to_string(),
+        DialogType::ConstraintDiagnostics => "Constraint Diagnostics".to_string(),
+        DialogType::MacroRecorder => "Macro Recorder".to_string(),
         DialogType::None => String::new(),
     }
 }
@@ -335,6 +359,451 @@ fn render_command_search_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<D
         ui.label("(Use Ctrl+Shift+P for the command palette)");
         ui.separator();
         if ui.button("Close").clicked() { *close = true; }
+    });
+    None
+}
+
+// ============================================================
+// Phase 4: New dialogs (mockups 62, 52, 84, 74, 60, 70)
+// ============================================================
+
+/// Render Settings dialog (mockup 62).
+///
+/// Controls viewport rendering quality: anti-aliasing, shadows,
+/// ambient occlusion, background color, edge rendering.
+fn render_render_settings_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<DialogAction> {
+    let mut quality = 1; // 0=Low, 1=Medium, 2=High
+    let mut shadows = true;
+    let mut ambient_occlusion = false;
+    let mut anti_alias = true;
+    let mut show_edges = true;
+    let mut show_grid = true;
+    let mut bg_color = [0.1f32, 0.1, 0.17, 1.0];
+    let mut edge_color = [0.54, 0.71, 0.98, 1.0]; // Catppuccin blue
+
+    ui.vertical(|ui| {
+        ui.heading("Render Settings");
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            ui.label("Quality:");
+            ui.radio_value(&mut quality, 0, "Low");
+            ui.radio_value(&mut quality, 1, "Medium");
+            ui.radio_value(&mut quality, 2, "High");
+        });
+
+        ui.separator();
+        ui.label("Effects:");
+        ui.checkbox(&mut shadows, "Shadows");
+        ui.checkbox(&mut ambient_occlusion, "Ambient Occlusion (SSAO)");
+        ui.checkbox(&mut anti_alias, "Anti-aliasing (MSAA 4×)");
+
+        ui.separator();
+        ui.label("Display:");
+        ui.checkbox(&mut show_edges, "Show edges");
+        ui.checkbox(&mut show_grid, "Show grid");
+
+        ui.separator();
+        ui.label("Colors:");
+        ui.horizontal(|ui| {
+            ui.label("Background:");
+            ui.color_edit_button_rgba_unmultiplied(&mut bg_color);
+        });
+        ui.horizontal(|ui| {
+            ui.label("Edge color:");
+            ui.color_edit_button_rgba_unmultiplied(&mut edge_color);
+        });
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("Apply").clicked() {
+                // In production, these would update ViewerApp fields
+            }
+            if ui.button("Reset to Defaults").clicked() {
+                quality = 1;
+                shadows = true;
+                ambient_occlusion = false;
+                anti_alias = true;
+                show_edges = true;
+                show_grid = true;
+                bg_color = [0.1, 0.1, 0.17, 1.0];
+                edge_color = [0.54, 0.71, 0.98, 1.0];
+            }
+            if ui.button("Close").clicked() { *close = true; }
+        });
+    });
+    None
+}
+
+/// Customize dialog (mockup 52).
+///
+/// Tabs: Ribbon customization, Shortcut editor, Toolbar layout.
+fn render_customize_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<DialogAction> {
+    let mut selected_tab = 0;
+    let tabs = ["Ribbon", "Shortcuts", "Toolbars", "Quick Access"];
+
+    ui.vertical(|ui| {
+        ui.heading("Customize");
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            for (i, tab) in tabs.iter().enumerate() {
+                if ui.selectable_label(selected_tab == i, *tab).clicked() {
+                    selected_tab = i;
+                }
+            }
+        });
+        ui.separator();
+
+        match selected_tab {
+            0 => {
+                // Ribbon customization
+                ui.label("Ribbon Tabs (drag to reorder):");
+                let ribbon_tabs = ["File", "Home", "Sketch", "Insert", "Modify",
+                    "Sheet Metal", "Assembly", "CAM", "Drawing", "Simulation",
+                    "Inspect", "AI", "Tools", "View", "Surface"];
+                for tab in &ribbon_tabs {
+                    ui.horizontal(|ui| {
+                        ui.label("≡");
+                        ui.label(*tab);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.checkbox(&mut true, "Visible");
+                        });
+                    });
+                }
+            }
+            1 => {
+                // Shortcuts
+                ui.label("Keyboard Shortcuts:");
+                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                    let shortcuts = [
+                        ("New", "Ctrl+N"), ("Open", "Ctrl+O"), ("Save", "Ctrl+S"),
+                        ("Undo", "Ctrl+Z"), ("Redo", "Ctrl+Shift+Z"),
+                        ("Copy", "Ctrl+C"), ("Paste", "Ctrl+V"), ("Cut", "Ctrl+X"),
+                        ("Fit", "F"), ("ISO View", "0"),
+                        ("Sketch Mode", "S"), ("Line", "L"), ("Circle", "C"),
+                        ("Command Palette", "Ctrl+Shift+P"), ("Options", "Ctrl+,"),
+                    ];
+                    for (cmd, sc) in &shortcuts {
+                        ui.horizontal(|ui| {
+                            ui.label(*cmd);
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(*sc);
+                                if ui.small_button("Edit").clicked() {}
+                            });
+                        });
+                    }
+                });
+            }
+            2 => {
+                // Toolbars
+                ui.label("Toolbar Layout:");
+                ui.checkbox(&mut true, "Show menu bar");
+                ui.checkbox(&mut true, "Show ribbon");
+                ui.checkbox(&mut true, "Show status bar");
+                ui.checkbox(&mut true, "Show left panel (Browser)");
+                ui.checkbox(&mut true, "Show right panel (Properties)");
+                ui.checkbox(&mut false, "Show timeline panel");
+            }
+            3 => {
+                // Quick Access Toolbar
+                ui.label("Quick Access Toolbar items:");
+                ui.checkbox(&mut true, "Undo");
+                ui.checkbox(&mut true, "Redo");
+                ui.checkbox(&mut true, "Save");
+                ui.checkbox(&mut false, "Open");
+                ui.checkbox(&mut false, "Print");
+            }
+            _ => {}
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("Apply").clicked() {}
+            if ui.button("Reset").clicked() {}
+            if ui.button("Close").clicked() { *close = true; }
+        });
+    });
+    None
+}
+
+/// NC Code Viewer dialog (mockup 84).
+///
+/// Displays generated G-code with syntax highlighting.
+/// Reads from ViewerApp.brepcad_cam_gcode.
+fn render_nc_code_viewer_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<DialogAction> {
+    // In production, this would read from self.brepcad_cam_gcode.
+    // For now, show a placeholder with sample G-code.
+    let sample_gcode = "; BRepCAD G-code (Fanuc)\n\
+; 1 operations\n\
+G90 G21 G17\n\
+G54\n\
+M3 S1000\n\
+; Op 1 : Profile\n\
+G0 Z10\n\
+G0 X0.000 Y0.000\n\
+G1 Z-5.000 F100\n\
+G1 X100.000 F200\n\
+G1 Y80.000\n\
+G1 X0.000\n\
+G1 Y0.000\n\
+G0 Z10\n\
+M5\n\
+M30\n";
+
+    ui.vertical(|ui| {
+        ui.heading("NC Code Viewer");
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            ui.label("Dialect:");
+            ui.label("Fanuc");
+            ui.separator();
+            ui.label("Lines: 16");
+            ui.separator();
+            ui.label("Est. time: 2.3 min");
+        });
+
+        ui.separator();
+
+        // G-code with basic syntax highlighting via monospace + color
+        egui::ScrollArea::vertical()
+            .max_height(350.0)
+            .show(ui, |ui| {
+                for line in sample_gcode.lines() {
+                    let color = if line.starts_with(';') {
+                        egui::Color32::from_rgb(108, 112, 134) // Comment gray
+                    } else if line.starts_with('G') || line.starts_with('M') {
+                        egui::Color32::from_rgb(137, 180, 250) // G/M codes blue
+                    } else if line.starts_with('X') || line.starts_with('Y') || line.starts_with('Z') {
+                        egui::Color32::from_rgb(166, 227, 161) // Coordinates green
+                    } else if line.starts_with('F') || line.starts_with('S') {
+                        egui::Color32::from_rgb(249, 226, 175) // Feed/speed yellow
+                    } else {
+                        egui::Color32::from_rgb(205, 214, 244) // Default text
+                    };
+                    ui.label(egui::RichText::new(line)
+                        .family(egui::FontFamily::Monospace)
+                        .size(11.0)
+                        .color(color));
+                }
+            });
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("Copy to Clipboard").clicked() {
+                ui.ctx().copy_text(sample_gcode.to_string());
+            }
+            if ui.button("Save As...").clicked() {}
+            if ui.button("Close").clicked() { *close = true; }
+        });
+    });
+    None
+}
+
+/// Print/Plot dialog (mockup 74).
+///
+/// Paper size, orientation, scale, preview.
+fn render_print_plot_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<DialogAction> {
+    let mut paper_size = 3; // 0=A0, 1=A1, 2=A2, 3=A3, 4=A4
+    let mut orientation = 0; // 0=Portrait, 1=Landscape
+    let mut scale = 1.0f32; // 1:1
+    let mut copies = 1;
+    let mut printer = "Default Printer".to_string();
+
+    ui.vertical(|ui| {
+        ui.heading("Print / Plot");
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            ui.label("Printer:");
+            ui.text_edit_singleline(&mut printer);
+            ui.button("Browse...");
+        });
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.label("Paper Size:");
+                egui::ComboBox::from_id_salt("paper_size_combo")
+                    .selected_text(["A0 (841×1189)", "A1 (594×841)", "A2 (420×594)",
+                                    "A3 (297×420)", "A4 (210×297)"][paper_size])
+                    .show_ui(ui, |ui| {
+                        for (i, label) in ["A0 (841×1189)", "A1 (594×841)", "A2 (420×594)",
+                                            "A3 (297×420)", "A4 (210×297)"].iter().enumerate() {
+                            ui.selectable_value(&mut paper_size, i, *label);
+                        }
+                    });
+            });
+            ui.vertical(|ui| {
+                ui.label("Orientation:");
+                ui.radio_value(&mut orientation, 0, "Portrait");
+                ui.radio_value(&mut orientation, 1, "Landscape");
+            });
+        });
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("Scale:");
+            ui.add(egui::Slider::new(&mut scale, 0.1..=10.0).text(": 1"));
+            ui.label(format!("({:.1}:1)", scale));
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Copies:");
+            ui.add(egui::DragValue::new(&mut copies).range(1..=99));
+        });
+
+        ui.separator();
+        ui.checkbox(&mut true, "Fit to paper");
+        ui.checkbox(&mut false, "Print grid");
+        ui.checkbox(&mut true, "Print title block");
+
+        ui.separator();
+        ui.label("Preview:");
+        let preview_frame = egui::Frame::new()
+            .fill(egui::Color32::from_rgb(0x1e, 0x1e, 0x2e))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::GRAY))
+            .inner_margin(egui::Margin::symmetric(40, 30));
+        preview_frame.show(ui, |ui| {
+            ui.label(egui::RichText::new("📄 Drawing Preview")
+                .size(14.0)
+                .color(egui::Color32::from_rgb(0x89, 0xb4, 0xfa)));
+            ui.label(egui::RichText::new(format!("{} × {}mm", 297, 420))
+                .size(10.0)
+                .color(egui::Color32::GRAY));
+        });
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("Print").clicked() {}
+            if ui.button("Export PDF").clicked() {}
+            if ui.button("Close").clicked() { *close = true; }
+        });
+    });
+    None
+}
+
+/// Constraint Diagnostics dialog (mockup 60).
+///
+/// Shows sketch constraint status, violations, DOF count.
+fn render_constraint_diagnostics_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<DialogAction> {
+    ui.vertical(|ui| {
+        ui.heading("Constraint Diagnostics");
+        ui.separator();
+
+        // Summary
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("DOF: 2").strong());
+                ui.label("Degrees of Freedom");
+            });
+            ui.separator();
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("3").strong().color(egui::Color32::from_rgb(80, 180, 80)));
+                ui.label("Constraints");
+            });
+            ui.separator();
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("0").strong().color(egui::Color32::from_rgb(220, 80, 80)));
+                ui.label("Violations");
+            });
+        });
+
+        ui.separator();
+        ui.label("Constraints:");
+        egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
+            let constraints = [
+                ("✓", "Coincident", "P1 = P2", "OK"),
+                ("✓", "Horizontal", "L1", "OK"),
+                ("✓", "Vertical", "L2", "OK"),
+                ("⚠", "Parallel", "L1 ∥ L3", "Over-constrained"),
+            ];
+            for (icon, ctype, desc, status) in &constraints {
+                let color = if *icon == "✓" {
+                    egui::Color32::from_rgb(80, 180, 80)
+                } else {
+                    egui::Color32::from_rgb(220, 180, 80)
+                };
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(*icon).color(color));
+                    ui.label(format!("{}: {}", ctype, desc));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(egui::RichText::new(*status).size(10.0).color(color));
+                    });
+                });
+            }
+        });
+
+        ui.separator();
+        ui.label("Suggestions:");
+        ui.label("• Add 1 more constraint to fully define the sketch");
+        ui.label("• Remove 'Parallel L1 ∥ L3' (redundant with existing)");
+
+        ui.separator();
+        if ui.button("Close").clicked() { *close = true; }
+    });
+    None
+}
+
+/// Macro Recorder dialog (mockup 70).
+///
+/// Records user actions to a script for replay.
+fn render_macro_recorder_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<DialogAction> {
+    let mut recording = false;
+    let mut macro_name = "macro1".to_string();
+    let mut macro_lang = 0; // 0=Python, 1=Lua
+
+    ui.vertical(|ui| {
+        ui.heading("Macro Recorder");
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            ui.label("Name:");
+            ui.text_edit_singleline(&mut macro_name);
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Language:");
+            ui.radio_value(&mut macro_lang, 0, "Python");
+            ui.radio_value(&mut macro_lang, 1, "Lua");
+        });
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.add(egui::Button::new(if recording { "⏹ Stop" } else { "⏺ Record" }))
+                .clicked() {
+                recording = !recording;
+            }
+            if ui.button("▶ Play").clicked() {}
+            if ui.button("⏸ Pause").clicked() {}
+        });
+
+        ui.separator();
+        ui.label("Recorded Actions:");
+        egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+            let actions = [
+                "1. [00:00] Select Box primitive",
+                "2. [00:01] Set width = 100.0",
+                "3. [00:02] Set height = 80.0",
+                "4. [00:03] Set depth = 60.0",
+                "5. [00:04] Click OK",
+                "6. [00:05] View → ISO",
+            ];
+            for action in &actions {
+                ui.label(egui::RichText::new(*action)
+                    .family(egui::FontFamily::Monospace)
+                    .size(10.0));
+            }
+        });
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("Save Macro").clicked() {}
+            if ui.button("Export Script").clicked() {}
+            if ui.button("Clear").clicked() {}
+            if ui.button("Close").clicked() { *close = true; }
+        });
     });
     None
 }

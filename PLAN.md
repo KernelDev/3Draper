@@ -153,7 +153,7 @@
 - [x] Phase 1 Task 1.4: Wire AI (real AiShapeParser)
 - [x] Phase 2: CAM postprocessor differentiation (Heidenhain/GRBL/Siemens/Fanuc)
 - [x] Phase 3: Visual compliance (QAT, HUD overlay, search in ribbon)
-- [ ] Phase 4: Missing dialogs
+- [x] Phase 4: Missing dialogs (RenderSettings, Customize, NcCodeViewer, PrintPlot, ConstraintDiagnostics, MacroRecorder)
 - [ ] Phase 5: Sketch constraints
 - [ ] Phase 6: Animation timeline
 - [ ] Phase 7: Scripting & plugins

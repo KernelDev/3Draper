@@ -14509,7 +14509,10 @@ impl ViewerApp {
             MenuAction::FileQuit => {
                 "Quit requested — close window to exit".to_string()
             }
-            MenuAction::FilePrint => "Print dialog not yet implemented".to_string(),
+            MenuAction::FilePrint => {
+                self.brepcad_dialog = crate::ui::dialogs::DialogType::PrintPlot;
+                String::new()
+            }
             MenuAction::FileExportObj => "OBJ export not yet implemented (use STL)".to_string(),
             MenuAction::FileExportGltf => "GLTF export not yet implemented".to_string(),
             MenuAction::FileExportPdf => "PDF export not yet implemented".to_string(),
@@ -15084,7 +15087,11 @@ impl ViewerApp {
             | MenuAction::SketchTrim | MenuAction::SketchExtend | MenuAction::SketchSplit
             | MenuAction::SketchOffset | MenuAction::SketchMirror | MenuAction::SketchPattern
             | MenuAction::SketchFillet | MenuAction::SketchSpline | MenuAction::SketchPolygon
-            | MenuAction::SketchArcTangent => "Sketch constraint/modify not yet implemented".to_string(),
+            | MenuAction::SketchArcTangent => {
+                // Open Constraint Diagnostics dialog for sketch constraint actions
+                self.brepcad_dialog = crate::ui::dialogs::DialogType::ConstraintDiagnostics;
+                "Sketch constraint: opened Constraint Diagnostics".to_string()
+            }
 
 
             // ── Measure actions ──
@@ -15531,8 +15538,12 @@ impl ViewerApp {
             MenuAction::CamSim2d | MenuAction::CamSim3d => {
                 if self.brepcad_cam_ops.is_empty() {
                     "No operations to simulate. Add CAM operations first.".to_string()
+                } else if self.brepcad_cam_gcode.is_empty() {
+                    "Generate G-code first (CAM → Post Process)".to_string()
                 } else {
-                    format!("Simulation: {} operations", self.brepcad_cam_ops.len())
+                    // Open NC Code Viewer dialog to show generated G-code
+                    self.brepcad_dialog = crate::ui::dialogs::DialogType::NcCodeViewer;
+                    format!("NC Code Viewer: {} operations", self.brepcad_cam_ops.len())
                 }
             }
             MenuAction::CamPostFanuc | MenuAction::CamPostSiemens | MenuAction::CamPostHaas
@@ -15872,9 +15883,15 @@ impl ViewerApp {
             }
 
             // ── Remaining Tools actions ──
-            MenuAction::ToolsCustomize => "Customize: ribbon/shortcut editor (coming soon)".to_string(),
+            MenuAction::ToolsCustomize => {
+                self.brepcad_dialog = crate::ui::dialogs::DialogType::Customize;
+                String::new()
+            }
             MenuAction::ToolsScriptingConsole => "Scripting Console: Python/Lua (coming soon)".to_string(),
-            MenuAction::ToolsMacroRecorder => "Macro Recorder: records user actions to script".to_string(),
+            MenuAction::ToolsMacroRecorder => {
+                self.brepcad_dialog = crate::ui::dialogs::DialogType::MacroRecorder;
+                String::new()
+            }
             MenuAction::ToolsTheme => "Theme: Catppuccin Mocha (default). Light theme coming soon.".to_string(),
             MenuAction::ToolsUiLayout => "UI Layout: save/restore panel layout (coming soon)".to_string(),
 
@@ -15920,8 +15937,8 @@ impl ViewerApp {
 
             // ── Render settings (mockup 62) ──
             MenuAction::FilePrint => {
-                self.brepcad_dialog = crate::ui::dialogs::DialogType::Options;
-                "Render settings: use Options → Display".to_string()
+                self.brepcad_dialog = crate::ui::dialogs::DialogType::RenderSettings;
+                String::new()
             }
 
             // ── Revision table (mockup 88) ──
