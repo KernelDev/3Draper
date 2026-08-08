@@ -124,7 +124,7 @@ fn interpolate_vertex(p1: vec3<f32>, p2: vec3<f32>, v1: f32, v2: f32) -> vec3<f3
     return p1 + t * (p2 - p1);
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let x = gid.x;
     let y = gid.y;
@@ -297,7 +297,7 @@ fn is_ear(i: u32) -> bool {
     return true;
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let vertex_idx = gid.x;
     if (vertex_idx >= params.num_vertices) {
@@ -428,7 +428,7 @@ impl TriangulateShader {
     /// Build a compute pipeline descriptor for Marching Cubes triangulation.
     pub fn marching_cubes_pipeline(params: &TriangulateParams) -> ComputePipelineDescriptor {
         let shader = Self::source(TriangulateMethod::MarchingCubes);
-        let stage = ComputeStage::new(shader).with_workgroup_size(64, 1, 1);
+        let stage = ComputeStage::new(shader).with_workgroup_size(256, 1, 1);
 
         // For 3D grids, we dispatch in 3D
         let wx = params.grid_size_x.div_ceil(64);
@@ -470,7 +470,7 @@ impl TriangulateShader {
     /// Build a compute pipeline descriptor for ear-clipping triangulation.
     pub fn ear_clipping_pipeline(num_vertices: u32, max_triangles: u32) -> ComputePipelineDescriptor {
         let shader = Self::source(TriangulateMethod::EarClipping);
-        let stage = ComputeStage::new(shader).with_workgroup_size(64, 1, 1);
+        let stage = ComputeStage::new(shader).with_workgroup_size(256, 1, 1);
 
         let workgroups = WorkgroupCount::for_element_count(num_vertices, 64);
 
@@ -498,6 +498,97 @@ impl TriangulateShader {
             })
             .with_workgroups(workgroups.x, workgroups.y, workgroups.z)
     }
+}
+
+// ============================================================
+// CPU fallback (C2 DoD: CPU fallback при отсутствии WebGPU)
+// ============================================================
+
+/// CPU fallback for Marching Cubes triangulation.
+///
+/// Per C2 DoD: provides CPU-side Marching Cubes when WebGPU is not available.
+/// Uses the same EDGE_TABLE and TRI_TABLE as the GPU shader.
+pub fn triangulate_marching_cubes_cpu(
+    sdf_grid: &[f32],
+    grid_size_x: u32,
+    grid_size_y: u32,
+    grid_size_z: u32,
+    iso_value: f32,
+    voxel_size: f32,
+) -> Vec<[f32; 3]> {
+    let mut vertices = Vec::new();
+
+    for z in 0..(grid_size_z - 1) {
+        for y in 0..(grid_size_y - 1) {
+            for x in 0..(grid_size_x - 1) {
+                // Sample 8 corners
+                let idx = |x: u32, y: u32, z: u32| -> f32 {
+                    sdf_grid[(x + y * grid_size_x + z * grid_size_x * grid_size_y) as usize]
+                };
+
+                let c = [
+                    idx(x, y, z), idx(x+1, y, z), idx(x+1, y, z+1), idx(x, y, z+1),
+                    idx(x, y+1, z), idx(x+1, y+1, z), idx(x+1, y+1, z+1), idx(x, y+1, z+1),
+                ];
+
+                // Compute cube sign
+                let mut sign = 0u32;
+                for i in 0..8 {
+                    if c[i] < iso_value { sign |= 1 << i; }
+                }
+
+                if sign == 0 || sign == 255 { continue; }
+
+                let edges = EDGE_TABLE[sign as usize];
+                if edges == 0 { continue; }
+
+                // Compute world-space corner positions
+                let base = [x as f32 * voxel_size, y as f32 * voxel_size, z as f32 * voxel_size];
+                let s = voxel_size;
+                let positions = [
+                    [base[0], base[1], base[2]],
+                    [base[0]+s, base[1], base[2]],
+                    [base[0]+s, base[1], base[2]+s],
+                    [base[0], base[1], base[2]+s],
+                    [base[0], base[1]+s, base[2]],
+                    [base[0]+s, base[1]+s, base[2]],
+                    [base[0]+s, base[1]+s, base[2]+s],
+                    [base[0], base[1]+s, base[2]+s],
+                ];
+
+                // Interpolate edge vertices
+                let edge_verts: [[f32; 3]; 12] = [[0f32; 3]; 12];
+                let mut edge_verts = edge_verts;
+                let interp = |p1: [f32;3], p2: [f32;3], v1: f32, v2: f32| -> [f32; 3] {
+                    let t = (iso_value - v1) / (v2 - v1).max(1e-10);
+                    [p1[0] + t*(p2[0]-p1[0]), p1[1] + t*(p2[1]-p1[1]), p1[2] + t*(p2[2]-p1[2])]
+                };
+
+                if edges & 1 != 0 { edge_verts[0] = interp(positions[0], positions[1], c[0], c[1]); }
+                if edges & 2 != 0 { edge_verts[1] = interp(positions[1], positions[2], c[1], c[2]); }
+                if edges & 4 != 0 { edge_verts[2] = interp(positions[2], positions[3], c[2], c[3]); }
+                if edges & 8 != 0 { edge_verts[3] = interp(positions[3], positions[0], c[3], c[0]); }
+                if edges & 16 != 0 { edge_verts[4] = interp(positions[4], positions[5], c[4], c[5]); }
+                if edges & 32 != 0 { edge_verts[5] = interp(positions[5], positions[6], c[5], c[6]); }
+                if edges & 64 != 0 { edge_verts[6] = interp(positions[6], positions[7], c[6], c[7]); }
+                if edges & 128 != 0 { edge_verts[7] = interp(positions[7], positions[4], c[7], c[4]); }
+                if edges & 256 != 0 { edge_verts[8] = interp(positions[0], positions[4], c[0], c[4]); }
+                if edges & 512 != 0 { edge_verts[9] = interp(positions[1], positions[5], c[1], c[5]); }
+                if edges & 1024 != 0 { edge_verts[10] = interp(positions[2], positions[6], c[2], c[6]); }
+                if edges & 2048 != 0 { edge_verts[11] = interp(positions[3], positions[7], c[3], c[7]); }
+
+                // Emit triangles
+                let tri_base = (sign as usize) * 16;
+                for i in 0..15 {
+                    let idx = TRI_TABLE[tri_base + i];
+                    if idx < 0 { break; }
+                    vertices.push(edge_verts[idx as usize]);
+                }
+            }
+        }
+    }
+
+    vertices
 }
 
 // ============================================================
@@ -664,7 +755,7 @@ mod tests {
 
         assert_eq!(pipeline.label, "marching_cubes_pipeline");
         assert_eq!(pipeline.bindings.len(), 4); // sdf, edge_table, tri_table, output
-        assert_eq!(pipeline.stage.workgroup_size, [64, 1, 1]);
+        assert_eq!(pipeline.stage.workgroup_size, [256, 1, 1]);
         // Workgroups: ceil(32/64)=1 in X, 32 in Y, 32 in Z
         assert_eq!(pipeline.workgroups.x, 1);
         assert_eq!(pipeline.workgroups.y, 32);
@@ -783,5 +874,33 @@ mod tests {
         let source = EAR_CLIPPING_WGSL;
         assert!(!source.contains("TODO"));
         assert!(!source.contains("FIXME"));
+    }
+
+    // ─── C2 DoD: CPU fallback + workgroup_size 256 tests ───
+
+    #[test]
+    fn test_cpu_fallback_empty_grid() {
+        let grid = vec![1.0f32; 27]; // 3×3×3, all outside
+        let verts = triangulate_marching_cubes_cpu(&grid, 3, 3, 3, 0.0, 1.0);
+        assert!(verts.is_empty(), "Empty grid should produce no vertices");
+    }
+
+    #[test]
+    fn test_cpu_fallback_produces_vertices() {
+        // 4×4×4 grid with a sphere SDF at center
+        let size = 4u32;
+        let mut grid = vec![1.0f32; (size * size * size) as usize];
+        // Set center voxel to inside (negative SDF)
+        let center = (size / 2) as usize;
+        grid[center + center * size as usize + center * size as usize * size as usize] = -1.0;
+        let verts = triangulate_marching_cubes_cpu(&grid, size, size, size, 0.0, 1.0);
+        assert!(!verts.is_empty(), "Should produce vertices for non-trivial SDF");
+    }
+
+    #[test]
+    fn test_workgroup_size_is_256() {
+        // C2 DoD: WGSL compute shader with workgroup size 256
+        assert!(MARCHING_CUBES_WGSL.contains("@workgroup_size(256)"));
+        assert!(EAR_CLIPPING_WGSL.contains("@workgroup_size(256)"));
     }
 }

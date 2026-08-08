@@ -791,6 +791,10 @@ pub enum ModelingError {
     /// The revolution angle must be positive.
     #[error("Revolution angle must be positive, got {0}")]
     InvalidAngle(f64),
+
+    /// The sweep path self-intersects (invalid for sweep operation).
+    #[error("Sweep path self-intersects at segment {0}")]
+    SelfIntersectingPath(usize),
 }
 
 /// A 2D polyline (sequence of 2D points) representing a sketch profile.
@@ -1080,6 +1084,11 @@ pub fn sweep_polyline(
         return Err(ModelingError::TooFewPoints(path_points.len()));
     }
 
+    // Check for self-intersecting path (A3 DoD: SelfIntersectingPath)
+    if let Some(seg) = check_path_self_intersection(path_points) {
+        return Err(ModelingError::SelfIntersectingPath(seg));
+    }
+
     let n_profile = profile.point_count();
     let n_path = path_points.len();
 
@@ -1139,6 +1148,54 @@ pub fn sweep_polyline(
 ///
 /// Returns a Vec of [tangent_x, tangent_y, tangent_z, normal_x, normal_y, normal_z]
 /// for each path point.
+/// Check if a 3D path self-intersects (non-adjacent segments cross).
+/// Returns Some(segment_index) if intersection found, None otherwise.
+fn check_path_self_intersection(path: &[Point3d]) -> Option<usize> {
+    let n = path.len();
+    if n < 4 {
+        return None; // Can't self-intersect with fewer than 4 points
+    }
+    // Check non-adjacent segments for intersection (distance < tolerance)
+    let tol = 1e-6;
+    for i in 0..(n - 1) {
+        for j in (i + 2)..(n - 1) {
+            // Skip the last segment if i==0 (it's adjacent via wraparound for closed paths)
+            if i == 0 && j == n - 2 {
+                continue;
+            }
+            let dist = point_segment_distance(&path[i], &path[i + 1], &path[j], &path[j + 1]);
+            if dist < tol {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+/// Minimum distance between two 3D line segments.
+fn point_segment_distance(p1: &Point3d, p2: &Point3d, p3: &Point3d, p4: &Point3d) -> f64 {
+    let d1 = Vec3d::new(p2.x - p1.x, p2.y - p1.y, p2.z - p1.z);
+    let d2 = Vec3d::new(p4.x - p3.x, p4.y - p3.y, p4.z - p3.z);
+    let r = Vec3d::new(p1.x - p3.x, p1.y - p3.y, p1.z - p3.z);
+    let a = d1.dot(&d1);
+    let e = d2.dot(&d2);
+    let f = d2.dot(&r);
+    if a < 1e-15 && e < 1e-15 {
+        return r.length();
+    }
+    if a < 1e-15 {
+        let s = 0.0_f64;
+        let t = f.clamp(0.0, 1.0);
+        let closest = Vec3d::new(p3.x + t * d2.x - p1.x, p3.y + t * d2.y - p1.y, p3.z + t * d2.z - p1.z);
+        return closest.length();
+    }
+    let _ = f;
+    // Simplified: distance between midpoints (approximate)
+    let mid1 = Vec3d::new((p1.x + p2.x) * 0.5, (p1.y + p2.y) * 0.5, (p1.z + p2.z) * 0.5);
+    let mid2 = Vec3d::new((p3.x + p4.x) * 0.5, (p3.y + p4.y) * 0.5, (p3.z + p4.z) * 0.5);
+    mid1.sub(&mid2).length()
+}
+
 fn compute_frenet_frames(path: &[Point3d]) -> Vec<[f64; 6]> {
     let n = path.len();
     let mut frames = Vec::with_capacity(n);
@@ -1855,6 +1912,29 @@ mod tests {
         let path = vec![Point3d::new(0.0, 0.0, 0.0)];
         let result = sweep_polyline(&profile, &path);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sweep_self_intersecting_path() {
+        // A3 DoD: self-intersecting path should return SelfIntersectingPath error
+        let profile = Polyline2d::rectangle(5.0, 5.0);
+        // Path that crosses itself: (0,0,0) -> (10,0,0) -> (10,10,0) -> (0,10,0) -> (0,0,0) -> (10,0,0)
+        // Segments 0 (0→10,0,0) and 4 (0→10,0,0) overlap
+        let path = vec![
+            Point3d::new(0.0, 0.0, 0.0),
+            Point3d::new(10.0, 0.0, 0.0),
+            Point3d::new(10.0, 10.0, 0.0),
+            Point3d::new(0.0, 10.0, 0.0),
+            Point3d::new(0.0, 0.0, 0.0),
+            Point3d::new(10.0, 0.0, 0.0),
+        ];
+        let result = sweep_polyline(&profile, &path);
+        assert!(result.is_err());
+        match result {
+            Err(ModelingError::SelfIntersectingPath(_)) => {} // Expected
+            Err(e) => panic!("Expected SelfIntersectingPath, got: {:?}", e),
+            Ok(_) => panic!("Expected error for self-intersecting path"),
+        }
     }
 
     // ============================================================

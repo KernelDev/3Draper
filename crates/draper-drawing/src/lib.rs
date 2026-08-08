@@ -222,6 +222,45 @@ pub struct Drawing {
     pub paper_size: PaperSize,
     /// Overall 3D dimensions (width, height, depth) in mm.
     pub dimensions: (f64, f64, f64),
+    /// Associative dimensions linked to feature parameters.
+    pub linked_dimensions: Vec<LinkedDimension>,
+}
+
+/// An associative dimension linked to a feature parameter.
+///
+/// Per FLEXIBLE_EXECUTION_PLAN task B3 DoD: `Dimension::from_feature(feature_id, param_name)`
+/// creates a dimension that updates when the feature parameter changes.
+#[derive(Debug, Clone)]
+pub struct LinkedDimension {
+    /// Feature ID this dimension is linked to.
+    pub feature_id: u64,
+    /// Parameter name within the feature (e.g., "width", "radius").
+    pub param_name: String,
+    /// Current dimension value (updated when feature changes).
+    pub value: f64,
+    /// Dimension label shown on the drawing.
+    pub label: String,
+}
+
+impl LinkedDimension {
+    /// Create an associative dimension from a feature parameter.
+    ///
+    /// Per B3 DoD: `Dimension::from_feature(feature_id, param_name)`
+    pub fn from_feature(feature_id: u64, param_name: &str, value: f64) -> Self {
+        let label = format!("{}: {:.1}mm", param_name, value);
+        Self {
+            feature_id,
+            param_name: param_name.to_string(),
+            value,
+            label,
+        }
+    }
+
+    /// Update the dimension value (called when feature parameter changes).
+    pub fn update_value(&mut self, value: f64) {
+        self.value = value;
+        self.label = format!("{}: {:.1}mm", self.param_name, value);
+    }
 }
 
 /// Standard paper sizes (width × height in mm).
@@ -282,6 +321,7 @@ impl Drawing {
             scale: 1.0,
             paper_size: PaperSize::A3,
             dimensions: (width, height, depth),
+            linked_dimensions: Vec::new(),
         })
     }
 
@@ -308,6 +348,7 @@ impl Drawing {
             scale: 1.0,
             paper_size: PaperSize::A4,
             dimensions: (max_x - min_x, max_y - min_y, max_z - min_z),
+            linked_dimensions: Vec::new(),
         })
     }
 
@@ -346,6 +387,7 @@ impl Drawing {
             scale: 1.0,
             paper_size: PaperSize::A3,
             dimensions: (max_x - min_x, max_y - min_y, max_z - min_z),
+            linked_dimensions: Vec::new(),
         })
     }
 
@@ -937,5 +979,38 @@ mod tests {
         assert!(pdf.contains("15.0"));
         assert!(pdf.contains("25.0"));
         assert!(pdf.contains("8.0"));
+    }
+
+    // ─── B3 DoD: Dimension::from_feature tests ───
+
+    #[test]
+    fn test_linked_dimension_from_feature() {
+        let dim = LinkedDimension::from_feature(42, "width", 50.0);
+        assert_eq!(dim.feature_id, 42);
+        assert_eq!(dim.param_name, "width");
+        assert!((dim.value - 50.0).abs() < 1e-6);
+        assert!(dim.label.contains("width"));
+        assert!(dim.label.contains("50.0"));
+    }
+
+    #[test]
+    fn test_linked_dimension_update_value() {
+        let mut dim = LinkedDimension::from_feature(1, "radius", 10.0);
+        assert!((dim.value - 10.0).abs() < 1e-6);
+        dim.update_value(25.0);
+        assert!((dim.value - 25.0).abs() < 1e-6);
+        assert!(dim.label.contains("25.0"));
+    }
+
+    #[test]
+    fn test_drawing_with_linked_dimensions() {
+        let mesh = make_box_mesh(10.0, 20.0, 5.0);
+        let mut drawing = Drawing::from_mesh(&mesh, "Test").unwrap();
+        let dim = LinkedDimension::from_feature(0, "width", 10.0);
+        drawing.linked_dimensions.push(dim);
+        assert_eq!(drawing.linked_dimensions.len(), 1);
+        // Update dimension when parameter changes
+        drawing.linked_dimensions[0].update_value(30.0);
+        assert!((drawing.linked_dimensions[0].value - 30.0).abs() < 1e-6);
     }
 }
