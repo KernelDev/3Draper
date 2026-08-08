@@ -298,7 +298,7 @@ pub mod nurbs_eval;
 pub mod triangulate;
 pub mod pipeline;
 
-pub use nurbs_eval::{NurbsEvalShader as NurbsEvalShaderPhase5, NurbsEvalParams};
+pub use nurbs_eval::{NurbsEvalShader as NurbsEvalShaderPhase5, NurbsEvalParams as NurbsEvalParamsPhase5};
 pub use triangulate::{TriangulateShader, TriangulateParams, TriangulateMethod};
 pub use pipeline::{
     ComputePipelineDescriptor, BindGroupLayoutEntry, BufferBinding,

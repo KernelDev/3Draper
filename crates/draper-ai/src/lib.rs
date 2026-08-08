@@ -31,7 +31,7 @@ pub use strategy::*;
 pub use predictive::*;
 pub use shape_parser::{GeometryAction, ParseError, ShapeParser};
 pub use design_reviewer::{
-    DesignReviewer as AiDesignReviewer, ReviewCategory, ReviewConfig, ReviewIssue, ReviewReport,
+    DesignReviewer as AiDesignReviewer, ReviewCategory, ReviewConfig as AiReviewConfig, ReviewIssue, ReviewReport,
     ReviewSeverity, ReviewStats,
 };
 pub use llm::{
@@ -39,5 +39,5 @@ pub use llm::{
     parse_with_llm,
 };
 pub use healing_ml::*;
-pub use shape_from_text::*;
-pub use design_review::*;
+pub use shape_from_text::{ShapeDescription, ShapeFromTextError};
+pub use design_review::{DesignReviewer, ReviewConfig, ReviewReport as MeshReviewReport};

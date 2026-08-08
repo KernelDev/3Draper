@@ -33,6 +33,7 @@ draper-json = { workspace = true }
 draper-implicit = { workspace = true }
 draper-subd = { workspace = true }
 draper-ai = { workspace = true }
+draper-cloud = { workspace = true }
 draper-sketch = { workspace = true }
 draper-fea = { workspace = true }
 draper-drawing = { workspace = true }

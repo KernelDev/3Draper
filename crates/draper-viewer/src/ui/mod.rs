@@ -17,6 +17,7 @@ pub mod sketch;
 pub mod workspaces;
 pub mod dispatcher;
 pub mod ai_panel;
+pub mod collab_panel;
 pub mod dock;
 
 use eframe::egui;

@@ -1164,21 +1164,16 @@ fn compute_frenet_frames(path: &[Point3d]) -> Vec<[f64; 6]> {
         }
     }
 
-    // Compute normals using parallel transport
-    let mut prev_normal = if tangents[0][0].abs() < 0.9 {
-        // Cross with X axis
-        let n = [
-            tangents[0][1] * 1.0 - tangents[0][2] * 0.0,
-            tangents[0][2] * 0.0 - tangents[0][0] * 0.0,
-            tangents[0][0] * 0.0 - tangents[0][1] * 1.0,
-        ]
+    // Compute normals using parallel transport.
+    // Initial normal = tangent × reference axis (X if tangent is not near X, else Y).
+    let mut prev_normal: [f64; 3] = if tangents[0][0].abs() < 0.9 {
+        // Cross with X axis (1, 0, 0):
+        // t × X = (t.y*0 - t.z*0, t.z*1 - t.x*0, t.x*0 - t.y*1) = (0, t.z, -t.y)
+        [0.0, tangents[0][2], -tangents[0][1]]
     } else {
-        // Cross with Y axis
-        let n = [
-            tangents[0][1] * 0.0 - tangents[0][2] * 1.0,
-            tangents[0][2] * 1.0 - tangents[0][0] * 0.0,
-            tangents[0][0] * 0.0 - tangents[0][1] * 0.0,
-        ]
+        // Cross with Y axis (0, 1, 0):
+        // t × Y = (t.y*0 - t.z*1, t.z*0 - t.x*0, t.x*1 - t.y*0) = (-t.z, 0, t.x)
+        [-tangents[0][2], 0.0, tangents[0][0]]
     };
     let len = (prev_normal[0] * prev_normal[0] + prev_normal[1] * prev_normal[1] + prev_normal[2] * prev_normal[2]).sqrt();
     if len > 1e-15 {

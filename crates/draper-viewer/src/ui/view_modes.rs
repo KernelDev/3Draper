@@ -53,6 +53,21 @@ impl ViewOrientation {
         ViewOrientation::Top, ViewOrientation::Bottom, ViewOrientation::Left,
         ViewOrientation::Right, ViewOrientation::Dimetric,
     ];
+
+    /// Get (azimuth, elevation) in degrees for this orientation.
+    /// Used by the dispatcher to set camera angles directly.
+    pub fn camera_angles(&self) -> (f32, f32) {
+        match self {
+            ViewOrientation::Iso => (45.0, 35.0),
+            ViewOrientation::Front => (0.0, 0.0),
+            ViewOrientation::Back => (180.0, 0.0),
+            ViewOrientation::Top => (0.0, 90.0),
+            ViewOrientation::Bottom => (0.0, -90.0),
+            ViewOrientation::Left => (-90.0, 0.0),
+            ViewOrientation::Right => (90.0, 0.0),
+            ViewOrientation::Dimetric => (20.0, 15.0),
+        }
+    }
 }
 
 /// What the ViewCube can request from the main app.

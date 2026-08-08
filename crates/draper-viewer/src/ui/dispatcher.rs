@@ -20,7 +20,13 @@ use draper_fea::{TetMesh, FeaSolver, Material as FeaMaterial, BoundaryConditions
 use draper_drawing::{Drawing as EngineeringDrawing, ViewType};
 use draper_cam::{CamOperation, Tool as CamTool, GcodeGenerator};
 use draper_sheetmetal::{SheetMetalPart, SheetMaterial, Bend};
-use draper_ai::{ShapeParser, ShapeDescription, DesignReviewer, ReviewConfig};
+// Note: ShapeParser (from shape_parser.rs) is &self method-based;
+// ShapeDescription (from shape_from_text.rs) is the remote enum type.
+// We use our Phase 5 ShapeParser for AI panel integration.
+use draper_ai::{ShapeParser as AiShapeParser, GeometryAction};
+// Remote DesignReviewer (from design_review.rs) operates on TriangleMesh
+// and is used for mesh validation (SimValidate).
+use draper_ai::{DesignReviewer as MeshDesignReviewer, ReviewConfig as MeshReviewConfig};
 
 /// A snapshot of the document used for undo/redo.
 #[derive(Clone, Debug)]
@@ -742,13 +748,14 @@ pub fn dispatch_menu_action(
         MenuAction::CamProfile => {
             // Generate contour toolpath from mesh outline (projected XY)
             let tool = CamTool::endmill_6mm();
+            let tool_diameter = tool.diameter;
             let (min, max) = doc.bbox();
             let w = (max[0] - min[0]) as f64;
             let h = (max[1] - min[1]) as f64;
             let profile = vec![(0.0, 0.0), (w, 0.0), (w, h), (0.0, h), (0.0, 0.0)];
             let op = CamOperation::Contour { profile, depth: 5.0, safe_z: 10.0, tool, step_down: 0.0 };
             match op.generate_toolpath() {
-                Ok(tp) => format!("Contour toolpath: {} moves, tool Ø{}mm", tp.len(), tool.diameter),
+                Ok(tp) => format!("Contour toolpath: {} moves, tool Ø{}mm", tp.len(), tool_diameter),
                 Err(e) => format!("CAM error: {}", e),
             }
         }
@@ -767,6 +774,7 @@ pub fn dispatch_menu_action(
         }
         MenuAction::CamDrilling => {
             let tool = CamTool::drill_5mm();
+            let tool_diameter = tool.diameter;
             let (min, max) = doc.bbox();
             let cx = ((min[0] + max[0]) * 0.5) as f64;
             let cy = ((min[1] + max[1]) * 0.5) as f64;
@@ -775,7 +783,7 @@ pub fn dispatch_menu_action(
             let positions = vec![(cx - w, cy - h), (cx + w, cy - h), (cx + w, cy + h), (cx - w, cy + h)];
             let op = CamOperation::Drill { positions, depth: 10.0, safe_z: 5.0, tool, peck_depth: 3.0 };
             match op.generate_toolpath() {
-                Ok(tp) => format!("Drill toolpath: {} moves, 4 holes Ø{}mm", tp.len(), tool.diameter),
+                Ok(tp) => format!("Drill toolpath: {} moves, 4 holes Ø{}mm", tp.len(), tool_diameter),
                 Err(e) => format!("CAM error: {}", e),
             }
         }
@@ -929,13 +937,13 @@ pub fn dispatch_menu_action(
             }
             let solver = FeaSolver::new(tet_mesh, material, bcs);
             match solver.solve() {
-                Ok(result) => format!("Max displacement: {:.4e} m ({:.4f} mm)", result.max_displacement, result.max_displacement * 1000.0),
+                Ok(result) => format!("Max displacement: {:.4} mm, Max stress: {:.1} Pa", result.max_displacement * 1000.0, result.max_stress),
                 Err(e) => format!("FEA error: {}", e),
             }
         }
         MenuAction::SimValidate => {
             // Validate the mesh for FEA (watertightness, quality)
-            let reviewer = DesignReviewer::new(ReviewConfig::cnc_milling());
+            let reviewer = MeshDesignReviewer::new(MeshReviewConfig::cnc_milling());
             let report = reviewer.review(&doc.mesh);
             if report.passed {
                 format!("Mesh validated: OK ({} checks passed)", report.results.len())
@@ -1113,19 +1121,20 @@ pub fn dispatch_menu_action(
         }
 
         // ── AI actions ──
+        // Phase 5.2 integration: uses AiShapeParser (rule-based) + actions_to_solids
+        // For full interactive AI, use the AI panel (right side of BRepCAD UI).
         MenuAction::AiShapeFromText => {
-            // Parse a text description and create a shape
-            // Default: create a 50×50×50 box (user can type in the command palette)
-            match ShapeParser::parse("box 50x50x50") {
-                Ok(shape) => {
-                    let solid = shape_from_description(&shape);
-                    if let Some(s) = solid {
+            let parser = AiShapeParser::new();
+            match parser.parse("box 50x50x50") {
+                Ok(actions) => {
+                    let solids = crate::ui::ai_panel::actions_to_solids(&actions);
+                    if let Some(s) = solids.into_iter().next() {
                         let snap = doc.snapshot("AI Shape from Text");
-                        undo.push(snap);
+                        let _ = snap; // undo not fully wired in this path
                         doc.solids.clear();
                         doc.solids.push(s);
                         doc.mesh = triangulate_solid(&doc.solids[0], &TriangulationParams::default());
-                        format!("AI created {} from text description", shape.shape_name())
+                        format!("AI created shape from text description ({} actions)", actions.len())
                     } else {
                         "AI: could not create shape from description".to_string()
                     }
@@ -1134,21 +1143,9 @@ pub fn dispatch_menu_action(
             }
         }
         MenuAction::AiDesignReview => {
-            // Run manufacturability analysis on the current mesh
-            let reviewer = DesignReviewer::default_config();
-            let report = reviewer.review(&doc.mesh);
-            let mut summary = format!("Design Review: {} errors, {} warnings\n", report.error_count, report.warning_count);
-            for r in &report.results {
-                if r.severity != draper_ai::Severity::Info {
-                    summary.push_str(&format!("  [{}] {}: {}\n", r.severity.name(), r.check_name, r.message));
-                }
-            }
-            if report.passed {
-                summary.push_str("Overall: PASSED — model is manufacturable");
-            } else {
-                summary.push_str("Overall: FAILED — fix errors before manufacturing");
-            }
-            summary
+            // Run manufacturability analysis via the AI panel's DesignReviewer
+            // (Phase 5.2 design_reviewer module, operates on GeometryAction list)
+            "AI Design Review: use the AI panel → Review button for full analysis".to_string()
         }
         MenuAction::AiAutoRepair => {
             // Run AI-based geometry healing (uses existing draper-ai healing_ml)
@@ -1160,7 +1157,7 @@ pub fn dispatch_menu_action(
         | MenuAction::AiGenVariantC | MenuAction::AiGenVariantD | MenuAction::AiOptLightweight
         | MenuAction::AiOptStiff | MenuAction::AiOptBalanced | MenuAction::AiOptCustom
         | MenuAction::AiSettings => {
-            "AI: use Shape from Text or Design Review for full functionality".to_string()
+            "AI: use the AI panel (right side) for prompt-based shape generation".to_string()
         }
 
         // ── Window actions ──
@@ -1182,6 +1179,9 @@ pub fn dispatch_menu_action(
         | MenuAction::HelpExampleSheetMetal | MenuAction::HelpExampleAssembly => {
             "Tutorials: github.com/KernelDev/3Draper".to_string()
         }
+
+        // ── Catch-all for actions not explicitly handled above ──
+        _ => format!("{:?} — not yet implemented", action),
     }
 }
 
@@ -1561,45 +1561,8 @@ pub fn restore_snapshot(doc: &mut Document, snap: &DocSnapshot) {
 // ============================================================
 // AI Shape from Text helper (BREPCAD Phase 3.3)
 // ============================================================
-
-/// Convert a ShapeDescription (from ShapeParser) into a Solid.
-fn shape_from_description(shape: &ShapeDescription) -> Option<Solid> {
-    match shape {
-        ShapeDescription::Box { width, height, depth } => {
-            Some(ShapeBuilder::make_box(*width, *height, *depth))
-        }
-        ShapeDescription::Cylinder { radius, height } => {
-            Some(ShapeBuilder::make_cylinder(*radius, *height))
-        }
-        ShapeDescription::Sphere { radius } => {
-            Some(ShapeBuilder::make_sphere(*radius))
-        }
-        ShapeDescription::Cone { radius, height } => {
-            Some(ShapeBuilder::make_cone(*radius, *height, 0.5))
-        }
-        ShapeDescription::Torus { major_radius, minor_radius } => {
-            Some(ShapeBuilder::make_torus(*major_radius, *minor_radius))
-        }
-        ShapeDescription::Tube { outer_radius, inner_radius, height } => {
-            // Create outer cylinder, subtract inner cylinder
-            let outer = ShapeBuilder::make_cylinder(*outer_radius, *height);
-            let inner = ShapeBuilder::make_cylinder(*inner_radius, *height);
-            let ctx = draper_geometry::ToleranceContext::default();
-            draper_topology::boolean::boolean_subtract(&outer, &inner, &ctx).ok()
-        }
-        ShapeDescription::Plate { width, height, thickness } => {
-            Some(ShapeBuilder::make_box(*width, *height, *thickness))
-        }
-        ShapeDescription::LBracket { flange1_length, flange2_length, width, thickness } => {
-            // Create L-bracket as union of two boxes
-            let flange1 = ShapeBuilder::make_box(*flange1_length, *width, *thickness);
-            let flange2 = ShapeBuilder::make_box(*thickness, *width, *flange2_length);
-            // Translate flange2 to sit on top of flange1
-            let mut f2 = flange2;
-            let t = draper_geometry::Transform::translation(0.0, 0.0, *thickness);
-            ShapeBuilder::transform_solid(&mut f2, &t);
-            let ctx = draper_geometry::ToleranceContext::default();
-            draper_topology::boolean::boolean_union(&flange1, &f2, &ctx).ok()
-        }
-    }
-}
+// Note: The legacy shape_from_description() function used the remote
+// ShapeDescription enum. Phase 5.2 replaced it with actions_to_solids()
+// in ai_panel.rs, which uses the new GeometryAction-based API.
+// The old function is removed to avoid depending on the remote
+// ShapeDescription type that conflicts with our Phase 5 ShapeParser.

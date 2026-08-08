@@ -774,6 +774,8 @@ pub struct ViewerApp {
     pub brepcad_marking_menu_visible: bool,
     /// AI panel state (ShapeParser, DesignReviewer, LLM).
     pub ai_panel: crate::ui::ai_panel::AiPanelState,
+    /// Collaboration panel state (WebSocket CRDT sync).
+    pub collab_panel: crate::ui::collab_panel::CollabPanelState,
     /// Last status message displayed in toast.
     pub brepcad_status_msg: String,
     /// Active workspace (Modeling, Visual Programming, CAM, FEA, etc.)
@@ -1505,6 +1507,7 @@ impl ViewerApp {
             brepcad_command_palette: Default::default(),
             brepcad_marking_menu_visible: false,
             ai_panel: Default::default(),
+            collab_panel: Default::default(),
             brepcad_status_msg: String::new(),
             brepcad_workspace: crate::ui::Workspace::Modeling,
             brepcad_vp_graph: crate::ui::workspaces::VpGraph::new(),
@@ -9741,6 +9744,22 @@ impl eframe::App for ViewerApp {
                         });
                 });
 
+            // ═══ Collaboration Panel (Phase 5.1 integration) ═══
+            // The collab panel is shown on the left side as a collapsible window.
+            // It provides WebSocket-based real-time collaboration (CRDT sync).
+            egui::SidePanel::left("collab_panel")
+                .min_width(200.0)
+                .default_width(260.0)
+                .max_width(350.0)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false; 2])
+                        .show(ui, |ui| {
+                            let _ = crate::ui::collab_panel::render_collab_panel(ui, &mut self.collab_panel);
+                        });
+                });
+
             // Status toast
             if !self.brepcad_status_msg.is_empty() {
                 egui::Area::new(egui::Id::new("brepcad_status_toast"))
@@ -15834,11 +15853,6 @@ impl ViewerApp {
             MenuAction::DrwAnnotationTolerance if false => String::new(), // unreachable, handled above
             MenuAction::DrwAnnotationSurfaceFinish if false => String::new(),
 
-            // ── All remaining actions: provide informative messages ──
-            _ => {
-                let name = format!("{:?}", action);
-                // Check if it's a known but advanced feature
-                
             // ── AI actions (Phase 5.2 UI integration) ──
             MenuAction::AiShapeFromText => {
                 self.brepcad_status_msg = "AI Shape-from-Text: type a prompt in the AI panel (right side)".to_string();
@@ -15875,7 +15889,12 @@ impl ViewerApp {
                 self.ai_panel.actions.push(draper_ai::GeometryAction::FilletAllEdges { radius: 2.0 });
                 "Added FilletAllEdges (R=2mm) to AI actions".to_string()
             }
-if name.contains("Cloud") || name.contains("License") || name.contains("Crash")
+
+            // ── All remaining actions: provide informative messages ──
+            _ => {
+                let name = format!("{:?}", action);
+                // Check if it's a known but advanced feature
+                if name.contains("Cloud") || name.contains("License") || name.contains("Crash")
                     || name.contains("Onboarding") || name.contains("Compare")
                     || name.contains("Reverse") || name.contains("Walkthrough")
                     || name.contains("Vr") || name.contains("Visual") {

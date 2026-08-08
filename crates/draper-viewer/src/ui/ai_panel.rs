@@ -32,7 +32,7 @@
 
 use eframe::egui;
 use draper_ai::{
-    DesignReviewer, GeometryAction, MockLlmClient, ShapeParser,
+    AiDesignReviewer as DesignReviewer, GeometryAction, MockLlmClient, ShapeParser,
     parse_with_llm, LlmClient, ReviewReport, ReviewSeverity,
 };
 use std::sync::Arc;

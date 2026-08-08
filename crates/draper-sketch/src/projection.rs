@@ -304,7 +304,7 @@ pub fn project_edges_to_sketch(
         match project_edge_to_sketch(curve, plane, sketch, samples) {
             Ok(ids) => all_ids.extend(ids),
             Err(e) => {
-                crate::log::debug!("Edge projection failed: {}", e);
+                log::debug!("Edge projection failed: {}", e);
             }
         }
     }
