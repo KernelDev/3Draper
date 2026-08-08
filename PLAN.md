@@ -154,9 +154,9 @@
 - [x] Phase 2: CAM postprocessor differentiation (Heidenhain/GRBL/Siemens/Fanuc)
 - [x] Phase 3: Visual compliance (QAT, HUD overlay, search in ribbon)
 - [x] Phase 4: Missing dialogs (RenderSettings, Customize, NcCodeViewer, PrintPlot, ConstraintDiagnostics, MacroRecorder)
-- [ ] Phase 5: Sketch constraints
-- [ ] Phase 6: Animation timeline
-- [ ] Phase 7: Scripting & plugins
+- [x] Phase 5: Sketch constraints (Equal constraint applied, diagnostics dialog)
+- [x] Phase 6: Animation Timeline panel (keyframes, tracks, playback, easing)
+- [x] Phase 7: Scripting console (command interpreter, 10 functions) + Plugin manager (existing)
 - [ ] Phase 8: Cloud collab enhancement
 
 ## Notes

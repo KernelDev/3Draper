@@ -18,6 +18,8 @@ pub mod workspaces;
 pub mod dispatcher;
 pub mod ai_panel;
 pub mod collab_panel;
+pub mod animation_panel;
+pub mod scripting_panel;
 pub mod dock;
 
 use eframe::egui;

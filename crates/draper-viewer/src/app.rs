@@ -776,6 +776,10 @@ pub struct ViewerApp {
     pub ai_panel: crate::ui::ai_panel::AiPanelState,
     /// Collaboration panel state (WebSocket CRDT sync).
     pub collab_panel: crate::ui::collab_panel::CollabPanelState,
+    /// Animation timeline state (Phase 6).
+    pub animation_panel: crate::ui::animation_panel::AnimationTimelineState,
+    /// Scripting console state (Phase 7).
+    pub scripting_console: crate::ui::scripting_panel::ScriptingConsoleState,
     /// Last status message displayed in toast.
     pub brepcad_status_msg: String,
     /// Active workspace (Modeling, Visual Programming, CAM, FEA, etc.)
@@ -1508,6 +1512,8 @@ impl ViewerApp {
             brepcad_marking_menu_visible: false,
             ai_panel: Default::default(),
             collab_panel: Default::default(),
+            animation_panel: Default::default(),
+            scripting_console: Default::default(),
             brepcad_status_msg: String::new(),
             brepcad_workspace: crate::ui::Workspace::Modeling,
             brepcad_vp_graph: crate::ui::workspaces::VpGraph::new(),
@@ -9802,6 +9808,34 @@ impl eframe::App for ViewerApp {
                         });
                 });
 
+            // ═══ Animation Timeline (Phase 6, mockups 92/96) ═══
+            // Shown as a bottom panel when visible (toggled via View → Timeline).
+            if self.animation_panel.visible {
+                egui::TopBottomPanel::bottom("animation_timeline_panel")
+                    .min_height(150.0)
+                    .default_height(200.0)
+                    .resizable(true)
+                    .show(ctx, |ui| {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false; 2])
+                            .show(ui, |ui| {
+                                crate::ui::animation_panel::render_animation_timeline(ui, &mut self.animation_panel);
+                            });
+                    });
+            }
+
+            // ═══ Scripting Console (Phase 7, mockup 69) ═══
+            // Shown as a bottom panel when visible (toggled via Tools → Scripting Console).
+            if self.scripting_console.visible {
+                egui::TopBottomPanel::bottom("scripting_console_panel")
+                    .min_height(120.0)
+                    .default_height(180.0)
+                    .resizable(true)
+                    .show(ctx, |ui| {
+                        let _ = crate::ui::scripting_panel::render_scripting_console(ui, &mut self.scripting_console);
+                    });
+            }
+
             // Status toast
             if !self.brepcad_status_msg.is_empty() {
                 egui::Area::new(egui::Id::new("brepcad_status_toast"))
@@ -14636,7 +14670,8 @@ impl ViewerApp {
             }
             MenuAction::ViewTimeline => {
                 self.brepcad_timeline_open = !self.brepcad_timeline_open;
-                if self.brepcad_timeline_open { "Timeline opened".to_string() } else { String::new() }
+                self.animation_panel.visible = self.brepcad_timeline_open;
+                if self.brepcad_timeline_open { "Animation Timeline opened".to_string() } else { String::new() }
             }
             MenuAction::ViewPerspective | MenuAction::ViewOrthographic => "Camera mode toggle not yet implemented".to_string(),
             MenuAction::ViewSaveLayout | MenuAction::ViewLoadLayout => "Layout save/load not yet implemented".to_string(),
@@ -15088,9 +15123,68 @@ impl ViewerApp {
             | MenuAction::SketchOffset | MenuAction::SketchMirror | MenuAction::SketchPattern
             | MenuAction::SketchFillet | MenuAction::SketchSpline | MenuAction::SketchPolygon
             | MenuAction::SketchArcTangent => {
-                // Open Constraint Diagnostics dialog for sketch constraint actions
-                self.brepcad_dialog = crate::ui::dialogs::DialogType::ConstraintDiagnostics;
-                "Sketch constraint: opened Constraint Diagnostics".to_string()
+                // Apply sketch constraint to last 2 entities
+                let n = self.brepcad_sketch_entities.len();
+                if n < 2 {
+                    "Add at least 2 sketch entities before applying constraints".to_string()
+                } else {
+                    let constraint_type = match action {
+                        MenuAction::SketchConstraintCoincident => 0u8,
+                        MenuAction::SketchConstraintCollinear => 1,
+                        MenuAction::SketchConstraintConcentric => 2,
+                        MenuAction::SketchConstraintParallel => 3,
+                        MenuAction::SketchConstraintPerpendicular => 4,
+                        MenuAction::SketchConstraintTangent => 5,
+                        MenuAction::SketchConstraintEqual => 6,
+                        MenuAction::SketchDimAngular => 7,
+                        MenuAction::SketchDimRadial => 8,
+                        MenuAction::SketchDimDiameter => 9,
+                        _ => 10,
+                    };
+                    self.brepcad_sketch_constraints.push((constraint_type, n - 2, n - 1));
+
+                    let constraint_name = match constraint_type {
+                        0 => "Coincident", 1 => "Collinear", 2 => "Concentric",
+                        3 => "Parallel", 4 => "Perpendicular", 5 => "Tangent",
+                        6 => "Equal", 7 => "Angle", 8 => "Radial", 9 => "Diameter",
+                        _ => "Modify",
+                    };
+
+                    // Apply Equal constraint: make second entity match first's length/radius
+                    if constraint_type == 6 && n >= 2 {
+                        // Compute reference length/radius from first entity
+                        let (ref_len, ref_radius) = match &self.brepcad_sketch_entities[n - 2] {
+                            BrepcadSketchEntity::Line { p1, p2 } => {
+                                let len = ((p2[0] - p1[0]).powi(2) + (p2[1] - p1[1]).powi(2)).sqrt();
+                                (len, None)
+                            }
+                            BrepcadSketchEntity::Circle { radius, .. } => {
+                                (0.0, Some(*radius))
+                            }
+                            _ => (0.0, None),
+                        };
+
+                        // Apply to second entity
+                        if let BrepcadSketchEntity::Line { p1: b1, p2: b2 } = &mut self.brepcad_sketch_entities[n - 1] {
+                            if ref_len > 0.0 {
+                                let len2 = ((b2[0] - b1[0]).powi(2) + (b2[1] - b1[1]).powi(2)).sqrt();
+                                if len2 > 1e-10 {
+                                    let scale = ref_len / len2;
+                                    b2[0] = b1[0] + (b2[0] - b1[0]) * scale;
+                                    b2[1] = b1[1] + (b2[1] - b1[1]) * scale;
+                                }
+                            }
+                        }
+                        if let Some(r) = ref_radius {
+                            if let BrepcadSketchEntity::Circle { radius, .. } = &mut self.brepcad_sketch_entities[n - 1] {
+                                *radius = r;
+                            }
+                        }
+                    }
+
+                    self.brepcad_dialog = crate::ui::dialogs::DialogType::ConstraintDiagnostics;
+                    format!("Applied {} constraint to entities #{} and #{}", constraint_name, n - 1, n)
+                }
             }
 
 
@@ -15887,7 +15981,14 @@ impl ViewerApp {
                 self.brepcad_dialog = crate::ui::dialogs::DialogType::Customize;
                 String::new()
             }
-            MenuAction::ToolsScriptingConsole => "Scripting Console: Python/Lua (coming soon)".to_string(),
+            MenuAction::ToolsScriptingConsole => {
+                self.scripting_console.visible = !self.scripting_console.visible;
+                if self.scripting_console.visible {
+                    String::new()
+                } else {
+                    "Scripting Console closed".to_string()
+                }
+            }
             MenuAction::ToolsMacroRecorder => {
                 self.brepcad_dialog = crate::ui::dialogs::DialogType::MacroRecorder;
                 String::new()
