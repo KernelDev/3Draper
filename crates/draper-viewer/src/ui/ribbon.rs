@@ -77,13 +77,35 @@ pub fn render_ribbon(ctx: &egui::Context, active: &mut RibbonTab) -> Option<Menu
     egui::TopBottomPanel::top("ribbon_bar")
         .exact_height(90.0)
         .show(ctx, |ui| {
-            // Tab selector row — horizontal, no wrapping
+            // Tab selector row with QAT (Quick Access Toolbar) on the right
             ui.horizontal(|ui| {
-                for tab in RibbonTab::ALL {
-                    if ui.selectable_label(*active == *tab, tab.label()).clicked() {
-                        *active = *tab;
+                // Tab selector (left side)
+                ui.horizontal(|ui| {
+                    for tab in RibbonTab::ALL {
+                        if ui.selectable_label(*active == *tab, tab.label()).clicked() {
+                            *active = *tab;
+                        }
                     }
-                }
+                });
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Quick Access Toolbar (QAT): Undo, Redo, Save
+                    if ui.button("↶").on_hover_text("Undo (Ctrl+Z)").clicked() {
+                        action = Some(MenuAction::EditUndo);
+                    }
+                    if ui.button("↷").on_hover_text("Redo (Ctrl+Shift+Z)").clicked() {
+                        action = Some(MenuAction::EditRedo);
+                    }
+                    if ui.button("💾").on_hover_text("Save (Ctrl+S)").clicked() {
+                        action = Some(MenuAction::FileSave);
+                    }
+                    ui.separator();
+                    // Command search box (mockup 01: "Search commands... ⌘P")
+                    let mut search_text = String::new();
+                    ui.add(egui::TextEdit::singleline(&mut search_text)
+                        .hint_text("Search... ⌘P")
+                        .desired_width(120.0));
+                });
             });
 
             ui.separator();

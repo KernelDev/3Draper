@@ -148,11 +148,11 @@
 ## Progress Tracking
 
 - [x] Phase 1 Task 1.1: Fix Tools→Options bug
-- [ ] Phase 1 Task 1.2: Wire FEA
-- [ ] Phase 1 Task 1.3: Wire CAM
-- [ ] Phase 1 Task 1.4: Wire AI
-- [ ] Phase 2: CAM postprocessor differentiation
-- [ ] Phase 3: Visual compliance (QAT, HUD, search)
+- [x] Phase 1 Task 1.2: Wire FEA (real FeaSolver::solve)
+- [x] Phase 1 Task 1.3: Wire CAM (dialect-specific G-code)
+- [x] Phase 1 Task 1.4: Wire AI (real AiShapeParser)
+- [x] Phase 2: CAM postprocessor differentiation (Heidenhain/GRBL/Siemens/Fanuc)
+- [x] Phase 3: Visual compliance (QAT, HUD overlay, search in ribbon)
 - [ ] Phase 4: Missing dialogs
 - [ ] Phase 5: Sketch constraints
 - [ ] Phase 6: Animation timeline

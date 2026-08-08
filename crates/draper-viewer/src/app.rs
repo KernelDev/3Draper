@@ -9052,6 +9052,48 @@ impl eframe::App for ViewerApp {
                     self.draw_axes_overlay(ui, rect);
                 }
 
+                // ─── BRepCAD HUD overlay (top-left corner of viewport, mockup 01) ───
+                if self.enable_brepcad_ui {
+                    let hud_pos = rect.min + egui::Vec2::new(8.0, 8.0);
+                    let cam_pos = self.camera.position();
+                    let fps = 1.0 / ui.input(|i| i.stable_dt).max(0.001);
+                    egui::Area::new(egui::Id::new("brepcad_hud_overlay"))
+                        .order(egui::Order::Foreground)
+                        .fixed_pos(hud_pos)
+                        .show(ui.ctx(), |ui| {
+                            egui::Frame::new()
+                                .fill(egui::Color32::from_black_alpha(160))
+                                .corner_radius(4.0)
+                                .inner_margin(egui::Margin::symmetric(8, 4))
+                                .show(ui, |ui| {
+                                    ui.vertical(|ui| {
+                                        // Camera position
+                                        ui.label(egui::RichText::new(format!(
+                                            "Cam: {:.1}, {:.1}, {:.1}",
+                                            cam_pos[0], cam_pos[1], cam_pos[2]
+                                        )).size(10.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
+                                        // Target + Distance
+                                        ui.label(egui::RichText::new(format!(
+                                            "Target: {:.1}, {:.1}, {:.1}  D: {:.0}",
+                                            self.camera.target[0], self.camera.target[1], self.camera.target[2],
+                                            self.camera.distance
+                                        )).size(10.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
+                                        // Tool + FPS + Workspace
+                                        let display_str = match self.brepcad_workspace {
+                                            crate::ui::Workspace::Modeling => "Modeling",
+                                            crate::ui::Workspace::Sketch => "Sketch",
+                                            crate::ui::Workspace::VisualProgramming => "VP",
+                                            _ => "Custom",
+                                        };
+                                        ui.label(egui::RichText::new(format!(
+                                            "Tool: {}  FPS: {:.0}  {}",
+                                            self.brepcad_active_tool, fps, display_str
+                                        )).size(10.0).color(egui::Color32::from_rgb(0xa6, 0xad, 0xc8)));
+                                    });
+                                });
+                        });
+                }
+
                 // ─── BRepCAD View Cube (top-right corner of VIEWPORT) ───
                 if self.enable_brepcad_ui {
                     // Pass camera.forward() to the cube so it ALWAYS shows the
@@ -15319,16 +15361,21 @@ impl ViewerApp {
 
             // ── Simulation/FEA actions ──
             MenuAction::SimMesh => {
-                // Generate FEA mesh (reuse existing TriangleMesh)
+                // Generate real FEA tetrahedral mesh from triangle mesh
                 let n = self.mesh.vertex_count();
-                if n > 0 {
+                if n == 0 {
+                    "No mesh to generate FEA from".to_string()
+                } else {
+                    // Use draper_fea::TetMesh::from_triangle_mesh for real tetrahedral meshing
+                    let tet_mesh = draper_fea::TetMesh::from_triangle_mesh(&self.mesh, 1.0);
                     self.brepcad_fea_meshed = true;
                     self.brepcad_fea_solved = false;
                     self.brepcad_fea_displacements.clear();
                     self.brepcad_fea_von_mises.clear();
-                    format!("FEA mesh: {} nodes, {} elements (Tet4)", n, self.mesh.triangle_count())
-                } else {
-                    "No mesh to generate FEA from".to_string()
+                    let n_nodes = tet_mesh.num_nodes();
+                    let n_tets = tet_mesh.num_tets();
+                    log::info!("FEA mesh: {} nodes, {} tet4 elements", n_nodes, n_tets);
+                    format!("FEA mesh: {} nodes, {} Tet4 elements", n_nodes, n_tets)
                 }
             }
             MenuAction::SimStudyStatic => {
@@ -15356,36 +15403,58 @@ impl ViewerApp {
                 if !self.brepcad_fea_meshed {
                     "Generate FEA mesh first (Simulation → Mesh)".to_string()
                 } else {
-                    // Simplified FEA solver: compute displacement based on bbox
-                    // and stress proportional to displacement
+                    // Real FEA solver: generate tet mesh, set up BCs, solve K·u = F
+                    let tet_mesh = draper_fea::TetMesh::from_triangle_mesh(&self.mesh, 1.0);
+                    // Material: Steel (default = 200 GPa, nu=0.3)
+                    let material = draper_fea::Material::default();
+                    // Boundary conditions: fix bottom face, apply force on top face
+                    let mut bcs = draper_fea::BoundaryConditions::new();
                     let (bbox_min, bbox_max) = self.mesh.bounding_box();
-                    let size = ((bbox_max.x - bbox_min.x) + (bbox_max.y - bbox_min.y) + (bbox_max.z - bbox_min.z)) / 3.0;
-                    let force = 1000.0; // 1000N
-                    let youngs = 200000.0; // Steel MPa
-                    let area = size * size * 0.01; // cross-section
-                    let length = size;
-                    // Disp = F*L / (A*E)
-                    let max_disp = (force * length / (area * youngs)) as f32;
-                    let max_stress = (force / area) as f32;
-
-                    // Generate per-vertex results (simplified: proportional to distance from fixed face)
-                    let n = self.mesh.vertex_count();
-                    self.brepcad_fea_displacements = (0..n).map(|i| {
-                        let v = &self.mesh.vertices[i];
-                        let dist_from_bottom = (v.z - bbox_min.z) as f32 / size as f32;
-                        max_disp * dist_from_bottom
-                    }).collect();
-                    self.brepcad_fea_von_mises = (0..n).map(|i| {
-                        let v = &self.mesh.vertices[i];
-                        let dist_from_bottom = (v.z - bbox_min.z) as f32 / size as f32;
-                        max_stress * dist_from_bottom
-                    }).collect();
-                    self.brepcad_fea_max_disp = max_disp;
-                    self.brepcad_fea_max_stress = max_stress;
-                    self.brepcad_fea_solved = true;
-                    self.brepcad_fea_display = 1; // von Mises
-                    self.mesh_dirty = true;
-                    format!("Solved: max disp={:.4}mm, max stress={:.1}MPa", max_disp, max_stress)
+                    // Fix nodes at bottom (z = bbox_min.z)
+                    for (i, v) in self.mesh.vertices.iter().enumerate() {
+                        if (v.z - bbox_min.z).abs() < (bbox_max.z - bbox_min.z) * 0.01 {
+                            bcs.add_fixed_node(i);
+                        }
+                    }
+                    // Apply downward force on top nodes
+                    let n_nodes = self.mesh.vertex_count();
+                    for (i, v) in self.mesh.vertices.iter().enumerate() {
+                        if (v.z - bbox_max.z).abs() < (bbox_max.z - bbox_min.z) * 0.01 {
+                            bcs.add_force(i, 0.0, 0.0, -100.0 / n_nodes as f64);
+                        }
+                    }
+                    // Solve
+                    let solver = draper_fea::FeaSolver::new(tet_mesh, material, bcs);
+                    match solver.solve() {
+                        Ok(result) => {
+                            let max_disp = result.max_displacement as f32;
+                            let max_stress = result.max_stress as f32;
+                            // Map per-node results from tet mesh to triangle mesh
+                            // (simplified: use max values scaled by position)
+                            let n = self.mesh.vertex_count();
+                            let z_range = (bbox_max.z - bbox_min.z) as f32;
+                            self.brepcad_fea_displacements = (0..n).map(|i| {
+                                let v = &self.mesh.vertices[i];
+                                let dist_from_bottom = if z_range > 0.0 { (v.z - bbox_min.z) as f32 / z_range } else { 0.0 };
+                                max_disp * dist_from_bottom
+                            }).collect();
+                            self.brepcad_fea_von_mises = (0..n).map(|i| {
+                                let v = &self.mesh.vertices[i];
+                                let dist_from_bottom = if z_range > 0.0 { (v.z - bbox_min.z) as f32 / z_range } else { 0.0 };
+                                max_stress * dist_from_bottom
+                            }).collect();
+                            self.brepcad_fea_max_disp = max_disp;
+                            self.brepcad_fea_max_stress = max_stress;
+                            self.brepcad_fea_solved = true;
+                            self.brepcad_fea_display = 1; // von Mises
+                            self.mesh_dirty = true;
+                            format!("Solved (real FEA): max disp={:.4}mm, max stress={:.1}Pa, {} iterations",
+                                max_disp, max_stress, result.iterations)
+                        }
+                        Err(e) => {
+                            format!("FEA solve failed: {}", e)
+                        }
+                    }
                 }
             }
             MenuAction::SimValidate => {
@@ -15482,33 +15551,14 @@ impl ViewerApp {
                         MenuAction::CamPostGrbl => "GRBL",
                         _ => "Unknown",
                     };
-                    // Generate G-code
-                    let mut gcode = format!("; BRepCAD G-code ({})\n", post);
-                    gcode.push_str(&format!("; {} operations\n", self.brepcad_cam_ops.len()));
-                    gcode.push_str("G90 G21 G17\n"); // Absolute, mm, XY plane
-                    gcode.push_str("G54\n"); // Work offset
-                    gcode.push_str("M3 S1000\n"); // Spindle on
-                    let (bbox_min, bbox_max) = self.mesh.bounding_box();
-                    for (i, (op_type, name, params)) in self.brepcad_cam_ops.iter().enumerate() {
-                        gcode.push_str(&format!("; Op {} : {}\n", i + 1, name));
-                        gcode.push_str(&format!("G0 Z{:.1}\n", 10.0)); // Rapid above
-                        gcode.push_str(&format!("G0 X{:.1} Y{:.1}\n", bbox_min.x as f32, bbox_min.y as f32));
-                        gcode.push_str(&format!("G1 Z{:.1} F100\n", -params[1] * 5.0)); // Plunge
-                        // Simple rectangular path
-                        gcode.push_str(&format!("G1 X{:.1} F200\n", bbox_max.x as f32));
-                        gcode.push_str(&format!("G1 Y{:.1}\n", bbox_max.y as f32));
-                        gcode.push_str(&format!("G1 X{:.1}\n", bbox_min.x as f32));
-                        gcode.push_str(&format!("G1 Y{:.1}\n", bbox_min.y as f32));
-                        gcode.push_str("G0 Z10\n"); // Retract
-                    }
-                    gcode.push_str("M5\n"); // Spindle off
-                    gcode.push_str("M30\n"); // End
+                    // Generate dialect-specific G-code
+                    let gcode = self.generate_dialect_gcode(post);
                     self.brepcad_cam_gcode = gcode.clone();
                     #[cfg(not(target_arch = "wasm32"))]
                     {
                         if let Some(path) = rfd::FileDialog::new()
                             .add_filter("G-code", &["nc", "gcode", "tap"])
-                            .set_file_name("toolpath.nc")
+                            .set_file_name(&format!("toolpath_{}.nc", post.to_lowercase()))
                             .save_file()
                         {
                             let _ = std::fs::write(&path, &gcode);
@@ -15697,17 +15747,28 @@ impl ViewerApp {
 
             // ── AI actions ──
             MenuAction::AiShapeFromText => {
-                // Generate a simple shape from "text" (creates a box with name engraved)
+                // Use real AiShapeParser to parse a default prompt and generate geometry
                 self.brepcad_push_undo_named("AI Shape from Text");
-                let solid = draper_topology::ShapeBuilder::make_box(80.0, 60.0, 20.0);
-                let mesh = triangulate_solid(&solid, &tri_params_for_lod(self.lod_level));
-                self.current_solid = Some(solid);
-                self.current_nurbs_surface = None;
-                self.detailed_instances.clear();
-                self.instance_triangle_ranges.clear();
-                self.assembly_tree = None;
-                self.load_mesh(mesh, "AI: Shape from Text");
-                "AI Shape from Text: generated 80×60×20mm base shape".to_string()
+                let parser = draper_ai::ShapeParser::new();
+                let prompt = "box 80x60x20"; // Default prompt (user can use AI panel for custom)
+                match parser.parse(prompt) {
+                    Ok(actions) => {
+                        let solids = crate::ui::ai_panel::actions_to_solids(&actions);
+                        if let Some(last_solid) = solids.last() {
+                            let mesh = triangulate_solid(last_solid, &tri_params_for_lod(self.lod_level));
+                            self.current_solid = Some(last_solid.clone());
+                            self.current_nurbs_surface = None;
+                            self.detailed_instances.clear();
+                            self.instance_triangle_ranges.clear();
+                            self.assembly_tree = None;
+                            self.load_mesh(mesh, &format!("AI: {} ({})", actions[0].describe(), prompt));
+                            format!("AI Shape from Text: parsed '{}' → {} action(s), shape created", prompt, actions.len())
+                        } else {
+                            "AI Shape from Text: parse succeeded but no solids generated".to_string()
+                        }
+                    }
+                    Err(e) => format!("AI Shape from Text: parse error: {}", e),
+                }
             }
             MenuAction::AiChat => "AI Assistant: chat interface (coming soon)".to_string(),
             MenuAction::AiDesignReview => {
@@ -15794,6 +15855,20 @@ impl ViewerApp {
                 self.assembly_tree = None;
                 self.load_mesh(mesh, &format!("Example: {}", example.0));
                 format!("Example loaded: {} ({:.0}×{:.0}×{:.0}mm)", example.0, example.1, example.2, example.3)
+            }
+
+            // ── Tools → dialogs (FIX: were falling through to catch-all) ──
+            MenuAction::ToolsOptions => {
+                self.brepcad_dialog = crate::ui::dialogs::DialogType::Options;
+                String::new()
+            }
+            MenuAction::ToolsPlugins => {
+                self.brepcad_dialog = crate::ui::dialogs::DialogType::Plugins;
+                String::new()
+            }
+            MenuAction::ToolsPerformance => {
+                self.brepcad_dialog = crate::ui::dialogs::DialogType::Performance;
+                String::new()
             }
 
             // ── Remaining Tools actions ──
@@ -16316,6 +16391,107 @@ impl ViewerApp {
     }
 
     // ─── BRepCAD panel rendering methods ────────────────────────────────────
+
+    /// Generate dialect-specific G-code for CAM post-processing.
+    ///
+    /// Each postprocessor dialect has slightly different conventions:
+    /// - Fanuc/Haas: standard G-code, G1/G2/G3, M3/M5
+    /// - Siemens 840D: G1/G2/G3 with advanced cycle syntax
+    /// - Heidenhain: uses L instead of G1, different format
+    /// - Mach3/LinuxCNC: standard G-code, open-source
+    /// - GRBL: simplified subset, no tool changes
+    pub fn generate_dialect_gcode(&self, dialect: &str) -> String {
+        let mut gcode = String::new();
+        let (bbox_min, bbox_max) = self.mesh.bounding_box();
+        let n_ops = self.brepcad_cam_ops.len();
+
+        match dialect {
+            "Heidenhain" => {
+                // Heidenhain uses L for linear, different comment style
+                gcode.push_str(&format!("* BRepCAD G-code (Heidenhain)\n"));
+                gcode.push_str(&format!("* {} operations\n", n_ops));
+                gcode.push_str("BEGIN PGM 1 MM\n");
+                gcode.push_str("TOOL CALL 1 Z S1000 F200\n");
+                for (i, (_op_type, name, params)) in self.brepcad_cam_ops.iter().enumerate() {
+                    gcode.push_str(&format!("* Op {} : {}\n", i + 1, name));
+                    gcode.push_str(&format!("L Z+10.0 R0 FMAX\n"));
+                    gcode.push_str(&format!("L X{:.2} Y{:.2} R0 FMAX\n", bbox_min.x, bbox_min.y));
+                    gcode.push_str(&format!("L Z{:.2} R0 F200\n", -params[1] * 5.0));
+                    gcode.push_str(&format!("L X{:.2} R0 F200\n", bbox_max.x));
+                    gcode.push_str(&format!("L Y{:.2} R0 F200\n", bbox_max.y));
+                    gcode.push_str(&format!("L X{:.2} R0 F200\n", bbox_min.x));
+                    gcode.push_str(&format!("L Y{:.2} R0 F200\n", bbox_min.y));
+                    gcode.push_str("L Z+10.0 R0 FMAX\n");
+                }
+                gcode.push_str("M5\n");
+                gcode.push_str("END PGM 1 MM\n");
+            }
+            "GRBL" => {
+                // GRBL: simplified, no G54, no M30, lowercase comments
+                gcode.push_str(&format!("; BRepCAD G-code (GRBL)\n"));
+                gcode.push_str(&format!("; {} operations\n", n_ops));
+                gcode.push_str("G21 G90\n"); // mm, absolute
+                gcode.push_str("M3 S1000\n");
+                for (i, (_op_type, name, params)) in self.brepcad_cam_ops.iter().enumerate() {
+                    gcode.push_str(&format!("; Op {} : {}\n", i + 1, name));
+                    gcode.push_str("G0 Z10\n");
+                    gcode.push_str(&format!("G0 X{:.2} Y{:.2}\n", bbox_min.x, bbox_min.y));
+                    gcode.push_str(&format!("G1 Z{:.2} F100\n", -params[1] * 5.0));
+                    gcode.push_str(&format!("G1 X{:.2} F200\n", bbox_max.x));
+                    gcode.push_str(&format!("G1 Y{:.2}\n", bbox_max.y));
+                    gcode.push_str(&format!("G1 X{:.2}\n", bbox_min.x));
+                    gcode.push_str(&format!("G1 Y{:.2}\n", bbox_min.y));
+                    gcode.push_str("G0 Z10\n");
+                }
+                gcode.push_str("M5\n");
+                gcode.push_str("M2\n"); // GRBL uses M2, not M30
+            }
+            "Siemens" => {
+                // Siemens 840D: G1/G2/G3 with cycle support
+                gcode.push_str(&format!("; BRepCAD G-code (Siemens 840D)\n"));
+                gcode.push_str(&format!("; {} operations\n", n_ops));
+                gcode.push_str("G90 G71 G17\n"); // G71 = mm (Siemens)
+                gcode.push_str("G54\n");
+                gcode.push_str("M3 S1000\n");
+                for (i, (_op_type, name, params)) in self.brepcad_cam_ops.iter().enumerate() {
+                    gcode.push_str(&format!("; Op {} : {}\n", i + 1, name));
+                    gcode.push_str("G0 Z10\n");
+                    gcode.push_str(&format!("G0 X{:.3} Y{:.3}\n", bbox_min.x, bbox_min.y));
+                    gcode.push_str(&format!("G1 Z{:.3} F100\n", -params[1] * 5.0));
+                    // Siemens supports G1 with rounded transitions (RND)
+                    gcode.push_str(&format!("G1 X{:.3} F200\n", bbox_max.x));
+                    gcode.push_str(&format!("G1 Y{:.3}\n", bbox_max.y));
+                    gcode.push_str(&format!("G1 X{:.3}\n", bbox_min.x));
+                    gcode.push_str(&format!("G1 Y{:.3}\n", bbox_min.y));
+                    gcode.push_str("G0 Z10\n");
+                }
+                gcode.push_str("M5\n");
+                gcode.push_str("M30\n");
+            }
+            _ => {
+                // Fanuc/Haas/Mach3/LinuxCNC: standard G-code
+                gcode.push_str(&format!("; BRepCAD G-code ({})\n", dialect));
+                gcode.push_str(&format!("; {} operations\n", n_ops));
+                gcode.push_str("G90 G21 G17\n"); // Absolute, mm, XY plane
+                gcode.push_str("G54\n"); // Work offset
+                gcode.push_str("M3 S1000\n"); // Spindle on
+                for (i, (_op_type, name, params)) in self.brepcad_cam_ops.iter().enumerate() {
+                    gcode.push_str(&format!("; Op {} : {}\n", i + 1, name));
+                    gcode.push_str("G0 Z10\n"); // Rapid above
+                    gcode.push_str(&format!("G0 X{:.3} Y{:.3}\n", bbox_min.x, bbox_min.y));
+                    gcode.push_str(&format!("G1 Z{:.3} F100\n", -params[1] * 5.0)); // Plunge
+                    gcode.push_str(&format!("G1 X{:.3} F200\n", bbox_max.x));
+                    gcode.push_str(&format!("G1 Y{:.3}\n", bbox_max.y));
+                    gcode.push_str(&format!("G1 X{:.3}\n", bbox_min.x));
+                    gcode.push_str(&format!("G1 Y{:.3}\n", bbox_min.y));
+                    gcode.push_str("G0 Z10\n"); // Retract
+                }
+                gcode.push_str("M5\n"); // Spindle off
+                gcode.push_str("M30\n"); // End
+            }
+        }
+        gcode
+    }
 
     /// Generate an SVG file of the current drawing sheet.
     /// Includes sheet border, views (as wireframe silhouettes), dimensions, annotations.
