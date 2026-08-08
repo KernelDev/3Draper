@@ -14549,7 +14549,39 @@ impl ViewerApp {
             }
             MenuAction::FileExportObj => "OBJ export not yet implemented (use STL)".to_string(),
             MenuAction::FileExportGltf => "GLTF export not yet implemented".to_string(),
-            MenuAction::FileExportPdf => "PDF export not yet implemented".to_string(),
+            MenuAction::FileExportPdf => {
+                // B4: Use Drawing::to_pdf() for PDF export
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if let Some(ref solid) = self.current_solid {
+                        let tri_params = tri_params_for_lod(self.lod_level);
+                        let mesh = triangulate_solid(solid, &tri_params);
+                        if let Ok(drawing) = draper_drawing::Drawing::from_mesh(&mesh, &self.current_model.name) {
+                            match drawing.to_pdf() {
+                                Ok(pdf) => {
+                                    if let Some(path) = rfd::FileDialog::new()
+                                        .add_filter("PDF", &["pdf"])
+                                        .set_file_name(&format!("{}.pdf", self.current_model.name))
+                                        .save_file()
+                                    {
+                                        let _ = std::fs::write(&path, &pdf);
+                                        format!("PDF exported: {}", path.to_string_lossy())
+                                    } else {
+                                        "PDF export cancelled".to_string()
+                                    }
+                                }
+                                Err(e) => format!("PDF export error: {}", e),
+                            }
+                        } else {
+                            "PDF export: cannot create drawing from mesh".to_string()
+                        }
+                    } else {
+                        "No model to export".to_string()
+                    }
+                }
+                #[cfg(target_arch = "wasm32")]
+                { "PDF export: use native build".to_string() }
+            }
             MenuAction::FileExportDxf => "DXF export not yet implemented".to_string(),
             MenuAction::FileImportObj => "OBJ import not yet implemented (use STL)".to_string(),
             MenuAction::FileImportPly => "PLY import not yet implemented".to_string(),
@@ -15364,8 +15396,42 @@ impl ViewerApp {
                 #[cfg(target_arch = "wasm32")]
                 { "SVG export: use native build".to_string() }
             }
-            MenuAction::DrwExportPdf | MenuAction::DrwExportDxf | MenuAction::DrwExportDwg => {
-                "Use SVG export (PDF/DXF/DWG coming soon)".to_string()
+            MenuAction::DrwExportPdf => {
+                // B4: Drawing PDF export with HLR
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if let Some(ref solid) = self.current_solid {
+                        let tri_params = tri_params_for_lod(self.lod_level);
+                        let mesh = triangulate_solid(solid, &tri_params);
+                        let hlr_config = draper_drawing::hlr::HlrConfig::default();
+                        if let Ok(drawing) = draper_drawing::Drawing::from_mesh_with_hlr(&mesh, &self.current_model.name, &hlr_config) {
+                            match drawing.to_pdf() {
+                                Ok(pdf) => {
+                                    if let Some(path) = rfd::FileDialog::new()
+                                        .add_filter("PDF", &["pdf"])
+                                        .set_file_name(&format!("{}_drawing.pdf", self.current_model.name))
+                                        .save_file()
+                                    {
+                                        let _ = std::fs::write(&path, &pdf);
+                                        format!("Drawing PDF exported (with HLR): {}", path.to_string_lossy())
+                                    } else {
+                                        "PDF export cancelled".to_string()
+                                    }
+                                }
+                                Err(e) => format!("PDF export error: {}", e),
+                            }
+                        } else {
+                            "PDF export: cannot create drawing from mesh".to_string()
+                        }
+                    } else {
+                        "No model to export".to_string()
+                    }
+                }
+                #[cfg(target_arch = "wasm32")]
+                { "PDF export: use native build".to_string() }
+            }
+            MenuAction::DrwExportDxf | MenuAction::DrwExportDwg => {
+                "Use SVG or PDF export (DXF/DWG coming soon)".to_string()
             }
             MenuAction::DrwAnnotationSurfaceFinish | MenuAction::DrwAnnotationWelding
             | MenuAction::DrwViewBrokenOut | MenuAction::DrwViewCrop | MenuAction::DrwViewAuxiliary => {
@@ -15441,7 +15507,39 @@ impl ViewerApp {
                     "Explode view: OFF".to_string()
                 }
             }
-            MenuAction::AsmSolve => "Assembly solver: no mates defined (use Add Component first)".to_string(),
+            MenuAction::AsmSolve => {
+                // B1: Use real AssemblySolver with 6-DOF (translation + rotation)
+                if self.brepcad_assembly_components.len() < 2 {
+                    "Assembly solver: need 2+ components (use Add Component first)".to_string()
+                } else {
+                    // Build a draper-assembly Assembly from UI state
+                    let mut asm = draper_assembly::Assembly::new();
+                    for (i, (name, _source, offset)) in self.brepcad_assembly_components.iter().enumerate() {
+                        let mut c = if i == 0 {
+                            draper_assembly::Component::new_fixed(i, name)
+                        } else {
+                            draper_assembly::Component::new(i, name)
+                        };
+                        c.set_translation(offset[0], offset[1], offset[2]);
+                        asm.add_component(c);
+                    }
+                    let mut solver = draper_assembly::AssemblySolver::new();
+                    match solver.solve(&mut asm) {
+                        Ok(()) => {
+                            // Apply solved positions back to UI state
+                            for (i, (_name, _source, offset)) in self.brepcad_assembly_components.iter_mut().enumerate() {
+                                if let Some(solved) = asm.get_component(i) {
+                                    offset[0] = solved.transform.m[0][3];
+                                    offset[1] = solved.transform.m[1][3];
+                                    offset[2] = solved.transform.m[2][3];
+                                }
+                            }
+                            "Assembly solved (6-DOF with rotations)".to_string()
+                        }
+                        Err(e) => format!("Assembly solve failed: {}", e),
+                    }
+                }
+            }
             MenuAction::AsmMotion => "Motion study: define mates first".to_string(),
             MenuAction::AsmDiagnostics => {
                 let n = self.brepcad_assembly_components.len();

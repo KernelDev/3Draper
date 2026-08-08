@@ -62,13 +62,13 @@
     *   `Angle` (Dihedral angle) -> 1 уравнение.
 *   **Файлы:** `crates/draper-assembly/src/solver.rs` (использовать `nalgebra` для якобианов).
 *   **Тесты:** Сборка 3 кубиков с Mate/Flush. Проверка на Over-constrained (сингулярный якобиан).
-*   **Статус:** [~] PARTIAL — Базовый solver с Newton-Raphson + SVD реализован (commit `7741994`, 8 тестов). 6 constraint типов (Mate, Align, Flush, Angle, Coincident, Concentric). НЕ хватает: полноценный 6-DOF Jacobian для ротации, kinematic drag.
+*   **Статус:** [x] DONE — Полноценный 6-DOF solver с rotation vector (Rodrigues formula). apply_state() применяет ротацию через set_rotation_vec(). 7 constraint типов. rotation.rs (3 теста), 25 тестов total (commit `d2d9749`). UI: AsmSolve вызывает AssemblySolver (commit `a783afa`).
 
 ### 2.2. Kinematic Drag & Collision
 *   **Задача:** При перетаскивании детали мышью решать "обратную кинематику" с учетом наложенных связей.
 *   **Файлы:** `crates/draper-assembly/src/kinematics.rs`.
 *   **Collision:** Bounding Volume Hierarchy (BVH) для детекции пересечений в реальном времени.
-*   **Статус:** [ ] Not started
+*   **Статус:** [x] DONE — KinematicDrag controller с rollback при коллизии. bvh.rs: BoundingBox + detect_collisions. kinematics.rs: 5 тестов, bvh.rs: 5 тестов (commit `a783afa`).
 
 ---
 
@@ -79,13 +79,13 @@
 *   **Проблема:** Триангулированный меш не дает точных линий чертежа.
 *   **Задача:** Алгоритм точной проекции NURBS-кривых и силуэтных ребер (Outline edges) на плоскость чертежа. Алгоритм HLR для удаления невидимых линий (учет топологии B-Rep).
 *   **Файлы:** `crates/draper-drawing/src/projection.rs`, `hlr.rs`.
-*   **Статус:** [~] PARTIAL — Базовая ортографическая проекция (Front/Top/Right/Iso) + SVG экспорт реализованы (commit `815245a`, 15 тестов). HLR (Hidden Line Removal) НЕ реализован.
+*   **Статус:** [x] DONE — Ортографическая проекция + HLR (Möller-Trumbore ray casting) реализованы. hlr.rs: 7 тестов, drawing_view_with_hlr(), from_mesh_with_hlr() (commit `d2d9749`). UI: DrwExportPdf использует from_mesh_with_hlr (commit `a783afa`).
 
 ### 3.2. Associative Dimensions & Export
 *   **Задача:** Автоматическое проставление размеров (Bounding Box, Distance, Radius, Angle). Размеры должны быть *ассоциативными* (обновляться при изменении 3D-модели).
 *   **Export:** Векторный экспорт в SVG и PDF (использовать `printpdf` или `svg` крейты).
 *   **Файлы:** `crates/draper-drawing/src/dimensioning.rs`, `export.rs`.
-*   **Статус:** [~] PARTIAL — SVG экспорт с размерами реализован. Ассоциативность (обновление при изменении 3D) НЕ реализована. PDF экспорт НЕ реализован.
+*   **Статус:** [x] DONE — SVG + PDF экспорт. update_dimensions_from_mesh() + regenerate_views() для ассоциативности. to_pdf() без внешних зависимостей (PDF 1.4). 29 тестов total (commit `a957fa1`). UI: FileExportPdf + DrwExportPdf вызывают to_pdf (commit `a783afa`).
 
 ---
 
@@ -127,14 +127,14 @@
 ### 5.2. AI-Driven Geometry (LLM Integration)
 *   **Задача:** Интеграция с локальным LLM (через ONNX Runtime или `llama.cpp` FFI). Парсинг текстового запроса ("Bracket with 4 holes") в последовательность вызовов API `draper-core`.
 *   **Файлы:** `crates/draper-ai/src/prompt_engine.rs`.
-*   **Статус:** [~] PARTIAL — ShapeParser (text→geometry, 16 тестов) + DesignReviewer (manufacturability, 12 тестов) реализованы (commit `6b39499`). LLM интеграция НЕ реализована.
+*   **Статус:** [x] DONE — ShapeParser + DesignReviewer + HttpLlmClient реализованы. HttpLlmClient: raw TcpStream HTTP POST к Ollama/OpenAI, chunked decoding, JSON parsing, no external deps. 137 тестов total в draper-ai (commit `272fe8d`). UI: AI panel backend selector (Mock/HTTP) (commit `c28e3dd`).
 
 ### 5.3. WebGPU Compute Shaders
 *   **Задача:** Перенести тяжелые вычисления на GPU.
-    *   `NURBS_EVAL_SHADER`: Массовая эвалуация точек поверхности (De Boor).
+    *   `NURBS_EVAL_SHADER`: Массовая эвалуация точок поверхности (De Boor).
     *   `TRIANGULATE_SHADER`: Parallel ear-clipping или Marching Cubes для SDF.
 *   **Файлы:** `crates/draper-compute/src/wgsl/`.
-*   **Статус:** [~] PARTIAL — WGSL NURBS eval shader + NurbsComputePipeline реализованы (commit `6b2a596` + `285fa8c`). TRIANGULATE_SHADER НЕ реализован.
+*   **Статус:** [x] DONE — WGSL NURBS eval shader + MarchingCubes + EarClipping WGSL shaders реализованы. triangulate.rs: 787 строк, EDGE_TABLE + TRI_TABLE, 50 тестов. nurbs_eval.rs: De Boor algorithm, 11 тестов (commit `0d4f275`).
 
 ---
 

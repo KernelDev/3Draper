@@ -39,6 +39,7 @@ draper-fea = { workspace = true }
 draper-drawing = { workspace = true }
 draper-cam = { workspace = true }
 draper-sheetmetal = { workspace = true }
+draper-assembly = { workspace = true }
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu", "x11", "wayland"] }
 egui = { workspace = true }
 egui_dock = { workspace = true }
