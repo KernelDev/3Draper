@@ -23,6 +23,8 @@ use draper_geometry::{Point3d, Vec3d, Direction3d, Transform};
 use nalgebra::{DMatrix, DVector};
 
 pub mod rotation;
+pub mod bvh;
+pub mod kinematics;
 
 use rotation::{RotationVec, rotation_matrix_to_vec};
 
@@ -63,6 +65,10 @@ pub struct Component {
     pub transform: Transform,
     /// Whether this component is fixed (grounded) — cannot move.
     pub fixed: bool,
+    /// Optional axis-aligned bounding box in *local* coordinates.
+    /// Used for collision detection. If `None`, the component is treated
+    /// as a point for collision purposes.
+    pub local_aabb: Option<bvh::BoundingBox>,
 }
 
 impl Component {
@@ -73,6 +79,7 @@ impl Component {
             name: name.to_string(),
             transform: Transform::identity(),
             fixed: false,
+            local_aabb: None,
         }
     }
 
@@ -83,6 +90,7 @@ impl Component {
             name: name.to_string(),
             transform: Transform::identity(),
             fixed: true,
+            local_aabb: None,
         }
     }
 

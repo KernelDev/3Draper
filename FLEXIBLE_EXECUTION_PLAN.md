@@ -500,4 +500,4 @@ START
 - [x] B4: PDF Export (P2) — to_pdf() with PDF 1.4 vector graphics, no external deps
 - [x] C1: LLM Backend Integration (P1) — HttpLlmClient with TcpStream HTTP POST, chunked decoding, JSON parsing, 8 tests
 - [x] C2: WebGPU Triangulate Shader (P2) — already implemented (MarchingCubes + EarClipping WGSL, 787 lines)
-- [ ] C3: Kinematic Drag & Collision (P2) — not started
+- [x] C3: Kinematic Drag & Collision (P2) — KinematicDrag + bvh.rs + detect_collisions, 10 tests
