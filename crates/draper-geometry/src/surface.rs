@@ -159,6 +159,31 @@ impl Plane {
         Some(Self { origin: *p1, u_dir, v_dir, normal })
     }
 
+    /// Create a plane from a normal direction and a point on the plane.
+    ///
+    /// Per BREPCAD Phase 1.2: needed for extrude side faces where the
+    /// normal is known but three non-collinear points may not be readily
+    /// available (e.g., when the first three points happen to be collinear).
+    pub fn from_normal_and_point(normal: &Direction3d, point: &Point3d) -> Option<Self> {
+        // Build an orthonormal basis: pick u_dir perpendicular to normal.
+        let n = Vec3d::new(normal.x, normal.y, normal.z);
+        // Pick an arbitrary vector not parallel to normal
+        let seed = if n.x.abs() < 0.9 {
+            Vec3d::new(1.0, 0.0, 0.0)
+        } else {
+            Vec3d::new(0.0, 1.0, 0.0)
+        };
+        let u_dir = seed.cross(&n).normalize()?;
+        let v_dir_vec = n.cross(&Vec3d::new(u_dir.x, u_dir.y, u_dir.z));
+        let v_dir = Direction3d::new(v_dir_vec.x, v_dir_vec.y, v_dir_vec.z)?;
+        Some(Self {
+            origin: *point,
+            u_dir,
+            v_dir,
+            normal: *normal,
+        })
+    }
+
     pub fn point_at(&self, u: f64, v: f64) -> Point3d {
         Point3d::new(
             self.origin.x + u * self.u_dir.x + v * self.v_dir.x,
@@ -1437,6 +1462,12 @@ impl NurbsSurface {
 
         // Compute the 3D point: S = (wx/w, wy/w, wz/w)
         let point = Point3d::new(wx / w, wy / w, wz / w);
+
+        // NaN/Inf guard: if the point is not finite, fall back to numerical.
+        if !point.x.is_finite() || !point.y.is_finite() || !point.z.is_finite() {
+            log::warn!("NURBS derivatives_at: non-finite point ({}, {}, {}) at u={}, v={} — falling back to numerical", point.x, point.y, point.z, u, v);
+            return self.derivatives_at_numerical(u, v);
+        }
 
         // Step 3: Compute derivatives using degree-reduced control points
         // dS_w/du is computed from the p control points of degree p-1 B-spline
@@ -2816,7 +2847,18 @@ fn nurbs_surface_eval(nurbs: &NurbsSurface, u: f64, v: f64) -> Point3d {
         if w.abs() < 1e-15 {
             Point3d::ORIGIN
         } else {
-            Point3d::new(result.0 / w, result.1 / w, result.2 / w)
+            let px = result.0 / w;
+            let py = result.1 / w;
+            let pz = result.2 / w;
+            // NaN/Inf guard: if any coordinate is not finite, return ORIGIN.
+            // This can happen with degenerate control points or numerical
+            // instability in the De Boor algorithm.
+            if px.is_finite() && py.is_finite() && pz.is_finite() {
+                Point3d::new(px, py, pz)
+            } else {
+                log::warn!("NURBS surface eval: non-finite result ({}, {}, {}) at u={}, v={} — returning ORIGIN", px, py, pz, u, v);
+                Point3d::ORIGIN
+            }
         }
     } else {
         Point3d::ORIGIN

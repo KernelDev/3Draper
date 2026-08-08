@@ -10,5 +10,6 @@ serde = ["dep:serde", "dep:serde_json", "draper-geometry/serde"]
 [dependencies]
 draper-geometry = { workspace = true }
 thiserror = { workspace = true }
+log = { workspace = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }

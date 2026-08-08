@@ -159,27 +159,34 @@ impl ToleranceContext {
     /// Vertex merge tolerance for topology-based vertex merging.
     ///
     /// Uses STEP model uncertainty (UNCERTAINTY_MEASURE_WITH_UNIT) when
-    /// available, multiplied by 100 (matching OpenCascade Shape Healing
-    /// approach). Falls back to model_scale * 3e-3 when not available.
+    /// available, multiplied by 10 (NOT 100 — see fix below). Falls back
+    /// to model_scale * 1e-3 when not available.
     ///
-    /// The factor of 100 on uncertainty is standard practice:
-    /// - Uncertainty = CAD system's stated geometric precision
-    /// - Vertex coordinates can differ by up to 100× uncertainty due to
-    ///   different export paths, rounding, and parameterization
-    /// - 100× uncertainty is still much smaller than feature sizes
-    ///   (arc lengths, edge lengths), preventing false merges
+    /// IMPORTANT: The previous ×100 multiplier caused severe over-merging on
+    /// models with relatively large uncertainty values (e.g., as1-oc-214_bolt.stp
+    /// has uncertainty=0.01mm, so ×100 = 1.0mm — 10% of the bolt head diameter,
+    /// causing all cylinder vertices to collapse to a single point and producing
+    /// only 12 triangles instead of thousands).
+    ///
+    /// The ×10 multiplier is a safer balance:
+    /// - For typical uncertainty 1e-6 (1μm): tol = 1e-5 = 0.01μm — very precise
+    /// - For larger uncertainty 0.01mm (10μm): tol = 0.1mm — still reasonable
+    /// - For very large uncertainty 0.1mm: tol = 1.0mm — capped at 0.1% of model
+    ///
+    /// The cap is reduced from 1% to 0.1% of model scale to further prevent
+    /// over-merging on models with large uncertainty or large model_scale.
     pub fn vertex_merge_tolerance(&self) -> f64 {
         match self.step_uncertainty {
             Some(u) if u > 0.0 && u.is_finite() => {
-                // STEP uncertainty * 100 — OpenCascade Shape Healing factor
-                let tol = u * 100.0;
-                // Cap at 1% of model scale to prevent over-merging on
-                // models with very large uncertainty values
-                tol.min(self.model_scale * 1e-2)
+                // STEP uncertainty × 10 (reduced from ×100 to prevent over-merging)
+                let tol = u * 10.0;
+                // Cap at 0.1% of model scale (was 1%) — prevents over-merging
+                // on models with large uncertainty relative to feature sizes
+                tol.min(self.model_scale * 1e-3)
             }
             _ => {
-                // Fallback: 0.3% of model scale
-                self.model_scale * 3e-3
+                // Fallback: 0.1% of model scale (was 0.3%)
+                self.model_scale * 1e-3
             }
         }
     }
@@ -195,14 +202,15 @@ impl ToleranceContext {
 
     /// Weld tolerance for post-merge boundary edge welding.
     ///
-    /// Uses STEP uncertainty × 200 when available, or model_scale × 1e-2.
+    /// Uses STEP uncertainty × 20 (was ×200) when available, or model_scale × 2e-3.
+    /// Reduced multiplier prevents over-merging on models with large uncertainty.
     pub fn weld_tolerance(&self) -> f64 {
         match self.step_uncertainty {
             Some(u) if u > 0.0 && u.is_finite() => {
-                let tol = u * 200.0;
-                tol.min(self.model_scale * 2e-2)
+                let tol = u * 20.0;
+                tol.min(self.model_scale * 2e-3)
             }
-            _ => self.model_scale * 1e-2,
+            _ => self.model_scale * 2e-3,
         }
     }
 
@@ -268,32 +276,42 @@ impl ToleranceContext {
     }
 }
 
-// Keep backward-compatible constants for gradual migration
+// ─── Deprecated global constants ───────────────────────────────────────────
+// These are kept for backward compatibility during the migration to
+// ToleranceContext. New code MUST NOT use them — use ToleranceContext instead.
+// The #[deprecated] attribute produces a compile warning to flag remaining usages.
+
 /// Default geometric tolerance (1e-6 mm = 1 nanometer).
-/// DEPRECATED: Use ToleranceContext instead.
+/// DEPRECATED: Use `ToleranceContext::coincidence_tolerance()` instead.
+#[deprecated(since = "0.2.0", note = "Use ToleranceContext::coincidence_tolerance() instead")]
 pub const TOLERANCE: f64 = DEFAULT_ABSOLUTE_TOLERANCE;
 
 /// Squared tolerance for efficient distance comparisons.
-/// DEPRECATED: Use ToleranceContext::coincidence_tolerance_sq() instead.
+/// DEPRECATED: Use `ToleranceContext::coincidence_tolerance_sq()` instead.
+#[deprecated(since = "0.2.0", note = "Use ToleranceContext::coincidence_tolerance_sq() instead")]
 pub const TOLERANCE_SQ: f64 = TOLERANCE * TOLERANCE;
 
 /// Angular tolerance in radians.
-/// DEPRECATED: Use ToleranceContext::angular instead.
+/// DEPRECATED: Use `ToleranceContext::angular_tolerance()` instead.
+#[deprecated(since = "0.2.0", note = "Use ToleranceContext::angular_tolerance() instead")]
 pub const ANGULAR_TOLERANCE: f64 = DEFAULT_ANGULAR_TOLERANCE;
 
 /// Parametric tolerance for curve/surface parameter comparisons.
-/// DEPRECATED: Use ToleranceContext::parametric instead.
+/// DEPRECATED: Use `ToleranceContext::parametric_tolerance()` instead.
+#[deprecated(since = "0.2.0", note = "Use ToleranceContext::parametric_tolerance() instead")]
 pub const PARAMETRIC_TOLERANCE: f64 = DEFAULT_PARAMETRIC_TOLERANCE;
 
 /// Check if two values are within geometric tolerance.
-/// DEPRECATED: Use ToleranceContext::is_coincident() instead.
+/// DEPRECATED: Use `ToleranceContext::is_coincident()` instead.
+#[deprecated(since = "0.2.0", note = "Use ToleranceContext::is_coincident() instead")]
 #[inline]
 pub fn is_coincident(a: f64, b: f64) -> bool {
     (a - b).abs() < TOLERANCE
 }
 
 /// Check if a value is approximately zero.
-/// DEPRECATED: Use ToleranceContext::is_zero() instead.
+/// DEPRECATED: Use `ToleranceContext::is_zero()` instead.
+#[deprecated(since = "0.2.0", note = "Use ToleranceContext::is_zero() instead")]
 #[inline]
 pub fn is_zero(a: f64) -> bool {
     a.abs() < TOLERANCE

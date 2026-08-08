@@ -666,6 +666,158 @@ impl Curve2d {
     }
 }
 
+/// Derive a PCURVE (Curve2d) from a 3D curve and a surface.
+///
+/// Per ROADMAP_VISION_2036 §2.2: When no analytical PCURVE is available
+/// from the STEP file, derive one by projecting the 3D curve's sample
+/// points onto the surface's UV space.
+///
+/// For simple cases (line on plane, circle on cylinder), this returns
+/// an analytical Curve2d. For complex cases (NURBS on NURBS), it
+/// returns a Nurbs2d fitted to the projected UV points.
+///
+/// Returns None if projection fails for any sample point.
+pub fn derive_pcurve(
+    curve_3d: &crate::Curve3d,
+    surface: &crate::Surface,
+    n_samples: usize,
+) -> Option<Curve2d> {
+    let n = n_samples.max(4).min(64);
+
+    // Sample the 3D curve
+    let (t_min, t_max) = curve_3d.param_range();
+    let mut points_3d = Vec::with_capacity(n);
+    let mut params = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = t_min + (t_max - t_min) * i as f64 / (n - 1) as f64;
+        points_3d.push(curve_3d.point_at(t));
+        params.push(t);
+    }
+
+    // Project each 3D point onto the surface's UV space
+    let mut uv_points = Vec::with_capacity(n);
+    for p in &points_3d {
+        let (u, v) = surface.project_point(p);
+        if !u.is_finite() || !v.is_finite() {
+            return None;
+        }
+        uv_points.push(Point2d::new(u, v));
+    }
+
+    // Try to detect simple analytical cases
+    // Check if UV points form a line (all collinear within tolerance)
+    if n >= 2 {
+        let is_line = check_collinear(&uv_points, 1e-6);
+        if is_line {
+            return Some(Curve2d::Line(Line2d::new(uv_points[0], uv_points[n - 1])));
+        }
+    }
+
+    // Check if UV points form a circle (constant radius from a center)
+    if n >= 4 {
+        if let Some(circle) = check_circular(&uv_points) {
+            return Some(Curve2d::Circle(circle));
+        }
+    }
+
+    // Fall back to Nurbs2d: fit a B-spline curve in UV space
+    // using the projected points as control points
+    let degree = 3.min(n - 1);
+    let control_points = uv_points.clone();
+    let weights = vec![1.0; control_points.len()];
+    let n_cp = control_points.len();
+    let n_knots = n_cp + degree + 1;
+    let mut knots = vec![0.0; n_knots];
+    for i in 0..n_knots {
+        if i <= degree {
+            knots[i] = 0.0;
+        } else if i >= n_cp {
+            knots[i] = 1.0;
+        } else {
+            knots[i] = (i - degree) as f64 / (n_cp - degree) as f64;
+        }
+    }
+
+    Some(Curve2d::Nurbs(Nurbs2d {
+        degree,
+        control_points,
+        weights,
+        knots,
+    }))
+}
+
+/// Check if a set of 2D points are collinear within tolerance.
+fn check_collinear(points: &[Point2d], tol: f64) -> bool {
+    if points.len() < 2 {
+        return true;
+    }
+    let p0 = points[0];
+    let p1 = points[points.len() - 1];
+    let dx = p1.u - p0.u;
+    let dy = p1.v - p0.v;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < tol {
+        return false;
+    }
+    let nx = -dy / len;
+    let ny = dx / len;
+    for p in points {
+        let dist = ((p.u - p0.u) * nx + (p.v - p0.v) * ny).abs();
+        if dist > tol {
+            return false;
+        }
+    }
+    true
+}
+
+/// Check if 2D points form a circle. Returns the circle if detected.
+fn check_circular(points: &[Point2d]) -> Option<Circle2d> {
+    if points.len() < 4 {
+        return None;
+    }
+    // Compute centroid as center estimate
+    let mut cu = 0.0;
+    let mut cv = 0.0;
+    for p in points {
+        cu += p.u;
+        cv += p.v;
+    }
+    cu /= points.len() as f64;
+    cv /= points.len() as f64;
+
+    // Check if all points are equidistant from center
+    let mut radii = Vec::with_capacity(points.len());
+    for p in points {
+        let du = p.u - cu;
+        let dv = p.v - cv;
+        radii.push((du * du + dv * dv).sqrt());
+    }
+    let avg_r = radii.iter().sum::<f64>() / radii.len() as f64;
+    let max_dev = radii.iter().map(|r| (r - avg_r).abs()).fold(0.0_f64, f64::max);
+    if max_dev > avg_r * 0.01 {
+        return None; // Not circular
+    }
+
+    // Determine start/end angles
+    let start_angle = {
+        let du = points[0].u - cu;
+        let dv = points[0].v - cv;
+        dv.atan2(du)
+    };
+    let end_angle = {
+        let du = points[points.len() - 1].u - cu;
+        let dv = points[points.len() - 1].v - cv;
+        dv.atan2(du)
+    };
+
+    Some(Circle2d {
+        center: Point2d::new(cu, cv),
+        radius: avg_r,
+        start_angle,
+        end_angle,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

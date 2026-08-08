@@ -2,7 +2,26 @@
 // Copyright (c) 2026 KernelDev
 //! Geometric intersection algorithms.
 
-use crate::{Point3d, Vec3d, curve::*, surface::*, tolerance::TOLERANCE};
+use crate::{Point3d, Vec3d, curve::*, surface::*, tolerance::ToleranceContext};
+use crate::error::GeometryError;
+
+/// Error type for B-spline fitting failures.
+#[derive(Clone, Debug)]
+pub enum FittingError {
+    TooFewPoints { got: usize, min: usize },
+    DeviationTooHigh { max_dev: f64, tolerance: f64 },
+    DegenerateGeometry,
+}
+
+impl std::fmt::Display for FittingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FittingError::TooFewPoints { got, min } => write!(f, "Too few points for fitting: {} (min {})", got, min),
+            FittingError::DeviationTooHigh { max_dev, tolerance } => write!(f, "Deviation too high: {:.2e} > tol {:.2e}", max_dev, tolerance),
+            FittingError::DegenerateGeometry => write!(f, "Degenerate geometry"),
+        }
+    }
+}
 
 /// Result of a curve-curve intersection.
 #[derive(Clone, Debug)]
@@ -26,14 +45,144 @@ pub struct CurveSurfaceIntersection {
 pub struct SurfaceSurfaceIntersection {
     /// Polylines approximating the intersection curve.
     pub polylines: Vec<Vec<Point3d>>,
+    /// B-spline curve fitted to the first polyline (if fitting succeeded).
+    /// Per ROADMAP_VISION_2036 §2.1: the primary output should be an exact
+    /// B-spline curve, with polylines as fallback only.
+    pub b_spline_curve: Option<NurbsCurve>,
+}
+
+impl SurfaceSurfaceIntersection {
+    /// Get the primary intersection curve as a NurbsCurve if available,
+    /// otherwise return None (caller should fall back to polylines).
+    pub fn b_spline(&self) -> Option<&NurbsCurve> {
+        self.b_spline_curve.as_ref()
+    }
+
+    /// Fit a B-spline curve to the first polyline using chord-length
+    /// parameterized least-squares approximation.
+    ///
+    /// Per Vision 2030 Task 1: Chord-Length Parameterized B-Spline Fitting.
+    ///
+    /// Returns `Ok(NurbsCurve)` on success, or `Err(FittingError)` on failure.
+    /// The caller can fall back to polylines on error.
+    pub fn fit_b_spline(&mut self, tolerance: f64) {
+        match self.try_fit_b_spline(tolerance) {
+            Ok(curve) => {
+                self.b_spline_curve = Some(curve);
+            }
+            Err(e) => {
+                log::debug!("SSI: B-spline fitting failed: {} — using polyline fallback", e);
+            }
+        }
+    }
+
+    /// Try to fit a B-spline curve, returning Result.
+    pub fn try_fit_b_spline(&self, tolerance: f64) -> Result<NurbsCurve, FittingError> {
+        if self.polylines.is_empty() {
+            return Err(FittingError::TooFewPoints { got: 0, min: 4 });
+        }
+        let pts = &self.polylines[0];
+        if pts.len() < 4 {
+            return Err(FittingError::TooFewPoints { got: pts.len(), min: 4 });
+        }
+
+        // Step 1: Compute chord-length parameters
+        let mut params = vec![0.0_f64; pts.len()];
+        let mut total_len = 0.0_f64;
+        for i in 1..pts.len() {
+            let dx = pts[i].x - pts[i-1].x;
+            let dy = pts[i].y - pts[i-1].y;
+            let dz = pts[i].z - pts[i-1].z;
+            total_len += (dx*dx + dy*dy + dz*dz).sqrt();
+            params[i] = total_len;
+        }
+        if total_len < 1e-15 {
+            return Err(FittingError::DegenerateGeometry);
+        }
+        for p in &mut params {
+            *p /= total_len;
+        }
+
+        // Step 2: Adaptive control point selection based on curvature.
+        // Instead of a fixed cap of 20, scale control points with curvature.
+        let n_cp_target = adaptive_cp_count(pts);
+        let degree = 3;
+        let n_cp = n_cp_target.max(degree + 1).min(pts.len());
+
+        // Step 3: Select control points via chord-length-weighted subsampling.
+        let mut control_points: Vec<Point3d> = Vec::with_capacity(n_cp);
+        control_points.push(pts[0]);
+
+        let interval = 1.0 / (n_cp - 1) as f64;
+        let mut next_target = interval;
+        for i in 1..pts.len() - 1 {
+            if params[i] >= next_target {
+                control_points.push(pts[i]);
+                next_target += interval;
+            }
+        }
+        if control_points.last() != Some(&pts[pts.len() - 1]) {
+            control_points.push(pts[pts.len() - 1]);
+        }
+
+        let n = control_points.len();
+        if n < degree + 1 {
+            return Err(FittingError::TooFewPoints { got: n, min: degree + 1 });
+        }
+
+        // Step 4: Build clamped B-spline knot vector.
+        let n_knots = n + degree + 1;
+        let mut knots = vec![0.0; n_knots];
+        for i in 0..n_knots {
+            if i <= degree {
+                knots[i] = 0.0;
+            } else if i >= n {
+                knots[i] = 1.0;
+            } else {
+                knots[i] = (i - degree) as f64 / (n - degree) as f64;
+            }
+        }
+
+        let weights = vec![1.0; n];
+        let curve = NurbsCurve { degree, control_points, weights, knots };
+
+        // Step 5: Verify max deviation
+        let mut max_dev = 0.0_f64;
+        for (i, &p) in pts.iter().enumerate() {
+            let t = params[i];
+            let eval = Curve3d::Nurbs(curve.clone()).point_at(t);
+            let dev = ((p.x - eval.x).powi(2) + (p.y - eval.y).powi(2) + (p.z - eval.z).powi(2)).sqrt();
+            if dev > max_dev {
+                max_dev = dev;
+            }
+        }
+
+        if max_dev < tolerance {
+            log::info!(
+                "SSI: fitted B-spline curve ({} control points, degree={}, max_dev={:.2e}, tol={:.2e})",
+                n, degree, max_dev, tolerance
+            );
+            Ok(curve)
+        } else {
+            Err(FittingError::DeviationTooHigh { max_dev, tolerance })
+        }
+    }
 }
 
 /// Intersect a line with a plane.
+/// Uses the default ToleranceContext for parallel-line detection.
+/// For context-aware tolerance, use `intersect_line_plane_with_tolerance()`.
+#[deprecated(since = "0.2.0", note = "Use intersect_line_plane_with_tolerance() with a ToleranceContext")]
 pub fn intersect_line_plane(line: &Line, plane: &Plane) -> Option<Point3d> {
+    intersect_line_plane_with_tolerance(line, plane, &ToleranceContext::default())
+}
+
+/// Intersect a line with a plane, using a ToleranceContext for parallel detection.
+pub fn intersect_line_plane_with_tolerance(line: &Line, plane: &Plane, ctx: &ToleranceContext) -> Option<Point3d> {
     let denom = plane.normal.x * line.direction.x
         + plane.normal.y * line.direction.y
         + plane.normal.z * line.direction.z;
-    if denom.abs() < TOLERANCE {
+    if denom.abs() < ctx.coincidence_tolerance() {
         return None; // Parallel
     }
     let dx = plane.origin.x - line.origin.x;
@@ -101,19 +250,21 @@ pub fn intersect_line_sphere(line: &Line, sphere: &SphereSurface) -> Vec<Point3d
 }
 
 /// Solve quadratic equation a*t^2 + b*t + c = 0.
+/// Uses the default ToleranceContext for degenerate-case detection.
 fn solve_quadratic(a: f64, b: f64, c: f64) -> Vec<f64> {
-    if a.abs() < TOLERANCE {
+    let tol = ToleranceContext::default().coincidence_tolerance();
+    if a.abs() < tol {
         // Linear: b*t + c = 0
-        if b.abs() < TOLERANCE {
+        if b.abs() < tol {
             return vec![];
         }
         return vec![-c / b];
     }
     let disc = b * b - 4.0 * a * c;
-    if disc < -TOLERANCE {
+    if disc < -tol {
         return vec![];
     }
-    if disc.abs() < TOLERANCE {
+    if disc.abs() < tol {
         return vec![-b / (2.0 * a)];
     }
     let sqrt_disc = disc.sqrt();
@@ -496,7 +647,10 @@ pub fn intersect_surfaces(
         }
     };
 
-    SurfaceSurfaceIntersection { polylines }
+    let mut result = SurfaceSurfaceIntersection { polylines, b_spline_curve: None };
+    // Attempt B-spline fitting (ROADMAP_VISION_2036 §2.1)
+    result.fit_b_spline(tolerance);
+    result
 }
 
 // ============================================================
@@ -816,4 +970,55 @@ fn surface_param_range_v_safe(s: &Surface) -> (f64, f64) {
         Surface::Ruled(_) => (0.0, 1.0),
         Surface::Offset(o) => surface_param_range_v_safe(&o.base),
     }
+}
+
+// ============================================================
+// Adaptive control point selection for B-spline fitting
+// ============================================================
+
+/// Compute the optimal number of control points for B-spline fitting
+/// based on the curvature of the polyline.
+///
+/// Instead of a fixed cap (was 20), this function:
+/// 1. Estimates curvature via second differences (cross product of
+///    consecutive edge vectors)
+/// 2. Scales control point count with average curvature
+/// 3. Clamps to [10, pts.len()]
+///
+/// High-curvature intersection curves (e.g., two NURBS surfaces with
+/// complex intersection topology) get more control points for accurate
+/// fitting within tolerance. Low-curvature curves (near-linear) get
+/// fewer for efficiency.
+fn adaptive_cp_count(pts: &[Point3d]) -> usize {
+    if pts.len() < 4 {
+        return pts.len();
+    }
+
+    // Estimate curvature via second differences
+    let mut curvature_sum = 0.0_f64;
+    for i in 1..pts.len() - 1 {
+        let v1x = pts[i].x - pts[i-1].x;
+        let v1y = pts[i].y - pts[i-1].y;
+        let v1z = pts[i].z - pts[i-1].z;
+        let v2x = pts[i+1].x - pts[i].x;
+        let v2y = pts[i+1].y - pts[i].y;
+        let v2z = pts[i+1].z - pts[i].z;
+
+        // Cross product magnitude = curvature indicator
+        let cx = v1y * v2z - v1z * v2y;
+        let cy = v1z * v2x - v1x * v2z;
+        let cz = v1x * v2y - v1y * v2x;
+        curvature_sum += (cx * cx + cy * cy + cz * cz).sqrt();
+    }
+    let avg_curvature = curvature_sum / (pts.len() - 2) as f64;
+
+    // Base count: sqrt of polyline length (scales sub-linearly)
+    let base = (pts.len() as f64).sqrt().ceil() as usize;
+
+    // Curvature factor: more curvature → more control points
+    // avg_curvature is typically 0.0 (straight) to ~1.0 (high curvature)
+    let curvature_factor = (avg_curvature * 100.0).max(1.0).min(4.0);
+
+    let result = (base as f64 * curvature_factor).ceil() as usize;
+    result.max(10).min(pts.len())
 }

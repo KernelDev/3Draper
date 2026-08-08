@@ -243,7 +243,12 @@ pub fn try_remove_knot(curve: &NurbsCurve, idx: usize, tolerance: f64) -> Option
         if a.abs() < 1e-15 {
             break;
         }
-        let last = *new_points.last().unwrap();
+        // Safe: new_points is initialized with one element before the loop
+        // and only grows. Using if-let to satisfy panic-free directive.
+        let last = match new_points.last() {
+            Some(&p) => p,
+            None => break, // Should never happen, but panic-free
+        };
         let curr = hpts[i];
         let new_pt = HomogeneousPoint {
             x: last.x + (curr.x - last.x) / a,
@@ -258,7 +263,11 @@ pub fn try_remove_knot(curve: &NurbsCurve, idx: usize, tolerance: f64) -> Option
     if new_points.is_empty() {
         return None;
     }
-    let computed = *new_points.last().unwrap();
+    // Safe: new_points is non-empty (checked above)
+    let computed = match new_points.last() {
+        Some(&p) => p,
+        None => return None, // Should never happen after is_empty check
+    };
     let target = hpts[idx];
     let dist_sq = (target.x - computed.x).powi(2)
         + (target.y - computed.y).powi(2)
@@ -531,7 +540,9 @@ pub fn elevate_degree(curve: &NurbsCurve) -> NurbsCurve {
         return curve.clone();
     }
     if elevated_beziers.len() == 1 {
-        return elevated_beziers.into_iter().next().unwrap();
+        // Safe: len() == 1 guarantees next() returns Some
+        return elevated_beziers.into_iter().next()
+            .unwrap_or_else(|| curve.clone());
     }
 
     // Step 3: Recombine using knot removal at the junctions

@@ -12,7 +12,15 @@ members = [
     "crates/draper-viewer",
     "crates/draper-cloud",
     "crates/draper-ai",
+    "crates/draper-implicit",
+    "crates/draper-subd",
     "crates/draper-compute",
+    "crates/draper-sketch",
+    "crates/draper-fea",
+    "crates/draper-drawing",
+    "crates/draper-assembly",
+    "crates/draper-sheetmetal",
+    "crates/draper-cam",
     "crates/draper-testing",
     "crates/draper-json",
     "tools",
@@ -48,7 +56,15 @@ draper-mesh = { path = "crates/draper-mesh", default-features = false }
 draper-core = { path = "crates/draper-core" }
 draper-cloud = { path = "crates/draper-cloud" }
 draper-ai = { path = "crates/draper-ai" }
+draper-implicit = { path = "crates/draper-implicit" }
+draper-subd = { path = "crates/draper-subd" }
 draper-compute = { path = "crates/draper-compute" }
+draper-sketch = { path = "crates/draper-sketch" }
+draper-fea = { path = "crates/draper-fea" }
+draper-drawing = { path = "crates/draper-drawing" }
+draper-assembly = { path = "crates/draper-assembly" }
+draper-sheetmetal = { path = "crates/draper-sheetmetal" }
+draper-cam = { path = "crates/draper-cam" }
 draper-testing = { path = "crates/draper-testing" }
 draper-json = { path = "crates/draper-json" }
 draper-wasm = { path = "crates/draper-wasm" }
@@ -68,8 +84,11 @@ anyhow = "1"
 
 # Rendering
 egui = "0.31"
+egui_dock = "0.16"
 eframe = { version = "0.31", features = ["wgpu", "default_fonts"] }
 wgpu = "24"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
 
 # FFI
 cbindgen = "0.27"
@@ -77,3 +96,7 @@ cbindgen = "0.27"
 # Logging
 log = "0.4"
 env_logger = "0.11"
+
+# Testing (ROADMAP_VISION_2036 §9.2, §9.3)
+proptest = "1"
+quickcheck = "1"

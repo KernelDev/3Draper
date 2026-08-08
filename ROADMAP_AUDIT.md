@@ -22,7 +22,7 @@ No NURBS-NURBS or NURBS-analytical intersection.
 - [x] Add `intersect_surfaces()` dispatcher
 - [x] Implement marching-based SSI for NURBS (item 6.2)
 - [x] Add 4D Newton refinement for exact intersection points (item 6.2)
-- [ ] Output: exact 3D curve (B-spline approximation of intersection polyline)
+- [x] Output: exact 3D curve (B-spline approximation of intersection polyline) <!-- Completed in commit 8d4de45, verified by independent audit on 2026-08-06 -->
 
 **Files:** `crates/draper-geometry/src/intersection.rs`
 

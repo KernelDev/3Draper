@@ -24,7 +24,7 @@
 use crate::entity::*;
 use draper_geometry::{Point2d, Point3d, Surface};
 use std::collections::{HashMap, HashSet};
-use draper_geometry::tolerance::TOLERANCE;
+use draper_geometry::tolerance::ToleranceContext;
 
 // ============================================================
 // Legacy types and functions (backward compatibility)
@@ -930,7 +930,7 @@ fn check_wire_closed(
                     let end_pt_i = get_coedge_end_point(ce_i, edge_map);
                     let start_pt_j = get_coedge_start_point(ce_j, edge_map);
                     if let (Some(pi), Some(pj)) = (end_pt_i, start_pt_j) {
-                        if pi.distance_to(&pj) > TOLERANCE * 10.0 {
+                        if pi.distance_to(&pj) > ToleranceContext::default().coincidence_tolerance() * 10.0 {
                             has_gap = true;
                             report.add(ValidationIssue::warning(
                                 "WireClosure",
@@ -952,7 +952,7 @@ fn check_wire_closed(
                 let end_pt_i = get_coedge_end_point(ce_i, edge_map);
                 let start_pt_j = get_coedge_start_point(ce_j, edge_map);
                 if let (Some(pi), Some(pj)) = (end_pt_i, start_pt_j) {
-                    if pi.distance_to(&pj) > TOLERANCE * 10.0 {
+                    if pi.distance_to(&pj) > ToleranceContext::default().coincidence_tolerance() * 10.0 {
                         has_gap = true;
                         report.add(ValidationIssue::warning(
                             "WireClosure",
@@ -1188,7 +1188,7 @@ fn check_geometric_consistency(
     edge_map: &HashMap<TopoId, Edge>,
     report: &mut TopologyValidationReport,
 ) {
-    let tol = TOLERANCE * 100.0; // Use a generous tolerance for geometric consistency
+    let tol = ToleranceContext::default().coincidence_tolerance() * 100.0; // Use a generous tolerance for geometric consistency
 
     for face in &shell.faces {
         let surface = match face.surface {
@@ -1356,7 +1356,7 @@ fn count_geometric_vertices(
     };
 
     let e = coedge_edge_ids.len();
-    let tol = TOLERANCE * 10.0;
+    let tol = ToleranceContext::default().coincidence_tolerance() * 10.0;
 
     // Collect all edge endpoints
     let mut points: Vec<Point3d> = Vec::new();

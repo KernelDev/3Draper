@@ -3136,6 +3136,108 @@ pub fn smooth_normals_adaptive(mesh: &mut TriangleMesh, solid: &Solid) {
     }
 }
 
+// ============================================================
+// ManifoldChecker — pre-cache watertightness validation
+// (ROADMAP_VISION_2036.md §1.2 — Sprint 1, Task 3)
+// ============================================================
+
+/// Checker for manifold/watertight status of a triangulated mesh.
+///
+/// Per ROADMAP_VISION_2036.md: this should be called BEFORE caching
+/// triangulation results. If the mesh is not watertight, the triangulation
+/// is considered failed and a fallback with reduced `max_deviation` should
+/// be triggered.
+///
+/// # Usage
+/// ```rust,ignore
+/// use draper_mesh::ManifoldChecker;
+///
+/// let checker = ManifoldChecker::new();
+/// let report = checker.check(&mesh);
+/// if !report.is_watertight() {
+///     // Retry with finer tolerance
+///     params.max_deviation *= 0.5;
+///     // ... re-triangulate ...
+/// }
+/// ```
+pub struct ManifoldChecker {
+    /// Whether to log detailed edge info on failure.
+    pub verbose: bool,
+    /// Boundary edge percentage threshold for "acceptable" (not watertight
+    /// but close enough to cache). Default: 0.0 (must be perfectly watertight).
+    pub boundary_threshold_pct: f64,
+}
+
+impl Default for ManifoldChecker {
+    fn default() -> Self {
+        Self {
+            verbose: false,
+            boundary_threshold_pct: 0.0,
+        }
+    }
+}
+
+impl ManifoldChecker {
+    /// Create a new ManifoldChecker with default settings (non-verbose,
+    /// strict watertightness required).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a verbose checker that logs detailed edge info.
+    pub fn verbose() -> Self {
+        Self {
+            verbose: true,
+            ..Self::default()
+        }
+    }
+
+    /// Check if a mesh is watertight (no boundary edges, no non-manifold edges).
+    /// Returns the full WatertightReport for diagnostic purposes.
+    pub fn check(&self, mesh: &TriangleMesh) -> WatertightReport {
+        validate_watertight(mesh, self.verbose)
+    }
+
+    /// Quick boolean check: is the mesh watertight?
+    /// This is equivalent to `self.check(mesh).is_watertight()` but may
+    /// short-circuit for performance on large meshes.
+    pub fn is_watertight(&self, mesh: &TriangleMesh) -> bool {
+        let report = self.check(mesh);
+        if !report.is_watertight() {
+            let total_edges = report.edge_count;
+            let boundary_pct = if total_edges > 0 {
+                report.boundary_edge_count as f64 / total_edges as f64 * 100.0
+            } else {
+                0.0
+            };
+            log::warn!(
+                "ManifoldChecker: NOT watertight — {} boundary edges ({:.2}%), {} non-manifold ({} tris, {} verts)",
+                report.boundary_edge_count, boundary_pct,
+                report.non_manifold_edge_count,
+                mesh.triangles.len(), mesh.vertices.len()
+            );
+        }
+        report.is_watertight()
+    }
+
+    /// Check if a mesh is "acceptably" watertight: either perfectly watertight,
+    /// or boundary edges are below the threshold percentage.
+    /// This is useful for large assemblies where 100% watertightness may be
+    /// impractical due to modeling imperfections.
+    pub fn is_acceptable(&self, mesh: &TriangleMesh) -> bool {
+        let report = self.check(mesh);
+        if report.is_watertight() {
+            return true;
+        }
+        let total_edges = report.edge_count;
+        if total_edges == 0 {
+            return false;
+        }
+        let boundary_pct = report.boundary_edge_count as f64 / total_edges as f64 * 100.0;
+        boundary_pct <= self.boundary_threshold_pct && report.non_manifold_edge_count == 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

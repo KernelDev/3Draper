@@ -7,6 +7,7 @@
 mod app;
 mod camera;
 mod renderer;
+mod ui;
 
 #[cfg(target_arch = "wasm32")]
 mod cache;
@@ -15,6 +16,11 @@ mod cache;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
+    // Initialize env_logger with Info level by default.
+    // Users can override with RUST_LOG=debug or RUST_LOG=trace.
+    if std::env::var("RUST_LOG").is_err() {
+        std::env::set_var("RUST_LOG", "info");
+    }
     env_logger::init();
 
     use std::sync::Arc;

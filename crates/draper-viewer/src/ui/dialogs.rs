@@ -174,8 +174,21 @@ fn render_about_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<DialogActi
 
 fn render_primitive_dialog(ui: &mut egui::Ui, pt: &PrimitiveType, close: &mut bool) -> Option<DialogAction> {
     let params = pt.params();
-    let mut values: Vec<f64> = params.iter().map(|p| p.1).collect();
     let mut result = None;
+
+    // Use egui memory to persist slider values across frames
+    let memory_id = ui.make_persistent_id(format!("primitive_dialog_{:?}", pt));
+    let mut values: Vec<f64> = ui.memory(|m| {
+        let v: Option<&Vec<f64>> = m.data.get_temp(memory_id);
+        v.cloned().unwrap_or_else(|| {
+            params.iter().map(|p| p.1).collect::<Vec<f64>>()
+        })
+    });
+
+    // Ensure values has correct length (in case primitive type changed)
+    if values.len() != params.len() {
+        values = params.iter().map(|p| p.1).collect();
+    }
 
     ui.vertical(|ui| {
         ui.label(format!("Insert {} — specify dimensions:", pt.label()));
@@ -197,6 +210,10 @@ fn render_primitive_dialog(ui: &mut egui::Ui, pt: &PrimitiveType, close: &mut bo
             if ui.button("Cancel").clicked() { *close = true; }
         });
     });
+
+    // Store values back to memory for next frame
+    ui.memory_mut(|m| m.data.insert_temp(memory_id, values));
+
     result
 }
 

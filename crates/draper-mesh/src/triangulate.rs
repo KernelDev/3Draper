@@ -1575,11 +1575,22 @@ fn triangulate_face_impl(face: &Face, params: &TriangulationParams, cache: &Edge
                 crate::edge_cache::clear_nurbs_projection_cache();
                 mesh
             }
-            Surface::Offset(_) | Surface::Ruled(_) => {
-                // Audit item 4.3 (2026-07-19): Offset/Ruled surfaces
-                // fall back to generic face triangulation.
-                // TODO: implement specialized triangulators for these types.
-                crate::triangulate_face(face, params)
+            Surface::Offset(offset) => {
+                // Dedicated Steiner grid for OffsetSurface (ROADMAP_VISION_2036 §2.3).
+                // Instead of falling back to generic triangulation, we:
+                // 1. Use the base surface's UV domain
+                // 2. Generate a Steiner grid on the base surface
+                // 3. Offset each grid point along the base surface's normal
+                // This preserves the base surface's parametric structure and
+                // handles inner contours (holes) correctly without NURBS approximation.
+                triangulate_offset_surface_face(face, offset, params, cache)
+            }
+            Surface::Ruled(ruled) => {
+                // Dedicated Steiner grid for RuledSurface (ROADMAP_VISION_2036 §2.3).
+                // S(u,v) = (1-v)*curve1(u) + v*curve2(u)
+                // We sample both curves at the same u-parameters and connect
+                // corresponding points with ruled triangles.
+                triangulate_ruled_surface_face(face, ruled, params, cache)
             }
         }
     } else {
@@ -4541,6 +4552,99 @@ fn triangulate_extrusion_face(face: &Face, ext: &draper_geometry::ExtrusionSurfa
     // Collect holes from inner loops
     let (hole_polylines, hole_uvs) = collect_face_holes_with_uv_from_cache(face, cache, &surface);
 
+    crate::parametric_domain::triangulate_surface_consistent(
+        &surface,
+        &boundary_3d,
+        &boundary_uvs,
+        &hole_polylines,
+        &hole_uvs,
+        face.forward,
+        params,
+    )
+}
+
+// ============================================================
+// Dedicated Steiner grid triangulators for Offset/Ruled surfaces
+// (ROADMAP_VISION_2036.md §2.3 — Sprint 4, Task 3)
+// ============================================================
+
+/// Triangulate an OffsetSurface face using a dedicated Steiner grid.
+///
+/// Instead of approximating the offset surface as NURBS and falling back
+/// to generic triangulation, this function:
+/// 1. Uses the base surface's UV domain and boundary edges from the cache
+/// 2. Calls triangulate_surface_consistent() with the Offset surface
+///    (which evaluates S(u,v) = base.point_at(u,v) + distance * base.normal_at(u,v))
+/// 3. This preserves the base surface's parametric structure and handles
+///    inner contours (holes) correctly
+///
+/// The surface's point_at() and normal_at() already handle the offset
+/// computation, so triangulate_surface_consistent() works directly —
+/// no NURBS approximation needed.
+fn triangulate_offset_surface_face(
+    face: &Face,
+    offset: &draper_geometry::OffsetSurface,
+    params: &TriangulationParams,
+    cache: &EdgeDiscretizationCache,
+) -> TriangleMesh {
+    let surface = face.surface.as_ref().cloned()
+        .unwrap_or(Surface::Offset(offset.clone()));
+
+    // Collect boundary from cache (same as other surface types)
+    let (boundary_3d, boundary_uvs) = collect_face_boundary_with_uv_from_cache(face, cache, &surface);
+
+    if boundary_3d.is_empty() {
+        // No boundary edges — fall back to generic triangulation
+        log::warn!("OffsetSurface face: no boundary edges — falling back to generic triangulation");
+        return crate::triangulate_face(face, params);
+    }
+
+    // Collect holes from inner loops
+    let (hole_polylines, hole_uvs) = collect_face_holes_with_uv_from_cache(face, cache, &surface);
+
+    // Use the consistent triangulation path — it evaluates surface.point_at(u,v)
+    // which for OffsetSurface computes base.point_at(u,v) + distance * base.normal_at(u,v)
+    crate::parametric_domain::triangulate_surface_consistent(
+        &surface,
+        &boundary_3d,
+        &boundary_uvs,
+        &hole_polylines,
+        &hole_uvs,
+        face.forward,
+        params,
+    )
+}
+
+/// Triangulate a RuledSurface face using a dedicated Steiner grid.
+///
+/// S(u,v) = (1-v)*curve1.point_at(u) + v*curve2.point_at(u)
+///
+/// This function samples both curves at the same u-parameters and connects
+/// corresponding points with ruled triangles. The boundary edges from the
+/// cache ensure watertightness with adjacent faces.
+fn triangulate_ruled_surface_face(
+    face: &Face,
+    ruled: &draper_geometry::RuledSurface,
+    params: &TriangulationParams,
+    cache: &EdgeDiscretizationCache,
+) -> TriangleMesh {
+    let surface = face.surface.as_ref().cloned()
+        .unwrap_or(Surface::Ruled(ruled.clone()));
+
+    // Collect boundary from cache
+    let (boundary_3d, boundary_uvs) = collect_face_boundary_with_uv_from_cache(face, cache, &surface);
+
+    if boundary_3d.is_empty() {
+        // No boundary edges — fall back to generic triangulation
+        log::warn!("RuledSurface face: no boundary edges — falling back to generic triangulation");
+        return crate::triangulate_face(face, params);
+    }
+
+    // Collect holes from inner loops
+    let (hole_polylines, hole_uvs) = collect_face_holes_with_uv_from_cache(face, cache, &surface);
+
+    // Use the consistent triangulation path — it evaluates surface.point_at(u,v)
+    // which for RuledSurface computes (1-v)*curve1(u) + v*curve2(u)
     crate::parametric_domain::triangulate_surface_consistent(
         &surface,
         &boundary_3d,

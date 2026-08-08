@@ -22,16 +22,22 @@ pub mod predictive;
 pub mod shape_parser;
 pub mod design_reviewer;
 pub mod llm;
+pub mod healing_ml;
+pub mod shape_from_text;
+pub mod design_review;
 
 pub use classifier::*;
 pub use strategy::*;
 pub use predictive::*;
 pub use shape_parser::{GeometryAction, ParseError, ShapeParser};
 pub use design_reviewer::{
-    DesignReviewer, ReviewCategory, ReviewConfig, ReviewIssue, ReviewReport,
+    DesignReviewer as AiDesignReviewer, ReviewCategory, ReviewConfig, ReviewIssue, ReviewReport,
     ReviewSeverity, ReviewStats,
 };
 pub use llm::{
     HttpLlmConfig, LlmClient, LlmError, LlmResponse, MockLlmClient, SYSTEM_PROMPT,
     parse_with_llm,
 };
+pub use healing_ml::*;
+pub use shape_from_text::*;
+pub use design_review::*;

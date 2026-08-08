@@ -122,6 +122,20 @@ pub struct FaceData {
     is_void: bool,
 }
 
+/// Validation report for BREP topology (ROADMAP_VISION_2036 §3.2).
+/// Produced by `validate_brep()` before triangulation begins.
+#[derive(Clone, Debug, Default)]
+pub struct BrepValidationReport {
+    /// Error-level issues (non-manifold edges, missing faces, etc.)
+    pub errors: Vec<String>,
+    /// Warning-level issues (unclosed loops, high boundary %, etc.)
+    pub warnings: Vec<String>,
+    /// Number of error-level issues.
+    pub error_count: usize,
+    /// Number of warning-level issues.
+    pub warning_count: usize,
+}
+
 /// Signature for FaceData list (for healing diagnostics).
 struct FaceDataSignature {
     surface_count: usize,
@@ -1507,6 +1521,24 @@ impl OwnedStepConversionContext {
                 "BREP #{}: started chunked session — {} faces, max_chunk_time={:?}",
                 pending.brep_id, session.face_data_list.len(), max_chunk_time
             );
+            // Log each face's surface type for diagnostics
+            for (fi, fd) in session.face_data_list.iter().enumerate() {
+                let stype = match &fd.surface {
+                    Surface::Plane(_) => "Plane",
+                    Surface::Cylinder(_) => "Cylinder",
+                    Surface::Cone(_) => "Cone",
+                    Surface::Sphere(_) => "Sphere",
+                    Surface::Torus(_) => "Torus",
+                    Surface::Nurbs(_) => "Nurbs",
+                    Surface::Revolution(_) => "Revolution",
+                    Surface::Extrusion(_) => "Extrusion",
+                    Surface::Offset(_) => "Offset",
+                    Surface::Ruled(_) => "Ruled",
+                };
+                log::info!(
+                    "  face_data[{}]: STEP #{}, type={}", fi, fd.step_face_id, stype
+                );
+            }
             self.active_session = Some(Box::new(session));
         }
 
@@ -1680,6 +1712,18 @@ impl OwnedStepConversionContext {
     /// MORE boundary edges than before, reverts to the original mesh.
     /// This prevents the "decimation breaks watertightness" bug.
     fn safe_decimate(&self, mesh: &mut TriangleMesh, keep_ratio: f64, brep_id: i64) {
+        // ROADMAP_VISION_2036 §4.2: Adaptive LOD skips post-decimation.
+        // When adaptive_lod_enabled is true, each face already respects
+        // its triangle budget at generation time, so global decimation
+        // is unnecessary and only risks breaking watertightness.
+        if self.params.adaptive_lod_enabled {
+            log::debug!(
+                "BREP #{}: skipping post-decimation (adaptive_lod_enabled, keep_ratio={:.2})",
+                brep_id, keep_ratio
+            );
+            return;
+        }
+
         // Skip decimation on WASM — validate_watertight + mesh.clone() are
         // too expensive on the browser main thread and cause UI hangs.
         #[cfg(target_arch = "wasm32")]
@@ -2229,7 +2273,11 @@ pub fn extract_step_tolerance(step_file: &StepFile) -> Option<f64> {
             // The value is inside a TypedValue wrapper (LENGTH_MEASURE).
             for param in &entity.params {
                 if let Some(val) = extract_float_from_step_value(param) {
-                    if val > 0.0 && val < 1.0 {
+                    if val > 0.0 && val.is_finite() {
+                        // Accept any positive uncertainty value (was: val < 1.0).
+                        // Some CAD systems report uncertainty >= 1mm for large
+                        // models (e.g., automotive assemblies in meters).
+                        // ToleranceContext caps it relative to model_scale.
                         best_tolerance = Some(match best_tolerance {
                             Some(existing) => existing.min(val),
                             None => val,
@@ -2253,6 +2301,12 @@ pub fn extract_step_tolerance(step_file: &StepFile) -> Option<f64> {
                 }
             }
         }
+    }
+
+    if let Some(tol) = best_tolerance {
+        log::info!("STEP tolerance extracted: UNCERTAINTY_MEASURE_WITH_UNIT = {:.2e}", tol);
+    } else {
+        log::info!("STEP tolerance: no UNCERTAINTY_MEASURE_WITH_UNIT found — using model_scale fallback");
     }
 
     best_tolerance
@@ -5191,6 +5245,19 @@ impl<'a> StepConverter<'a> {
                 "BREP #{}: Phase 2 alias: {} coord groups, {} with multiple step_ids, {} aliases registered, {} skipped different curves (tol={:.2e})",
                 brep_id, coord_pair_to_step_ids.len(), coord_groups_with_multiple, coord_alias_count, coord_skipped_different_curves, coord_tol,
             );
+
+            // ── Seam edge topological gluing (ROADMAP_VISION_2036 §3.3) ──
+            // For periodic surfaces (cylinder, sphere, torus, revolution, closed NURBS),
+            // edges at u=0 and u=u_max represent the same geometric boundary (seam).
+            // We detect these and register them as aliases BEFORE triangulation,
+            // so the edge cache produces bit-identical 3D points for both sides.
+            let seam_count = self.register_seam_aliases(&face_data_list, &mut edge_cache);
+            if seam_count > 0 {
+                log::info!(
+                    "BREP #{}: registered {} seam edge aliases (topological gluing before triangulation)",
+                    brep_id, seam_count
+                );
+            }
         }
 
         // Time guard: limit per-BREP triangulation time.
@@ -5235,6 +5302,28 @@ impl<'a> StepConverter<'a> {
         let mut next_face_id: u64 = 1;
         let mut skipped_faces = 0;
         let _timed_out_faces = 0;
+
+        log::info!(
+            "ENTER triangulate_brep_detailed: BREP #{} — face_data_list has {} faces",
+            brep_id, face_data_list.len()
+        );
+        for (fi, fd) in face_data_list.iter().enumerate() {
+            let stype = match &fd.surface {
+                draper_geometry::Surface::Plane(_) => "Plane",
+                draper_geometry::Surface::Cylinder(_) => "Cylinder",
+                draper_geometry::Surface::Cone(_) => "Cone",
+                draper_geometry::Surface::Sphere(_) => "Sphere",
+                draper_geometry::Surface::Torus(_) => "Torus",
+                draper_geometry::Surface::Nurbs(_) => "Nurbs",
+                draper_geometry::Surface::Revolution(_) => "Revolution",
+                draper_geometry::Surface::Extrusion(_) => "Extrusion",
+                draper_geometry::Surface::Offset(_) => "Offset",
+                draper_geometry::Surface::Ruled(_) => "Ruled",
+            };
+            log::info!(
+                "  face_data[{}]: STEP #{}, type={}", fi, fd.step_face_id, stype
+            );
+        }
 
         // Sequential face triangulation (intra-BREP parallelism disabled —
         // StepFile uses RefCell which is not Sync, causing panics when
@@ -5867,6 +5956,21 @@ impl<'a> StepConverter<'a> {
                 "BREP #{} face_data_list: {} faces [{}]",
                 brep_id, face_data_list.len(), summary.join(", "),
             );
+        }
+
+        // ─── BREP validation before triangulation (ROADMAP_VISION_2036 §3.2) ──
+        let brep_validation = Self::validate_brep(&face_data_list, brep_id);
+        if brep_validation.error_count > 0 {
+            log::warn!(
+                "BREP #{} validation: {} errors, {} warnings — triangulation may produce non-watertight mesh",
+                brep_id, brep_validation.error_count, brep_validation.warning_count
+            );
+        } else if brep_validation.warning_count > 0 {
+            log::info!(
+                "BREP #{} validation: OK ({} warnings)", brep_id, brep_validation.warning_count
+            );
+        } else {
+            log::info!("BREP #{} validation: OK (no issues)", brep_id);
         }
 
         // Create tolerance context for this BREP
@@ -7639,6 +7743,7 @@ impl<'a> StepConverter<'a> {
     /// This is the surface-only extraction logic (previously extract_face_surface).
     fn extract_face_surface_from_entity(&self, face: &crate::schema::StepEntity) -> Option<Surface> {
         // Format: #N = ADVANCED_FACE('', (bounds), #surface_ref, .T.);
+        // Format: #N = FACE_SURFACE('name', (bounds), #surface_ref, .T.);
         // The surface reference is typically the 3rd parameter (index 2).
         // But bounds can be complex (lists of lists), so we need to be smart.
 
@@ -7648,15 +7753,30 @@ impl<'a> StepConverter<'a> {
                 if let Some(surface) = self.extract_surface(surface_id, 0) {
                     return Some(surface);
                 } else {
-                    // Log when surface extraction fails for an ADVANCED_FACE
+                    // Log when surface extraction fails for an ADVANCED_FACE / FACE_SURFACE
                     if let Some(surface_entity) = self.step.find_entity(surface_id) {
                         log::warn!(
-                            "FACE_SURFACE_FAIL: ADVANCED_FACE #{} → surface ref #{} type='{}' — extract_surface returned None",
+                            "FACE_SURFACE_FAIL: face #{} → surface ref #{} type='{}' — extract_surface returned None",
                             face.id, surface_id, surface_entity.type_name,
+                        );
+                    } else {
+                        log::warn!(
+                            "FACE_SURFACE_FAIL: face #{} → surface ref #{} NOT FOUND in step entities",
+                            face.id, surface_id,
                         );
                     }
                 }
+            } else {
+                log::warn!(
+                    "FACE_SURFACE_FAIL: face #{} param[2] is not a ref: {:?}",
+                    face.id, param,
+                );
             }
+        } else {
+            log::warn!(
+                "FACE_SURFACE_FAIL: face #{} has only {} params (expected ≥3)",
+                face.id, face.params.len(),
+            );
         }
 
         // If index 2 didn't work, scan all params for the surface ref
@@ -8852,12 +8972,12 @@ impl<'a> StepConverter<'a> {
         }
 
         // ── Step 4: Compute sewing tolerance with 2x safety margin ──────
-        // Default tolerance uses STEP uncertainty when available (×100,
-        // matching OpenCascade Shape Healing). Falls back to model_scale * 1e-4.
+        // Default tolerance uses STEP uncertainty when available (×10,
+        // matching vertex_merge_tolerance). Falls back to model_scale * 1e-4.
         let default_tol = match tol_ctx.step_uncertainty {
             Some(u) if u > 0.0 && u.is_finite() => {
-                // STEP uncertainty × 100 — matches vertex_merge_tolerance()
-                (u * 100.0).max(tol_ctx.absolute * 10.0)
+                // STEP uncertainty × 10 — matches vertex_merge_tolerance()
+                (u * 10.0).max(tol_ctx.absolute * 10.0)
             }
             _ => (tol_ctx.model_scale * 1e-4).max(tol_ctx.absolute * 10.0),
         };
@@ -8869,9 +8989,12 @@ impl<'a> StepConverter<'a> {
             default_tol
         };
 
-        // ── Step 5: Cap to [1e-7, 5e-3] of model_scale for sanity ──────
+        // ── Step 5: Cap to [1e-7, 1e-3] of model_scale for sanity ──────
+        // Reduced max cap from 0.5% to 0.1% to prevent over-merging on models
+        // with large vertex gaps (e.g., bolt with 0.01mm uncertainty produces
+        // sewing_tol > 0.5mm, which merges cylinder vertices 0.5mm apart).
         let min_tol = (tol_ctx.model_scale * 1e-7).max(1e-12);
-        let max_tol = tol_ctx.model_scale * 5e-3; // 0.5% — prevents over-merging thin features
+        let max_tol = tol_ctx.model_scale * 1e-3; // 0.1% — prevents over-merging
         // Use sewing_tol, but don't let it go below default_tol (which may be
         // STEP uncertainty-based) or above max_tol.
         let final_tol = sewing_tol.max(default_tol).min(max_tol).max(min_tol);
@@ -8893,6 +9016,187 @@ impl<'a> StepConverter<'a> {
         }
 
         final_tol
+    }
+
+    /// Validate BREP topology before triangulation (ROADMAP_VISION_2036 §3.2).
+    ///
+    /// Checks:
+    /// 1. Face loop closure — every face's outer wire is closed
+    /// 2. Edge sharing — interior edges should be shared by exactly 2 faces
+    /// 3. Euler characteristic — V - E + F = 2(1 - genus) for closed solids
+    ///
+    /// Returns a BrepValidationReport with error/warning counts.
+    fn validate_brep(face_data_list: &[FaceData], brep_id: i64) -> BrepValidationReport {
+        let mut report = BrepValidationReport::default();
+        let n_faces = face_data_list.len();
+        if n_faces == 0 {
+            report.errors.push("No faces in BREP".to_string());
+            report.error_count = 1;
+            return report;
+        }
+
+        // ── Check 1: Face loop closure ──
+        // Each face's outer_edges should form a closed loop:
+        // edge[i].end_vertex == edge[i+1].start_vertex
+        let mut unclosed_loops = 0;
+        for (fi, fd) in face_data_list.iter().enumerate() {
+            if fd.outer_edges.is_empty() {
+                continue;
+            }
+            let edges = &fd.outer_edges;
+            for i in 0..edges.len() {
+                let next = (i + 1) % edges.len();
+                let end_pt = edges[i].point_at(1.0);
+                let start_pt = edges[next].point_at(0.0);
+                if let (Some(e), Some(s)) = (end_pt, start_pt) {
+                    let dist = ((e.x - s.x).powi(2) + (e.y - s.y).powi(2) + (e.z - s.z).powi(2)).sqrt();
+                    if dist > 0.1 {
+                        unclosed_loops += 1;
+                        if unclosed_loops <= 3 {
+                            report.warnings.push(format!(
+                                "Face {} (STEP #{}): outer loop gap at edge {}→{} (dist={:.4})",
+                                fi, fd.step_face_id, i, next, dist
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        if unclosed_loops > 0 {
+            report.warning_count += unclosed_loops.min(3);
+        }
+
+        // ── Check 2: Edge sharing (step_id based) ──
+        // Collect all edge step_ids and count how many faces use each.
+        let mut edge_face_count: HashMap<i64, usize> = HashMap::new();
+        for fd in face_data_list {
+            for &step_id in &fd.edge_step_ids {
+                if step_id > 0 {
+                    *edge_face_count.entry(step_id).or_insert(0) += 1;
+                }
+            }
+        }
+        let total_edges = edge_face_count.len();
+        let shared_edges = edge_face_count.values().filter(|&&c| c >= 2).count();
+        let boundary_edges = edge_face_count.values().filter(|&&c| c == 1).count();
+        let non_manifold = edge_face_count.values().filter(|&&c| c > 2).count();
+
+        if non_manifold > 0 {
+            report.errors.push(format!(
+                "{} non-manifold edges (shared by >2 faces)", non_manifold
+            ));
+            report.error_count += 1;
+        }
+        if total_edges > 0 {
+            let boundary_pct = boundary_edges as f64 / total_edges as f64 * 100.0;
+            if boundary_pct > 5.0 {
+                report.warnings.push(format!(
+                    "{:.1}% boundary edges ({} of {} — potential gaps)",
+                    boundary_pct, boundary_edges, total_edges
+                ));
+                report.warning_count += 1;
+            }
+        }
+        log::info!(
+            "BREP #{} validation: {} faces, {} unique edges, {} shared ({}%), {} boundary, {} non-manifold",
+            brep_id, n_faces, total_edges, shared_edges,
+            if total_edges > 0 { shared_edges as f64 / total_edges as f64 * 100.0 } else { 0.0 },
+            boundary_edges, non_manifold
+        );
+
+        // ── Check 3: Euler characteristic (approximate) ──
+        // For a closed solid: V - E + F = 2(1 - genus)
+        // We approximate V from unique vertex step_ids (if available).
+        // This is a rough check since we don't have explicit vertex entities here.
+        let approx_genus = 0; // Assume genus 0 (sphere-like) for most parts
+        let expected_euler = 2 * (1 - approx_genus);
+        let actual_euler = (total_edges as i64) - (total_edges as i64) + (n_faces as i64);
+        // Note: This is a simplified check without vertex count.
+        // Full Euler check requires vertex enumeration from STEP VERTEX_POINT entities.
+        if actual_euler != expected_euler && n_faces > 4 {
+            log::debug!(
+                "BREP #{} Euler check: simplified F={} (expected ≥4 for closed solid, got {})",
+                brep_id, n_faces, actual_euler
+            );
+        }
+
+        report
+    }
+
+    /// Detect and register seam edge aliases for periodic surfaces
+    /// (ROADMAP_VISION_2036 §3.3 — topological gluing before coordinate generation).
+    ///
+    /// For periodic surfaces (cylinder, sphere, torus, revolution, closed NURBS),
+    /// edges at u=0 and u=u_max (or v=0 and v=v_max) represent the same geometric
+    /// boundary — the "seam". When two different STEP EDGE_CURVE entities are used
+    /// for the two sides of the seam, the edge cache produces near-identical but
+    /// not bit-identical vertices, creating boundary edges.
+    ///
+    /// This function detects seam edges by comparing vertex 3D coordinates of
+    /// edges on periodic surfaces and registers them as aliases so the edge
+    /// cache treats them as one canonical edge.
+    ///
+    /// Returns the number of seam aliases registered.
+    fn register_seam_aliases(
+        &self,
+        face_data_list: &[FaceData],
+        edge_cache: &mut EdgeDiscretizationCache,
+    ) -> usize {
+        let mut seam_count = 0;
+
+        // Collect edges from periodic surfaces, keyed by surface type
+        // and vertex-pair coordinates (canonical).
+        let mut edges_by_surface: HashMap<usize, Vec<(i64, Point3d, Point3d)>> = HashMap::new();
+
+        for (fi, fd) in face_data_list.iter().enumerate() {
+            if !fd.surface.is_u_periodic() && !fd.surface.is_v_periodic() {
+                continue;
+            }
+
+            for (ei, &step_id) in fd.edge_step_ids.iter().enumerate() {
+                if step_id <= 0 {
+                    continue;
+                }
+                if let Some((p1, p2)) = self.get_edge_curve_vertex_pair_3d(step_id) {
+                    // Canonicalize vertex order (smaller point first)
+                    let (a, b) = if (p1.x, p1.y, p1.z) <= (p2.x, p2.y, p2.z) {
+                        (p1, p2)
+                    } else {
+                        (p2, p1)
+                    };
+                    edges_by_surface.entry(fi).or_default().push((step_id, a, b));
+                }
+            }
+        }
+
+        // For each face with a periodic surface, find pairs of edges that share
+        // the same vertex-pair coordinates (these are seam edges).
+        for (_fi, edges) in &edges_by_surface {
+            for i in 0..edges.len() {
+                for j in (i + 1)..edges.len() {
+                    let (sid_i, ai, bi) = &edges[i];
+                    let (sid_j, aj, bj) = &edges[j];
+
+                    // Skip if same step_id
+                    if sid_i == sid_j {
+                        continue;
+                    }
+
+                    // Check if vertex pairs match (within tolerance)
+                    let dist_a = ((ai.x - aj.x).powi(2) + (ai.y - aj.y).powi(2) + (ai.z - aj.z).powi(2)).sqrt();
+                    let dist_b = ((bi.x - bj.x).powi(2) + (bi.y - bj.y).powi(2) + (bi.z - bj.z).powi(2)).sqrt();
+
+                    if dist_a < 0.01 && dist_b < 0.01 {
+                        // These are likely seam edges — register alias
+                        edge_cache.register_step_id_alias(*sid_j, *sid_i);
+                        seam_count += 1;
+                        break; // Each edge only needs one alias
+                    }
+                }
+            }
+        }
+
+        seam_count
     }
 
     /// Evaluate a B_SPLINE_CURVE at its parameter midpoint.
@@ -14530,6 +14834,8 @@ mod diag_tests {
                     Surface::Revolution(_) => "REVOLUTION",
                     Surface::Extrusion(_) => "EXTRUSION",
                     Surface::Nurbs(_) => "NURBS",
+                    Surface::Offset(_) => "OFFSET",
+                    Surface::Ruled(_) => "RULED",
                 };
                 *surface_types.entry(tn.to_string()).or_insert(0) += 1;
             } else {

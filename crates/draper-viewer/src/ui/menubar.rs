@@ -69,6 +69,8 @@ pub enum MenuAction {
     ViewToggleEdges,
     ViewToggleNormals,
     ViewToggleSilhouette,
+    ViewSectionCut,
+    ViewTimeline,
     ViewPerspective,
     ViewOrthographic,
     ViewSaveLayout,
@@ -92,6 +94,14 @@ pub enum MenuAction {
     InsertLinearPattern,
     InsertCircularPattern,
     InsertMirror,
+
+    // ── Advanced geometry (ROADMAP_VISION_2036) ──
+    InsertImplicitSolid,
+    InsertSubdMesh,
+    FileExportIga,
+    ToolsGenerativeDesign,
+    ToolsAiHealing,
+    ToolsSubdivide,
 
     // ── Sketch actions ──
     SketchEnter,
@@ -454,6 +464,7 @@ fn render_file_menu(ui: &mut egui::Ui) -> Option<MenuAction> {
             if ui.button("STEP (AP214)").clicked() { action = Some(MenuAction::FileExportStep); ui.close_menu(); return; }
             if ui.button("STEP (AP242)").clicked() { action = Some(MenuAction::FileExportStep); ui.close_menu(); return; }
             if ui.button("STL (*.stl)").clicked() { action = Some(MenuAction::FileExportStl); ui.close_menu(); return; }
+            if ui.button("IGA (NURBS for FEA)").clicked() { action = Some(MenuAction::FileExportIga); ui.close_menu(); return; }
             if ui.button("OBJ (*.obj)").clicked() { action = Some(MenuAction::FileExportObj); ui.close_menu(); return; }
             if ui.button("GLTF (*.gltf)").clicked() { action = Some(MenuAction::FileExportGltf); ui.close_menu(); return; }
             if ui.button("PDF (*.pdf)").clicked() { action = Some(MenuAction::FileExportPdf); ui.close_menu(); return; }
@@ -532,6 +543,9 @@ fn render_view_menu(ui: &mut egui::Ui) -> Option<MenuAction> {
             if ui.button("Toggle Edges").clicked() { action = Some(MenuAction::ViewToggleEdges); ui.close_menu(); return; }
             if ui.button("Toggle Normals").clicked() { action = Some(MenuAction::ViewToggleNormals); ui.close_menu(); return; }
             if ui.button("Toggle Silhouette").clicked() { action = Some(MenuAction::ViewToggleSilhouette); ui.close_menu(); return; }
+            ui.separator();
+            if ui.button("Section Cut…").clicked() { action = Some(MenuAction::ViewSectionCut); ui.close_menu(); return; }
+            if ui.button("Feature Timeline…").clicked() { action = Some(MenuAction::ViewTimeline); ui.close_menu(); return; }
         });
         ui.menu_button("Camera", |ui| {
             if ui.button("Perspective").clicked() { action = Some(MenuAction::ViewPerspective); ui.close_menu(); return; }
@@ -573,6 +587,9 @@ fn render_insert_menu(ui: &mut egui::Ui) -> Option<MenuAction> {
             if ui.button("Circular Pattern").clicked() { action = Some(MenuAction::InsertCircularPattern); ui.close_menu(); return; }
             if ui.button("Mirror").clicked() { action = Some(MenuAction::InsertMirror); ui.close_menu(); return; }
         });
+        ui.separator();
+        if ui.button("Implicit Solid (SDF)").clicked() { action = Some(MenuAction::InsertImplicitSolid); ui.close_menu(); return; }
+        if ui.button("SubD Mesh").clicked() { action = Some(MenuAction::InsertSubdMesh); ui.close_menu(); return; }
     });
     action
 }
@@ -955,6 +972,10 @@ fn render_tools_menu(ui: &mut egui::Ui) -> Option<MenuAction> {
         if ui.button("Plugins Manager").clicked() { action = Some(MenuAction::ToolsPlugins); ui.close_menu(); return; }
         if ui.button("Scripting Console").clicked() { action = Some(MenuAction::ToolsScriptingConsole); ui.close_menu(); return; }
         if ui.button("AI Settings").clicked() { action = Some(MenuAction::ToolsAiSettings); ui.close_menu(); return; }
+        ui.separator();
+        if ui.button("Generative Design").clicked() { action = Some(MenuAction::ToolsGenerativeDesign); ui.close_menu(); return; }
+        if ui.button("AI Healing").clicked() { action = Some(MenuAction::ToolsAiHealing); ui.close_menu(); return; }
+        if ui.button("Subdivide Mesh").clicked() { action = Some(MenuAction::ToolsSubdivide); ui.close_menu(); return; }
         if ui.button("Macro Recorder").clicked() { action = Some(MenuAction::ToolsMacroRecorder); ui.close_menu(); return; }
         if ui.button("Performance Monitor").clicked() { action = Some(MenuAction::ToolsPerformance); ui.close_menu(); return; }
         if ui.button("Theme").clicked() { action = Some(MenuAction::ToolsTheme); ui.close_menu(); return; }
