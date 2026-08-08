@@ -157,7 +157,7 @@
 - [x] Phase 5: Sketch constraints (Equal constraint applied, diagnostics dialog)
 - [x] Phase 6: Animation Timeline panel (keyframes, tracks, playback, easing)
 - [x] Phase 7: Scripting console (command interpreter, 10 functions) + Plugin manager (existing)
-- [ ] Phase 8: Cloud collab enhancement
+- [x] Phase 8: Cloud collab enhancement (avatars, activity feed, branch mgmt, storage)
 
 ## Notes
 

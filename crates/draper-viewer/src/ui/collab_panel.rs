@@ -64,6 +64,46 @@ pub struct CollabPanelState {
     pub sender: Option<mpsc::UnboundedSender<SyncMessage>>,
     /// Status message.
     pub status: String,
+
+    // ─── Phase 8: Extended UI fields (mockup 73) ───
+
+    /// Activity feed entries (recent collaborative actions).
+    pub activity_feed: Vec<ActivityEntry>,
+    /// Branch info for version control display.
+    pub branch_info: BranchInfo,
+    /// Storage usage: (used_bytes, total_bytes).
+    pub storage_usage: (u64, u64),
+    /// User color assignments for avatars (replica_id → color).
+    pub user_colors: std::collections::HashMap<String, [u8; 3]>,
+}
+
+/// An entry in the activity feed.
+#[derive(Clone, Debug)]
+pub struct ActivityEntry {
+    pub timestamp: String,
+    pub user: String,
+    pub action: String,
+    pub target: String,
+}
+
+/// Branch information for version control display.
+#[derive(Clone, Debug)]
+pub struct BranchInfo {
+    pub current_branch: String,
+    pub commits_ahead: u32,
+    pub commits_behind: u32,
+    pub last_commit_msg: String,
+}
+
+impl Default for BranchInfo {
+    fn default() -> Self {
+        Self {
+            current_branch: "main".to_string(),
+            commits_ahead: 0,
+            commits_behind: 0,
+            last_commit_msg: "Initial commit".to_string(),
+        }
+    }
 }
 
 /// A log entry for a collaboration operation.
@@ -76,6 +116,12 @@ pub struct OpLogEntry {
 
 impl Default for CollabPanelState {
     fn default() -> Self {
+        let mut user_colors = std::collections::HashMap::new();
+        user_colors.insert("alice".to_string(), [137, 180, 250]);   // Blue
+        user_colors.insert("bob".to_string(), [166, 227, 161]);     // Green
+        user_colors.insert("charlie".to_string(), [249, 226, 175]); // Yellow
+        user_colors.insert("maria".to_string(), [203, 166, 247]);   // Mauve
+
         Self {
             server_url: "http://localhost:8080".to_string(),
             session_id: "doc-1".to_string(),
@@ -88,6 +134,10 @@ impl Default for CollabPanelState {
             receiver: None,
             sender: None,
             status: "Disconnected — click Connect to join".to_string(),
+            activity_feed: Vec::new(),
+            branch_info: BranchInfo::default(),
+            storage_usage: (4_200_000_000, 10_000_000_000), // 4.2 GB / 10 GB
+            user_colors,
         }
     }
 }
@@ -222,7 +272,78 @@ impl CollabPanelState {
         if self.op_log.len() > 50 {
             self.op_log.remove(0);
         }
+
+        // Add to activity feed
+        self.add_activity(&self.replica_id.clone(), "editing", "Face #100");
+
         self.status = "Sent test operation (AddFace #100)".to_string();
+    }
+
+    /// Add an activity feed entry.
+    pub fn add_activity(&mut self, user: &str, action: &str, target: &str) {
+        let entry = ActivityEntry {
+            timestamp: current_time_str(),
+            user: user.to_string(),
+            action: action.to_string(),
+            target: target.to_string(),
+        };
+        self.activity_feed.push(entry);
+        if self.activity_feed.len() > 30 {
+            self.activity_feed.remove(0);
+        }
+    }
+
+    /// Get the avatar color for a user.
+    pub fn get_user_color(&self, user: &str) -> [u8; 3] {
+        *self.user_colors.get(user).unwrap_or(&[180, 180, 180])
+    }
+
+    /// Get the avatar initials for a user name.
+    pub fn get_initials(name: &str) -> String {
+        let chars: Vec<char> = name.chars().collect();
+        if chars.is_empty() {
+            return "?".to_string();
+        }
+        if chars.len() >= 2 {
+            format!("{}{}", chars[0].to_uppercase(), chars[1].to_uppercase())
+        } else {
+            chars[0].to_uppercase().to_string()
+        }
+    }
+
+    /// Commit changes (simulated).
+    pub fn commit(&mut self, message: &str) {
+        self.branch_info.commits_ahead += 1;
+        self.branch_info.last_commit_msg = message.to_string();
+        self.add_activity(&self.replica_id.clone(), "committed", message);
+        self.status = format!("Committed: '{}'", message);
+    }
+
+    /// Merge from remote (simulated).
+    pub fn merge(&mut self) {
+        self.branch_info.commits_behind = 0;
+        self.branch_info.commits_ahead = 0;
+        self.add_activity(&self.replica_id.clone(), "merged", "main");
+        self.status = "Merged from main".to_string();
+    }
+
+    /// Pull from remote (simulated).
+    pub fn pull(&mut self) {
+        self.branch_info.commits_behind = 0;
+        self.add_activity(&self.replica_id.clone(), "pulled", "main");
+        self.status = "Pulled latest from main".to_string();
+    }
+
+    /// Format storage usage as human-readable string.
+    pub fn storage_usage_str(&self) -> String {
+        let (used, total) = self.storage_usage;
+        format!("{:.1} GB / {:.1} GB", used as f64 / 1e9, total as f64 / 1e9)
+    }
+
+    /// Storage usage as a fraction (0.0 to 1.0).
+    pub fn storage_fraction(&self) -> f32 {
+        let (used, total) = self.storage_usage;
+        if total == 0 { 0.0 } else { used as f32 / total as f32 }
     }
 
     /// Poll for incoming messages from the server.
@@ -230,30 +351,43 @@ impl CollabPanelState {
     /// This should be called each frame to process any messages that the
     /// server has broadcast to us.
     pub fn poll_messages(&mut self) {
-        let Some(rx) = &mut self.receiver else {
-            return;
-        };
+        let mut received_ops: Vec<(String, String)> = Vec::new();
+        let mut received_presence: Option<Vec<String>> = None;
 
-        // Drain all available messages without blocking
-        while let Ok(msg) = rx.try_recv() {
-            match &msg {
-                SyncMessage::RemoteOp { replica_id, operation, .. } => {
-                    let entry = OpLogEntry {
-                        timestamp: current_time_str(),
-                        replica_id: replica_id.clone(),
-                        operation_desc: format!("{:?}", operation),
-                    };
-                    self.op_log.push(entry);
-                    if self.op_log.len() > 50 {
-                        self.op_log.remove(0);
+        if let Some(rx) = &mut self.receiver {
+            // Drain all available messages without blocking
+            while let Ok(msg) = rx.try_recv() {
+                match &msg {
+                    SyncMessage::RemoteOp { replica_id, operation, .. } => {
+                        received_ops.push((replica_id.clone(), format!("{:?}", operation)));
                     }
+                    SyncMessage::Presence { replicas, .. } => {
+                        received_presence = Some(replicas.clone());
+                    }
+                    _ => {}
                 }
-                SyncMessage::Presence { replicas, .. } => {
-                    self.peers = replicas.clone();
-                    self.peer_count = replicas.len();
-                }
-                _ => {}
             }
+        }
+
+        // Process received operations (outside the borrow of self.receiver)
+        for (replica_id, op_desc) in received_ops {
+            let entry = OpLogEntry {
+                timestamp: current_time_str(),
+                replica_id: replica_id.clone(),
+                operation_desc: op_desc.clone(),
+            };
+            self.op_log.push(entry);
+            if self.op_log.len() > 50 {
+                self.op_log.remove(0);
+            }
+            // Add to activity feed
+            self.add_activity(&replica_id, "modified", &op_desc);
+        }
+
+        // Update presence
+        if let Some(replicas) = received_presence {
+            self.peers = replicas.clone();
+            self.peer_count = replicas.len();
         }
     }
 
@@ -337,38 +471,139 @@ pub fn render_collab_panel(ui: &mut egui::Ui, state: &mut CollabPanelState) -> O
     };
     ui.label(egui::RichText::new(&state.status).size(11.0).color(status_color));
 
-    // === Peers ===
+    // === Peers with avatars ===
     if state.connected && !state.peers.is_empty() {
         ui.add_space(4.0);
-        ui.label(egui::RichText::new(format!("Peers ({}):", state.peer_count)).size(11.0).strong());
+        ui.label(egui::RichText::new(format!("Online ({}):", state.peer_count)).size(11.0).strong());
         egui::ScrollArea::vertical()
             .max_height(80.0)
             .show(ui, |ui| {
                 for peer in &state.peers {
                     let is_me = peer == &state.replica_id;
-                    let label = if is_me {
-                        format!("• {} (you)", peer)
-                    } else {
-                        format!("• {}", peer)
-                    };
-                    ui.label(egui::RichText::new(label).size(10.0));
+                    let color = state.get_user_color(peer);
+                    let initials = CollabPanelState::get_initials(peer);
+                    ui.horizontal(|ui| {
+                        // Avatar circle
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(18.0, 18.0),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter().circle_filled(
+                            rect.center(),
+                            8.0,
+                            egui::Color32::from_rgb(color[0], color[1], color[2]),
+                        );
+                        ui.painter().text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            &initials,
+                            egui::FontId::proportional(8.0),
+                            egui::Color32::BLACK,
+                        );
+                        // Online indicator (green dot)
+                        ui.painter().circle_filled(
+                            egui::pos2(rect.max.x - 2.0, rect.max.y - 2.0),
+                            3.0,
+                            egui::Color32::from_rgb(80, 200, 80),
+                        );
+                        // Name
+                        let name_label = if is_me {
+                            format!("{} (you)", peer)
+                        } else {
+                            peer.clone()
+                        };
+                        ui.label(egui::RichText::new(name_label).size(10.0));
+                    });
                 }
             });
     }
 
+    // === Activity Feed ===
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new("Activity:").size(11.0).strong());
+    if state.activity_feed.is_empty() {
+        ui.label(egui::RichText::new("(no recent activity)").size(10.0).weak());
+    } else {
+        egui::ScrollArea::vertical()
+            .max_height(100.0)
+            .show(ui, |ui| {
+                for entry in state.activity_feed.iter().rev() {
+                    let color = state.get_user_color(&entry.user);
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(&entry.timestamp).size(9.0).weak().color(egui::Color32::from_rgb(120, 120, 120)));
+                        ui.label(egui::RichText::new(&entry.user).size(9.0).color(egui::Color32::from_rgb(color[0], color[1], color[2])));
+                        ui.label(egui::RichText::new(entry.action.clone()).size(9.0).color(egui::Color32::from_rgb(150, 150, 160)));
+                        ui.label(egui::RichText::new(&entry.target).size(9.0));
+                    });
+                }
+            });
+    }
+
+    // === Branch Management ===
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new("Branch:").size(11.0).strong());
+    ui.horizontal(|ui| {
+        // Branch icon
+        ui.label(egui::RichText::new("⎇").size(12.0).color(egui::Color32::from_rgb(0x89, 0xb4, 0xfa)));
+        ui.label(egui::RichText::new(&state.branch_info.current_branch).size(10.0).strong());
+        if state.branch_info.commits_ahead > 0 {
+            ui.label(egui::RichText::new(format!("↑{}", state.branch_info.commits_ahead))
+                .size(9.0).color(egui::Color32::from_rgb(80, 180, 80)));
+        }
+        if state.branch_info.commits_behind > 0 {
+            ui.label(egui::RichText::new(format!("↓{}", state.branch_info.commits_behind))
+                .size(9.0).color(egui::Color32::from_rgb(220, 180, 80)));
+        }
+    });
+    ui.label(egui::RichText::new(format!("Last: {}", state.branch_info.last_commit_msg))
+        .size(9.0).weak().color(egui::Color32::from_rgb(120, 120, 130)));
+
+    // Branch action buttons
+    ui.horizontal(|ui| {
+        let mut commit_msg = String::new();
+        // Commit button opens inline text
+        if ui.button("Commit").clicked() {
+            state.commit("Update model");
+        }
+        if ui.add_enabled(state.branch_info.commits_behind > 0, egui::Button::new("Pull")).clicked() {
+            state.pull();
+        }
+        if ui.add_enabled(state.branch_info.commits_ahead > 0, egui::Button::new("Merge")).clicked() {
+            state.merge();
+        }
+        let _ = commit_msg;
+    });
+
+    // === Storage Usage ===
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new("Cloud Storage:").size(11.0).strong());
+    let fraction = state.storage_fraction();
+    let storage_color = if fraction > 0.9 {
+        egui::Color32::from_rgb(220, 80, 80) // Red
+    } else if fraction > 0.7 {
+        egui::Color32::from_rgb(220, 180, 80) // Yellow
+    } else {
+        egui::Color32::from_rgb(80, 180, 80) // Green
+    };
+    ui.add(egui::ProgressBar::new(fraction)
+        .fill(storage_color)
+        .text(state.storage_usage_str()));
+
     // === Operation log ===
     ui.add_space(4.0);
-    ui.label(egui::RichText::new("Recent Operations:").size(11.0).strong());
+    ui.label(egui::RichText::new("Operation Log:").size(11.0).strong());
     if state.op_log.is_empty() {
         ui.label(egui::RichText::new("(no operations yet)").size(10.0).weak());
     } else {
         egui::ScrollArea::vertical()
-            .max_height(120.0)
+            .max_height(80.0)
             .show(ui, |ui| {
                 for entry in state.op_log.iter().rev() {
+                    let color = state.get_user_color(&entry.replica_id);
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(&entry.timestamp).size(9.0).weak().color(egui::Color32::from_rgb(120, 120, 120)));
-                        ui.label(egui::RichText::new(format!("[{}]", entry.replica_id)).size(9.0).color(egui::Color32::from_rgb(100, 160, 220)));
+                        ui.label(egui::RichText::new(format!("[{}]", entry.replica_id)).size(9.0)
+                            .color(egui::Color32::from_rgb(color[0], color[1], color[2])));
                         ui.label(egui::RichText::new(&entry.operation_desc).size(9.0));
                     });
                 }
@@ -533,5 +768,120 @@ mod tests {
         assert_eq!(entry.timestamp, "12:34:56");
         assert_eq!(entry.replica_id, "alice");
         assert_eq!(entry.operation_desc, "AddFace #42");
+    }
+
+    // ─── Phase 8 tests ───
+
+    #[test]
+    fn test_activity_feed_default_empty() {
+        let state = CollabPanelState::default();
+        assert!(state.activity_feed.is_empty());
+    }
+
+    #[test]
+    fn test_add_activity() {
+        let mut state = CollabPanelState::default();
+        state.add_activity("bob", "editing", "Sketch 3");
+        assert_eq!(state.activity_feed.len(), 1);
+        assert_eq!(state.activity_feed[0].user, "bob");
+        assert_eq!(state.activity_feed[0].action, "editing");
+        assert_eq!(state.activity_feed[0].target, "Sketch 3");
+    }
+
+    #[test]
+    fn test_activity_feed_max_30() {
+        let mut state = CollabPanelState::default();
+        for i in 0..50 {
+            state.add_activity("bob", "editing", &format!("Op {}", i));
+        }
+        assert_eq!(state.activity_feed.len(), 30);
+    }
+
+    #[test]
+    fn test_user_colors() {
+        let state = CollabPanelState::default();
+        assert_eq!(state.get_user_color("alice"), [137, 180, 250]);
+        assert_eq!(state.get_user_color("bob"), [166, 227, 161]);
+        assert_eq!(state.get_user_color("unknown"), [180, 180, 180]); // Default gray
+    }
+
+    #[test]
+    fn test_get_initials() {
+        assert_eq!(CollabPanelState::get_initials("alice"), "AL");
+        assert_eq!(CollabPanelState::get_initials("bob"), "BO");
+        assert_eq!(CollabPanelState::get_initials("a"), "A");
+        assert_eq!(CollabPanelState::get_initials(""), "?");
+    }
+
+    #[test]
+    fn test_commit() {
+        let mut state = CollabPanelState::default();
+        assert_eq!(state.branch_info.commits_ahead, 0);
+        state.commit("Add fillet");
+        assert_eq!(state.branch_info.commits_ahead, 1);
+        assert_eq!(state.branch_info.last_commit_msg, "Add fillet");
+        assert!(state.status.contains("Committed"));
+        assert_eq!(state.activity_feed.len(), 1);
+    }
+
+    #[test]
+    fn test_merge() {
+        let mut state = CollabPanelState::default();
+        state.branch_info.commits_ahead = 3;
+        state.branch_info.commits_behind = 1;
+        state.merge();
+        assert_eq!(state.branch_info.commits_ahead, 0);
+        assert_eq!(state.branch_info.commits_behind, 0);
+        assert!(state.status.contains("Merged"));
+    }
+
+    #[test]
+    fn test_pull() {
+        let mut state = CollabPanelState::default();
+        state.branch_info.commits_behind = 5;
+        state.pull();
+        assert_eq!(state.branch_info.commits_behind, 0);
+        assert!(state.status.contains("Pulled"));
+    }
+
+    #[test]
+    fn test_storage_usage_str() {
+        let state = CollabPanelState::default();
+        let s = state.storage_usage_str();
+        assert!(s.contains("4.2 GB"));
+        assert!(s.contains("10.0 GB"));
+    }
+
+    #[test]
+    fn test_storage_fraction() {
+        let state = CollabPanelState::default();
+        let frac = state.storage_fraction();
+        assert!((frac - 0.42).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_storage_fraction_zero_total() {
+        let mut state = CollabPanelState::default();
+        state.storage_usage = (100, 0);
+        assert_eq!(state.storage_fraction(), 0.0);
+    }
+
+    #[test]
+    fn test_branch_info_default() {
+        let bi = BranchInfo::default();
+        assert_eq!(bi.current_branch, "main");
+        assert_eq!(bi.commits_ahead, 0);
+        assert_eq!(bi.commits_behind, 0);
+        assert_eq!(bi.last_commit_msg, "Initial commit");
+    }
+
+    #[test]
+    fn test_send_test_operation_adds_activity() {
+        let mut state = CollabPanelState::default();
+        state.connect();
+        state.send_test_operation();
+        assert!(!state.activity_feed.is_empty());
+        assert_eq!(state.activity_feed[0].user, "alice");
+        assert_eq!(state.activity_feed[0].action, "editing");
     }
 }
