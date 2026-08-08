@@ -10275,6 +10275,20 @@ impl eframe::App for ViewerApp {
                                             };
                                             match self.brepcad_feature_tree.edit_parameter(root, new_params) {
                                                 Ok(()) => {
+                                                    // Re-evaluate the feature tree to get the rebuilt solid
+                                                    if let Some(root) = self.brepcad_feature_tree.root() {
+                                                        if let Some(rebuilt_solid) = self.brepcad_feature_tree.evaluate(root) {
+                                                            // Update the viewport with the rebuilt solid
+                                                            let tri_params = tri_params_for_lod(self.lod_level);
+                                                            let mesh = triangulate_solid(rebuilt_solid, &tri_params);
+                                                            self.current_solid = Some(rebuilt_solid.clone());
+                                                            self.current_nurbs_surface = None;
+                                                            self.detailed_instances.clear();
+                                                            self.instance_triangle_ranges.clear();
+                                                            self.assembly_tree = None;
+                                                            self.load_mesh(mesh, &format!("Rebuilt (distance={:.1}mm)", new_distance));
+                                                        }
+                                                    }
                                                     self.brepcad_status_msg = format!("Rebuilt with distance={:.1}mm", new_distance);
                                                     log::info!("FeatureTree: rebuilt with distance={}", new_distance);
                                                 }
@@ -14550,13 +14564,14 @@ impl ViewerApp {
             MenuAction::FileExportObj => "OBJ export not yet implemented (use STL)".to_string(),
             MenuAction::FileExportGltf => "GLTF export not yet implemented".to_string(),
             MenuAction::FileExportPdf => {
-                // B4: Use Drawing::to_pdf() for PDF export
+                // B4: Use Drawing::to_pdf() with HLR for PDF export
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     if let Some(ref solid) = self.current_solid {
                         let tri_params = tri_params_for_lod(self.lod_level);
                         let mesh = triangulate_solid(solid, &tri_params);
-                        if let Ok(drawing) = draper_drawing::Drawing::from_mesh(&mesh, &self.current_model.name) {
+                        let hlr_config = draper_drawing::hlr::HlrConfig::default();
+                        if let Ok(drawing) = draper_drawing::Drawing::from_mesh_with_hlr(&mesh, &self.current_model.name, &hlr_config) {
                             match drawing.to_pdf() {
                                 Ok(pdf) => {
                                     if let Some(path) = rfd::FileDialog::new()
@@ -15379,18 +15394,35 @@ impl ViewerApp {
             MenuAction::DrwExportSvg => {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("SVG", &["svg"])
-                        .set_file_name("drawing.svg")
-                        .save_file()
-                    {
-                        let svg = self.generate_drawing_svg();
-                        match std::fs::write(&path, &svg) {
-                            Ok(_) => format!("Drawing exported: {}", path.to_string_lossy()),
-                            Err(e) => format!("Export failed: {}", e),
+                    // B2: Use HLR-based drawing for SVG export
+                    if let Some(ref solid) = self.current_solid {
+                        let tri_params = tri_params_for_lod(self.lod_level);
+                        let mesh = triangulate_solid(solid, &tri_params);
+                        let hlr_config = draper_drawing::hlr::HlrConfig::default();
+                        match draper_drawing::Drawing::from_mesh_with_hlr(&mesh, &self.current_model.name, &hlr_config) {
+                            Ok(drawing) => {
+                                match drawing.to_svg() {
+                                    Ok(svg) => {
+                                        if let Some(path) = rfd::FileDialog::new()
+                                            .add_filter("SVG", &["svg"])
+                                            .set_file_name(&format!("{}_drawing.svg", self.current_model.name))
+                                            .save_file()
+                                        {
+                                            match std::fs::write(&path, &svg) {
+                                                Ok(_) => format!("Drawing SVG exported (with HLR): {}", path.to_string_lossy()),
+                                                Err(e) => format!("Export failed: {}", e),
+                                            }
+                                        } else {
+                                            "SVG export cancelled".to_string()
+                                        }
+                                    }
+                                    Err(e) => format!("SVG generation error: {}", e),
+                                }
+                            }
+                            Err(e) => format!("Drawing creation error: {}", e),
                         }
                     } else {
-                        "Export cancelled".to_string()
+                        "No model to export".to_string()
                     }
                 }
                 #[cfg(target_arch = "wasm32")]
