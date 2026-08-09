@@ -243,7 +243,7 @@ Priority order (by user impact):
 - [ ] Phase 2 Task 2.1: High-priority dialogs (BOM, Layer, Tool Lib, FEA Mesh, Title Block)
 - [ ] Phase 2 Task 2.2: Medium-priority dialogs (5 dialogs)
 - [ ] Phase 2 Task 2.3: Low-priority dialogs (4 dialogs)
-- [ ] Phase 3 Task 3.1: Clipboard (Cut/Copy/Paste)
+- [x] Phase 3 Task 3.1: Clipboard (Cut/Copy/Paste) — solid clipboard with 20mm X offset on paste
 - [ ] Phase 3 Task 3.2: NC Code Viewer real G-code
 - [ ] Phase 3 Task 3.3: Macro Recorder real recording
 - [ ] Phase 3 Task 3.4: Direct Modeling (Move/Offset Face)

@@ -636,6 +636,8 @@ pub struct ViewerApp {
     /// or a STEP file with a single solid is imported). Operations like
     /// fillet/chamfer/shell/transform work on this solid.
     current_solid: Option<Solid>,
+    /// Clipboard for Cut/Copy/Paste operations.
+    brepcad_clipboard: Option<Solid>,
     /// The current NURBS surface, if a NURBS gallery model is loaded.
     /// Required so that `retriangulate_for_lod()` can rebuild the grid mesh
     /// with LOD-aware step count. `triangulate_solid` does NOT work on a
@@ -1469,6 +1471,7 @@ impl ViewerApp {
             _pending_step_name: None,
             partial_result_info: None,
             current_solid: Some(solid_clone_for_field),
+            brepcad_clipboard: None,
             current_nurbs_surface: None,
             secondary_solid: None,
             fillet_radius: 5.0,
@@ -14624,8 +14627,42 @@ impl ViewerApp {
                     "No solid to duplicate".to_string()
                 }
             }
-            MenuAction::EditCut | MenuAction::EditCopy | MenuAction::EditPaste => {
-                "Clipboard operations not yet implemented".to_string()
+            MenuAction::EditCut => {
+                if let Some(ref solid) = self.current_solid {
+                    self.brepcad_clipboard = Some(solid.clone());
+                    self.current_solid = None;
+                    self.load_box(); // Reset to default
+                    "Cut: solid moved to clipboard".to_string()
+                } else {
+                    "Cut: no solid selected".to_string()
+                }
+            }
+            MenuAction::EditCopy => {
+                if let Some(ref solid) = self.current_solid {
+                    self.brepcad_clipboard = Some(solid.clone());
+                    "Copy: solid copied to clipboard".to_string()
+                } else {
+                    "Copy: no solid selected".to_string()
+                }
+            }
+            MenuAction::EditPaste => {
+                if let Some(ref clipboard_solid) = self.brepcad_clipboard {
+                    let solid = clipboard_solid.clone();
+                    // Offset pasted solid by 20mm in X
+                    let mut s = solid;
+                    let t = draper_geometry::Transform::translation(20.0, 0.0, 0.0); draper_topology::ShapeBuilder::transform_solid(&mut s, &t);
+                    let mesh = triangulate_solid(&s, &tri_params_for_lod(self.lod_level));
+                    self.current_solid = Some(s);
+                    self.current_nurbs_surface = None;
+                    self.detailed_instances.clear();
+                    self.instance_triangle_ranges.clear();
+                    self.assembly_tree = None;
+                    self.load_mesh(mesh, "Pasted Solid (+20mm X)");
+                    self.brepcad_push_undo_named("Paste");
+                    "Paste: solid inserted from clipboard".to_string()
+                } else {
+                    "Paste: clipboard is empty".to_string()
+                }
             }
             MenuAction::EditFind => "Find (parameters search) not yet implemented".to_string(),
 
