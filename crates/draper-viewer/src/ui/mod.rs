@@ -22,6 +22,8 @@ pub mod animation_panel;
 pub mod scripting_panel;
 pub mod icons;
 pub mod dock;
+pub mod icons;
+pub mod macro_recorder;
 
 use eframe::egui;
 

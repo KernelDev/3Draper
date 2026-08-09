@@ -14,5 +14,8 @@ draper-topology = { workspace = true }
 draper-mesh = { workspace = true }
 draper-step = { workspace = true }
 draper-core = { workspace = true }
+draper-sketch = { workspace = true }
+draper-assembly = { workspace = true }
+draper-viewer = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }

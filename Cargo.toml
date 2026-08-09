@@ -66,6 +66,7 @@ draper-assembly = { path = "crates/draper-assembly" }
 draper-sheetmetal = { path = "crates/draper-sheetmetal" }
 draper-cam = { path = "crates/draper-cam" }
 draper-testing = { path = "crates/draper-testing" }
+draper-viewer = { path = "crates/draper-viewer" }
 draper-json = { path = "crates/draper-json" }
 draper-wasm = { path = "crates/draper-wasm" }
 

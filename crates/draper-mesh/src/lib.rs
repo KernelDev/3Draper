@@ -32,6 +32,7 @@ pub mod decimate;
 #[cfg(feature = "export-3mf")]
 pub mod export;
 pub mod export_usd;
+pub mod formats;
 
 pub use mesh::*;
 pub use triangulate::*;
