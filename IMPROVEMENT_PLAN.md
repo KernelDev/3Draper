@@ -240,11 +240,11 @@ Priority order (by user impact):
 - [x] Phase 1 Task 1.1: Icon system foundation — procedural vector icons (32+ icons)
 - [x] Phase 1 Task 1.2: Menu bar icons — icon_menu_item() helper added
 - [x] Phase 1 Task 1.3: Workspace sidebar + status bar icons
-- [ ] Phase 2 Task 2.1: High-priority dialogs (BOM, Layer, Tool Lib, FEA Mesh, Title Block)
-- [ ] Phase 2 Task 2.2: Medium-priority dialogs (5 dialogs)
-- [ ] Phase 2 Task 2.3: Low-priority dialogs (4 dialogs)
-- [ ] Phase 3 Task 3.1: Clipboard (Cut/Copy/Paste)
-- [ ] Phase 3 Task 3.2: NC Code Viewer real G-code
+- [x] Phase 2 Task 2.1: High-priority dialogs (BOM, Layer, Tool Lib, FEA Mesh, Title Block)
+- [x] Phase 2 Task 2.2: Medium-priority dialogs (Param SR, Revision, Tutorial, Crash, Onboarding)
+- [x] Phase 2 Task 2.3: Low-priority dialogs (Update, License, Mold Catalog, Modal Plotter)
+- [x] Phase 3 Task 3.1: Clipboard (Cut/Copy/Paste)
+- [x] Phase 3 Task 3.2: NC Code Viewer real G-code + dialect
 - [x] Phase 3 Task 3.3: Macro Recorder real recording + Python/Lua export
 - [x] Phase 3 Task 3.4: Direct Modeling (Move/Offset/Replace/Split Face)
 - [x] Phase 3 Task 3.5: Sketch tools (Spline + Polygon with Catmull-Rom tessellation)
