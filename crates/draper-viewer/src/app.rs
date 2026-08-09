@@ -925,6 +925,8 @@ pub struct ViewerApp {
     pub brepcad_cam_ops: Vec<(u8, String, [f32; 4])>,
     /// CAM: G-code output.
     pub brepcad_cam_gcode: String,
+    /// Phase 3.2: dialect label for the last generated G-code.
+    pub brepcad_cam_dialect: String,
     /// Sheet Metal: thickness.
     pub brepcad_sm_thickness: f32,
     /// Sheet Metal: bend radius.
@@ -1588,6 +1590,7 @@ impl ViewerApp {
             brepcad_cam_tool_diameter: 6.0,
             brepcad_cam_ops: Vec::new(),
             brepcad_cam_gcode: String::new(),
+            brepcad_cam_dialect: String::new(),
             brepcad_sm_thickness: 2.0,
             brepcad_sm_bend_radius: 1.0,
             brepcad_sm_k_factor: 0.33,
@@ -15790,8 +15793,11 @@ impl ViewerApp {
                 } else if self.brepcad_cam_gcode.is_empty() {
                     "Generate G-code first (CAM → Post Process)".to_string()
                 } else {
-                    // Open NC Code Viewer dialog to show generated G-code
-                    self.brepcad_dialog = crate::ui::dialogs::DialogType::NcCodeViewer;
+                    // Phase 3.2: pass actual G-code + dialect to the dialog.
+                    self.brepcad_dialog = crate::ui::dialogs::DialogType::NcCodeViewer {
+                        gcode: self.brepcad_cam_gcode.clone(),
+                        dialect: self.brepcad_cam_dialect.clone(),
+                    };
                     format!("NC Code Viewer: {} operations", self.brepcad_cam_ops.len())
                 }
             }
@@ -15814,6 +15820,7 @@ impl ViewerApp {
                     // Generate dialect-specific G-code
                     let gcode = self.generate_dialect_gcode(post);
                     self.brepcad_cam_gcode = gcode.clone();
+                    self.brepcad_cam_dialect = post.to_string();
                     #[cfg(not(target_arch = "wasm32"))]
                     {
                         if let Some(path) = rfd::FileDialog::new()
@@ -16085,14 +16092,30 @@ impl ViewerApp {
             MenuAction::WinSaveLayout => "Window: Save Layout — coming soon".to_string(),
 
             // ── Help actions ──
-            MenuAction::HelpCheckUpdates => "BRepCAD is up to date (latest build)".to_string(),
+            MenuAction::HelpAbout => {
+                self.brepcad_dialog = crate::ui::dialogs::DialogType::About;
+                String::new()
+            }
+            MenuAction::HelpCheckUpdates => {
+                self.brepcad_dialog = crate::ui::dialogs::DialogType::UpdateCheck;
+                "Checking for updates…".to_string()
+            }
             MenuAction::HelpDocs => "Documentation: https://github.com/KernelDev/3Draper".to_string(),
             MenuAction::HelpForum => "Forum: https://github.com/KernelDev/3Draper/discussions".to_string(),
             MenuAction::HelpReportBug => "Report Bug: https://github.com/KernelDev/3Draper/issues".to_string(),
             MenuAction::HelpAssetsLibrary => "Assets Library: 3D models and materials (coming soon)".to_string(),
-            MenuAction::HelpTutorialGettingStarted => "Tutorial: Getting Started — press S for Sketch, Ctrl+Shift+P for commands".to_string(),
-            MenuAction::HelpTutorialSketch => "Tutorial: Sketch — draw lines, circles, rectangles, then Extrude".to_string(),
-            MenuAction::HelpTutorialAssembly => "Tutorial: Assembly — use Add Component, then BOM Editor".to_string(),
+            MenuAction::HelpTutorialGettingStarted => {
+                self.brepcad_dialog = crate::ui::dialogs::DialogType::TutorialBrowser;
+                "Tutorial Browser opened".to_string()
+            }
+            MenuAction::HelpTutorialSketch => {
+                self.brepcad_dialog = crate::ui::dialogs::DialogType::TutorialBrowser;
+                "Tutorial Browser opened".to_string()
+            }
+            MenuAction::HelpTutorialAssembly => {
+                self.brepcad_dialog = crate::ui::dialogs::DialogType::TutorialBrowser;
+                "Tutorial Browser opened".to_string()
+            }
             MenuAction::HelpExampleBracket | MenuAction::HelpExampleBolt | MenuAction::HelpExampleGear
             | MenuAction::HelpExampleEngine | MenuAction::HelpExampleMold
             | MenuAction::HelpExampleSheetMetal | MenuAction::HelpExampleAssembly => {

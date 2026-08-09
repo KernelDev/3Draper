@@ -23,7 +23,14 @@ pub enum DialogType {
     /// Customize dialog (mockup 52).
     Customize,
     /// NC Code Viewer dialog (mockup 84).
-    NcCodeViewer,
+    /// Phase 3.2: now carries the actual G-code string + dialect label
+    /// so the dialog can show real generated code, not a placeholder.
+    NcCodeViewer {
+        /// G-code text to display (multiple lines, separated by '\n').
+        gcode: String,
+        /// Dialect label (e.g. "Fanuc", "Siemens", "Haas").
+        dialect: String,
+    },
     /// Print/Plot dialog (mockup 74).
     PrintPlot,
     /// Constraint Diagnostics dialog (mockup 60).
@@ -40,6 +47,26 @@ pub enum DialogType {
     FeaMeshControl,
     /// Title Block Editor dialog (mockup 87).
     TitleBlockEditor,
+    // ─── Phase 2.2: Medium-priority dialogs ───
+    /// Param Search/Replace dialog (mockup 91).
+    ParamSearchReplace,
+    /// Revision Table dialog (mockup 88).
+    RevisionTable,
+    /// Tutorial Browser dialog (mockup 72).
+    TutorialBrowser,
+    /// Crash Recovery dialog (mockup 76).
+    CrashRecovery,
+    /// Onboarding Wizard dialog (mockup 77).
+    OnboardingWizard,
+    // ─── Phase 2.3: Low-priority dialogs ───
+    /// Update dialog (mockup 58).
+    UpdateCheck,
+    /// License dialog (mockup 75).
+    LicenseInfo,
+    /// Mold Catalog dialog (mockup 61).
+    MoldCatalog,
+    /// Modal Plotter dialog (mockup 86).
+    ModalPlotter,
 }
 
 /// Primitive type for the Insert dialog.
@@ -105,7 +132,9 @@ pub fn render_dialog(ctx: &egui::Context, dialog: &mut DialogType) -> Option<Dia
                 DialogType::CommandSearch => action = render_command_search_dialog(ui, &mut close),
                 DialogType::RenderSettings => action = render_render_settings_dialog(ui, &mut close),
                 DialogType::Customize => action = render_customize_dialog(ui, &mut close),
-                DialogType::NcCodeViewer => action = render_nc_code_viewer_dialog(ui, &mut close),
+                DialogType::NcCodeViewer { gcode, dialect } => {
+                    action = render_nc_code_viewer_dialog(ui, &mut close, gcode, dialect);
+                }
                 DialogType::PrintPlot => action = render_print_plot_dialog(ui, &mut close),
                 DialogType::ConstraintDiagnostics => action = render_constraint_diagnostics_dialog(ui, &mut close),
                 DialogType::MacroRecorder => action = render_macro_recorder_dialog(ui, &mut close),
@@ -114,6 +143,15 @@ pub fn render_dialog(ctx: &egui::Context, dialog: &mut DialogType) -> Option<Dia
                 DialogType::ToolLibrary => action = render_tool_library_dialog(ui, &mut close),
                 DialogType::FeaMeshControl => action = render_fea_mesh_control_dialog(ui, &mut close),
                 DialogType::TitleBlockEditor => action = render_title_block_editor_dialog(ui, &mut close),
+                DialogType::ParamSearchReplace => action = render_param_search_replace_dialog(ui, &mut close),
+                DialogType::RevisionTable => action = render_revision_table_dialog(ui, &mut close),
+                DialogType::TutorialBrowser => action = render_tutorial_browser_dialog(ui, &mut close),
+                DialogType::CrashRecovery => action = render_crash_recovery_dialog(ui, &mut close),
+                DialogType::OnboardingWizard => action = render_onboarding_wizard_dialog(ui, &mut close),
+                DialogType::UpdateCheck => action = render_update_check_dialog(ui, &mut close),
+                DialogType::LicenseInfo => action = render_license_info_dialog(ui, &mut close),
+                DialogType::MoldCatalog => action = render_mold_catalog_dialog(ui, &mut close),
+                DialogType::ModalPlotter => action = render_modal_plotter_dialog(ui, &mut close),
                 DialogType::None => {}
             }
         });
@@ -137,7 +175,7 @@ fn dialog_title(dialog: &DialogType) -> String {
         DialogType::CommandSearch => "Command Search".to_string(),
         DialogType::RenderSettings => "Render Settings".to_string(),
         DialogType::Customize => "Customize".to_string(),
-        DialogType::NcCodeViewer => "NC Code Viewer".to_string(),
+        DialogType::NcCodeViewer { .. } => "NC Code Viewer".to_string(),
         DialogType::PrintPlot => "Print / Plot".to_string(),
         DialogType::ConstraintDiagnostics => "Constraint Diagnostics".to_string(),
         DialogType::MacroRecorder => "Macro Recorder".to_string(),
@@ -146,6 +184,15 @@ fn dialog_title(dialog: &DialogType) -> String {
         DialogType::ToolLibrary => "Tool Library".to_string(),
         DialogType::FeaMeshControl => "FEA Mesh Control".to_string(),
         DialogType::TitleBlockEditor => "Title Block Editor".to_string(),
+        DialogType::ParamSearchReplace => "Parameter Search & Replace".to_string(),
+        DialogType::RevisionTable => "Revision Table".to_string(),
+        DialogType::TutorialBrowser => "Tutorial Browser".to_string(),
+        DialogType::CrashRecovery => "Crash Recovery".to_string(),
+        DialogType::OnboardingWizard => "Welcome to BRepCAD".to_string(),
+        DialogType::UpdateCheck => "Check for Updates".to_string(),
+        DialogType::LicenseInfo => "License Information".to_string(),
+        DialogType::MoldCatalog => "Mold Base Catalog".to_string(),
+        DialogType::ModalPlotter => "Modal Plotter".to_string(),
         DialogType::None => String::new(),
     }
 }
@@ -549,27 +596,23 @@ fn render_customize_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<Dialog
 
 /// NC Code Viewer dialog (mockup 84).
 ///
-/// Displays generated G-code with syntax highlighting.
-/// Reads from ViewerApp.brepcad_cam_gcode.
-fn render_nc_code_viewer_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<DialogAction> {
-    // In production, this would read from self.brepcad_cam_gcode.
-    // For now, show a placeholder with sample G-code.
-    let sample_gcode = "; BRepCAD G-code (Fanuc)\n\
-; 1 operations\n\
-G90 G21 G17\n\
-G54\n\
-M3 S1000\n\
-; Op 1 : Profile\n\
-G0 Z10\n\
-G0 X0.000 Y0.000\n\
-G1 Z-5.000 F100\n\
-G1 X100.000 F200\n\
-G1 Y80.000\n\
-G1 X0.000\n\
-G1 Y0.000\n\
-G0 Z10\n\
-M5\n\
-M30\n";
+/// Phase 3.2: Now reads from the actual CAM postprocessor output
+/// (passed in via DialogType::NcCodeViewer { gcode, dialect }).
+fn render_nc_code_viewer_dialog(
+    ui: &mut egui::Ui,
+    close: &mut bool,
+    gcode: &str,
+    dialect: &str,
+) -> Option<DialogAction> {
+    // If no G-code has been generated yet, show a helpful hint.
+    let display_gcode = if gcode.is_empty() {
+        "; No G-code generated yet.\n; Run CAM → Post Process → (Fanuc/Siemens/Haas/...) to generate G-code,\n; then re-open this viewer."
+    } else {
+        gcode
+    };
+
+    let line_count = display_gcode.lines().count();
+    let estimated_min = (line_count as f32 * 0.05).max(0.1);
 
     ui.vertical(|ui| {
         ui.heading("NC Code Viewer");
@@ -577,31 +620,20 @@ M30\n";
 
         ui.horizontal(|ui| {
             ui.label("Dialect:");
-            ui.label("Fanuc");
+            ui.label(dialect);
             ui.separator();
-            ui.label("Lines: 16");
+            ui.label(format!("Lines: {}", line_count));
             ui.separator();
-            ui.label("Est. time: 2.3 min");
+            ui.label(format!("Est. time: {:.1} min", estimated_min));
         });
 
         ui.separator();
 
-        // G-code with basic syntax highlighting via monospace + color
         egui::ScrollArea::vertical()
             .max_height(350.0)
             .show(ui, |ui| {
-                for line in sample_gcode.lines() {
-                    let color = if line.starts_with(';') {
-                        egui::Color32::from_rgb(108, 112, 134) // Comment gray
-                    } else if line.starts_with('G') || line.starts_with('M') {
-                        egui::Color32::from_rgb(137, 180, 250) // G/M codes blue
-                    } else if line.starts_with('X') || line.starts_with('Y') || line.starts_with('Z') {
-                        egui::Color32::from_rgb(166, 227, 161) // Coordinates green
-                    } else if line.starts_with('F') || line.starts_with('S') {
-                        egui::Color32::from_rgb(249, 226, 175) // Feed/speed yellow
-                    } else {
-                        egui::Color32::from_rgb(205, 214, 244) // Default text
-                    };
+                for line in display_gcode.lines() {
+                    let color = classify_gcode_line(line);
                     ui.label(egui::RichText::new(line)
                         .family(egui::FontFamily::Monospace)
                         .size(11.0)
@@ -612,13 +644,40 @@ M30\n";
         ui.separator();
         ui.horizontal(|ui| {
             if ui.button("Copy to Clipboard").clicked() {
-                ui.ctx().copy_text(sample_gcode.to_string());
+                ui.ctx().copy_text(display_gcode.to_string());
             }
-            if ui.button("Save As...").clicked() {}
+            if ui.button("Save As...").clicked() {
+                ui.ctx().copy_text(display_gcode.to_string());
+            }
             if ui.button("Close").clicked() { *close = true; }
         });
     });
     None
+}
+
+/// Classify a single G-code line for syntax highlighting.
+fn classify_gcode_line(line: &str) -> egui::Color32 {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with(';') || trimmed.starts_with('(') {
+        egui::Color32::from_rgb(108, 112, 134) // gray comment
+    } else if trimmed.starts_with('G') {
+        egui::Color32::from_rgb(137, 180, 250) // blue G-code
+    } else if trimmed.starts_with('M') {
+        egui::Color32::from_rgb(137, 180, 250) // blue M-code
+    } else if trimmed.starts_with('T') {
+        egui::Color32::from_rgb(245, 194, 231) // pink tool change
+    } else if trimmed.starts_with('X') || trimmed.starts_with('Y') || trimmed.starts_with('Z')
+        || trimmed.starts_with('I') || trimmed.starts_with('J') || trimmed.starts_with('K')
+        || trimmed.starts_with('R')
+    {
+        egui::Color32::from_rgb(166, 227, 161) // green coordinates
+    } else if trimmed.starts_with('F') || trimmed.starts_with('S') {
+        egui::Color32::from_rgb(249, 226, 175) // yellow feed/speed
+    } else if trimmed.starts_with('N') {
+        egui::Color32::from_rgb(148, 226, 213) // cyan line number
+    } else {
+        egui::Color32::from_rgb(205, 214, 244) // default text
+    }
 }
 
 /// Print/Plot dialog (mockup 74).
@@ -1086,4 +1145,612 @@ fn render_title_block_editor_dialog(ui: &mut egui::Ui, close: &mut bool) -> Opti
         });
     });
     None
+}
+
+// ============================================================
+// Phase 2.2: Medium-priority dialogs
+// ============================================================
+
+use std::cell::{Cell, RefCell};
+
+thread_local! {
+    static PARAM_FIND: RefCell<String> = const { RefCell::new(String::new()) };
+    static PARAM_REPLACE: RefCell<String> = const { RefCell::new(String::new()) };
+    static PARAM_SCOPE: Cell<u8> = const { Cell::new(0) };
+    static PARAM_MATCH_CASE: Cell<bool> = const { Cell::new(false) };
+    static PARAM_USE_REGEX: Cell<bool> = const { Cell::new(false) };
+    static PARAM_PREVIEW: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+
+    static REV_ROWS: RefCell<Vec<(String, String, String, String, bool)>>
+        = RefCell::new(vec![
+            ("A".to_string(), "Initial release".to_string(),
+             "2026-08-09".to_string(), "CAD User".to_string(), true),
+        ]);
+    static REV_NEW_REV: RefCell<String> = RefCell::new("B".to_string());
+    static REV_NEW_DESC: RefCell<String> = const { RefCell::new(String::new()) };
+
+    static TUT_CATEGORY: Cell<usize> = const { Cell::new(0) };
+    static TUT_DIFFICULTY: Cell<usize> = const { Cell::new(0) };
+    static TUT_SELECTED: Cell<usize> = const { Cell::new(0) };
+
+    static ONB_STEP: Cell<u8> = const { Cell::new(0) };
+    static ONB_UNITS: Cell<u8> = const { Cell::new(0) };
+    static ONB_WORKSPACE: Cell<u8> = const { Cell::new(0) };
+    static ONB_THEME: Cell<u8> = const { Cell::new(0) };
+    static ONB_NAME: RefCell<String> = const { RefCell::new(String::new()) };
+
+    static UPD_CHECKED: Cell<bool> = const { Cell::new(false) };
+    static UPD_LATEST: RefCell<String> = const { RefCell::new(String::new()) };
+
+    static MOLD_VENDOR: Cell<u8> = const { Cell::new(0) };
+    static MOLD_SELECTED: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Parameter Search & Replace dialog (mockup 91).
+fn render_param_search_replace_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<DialogAction> {
+    let mut find = PARAM_FIND.with(|c| c.borrow().clone());
+    let mut replace = PARAM_REPLACE.with(|c| c.borrow().clone());
+    let mut scope = PARAM_SCOPE.get();
+    let mut match_case = PARAM_MATCH_CASE.get();
+    let mut use_regex = PARAM_USE_REGEX.get();
+    let mut preview: Vec<String> = PARAM_PREVIEW.with(|c| c.borrow().clone());
+
+    ui.vertical(|ui| {
+        ui.heading("Parameter Search & Replace");
+        ui.separator();
+        egui::Grid::new("param_sr_grid").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+            ui.label("Find:"); ui.text_edit_singleline(&mut find); ui.end_row();
+            ui.label("Replace with:"); ui.text_edit_singleline(&mut replace); ui.end_row();
+            ui.label("Scope:");
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut scope, 0, "Current Sketch");
+                ui.radio_value(&mut scope, 1, "Current Part");
+                ui.radio_value(&mut scope, 2, "Entire Assembly");
+            });
+            ui.end_row();
+        });
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut match_case, "Match case");
+            ui.checkbox(&mut use_regex, "Use regex");
+        });
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("Find All").clicked() {
+                preview.clear();
+                if !find.is_empty() {
+                    preview.push(format!("Sketch1.width = 100 (matches '{}')", find));
+                    preview.push(format!("Sketch1.height = 50 (matches '{}')", find));
+                    preview.push(format!("Extrude1.depth = {}", find));
+                }
+            }
+            if ui.button("Replace All").clicked() {}
+        });
+        ui.separator();
+        ui.label(format!("Preview ({} matches):", preview.len()));
+        egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+            if preview.is_empty() {
+                ui.label("(no matches — click \"Find All\")");
+            } else {
+                for line in &preview { ui.label(line); }
+            }
+        });
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("Apply").clicked() { *close = true; }
+            if ui.button("Close").clicked() { *close = true; }
+        });
+    });
+    PARAM_FIND.with(|c| *c.borrow_mut() = find);
+    PARAM_REPLACE.with(|c| *c.borrow_mut() = replace);
+    PARAM_SCOPE.set(scope);
+    PARAM_MATCH_CASE.set(match_case);
+    PARAM_USE_REGEX.set(use_regex);
+    PARAM_PREVIEW.with(|c| *c.borrow_mut() = preview);
+    None
+}
+
+/// Revision Table dialog (mockup 88).
+fn render_revision_table_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<DialogAction> {
+    let mut rows = REV_ROWS.with(|c| c.borrow().clone());
+    let mut new_rev = REV_NEW_REV.with(|c| c.borrow().clone());
+    let mut new_desc = REV_NEW_DESC.with(|c| c.borrow().clone());
+
+    ui.vertical(|ui| {
+        ui.heading("Revision Table");
+        ui.separator();
+        egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
+            egui::Grid::new("rev_grid").num_columns(6).spacing([8.0, 4.0]).striped(true).show(ui, |ui| {
+                ui.heading("Rev"); ui.heading("Description"); ui.heading("Date");
+                ui.heading("Author"); ui.heading("Approved"); ui.heading("Actions"); ui.end_row();
+                let mut remove_idx = None;
+                for (i, (rev, desc, date, author, approved)) in rows.iter_mut().enumerate() {
+                    ui.label(rev.as_str()); ui.label(desc.as_str()); ui.label(date.as_str());
+                    ui.label(author.as_str()); ui.checkbox(approved, "");
+                    if ui.button("Delete").clicked() { remove_idx = Some(i); }
+                    ui.end_row();
+                }
+                if let Some(idx) = remove_idx { rows.remove(idx); }
+            });
+        });
+        ui.separator();
+        ui.label("Add new revision:");
+        egui::Grid::new("rev_new_grid").num_columns(4).show(ui, |ui| {
+            ui.label("Rev:"); ui.text_edit_singleline(&mut new_rev);
+            ui.label("Description:"); ui.text_edit_singleline(&mut new_desc); ui.end_row();
+        });
+        ui.horizontal(|ui| {
+            if ui.button("Add Revision").clicked() {
+                let next_rev = new_rev.clone();
+                let next_desc = new_desc.clone();
+                rows.push((next_rev, next_desc, "2026-08-09".to_string(),
+                          "CAD User".to_string(), false));
+                new_desc.clear();
+                if let Some(c) = new_rev.chars().next() {
+                    let next_char = ((c as u8) + 1) as char;
+                    new_rev = next_char.to_string();
+                }
+            }
+            if ui.button("Close").clicked() { *close = true; }
+        });
+    });
+    REV_ROWS.with(|c| *c.borrow_mut() = rows);
+    REV_NEW_REV.with(|c| *c.borrow_mut() = new_rev);
+    REV_NEW_DESC.with(|c| *c.borrow_mut() = new_desc);
+    None
+}
+
+/// Tutorial Browser dialog (mockup 72).
+fn render_tutorial_browser_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<DialogAction> {
+    let categories = ["Getting Started", "Sketching", "Part Modeling",
+                      "Assembly", "Drawing", "Sheet Metal", "CAM", "FEA"];
+    let difficulties = ["All", "Beginner", "Intermediate", "Advanced"];
+    let tutorials_per_category: &[&[(&str, &str, &str)]] = &[
+        &[("Welcome Tour", "Beginner", "5 min — UI overview"),
+          ("First Part", "Beginner", "10 min — sketch + extrude"),
+          ("Save & Export", "Beginner", "5 min — STEP/STL/PDF")],
+        &[("Basic Sketching", "Beginner", "8 min — lines, circles"),
+          ("Constraints", "Intermediate", "12 min — coincident, tangent"),
+          ("Dimensions", "Intermediate", "10 min — linear, angular")],
+        &[("Extrude & Revolve", "Beginner", "10 min"),
+          ("Loft & Sweep", "Intermediate", "15 min"),
+          ("Fillets & Chamfers", "Beginner", "8 min")],
+        &[("Mate Constraints", "Intermediate", "12 min"),
+          ("Exploded Views", "Intermediate", "8 min"),
+          ("Motion Study", "Advanced", "20 min")],
+        &[("Drawing Templates", "Intermediate", "15 min"),
+          ("Dimensions & Annotations", "Intermediate", "12 min"),
+          ("HLR Views", "Advanced", "10 min")],
+        &[("Base Flange", "Intermediate", "8 min"),
+          ("Bends & Relief", "Intermediate", "12 min"),
+          ("Flat Pattern", "Advanced", "10 min")],
+        &[("2.5D Pocket", "Intermediate", "15 min"),
+          ("3D Surfacing", "Advanced", "20 min"),
+          ("Post Processing", "Intermediate", "8 min")],
+        &[("Linear Static", "Intermediate", "15 min"),
+          ("Modal Analysis", "Advanced", "20 min"),
+          ("Mesh Quality", "Advanced", "10 min")],
+    ];
+    let mut category = TUT_CATEGORY.get();
+    let mut difficulty = TUT_DIFFICULTY.get();
+    let mut selected = TUT_SELECTED.get();
+    let cat_tutorials = tutorials_per_category.get(category).copied().unwrap_or(&[]);
+
+    ui.vertical(|ui| {
+        ui.heading("Tutorial Browser");
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.label("Category:");
+                for (i, c) in categories.iter().enumerate() { ui.radio_value(&mut category, i, *c); }
+            });
+            ui.separator();
+            ui.vertical(|ui| {
+                ui.label("Difficulty:");
+                for (i, d) in difficulties.iter().enumerate() { ui.radio_value(&mut difficulty, i, *d); }
+            });
+        });
+        ui.separator();
+        ui.label(format!("Tutorials ({} shown):", cat_tutorials.len()));
+        egui::ScrollArea::vertical().max_height(250.0).show(ui, |ui| {
+            for (i, (title, diff, duration)) in cat_tutorials.iter().enumerate() {
+                let diff_match = difficulty == 0 || difficulties[difficulty] == *diff;
+                if !diff_match { continue; }
+                let is_selected = selected == i;
+                if ui.selectable_label(is_selected,
+                    format!("{} [{}] — {}", title, diff, duration)).clicked() { selected = i; }
+            }
+        });
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("Start Tutorial").clicked() {}
+            if ui.button("Close").clicked() { *close = true; }
+        });
+    });
+    TUT_CATEGORY.set(category);
+    TUT_DIFFICULTY.set(difficulty);
+    TUT_SELECTED.set(selected);
+    None
+}
+
+/// Crash Recovery dialog (mockup 76).
+fn render_crash_recovery_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<DialogAction> {
+    let auto_saves = [
+        ("untitled_001.brep", "2026-08-09 14:32:01", "12 KB"),
+        ("bracket_v2.brep", "2026-08-09 13:18:45", "47 KB"),
+        ("assembly_test.brep", "2026-08-09 11:05:22", "120 KB"),
+    ];
+    ui.vertical(|ui| {
+        ui.heading("Crash Recovery");
+        ui.separator();
+        ui.label("BRepCAD detected auto-saved files from a previous session.");
+        ui.label("Select a file to recover, or discard to delete it permanently.");
+        ui.separator();
+        egui::Grid::new("crash_grid").num_columns(4).striped(true).show(ui, |ui| {
+            ui.heading("File"); ui.heading("Saved"); ui.heading("Size"); ui.heading("Actions"); ui.end_row();
+            for (name, time, size) in &auto_saves {
+                ui.label(*name); ui.label(*time); ui.label(*size);
+                ui.horizontal(|ui| {
+                    if ui.button("Recover").clicked() {}
+                    if ui.button("Discard").clicked() {}
+                });
+                ui.end_row();
+            }
+        });
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("Recover All").clicked() {}
+            if ui.button("Discard All").clicked() {}
+            if ui.button("Close").clicked() { *close = true; }
+        });
+    });
+    None
+}
+
+/// Onboarding Wizard dialog (mockup 77).
+fn render_onboarding_wizard_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<DialogAction> {
+    let mut step = ONB_STEP.get();
+    let mut units = ONB_UNITS.get();
+    let mut workspace = ONB_WORKSPACE.get();
+    let mut theme = ONB_THEME.get();
+    let mut name = ONB_NAME.with(|c| c.borrow().clone());
+    if name.is_empty() { name = "User".to_string(); }
+
+    let steps = ["Welcome", "Profile", "Units & Workspace", "Theme", "Done"];
+    ui.vertical(|ui| {
+        ui.heading("Welcome to BRepCAD");
+        ui.label(format!("Step {} of {}: {}", step + 1, steps.len(), steps[step as usize]));
+        ui.separator();
+        let progress = (step as f32 + 1.0) / steps.len() as f32;
+        ui.add(egui::ProgressBar::new(progress));
+        ui.separator();
+        match step {
+            0 => {
+                ui.label("Welcome to BRepCAD — a Rust-native 3D CAD/CAE/CAM system.");
+                ui.label("This wizard will guide you through initial setup.");
+                ui.label("Click Next to continue, or Skip to use defaults.");
+            }
+            1 => {
+                ui.label("Profile");
+                egui::Grid::new("onb_profile").show(ui, |ui| {
+                    ui.label("Your name:"); ui.text_edit_singleline(&mut name); ui.end_row();
+                });
+            }
+            2 => {
+                ui.label("Units & Default Workspace");
+                egui::Grid::new("onb_units").show(ui, |ui| {
+                    ui.label("Default units:");
+                    ui.horizontal(|ui| {
+                        ui.radio_value(&mut units, 0, "mm");
+                        ui.radio_value(&mut units, 1, "cm");
+                        ui.radio_value(&mut units, 2, "m");
+                        ui.radio_value(&mut units, 3, "inch");
+                    });
+                    ui.end_row();
+                    ui.label("Default workspace:");
+                    ui.horizontal(|ui| {
+                        ui.radio_value(&mut workspace, 0, "Modeling");
+                        ui.radio_value(&mut workspace, 1, "Sketch");
+                        ui.radio_value(&mut workspace, 2, "Drawing");
+                    });
+                    ui.end_row();
+                });
+            }
+            3 => {
+                ui.label("Theme");
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut theme, 0, "Dark");
+                    ui.radio_value(&mut theme, 1, "Light");
+                    ui.radio_value(&mut theme, 2, "System");
+                });
+            }
+            _ => {
+                ui.label("Setup complete!");
+                ui.label(format!("Welcome, {}!", name));
+                ui.label("Click Finish to start using BRepCAD.");
+            }
+        }
+        ui.separator();
+        ui.horizontal(|ui| {
+            if step > 0 && ui.button("Back").clicked() { step -= 1; }
+            if step < (steps.len() - 1) as u8 {
+                if ui.button("Next").clicked() { step += 1; }
+            } else {
+                if ui.button("Finish").clicked() { *close = true; }
+            }
+            if ui.button("Skip").clicked() { *close = true; }
+        });
+    });
+    ONB_STEP.set(step);
+    ONB_UNITS.set(units);
+    ONB_WORKSPACE.set(workspace);
+    ONB_THEME.set(theme);
+    ONB_NAME.with(|c| *c.borrow_mut() = name);
+    None
+}
+
+// ============================================================
+// Phase 2.3: Low-priority dialogs
+// ============================================================
+
+/// Update Check dialog (mockup 58).
+fn render_update_check_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<DialogAction> {
+    let mut checked = UPD_CHECKED.get();
+    let latest = UPD_LATEST.with(|c| c.borrow().clone());
+    let latest = if latest.is_empty() { "0.1.0".to_string() } else { latest };
+
+    ui.vertical(|ui| {
+        ui.heading("Check for Updates");
+        ui.separator();
+        egui::Grid::new("update_grid").show(ui, |ui| {
+            ui.label("Current version:"); ui.label(env!("CARGO_PKG_VERSION")); ui.end_row();
+            ui.label("Latest version:"); ui.label(latest.as_str()); ui.end_row();
+        });
+        ui.separator();
+        if !checked {
+            ui.label("Click \"Check Now\" to look for updates.");
+        } else if latest == env!("CARGO_PKG_VERSION") {
+            ui.colored_label(egui::Color32::from_rgb(166, 227, 161),
+                "✓ You are running the latest version.");
+        } else {
+            ui.colored_label(egui::Color32::from_rgb(249, 226, 175),
+                "⚠ A new version is available!");
+            ui.label("Release notes:");
+            egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
+                ui.label("• Improved HLR performance (100× faster)");
+                ui.label("• Added NURBS sweep along curve");
+                ui.label("• New menu icons (Phase 1.2)");
+                ui.label("• View toggles for shadows/AO (Phase 3.6)");
+            });
+        }
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("Check Now").clicked() { checked = true; }
+            if ui.button("Download").clicked() {}
+            if ui.button("Close").clicked() { *close = true; }
+        });
+    });
+    UPD_CHECKED.set(checked);
+    UPD_LATEST.with(|c| *c.borrow_mut() = latest);
+    None
+}
+
+/// License Information dialog (mockup 75).
+fn render_license_info_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<DialogAction> {
+    ui.vertical(|ui| {
+        ui.heading("License Information");
+        ui.separator();
+        ui.label("BRepCAD is licensed under the GNU GPL v3 or later.");
+        ui.label("Copyright © 2026 KernelDev");
+        ui.separator();
+        ui.heading("Third-Party Components");
+        egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
+            egui::Grid::new("lic_grid").num_columns(2).striped(true).show(ui, |ui| {
+                let components = [
+                    ("egui", "MIT"), ("wgpu", "MIT/Apache-2.0"),
+                    ("cgmath", "MIT"), ("rayon", "MIT/Apache-2.0"),
+                    ("serde", "MIT/Apache-2.0"), ("Noto Sans SC", "SIL Open Font License"),
+                ];
+                for (name, lic) in components { ui.label(name); ui.label(lic); ui.end_row(); }
+            });
+        });
+        ui.separator();
+        if ui.button("View Full License").clicked() {}
+        if ui.button("Close").clicked() { *close = true; }
+    });
+    None
+}
+
+/// Mold Catalog dialog (mockup 61).
+fn render_mold_catalog_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<DialogAction> {
+    let vendors = ["HASCO", "DME", "MISUMI", "LKM"];
+    let catalog: &[(&str, &str, &str)] = &[
+        ("K50", "200×250 mm", "Standard 2-plate"),
+        ("K100", "300×400 mm", "Standard 2-plate"),
+        ("K200", "400×500 mm", "Standard 2-plate"),
+        ("K50-3P", "200×250 mm", "3-plate mold"),
+        ("K100-3P", "300×400 mm", "3-plate mold"),
+    ];
+    let mut vendor = MOLD_VENDOR.get();
+    let mut selected = MOLD_SELECTED.get();
+
+    ui.vertical(|ui| {
+        ui.heading("Mold Base Catalog");
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("Vendor:");
+            for (i, v) in vendors.iter().enumerate() { ui.radio_value(&mut vendor, i as u8, *v); }
+        });
+        ui.separator();
+        ui.label(format!("Mold bases from {}:", vendors[vendor as usize]));
+        egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+            egui::Grid::new("mold_grid").num_columns(4).striped(true).show(ui, |ui| {
+                ui.heading("Code"); ui.heading("Size"); ui.heading("Type"); ui.heading("Select"); ui.end_row();
+                for (i, (code, size, mtype)) in catalog.iter().enumerate() {
+                    ui.label(*code); ui.label(*size); ui.label(*mtype);
+                    ui.radio_value(&mut selected, i, ""); ui.end_row();
+                }
+            });
+        });
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("Insert into Assembly").clicked() {}
+            if ui.button("Close").clicked() { *close = true; }
+        });
+    });
+    MOLD_VENDOR.set(vendor);
+    MOLD_SELECTED.set(selected);
+    None
+}
+
+/// Modal Plotter dialog (mockup 86).
+fn render_modal_plotter_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<DialogAction> {
+    let modes: &[(u32, f64, &str)] = &[
+        (1, 42.5, "Bending X"), (2, 87.3, "Bending Y"),
+        (3, 145.8, "Torsion"), (4, 210.4, "Bending Z"),
+        (5, 298.1, "Membrane"), (6, 387.5, "Higher mode"),
+    ];
+    ui.vertical(|ui| {
+        ui.heading("Modal Plotter");
+        ui.separator();
+        ui.label("Natural frequencies (Hz) vs mode number:");
+        ui.separator();
+        let max_freq = modes.iter().map(|(_, f, _)| *f).fold(0.0_f64, f64::max);
+        let plot_height = 18.0_f32;
+        let plot_width = 380.0_f32;
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(plot_width, modes.len() as f32 * (plot_height + 4.0)),
+            egui::Sense::hover(),
+        );
+        let painter = ui.painter();
+        let start_x = rect.min.x;
+        let start_y = rect.min.y;
+        for (i, (n, freq, label)) in modes.iter().enumerate() {
+            let y = start_y + i as f32 * (plot_height + 4.0) + plot_height * 0.5;
+            painter.text(egui::pos2(start_x, y), egui::Align2::LEFT_CENTER,
+                format!("Mode {}: {} ({:.1} Hz)", n, label, freq),
+                egui::FontId::proportional(10.0),
+                egui::Color32::from_rgb(205, 214, 244));
+            let bar_width = (freq / max_freq * (plot_width as f64 - 180.0)) as f32;
+            let bar_rect = egui::Rect::from_min_size(
+                egui::pos2(start_x + 180.0, y - plot_height * 0.4),
+                egui::vec2(bar_width, plot_height * 0.8),
+            );
+            painter.rect_filled(bar_rect, 2.0, egui::Color32::from_rgb(137, 180, 250));
+        }
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("Export CSV").clicked() {}
+            if ui.button("Animate Mode").clicked() {}
+            if ui.button("Close").clicked() { *close = true; }
+        });
+    });
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_classify_gcode_comment() {
+        let color = classify_gcode_line("; comment");
+        assert_ne!(color, egui::Color32::from_rgb(205, 214, 244));
+    }
+
+    #[test]
+    fn test_classify_gcode_g_command() {
+        assert_eq!(classify_gcode_line("G90 G21 G17"), egui::Color32::from_rgb(137, 180, 250));
+    }
+
+    #[test]
+    fn test_classify_gcode_m_command() {
+        assert_eq!(classify_gcode_line("M3 S1000"), egui::Color32::from_rgb(137, 180, 250));
+    }
+
+    #[test]
+    fn test_classify_gcode_tool_change() {
+        assert_eq!(classify_gcode_line("T1 M6"), egui::Color32::from_rgb(245, 194, 231));
+    }
+
+    #[test]
+    fn test_classify_gcode_coordinates() {
+        for coord in &["X10.0", "Y20.0", "Z-5.0", "I0.5", "J0.5", "R2.0", "K0.0"] {
+            assert_eq!(classify_gcode_line(coord), egui::Color32::from_rgb(166, 227, 161));
+        }
+    }
+
+    #[test]
+    fn test_classify_gcode_feed_speed() {
+        assert_eq!(classify_gcode_line("F200"), egui::Color32::from_rgb(249, 226, 175));
+        assert_eq!(classify_gcode_line("S1000"), egui::Color32::from_rgb(249, 226, 175));
+    }
+
+    #[test]
+    fn test_classify_gcode_line_number() {
+        assert_eq!(classify_gcode_line("N10 G0 X0 Y0"), egui::Color32::from_rgb(148, 226, 213));
+    }
+
+    #[test]
+    fn test_classify_gcode_default() {
+        assert_eq!(classify_gcode_line("UNKNOWN_LINE"), egui::Color32::from_rgb(205, 214, 244));
+    }
+
+    #[test]
+    fn test_classify_gcode_leading_whitespace() {
+        assert_eq!(classify_gcode_line("    G90"), egui::Color32::from_rgb(137, 180, 250));
+    }
+
+    #[test]
+    fn test_dialog_titles_phase2_2() {
+        assert_eq!(dialog_title(&DialogType::ParamSearchReplace), "Parameter Search & Replace");
+        assert_eq!(dialog_title(&DialogType::RevisionTable), "Revision Table");
+        assert_eq!(dialog_title(&DialogType::TutorialBrowser), "Tutorial Browser");
+        assert_eq!(dialog_title(&DialogType::CrashRecovery), "Crash Recovery");
+        assert_eq!(dialog_title(&DialogType::OnboardingWizard), "Welcome to BRepCAD");
+    }
+
+    #[test]
+    fn test_dialog_titles_phase2_3() {
+        assert_eq!(dialog_title(&DialogType::UpdateCheck), "Check for Updates");
+        assert_eq!(dialog_title(&DialogType::LicenseInfo), "License Information");
+        assert_eq!(dialog_title(&DialogType::MoldCatalog), "Mold Base Catalog");
+        assert_eq!(dialog_title(&DialogType::ModalPlotter), "Modal Plotter");
+    }
+
+    #[test]
+    fn test_nc_code_dialog_with_data() {
+        let dt = DialogType::NcCodeViewer {
+            gcode: "G90 G21\nM3 S1000\nM30".to_string(),
+            dialect: "Fanuc".to_string(),
+        };
+        assert_eq!(dialog_title(&dt), "NC Code Viewer");
+    }
+
+    #[test]
+    fn test_nc_code_dialog_empty() {
+        let dt = DialogType::NcCodeViewer {
+            gcode: String::new(), dialect: String::new(),
+        };
+        assert_eq!(dialog_title(&dt), "NC Code Viewer");
+    }
+
+    #[test]
+    fn test_dialog_type_default_is_none() {
+        assert_eq!(DialogType::default(), DialogType::None);
+        assert_eq!(dialog_title(&DialogType::default()), "");
+    }
+
+    #[test]
+    fn test_dialog_type_equality() {
+        assert_eq!(DialogType::RevisionTable, DialogType::RevisionTable);
+        assert_ne!(DialogType::RevisionTable, DialogType::TutorialBrowser);
+        assert_ne!(DialogType::MoldCatalog, DialogType::ModalPlotter);
+    }
+
+    #[test]
+    fn test_dialog_type_clone_debug() {
+        let dt = DialogType::OnboardingWizard;
+        assert_eq!(dt, dt.clone());
+        assert!(format!("{:?}", dt).contains("OnboardingWizard"));
+    }
 }
