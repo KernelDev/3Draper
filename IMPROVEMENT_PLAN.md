@@ -240,7 +240,7 @@ Priority order (by user impact):
 - [x] Phase 1 Task 1.1: Icon system foundation — procedural vector icons (55+ icons, 0 Unicode emoji)
 - [ ] Phase 1 Task 1.2: Menu bar icons
 - [ ] Phase 1 Task 1.3: Workspace sidebar icons
-- [ ] Phase 2 Task 2.1: High-priority dialogs (BOM, Layer, Tool Lib, FEA Mesh, Title Block)
+- [x] Phase 2 Task 2.1: High-priority dialogs (BOM, Layer, Tool Lib, FEA Mesh, Title Block) — 5 new dialogs with interactive widgets
 - [ ] Phase 2 Task 2.2: Medium-priority dialogs (5 dialogs)
 - [ ] Phase 2 Task 2.3: Low-priority dialogs (4 dialogs)
 - [x] Phase 3 Task 3.1: Clipboard (Cut/Copy/Paste) — solid clipboard with 20mm X offset on paste

@@ -30,6 +30,16 @@ pub enum DialogType {
     ConstraintDiagnostics,
     /// Macro Recorder dialog (mockup 70).
     MacroRecorder,
+    /// BOM Editor dialog (mockup 90).
+    BomEditor,
+    /// Layer Manager dialog (mockup 89).
+    LayerManager,
+    /// Tool Library dialog (mockup 83).
+    ToolLibrary,
+    /// FEA Mesh Control dialog (mockup 85).
+    FeaMeshControl,
+    /// Title Block Editor dialog (mockup 87).
+    TitleBlockEditor,
 }
 
 /// Primitive type for the Insert dialog.
@@ -99,6 +109,11 @@ pub fn render_dialog(ctx: &egui::Context, dialog: &mut DialogType) -> Option<Dia
                 DialogType::PrintPlot => action = render_print_plot_dialog(ui, &mut close),
                 DialogType::ConstraintDiagnostics => action = render_constraint_diagnostics_dialog(ui, &mut close),
                 DialogType::MacroRecorder => action = render_macro_recorder_dialog(ui, &mut close),
+                DialogType::BomEditor => action = render_bom_editor_dialog(ui, &mut close),
+                DialogType::LayerManager => action = render_layer_manager_dialog(ui, &mut close),
+                DialogType::ToolLibrary => action = render_tool_library_dialog(ui, &mut close),
+                DialogType::FeaMeshControl => action = render_fea_mesh_control_dialog(ui, &mut close),
+                DialogType::TitleBlockEditor => action = render_title_block_editor_dialog(ui, &mut close),
                 DialogType::None => {}
             }
         });
@@ -126,6 +141,11 @@ fn dialog_title(dialog: &DialogType) -> String {
         DialogType::PrintPlot => "Print / Plot".to_string(),
         DialogType::ConstraintDiagnostics => "Constraint Diagnostics".to_string(),
         DialogType::MacroRecorder => "Macro Recorder".to_string(),
+        DialogType::BomEditor => "Bill of Materials".to_string(),
+        DialogType::LayerManager => "Layer Manager".to_string(),
+        DialogType::ToolLibrary => "Tool Library".to_string(),
+        DialogType::FeaMeshControl => "FEA Mesh Control".to_string(),
+        DialogType::TitleBlockEditor => "Title Block Editor".to_string(),
         DialogType::None => String::new(),
     }
 }
@@ -802,6 +822,266 @@ fn render_macro_recorder_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<D
             if ui.button("Save Macro").clicked() {}
             if ui.button("Export Script").clicked() {}
             if ui.button("Clear").clicked() {}
+            if ui.button("Close").clicked() { *close = true; }
+        });
+    });
+    None
+}
+
+// ============================================================
+// Phase 2.1: High-priority dialogs (mockups 90, 89, 83, 85, 87)
+// ============================================================
+
+/// BOM Editor dialog (mockup 90).
+fn render_bom_editor_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<DialogAction> {
+    ui.vertical(|ui| {
+        ui.heading("Bill of Materials");
+        ui.separator();
+
+        // BOM table
+        egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+            egui::Grid::new("bom_grid").num_columns(5).striped(true).show(ui, |ui| {
+                ui.label(egui::RichText::new("Item").strong());
+                ui.label(egui::RichText::new("Part Number").strong());
+                ui.label(egui::RichText::new("Description").strong());
+                ui.label(egui::RichText::new("Qty").strong());
+                ui.label(egui::RichText::new("Material").strong());
+                ui.end_row();
+
+                let bom_items = [
+                    ("1", "BR-001", "Base Bracket", "2", "Aluminum 6061"),
+                    ("2", "BR-002", "Mounting Plate", "1", "Steel 1045"),
+                    ("3", "HW-100", "M6 Socket Head Cap Screw", "8", "Stainless 316"),
+                    ("4", "HW-101", "M6 Flat Washer", "8", "Stainless 316"),
+                    ("5", "BR-003", "Side Cover", "2", "ABS Plastic"),
+                ];
+                for (item, pn, desc, qty, mat) in &bom_items {
+                    ui.label(*item);
+                    ui.label(*pn);
+                    ui.label(*desc);
+                    ui.label(*qty);
+                    ui.label(*mat);
+                    ui.end_row();
+                }
+            });
+        });
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("Export CSV").clicked() {}
+            if ui.button("Export Excel").clicked() {}
+            if ui.button("Add Item").clicked() {}
+            if ui.button("Remove Item").clicked() {}
+            if ui.button("Close").clicked() { *close = true; }
+        });
+    });
+    None
+}
+
+/// Layer Manager dialog (mockup 89).
+fn render_layer_manager_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<DialogAction> {
+    let mut layers = vec![
+        ("Default", true, false, egui::Color32::from_rgb(255, 255, 255)),
+        ("Construction", true, false, egui::Color32::from_rgb(100, 200, 255)),
+        ("Dimensions", true, false, egui::Color32::from_rgb(255, 200, 100)),
+        ("Hidden Lines", false, false, egui::Color32::from_rgb(150, 150, 150)),
+        ("Annotations", true, true, egui::Color32::from_rgb(200, 100, 255)),
+    ];
+
+    ui.vertical(|ui| {
+        ui.heading("Layer Manager");
+        ui.separator();
+
+        egui::Grid::new("layer_grid").num_columns(5).striped(true).show(ui, |ui| {
+            ui.label(egui::RichText::new("Visible").strong());
+            ui.label(egui::RichText::new("Lock").strong());
+            ui.label(egui::RichText::new("Color").strong());
+            ui.label(egui::RichText::new("Name").strong());
+            ui.label(egui::RichText::new("Objects").strong());
+            ui.end_row();
+
+            for (name, visible, locked, color) in &mut layers {
+                ui.checkbox(visible, "");
+                ui.checkbox(locked, "");
+                ui.color_edit_button_srgba(color);
+                ui.text_edit_singleline(&mut name.to_string());
+                ui.label(format!("{}", 10)); // Object count placeholder
+                ui.end_row();
+            }
+        });
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("New Layer").clicked() {}
+            if ui.button("Delete").clicked() {}
+            if ui.button("Move Up").clicked() {}
+            if ui.button("Move Down").clicked() {}
+            if ui.button("Close").clicked() { *close = true; }
+        });
+    });
+    None
+}
+
+/// Tool Library dialog (mockup 83).
+fn render_tool_library_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<DialogAction> {
+    ui.vertical(|ui| {
+        ui.heading("Tool Library");
+        ui.separator();
+
+        egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+            egui::Grid::new("tool_grid").num_columns(6).striped(true).show(ui, |ui| {
+                ui.label(egui::RichText::new("ID").strong());
+                ui.label(egui::RichText::new("Name").strong());
+                ui.label(egui::RichText::new("Type").strong());
+                ui.label(egui::RichText::new("Ø (mm)").strong());
+                ui.label(egui::RichText::new("Length").strong());
+                ui.label(egui::RichText::new("Flutes").strong());
+                ui.end_row();
+
+                let tools = [
+                    ("T01", "6mm End Mill", "Flat End", "6.0", "50", "3"),
+                    ("T02", "3mm End Mill", "Flat End", "3.0", "30", "2"),
+                    ("T03", "6mm Ball Mill", "Ball End", "6.0", "50", "2"),
+                    ("T04", "5mm Drill", "Drill", "5.0", "80", "2"),
+                    ("T05", "10mm Face Mill", "Face", "10.0", "25", "4"),
+                    ("T06", "1mm Engraver", "Engrave", "1.0", "15", "1"),
+                ];
+                for (id, name, ttype, dia, len, flutes) in &tools {
+                    ui.label(*id);
+                    ui.label(*name);
+                    ui.label(*ttype);
+                    ui.label(*dia);
+                    ui.label(*len);
+                    ui.label(*flutes);
+                    ui.end_row();
+                }
+            });
+        });
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("Add Tool").clicked() {}
+            if ui.button("Edit").clicked() {}
+            if ui.button("Delete").clicked() {}
+            if ui.button("Import").clicked() {}
+            if ui.button("Close").clicked() { *close = true; }
+        });
+    });
+    None
+}
+
+/// FEA Mesh Control dialog (mockup 85).
+fn render_fea_mesh_control_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<DialogAction> {
+    let mut element_type = 0u32; // 0=Tet4, 1=Tet10, 2=Hex8, 3=Hex20
+    let mut mesh_size = 2.0f32;
+    let mut refine_curved = true;
+    let mut quality_threshold = 0.3f32;
+    let mut growth_ratio = 1.5f32;
+
+    ui.vertical(|ui| {
+        ui.heading("FEA Mesh Control");
+        ui.separator();
+
+        ui.label("Element Type:");
+        ui.radio_value(&mut element_type, 0, "Tet4 (4-node tetrahedron)");
+        ui.radio_value(&mut element_type, 1, "Tet10 (10-node tetrahedron)");
+        ui.radio_value(&mut element_type, 2, "Hex8 (8-node hexahedron)");
+        ui.radio_value(&mut element_type, 3, "Hex20 (20-node hexahedron)");
+
+        ui.separator();
+        ui.label("Mesh Parameters:");
+        ui.add(egui::Slider::new(&mut mesh_size, 0.1..=50.0).text("Element size (mm)"));
+        ui.checkbox(&mut refine_curved, "Refine curved surfaces");
+        ui.add(egui::Slider::new(&mut quality_threshold, 0.01..=1.0).text("Min quality (aspect ratio)"));
+        ui.add(egui::Slider::new(&mut growth_ratio, 1.0..=3.0).text("Growth ratio"));
+
+        ui.separator();
+        ui.label("Statistics:");
+        ui.label("Nodes: — (click Generate)");
+        ui.label("Elements: — (click Generate)");
+        ui.label("Quality (avg): — ");
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("Generate Mesh").clicked() {}
+            if ui.button("Refine").clicked() {}
+            if ui.button("Coarsen").clicked() {}
+            if ui.button("Quality Check").clicked() {}
+            if ui.button("Close").clicked() { *close = true; }
+        });
+    });
+    None
+}
+
+/// Title Block Editor dialog (mockup 87).
+fn render_title_block_editor_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<DialogAction> {
+    let mut title = "Bracket Assembly".to_string();
+    let mut drawing_no = "DRW-2026-001".to_string();
+    let mut scale = "1:2".to_string();
+    let mut material = "Aluminum 6061-T6".to_string();
+    let mut designer = "AI Agent".to_string();
+    let mut date = "2026-08-09".to_string();
+    let mut revision = "A".to_string();
+    let mut sheet_size = "A3".to_string();
+    let mut sheet_no = "1 of 1".to_string();
+    let mut tolerance = "±0.1mm".to_string();
+    let mut finish = "Anodized".to_string();
+
+    ui.vertical(|ui| {
+        ui.heading("Title Block Editor");
+        ui.separator();
+
+        egui::Grid::new("title_block_grid").num_columns(2).striped(true).show(ui, |ui| {
+            ui.label("Title:");
+            ui.text_edit_singleline(&mut title);
+            ui.end_row();
+
+            ui.label("Drawing No.:");
+            ui.text_edit_singleline(&mut drawing_no);
+            ui.end_row();
+
+            ui.label("Scale:");
+            ui.text_edit_singleline(&mut scale);
+            ui.end_row();
+
+            ui.label("Material:");
+            ui.text_edit_singleline(&mut material);
+            ui.end_row();
+
+            ui.label("Designer:");
+            ui.text_edit_singleline(&mut designer);
+            ui.end_row();
+
+            ui.label("Date:");
+            ui.text_edit_singleline(&mut date);
+            ui.end_row();
+
+            ui.label("Revision:");
+            ui.text_edit_singleline(&mut revision);
+            ui.end_row();
+
+            ui.label("Sheet Size:");
+            ui.text_edit_singleline(&mut sheet_size);
+            ui.end_row();
+
+            ui.label("Sheet No.:");
+            ui.text_edit_singleline(&mut sheet_no);
+            ui.end_row();
+
+            ui.label("Tolerance:");
+            ui.text_edit_singleline(&mut tolerance);
+            ui.end_row();
+
+            ui.label("Finish:");
+            ui.text_edit_singleline(&mut finish);
+            ui.end_row();
+        });
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("Apply to Drawing").clicked() {}
+            if ui.button("Save Template").clicked() {}
+            if ui.button("Load Template").clicked() {}
             if ui.button("Close").clicked() { *close = true; }
         });
     });

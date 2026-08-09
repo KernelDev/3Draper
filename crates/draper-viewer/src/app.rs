@@ -15559,8 +15559,8 @@ impl ViewerApp {
                     let weight = vol * 7.85;
                     self.brepcad_bom_entries.push((self.current_model.name.clone(), 1, "Steel".to_string(), weight));
                 }
-                self.brepcad_bom_dialog_open = !self.brepcad_bom_dialog_open;
-                "BOM editor opened".to_string()
+                self.brepcad_dialog = crate::ui::dialogs::DialogType::BomEditor;
+                String::new()
             }
             MenuAction::AsmExplode => {
                 if self.brepcad_explode_factor < 0.5 {
@@ -15629,22 +15629,9 @@ impl ViewerApp {
 
             // ── Simulation/FEA actions ──
             MenuAction::SimMesh => {
-                // Generate real FEA tetrahedral mesh from triangle mesh
-                let n = self.mesh.vertex_count();
-                if n == 0 {
-                    "No mesh to generate FEA from".to_string()
-                } else {
-                    // Use draper_fea::TetMesh::from_triangle_mesh for real tetrahedral meshing
-                    let tet_mesh = draper_fea::TetMesh::from_triangle_mesh(&self.mesh, 1.0);
-                    self.brepcad_fea_meshed = true;
-                    self.brepcad_fea_solved = false;
-                    self.brepcad_fea_displacements.clear();
-                    self.brepcad_fea_von_mises.clear();
-                    let n_nodes = tet_mesh.num_nodes();
-                    let n_tets = tet_mesh.num_tets();
-                    log::info!("FEA mesh: {} nodes, {} tet4 elements", n_nodes, n_tets);
-                    format!("FEA mesh: {} nodes, {} Tet4 elements", n_nodes, n_tets)
-                }
+                // Open FEA Mesh Control dialog
+                self.brepcad_dialog = crate::ui::dialogs::DialogType::FeaMeshControl;
+                String::new()
             }
             MenuAction::SimStudyStatic => {
                 self.brepcad_fea_study_type = 0;
@@ -15770,7 +15757,8 @@ impl ViewerApp {
                 format!("Stock: {:.0}×{:.0}×{:.0}mm", self.brepcad_cam_stock[0], self.brepcad_cam_stock[1], self.brepcad_cam_stock[2])
             }
             MenuAction::CamToolLibrary => {
-                format!("Tool Library: D={:.1}mm end mill (default)", self.brepcad_cam_tool_diameter)
+                self.brepcad_dialog = crate::ui::dialogs::DialogType::ToolLibrary;
+                String::new()
             }
             MenuAction::CamFacing => {
                 self.brepcad_cam_ops.push((0, "Facing".to_string(), [self.brepcad_cam_tool_diameter, 0.5, 0.0, 0.0]));
