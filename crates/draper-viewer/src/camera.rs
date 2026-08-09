@@ -132,6 +132,11 @@ pub struct OrbitCamera {
     /// Used to scale zoom limits so small models can be zoomed in
     /// and large models can be zoomed out.
     model_size: f32,
+    /// Projection mode: true = perspective (default), false = orthographic.
+    /// Phase 3.6: toggled via ViewPerspective / ViewOrthographic menu actions.
+    pub perspective: bool,
+    /// Orthographic half-height (world units). Used only when `perspective` is false.
+    pub ortho_half_height: f32,
 }
 
 impl OrbitCamera {
@@ -151,6 +156,8 @@ impl OrbitCamera {
             near: 0.1,
             far: 100000.0,
             model_size: 100.0,
+            perspective: true,
+            ortho_half_height: 100.0,
         }
     }
 
@@ -249,10 +256,20 @@ impl OrbitCamera {
         ]
     }
 
-    /// Compute perspective projection matrix (column-major 4x4).
+    /// Compute projection matrix (column-major 4x4).
     ///
-    /// Uses wgpu/Vulkan Z range convention [0, 1] (NOT OpenGL [-1, 1]).
+    /// Phase 3.6: dispatches to perspective or orthographic based on
+    /// the `perspective` field. Uses wgpu/Vulkan Z convention [0, 1].
     pub fn projection_matrix(&self, aspect: f32) -> [[f32; 4]; 4] {
+        if self.perspective {
+            self.perspective_matrix(aspect)
+        } else {
+            self.orthographic_matrix(aspect)
+        }
+    }
+
+    /// Perspective projection matrix.
+    fn perspective_matrix(&self, aspect: f32) -> [[f32; 4]; 4] {
         let fov_rad = self.fov.to_radians();
         let f = 1.0 / (fov_rad * 0.5).tan();
         let z_range = self.near - self.far;
@@ -263,6 +280,34 @@ impl OrbitCamera {
             [0.0, 0.0, self.far / z_range, -1.0],
             [0.0, 0.0, self.near * self.far / z_range, 0.0],
         ]
+    }
+
+    /// Orthographic projection matrix.
+    /// Width derived from `ortho_half_height * aspect`.
+    fn orthographic_matrix(&self, aspect: f32) -> [[f32; 4]; 4] {
+        let t = self.ortho_half_height;
+        let b = -self.ortho_half_height;
+        let r = self.ortho_half_height * aspect;
+        let l = -r;
+        let n = self.near;
+        let f = self.far;
+        [
+            [2.0 / (r - l), 0.0, 0.0, 0.0],
+            [0.0, 2.0 / (t - b), 0.0, 0.0],
+            [0.0, 0.0, 1.0 / (f - n), 0.0],
+            [-(r + l) / (r - l), -(t + b) / (t - b), -n / (f - n), 1.0],
+        ]
+    }
+
+    /// Toggle between perspective and orthographic.
+    /// When switching to ortho, sync `ortho_half_height` with current distance/fov.
+    pub fn set_perspective(&mut self, perspective: bool) {
+        if perspective == self.perspective { return; }
+        if !perspective {
+            let fov_rad = self.fov.to_radians();
+            self.ortho_half_height = (fov_rad * 0.5).tan() * self.distance;
+        }
+        self.perspective = perspective;
     }
 
     /// Rotate the camera by the given screen-space deltas (orbit around target).
@@ -510,5 +555,60 @@ impl OrbitCamera {
 
         let origin = self.position();
         (origin, dir_world)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_perspective_default() {
+        let cam = OrbitCamera::new();
+        assert!(cam.perspective);
+    }
+
+    #[test]
+    fn test_switch_to_orthographic() {
+        let mut cam = OrbitCamera::new();
+        cam.distance = 200.0;
+        cam.fov = 45.0;
+        cam.set_perspective(false);
+        assert!(!cam.perspective);
+        let expected = (45.0_f32.to_radians() * 0.5).tan() * 200.0;
+        assert!((cam.ortho_half_height - expected).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_switch_back_to_perspective() {
+        let mut cam = OrbitCamera::new();
+        cam.set_perspective(false);
+        cam.set_perspective(true);
+        assert!(cam.perspective);
+    }
+
+    #[test]
+    fn test_perspective_matrix_aspect() {
+        let cam = OrbitCamera::new();
+        let m1 = cam.projection_matrix(1.0);
+        let m2 = cam.projection_matrix(2.0);
+        assert!((m1[0][0] / m2[0][0] - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_orthographic_matrix() {
+        let mut cam = OrbitCamera::new();
+        cam.set_perspective(false);
+        let m = cam.projection_matrix(1.0);
+        assert!((m[3][3] - 1.0).abs() < 0.01, "Ortho [3][3] should be 1.0");
+        assert!(m[2][3].abs() < 0.01, "Ortho [2][3] should be 0 (no perspective divide)");
+    }
+
+    #[test]
+    fn test_set_perspective_idempotent() {
+        let mut cam = OrbitCamera::new();
+        let original_ortho = cam.ortho_half_height;
+        cam.set_perspective(true);
+        assert_eq!(cam.ortho_half_height, original_ortho);
     }
 }

@@ -330,7 +330,8 @@ mod tests {
 
     #[test]
     fn test_plane_invalid_normal() {
-        let result = SketchPlane::new(Point3d::ORIGIN, Direction3d::new(0.0, 0.0, 0.0));
+        let zero_normal = Direction3d::new_unchecked(0.0, 0.0, 0.0);
+        let result = SketchPlane::new(Point3d::ORIGIN, zero_normal);
         assert!(result.is_err());
     }
 

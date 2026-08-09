@@ -92,7 +92,7 @@ pub enum SolverError {
 // Sketch entities
 // ============================================================
 
-/// A 2D sketch entity (point, line, circle, arc).
+/// A 2D sketch entity (point, line, circle, arc, spline, polygon).
 #[derive(Debug, Clone)]
 pub enum SketchEntity {
     /// A 2D point with coordinates (x, y).
@@ -104,6 +104,16 @@ pub enum SketchEntity {
     Circle { id: u64, center: u64, radius_param: String },
     /// An arc from start to end around a center.
     Arc { id: u64, center: u64, start: u64, end: u64 },
+    /// Phase 3.5: A spline through a list of control points (Catmull-Rom).
+    Spline { id: u64, points: Vec<u64>, tension: f64 },
+    /// Phase 3.5: A regular polygon (N-sided) inscribed in a circle.
+    Polygon {
+        id: u64,
+        center: u64,
+        radius_param: String,
+        sides: u32,
+        rotation_deg: f64,
+    },
 }
 
 impl SketchEntity {
@@ -113,7 +123,9 @@ impl SketchEntity {
             SketchEntity::Point { id, .. }
             | SketchEntity::Line { id, .. }
             | SketchEntity::Circle { id, .. }
-            | SketchEntity::Arc { id, .. } => *id,
+            | SketchEntity::Arc { id, .. }
+            | SketchEntity::Spline { id, .. }
+            | SketchEntity::Polygon { id, .. } => *id,
         }
     }
 
@@ -124,6 +136,8 @@ impl SketchEntity {
             SketchEntity::Line { start, end, .. } => vec![*start, *end],
             SketchEntity::Circle { center, .. } => vec![*center],
             SketchEntity::Arc { center, start, end, .. } => vec![*center, *start, *end],
+            SketchEntity::Spline { points, .. } => points.clone(),
+            SketchEntity::Polygon { center, .. } => vec![*center],
         }
     }
 }
@@ -213,7 +227,7 @@ impl Sketch2d {
     }
 
     /// Allocate a unique entity ID.
-    fn alloc_id(&mut self) -> u64 {
+    pub fn alloc_id(&mut self) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         id
@@ -251,6 +265,116 @@ impl Sketch2d {
         let id = self.alloc_id();
         self.entities.push(SketchEntity::Arc { id, center, start, end });
         id
+    }
+
+    /// Phase 3.5: Add a spline through a list of control points.
+    /// Uses Catmull-Rom interpolation. Returns u64::MAX if < 2 points.
+    pub fn add_spline(&mut self, points: Vec<u64>, tension: f64) -> u64 {
+        if points.len() < 2 {
+            return u64::MAX;
+        }
+        let id = self.alloc_id();
+        let tension = tension.clamp(0.0, 1.0);
+        self.entities.push(SketchEntity::Spline { id, points, tension });
+        id
+    }
+
+    /// Phase 3.5: Add a regular polygon. Returns u64::MAX if sides < 3.
+    pub fn add_polygon(
+        &mut self, center: u64, radius_param: &str, radius_value: f64,
+        sides: u32, rotation_deg: f64,
+    ) -> u64 {
+        if sides < 3 {
+            return u64::MAX;
+        }
+        let id = self.alloc_id();
+        self.parameters.insert(radius_param.to_string(), radius_value);
+        self.entities.push(SketchEntity::Polygon {
+            id, center, radius_param: radius_param.to_string(), sides, rotation_deg,
+        });
+        id
+    }
+
+    /// Phase 3.5: Tessellate a spline into a polyline using Catmull-Rom.
+    pub fn tessellate_spline(&self, spline_id: u64, segments_per_span: u32) -> Vec<(f64, f64)> {
+        let spline = self.entities.iter().find_map(|e| {
+            if let SketchEntity::Spline { id, points, tension } = e {
+                if *id == spline_id { return Some((points.clone(), *tension)); }
+            }
+            None
+        });
+        let (point_ids, tension) = match spline {
+            Some(s) => s,
+            None => return Vec::new(),
+        };
+        if point_ids.len() < 2 { return Vec::new(); }
+
+        let mut pts: Vec<(f64, f64)> = Vec::with_capacity(point_ids.len());
+        for pid in &point_ids {
+            match self.get_point(*pid) {
+                Some(p) => pts.push(p),
+                None => return Vec::new(),
+            }
+        }
+
+        let mut result: Vec<(f64, f64)> = Vec::new();
+        let s = tension;
+        let segs = segments_per_span.max(1) as usize;
+
+        for i in 0..pts.len() - 1 {
+            let p0 = if i == 0 { pts[i] } else { pts[i - 1] };
+            let p1 = pts[i];
+            let p2 = pts[i + 1];
+            let p3 = if i + 2 < pts.len() { pts[i + 2] } else { pts[i + 1] };
+
+            for j in 0..segs {
+                let t = j as f64 / segs as f64;
+                let t2 = t * t;
+                let t3 = t2 * t;
+                let alpha = 1.0 - s;
+                let x = alpha * (0.5 * (2.0 * p1.0
+                    + (-p0.0 + p2.0) * t
+                    + (2.0 * p0.0 - 5.0 * p1.0 + 4.0 * p2.0 - p3.0) * t2
+                    + (-p0.0 + 3.0 * p1.0 - 3.0 * p2.0 + p3.0) * t3))
+                    + s * (p1.0 + (p2.0 - p1.0) * t);
+                let y = alpha * (0.5 * (2.0 * p1.1
+                    + (-p0.1 + p2.1) * t
+                    + (2.0 * p0.1 - 5.0 * p1.1 + 4.0 * p2.1 - p3.1) * t2
+                    + (-p0.1 + 3.0 * p1.1 - 3.0 * p2.1 + p3.1) * t3))
+                    + s * (p1.1 + (p2.1 - p1.1) * t);
+                result.push((x, y));
+            }
+        }
+        result.push(*pts.last().unwrap());
+        result
+    }
+
+    /// Phase 3.5: Tessellate a polygon into a closed vertex list.
+    pub fn tessellate_polygon(&self, polygon_id: u64) -> Vec<(f64, f64)> {
+        let poly = self.entities.iter().find_map(|e| {
+            if let SketchEntity::Polygon { id, center, radius_param, sides, rotation_deg } = e {
+                if *id == polygon_id {
+                    return Some((*center, radius_param.clone(), *sides, *rotation_deg));
+                }
+            }
+            None
+        });
+        let (center_id, radius_param, sides, rotation_deg) = match poly {
+            Some(p) => p,
+            None => return Vec::new(),
+        };
+        let (cx, cy) = match self.get_point(center_id) { Some(p) => p, None => return Vec::new() };
+        let radius = match self.parameters.get(&radius_param) { Some(r) => *r, None => return Vec::new() };
+        if sides < 3 || radius <= 0.0 { return Vec::new(); }
+
+        let rot_rad = rotation_deg.to_radians();
+        let mut verts: Vec<(f64, f64)> = Vec::with_capacity(sides as usize + 1);
+        for i in 0..sides {
+            let angle = rot_rad + (i as f64) * std::f64::consts::TAU / sides as f64;
+            verts.push((cx + radius * angle.cos(), cy + radius * angle.sin()));
+        }
+        if let Some(first) = verts.first() { verts.push(*first); }
+        verts
     }
 
     /// Add a constraint to the sketch.
@@ -1114,5 +1238,92 @@ mod tests {
 
         sketch.add_constraint(Constraint::Coincident { p1, p2 });
         assert_eq!(sketch.constraint_equation_count(), 5); // 3 + 2
+    }
+
+    // ─── Phase 3.5: Spline + Polygon tests ───
+
+    #[test]
+    fn test_add_spline_basic() {
+        let mut sketch = Sketch2d::new();
+        let p0 = sketch.add_point(0.0, 0.0);
+        let p1 = sketch.add_point(10.0, 5.0);
+        let p2 = sketch.add_point(20.0, 0.0);
+        let id = sketch.add_spline(vec![p0, p1, p2], 0.0);
+        assert!(id != u64::MAX);
+    }
+
+    #[test]
+    fn test_add_spline_too_few_points() {
+        let mut sketch = Sketch2d::new();
+        let p0 = sketch.add_point(0.0, 0.0);
+        assert_eq!(sketch.add_spline(vec![p0], 0.0), u64::MAX);
+    }
+
+    #[test]
+    fn test_tessellate_spline_endpoints() {
+        let mut sketch = Sketch2d::new();
+        let p0 = sketch.add_point(0.0, 0.0);
+        let p1 = sketch.add_point(10.0, 10.0);
+        let p2 = sketch.add_point(20.0, 0.0);
+        let id = sketch.add_spline(vec![p0, p1, p2], 0.0);
+        let pts = sketch.tessellate_spline(id, 10);
+        assert!(pts.len() >= 21);
+        assert!((pts[0].0 - 0.0).abs() < 1e-9);
+        let last = *pts.last().unwrap();
+        assert!((last.0 - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_tessellate_spline_missing_id() {
+        let mut sketch = Sketch2d::new();
+        assert!(sketch.tessellate_spline(9999, 10).is_empty());
+    }
+
+    #[test]
+    fn test_add_polygon_basic() {
+        let mut sketch = Sketch2d::new();
+        let center = sketch.add_point(0.0, 0.0);
+        let id = sketch.add_polygon(center, "r", 10.0, 6, 0.0);
+        assert!(id != u64::MAX);
+        assert_eq!(sketch.get_parameter("r"), Some(10.0));
+    }
+
+    #[test]
+    fn test_add_polygon_too_few_sides() {
+        let mut sketch = Sketch2d::new();
+        let center = sketch.add_point(0.0, 0.0);
+        assert_eq!(sketch.add_polygon(center, "r", 10.0, 2, 0.0), u64::MAX);
+    }
+
+    #[test]
+    fn test_tessellate_polygon_hex() {
+        let mut sketch = Sketch2d::new();
+        let center = sketch.add_point(5.0, 5.0);
+        let id = sketch.add_polygon(center, "r", 10.0, 6, 0.0);
+        let verts = sketch.tessellate_polygon(id);
+        assert_eq!(verts.len(), 7); // 6 + closing
+        assert!((verts[0].0 - verts[6].0).abs() < 1e-9);
+        assert!((verts[0].0 - 15.0).abs() < 1e-9); // center + (radius, 0)
+    }
+
+    #[test]
+    fn test_tessellate_polygon_rotation() {
+        let mut sketch = Sketch2d::new();
+        let center = sketch.add_point(0.0, 0.0);
+        let id = sketch.add_polygon(center, "r", 10.0, 4, 90.0);
+        let verts = sketch.tessellate_polygon(id);
+        assert!((verts[0].0 - 0.0).abs() < 1e-9);
+        assert!((verts[0].1 - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_spline_point_refs() {
+        let mut sketch = Sketch2d::new();
+        let p0 = sketch.add_point(0.0, 0.0);
+        let p1 = sketch.add_point(10.0, 0.0);
+        let p2 = sketch.add_point(20.0, 0.0);
+        let id = sketch.add_spline(vec![p0, p1, p2], 0.0);
+        let spline = sketch.entities.iter().find(|e| e.id() == id).unwrap();
+        assert_eq!(spline.point_refs(), vec![p0, p1, p2]);
     }
 }
