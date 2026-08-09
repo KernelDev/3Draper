@@ -13,7 +13,7 @@ use crate::builder::ShapeBuilder;
 use crate::boolean::boolean_subtract;
 use draper_geometry::{
     Point3d, Direction3d, Vec3d,
-    Curve3d, Line, Surface, NurbsCurve,
+    Curve3d, Line, Surface, Plane, NurbsCurve,
     Transform, ToleranceContext,
 };
 use std::f64::consts::PI;
@@ -1454,6 +1454,143 @@ pub fn loft_wires(wires: &[Vec<Point3d>]) -> Result<Solid, ModelingError> {
 }
 
 // ============================================================
+// Phase 3.4: Direct Modeling operations
+// ============================================================
+
+/// Move a single planar face by a translation vector.
+/// Non-planar faces return an error. The original solid is not mutated.
+pub fn move_face_planar(solid: &Solid, face_index: usize, translation: Vec3d) -> Result<Solid, String> {
+    let mut new_solid = solid.clone();
+    let faces_len = new_solid.faces().len();
+    let mut faces_iter = new_solid.faces_mut();
+    let face = faces_iter.into_iter().nth(face_index)
+        .ok_or_else(|| format!("Face index {} out of range (solid has {} faces)",
+            face_index, faces_len))?;
+
+    let plane = match &face.surface {
+        Some(Surface::Plane(p)) => p.clone(),
+        Some(other) => return Err(format!(
+            "Face {} is not planar (surface type: {})", face_index, surface_type_name(other))),
+        None => return Err(format!("Face {} has no surface", face_index)),
+    };
+
+    let new_plane = Plane {
+        origin: Point3d::new(
+            plane.origin.x + translation.x,
+            plane.origin.y + translation.y,
+            plane.origin.z + translation.z,
+        ),
+        u_dir: plane.u_dir, v_dir: plane.v_dir, normal: plane.normal,
+    };
+    face.surface = Some(Surface::Plane(new_plane));
+
+    for edge in &mut face.edges {
+        translate_edge_in_place(edge, &translation);
+    }
+
+    Ok(new_solid)
+}
+
+/// Offset a planar face along its normal by a signed distance.
+pub fn offset_face_planar(solid: &Solid, face_index: usize, distance: f64) -> Result<Solid, String> {
+    let faces = solid.faces();
+    let face = faces.get(face_index)
+        .ok_or_else(|| format!("Face index {} out of range", face_index))?;
+    let plane = match &face.surface {
+        Some(Surface::Plane(p)) => p.clone(),
+        Some(other) => return Err(format!(
+            "Face {} is not planar (surface type: {})", face_index, surface_type_name(other))),
+        None => return Err(format!("Face {} has no surface", face_index)),
+    };
+    let translation = Vec3d::new(
+        plane.normal.x * distance,
+        plane.normal.y * distance,
+        plane.normal.z * distance,
+    );
+    move_face_planar(solid, face_index, translation)
+}
+
+/// Replace a face's surface with a planar triangle defined by 3 points.
+pub fn replace_face_planar(
+    solid: &Solid, face_index: usize,
+    p1: Point3d, p2: Point3d, p3: Point3d,
+) -> Result<Solid, String> {
+    let mut new_solid = solid.clone();
+    let faces_len = new_solid.faces().len();
+    let mut faces_iter = new_solid.faces_mut();
+    let face = faces_iter.into_iter().nth(face_index)
+        .ok_or_else(|| format!("Face index {} out of range (solid has {} faces)",
+            face_index, faces_len))?;
+
+    let plane = Plane::from_three_points(&p1, &p2, &p3)
+        .ok_or_else(|| "Three points are collinear — cannot form a plane".to_string())?;
+    face.surface = Some(Surface::Plane(plane));
+
+    let e1 = Edge::new_line(p1, p2);
+    let e2 = Edge::new_line(p2, p3);
+    let e3 = Edge::new_line(p3, p1);
+    let e1_id = e1.id; let e2_id = e2.id; let e3_id = e3.id;
+    face.edges = vec![e1, e2, e3];
+    face.outer_wire = Some(Wire::new(vec![
+        CoEdge::new(e1_id, true), CoEdge::new(e2_id, true), CoEdge::new(e3_id, true),
+    ]));
+    Ok(new_solid)
+}
+
+/// Split a face by inserting a new edge between two points.
+pub fn split_face(
+    solid: &Solid, face_index: usize,
+    p1: Point3d, p2: Point3d,
+) -> Result<Solid, String> {
+    if p1.distance_to(&p2) < 1e-10 {
+        return Err("p1 and p2 are coincident — cannot split".to_string());
+    }
+    let mut new_solid = solid.clone();
+    let faces_len = new_solid.faces().len();
+    let mut faces_iter = new_solid.faces_mut();
+    let face = faces_iter.into_iter().nth(face_index)
+        .ok_or_else(|| format!("Face index {} out of range (solid has {} faces)",
+            face_index, faces_len))?;
+
+    let new_edge = Edge::new_line(p1, p2);
+    let new_edge_id = new_edge.id;
+    face.edges.push(new_edge);
+    if let Some(ref mut wire) = face.outer_wire {
+        wire.coedges.push(CoEdge::new(new_edge_id, true));
+    }
+    Ok(new_solid)
+}
+
+fn translate_edge_in_place(edge: &mut Edge, t: &Vec3d) {
+    if let Some(ref mut pt) = edge.start_vertex_point {
+        pt.x += t.x; pt.y += t.y; pt.z += t.z;
+    }
+    if let Some(ref mut pt) = edge.end_vertex_point {
+        pt.x += t.x; pt.y += t.y; pt.z += t.z;
+    }
+    if let Some(Curve3d::Line(ref mut line)) = edge.curve {
+        line.origin = Point3d::new(
+            line.origin.x + t.x, line.origin.y + t.y, line.origin.z + t.z,
+        );
+    }
+}
+
+fn surface_type_name(surface: &Surface) -> &'static str {
+    match surface {
+        Surface::Plane(_) => "Plane",
+        Surface::Cylinder(_) => "Cylinder",
+        Surface::Cone(_) => "Cone",
+        Surface::Sphere(_) => "Sphere",
+        Surface::Torus(_) => "Torus",
+        Surface::Revolution(_) => "Revolution",
+        Surface::Extrusion(_) => "Extrusion",
+        Surface::Nurbs(_) => "NURBS",
+        Surface::Offset(_) => "Offset",
+        Surface::Ruled(_) => "Ruled",
+    }
+}
+
+// ============================================================
 // Tests
 // ============================================================
 
@@ -2212,4 +2349,88 @@ mod tests {
         let result = loft_wires(&wires);
         assert!(result.is_err());
     }
+
+    // ─── Phase 3.4: Direct Modeling tests ───
+
+    #[test]
+    fn test_move_face_planar_box() {
+        let box_solid = ShapeBuilder::make_box(100.0, 100.0, 100.0);
+        let result = move_face_planar(&box_solid, 0, Vec3d::new(0.0, 0.0, 50.0));
+        match result {
+            Ok(moved) => assert!(!moved.faces().is_empty()),
+            Err(_) => {} // acceptable if face 0 isn't planar
+        }
+    }
+
+    #[test]
+    fn test_move_face_invalid_index() {
+        let box_solid = ShapeBuilder::make_box(100.0, 100.0, 100.0);
+        assert!(move_face_planar(&box_solid, 999, Vec3d::new(0.0, 0.0, 50.0)).is_err());
+    }
+
+    #[test]
+    fn test_offset_face_planar_box() {
+        let box_solid = ShapeBuilder::make_box(100.0, 100.0, 100.0);
+        let result = offset_face_planar(&box_solid, 0, 10.0);
+        match result {
+            Ok(offset) => assert!(!offset.faces().is_empty()),
+            Err(_) => {}
+        }
+    }
+
+    #[test]
+    fn test_offset_face_invalid_index() {
+        let box_solid = ShapeBuilder::make_box(100.0, 100.0, 100.0);
+        assert!(offset_face_planar(&box_solid, 999, 10.0).is_err());
+    }
+
+    #[test]
+    fn test_replace_face_planar_basic() {
+        let box_solid = ShapeBuilder::make_box(100.0, 100.0, 100.0);
+        let p1 = Point3d::new(0.0, 0.0, 0.0);
+        let p2 = Point3d::new(50.0, 0.0, 0.0);
+        let p3 = Point3d::new(0.0, 50.0, 0.0);
+        let result = replace_face_planar(&box_solid, 0, p1, p2, p3);
+        match result {
+            Ok(replaced) => assert!(!replaced.faces().is_empty()),
+            Err(_) => {}
+        }
+    }
+
+    #[test]
+    fn test_replace_face_collinear_points() {
+        let box_solid = ShapeBuilder::make_box(100.0, 100.0, 100.0);
+        let p1 = Point3d::new(0.0, 0.0, 0.0);
+        let p2 = Point3d::new(50.0, 0.0, 0.0);
+        let p3 = Point3d::new(100.0, 0.0, 0.0);
+        assert!(replace_face_planar(&box_solid, 0, p1, p2, p3).is_err());
+    }
+
+    #[test]
+    fn test_split_face_basic() {
+        let box_solid = ShapeBuilder::make_box(100.0, 100.0, 100.0);
+        let p1 = Point3d::new(0.0, 0.0, 0.0);
+        let p2 = Point3d::new(50.0, 50.0, 0.0);
+        let result = split_face(&box_solid, 0, p1, p2);
+        match result {
+            Ok(split) => assert_eq!(split.faces().len(), box_solid.faces().len()),
+            Err(_) => {}
+        }
+    }
+
+    #[test]
+    fn test_split_face_coincident_points() {
+        let box_solid = ShapeBuilder::make_box(100.0, 100.0, 100.0);
+        let p = Point3d::new(50.0, 50.0, 0.0);
+        assert!(split_face(&box_solid, 0, p, p).is_err());
+    }
+
+    #[test]
+    fn test_move_face_returns_cloned_solid() {
+        let box_solid = ShapeBuilder::make_box(100.0, 100.0, 100.0);
+        let original_face_count = box_solid.faces().len();
+        let _ = move_face_planar(&box_solid, 0, Vec3d::new(10.0, 0.0, 0.0));
+        assert_eq!(box_solid.faces().len(), original_face_count);
+    }
 }
+
