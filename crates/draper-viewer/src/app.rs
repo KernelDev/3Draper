@@ -8504,7 +8504,8 @@ impl eframe::App for ViewerApp {
 
                                     if let Some(ref tree) = assembly_tree_clone {
                                         // Simple tree renderer using HashSet for open/closed state.
-                                        // No CollapsingState — just a HashSet of open node keys.
+                                        // Renders a proper tree with indentation, small triangle arrows,
+                                        // and tight spacing (like a file explorer tree).
                                         fn render_tree_node(
                                             ui: &mut egui::Ui,
                                             node: &draper_step::AssemblyNode,
@@ -8512,6 +8513,7 @@ impl eframe::App for ViewerApp {
                                             hidden: &std::collections::HashSet<usize>,
                                             filter: &str,
                                             active: bool,
+                                            depth: usize,
                                             open_nodes: &std::collections::HashSet<String>,
                                             pending_select: &mut Option<usize>,
                                             pending_vis: &mut Option<usize>,
@@ -8522,7 +8524,7 @@ impl eframe::App for ViewerApp {
                                             // Filter: if active and name doesn't match, check children
                                             if active && !name.to_lowercase().contains(filter) {
                                                 for c in &node.children {
-                                                    render_tree_node(ui, c, sel, hidden, filter, active, open_nodes, pending_select, pending_vis, pending_isolate, pending_toggle);
+                                                    render_tree_node(ui, c, sel, hidden, filter, active, depth, open_nodes, pending_select, pending_vis, pending_isolate, pending_toggle);
                                                 }
                                                 return;
                                             }
@@ -8533,48 +8535,83 @@ impl eframe::App for ViewerApp {
                                             let key = format!("{}_{}", node.name, node.pd_id);
                                             let is_open = open_nodes.contains(&key);
 
+                                            // Tree row with indentation
                                             ui.horizontal(|ui| {
-                                                // Collapse/expand arrow — ONLY for nodes with children
+                                                // Indentation: each depth level adds 16px
+                                                ui.add_space(depth as f32 * 16.0);
+
+                                                // Collapse/expand arrow — small triangle, NOT a button box.
+                                                // Use a label with Sense::click() for a cleaner look.
                                                 if has_children {
-                                                    let arrow = if is_open { "▼" } else { "▶" };
-                                                    if ui.small_button(arrow).on_hover_text(if is_open { "Collapse" } else { "Expand" }).clicked() {
+                                                    let arrow = if is_open { "▾" } else { "▸" };
+                                                    let arrow_resp = ui.add(
+                                                        egui::Label::new(
+                                                            egui::RichText::new(arrow)
+                                                                .size(12.0)
+                                                                .color(egui::Color32::from_rgb(160, 160, 170))
+                                                        )
+                                                        .sense(egui::Sense::click())
+                                                    );
+                                                    if arrow_resp.clicked() {
                                                         *pending_toggle = Some(key.clone());
                                                     }
                                                 } else {
-                                                    // Leaf node — no arrow, just indent to align
-                                                    ui.add_space(18.0);
+                                                    // Leaf node — small dot for alignment
+                                                    ui.add_space(12.0);
                                                 }
 
-                                                // Visibility toggle (eye icon) — only for leaf instances
+                                                // Visibility toggle (eye) — compact, right next to the arrow
                                                 if let Some(idx) = inst_idx {
-                                                    let eye = if is_hid { "🚫" } else { "👁" };
-                                                    if ui.small_button(eye).on_hover_text("Toggle visibility").clicked() {
+                                                    let eye = if is_hid { "○" } else { "●" };
+                                                    let eye_color = if is_hid {
+                                                        egui::Color32::from_rgb(120, 120, 120)
+                                                    } else {
+                                                        egui::Color32::from_rgb(100, 180, 100)
+                                                    };
+                                                    let eye_resp = ui.add(
+                                                        egui::Label::new(
+                                                            egui::RichText::new(eye)
+                                                                .size(10.0)
+                                                                .color(eye_color)
+                                                        )
+                                                        .sense(egui::Sense::click())
+                                                    );
+                                                    if eye_resp.clicked() {
                                                         *pending_vis = Some(idx);
                                                     }
-                                                } else {
-                                                    ui.add_space(22.0); // align assembly nodes
+                                                    eye_resp.on_hover_text("Toggle visibility");
                                                 }
 
-                                                // Isolate button (★) — only for leaf instances
+                                                // Isolate button (★) — compact
                                                 if let Some(idx) = inst_idx {
-                                                    if ui.small_button("★").on_hover_text("Isolate: show only this element").clicked() {
+                                                    let iso_resp = ui.add(
+                                                        egui::Label::new(
+                                                            egui::RichText::new("★")
+                                                                .size(10.0)
+                                                                .color(egui::Color32::from_rgb(200, 180, 80))
+                                                        )
+                                                        .sense(egui::Sense::click())
+                                                    );
+                                                    if iso_resp.clicked() {
                                                         *pending_isolate = Some(idx);
                                                     }
-                                                } else {
-                                                    ui.add_space(22.0);
+                                                    iso_resp.on_hover_text("Isolate: show only this");
                                                 }
 
-                                                // Click-to-select label
+                                                // Click-to-select label — tight spacing, no extra gap
                                                 let txt = if is_hid {
                                                     egui::RichText::new(name.as_str())
+                                                        .size(11.0)
                                                         .color(egui::Color32::from_rgb(120, 120, 120))
                                                         .strikethrough()
                                                 } else if is_sel {
                                                     egui::RichText::new(name.as_str())
+                                                        .size(11.0)
                                                         .color(egui::Color32::from_rgb(137, 180, 250))
                                                         .strong()
                                                 } else {
                                                     egui::RichText::new(name.as_str())
+                                                        .size(11.0)
                                                 };
                                                 if ui.selectable_label(is_sel, txt).clicked() {
                                                     if let Some(idx) = inst_idx {
@@ -8586,13 +8623,13 @@ impl eframe::App for ViewerApp {
                                             // Render children only if this node is open
                                             if is_open && has_children {
                                                 for c in &node.children {
-                                                    render_tree_node(ui, c, sel, hidden, filter, active, open_nodes, pending_select, pending_vis, pending_isolate, pending_toggle);
+                                                    render_tree_node(ui, c, sel, hidden, filter, active, depth + 1, open_nodes, pending_select, pending_vis, pending_isolate, pending_toggle);
                                                 }
                                             }
                                         }
                                         let fl = self.brepcad_tree_filter.to_lowercase();
                                         let fa = !fl.is_empty();
-                                        render_tree_node(ui, tree, selected_instance, &hidden_instances_clone, &fl, fa, &self.brepcad_tree_open_nodes, &mut pending_select, &mut pending_visibility_toggle, &mut pending_isolate, &mut pending_toggle_node);
+                                        render_tree_node(ui, tree, selected_instance, &hidden_instances_clone, &fl, fa, 0, &self.brepcad_tree_open_nodes, &mut pending_select, &mut pending_visibility_toggle, &mut pending_isolate, &mut pending_toggle_node);
 
                                         // Fix #4: Face list for current solid
                                         if let Some(idx) = selected_instance {
