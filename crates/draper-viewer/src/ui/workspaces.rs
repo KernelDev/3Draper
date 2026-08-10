@@ -8,12 +8,131 @@
 use std::collections::HashMap;
 
 // ============================================================
-// 9.1. Visual Programming (Node Graph)
+// 9.1. Visual Programming (Node Graph) — Grasshopper-Inspired
 // ============================================================
+
+/// Typed data that flows between VP nodes.
+/// Each port on a node carries one of these types.
+#[derive(Clone, Debug)]
+pub enum VpData {
+    /// 3D solid geometry (box, sphere, boolean result, etc.)
+    Geometry(Box<draper_topology::Solid>),
+    /// A 2D/3D polyline curve
+    Curve(Vec<draper_geometry::Point3d>),
+    /// Floating-point number
+    Number(f64),
+    /// Whole number
+    Integer(i64),
+    /// True/False
+    Boolean(bool),
+    /// 3D point [x, y, z]
+    Point([f64; 3]),
+    /// 3D vector [x, y, z]
+    Vector([f64; 3]),
+    /// Text string
+    String(String),
+    /// List of items (data tree leaf)
+    List(Vec<VpData>),
+    /// No data yet (not computed)
+    Empty,
+}
+
+/// Port data type — used for type-checking connections.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PortType {
+    Geometry,
+    Curve,
+    Number,
+    Integer,
+    Boolean,
+    Point,
+    Vector,
+    String,
+    List,
+    Any, // Accepts any type (for Bake, Panel, etc.)
+}
+
+impl PortType {
+    /// Check if this port type can accept data of another type.
+    pub fn accepts(&self, other: &PortType) -> bool {
+        if *self == PortType::Any || *other == PortType::Any { return true; }
+        if *self == *other { return true; }
+        // Number accepts Integer (promotion)
+        if *self == PortType::Number && *other == PortType::Integer { return true; }
+        // Integer accepts Number (truncation)
+        if *self == PortType::Integer && *other == PortType::Number { return true; }
+        // Point accepts Vector and vice versa
+        if *self == PortType::Point && *other == PortType::Vector { return true; }
+        if *self == PortType::Vector && *other == PortType::Point { return true; }
+        // List accepts anything (wrap in single-element list)
+        if *self == PortType::List { return true; }
+        // Any type accepts List (take first element)
+        if *other == PortType::List { return true; }
+        false
+    }
+
+    /// Display color for this port type (for visual identification).
+    pub fn color(&self) -> egui::Color32 {
+        match self {
+            PortType::Geometry => egui::Color32::from_rgb(0x89, 0xb4, 0xfa), // blue
+            PortType::Curve => egui::Color32::from_rgb(0xa6, 0xe3, 0xa1),    // green
+            PortType::Number => egui::Color32::from_rgb(0xf9, 0xe2, 0xaf),   // yellow
+            PortType::Integer => egui::Color32::from_rgb(0xeb, 0xa0, 0xac),   // red
+            PortType::Boolean => egui::Color32::from_rgb(0xf5, 0xc2, 0xe7),  // pink
+            PortType::Point => egui::Color32::from_rgb(0xfab3, 0x87, 0x95),  // peach
+            PortType::Vector => egui::Color32::from_rgb(0x94, 0xe2, 0xd5),   // teal
+            PortType::String => egui::Color32::from_rgb(0xba, 0xc2, 0xde),   // lavender
+            PortType::List => egui::Color32::from_rgb(0xcb, 0xa6, 0xf7),     // purple
+            PortType::Any => egui::Color32::from_rgb(0x6c, 0x70, 0x86),      // gray
+        }
+    }
+}
+
+/// Port descriptor — name + type.
+#[derive(Clone, Debug)]
+pub struct PortDesc {
+    pub name: &'static str,
+    pub port_type: PortType,
+}
 
 /// Node type for the visual programming editor.
 #[derive(Clone, Debug)]
 pub enum NodeType {
+    // ─── Params (Input Parameters) ───
+    /// Number slider — draggable float value.
+    NumberSlider { value: f64, min: f64, max: f64 },
+    /// Integer input.
+    IntegerInput { value: i64 },
+    /// Boolean toggle.
+    BooleanToggle { value: bool },
+    /// 3D Point parameter.
+    PointInput { x: f64, y: f64, z: f64 },
+    /// 3D Vector parameter.
+    VectorInput { x: f64, y: f64, z: f64 },
+    /// Text panel — displays data.
+    Panel,
+
+    // ─── Maths ───
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Sin,
+    Cos,
+    Abs,
+    Sqrt,
+    Min,
+    Max,
+    Average,
+    Expression { expr: String },
+
+    // ─── Sets (List Operations) ───
+    Series { start: f64, step: f64, count: u32 },
+    ListLength,
+    ListItem,
+    Reverse,
+
+    // ─── Primitives (Geometry Creation) ───
     /// Box primitive.
     Box { width: f64, height: f64, depth: f64 },
     /// Sphere primitive.
@@ -24,30 +143,35 @@ pub enum NodeType {
     Cone { bottom_radius: f64, top_radius: f64, height: f64 },
     /// Torus primitive.
     Torus { major_radius: f64, minor_radius: f64 },
-    /// Fillet operation.
-    Fillet { radius: f64, edges: String },
-    /// Chamfer operation.
-    Chamfer { distance: f64, edges: String },
-    /// Linear array.
-    LinearArray { count: u32, spacing: f64, direction: [f64; 3] },
-    /// Circular array.
-    CircularArray { count: u32, axis: [f64; 3], angle: f64 },
-    /// Mirror.
-    Mirror { plane: String },
+
+    // ─── Curve ───
+    Line,
+    Circle { radius: f64 },
+    DivideCurve { count: u32 },
+
+    // ─── Transform ───
+    Move,
+    Rotate { angle_deg: f64 },
+    Scale { factor: f64 },
+    Mirror,
+    LinearArray { count: u32, spacing: f64 },
+    CircularArray { count: u32, angle: f64 },
+
+    // ─── Intersect (Boolean) ───
     /// Boolean union.
     BooleanUnion,
     /// Boolean subtract.
     BooleanSubtract,
     /// Boolean intersect.
     BooleanIntersect,
-    /// Python script node.
-    PythonScript { code: String },
-    /// Math expression.
-    MathExpression { expr: String },
-    /// Extract faces.
-    ExtractFaces,
-    /// Extract edges.
-    ExtractEdges,
+
+    // ─── Modify ───
+    /// Fillet operation.
+    Fillet { radius: f64 },
+    /// Chamfer operation.
+    Chamfer { distance: f64 },
+
+    // ─── Output ───
     /// Bake to document.
     BakeToDoc,
 }
@@ -55,83 +179,236 @@ pub enum NodeType {
 impl NodeType {
     pub fn label(&self) -> &'static str {
         match self {
+            // Params
+            NodeType::NumberSlider { .. } => "Number",
+            NodeType::IntegerInput { .. } => "Integer",
+            NodeType::BooleanToggle { .. } => "Boolean",
+            NodeType::PointInput { .. } => "Point",
+            NodeType::VectorInput { .. } => "Vector",
+            NodeType::Panel => "Panel",
+            // Maths
+            NodeType::Add => "Add (+)",
+            NodeType::Subtract => "Subtract (-)",
+            NodeType::Multiply => "Multiply (*)",
+            NodeType::Divide => "Divide (/)",
+            NodeType::Sin => "Sin",
+            NodeType::Cos => "Cos",
+            NodeType::Abs => "Abs",
+            NodeType::Sqrt => "Sqrt",
+            NodeType::Min => "Min",
+            NodeType::Max => "Max",
+            NodeType::Average => "Average",
+            NodeType::Expression { .. } => "Expression",
+            // Sets
+            NodeType::Series { .. } => "Series",
+            NodeType::ListLength => "List Length",
+            NodeType::ListItem => "List Item",
+            NodeType::Reverse => "Reverse",
+            // Primitives
             NodeType::Box { .. } => "Box",
             NodeType::Sphere { .. } => "Sphere",
             NodeType::Cylinder { .. } => "Cylinder",
             NodeType::Cone { .. } => "Cone",
             NodeType::Torus { .. } => "Torus",
-            NodeType::Fillet { .. } => "Fillet",
-            NodeType::Chamfer { .. } => "Chamfer",
+            // Curve
+            NodeType::Line => "Line",
+            NodeType::Circle { .. } => "Circle",
+            NodeType::DivideCurve { .. } => "Divide Curve",
+            // Transform
+            NodeType::Move => "Move",
+            NodeType::Rotate { .. } => "Rotate",
+            NodeType::Scale { .. } => "Scale",
+            NodeType::Mirror => "Mirror",
             NodeType::LinearArray { .. } => "Linear Array",
             NodeType::CircularArray { .. } => "Circular Array",
-            NodeType::Mirror { .. } => "Mirror",
+            // Boolean
             NodeType::BooleanUnion => "Union",
             NodeType::BooleanSubtract => "Subtract",
             NodeType::BooleanIntersect => "Intersect",
-            NodeType::PythonScript { .. } => "Python Script",
-            NodeType::MathExpression { .. } => "Math Expression",
-            NodeType::ExtractFaces => "Extract Faces",
-            NodeType::ExtractEdges => "Extract Edges",
+            // Modify
+            NodeType::Fillet { .. } => "Fillet",
+            NodeType::Chamfer { .. } => "Chamfer",
+            // Output
             NodeType::BakeToDoc => "Bake to Doc",
         }
     }
 
     pub fn category(&self) -> &'static str {
         match self {
+            NodeType::NumberSlider { .. } | NodeType::IntegerInput { .. } |
+            NodeType::BooleanToggle { .. } | NodeType::PointInput { .. } |
+            NodeType::VectorInput { .. } | NodeType::Panel => "Params",
+            NodeType::Add | NodeType::Subtract | NodeType::Multiply | NodeType::Divide |
+            NodeType::Sin | NodeType::Cos | NodeType::Abs | NodeType::Sqrt |
+            NodeType::Min | NodeType::Max | NodeType::Average | NodeType::Expression { .. } => "Maths",
+            NodeType::Series { .. } | NodeType::ListLength | NodeType::ListItem | NodeType::Reverse => "Sets",
             NodeType::Box { .. } | NodeType::Sphere { .. } | NodeType::Cylinder { .. } |
             NodeType::Cone { .. } | NodeType::Torus { .. } => "Primitives",
-            NodeType::Fillet { .. } | NodeType::Chamfer { .. } | NodeType::LinearArray { .. } |
-            NodeType::CircularArray { .. } | NodeType::Mirror { .. } => "Modify",
+            NodeType::Line | NodeType::Circle { .. } | NodeType::DivideCurve { .. } => "Curve",
+            NodeType::Move | NodeType::Rotate { .. } | NodeType::Scale { .. } |
+            NodeType::Mirror | NodeType::LinearArray { .. } | NodeType::CircularArray { .. } => "Transform",
             NodeType::BooleanUnion | NodeType::BooleanSubtract | NodeType::BooleanIntersect => "Boolean",
-            NodeType::PythonScript { .. } | NodeType::MathExpression { .. } => "Script",
-            NodeType::ExtractFaces | NodeType::ExtractEdges => "Topology",
+            NodeType::Fillet { .. } | NodeType::Chamfer { .. } => "Modify",
             NodeType::BakeToDoc => "Output",
         }
     }
 
     pub fn icon(&self) -> &'static str {
         match self {
-            NodeType::Box { .. } => "▭",
-            NodeType::Sphere { .. } => "◯",
-            NodeType::Cylinder { .. } => "⬭",
-            NodeType::Cone { .. } => "△",
-            NodeType::Torus { .. } => "◎",
-            NodeType::Fillet { .. } => "◜",
-            NodeType::Chamfer { .. } => "◹",
-            NodeType::LinearArray { .. } => "⫼",
-            NodeType::CircularArray { .. } => "⊙",
-            NodeType::Mirror { .. } => "⇋",
-            NodeType::BooleanUnion => "∪",
-            NodeType::BooleanSubtract => "∖",
-            NodeType::BooleanIntersect => "∩",
-            NodeType::PythonScript { .. } => "🐍",
-            NodeType::MathExpression { .. } => "f(x)",
-            NodeType::ExtractFaces => "🔷",
-            NodeType::ExtractEdges => "📏",
-            NodeType::BakeToDoc => "🎯",
+            NodeType::NumberSlider { .. } => "#",
+            NodeType::IntegerInput { .. } => "I",
+            NodeType::BooleanToggle { .. } => "T/F",
+            NodeType::PointInput { .. } => "P",
+            NodeType::VectorInput { .. } => "V",
+            NodeType::Panel => "[]",
+            NodeType::Add => "+",
+            NodeType::Subtract => "-",
+            NodeType::Multiply => "*",
+            NodeType::Divide => "/",
+            NodeType::Sin | NodeType::Cos | NodeType::Abs | NodeType::Sqrt => "f(x)",
+            NodeType::Min | NodeType::Max | NodeType::Average => "min",
+            NodeType::Expression { .. } => "expr",
+            NodeType::Series { .. } => "S",
+            NodeType::ListLength => "len",
+            NodeType::ListItem => "[]i",
+            NodeType::Reverse => "rev",
+            NodeType::Box { .. } => "B",
+            NodeType::Sphere { .. } => "S",
+            NodeType::Cylinder { .. } => "C",
+            NodeType::Cone { .. } => "Co",
+            NodeType::Torus { .. } => "T",
+            NodeType::Line => "L",
+            NodeType::Circle { .. } => "O",
+            NodeType::DivideCurve { .. } => "Div",
+            NodeType::Move => "Mv",
+            NodeType::Rotate { .. } => "Rot",
+            NodeType::Scale { .. } => "Sc",
+            NodeType::Mirror => "Mir",
+            NodeType::LinearArray { .. } => "Arr",
+            NodeType::CircularArray { .. } => "Cir",
+            NodeType::BooleanUnion => "U",
+            NodeType::BooleanSubtract => "Sub",
+            NodeType::BooleanIntersect => "Int",
+            NodeType::Fillet { .. } => "Fil",
+            NodeType::Chamfer { .. } => "Chm",
+            NodeType::BakeToDoc => "Bake",
+        }
+    }
+
+    /// Input port descriptors (name + type) for this node.
+    pub fn input_ports(&self) -> Vec<PortDesc> {
+        match self {
+            // Params — no inputs
+            NodeType::NumberSlider { .. } | NodeType::IntegerInput { .. } |
+            NodeType::BooleanToggle { .. } | NodeType::PointInput { .. } |
+            NodeType::VectorInput { .. } | NodeType::Series { .. } |
+            NodeType::Box { .. } | NodeType::Sphere { .. } | NodeType::Cylinder { .. } |
+            NodeType::Cone { .. } | NodeType::Torus { .. } | NodeType::Circle { .. } => vec![],
+            // Panel — accepts any
+            NodeType::Panel => vec![PortDesc { name: "D", port_type: PortType::Any }],
+            // Maths — 2 Number inputs
+            NodeType::Add | NodeType::Subtract | NodeType::Multiply | NodeType::Divide |
+            NodeType::Min | NodeType::Max => vec![
+                PortDesc { name: "A", port_type: PortType::Number },
+                PortDesc { name: "B", port_type: PortType::Number },
+            ],
+            // Single-input maths
+            NodeType::Sin | NodeType::Cos | NodeType::Abs | NodeType::Sqrt => vec![
+                PortDesc { name: "X", port_type: PortType::Number },
+            ],
+            NodeType::Average => vec![PortDesc { name: "L", port_type: PortType::List }],
+            NodeType::Expression { .. } => vec![PortDesc { name: "X", port_type: PortType::Number }],
+            // Sets
+            NodeType::ListLength => vec![PortDesc { name: "L", port_type: PortType::List }],
+            NodeType::ListItem => vec![
+                PortDesc { name: "L", port_type: PortType::List },
+                PortDesc { name: "I", port_type: PortType::Integer },
+            ],
+            NodeType::Reverse => vec![PortDesc { name: "L", port_type: PortType::List }],
+            // Curve
+            NodeType::Line => vec![
+                PortDesc { name: "A", port_type: PortType::Point },
+                PortDesc { name: "B", port_type: PortType::Point },
+            ],
+            NodeType::DivideCurve { .. } => vec![
+                PortDesc { name: "C", port_type: PortType::Curve },
+                PortDesc { name: "N", port_type: PortType::Integer },
+            ],
+            // Transform — 1 Geometry + optional Vector/Number
+            NodeType::Move => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+                PortDesc { name: "V", port_type: PortType::Vector },
+            ],
+            NodeType::Rotate { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+                PortDesc { name: "A", port_type: PortType::Number },
+            ],
+            NodeType::Scale { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+                PortDesc { name: "F", port_type: PortType::Number },
+            ],
+            NodeType::Mirror => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+            ],
+            NodeType::LinearArray { .. } | NodeType::CircularArray { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+            ],
+            // Boolean — 2 Geometry inputs
+            NodeType::BooleanUnion | NodeType::BooleanSubtract | NodeType::BooleanIntersect => vec![
+                PortDesc { name: "A", port_type: PortType::Geometry },
+                PortDesc { name: "B", port_type: PortType::Geometry },
+            ],
+            // Modify — 1 Geometry
+            NodeType::Fillet { .. } | NodeType::Chamfer { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+            ],
+            // Output
+            NodeType::BakeToDoc => vec![PortDesc { name: "G", port_type: PortType::Geometry }],
+        }
+    }
+
+    /// Output port descriptors for this node.
+    pub fn output_ports(&self) -> Vec<PortDesc> {
+        match self {
+            NodeType::NumberSlider { .. } => vec![PortDesc { name: "V", port_type: PortType::Number }],
+            NodeType::IntegerInput { .. } => vec![PortDesc { name: "V", port_type: PortType::Integer }],
+            NodeType::BooleanToggle { .. } => vec![PortDesc { name: "V", port_type: PortType::Boolean }],
+            NodeType::PointInput { .. } => vec![PortDesc { name: "P", port_type: PortType::Point }],
+            NodeType::VectorInput { .. } => vec![PortDesc { name: "V", port_type: PortType::Vector }],
+            NodeType::Panel | NodeType::BakeToDoc => vec![],
+            NodeType::Series { .. } => vec![PortDesc { name: "L", port_type: PortType::List }],
+            NodeType::ListLength => vec![PortDesc { name: "N", port_type: PortType::Integer }],
+            NodeType::ListItem => vec![PortDesc { name: "I", port_type: PortType::Any }],
+            NodeType::Reverse => vec![PortDesc { name: "L", port_type: PortType::List }],
+            // Math outputs are Number
+            NodeType::Add | NodeType::Subtract | NodeType::Multiply | NodeType::Divide |
+            NodeType::Sin | NodeType::Cos | NodeType::Abs | NodeType::Sqrt |
+            NodeType::Min | NodeType::Max | NodeType::Average | NodeType::Expression { .. } => vec![
+                PortDesc { name: "R", port_type: PortType::Number },
+            ],
+            // Geometry outputs
+            NodeType::Box { .. } | NodeType::Sphere { .. } | NodeType::Cylinder { .. } |
+            NodeType::Cone { .. } | NodeType::Torus { .. } |
+            NodeType::Move | NodeType::Rotate { .. } | NodeType::Scale { .. } |
+            NodeType::Mirror | NodeType::LinearArray { .. } | NodeType::CircularArray { .. } |
+            NodeType::BooleanUnion | NodeType::BooleanSubtract | NodeType::BooleanIntersect |
+            NodeType::Fillet { .. } | NodeType::Chamfer { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+            ],
+            // Curve outputs
+            NodeType::Line | NodeType::Circle { .. } => vec![PortDesc { name: "C", port_type: PortType::Curve }],
+            NodeType::DivideCurve { .. } => vec![PortDesc { name: "P", port_type: PortType::List }],
         }
     }
 
     /// Number of input ports.
     pub fn input_count(&self) -> usize {
-        match self {
-            NodeType::Box { .. } | NodeType::Sphere { .. } | NodeType::Cylinder { .. } |
-            NodeType::Cone { .. } | NodeType::Torus { .. } => 0,
-            NodeType::Fillet { .. } | NodeType::Chamfer { .. } |
-            NodeType::LinearArray { .. } | NodeType::CircularArray { .. } |
-            NodeType::Mirror { .. } | NodeType::ExtractFaces | NodeType::ExtractEdges => 1,
-            NodeType::BooleanUnion | NodeType::BooleanSubtract | NodeType::BooleanIntersect => 2,
-            NodeType::PythonScript { .. } | NodeType::MathExpression { .. } => 1,
-            NodeType::BakeToDoc => 1,
-        }
+        self.input_ports().len()
     }
 
     /// Number of output ports.
     pub fn output_count(&self) -> usize {
-        match self {
-            NodeType::BakeToDoc => 0,
-            _ => 1,
-        }
+        self.output_ports().len()
     }
 }
 

@@ -6828,8 +6828,77 @@ impl eframe::App for ViewerApp {
 
                             // Categories with nodes (matching mockup 03 layout)
                             egui::ScrollArea::vertical().show(ui, |ui| {
-                                // Primitives
-                                ui.label(egui::RichText::new("▼ Primitives").size(11.0).color(egui::Color32::from_rgb(0x89, 0xb4, 0xfa)).strong());
+                                let filter = self.brepcad_tree_filter.to_lowercase();
+                                let add_node = |graph: &mut crate::ui::workspaces::VpGraph, nt: crate::ui::workspaces::NodeType| {
+                                    let n = graph.node_count();
+                                    graph.add_node(nt, 80.0 + (n as f32 % 3.0) * 220.0, 80.0 + (n as f32 / 3.0).floor() * 160.0)
+                                };
+
+                                // Params
+                                ui.label(egui::RichText::new("Params").size(11.0).color(egui::Color32::from_rgb(0xa6, 0xe3, 0xa1)).strong());
+                                let params = [
+                                    ("Number Slider", crate::ui::workspaces::NodeType::NumberSlider { value: 50.0, min: 0.0, max: 200.0 }),
+                                    ("Integer", crate::ui::workspaces::NodeType::IntegerInput { value: 5 }),
+                                    ("Boolean", crate::ui::workspaces::NodeType::BooleanToggle { value: true }),
+                                    ("Point", crate::ui::workspaces::NodeType::PointInput { x: 0.0, y: 0.0, z: 0.0 }),
+                                    ("Vector", crate::ui::workspaces::NodeType::VectorInput { x: 0.0, y: 0.0, z: 1.0 }),
+                                    ("Panel", crate::ui::workspaces::NodeType::Panel),
+                                ];
+                                for (label, nt) in &params {
+                                    if filter.is_empty() || label.to_lowercase().contains(&filter) {
+                                        if ui.add(egui::Button::new(*label).min_size(egui::vec2(180.0, 22.0))).clicked() {
+                                            let id = add_node(&mut self.brepcad_vp_graph, nt.clone());
+                                            self.brepcad_status_msg = format!("VP: added {} (id={})", label, id);
+                                            self.brepcad_vp_dirty = true;
+                                        }
+                                    }
+                                }
+
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new("Maths").size(11.0).color(egui::Color32::from_rgb(0xf9, 0xe2, 0xaf)).strong());
+                                let maths = [
+                                    ("Add", crate::ui::workspaces::NodeType::Add),
+                                    ("Subtract", crate::ui::workspaces::NodeType::Subtract),
+                                    ("Multiply", crate::ui::workspaces::NodeType::Multiply),
+                                    ("Divide", crate::ui::workspaces::NodeType::Divide),
+                                    ("Sin", crate::ui::workspaces::NodeType::Sin),
+                                    ("Cos", crate::ui::workspaces::NodeType::Cos),
+                                    ("Abs", crate::ui::workspaces::NodeType::Abs),
+                                    ("Sqrt", crate::ui::workspaces::NodeType::Sqrt),
+                                    ("Min", crate::ui::workspaces::NodeType::Min),
+                                    ("Max", crate::ui::workspaces::NodeType::Max),
+                                    ("Average", crate::ui::workspaces::NodeType::Average),
+                                ];
+                                for (label, nt) in &maths {
+                                    if filter.is_empty() || label.to_lowercase().contains(&filter) {
+                                        if ui.add(egui::Button::new(*label).min_size(egui::vec2(180.0, 22.0))).clicked() {
+                                            let id = add_node(&mut self.brepcad_vp_graph, nt.clone());
+                                            self.brepcad_status_msg = format!("VP: added {} (id={})", label, id);
+                                            self.brepcad_vp_dirty = true;
+                                        }
+                                    }
+                                }
+
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new("Sets").size(11.0).color(egui::Color32::from_rgb(0xcb, 0xa6, 0xf7)).strong());
+                                let sets = [
+                                    ("Series", crate::ui::workspaces::NodeType::Series { start: 0.0, step: 10.0, count: 10 }),
+                                    ("List Length", crate::ui::workspaces::NodeType::ListLength),
+                                    ("List Item", crate::ui::workspaces::NodeType::ListItem),
+                                    ("Reverse", crate::ui::workspaces::NodeType::Reverse),
+                                ];
+                                for (label, nt) in &sets {
+                                    if filter.is_empty() || label.to_lowercase().contains(&filter) {
+                                        if ui.add(egui::Button::new(*label).min_size(egui::vec2(180.0, 22.0))).clicked() {
+                                            let id = add_node(&mut self.brepcad_vp_graph, nt.clone());
+                                            self.brepcad_status_msg = format!("VP: added {} (id={})", label, id);
+                                            self.brepcad_vp_dirty = true;
+                                        }
+                                    }
+                                }
+
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new("Primitives").size(11.0).color(egui::Color32::from_rgb(0x89, 0xb4, 0xfa)).strong());
                                 let prims = [
                                     ("Box", crate::ui::workspaces::NodeType::Box { width: 100.0, height: 100.0, depth: 100.0 }),
                                     ("Sphere", crate::ui::workspaces::NodeType::Sphere { radius: 50.0 }),
@@ -6838,60 +6907,91 @@ impl eframe::App for ViewerApp {
                                     ("Torus", crate::ui::workspaces::NodeType::Torus { major_radius: 30.0, minor_radius: 8.0 }),
                                 ];
                                 for (label, nt) in &prims {
-                                    let filtered = !self.brepcad_tree_filter.is_empty()
-                                        && !label.to_lowercase().contains(&self.brepcad_tree_filter.to_lowercase());
-                                    if !filtered && ui.add(egui::Button::new(*label).min_size(egui::vec2(180.0, 22.0))).clicked() {
-                                        let id = self.brepcad_vp_graph.add_node(nt.clone(),
-                                            80.0 + (self.brepcad_vp_graph.node_count() as f32 % 3.0) * 200.0,
-                                            120.0 + (self.brepcad_vp_graph.node_count() as f32 / 3.0).floor() * 140.0);
-                                        self.brepcad_status_msg = format!("VP: added {} (id={})", label, id);
+                                    if filter.is_empty() || label.to_lowercase().contains(&filter) {
+                                        if ui.add(egui::Button::new(*label).min_size(egui::vec2(180.0, 22.0))).clicked() {
+                                            let id = add_node(&mut self.brepcad_vp_graph, nt.clone());
+                                            self.brepcad_status_msg = format!("VP: added {} (id={})", label, id);
+                                            self.brepcad_vp_dirty = true;
+                                        }
                                     }
                                 }
 
                                 ui.add_space(4.0);
-                                ui.label(egui::RichText::new("▼ Modify").size(11.0).color(egui::Color32::from_rgb(0xf9, 0xe2, 0xaf)).strong());
-                                let mods = [
-                                    ("Fillet", crate::ui::workspaces::NodeType::Fillet { radius: 5.0, edges: "all".to_string() }),
-                                    ("Chamfer", crate::ui::workspaces::NodeType::Chamfer { distance: 2.0, edges: "all".to_string() }),
-                                    ("Linear Array", crate::ui::workspaces::NodeType::LinearArray { count: 3, spacing: 120.0, direction: [1.0, 0.0, 0.0] }),
-                                    ("Circular Array", crate::ui::workspaces::NodeType::CircularArray { count: 6, axis: [0.0, 0.0, 1.0], angle: 360.0 }),
-                                    ("Mirror", crate::ui::workspaces::NodeType::Mirror { plane: "YZ".to_string() }),
+                                ui.label(egui::RichText::new("Curve").size(11.0).color(egui::Color32::from_rgb(0xa6, 0xe3, 0xa1)).strong());
+                                let curves = [
+                                    ("Line", crate::ui::workspaces::NodeType::Line),
+                                    ("Circle", crate::ui::workspaces::NodeType::Circle { radius: 50.0 }),
+                                    ("Divide Curve", crate::ui::workspaces::NodeType::DivideCurve { count: 10 }),
                                 ];
-                                for (label, nt) in &mods {
-                                    let filtered = !self.brepcad_tree_filter.is_empty()
-                                        && !label.to_lowercase().contains(&self.brepcad_tree_filter.to_lowercase());
-                                    if !filtered && ui.add(egui::Button::new(*label).min_size(egui::vec2(180.0, 22.0))).clicked() {
-                                        let id = self.brepcad_vp_graph.add_node(nt.clone(),
-                                            80.0 + (self.brepcad_vp_graph.node_count() as f32 % 3.0) * 200.0,
-                                            120.0 + (self.brepcad_vp_graph.node_count() as f32 / 3.0).floor() * 140.0);
-                                        self.brepcad_status_msg = format!("VP: added {} (id={})", label, id);
+                                for (label, nt) in &curves {
+                                    if filter.is_empty() || label.to_lowercase().contains(&filter) {
+                                        if ui.add(egui::Button::new(*label).min_size(egui::vec2(180.0, 22.0))).clicked() {
+                                            let id = add_node(&mut self.brepcad_vp_graph, nt.clone());
+                                            self.brepcad_status_msg = format!("VP: added {} (id={})", label, id);
+                                            self.brepcad_vp_dirty = true;
+                                        }
                                     }
                                 }
 
                                 ui.add_space(4.0);
-                                ui.label(egui::RichText::new("▼ Boolean").size(11.0).color(egui::Color32::from_rgb(0xcb, 0xa6, 0xf7)).strong());
+                                ui.label(egui::RichText::new("Transform").size(11.0).color(egui::Color32::from_rgb(0xf9, 0xe2, 0xaf)).strong());
+                                let transforms = [
+                                    ("Move", crate::ui::workspaces::NodeType::Move),
+                                    ("Rotate", crate::ui::workspaces::NodeType::Rotate { angle_deg: 45.0 }),
+                                    ("Scale", crate::ui::workspaces::NodeType::Scale { factor: 2.0 }),
+                                    ("Mirror", crate::ui::workspaces::NodeType::Mirror),
+                                    ("Linear Array", crate::ui::workspaces::NodeType::LinearArray { count: 3, spacing: 120.0 }),
+                                    ("Circular Array", crate::ui::workspaces::NodeType::CircularArray { count: 6, angle: 360.0 }),
+                                ];
+                                for (label, nt) in &transforms {
+                                    if filter.is_empty() || label.to_lowercase().contains(&filter) {
+                                        if ui.add(egui::Button::new(*label).min_size(egui::vec2(180.0, 22.0))).clicked() {
+                                            let id = add_node(&mut self.brepcad_vp_graph, nt.clone());
+                                            self.brepcad_status_msg = format!("VP: added {} (id={})", label, id);
+                                            self.brepcad_vp_dirty = true;
+                                        }
+                                    }
+                                }
+
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new("Boolean").size(11.0).color(egui::Color32::from_rgb(0xcb, 0xa6, 0xf7)).strong());
                                 let bools = [
                                     ("Union", crate::ui::workspaces::NodeType::BooleanUnion),
                                     ("Subtract", crate::ui::workspaces::NodeType::BooleanSubtract),
                                     ("Intersect", crate::ui::workspaces::NodeType::BooleanIntersect),
                                 ];
                                 for (label, nt) in &bools {
-                                    let filtered = !self.brepcad_tree_filter.is_empty()
-                                        && !label.to_lowercase().contains(&self.brepcad_tree_filter.to_lowercase());
-                                    if !filtered && ui.add(egui::Button::new(*label).min_size(egui::vec2(180.0, 22.0))).clicked() {
-                                        let id = self.brepcad_vp_graph.add_node(nt.clone(),
-                                            80.0 + (self.brepcad_vp_graph.node_count() as f32 % 3.0) * 200.0,
-                                            120.0 + (self.brepcad_vp_graph.node_count() as f32 / 3.0).floor() * 140.0);
-                                        self.brepcad_status_msg = format!("VP: added {} (id={})", label, id);
+                                    if filter.is_empty() || label.to_lowercase().contains(&filter) {
+                                        if ui.add(egui::Button::new(*label).min_size(egui::vec2(180.0, 22.0))).clicked() {
+                                            let id = add_node(&mut self.brepcad_vp_graph, nt.clone());
+                                            self.brepcad_status_msg = format!("VP: added {} (id={})", label, id);
+                                            self.brepcad_vp_dirty = true;
+                                        }
                                     }
                                 }
 
                                 ui.add_space(4.0);
-                                ui.label(egui::RichText::new("▼ Output").size(11.0).color(egui::Color32::from_rgb(0xf3, 0x8b, 0xa8)).strong());
+                                ui.label(egui::RichText::new("Modify").size(11.0).color(egui::Color32::from_rgb(0xf9, 0xe2, 0xaf)).strong());
+                                let modify = [
+                                    ("Fillet", crate::ui::workspaces::NodeType::Fillet { radius: 5.0 }),
+                                    ("Chamfer", crate::ui::workspaces::NodeType::Chamfer { distance: 2.0 }),
+                                ];
+                                for (label, nt) in &modify {
+                                    if filter.is_empty() || label.to_lowercase().contains(&filter) {
+                                        if ui.add(egui::Button::new(*label).min_size(egui::vec2(180.0, 22.0))).clicked() {
+                                            let id = add_node(&mut self.brepcad_vp_graph, nt.clone());
+                                            self.brepcad_status_msg = format!("VP: added {} (id={})", label, id);
+                                            self.brepcad_vp_dirty = true;
+                                        }
+                                    }
+                                }
+
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new("Output").size(11.0).color(egui::Color32::from_rgb(0xf3, 0x8b, 0xa8)).strong());
                                 if ui.add(egui::Button::new("Bake to Doc").min_size(egui::vec2(180.0, 22.0))).clicked() {
-                                    let id = self.brepcad_vp_graph.add_node(
-                                        crate::ui::workspaces::NodeType::BakeToDoc, 800.0, 400.0);
+                                    let id = add_node(&mut self.brepcad_vp_graph, crate::ui::workspaces::NodeType::BakeToDoc);
                                     self.brepcad_status_msg = format!("VP: added Bake to Doc (id={})", id);
+                                    self.brepcad_vp_dirty = true;
                                 }
 
                                 ui.add_space(8.0);
@@ -17616,102 +17716,273 @@ fn vp_node_colors(nt: &crate::ui::workspaces::NodeType) -> (egui::Color32, egui:
 /// VP helper: evaluate the graph and return the result solid.
 /// Walks connections topologically: primitives first, then modifiers.
 fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<draper_topology::Solid> {
-    use crate::ui::workspaces::NodeType;
+    use crate::ui::workspaces::{NodeType, VpData};
     use draper_topology::ShapeBuilder;
+    use draper_geometry::{Point3d, Vec3d, Transform};
 
-    let mut solids: std::collections::HashMap<u64, draper_topology::Solid> = std::collections::HashMap::new();
+    // Each node produces VpData (typed output).
+    let mut results: std::collections::HashMap<u64, VpData> = std::collections::HashMap::new();
 
+    // Resolve inputs for a node by following connections.
     fn resolve_inputs(
         node_id: u64,
         graph: &crate::ui::workspaces::VpGraph,
-        solids: &std::collections::HashMap<u64, draper_topology::Solid>,
-    ) -> Vec<draper_topology::Solid> {
+        results: &std::collections::HashMap<u64, VpData>,
+    ) -> Vec<VpData> {
         let mut inputs = Vec::new();
         for conn in &graph.connections {
             if conn.to_node == node_id {
-                if let Some(s) = solids.get(&conn.from_node) {
-                    inputs.push(s.clone());
+                if let Some(d) = results.get(&conn.from_node) {
+                    inputs.push(d.clone());
                 }
             }
         }
         inputs
     }
 
+    // Helper to extract Number from VpData
+    fn to_number(d: &VpData) -> Option<f64> {
+        match d {
+            VpData::Number(n) => Some(*n),
+            VpData::Integer(i) => Some(*i as f64),
+            _ => None,
+        }
+    }
+
+    // Helper to extract Solid from VpData
+    fn to_solid(d: &VpData) -> Option<draper_topology::Solid> {
+        match d {
+            VpData::Geometry(s) => Some((**s).clone()),
+            _ => None,
+        }
+    }
+
+    // Helper to extract Point from VpData
+    fn to_point(d: &VpData) -> Option<[f64; 3]> {
+        match d {
+            VpData::Point(p) => Some(*p),
+            VpData::Vector(v) => Some(*v),
+            _ => None,
+        }
+    }
+
     for _pass in 0..graph.nodes.len() + 1 {
         let mut changed = false;
         for node in &graph.nodes {
-            if solids.contains_key(&node.id) { continue; }
-            let inputs = resolve_inputs(node.id, graph, &solids);
+            if results.contains_key(&node.id) { continue; }
+            let inputs = resolve_inputs(node.id, graph, &results);
             match &node.node_type {
+                // ─── Params ───
+                NodeType::NumberSlider { value, .. } => {
+                    results.insert(node.id, VpData::Number(*value));
+                    changed = true;
+                }
+                NodeType::IntegerInput { value } => {
+                    results.insert(node.id, VpData::Integer(*value));
+                    changed = true;
+                }
+                NodeType::BooleanToggle { value } => {
+                    results.insert(node.id, VpData::Boolean(*value));
+                    changed = true;
+                }
+                NodeType::PointInput { x, y, z } => {
+                    results.insert(node.id, VpData::Point([*x, *y, *z]));
+                    changed = true;
+                }
+                NodeType::VectorInput { x, y, z } => {
+                    results.insert(node.id, VpData::Vector([*x, *y, *z]));
+                    changed = true;
+                }
+
+                // ─── Maths ───
+                NodeType::Add => {
+                    let a = inputs.get(0).and_then(to_number);
+                    let b = inputs.get(1).and_then(to_number);
+                    if let (Some(a), Some(b)) = (a, b) {
+                        results.insert(node.id, VpData::Number(a + b));
+                        changed = true;
+                    }
+                }
+                NodeType::Subtract => {
+                    let a = inputs.get(0).and_then(to_number);
+                    let b = inputs.get(1).and_then(to_number);
+                    if let (Some(a), Some(b)) = (a, b) {
+                        results.insert(node.id, VpData::Number(a - b));
+                        changed = true;
+                    }
+                }
+                NodeType::Multiply => {
+                    let a = inputs.get(0).and_then(to_number);
+                    let b = inputs.get(1).and_then(to_number);
+                    if let (Some(a), Some(b)) = (a, b) {
+                        results.insert(node.id, VpData::Number(a * b));
+                        changed = true;
+                    }
+                }
+                NodeType::Divide => {
+                    let a = inputs.get(0).and_then(to_number);
+                    let b = inputs.get(1).and_then(to_number);
+                    if let (Some(a), Some(b)) = (a, b) if b.abs() > 1e-10 {
+                        results.insert(node.id, VpData::Number(a / b));
+                        changed = true;
+                    }
+                }
+                NodeType::Sin => {
+                    if let Some(x) = inputs.get(0).and_then(to_number) {
+                        results.insert(node.id, VpData::Number(x.sin()));
+                        changed = true;
+                    }
+                }
+                NodeType::Cos => {
+                    if let Some(x) = inputs.get(0).and_then(to_number) {
+                        results.insert(node.id, VpData::Number(x.cos()));
+                        changed = true;
+                    }
+                }
+                NodeType::Abs => {
+                    if let Some(x) = inputs.get(0).and_then(to_number) {
+                        results.insert(node.id, VpData::Number(x.abs()));
+                        changed = true;
+                    }
+                }
+                NodeType::Sqrt => {
+                    if let Some(x) = inputs.get(0).and_then(to_number) {
+                        if *x >= 0.0 {
+                            results.insert(node.id, VpData::Number(x.sqrt()));
+                            changed = true;
+                        }
+                    }
+                }
+                NodeType::Min => {
+                    let a = inputs.get(0).and_then(to_number);
+                    let b = inputs.get(1).and_then(to_number);
+                    if let (Some(a), Some(b)) = (a, b) {
+                        results.insert(node.id, VpData::Number(a.min(b)));
+                        changed = true;
+                    }
+                }
+                NodeType::Max => {
+                    let a = inputs.get(0).and_then(to_number);
+                    let b = inputs.get(1).and_then(to_number);
+                    if let (Some(a), Some(b)) = (a, b) {
+                        results.insert(node.id, VpData::Number(a.max(b)));
+                        changed = true;
+                    }
+                }
+
+                // ─── Primitives ───
                 NodeType::Box { width, height, depth } => {
-                    solids.insert(node.id, ShapeBuilder::make_box(*width, *height, *depth));
+                    let w = inputs.get(0).and_then(to_number).unwrap_or(*width);
+                    let h = inputs.get(1).and_then(to_number).unwrap_or(*height);
+                    let d = inputs.get(2).and_then(to_number).unwrap_or(*depth);
+                    results.insert(node.id, VpData::Geometry(Box::new(ShapeBuilder::make_box(w, h, d))));
                     changed = true;
                 }
                 NodeType::Sphere { radius } => {
-                    solids.insert(node.id, ShapeBuilder::make_sphere(*radius));
+                    let r = inputs.get(0).and_then(to_number).unwrap_or(*radius);
+                    results.insert(node.id, VpData::Geometry(Box::new(ShapeBuilder::make_sphere(r))));
                     changed = true;
                 }
                 NodeType::Cylinder { radius, height } => {
-                    solids.insert(node.id, ShapeBuilder::make_cylinder(*radius, *height));
+                    let r = inputs.get(0).and_then(to_number).unwrap_or(*radius);
+                    let h = inputs.get(1).and_then(to_number).unwrap_or(*height);
+                    results.insert(node.id, VpData::Geometry(Box::new(ShapeBuilder::make_cylinder(r, h))));
                     changed = true;
                 }
                 NodeType::Cone { bottom_radius, height, .. } => {
-                    solids.insert(node.id, ShapeBuilder::make_cone(*bottom_radius, *height, 0.5));
+                    let r = inputs.get(0).and_then(to_number).unwrap_or(*bottom_radius);
+                    let h = inputs.get(1).and_then(to_number).unwrap_or(*height);
+                    results.insert(node.id, VpData::Geometry(Box::new(ShapeBuilder::make_cone(r, h, 0.5))));
                     changed = true;
                 }
                 NodeType::Torus { major_radius, minor_radius } => {
-                    solids.insert(node.id, ShapeBuilder::make_torus(*major_radius, *minor_radius));
+                    let r = inputs.get(0).and_then(to_number).unwrap_or(*major_radius);
+                    let ri = inputs.get(1).and_then(to_number).unwrap_or(*minor_radius);
+                    results.insert(node.id, VpData::Geometry(Box::new(ShapeBuilder::make_torus(r, ri))));
                     changed = true;
                 }
+
+                // ─── Transform ───
+                NodeType::Move => {
+                    if let Some(solid) = inputs.get(0).and_then(to_solid) {
+                        let v = inputs.get(1).and_then(|d| match d {
+                            VpData::Vector(v) => Some(*v),
+                            VpData::Point(p) => Some(*p),
+                            _ => None,
+                        }).unwrap_or([0.0, 0.0, 0.0]);
+                        let mut s = solid;
+                        ShapeBuilder::transform_solid(&mut s, &Transform::translation(v[0], v[1], v[2]));
+                        results.insert(node.id, VpData::Geometry(Box::new(s)));
+                        changed = true;
+                    }
+                }
+                NodeType::Scale { factor } => {
+                    if let Some(solid) = inputs.get(0).and_then(to_solid) {
+                        let f = inputs.get(1).and_then(to_number).unwrap_or(*factor);
+                        let mut s = solid;
+                        ShapeBuilder::transform_solid(&mut s, &Transform::scaling(f, f, f));
+                        results.insert(node.id, VpData::Geometry(Box::new(s)));
+                        changed = true;
+                    }
+                }
+
+                // ─── Boolean ───
                 NodeType::BooleanSubtract => {
-                    if inputs.len() >= 2 {
+                    let a = inputs.get(0).and_then(to_solid);
+                    let b = inputs.get(1).and_then(to_solid);
+                    if let (Some(a), Some(b)) = (a, b) {
                         let tol_ctx = draper_geometry::ToleranceContext::default();
-                        match draper_topology::boolean::boolean_subtract(&inputs[0], &inputs[1], &tol_ctx) {
-                            Ok(result) => { solids.insert(node.id, result); changed = true; }
-                            Err(_) => { solids.insert(node.id, inputs[0].clone()); changed = true; }
+                        match draper_topology::boolean::boolean_subtract(&a, &b, &tol_ctx) {
+                            Ok(result) => { results.insert(node.id, VpData::Geometry(Box::new(result))); changed = true; }
+                            Err(_) => { results.insert(node.id, VpData::Geometry(Box::new(a))); changed = true; }
                         }
                     }
                 }
                 NodeType::BooleanUnion | NodeType::BooleanIntersect => {
-                    if inputs.len() >= 2 {
-                        solids.insert(node.id, inputs[0].clone());
+                    if let Some(a) = inputs.get(0).and_then(to_solid) {
+                        results.insert(node.id, VpData::Geometry(Box::new(a)));
                         changed = true;
                     }
                 }
-                NodeType::Fillet { radius, .. } => {
-                    if inputs.len() >= 1 {
-                        match draper_topology::operations::fillet_edge(&inputs[0], 0, *radius) {
-                            Ok(result) => { solids.insert(node.id, result); changed = true; }
-                            Err(_) => { solids.insert(node.id, inputs[0].clone()); changed = true; }
+
+                // ─── Modify ───
+                NodeType::Fillet { radius } => {
+                    if let Some(solid) = inputs.get(0).and_then(to_solid) {
+                        match draper_topology::operations::fillet_edge(&solid, 0, *radius) {
+                            Ok(result) => { results.insert(node.id, VpData::Geometry(Box::new(result))); changed = true; }
+                            Err(_) => { results.insert(node.id, VpData::Geometry(Box::new(solid))); changed = true; }
                         }
                     }
                 }
-                NodeType::Chamfer { distance, .. } => {
-                    if inputs.len() >= 1 {
-                        match draper_topology::operations::chamfer_edge(&inputs[0], 0, *distance) {
-                            Ok(result) => { solids.insert(node.id, result); changed = true; }
-                            Err(_) => { solids.insert(node.id, inputs[0].clone()); changed = true; }
+                NodeType::Chamfer { distance } => {
+                    if let Some(solid) = inputs.get(0).and_then(to_solid) {
+                        match draper_topology::operations::chamfer_edge(&solid, 0, *distance) {
+                            Ok(result) => { results.insert(node.id, VpData::Geometry(Box::new(result))); changed = true; }
+                            Err(_) => { results.insert(node.id, VpData::Geometry(Box::new(solid))); changed = true; }
                         }
                     }
                 }
+
+                // ─── Output ───
                 NodeType::BakeToDoc => {
                     if let Some(last) = inputs.last() {
-                        solids.insert(node.id, last.clone());
+                        results.insert(node.id, last.clone());
                         changed = true;
                     }
                 }
+
                 _ => {}
             }
         }
         if !changed { break; }
     }
 
-    // Find result: prefer BakeToDoc, else last evaluated
+    // Find result: prefer BakeToDoc, else last Geometry
     graph.nodes.iter()
         .find(|n| matches!(n.node_type, NodeType::BakeToDoc))
-        .and_then(|n| solids.get(&n.id))
-        .or_else(|| graph.nodes.iter().rev().find_map(|n| solids.get(&n.id)))
-        .cloned()
+        .and_then(|n| results.get(&n.id))
+        .or_else(|| graph.nodes.iter().rev().find_map(|n| results.get(&n.id)))
+        .and_then(|d| to_solid(d))
 }
 
 /// VP helper: check if a node's field changed (for live preview).
