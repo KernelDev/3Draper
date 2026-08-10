@@ -796,6 +796,11 @@ pub struct ViewerApp {
     pub brepcad_browser_visible: bool,
     /// Properties panel visible (collapsible).
     pub brepcad_properties_visible: bool,
+    /// AI panel visible (right side, collapsible). Fix #1: was always shown
+    /// after CentralPanel, causing overlap. Now rendered before CentralPanel.
+    pub brepcad_ai_panel_visible: bool,
+    /// Collaboration panel visible (left side, collapsible).
+    pub brepcad_collab_panel_visible: bool,
     /// Left panel active tab (Tree/Layers/Selection).
     pub brepcad_left_tab: BrepcadLeftTab,
     /// Right panel active tab (Properties/Constraints/Dimensions/Material).
@@ -1526,6 +1531,8 @@ impl ViewerApp {
             brepcad_dock_state: crate::ui::dock::DockStateHolder::new(),
             brepcad_browser_visible: true,
             brepcad_properties_visible: true,
+            brepcad_ai_panel_visible: false,
+            brepcad_collab_panel_visible: false,
             brepcad_left_tab: BrepcadLeftTab::Tree,
             brepcad_right_tab: BrepcadRightTab::Properties,
             brepcad_tree_filter: String::new(),
@@ -8435,6 +8442,16 @@ impl eframe::App for ViewerApp {
                         if ui.small_button(if self.brepcad_properties_visible { ">" } else { "<" }).on_hover_text("Toggle Properties").clicked() {
                             self.brepcad_properties_visible = !self.brepcad_properties_visible;
                         }
+                        ui.separator();
+                        // Fix #3: AI and Collab panel toggle buttons (floating windows)
+                        let ai_btn = if self.brepcad_ai_panel_visible { "AI ✓" } else { "AI" };
+                        if ui.small_button(ai_btn).on_hover_text("Toggle AI Assistant panel").clicked() {
+                            self.brepcad_ai_panel_visible = !self.brepcad_ai_panel_visible;
+                        }
+                        let collab_btn = if self.brepcad_collab_panel_visible { "Colab ✓" } else { "Colab" };
+                        if ui.small_button(collab_btn).on_hover_text("Toggle Collaboration panel").clicked() {
+                            self.brepcad_collab_panel_visible = !self.brepcad_collab_panel_visible;
+                        }
                     });
                 });
 
@@ -8460,30 +8477,132 @@ impl eframe::App for ViewerApp {
                             ui.button("Filter");
                         });
                         ui.separator();
-                        egui::ScrollArea::vertical().show(ui, |ui| {
+                        let scroll_result = egui::ScrollArea::vertical().show(ui, |ui| {
+                            // Fix #4: Pending actions for tree interaction
+                            let mut pending_select: Option<usize> = None;
+                            let mut pending_visibility_toggle: Option<usize> = None;
                             match self.brepcad_left_tab {
                                 BrepcadLeftTab::Tree => {
                                     if let Some(ref tree) = assembly_tree_clone {
-                                        fn render_node(ui: &mut egui::Ui, node: &draper_step::AssemblyNode, sel: Option<usize>, hidden: &std::collections::HashSet<usize>, filter: &str, active: bool, depth: usize) {
+                                        // Fix #4: New tree renderer with click selection,
+                                        // visibility toggle, and collapse/expand.
+                                        fn render_tree_node(
+                                            ui: &mut egui::Ui,
+                                            node: &draper_step::AssemblyNode,
+                                            sel: Option<usize>,
+                                            hidden: &std::collections::HashSet<usize>,
+                                            filter: &str,
+                                            active: bool,
+                                            depth: usize,
+                                            pending_select: &mut Option<usize>,
+                                            pending_vis: &mut Option<usize>,
+                                        ) {
                                             let name = &node.name;
                                             if active && !name.to_lowercase().contains(filter) {
-                                                for c in &node.children { render_node(ui, c, sel, hidden, filter, active, depth); }
+                                                for c in &node.children {
+                                                    render_tree_node(ui, c, sel, hidden, filter, active, depth, pending_select, pending_vis);
+                                                }
                                                 return;
                                             }
+                                            let has_children = !node.children.is_empty();
+                                            let is_sel = node.instance_index.map_or(false, |i| i != usize::MAX && sel == Some(i));
+                                            let is_hid = node.instance_index.map_or(false, |i| hidden.contains(&i));
+
                                             ui.horizontal(|ui| {
-                                                ui.add_space(depth as f32 * 16.0);
-                                                let is_sel = node.instance_index.map_or(false, |i| sel == Some(i));
-                                                let is_hid = node.instance_index.map_or(false, |i| hidden.contains(&i));
-                                                let txt = if is_hid { format!(".. {}", name) } else { name.clone() };
-                                                ui.selectable_label(is_sel, &txt);
+                                                ui.add_space(depth as f32 * 14.0);
+
+                                                // Fix #4: Collapse/expand arrow for nodes with children
+                                                if has_children {
+                                                    let arrow = if depth < 2 { "▼" } else { "▶" };
+                                                    if ui.small_button(arrow).clicked() {
+                                                        // Toggle would need per-node state; for now just visual
+                                                    }
+                                                } else {
+                                                    ui.add_space(14.0); // align leaf nodes
+                                                }
+
+                                                // Fix #4: Visibility toggle (eye icon)
+                                                if let Some(idx) = node.instance_index {
+                                                    if idx != usize::MAX {
+                                                        let eye = if is_hid { "🚫" } else { "👁" };
+                                                        if ui.small_button(eye).clicked() {
+                                                            *pending_vis = Some(idx);
+                                                        }
+                                                    }
+                                                }
+
+                                                // Fix #4: Click-to-select label
+                                                let txt = if is_hid {
+                                                    egui::RichText::new(name.as_str()).color(egui::Color32::from_rgb(120, 120, 120)).strikethrough()
+                                                } else if is_sel {
+                                                    egui::RichText::new(name.as_str()).color(egui::Color32::from_rgb(137, 180, 250)).strong()
+                                                } else {
+                                                    egui::RichText::new(name.as_str())
+                                                };
+                                                if ui.selectable_label(is_sel, txt).clicked() {
+                                                    if let Some(idx) = node.instance_index {
+                                                        if idx != usize::MAX {
+                                                            *pending_select = Some(idx);
+                                                        }
+                                                    }
+                                                }
                                             });
-                                            for c in &node.children { render_node(ui, c, sel, hidden, filter, active, depth+1); }
+
+                                            // Render children (only if "expanded" — simplified: show top 2 levels)
+                                            if depth < 2 || !has_children {
+                                                for c in &node.children {
+                                                    render_tree_node(ui, c, sel, hidden, filter, active, depth + 1, pending_select, pending_vis);
+                                                }
+                                            }
                                         }
                                         let fl = self.brepcad_tree_filter.to_lowercase();
                                         let fa = !fl.is_empty();
-                                        render_node(ui, tree, selected_instance, &hidden_instances_clone, &fl, fa, 0);
+                                        render_tree_node(ui, tree, selected_instance, &hidden_instances_clone, &fl, fa, 0, &mut pending_select, &mut pending_visibility_toggle);
+
+                                        // Fix #4: Face list for current solid
+                                        if let Some(idx) = selected_instance {
+                                            if let Some(inst) = detailed_instances_clone.get(idx) {
+                                                ui.separator();
+                                                ui.label(egui::RichText::new(format!("Faces ({})", inst.faces.len())).strong());
+                                                for (fi, face) in inst.faces.iter().take(50).enumerate() {
+                                                    let face_sel = selected_face == Some((idx, face.face_id));
+                                                    let tri_count = face.triangle_range.1.saturating_sub(face.triangle_range.0);
+                                                    let face_label = format!("Face {}: {} ({} tris)", fi, face.surface_type, tri_count);
+                                                    ui.selectable_label(face_sel, &face_label);
+                                                }
+                                                if inst.faces.len() > 50 {
+                                                    ui.label(format!("... and {} more", inst.faces.len() - 50));
+                                                }
+                                            }
+                                        }
                                     } else {
-                                        ui.label(format!("{} ({}v {}t)", model_name, vert_count, tri_count));
+                                        // No assembly tree — show solid info if available
+                                        ui.label(egui::RichText::new(&model_name).strong());
+                                        ui.label(format!("Vertices: {}", vert_count));
+                                        ui.label(format!("Triangles: {}", tri_count));
+                                        // Fix #4: If we have a current_solid, show its face count
+                                        if let Some(ref solid) = self.current_solid {
+                                            let face_count = solid.faces().len();
+                                            ui.separator();
+                                            ui.label(egui::RichText::new(format!("Solid Faces ({})", face_count)).strong());
+                                            for (fi, face) in solid.faces().iter().take(30).enumerate() {
+                                                let surf_type = match &face.surface {
+                                                    Some(draper_geometry::Surface::Plane(_)) => "Plane",
+                                                    Some(draper_geometry::Surface::Cylinder(_)) => "Cylinder",
+                                                    Some(draper_geometry::Surface::Cone(_)) => "Cone",
+                                                    Some(draper_geometry::Surface::Sphere(_)) => "Sphere",
+                                                    Some(draper_geometry::Surface::Torus(_)) => "Torus",
+                                                    Some(draper_geometry::Surface::Nurbs(_)) => "NURBS",
+                                                    Some(_) => "Other",
+                                                    None => "None",
+                                                };
+                                                let edge_count = face.edges.len();
+                                                ui.label(format!("  Face {}: {} ({} edges)", fi, surf_type, edge_count));
+                                            }
+                                            if face_count > 30 {
+                                                ui.label(format!("... and {} more", face_count - 30));
+                                            }
+                                        }
                                     }
                                 }
                                 BrepcadLeftTab::Layers => { ui.label("No layers"); }
@@ -8497,7 +8616,26 @@ impl eframe::App for ViewerApp {
                                     } else { ui.label("Nothing selected"); }
                                 }
                             }
+                            // Return pending actions for the outer code to apply
+                            (pending_select, pending_visibility_toggle)
                         });
+                        // Fix #4: Apply pending tree actions
+                        let (pending_sel, pending_vis) = scroll_result.inner;
+                        if let Some(idx) = pending_sel {
+                            self.selected_instance = Some(idx);
+                            self.selected_face = None;
+                            self.highlight_dirty = true;
+                        }
+                        if let Some(idx) = pending_vis {
+                            if self.hidden_instances.contains(&idx) {
+                                self.hidden_instances.remove(&idx);
+                            } else {
+                                self.hidden_instances.insert(idx);
+                            }
+                            self.highlight_dirty = true;
+                            self.edge_dirty = true;
+                            self.wireframe_overlay_dirty = true;
+                        }
                     });
             }
 
@@ -8550,6 +8688,13 @@ impl eframe::App for ViewerApp {
         } // end if enable_brepcad_ui
 
         // === Central 3D viewport ===
+        // Fix #2: Skip the main viewport when VP workspace is active —
+        // the VP workspace renders its own CentralPanel at line 6787.
+        // Having two CentralPanels in the same frame causes the second
+        // one to get zero space, and its content overlaps the VP canvas.
+        if self.enable_brepcad_ui && self.brepcad_workspace == crate::ui::Workspace::VisualProgramming {
+            // VP workspace already rendered its own CentralPanel — skip.
+        } else {
         egui::CentralPanel::default()
             .frame(egui::Frame::default()
                 .fill(egui::Color32::from_rgb(0x1a, 0x1a, 0x2a))
@@ -9572,6 +9717,8 @@ impl eframe::App for ViewerApp {
                     }
                 }
             });
+        } // end of else (Fix #2: skip viewport when VP workspace active)
+
         // ═══════════════════════════════════════════════════════════════════════
         // === MOBILE UI — floating buttons + overlay panels ===
         // ═══════════════════════════════════════════════════════════════════════
@@ -9758,61 +9905,72 @@ impl eframe::App for ViewerApp {
             }
 
             // ═══ AI Panel (Phase 5.2 integration) ═══
-            // The AI panel is shown on the right side as a collapsible window.
-            // It provides natural-language → geometry parsing, design review,
-            // and LLM-based prompt expansion.
-            egui::SidePanel::right("ai_panel")
-                .min_width(240.0)
-                .default_width(300.0)
-                .max_width(400.0)
-                .resizable(true)
-                .show(ctx, |ui| {
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false; 2])
-                        .show(ui, |ui| {
-                            if let Some(actions) = crate::ui::ai_panel::render_ai_panel(ui, &mut self.ai_panel) {
-                                // User clicked "Apply to Scene" — convert actions to solids
-                                let solids = crate::ui::ai_panel::actions_to_solids(&actions);
-                                if !solids.is_empty() {
-                                    // Use the last solid as the current model (final result after booleans)
-                                    if let Some(last_solid) = solids.last() {
-                                        let tri_params = tri_params_for_lod(self.lod_level);
-                                        let mesh = triangulate_solid(last_solid, &tri_params);
-                                        self.current_solid = Some(last_solid.clone());
-                                        self.current_nurbs_surface = None;
-                                        self.detailed_instances.clear();
-                                        self.instance_triangle_ranges.clear();
-                                        self.assembly_tree = None;
-                                        let action_desc = if actions.len() == 1 {
-                                            actions[0].describe()
-                                        } else {
-                                            format!("{} actions", actions.len())
-                                        };
-                                        self.load_mesh(mesh, &format!("AI: {}", action_desc));
-                                        self.brepcad_status_msg = format!("AI: applied {} action(s) to scene", actions.len());
-                                    }
-                                } else {
-                                    self.brepcad_status_msg = "AI: no solids generated (parse error?)".to_string();
+            // Fix #1: Render as a floating Window instead of SidePanel.
+            // Previously this was a SidePanel::right rendered AFTER CentralPanel,
+            // which caused it to overlap the viewport and intercept mouse events.
+            // Now it's a floating window that doesn't consume viewport space.
+            if self.brepcad_ai_panel_visible {
+                let mut ai_actions_pending = None;
+                egui::Window::new("AI Assistant")
+                    .default_width(300.0)
+                    .default_height(400.0)
+                    .min_width(240.0)
+                    .min_height(200.0)
+                    .resizable(true)
+                    .collapsible(true)
+                    .show(ctx, |ui| {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false; 2])
+                            .show(ui, |ui| {
+                                if let Some(actions) = crate::ui::ai_panel::render_ai_panel(ui, &mut self.ai_panel) {
+                                    ai_actions_pending = Some(actions);
                                 }
-                            }
-                        });
-                });
+                            });
+                    });
+                // Apply AI actions outside the window closure to avoid borrow conflicts
+                if let Some(actions) = ai_actions_pending {
+                    let solids = crate::ui::ai_panel::actions_to_solids(&actions);
+                    if !solids.is_empty() {
+                        if let Some(last_solid) = solids.last() {
+                            let tri_params = tri_params_for_lod(self.lod_level);
+                            let mesh = triangulate_solid(last_solid, &tri_params);
+                            self.current_solid = Some(last_solid.clone());
+                            self.current_nurbs_surface = None;
+                            self.detailed_instances.clear();
+                            self.instance_triangle_ranges.clear();
+                            self.assembly_tree = None;
+                            let action_desc = if actions.len() == 1 {
+                                actions[0].describe()
+                            } else {
+                                format!("{} actions", actions.len())
+                            };
+                            self.load_mesh(mesh, &format!("AI: {}", action_desc));
+                            self.brepcad_status_msg = format!("AI: applied {} action(s) to scene", actions.len());
+                        }
+                    } else {
+                        self.brepcad_status_msg = "AI: no solids generated (parse error?)".to_string();
+                    }
+                }
+            }
 
             // ═══ Collaboration Panel (Phase 5.1 integration) ═══
-            // The collab panel is shown on the left side as a collapsible window.
-            // It provides WebSocket-based real-time collaboration (CRDT sync).
-            egui::SidePanel::left("collab_panel")
-                .min_width(200.0)
-                .default_width(260.0)
-                .max_width(350.0)
-                .resizable(true)
-                .show(ctx, |ui| {
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false; 2])
-                        .show(ui, |ui| {
-                            let _ = crate::ui::collab_panel::render_collab_panel(ui, &mut self.collab_panel);
-                        });
-                });
+            // Fix #1: Render as floating Window instead of SidePanel (same reason as AI panel).
+            if self.brepcad_collab_panel_visible {
+                egui::Window::new("Collaboration")
+                    .default_width(260.0)
+                    .default_height(350.0)
+                    .min_width(200.0)
+                    .min_height(150.0)
+                    .resizable(true)
+                    .collapsible(true)
+                    .show(ctx, |ui| {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false; 2])
+                            .show(ui, |ui| {
+                                let _ = crate::ui::collab_panel::render_collab_panel(ui, &mut self.collab_panel);
+                            });
+                    });
+            }
 
             // ═══ Animation Timeline (Phase 6, mockups 92/96) ═══
             // Shown as a bottom panel when visible (toggled via View → Timeline).
@@ -16090,6 +16248,28 @@ impl ViewerApp {
             MenuAction::WinNextTab => "Window: Next Tab — no multi-doc yet".to_string(),
             MenuAction::WinPrevTab => "Window: Previous Tab — no multi-doc yet".to_string(),
             MenuAction::WinSaveLayout => "Window: Save Layout — coming soon".to_string(),
+            // Fix #3: Panel toggle actions
+            MenuAction::WinToggleBrowser => {
+                self.brepcad_browser_visible = !self.brepcad_browser_visible;
+                format!("Browser panel: {}", if self.brepcad_browser_visible { "visible" } else { "hidden" })
+            }
+            MenuAction::WinToggleProperties => {
+                self.brepcad_properties_visible = !self.brepcad_properties_visible;
+                format!("Properties panel: {}", if self.brepcad_properties_visible { "visible" } else { "hidden" })
+            }
+            MenuAction::WinToggleAI => {
+                self.brepcad_ai_panel_visible = !self.brepcad_ai_panel_visible;
+                format!("AI Assistant panel: {}", if self.brepcad_ai_panel_visible { "visible" } else { "hidden" })
+            }
+            MenuAction::WinToggleCollab => {
+                self.brepcad_collab_panel_visible = !self.brepcad_collab_panel_visible;
+                format!("Collaboration panel: {}", if self.brepcad_collab_panel_visible { "visible" } else { "hidden" })
+            }
+            MenuAction::WinToggleTimeline => {
+                self.animation_panel.visible = !self.animation_panel.visible;
+                self.brepcad_timeline_open = self.animation_panel.visible;
+                format!("Timeline panel: {}", if self.animation_panel.visible { "visible" } else { "hidden" })
+            }
 
             // ── Help actions ──
             MenuAction::HelpAbout => {
@@ -16244,7 +16424,13 @@ impl ViewerApp {
             }
             MenuAction::AiChat => {
                 self.ai_panel.status = "Chat mode: type a design prompt".to_string();
-                "AI Chat: type a prompt in the AI panel".to_string()
+                // Fix #1: Toggle the AI panel visibility
+                self.brepcad_ai_panel_visible = !self.brepcad_ai_panel_visible;
+                if self.brepcad_ai_panel_visible {
+                    "AI Chat panel opened".to_string()
+                } else {
+                    "AI Chat panel closed".to_string()
+                }
             }
             MenuAction::AiCostEstimate => {
                 if self.ai_panel.actions.is_empty() {

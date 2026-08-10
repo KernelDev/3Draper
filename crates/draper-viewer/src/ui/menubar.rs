@@ -385,6 +385,12 @@ pub enum MenuAction {
     WinNextTab,
     WinPrevTab,
     WinSaveLayout,
+    // Fix #3: Panel toggle actions for detachable panels
+    WinToggleBrowser,
+    WinToggleProperties,
+    WinToggleAI,
+    WinToggleCollab,
+    WinToggleTimeline,
 
     // ── Help actions ──
     HelpAbout,
@@ -1045,6 +1051,13 @@ fn render_window_menu(ui: &mut egui::Ui) -> Option<MenuAction> {
         if ui.button("Previous Tab").clicked() { action = Some(MenuAction::WinPrevTab); ui.close_menu(); return; }
         ui.separator();
         if ui.button("Save Layout").clicked() { action = Some(MenuAction::WinSaveLayout); ui.close_menu(); return; }
+        ui.separator();
+        ui.label("Panels:");
+        if ui.button("Toggle Browser").clicked() { action = Some(MenuAction::WinToggleBrowser); ui.close_menu(); return; }
+        if ui.button("Toggle Properties").clicked() { action = Some(MenuAction::WinToggleProperties); ui.close_menu(); return; }
+        if ui.button("Toggle AI Assistant").clicked() { action = Some(MenuAction::WinToggleAI); ui.close_menu(); return; }
+        if ui.button("Toggle Collaboration").clicked() { action = Some(MenuAction::WinToggleCollab); ui.close_menu(); return; }
+        if ui.button("Toggle Timeline").clicked() { action = Some(MenuAction::WinToggleTimeline); ui.close_menu(); return; }
         ui.separator();
         ui.label("Open Documents:");
         ui.label("  • model.step");
