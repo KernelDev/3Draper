@@ -12,7 +12,7 @@ pub fn draw_icon(ui: &mut egui::Ui, name: &str, rect: egui::Rect, color: egui::C
     let painter = ui.painter();
     let c = rect.center();
     let s = rect.size().min_elem() * 0.5;
-    let st = egui::Stroke::new(2.0, color);
+    let st = egui::Stroke::new(2.0_f32, color);
     match name {
         "new" | "import" => draw_doc(painter, c, s, st),
         "open" => draw_folder(painter, c, s, st),
@@ -50,7 +50,7 @@ pub fn draw_icon(ui: &mut egui::Ui, name: &str, rect: egui::Rect, color: egui::C
 pub fn draw_icon_in_rect(painter: &egui::Painter, name: &str, rect: egui::Rect, color: egui::Color32) -> bool {
     let c = rect.center();
     let s = rect.size().min_elem() * 0.5;
-    let st = egui::Stroke::new(1.6, color);
+    let st = egui::Stroke::new(1.6_f32, color);
     match name {
         "new" | "import" => draw_doc(painter, c, s, st),
         "open" => draw_folder(painter, c, s, st),
@@ -95,9 +95,9 @@ pub fn icon_button(ui: &mut egui::Ui, icon_name: &str, label: &str) -> bool {
     } else {
         ui.style().visuals.widgets.noninteractive.fg_stroke.color
     };
-    ui.painter().rect_filled(rect, 4.0, bg);
+    ui.painter().rect_filled(rect, 4.0_f32, bg);
     if response.hovered() || response.clicked() {
-        ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(1.0, fg), egui::StrokeKind::Outside);
+        ui.painter().rect_stroke(rect, 4.0_f32, egui::Stroke::new(1.0_f32, fg), egui::StrokeKind::Outside);
     }
     let icon_rect = egui::Rect::from_center_size(
         egui::pos2(rect.center().x - 5.0, rect.min.y + 14.0),
@@ -141,7 +141,7 @@ fn pt(x: f32, y: f32, c: egui::Pos2, s: f32) -> egui::Pos2 {
 
 fn draw_doc(p: &egui::Painter, c: egui::Pos2, s: f32, st: egui::Stroke) {
     let r = egui::Rect::from_center_size(c, egui::vec2(s * 1.4, s * 1.6));
-    p.rect_stroke(r, 2.0, st, egui::StrokeKind::Outside);
+    p.rect_stroke(r, 2.0_f32, st, egui::StrokeKind::Outside);
     p.line_segment([pt(-0.4, -0.8, c, s), pt(0.0, -0.8, c, s)], st);
     p.line_segment([pt(0.0, -0.8, c, s), pt(0.0, -0.4, c, s)], st);
     p.line_segment([pt(0.0, -0.4, c, s), pt(-0.4, -0.8, c, s)], st);
@@ -158,7 +158,7 @@ fn draw_folder(p: &egui::Painter, c: egui::Pos2, s: f32, st: egui::Stroke) {
 
 fn draw_save(p: &egui::Painter, c: egui::Pos2, s: f32, st: egui::Stroke) {
     let r = egui::Rect::from_center_size(c, egui::vec2(s * 1.4, s * 1.4));
-    p.rect_stroke(r, 2.0, st, egui::StrokeKind::Outside);
+    p.rect_stroke(r, 2.0_f32, st, egui::StrokeKind::Outside);
     p.line_segment([pt(-0.5, -0.7, c, s), pt(0.5, -0.7, c, s)], st);
     p.line_segment([pt(0.5, -0.7, c, s), pt(0.5, 0.0, c, s)], st);
     p.line_segment([pt(0.5, 0.0, c, s), pt(-0.5, 0.0, c, s)], st);
@@ -198,7 +198,7 @@ fn draw_redo(p: &egui::Painter, c: egui::Pos2, s: f32, st: egui::Stroke) {
 }
 
 fn draw_scissors(p: &egui::Painter, c: egui::Pos2, s: f32, st: egui::Stroke) {
-    p.circle_stroke(pt(-0.4, 0.4, c, s), s * 0.2, st);
+    p.circle_stroke(pt(-0.4, 0.4_f32, c, s), s * 0.2, st);
     p.circle_stroke(pt(-0.4, -0.4, c, s), s * 0.2, st);
     p.line_segment([pt(-0.2, 0.3, c, s), pt(0.6, -0.5, c, s)], st);
     p.line_segment([pt(-0.2, -0.3, c, s), pt(0.6, 0.5, c, s)], st);
@@ -206,7 +206,7 @@ fn draw_scissors(p: &egui::Painter, c: egui::Pos2, s: f32, st: egui::Stroke) {
 
 fn draw_copy(p: &egui::Painter, c: egui::Pos2, s: f32, st: egui::Stroke) {
     p.rect_stroke(egui::Rect::from_center_size(pt(-0.2, -0.2, c, s), egui::vec2(s * 0.9, s * 0.9)), 2.0, st, egui::StrokeKind::Outside);
-    p.rect_stroke(egui::Rect::from_center_size(pt(0.3, 0.3, c, s), egui::vec2(s * 0.9, s * 0.9)), 2.0, st, egui::StrokeKind::Outside);
+    p.rect_stroke(egui::Rect::from_center_size(pt(0.3, 0.3_f32, c, s), egui::vec2(s * 0.9, s * 0.9)), 2.0, st, egui::StrokeKind::Outside);
 }
 
 fn draw_clipboard(p: &egui::Painter, c: egui::Pos2, s: f32, st: egui::Stroke) {
@@ -240,7 +240,7 @@ fn draw_zoom_out(p: &egui::Painter, c: egui::Pos2, s: f32, st: egui::Stroke) {
 
 fn draw_cube(p: &egui::Painter, c: egui::Pos2, s: f32, st: egui::Stroke) {
     let r = egui::Rect::from_center_size(c, egui::vec2(s * 1.2, s * 1.2));
-    p.rect_stroke(r, 2.0, st, egui::StrokeKind::Outside);
+    p.rect_stroke(r, 2.0_f32, st, egui::StrokeKind::Outside);
     p.line_segment([pt(-0.6, -0.6, c, s), pt(-0.3, -0.85, c, s)], st);
     p.line_segment([pt(0.6, -0.6, c, s), pt(0.9, -0.85, c, s)], st);
     p.line_segment([pt(-0.3, -0.85, c, s), pt(0.9, -0.85, c, s)], st);

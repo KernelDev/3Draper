@@ -51,7 +51,7 @@ pub fn render_left_panel(ctx: &egui::Context, active_tab: &mut LeftPanelTab, tre
             // Filter box
             ui.horizontal(|ui| {
                 ui.text_edit_singleline(&mut String::new());
-                ui.button("Filter");
+                let _ = ui.button("Filter");
             });
             ui.separator();
 
@@ -189,7 +189,7 @@ fn render_material(ui: &mut egui::Ui) {
     ui.heading("Material");
     ui.separator();
     ui.label("No material assigned");
-    ui.button("Assign Material…");
+    let _ = ui.button("Assign Material…");
     ui.separator();
     ui.collapsing("Library", |ui| {
         let categories = ["Metals", "Plastics", "Ceramics", "Composites", "Wood", "Glass", "Custom"];

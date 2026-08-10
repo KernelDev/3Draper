@@ -134,7 +134,7 @@ pub fn render_command_palette(ctx: &egui::Context, palette: &mut CommandPalette)
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style())
                 .fill(egui::Color32::from_rgb(30, 35, 40))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 70, 80)))
+                .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(60, 70, 80)))
                 .show(ui, |ui| {
                     ui.set_width(popup_width);
 

@@ -152,7 +152,7 @@ pub fn marking_menu(ctx: &egui::Context, show: &mut bool) -> Option<ContextActio
 
                 // Background circle
                 ui.painter().circle_filled(center, radius + 10.0, egui::Color32::from_black_alpha(200));
-                ui.painter().circle_stroke(center, radius, egui::Stroke::new(2.0, egui::Color32::from_rgb(10, 132, 255)));
+                ui.painter().circle_stroke(center, radius, egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(10, 132, 255)));
 
                 let items = [
                     ("N",  0.0_f32, -1.0_f32, "Fillet"),
@@ -171,7 +171,7 @@ pub fn marking_menu(ctx: &egui::Context, show: &mut bool) -> Option<ContextActio
                     let resp = ui.allocate_rect(btn_rect, egui::Sense::click());
 
                     let bg = if resp.hovered() { egui::Color32::from_rgb(10, 132, 255) } else { egui::Color32::from_rgb(40, 50, 60) };
-                    ui.painter().rect_filled(btn_rect, 6.0, bg);
+                    ui.painter().rect_filled(btn_rect, 6.0_f32, bg);
                     ui.painter().text(pos, egui::Align2::CENTER_CENTER, format!("{}\n{}", dir, label), egui::FontId::proportional(11.0), egui::Color32::WHITE);
 
                     if resp.clicked() {
@@ -183,7 +183,7 @@ pub fn marking_menu(ctx: &egui::Context, show: &mut bool) -> Option<ContextActio
                 // Center: ESC
                 let center_rect = egui::Rect::from_center_size(center, egui::vec2(50.0, 50.0));
                 let center_resp = ui.allocate_rect(center_rect, egui::Sense::click());
-                ui.painter().circle_filled(center, 25.0, egui::Color32::from_rgb(80, 30, 30));
+                ui.painter().circle_filled(center, 25.0_f32, egui::Color32::from_rgb(80, 30, 30));
                 ui.painter().text(center, egui::Align2::CENTER_CENTER, "ESC", egui::FontId::proportional(14.0), egui::Color32::WHITE);
                 if center_resp.clicked() { close = true; }
             });

@@ -6607,7 +6607,7 @@ impl eframe::App for ViewerApp {
                     .resizable(false)
                     .frame(egui::Frame::default()
                         .fill(egui::Color32::from_rgb(0x11, 0x11, 0x1b))
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x31, 0x32, 0x44))))
+                        .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0x31, 0x32, 0x44))))
                     .show(ctx, |ui| {
                         ui.vertical_centered(|ui| {
                             ui.add_space(4.0);
@@ -6641,7 +6641,7 @@ impl eframe::App for ViewerApp {
                         .exact_height(32.0)
                         .frame(egui::Frame::default()
                             .fill(egui::Color32::from_rgb(0x18, 0x18, 0x25))
-                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x31, 0x32, 0x44))))
+                            .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0x31, 0x32, 0x44))))
                         .show(ctx, |ui| {
                             ui.horizontal(|ui| {
                                 if ui.button("Compute").clicked() {
@@ -6656,7 +6656,7 @@ impl eframe::App for ViewerApp {
                                     // VP graph evaluation: walk connections to evaluate boolean ops.
                                     // For each node, resolve its input solid (from connected source),
                                     // then apply the node's operation.
-                                    let graph = &self.brepcad_vp_graph;
+                                    let graph = self.brepcad_vp_graph.clone();
                                     let mut solids: std::collections::HashMap<u64, draper_topology::Solid> = std::collections::HashMap::new();
 
                                     // Helper: resolve a node's input solid by following connections.
@@ -6685,7 +6685,7 @@ impl eframe::App for ViewerApp {
                                             if solids.contains_key(&node.id) {
                                                 continue; // Already evaluated
                                             }
-                                            let inputs = resolve_inputs(node.id, graph, &solids);
+                                            let inputs = resolve_inputs(node.id, &graph, &solids);
                                             match &node.node_type {
                                                 // Primitives — no inputs needed
                                                 crate::ui::workspaces::NodeType::Box { width, height, depth } => {
@@ -6808,7 +6808,7 @@ impl eframe::App for ViewerApp {
                         .resizable(true)
                         .frame(egui::Frame::default()
                             .fill(egui::Color32::from_rgb(0x18, 0x18, 0x25))
-                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x31, 0x32, 0x44))))
+                            .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0x31, 0x32, 0x44))))
                         .show(ctx, |ui| {
                             ui.heading("Node Palette");
                             ui.separator();
@@ -6899,7 +6899,7 @@ impl eframe::App for ViewerApp {
                         .frame(egui::Frame::new().fill(egui::Color32::from_rgb(0x0d, 0x0d, 0x1a)))
                         .show(ctx, |ui| {
                             let available = ui.available_size();
-                            let (rect, _response) = ui.allocate_at_least(available, egui::Sense::click_and_drag());
+                            let (rect, response) = ui.allocate_at_least(available, egui::Sense::click_and_drag());
 
                             let painter = ui.painter();
 
@@ -6953,12 +6953,12 @@ impl eframe::App for ViewerApp {
                                 };
 
                                 // Node body (dark surface)
-                                painter.rect_filled(node_rect, 8.0, egui::Color32::from_rgb(0x31, 0x32, 0x44));
-                                painter.rect_stroke(node_rect, 8.0, egui::Stroke::new(2.0, border_color), egui::StrokeKind::Outside);
+                                painter.rect_filled(node_rect, 8.0_f32, egui::Color32::from_rgb(0x31, 0x32, 0x44));
+                                painter.rect_stroke(node_rect, 8.0_f32, egui::Stroke::new(2.0_f32, border_color), egui::StrokeKind::Outside);
 
                                 // Header bar (colored)
                                 let header_rect = egui::Rect::from_min_size(pos, egui::vec2(node_w, 26.0));
-                                painter.rect_filled(header_rect, 8.0, header_color);
+                                painter.rect_filled(header_rect, 8.0_f32, header_color);
 
                                 // Title
                                 let label = node.node_type.label();
@@ -6997,8 +6997,8 @@ impl eframe::App for ViewerApp {
 
                                 // Output port (right side, circle)
                                 let port_pos = egui::pos2(node_rect.right(), node_rect.center().y);
-                                painter.circle_filled(port_pos, 7.0, header_color);
-                                painter.circle_stroke(port_pos, 7.0, egui::Stroke::new(2.0, egui::Color32::from_rgb(0x1e, 0x1e, 0x2e)));
+                                painter.circle_filled(port_pos, 7.0_f32, header_color);
+                                painter.circle_stroke(port_pos, 7.0_f32, egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(0x1e, 0x1e, 0x2e)));
 
                                 // Input port (left side, for non-primitive nodes)
                                 let has_input = matches!(&node.node_type,
@@ -7014,8 +7014,8 @@ impl eframe::App for ViewerApp {
                                 );
                                 if has_input {
                                     let in_port = egui::pos2(node_rect.left(), node_rect.center().y);
-                                    painter.circle_filled(in_port, 7.0, header_color);
-                                    painter.circle_stroke(in_port, 7.0, egui::Stroke::new(2.0, egui::Color32::from_rgb(0x1e, 0x1e, 0x2e)));
+                                    painter.circle_filled(in_port, 7.0_f32, header_color);
+                                    painter.circle_stroke(in_port, 7.0_f32, egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(0x1e, 0x1e, 0x2e)));
                                 }
 
                                 // Node ID
@@ -7036,7 +7036,7 @@ impl eframe::App for ViewerApp {
                                     let from_pos = egui::pos2(rect.min.x + from.x + node_w, rect.min.y + from.y + node_h * 0.5);
                                     let to_pos = egui::pos2(rect.min.x + to.x, rect.min.y + to.y + node_h * 0.5);
                                     painter.line_segment([from_pos, to_pos],
-                                        egui::Stroke::new(2.5, egui::Color32::from_rgba_premultiplied(0x89, 0xb4, 0xfa, 180)));
+                                        egui::Stroke::new(2.5_f32, egui::Color32::from_rgba_premultiplied(0x89, 0xb4, 0xfa, 180)));
                                 }
                             }
 
@@ -7151,7 +7151,7 @@ impl eframe::App for ViewerApp {
                                     );
                                     let to_pos = self.brepcad_vp_connect_mouse;
                                     painter.line_segment([from_pos, to_pos],
-                                        egui::Stroke::new(2.5, egui::Color32::from_rgba_premultiplied(0xf9, 0xe2, 0xaf, 200)));
+                                        egui::Stroke::new(2.5_f32, egui::Color32::from_rgba_premultiplied(0xf9, 0xe2, 0xaf, 200)));
                                     // Cancel on Escape or right-click
                                     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                                         self.brepcad_vp_connect_from = None;
@@ -8646,7 +8646,7 @@ impl eframe::App for ViewerApp {
                 .exact_height(24.0)
                 .frame(egui::Frame::default()
                     .fill(egui::Color32::from_rgb(0x11, 0x11, 0x1b))
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x31, 0x32, 0x44))))
+                    .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0x31, 0x32, 0x44))))
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(format!("X {:.1}  Y {:.1}  Z {:.1}", cam_pos[0], cam_pos[1], cam_pos[2]));
@@ -8694,7 +8694,7 @@ impl eframe::App for ViewerApp {
                     .resizable(true)
                     .frame(egui::Frame::default()
                         .fill(egui::Color32::from_rgb(0x18, 0x18, 0x25))
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x31, 0x32, 0x44))))
+                        .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0x31, 0x32, 0x44))))
                     .show(ctx, |ui| {
                         ui.horizontal(|ui| {
                             ui.selectable_value(&mut self.brepcad_left_tab, BrepcadLeftTab::Tree, "Tree");
@@ -8704,7 +8704,7 @@ impl eframe::App for ViewerApp {
                         ui.separator();
                         ui.horizontal(|ui| {
                             ui.text_edit_singleline(&mut self.brepcad_tree_filter);
-                            ui.button("Filter");
+                            let _ = ui.button("Filter");
                         });
                         ui.separator();
                         let scroll_result = egui::ScrollArea::vertical().show(ui, |ui| {
@@ -9002,7 +9002,7 @@ impl eframe::App for ViewerApp {
                     .resizable(true)
                     .frame(egui::Frame::default()
                         .fill(egui::Color32::from_rgb(0x18, 0x18, 0x25))
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x31, 0x32, 0x44))))
+                        .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0x31, 0x32, 0x44))))
                     .show(ctx, |ui| {
                         ui.horizontal(|ui| {
                             ui.selectable_value(&mut self.brepcad_right_tab, BrepcadRightTab::Properties, "Props");
@@ -9744,14 +9744,14 @@ impl eframe::App for ViewerApp {
                                 let s1 = egui::pos2(cx + x1 as f32 * scale, cy - y1 as f32 * scale);
                                 let s2 = egui::pos2(cx + x2 as f32 * scale, cy - y2 as f32 * scale);
                                 ui.painter().line_segment([s1, s2], stroke);
-                                ui.painter().circle_filled(s1, 3.0, point_color);
-                                ui.painter().circle_filled(s2, 3.0, point_color);
+                                ui.painter().circle_filled(s1, 3.0_f32, point_color);
+                                ui.painter().circle_filled(s2, 3.0_f32, point_color);
                             }
                             BrepcadSketchEntity::Circle { center, radius } => {
                                 let sc = egui::pos2(cx + center[0] as f32 * scale, cy - center[1] as f32 * scale);
                                 let r = *radius as f32 * scale;
                                 ui.painter().circle_stroke(sc, r, stroke);
-                                ui.painter().circle_filled(sc, 3.0, point_color);
+                                ui.painter().circle_filled(sc, 3.0_f32, point_color);
                             }
                             BrepcadSketchEntity::Rectangle { p1, p2 } => {
                                 let s1 = egui::pos2(cx + p1[0] as f32 * scale, cy - p1[1] as f32 * scale);
@@ -9765,7 +9765,7 @@ impl eframe::App for ViewerApp {
                             }
                             BrepcadSketchEntity::Point { p } => {
                                 let s = egui::pos2(cx + p[0] as f32 * scale, cy - p[1] as f32 * scale);
-                                ui.painter().circle_filled(s, 4.0, point_color);
+                                ui.painter().circle_filled(s, 4.0_f32, point_color);
                             }
                             BrepcadSketchEntity::Arc { center, radius, start, end } => {
                                 let sc = egui::pos2(cx + center[0] as f32 * scale, cy - center[1] as f32 * scale);
@@ -9791,7 +9791,7 @@ impl eframe::App for ViewerApp {
                     // Draw pending click points
                     for p in &self.brepcad_sketch_points {
                         let s = egui::pos2(cx + p[0] as f32 * scale, cy - p[1] as f32 * scale);
-                        ui.painter().circle_filled(s, 5.0, egui::Color32::from_rgb(0x89, 0xb4, 0xfa));
+                        ui.painter().circle_filled(s, 5.0_f32, egui::Color32::from_rgb(0x89, 0xb4, 0xfa));
                     }
 
                     // Sketch mode indicator
@@ -10030,7 +10030,7 @@ impl eframe::App for ViewerApp {
                     // Progress bar background
                     ui.painter().rect_filled(
                         bar_rect,
-                        3.0,
+                        3.0_f32,
                         egui::Color32::from_rgb(60, 60, 60),
                     );
 
@@ -11107,9 +11107,9 @@ impl eframe::App for ViewerApp {
                         ui.add_space(120.0);
                         ui.separator();
                         ui.horizontal(|ui| {
-                            ui.button("+ Add Node");
-                            ui.button("▶ Run");
-                            ui.button("💾 Bake to Document");
+                            let _ = ui.button("+ Add Node");
+                            let _ = ui.button("▶ Run");
+                            let _ = ui.button("💾 Bake to Document");
                         });
                     });
             }
@@ -11479,7 +11479,7 @@ impl ViewerApp {
                             egui::vec2(size, size),
                             egui::Sense::click_and_drag(),
                         );
-                        ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgb(26, 26, 46));
+                        ui.painter().rect_filled(rect, 0.0_f32, egui::Color32::from_rgb(26, 26, 46));
 
                         let margin = size * 0.067;
                         let draw_size = size - 2.0 * margin;
@@ -11735,7 +11735,7 @@ impl ViewerApp {
                                 egui::pos2(box_right_x as f32, box_bottom_y as f32),
                             ),
                             0.0,
-                            egui::Stroke::new(0.5, egui::Color32::from_rgb(60, 60, 90)),
+                            egui::Stroke::new(0.5_f32, egui::Color32::from_rgb(60, 60, 90)),
                             egui::StrokeKind::Middle,
                         );
 
@@ -11748,7 +11748,7 @@ impl ViewerApp {
                             let x = map_u(u);
                             painter.line_segment(
                                 [egui::pos2(x, box_top_y as f32), egui::pos2(x, box_bottom_y as f32)],
-                                egui::Stroke::new(0.5, egui::Color32::from_rgb(51, 51, 68)),
+                                egui::Stroke::new(0.5_f32, egui::Color32::from_rgb(51, 51, 68)),
                             );
                         }
                         for j in 0..=v_divs {
@@ -11756,7 +11756,7 @@ impl ViewerApp {
                             let y = map_v(v);
                             painter.line_segment(
                                 [egui::pos2(box_left_x as f32, y), egui::pos2(box_right_x as f32, y)],
-                                egui::Stroke::new(0.5, egui::Color32::from_rgb(51, 51, 68)),
+                                egui::Stroke::new(0.5_f32, egui::Color32::from_rgb(51, 51, 68)),
                             );
                         }
 
@@ -11846,7 +11846,7 @@ impl ViewerApp {
                                     // Draw each edge of the triangle as an explicit line segment
                                     // so the diagonal of each quad-pair is always visible.
                                     let edge_color = egui::Color32::from_rgba_premultiplied(100, 170, 255, 140);
-                                    let edge_stroke = egui::Stroke::new(1.0, edge_color);
+                                    let edge_stroke = egui::Stroke::new(1.0_f32, edge_color);
                                     painter.line_segment([p0, p1], edge_stroke);
                                     painter.line_segment([p1, p2], edge_stroke);
                                     painter.line_segment([p2, p0], edge_stroke);
@@ -11861,7 +11861,7 @@ impl ViewerApp {
                             let points: Vec<egui::Pos2> = poly.iter()
                                 .map(|&(u, v)| egui::pos2(map_u(u), map_v(v)))
                                 .collect();
-                            painter.line(points, egui::Stroke::new(1.5, egui::Color32::from_rgb(0, 255, 136)));
+                            painter.line(points, egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(0, 255, 136)));
                         }
                         // Inner boundaries
                         for poly in &face_uv.inner_polylines {
@@ -11869,7 +11869,7 @@ impl ViewerApp {
                             let points: Vec<egui::Pos2> = poly.iter()
                                 .map(|&(u, v)| egui::pos2(map_u(u), map_v(v)))
                                 .collect();
-                            painter.line(points, egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 68, 68)));
+                            painter.line(points, egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(255, 68, 68)));
                         }
 
                         // ─── Seam lines (for periodic surfaces) ───────────────
@@ -11886,7 +11886,7 @@ impl ViewerApp {
                         // We use the surface's natural_uv_domain() to find the
                         // seam location (typically u=0 and u=2π). The seam is
                         // only drawn if it falls within the visible UV range.
-                        let seam_stroke = egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 200, 0));
+                        let seam_stroke = egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(255, 200, 0));
                         if face_uv.u_periodic && face_uv.u_period > 0.0 {
                             if let Some(s) = surface_ref {
                                 let (nat_u0, nat_u1, _nat_v0, _nat_v1) = s.natural_uv_domain();
@@ -12405,7 +12405,7 @@ impl ViewerApp {
                 } else {
                     egui::Color32::from_rgba_premultiplied(40, 40, 50, 200)
                 };
-                ui.painter().rect_filled(rect, 8.0, fill);
+                ui.painter().rect_filled(rect, 8.0_f32, fill);
                 ui.painter().text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
@@ -12433,7 +12433,7 @@ impl ViewerApp {
                 } else {
                     egui::Color32::from_rgba_premultiplied(40, 40, 50, 200)
                 };
-                ui.painter().rect_filled(rect, 8.0, fill);
+                ui.painter().rect_filled(rect, 8.0_f32, fill);
                 ui.painter().text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
@@ -12465,7 +12465,7 @@ impl ViewerApp {
                 } else {
                     egui::Color32::from_rgba_premultiplied(40, 40, 50, 200)
                 };
-                ui.painter().rect_filled(rect, 8.0, fill);
+                ui.painter().rect_filled(rect, 8.0_f32, fill);
                 ui.painter().text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
@@ -12511,7 +12511,7 @@ impl ViewerApp {
                     // Background panel
                     ui.painter().rect_filled(
                         rect,
-                        10.0,
+                        10.0_f32,
                         egui::Color32::from_rgba_premultiplied(0, 0, 0, 200),
                     );
 
@@ -14581,7 +14581,7 @@ impl ViewerApp {
 
             ui.painter().line_segment(
                 [egui::Pos2::new(origin_x, origin_y), egui::Pos2::new(end_x, end_y)],
-                egui::Stroke::new(2.0, color),
+                egui::Stroke::new(2.0_f32, color),
             );
             ui.painter().text(
                 egui::Pos2::new(end_x + 5.0, end_y - 5.0),
@@ -14707,15 +14707,15 @@ impl ViewerApp {
             let mid_y = anchor_2d.y + offset_y * 0.3;
             painter.line_segment(
                 [anchor_2d, egui::pos2(mid_x, mid_y)],
-                egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 200, 60)),
+                egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(255, 200, 60)),
             );
             painter.line_segment(
                 [egui::pos2(mid_x, mid_y), label_pos],
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 200, 60)),
+                egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(255, 200, 60)),
             );
 
             // ─── Small dot at the anchor (attachment point on the face) ───
-            painter.circle_filled(anchor_2d, 3.0, egui::Color32::from_rgb(255, 200, 60));
+            painter.circle_filled(anchor_2d, 3.0_f32, egui::Color32::from_rgb(255, 200, 60));
 
             // ─── Tolerance frame (feature control frame) ───
             // Build the text content
@@ -14779,14 +14779,14 @@ impl ViewerApp {
             // Draw frame background
             painter.rect_filled(
                 frame_rect,
-                2.0,
+                2.0_f32,
                 egui::Color32::from_rgba_premultiplied(30, 30, 50, 220),
             );
             // Draw frame border
             painter.rect_stroke(
                 frame_rect,
-                2.0,
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 200, 60)),
+                2.0_f32,
+                egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(255, 200, 60)),
                 egui::StrokeKind::Outside,
             );
 
@@ -14803,7 +14803,7 @@ impl ViewerApp {
             let sep1_x = label_pos.x + symbol_width + pad * 0.5;
             painter.line_segment(
                 [egui::pos2(sep1_x, frame_rect.top()), egui::pos2(sep1_x, frame_rect.bottom())],
-                egui::Stroke::new(0.5, egui::Color32::from_rgb(200, 160, 40)),
+                egui::Stroke::new(0.5_f32, egui::Color32::from_rgb(200, 160, 40)),
             );
 
             // Vertical separator after tolerance value (if there are datums)
@@ -14811,7 +14811,7 @@ impl ViewerApp {
                 let sep2_x = label_pos.x + tol_width + pad * 0.5;
                 painter.line_segment(
                     [egui::pos2(sep2_x, frame_rect.top()), egui::pos2(sep2_x, frame_rect.bottom())],
-                    egui::Stroke::new(0.5, egui::Color32::from_rgb(200, 160, 40)),
+                    egui::Stroke::new(0.5_f32, egui::Color32::from_rgb(200, 160, 40)),
                 );
             }
 
@@ -17428,7 +17428,7 @@ impl ViewerApp {
 ///   #1e1e2e base, #181825 mantle, #11111b crust, #313244 surface0,
 ///   #45475a surface1, #cdd6f4 text, #a6adc8 subtext, #89b4fa blue accent
 pub fn apply_brepcad_theme(ctx: &egui::Context) {
-    use egui::{Color32, Vec2, Rounding, Stroke};
+    use egui::{Color32, Vec2, CornerRadius, Stroke};
 
     let mut style: egui::Style = (*ctx.style()).clone();
     let mut visuals = egui::Visuals::dark();
@@ -17437,34 +17437,34 @@ pub fn apply_brepcad_theme(ctx: &egui::Context) {
     visuals.faint_bg_color   = Color32::from_rgb(0x18, 0x18, 0x25);
     visuals.extreme_bg_color = Color32::from_rgb(0x11, 0x11, 0x1b);
     visuals.window_fill      = Color32::from_rgb(0x1e, 0x1e, 0x2e);
-    visuals.window_stroke    = Stroke::new(1.0, Color32::from_rgb(0x45, 0x47, 0x5a));
+    visuals.window_stroke    = Stroke::new(1.0_f32, Color32::from_rgb(0x45, 0x47, 0x5a));
     visuals.override_text_color = Some(Color32::from_rgb(0xcd, 0xd6, 0xf4));
 
     let blue = Color32::from_rgb(0x89, 0xb4, 0xfa);
     visuals.widgets.noninteractive.bg_fill   = Color32::from_rgb(0x18, 0x18, 0x25);
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(0x45, 0x47, 0x5a));
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(0xa6, 0xad, 0xc8));
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(0x45, 0x47, 0x5a));
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(0xa6, 0xad, 0xc8));
     visuals.widgets.inactive.bg_fill   = Color32::from_rgb(0x31, 0x32, 0x44);
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(0x45, 0x47, 0x5a));
-    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(0xcd, 0xd6, 0xf4));
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(0x45, 0x47, 0x5a));
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(0xcd, 0xd6, 0xf4));
     visuals.widgets.hovered.bg_fill   = Color32::from_rgb(0x45, 0x47, 0x5a);
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, blue);
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::from_rgb(0xcd, 0xd6, 0xf4));
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, blue);
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(0xcd, 0xd6, 0xf4));
     visuals.widgets.active.bg_fill   = Color32::from_rgb(0x58, 0x5b, 0x70);
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0, blue);
-    visuals.widgets.active.fg_stroke = Stroke::new(1.5, Color32::from_rgb(0xff, 0xff, 0xff));
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, blue);
+    visuals.widgets.active.fg_stroke = Stroke::new(1.5_f32, Color32::from_rgb(0xff, 0xff, 0xff));
     visuals.widgets.open.bg_fill = Color32::from_rgb(0x45, 0x47, 0x5a);
     visuals.selection.bg_fill = Color32::from_rgb(0x09, 0x47, 0x71);
-    visuals.selection.stroke  = Stroke::new(1.0, blue);
+    visuals.selection.stroke  = Stroke::new(1.0_f32, blue);
     visuals.hyperlink_color   = blue;
 
     style.visuals = visuals;
     style.spacing.item_spacing = Vec2::new(6.0, 4.0);
     style.spacing.button_padding = Vec2::new(8.0, 4.0);
-    style.visuals.widgets.noninteractive.corner_radius = Rounding::same(4);
-    style.visuals.widgets.inactive.corner_radius = Rounding::same(4);
-    style.visuals.widgets.hovered.corner_radius = Rounding::same(4);
-    style.visuals.widgets.active.corner_radius = Rounding::same(4);
+    style.visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(4);
+    style.visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(4);
+    style.visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(4);
+    style.visuals.widgets.active.corner_radius = egui::CornerRadius::same(4);
     style.visuals.window_shadow = egui::epaint::Shadow::NONE;
 
     ctx.set_style(style);

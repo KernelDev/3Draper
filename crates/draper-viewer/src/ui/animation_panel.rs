@@ -363,7 +363,7 @@ pub fn render_animation_timeline(ui: &mut egui::Ui, state: &mut AnimationTimelin
                     // Draw timeline background
                     ui.painter().rect_filled(
                         rect,
-                        2.0,
+                        2.0_f32,
                         egui::Color32::from_rgb(0x18, 0x18, 0x25),
                     );
 
@@ -373,7 +373,7 @@ pub fn render_animation_timeline(ui: &mut egui::Ui, state: &mut AnimationTimelin
                         let pos = egui::pos2(x, rect.center().y);
                         ui.painter().circle_filled(
                             pos,
-                            4.0,
+                            4.0_f32,
                             egui::Color32::from_rgb(track.color[0], track.color[1], track.color[2]),
                         );
                     }
@@ -382,7 +382,7 @@ pub fn render_animation_timeline(ui: &mut egui::Ui, state: &mut AnimationTimelin
                     let cx = rect.min.x + (state.current_frame as f32 / total_frames as f32) * rect.width();
                     ui.painter().line_segment(
                         [egui::pos2(cx, rect.min.y), egui::pos2(cx, rect.max.y)],
-                        egui::Stroke::new(1.5, egui::Color32::from_rgb(0xf3, 0x8b, 0xa8)),
+                        egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(0xf3, 0x8b, 0xa8)),
                     );
                 });
             }

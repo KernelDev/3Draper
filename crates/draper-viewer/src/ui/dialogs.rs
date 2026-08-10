@@ -328,8 +328,8 @@ fn render_plugins_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<DialogAc
                     ui.checkbox(&mut true, "");
                     ui.label(*p);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.small_button("Settings");
-                        ui.small_button("Disable");
+                        let _ = ui.small_button("Settings");
+                        let _ = ui.small_button("Disable");
                     });
                 });
             }
@@ -406,7 +406,7 @@ fn render_shortcut_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<DialogA
                     ui.label(*cmd);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(*shortcut);
-                        ui.small_button("Edit");
+                        let _ = ui.small_button("Edit");
                     });
                 });
             }
@@ -697,7 +697,7 @@ fn render_print_plot_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<Dialo
         ui.horizontal(|ui| {
             ui.label("Printer:");
             ui.text_edit_singleline(&mut printer);
-            ui.button("Browse...");
+            let _ = ui.button("Browse...");
         });
 
         ui.separator();
@@ -742,7 +742,7 @@ fn render_print_plot_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<Dialo
         ui.label("Preview:");
         let preview_frame = egui::Frame::new()
             .fill(egui::Color32::from_rgb(0x1e, 0x1e, 0x2e))
-            .stroke(egui::Stroke::new(1.0, egui::Color32::GRAY))
+            .stroke(egui::Stroke::new(1.0_f32, egui::Color32::GRAY))
             .inner_margin(egui::Margin::symmetric(40, 30));
         preview_frame.show(ui, |ui| {
             ui.label(egui::RichText::new("📄 Drawing Preview")
@@ -1635,7 +1635,7 @@ fn render_modal_plotter_dialog(ui: &mut egui::Ui, close: &mut bool) -> Option<Di
                 egui::pos2(start_x + 180.0, y - plot_height * 0.4),
                 egui::vec2(bar_width, plot_height * 0.8),
             );
-            painter.rect_filled(bar_rect, 2.0, egui::Color32::from_rgb(137, 180, 250));
+            painter.rect_filled(bar_rect, 2.0_f32, egui::Color32::from_rgb(137, 180, 250));
         }
         ui.separator();
         ui.horizontal(|ui| {
