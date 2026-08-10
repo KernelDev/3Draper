@@ -8540,19 +8540,21 @@ impl eframe::App for ViewerApp {
                                                 // Indentation: each depth level adds 16px
                                                 ui.add_space(depth as f32 * 16.0);
 
-                                                // Collapse/expand arrow — small triangle, NOT a button box.
-                                                // Use a label with Sense::click() for a cleaner look.
+                                                // Collapse/expand arrow — small triangle.
+                                                // Uses Button::new().frame(false) instead of Label:
+                                                // - No text cursor (Label shows I-beam cursor)
+                                                // - No text selection (Label allows selecting text)
+                                                // - Clickable without visual button frame
                                                 if has_children {
                                                     let arrow = if is_open { "▾" } else { "▸" };
-                                                    let arrow_resp = ui.add(
-                                                        egui::Label::new(
+                                                    if ui.add(
+                                                        egui::Button::new(
                                                             egui::RichText::new(arrow)
                                                                 .size(12.0)
                                                                 .color(egui::Color32::from_rgb(160, 160, 170))
                                                         )
-                                                        .sense(egui::Sense::click())
-                                                    );
-                                                    if arrow_resp.clicked() {
+                                                        .frame(false)
+                                                    ).on_hover_text(if is_open { "Collapse" } else { "Expand" }).clicked() {
                                                         *pending_toggle = Some(key.clone());
                                                     }
                                                 } else {
@@ -8560,7 +8562,7 @@ impl eframe::App for ViewerApp {
                                                     ui.add_space(12.0);
                                                 }
 
-                                                // Visibility toggle (eye) — compact, right next to the arrow
+                                                // Visibility toggle — compact dot icon
                                                 if let Some(idx) = inst_idx {
                                                     let eye = if is_hid { "○" } else { "●" };
                                                     let eye_color = if is_hid {
@@ -8568,34 +8570,30 @@ impl eframe::App for ViewerApp {
                                                     } else {
                                                         egui::Color32::from_rgb(100, 180, 100)
                                                     };
-                                                    let eye_resp = ui.add(
-                                                        egui::Label::new(
+                                                    if ui.add(
+                                                        egui::Button::new(
                                                             egui::RichText::new(eye)
                                                                 .size(10.0)
                                                                 .color(eye_color)
                                                         )
-                                                        .sense(egui::Sense::click())
-                                                    );
-                                                    if eye_resp.clicked() {
+                                                        .frame(false)
+                                                    ).on_hover_text("Toggle visibility").clicked() {
                                                         *pending_vis = Some(idx);
                                                     }
-                                                    eye_resp.on_hover_text("Toggle visibility");
                                                 }
 
                                                 // Isolate button (★) — compact
                                                 if let Some(idx) = inst_idx {
-                                                    let iso_resp = ui.add(
-                                                        egui::Label::new(
+                                                    if ui.add(
+                                                        egui::Button::new(
                                                             egui::RichText::new("★")
                                                                 .size(10.0)
                                                                 .color(egui::Color32::from_rgb(200, 180, 80))
                                                         )
-                                                        .sense(egui::Sense::click())
-                                                    );
-                                                    if iso_resp.clicked() {
+                                                        .frame(false)
+                                                    ).on_hover_text("Isolate: show only this").clicked() {
                                                         *pending_isolate = Some(idx);
                                                     }
-                                                    iso_resp.on_hover_text("Isolate: show only this");
                                                 }
 
                                                 // Click-to-select label — tight spacing, no extra gap
