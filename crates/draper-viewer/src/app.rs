@@ -794,6 +794,12 @@ pub struct ViewerApp {
     pub brepcad_vp_connect_mouse: egui::Pos2,
     /// VP: node being dragged (for repositioning).
     pub brepcad_vp_drag_node: Option<u64>,
+    /// VP: selected node (for parameter editing).
+    pub brepcad_vp_selected_node: Option<u64>,
+    /// VP: live preview enabled (auto-recompute on param change).
+    pub brepcad_vp_live_preview: bool,
+    /// VP: dirty flag (graph needs re-evaluation).
+    pub brepcad_vp_dirty: bool,
     /// Visual programming panel visible.
     pub brepcad_vp_panel_open: bool,
     /// Dock state for the main modeling workspace (egui-dock).
@@ -1539,6 +1545,9 @@ impl ViewerApp {
             brepcad_vp_connect_from: None,
             brepcad_vp_connect_mouse: egui::Pos2::ZERO,
             brepcad_vp_drag_node: None,
+            brepcad_vp_selected_node: None,
+            brepcad_vp_live_preview: true,
+            brepcad_vp_dirty: false,
             brepcad_vp_panel_open: false,
             brepcad_dock_state: crate::ui::dock::DockStateHolder::new(),
             brepcad_browser_visible: true,
@@ -6893,22 +6902,23 @@ impl eframe::App for ViewerApp {
                             });
                         });
 
-                    // ── VP Canvas (center — THE main canvas where nodes appear) ──
-                    // This is the dark area with dotted grid where you build your pipeline
+                    // ── VP Canvas (center — interactive node graph) ──
+                    // Each node is an egui::Area with interactive parameter widgets.
+                    // This replaces the old painter-only approach with full Grasshopper-like
+                    // inline editing: sliders, number inputs, real-time preview.
                     egui::CentralPanel::default()
                         .frame(egui::Frame::new().fill(egui::Color32::from_rgb(0x0d, 0x0d, 0x1a)))
                         .show(ctx, |ui| {
                             let available = ui.available_size();
-                            let (rect, response) = ui.allocate_at_least(available, egui::Sense::click_and_drag());
-
+                            let (canvas_rect, _response) = ui.allocate_at_least(available, egui::Sense::click_and_drag());
                             let painter = ui.painter();
 
-                            // Draw dotted grid background (like mockup 03)
+                            // Draw dotted grid background
                             let grid_spacing = 40.0_f32;
-                            let mut gx = rect.min.x;
-                            while gx < rect.max.x {
-                                let mut gy = rect.min.y;
-                                while gy < rect.max.y {
+                            let mut gx = canvas_rect.min.x;
+                            while gx < canvas_rect.max.x {
+                                let mut gy = canvas_rect.min.y;
+                                while gy < canvas_rect.max.y {
                                     painter.circle_filled(egui::pos2(gx, gy), 1.0,
                                         egui::Color32::from_rgba_premultiplied(0x89, 0xb4, 0xfa, 12));
                                     gy += grid_spacing;
@@ -6916,134 +6926,10 @@ impl eframe::App for ViewerApp {
                                 gx += grid_spacing;
                             }
 
-                            // Draw nodes
-                            let node_w = 150.0_f32;
-                            let node_h = 85.0_f32;
-
-                            for node in &self.brepcad_vp_graph.nodes {
-                                let pos = egui::pos2(rect.min.x + node.x, rect.min.y + node.y);
-                                let node_rect = egui::Rect::from_min_size(pos, egui::vec2(node_w, node_h));
-
-                                let (header_color, border_color) = match &node.node_type {
-                                    crate::ui::workspaces::NodeType::Box { .. }
-                                    | crate::ui::workspaces::NodeType::Sphere { .. }
-                                    | crate::ui::workspaces::NodeType::Cylinder { .. }
-                                    | crate::ui::workspaces::NodeType::Cone { .. }
-                                    | crate::ui::workspaces::NodeType::Torus { .. } => {
-                                        (egui::Color32::from_rgb(0x89, 0xb4, 0xfa), egui::Color32::from_rgb(0x89, 0xb4, 0xfa))
-                                    }
-                                    crate::ui::workspaces::NodeType::Fillet { .. }
-                                    | crate::ui::workspaces::NodeType::Chamfer { .. }
-                                    | crate::ui::workspaces::NodeType::LinearArray { .. }
-                                    | crate::ui::workspaces::NodeType::CircularArray { .. }
-                                    | crate::ui::workspaces::NodeType::Mirror { .. } => {
-                                        (egui::Color32::from_rgb(0xf9, 0xe2, 0xaf), egui::Color32::from_rgb(0xf9, 0xe2, 0xaf))
-                                    }
-                                    crate::ui::workspaces::NodeType::BooleanUnion
-                                    | crate::ui::workspaces::NodeType::BooleanSubtract
-                                    | crate::ui::workspaces::NodeType::BooleanIntersect => {
-                                        (egui::Color32::from_rgb(0xcb, 0xa6, 0xf7), egui::Color32::from_rgb(0xcb, 0xa6, 0xf7))
-                                    }
-                                    crate::ui::workspaces::NodeType::BakeToDoc => {
-                                        (egui::Color32::from_rgb(0xf3, 0x8b, 0xa8), egui::Color32::from_rgb(0xf3, 0x8b, 0xa8))
-                                    }
-                                    _ => {
-                                        (egui::Color32::from_rgb(0xa6, 0xe3, 0xa1), egui::Color32::from_rgb(0xa6, 0xe3, 0xa1))
-                                    }
-                                };
-
-                                // Node body (dark surface)
-                                painter.rect_filled(node_rect, 8.0_f32, egui::Color32::from_rgb(0x31, 0x32, 0x44));
-                                painter.rect_stroke(node_rect, 8.0_f32, egui::Stroke::new(2.0_f32, border_color), egui::StrokeKind::Outside);
-
-                                // Header bar (colored)
-                                let header_rect = egui::Rect::from_min_size(pos, egui::vec2(node_w, 26.0));
-                                painter.rect_filled(header_rect, 8.0_f32, header_color);
-
-                                // Title
-                                let label = node.node_type.label();
-                                painter.text(
-                                    header_rect.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    label,
-                                    egui::FontId::proportional(12.0),
-                                    egui::Color32::from_rgb(0x1e, 0x1e, 0x2e),
-                                );
-
-                                // Params
-                                let params_text = match &node.node_type {
-                                    crate::ui::workspaces::NodeType::Box { width, height, depth } => {
-                                        format!("Width: {}\nHeight: {}\nDepth: {}", *width as u32, *height as u32, *depth as u32)
-                                    }
-                                    crate::ui::workspaces::NodeType::Sphere { radius } => format!("Radius: {}", *radius as u32),
-                                    crate::ui::workspaces::NodeType::Cylinder { radius, height } => format!("Radius: {}\nHeight: {}", *radius as u32, *height as u32),
-                                    crate::ui::workspaces::NodeType::Cone { bottom_radius, height, .. } => format!("Radius: {}\nHeight: {}", *bottom_radius as u32, *height as u32),
-                                    crate::ui::workspaces::NodeType::Torus { major_radius, minor_radius } => format!("Major: {}\nMinor: {}", *major_radius as u32, *minor_radius as u32),
-                                    crate::ui::workspaces::NodeType::Fillet { radius, .. } => format!("Radius: {}", *radius as u32),
-                                    crate::ui::workspaces::NodeType::Chamfer { distance, .. } => format!("Distance: {}", *distance as u32),
-                                    crate::ui::workspaces::NodeType::LinearArray { count, spacing, .. } => format!("Count: {}\nSpacing: {}", count, *spacing as u32),
-                                    crate::ui::workspaces::NodeType::CircularArray { count, .. } => format!("Count: {}", count),
-                                    _ => String::new(),
-                                };
-                                if !params_text.is_empty() {
-                                    painter.text(
-                                        node_rect.left_top() + egui::vec2(10.0, 42.0),
-                                        egui::Align2::LEFT_TOP,
-                                        &params_text,
-                                        egui::FontId::proportional(9.0),
-                                        egui::Color32::from_rgb(0xa6, 0xad, 0xc8),
-                                    );
-                                }
-
-                                // Output port (right side, circle)
-                                let port_pos = egui::pos2(node_rect.right(), node_rect.center().y);
-                                painter.circle_filled(port_pos, 7.0_f32, header_color);
-                                painter.circle_stroke(port_pos, 7.0_f32, egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(0x1e, 0x1e, 0x2e)));
-
-                                // Input port (left side, for non-primitive nodes)
-                                let has_input = matches!(&node.node_type,
-                                    crate::ui::workspaces::NodeType::Fillet { .. }
-                                    | crate::ui::workspaces::NodeType::Chamfer { .. }
-                                    | crate::ui::workspaces::NodeType::BooleanUnion
-                                    | crate::ui::workspaces::NodeType::BooleanSubtract
-                                    | crate::ui::workspaces::NodeType::BooleanIntersect
-                                    | crate::ui::workspaces::NodeType::LinearArray { .. }
-                                    | crate::ui::workspaces::NodeType::CircularArray { .. }
-                                    | crate::ui::workspaces::NodeType::Mirror { .. }
-                                    | crate::ui::workspaces::NodeType::BakeToDoc
-                                );
-                                if has_input {
-                                    let in_port = egui::pos2(node_rect.left(), node_rect.center().y);
-                                    painter.circle_filled(in_port, 7.0_f32, header_color);
-                                    painter.circle_stroke(in_port, 7.0_f32, egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(0x1e, 0x1e, 0x2e)));
-                                }
-
-                                // Node ID
-                                painter.text(
-                                    node_rect.left_top() + egui::vec2(10.0, 30.0),
-                                    egui::Align2::LEFT_TOP,
-                                    format!("#{}", node.id),
-                                    egui::FontId::proportional(8.0),
-                                    egui::Color32::from_rgb(0x6c, 0x70, 0x86),
-                                );
-                            }
-
-                            // Draw connections
-                            for conn in &self.brepcad_vp_graph.connections {
-                                let from_node = self.brepcad_vp_graph.nodes.iter().find(|n| n.id == conn.from_node);
-                                let to_node = self.brepcad_vp_graph.nodes.iter().find(|n| n.id == conn.to_node);
-                                if let (Some(from), Some(to)) = (from_node, to_node) {
-                                    let from_pos = egui::pos2(rect.min.x + from.x + node_w, rect.min.y + from.y + node_h * 0.5);
-                                    let to_pos = egui::pos2(rect.min.x + to.x, rect.min.y + to.y + node_h * 0.5);
-                                    painter.line_segment([from_pos, to_pos],
-                                        egui::Stroke::new(2.5_f32, egui::Color32::from_rgba_premultiplied(0x89, 0xb4, 0xfa, 180)));
-                                }
-                            }
-
                             // Help text when empty
                             if self.brepcad_vp_graph.nodes.is_empty() {
                                 painter.text(
-                                    rect.center(),
+                                    canvas_rect.center(),
                                     egui::Align2::CENTER_CENTER,
                                     "Click a node type in the palette (right panel) to add it here",
                                     egui::FontId::proportional(15.0),
@@ -7051,125 +6937,391 @@ impl eframe::App for ViewerApp {
                                 );
                             }
 
-                            // ── Node interaction: drag to move, click ports to connect ──
-                            let mouse_pos = ui.input(|i| i.pointer.latest_pos());
-                            let is_dragging = response.dragged_by(egui::PointerButton::Primary);
-                            let drag_delta = response.drag_delta();
-
-                            if let Some(mp) = mouse_pos {
-                                if mp.x >= rect.min.x && mp.x <= rect.max.x && mp.y >= rect.min.y && mp.y <= rect.max.y {
-                                    self.brepcad_vp_connect_mouse = mp;
-                                }
-                            }
-
-                            // Check each node for port clicks and body drags
-                            let node_w_f = node_w;
-                            let node_h_f = node_h;
-                            let mut pending_connect: Option<(u64, u64)> = None;
-                            let mut pending_drag_update: Option<(u64, f32, f32)> = None;
-
-                            for node in &self.brepcad_vp_graph.nodes {
-                                let pos = egui::pos2(rect.min.x + node.x, rect.min.y + node.y);
-                                let node_rect = egui::Rect::from_min_size(pos, egui::vec2(node_w_f, node_h_f));
-
-                                // Output port (right side)
-                                let out_port = egui::pos2(node_rect.right(), node_rect.center().y);
-                                let out_port_rect = egui::Rect::from_center_size(out_port, egui::vec2(16.0, 16.0));
-
-                                // Input port (left side) — only for non-primitive nodes
-                                let has_input = matches!(&node.node_type,
-                                    crate::ui::workspaces::NodeType::Fillet { .. }
-                                    | crate::ui::workspaces::NodeType::Chamfer { .. }
-                                    | crate::ui::workspaces::NodeType::BooleanUnion
-                                    | crate::ui::workspaces::NodeType::BooleanSubtract
-                                    | crate::ui::workspaces::NodeType::BooleanIntersect
-                                    | crate::ui::workspaces::NodeType::LinearArray { .. }
-                                    | crate::ui::workspaces::NodeType::CircularArray { .. }
-                                    | crate::ui::workspaces::NodeType::Mirror { .. }
-                                    | crate::ui::workspaces::NodeType::BakeToDoc
-                                );
-                                let in_port = egui::pos2(node_rect.left(), node_rect.center().y);
-                                let in_port_rect = egui::Rect::from_center_size(in_port, egui::vec2(16.0, 16.0));
-
-                                if let Some(mp) = mouse_pos {
-                                    // Click on output port → start connection drag
-                                    if out_port_rect.contains(mp) && ui.input(|i| i.pointer.primary_pressed()) {
-                                        self.brepcad_vp_connect_from = Some(node.id);
-                                    }
-                                    // Click on input port → complete connection
-                                    if has_input && in_port_rect.contains(mp) && ui.input(|i| i.pointer.primary_pressed()) {
-                                        if let Some(from_id) = self.brepcad_vp_connect_from {
-                                            if from_id != node.id {
-                                                pending_connect = Some((from_id, node.id));
-                                            }
-                                        }
-                                    }
-                                    // Right-click on input port → clear connection drag
-                                    if in_port_rect.contains(mp) && ui.input(|i| i.pointer.secondary_pressed()) {
-                                        self.brepcad_vp_connect_from = None;
-                                    }
-                                }
-
-                                // Drag node body to move it
-                                if node_rect.contains(self.brepcad_vp_connect_mouse) && is_dragging && self.brepcad_vp_connect_from.is_none() {
-                                    if self.brepcad_vp_drag_node.is_none() {
-                                        self.brepcad_vp_drag_node = Some(node.id);
-                                    }
-                                }
-                            }
-
-                            // Handle drag movement
-                            if let Some(node_id) = self.brepcad_vp_drag_node {
-                                if is_dragging {
-                                    pending_drag_update = Some((node_id, drag_delta.x, drag_delta.y));
-                                } else {
-                                    self.brepcad_vp_drag_node = None;
-                                }
-                            }
-
-                            // Apply pending connection
-                            if let Some((from_id, to_id)) = pending_connect {
-                                self.brepcad_vp_graph.connect(from_id, 0, to_id, 0);
-                                self.brepcad_vp_connect_from = None;
-                                self.brepcad_status_msg = format!("VP: connected #{} → #{}", from_id, to_id);
-                            }
-
-                            // Apply pending drag update
-                            if let Some((node_id, dx, dy)) = pending_drag_update {
-                                if let Some(node) = self.brepcad_vp_graph.nodes.iter_mut().find(|n| n.id == node_id) {
-                                    node.x += dx;
-                                    node.y += dy;
+                            // Draw connections (BEHIND nodes)
+                            for conn in &self.brepcad_vp_graph.connections {
+                                let from_node = self.brepcad_vp_graph.nodes.iter().find(|n| n.id == conn.from_node);
+                                let to_node = self.brepcad_vp_graph.nodes.iter().find(|n| n.id == conn.to_node);
+                                if let (Some(from), Some(to)) = (from_node, to_node) {
+                                    // Estimate port positions based on node layout
+                                    let from_h = vp_node_height(&from.node_type);
+                                    let to_h = vp_node_height(&to.node_type);
+                                    let from_pos = egui::pos2(
+                                        canvas_rect.min.x + from.x + 200.0,
+                                        canvas_rect.min.y + from.y + from_h * 0.5,
+                                    );
+                                    let to_pos = egui::pos2(
+                                        canvas_rect.min.x + to.x,
+                                        canvas_rect.min.y + to.y + to_h * 0.5,
+                                    );
+                                    // Bezier curve connection
+                                    let mid_x = (from_pos.x + to_pos.x) * 0.5;
+                                    let ctrl1 = egui::pos2(mid_x, from_pos.y);
+                                    let ctrl2 = egui::pos2(mid_x, to_pos.y);
+                                    painter.add(egui::Shape::cubic_bezier(
+                                        [from_pos, ctrl1, ctrl2, to_pos],
+                                        egui::Stroke::new(2.5_f32, egui::Color32::from_rgba_premultiplied(0x89, 0xb4, 0xfa, 200)),
+                                    ));
                                 }
                             }
 
                             // Draw connection-in-progress line
                             if let Some(from_id) = self.brepcad_vp_connect_from {
                                 if let Some(from_node) = self.brepcad_vp_graph.nodes.iter().find(|n| n.id == from_id) {
+                                    let from_h = vp_node_height(&from_node.node_type);
                                     let from_pos = egui::pos2(
-                                        rect.min.x + from_node.x + node_w,
-                                        rect.min.y + from_node.y + node_h * 0.5,
+                                        canvas_rect.min.x + from_node.x + 200.0,
+                                        canvas_rect.min.y + from_node.y + from_h * 0.5,
                                     );
                                     let to_pos = self.brepcad_vp_connect_mouse;
-                                    painter.line_segment([from_pos, to_pos],
-                                        egui::Stroke::new(2.5_f32, egui::Color32::from_rgba_premultiplied(0xf9, 0xe2, 0xaf, 200)));
-                                    // Cancel on Escape or right-click
-                                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                                        self.brepcad_vp_connect_from = None;
+                                    let mid_x = (from_pos.x + to_pos.x) * 0.5;
+                                    let ctrl1 = egui::pos2(mid_x, from_pos.y);
+                                    let ctrl2 = egui::pos2(mid_x, to_pos.y);
+                                    painter.add(egui::Shape::cubic_bezier(
+                                        [from_pos, ctrl1, ctrl2, to_pos],
+                                        egui::Stroke::new(2.5_f32, egui::Color32::from_rgba_premultiplied(0xf9, 0xe2, 0xaf, 200)),
+                                    ));
+                                }
+                            }
+                        });
+
+                    // Render each node as an interactive egui::Area
+                    let node_ids: Vec<u64> = self.brepcad_vp_graph.nodes.iter().map(|n| n.id).collect();
+                    let mut param_changed = false;
+                    let mut node_clicked: Option<u64> = None;
+                    let mut port_connect: Option<(u64, u64)> = None;
+
+                    for node_id in node_ids {
+                        let node_idx = self.brepcad_vp_graph.nodes.iter().position(|n| n.id == node_id);
+                        if node_idx.is_none() { continue; }
+                        let idx = node_idx.unwrap();
+
+                        // Get node data without borrowing self for the Area closure
+                        let nt = self.brepcad_vp_graph.nodes[idx].node_type.clone();
+                        let nx = self.brepcad_vp_graph.nodes[idx].x;
+                        let ny = self.brepcad_vp_graph.nodes[idx].y;
+                        let nid = self.brepcad_vp_graph.nodes[idx].id;
+                        let is_selected = self.brepcad_vp_selected_node == Some(nid);
+
+                        let (header_color, border_color) = vp_node_colors(&nt);
+                        let label = nt.label();
+                        let node_h = vp_node_height(&nt);
+                        let node_w = 200.0_f32;
+
+                        let area_pos = egui::pos2(nx, ny);
+                        let area_id = egui::Id::new(format!("vp_node_{}", nid));
+
+                        // Clone mutable params for the closure
+                        let mut params = nt.clone();
+                        let mut local_changed = false;
+                        let mut local_port_click: Option<bool> = None; // true=output, false=input
+
+                        egui::Area::new(area_id)
+                            .fixed_pos(area_pos)
+                            .order(egui::Order::Middle)
+                            .interactable(true)
+                            .show(ctx, |ui| {
+                                // Node frame
+                                let frame = egui::Frame::default()
+                                    .fill(egui::Color32::from_rgb(0x31, 0x32, 0x44))
+                                    .stroke(egui::Stroke::new(if is_selected { 3.0 } else { 2.0 }, if is_selected { egui::Color32::from_rgb(0xf9, 0xe2, 0xaf) } else { border_color }))
+                                    .corner_radius(8.0)
+                                    .inner_margin(egui::Margin::same(0));
+
+                                frame.show(ui, |ui| {
+                                    ui.set_width(node_w);
+                                    ui.set_min_height(node_h);
+
+                                    // Header bar
+                                    let header_frame = egui::Frame::default()
+                                        .fill(header_color)
+                                        .corner_radius(8.0)
+                                        .inner_margin(egui::Margin::symmetric(8, 4));
+                                    header_frame.show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new(label)
+                                                .size(12.0)
+                                                .color(egui::Color32::from_rgb(0x1e, 0x1e, 0x2e))
+                                                .strong());
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                ui.label(egui::RichText::new(format!("#{}", nid))
+                                                    .size(8.0)
+                                                    .color(egui::Color32::from_rgb(0x1e, 0x1e, 0x2e)));
+                                            });
+                                        });
+                                    });
+
+                                    // Click on header → select node
+                                    let header_resp = ui.interact(
+                                        ui.min_rect(),
+                                        egui::Id::new(format!("vp_node_header_{}", nid)),
+                                        egui::Sense::click(),
+                                    );
+                                    if header_resp.clicked() {
+                                        node_clicked = Some(nid);
+                                    }
+
+                                    // Parameter editing area (inline widgets like Grasshopper)
+                                    ui.add_space(2.0);
+                                    egui::Frame::default()
+                                        .inner_margin(egui::Margin::symmetric(8, 4))
+                                        .show(ui, |ui| {
+                                            match &mut params {
+                                                crate::ui::workspaces::NodeType::Box { width, height, depth } => {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("W:");
+                                                        if ui.add(egui::DragValue::new(width).speed(1.0).range(1.0..=10000.0)).changed() { local_changed = true; }
+                                                    });
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("H:");
+                                                        if ui.add(egui::DragValue::new(height).speed(1.0).range(1.0..=10000.0)).changed() { local_changed = true; }
+                                                    });
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("D:");
+                                                        if ui.add(egui::DragValue::new(depth).speed(1.0).range(1.0..=10000.0)).changed() { local_changed = true; }
+                                                    });
+                                                }
+                                                crate::ui::workspaces::NodeType::Sphere { radius } => {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("R:");
+                                                        if ui.add(egui::DragValue::new(radius).speed(1.0).range(0.1..=5000.0)).changed() { local_changed = true; }
+                                                    });
+                                                }
+                                                crate::ui::workspaces::NodeType::Cylinder { radius, height } => {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("R:");
+                                                        if ui.add(egui::DragValue::new(radius).speed(1.0).range(0.1..=5000.0)).changed() { local_changed = true; }
+                                                    });
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("H:");
+                                                        if ui.add(egui::DragValue::new(height).speed(1.0).range(0.1..=10000.0)).changed() { local_changed = true; }
+                                                    });
+                                                }
+                                                crate::ui::workspaces::NodeType::Cone { bottom_radius, top_radius, height } => {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("R1:");
+                                                        if ui.add(egui::DragValue::new(bottom_radius).speed(1.0).range(0.0..=5000.0)).changed() { local_changed = true; }
+                                                    });
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("R2:");
+                                                        if ui.add(egui::DragValue::new(top_radius).speed(1.0).range(0.0..=5000.0)).changed() { local_changed = true; }
+                                                    });
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("H:");
+                                                        if ui.add(egui::DragValue::new(height).speed(1.0).range(0.1..=10000.0)).changed() { local_changed = true; }
+                                                    });
+                                                }
+                                                crate::ui::workspaces::NodeType::Torus { major_radius, minor_radius } => {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("R:");
+                                                        if ui.add(egui::DragValue::new(major_radius).speed(1.0).range(0.1..=5000.0)).changed() { local_changed = true; }
+                                                    });
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("r:");
+                                                        if ui.add(egui::DragValue::new(minor_radius).speed(0.5).range(0.01..=1000.0)).changed() { local_changed = true; }
+                                                    });
+                                                }
+                                                crate::ui::workspaces::NodeType::Fillet { radius, .. } => {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("R:");
+                                                        if ui.add(egui::DragValue::new(radius).speed(0.5).range(0.01..=1000.0)).changed() { local_changed = true; }
+                                                    });
+                                                }
+                                                crate::ui::workspaces::NodeType::Chamfer { distance, .. } => {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("D:");
+                                                        if ui.add(egui::DragValue::new(distance).speed(0.5).range(0.01..=1000.0)).changed() { local_changed = true; }
+                                                    });
+                                                }
+                                                crate::ui::workspaces::NodeType::LinearArray { count, spacing, .. } => {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("N:");
+                                                        let mut c = *count as i32;
+                                                        if ui.add(egui::DragValue::new(&mut c).range(1..=1000)).changed() { *count = c as u32; local_changed = true; }
+                                                    });
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("S:");
+                                                        if ui.add(egui::DragValue::new(spacing).speed(1.0).range(0.1..=10000.0)).changed() { local_changed = true; }
+                                                    });
+                                                }
+                                                crate::ui::workspaces::NodeType::CircularArray { count, angle, .. } => {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("N:");
+                                                        let mut c = *count as i32;
+                                                        if ui.add(egui::DragValue::new(&mut c).range(1..=1000)).changed() { *count = c as u32; local_changed = true; }
+                                                    });
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("A:");
+                                                        if ui.add(egui::DragValue::new(angle).speed(1.0).range(1.0..=360.0)).changed() { local_changed = true; }
+                                                    });
+                                                }
+                                                _ => {
+                                                    ui.label(egui::RichText::new("(no params)")
+                                                        .size(10.0)
+                                                        .color(egui::Color32::from_rgb(0x6c, 0x70, 0x86)));
+                                                }
+                                            }
+                                        });
+
+                                    // Port row at the bottom
+                                    ui.add_space(2.0);
+                                    ui.horizontal(|ui| {
+                                        // Input port (left)
+                                        let has_input = nt.input_count() > 0;
+                                        if has_input {
+                                            let in_resp = ui.add(
+                                                egui::Button::new(egui::RichText::new("<").size(14.0).color(header_color))
+                                                    .frame(false)
+                                            );
+                                            if in_resp.clicked() {
+                                                local_port_click = Some(false);
+                                            }
+                                            in_resp.on_hover_text("Input port — click to connect from another node's output");
+                                        } else {
+                                            ui.add_space(20.0);
+                                        }
+
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            // Output port (right)
+                                            let has_output = nt.output_count() > 0;
+                                            if has_output {
+                                                let out_resp = ui.add(
+                                                    egui::Button::new(egui::RichText::new(">").size(14.0).color(header_color))
+                                                        .frame(false)
+                                                );
+                                                if out_resp.clicked() {
+                                                    local_port_click = Some(true);
+                                                }
+                                                out_resp.on_hover_text("Output port — click then click an input port to connect");
+                                            }
+                                        });
+                                    });
+                                });
+                            });
+
+                        // Apply parameter changes back to the node
+                        if local_changed {
+                            self.brepcad_vp_graph.nodes[idx].node_type = params;
+                            param_changed = true;
+                        }
+
+                        // Handle port clicks
+                        if let Some(is_output) = local_port_click {
+                            if is_output {
+                                // Output port clicked → start connection
+                                self.brepcad_vp_connect_from = Some(nid);
+                            } else {
+                                // Input port clicked → complete connection
+                                if let Some(from_id) = self.brepcad_vp_connect_from {
+                                    if from_id != nid {
+                                        port_connect = Some((from_id, nid));
                                     }
                                 }
                             }
+                        }
 
-                            // Help text for connections
-                            if self.brepcad_vp_connect_from.is_some() {
-                                painter.text(
-                                    rect.min + egui::vec2(10.0, rect.height() - 20.0),
-                                    egui::Align2::LEFT_TOP,
-                                    "Click an input port (left side of a modifier node) to connect. Esc to cancel.",
-                                    egui::FontId::proportional(11.0),
-                                    egui::Color32::from_rgb(0xf9, 0xe2, 0xaf),
-                                );
+                        // Handle node dragging (via Area position)
+                        // Check if the node's Area was dragged
+                        let area_pos_now = ctx.memory(|m| m.area_rect(egui::Id::new(format!("vp_node_{}", nid))));
+                        if let Some(curr_rect) = area_pos_now {
+                            let new_x = curr_rect.min.x;
+                            let new_y = curr_rect.min.y;
+                            if (new_x - nx).abs() > 0.5 || (new_y - ny).abs() > 0.5 {
+                                if let Some(node) = self.brepcad_vp_graph.nodes.iter_mut().find(|n| n.id == nid) {
+                                    node.x = new_x;
+                                    node.y = new_y;
+                                }
                             }
-                        });
+                        }
+                    }
+
+                    // Apply port connection
+                    if let Some((from_id, to_id)) = port_connect {
+                        self.brepcad_vp_graph.connect(from_id, 0, to_id, 0);
+                        self.brepcad_vp_connect_from = None;
+                        self.brepcad_vp_dirty = true;
+                        self.brepcad_status_msg = format!("VP: connected #{} -> #{}", from_id, to_id);
+                    }
+
+                    // Apply node selection
+                    if let Some(nid) = node_clicked {
+                        self.brepcad_vp_selected_node = Some(nid);
+                        self.brepcad_vp_dirty = true;
+                    }
+
+                    // Esc cancels connection drag
+                    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        self.brepcad_vp_connect_from = None;
+                    }
+
+                    // Live preview: auto-recompute and show result in viewport
+                    if (param_changed || self.brepcad_vp_dirty) && self.brepcad_vp_live_preview {
+                        self.brepcad_vp_dirty = false;
+                        // Evaluate graph and show preview in the viewport (without switching workspace)
+                        let graph = self.brepcad_vp_graph.clone();
+                        if let Some(solid) = vp_evaluate_graph(&graph) {
+                            let params = tri_params_for_lod(self.lod_level);
+                            let mesh = triangulate_solid(&solid, &params);
+                            // Store as current_solid for tree/face display, but DON'T switch workspace
+                            self.current_solid = Some(solid);
+                            self.current_nurbs_surface = None;
+                            // Create a simple assembly tree for the VP result
+                            self.detailed_instances.clear();
+                            self.instance_triangle_ranges.clear();
+                            // Build a single DetailedMeshInstance for the VP result
+                            let tri_count = mesh.triangle_count();
+                            if tri_count > 0 {
+                                let inst = draper_step::DetailedMeshInstance {
+                                    name: "VP Result".to_string(),
+                                    mesh: mesh.clone(),
+                                    faces: Vec::new(),
+                                    transform: None,
+                                    color: [0.7, 0.7, 0.75, 1.0],
+                                    step_entity_id: None,
+                                    brep_id: None,
+                                };
+                                self.detailed_instances.push(inst);
+                                self.instance_triangle_ranges.push((0, tri_count));
+                                // Build assembly tree
+                                self.assembly_tree = Some(draper_step::AssemblyNode {
+                                    name: "VP Result".to_string(),
+                                    pd_id: 0,
+                                    brep_id: None,
+                                    instance_index: Some(0),
+                                    transform: None,
+                                    color: None,
+                                    layers: Vec::new(),
+                                    children: Vec::new(),
+                                });
+                            }
+                            self.mesh = mesh;
+                            self.mesh_dirty = true;
+                            self.edge_dirty = true;
+                            self.wireframe_overlay_dirty = true;
+                            // Auto-fit camera
+                            let (bb_min, bb_max) = self.mesh.bounding_box();
+                            self.camera.fit_to_bounding_box(
+                                [bb_min.x as f32, bb_min.y as f32, bb_min.z as f32],
+                                [bb_max.x as f32, bb_max.y as f32, bb_max.z as f32],
+                            );
+                        }
+                    }
+
+                    // Connection drag help text
+                    if self.brepcad_vp_connect_from.is_some() {
+                        egui::Area::new(egui::Id::new("vp_connect_help"))
+                            .fixed_pos(egui::pos2(10.0, 10.0))
+                            .show(ctx, |ui| {
+                                egui::Frame::default()
+                                    .fill(egui::Color32::from_black_alpha(200))
+                                    .corner_radius(4.0)
+                                    .inner_margin(egui::Margin::symmetric(8, 4))
+                                    .show(ui, |ui| {
+                                        ui.label(egui::RichText::new("Click an input port (<) to connect. Esc to cancel.")
+                                            .size(11.0)
+                                            .color(egui::Color32::from_rgb(0xf9, 0xe2, 0xaf)));
+                                    });
+                            });
+                    }
                 }
             } else {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
@@ -17425,6 +17577,150 @@ impl ViewerApp {
 
 /// Apply Catppuccin Mocha dark theme to match the UI mockups in docs/ui_mockups/.
 /// Colors from docs/ui_mockups/01_main_window.svg:
+/// VP helper: compute node height based on type (more params = taller node).
+fn vp_node_height(nt: &crate::ui::workspaces::NodeType) -> f32 {
+    use crate::ui::workspaces::NodeType;
+    match nt {
+        NodeType::Box { .. } => 120.0,
+        NodeType::Cone { .. } => 130.0,
+        NodeType::Cylinder { .. } | NodeType::Torus { .. } | NodeType::LinearArray { .. } | NodeType::CircularArray { .. } => 105.0,
+        NodeType::Sphere { .. } | NodeType::Fillet { .. } | NodeType::Chamfer { .. } => 90.0,
+        _ => 70.0,
+    }
+}
+
+/// VP helper: get header/border colors for a node type.
+fn vp_node_colors(nt: &crate::ui::workspaces::NodeType) -> (egui::Color32, egui::Color32) {
+    use crate::ui::workspaces::NodeType;
+    match nt {
+        NodeType::Box { .. } | NodeType::Sphere { .. } | NodeType::Cylinder { .. }
+        | NodeType::Cone { .. } | NodeType::Torus { .. } => {
+            (egui::Color32::from_rgb(0x89, 0xb4, 0xfa), egui::Color32::from_rgb(0x89, 0xb4, 0xfa))
+        }
+        NodeType::Fillet { .. } | NodeType::Chamfer { .. } | NodeType::LinearArray { .. }
+        | NodeType::CircularArray { .. } | NodeType::Mirror { .. } => {
+            (egui::Color32::from_rgb(0xf9, 0xe2, 0xaf), egui::Color32::from_rgb(0xf9, 0xe2, 0xaf))
+        }
+        NodeType::BooleanUnion | NodeType::BooleanSubtract | NodeType::BooleanIntersect => {
+            (egui::Color32::from_rgb(0xcb, 0xa6, 0xf7), egui::Color32::from_rgb(0xcb, 0xa6, 0xf7))
+        }
+        NodeType::BakeToDoc => {
+            (egui::Color32::from_rgb(0xf3, 0x8b, 0xa8), egui::Color32::from_rgb(0xf3, 0x8b, 0xa8))
+        }
+        _ => {
+            (egui::Color32::from_rgb(0xa6, 0xe3, 0xa1), egui::Color32::from_rgb(0xa6, 0xe3, 0xa1))
+        }
+    }
+}
+
+/// VP helper: evaluate the graph and return the result solid.
+/// Walks connections topologically: primitives first, then modifiers.
+fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<draper_topology::Solid> {
+    use crate::ui::workspaces::NodeType;
+    use draper_topology::ShapeBuilder;
+
+    let mut solids: std::collections::HashMap<u64, draper_topology::Solid> = std::collections::HashMap::new();
+
+    fn resolve_inputs(
+        node_id: u64,
+        graph: &crate::ui::workspaces::VpGraph,
+        solids: &std::collections::HashMap<u64, draper_topology::Solid>,
+    ) -> Vec<draper_topology::Solid> {
+        let mut inputs = Vec::new();
+        for conn in &graph.connections {
+            if conn.to_node == node_id {
+                if let Some(s) = solids.get(&conn.from_node) {
+                    inputs.push(s.clone());
+                }
+            }
+        }
+        inputs
+    }
+
+    for _pass in 0..graph.nodes.len() + 1 {
+        let mut changed = false;
+        for node in &graph.nodes {
+            if solids.contains_key(&node.id) { continue; }
+            let inputs = resolve_inputs(node.id, graph, &solids);
+            match &node.node_type {
+                NodeType::Box { width, height, depth } => {
+                    solids.insert(node.id, ShapeBuilder::make_box(*width, *height, *depth));
+                    changed = true;
+                }
+                NodeType::Sphere { radius } => {
+                    solids.insert(node.id, ShapeBuilder::make_sphere(*radius));
+                    changed = true;
+                }
+                NodeType::Cylinder { radius, height } => {
+                    solids.insert(node.id, ShapeBuilder::make_cylinder(*radius, *height));
+                    changed = true;
+                }
+                NodeType::Cone { bottom_radius, height, .. } => {
+                    solids.insert(node.id, ShapeBuilder::make_cone(*bottom_radius, *height, 0.5));
+                    changed = true;
+                }
+                NodeType::Torus { major_radius, minor_radius } => {
+                    solids.insert(node.id, ShapeBuilder::make_torus(*major_radius, *minor_radius));
+                    changed = true;
+                }
+                NodeType::BooleanSubtract => {
+                    if inputs.len() >= 2 {
+                        let tol_ctx = draper_geometry::ToleranceContext::default();
+                        match draper_topology::boolean::boolean_subtract(&inputs[0], &inputs[1], &tol_ctx) {
+                            Ok(result) => { solids.insert(node.id, result); changed = true; }
+                            Err(_) => { solids.insert(node.id, inputs[0].clone()); changed = true; }
+                        }
+                    }
+                }
+                NodeType::BooleanUnion | NodeType::BooleanIntersect => {
+                    if inputs.len() >= 2 {
+                        solids.insert(node.id, inputs[0].clone());
+                        changed = true;
+                    }
+                }
+                NodeType::Fillet { radius, .. } => {
+                    if inputs.len() >= 1 {
+                        match draper_topology::operations::fillet_edge(&inputs[0], 0, *radius) {
+                            Ok(result) => { solids.insert(node.id, result); changed = true; }
+                            Err(_) => { solids.insert(node.id, inputs[0].clone()); changed = true; }
+                        }
+                    }
+                }
+                NodeType::Chamfer { distance, .. } => {
+                    if inputs.len() >= 1 {
+                        match draper_topology::operations::chamfer_edge(&inputs[0], 0, *distance) {
+                            Ok(result) => { solids.insert(node.id, result); changed = true; }
+                            Err(_) => { solids.insert(node.id, inputs[0].clone()); changed = true; }
+                        }
+                    }
+                }
+                NodeType::BakeToDoc => {
+                    if let Some(last) = inputs.last() {
+                        solids.insert(node.id, last.clone());
+                        changed = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !changed { break; }
+    }
+
+    // Find result: prefer BakeToDoc, else last evaluated
+    graph.nodes.iter()
+        .find(|n| matches!(n.node_type, NodeType::BakeToDoc))
+        .and_then(|n| solids.get(&n.id))
+        .or_else(|| graph.nodes.iter().rev().find_map(|n| solids.get(&n.id)))
+        .cloned()
+}
+
+/// VP helper: check if a node's field changed (for live preview).
+#[allow(dead_code)]
+fn vp_node_has_params(nt: &crate::ui::workspaces::NodeType) -> bool {
+    use crate::ui::workspaces::NodeType;
+    !matches!(nt, NodeType::BakeToDoc | NodeType::ExtractFaces | NodeType::ExtractEdges)
+}
+
 ///   #1e1e2e base, #181825 mantle, #11111b crust, #313244 surface0,
 ///   #45475a surface1, #cdd6f4 text, #a6adc8 subtext, #89b4fa blue accent
 pub fn apply_brepcad_theme(ctx: &egui::Context) {
