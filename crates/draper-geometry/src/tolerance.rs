@@ -289,7 +289,7 @@ pub const TOLERANCE: f64 = DEFAULT_ABSOLUTE_TOLERANCE;
 /// Squared tolerance for efficient distance comparisons.
 /// DEPRECATED: Use `ToleranceContext::coincidence_tolerance_sq()` instead.
 #[deprecated(since = "0.2.0", note = "Use ToleranceContext::coincidence_tolerance_sq() instead")]
-pub const TOLERANCE_SQ: f64 = TOLERANCE * TOLERANCE;
+pub const TOLERANCE_SQ: f64 = DEFAULT_ABSOLUTE_TOLERANCE * DEFAULT_ABSOLUTE_TOLERANCE;
 
 /// Angular tolerance in radians.
 /// DEPRECATED: Use `ToleranceContext::angular_tolerance()` instead.
@@ -306,7 +306,7 @@ pub const PARAMETRIC_TOLERANCE: f64 = DEFAULT_PARAMETRIC_TOLERANCE;
 #[deprecated(since = "0.2.0", note = "Use ToleranceContext::is_coincident() instead")]
 #[inline]
 pub fn is_coincident(a: f64, b: f64) -> bool {
-    (a - b).abs() < TOLERANCE
+    (a - b).abs() < DEFAULT_ABSOLUTE_TOLERANCE
 }
 
 /// Check if a value is approximately zero.
@@ -314,7 +314,7 @@ pub fn is_coincident(a: f64, b: f64) -> bool {
 #[deprecated(since = "0.2.0", note = "Use ToleranceContext::is_zero() instead")]
 #[inline]
 pub fn is_zero(a: f64) -> bool {
-    a.abs() < TOLERANCE
+    a.abs() < DEFAULT_ABSOLUTE_TOLERANCE
 }
 
 /// Check if two values are within a custom tolerance.

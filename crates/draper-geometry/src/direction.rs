@@ -2,7 +2,7 @@
 // Copyright (c) 2026 KernelDev
 //! Direction (unit vector) in 3D space.
 
-use crate::tolerance::is_zero;
+use crate::tolerance::DEFAULT_ABSOLUTE_TOLERANCE;
 use std::fmt;
 
 /// A unit direction vector in 3D space. Always normalized.
@@ -26,7 +26,7 @@ impl Direction3d {
     /// Returns None if the vector has zero length.
     pub fn new(x: f64, y: f64, z: f64) -> Option<Self> {
         let len = (x * x + y * y + z * z).sqrt();
-        if is_zero(len) {
+        if len.abs() < DEFAULT_ABSOLUTE_TOLERANCE {
             None
         } else {
             Some(Self { x: x / len, y: y / len, z: z / len })
@@ -47,7 +47,7 @@ impl Direction3d {
         let cz = self.x * other.y - self.y * other.x;
         // Result should be unit length since inputs are unit
         let len = (cx * cx + cy * cy + cz * cz).sqrt();
-        if is_zero(len) {
+        if len.abs() < DEFAULT_ABSOLUTE_TOLERANCE {
             Direction3d::Z // Fallback
         } else {
             Direction3d { x: cx / len, y: cy / len, z: cz / len }

@@ -21,6 +21,7 @@ use draper_geometry::{
     Point3d, Point2d, Direction3d,
     Surface, Plane, CylinderSurface, SphereSurface, TorusSurface,
     ConeSurface, NurbsSurface,
+    ToleranceContext,
 };
 use draper_topology::{Face, Wire, Edge, Solid, Shell, Compound};
 // WASM-compatible Instant: on native uses std::time::Instant,
@@ -1851,7 +1852,7 @@ fn collect_face_boundary_from_cache(
         let mut unique = vec![points[0]];
         for p in &points[1..] {
             if let Some(last) = unique.last() {
-                if !last.is_coincident_with(p) {
+                if !last.is_coincident_with_tolerance(&p, &ToleranceContext::default()) {
                     unique.push(*p);
                 }
             }
@@ -1859,7 +1860,7 @@ fn collect_face_boundary_from_cache(
         // Also check last vs first (closed loop)
         if unique.len() > 1 {
             if let Some(last) = unique.last() {
-                if last.is_coincident_with(&unique[0]) {
+                if last.is_coincident_with_tolerance(&unique[0], &ToleranceContext::default()) {
                     unique.pop();
                 }
             }
@@ -1943,7 +1944,7 @@ fn collect_face_boundary_with_uv_from_cache(
         let mut unique_uv = vec![points_uv[0]];
         for i in 1..points_3d.len() {
             if let Some(last) = unique_3d.last() {
-                if !last.is_coincident_with(&points_3d[i]) {
+                if !last.is_coincident_with_tolerance(&points_3d[i], &ToleranceContext::default()) {
                     unique_3d.push(points_3d[i]);
                     unique_uv.push(points_uv[i]);
                 }
@@ -1952,7 +1953,7 @@ fn collect_face_boundary_with_uv_from_cache(
         // Also check last vs first (closed loop)
         if unique_3d.len() > 1 {
             if let Some(last) = unique_3d.last() {
-                if last.is_coincident_with(&unique_3d[0]) {
+                if last.is_coincident_with_tolerance(&unique_3d[0], &ToleranceContext::default()) {
                     unique_3d.pop();
                     unique_uv.pop();
                 }
@@ -2005,14 +2006,14 @@ fn collect_face_holes_from_cache(
             let mut unique = vec![points[0]];
             for p in &points[1..] {
                 if let Some(last) = unique.last() {
-                    if !last.is_coincident_with(p) {
+                    if !last.is_coincident_with_tolerance(&p, &ToleranceContext::default()) {
                         unique.push(*p);
                     }
                 }
             }
             if unique.len() > 1 {
                 if let Some(last) = unique.last() {
-                    if last.is_coincident_with(&unique[0]) {
+                    if last.is_coincident_with_tolerance(&unique[0], &ToleranceContext::default()) {
                         unique.pop();
                     }
                 }
@@ -2088,7 +2089,7 @@ fn collect_face_holes_with_uv_from_cache(
             let mut unique_uv = vec![pts_uv[0]];
             for i in 1..pts_3d.len() {
                 if let Some(last) = unique_3d.last() {
-                    if !last.is_coincident_with(&pts_3d[i]) {
+                    if !last.is_coincident_with_tolerance(&pts_3d[i], &ToleranceContext::default()) {
                         unique_3d.push(pts_3d[i]);
                         unique_uv.push(pts_uv[i]);
                     }
@@ -2096,7 +2097,7 @@ fn collect_face_holes_with_uv_from_cache(
             }
             if unique_3d.len() > 1 {
                 if let Some(last) = unique_3d.last() {
-                    if last.is_coincident_with(&unique_3d[0]) {
+                    if last.is_coincident_with_tolerance(&unique_3d[0], &ToleranceContext::default()) {
                         unique_3d.pop();
                         unique_uv.pop();
                     }
@@ -9971,14 +9972,14 @@ fn collect_face_boundary_no_surface(face: &Face, cache: &EdgeDiscretizationCache
         let mut unique = vec![points[0]];
         for p in &points[1..] {
             if let Some(last) = unique.last() {
-                if !last.is_coincident_with(p) {
+                if !last.is_coincident_with_tolerance(&p, &ToleranceContext::default()) {
                     unique.push(*p);
                 }
             }
         }
         if unique.len() > 1 {
             if let Some(last) = unique.last() {
-                if last.is_coincident_with(&unique[0]) {
+                if last.is_coincident_with_tolerance(&unique[0], &ToleranceContext::default()) {
                     unique.pop();
                 }
             }
