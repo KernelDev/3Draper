@@ -807,6 +807,9 @@ pub struct ViewerApp {
     pub brepcad_right_tab: BrepcadRightTab,
     /// Tree filter text.
     pub brepcad_tree_filter: String,
+    /// Tree node keys that are expanded (open). Nodes not in this set are collapsed.
+    /// Uses the same key format as node_key(): "{name}_{pd_id}".
+    pub brepcad_tree_open_nodes: std::collections::HashSet<String>,
     /// Active tool name (shown in status bar).
     pub brepcad_active_tool: String,
     /// Current view orientation label (shown in status bar).
@@ -1536,6 +1539,7 @@ impl ViewerApp {
             brepcad_left_tab: BrepcadLeftTab::Tree,
             brepcad_right_tab: BrepcadRightTab::Properties,
             brepcad_tree_filter: String::new(),
+            brepcad_tree_open_nodes: std::collections::HashSet::new(),
             brepcad_active_tool: "Select".to_string(),
             brepcad_view_orientation: "ISO".to_string(),
             brepcad_viewcube_state: crate::ui::view_modes::ViewCubeState::new(),
@@ -8478,16 +8482,29 @@ impl eframe::App for ViewerApp {
                         });
                         ui.separator();
                         let scroll_result = egui::ScrollArea::vertical().show(ui, |ui| {
-                            // Pending actions for tree interaction
                             let mut pending_select: Option<usize> = None;
                             let mut pending_visibility_toggle: Option<usize> = None;
                             let mut pending_isolate: Option<usize> = None;
+                            let mut pending_toggle_node: Option<String> = None;
                             match self.brepcad_left_tab {
                                 BrepcadLeftTab::Tree => {
+                                    // "Show All" button — restores visibility of all hidden instances.
+                                    let has_hidden = !self.hidden_instances.is_empty();
+                                    if has_hidden {
+                                        ui.horizontal(|ui| {
+                                            if ui.button("👁 Show All").on_hover_text("Restore visibility of all hidden elements").clicked() {
+                                                self.hidden_instances.clear();
+                                                self.highlight_dirty = true;
+                                                self.edge_dirty = true;
+                                                self.wireframe_overlay_dirty = true;
+                                            }
+                                        });
+                                        ui.separator();
+                                    }
+
                                     if let Some(ref tree) = assembly_tree_clone {
-                                        // New tree renderer with real collapse/expand, isolate.
-                                        // Uses egui::collapsing_header::CollapsingState for per-node
-                                        // expand/collapse state that persists across frames.
+                                        // Simple tree renderer using HashSet for open/closed state.
+                                        // No CollapsingState — just a HashSet of open node keys.
                                         fn render_tree_node(
                                             ui: &mut egui::Ui,
                                             node: &draper_step::AssemblyNode,
@@ -8495,15 +8512,17 @@ impl eframe::App for ViewerApp {
                                             hidden: &std::collections::HashSet<usize>,
                                             filter: &str,
                                             active: bool,
+                                            open_nodes: &std::collections::HashSet<String>,
                                             pending_select: &mut Option<usize>,
                                             pending_vis: &mut Option<usize>,
                                             pending_isolate: &mut Option<usize>,
+                                            pending_toggle: &mut Option<String>,
                                         ) {
                                             let name = &node.name;
                                             // Filter: if active and name doesn't match, check children
                                             if active && !name.to_lowercase().contains(filter) {
                                                 for c in &node.children {
-                                                    render_tree_node(ui, c, sel, hidden, filter, active, pending_select, pending_vis, pending_isolate);
+                                                    render_tree_node(ui, c, sel, hidden, filter, active, open_nodes, pending_select, pending_vis, pending_isolate, pending_toggle);
                                                 }
                                                 return;
                                             }
@@ -8511,80 +8530,69 @@ impl eframe::App for ViewerApp {
                                             let is_sel = node.instance_index.map_or(false, |i| i != usize::MAX && sel == Some(i));
                                             let is_hid = node.instance_index.map_or(false, |i| hidden.contains(&i));
                                             let inst_idx = node.instance_index.filter(|&i| i != usize::MAX);
+                                            let key = format!("{}_{}", node.name, node.pd_id);
+                                            let is_open = open_nodes.contains(&key);
 
-                                            // Use CollapsingState for real expand/collapse that persists
-                                            let collapsing_id = egui::Id::new(format!("brepcad_tree_node_{}_{}", node.name, node.pd_id));
-                                            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
-                                                ui.ctx(), collapsing_id, true, // default open
-                                            );
-                                            let is_open_before = state.is_open();
-
-                                            // Build the header row
-                                            state.show_header(ui, |ui| {
-                                                ui.horizontal(|ui| {
-                                                    // Collapse/expand arrow (only for nodes with children)
-                                                    if has_children {
-                                                        let arrow_text = if is_open_before { "▼" } else { "▶" };
-                                                        if ui.small_button(arrow_text).clicked() {
-                                                            // Toggle will happen via CollapsingState's built-in
-                                                            // header click; the button is just visual feedback.
-                                                        }
-                                                    } else {
-                                                        ui.add_space(18.0); // align leaf nodes
+                                            ui.horizontal(|ui| {
+                                                // Collapse/expand arrow — ONLY for nodes with children
+                                                if has_children {
+                                                    let arrow = if is_open { "▼" } else { "▶" };
+                                                    if ui.small_button(arrow).on_hover_text(if is_open { "Collapse" } else { "Expand" }).clicked() {
+                                                        *pending_toggle = Some(key.clone());
                                                     }
+                                                } else {
+                                                    // Leaf node — no arrow, just indent to align
+                                                    ui.add_space(18.0);
+                                                }
 
-                                                    // Visibility toggle (eye icon)
+                                                // Visibility toggle (eye icon) — only for leaf instances
+                                                if let Some(idx) = inst_idx {
+                                                    let eye = if is_hid { "🚫" } else { "👁" };
+                                                    if ui.small_button(eye).on_hover_text("Toggle visibility").clicked() {
+                                                        *pending_vis = Some(idx);
+                                                    }
+                                                } else {
+                                                    ui.add_space(22.0); // align assembly nodes
+                                                }
+
+                                                // Isolate button (★) — only for leaf instances
+                                                if let Some(idx) = inst_idx {
+                                                    if ui.small_button("★").on_hover_text("Isolate: show only this element").clicked() {
+                                                        *pending_isolate = Some(idx);
+                                                    }
+                                                } else {
+                                                    ui.add_space(22.0);
+                                                }
+
+                                                // Click-to-select label
+                                                let txt = if is_hid {
+                                                    egui::RichText::new(name.as_str())
+                                                        .color(egui::Color32::from_rgb(120, 120, 120))
+                                                        .strikethrough()
+                                                } else if is_sel {
+                                                    egui::RichText::new(name.as_str())
+                                                        .color(egui::Color32::from_rgb(137, 180, 250))
+                                                        .strong()
+                                                } else {
+                                                    egui::RichText::new(name.as_str())
+                                                };
+                                                if ui.selectable_label(is_sel, txt).clicked() {
                                                     if let Some(idx) = inst_idx {
-                                                        let eye = if is_hid { "🚫" } else { "👁" };
-                                                        if ui.small_button(eye).on_hover_text("Toggle visibility").clicked() {
-                                                            *pending_vis = Some(idx);
-                                                        }
-                                                    } else if has_children {
-                                                        // For assembly nodes without instance, show a dim placeholder
-                                                        ui.label(egui::RichText::new("  ").size(10.0));
+                                                        *pending_select = Some(idx);
                                                     }
-
-                                                    // Isolate button (show only this element)
-                                                    if let Some(idx) = inst_idx {
-                                                        if ui.small_button("★").on_hover_text("Isolate (show only this)").clicked() {
-                                                            *pending_isolate = Some(idx);
-                                                        }
-                                                    }
-
-                                                    // Click-to-select label
-                                                    let txt = if is_hid {
-                                                        egui::RichText::new(name.as_str())
-                                                            .color(egui::Color32::from_rgb(120, 120, 120))
-                                                            .strikethrough()
-                                                    } else if is_sel {
-                                                        egui::RichText::new(name.as_str())
-                                                            .color(egui::Color32::from_rgb(137, 180, 250))
-                                                            .strong()
-                                                    } else {
-                                                        egui::RichText::new(name.as_str())
-                                                    };
-                                                    if ui.selectable_label(is_sel, txt).clicked() {
-                                                        if let Some(idx) = inst_idx {
-                                                            *pending_select = Some(idx);
-                                                        }
-                                                    }
-                                                });
+                                                }
                                             });
 
-                                            // Render children when open
-                                            // Re-load state to check if it's still open after user interaction
-                                            let state_after = egui::collapsing_header::CollapsingState::load_with_default_open(
-                                                ui.ctx(), collapsing_id, true,
-                                            );
-                                            if state_after.is_open() && has_children {
+                                            // Render children only if this node is open
+                                            if is_open && has_children {
                                                 for c in &node.children {
-                                                    render_tree_node(ui, c, sel, hidden, filter, active, pending_select, pending_vis, pending_isolate);
+                                                    render_tree_node(ui, c, sel, hidden, filter, active, open_nodes, pending_select, pending_vis, pending_isolate, pending_toggle);
                                                 }
                                             }
                                         }
                                         let fl = self.brepcad_tree_filter.to_lowercase();
                                         let fa = !fl.is_empty();
-                                        render_tree_node(ui, tree, selected_instance, &hidden_instances_clone, &fl, fa, &mut pending_select, &mut pending_visibility_toggle, &mut pending_isolate);
+                                        render_tree_node(ui, tree, selected_instance, &hidden_instances_clone, &fl, fa, &self.brepcad_tree_open_nodes, &mut pending_select, &mut pending_visibility_toggle, &mut pending_isolate, &mut pending_toggle_node);
 
                                         // Fix #4: Face list for current solid
                                         if let Some(idx) = selected_instance {
@@ -8644,10 +8652,10 @@ impl eframe::App for ViewerApp {
                                 }
                             }
                             // Return pending actions for the outer code to apply
-                            (pending_select, pending_visibility_toggle, pending_isolate)
+                            (pending_select, pending_visibility_toggle, pending_isolate, pending_toggle_node)
                         });
                         // Apply pending tree actions
-                        let (pending_sel, pending_vis, pending_iso) = scroll_result.inner;
+                        let (pending_sel, pending_vis, pending_iso, pending_toggle) = scroll_result.inner;
                         if let Some(idx) = pending_sel {
                             self.selected_instance = Some(idx);
                             self.selected_face = None;
@@ -8676,6 +8684,14 @@ impl eframe::App for ViewerApp {
                             self.highlight_dirty = true;
                             self.edge_dirty = true;
                             self.wireframe_overlay_dirty = true;
+                        }
+                        // Toggle node open/closed
+                        if let Some(key) = pending_toggle {
+                            if self.brepcad_tree_open_nodes.contains(&key) {
+                                self.brepcad_tree_open_nodes.remove(&key);
+                            } else {
+                                self.brepcad_tree_open_nodes.insert(key);
+                            }
                         }
                     });
             }
@@ -9076,15 +9092,10 @@ impl eframe::App for ViewerApp {
                                         let (path, target) = find_instance_path(tree, pick.instance_idx);
                                         self.open_tree_nodes = path.iter().cloned().collect();
                                         self.scroll_to_tree_node = target;
-                                        // Also expand the brepcad tree's CollapsingState nodes
+                                        // Also expand the brepcad tree's open-nodes HashSet
                                         // along the path so the selected instance is visible.
                                         for nk in &path {
-                                            let collapsing_id = egui::Id::new(format!("brepcad_tree_node_{}", nk));
-                                            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
-                                                ctx, collapsing_id, true,
-                                            );
-                                            state.set_open(true);
-                                            state.store(ctx);
+                                            self.brepcad_tree_open_nodes.insert(nk.clone());
                                         }
                                     }
                                 }
