@@ -5494,6 +5494,12 @@ impl ViewerApp {
                     self.is_loading = false;
                     self.conversion_ctx = None;
                     self.loading_start = None;
+                    // Fix #1: Force mesh_dirty so the final mesh gets uploaded
+                    // to GPU. Without this, the last partial frame may have
+                    // already cleared mesh_dirty, leaving the viewport black.
+                    self.mesh_dirty = true;
+                    self.edge_dirty = true;
+                    self.wireframe_overlay_dirty = true;
                     let vcount = self.mesh.vertex_count();
                     let tcount = self.mesh.triangle_count();
                     self.log(&format!(
@@ -8540,17 +8546,16 @@ impl eframe::App for ViewerApp {
                                                 // Indentation: each depth level adds 16px
                                                 ui.add_space(depth as f32 * 16.0);
 
-                                                // Collapse/expand arrow — small triangle.
-                                                // Uses Button::new().frame(false) instead of Label:
-                                                // - No text cursor (Label shows I-beam cursor)
-                                                // - No text selection (Label allows selecting text)
-                                                // - Clickable without visual button frame
+                                                // Collapse/expand arrow — uses ASCII-safe characters
+                                                // that are guaranteed to render in all fonts.
+                                                // v = expanded (pointing down), > = collapsed (pointing right)
                                                 if has_children {
-                                                    let arrow = if is_open { "▾" } else { "▸" };
+                                                    let arrow = if is_open { "v" } else { ">" };
                                                     if ui.add(
                                                         egui::Button::new(
                                                             egui::RichText::new(arrow)
-                                                                .size(12.0)
+                                                                .size(11.0)
+                                                                .strong()
                                                                 .color(egui::Color32::from_rgb(160, 160, 170))
                                                         )
                                                         .frame(false)
@@ -8558,23 +8563,30 @@ impl eframe::App for ViewerApp {
                                                         *pending_toggle = Some(key.clone());
                                                     }
                                                 } else {
-                                                    // Leaf node — small dot for alignment
-                                                    ui.add_space(12.0);
+                                                    // Leaf node — dash for alignment
+                                                    ui.add(
+                                                        egui::Button::new(
+                                                            egui::RichText::new("-")
+                                                                .size(11.0)
+                                                                .color(egui::Color32::from_rgb(100, 100, 110))
+                                                        )
+                                                        .frame(false)
+                                                    );
                                                 }
 
-                                                // Visibility toggle — compact dot icon
+                                                // Visibility toggle — ASCII-safe: [x] = hidden, [v] = visible
                                                 if let Some(idx) = inst_idx {
-                                                    let eye = if is_hid { "○" } else { "●" };
-                                                    let eye_color = if is_hid {
-                                                        egui::Color32::from_rgb(120, 120, 120)
+                                                    let vis_text = if is_hid { "[x]" } else { "[v]" };
+                                                    let vis_color = if is_hid {
+                                                        egui::Color32::from_rgb(180, 80, 80)
                                                     } else {
-                                                        egui::Color32::from_rgb(100, 180, 100)
+                                                        egui::Color32::from_rgb(80, 180, 80)
                                                     };
                                                     if ui.add(
                                                         egui::Button::new(
-                                                            egui::RichText::new(eye)
+                                                            egui::RichText::new(vis_text)
                                                                 .size(10.0)
-                                                                .color(eye_color)
+                                                                .color(vis_color)
                                                         )
                                                         .frame(false)
                                                     ).on_hover_text("Toggle visibility").clicked() {
@@ -8582,11 +8594,11 @@ impl eframe::App for ViewerApp {
                                                     }
                                                 }
 
-                                                // Isolate button (★) — compact
+                                                // Isolate button — ASCII-safe: [*]
                                                 if let Some(idx) = inst_idx {
                                                     if ui.add(
                                                         egui::Button::new(
-                                                            egui::RichText::new("★")
+                                                            egui::RichText::new("[*]")
                                                                 .size(10.0)
                                                                 .color(egui::Color32::from_rgb(200, 180, 80))
                                                         )
@@ -16614,9 +16626,16 @@ impl ViewerApp {
                 // Set the new solid as current
                 self.current_solid = Some(solid);
                 self.current_nurbs_surface = None;
-                self.detailed_instances.clear();
-                self.instance_triangle_ranges.clear();
-                self.assembly_tree = None;
+                // Fix #3: Don't clear detailed_instances and assembly_tree
+                // when merging into an existing document. This was destroying
+                // the STEP-loaded assembly tree when inserting a primitive.
+                // Only clear these if there was no existing solid (fresh document).
+                if self.secondary_solid.is_none() {
+                    // Fresh document — no existing assembly to preserve
+                    self.detailed_instances.clear();
+                    self.instance_triangle_ranges.clear();
+                    self.assembly_tree = None;
+                }
                 self.mesh_dirty = true;
                 self.edge_dirty = true;
                 self.wireframe_overlay_dirty = true;

@@ -144,7 +144,12 @@ impl CallbackTrait for SceneCallback {
         let mut guard = self.resources.lock().unwrap();
         let resources = match guard.as_mut() {
             Some(r) => r,
-            None => return Vec::new(),
+            None => {
+                // Fix #1: If GPU resources don't exist yet (e.g. after STEP load
+                // cleared them), we can't render. Return empty — the app.rs
+                // upload code will create resources on the next mesh_dirty frame.
+                return Vec::new();
+            }
         };
 
         if resources.index_count == 0 {
