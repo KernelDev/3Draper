@@ -4977,7 +4977,7 @@ fn try_strip_triangulation_ruled_nurbs(
             let d = ((p_curr.x - p_prev.x).powi(2) + (p_curr.y - p_prev.y).powi(2) + (p_curr.z - p_prev.z).powi(2)).sqrt();
             template_cum.push(template_cum[i - 1] + d);
         }
-        let template_total = *template_cum.last().unwrap();
+        let template_total = *template_cum.last().expect("template_cum non-empty after construction");
 
         // Compute cumulative arc length for rail
         let mut rail_cum: Vec<f64> = Vec::with_capacity(rail.len());
@@ -5004,7 +5004,7 @@ fn try_strip_triangulation_ruled_nurbs(
             };
 
             if seg_idx >= rail.len() {
-                let idx = *rail.last().unwrap();
+                let idx = *rail.last().expect("rail non-empty after construction");
                 out.push((bnd_pts[idx], bnd_uvs[idx], Some(idx)));
                 continue;
             }
@@ -5065,7 +5065,7 @@ fn try_strip_triangulation_ruled_nurbs(
             let seg = (dx * dx + dy * dy + dz * dz).sqrt();
             cum_len.push(cum_len[i - 1] + seg);
         }
-        let total_len = *cum_len.last().unwrap();
+        let total_len = *cum_len.last().expect("cum_len non-empty after construction");
 
         let mut out: Vec<(Point3d, Point2d, Option<usize>)> = Vec::with_capacity(n);
         for k in 0..n {

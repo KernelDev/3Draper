@@ -406,7 +406,7 @@ mod tests {
         // The leader is a line along the Z axis (the actual intersection direction)
         let leader = Curve3d::Line(Line::new(
             Point3d::new(0.0, 0.0, -1.0),
-            Direction3d::new(0.0, 0.0, 1.0).unwrap(),
+            Direction3d::Z,
         ));
 
         let ic = IntersectionCurve::new(plane0, plane1, leader);
@@ -438,7 +438,7 @@ mod tests {
         // Use the same plane for both surfaces (degenerate — no intersection curve)
         let leader = Curve3d::Line(Line::new(
             Point3d::new(0.0, 0.0, 0.0),
-            Direction3d::new(1.0, 0.0, 0.0).unwrap(),
+            Direction3d::X,
         ));
         let ic = IntersectionCurve::new(plane.clone(), plane, leader.clone());
 
@@ -458,7 +458,7 @@ mod tests {
         // Leader along the Z axis
         let leader = Curve3d::Line(Line::new(
             Point3d::new(0.0, 0.0, -1.0),
-            Direction3d::new(0.0, 0.0, 1.0).unwrap(),
+            Direction3d::Z,
         ));
         let ic = IntersectionCurve::new(plane0, plane1, leader);
 

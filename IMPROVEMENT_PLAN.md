@@ -50,25 +50,25 @@ crates/draper-viewer/src/ui/ribbon.rs (modify — use IconSet)
 ```
 
 **DoD:**
-- [ ] 40+ icons created from mockup SVGs or Lucide/Phosphor
-- [ ] IconSet struct loads and caches all icons at startup
-- [ ] All ribbon buttons use IconSet instead of Unicode
-- [ ] No visual regressions (button sizes, alignment)
+- [x] 40+ icons created from mockup SVGs or Lucide/Phosphor
+- [x] IconSet struct loads and caches all icons at startup
+- [x] All ribbon buttons use IconSet instead of Unicode
+- [x] No visual regressions (button sizes, alignment)
 
 ### Task 1.2: Menu bar icons `[P1 | Effort: LOW]`
 
 - Add small 12×12 icons to menu items (optional, matches mockups 07-27)
 
 **DoD:**
-- [ ] 21 menus have leading icons
+- [x] 21 menus have leading icons
 
 ### Task 1.3: Status bar + workspace sidebar icons `[P1 | Effort: LOW]`
 
 - Replace text workspace buttons (M, S, VP, SM, CAM, FEA, DR, AI) with 24×24 icons
 
 **DoD:**
-- [ ] 8 workspace buttons use icons
-- [ ] Status bar items have icons
+- [x] 8 workspace buttons use icons
+- [x] Status bar items have icons
 
 ---
 
@@ -88,10 +88,10 @@ Priority order (by user impact):
 5. **Title Block Editor (87)** — Editable title block fields
 
 **DoD per dialog:**
-- [ ] DialogType variant added
-- [ ] render_*_dialog() function with interactive widgets
-- [ ] Wired to menu action (opens dialog)
-- [ ] At least 1 test
+- [x] DialogType variant added
+- [x] render_*_dialog() function with interactive widgets
+- [x] Wired to menu action (opens dialog)
+- [x] At least 1 test
 
 ### Task 2.2: Medium-priority dialogs `[P1 | Effort: LOW]`
 
@@ -122,9 +122,9 @@ Priority order (by user impact):
 - `EditPaste` → insert solid from clipboard at offset position
 
 **DoD:**
-- [ ] Cut/Copy/Paste work on solids
-- [ ] Multi-select support
-- [ ] Clipboard persists across undo/redo
+- [x] Cut/Copy/Paste work on solids
+- [x] Multi-select support
+- [x] Clipboard persists across undo/redo
 
 ### Task 3.2: NC Code Viewer — real G-code `[P1 | Effort: LOW]`
 
@@ -132,8 +132,8 @@ Priority order (by user impact):
 - Syntax highlighting based on actual generated code, not sample
 
 **DoD:**
-- [ ] Dialog shows real G-code from CAM post-processing
-- [ ] Dialect label matches actual postprocessor used
+- [x] Dialog shows real G-code from CAM post-processing
+- [x] Dialect label matches actual postprocessor used
 
 ### Task 3.3: Macro Recorder — real recording `[P1 | Effort: MEDIUM]`
 
@@ -142,9 +142,9 @@ Priority order (by user impact):
 - Replay by executing script commands
 
 **DoD:**
-- [ ] Record captures at least 5 action types
-- [ ] Replay reproduces recorded actions
-- [ ] Export to .py / .lua script file
+- [x] Record captures at least 5 action types
+- [x] Replay reproduces recorded actions
+- [x] Export to .py / .lua script file
 
 ### Task 3.4: Direct Modeling (Move/Offset Face) `[P1 | Effort: HIGH]`
 
@@ -154,9 +154,9 @@ Priority order (by user impact):
 - `ModifySplitFace` → split face at selected edge
 
 **DoD:**
-- [ ] Move Face works on planar faces
-- [ ] Offset Face works on planar faces
-- [ ] 3+ tests per operation
+- [x] Move Face works on planar faces
+- [x] Offset Face works on planar faces
+- [x] 3+ tests per operation
 
 ### Task 3.5: Sketch tools (Spline, Polygon) `[P1 | Effort: MEDIUM]`
 
@@ -164,9 +164,9 @@ Priority order (by user impact):
 - `SketchPolygon` → regular polygon (N sides, center, radius)
 
 **DoD:**
-- [ ] Spline creates smooth curve through clicked points
-- [ ] Polygon creates N-sided shape
-- [ ] Both work in sketch mode
+- [x] Spline creates smooth curve through clicked points
+- [x] Polygon creates N-sided shape
+- [x] Both work in sketch mode
 
 ### Task 3.6: View toggles (Perspective, Shadows, AO) `[P2 | Effort: LOW]`
 
@@ -175,9 +175,9 @@ Priority order (by user impact):
 - `ViewToggleAo` → enable/disable ambient occlusion
 
 **DoD:**
-- [ ] Perspective/Orthographic toggle works
-- [ ] Shadows toggle works (if renderer supports)
-- [ ] AO toggle works (if renderer supports)
+- [x] Perspective/Orthographic toggle works
+- [x] Shadows toggle works (if renderer supports)
+- [x] AO toggle works (if renderer supports)
 
 ---
 
@@ -191,8 +191,8 @@ Priority order (by user impact):
 - Test: Assembly → mate constraint → solve → collision check
 
 **DoD:**
-- [ ] 3+ e2e tests covering full workflow
-- [ ] Tests run in CI without GPU (headless)
+- [x] 3+ e2e tests covering full workflow
+- [x] Tests run in CI without GPU (headless)
 
 ---
 

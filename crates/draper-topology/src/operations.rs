@@ -841,7 +841,7 @@ impl Polyline2d {
             return false;
         }
         let first = self.points[0];
-        let last = *self.points.last().unwrap();
+        let last = self.points[self.points.len() - 1];
         let dx = first.0 - last.0;
         let dy = first.1 - last.1;
         (dx * dx + dy * dy).sqrt() < 1e-10

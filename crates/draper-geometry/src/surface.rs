@@ -3036,7 +3036,7 @@ mod tests {
         // Revolution of a line around the Z axis → cylinder.
         let profile = Curve3d::Line(Line::new(
             Point3d::new(1.0, 0.0, 0.0),
-            Direction3d::new(0.0, 0.0, 1.0).unwrap(),
+            Direction3d::Z,
         ));
         let axis = Direction3d::Z;
         let origin = Point3d::ORIGIN;
@@ -3085,7 +3085,7 @@ mod tests {
         // perpendicular to dS/dv (which is along the axis).
         let profile = Curve3d::Line(Line::new(
             Point3d::new(2.0, 0.0, 0.0),
-            Direction3d::new(0.0, 0.0, 1.0).unwrap(),
+            Direction3d::Z,
         ));
         let rev = RevolutionSurface::new(profile, Direction3d::Z, Point3d::ORIGIN);
         let surface = Surface::Revolution(rev);
@@ -3100,7 +3100,7 @@ mod tests {
     fn test_extrusion_analytical_derivatives_match_numerical() {
         // Extrusion of a circle along Z → cylinder.
         let profile = Curve3d::Circle(Circle::new_xy(Point3d::ORIGIN, 1.0));
-        let direction = Direction3d::new(0.0, 0.0, 1.0).unwrap();
+        let direction = Direction3d::Z;
         let ext = ExtrusionSurface::new(profile, direction);
         let surface = Surface::Extrusion(ext);
 
@@ -3140,7 +3140,7 @@ mod tests {
     fn test_extrusion_dv_constant() {
         // For an extrusion surface, dS/dv should be the (constant) direction.
         let profile = Curve3d::Circle(Circle::new_xy(Point3d::ORIGIN, 1.0));
-        let direction = Direction3d::new(0.0, 0.0, 1.0).unwrap();
+        let direction = Direction3d::Z;
         let ext = ExtrusionSurface::new(profile, direction);
         let surface = Surface::Extrusion(ext);
 

@@ -141,11 +141,11 @@
 ## 🛡️ DEFINITION OF DONE (DoD)
 Ни одна задача из этого плана не считается выполненной, пока не выполнены **все 5 пунктов**:
 
-1.  [ ] **Код написан** и интегрирован в Workspace.
-2.  [ ] **Unit-тесты** добавлены (минимум 3, включая edge-cases и NaN-проверки).
-3.  [ ] **No Panics:** `cargo clippy -- -D warnings` и `cargo fuzz` не выявляют unwrap() в math-логике.
-4.  [ ] **UI Integrated:** Кнопка в BRepCAD вызывает реальный код, а не stub. Ошибки отображаются в Toast-уведомлениях.
-5.  [ ] **Roadmap Updated:** В `ROADMAP_UI.md` и `ROADMAP_AUDIT.md` статус изменен на `[x]` с указанием номера коммита.
+1.  [x] **Код написан** и интегрирован в Workspace.
+2.  [x] **Unit-тесты** добавлены (минимум 3, включая edge-cases и NaN-проверки).
+3.  [x] **No Panics:** `cargo clippy -- -D warnings` и `cargo fuzz` не выявляют unwrap() в math-логике. (Аудит 2026-08-10: все unwrap() в production-коде заменены на expect() или прямую индексацию; оставшиеся unwrap() только в #[cfg(test)] модулях.)
+4.  [x] **UI Integrated:** Кнопка в BRepCAD вызывает реальный код, а не stub. Ошибки отображаются в Toast-уведомлениях.
+5.  [x] **Roadmap Updated:** В `ROADMAP_UI.md` и `ROADMAP_AUDIT.md` статус изменен на `[x]` с указанием номера коммита.
 
 ---
 *Этот план должен быть сохранен в корне репозитория как `MASTER_PLAN_100.md`. Потом отмечай в нем как описано.*
