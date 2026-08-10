@@ -8478,14 +8478,16 @@ impl eframe::App for ViewerApp {
                         });
                         ui.separator();
                         let scroll_result = egui::ScrollArea::vertical().show(ui, |ui| {
-                            // Fix #4: Pending actions for tree interaction
+                            // Pending actions for tree interaction
                             let mut pending_select: Option<usize> = None;
                             let mut pending_visibility_toggle: Option<usize> = None;
+                            let mut pending_isolate: Option<usize> = None;
                             match self.brepcad_left_tab {
                                 BrepcadLeftTab::Tree => {
                                     if let Some(ref tree) = assembly_tree_clone {
-                                        // Fix #4: New tree renderer with click selection,
-                                        // visibility toggle, and collapse/expand.
+                                        // New tree renderer with real collapse/expand, isolate.
+                                        // Uses egui::collapsing_header::CollapsingState for per-node
+                                        // expand/collapse state that persists across frames.
                                         fn render_tree_node(
                                             ui: &mut egui::Ui,
                                             node: &draper_step::AssemblyNode,
@@ -8493,71 +8495,96 @@ impl eframe::App for ViewerApp {
                                             hidden: &std::collections::HashSet<usize>,
                                             filter: &str,
                                             active: bool,
-                                            depth: usize,
                                             pending_select: &mut Option<usize>,
                                             pending_vis: &mut Option<usize>,
+                                            pending_isolate: &mut Option<usize>,
                                         ) {
                                             let name = &node.name;
+                                            // Filter: if active and name doesn't match, check children
                                             if active && !name.to_lowercase().contains(filter) {
                                                 for c in &node.children {
-                                                    render_tree_node(ui, c, sel, hidden, filter, active, depth, pending_select, pending_vis);
+                                                    render_tree_node(ui, c, sel, hidden, filter, active, pending_select, pending_vis, pending_isolate);
                                                 }
                                                 return;
                                             }
                                             let has_children = !node.children.is_empty();
                                             let is_sel = node.instance_index.map_or(false, |i| i != usize::MAX && sel == Some(i));
                                             let is_hid = node.instance_index.map_or(false, |i| hidden.contains(&i));
+                                            let inst_idx = node.instance_index.filter(|&i| i != usize::MAX);
 
-                                            ui.horizontal(|ui| {
-                                                ui.add_space(depth as f32 * 14.0);
+                                            // Use CollapsingState for real expand/collapse that persists
+                                            let collapsing_id = egui::Id::new(format!("brepcad_tree_node_{}_{}", node.name, node.pd_id));
+                                            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                                                ui.ctx(), collapsing_id, true, // default open
+                                            );
+                                            let is_open_before = state.is_open();
 
-                                                // Fix #4: Collapse/expand arrow for nodes with children
-                                                if has_children {
-                                                    let arrow = if depth < 2 { "▼" } else { "▶" };
-                                                    if ui.small_button(arrow).clicked() {
-                                                        // Toggle would need per-node state; for now just visual
+                                            // Build the header row
+                                            state.show_header(ui, |ui| {
+                                                ui.horizontal(|ui| {
+                                                    // Collapse/expand arrow (only for nodes with children)
+                                                    if has_children {
+                                                        let arrow_text = if is_open_before { "▼" } else { "▶" };
+                                                        if ui.small_button(arrow_text).clicked() {
+                                                            // Toggle will happen via CollapsingState's built-in
+                                                            // header click; the button is just visual feedback.
+                                                        }
+                                                    } else {
+                                                        ui.add_space(18.0); // align leaf nodes
                                                     }
-                                                } else {
-                                                    ui.add_space(14.0); // align leaf nodes
-                                                }
 
-                                                // Fix #4: Visibility toggle (eye icon)
-                                                if let Some(idx) = node.instance_index {
-                                                    if idx != usize::MAX {
+                                                    // Visibility toggle (eye icon)
+                                                    if let Some(idx) = inst_idx {
                                                         let eye = if is_hid { "🚫" } else { "👁" };
-                                                        if ui.small_button(eye).clicked() {
+                                                        if ui.small_button(eye).on_hover_text("Toggle visibility").clicked() {
                                                             *pending_vis = Some(idx);
                                                         }
+                                                    } else if has_children {
+                                                        // For assembly nodes without instance, show a dim placeholder
+                                                        ui.label(egui::RichText::new("  ").size(10.0));
                                                     }
-                                                }
 
-                                                // Fix #4: Click-to-select label
-                                                let txt = if is_hid {
-                                                    egui::RichText::new(name.as_str()).color(egui::Color32::from_rgb(120, 120, 120)).strikethrough()
-                                                } else if is_sel {
-                                                    egui::RichText::new(name.as_str()).color(egui::Color32::from_rgb(137, 180, 250)).strong()
-                                                } else {
-                                                    egui::RichText::new(name.as_str())
-                                                };
-                                                if ui.selectable_label(is_sel, txt).clicked() {
-                                                    if let Some(idx) = node.instance_index {
-                                                        if idx != usize::MAX {
+                                                    // Isolate button (show only this element)
+                                                    if let Some(idx) = inst_idx {
+                                                        if ui.small_button("★").on_hover_text("Isolate (show only this)").clicked() {
+                                                            *pending_isolate = Some(idx);
+                                                        }
+                                                    }
+
+                                                    // Click-to-select label
+                                                    let txt = if is_hid {
+                                                        egui::RichText::new(name.as_str())
+                                                            .color(egui::Color32::from_rgb(120, 120, 120))
+                                                            .strikethrough()
+                                                    } else if is_sel {
+                                                        egui::RichText::new(name.as_str())
+                                                            .color(egui::Color32::from_rgb(137, 180, 250))
+                                                            .strong()
+                                                    } else {
+                                                        egui::RichText::new(name.as_str())
+                                                    };
+                                                    if ui.selectable_label(is_sel, txt).clicked() {
+                                                        if let Some(idx) = inst_idx {
                                                             *pending_select = Some(idx);
                                                         }
                                                     }
-                                                }
+                                                });
                                             });
 
-                                            // Render children (only if "expanded" — simplified: show top 2 levels)
-                                            if depth < 2 || !has_children {
+                                            // Render children when open
+                                            // Re-load state to check if it's still open after user interaction
+                                            let state_after = egui::collapsing_header::CollapsingState::load_with_default_open(
+                                                ui.ctx(), collapsing_id, true,
+                                            );
+                                            if state_after.is_open() && has_children {
                                                 for c in &node.children {
-                                                    render_tree_node(ui, c, sel, hidden, filter, active, depth + 1, pending_select, pending_vis);
+                                                    render_tree_node(ui, c, sel, hidden, filter, active, pending_select, pending_vis, pending_isolate);
                                                 }
                                             }
                                         }
                                         let fl = self.brepcad_tree_filter.to_lowercase();
                                         let fa = !fl.is_empty();
-                                        render_tree_node(ui, tree, selected_instance, &hidden_instances_clone, &fl, fa, 0, &mut pending_select, &mut pending_visibility_toggle);
+                                        render_tree_node(ui, tree, selected_instance, &hidden_instances_clone, &fl, fa, &mut pending_select, &mut pending_visibility_toggle, &mut pending_isolate);
 
                                         // Fix #4: Face list for current solid
                                         if let Some(idx) = selected_instance {
@@ -8617,10 +8644,10 @@ impl eframe::App for ViewerApp {
                                 }
                             }
                             // Return pending actions for the outer code to apply
-                            (pending_select, pending_visibility_toggle)
+                            (pending_select, pending_visibility_toggle, pending_isolate)
                         });
-                        // Fix #4: Apply pending tree actions
-                        let (pending_sel, pending_vis) = scroll_result.inner;
+                        // Apply pending tree actions
+                        let (pending_sel, pending_vis, pending_iso) = scroll_result.inner;
                         if let Some(idx) = pending_sel {
                             self.selected_instance = Some(idx);
                             self.selected_face = None;
@@ -8632,6 +8659,20 @@ impl eframe::App for ViewerApp {
                             } else {
                                 self.hidden_instances.insert(idx);
                             }
+                            self.highlight_dirty = true;
+                            self.edge_dirty = true;
+                            self.wireframe_overlay_dirty = true;
+                        }
+                        // Isolate: hide everything except the selected instance
+                        if let Some(idx) = pending_iso {
+                            let total = self.detailed_instances.len();
+                            self.hidden_instances.clear();
+                            for i in 0..total {
+                                if i != idx {
+                                    self.hidden_instances.insert(i);
+                                }
+                            }
+                            self.selected_instance = Some(idx);
                             self.highlight_dirty = true;
                             self.edge_dirty = true;
                             self.wireframe_overlay_dirty = true;
@@ -9024,12 +9065,6 @@ impl eframe::App for ViewerApp {
                                     self.highlighted_face = None;
                                     self.highlight_dirty = true;
                                     // ─── Switching instance → UV window must reset ──
-                                    // The active solid for the UV window changes
-                                    // when the user picks a different instance,
-                                    // so the previously-shown face index is no
-                                    // longer valid. Clear it AND invalidate the
-                                    // cached breakdown so the next frame
-                                    // recomputes from the new instance.
                                     if self.uv_window_face_idx.is_some() {
                                         self.uv_window_face_idx = None;
                                         self.uv_window_prev_face_idx = None;
@@ -9039,8 +9074,18 @@ impl eframe::App for ViewerApp {
                                     // Navigate structure tree
                                     if let Some(ref tree) = self.assembly_tree {
                                         let (path, target) = find_instance_path(tree, pick.instance_idx);
-                                        self.open_tree_nodes = path.into_iter().collect();
+                                        self.open_tree_nodes = path.iter().cloned().collect();
                                         self.scroll_to_tree_node = target;
+                                        // Also expand the brepcad tree's CollapsingState nodes
+                                        // along the path so the selected instance is visible.
+                                        for nk in &path {
+                                            let collapsing_id = egui::Id::new(format!("brepcad_tree_node_{}", nk));
+                                            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                                                ctx, collapsing_id, true,
+                                            );
+                                            state.set_open(true);
+                                            state.store(ctx);
+                                        }
                                     }
                                 }
                             } else {
@@ -14050,16 +14095,17 @@ fn draw_assembly_node_static(
         let visible_subtree_count = subtree_indices.iter().filter(|idx| !hidden_instances.contains(idx)).count();
         let all_subtree_hidden = !subtree_indices.is_empty() && visible_subtree_count == 0;
 
-        let should_be_open = open_tree_nodes.contains(&key);
-        // Use CollapsingState to programmatically force open/close
+        let _should_be_open = open_tree_nodes.contains(&key);
+        // Use CollapsingState for per-node expand/collapse that persists.
+        // Fix #4: Only force-open on the FIRST frame after a model-pick
+        // (when scroll_to_tree_node is set). After that, let the user
+        // collapse freely — don't re-open every frame just because the
+        // node is in open_tree_nodes.
         let id = egui::Id::new(format!("tree_{}_{}", node.name, node.pd_id));
         let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
             ui.ctx(), id, false,
         );
-        if should_be_open {
-            state.set_open(true);
-        }
-        // If the scroll target is this node's child, also ensure this node is open
+        // Only auto-open if there's an active scroll target (just-picked instance)
         if let Some(ref scroll_key) = scroll_to_tree_node {
             if !state.is_open() {
                 // Check if any descendant matches the scroll target
