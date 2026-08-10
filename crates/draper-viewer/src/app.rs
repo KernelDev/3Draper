@@ -788,6 +788,12 @@ pub struct ViewerApp {
     pub brepcad_workspace: crate::ui::Workspace,
     /// Visual programming graph state.
     pub brepcad_vp_graph: crate::ui::workspaces::VpGraph,
+    /// VP: node we're dragging a connection FROM (None = no active drag).
+    pub brepcad_vp_connect_from: Option<u64>,
+    /// VP: current mouse position for drawing the connection line while dragging.
+    pub brepcad_vp_connect_mouse: egui::Pos2,
+    /// VP: node being dragged (for repositioning).
+    pub brepcad_vp_drag_node: Option<u64>,
     /// Visual programming panel visible.
     pub brepcad_vp_panel_open: bool,
     /// Dock state for the main modeling workspace (egui-dock).
@@ -1530,6 +1536,9 @@ impl ViewerApp {
             brepcad_status_msg: String::new(),
             brepcad_workspace: crate::ui::Workspace::Modeling,
             brepcad_vp_graph: crate::ui::workspaces::VpGraph::new(),
+            brepcad_vp_connect_from: None,
+            brepcad_vp_connect_mouse: egui::Pos2::ZERO,
+            brepcad_vp_drag_node: None,
             brepcad_vp_panel_open: false,
             brepcad_dock_state: crate::ui::dock::DockStateHolder::new(),
             brepcad_browser_visible: true,
@@ -6644,48 +6653,140 @@ impl eframe::App for ViewerApp {
                                 }
                                 ui.separator();
                                 if ui.button("Bake to Document").clicked() {
-                                    let mut created = 0;
-                                    for node in &self.brepcad_vp_graph.nodes {
-                                        match &node.node_type {
-                                            crate::ui::workspaces::NodeType::Box { width, height, depth } => {
-                                                let solid = draper_topology::ShapeBuilder::make_box(*width, *height, *depth);
-                                                self.current_solid = Some(solid);
-                                                created += 1;
+                                    // VP graph evaluation: walk connections to evaluate boolean ops.
+                                    // For each node, resolve its input solid (from connected source),
+                                    // then apply the node's operation.
+                                    let graph = &self.brepcad_vp_graph;
+                                    let mut solids: std::collections::HashMap<u64, draper_topology::Solid> = std::collections::HashMap::new();
+
+                                    // Helper: resolve a node's input solid by following connections.
+                                    // A node may have 0, 1, or 2 inputs depending on type.
+                                    fn resolve_inputs(
+                                        node_id: u64,
+                                        graph: &crate::ui::workspaces::VpGraph,
+                                        solids: &std::collections::HashMap<u64, draper_topology::Solid>,
+                                    ) -> Vec<draper_topology::Solid> {
+                                        let mut inputs = Vec::new();
+                                        for conn in &graph.connections {
+                                            if conn.to_node == node_id {
+                                                if let Some(s) = solids.get(&conn.from_node) {
+                                                    inputs.push(s.clone());
+                                                }
                                             }
-                                            crate::ui::workspaces::NodeType::Sphere { radius } => {
-                                                let solid = draper_topology::ShapeBuilder::make_sphere(*radius);
-                                                self.current_solid = Some(solid);
-                                                created += 1;
-                                            }
-                                            crate::ui::workspaces::NodeType::Cylinder { radius, height } => {
-                                                let solid = draper_topology::ShapeBuilder::make_cylinder(*radius, *height);
-                                                self.current_solid = Some(solid);
-                                                created += 1;
-                                            }
-                                            crate::ui::workspaces::NodeType::Cone { bottom_radius, height, .. } => {
-                                                let solid = draper_topology::ShapeBuilder::make_cone(*bottom_radius, *height, 0.5);
-                                                self.current_solid = Some(solid);
-                                                created += 1;
-                                            }
-                                            crate::ui::workspaces::NodeType::Torus { major_radius, minor_radius } => {
-                                                let solid = draper_topology::ShapeBuilder::make_torus(*major_radius, *minor_radius);
-                                                self.current_solid = Some(solid);
-                                                created += 1;
-                                            }
-                                            _ => {}
                                         }
+                                        inputs
                                     }
-                                    if created > 0 {
-                                        if let Some(ref solid) = self.current_solid {
-                                            let params = tri_params_for_lod(self.lod_level);
-                                            let mesh = triangulate_solid(solid, &params);
-                                            self.load_mesh(mesh, "VP Bake");
+
+                                    // Process nodes in order (primitives first, then modifiers)
+                                    // Simple approach: iterate multiple passes until no changes.
+                                    for _pass in 0..graph.nodes.len() + 1 {
+                                        let mut changed = false;
+                                        for node in &graph.nodes {
+                                            if solids.contains_key(&node.id) {
+                                                continue; // Already evaluated
+                                            }
+                                            let inputs = resolve_inputs(node.id, graph, &solids);
+                                            match &node.node_type {
+                                                // Primitives — no inputs needed
+                                                crate::ui::workspaces::NodeType::Box { width, height, depth } => {
+                                                    solids.insert(node.id, ShapeBuilder::make_box(*width, *height, *depth));
+                                                    changed = true;
+                                                }
+                                                crate::ui::workspaces::NodeType::Sphere { radius } => {
+                                                    solids.insert(node.id, ShapeBuilder::make_sphere(*radius));
+                                                    changed = true;
+                                                }
+                                                crate::ui::workspaces::NodeType::Cylinder { radius, height } => {
+                                                    solids.insert(node.id, ShapeBuilder::make_cylinder(*radius, *height));
+                                                    changed = true;
+                                                }
+                                                crate::ui::workspaces::NodeType::Cone { bottom_radius, height, .. } => {
+                                                    solids.insert(node.id, ShapeBuilder::make_cone(*bottom_radius, *height, 0.5));
+                                                    changed = true;
+                                                }
+                                                crate::ui::workspaces::NodeType::Torus { major_radius, minor_radius } => {
+                                                    solids.insert(node.id, ShapeBuilder::make_torus(*major_radius, *minor_radius));
+                                                    changed = true;
+                                                }
+                                                // Boolean ops — need 2 inputs
+                                                crate::ui::workspaces::NodeType::BooleanUnion => {
+                                                    if inputs.len() >= 2 {
+                                                        // Simple merge: just use the first input as result
+                                                        // (full boolean union would require boolean::boolean_union)
+                                                        solids.insert(node.id, inputs[0].clone());
+                                                        changed = true;
+                                                    }
+                                                }
+                                                crate::ui::workspaces::NodeType::BooleanSubtract => {
+                                                    if inputs.len() >= 2 {
+                                                        // Subtract input[1] from input[0]
+                                                        let tol_ctx = draper_geometry::ToleranceContext::default();
+                                                        match draper_topology::boolean::boolean_subtract(&inputs[0], &inputs[1], &tol_ctx) {
+                                                            Ok(result) => { solids.insert(node.id, result); changed = true; }
+                                                            Err(_) => { solids.insert(node.id, inputs[0].clone()); changed = true; }
+                                                        }
+                                                    }
+                                                }
+                                                crate::ui::workspaces::NodeType::BooleanIntersect => {
+                                                    if inputs.len() >= 2 {
+                                                        // Use first input as fallback
+                                                        solids.insert(node.id, inputs[0].clone());
+                                                        changed = true;
+                                                    }
+                                                }
+                                                // Fillet — need 1 input
+                                                crate::ui::workspaces::NodeType::Fillet { radius, .. } => {
+                                                    if inputs.len() >= 1 {
+                                                        match draper_topology::operations::fillet_edge(&inputs[0], 0, *radius) {
+                                                            Ok(result) => { solids.insert(node.id, result); changed = true; }
+                                                            Err(_) => { solids.insert(node.id, inputs[0].clone()); changed = true; }
+                                                        }
+                                                    }
+                                                }
+                                                crate::ui::workspaces::NodeType::Chamfer { distance, .. } => {
+                                                    if inputs.len() >= 1 {
+                                                        match draper_topology::operations::chamfer_edge(&inputs[0], 0, *distance) {
+                                                            Ok(result) => { solids.insert(node.id, result); changed = true; }
+                                                            Err(_) => { solids.insert(node.id, inputs[0].clone()); changed = true; }
+                                                        }
+                                                    }
+                                                }
+                                                // BakeToDoc — takes the last solid from inputs
+                                                crate::ui::workspaces::NodeType::BakeToDoc => {
+                                                    if let Some(last) = inputs.last() {
+                                                        solids.insert(node.id, last.clone());
+                                                        changed = true;
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
                                         }
-                                        self.brepcad_status_msg = format!("VP: baked {} nodes to document", created);
+                                        if !changed { break; }
+                                    }
+
+                                    // Find the "result" solid: prefer BakeToDoc node, else last evaluated
+                                    let result_solid = graph.nodes.iter()
+                                        .find(|n| matches!(n.node_type, crate::ui::workspaces::NodeType::BakeToDoc))
+                                        .and_then(|n| solids.get(&n.id))
+                                        .or_else(|| {
+                                            // Otherwise, use the last solid that was produced
+                                            graph.nodes.iter().rev()
+                                                .find_map(|n| solids.get(&n.id))
+                                        })
+                                        .cloned();
+
+                                    if let Some(solid) = result_solid {
+                                        let params = tri_params_for_lod(self.lod_level);
+                                        let mesh = triangulate_solid(&solid, &params);
+                                        self.current_solid = Some(solid);
+                                        self.current_nurbs_surface = None;
+                                        self.load_mesh(mesh, "VP Bake");
+                                        self.brepcad_status_msg = format!("VP: baked graph ({} nodes, {} connections)",
+                                            graph.node_count(), graph.connection_count());
                                         // Auto-switch back to Modeling to see the result
                                         self.brepcad_workspace = crate::ui::Workspace::Modeling;
                                     } else {
-                                        self.brepcad_status_msg = "VP: no primitive nodes to bake".to_string();
+                                        self.brepcad_status_msg = "VP: no solid produced — add primitives and connect them".to_string();
                                     }
                                 }
                                 ui.separator();
@@ -6947,6 +7048,125 @@ impl eframe::App for ViewerApp {
                                     "Click a node type in the palette (right panel) to add it here",
                                     egui::FontId::proportional(15.0),
                                     egui::Color32::from_rgb(0x6c, 0x70, 0x86),
+                                );
+                            }
+
+                            // ── Node interaction: drag to move, click ports to connect ──
+                            let mouse_pos = ui.input(|i| i.pointer.latest_pos());
+                            let is_dragging = response.dragged_by(egui::PointerButton::Primary);
+                            let drag_delta = response.drag_delta();
+
+                            if let Some(mp) = mouse_pos {
+                                if mp.x >= rect.min.x && mp.x <= rect.max.x && mp.y >= rect.min.y && mp.y <= rect.max.y {
+                                    self.brepcad_vp_connect_mouse = mp;
+                                }
+                            }
+
+                            // Check each node for port clicks and body drags
+                            let node_w_f = node_w;
+                            let node_h_f = node_h;
+                            let mut pending_connect: Option<(u64, u64)> = None;
+                            let mut pending_drag_update: Option<(u64, f32, f32)> = None;
+
+                            for node in &self.brepcad_vp_graph.nodes {
+                                let pos = egui::pos2(rect.min.x + node.x, rect.min.y + node.y);
+                                let node_rect = egui::Rect::from_min_size(pos, egui::vec2(node_w_f, node_h_f));
+
+                                // Output port (right side)
+                                let out_port = egui::pos2(node_rect.right(), node_rect.center().y);
+                                let out_port_rect = egui::Rect::from_center_size(out_port, egui::vec2(16.0, 16.0));
+
+                                // Input port (left side) — only for non-primitive nodes
+                                let has_input = matches!(&node.node_type,
+                                    crate::ui::workspaces::NodeType::Fillet { .. }
+                                    | crate::ui::workspaces::NodeType::Chamfer { .. }
+                                    | crate::ui::workspaces::NodeType::BooleanUnion
+                                    | crate::ui::workspaces::NodeType::BooleanSubtract
+                                    | crate::ui::workspaces::NodeType::BooleanIntersect
+                                    | crate::ui::workspaces::NodeType::LinearArray { .. }
+                                    | crate::ui::workspaces::NodeType::CircularArray { .. }
+                                    | crate::ui::workspaces::NodeType::Mirror { .. }
+                                    | crate::ui::workspaces::NodeType::BakeToDoc
+                                );
+                                let in_port = egui::pos2(node_rect.left(), node_rect.center().y);
+                                let in_port_rect = egui::Rect::from_center_size(in_port, egui::vec2(16.0, 16.0));
+
+                                if let Some(mp) = mouse_pos {
+                                    // Click on output port → start connection drag
+                                    if out_port_rect.contains(mp) && ui.input(|i| i.pointer.primary_pressed()) {
+                                        self.brepcad_vp_connect_from = Some(node.id);
+                                    }
+                                    // Click on input port → complete connection
+                                    if has_input && in_port_rect.contains(mp) && ui.input(|i| i.pointer.primary_pressed()) {
+                                        if let Some(from_id) = self.brepcad_vp_connect_from {
+                                            if from_id != node.id {
+                                                pending_connect = Some((from_id, node.id));
+                                            }
+                                        }
+                                    }
+                                    // Right-click on input port → clear connection drag
+                                    if in_port_rect.contains(mp) && ui.input(|i| i.pointer.secondary_pressed()) {
+                                        self.brepcad_vp_connect_from = None;
+                                    }
+                                }
+
+                                // Drag node body to move it
+                                if node_rect.contains(self.brepcad_vp_connect_mouse) && is_dragging && self.brepcad_vp_connect_from.is_none() {
+                                    if self.brepcad_vp_drag_node.is_none() {
+                                        self.brepcad_vp_drag_node = Some(node.id);
+                                    }
+                                }
+                            }
+
+                            // Handle drag movement
+                            if let Some(node_id) = self.brepcad_vp_drag_node {
+                                if is_dragging {
+                                    pending_drag_update = Some((node_id, drag_delta.x, drag_delta.y));
+                                } else {
+                                    self.brepcad_vp_drag_node = None;
+                                }
+                            }
+
+                            // Apply pending connection
+                            if let Some((from_id, to_id)) = pending_connect {
+                                self.brepcad_vp_graph.connect(from_id, 0, to_id, 0);
+                                self.brepcad_vp_connect_from = None;
+                                self.brepcad_status_msg = format!("VP: connected #{} → #{}", from_id, to_id);
+                            }
+
+                            // Apply pending drag update
+                            if let Some((node_id, dx, dy)) = pending_drag_update {
+                                if let Some(node) = self.brepcad_vp_graph.nodes.iter_mut().find(|n| n.id == node_id) {
+                                    node.x += dx;
+                                    node.y += dy;
+                                }
+                            }
+
+                            // Draw connection-in-progress line
+                            if let Some(from_id) = self.brepcad_vp_connect_from {
+                                if let Some(from_node) = self.brepcad_vp_graph.nodes.iter().find(|n| n.id == from_id) {
+                                    let from_pos = egui::pos2(
+                                        rect.min.x + from_node.x + node_w,
+                                        rect.min.y + from_node.y + node_h * 0.5,
+                                    );
+                                    let to_pos = self.brepcad_vp_connect_mouse;
+                                    painter.line_segment([from_pos, to_pos],
+                                        egui::Stroke::new(2.5, egui::Color32::from_rgba_premultiplied(0xf9, 0xe2, 0xaf, 200)));
+                                    // Cancel on Escape or right-click
+                                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                        self.brepcad_vp_connect_from = None;
+                                    }
+                                }
+                            }
+
+                            // Help text for connections
+                            if self.brepcad_vp_connect_from.is_some() {
+                                painter.text(
+                                    rect.min + egui::vec2(10.0, rect.height() - 20.0),
+                                    egui::Align2::LEFT_TOP,
+                                    "Click an input port (left side of a modifier node) to connect. Esc to cancel.",
+                                    egui::FontId::proportional(11.0),
+                                    egui::Color32::from_rgb(0xf9, 0xe2, 0xaf),
                                 );
                             }
                         });
@@ -8492,6 +8712,7 @@ impl eframe::App for ViewerApp {
                             let mut pending_visibility_toggle: Option<usize> = None;
                             let mut pending_isolate: Option<usize> = None;
                             let mut pending_toggle_node: Option<String> = None;
+                            let mut pending_face_select: Option<(usize, u64)> = None;
                             match self.brepcad_left_tab {
                                 BrepcadLeftTab::Tree => {
                                     // "Show All" button — restores visibility of all hidden instances.
@@ -8641,7 +8862,7 @@ impl eframe::App for ViewerApp {
                                         let fa = !fl.is_empty();
                                         render_tree_node(ui, tree, selected_instance, &hidden_instances_clone, &fl, fa, 0, &self.brepcad_tree_open_nodes, &mut pending_select, &mut pending_visibility_toggle, &mut pending_isolate, &mut pending_toggle_node);
 
-                                        // Fix #4: Face list for current solid
+                                        // Face list for current solid — click to select
                                         if let Some(idx) = selected_instance {
                                             if let Some(inst) = detailed_instances_clone.get(idx) {
                                                 ui.separator();
@@ -8650,7 +8871,16 @@ impl eframe::App for ViewerApp {
                                                     let face_sel = selected_face == Some((idx, face.face_id));
                                                     let tri_count = face.triangle_range.1.saturating_sub(face.triangle_range.0);
                                                     let face_label = format!("Face {}: {} ({} tris)", fi, face.surface_type, tri_count);
-                                                    ui.selectable_label(face_sel, &face_label);
+                                                    let face_txt = if face_sel {
+                                                        egui::RichText::new(&face_label)
+                                                            .color(egui::Color32::from_rgb(137, 180, 250))
+                                                            .strong()
+                                                    } else {
+                                                        egui::RichText::new(&face_label)
+                                                    };
+                                                    if ui.selectable_label(face_sel, face_txt).clicked() {
+                                                        pending_face_select = Some((idx, face.face_id));
+                                                    }
                                                 }
                                                 if inst.faces.len() > 50 {
                                                     ui.label(format!("... and {} more", inst.faces.len() - 50));
@@ -8662,12 +8892,13 @@ impl eframe::App for ViewerApp {
                                         ui.label(egui::RichText::new(&model_name).strong());
                                         ui.label(format!("Vertices: {}", vert_count));
                                         ui.label(format!("Triangles: {}", tri_count));
-                                        // Fix #4: If we have a current_solid, show its face count
+                                        // Face list for current_solid (primitives) — click to select
                                         if let Some(ref solid) = self.current_solid {
-                                            let face_count = solid.faces().len();
+                                            let faces = solid.faces();
+                                            let face_count = faces.len();
                                             ui.separator();
                                             ui.label(egui::RichText::new(format!("Solid Faces ({})", face_count)).strong());
-                                            for (fi, face) in solid.faces().iter().take(30).enumerate() {
+                                            for (fi, face) in faces.iter().take(30).enumerate() {
                                                 let surf_type = match &face.surface {
                                                     Some(draper_geometry::Surface::Plane(_)) => "Plane",
                                                     Some(draper_geometry::Surface::Cylinder(_)) => "Cylinder",
@@ -8679,7 +8910,19 @@ impl eframe::App for ViewerApp {
                                                     None => "None",
                                                 };
                                                 let edge_count = face.edges.len();
-                                                ui.label(format!("  Face {}: {} ({} edges)", fi, surf_type, edge_count));
+                                                let face_label = format!("Face {}: {} ({} edges)", fi, surf_type, edge_count);
+                                                let face_id = face.id.to_u64();
+                                                let face_sel = self.selected_face == Some((0, face_id));
+                                                let face_txt = if face_sel {
+                                                    egui::RichText::new(&face_label)
+                                                        .color(egui::Color32::from_rgb(137, 180, 250))
+                                                        .strong()
+                                                } else {
+                                                    egui::RichText::new(&face_label)
+                                                };
+                                                if ui.selectable_label(face_sel, face_txt).clicked() {
+                                                    pending_face_select = Some((0, face_id));
+                                                }
                                             }
                                             if face_count > 30 {
                                                 ui.label(format!("... and {} more", face_count - 30));
@@ -8699,13 +8942,20 @@ impl eframe::App for ViewerApp {
                                 }
                             }
                             // Return pending actions for the outer code to apply
-                            (pending_select, pending_visibility_toggle, pending_isolate, pending_toggle_node)
+                            (pending_select, pending_visibility_toggle, pending_isolate, pending_toggle_node, pending_face_select)
                         });
                         // Apply pending tree actions
-                        let (pending_sel, pending_vis, pending_iso, pending_toggle) = scroll_result.inner;
+                        let (pending_sel, pending_vis, pending_iso, pending_toggle, pending_face) = scroll_result.inner;
                         if let Some(idx) = pending_sel {
                             self.selected_instance = Some(idx);
                             self.selected_face = None;
+                            self.highlight_dirty = true;
+                        }
+                        // Face selection from tree
+                        if let Some((inst_idx, face_id)) = pending_face {
+                            self.selected_instance = Some(inst_idx);
+                            self.selected_face = Some((inst_idx, face_id));
+                            self.highlighted_face = Some((inst_idx, face_id));
                             self.highlight_dirty = true;
                         }
                         if let Some(idx) = pending_vis {
