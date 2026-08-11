@@ -2457,9 +2457,16 @@ fn split_face_with_shared_edge(
         Surface::Plane(plane) => {
             split_planar_face_shared(face, plane, intersection_points, shared_edge, tol)
         }
+        Surface::Cylinder(cyl) => {
+            // For cylinder faces, the intersection curve trims the surface.
+            // We add the shared edge as an inner wire (hole boundary) AND
+            // also split the existing boundary edges at intersection points
+            // to ensure proper trimming.
+            split_cylinder_face_shared(face, cyl, intersection_points, shared_edge, tol)
+        }
         _ => {
-            // For non-planar faces, add the shared edge as an inner wire (hole)
-            // rather than creating an invalid 1-edge face.
+            // For other non-planar faces (sphere, cone, etc.):
+            // add the shared edge as an inner wire (hole boundary)
             let mut face_with_hole = face.clone();
             let coedge = CoEdge::new(shared_edge.id, true);
             let wire = Wire::new(vec![coedge]);
@@ -2471,6 +2478,112 @@ fn split_face_with_shared_edge(
             })
         }
     }
+}
+
+/// Split a cylinder face using a shared edge for the intersection boundary.
+///
+/// Cylinder faces have boundary circles (top/bottom caps). When a boolean
+/// operation intersects the cylinder, the intersection curve trims the
+/// lateral surface. We:
+/// 1. Add the shared edge as an inner wire (hole) for the intersection curve
+/// 2. Split the existing boundary edges at intersection points
+/// 3. Keep the original surface with updated boundaries
+fn split_cylinder_face_shared(
+    face: &Face,
+    _cyl: &CylinderSurface,
+    intersection_points: &[Point3d],
+    shared_edge: &Edge,
+    tol: f64,
+) -> BooleanResult<SplitFaceResult> {
+    // For the cylinder lateral surface, we add the intersection curve as
+    // an inner wire (hole). The triangulation will use earcut to handle
+    // the hole properly.
+    //
+    // We also need to split the boundary edges (top/bottom circles) at
+    // the intersection points to ensure proper trimming. This is done by
+    // checking if any intersection points lie on the boundary edges.
+    let mut face_with_hole = face.clone();
+
+    // Add the shared edge as an inner wire (hole boundary)
+    let coedge = CoEdge::new(shared_edge.id, true);
+    let wire = Wire::new(vec![coedge]);
+    face_with_hole.add_hole(wire);
+    face_with_hole.edges.push(shared_edge.clone());
+
+    // Split boundary edges at intersection points
+    // For each existing edge, check if any intersection point lies on it
+    // and split the edge at that point.
+    let mut new_edges = Vec::new();
+    for edge in &face_with_hole.edges {
+        if let Some(ref curve) = edge.curve {
+            let (t_min, t_max) = edge.param_range;
+            let mut split_params: Vec<f64> = Vec::new();
+
+            for ip in intersection_points {
+                // Check if this intersection point is on this edge
+                // by finding the parameter t that minimizes distance
+                let n_samples = 50;
+                let mut best_t = None;
+                let mut best_dist = f64::MAX;
+                for i in 0..n_samples {
+                    let t = t_min + (t_max - t_min) * (i as f64 / (n_samples - 1) as f64);
+                    let p = curve.point_at(t);
+                    let d = (p.x - ip.x).powi(2) + (p.y - ip.y).powi(2) + (p.z - ip.z).powi(2);
+                    if d < best_dist {
+                        best_dist = d;
+                        best_t = Some(t);
+                    }
+                }
+
+                // If the closest point is within tolerance, add as split point
+                if best_dist < tol * tol * 100.0 {
+                    if let Some(t) = best_t {
+                        if t > t_min + tol && t < t_max - tol {
+                            if !split_params.iter().any(|&t2| (t - t2).abs() < tol) {
+                                split_params.push(t);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if split_params.is_empty() {
+                new_edges.push(edge.clone());
+            } else {
+                // Split the edge at the found parameters
+                split_params.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let mut prev_t = t_min;
+                for &t in &split_params {
+                    if let Some(ref curve) = edge.curve {
+                        // Create a NEW edge for each sub-segment (new ID)
+                        let mut sub_edge = edge.clone();
+                        sub_edge.id = TopoId::new(); // New ID for sub-edge
+                        sub_edge.param_range = (prev_t, t);
+                        sub_edge.start_vertex_point = Some(curve.point_at(prev_t));
+                        sub_edge.end_vertex_point = Some(curve.point_at(t));
+                        new_edges.push(sub_edge);
+                    }
+                    prev_t = t;
+                }
+                if prev_t < t_max {
+                    let mut sub_edge = edge.clone();
+                    sub_edge.id = TopoId::new(); // New ID for sub-edge
+                    sub_edge.param_range = (prev_t, t_max);
+                    sub_edge.start_vertex_point = Some(curve.point_at(prev_t));
+                    sub_edge.end_vertex_point = Some(curve.point_at(t_max));
+                    new_edges.push(sub_edge);
+                }
+            }
+        } else {
+            new_edges.push(edge.clone());
+        }
+    }
+
+    face_with_hole.edges = new_edges;
+
+    Ok(SplitFaceResult {
+        faces: vec![face_with_hole],
+    })
 }
 
 /// Split a planar face using a shared edge for the intersection boundary.
