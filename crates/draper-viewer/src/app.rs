@@ -6255,6 +6255,14 @@ impl ViewerApp {
     /// Rebuild a Solid from the current model for export purposes.
     fn rebuild_current_solid(&self) -> draper_topology::Solid {
         use draper_topology::ShapeBuilder;
+        // Priority 1: use the actual current_solid (set by VP evaluation,
+        // STEP import, or boolean operations). This ensures exports reflect
+        // the real geometry, not a stub based on the model name.
+        if let Some(ref solid) = self.current_solid {
+            return solid.clone();
+        }
+        // Priority 2: fall back to name-based stub (legacy path for
+        // when no solid is loaded — e.g., empty scene).
         match self.current_model.name.as_str() {
             n if n.starts_with("Box") => {
                 ShapeBuilder::make_box(100.0, 80.0, 60.0)
@@ -7708,7 +7716,53 @@ impl eframe::App for ViewerApp {
                                 let graph = self.brepcad_vp_graph.clone();
                                 if let Some(solid) = vp_evaluate_graph(&graph) {
                                     let params = tri_params_for_lod(self.lod_level);
-                                    let mesh = triangulate_solid(&solid, &params);
+                                    let mut mesh = triangulate_solid(&solid, &params);
+                                    // Post-triangulation watertightness repair.
+                                    // Boolean operations may produce faces that don't share
+                                    // edge IDs, causing the edge cache to miss matches and
+                                    // produce non-coincident boundary vertices. This creates
+                                    // boundary gaps. We repair using a multi-pass strategy:
+                                    //   1. Weld boundary vertices within model-scale tolerance
+                                    //   2. Fill closed boundary loops with triangles
+                                    //   3. Repeat until watertight or no more progress
+                                    let scale = vp_solid_scale(&solid);
+                                    let report_before = draper_mesh::watertight::validate_watertight(&mesh, false);
+                                    if !report_before.is_watertight() {
+                                        let mut best_boundary = report_before.boundary_edge_count;
+                                        // Try decreasing weld tolerances — start larger to
+                                        // bridge gaps from intersection curve mismatches,
+                                        // then decrease to avoid over-welding.
+                                        let weld_tolerances: [f64; 5] = [
+                                            scale * 0.02, // ~2% of model scale (bridges gaps)
+                                            scale * 0.01,
+                                            scale * 0.005,
+                                            scale * 0.002,
+                                            scale * 0.001,
+                                        ];
+                                        for wt in &weld_tolerances {
+                                            draper_mesh::watertight::weld_boundary_edge_vertices_aggressive(&mut mesh, *wt);
+                                            // Fill gaps with large max_loop to close big holes
+                                            for _ in 0..3 {
+                                                let filled = draper_mesh::watertight::fill_boundary_gaps(&mut mesh, 512);
+                                                if filled == 0 { break; }
+                                            }
+                                            let report = draper_mesh::watertight::validate_watertight(&mesh, false);
+                                            if report.is_watertight() {
+                                                best_boundary = 0;
+                                                self.brepcad_status_msg = format!(
+                                                    "VP: mesh repaired (watertight ✓, wt={:.2e})", wt);
+                                                break;
+                                            }
+                                            if report.boundary_edge_count < best_boundary {
+                                                best_boundary = report.boundary_edge_count;
+                                            }
+                                        }
+                                        if best_boundary > 0 {
+                                            self.brepcad_status_msg = format!(
+                                                "VP: mesh partial repair ({} boundary edges remain)",
+                                                best_boundary);
+                                        }
+                                    }
                                     self.current_solid = Some(solid);
                                     self.current_nurbs_surface = None;
                                     self.detailed_instances.clear();
@@ -18094,6 +18148,37 @@ fn vp_node_colors(nt: &crate::ui::workspaces::NodeType) -> (egui::Color32, egui:
     }
 }
 
+/// VP helper: compute a model-scale metric (max dimension of bounding box)
+/// from a solid's edge vertices. Used to derive a model-scale-aware
+/// ToleranceContext for boolean operations.
+fn vp_solid_scale(solid: &draper_topology::Solid) -> f64 {
+    let mut min = draper_geometry::Point3d::new(f64::MAX, f64::MAX, f64::MAX);
+    let mut max = draper_geometry::Point3d::new(f64::MIN, f64::MIN, f64::MIN);
+    let mut has = false;
+    for face in solid.faces() {
+        for edge in &face.edges {
+            if edge.degenerate { continue; }
+            if let Some(p) = edge.start_point() {
+                min.x = min.x.min(p.x); min.y = min.y.min(p.y); min.z = min.z.min(p.z);
+                max.x = max.x.max(p.x); max.y = max.y.max(p.y); max.z = max.z.max(p.z);
+                has = true;
+            }
+            if let Some(p) = edge.end_point() {
+                min.x = min.x.min(p.x); min.y = min.y.min(p.y); min.z = min.z.min(p.z);
+                max.x = max.x.max(p.x); max.y = max.y.max(p.y); max.z = max.z.max(p.z);
+                has = true;
+            }
+        }
+    }
+    if !has {
+        return 1.0;
+    }
+    let dx = max.x - min.x;
+    let dy = max.y - min.y;
+    let dz = max.z - min.z;
+    dx.max(dy).max(dz).max(1.0)
+}
+
 /// VP helper: evaluate the graph and return the result solid.
 /// Walks connections topologically: primitives first, then modifiers.
 fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<draper_topology::Solid> {
@@ -18338,17 +18423,56 @@ fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<draper_to
                     let a = inputs.get(0).and_then(to_solid);
                     let b = inputs.get(1).and_then(to_solid);
                     if let (Some(a), Some(b)) = (a, b) {
-                        let tol_ctx = draper_geometry::ToleranceContext::default();
+                        // Use model-scale-aware tolerance for robust boolean ops
+                        let scale = vp_solid_scale(&a);
+                        let tol_ctx = draper_geometry::ToleranceContext::from_model_scale(scale);
                         match draper_topology::boolean::boolean_subtract(&a, &b, &tol_ctx) {
-                            Ok(result) => { results.insert(node.id, VpData::Geometry(Box::new(result))); changed = true; }
-                            Err(_) => { results.insert(node.id, VpData::Geometry(Box::new(a))); changed = true; }
+                            Ok(result) => {
+                                results.insert(node.id, VpData::Geometry(Box::new(result)));
+                                changed = true;
+                            }
+                            Err(_e) => {
+                                // On failure, return A unchanged (user sees uncut solid)
+                                results.insert(node.id, VpData::Geometry(Box::new(a)));
+                                changed = true;
+                            }
                         }
                     }
                 }
-                NodeType::BooleanUnion | NodeType::BooleanIntersect => {
-                    if let Some(a) = inputs.get(0).and_then(to_solid) {
-                        results.insert(node.id, VpData::Geometry(Box::new(a)));
-                        changed = true;
+                NodeType::BooleanUnion => {
+                    let a = inputs.get(0).and_then(to_solid);
+                    let b = inputs.get(1).and_then(to_solid);
+                    if let (Some(a), Some(b)) = (a, b) {
+                        let scale = vp_solid_scale(&a).max(vp_solid_scale(&b));
+                        let tol_ctx = draper_geometry::ToleranceContext::from_model_scale(scale);
+                        match draper_topology::boolean::boolean_union(&a, &b, &tol_ctx) {
+                            Ok(result) => {
+                                results.insert(node.id, VpData::Geometry(Box::new(result)));
+                                changed = true;
+                            }
+                            Err(_e) => {
+                                results.insert(node.id, VpData::Geometry(Box::new(a)));
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+                NodeType::BooleanIntersect => {
+                    let a = inputs.get(0).and_then(to_solid);
+                    let b = inputs.get(1).and_then(to_solid);
+                    if let (Some(a), Some(b)) = (a, b) {
+                        let scale = vp_solid_scale(&a).max(vp_solid_scale(&b));
+                        let tol_ctx = draper_geometry::ToleranceContext::from_model_scale(scale);
+                        match draper_topology::boolean::boolean_intersect(&a, &b, &tol_ctx) {
+                            Ok(result) => {
+                                results.insert(node.id, VpData::Geometry(Box::new(result)));
+                                changed = true;
+                            }
+                            Err(_e) => {
+                                results.insert(node.id, VpData::Geometry(Box::new(a)));
+                                changed = true;
+                            }
+                        }
                     }
                 }
 
