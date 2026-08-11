@@ -153,6 +153,9 @@ impl ShapeBuilder {
         // Store bottom and top circle edges so compute_axis_v_range can
         // determine the height range. Wire is empty — the triangulation
         // uses the full cylinder path.
+        //
+        // When a boolean operation adds an intersection curve as an inner
+        // wire (hole), the triangulation's fallback path handles it.
         let lateral_wire = Wire::new(vec![]);
         let mut lateral_face = Face::new(Surface::Cylinder(cyl_surface), lateral_wire);
         lateral_face.edges = vec![bottom_edge, top_edge];

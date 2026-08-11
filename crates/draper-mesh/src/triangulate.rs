@@ -2797,6 +2797,11 @@ fn triangulate_cylinder_face(face: &Face, cyl: &CylinderSurface, params: &Triang
         let mut direct_boundary: Vec<Point3d> = Vec::new();
         for edge in &face.edges {
             if edge.degenerate { continue; }
+            // Skip edges that are in inner_wires (holes) — they're not part of the outer boundary
+            let is_hole_edge = face.inner_wires.iter().any(|w| {
+                w.coedges.iter().any(|c| c.edge == edge.id)
+            });
+            if is_hole_edge { continue; }
             if let Some(disc) = cache.get(edge.id) {
                 direct_boundary.extend(disc.points_3d.iter().cloned());
             }
@@ -2821,6 +2826,31 @@ fn triangulate_cylinder_face(face: &Face, cyl: &CylinderSurface, params: &Triang
                 }
             }
             if dedup.len() >= 6 {
+                // Check if there are holes (from boolean operations)
+                let (hole_polylines, hole_uvs) = collect_face_holes_with_uv_from_cache(face, cache, &surface);
+                if !hole_polylines.is_empty() {
+                    // Has holes — use general surface triangulation with holes
+                    for (hi, h) in hole_polylines.iter().enumerate() {
+                        eprintln!("  Hole {}: {} pts, first={:?}, last={:?}", hi, h.len(), h.first(), h.last());
+                    }
+                    eprintln!("  Boundary: first={:?}, last={:?}", dedup.first(), dedup.last());
+                    // Compute boundary UVs
+                    let boundary_uvs: Vec<Point2d> = dedup.iter()
+                        .map(|p| {
+                            let (u, v) = cyl.project_point(p);
+                            Point2d::new(u, v)
+                        })
+                        .collect();
+                    return crate::parametric_domain::triangulate_surface_consistent(
+                        &surface,
+                        &dedup,
+                        &boundary_uvs,
+                        &hole_polylines,
+                        &hole_uvs,
+                        face.forward,
+                        params,
+                    );
+                }
                 log::debug!(
                     "Cylinder face #{}: no outer_wire but {} edge points recovered from cache — using tube grid triangulation",
                     face.id, dedup.len()

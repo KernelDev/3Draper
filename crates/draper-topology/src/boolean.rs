@@ -693,15 +693,12 @@ fn find_line_point_on_both_planes(
 
 /// Plane-Cylinder intersection: returns an ellipse (or circle, or two lines).
 fn intersect_plane_cylinder(plane: &Plane, cyl: &CylinderSurface, tol: f64) -> Vec<IntersectionCurve> {
-    // Distance from cylinder axis to plane
+    // Distance from cylinder origin to plane (signed)
     let dx = cyl.origin.x - plane.origin.x;
     let dy = cyl.origin.y - plane.origin.y;
     let dz = cyl.origin.z - plane.origin.z;
-    let dist = (dx * plane.normal.x + dy * plane.normal.y + dz * plane.normal.z).abs();
-
-    if dist > cyl.radius + tol {
-        return Vec::new(); // No intersection
-    }
+    let signed_dist = dx * plane.normal.x + dy * plane.normal.y + dz * plane.normal.z;
+    let dist = signed_dist.abs();
 
     // Angle between plane normal and cylinder axis
     let cos_angle = (plane.normal.x * cyl.axis.x
@@ -709,15 +706,32 @@ fn intersect_plane_cylinder(plane: &Plane, cyl: &CylinderSurface, tol: f64) -> V
         + plane.normal.z * cyl.axis.z)
         .abs();
 
+    // For a plane PERPENDICULAR to the cylinder axis (cos_angle ≈ 1):
+    //   The intersection is always a circle (if the plane is within the
+    //   cylinder's height range). The `dist > radius` check does NOT apply
+    //   here because dist is the distance along the axis, not from the axis.
+    //
+    // For a plane PARALLEL or at an angle to the axis (cos_angle < 1):
+    //   The intersection is an ellipse (or two lines if parallel).
+    //   The `dist > radius` check applies — if the plane is too far from
+    //   the axis, there's no intersection.
+    if cos_angle < 1.0 - 1e-10 && dist > cyl.radius + tol {
+        return Vec::new(); // No intersection (plane misses cylinder)
+    }
+
     if cos_angle > 1.0 - 1e-10 {
-        // Plane perpendicular to cylinder axis — circle intersection
+        // Plane perpendicular to cylinder axis — circle intersection.
+        // The center of the intersection circle is the point on the cylinder
+        // axis that lies on the plane. Since the plane normal is parallel to
+        // the axis, we project the cylinder origin onto the plane:
+        //   center = cyl.origin - signed_dist * plane.normal
         let center_on_axis = Point3d::new(
-            cyl.origin.x + dist * plane.normal.x * if dx * plane.normal.x + dy * plane.normal.y + dz * plane.normal.z > 0.0 { -1.0 } else { 1.0 },
-            cyl.origin.y + dist * plane.normal.y * if dx * plane.normal.x + dy * plane.normal.y + dz * plane.normal.z > 0.0 { -1.0 } else { 1.0 },
-            cyl.origin.z + dist * plane.normal.z * if dx * plane.normal.x + dy * plane.normal.y + dz * plane.normal.z > 0.0 { -1.0 } else { 1.0 },
+            cyl.origin.x - signed_dist * plane.normal.x,
+            cyl.origin.y - signed_dist * plane.normal.y,
+            cyl.origin.z - signed_dist * plane.normal.z,
         );
 
-        // Simplified: just create a circle in the plane
+        // Create a circle in the plane at the intersection
         let circle = Circle::new(center_on_axis, plane.normal, cyl.radius);
 
         // Sample the circle
@@ -2275,6 +2289,8 @@ pub fn boolean_operation(
                 None => continue,
             };
 
+            // Debug: log surface types
+
             let curves = intersect_surfaces(surf_a, surf_b, tol_ctx);
             for curve in curves {
                 if curve.points.len() < 2 {
@@ -2306,6 +2322,7 @@ pub fn boolean_operation(
         }
     }
 
+
     // Step 2: If no intersections, handle the simple cases
     if shared_intersections.is_empty() {
         return handle_no_intersection(solid_a, solid_b, op, tol_ctx);
@@ -2321,49 +2338,82 @@ pub fn boolean_operation(
     let mut a_split_map: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
     let mut b_split_map: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
 
+    // Group intersections by face index so we can split each face with ALL
+    // its intersection curves at once (needed for cylinder splitting which
+    // requires both top and bottom intersection circles).
+    let mut a_intersections_by_face: std::collections::HashMap<usize, Vec<&SharedIntersection>> = std::collections::HashMap::new();
+    let mut b_intersections_by_face: std::collections::HashMap<usize, Vec<&SharedIntersection>> = std::collections::HashMap::new();
     for si in &shared_intersections {
-        // Split face A
-        if si.face_a_idx < faces_a.len() {
-            let split_result = split_face_with_shared_edge(
-                &faces_a[si.face_a_idx],
-                &si.points,
-                &si.shared_edge,
-                tol_ctx,
-            )?;
-            if split_result.faces.len() > 1 {
-                let mut new_indices = Vec::new();
-                let first_idx = si.face_a_idx;
-                faces_a[first_idx] = split_result.faces[0].clone();
-                new_indices.push(first_idx);
-                for extra_face in split_result.faces.iter().skip(1) {
-                    let new_idx = faces_a.len();
-                    faces_a.push(extra_face.clone());
-                    new_indices.push(new_idx);
-                }
-                a_split_map.insert(si.face_a_idx, new_indices);
-            }
-        }
+        a_intersections_by_face.entry(si.face_a_idx).or_default().push(si);
+        b_intersections_by_face.entry(si.face_b_idx).or_default().push(si);
+    }
 
-        // Split face B
-        if si.face_b_idx < faces_b.len() {
-            let split_result = split_face_with_shared_edge(
-                &faces_b[si.face_b_idx],
-                &si.points,
-                &si.shared_edge,
-                tol_ctx,
-            )?;
-            if split_result.faces.len() > 1 {
-                let mut new_indices = Vec::new();
-                let first_idx = si.face_b_idx;
-                faces_b[first_idx] = split_result.faces[0].clone();
-                new_indices.push(first_idx);
-                for extra_face in split_result.faces.iter().skip(1) {
-                    let new_idx = faces_b.len();
-                    faces_b.push(extra_face.clone());
-                    new_indices.push(new_idx);
-                }
-                b_split_map.insert(si.face_b_idx, new_indices);
+    // Split face A — process faces in reverse order so indices don't shift
+    let mut a_face_indices: Vec<usize> = a_intersections_by_face.keys().cloned().collect();
+    a_face_indices.sort_by(|a, b| b.cmp(a)); // Reverse order
+    for face_a_idx in a_face_indices {
+        if face_a_idx >= faces_a.len() { continue; }
+        let sis = &a_intersections_by_face[&face_a_idx];
+        // Combine all intersection points for this face
+        let mut all_points: Vec<Point3d> = Vec::new();
+        let mut all_edges: Vec<Edge> = Vec::new();
+        for si in sis {
+            all_points.extend(si.points.iter().cloned());
+            all_edges.push(si.shared_edge.clone());
+        }
+        let split_result = split_face_with_shared_edges(
+            &faces_a[face_a_idx],
+            &all_points,
+            &all_edges,
+            tol_ctx,
+        )?;
+        if split_result.faces.len() > 1 {
+            let mut new_indices = Vec::new();
+            let first_idx = face_a_idx;
+            faces_a[first_idx] = split_result.faces[0].clone();
+            new_indices.push(first_idx);
+            for extra_face in split_result.faces.iter().skip(1) {
+                let new_idx = faces_a.len();
+                faces_a.push(extra_face.clone());
+                new_indices.push(new_idx);
             }
+            a_split_map.insert(face_a_idx, new_indices);
+        } else if split_result.faces.len() == 1 {
+            faces_a[face_a_idx] = split_result.faces[0].clone();
+        }
+    }
+
+    // Split face B — same approach
+    let mut b_face_indices: Vec<usize> = b_intersections_by_face.keys().cloned().collect();
+    b_face_indices.sort_by(|a, b| b.cmp(a)); // Reverse order
+    for face_b_idx in b_face_indices {
+        if face_b_idx >= faces_b.len() { continue; }
+        let sis = &b_intersections_by_face[&face_b_idx];
+        let mut all_points: Vec<Point3d> = Vec::new();
+        let mut all_edges: Vec<Edge> = Vec::new();
+        for si in sis {
+            all_points.extend(si.points.iter().cloned());
+            all_edges.push(si.shared_edge.clone());
+        }
+        let split_result = split_face_with_shared_edges(
+            &faces_b[face_b_idx],
+            &all_points,
+            &all_edges,
+            tol_ctx,
+        )?;
+        if split_result.faces.len() > 1 {
+            let mut new_indices = Vec::new();
+            let first_idx = face_b_idx;
+            faces_b[first_idx] = split_result.faces[0].clone();
+            new_indices.push(first_idx);
+            for extra_face in split_result.faces.iter().skip(1) {
+                let new_idx = faces_b.len();
+                faces_b.push(extra_face.clone());
+                new_indices.push(new_idx);
+            }
+            b_split_map.insert(face_b_idx, new_indices);
+        } else if split_result.faces.len() == 1 {
+            faces_b[face_b_idx] = split_result.faces[0].clone();
         }
     }
 
@@ -2436,9 +2486,19 @@ fn split_face_with_shared_edge(
     shared_edge: &Edge,
     tol_ctx: &ToleranceContext,
 ) -> BooleanResult<SplitFaceResult> {
+    split_face_with_shared_edges(face, intersection_points, &[shared_edge.clone()], tol_ctx)
+}
+
+/// Split a face with multiple shared edges (for faces intersected by multiple curves).
+fn split_face_with_shared_edges(
+    face: &Face,
+    intersection_points: &[Point3d],
+    shared_edges: &[Edge],
+    tol_ctx: &ToleranceContext,
+) -> BooleanResult<SplitFaceResult> {
     let tol = tol_ctx.coincidence_tolerance();
 
-    if intersection_points.len() < 2 {
+    if intersection_points.len() < 2 || shared_edges.is_empty() {
         return Ok(SplitFaceResult {
             faces: vec![face.clone()],
         });
@@ -2455,134 +2515,190 @@ fn split_face_with_shared_edge(
 
     match surface {
         Surface::Plane(plane) => {
-            split_planar_face_shared(face, plane, intersection_points, shared_edge, tol)
+            // For plane faces, use the first shared edge
+            split_planar_face_shared(face, plane, intersection_points, &shared_edges[0], tol)
         }
         Surface::Cylinder(cyl) => {
-            // For cylinder faces, the intersection curve trims the surface.
-            // We add the shared edge as an inner wire (hole boundary) AND
-            // also split the existing boundary edges at intersection points
-            // to ensure proper trimming.
-            split_cylinder_face_shared(face, cyl, intersection_points, shared_edge, tol)
+            // For cylinder faces, pass ALL shared edges so the inner band
+            // can use the correct shared edge for each boundary circle
+            split_cylinder_face_multi_shared(face, cyl, intersection_points, shared_edges, tol)
         }
         _ => {
-            // For other non-planar faces (sphere, cone, etc.):
-            // add the shared edge as an inner wire (hole boundary)
-            let mut face_with_hole = face.clone();
-            let coedge = CoEdge::new(shared_edge.id, true);
-            let wire = Wire::new(vec![coedge]);
-            face_with_hole.add_hole(wire);
-            face_with_hole.edges.push(shared_edge.clone());
-
+            // For other non-planar faces: add each shared edge as a hole
+            let mut face_with_holes = face.clone();
+            for se in shared_edges {
+                let coedge = CoEdge::new(se.id, true);
+                let wire = Wire::new(vec![coedge]);
+                face_with_holes.add_hole(wire);
+                face_with_holes.edges.push(se.clone());
+            }
             Ok(SplitFaceResult {
-                faces: vec![face_with_hole],
+                faces: vec![face_with_holes],
             })
         }
     }
 }
 
-/// Split a cylinder face using a shared edge for the intersection boundary.
+/// Split a cylinder face with multiple shared edges.
 ///
-/// Cylinder faces have boundary circles (top/bottom caps). When a boolean
-/// operation intersects the cylinder, the intersection curve trims the
-/// lateral surface. We:
-/// 1. Add the shared edge as an inner wire (hole) for the intersection curve
-/// 2. Split the existing boundary edges at intersection points
-/// 3. Keep the original surface with updated boundaries
-fn split_cylinder_face_shared(
+/// Each shared edge corresponds to an intersection circle at a specific height.
+/// The cylinder is split into bands at each intersection height:
+/// - Inner bands (between intersection heights) — inside the other solid
+/// - Outer bands (above/below intersections) — outside the other solid
+///
+/// Each band uses the SHARED edge for its boundary at the intersection height,
+/// ensuring watertight topology with the adjacent planar faces.
+fn split_cylinder_face_multi_shared(
     face: &Face,
-    _cyl: &CylinderSurface,
+    cyl: &CylinderSurface,
     intersection_points: &[Point3d],
-    shared_edge: &Edge,
+    shared_edges: &[Edge],
     tol: f64,
 ) -> BooleanResult<SplitFaceResult> {
-    // For the cylinder lateral surface, we add the intersection curve as
-    // an inner wire (hole). The triangulation will use earcut to handle
-    // the hole properly.
-    //
-    // We also need to split the boundary edges (top/bottom circles) at
-    // the intersection points to ensure proper trimming. This is done by
-    // checking if any intersection points lie on the boundary edges.
-    let mut face_with_hole = face.clone();
-
-    // Add the shared edge as an inner wire (hole boundary)
-    let coedge = CoEdge::new(shared_edge.id, true);
-    let wire = Wire::new(vec![coedge]);
-    face_with_hole.add_hole(wire);
-    face_with_hole.edges.push(shared_edge.clone());
-
-    // Split boundary edges at intersection points
-    // For each existing edge, check if any intersection point lies on it
-    // and split the edge at that point.
-    let mut new_edges = Vec::new();
-    for edge in &face_with_hole.edges {
-        if let Some(ref curve) = edge.curve {
-            let (t_min, t_max) = edge.param_range;
-            let mut split_params: Vec<f64> = Vec::new();
-
-            for ip in intersection_points {
-                // Check if this intersection point is on this edge
-                // by finding the parameter t that minimizes distance
-                let n_samples = 50;
-                let mut best_t = None;
-                let mut best_dist = f64::MAX;
-                for i in 0..n_samples {
-                    let t = t_min + (t_max - t_min) * (i as f64 / (n_samples - 1) as f64);
-                    let p = curve.point_at(t);
-                    let d = (p.x - ip.x).powi(2) + (p.y - ip.y).powi(2) + (p.z - ip.z).powi(2);
-                    if d < best_dist {
-                        best_dist = d;
-                        best_t = Some(t);
-                    }
-                }
-
-                // If the closest point is within tolerance, add as split point
-                if best_dist < tol * tol * 100.0 {
-                    if let Some(t) = best_t {
-                        if t > t_min + tol && t < t_max - tol {
-                            if !split_params.iter().any(|&t2| (t - t2).abs() < tol) {
-                                split_params.push(t);
-                            }
-                        }
-                    }
-                }
-            }
-
-            if split_params.is_empty() {
-                new_edges.push(edge.clone());
-            } else {
-                // Split the edge at the found parameters
-                split_params.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let mut prev_t = t_min;
-                for &t in &split_params {
-                    if let Some(ref curve) = edge.curve {
-                        // Create a NEW edge for each sub-segment (new ID)
-                        let mut sub_edge = edge.clone();
-                        sub_edge.id = TopoId::new(); // New ID for sub-edge
-                        sub_edge.param_range = (prev_t, t);
-                        sub_edge.start_vertex_point = Some(curve.point_at(prev_t));
-                        sub_edge.end_vertex_point = Some(curve.point_at(t));
-                        new_edges.push(sub_edge);
-                    }
-                    prev_t = t;
-                }
-                if prev_t < t_max {
-                    let mut sub_edge = edge.clone();
-                    sub_edge.id = TopoId::new(); // New ID for sub-edge
-                    sub_edge.param_range = (prev_t, t_max);
-                    sub_edge.start_vertex_point = Some(curve.point_at(prev_t));
-                    sub_edge.end_vertex_point = Some(curve.point_at(t_max));
-                    new_edges.push(sub_edge);
-                }
-            }
+    // Match each shared edge to its v (height) value
+    // Each shared edge has start_vertex_point which we can project to get v
+    let mut v_edges: Vec<(f64, Edge)> = Vec::new();
+    for se in shared_edges {
+        // Use the first point of the edge to determine v
+        let p = if let Some(ref curve) = se.curve {
+            curve.point_at(se.param_range.0)
+        } else if let Some(p) = se.start_vertex_point {
+            p
         } else {
-            new_edges.push(edge.clone());
-        }
+            continue;
+        };
+        let (_, v) = cyl.project_point(&p);
+        v_edges.push((v, se.clone()));
     }
 
-    face_with_hole.edges = new_edges;
+    // Also collect v values from intersection points that don't have a shared edge
+    let mut v_values: Vec<f64> = v_edges.iter().map(|(v, _)| *v).collect();
+    for p in intersection_points {
+        let (_, v) = cyl.project_point(p);
+        if !v_values.iter().any(|&v2| (v - v2).abs() < tol * 100.0) {
+            v_values.push(v);
+        }
+    }
+    v_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    v_edges.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Get the cylinder height range from existing edges
+    let mut v_min = f64::MAX;
+    let mut v_max = f64::MIN;
+    for edge in &face.edges {
+        if let Some(ref curve) = edge.curve {
+            let (t_min, t_max) = edge.param_range;
+            let n = 10;
+            for i in 0..=n {
+                let t = t_min + (t_max - t_min) * (i as f64 / n as f64);
+                let p = curve.point_at(t);
+                let (_, v) = cyl.project_point(&p);
+                v_min = v_min.min(v);
+                v_max = v_max.max(v);
+            }
+        }
+    }
+    if v_min > v_max {
+        v_min = 0.0;
+        v_max = v_values.last().copied().unwrap_or(1.0) + 1.0;
+    }
+
+    // If we have fewer than 2 distinct v values, can't split into bands
+    let distinct_v: Vec<f64> = {
+        let mut dv: Vec<f64> = Vec::new();
+        for &v in &v_values {
+            if !dv.iter().any(|&v2| (v - v2).abs() < tol * 100.0) {
+                dv.push(v);
+            }
+        }
+        dv.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        dv
+    };
+
+    if distinct_v.len() < 2 {
+        // Can't split — add shared edges as holes
+        let mut face_with_holes = face.clone();
+        for se in shared_edges {
+            let coedge = CoEdge::new(se.id, true);
+            let wire = Wire::new(vec![coedge]);
+            face_with_holes.add_hole(wire);
+            face_with_holes.edges.push(se.clone());
+        }
+        return Ok(SplitFaceResult {
+            faces: vec![face_with_holes],
+        });
+    }
+
+    let v1 = distinct_v[0];
+    let v2 = distinct_v[1];
+
+    // Find the shared edges for v1 and v2
+    let edge_v1 = v_edges.iter()
+        .find(|(v, _)| (v - v1).abs() < tol * 100.0)
+        .map(|(_, e)| e.clone());
+    let edge_v2 = v_edges.iter()
+        .find(|(v, _)| (v - v2).abs() < tol * 100.0)
+        .map(|(_, e)| e.clone());
+
+    // If we don't have shared edges for both v values, create circle edges
+    let edge_v1 = match edge_v1 {
+        Some(e) => e,
+        None => {
+            let c = Circle::new(
+                Point3d::new(cyl.origin.x + v1 * cyl.axis.x, cyl.origin.y + v1 * cyl.axis.y, cyl.origin.z + v1 * cyl.axis.z),
+                cyl.axis, cyl.radius,
+            );
+            Edge { id: TopoId::new(), curve: Some(Curve3d::Circle(c.clone())), param_range: (0.0, 2.0*PI), vertex_start: None, vertex_end: None, start_vertex_point: Some(c.point_at(0.0)), end_vertex_point: Some(c.point_at(2.0*PI)), forward: true, tolerance: tol, degenerate: false, step_entity_id: None }
+        }
+    };
+    let edge_v2 = match edge_v2 {
+        Some(e) => e,
+        None => {
+            let c = Circle::new(
+                Point3d::new(cyl.origin.x + v2 * cyl.axis.x, cyl.origin.y + v2 * cyl.axis.y, cyl.origin.z + v2 * cyl.axis.z),
+                cyl.axis, cyl.radius,
+            );
+            Edge { id: TopoId::new(), curve: Some(Curve3d::Circle(c.clone())), param_range: (0.0, 2.0*PI), vertex_start: None, vertex_end: None, start_vertex_point: Some(c.point_at(0.0)), end_vertex_point: Some(c.point_at(2.0*PI)), forward: true, tolerance: tol, degenerate: false, step_entity_id: None }
+        }
+    };
+
+    // Create the INNER band face (v1 to v2) — inside the other solid
+    let inner_coedge_bottom = CoEdge::new(edge_v1.id, false);
+    let inner_coedge_top = CoEdge::new(edge_v2.id, true);
+    let inner_wire = Wire::new(vec![inner_coedge_bottom, inner_coedge_top]);
+    let mut inner_face = Face::new(Surface::Cylinder(cyl.clone()), inner_wire);
+    inner_face.edges = vec![edge_v1.clone(), edge_v2.clone()];
+
+    let mut all_faces = vec![inner_face];
+
+    // Bottom outer band (v_min to v1)
+    if v1 > v_min + tol {
+        let c = Circle::new(
+            Point3d::new(cyl.origin.x + v_min * cyl.axis.x, cyl.origin.y + v_min * cyl.axis.y, cyl.origin.z + v_min * cyl.axis.z),
+            cyl.axis, cyl.radius,
+        );
+        let bottom_edge = Edge { id: TopoId::new(), curve: Some(Curve3d::Circle(c.clone())), param_range: (0.0, 2.0*PI), vertex_start: None, vertex_end: None, start_vertex_point: Some(c.point_at(0.0)), end_vertex_point: Some(c.point_at(2.0*PI)), forward: true, tolerance: tol, degenerate: false, step_entity_id: None };
+        let wire = Wire::new(vec![CoEdge::new(bottom_edge.id, true), CoEdge::new(edge_v1.id, false)]);
+        let mut f = Face::new(Surface::Cylinder(cyl.clone()), wire);
+        f.edges = vec![bottom_edge, edge_v1.clone()];
+        all_faces.push(f);
+    }
+
+    // Top outer band (v2 to v_max)
+    if v2 < v_max - tol {
+        let c = Circle::new(
+            Point3d::new(cyl.origin.x + v_max * cyl.axis.x, cyl.origin.y + v_max * cyl.axis.y, cyl.origin.z + v_max * cyl.axis.z),
+            cyl.axis, cyl.radius,
+        );
+        let top_edge = Edge { id: TopoId::new(), curve: Some(Curve3d::Circle(c.clone())), param_range: (0.0, 2.0*PI), vertex_start: None, vertex_end: None, start_vertex_point: Some(c.point_at(0.0)), end_vertex_point: Some(c.point_at(2.0*PI)), forward: true, tolerance: tol, degenerate: false, step_entity_id: None };
+        let wire = Wire::new(vec![CoEdge::new(edge_v2.id, false), CoEdge::new(top_edge.id, true)]);
+        let mut f = Face::new(Surface::Cylinder(cyl.clone()), wire);
+        f.edges = vec![edge_v2.clone(), top_edge];
+        all_faces.push(f);
+    }
 
     Ok(SplitFaceResult {
-        faces: vec![face_with_hole],
+        faces: all_faces,
     })
 }
 
