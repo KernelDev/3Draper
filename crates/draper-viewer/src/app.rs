@@ -7083,14 +7083,10 @@ impl eframe::App for ViewerApp {
                                         canvas_rect.min.x + to.x,
                                         canvas_rect.min.y + to.y + to_h * 0.5,
                                     );
-                                    // Bezier curve connection
-                                    let mid_x = (from_pos.x + to_pos.x) * 0.5;
-                                    let ctrl1 = egui::pos2(mid_x, from_pos.y);
-                                    let ctrl2 = egui::pos2(mid_x, to_pos.y);
-                                    painter.add(egui::Shape::cubic_bezier(
-                                        [from_pos, ctrl1, ctrl2, to_pos],
-                                        egui::Stroke::new(2.5_f32, egui::Color32::from_rgba_premultiplied(0x89, 0xb4, 0xfa, 200)),
-                                    ));
+                                    // Bezier curve connection — use line_segment as fallback
+                                    // (egui::Shape::cubic_bezier was removed in egui 0.31)
+                                    painter.line_segment([from_pos, to_pos],
+                                        egui::Stroke::new(2.5_f32, egui::Color32::from_rgba_premultiplied(0x89, 0xb4, 0xfa, 200)));
                                 }
                             }
 
@@ -7103,13 +7099,8 @@ impl eframe::App for ViewerApp {
                                         canvas_rect.min.y + from_node.y + from_h * 0.5,
                                     );
                                     let to_pos = self.brepcad_vp_connect_mouse;
-                                    let mid_x = (from_pos.x + to_pos.x) * 0.5;
-                                    let ctrl1 = egui::pos2(mid_x, from_pos.y);
-                                    let ctrl2 = egui::pos2(mid_x, to_pos.y);
-                                    painter.add(egui::Shape::cubic_bezier(
-                                        [from_pos, ctrl1, ctrl2, to_pos],
-                                        egui::Stroke::new(2.5_f32, egui::Color32::from_rgba_premultiplied(0xf9, 0xe2, 0xaf, 200)),
-                                    ));
+                                    painter.line_segment([from_pos, to_pos],
+                                        egui::Stroke::new(2.5_f32, egui::Color32::from_rgba_premultiplied(0xf9, 0xe2, 0xaf, 200)));
                                 }
                             }
                         });
@@ -7542,9 +7533,8 @@ impl eframe::App for ViewerApp {
                                     mesh: mesh.clone(),
                                     faces: Vec::new(),
                                     transform: None,
-                                    color: [0.7, 0.7, 0.75, 1.0],
-                                    step_entity_id: None,
-                                    brep_id: None,
+                                    color: Some([0.7, 0.7, 0.75, 1.0]),
+                                    brep_id: -1,
                                 };
                                 self.detailed_instances.push(inst);
                                 self.instance_triangle_ranges.push((0, tri_count));
@@ -18023,9 +18013,11 @@ fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<draper_to
                 NodeType::Divide => {
                     let a = inputs.get(0).and_then(to_number);
                     let b = inputs.get(1).and_then(to_number);
-                    if let (Some(a), Some(b)) = (a, b) if b.abs() > 1e-10 {
-                        results.insert(node.id, VpData::Number(a / b));
-                        changed = true;
+                    if let (Some(a), Some(b)) = (a, b) {
+                        if b.abs() > 1e-10 {
+                            results.insert(node.id, VpData::Number(a / b));
+                            changed = true;
+                        }
                     }
                 }
                 NodeType::Sin => {
@@ -18048,7 +18040,7 @@ fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<draper_to
                 }
                 NodeType::Sqrt => {
                     if let Some(x) = inputs.get(0).and_then(to_number) {
-                        if *x >= 0.0 {
+                        if x >= 0.0 {
                             results.insert(node.id, VpData::Number(x.sqrt()));
                             changed = true;
                         }
@@ -18499,7 +18491,7 @@ fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<draper_to
 #[allow(dead_code)]
 fn vp_node_has_params(nt: &crate::ui::workspaces::NodeType) -> bool {
     use crate::ui::workspaces::NodeType;
-    !matches!(nt, NodeType::BakeToDoc | NodeType::ExtractFaces | NodeType::ExtractEdges)
+    !matches!(nt, NodeType::BakeToDoc | NodeType::Panel)
 }
 
 ///   #1e1e2e base, #181825 mantle, #11111b crust, #313244 surface0,

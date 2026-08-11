@@ -79,7 +79,7 @@ impl PortType {
             PortType::Number => egui::Color32::from_rgb(0xf9, 0xe2, 0xaf),   // yellow
             PortType::Integer => egui::Color32::from_rgb(0xeb, 0xa0, 0xac),   // red
             PortType::Boolean => egui::Color32::from_rgb(0xf5, 0xc2, 0xe7),  // pink
-            PortType::Point => egui::Color32::from_rgb(0xfab3, 0x87, 0x95),  // peach
+            PortType::Point => egui::Color32::from_rgb(0xfa, 0xb3, 0x87),  // peach
             PortType::Vector => egui::Color32::from_rgb(0x94, 0xe2, 0xd5),   // teal
             PortType::String => egui::Color32::from_rgb(0xba, 0xc2, 0xde),   // lavender
             PortType::List => egui::Color32::from_rgb(0xcb, 0xa6, 0xf7),     // purple
@@ -286,7 +286,8 @@ impl NodeType {
             NodeType::BooleanToggle { .. } | NodeType::PointInput { .. } |
             NodeType::VectorInput { .. } | NodeType::Panel => "Params",
             NodeType::Add | NodeType::Subtract | NodeType::Multiply | NodeType::Divide |
-            NodeType::Sin | NodeType::Cos | NodeType::Abs | NodeType::Sqrt |
+            NodeType::Sin | NodeType::Cos | NodeType::Tan | NodeType::Abs |
+            NodeType::Sqrt | NodeType::Pow | NodeType::Round |
             NodeType::Min | NodeType::Max | NodeType::Average | NodeType::Expression { .. } => "Maths",
             NodeType::Series { .. } | NodeType::Range { .. } | NodeType::ListLength |
             NodeType::ListItem | NodeType::Reverse | NodeType::Sort | NodeType::CullPattern => "Sets",
@@ -321,6 +322,7 @@ impl NodeType {
             NodeType::Min | NodeType::Max | NodeType::Average => "min",
             NodeType::Expression { .. } => "expr",
             NodeType::Series { .. } => "S",
+            NodeType::Range { .. } => "Rng",
             NodeType::ListLength => "len",
             NodeType::ListItem => "[]i",
             NodeType::Reverse => "rev",
@@ -365,7 +367,7 @@ impl NodeType {
             // Params — no inputs
             NodeType::NumberSlider { .. } | NodeType::IntegerInput { .. } |
             NodeType::BooleanToggle { .. } | NodeType::PointInput { .. } |
-            NodeType::VectorInput { .. } | NodeType::Series { .. } |
+            NodeType::VectorInput { .. } | NodeType::Series { .. } | NodeType::Range { .. } |
             NodeType::Box { .. } | NodeType::Sphere { .. } | NodeType::Cylinder { .. } |
             NodeType::Cone { .. } | NodeType::Torus { .. } | NodeType::Circle { .. } => vec![],
             // Panel — accepts any
@@ -488,10 +490,10 @@ impl NodeType {
             ],
             NodeType::Panel => vec![],
             NodeType::BakeToDoc => vec![],
-            NodeType::Series { .. } => vec![PortDesc { name: "L", port_type: PortType::List }],
+            NodeType::Series { .. } | NodeType::Range { .. } => vec![PortDesc { name: "L", port_type: PortType::List }],
             NodeType::ListLength => vec![PortDesc { name: "N", port_type: PortType::Integer }],
             NodeType::ListItem => vec![PortDesc { name: "I", port_type: PortType::Any }],
-            NodeType::Reverse => vec![PortDesc { name: "L", port_type: PortType::List }],
+            NodeType::Reverse | NodeType::Sort | NodeType::CullPattern => vec![PortDesc { name: "L", port_type: PortType::List }],
             // Math outputs are Number
             NodeType::Add | NodeType::Subtract | NodeType::Multiply | NodeType::Divide |
             NodeType::Sin | NodeType::Cos | NodeType::Tan | NodeType::Abs |
