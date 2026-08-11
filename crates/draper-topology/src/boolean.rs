@@ -2129,23 +2129,38 @@ fn split_general_face(
     intersection_points: &[Point3d],
     tol: f64,
 ) -> BooleanResult<SplitFaceResult> {
-    // For non-planar faces, create two new faces:
-    // One on each side of the intersection curve.
-    // The intersection curve becomes a shared boundary edge.
-
+    // For non-planar faces (cylinder, sphere, etc.), we CANNOT easily split
+    // the face along the intersection curve because that would require
+    // trimming the parametric surface — a complex operation.
+    //
+    // Previous approach created face_b with only 1 edge (the intersection
+    // curve), which is topologically invalid (unclosed wire) and caused
+    // the triangulation to produce garbage.
+    //
+    // New approach: return the face UNSPLIT. The classification step
+    // (Step 4) will use the face centroid to determine if the ENTIRE face
+    // is inside or outside the other solid, and keep/discard accordingly.
+    //
+    // This is correct for the common case where the intersection curve
+    // divides the face into a "mostly inside" and "mostly outside" region —
+    // the centroid will be on the dominant side.
+    //
+    // For cases where the face is split roughly in half, this may keep or
+    // discard the entire face, but that's a better failure mode than
+    // producing invalid topology.
+    //
+    // The intersection curve is still stored in the face's edges for
+    // potential future use (e.g., creating a proper trimmed surface).
+    let _ = tol;
     if intersection_points.len() < 2 {
         return Ok(SplitFaceResult {
             faces: vec![face.clone()],
         });
     }
 
-    // Create an edge along the intersection curve
-    // Use a polyline approximation (NURBS curve would be better)
-    let n = intersection_points.len();
-    let _first = intersection_points[0];
-    let _last = intersection_points[n - 1];
-
-    // Create a NURBS curve interpolating the intersection points
+    // Return the face unsplit, but store the intersection curve as an
+    // additional edge (for debugging/future use)
+    let mut face_with_curve = face.clone();
     let int_curve = create_polyline_curve(intersection_points);
     let int_edge = Edge {
         id: TopoId::new(),
@@ -2153,31 +2168,17 @@ fn split_general_face(
         param_range: (0.0, 1.0),
         vertex_start: None,
         vertex_end: None,
-        start_vertex_point: None,
-        end_vertex_point: None,
+        start_vertex_point: Some(intersection_points[0]),
+        end_vertex_point: Some(intersection_points[intersection_points.len() - 1]),
         forward: true,
         tolerance: tol,
         degenerate: false,
         step_entity_id: None,
     };
-
-    // Create two sub-faces
-    // Face A: original face with the intersection edge added as an inner wire
-    let mut face_a = face.clone();
-    let coedge_a = CoEdge::new(int_edge.id, true);
-    let wire_a = Wire::new(vec![coedge_a]);
-    face_a.add_hole(wire_a);
-
-    // Face B: new face bounded by the intersection curve
-    // (simplified: just the intersection curve as the outer wire)
-    let coedge_b = CoEdge::new(int_edge.id, false);
-    let wire_b = Wire::new(vec![coedge_b]);
-    let mut face_b = Face::new_surface_only(face.surface.clone().unwrap_or(Surface::Plane(Plane::xy())));
-    face_b.outer_wire = Some(wire_b);
-    face_b.edges = vec![int_edge];
+    face_with_curve.edges.push(int_edge);
 
     Ok(SplitFaceResult {
-        faces: vec![face_a, face_b],
+        faces: vec![face_with_curve],
     })
 }
 
