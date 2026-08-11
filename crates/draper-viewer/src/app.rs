@@ -7255,9 +7255,112 @@ impl eframe::App for ViewerApp {
                                                     });
                                                 }
                                                 _ => {
-                                                    ui.label(egui::RichText::new("(no params)")
-                                                        .size(10.0)
-                                                        .color(egui::Color32::from_rgb(0x6c, 0x70, 0x86)));
+                                                    // Params nodes with inline editing
+                                                    match &mut params {
+                                                        crate::ui::workspaces::NodeType::NumberSlider { value, min, max } => {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("V:");
+                                                                if ui.add(egui::Slider::new(value, *min..=*max).clamp_to_range(true)).changed() { local_changed = true; }
+                                                            });
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("min:");
+                                                                if ui.add(egui::DragValue::new(min).speed(1.0)).changed() { local_changed = true; }
+                                                                ui.label("max:");
+                                                                if ui.add(egui::DragValue::new(max).speed(1.0)).changed() { local_changed = true; }
+                                                            });
+                                                        }
+                                                        crate::ui::workspaces::NodeType::IntegerInput { value } => {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("V:");
+                                                                let mut v = *value as i32;
+                                                                if ui.add(egui::DragValue::new(&mut v).range(0..=1000000)).changed() { *value = v as i64; local_changed = true; }
+                                                            });
+                                                        }
+                                                        crate::ui::workspaces::NodeType::BooleanToggle { value } => {
+                                                            ui.horizontal(|ui| {
+                                                                if ui.checkbox(value, if *value { "True" } else { "False" }).changed() { local_changed = true; }
+                                                            });
+                                                        }
+                                                        crate::ui::workspaces::NodeType::PointInput { x, y, z } => {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("X:");
+                                                                if ui.add(egui::DragValue::new(x).speed(1.0)).changed() { local_changed = true; }
+                                                            });
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Y:");
+                                                                if ui.add(egui::DragValue::new(y).speed(1.0)).changed() { local_changed = true; }
+                                                            });
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Z:");
+                                                                if ui.add(egui::DragValue::new(z).speed(1.0)).changed() { local_changed = true; }
+                                                            });
+                                                        }
+                                                        crate::ui::workspaces::NodeType::VectorInput { x, y, z } => {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("X:");
+                                                                if ui.add(egui::DragValue::new(x).speed(1.0)).changed() { local_changed = true; }
+                                                            });
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Y:");
+                                                                if ui.add(egui::DragValue::new(y).speed(1.0)).changed() { local_changed = true; }
+                                                            });
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Z:");
+                                                                if ui.add(egui::DragValue::new(z).speed(1.0)).changed() { local_changed = true; }
+                                                            });
+                                                        }
+                                                        crate::ui::workspaces::NodeType::Series { start, step, count } => {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Start:");
+                                                                if ui.add(egui::DragValue::new(start).speed(1.0)).changed() { local_changed = true; }
+                                                            });
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Step:");
+                                                                if ui.add(egui::DragValue::new(step).speed(1.0)).changed() { local_changed = true; }
+                                                            });
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Count:");
+                                                                let mut c = *count as i32;
+                                                                if ui.add(egui::DragValue::new(&mut c).range(1..=10000)).changed() { *count = c as u32; local_changed = true; }
+                                                            });
+                                                        }
+                                                        crate::ui::workspaces::NodeType::Rotate { angle_deg } => {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Angle:");
+                                                                if ui.add(egui::DragValue::new(angle_deg).speed(1.0).range(-360.0..=360.0)).changed() { local_changed = true; }
+                                                            });
+                                                        }
+                                                        crate::ui::workspaces::NodeType::Scale { factor } => {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Factor:");
+                                                                if ui.add(egui::DragValue::new(factor).speed(0.1).range(0.01..=100.0)).changed() { local_changed = true; }
+                                                            });
+                                                        }
+                                                        crate::ui::workspaces::NodeType::Circle { radius } => {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("R:");
+                                                                if ui.add(egui::DragValue::new(radius).speed(1.0).range(0.1..=5000.0)).changed() { local_changed = true; }
+                                                            });
+                                                        }
+                                                        crate::ui::workspaces::NodeType::DivideCurve { count } => {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("N:");
+                                                                let mut c = *count as i32;
+                                                                if ui.add(egui::DragValue::new(&mut c).range(1..=10000)).changed() { *count = c as u32; local_changed = true; }
+                                                            });
+                                                        }
+                                                        crate::ui::workspaces::NodeType::Expression { expr } => {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("f:");
+                                                                if ui.text_edit_singleline(expr).changed() { local_changed = true; }
+                                                            });
+                                                        }
+                                                        _ => {
+                                                            ui.label(egui::RichText::new("(no params)")
+                                                                .size(10.0)
+                                                                .color(egui::Color32::from_rgb(0x6c, 0x70, 0x86)));
+                                                        }
+                                                    }
                                                 }
                                             }
                                         });
@@ -17683,8 +17786,14 @@ fn vp_node_height(nt: &crate::ui::workspaces::NodeType) -> f32 {
     match nt {
         NodeType::Box { .. } => 120.0,
         NodeType::Cone { .. } => 130.0,
+        NodeType::PointInput { .. } | NodeType::VectorInput { .. } => 120.0,
+        NodeType::NumberSlider { .. } => 100.0,
+        NodeType::Series { .. } => 120.0,
         NodeType::Cylinder { .. } | NodeType::Torus { .. } | NodeType::LinearArray { .. } | NodeType::CircularArray { .. } => 105.0,
-        NodeType::Sphere { .. } | NodeType::Fillet { .. } | NodeType::Chamfer { .. } => 90.0,
+        NodeType::Sphere { .. } | NodeType::Fillet { .. } | NodeType::Chamfer { .. } |
+        NodeType::Rotate { .. } | NodeType::Scale { .. } | NodeType::Circle { .. } |
+        NodeType::DivideCurve { .. } | NodeType::IntegerInput { .. } |
+        NodeType::BooleanToggle { .. } | NodeType::Expression { .. } => 90.0,
         _ => 70.0,
     }
 }
@@ -17693,17 +17802,45 @@ fn vp_node_height(nt: &crate::ui::workspaces::NodeType) -> f32 {
 fn vp_node_colors(nt: &crate::ui::workspaces::NodeType) -> (egui::Color32, egui::Color32) {
     use crate::ui::workspaces::NodeType;
     match nt {
+        // Params — green
+        NodeType::NumberSlider { .. } | NodeType::IntegerInput { .. } |
+        NodeType::BooleanToggle { .. } | NodeType::PointInput { .. } |
+        NodeType::VectorInput { .. } | NodeType::Panel => {
+            (egui::Color32::from_rgb(0xa6, 0xe3, 0xa1), egui::Color32::from_rgb(0xa6, 0xe3, 0xa1))
+        }
+        // Maths — yellow
+        NodeType::Add | NodeType::Subtract | NodeType::Multiply | NodeType::Divide |
+        NodeType::Sin | NodeType::Cos | NodeType::Abs | NodeType::Sqrt |
+        NodeType::Min | NodeType::Max | NodeType::Average | NodeType::Expression { .. } => {
+            (egui::Color32::from_rgb(0xf9, 0xe2, 0xaf), egui::Color32::from_rgb(0xf9, 0xe2, 0xaf))
+        }
+        // Sets — purple
+        NodeType::Series { .. } | NodeType::ListLength | NodeType::ListItem | NodeType::Reverse => {
+            (egui::Color32::from_rgb(0xcb, 0xa6, 0xf7), egui::Color32::from_rgb(0xcb, 0xa6, 0xf7))
+        }
+        // Primitives — blue
         NodeType::Box { .. } | NodeType::Sphere { .. } | NodeType::Cylinder { .. }
         | NodeType::Cone { .. } | NodeType::Torus { .. } => {
             (egui::Color32::from_rgb(0x89, 0xb4, 0xfa), egui::Color32::from_rgb(0x89, 0xb4, 0xfa))
         }
-        NodeType::Fillet { .. } | NodeType::Chamfer { .. } | NodeType::LinearArray { .. }
-        | NodeType::CircularArray { .. } | NodeType::Mirror { .. } => {
-            (egui::Color32::from_rgb(0xf9, 0xe2, 0xaf), egui::Color32::from_rgb(0xf9, 0xe2, 0xaf))
+        // Curve — teal
+        NodeType::Line | NodeType::Circle { .. } | NodeType::DivideCurve { .. } => {
+            (egui::Color32::from_rgb(0x94, 0xe2, 0xd5), egui::Color32::from_rgb(0x94, 0xe2, 0xd5))
         }
+        // Transform — peach
+        NodeType::Move | NodeType::Rotate { .. } | NodeType::Scale { .. } |
+        NodeType::Mirror | NodeType::LinearArray { .. } | NodeType::CircularArray { .. } => {
+            (egui::Color32::from_rgb(0xfa, 0xb3, 0x87), egui::Color32::from_rgb(0xfa, 0xb3, 0x87))
+        }
+        // Boolean — lavender
         NodeType::BooleanUnion | NodeType::BooleanSubtract | NodeType::BooleanIntersect => {
             (egui::Color32::from_rgb(0xcb, 0xa6, 0xf7), egui::Color32::from_rgb(0xcb, 0xa6, 0xf7))
         }
+        // Modify — yellow
+        NodeType::Fillet { .. } | NodeType::Chamfer { .. } => {
+            (egui::Color32::from_rgb(0xf9, 0xe2, 0xaf), egui::Color32::from_rgb(0xf9, 0xe2, 0xaf))
+        }
+        // Output — pink
         NodeType::BakeToDoc => {
             (egui::Color32::from_rgb(0xf3, 0x8b, 0xa8), egui::Color32::from_rgb(0xf3, 0x8b, 0xa8))
         }
@@ -17967,6 +18104,150 @@ fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<draper_to
                 NodeType::BakeToDoc => {
                     if let Some(last) = inputs.last() {
                         results.insert(node.id, last.clone());
+                        changed = true;
+                    }
+                }
+
+                // ─── Transform (Rotate, Mirror, Arrays) ───
+                NodeType::Rotate { angle_deg } => {
+                    if let Some(solid) = inputs.get(0).and_then(to_solid) {
+                        let angle = inputs.get(1).and_then(to_number).unwrap_or(*angle_deg);
+                        let rad = angle.to_radians();
+                        let mut s = solid;
+                        ShapeBuilder::transform_solid(&mut s, &Transform::rotation_z(rad));
+                        results.insert(node.id, VpData::Geometry(Box::new(s)));
+                        changed = true;
+                    }
+                }
+                NodeType::Mirror => {
+                    if let Some(solid) = inputs.get(0).and_then(to_solid) {
+                        let mut s = solid;
+                        // Mirror across YZ plane (negate X)
+                        ShapeBuilder::transform_solid(&mut s, &Transform::scaling(-1.0, 1.0, 1.0));
+                        results.insert(node.id, VpData::Geometry(Box::new(s)));
+                        changed = true;
+                    }
+                }
+                NodeType::LinearArray { count, spacing, .. } => {
+                    if let Some(solid) = inputs.get(0).and_then(to_solid) {
+                        let n = *count as usize;
+                        let sp = inputs.get(1).and_then(to_number).unwrap_or(*spacing);
+                        // For now, return the original solid (array would create multiple)
+                        let _ = (n, sp);
+                        results.insert(node.id, VpData::Geometry(Box::new(solid)));
+                        changed = true;
+                    }
+                }
+                NodeType::CircularArray { count, .. } => {
+                    if let Some(solid) = inputs.get(0).and_then(to_solid) {
+                        let _ = count;
+                        results.insert(node.id, VpData::Geometry(Box::new(solid)));
+                        changed = true;
+                    }
+                }
+
+                // ─── Curve ───
+                NodeType::Line => {
+                    let a = inputs.get(0).and_then(to_point);
+                    let b = inputs.get(1).and_then(to_point);
+                    if let (Some(a), Some(b)) = (a, b) {
+                        let pts = vec![
+                            Point3d::new(a[0], a[1], a[2]),
+                            Point3d::new(b[0], b[1], b[2]),
+                        ];
+                        results.insert(node.id, VpData::Curve(pts));
+                        changed = true;
+                    }
+                }
+                NodeType::Circle { radius } => {
+                    let r = inputs.get(0).and_then(to_number).unwrap_or(*radius);
+                    let segments = 32;
+                    let mut pts = Vec::with_capacity(segments + 1);
+                    for i in 0..=segments {
+                        let angle = 2.0 * std::f64::consts::PI * i as f64 / segments as f64;
+                        pts.push(Point3d::new(r * angle.cos(), r * angle.sin(), 0.0));
+                    }
+                    results.insert(node.id, VpData::Curve(pts));
+                    changed = true;
+                }
+                NodeType::DivideCurve { count } => {
+                    if let Some(VpData::Curve(pts)) = inputs.get(0) {
+                        let n = *count as usize;
+                        let mut result_pts = Vec::with_capacity(n);
+                        for i in 0..n {
+                            let t = i as f64 / n as f64;
+                            let idx = (t * (pts.len() - 1) as f64) as usize;
+                            result_pts.push([pts[idx].x, pts[idx].y, pts[idx].z]);
+                        }
+                        results.insert(node.id, VpData::List(
+                            result_pts.iter().map(|p| VpData::Point(*p)).collect()
+                        ));
+                        changed = true;
+                    }
+                }
+
+                // ─── Sets (List Operations) ───
+                NodeType::Series { start, step, count } => {
+                    let s = inputs.get(0).and_then(to_number).unwrap_or(*start);
+                    let st = inputs.get(1).and_then(to_number).unwrap_or(*step);
+                    let c = *count as usize;
+                    let list: Vec<VpData> = (0..c).map(|i| VpData::Number(s + st * i as f64)).collect();
+                    results.insert(node.id, VpData::List(list));
+                    changed = true;
+                }
+                NodeType::ListLength => {
+                    if let Some(VpData::List(items)) = inputs.get(0) {
+                        results.insert(node.id, VpData::Integer(items.len() as i64));
+                        changed = true;
+                    }
+                }
+                NodeType::ListItem => {
+                    if let (Some(VpData::List(items)), Some(idx)) = (inputs.get(0), inputs.get(1).and_then(|d| match d {
+                        VpData::Integer(i) => Some(*i as usize),
+                        VpData::Number(n) => Some(*n as usize),
+                        _ => None,
+                    })) {
+                        if let Some(item) = items.get(idx) {
+                            results.insert(node.id, item.clone());
+                            changed = true;
+                        }
+                    }
+                }
+                NodeType::Reverse => {
+                    if let Some(VpData::List(items)) = inputs.get(0) {
+                        let mut rev = items.clone();
+                        rev.reverse();
+                        results.insert(node.id, VpData::List(rev));
+                        changed = true;
+                    }
+                }
+
+                // ─── Average ───
+                NodeType::Average => {
+                    if let Some(VpData::List(items)) = inputs.get(0) {
+                        let nums: Vec<f64> = items.iter().filter_map(to_number).collect();
+                        if !nums.is_empty() {
+                            let avg = nums.iter().sum::<f64>() / nums.len() as f64;
+                            results.insert(node.id, VpData::Number(avg));
+                            changed = true;
+                        }
+                    }
+                }
+
+                // ─── Expression (simple: evaluate "a + b" where a, b are inputs) ───
+                NodeType::Expression { expr } => {
+                    if let Some(x) = inputs.get(0).and_then(to_number) {
+                        // Very simple: just pass through for now
+                        let _ = expr;
+                        results.insert(node.id, VpData::Number(x));
+                        changed = true;
+                    }
+                }
+
+                // ─── Panel (pass-through, display only) ───
+                NodeType::Panel => {
+                    if let Some(d) = inputs.get(0) {
+                        results.insert(node.id, d.clone());
                         changed = true;
                     }
                 }

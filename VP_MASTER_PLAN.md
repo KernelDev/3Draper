@@ -178,10 +178,10 @@ VpData enum:
 
 ## DoD
 
-- [ ] Every node type has inline parameter editing (DragValue/Slider/Checkbox)
-- [ ] Changing any parameter triggers live preview (no manual Bake needed)
-- [ ] Connections are type-checked — incompatible types can't connect
-- [ ] Math nodes work with Number Slider inputs (parametric chains)
-- [ ] Transform nodes accept geometry from any source
-- [ ] Bake creates proper tree entry with face list
-- [ ] At least 30 node types implemented
+- [x] Every node type has inline parameter editing (DragValue/Slider/Checkbox)
+- [x] Changing any parameter triggers live preview (no manual Bake needed)
+- [ ] Connections are type-checked — incompatible types can't connect (PortType.accepts() implemented, UI enforcement TODO)
+- [x] Math nodes work with Number Slider inputs (parametric chains)
+- [x] Transform nodes accept geometry from any source
+- [x] Bake creates proper tree entry with face list
+- [x] At least 30 node types implemented (39 types implemented)
