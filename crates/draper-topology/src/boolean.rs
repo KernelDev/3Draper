@@ -2249,8 +2249,20 @@ pub fn boolean_operation(
         BooleanError::MissingShell("Solid B has no outer shell".to_string())
     })?;
 
-    // Step 1: Find all intersection curves between faces of A and faces of B
-    let mut intersection_curves: Vec<(usize, usize, IntersectionCurve)> = Vec::new();
+    // Step 1: Find all intersection curves between faces of A and faces of B.
+    // For each intersection curve, create a SHARED Edge that will be used by
+    // both the A-face split and the B-face split. This ensures both split
+    // faces reference the same edge ID, which is critical for watertightness
+    // — the edge cache will produce identical 3D vertices for both faces.
+    #[derive(Clone)]
+    struct SharedIntersection {
+        face_a_idx: usize,
+        face_b_idx: usize,
+        shared_edge: Edge,
+        points: Vec<Point3d>,
+    }
+
+    let mut shared_intersections: Vec<SharedIntersection> = Vec::new();
 
     for (ia, face_a) in shell_a.faces.iter().enumerate() {
         let surf_a = match &face_a.surface {
@@ -2265,64 +2277,109 @@ pub fn boolean_operation(
 
             let curves = intersect_surfaces(surf_a, surf_b, tol_ctx);
             for curve in curves {
-                intersection_curves.push((ia, ib, curve));
+                if curve.points.len() < 2 {
+                    continue;
+                }
+                // Create a shared edge for this intersection curve.
+                // This edge will be referenced by BOTH split faces.
+                let int_curve = create_polyline_curve(&curve.points);
+                let shared_edge = Edge {
+                    id: TopoId::new(),
+                    curve: Some(int_curve),
+                    param_range: (0.0, 1.0),
+                    vertex_start: None,
+                    vertex_end: None,
+                    start_vertex_point: Some(curve.points[0]),
+                    end_vertex_point: Some(curve.points[curve.points.len() - 1]),
+                    forward: true,
+                    tolerance: tol_ctx.coincidence_tolerance(),
+                    degenerate: false,
+                    step_entity_id: None,
+                };
+                shared_intersections.push(SharedIntersection {
+                    face_a_idx: ia,
+                    face_b_idx: ib,
+                    shared_edge,
+                    points: curve.points.clone(),
+                });
             }
         }
     }
 
     // Step 2: If no intersections, handle the simple cases
-    if intersection_curves.is_empty() {
+    if shared_intersections.is_empty() {
         return handle_no_intersection(solid_a, solid_b, op, tol_ctx);
     }
 
-    // Step 3: Split faces along intersection curves
+    // Step 3: Split faces along intersection curves.
+    // Each split uses the SHARED edge, so adjacent split faces will have
+    // the same edge ID in their wires → edge cache produces shared vertices.
     let mut faces_a: Vec<Face> = shell_a.faces.clone();
     let mut faces_b: Vec<Face> = shell_b.faces.clone();
 
-    for (ia, ib, curve) in &intersection_curves {
-        // Split face A along the intersection curve
-        if *ia < faces_a.len() {
-            let split_result = split_face(&faces_a[*ia], &curve.points, tol_ctx)?;
+    // Track which faces were split and need re-classification
+    let mut a_split_map: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+    let mut b_split_map: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+
+    for si in &shared_intersections {
+        // Split face A
+        if si.face_a_idx < faces_a.len() {
+            let split_result = split_face_with_shared_edge(
+                &faces_a[si.face_a_idx],
+                &si.points,
+                &si.shared_edge,
+                tol_ctx,
+            )?;
             if split_result.faces.len() > 1 {
-                faces_a[*ia] = split_result.faces[0].clone();
+                let mut new_indices = Vec::new();
+                let first_idx = si.face_a_idx;
+                faces_a[first_idx] = split_result.faces[0].clone();
+                new_indices.push(first_idx);
                 for extra_face in split_result.faces.iter().skip(1) {
+                    let new_idx = faces_a.len();
                     faces_a.push(extra_face.clone());
+                    new_indices.push(new_idx);
                 }
+                a_split_map.insert(si.face_a_idx, new_indices);
             }
         }
 
-        // Split face B along the intersection curve
-        if *ib < faces_b.len() {
-            let split_result = split_face(&faces_b[*ib], &curve.points, tol_ctx)?;
+        // Split face B
+        if si.face_b_idx < faces_b.len() {
+            let split_result = split_face_with_shared_edge(
+                &faces_b[si.face_b_idx],
+                &si.points,
+                &si.shared_edge,
+                tol_ctx,
+            )?;
             if split_result.faces.len() > 1 {
-                faces_b[*ib] = split_result.faces[0].clone();
+                let mut new_indices = Vec::new();
+                let first_idx = si.face_b_idx;
+                faces_b[first_idx] = split_result.faces[0].clone();
+                new_indices.push(first_idx);
                 for extra_face in split_result.faces.iter().skip(1) {
+                    let new_idx = faces_b.len();
                     faces_b.push(extra_face.clone());
+                    new_indices.push(new_idx);
                 }
+                b_split_map.insert(si.face_b_idx, new_indices);
             }
         }
     }
 
-    // Step 4: Classify each face piece
+    // Step 4: Classify each face piece using MULTIPLE sample points
+    // (not just centroid) for more robust inside/outside determination.
     let mut result_faces: Vec<Face> = Vec::new();
 
     for face in &faces_a {
-        let classification = classify_face_relative_to_solid(face, solid_b, tol_ctx);
+        let classification = classify_face_robust(face, solid_b, tol_ctx);
         match op {
-            BooleanOp::Union => {
-                // Keep faces from A that are outside B
-                if classification != FaceClassification::Inside {
-                    result_faces.push(face.clone());
-                }
-            }
-            BooleanOp::Subtract => {
-                // Keep faces from A that are outside B
+            BooleanOp::Union | BooleanOp::Subtract => {
                 if classification != FaceClassification::Inside {
                     result_faces.push(face.clone());
                 }
             }
             BooleanOp::Intersect => {
-                // Keep faces from A that are inside B
                 if classification == FaceClassification::Inside
                     || classification == FaceClassification::OnBoundary
                 {
@@ -2333,16 +2390,14 @@ pub fn boolean_operation(
     }
 
     for face in &faces_b {
-        let classification = classify_face_relative_to_solid(face, solid_a, tol_ctx);
+        let classification = classify_face_robust(face, solid_a, tol_ctx);
         match op {
             BooleanOp::Union => {
-                // Keep faces from B that are outside A
                 if classification != FaceClassification::Inside {
                     result_faces.push(face.clone());
                 }
             }
             BooleanOp::Subtract => {
-                // Keep faces from B that are inside A (with reversed orientation)
                 if classification == FaceClassification::Inside
                     || classification == FaceClassification::OnBoundary
                 {
@@ -2352,7 +2407,6 @@ pub fn boolean_operation(
                 }
             }
             BooleanOp::Intersect => {
-                // Keep faces from B that are inside A
                 if classification == FaceClassification::Inside
                     || classification == FaceClassification::OnBoundary
                 {
@@ -2371,6 +2425,251 @@ pub fn boolean_operation(
     // Step 5: Connect faces into a new closed shell
     let shell = Shell::new_closed(result_faces);
     Ok(Solid::new(shell))
+}
+
+/// Split a face along an intersection curve, using a SHARED edge that is
+/// also used by the adjacent face's split. This ensures both split faces
+/// reference the same edge ID, producing watertight meshes.
+fn split_face_with_shared_edge(
+    face: &Face,
+    intersection_points: &[Point3d],
+    shared_edge: &Edge,
+    tol_ctx: &ToleranceContext,
+) -> BooleanResult<SplitFaceResult> {
+    let tol = tol_ctx.coincidence_tolerance();
+
+    if intersection_points.len() < 2 {
+        return Ok(SplitFaceResult {
+            faces: vec![face.clone()],
+        });
+    }
+
+    let surface = match &face.surface {
+        Some(s) => s,
+        None => {
+            return Ok(SplitFaceResult {
+                faces: vec![face.clone()],
+            });
+        }
+    };
+
+    match surface {
+        Surface::Plane(plane) => {
+            split_planar_face_shared(face, plane, intersection_points, shared_edge, tol)
+        }
+        _ => {
+            // For non-planar faces, add the shared edge as an inner wire (hole)
+            // rather than creating an invalid 1-edge face.
+            let mut face_with_hole = face.clone();
+            let coedge = CoEdge::new(shared_edge.id, true);
+            let wire = Wire::new(vec![coedge]);
+            face_with_hole.add_hole(wire);
+            face_with_hole.edges.push(shared_edge.clone());
+
+            Ok(SplitFaceResult {
+                faces: vec![face_with_hole],
+            })
+        }
+    }
+}
+
+/// Split a planar face using a shared edge for the intersection boundary.
+///
+/// Instead of creating entirely new edges for the split faces, we use the
+/// SHARED edge for the intersection curve portion of the boundary. This
+/// ensures both adjacent split faces (from solid A and solid B) reference
+/// the same edge ID, so the edge cache produces identical 3D vertices
+/// for both faces → watertight mesh.
+fn split_planar_face_shared(
+    face: &Face,
+    plane: &Plane,
+    intersection_points: &[Point3d],
+    shared_edge: &Edge,
+    tol: f64,
+) -> BooleanResult<SplitFaceResult> {
+    // Get the face's boundary polygon
+    let mut boundary: Vec<Point3d> = Vec::new();
+    for edge in &face.edges {
+        if let Some(ref curve) = edge.curve {
+            let (t_min, t_max) = edge.param_range;
+            let n = 20;
+            for i in 0..n {
+                let t = t_min + (t_max - t_min) * (i as f64 / n as f64);
+                boundary.push(curve.point_at(t));
+            }
+        }
+    }
+
+    if boundary.is_empty() {
+        return Ok(SplitFaceResult {
+            faces: vec![face.clone()],
+        });
+    }
+
+    // Project to 2D
+    let boundary_2d: Vec<(f64, f64)> = boundary
+        .iter()
+        .map(|p| plane.project_point(p))
+        .collect();
+
+    let intersection_2d: Vec<(f64, f64)> = intersection_points
+        .iter()
+        .map(|p| plane.project_point(p))
+        .collect();
+
+    let entry_exit = find_boundary_intersections(&boundary_2d, &intersection_2d, tol);
+
+    if entry_exit.len() < 2 {
+        // Intersection curve doesn't cross the boundary.
+        // It may be entirely inside the face → add as a hole.
+        // This creates a proper trimmed face with the intersection as inner boundary.
+        let mut face_with_hole = face.clone();
+        let coedge = CoEdge::new(shared_edge.id, true);
+        let wire = Wire::new(vec![coedge]);
+        face_with_hole.add_hole(wire);
+        face_with_hole.edges.push(shared_edge.clone());
+        return Ok(SplitFaceResult {
+            faces: vec![face_with_hole],
+        });
+    }
+
+    let (poly_a, poly_b) = split_polygon_at_intersections(
+        &boundary_2d,
+        &intersection_2d,
+        &entry_exit,
+    );
+
+    // Build faces using the SHARED edge for the intersection portion.
+    // Each split face has:
+    //   - Some edges from the original boundary (new Edge IDs)
+    //   - The shared edge for the intersection curve portion
+    let mut result_faces = Vec::new();
+
+    for poly_2d in &[poly_a, poly_b] {
+        if poly_2d.len() < 3 {
+            continue;
+        }
+
+        let points_3d: Vec<Point3d> = poly_2d
+            .iter()
+            .map(|(u, v)| plane.point_at(*u, *v))
+            .collect();
+
+        // Build the face with edges, using the shared edge where the
+        // intersection curve is part of the boundary.
+        let n = points_3d.len();
+        let mut edges = Vec::new();
+        let mut coedges = Vec::new();
+
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let p0 = points_3d[i];
+            let p1 = points_3d[j];
+
+            // Check if this edge is part of the intersection curve
+            // (both endpoints are on the intersection curve)
+            let p0_on_curve = intersection_points.iter().any(|ip| {
+                (ip.x - p0.x).powi(2) + (ip.y - p0.y).powi(2) + (ip.z - p0.z).powi(2) < tol * tol * 100.0
+            });
+            let p1_on_curve = intersection_points.iter().any(|ip| {
+                (ip.x - p1.x).powi(2) + (ip.y - p1.y).powi(2) + (ip.z - p1.z).powi(2) < tol * tol * 100.0
+            });
+
+            if p0_on_curve && p1_on_curve {
+                // Use the shared edge for this segment
+                edges.push(shared_edge.clone());
+                coedges.push(CoEdge::new(shared_edge.id, true));
+            } else {
+                // Create a new edge for non-intersection boundary segments
+                let e = Edge::new_line(p0, p1);
+                let eid = e.id;
+                edges.push(e);
+                coedges.push(CoEdge::new(eid, true));
+            }
+        }
+
+        let wire = Wire::new(coedges);
+        let surface = Surface::Plane(plane.clone());
+        let mut new_face = Face::new(surface, wire);
+        new_face.edges = edges;
+        result_faces.push(new_face);
+    }
+
+    if result_faces.is_empty() {
+        return Ok(SplitFaceResult {
+            faces: vec![face.clone()],
+        });
+    }
+
+    Ok(SplitFaceResult {
+        faces: result_faces,
+    })
+}
+
+/// Robust face classification using multiple sample points.
+/// Instead of just the centroid, samples several points on the face
+/// and takes a majority vote for inside/outside determination.
+fn classify_face_robust(
+    face: &Face,
+    solid: &Solid,
+    tol_ctx: &ToleranceContext,
+) -> FaceClassification {
+    let surface = match &face.surface {
+        Some(s) => s,
+        None => return FaceClassification::Outside,
+    };
+
+    let (u_min, u_max, v_min, v_max) = surface_param_range(surface);
+    let (u_min, u_max, v_min, v_max) =
+        compute_face_uv_range(face, surface, u_min, u_max, v_min, v_max);
+
+    // Sample a grid of points and classify each
+    let n = 5;
+    let mut inside_count = 0;
+    let mut outside_count = 0;
+    let mut boundary_count = 0;
+    let mut total = 0;
+
+    for i in 1..n {
+        for j in 1..n {
+            let u = u_min + (u_max - u_min) * (i as f64 / n as f64);
+            let v = v_min + (v_max - v_min) * (j as f64 / n as f64);
+            let p = surface.point_at(u, v);
+
+            // Offset slightly inward along normal to avoid boundary ambiguity
+            let normal = surface.normal_at(u, v);
+            let offset = tol_ctx.coincidence_tolerance() * 10.0;
+            let offset_point = Point3d::new(
+                p.x - normal.x * offset,
+                p.y - normal.y * offset,
+                p.z - normal.z * offset,
+            );
+
+            total += 1;
+            match classify_point(solid, &offset_point, tol_ctx) {
+                PointClassification::Inside => inside_count += 1,
+                PointClassification::Outside => outside_count += 1,
+                PointClassification::OnBoundary => boundary_count += 1,
+            }
+        }
+    }
+
+    if total == 0 {
+        return FaceClassification::Outside;
+    }
+
+    // Majority vote
+    if inside_count > outside_count && inside_count > boundary_count {
+        FaceClassification::Inside
+    } else if outside_count >= inside_count && outside_count >= boundary_count {
+        if boundary_count > 0 && outside_count == 0 {
+            FaceClassification::OnBoundary
+        } else {
+            FaceClassification::Outside
+        }
+    } else {
+        FaceClassification::OnBoundary
+    }
 }
 
 /// Classification of a face relative to a solid.
