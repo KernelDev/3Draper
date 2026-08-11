@@ -143,7 +143,7 @@ VpData enum:
 - [x] Replace `NodeType` params with `VpData` inputs/outputs
 - [x] Add Number Slider node (with min/max/value)
 - [x] Add Integer, Boolean Toggle, Point, Vector parameter nodes
-- [ ] Type-check connections (only compatible types connect) — PortType.accepts() implemented, UI enforcement TODO
+- [x] Type-check connections (only compatible types connect) — PortType.accepts() + UI enforcement (port clicks check accepts(), reject with status msg on mismatch)
 
 ### Phase 2: Math Nodes
 - [x] Add, Subtract, Multiply, Divide
@@ -180,7 +180,7 @@ VpData enum:
 
 - [x] Every node type has inline parameter editing (DragValue/Slider/Checkbox)
 - [x] Changing any parameter triggers live preview (no manual Bake needed)
-- [ ] Connections are type-checked — incompatible types can't connect (PortType.accepts() implemented, UI enforcement TODO)
+- [x] Connections are type-checked — incompatible types can't connect (PortType.accepts() enforced in port-click handler)
 - [x] Math nodes work with Number Slider inputs (parametric chains)
 - [x] Transform nodes accept geometry from any source
 - [x] Bake creates proper tree entry with face list

@@ -86,6 +86,22 @@ impl PortType {
             PortType::Any => egui::Color32::from_rgb(0x6c, 0x70, 0x86),      // gray
         }
     }
+
+    /// Short human-readable name for tooltips and status messages.
+    pub fn name(&self) -> &'static str {
+        match self {
+            PortType::Geometry => "Geometry",
+            PortType::Curve => "Curve",
+            PortType::Number => "Number",
+            PortType::Integer => "Integer",
+            PortType::Boolean => "Boolean",
+            PortType::Point => "Point",
+            PortType::Vector => "Vector",
+            PortType::String => "String",
+            PortType::List => "List",
+            PortType::Any => "Any",
+        }
+    }
 }
 
 /// Port descriptor — name + type.
@@ -478,7 +494,8 @@ impl NodeType {
             NodeType::BooleanToggle { .. } => vec![PortDesc { name: "V", port_type: PortType::Boolean }],
             NodeType::PointInput { .. } => vec![PortDesc { name: "P", port_type: PortType::Point }],
             NodeType::VectorInput { .. } => vec![PortDesc { name: "V", port_type: PortType::Vector }],
-            NodeType::Panel | // Data Tree
+            NodeType::Panel => vec![PortDesc { name: "D", port_type: PortType::Any }],
+            // Data Tree
             NodeType::Graft | NodeType::Flatten | NodeType::CrossRef |
             NodeType::ShiftList { .. } | NodeType::Subset { .. } |
             NodeType::Weave | NodeType::Concat => vec![
@@ -488,7 +505,6 @@ impl NodeType {
                 PortDesc { name: "A", port_type: PortType::List },
                 PortDesc { name: "B", port_type: PortType::List },
             ],
-            NodeType::Panel => vec![],
             NodeType::BakeToDoc => vec![],
             NodeType::Series { .. } | NodeType::Range { .. } => vec![PortDesc { name: "L", port_type: PortType::List }],
             NodeType::ListLength => vec![PortDesc { name: "N", port_type: PortType::Integer }],
