@@ -17,6 +17,8 @@ use std::collections::HashMap;
 pub enum VpData {
     /// 3D solid geometry (box, sphere, boolean result, etc.)
     Geometry(Box<draper_topology::Solid>),
+    /// Triangle mesh (from mesh boolean operations)
+    Mesh(Box<draper_mesh::TriangleMesh>),
     /// A 2D/3D polyline curve
     Curve(Vec<draper_geometry::Point3d>),
     /// Floating-point number

@@ -99,3 +99,4 @@ pub fn init_wasm_thread_pool() -> Result<(), String> {
 pub fn init_wasm_thread_pool() -> Result<(), String> {
     Ok(())
 }
+pub mod mesh_boolean;

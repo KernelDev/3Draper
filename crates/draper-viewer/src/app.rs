@@ -18179,6 +18179,42 @@ fn vp_solid_scale(solid: &draper_topology::Solid) -> f64 {
     dx.max(dy).max(dz).max(1.0)
 }
 
+/// Create a Solid from a TriangleMesh by creating one planar Face per triangle.
+/// This is used to convert mesh boolean results back to Solid for downstream
+/// VP nodes that expect Geometry input.
+fn solid_from_mesh(mesh: &draper_mesh::TriangleMesh) -> draper_topology::Solid {
+    use draper_topology::{Shell, Face, Edge, Wire, CoEdge};
+    use draper_geometry::{Plane, Surface};
+
+    let mut faces = Vec::with_capacity(mesh.triangles.len());
+    for tri in &mesh.triangles {
+        let p0 = mesh.vertices[tri[0] as usize];
+        let p1 = mesh.vertices[tri[1] as usize];
+        let p2 = mesh.vertices[tri[2] as usize];
+
+        let e0 = Edge::new_line(p0, p1);
+        let e1 = Edge::new_line(p1, p2);
+        let e2 = Edge::new_line(p2, p0);
+
+        let coedges = vec![
+            CoEdge::new(e0.id, true),
+            CoEdge::new(e1.id, true),
+            CoEdge::new(e2.id, true),
+        ];
+        let wire = Wire::new(coedges);
+
+        let plane = Plane::from_three_points(&p0, &p1, &p2)
+            .unwrap_or_else(|| Plane::from_origin_and_normal(p0, draper_geometry::Direction3d::Z));
+
+        let mut face = Face::new(Surface::Plane(plane), wire);
+        face.edges = vec![e0, e1, e2];
+        faces.push(face);
+    }
+
+    let shell = Shell::new_closed(faces);
+    draper_topology::Solid::new(shell)
+}
+
 /// VP helper: evaluate the graph and return the result solid.
 /// Walks connections topologically: primitives first, then modifiers.
 fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<draper_topology::Solid> {
@@ -18219,6 +18255,22 @@ fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<draper_to
     fn to_solid(d: &VpData) -> Option<draper_topology::Solid> {
         match d {
             VpData::Geometry(s) => Some((**s).clone()),
+            // Mesh → Solid conversion: create a Solid from the mesh's triangles
+            // as a single shell of planar faces (one per triangle).
+            // This allows downstream nodes to work with boolean results.
+            VpData::Mesh(m) => Some(solid_from_mesh(&m)),
+            _ => None,
+        }
+    }
+
+    // Helper to extract TriangleMesh from VpData
+    fn to_mesh(d: &VpData) -> Option<draper_mesh::TriangleMesh> {
+        match d {
+            VpData::Mesh(m) => Some((**m).clone()),
+            VpData::Geometry(s) => {
+                let params = tri_params_for_lod(LodLevel::Medium);
+                Some(triangulate_solid(s, &params))
+            }
             _ => None,
         }
     }
@@ -18419,60 +18471,44 @@ fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<draper_to
                 }
 
                 // ─── Boolean ───
+                // Uses mesh-based boolean operations for robust watertight results.
+                // The B-Rep boolean (draper_topology::boolean) has topology issues
+                // with non-planar intersections (cylinder through box), so we
+                // triangulate both inputs, run the mesh boolean, and return a Mesh.
                 NodeType::BooleanSubtract => {
                     let a = inputs.get(0).and_then(to_solid);
                     let b = inputs.get(1).and_then(to_solid);
                     if let (Some(a), Some(b)) = (a, b) {
-                        // Use model-scale-aware tolerance for robust boolean ops
-                        let scale = vp_solid_scale(&a);
-                        let tol_ctx = draper_geometry::ToleranceContext::from_model_scale(scale);
-                        match draper_topology::boolean::boolean_subtract(&a, &b, &tol_ctx) {
-                            Ok(result) => {
-                                results.insert(node.id, VpData::Geometry(Box::new(result)));
-                                changed = true;
-                            }
-                            Err(_e) => {
-                                // On failure, return A unchanged (user sees uncut solid)
-                                results.insert(node.id, VpData::Geometry(Box::new(a)));
-                                changed = true;
-                            }
-                        }
+                        let params = tri_params_for_lod(LodLevel::Medium);
+                        let mesh_a = triangulate_solid(&a, &params);
+                        let mesh_b = triangulate_solid(&b, &params);
+                        let result = draper_mesh::mesh_boolean::mesh_subtract(&mesh_a, &mesh_b);
+                        results.insert(node.id, VpData::Mesh(Box::new(result)));
+                        changed = true;
                     }
                 }
                 NodeType::BooleanUnion => {
                     let a = inputs.get(0).and_then(to_solid);
                     let b = inputs.get(1).and_then(to_solid);
                     if let (Some(a), Some(b)) = (a, b) {
-                        let scale = vp_solid_scale(&a).max(vp_solid_scale(&b));
-                        let tol_ctx = draper_geometry::ToleranceContext::from_model_scale(scale);
-                        match draper_topology::boolean::boolean_union(&a, &b, &tol_ctx) {
-                            Ok(result) => {
-                                results.insert(node.id, VpData::Geometry(Box::new(result)));
-                                changed = true;
-                            }
-                            Err(_e) => {
-                                results.insert(node.id, VpData::Geometry(Box::new(a)));
-                                changed = true;
-                            }
-                        }
+                        let params = tri_params_for_lod(LodLevel::Medium);
+                        let mesh_a = triangulate_solid(&a, &params);
+                        let mesh_b = triangulate_solid(&b, &params);
+                        let result = draper_mesh::mesh_boolean::mesh_union(&mesh_a, &mesh_b);
+                        results.insert(node.id, VpData::Mesh(Box::new(result)));
+                        changed = true;
                     }
                 }
                 NodeType::BooleanIntersect => {
                     let a = inputs.get(0).and_then(to_solid);
                     let b = inputs.get(1).and_then(to_solid);
                     if let (Some(a), Some(b)) = (a, b) {
-                        let scale = vp_solid_scale(&a).max(vp_solid_scale(&b));
-                        let tol_ctx = draper_geometry::ToleranceContext::from_model_scale(scale);
-                        match draper_topology::boolean::boolean_intersect(&a, &b, &tol_ctx) {
-                            Ok(result) => {
-                                results.insert(node.id, VpData::Geometry(Box::new(result)));
-                                changed = true;
-                            }
-                            Err(_e) => {
-                                results.insert(node.id, VpData::Geometry(Box::new(a)));
-                                changed = true;
-                            }
-                        }
+                        let params = tri_params_for_lod(LodLevel::Medium);
+                        let mesh_a = triangulate_solid(&a, &params);
+                        let mesh_b = triangulate_solid(&b, &params);
+                        let result = draper_mesh::mesh_boolean::mesh_intersect(&mesh_a, &mesh_b);
+                        results.insert(node.id, VpData::Mesh(Box::new(result)));
+                        changed = true;
                     }
                 }
 
