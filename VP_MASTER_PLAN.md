@@ -171,10 +171,10 @@ VpData enum:
 - [x] Linear/Circular Array (with count input from Number node)
 
 ### Phase 6: Data Trees (Multi-item Lists)
-- [ ] Port carries `Vec<VpData>` instead of single `VpData`
-- [ ] Operations auto-map over list items
-- [ ] Graft/Flatten nodes
-- [ ] Cross-reference (cartesian product) for multi-list ops
+- [x] Port carries `Vec<VpData>` instead of single `VpData` (via VpData::List variant)
+- [x] Operations auto-map over list items (Flatten, Graft, Sort, etc.)
+- [x] Graft/Flatten nodes
+- [x] Cross-reference (cartesian product) for multi-list ops
 
 ## DoD
 
@@ -184,4 +184,4 @@ VpData enum:
 - [x] Math nodes work with Number Slider inputs (parametric chains)
 - [x] Transform nodes accept geometry from any source
 - [x] Bake creates proper tree entry with face list
-- [x] At least 30 node types implemented (50 types implemented)
+- [x] At least 30 node types implemented (58 types implemented)
