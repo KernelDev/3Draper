@@ -139,36 +139,36 @@ VpData enum:
 ## Implementation Phases
 
 ### Phase 1: Core Data Types + Parameter Nodes (Current → Next)
-- [ ] Define `VpData` enum with typed ports
-- [ ] Replace `NodeType` params with `VpData` inputs/outputs
-- [ ] Add Number Slider node (with min/max/value)
-- [ ] Add Integer, Boolean Toggle, Point, Vector parameter nodes
-- [ ] Type-check connections (only compatible types connect)
+- [x] Define `VpData` enum with typed ports
+- [x] Replace `NodeType` params with `VpData` inputs/outputs
+- [x] Add Number Slider node (with min/max/value)
+- [x] Add Integer, Boolean Toggle, Point, Vector parameter nodes
+- [ ] Type-check connections (only compatible types connect) — PortType.accepts() implemented, UI enforcement TODO
 
 ### Phase 2: Math Nodes
-- [ ] Add, Subtract, Multiply, Divide
-- [ ] Sin, Cos, Tan, Abs, Sqrt, Pow
-- [ ] Min, Max, Average, Round
-- [ ] Expression node (evaluate math expression string)
+- [x] Add, Subtract, Multiply, Divide
+- [x] Sin, Cos, Tan, Abs, Sqrt, Pow
+- [x] Min, Max, Average, Round
+- [x] Expression node (pass-through, full parser TODO)
 
 ### Phase 3: Sets (List Operations)
-- [ ] Series (start, step, count → list)
-- [ ] Range (domain, count → list)
-- [ ] List Item, List Length
-- [ ] Cull Pattern, Reverse, Sort
+- [x] Series (start, step, count → list)
+- [x] Range (domain, count → list)
+- [x] List Item, List Length
+- [x] Cull Pattern, Reverse, Sort
 
 ### Phase 4: Curve Nodes
-- [ ] Line (2 points → curve)
-- [ ] Circle (center + radius → curve)
-- [ ] Divide Curve (curve + N → points)
-- [ ] Evaluate Curve, Curve Length
+- [x] Line (2 points → curve)
+- [x] Circle (center + radius → curve)
+- [x] Divide Curve (curve + N → points)
+- [x] Evaluate Curve, Curve Length
 
 ### Phase 5: Transform Nodes
-- [ ] Move (geometry + vector)
-- [ ] Rotate (geometry + axis + angle)
-- [ ] Scale (geometry + factor)
-- [ ] Mirror (geometry + plane)
-- [ ] Linear/Circular Array (with count input from Number node)
+- [x] Move (geometry + vector)
+- [x] Rotate (geometry + axis + angle)
+- [x] Scale (geometry + factor)
+- [x] Mirror (geometry + plane)
+- [x] Linear/Circular Array (with count input from Number node)
 
 ### Phase 6: Data Trees (Multi-item Lists)
 - [ ] Port carries `Vec<VpData>` instead of single `VpData`
@@ -184,4 +184,4 @@ VpData enum:
 - [x] Math nodes work with Number Slider inputs (parametric chains)
 - [x] Transform nodes accept geometry from any source
 - [x] Bake creates proper tree entry with face list
-- [x] At least 30 node types implemented (39 types implemented)
+- [x] At least 30 node types implemented (50 types implemented)

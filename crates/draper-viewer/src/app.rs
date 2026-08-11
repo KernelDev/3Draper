@@ -6863,8 +6863,11 @@ impl eframe::App for ViewerApp {
                                     ("Divide", crate::ui::workspaces::NodeType::Divide),
                                     ("Sin", crate::ui::workspaces::NodeType::Sin),
                                     ("Cos", crate::ui::workspaces::NodeType::Cos),
+                                    ("Tan", crate::ui::workspaces::NodeType::Tan),
                                     ("Abs", crate::ui::workspaces::NodeType::Abs),
                                     ("Sqrt", crate::ui::workspaces::NodeType::Sqrt),
+                                    ("Pow", crate::ui::workspaces::NodeType::Pow),
+                                    ("Round", crate::ui::workspaces::NodeType::Round),
                                     ("Min", crate::ui::workspaces::NodeType::Min),
                                     ("Max", crate::ui::workspaces::NodeType::Max),
                                     ("Average", crate::ui::workspaces::NodeType::Average),
@@ -6883,9 +6886,12 @@ impl eframe::App for ViewerApp {
                                 ui.label(egui::RichText::new("Sets").size(11.0).color(egui::Color32::from_rgb(0xcb, 0xa6, 0xf7)).strong());
                                 let sets = [
                                     ("Series", crate::ui::workspaces::NodeType::Series { start: 0.0, step: 10.0, count: 10 }),
+                                    ("Range", crate::ui::workspaces::NodeType::Range { domain_min: 0.0, domain_max: 100.0, count: 10 }),
                                     ("List Length", crate::ui::workspaces::NodeType::ListLength),
                                     ("List Item", crate::ui::workspaces::NodeType::ListItem),
                                     ("Reverse", crate::ui::workspaces::NodeType::Reverse),
+                                    ("Sort", crate::ui::workspaces::NodeType::Sort),
+                                    ("Cull Pattern", crate::ui::workspaces::NodeType::CullPattern),
                                 ];
                                 for (label, nt) in &sets {
                                     if filter.is_empty() || label.to_lowercase().contains(&filter) {
@@ -6922,6 +6928,8 @@ impl eframe::App for ViewerApp {
                                     ("Line", crate::ui::workspaces::NodeType::Line),
                                     ("Circle", crate::ui::workspaces::NodeType::Circle { radius: 50.0 }),
                                     ("Divide Curve", crate::ui::workspaces::NodeType::DivideCurve { count: 10 }),
+                                    ("Evaluate Curve", crate::ui::workspaces::NodeType::EvaluateCurve),
+                                    ("Curve Length", crate::ui::workspaces::NodeType::CurveLength),
                                 ];
                                 for (label, nt) in &curves {
                                     if filter.is_empty() || label.to_lowercase().contains(&filter) {
@@ -7317,6 +7325,21 @@ impl eframe::App for ViewerApp {
                                                             ui.horizontal(|ui| {
                                                                 ui.label("Step:");
                                                                 if ui.add(egui::DragValue::new(step).speed(1.0)).changed() { local_changed = true; }
+                                                            });
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Count:");
+                                                                let mut c = *count as i32;
+                                                                if ui.add(egui::DragValue::new(&mut c).range(1..=10000)).changed() { *count = c as u32; local_changed = true; }
+                                                            });
+                                                        }
+                                                        crate::ui::workspaces::NodeType::Range { domain_min, domain_max, count } => {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Min:");
+                                                                if ui.add(egui::DragValue::new(domain_min).speed(1.0)).changed() { local_changed = true; }
+                                                            });
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Max:");
+                                                                if ui.add(egui::DragValue::new(domain_max).speed(1.0)).changed() { local_changed = true; }
                                                             });
                                                             ui.horizontal(|ui| {
                                                                 ui.label("Count:");
@@ -18006,6 +18029,26 @@ fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<draper_to
                         changed = true;
                     }
                 }
+                NodeType::Tan => {
+                    if let Some(x) = inputs.get(0).and_then(to_number) {
+                        results.insert(node.id, VpData::Number(x.tan()));
+                        changed = true;
+                    }
+                }
+                NodeType::Pow => {
+                    let b = inputs.get(0).and_then(to_number);
+                    let e = inputs.get(1).and_then(to_number);
+                    if let (Some(b), Some(e)) = (b, e) {
+                        results.insert(node.id, VpData::Number(b.powf(e)));
+                        changed = true;
+                    }
+                }
+                NodeType::Round => {
+                    if let Some(x) = inputs.get(0).and_then(to_number) {
+                        results.insert(node.id, VpData::Integer(x.round() as i64));
+                        changed = true;
+                    }
+                }
 
                 // ─── Primitives ───
                 NodeType::Box { width, height, depth } => {
@@ -18185,6 +18228,28 @@ fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<draper_to
                         changed = true;
                     }
                 }
+                NodeType::EvaluateCurve => {
+                    if let (Some(VpData::Curve(pts)), Some(t)) = (inputs.get(0), inputs.get(1).and_then(to_number)) {
+                        if !pts.is_empty() {
+                            let idx = (t.clamp(0.0, 1.0) * (pts.len() - 1) as f64) as usize;
+                            results.insert(node.id, VpData::Point([pts[idx].x, pts[idx].y, pts[idx].z]));
+                            changed = true;
+                        }
+                    }
+                }
+                NodeType::CurveLength => {
+                    if let Some(VpData::Curve(pts)) = inputs.get(0) {
+                        let mut len = 0.0;
+                        for i in 1..pts.len() {
+                            let dx = pts[i].x - pts[i-1].x;
+                            let dy = pts[i].y - pts[i-1].y;
+                            let dz = pts[i].z - pts[i-1].z;
+                            len += (dx*dx + dy*dy + dz*dz).sqrt();
+                        }
+                        results.insert(node.id, VpData::Number(len));
+                        changed = true;
+                    }
+                }
 
                 // ─── Sets (List Operations) ───
                 NodeType::Series { start, step, count } => {
@@ -18194,6 +18259,15 @@ fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<draper_to
                     let list: Vec<VpData> = (0..c).map(|i| VpData::Number(s + st * i as f64)).collect();
                     results.insert(node.id, VpData::List(list));
                     changed = true;
+                }
+                NodeType::Range { domain_min, domain_max, count } => {
+                    let c = *count as usize;
+                    if c > 0 {
+                        let step = (domain_max - domain_min) / c as f64;
+                        let list: Vec<VpData> = (0..c).map(|i| VpData::Number(domain_min + step * i as f64)).collect();
+                        results.insert(node.id, VpData::List(list));
+                        changed = true;
+                    }
                 }
                 NodeType::ListLength => {
                     if let Some(VpData::List(items)) = inputs.get(0) {
@@ -18218,6 +18292,26 @@ fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<draper_to
                         let mut rev = items.clone();
                         rev.reverse();
                         results.insert(node.id, VpData::List(rev));
+                        changed = true;
+                    }
+                }
+                NodeType::Sort => {
+                    if let Some(VpData::List(items)) = inputs.get(0) {
+                        let mut sorted: Vec<f64> = items.iter().filter_map(to_number).collect();
+                        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        results.insert(node.id, VpData::List(sorted.into_iter().map(VpData::Number).collect()));
+                        changed = true;
+                    }
+                }
+                NodeType::CullPattern => {
+                    if let (Some(VpData::List(items)), Some(VpData::List(pattern))) = (inputs.get(0), inputs.get(1)) {
+                        let culled: Vec<VpData> = items.iter().zip(pattern.iter()).filter_map(|(item, p)| {
+                            match p {
+                                VpData::Boolean(true) => Some(item.clone()),
+                                _ => None,
+                            }
+                        }).collect();
+                        results.insert(node.id, VpData::List(culled));
                         changed = true;
                     }
                 }

@@ -119,8 +119,11 @@ pub enum NodeType {
     Divide,
     Sin,
     Cos,
+    Tan,
     Abs,
     Sqrt,
+    Pow,
+    Round,
     Min,
     Max,
     Average,
@@ -128,9 +131,12 @@ pub enum NodeType {
 
     // ─── Sets (List Operations) ───
     Series { start: f64, step: f64, count: u32 },
+    Range { domain_min: f64, domain_max: f64, count: u32 },
     ListLength,
     ListItem,
     Reverse,
+    Sort,
+    CullPattern,
 
     // ─── Primitives (Geometry Creation) ───
     /// Box primitive.
@@ -148,6 +154,8 @@ pub enum NodeType {
     Line,
     Circle { radius: f64 },
     DivideCurve { count: u32 },
+    EvaluateCurve,
+    CurveLength,
 
     // ─── Transform ───
     Move,
@@ -193,7 +201,10 @@ impl NodeType {
             NodeType::Divide => "Divide (/)",
             NodeType::Sin => "Sin",
             NodeType::Cos => "Cos",
+            NodeType::Tan => "Tan",
             NodeType::Abs => "Abs",
+            NodeType::Pow => "Pow",
+            NodeType::Round => "Round",
             NodeType::Sqrt => "Sqrt",
             NodeType::Min => "Min",
             NodeType::Max => "Max",
@@ -201,9 +212,14 @@ impl NodeType {
             NodeType::Expression { .. } => "Expression",
             // Sets
             NodeType::Series { .. } => "Series",
+            NodeType::Range { .. } => "Range",
             NodeType::ListLength => "List Length",
             NodeType::ListItem => "List Item",
             NodeType::Reverse => "Reverse",
+            NodeType::Sort => "Sort",
+            NodeType::CullPattern => "Cull Pattern",
+            NodeType::Sort => "Sort",
+            NodeType::CullPattern => "Cull Pattern",
             // Primitives
             NodeType::Box { .. } => "Box",
             NodeType::Sphere { .. } => "Sphere",
@@ -214,6 +230,10 @@ impl NodeType {
             NodeType::Line => "Line",
             NodeType::Circle { .. } => "Circle",
             NodeType::DivideCurve { .. } => "Divide Curve",
+            NodeType::EvaluateCurve => "Evaluate Curve",
+            NodeType::CurveLength => "Curve Length",
+            NodeType::EvaluateCurve => "Evaluate Curve",
+            NodeType::CurveLength => "Curve Length",
             // Transform
             NodeType::Move => "Move",
             NodeType::Rotate { .. } => "Rotate",
@@ -241,10 +261,12 @@ impl NodeType {
             NodeType::Add | NodeType::Subtract | NodeType::Multiply | NodeType::Divide |
             NodeType::Sin | NodeType::Cos | NodeType::Abs | NodeType::Sqrt |
             NodeType::Min | NodeType::Max | NodeType::Average | NodeType::Expression { .. } => "Maths",
-            NodeType::Series { .. } | NodeType::ListLength | NodeType::ListItem | NodeType::Reverse => "Sets",
+            NodeType::Series { .. } | NodeType::Range { .. } | NodeType::ListLength |
+            NodeType::ListItem | NodeType::Reverse | NodeType::Sort | NodeType::CullPattern => "Sets",
             NodeType::Box { .. } | NodeType::Sphere { .. } | NodeType::Cylinder { .. } |
             NodeType::Cone { .. } | NodeType::Torus { .. } => "Primitives",
-            NodeType::Line | NodeType::Circle { .. } | NodeType::DivideCurve { .. } => "Curve",
+            NodeType::Line | NodeType::Circle { .. } | NodeType::DivideCurve { .. } |
+            NodeType::EvaluateCurve | NodeType::CurveLength => "Curve",
             NodeType::Move | NodeType::Rotate { .. } | NodeType::Scale { .. } |
             NodeType::Mirror | NodeType::LinearArray { .. } | NodeType::CircularArray { .. } => "Transform",
             NodeType::BooleanUnion | NodeType::BooleanSubtract | NodeType::BooleanIntersect => "Boolean",
@@ -265,13 +287,15 @@ impl NodeType {
             NodeType::Subtract => "-",
             NodeType::Multiply => "*",
             NodeType::Divide => "/",
-            NodeType::Sin | NodeType::Cos | NodeType::Abs | NodeType::Sqrt => "f(x)",
+            NodeType::Sin | NodeType::Cos | NodeType::Tan | NodeType::Abs | NodeType::Sqrt | NodeType::Pow | NodeType::Round => "f(x)",
             NodeType::Min | NodeType::Max | NodeType::Average => "min",
             NodeType::Expression { .. } => "expr",
             NodeType::Series { .. } => "S",
             NodeType::ListLength => "len",
             NodeType::ListItem => "[]i",
             NodeType::Reverse => "rev",
+            NodeType::Sort => "sort",
+            NodeType::CullPattern => "cull",
             NodeType::Box { .. } => "B",
             NodeType::Sphere { .. } => "S",
             NodeType::Cylinder { .. } => "C",
@@ -280,6 +304,8 @@ impl NodeType {
             NodeType::Line => "L",
             NodeType::Circle { .. } => "O",
             NodeType::DivideCurve { .. } => "Div",
+            NodeType::EvaluateCurve => "Eval",
+            NodeType::CurveLength => "Len",
             NodeType::Move => "Mv",
             NodeType::Rotate { .. } => "Rot",
             NodeType::Scale { .. } => "Sc",
@@ -313,8 +339,13 @@ impl NodeType {
                 PortDesc { name: "B", port_type: PortType::Number },
             ],
             // Single-input maths
-            NodeType::Sin | NodeType::Cos | NodeType::Abs | NodeType::Sqrt => vec![
+            NodeType::Sin | NodeType::Cos | NodeType::Tan | NodeType::Abs |
+            NodeType::Sqrt | NodeType::Round => vec![
                 PortDesc { name: "X", port_type: PortType::Number },
+            ],
+            NodeType::Pow => vec![
+                PortDesc { name: "B", port_type: PortType::Number },
+                PortDesc { name: "E", port_type: PortType::Number },
             ],
             NodeType::Average => vec![PortDesc { name: "L", port_type: PortType::List }],
             NodeType::Expression { .. } => vec![PortDesc { name: "X", port_type: PortType::Number }],
@@ -324,7 +355,11 @@ impl NodeType {
                 PortDesc { name: "L", port_type: PortType::List },
                 PortDesc { name: "I", port_type: PortType::Integer },
             ],
-            NodeType::Reverse => vec![PortDesc { name: "L", port_type: PortType::List }],
+            NodeType::Reverse | NodeType::Sort => vec![PortDesc { name: "L", port_type: PortType::List }],
+            NodeType::CullPattern => vec![
+                PortDesc { name: "L", port_type: PortType::List },
+                PortDesc { name: "P", port_type: PortType::List },
+            ],
             // Curve
             NodeType::Line => vec![
                 PortDesc { name: "A", port_type: PortType::Point },
@@ -333,6 +368,13 @@ impl NodeType {
             NodeType::DivideCurve { .. } => vec![
                 PortDesc { name: "C", port_type: PortType::Curve },
                 PortDesc { name: "N", port_type: PortType::Integer },
+            ],
+            NodeType::EvaluateCurve => vec![
+                PortDesc { name: "C", port_type: PortType::Curve },
+                PortDesc { name: "T", port_type: PortType::Number },
+            ],
+            NodeType::CurveLength => vec![
+                PortDesc { name: "C", port_type: PortType::Curve },
             ],
             // Transform — 1 Geometry + optional Vector/Number
             NodeType::Move => vec![
@@ -382,7 +424,8 @@ impl NodeType {
             NodeType::Reverse => vec![PortDesc { name: "L", port_type: PortType::List }],
             // Math outputs are Number
             NodeType::Add | NodeType::Subtract | NodeType::Multiply | NodeType::Divide |
-            NodeType::Sin | NodeType::Cos | NodeType::Abs | NodeType::Sqrt |
+            NodeType::Sin | NodeType::Cos | NodeType::Tan | NodeType::Abs |
+            NodeType::Sqrt | NodeType::Pow | NodeType::Round |
             NodeType::Min | NodeType::Max | NodeType::Average | NodeType::Expression { .. } => vec![
                 PortDesc { name: "R", port_type: PortType::Number },
             ],
@@ -398,6 +441,8 @@ impl NodeType {
             // Curve outputs
             NodeType::Line | NodeType::Circle { .. } => vec![PortDesc { name: "C", port_type: PortType::Curve }],
             NodeType::DivideCurve { .. } => vec![PortDesc { name: "P", port_type: PortType::List }],
+            NodeType::EvaluateCurve => vec![PortDesc { name: "P", port_type: PortType::Point }],
+            NodeType::CurveLength => vec![PortDesc { name: "L", port_type: PortType::Number }],
         }
     }
 
