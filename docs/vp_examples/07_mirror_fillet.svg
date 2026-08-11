@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 350" width="1000" height="350">
+<rect width="1000" height="350" fill="#0d0d1a"/>
+<!-- Dotted grid -->
+<defs>
+  <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+    <circle cx="0" cy="0" r="1" fill="rgba(137,180,250,0.05)"/>
+  </pattern>
+</defs>
+<rect width="1000" height="350" fill="url(#grid)"/>
+<text x="500.0" y="30" font-family="sans-serif" font-size="18" font-weight="bold" fill="#cdd6f4" text-anchor="middle">Example 7: Mirror + Fillet — mirror across YZ plane then round edges</text>
+
+<rect x="30" y="100" width="200" height="120" rx="8" fill="#313244" stroke="#89b4fa" stroke-width="2"/>
+<rect x="30" y="100" width="200" height="22" rx="8" fill="#89b4fa"/>
+<rect x="30" y="114" width="200" height="8" fill="#89b4fa"/>
+<text x="40" y="115" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Box</text>
+<text x="220" y="115" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="40" y="140" font-family="monospace" font-size="10" fill="#cdd6f4">W: 100  H: 80  D: 50</text>
+<circle cx="230" cy="160.0" r="6" fill="#1e1e2e"/>
+<circle cx="230" cy="160.0" r="4.5" fill="#89b4fa"/>
+<text x="220" y="163.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">G</text>
+<rect x="330" y="90" width="200" height="100" rx="8" fill="#313244" stroke="#fab387" stroke-width="2"/>
+<rect x="330" y="90" width="200" height="22" rx="8" fill="#fab387"/>
+<rect x="330" y="104" width="200" height="8" fill="#fab387"/>
+<text x="340" y="105" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Mirror</text>
+<text x="520" y="105" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="340" y="130" font-family="monospace" font-size="10" fill="#cdd6f4">Plane: YZ</text>
+<circle cx="330" cy="140.0" r="6" fill="#1e1e2e"/>
+<circle cx="330" cy="140.0" r="4.5" fill="#89b4fa"/>
+<text x="340" y="143.0" font-family="sans-serif" font-size="9" fill="#a6adc8">G</text>
+<circle cx="530" cy="140.0" r="6" fill="#1e1e2e"/>
+<circle cx="530" cy="140.0" r="4.5" fill="#89b4fa"/>
+<text x="520" y="143.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">G</text>
+<rect x="640" y="90" width="200" height="100" rx="8" fill="#313244" stroke="#f9e2af" stroke-width="2"/>
+<rect x="640" y="90" width="200" height="22" rx="8" fill="#f9e2af"/>
+<rect x="640" y="104" width="200" height="8" fill="#f9e2af"/>
+<text x="650" y="105" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Fillet</text>
+<text x="830" y="105" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="650" y="130" font-family="monospace" font-size="10" fill="#cdd6f4">R: 5.0</text>
+<circle cx="640" cy="140.0" r="6" fill="#1e1e2e"/>
+<circle cx="640" cy="140.0" r="4.5" fill="#89b4fa"/>
+<text x="650" y="143.0" font-family="sans-serif" font-size="9" fill="#a6adc8">G</text>
+<circle cx="840" cy="140.0" r="6" fill="#1e1e2e"/>
+<circle cx="840" cy="140.0" r="4.5" fill="#89b4fa"/>
+<text x="830" y="143.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">G</text>
+<rect x="920" y="105" width="160" height="90" rx="8" fill="#313244" stroke="#f38ba8" stroke-width="2"/>
+<rect x="920" y="105" width="160" height="22" rx="8" fill="#f38ba8"/>
+<rect x="920" y="119" width="160" height="8" fill="#f38ba8"/>
+<text x="930" y="120" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Bake</text>
+<text x="1070" y="120" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<circle cx="920" cy="150.0" r="6" fill="#1e1e2e"/>
+<circle cx="920" cy="150.0" r="4.5" fill="#89b4fa"/>
+<text x="930" y="153.0" font-family="sans-serif" font-size="9" fill="#a6adc8">G</text>
+<path d="M230,160.0 C280.0,160.0 280.0,140.0 330,140.0" stroke="#89b4fa" stroke-width="2.5" fill="none" opacity="0.85"/>
+<path d="M530,140.0 C585.0,140.0 585.0,140.0 640,140.0" stroke="#89b4fa" stroke-width="2.5" fill="none" opacity="0.85"/>
+<path d="M840,140.0 C880.0,140.0 880.0,150.0 920,150.0" stroke="#89b4fa" stroke-width="2.5" fill="none" opacity="0.85"/>
+<text x="500" y="320" font-family="sans-serif" font-size="11" fill="#a6adc8" text-anchor="middle">Result: Mirrored box (negate X) with 5-unit rounded edges</text>
+</svg>

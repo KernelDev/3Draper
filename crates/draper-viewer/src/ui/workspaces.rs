@@ -104,6 +104,27 @@ impl PortType {
     }
 }
 
+/// Mirror plane for the Mirror transform node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MirrorPlane {
+    /// Mirror across the YZ plane (negate X).
+    YZ,
+    /// Mirror across the XZ plane (negate Y).
+    XZ,
+    /// Mirror across the XY plane (negate Z).
+    XY,
+}
+
+impl MirrorPlane {
+    pub fn label(&self) -> &'static str {
+        match self {
+            MirrorPlane::YZ => "YZ",
+            MirrorPlane::XZ => "XZ",
+            MirrorPlane::XY => "XY",
+        }
+    }
+}
+
 /// Port descriptor — name + type.
 #[derive(Clone, Debug)]
 pub struct PortDesc {
@@ -174,10 +195,14 @@ pub enum NodeType {
     CurveLength,
 
     // ─── Transform ───
-    Move,
-    Rotate { angle_deg: f64 },
-    Scale { factor: f64 },
-    Mirror,
+    /// Move (translate) geometry by a vector. Default X=0, Y=0, Z=0.
+    Move { x: f64, y: f64, z: f64 },
+    /// Rotate geometry by Euler angles (X, Y, Z) in degrees.
+    Rotate { x_deg: f64, y_deg: f64, z_deg: f64 },
+    /// Scale geometry by non-uniform factors (X, Y, Z).
+    Scale { x: f64, y: f64, z: f64 },
+    /// Mirror geometry across a plane (XY, XZ, or YZ).
+    Mirror { plane: MirrorPlane },
     LinearArray { count: u32, spacing: f64 },
     CircularArray { count: u32, angle: f64 },
 
@@ -269,10 +294,10 @@ impl NodeType {
             NodeType::EvaluateCurve => "Evaluate Curve",
             NodeType::CurveLength => "Curve Length",
             // Transform
-            NodeType::Move => "Move",
+            NodeType::Move { .. } => "Move",
             NodeType::Rotate { .. } => "Rotate",
             NodeType::Scale { .. } => "Scale",
-            NodeType::Mirror => "Mirror",
+            NodeType::Mirror { .. } => "Mirror",
             NodeType::LinearArray { .. } => "Linear Array",
             NodeType::CircularArray { .. } => "Circular Array",
             // Boolean
@@ -311,8 +336,8 @@ impl NodeType {
             NodeType::Cone { .. } | NodeType::Torus { .. } => "Primitives",
             NodeType::Line | NodeType::Circle { .. } | NodeType::DivideCurve { .. } |
             NodeType::EvaluateCurve | NodeType::CurveLength => "Curve",
-            NodeType::Move | NodeType::Rotate { .. } | NodeType::Scale { .. } |
-            NodeType::Mirror | NodeType::LinearArray { .. } | NodeType::CircularArray { .. } => "Transform",
+            NodeType::Move { .. } | NodeType::Rotate { .. } | NodeType::Scale { .. } |
+            NodeType::Mirror { .. } | NodeType::LinearArray { .. } | NodeType::CircularArray { .. } => "Transform",
             NodeType::BooleanUnion | NodeType::BooleanSubtract | NodeType::BooleanIntersect => "Boolean",
             NodeType::Fillet { .. } | NodeType::Chamfer { .. } => "Modify",
             NodeType::Graft | NodeType::Flatten | NodeType::CrossRef |
@@ -354,10 +379,10 @@ impl NodeType {
             NodeType::DivideCurve { .. } => "Div",
             NodeType::EvaluateCurve => "Eval",
             NodeType::CurveLength => "Len",
-            NodeType::Move => "Mv",
+            NodeType::Move { .. } => "Mv",
             NodeType::Rotate { .. } => "Rot",
             NodeType::Scale { .. } => "Sc",
-            NodeType::Mirror => "Mir",
+            NodeType::Mirror { .. } => "Mir",
             NodeType::LinearArray { .. } => "Arr",
             NodeType::CircularArray { .. } => "Cir",
             NodeType::BooleanUnion => "U",
@@ -433,19 +458,23 @@ impl NodeType {
                 PortDesc { name: "C", port_type: PortType::Curve },
             ],
             // Transform — 1 Geometry + optional Vector/Number
-            NodeType::Move => vec![
+            NodeType::Move { .. } => vec![
                 PortDesc { name: "G", port_type: PortType::Geometry },
                 PortDesc { name: "V", port_type: PortType::Vector },
             ],
             NodeType::Rotate { .. } => vec![
                 PortDesc { name: "G", port_type: PortType::Geometry },
-                PortDesc { name: "A", port_type: PortType::Number },
+                PortDesc { name: "X", port_type: PortType::Number },
+                PortDesc { name: "Y", port_type: PortType::Number },
+                PortDesc { name: "Z", port_type: PortType::Number },
             ],
             NodeType::Scale { .. } => vec![
                 PortDesc { name: "G", port_type: PortType::Geometry },
-                PortDesc { name: "F", port_type: PortType::Number },
+                PortDesc { name: "X", port_type: PortType::Number },
+                PortDesc { name: "Y", port_type: PortType::Number },
+                PortDesc { name: "Z", port_type: PortType::Number },
             ],
-            NodeType::Mirror => vec![
+            NodeType::Mirror { .. } => vec![
                 PortDesc { name: "G", port_type: PortType::Geometry },
             ],
             NodeType::LinearArray { .. } | NodeType::CircularArray { .. } => vec![
@@ -520,8 +549,8 @@ impl NodeType {
             // Geometry outputs
             NodeType::Box { .. } | NodeType::Sphere { .. } | NodeType::Cylinder { .. } |
             NodeType::Cone { .. } | NodeType::Torus { .. } |
-            NodeType::Move | NodeType::Rotate { .. } | NodeType::Scale { .. } |
-            NodeType::Mirror | NodeType::LinearArray { .. } | NodeType::CircularArray { .. } |
+            NodeType::Move { .. } | NodeType::Rotate { .. } | NodeType::Scale { .. } |
+            NodeType::Mirror { .. } | NodeType::LinearArray { .. } | NodeType::CircularArray { .. } |
             NodeType::BooleanUnion | NodeType::BooleanSubtract | NodeType::BooleanIntersect |
             NodeType::Fillet { .. } | NodeType::Chamfer { .. } => vec![
                 PortDesc { name: "G", port_type: PortType::Geometry },

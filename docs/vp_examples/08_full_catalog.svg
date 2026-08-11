@@ -1,0 +1,766 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 2400" width="1600" height="2400">
+<rect width="1600" height="2400" fill="#0d0d1a"/>
+<!-- Dotted grid -->
+<defs>
+  <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+    <circle cx="0" cy="0" r="1" fill="rgba(137,180,250,0.05)"/>
+  </pattern>
+</defs>
+<rect width="1600" height="2400" fill="url(#grid)"/>
+<text x="800.0" y="30" font-family="sans-serif" font-size="18" font-weight="bold" fill="#cdd6f4" text-anchor="middle">BRepCAD VP — Complete Node Catalog (58 types)</text>
+
+<rect x="30" y="70" width="360" height="24" rx="4" fill="#a6e3a1" opacity="0.2"/>
+<text x="40" y="87" font-family="sans-serif" font-size="13" font-weight="bold" fill="#a6e3a1">PARAMS (6)</text>
+<rect x="30" y="104" width="360" height="76" rx="8" fill="#313244" stroke="#a6e3a1" stroke-width="2"/>
+<rect x="30" y="104" width="360" height="22" rx="8" fill="#a6e3a1"/>
+<rect x="30" y="118" width="360" height="8" fill="#a6e3a1"/>
+<text x="40" y="119" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Number Slider</text>
+<text x="380" y="119" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="40" y="144" font-family="monospace" font-size="10" fill="#cdd6f4">value, min, max</text>
+<circle cx="390" cy="142.0" r="6" fill="#1e1e2e"/>
+<circle cx="390" cy="142.0" r="4.5" fill="#f9e2af"/>
+<text x="380" y="145.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">V</text>
+<rect x="30" y="192" width="360" height="76" rx="8" fill="#313244" stroke="#a6e3a1" stroke-width="2"/>
+<rect x="30" y="192" width="360" height="22" rx="8" fill="#a6e3a1"/>
+<rect x="30" y="206" width="360" height="8" fill="#a6e3a1"/>
+<text x="40" y="207" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Integer</text>
+<text x="380" y="207" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="40" y="232" font-family="monospace" font-size="10" fill="#cdd6f4">value: i64</text>
+<circle cx="390" cy="230.0" r="6" fill="#1e1e2e"/>
+<circle cx="390" cy="230.0" r="4.5" fill="#eba0ac"/>
+<text x="380" y="233.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">V</text>
+<rect x="30" y="280" width="360" height="76" rx="8" fill="#313244" stroke="#a6e3a1" stroke-width="2"/>
+<rect x="30" y="280" width="360" height="22" rx="8" fill="#a6e3a1"/>
+<rect x="30" y="294" width="360" height="8" fill="#a6e3a1"/>
+<text x="40" y="295" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Boolean</text>
+<text x="380" y="295" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="40" y="320" font-family="monospace" font-size="10" fill="#cdd6f4">true/false</text>
+<circle cx="390" cy="318.0" r="6" fill="#1e1e2e"/>
+<circle cx="390" cy="318.0" r="4.5" fill="#6c7086"/>
+<text x="380" y="321.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">V</text>
+<rect x="30" y="368" width="360" height="76" rx="8" fill="#313244" stroke="#a6e3a1" stroke-width="2"/>
+<rect x="30" y="368" width="360" height="22" rx="8" fill="#a6e3a1"/>
+<rect x="30" y="382" width="360" height="8" fill="#a6e3a1"/>
+<text x="40" y="383" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Point</text>
+<text x="380" y="383" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="40" y="408" font-family="monospace" font-size="10" fill="#cdd6f4">x, y, z</text>
+<circle cx="390" cy="406.0" r="6" fill="#1e1e2e"/>
+<circle cx="390" cy="406.0" r="4.5" fill="#fab387"/>
+<text x="380" y="409.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">P</text>
+<rect x="30" y="456" width="360" height="76" rx="8" fill="#313244" stroke="#a6e3a1" stroke-width="2"/>
+<rect x="30" y="456" width="360" height="22" rx="8" fill="#a6e3a1"/>
+<rect x="30" y="470" width="360" height="8" fill="#a6e3a1"/>
+<text x="40" y="471" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Vector</text>
+<text x="380" y="471" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="40" y="496" font-family="monospace" font-size="10" fill="#cdd6f4">x, y, z</text>
+<circle cx="390" cy="494.0" r="6" fill="#1e1e2e"/>
+<circle cx="390" cy="494.0" r="4.5" fill="#94e2d5"/>
+<text x="380" y="497.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">V</text>
+<rect x="30" y="544" width="360" height="76" rx="8" fill="#313244" stroke="#a6e3a1" stroke-width="2"/>
+<rect x="30" y="544" width="360" height="22" rx="8" fill="#a6e3a1"/>
+<rect x="30" y="558" width="360" height="8" fill="#a6e3a1"/>
+<text x="40" y="559" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Panel</text>
+<text x="380" y="559" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="40" y="584" font-family="monospace" font-size="10" fill="#cdd6f4">display any</text>
+<circle cx="30" cy="582.0" r="6" fill="#1e1e2e"/>
+<circle cx="30" cy="582.0" r="4.5" fill="#6c7086"/>
+<text x="40" y="585.0" font-family="sans-serif" font-size="9" fill="#a6adc8">D</text>
+<circle cx="390" cy="582.0" r="6" fill="#1e1e2e"/>
+<circle cx="390" cy="582.0" r="4.5" fill="#6c7086"/>
+<text x="380" y="585.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">D</text>
+<rect x="410" y="632" width="360" height="24" rx="4" fill="#f9e2af" opacity="0.2"/>
+<text x="420" y="649" font-family="sans-serif" font-size="13" font-weight="bold" fill="#f9e2af">MATHS (12)</text>
+<rect x="410" y="666" width="360" height="92" rx="8" fill="#313244" stroke="#f9e2af" stroke-width="2"/>
+<rect x="410" y="666" width="360" height="22" rx="8" fill="#f9e2af"/>
+<rect x="410" y="680" width="360" height="8" fill="#f9e2af"/>
+<text x="420" y="681" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Add</text>
+<text x="760" y="681" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="420" y="706" font-family="monospace" font-size="10" fill="#cdd6f4">A + B</text>
+<circle cx="410" cy="696.6666666666666" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="696.6666666666666" r="4.5" fill="#f9e2af"/>
+<text x="420" y="699.6666666666666" font-family="sans-serif" font-size="9" fill="#a6adc8">A</text>
+<circle cx="410" cy="727.3333333333334" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="727.3333333333334" r="4.5" fill="#f9e2af"/>
+<text x="420" y="730.3333333333334" font-family="sans-serif" font-size="9" fill="#a6adc8">B</text>
+<circle cx="770" cy="712.0" r="6" fill="#1e1e2e"/>
+<circle cx="770" cy="712.0" r="4.5" fill="#f9e2af"/>
+<text x="760" y="715.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">R</text>
+<rect x="410" y="770" width="360" height="92" rx="8" fill="#313244" stroke="#f9e2af" stroke-width="2"/>
+<rect x="410" y="770" width="360" height="22" rx="8" fill="#f9e2af"/>
+<rect x="410" y="784" width="360" height="8" fill="#f9e2af"/>
+<text x="420" y="785" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Subtract</text>
+<text x="760" y="785" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="420" y="810" font-family="monospace" font-size="10" fill="#cdd6f4">A - B</text>
+<circle cx="410" cy="800.6666666666666" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="800.6666666666666" r="4.5" fill="#f9e2af"/>
+<text x="420" y="803.6666666666666" font-family="sans-serif" font-size="9" fill="#a6adc8">A</text>
+<circle cx="410" cy="831.3333333333334" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="831.3333333333334" r="4.5" fill="#f9e2af"/>
+<text x="420" y="834.3333333333334" font-family="sans-serif" font-size="9" fill="#a6adc8">B</text>
+<circle cx="770" cy="816.0" r="6" fill="#1e1e2e"/>
+<circle cx="770" cy="816.0" r="4.5" fill="#f9e2af"/>
+<text x="760" y="819.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">R</text>
+<rect x="410" y="874" width="360" height="92" rx="8" fill="#313244" stroke="#f9e2af" stroke-width="2"/>
+<rect x="410" y="874" width="360" height="22" rx="8" fill="#f9e2af"/>
+<rect x="410" y="888" width="360" height="8" fill="#f9e2af"/>
+<text x="420" y="889" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Multiply</text>
+<text x="760" y="889" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="420" y="914" font-family="monospace" font-size="10" fill="#cdd6f4">A × B</text>
+<circle cx="410" cy="904.6666666666666" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="904.6666666666666" r="4.5" fill="#f9e2af"/>
+<text x="420" y="907.6666666666666" font-family="sans-serif" font-size="9" fill="#a6adc8">A</text>
+<circle cx="410" cy="935.3333333333334" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="935.3333333333334" r="4.5" fill="#f9e2af"/>
+<text x="420" y="938.3333333333334" font-family="sans-serif" font-size="9" fill="#a6adc8">B</text>
+<circle cx="770" cy="920.0" r="6" fill="#1e1e2e"/>
+<circle cx="770" cy="920.0" r="4.5" fill="#f9e2af"/>
+<text x="760" y="923.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">R</text>
+<rect x="410" y="978" width="360" height="92" rx="8" fill="#313244" stroke="#f9e2af" stroke-width="2"/>
+<rect x="410" y="978" width="360" height="22" rx="8" fill="#f9e2af"/>
+<rect x="410" y="992" width="360" height="8" fill="#f9e2af"/>
+<text x="420" y="993" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Divide</text>
+<text x="760" y="993" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="420" y="1018" font-family="monospace" font-size="10" fill="#cdd6f4">A ÷ B</text>
+<circle cx="410" cy="1008.6666666666666" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="1008.6666666666666" r="4.5" fill="#f9e2af"/>
+<text x="420" y="1011.6666666666666" font-family="sans-serif" font-size="9" fill="#a6adc8">A</text>
+<circle cx="410" cy="1039.3333333333333" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="1039.3333333333333" r="4.5" fill="#f9e2af"/>
+<text x="420" y="1042.3333333333333" font-family="sans-serif" font-size="9" fill="#a6adc8">B</text>
+<circle cx="770" cy="1024.0" r="6" fill="#1e1e2e"/>
+<circle cx="770" cy="1024.0" r="4.5" fill="#f9e2af"/>
+<text x="760" y="1027.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">R</text>
+<rect x="410" y="1082" width="360" height="76" rx="8" fill="#313244" stroke="#f9e2af" stroke-width="2"/>
+<rect x="410" y="1082" width="360" height="22" rx="8" fill="#f9e2af"/>
+<rect x="410" y="1096" width="360" height="8" fill="#f9e2af"/>
+<text x="420" y="1097" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Sin</text>
+<text x="760" y="1097" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="420" y="1122" font-family="monospace" font-size="10" fill="#cdd6f4">sin(X)</text>
+<circle cx="410" cy="1120.0" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="1120.0" r="4.5" fill="#f9e2af"/>
+<text x="420" y="1123.0" font-family="sans-serif" font-size="9" fill="#a6adc8">X</text>
+<circle cx="770" cy="1120.0" r="6" fill="#1e1e2e"/>
+<circle cx="770" cy="1120.0" r="4.5" fill="#f9e2af"/>
+<text x="760" y="1123.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">R</text>
+<rect x="410" y="1170" width="360" height="76" rx="8" fill="#313244" stroke="#f9e2af" stroke-width="2"/>
+<rect x="410" y="1170" width="360" height="22" rx="8" fill="#f9e2af"/>
+<rect x="410" y="1184" width="360" height="8" fill="#f9e2af"/>
+<text x="420" y="1185" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Cos</text>
+<text x="760" y="1185" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="420" y="1210" font-family="monospace" font-size="10" fill="#cdd6f4">cos(X)</text>
+<circle cx="410" cy="1208.0" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="1208.0" r="4.5" fill="#f9e2af"/>
+<text x="420" y="1211.0" font-family="sans-serif" font-size="9" fill="#a6adc8">X</text>
+<circle cx="770" cy="1208.0" r="6" fill="#1e1e2e"/>
+<circle cx="770" cy="1208.0" r="4.5" fill="#f9e2af"/>
+<text x="760" y="1211.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">R</text>
+<rect x="410" y="1258" width="360" height="76" rx="8" fill="#313244" stroke="#f9e2af" stroke-width="2"/>
+<rect x="410" y="1258" width="360" height="22" rx="8" fill="#f9e2af"/>
+<rect x="410" y="1272" width="360" height="8" fill="#f9e2af"/>
+<text x="420" y="1273" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Tan</text>
+<text x="760" y="1273" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="420" y="1298" font-family="monospace" font-size="10" fill="#cdd6f4">tan(X)</text>
+<circle cx="410" cy="1296.0" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="1296.0" r="4.5" fill="#f9e2af"/>
+<text x="420" y="1299.0" font-family="sans-serif" font-size="9" fill="#a6adc8">X</text>
+<circle cx="770" cy="1296.0" r="6" fill="#1e1e2e"/>
+<circle cx="770" cy="1296.0" r="4.5" fill="#f9e2af"/>
+<text x="760" y="1299.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">R</text>
+<rect x="410" y="1346" width="360" height="76" rx="8" fill="#313244" stroke="#f9e2af" stroke-width="2"/>
+<rect x="410" y="1346" width="360" height="22" rx="8" fill="#f9e2af"/>
+<rect x="410" y="1360" width="360" height="8" fill="#f9e2af"/>
+<text x="420" y="1361" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Abs</text>
+<text x="760" y="1361" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="420" y="1386" font-family="monospace" font-size="10" fill="#cdd6f4">|X|</text>
+<circle cx="410" cy="1384.0" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="1384.0" r="4.5" fill="#f9e2af"/>
+<text x="420" y="1387.0" font-family="sans-serif" font-size="9" fill="#a6adc8">X</text>
+<circle cx="770" cy="1384.0" r="6" fill="#1e1e2e"/>
+<circle cx="770" cy="1384.0" r="4.5" fill="#f9e2af"/>
+<text x="760" y="1387.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">R</text>
+<rect x="410" y="1434" width="360" height="76" rx="8" fill="#313244" stroke="#f9e2af" stroke-width="2"/>
+<rect x="410" y="1434" width="360" height="22" rx="8" fill="#f9e2af"/>
+<rect x="410" y="1448" width="360" height="8" fill="#f9e2af"/>
+<text x="420" y="1449" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Sqrt</text>
+<text x="760" y="1449" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="420" y="1474" font-family="monospace" font-size="10" fill="#cdd6f4">√X</text>
+<circle cx="410" cy="1472.0" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="1472.0" r="4.5" fill="#f9e2af"/>
+<text x="420" y="1475.0" font-family="sans-serif" font-size="9" fill="#a6adc8">X</text>
+<circle cx="770" cy="1472.0" r="6" fill="#1e1e2e"/>
+<circle cx="770" cy="1472.0" r="4.5" fill="#f9e2af"/>
+<text x="760" y="1475.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">R</text>
+<rect x="410" y="1522" width="360" height="92" rx="8" fill="#313244" stroke="#f9e2af" stroke-width="2"/>
+<rect x="410" y="1522" width="360" height="22" rx="8" fill="#f9e2af"/>
+<rect x="410" y="1536" width="360" height="8" fill="#f9e2af"/>
+<text x="420" y="1537" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Pow</text>
+<text x="760" y="1537" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="420" y="1562" font-family="monospace" font-size="10" fill="#cdd6f4">B^E</text>
+<circle cx="410" cy="1552.6666666666667" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="1552.6666666666667" r="4.5" fill="#f9e2af"/>
+<text x="420" y="1555.6666666666667" font-family="sans-serif" font-size="9" fill="#a6adc8">B</text>
+<circle cx="410" cy="1583.3333333333333" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="1583.3333333333333" r="4.5" fill="#f9e2af"/>
+<text x="420" y="1586.3333333333333" font-family="sans-serif" font-size="9" fill="#a6adc8">E</text>
+<circle cx="770" cy="1568.0" r="6" fill="#1e1e2e"/>
+<circle cx="770" cy="1568.0" r="4.5" fill="#f9e2af"/>
+<text x="760" y="1571.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">R</text>
+<rect x="410" y="1626" width="360" height="92" rx="8" fill="#313244" stroke="#f9e2af" stroke-width="2"/>
+<rect x="410" y="1626" width="360" height="22" rx="8" fill="#f9e2af"/>
+<rect x="410" y="1640" width="360" height="8" fill="#f9e2af"/>
+<text x="420" y="1641" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Min/Max</text>
+<text x="760" y="1641" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="420" y="1666" font-family="monospace" font-size="10" fill="#cdd6f4">min/max(A,B)</text>
+<circle cx="410" cy="1656.6666666666667" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="1656.6666666666667" r="4.5" fill="#f9e2af"/>
+<text x="420" y="1659.6666666666667" font-family="sans-serif" font-size="9" fill="#a6adc8">A</text>
+<circle cx="410" cy="1687.3333333333333" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="1687.3333333333333" r="4.5" fill="#f9e2af"/>
+<text x="420" y="1690.3333333333333" font-family="sans-serif" font-size="9" fill="#a6adc8">B</text>
+<circle cx="770" cy="1672.0" r="6" fill="#1e1e2e"/>
+<circle cx="770" cy="1672.0" r="4.5" fill="#f9e2af"/>
+<text x="760" y="1675.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">R</text>
+<rect x="410" y="1730" width="360" height="76" rx="8" fill="#313244" stroke="#f9e2af" stroke-width="2"/>
+<rect x="410" y="1730" width="360" height="22" rx="8" fill="#f9e2af"/>
+<rect x="410" y="1744" width="360" height="8" fill="#f9e2af"/>
+<text x="420" y="1745" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Expression</text>
+<text x="760" y="1745" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="420" y="1770" font-family="monospace" font-size="10" fill="#cdd6f4">f(x) = ...</text>
+<circle cx="410" cy="1768.0" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="1768.0" r="4.5" fill="#f9e2af"/>
+<text x="420" y="1771.0" font-family="sans-serif" font-size="9" fill="#a6adc8">X</text>
+<circle cx="770" cy="1768.0" r="6" fill="#1e1e2e"/>
+<circle cx="770" cy="1768.0" r="4.5" fill="#f9e2af"/>
+<text x="760" y="1771.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">R</text>
+<rect x="790" y="1818" width="360" height="24" rx="4" fill="#cba6f7" opacity="0.2"/>
+<text x="800" y="1835" font-family="sans-serif" font-size="13" font-weight="bold" fill="#cba6f7">SETS (8)</text>
+<rect x="790" y="1852" width="360" height="76" rx="8" fill="#313244" stroke="#cba6f7" stroke-width="2"/>
+<rect x="790" y="1852" width="360" height="22" rx="8" fill="#cba6f7"/>
+<rect x="790" y="1866" width="360" height="8" fill="#cba6f7"/>
+<text x="800" y="1867" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Series</text>
+<text x="1140" y="1867" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="800" y="1892" font-family="monospace" font-size="10" fill="#cdd6f4">start, step, count</text>
+<circle cx="1150" cy="1890.0" r="6" fill="#1e1e2e"/>
+<circle cx="1150" cy="1890.0" r="4.5" fill="#cba6f7"/>
+<text x="1140" y="1893.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">L</text>
+<rect x="790" y="1940" width="360" height="76" rx="8" fill="#313244" stroke="#cba6f7" stroke-width="2"/>
+<rect x="790" y="1940" width="360" height="22" rx="8" fill="#cba6f7"/>
+<rect x="790" y="1954" width="360" height="8" fill="#cba6f7"/>
+<text x="800" y="1955" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Range</text>
+<text x="1140" y="1955" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="800" y="1980" font-family="monospace" font-size="10" fill="#cdd6f4">min, max, count</text>
+<circle cx="1150" cy="1978.0" r="6" fill="#1e1e2e"/>
+<circle cx="1150" cy="1978.0" r="4.5" fill="#cba6f7"/>
+<text x="1140" y="1981.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">L</text>
+<rect x="790" y="2028" width="360" height="76" rx="8" fill="#313244" stroke="#cba6f7" stroke-width="2"/>
+<rect x="790" y="2028" width="360" height="22" rx="8" fill="#cba6f7"/>
+<rect x="790" y="2042" width="360" height="8" fill="#cba6f7"/>
+<text x="800" y="2043" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">List Length</text>
+<text x="1140" y="2043" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="800" y="2068" font-family="monospace" font-size="10" fill="#cdd6f4">len(L)</text>
+<circle cx="790" cy="2066.0" r="6" fill="#1e1e2e"/>
+<circle cx="790" cy="2066.0" r="4.5" fill="#cba6f7"/>
+<text x="800" y="2069.0" font-family="sans-serif" font-size="9" fill="#a6adc8">L</text>
+<circle cx="1150" cy="2066.0" r="6" fill="#1e1e2e"/>
+<circle cx="1150" cy="2066.0" r="4.5" fill="#eba0ac"/>
+<text x="1140" y="2069.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">N</text>
+<rect x="790" y="2116" width="360" height="92" rx="8" fill="#313244" stroke="#cba6f7" stroke-width="2"/>
+<rect x="790" y="2116" width="360" height="22" rx="8" fill="#cba6f7"/>
+<rect x="790" y="2130" width="360" height="8" fill="#cba6f7"/>
+<text x="800" y="2131" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">List Item</text>
+<text x="1140" y="2131" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="800" y="2156" font-family="monospace" font-size="10" fill="#cdd6f4">L[I]</text>
+<circle cx="790" cy="2146.6666666666665" r="6" fill="#1e1e2e"/>
+<circle cx="790" cy="2146.6666666666665" r="4.5" fill="#cba6f7"/>
+<text x="800" y="2149.6666666666665" font-family="sans-serif" font-size="9" fill="#a6adc8">L</text>
+<circle cx="790" cy="2177.3333333333335" r="6" fill="#1e1e2e"/>
+<circle cx="790" cy="2177.3333333333335" r="4.5" fill="#eba0ac"/>
+<text x="800" y="2180.3333333333335" font-family="sans-serif" font-size="9" fill="#a6adc8">I</text>
+<circle cx="1150" cy="2162.0" r="6" fill="#1e1e2e"/>
+<circle cx="1150" cy="2162.0" r="4.5" fill="#6c7086"/>
+<text x="1140" y="2165.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">I</text>
+<rect x="790" y="2220" width="360" height="76" rx="8" fill="#313244" stroke="#cba6f7" stroke-width="2"/>
+<rect x="790" y="2220" width="360" height="22" rx="8" fill="#cba6f7"/>
+<rect x="790" y="2234" width="360" height="8" fill="#cba6f7"/>
+<text x="800" y="2235" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Reverse</text>
+<text x="1140" y="2235" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="800" y="2260" font-family="monospace" font-size="10" fill="#cdd6f4">reverse(L)</text>
+<circle cx="790" cy="2258.0" r="6" fill="#1e1e2e"/>
+<circle cx="790" cy="2258.0" r="4.5" fill="#cba6f7"/>
+<text x="800" y="2261.0" font-family="sans-serif" font-size="9" fill="#a6adc8">L</text>
+<circle cx="1150" cy="2258.0" r="6" fill="#1e1e2e"/>
+<circle cx="1150" cy="2258.0" r="4.5" fill="#cba6f7"/>
+<text x="1140" y="2261.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">L</text>
+<rect x="790" y="2308" width="360" height="76" rx="8" fill="#313244" stroke="#cba6f7" stroke-width="2"/>
+<rect x="790" y="2308" width="360" height="22" rx="8" fill="#cba6f7"/>
+<rect x="790" y="2322" width="360" height="8" fill="#cba6f7"/>
+<text x="800" y="2323" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Sort</text>
+<text x="1140" y="2323" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="800" y="2348" font-family="monospace" font-size="10" fill="#cdd6f4">sort(L)</text>
+<circle cx="790" cy="2346.0" r="6" fill="#1e1e2e"/>
+<circle cx="790" cy="2346.0" r="4.5" fill="#cba6f7"/>
+<text x="800" y="2349.0" font-family="sans-serif" font-size="9" fill="#a6adc8">L</text>
+<circle cx="1150" cy="2346.0" r="6" fill="#1e1e2e"/>
+<circle cx="1150" cy="2346.0" r="4.5" fill="#cba6f7"/>
+<text x="1140" y="2349.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">L</text>
+<rect x="790" y="2396" width="360" height="92" rx="8" fill="#313244" stroke="#cba6f7" stroke-width="2"/>
+<rect x="790" y="2396" width="360" height="22" rx="8" fill="#cba6f7"/>
+<rect x="790" y="2410" width="360" height="8" fill="#cba6f7"/>
+<text x="800" y="2411" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Cull Pattern</text>
+<text x="1140" y="2411" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="800" y="2436" font-family="monospace" font-size="10" fill="#cdd6f4">filter by pattern</text>
+<circle cx="790" cy="2426.6666666666665" r="6" fill="#1e1e2e"/>
+<circle cx="790" cy="2426.6666666666665" r="4.5" fill="#cba6f7"/>
+<text x="800" y="2429.6666666666665" font-family="sans-serif" font-size="9" fill="#a6adc8">L</text>
+<circle cx="790" cy="2457.3333333333335" r="6" fill="#1e1e2e"/>
+<circle cx="790" cy="2457.3333333333335" r="4.5" fill="#cba6f7"/>
+<text x="800" y="2460.3333333333335" font-family="sans-serif" font-size="9" fill="#a6adc8">P</text>
+<circle cx="1150" cy="2442.0" r="6" fill="#1e1e2e"/>
+<circle cx="1150" cy="2442.0" r="4.5" fill="#cba6f7"/>
+<text x="1140" y="2445.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">L</text>
+<rect x="790" y="2500" width="360" height="76" rx="8" fill="#313244" stroke="#cba6f7" stroke-width="2"/>
+<rect x="790" y="2500" width="360" height="22" rx="8" fill="#cba6f7"/>
+<rect x="790" y="2514" width="360" height="8" fill="#cba6f7"/>
+<text x="800" y="2515" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Average</text>
+<text x="1140" y="2515" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="800" y="2540" font-family="monospace" font-size="10" fill="#cdd6f4">mean(L)</text>
+<circle cx="790" cy="2538.0" r="6" fill="#1e1e2e"/>
+<circle cx="790" cy="2538.0" r="4.5" fill="#cba6f7"/>
+<text x="800" y="2541.0" font-family="sans-serif" font-size="9" fill="#a6adc8">L</text>
+<circle cx="1150" cy="2538.0" r="6" fill="#1e1e2e"/>
+<circle cx="1150" cy="2538.0" r="4.5" fill="#f9e2af"/>
+<text x="1140" y="2541.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">R</text>
+<rect x="1170" y="2588" width="360" height="24" rx="4" fill="#89b4fa" opacity="0.2"/>
+<text x="1180" y="2605" font-family="sans-serif" font-size="13" font-weight="bold" fill="#89b4fa">PRIMITIVES (5)</text>
+<rect x="1170" y="2622" width="360" height="76" rx="8" fill="#313244" stroke="#89b4fa" stroke-width="2"/>
+<rect x="1170" y="2622" width="360" height="22" rx="8" fill="#89b4fa"/>
+<rect x="1170" y="2636" width="360" height="8" fill="#89b4fa"/>
+<text x="1180" y="2637" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Box</text>
+<text x="1520" y="2637" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="1180" y="2662" font-family="monospace" font-size="10" fill="#cdd6f4">W, H, D</text>
+<circle cx="1530" cy="2660.0" r="6" fill="#1e1e2e"/>
+<circle cx="1530" cy="2660.0" r="4.5" fill="#89b4fa"/>
+<text x="1520" y="2663.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">G</text>
+<rect x="1170" y="2710" width="360" height="76" rx="8" fill="#313244" stroke="#89b4fa" stroke-width="2"/>
+<rect x="1170" y="2710" width="360" height="22" rx="8" fill="#89b4fa"/>
+<rect x="1170" y="2724" width="360" height="8" fill="#89b4fa"/>
+<text x="1180" y="2725" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Sphere</text>
+<text x="1520" y="2725" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="1180" y="2750" font-family="monospace" font-size="10" fill="#cdd6f4">radius</text>
+<circle cx="1530" cy="2748.0" r="6" fill="#1e1e2e"/>
+<circle cx="1530" cy="2748.0" r="4.5" fill="#89b4fa"/>
+<text x="1520" y="2751.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">G</text>
+<rect x="1170" y="2798" width="360" height="76" rx="8" fill="#313244" stroke="#89b4fa" stroke-width="2"/>
+<rect x="1170" y="2798" width="360" height="22" rx="8" fill="#89b4fa"/>
+<rect x="1170" y="2812" width="360" height="8" fill="#89b4fa"/>
+<text x="1180" y="2813" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Cylinder</text>
+<text x="1520" y="2813" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="1180" y="2838" font-family="monospace" font-size="10" fill="#cdd6f4">R, H</text>
+<circle cx="1530" cy="2836.0" r="6" fill="#1e1e2e"/>
+<circle cx="1530" cy="2836.0" r="4.5" fill="#89b4fa"/>
+<text x="1520" y="2839.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">G</text>
+<rect x="1170" y="2886" width="360" height="76" rx="8" fill="#313244" stroke="#89b4fa" stroke-width="2"/>
+<rect x="1170" y="2886" width="360" height="22" rx="8" fill="#89b4fa"/>
+<rect x="1170" y="2900" width="360" height="8" fill="#89b4fa"/>
+<text x="1180" y="2901" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Cone</text>
+<text x="1520" y="2901" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="1180" y="2926" font-family="monospace" font-size="10" fill="#cdd6f4">R1, R2, H</text>
+<circle cx="1530" cy="2924.0" r="6" fill="#1e1e2e"/>
+<circle cx="1530" cy="2924.0" r="4.5" fill="#89b4fa"/>
+<text x="1520" y="2927.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">G</text>
+<rect x="1170" y="2974" width="360" height="76" rx="8" fill="#313244" stroke="#89b4fa" stroke-width="2"/>
+<rect x="1170" y="2974" width="360" height="22" rx="8" fill="#89b4fa"/>
+<rect x="1170" y="2988" width="360" height="8" fill="#89b4fa"/>
+<text x="1180" y="2989" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Torus</text>
+<text x="1520" y="2989" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="1180" y="3014" font-family="monospace" font-size="10" fill="#cdd6f4">R, r</text>
+<circle cx="1530" cy="3012.0" r="6" fill="#1e1e2e"/>
+<circle cx="1530" cy="3012.0" r="4.5" fill="#89b4fa"/>
+<text x="1520" y="3015.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">G</text>
+<rect x="30" y="70" width="360" height="24" rx="4" fill="#94e2d5" opacity="0.2"/>
+<text x="40" y="87" font-family="sans-serif" font-size="13" font-weight="bold" fill="#94e2d5">CURVE (5)</text>
+<rect x="30" y="104" width="360" height="92" rx="8" fill="#313244" stroke="#94e2d5" stroke-width="2"/>
+<rect x="30" y="104" width="360" height="22" rx="8" fill="#94e2d5"/>
+<rect x="30" y="118" width="360" height="8" fill="#94e2d5"/>
+<text x="40" y="119" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Line</text>
+<text x="380" y="119" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="40" y="144" font-family="monospace" font-size="10" fill="#cdd6f4">A→B</text>
+<circle cx="30" cy="134.66666666666666" r="6" fill="#1e1e2e"/>
+<circle cx="30" cy="134.66666666666666" r="4.5" fill="#fab387"/>
+<text x="40" y="137.66666666666666" font-family="sans-serif" font-size="9" fill="#a6adc8">A</text>
+<circle cx="30" cy="165.33333333333334" r="6" fill="#1e1e2e"/>
+<circle cx="30" cy="165.33333333333334" r="4.5" fill="#fab387"/>
+<text x="40" y="168.33333333333334" font-family="sans-serif" font-size="9" fill="#a6adc8">B</text>
+<circle cx="390" cy="150.0" r="6" fill="#1e1e2e"/>
+<circle cx="390" cy="150.0" r="4.5" fill="#a6e3a1"/>
+<text x="380" y="153.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">C</text>
+<rect x="30" y="208" width="360" height="76" rx="8" fill="#313244" stroke="#94e2d5" stroke-width="2"/>
+<rect x="30" y="208" width="360" height="22" rx="8" fill="#94e2d5"/>
+<rect x="30" y="222" width="360" height="8" fill="#94e2d5"/>
+<text x="40" y="223" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Circle</text>
+<text x="380" y="223" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="40" y="248" font-family="monospace" font-size="10" fill="#cdd6f4">radius</text>
+<circle cx="390" cy="246.0" r="6" fill="#1e1e2e"/>
+<circle cx="390" cy="246.0" r="4.5" fill="#a6e3a1"/>
+<text x="380" y="249.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">C</text>
+<rect x="30" y="296" width="360" height="92" rx="8" fill="#313244" stroke="#94e2d5" stroke-width="2"/>
+<rect x="30" y="296" width="360" height="22" rx="8" fill="#94e2d5"/>
+<rect x="30" y="310" width="360" height="8" fill="#94e2d5"/>
+<text x="40" y="311" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Divide Curve</text>
+<text x="380" y="311" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="40" y="336" font-family="monospace" font-size="10" fill="#cdd6f4">N points on curve</text>
+<circle cx="30" cy="326.6666666666667" r="6" fill="#1e1e2e"/>
+<circle cx="30" cy="326.6666666666667" r="4.5" fill="#a6e3a1"/>
+<text x="40" y="329.6666666666667" font-family="sans-serif" font-size="9" fill="#a6adc8">C</text>
+<circle cx="30" cy="357.3333333333333" r="6" fill="#1e1e2e"/>
+<circle cx="30" cy="357.3333333333333" r="4.5" fill="#eba0ac"/>
+<text x="40" y="360.3333333333333" font-family="sans-serif" font-size="9" fill="#a6adc8">N</text>
+<circle cx="390" cy="342.0" r="6" fill="#1e1e2e"/>
+<circle cx="390" cy="342.0" r="4.5" fill="#cba6f7"/>
+<text x="380" y="345.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">P</text>
+<rect x="30" y="400" width="360" height="92" rx="8" fill="#313244" stroke="#94e2d5" stroke-width="2"/>
+<rect x="30" y="400" width="360" height="22" rx="8" fill="#94e2d5"/>
+<rect x="30" y="414" width="360" height="8" fill="#94e2d5"/>
+<text x="40" y="415" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Evaluate Curve</text>
+<text x="380" y="415" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="40" y="440" font-family="monospace" font-size="10" fill="#cdd6f4">point at t</text>
+<circle cx="30" cy="430.6666666666667" r="6" fill="#1e1e2e"/>
+<circle cx="30" cy="430.6666666666667" r="4.5" fill="#a6e3a1"/>
+<text x="40" y="433.6666666666667" font-family="sans-serif" font-size="9" fill="#a6adc8">C</text>
+<circle cx="30" cy="461.3333333333333" r="6" fill="#1e1e2e"/>
+<circle cx="30" cy="461.3333333333333" r="4.5" fill="#f9e2af"/>
+<text x="40" y="464.3333333333333" font-family="sans-serif" font-size="9" fill="#a6adc8">T</text>
+<circle cx="390" cy="446.0" r="6" fill="#1e1e2e"/>
+<circle cx="390" cy="446.0" r="4.5" fill="#fab387"/>
+<text x="380" y="449.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">P</text>
+<rect x="30" y="504" width="360" height="76" rx="8" fill="#313244" stroke="#94e2d5" stroke-width="2"/>
+<rect x="30" y="504" width="360" height="22" rx="8" fill="#94e2d5"/>
+<rect x="30" y="518" width="360" height="8" fill="#94e2d5"/>
+<text x="40" y="519" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Curve Length</text>
+<text x="380" y="519" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="40" y="544" font-family="monospace" font-size="10" fill="#cdd6f4">arc length</text>
+<circle cx="30" cy="542.0" r="6" fill="#1e1e2e"/>
+<circle cx="30" cy="542.0" r="4.5" fill="#a6e3a1"/>
+<text x="40" y="545.0" font-family="sans-serif" font-size="9" fill="#a6adc8">C</text>
+<circle cx="390" cy="542.0" r="6" fill="#1e1e2e"/>
+<circle cx="390" cy="542.0" r="4.5" fill="#f9e2af"/>
+<text x="380" y="545.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">L</text>
+<rect x="410" y="592" width="360" height="24" rx="4" fill="#fab387" opacity="0.2"/>
+<text x="420" y="609" font-family="sans-serif" font-size="13" font-weight="bold" fill="#fab387">TRANSFORM (6)</text>
+<rect x="410" y="626" width="360" height="92" rx="8" fill="#313244" stroke="#fab387" stroke-width="2"/>
+<rect x="410" y="626" width="360" height="22" rx="8" fill="#fab387"/>
+<rect x="410" y="640" width="360" height="8" fill="#fab387"/>
+<text x="420" y="641" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Move</text>
+<text x="760" y="641" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="420" y="666" font-family="monospace" font-size="10" fill="#cdd6f4">X, Y, Z translation</text>
+<circle cx="410" cy="656.6666666666666" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="656.6666666666666" r="4.5" fill="#89b4fa"/>
+<text x="420" y="659.6666666666666" font-family="sans-serif" font-size="9" fill="#a6adc8">G</text>
+<circle cx="410" cy="687.3333333333334" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="687.3333333333334" r="4.5" fill="#94e2d5"/>
+<text x="420" y="690.3333333333334" font-family="sans-serif" font-size="9" fill="#a6adc8">V</text>
+<circle cx="770" cy="672.0" r="6" fill="#1e1e2e"/>
+<circle cx="770" cy="672.0" r="4.5" fill="#89b4fa"/>
+<text x="760" y="675.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">G</text>
+<rect x="410" y="730" width="360" height="124" rx="8" fill="#313244" stroke="#fab387" stroke-width="2"/>
+<rect x="410" y="730" width="360" height="22" rx="8" fill="#fab387"/>
+<rect x="410" y="744" width="360" height="8" fill="#fab387"/>
+<text x="420" y="745" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Rotate</text>
+<text x="760" y="745" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="420" y="770" font-family="monospace" font-size="10" fill="#cdd6f4">Euler XYZ°</text>
+<circle cx="410" cy="754.8" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="754.8" r="4.5" fill="#89b4fa"/>
+<text x="420" y="757.8" font-family="sans-serif" font-size="9" fill="#a6adc8">G</text>
+<circle cx="410" cy="779.6" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="779.6" r="4.5" fill="#f9e2af"/>
+<text x="420" y="782.6" font-family="sans-serif" font-size="9" fill="#a6adc8">X</text>
+<circle cx="410" cy="804.4" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="804.4" r="4.5" fill="#f9e2af"/>
+<text x="420" y="807.4" font-family="sans-serif" font-size="9" fill="#a6adc8">Y</text>
+<circle cx="410" cy="829.2" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="829.2" r="4.5" fill="#f9e2af"/>
+<text x="420" y="832.2" font-family="sans-serif" font-size="9" fill="#a6adc8">Z</text>
+<circle cx="770" cy="792.0" r="6" fill="#1e1e2e"/>
+<circle cx="770" cy="792.0" r="4.5" fill="#89b4fa"/>
+<text x="760" y="795.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">G</text>
+<rect x="410" y="866" width="360" height="124" rx="8" fill="#313244" stroke="#fab387" stroke-width="2"/>
+<rect x="410" y="866" width="360" height="22" rx="8" fill="#fab387"/>
+<rect x="410" y="880" width="360" height="8" fill="#fab387"/>
+<text x="420" y="881" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Scale</text>
+<text x="760" y="881" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="420" y="906" font-family="monospace" font-size="10" fill="#cdd6f4">non-uniform XYZ</text>
+<circle cx="410" cy="890.8" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="890.8" r="4.5" fill="#89b4fa"/>
+<text x="420" y="893.8" font-family="sans-serif" font-size="9" fill="#a6adc8">G</text>
+<circle cx="410" cy="915.6" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="915.6" r="4.5" fill="#f9e2af"/>
+<text x="420" y="918.6" font-family="sans-serif" font-size="9" fill="#a6adc8">X</text>
+<circle cx="410" cy="940.4" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="940.4" r="4.5" fill="#f9e2af"/>
+<text x="420" y="943.4" font-family="sans-serif" font-size="9" fill="#a6adc8">Y</text>
+<circle cx="410" cy="965.2" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="965.2" r="4.5" fill="#f9e2af"/>
+<text x="420" y="968.2" font-family="sans-serif" font-size="9" fill="#a6adc8">Z</text>
+<circle cx="770" cy="928.0" r="6" fill="#1e1e2e"/>
+<circle cx="770" cy="928.0" r="4.5" fill="#89b4fa"/>
+<text x="760" y="931.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">G</text>
+<rect x="410" y="1002" width="360" height="76" rx="8" fill="#313244" stroke="#fab387" stroke-width="2"/>
+<rect x="410" y="1002" width="360" height="22" rx="8" fill="#fab387"/>
+<rect x="410" y="1016" width="360" height="8" fill="#fab387"/>
+<text x="420" y="1017" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Mirror</text>
+<text x="760" y="1017" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="420" y="1042" font-family="monospace" font-size="10" fill="#cdd6f4">plane: YZ/XZ/XY</text>
+<circle cx="410" cy="1040.0" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="1040.0" r="4.5" fill="#89b4fa"/>
+<text x="420" y="1043.0" font-family="sans-serif" font-size="9" fill="#a6adc8">G</text>
+<circle cx="770" cy="1040.0" r="6" fill="#1e1e2e"/>
+<circle cx="770" cy="1040.0" r="4.5" fill="#89b4fa"/>
+<text x="760" y="1043.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">G</text>
+<rect x="410" y="1090" width="360" height="76" rx="8" fill="#313244" stroke="#fab387" stroke-width="2"/>
+<rect x="410" y="1090" width="360" height="22" rx="8" fill="#fab387"/>
+<rect x="410" y="1104" width="360" height="8" fill="#fab387"/>
+<text x="420" y="1105" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Linear Array</text>
+<text x="760" y="1105" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="420" y="1130" font-family="monospace" font-size="10" fill="#cdd6f4">count, spacing</text>
+<circle cx="410" cy="1128.0" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="1128.0" r="4.5" fill="#89b4fa"/>
+<text x="420" y="1131.0" font-family="sans-serif" font-size="9" fill="#a6adc8">G</text>
+<circle cx="770" cy="1128.0" r="6" fill="#1e1e2e"/>
+<circle cx="770" cy="1128.0" r="4.5" fill="#89b4fa"/>
+<text x="760" y="1131.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">G</text>
+<rect x="410" y="1178" width="360" height="76" rx="8" fill="#313244" stroke="#fab387" stroke-width="2"/>
+<rect x="410" y="1178" width="360" height="22" rx="8" fill="#fab387"/>
+<rect x="410" y="1192" width="360" height="8" fill="#fab387"/>
+<text x="420" y="1193" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Circular Array</text>
+<text x="760" y="1193" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="420" y="1218" font-family="monospace" font-size="10" fill="#cdd6f4">count, angle°</text>
+<circle cx="410" cy="1216.0" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="1216.0" r="4.5" fill="#89b4fa"/>
+<text x="420" y="1219.0" font-family="sans-serif" font-size="9" fill="#a6adc8">G</text>
+<circle cx="770" cy="1216.0" r="6" fill="#1e1e2e"/>
+<circle cx="770" cy="1216.0" r="4.5" fill="#89b4fa"/>
+<text x="760" y="1219.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">G</text>
+<rect x="790" y="1266" width="360" height="24" rx="4" fill="#cba6f7" opacity="0.2"/>
+<text x="800" y="1283" font-family="sans-serif" font-size="13" font-weight="bold" fill="#cba6f7">BOOLEAN (3)</text>
+<rect x="790" y="1300" width="360" height="92" rx="8" fill="#313244" stroke="#cba6f7" stroke-width="2"/>
+<rect x="790" y="1300" width="360" height="22" rx="8" fill="#cba6f7"/>
+<rect x="790" y="1314" width="360" height="8" fill="#cba6f7"/>
+<text x="800" y="1315" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Union</text>
+<text x="1140" y="1315" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="800" y="1340" font-family="monospace" font-size="10" fill="#cdd6f4">A ∪ B</text>
+<circle cx="790" cy="1330.6666666666667" r="6" fill="#1e1e2e"/>
+<circle cx="790" cy="1330.6666666666667" r="4.5" fill="#89b4fa"/>
+<text x="800" y="1333.6666666666667" font-family="sans-serif" font-size="9" fill="#a6adc8">A</text>
+<circle cx="790" cy="1361.3333333333333" r="6" fill="#1e1e2e"/>
+<circle cx="790" cy="1361.3333333333333" r="4.5" fill="#89b4fa"/>
+<text x="800" y="1364.3333333333333" font-family="sans-serif" font-size="9" fill="#a6adc8">B</text>
+<circle cx="1150" cy="1346.0" r="6" fill="#1e1e2e"/>
+<circle cx="1150" cy="1346.0" r="4.5" fill="#89b4fa"/>
+<text x="1140" y="1349.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">G</text>
+<rect x="790" y="1404" width="360" height="92" rx="8" fill="#313244" stroke="#cba6f7" stroke-width="2"/>
+<rect x="790" y="1404" width="360" height="22" rx="8" fill="#cba6f7"/>
+<rect x="790" y="1418" width="360" height="8" fill="#cba6f7"/>
+<text x="800" y="1419" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Subtract</text>
+<text x="1140" y="1419" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="800" y="1444" font-family="monospace" font-size="10" fill="#cdd6f4">A - B</text>
+<circle cx="790" cy="1434.6666666666667" r="6" fill="#1e1e2e"/>
+<circle cx="790" cy="1434.6666666666667" r="4.5" fill="#89b4fa"/>
+<text x="800" y="1437.6666666666667" font-family="sans-serif" font-size="9" fill="#a6adc8">A</text>
+<circle cx="790" cy="1465.3333333333333" r="6" fill="#1e1e2e"/>
+<circle cx="790" cy="1465.3333333333333" r="4.5" fill="#89b4fa"/>
+<text x="800" y="1468.3333333333333" font-family="sans-serif" font-size="9" fill="#a6adc8">B</text>
+<circle cx="1150" cy="1450.0" r="6" fill="#1e1e2e"/>
+<circle cx="1150" cy="1450.0" r="4.5" fill="#89b4fa"/>
+<text x="1140" y="1453.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">G</text>
+<rect x="790" y="1508" width="360" height="92" rx="8" fill="#313244" stroke="#cba6f7" stroke-width="2"/>
+<rect x="790" y="1508" width="360" height="22" rx="8" fill="#cba6f7"/>
+<rect x="790" y="1522" width="360" height="8" fill="#cba6f7"/>
+<text x="800" y="1523" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Intersect</text>
+<text x="1140" y="1523" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="800" y="1548" font-family="monospace" font-size="10" fill="#cdd6f4">A ∩ B</text>
+<circle cx="790" cy="1538.6666666666667" r="6" fill="#1e1e2e"/>
+<circle cx="790" cy="1538.6666666666667" r="4.5" fill="#89b4fa"/>
+<text x="800" y="1541.6666666666667" font-family="sans-serif" font-size="9" fill="#a6adc8">A</text>
+<circle cx="790" cy="1569.3333333333333" r="6" fill="#1e1e2e"/>
+<circle cx="790" cy="1569.3333333333333" r="4.5" fill="#89b4fa"/>
+<text x="800" y="1572.3333333333333" font-family="sans-serif" font-size="9" fill="#a6adc8">B</text>
+<circle cx="1150" cy="1554.0" r="6" fill="#1e1e2e"/>
+<circle cx="1150" cy="1554.0" r="4.5" fill="#89b4fa"/>
+<text x="1140" y="1557.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">G</text>
+<rect x="1170" y="1612" width="360" height="24" rx="4" fill="#f9e2af" opacity="0.2"/>
+<text x="1180" y="1629" font-family="sans-serif" font-size="13" font-weight="bold" fill="#f9e2af">MODIFY (2)</text>
+<rect x="1170" y="1646" width="360" height="76" rx="8" fill="#313244" stroke="#f9e2af" stroke-width="2"/>
+<rect x="1170" y="1646" width="360" height="22" rx="8" fill="#f9e2af"/>
+<rect x="1170" y="1660" width="360" height="8" fill="#f9e2af"/>
+<text x="1180" y="1661" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Fillet</text>
+<text x="1520" y="1661" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="1180" y="1686" font-family="monospace" font-size="10" fill="#cdd6f4">round edges, R</text>
+<circle cx="1170" cy="1684.0" r="6" fill="#1e1e2e"/>
+<circle cx="1170" cy="1684.0" r="4.5" fill="#89b4fa"/>
+<text x="1180" y="1687.0" font-family="sans-serif" font-size="9" fill="#a6adc8">G</text>
+<circle cx="1530" cy="1684.0" r="6" fill="#1e1e2e"/>
+<circle cx="1530" cy="1684.0" r="4.5" fill="#89b4fa"/>
+<text x="1520" y="1687.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">G</text>
+<rect x="1170" y="1734" width="360" height="76" rx="8" fill="#313244" stroke="#f9e2af" stroke-width="2"/>
+<rect x="1170" y="1734" width="360" height="22" rx="8" fill="#f9e2af"/>
+<rect x="1170" y="1748" width="360" height="8" fill="#f9e2af"/>
+<text x="1180" y="1749" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Chamfer</text>
+<text x="1520" y="1749" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="1180" y="1774" font-family="monospace" font-size="10" fill="#cdd6f4">bevel edges, D</text>
+<circle cx="1170" cy="1772.0" r="6" fill="#1e1e2e"/>
+<circle cx="1170" cy="1772.0" r="4.5" fill="#89b4fa"/>
+<text x="1180" y="1775.0" font-family="sans-serif" font-size="9" fill="#a6adc8">G</text>
+<circle cx="1530" cy="1772.0" r="6" fill="#1e1e2e"/>
+<circle cx="1530" cy="1772.0" r="4.5" fill="#89b4fa"/>
+<text x="1520" y="1775.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">G</text>
+<rect x="30" y="70" width="360" height="24" rx="4" fill="#cba6f7" opacity="0.2"/>
+<text x="40" y="87" font-family="sans-serif" font-size="13" font-weight="bold" fill="#cba6f7">DATA TREE (8)</text>
+<rect x="30" y="104" width="360" height="76" rx="8" fill="#313244" stroke="#cba6f7" stroke-width="2"/>
+<rect x="30" y="104" width="360" height="22" rx="8" fill="#cba6f7"/>
+<rect x="30" y="118" width="360" height="8" fill="#cba6f7"/>
+<text x="40" y="119" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Graft</text>
+<text x="380" y="119" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="40" y="144" font-family="monospace" font-size="10" fill="#cdd6f4">add branch level</text>
+<circle cx="30" cy="142.0" r="6" fill="#1e1e2e"/>
+<circle cx="30" cy="142.0" r="4.5" fill="#cba6f7"/>
+<text x="40" y="145.0" font-family="sans-serif" font-size="9" fill="#a6adc8">L</text>
+<circle cx="390" cy="142.0" r="6" fill="#1e1e2e"/>
+<circle cx="390" cy="142.0" r="4.5" fill="#cba6f7"/>
+<text x="380" y="145.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">L</text>
+<rect x="30" y="192" width="360" height="76" rx="8" fill="#313244" stroke="#cba6f7" stroke-width="2"/>
+<rect x="30" y="192" width="360" height="22" rx="8" fill="#cba6f7"/>
+<rect x="30" y="206" width="360" height="8" fill="#cba6f7"/>
+<text x="40" y="207" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Flatten</text>
+<text x="380" y="207" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="40" y="232" font-family="monospace" font-size="10" fill="#cdd6f4">remove all branches</text>
+<circle cx="30" cy="230.0" r="6" fill="#1e1e2e"/>
+<circle cx="30" cy="230.0" r="4.5" fill="#cba6f7"/>
+<text x="40" y="233.0" font-family="sans-serif" font-size="9" fill="#a6adc8">L</text>
+<circle cx="390" cy="230.0" r="6" fill="#1e1e2e"/>
+<circle cx="390" cy="230.0" r="4.5" fill="#cba6f7"/>
+<text x="380" y="233.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">L</text>
+<rect x="30" y="280" width="360" height="92" rx="8" fill="#313244" stroke="#cba6f7" stroke-width="2"/>
+<rect x="30" y="280" width="360" height="22" rx="8" fill="#cba6f7"/>
+<rect x="30" y="294" width="360" height="8" fill="#cba6f7"/>
+<text x="40" y="295" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">CrossRef</text>
+<text x="380" y="295" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="40" y="320" font-family="monospace" font-size="10" fill="#cdd6f4">cartesian product</text>
+<circle cx="30" cy="310.6666666666667" r="6" fill="#1e1e2e"/>
+<circle cx="30" cy="310.6666666666667" r="4.5" fill="#cba6f7"/>
+<text x="40" y="313.6666666666667" font-family="sans-serif" font-size="9" fill="#a6adc8">A</text>
+<circle cx="30" cy="341.3333333333333" r="6" fill="#1e1e2e"/>
+<circle cx="30" cy="341.3333333333333" r="4.5" fill="#cba6f7"/>
+<text x="40" y="344.3333333333333" font-family="sans-serif" font-size="9" fill="#a6adc8">B</text>
+<circle cx="390" cy="326.0" r="6" fill="#1e1e2e"/>
+<circle cx="390" cy="326.0" r="4.5" fill="#cba6f7"/>
+<text x="380" y="329.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">L</text>
+<rect x="30" y="384" width="360" height="92" rx="8" fill="#313244" stroke="#cba6f7" stroke-width="2"/>
+<rect x="30" y="384" width="360" height="22" rx="8" fill="#cba6f7"/>
+<rect x="30" y="398" width="360" height="8" fill="#cba6f7"/>
+<text x="40" y="399" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">ShiftList</text>
+<text x="380" y="399" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="40" y="424" font-family="monospace" font-size="10" fill="#cdd6f4">shift by N</text>
+<circle cx="30" cy="414.6666666666667" r="6" fill="#1e1e2e"/>
+<circle cx="30" cy="414.6666666666667" r="4.5" fill="#cba6f7"/>
+<text x="40" y="417.6666666666667" font-family="sans-serif" font-size="9" fill="#a6adc8">L</text>
+<circle cx="30" cy="445.3333333333333" r="6" fill="#1e1e2e"/>
+<circle cx="30" cy="445.3333333333333" r="4.5" fill="#eba0ac"/>
+<text x="40" y="448.3333333333333" font-family="sans-serif" font-size="9" fill="#a6adc8">N</text>
+<circle cx="390" cy="430.0" r="6" fill="#1e1e2e"/>
+<circle cx="390" cy="430.0" r="4.5" fill="#cba6f7"/>
+<text x="380" y="433.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">L</text>
+<rect x="30" y="488" width="360" height="108" rx="8" fill="#313244" stroke="#cba6f7" stroke-width="2"/>
+<rect x="30" y="488" width="360" height="22" rx="8" fill="#cba6f7"/>
+<rect x="30" y="502" width="360" height="8" fill="#cba6f7"/>
+<text x="40" y="503" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Subset</text>
+<text x="380" y="503" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="40" y="528" font-family="monospace" font-size="10" fill="#cdd6f4">L[S:S+C]</text>
+<circle cx="30" cy="515.0" r="6" fill="#1e1e2e"/>
+<circle cx="30" cy="515.0" r="4.5" fill="#cba6f7"/>
+<text x="40" y="518.0" font-family="sans-serif" font-size="9" fill="#a6adc8">L</text>
+<circle cx="30" cy="542.0" r="6" fill="#1e1e2e"/>
+<circle cx="30" cy="542.0" r="4.5" fill="#eba0ac"/>
+<text x="40" y="545.0" font-family="sans-serif" font-size="9" fill="#a6adc8">S</text>
+<circle cx="30" cy="569.0" r="6" fill="#1e1e2e"/>
+<circle cx="30" cy="569.0" r="4.5" fill="#eba0ac"/>
+<text x="40" y="572.0" font-family="sans-serif" font-size="9" fill="#a6adc8">C</text>
+<circle cx="390" cy="542.0" r="6" fill="#1e1e2e"/>
+<circle cx="390" cy="542.0" r="4.5" fill="#cba6f7"/>
+<text x="380" y="545.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">L</text>
+<rect x="30" y="608" width="360" height="92" rx="8" fill="#313244" stroke="#cba6f7" stroke-width="2"/>
+<rect x="30" y="608" width="360" height="22" rx="8" fill="#cba6f7"/>
+<rect x="30" y="622" width="360" height="8" fill="#cba6f7"/>
+<text x="40" y="623" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Dispatch</text>
+<text x="380" y="623" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="40" y="648" font-family="monospace" font-size="10" fill="#cdd6f4">split by pattern</text>
+<circle cx="30" cy="638.6666666666666" r="6" fill="#1e1e2e"/>
+<circle cx="30" cy="638.6666666666666" r="4.5" fill="#cba6f7"/>
+<text x="40" y="641.6666666666666" font-family="sans-serif" font-size="9" fill="#a6adc8">L</text>
+<circle cx="30" cy="669.3333333333334" r="6" fill="#1e1e2e"/>
+<circle cx="30" cy="669.3333333333334" r="4.5" fill="#cba6f7"/>
+<text x="40" y="672.3333333333334" font-family="sans-serif" font-size="9" fill="#a6adc8">P</text>
+<circle cx="390" cy="638.6666666666666" r="6" fill="#1e1e2e"/>
+<circle cx="390" cy="638.6666666666666" r="4.5" fill="#cba6f7"/>
+<text x="380" y="641.6666666666666" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">A</text>
+<circle cx="390" cy="669.3333333333334" r="6" fill="#1e1e2e"/>
+<circle cx="390" cy="669.3333333333334" r="4.5" fill="#cba6f7"/>
+<text x="380" y="672.3333333333334" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">B</text>
+<rect x="30" y="712" width="360" height="92" rx="8" fill="#313244" stroke="#cba6f7" stroke-width="2"/>
+<rect x="30" y="712" width="360" height="22" rx="8" fill="#cba6f7"/>
+<rect x="30" y="726" width="360" height="8" fill="#cba6f7"/>
+<text x="40" y="727" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Weave</text>
+<text x="380" y="727" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="40" y="752" font-family="monospace" font-size="10" fill="#cdd6f4">interleave A,B</text>
+<circle cx="30" cy="742.6666666666666" r="6" fill="#1e1e2e"/>
+<circle cx="30" cy="742.6666666666666" r="4.5" fill="#cba6f7"/>
+<text x="40" y="745.6666666666666" font-family="sans-serif" font-size="9" fill="#a6adc8">A</text>
+<circle cx="30" cy="773.3333333333334" r="6" fill="#1e1e2e"/>
+<circle cx="30" cy="773.3333333333334" r="4.5" fill="#cba6f7"/>
+<text x="40" y="776.3333333333334" font-family="sans-serif" font-size="9" fill="#a6adc8">B</text>
+<circle cx="390" cy="758.0" r="6" fill="#1e1e2e"/>
+<circle cx="390" cy="758.0" r="4.5" fill="#cba6f7"/>
+<text x="380" y="761.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">L</text>
+<rect x="30" y="816" width="360" height="92" rx="8" fill="#313244" stroke="#cba6f7" stroke-width="2"/>
+<rect x="30" y="816" width="360" height="22" rx="8" fill="#cba6f7"/>
+<rect x="30" y="830" width="360" height="8" fill="#cba6f7"/>
+<text x="40" y="831" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Concat</text>
+<text x="380" y="831" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="40" y="856" font-family="monospace" font-size="10" fill="#cdd6f4">A ++ B</text>
+<circle cx="30" cy="846.6666666666666" r="6" fill="#1e1e2e"/>
+<circle cx="30" cy="846.6666666666666" r="4.5" fill="#cba6f7"/>
+<text x="40" y="849.6666666666666" font-family="sans-serif" font-size="9" fill="#a6adc8">A</text>
+<circle cx="30" cy="877.3333333333334" r="6" fill="#1e1e2e"/>
+<circle cx="30" cy="877.3333333333334" r="4.5" fill="#cba6f7"/>
+<text x="40" y="880.3333333333334" font-family="sans-serif" font-size="9" fill="#a6adc8">B</text>
+<circle cx="390" cy="862.0" r="6" fill="#1e1e2e"/>
+<circle cx="390" cy="862.0" r="4.5" fill="#cba6f7"/>
+<text x="380" y="865.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">L</text>
+<rect x="410" y="920" width="360" height="24" rx="4" fill="#f38ba8" opacity="0.2"/>
+<text x="420" y="937" font-family="sans-serif" font-size="13" font-weight="bold" fill="#f38ba8">OUTPUT (1)</text>
+<rect x="410" y="954" width="360" height="76" rx="8" fill="#313244" stroke="#f38ba8" stroke-width="2"/>
+<rect x="410" y="954" width="360" height="22" rx="8" fill="#f38ba8"/>
+<rect x="410" y="968" width="360" height="8" fill="#f38ba8"/>
+<text x="420" y="969" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Bake to Doc</text>
+<text x="760" y="969" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="420" y="994" font-family="monospace" font-size="10" fill="#cdd6f4">commit to document</text>
+<circle cx="410" cy="992.0" r="6" fill="#1e1e2e"/>
+<circle cx="410" cy="992.0" r="4.5" fill="#89b4fa"/>
+<text x="420" y="995.0" font-family="sans-serif" font-size="9" fill="#a6adc8">G</text>
+<rect x="30" y="2340" width="1540" height="40" rx="6" fill="#313244" opacity="0.8"/>
+<text x="50" y="2365" font-family="sans-serif" font-size="11" fill="#cdd6f4">Port colors:</text>
+<circle cx="150" cy="2360" r="5" fill="#89b4fa"/>
+<text x="160" y="2364" font-family="sans-serif" font-size="10" fill="#a6adc8">Geometry</text>
+<circle cx="250" cy="2360" r="5" fill="#f9e2af"/>
+<text x="260" y="2364" font-family="sans-serif" font-size="10" fill="#a6adc8">Number</text>
+<circle cx="350" cy="2360" r="5" fill="#eba0ac"/>
+<text x="360" y="2364" font-family="sans-serif" font-size="10" fill="#a6adc8">Integer</text>
+<circle cx="450" cy="2360" r="5" fill="#94e2d5"/>
+<text x="460" y="2364" font-family="sans-serif" font-size="10" fill="#a6adc8">Vector</text>
+<circle cx="550" cy="2360" r="5" fill="#fab387"/>
+<text x="560" y="2364" font-family="sans-serif" font-size="10" fill="#a6adc8">Point</text>
+<circle cx="650" cy="2360" r="5" fill="#cba6f7"/>
+<text x="660" y="2364" font-family="sans-serif" font-size="10" fill="#a6adc8">List</text>
+<circle cx="750" cy="2360" r="5" fill="#6c7086"/>
+<text x="760" y="2364" font-family="sans-serif" font-size="10" fill="#a6adc8">Any</text>
+</svg>

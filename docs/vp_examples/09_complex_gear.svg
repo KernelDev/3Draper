@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 600" width="1400" height="600">
+<rect width="1400" height="600" fill="#0d0d1a"/>
+<!-- Dotted grid -->
+<defs>
+  <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+    <circle cx="0" cy="0" r="1" fill="rgba(137,180,250,0.05)"/>
+  </pattern>
+</defs>
+<rect width="1400" height="600" fill="url(#grid)"/>
+<text x="700.0" y="30" font-family="sans-serif" font-size="18" font-weight="bold" fill="#cdd6f4" text-anchor="middle">Example 9: Complex Parametric Model — Gear-like shape</text>
+
+<rect x="20" y="80" width="200" height="100" rx="8" fill="#313244" stroke="#a6e3a1" stroke-width="2"/>
+<rect x="20" y="80" width="200" height="22" rx="8" fill="#a6e3a1"/>
+<rect x="20" y="94" width="200" height="8" fill="#a6e3a1"/>
+<text x="30" y="95" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Number Slider</text>
+<text x="210" y="95" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="30" y="120" font-family="monospace" font-size="10" fill="#cdd6f4">V: 12  min: 4  max: 30</text>
+<circle cx="220" cy="130.0" r="6" fill="#1e1e2e"/>
+<circle cx="220" cy="130.0" r="4.5" fill="#f9e2af"/>
+<text x="210" y="133.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">V</text>
+<rect x="20" y="220" width="200" height="100" rx="8" fill="#313244" stroke="#89b4fa" stroke-width="2"/>
+<rect x="20" y="220" width="200" height="22" rx="8" fill="#89b4fa"/>
+<rect x="20" y="234" width="200" height="8" fill="#89b4fa"/>
+<text x="30" y="235" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Cylinder</text>
+<text x="210" y="235" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="30" y="260" font-family="monospace" font-size="10" fill="#cdd6f4">R: 50  H: 20</text>
+<circle cx="220" cy="270.0" r="6" fill="#1e1e2e"/>
+<circle cx="220" cy="270.0" r="4.5" fill="#89b4fa"/>
+<text x="210" y="273.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">G</text>
+<rect x="320" y="90" width="200" height="130" rx="8" fill="#313244" stroke="#fab387" stroke-width="2"/>
+<rect x="320" y="90" width="200" height="22" rx="8" fill="#fab387"/>
+<rect x="320" y="104" width="200" height="8" fill="#fab387"/>
+<text x="330" y="105" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Circular Array</text>
+<text x="510" y="105" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="330" y="130" font-family="monospace" font-size="10" fill="#cdd6f4">N: 12  A: 360°</text>
+<circle cx="320" cy="155.0" r="6" fill="#1e1e2e"/>
+<circle cx="320" cy="155.0" r="4.5" fill="#89b4fa"/>
+<text x="330" y="158.0" font-family="sans-serif" font-size="9" fill="#a6adc8">G</text>
+<circle cx="520" cy="155.0" r="6" fill="#1e1e2e"/>
+<circle cx="520" cy="155.0" r="4.5" fill="#89b4fa"/>
+<text x="510" y="158.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">G</text>
+<rect x="320" y="270" width="200" height="120" rx="8" fill="#313244" stroke="#89b4fa" stroke-width="2"/>
+<rect x="320" y="270" width="200" height="22" rx="8" fill="#89b4fa"/>
+<rect x="320" y="284" width="200" height="8" fill="#89b4fa"/>
+<text x="330" y="285" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Box</text>
+<text x="510" y="285" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="330" y="310" font-family="monospace" font-size="10" fill="#cdd6f4">W: 15  H: 25  D: 20</text>
+<circle cx="520" cy="330.0" r="6" fill="#1e1e2e"/>
+<circle cx="520" cy="330.0" r="4.5" fill="#89b4fa"/>
+<text x="510" y="333.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">G</text>
+<rect x="660" y="180" width="200" height="120" rx="8" fill="#313244" stroke="#cba6f7" stroke-width="2"/>
+<rect x="660" y="180" width="200" height="22" rx="8" fill="#cba6f7"/>
+<rect x="660" y="194" width="200" height="8" fill="#cba6f7"/>
+<text x="670" y="195" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Union</text>
+<text x="850" y="195" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<circle cx="660" cy="220.0" r="6" fill="#1e1e2e"/>
+<circle cx="660" cy="220.0" r="4.5" fill="#89b4fa"/>
+<text x="670" y="223.0" font-family="sans-serif" font-size="9" fill="#a6adc8">A</text>
+<circle cx="660" cy="260.0" r="6" fill="#1e1e2e"/>
+<circle cx="660" cy="260.0" r="4.5" fill="#89b4fa"/>
+<text x="670" y="263.0" font-family="sans-serif" font-size="9" fill="#a6adc8">B</text>
+<circle cx="860" cy="240.0" r="6" fill="#1e1e2e"/>
+<circle cx="860" cy="240.0" r="4.5" fill="#89b4fa"/>
+<text x="850" y="243.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">G</text>
+<rect x="660" y="430" width="200" height="100" rx="8" fill="#313244" stroke="#89b4fa" stroke-width="2"/>
+<rect x="660" y="430" width="200" height="22" rx="8" fill="#89b4fa"/>
+<rect x="660" y="444" width="200" height="8" fill="#89b4fa"/>
+<text x="670" y="445" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Cylinder</text>
+<text x="850" y="445" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<text x="670" y="470" font-family="monospace" font-size="10" fill="#cdd6f4">R: 10  H: 30</text>
+<circle cx="860" cy="480.0" r="6" fill="#1e1e2e"/>
+<circle cx="860" cy="480.0" r="4.5" fill="#89b4fa"/>
+<text x="850" y="483.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">G</text>
+<rect x="960" y="200" width="200" height="120" rx="8" fill="#313244" stroke="#cba6f7" stroke-width="2"/>
+<rect x="960" y="200" width="200" height="22" rx="8" fill="#cba6f7"/>
+<rect x="960" y="214" width="200" height="8" fill="#cba6f7"/>
+<text x="970" y="215" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Subtract</text>
+<text x="1150" y="215" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<circle cx="960" cy="240.0" r="6" fill="#1e1e2e"/>
+<circle cx="960" cy="240.0" r="4.5" fill="#89b4fa"/>
+<text x="970" y="243.0" font-family="sans-serif" font-size="9" fill="#a6adc8">A</text>
+<circle cx="960" cy="280.0" r="6" fill="#1e1e2e"/>
+<circle cx="960" cy="280.0" r="4.5" fill="#89b4fa"/>
+<text x="970" y="283.0" font-family="sans-serif" font-size="9" fill="#a6adc8">B</text>
+<circle cx="1160" cy="260.0" r="6" fill="#1e1e2e"/>
+<circle cx="1160" cy="260.0" r="4.5" fill="#89b4fa"/>
+<text x="1150" y="263.0" font-family="sans-serif" font-size="9" fill="#a6adc8" text-anchor="end">G</text>
+<rect x="1240" y="215" width="140" height="90" rx="8" fill="#313244" stroke="#f38ba8" stroke-width="2"/>
+<rect x="1240" y="215" width="140" height="22" rx="8" fill="#f38ba8"/>
+<rect x="1240" y="229" width="140" height="8" fill="#f38ba8"/>
+<text x="1250" y="230" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e1e2e">Bake</text>
+<text x="1370" y="230" font-family="sans-serif" font-size="9" fill="#1e1e2e" text-anchor="end">#1</text>
+<circle cx="1240" cy="260.0" r="6" fill="#1e1e2e"/>
+<circle cx="1240" cy="260.0" r="4.5" fill="#89b4fa"/>
+<text x="1250" y="263.0" font-family="sans-serif" font-size="9" fill="#a6adc8">G</text>
+<path d="M220,130.0 C270.0,130.0 270.0,155.0 320,155.0" stroke="#f9e2af" stroke-width="2.5" fill="none" opacity="0.85"/>
+<path d="M520,330.0 C420.0,330.0 420.0,155.0 320,155.0" stroke="#89b4fa" stroke-width="2.5" fill="none" opacity="0.85"/>
+<path d="M220,270.0 C440.0,270.0 440.0,220.0 660,220.0" stroke="#89b4fa" stroke-width="2.5" fill="none" opacity="0.85"/>
+<path d="M520,155.0 C590.0,155.0 590.0,260.0 660,260.0" stroke="#89b4fa" stroke-width="2.5" fill="none" opacity="0.85"/>
+<path d="M860,240.0 C910.0,240.0 910.0,240.0 960,240.0" stroke="#89b4fa" stroke-width="2.5" fill="none" opacity="0.85"/>
+<path d="M860,480.0 C910.0,480.0 910.0,280.0 960,280.0" stroke="#89b4fa" stroke-width="2.5" fill="none" opacity="0.85"/>
+<path d="M1160,260.0 C1200.0,260.0 1200.0,260.0 1240,260.0" stroke="#89b4fa" stroke-width="2.5" fill="none" opacity="0.85"/>
+<text x="700" y="570" font-family="sans-serif" font-size="11" fill="#a6adc8" text-anchor="middle">Gear: Cylinder + 12 teeth(Box×CircularArray) - center hole(Cylinder) → Bake</text>
+</svg>

@@ -6944,10 +6944,10 @@ impl eframe::App for ViewerApp {
                                 ui.add_space(4.0);
                                 ui.label(egui::RichText::new("Transform").size(11.0).color(egui::Color32::from_rgb(0xf9, 0xe2, 0xaf)).strong());
                                 let transforms = [
-                                    ("Move", crate::ui::workspaces::NodeType::Move),
-                                    ("Rotate", crate::ui::workspaces::NodeType::Rotate { angle_deg: 45.0 }),
-                                    ("Scale", crate::ui::workspaces::NodeType::Scale { factor: 2.0 }),
-                                    ("Mirror", crate::ui::workspaces::NodeType::Mirror),
+                                    ("Move", crate::ui::workspaces::NodeType::Move { x: 10.0, y: 0.0, z: 0.0 }),
+                                    ("Rotate", crate::ui::workspaces::NodeType::Rotate { x_deg: 0.0, y_deg: 0.0, z_deg: 45.0 }),
+                                    ("Scale", crate::ui::workspaces::NodeType::Scale { x: 2.0, y: 2.0, z: 2.0 }),
+                                    ("Mirror", crate::ui::workspaces::NodeType::Mirror { plane: crate::ui::workspaces::MirrorPlane::YZ }),
                                     ("Linear Array", crate::ui::workspaces::NodeType::LinearArray { count: 3, spacing: 120.0 }),
                                     ("Circular Array", crate::ui::workspaces::NodeType::CircularArray { count: 6, angle: 360.0 }),
                                 ];
@@ -7416,16 +7416,71 @@ impl eframe::App for ViewerApp {
                                                                         if ui.add(egui::DragValue::new(&mut c).range(1..=10000)).changed() { *count = c as u32; local_changed = true; }
                                                                     });
                                                                 }
-                                                                crate::ui::workspaces::NodeType::Rotate { angle_deg } => {
+                                                                crate::ui::workspaces::NodeType::Rotate { x_deg, y_deg, z_deg } => {
                                                                     ui.horizontal(|ui| {
-                                                                        ui.label("Angle:");
-                                                                        if ui.add(egui::DragValue::new(angle_deg).speed(1.0).range(-360.0..=360.0)).changed() { local_changed = true; }
+                                                                        ui.label("X°:");
+                                                                        if ui.add(egui::DragValue::new(x_deg).speed(1.0).range(-360.0..=360.0)).changed() { local_changed = true; }
+                                                                    });
+                                                                    ui.horizontal(|ui| {
+                                                                        ui.label("Y°:");
+                                                                        if ui.add(egui::DragValue::new(y_deg).speed(1.0).range(-360.0..=360.0)).changed() { local_changed = true; }
+                                                                    });
+                                                                    ui.horizontal(|ui| {
+                                                                        ui.label("Z°:");
+                                                                        if ui.add(egui::DragValue::new(z_deg).speed(1.0).range(-360.0..=360.0)).changed() { local_changed = true; }
                                                                     });
                                                                 }
-                                                                crate::ui::workspaces::NodeType::Scale { factor } => {
+                                                                crate::ui::workspaces::NodeType::Scale { x, y, z } => {
                                                                     ui.horizontal(|ui| {
-                                                                        ui.label("Factor:");
-                                                                        if ui.add(egui::DragValue::new(factor).speed(0.1).range(0.01..=100.0)).changed() { local_changed = true; }
+                                                                        ui.label("X:");
+                                                                        if ui.add(egui::DragValue::new(x).speed(0.1).range(0.01..=100.0)).changed() { local_changed = true; }
+                                                                    });
+                                                                    ui.horizontal(|ui| {
+                                                                        ui.label("Y:");
+                                                                        if ui.add(egui::DragValue::new(y).speed(0.1).range(0.01..=100.0)).changed() { local_changed = true; }
+                                                                    });
+                                                                    ui.horizontal(|ui| {
+                                                                        ui.label("Z:");
+                                                                        if ui.add(egui::DragValue::new(z).speed(0.1).range(0.01..=100.0)).changed() { local_changed = true; }
+                                                                    });
+                                                                }
+                                                                crate::ui::workspaces::NodeType::Move { x, y, z } => {
+                                                                    ui.horizontal(|ui| {
+                                                                        ui.label("X:");
+                                                                        if ui.add(egui::DragValue::new(x).speed(1.0)).changed() { local_changed = true; }
+                                                                    });
+                                                                    ui.horizontal(|ui| {
+                                                                        ui.label("Y:");
+                                                                        if ui.add(egui::DragValue::new(y).speed(1.0)).changed() { local_changed = true; }
+                                                                    });
+                                                                    ui.horizontal(|ui| {
+                                                                        ui.label("Z:");
+                                                                        if ui.add(egui::DragValue::new(z).speed(1.0)).changed() { local_changed = true; }
+                                                                    });
+                                                                }
+                                                                crate::ui::workspaces::NodeType::Mirror { plane } => {
+                                                                    ui.horizontal(|ui| {
+                                                                        ui.label("Plane:");
+                                                                        let mut idx = match plane {
+                                                                            crate::ui::workspaces::MirrorPlane::YZ => 0,
+                                                                            crate::ui::workspaces::MirrorPlane::XZ => 1,
+                                                                            crate::ui::workspaces::MirrorPlane::XY => 2,
+                                                                        };
+                                                                        let resp = egui::ComboBox::from_label("")
+                                                                            .selected_text(match plane {
+                                                                                crate::ui::workspaces::MirrorPlane::YZ => "YZ",
+                                                                                crate::ui::workspaces::MirrorPlane::XZ => "XZ",
+                                                                                crate::ui::workspaces::MirrorPlane::XY => "XY",
+                                                                            })
+                                                                            .show_ui(ui, |ui| {
+                                                                                if ui.selectable_label(*plane == crate::ui::workspaces::MirrorPlane::YZ, "YZ (negate X)").clicked() { *plane = crate::ui::workspaces::MirrorPlane::YZ; }
+                                                                                if ui.selectable_label(*plane == crate::ui::workspaces::MirrorPlane::XZ, "XZ (negate Y)").clicked() { *plane = crate::ui::workspaces::MirrorPlane::XZ; }
+                                                                                if ui.selectable_label(*plane == crate::ui::workspaces::MirrorPlane::XY, "XY (negate Z)").clicked() { *plane = crate::ui::workspaces::MirrorPlane::XY; }
+                                                                            });
+                                                                        if resp.response.clicked() {
+                                                                            let _ = idx;
+                                                                            local_changed = true;
+                                                                        }
                                                                     });
                                                                 }
                                                                 crate::ui::workspaces::NodeType::Circle { radius } => {
@@ -7484,20 +7539,26 @@ impl eframe::App for ViewerApp {
                                             });
 
                                             // ── Visible, clickable port circles ──
+                                            // Hit rects are placed INSIDE the node (shifted inward) so they
+                                            // don't get clipped by the Area's clip_rect.
+                                            // Ports support both click-to-connect and drag-to-connect.
                                             let area_rect = ui.min_rect();
                                             let node_left = area_rect.min.x;
                                             let node_right = area_rect.max.x;
                                             let node_top = area_rect.min.y;
                                             let node_bottom = area_rect.max.y;
                                             let node_height = node_bottom - node_top;
+                                            let is_connecting = self.brepcad_vp_connect_from.is_some();
 
                                             // Input ports (left edge)
                                             for (i, pd) in in_ports.iter().enumerate() {
                                                 let y_off = node_height * (i + 1) as f32 / (in_count + 1) as f32;
                                                 let center = egui::pos2(node_left, node_top + y_off);
                                                 let port_color = pd.port_type.color();
-                                                ui.painter().circle_filled(center, 6.0, egui::Color32::from_rgb(0x1e, 0x1e, 0x2e));
-                                                ui.painter().circle_filled(center, 4.5, port_color);
+                                                // Highlight if a connection is in progress
+                                                let r = if is_connecting { 7.0 } else { 6.0 };
+                                                ui.painter().circle_filled(center, r, egui::Color32::from_rgb(0x1e, 0x1e, 0x2e));
+                                                ui.painter().circle_filled(center, r - 1.5, port_color);
                                                 ui.painter().text(
                                                     egui::pos2(node_left + 10.0, center.y - 6.0),
                                                     egui::Align2::LEFT_CENTER,
@@ -7505,15 +7566,22 @@ impl eframe::App for ViewerApp {
                                                     egui::FontId::proportional(9.0),
                                                     egui::Color32::from_rgb(0xc0, 0xca, 0xf5),
                                                 );
-                                                let hit_rect = egui::Rect::from_center_size(center, egui::vec2(14.0, 14.0));
+                                                // Hit rect INSIDE the node (from node_left to node_left+16)
+                                                let hit_rect = egui::Rect::from_min_size(
+                                                    egui::pos2(node_left, center.y - 9.0),
+                                                    egui::vec2(18.0, 18.0),
+                                                );
                                                 let resp = ui.interact(
                                                     hit_rect,
                                                     egui::Id::new(format!("vp_port_in_{}_{}", nid, i)),
-                                                    egui::Sense::click(),
+                                                    egui::Sense::click_and_drag(),
                                                 );
-                                                if resp.on_hover_text(format!("{}: {} (input)", pd.name, pd.port_type.name())).clicked() {
+                                                if resp.on_hover_text(format!("{}: {} (input) — click to connect", pd.name, pd.port_type.name())).clicked() {
                                                     local_port_click = Some((false, i));
                                                 }
+                                                // Also support drag-release on this port
+                                                // Note: can't check drag_stopped after on_hover_text consumed resp,
+                                                // so we rely on click for input ports.
                                             }
 
                                             // Output port(s) (right edge)
@@ -7526,8 +7594,9 @@ impl eframe::App for ViewerApp {
                                                     };
                                                     let center = egui::pos2(node_right, node_top + y_off);
                                                     let port_color = pd.port_type.color();
-                                                    ui.painter().circle_filled(center, 6.0, egui::Color32::from_rgb(0x1e, 0x1e, 0x2e));
-                                                    ui.painter().circle_filled(center, 4.5, port_color);
+                                                    let r = if is_connecting { 7.0 } else { 6.0 };
+                                                    ui.painter().circle_filled(center, r, egui::Color32::from_rgb(0x1e, 0x1e, 0x2e));
+                                                    ui.painter().circle_filled(center, r - 1.5, port_color);
                                                     ui.painter().text(
                                                         egui::pos2(node_right - 10.0, center.y - 6.0),
                                                         egui::Align2::RIGHT_CENTER,
@@ -7535,13 +7604,20 @@ impl eframe::App for ViewerApp {
                                                         egui::FontId::proportional(9.0),
                                                         egui::Color32::from_rgb(0xc0, 0xca, 0xf5),
                                                     );
-                                                    let hit_rect = egui::Rect::from_center_size(center, egui::vec2(14.0, 14.0));
+                                                    // Hit rect INSIDE the node (from node_right-18 to node_right)
+                                                    let hit_rect = egui::Rect::from_min_size(
+                                                        egui::pos2(node_right - 18.0, center.y - 9.0),
+                                                        egui::vec2(18.0, 18.0),
+                                                    );
                                                     let resp = ui.interact(
                                                         hit_rect,
                                                         egui::Id::new(format!("vp_port_out_{}_{}", nid, i)),
-                                                        egui::Sense::click(),
+                                                        egui::Sense::click_and_drag(),
                                                     );
-                                                    if resp.on_hover_text(format!("{}: {} (output)", pd.name, pd.port_type.name())).clicked() {
+                                                    // Check drag_started BEFORE on_hover_text consumes resp
+                                                    let drag_started = resp.drag_started();
+                                                    let clicked = resp.on_hover_text(format!("{}: {} (output) — click or drag to connect", pd.name, pd.port_type.name())).clicked();
+                                                    if clicked || drag_started {
                                                         local_port_click = Some((true, i));
                                                     }
                                                 }
@@ -17955,8 +18031,11 @@ fn vp_node_height(nt: &crate::ui::workspaces::NodeType) -> f32 {
         NodeType::NumberSlider { .. } => 100.0,
         NodeType::Series { .. } => 120.0,
         NodeType::Cylinder { .. } | NodeType::Torus { .. } | NodeType::LinearArray { .. } | NodeType::CircularArray { .. } => 105.0,
+        // 3-parameter transform nodes (X/Y/Z)
+        NodeType::Move { .. } | NodeType::Rotate { .. } | NodeType::Scale { .. } => 130.0,
+        NodeType::Mirror { .. } => 80.0,
         NodeType::Sphere { .. } | NodeType::Fillet { .. } | NodeType::Chamfer { .. } |
-        NodeType::Rotate { .. } | NodeType::Scale { .. } | NodeType::Circle { .. } |
+        NodeType::Circle { .. } |
         NodeType::DivideCurve { .. } | NodeType::IntegerInput { .. } |
         NodeType::BooleanToggle { .. } | NodeType::Expression { .. } => 90.0,
         _ => 70.0,
@@ -17993,8 +18072,8 @@ fn vp_node_colors(nt: &crate::ui::workspaces::NodeType) -> (egui::Color32, egui:
             (egui::Color32::from_rgb(0x94, 0xe2, 0xd5), egui::Color32::from_rgb(0x94, 0xe2, 0xd5))
         }
         // Transform — peach
-        NodeType::Move | NodeType::Rotate { .. } | NodeType::Scale { .. } |
-        NodeType::Mirror | NodeType::LinearArray { .. } | NodeType::CircularArray { .. } => {
+        NodeType::Move { .. } | NodeType::Rotate { .. } | NodeType::Scale { .. } |
+        NodeType::Mirror { .. } | NodeType::LinearArray { .. } | NodeType::CircularArray { .. } => {
             (egui::Color32::from_rgb(0xfa, 0xb3, 0x87), egui::Color32::from_rgb(0xfa, 0xb3, 0x87))
         }
         // Boolean — lavender
@@ -18227,24 +18306,28 @@ fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<draper_to
                 }
 
                 // ─── Transform ───
-                NodeType::Move => {
+                NodeType::Move { x, y, z } => {
                     if let Some(solid) = inputs.get(0).and_then(to_solid) {
+                        // If a vector is connected, use it; otherwise use inline X/Y/Z
                         let v = inputs.get(1).and_then(|d| match d {
                             VpData::Vector(v) => Some(*v),
                             VpData::Point(p) => Some(*p),
                             _ => None,
-                        }).unwrap_or([0.0, 0.0, 0.0]);
+                        }).unwrap_or([*x, *y, *z]);
                         let mut s = solid;
                         ShapeBuilder::transform_solid(&mut s, &Transform::translation(v[0], v[1], v[2]));
                         results.insert(node.id, VpData::Geometry(Box::new(s)));
                         changed = true;
                     }
                 }
-                NodeType::Scale { factor } => {
+                NodeType::Scale { x, y, z } => {
                     if let Some(solid) = inputs.get(0).and_then(to_solid) {
-                        let f = inputs.get(1).and_then(to_number).unwrap_or(*factor);
+                        // Connected X/Y/Z override inline values
+                        let sx = inputs.get(1).and_then(to_number).unwrap_or(*x);
+                        let sy = inputs.get(2).and_then(to_number).unwrap_or(*y);
+                        let sz = inputs.get(3).and_then(to_number).unwrap_or(*z);
                         let mut s = solid;
-                        ShapeBuilder::transform_solid(&mut s, &Transform::scaling(f, f, f));
+                        ShapeBuilder::transform_solid(&mut s, &Transform::scaling(sx, sy, sz));
                         results.insert(node.id, VpData::Geometry(Box::new(s)));
                         changed = true;
                     }
@@ -18296,21 +18379,36 @@ fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<draper_to
                 }
 
                 // ─── Transform (Rotate, Mirror, Arrays) ───
-                NodeType::Rotate { angle_deg } => {
+                NodeType::Rotate { x_deg, y_deg, z_deg } => {
                     if let Some(solid) = inputs.get(0).and_then(to_solid) {
-                        let angle = inputs.get(1).and_then(to_number).unwrap_or(*angle_deg);
-                        let rad = angle.to_radians();
+                        // Connected X/Y/Z angles override inline values
+                        let ax = inputs.get(1).and_then(to_number).unwrap_or(*x_deg);
+                        let ay = inputs.get(2).and_then(to_number).unwrap_or(*y_deg);
+                        let az = inputs.get(3).and_then(to_number).unwrap_or(*z_deg);
                         let mut s = solid;
-                        ShapeBuilder::transform_solid(&mut s, &Transform::rotation_z(rad));
+                        // Apply Euler angles: X first, then Y, then Z (intrinsic rotations)
+                        if ax != 0.0 {
+                            ShapeBuilder::transform_solid(&mut s, &Transform::rotation_x(ax.to_radians()));
+                        }
+                        if ay != 0.0 {
+                            ShapeBuilder::transform_solid(&mut s, &Transform::rotation_y(ay.to_radians()));
+                        }
+                        if az != 0.0 {
+                            ShapeBuilder::transform_solid(&mut s, &Transform::rotation_z(az.to_radians()));
+                        }
                         results.insert(node.id, VpData::Geometry(Box::new(s)));
                         changed = true;
                     }
                 }
-                NodeType::Mirror => {
+                NodeType::Mirror { plane } => {
                     if let Some(solid) = inputs.get(0).and_then(to_solid) {
                         let mut s = solid;
-                        // Mirror across YZ plane (negate X)
-                        ShapeBuilder::transform_solid(&mut s, &Transform::scaling(-1.0, 1.0, 1.0));
+                        let t = match plane {
+                            crate::ui::workspaces::MirrorPlane::YZ => Transform::scaling(-1.0, 1.0, 1.0),
+                            crate::ui::workspaces::MirrorPlane::XZ => Transform::scaling(1.0, -1.0, 1.0),
+                            crate::ui::workspaces::MirrorPlane::XY => Transform::scaling(1.0, 1.0, -1.0),
+                        };
+                        ShapeBuilder::transform_solid(&mut s, &t);
                         results.insert(node.id, VpData::Geometry(Box::new(s)));
                         changed = true;
                     }
