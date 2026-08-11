@@ -179,6 +179,24 @@ pub enum NodeType {
     /// Chamfer operation.
     Chamfer { distance: f64 },
 
+    // ─── Data Tree Operations (Phase 6) ───
+    /// Graft: wraps each item in a list into its own single-item list.
+    Graft,
+    /// Flatten: concatenates all sub-lists into a single flat list.
+    Flatten,
+    /// Cross-reference: cartesian product of two lists.
+    CrossRef,
+    /// Shift List: shifts list items by N positions.
+    ShiftList { amount: i32 },
+    /// Subset: extracts a sub-list from start to end index.
+    Subset { start: u32, count: u32 },
+    /// Dispatch: splits a list into two based on a boolean pattern.
+    Dispatch,
+    /// Weave: interleaves two lists into one.
+    Weave,
+    /// Concat: concatenates two lists.
+    Concat,
+
     // ─── Output ───
     /// Bake to document.
     BakeToDoc,
@@ -248,6 +266,15 @@ impl NodeType {
             // Modify
             NodeType::Fillet { .. } => "Fillet",
             NodeType::Chamfer { .. } => "Chamfer",
+            // Data Tree
+            NodeType::Graft => "Graft",
+            NodeType::Flatten => "Flatten",
+            NodeType::CrossRef => "Cross Reference",
+            NodeType::ShiftList { .. } => "Shift List",
+            NodeType::Subset { .. } => "Subset",
+            NodeType::Dispatch => "Dispatch",
+            NodeType::Weave => "Weave",
+            NodeType::Concat => "Concat",
             // Output
             NodeType::BakeToDoc => "Bake to Doc",
         }
@@ -271,6 +298,9 @@ impl NodeType {
             NodeType::Mirror | NodeType::LinearArray { .. } | NodeType::CircularArray { .. } => "Transform",
             NodeType::BooleanUnion | NodeType::BooleanSubtract | NodeType::BooleanIntersect => "Boolean",
             NodeType::Fillet { .. } | NodeType::Chamfer { .. } => "Modify",
+            NodeType::Graft | NodeType::Flatten | NodeType::CrossRef |
+            NodeType::ShiftList { .. } | NodeType::Subset { .. } |
+            NodeType::Dispatch | NodeType::Weave | NodeType::Concat => "Tree",
             NodeType::BakeToDoc => "Output",
         }
     }
@@ -317,6 +347,14 @@ impl NodeType {
             NodeType::BooleanIntersect => "Int",
             NodeType::Fillet { .. } => "Fil",
             NodeType::Chamfer { .. } => "Chm",
+            NodeType::Graft => "Gr",
+            NodeType::Flatten => "Fl",
+            NodeType::CrossRef => "XR",
+            NodeType::ShiftList { .. } => "Sh",
+            NodeType::Subset { .. } => "Sub",
+            NodeType::Dispatch => "Dp",
+            NodeType::Weave => "Wv",
+            NodeType::Concat => "Cat",
             NodeType::BakeToDoc => "Bake",
         }
     }
@@ -404,6 +442,27 @@ impl NodeType {
             NodeType::Fillet { .. } | NodeType::Chamfer { .. } => vec![
                 PortDesc { name: "G", port_type: PortType::Geometry },
             ],
+            // Data Tree
+            NodeType::Graft | NodeType::Flatten => vec![
+                PortDesc { name: "L", port_type: PortType::List },
+            ],
+            NodeType::CrossRef | NodeType::Weave | NodeType::Concat => vec![
+                PortDesc { name: "A", port_type: PortType::List },
+                PortDesc { name: "B", port_type: PortType::List },
+            ],
+            NodeType::ShiftList { .. } => vec![
+                PortDesc { name: "L", port_type: PortType::List },
+                PortDesc { name: "N", port_type: PortType::Integer },
+            ],
+            NodeType::Subset { .. } => vec![
+                PortDesc { name: "L", port_type: PortType::List },
+                PortDesc { name: "S", port_type: PortType::Integer },
+                PortDesc { name: "C", port_type: PortType::Integer },
+            ],
+            NodeType::Dispatch => vec![
+                PortDesc { name: "L", port_type: PortType::List },
+                PortDesc { name: "P", port_type: PortType::List },
+            ],
             // Output
             NodeType::BakeToDoc => vec![PortDesc { name: "G", port_type: PortType::Geometry }],
         }
@@ -417,7 +476,18 @@ impl NodeType {
             NodeType::BooleanToggle { .. } => vec![PortDesc { name: "V", port_type: PortType::Boolean }],
             NodeType::PointInput { .. } => vec![PortDesc { name: "P", port_type: PortType::Point }],
             NodeType::VectorInput { .. } => vec![PortDesc { name: "V", port_type: PortType::Vector }],
-            NodeType::Panel | NodeType::BakeToDoc => vec![],
+            NodeType::Panel | // Data Tree
+            NodeType::Graft | NodeType::Flatten | NodeType::CrossRef |
+            NodeType::ShiftList { .. } | NodeType::Subset { .. } |
+            NodeType::Weave | NodeType::Concat => vec![
+                PortDesc { name: "L", port_type: PortType::List },
+            ],
+            NodeType::Dispatch => vec![
+                PortDesc { name: "A", port_type: PortType::List },
+                PortDesc { name: "B", port_type: PortType::List },
+            ],
+            NodeType::Panel => vec![],
+            NodeType::BakeToDoc => vec![],
             NodeType::Series { .. } => vec![PortDesc { name: "L", port_type: PortType::List }],
             NodeType::ListLength => vec![PortDesc { name: "N", port_type: PortType::Integer }],
             NodeType::ListItem => vec![PortDesc { name: "I", port_type: PortType::Any }],

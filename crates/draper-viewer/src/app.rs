@@ -6995,6 +6995,28 @@ impl eframe::App for ViewerApp {
                                 }
 
                                 ui.add_space(4.0);
+                                ui.label(egui::RichText::new("Tree").size(11.0).color(egui::Color32::from_rgb(0x94, 0xe2, 0xd5)).strong());
+                                let tree_nodes = [
+                                    ("Graft", crate::ui::workspaces::NodeType::Graft),
+                                    ("Flatten", crate::ui::workspaces::NodeType::Flatten),
+                                    ("Cross Reference", crate::ui::workspaces::NodeType::CrossRef),
+                                    ("Shift List", crate::ui::workspaces::NodeType::ShiftList { amount: 1 }),
+                                    ("Subset", crate::ui::workspaces::NodeType::Subset { start: 0, count: 5 }),
+                                    ("Dispatch", crate::ui::workspaces::NodeType::Dispatch),
+                                    ("Weave", crate::ui::workspaces::NodeType::Weave),
+                                    ("Concat", crate::ui::workspaces::NodeType::Concat),
+                                ];
+                                for (label, nt) in &tree_nodes {
+                                    if filter.is_empty() || label.to_lowercase().contains(&filter) {
+                                        if ui.add(egui::Button::new(*label).min_size(egui::vec2(180.0, 22.0))).clicked() {
+                                            let id = add_node(&mut self.brepcad_vp_graph, nt.clone());
+                                            self.brepcad_status_msg = format!("VP: added {} (id={})", label, id);
+                                            self.brepcad_vp_dirty = true;
+                                        }
+                                    }
+                                }
+
+                                ui.add_space(4.0);
                                 ui.label(egui::RichText::new("Output").size(11.0).color(egui::Color32::from_rgb(0xf3, 0x8b, 0xa8)).strong());
                                 if ui.add(egui::Button::new("Bake to Doc").min_size(egui::vec2(180.0, 22.0))).clicked() {
                                     let id = add_node(&mut self.brepcad_vp_graph, crate::ui::workspaces::NodeType::BakeToDoc);
@@ -7376,6 +7398,25 @@ impl eframe::App for ViewerApp {
                                                             ui.horizontal(|ui| {
                                                                 ui.label("f:");
                                                                 if ui.text_edit_singleline(expr).changed() { local_changed = true; }
+                                                            });
+                                                        }
+                                                        crate::ui::workspaces::NodeType::ShiftList { amount } => {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Shift:");
+                                                                let mut a = *amount as i32;
+                                                                if ui.add(egui::DragValue::new(&mut a).range(-10000..=10000)).changed() { *amount = a; local_changed = true; }
+                                                            });
+                                                        }
+                                                        crate::ui::workspaces::NodeType::Subset { start, count } => {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Start:");
+                                                                let mut s = *start as i32;
+                                                                if ui.add(egui::DragValue::new(&mut s).range(0..=100000)).changed() { *start = s as u32; local_changed = true; }
+                                                            });
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Count:");
+                                                                let mut c = *count as i32;
+                                                                if ui.add(egui::DragValue::new(&mut c).range(1..=100000)).changed() { *count = c as u32; local_changed = true; }
                                                             });
                                                         }
                                                         _ => {
@@ -18342,6 +18383,100 @@ fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<draper_to
                 NodeType::Panel => {
                     if let Some(d) = inputs.get(0) {
                         results.insert(node.id, d.clone());
+                        changed = true;
+                    }
+                }
+
+                // ─── Data Tree Operations (Phase 6) ───
+                NodeType::Graft => {
+                    if let Some(VpData::List(items)) = inputs.get(0) {
+                        let grafted: Vec<VpData> = items.iter()
+                            .map(|item| VpData::List(vec![item.clone()]))
+                            .collect();
+                        results.insert(node.id, VpData::List(grafted));
+                        changed = true;
+                    }
+                }
+                NodeType::Flatten => {
+                    if let Some(VpData::List(items)) = inputs.get(0) {
+                        let mut flat = Vec::new();
+                        for item in items {
+                            match item {
+                                VpData::List(sub) => flat.extend(sub.iter().cloned()),
+                                other => flat.push(other.clone()),
+                            }
+                        }
+                        results.insert(node.id, VpData::List(flat));
+                        changed = true;
+                    }
+                }
+                NodeType::CrossRef => {
+                    if let (Some(VpData::List(a)), Some(VpData::List(b))) = (inputs.get(0), inputs.get(1)) {
+                        let mut result = Vec::new();
+                        for item_a in a {
+                            for item_b in b {
+                                result.push(VpData::List(vec![item_a.clone(), item_b.clone()]));
+                            }
+                        }
+                        results.insert(node.id, VpData::List(result));
+                        changed = true;
+                    }
+                }
+                NodeType::ShiftList { amount } => {
+                    if let Some(VpData::List(items)) = inputs.get(0) {
+                        let n = items.len();
+                        if n > 0 {
+                            let shift = (*amount as i64).rem_euclid(n as i64) as usize;
+                            let mut shifted = items.clone();
+                            shifted.rotate_left(shift);
+                            results.insert(node.id, VpData::List(shifted));
+                            changed = true;
+                        }
+                    }
+                }
+                NodeType::Subset { start, count } => {
+                    if let Some(VpData::List(items)) = inputs.get(0) {
+                        let s = *start as usize;
+                        let c = *count as usize;
+                        let subset: Vec<VpData> = items.iter().skip(s).take(c).cloned().collect();
+                        results.insert(node.id, VpData::List(subset));
+                        changed = true;
+                    }
+                }
+                NodeType::Dispatch => {
+                    if let (Some(VpData::List(items)), Some(VpData::List(pattern))) = (inputs.get(0), inputs.get(1)) {
+                        let mut list_a = Vec::new();
+                        let mut list_b = Vec::new();
+                        for (item, p) in items.iter().zip(pattern.iter()) {
+                            match p {
+                                VpData::Boolean(true) => list_a.push(item.clone()),
+                                _ => list_b.push(item.clone()),
+                            }
+                        }
+                        results.insert(node.id, VpData::List(vec![
+                            VpData::List(list_a),
+                            VpData::List(list_b),
+                        ]));
+                        changed = true;
+                    }
+                }
+                NodeType::Weave => {
+                    if let (Some(VpData::List(a)), Some(VpData::List(b))) = (inputs.get(0), inputs.get(1)) {
+                        let mut result = Vec::new();
+                        let max_len = a.len().max(b.len());
+                        for i in 0..max_len {
+                            if i < a.len() { result.push(a[i].clone()); }
+                            if i < b.len() { result.push(b[i].clone()); }
+                        }
+                        results.insert(node.id, VpData::List(result));
+                        changed = true;
+                    }
+                }
+                NodeType::Concat => {
+                    if let (Some(VpData::List(a)), Some(VpData::List(b))) = (inputs.get(0), inputs.get(1)) {
+                        let mut result = a.clone();
+                        result.extend(b.iter().cloned());
+                        results.insert(node.id, VpData::List(result));
                         changed = true;
                     }
                 }
