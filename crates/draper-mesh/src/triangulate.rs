@@ -2860,7 +2860,14 @@ fn triangulate_cylinder_face(face: &Face, cyl: &CylinderSurface, params: &Triang
     }
 
     // Detect "full U-period wrap" tube face and use grid triangulation for watertightness.
-    if boundary_uvs.len() >= 4 && is_full_u_period_wrap(&boundary_uvs, 2.0 * PI) {
+    // BUT: if any CoEdge has a PCurve (from boolean operations), use the
+    // general surface triangulation path instead — it evaluates boundary
+    // points from the PCurve, ensuring watertight topology with adjacent
+    // faces that share the same intersection edge.
+    let has_pcurves = face.outer_wire.as_ref()
+        .map(|w| w.coedges.iter().any(|c| c.curve_2d.is_some()))
+        .unwrap_or(false);
+    if !has_pcurves && boundary_uvs.len() >= 4 && is_full_u_period_wrap(&boundary_uvs, 2.0 * PI) {
         let (hole_polylines, _hole_uvs) = collect_face_holes_with_uv_from_cache(face, cache, &surface);
         if hole_polylines.is_empty() {
             log::info!(
@@ -2886,7 +2893,9 @@ fn triangulate_cylinder_face(face: &Face, cyl: &CylinderSurface, params: &Triang
     // Detection: no holes, both bottom_ring and top_ring have ≥3 points.
     // Triangulation: `triangulate_cylinder_tube_from_boundary` handles both
     // full and partial wrap (uses `is_full_wrap` to decide wrap-around).
-    if hole_polylines.is_empty() && boundary_3d.len() >= 6 {
+    // Skip this path if CoEdges have PCurves (from boolean operations) —
+    // use general surface triangulation instead for watertight topology.
+    if !has_pcurves && hole_polylines.is_empty() && boundary_3d.len() >= 6 {
         let (v_min_pw, v_max_pw) = compute_axis_v_range_pts(&boundary_3d, &cyl.origin, &cyl.axis);
         if v_max_pw > v_min_pw {
             let dedup_tol = (v_max_pw - v_min_pw).abs() * 0.01 + 1e-12;
