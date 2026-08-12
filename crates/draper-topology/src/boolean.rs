@@ -2118,8 +2118,10 @@ fn split_polygon_at_intersections(
     intersection: &[(f64, f64)],
     _crossings: &[usize],
 ) -> (Vec<(f64, f64)>, Vec<(f64, f64)>) {
-    // Simplified approach: create two sub-polygons by inserting the
-    // intersection curve as a shared boundary.
+    // Create two sub-polygons by inserting ONLY the entry/exit points
+    // of the intersection curve as shared boundary.
+    // The actual intersection curve is represented by the SHARED EDGE,
+    // not by inserting all intersection points into the polygon.
 
     let n = boundary.len();
     let ni = intersection.len();
@@ -2132,11 +2134,15 @@ fn split_polygon_at_intersections(
     let start_idx = find_closest_boundary_point(&intersection[0], boundary);
     let end_idx = find_closest_boundary_point(&intersection[ni - 1], boundary);
 
-    // Build two sub-polygons
+    // The entry/exit points are the first and last intersection points
+    let entry = intersection[0];
+    let exit = intersection[ni - 1];
+
+    // Build two sub-polygons using ONLY entry/exit points (not all 100 points)
     let mut poly_a: Vec<(f64, f64)> = Vec::new();
     let mut poly_b: Vec<(f64, f64)> = Vec::new();
 
-    // Polygon A: boundary from start to end, then intersection curve back
+    // Polygon A: boundary from start to end, then exit→entry (intersection curve)
     if start_idx <= end_idx {
         for i in start_idx..=end_idx {
             poly_a.push(boundary[i % n]);
@@ -2149,12 +2155,11 @@ fn split_polygon_at_intersections(
             poly_a.push(boundary[i]);
         }
     }
-    // Add intersection curve in reverse
-    for i in (0..ni).rev() {
-        poly_a.push(intersection[i]);
-    }
+    // Add only exit and entry points (the shared edge represents the curve between them)
+    poly_a.push(exit);
+    poly_a.push(entry);
 
-    // Polygon B: boundary from end to start, then intersection curve
+    // Polygon B: boundary from end to start, then entry→exit (intersection curve)
     if end_idx <= start_idx {
         for i in end_idx..=start_idx {
             poly_b.push(boundary[i % n]);
@@ -2167,9 +2172,8 @@ fn split_polygon_at_intersections(
             poly_b.push(boundary[i]);
         }
     }
-    for i in 0..ni {
-        poly_b.push(intersection[i]);
-    }
+    poly_b.push(entry);
+    poly_b.push(exit);
 
     (poly_a, poly_b)
 }
