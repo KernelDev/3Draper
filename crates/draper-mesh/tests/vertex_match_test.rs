@@ -30,7 +30,7 @@ fn test_cylinder_plane_vertex_match() {
         eprintln!("  Face[{}]: {} (edges={}, outer={}, holes={})",
             i, surf_type, edge_count, has_outer, hole_count);
 
-        // Print edge curve types
+        // Print edge IDs and curve types
         for (j, edge) in face.edges.iter().enumerate() {
             let curve_type = match &edge.curve {
                 Some(draper_geometry::Curve3d::Circle(_)) => "Circle",
@@ -39,7 +39,13 @@ fn test_cylinder_plane_vertex_match() {
                 Some(_) => "Other",
                 None => "None",
             };
-            eprintln!("    Edge[{}]: {} param_range={:?}", j, curve_type, edge.param_range);
+            eprintln!("    Edge[{}]: id={:?} {} param_range={:?}", j, edge.id, curve_type, edge.param_range);
+        }
+        // Print inner wire edge IDs
+        for (hi, wire) in face.inner_wires.iter().enumerate() {
+            for (ci, coedge) in wire.coedges.iter().enumerate() {
+                eprintln!("    Hole[{}] CoEdge[{}]: edge_id={:?}", hi, ci, coedge.edge);
+            }
         }
     }
 

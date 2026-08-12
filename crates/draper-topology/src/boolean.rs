@@ -2011,16 +2011,15 @@ fn split_planar_face(
     intersection_points: &[Point3d],
     tol: f64,
 ) -> BooleanResult<SplitFaceResult> {
-    // Get the face's boundary polygon
+    // Get the face's boundary polygon — use ONLY the edge endpoints (vertices)
+    // not intermediate samples. This keeps the polygon simple (4 vertices for
+    // a rectangle) and ensures split faces have minimal edges.
     let mut boundary: Vec<Point3d> = Vec::new();
     for edge in &face.edges {
         if let Some(ref curve) = edge.curve {
-            let (t_min, t_max) = edge.param_range;
-            let n = 20;
-            for i in 0..n {
-                let t = t_min + (t_max - t_min) * (i as f64 / n as f64);
-                boundary.push(curve.point_at(t));
-            }
+            let (t_min, _t_max) = edge.param_range;
+            // Use just the start point of each edge (end point = start of next)
+            boundary.push(curve.point_at(t_min));
         }
     }
 
@@ -2835,16 +2834,15 @@ fn split_planar_face_shared(
     pcurve: Option<Curve2d>,
     tol: f64,
 ) -> BooleanResult<SplitFaceResult> {
-    // Get the face's boundary polygon
+    // Get the face's boundary polygon — use ONLY the edge endpoints (vertices)
+    // not intermediate samples. This keeps the polygon simple (4 vertices for
+    // a rectangle) and ensures split faces have minimal edges.
     let mut boundary: Vec<Point3d> = Vec::new();
     for edge in &face.edges {
         if let Some(ref curve) = edge.curve {
-            let (t_min, t_max) = edge.param_range;
-            let n = 20;
-            for i in 0..n {
-                let t = t_min + (t_max - t_min) * (i as f64 / n as f64);
-                boundary.push(curve.point_at(t));
-            }
+            let (t_min, _t_max) = edge.param_range;
+            // Use just the start point of each edge (end point = start of next)
+            boundary.push(curve.point_at(t_min));
         }
     }
 
@@ -2918,11 +2916,22 @@ fn split_planar_face_shared(
 
     // Build faces using the SHARED edge for the intersection portion.
     // Each split face has:
-    //   - Some edges from the original boundary (new Edge IDs)
+    //   - Edges from the original face boundary (REUSED Edge IDs for watertight)
     //   - The shared edge for the intersection curve portion
+    //   - NEW shared edges for boundary segments created by the split
+    //     (entry/exit points that split original edges)
+    //
+    // For watertightness, we create a map of "split edge" → shared Edge
+    // so that both poly_a and poly_b reference the same Edge ID for
+    // the same geometric segment.
     let mut result_faces = Vec::new();
 
-    for poly_2d in &[poly_a, poly_b] {
+    // Map: (p0_index, p1_index) → Edge, for segments that need shared edges
+    // (entry/exit split points). Key is sorted vertex pair for dedup.
+    let mut shared_split_edges: std::collections::HashMap<(usize, usize), Edge> = std::collections::HashMap::new();
+
+    for poly_idx in 0..2 {
+        let poly_2d = if poly_idx == 0 { &poly_a } else { &poly_b };
         if poly_2d.len() < 3 {
             continue;
         }
@@ -2932,8 +2941,6 @@ fn split_planar_face_shared(
             .map(|(u, v)| plane.point_at(*u, *v))
             .collect();
 
-        // Build the face with edges, using the shared edge where the
-        // intersection curve is part of the boundary.
         let n = points_3d.len();
         let mut edges = Vec::new();
         let mut coedges = Vec::new();
@@ -2953,15 +2960,66 @@ fn split_planar_face_shared(
             });
 
             if p0_on_curve && p1_on_curve {
-                // Use the shared edge for this segment
+                // Use the shared edge for the intersection curve segment
                 edges.push(shared_edge.clone());
                 coedges.push(CoEdge::new(shared_edge.id, true));
             } else {
-                // Create a new edge for non-intersection boundary segments
-                let e = Edge::new_line(p0, p1);
-                let eid = e.id;
-                edges.push(e);
-                coedges.push(CoEdge::new(eid, true));
+                // This is a boundary segment — try to reuse the original face's edge
+                // by matching the segment to an original edge.
+                // Find the original edge that contains both p0 and p1.
+                let mut found_edge = None;
+                for orig_edge in &face.edges {
+                    if let Some(ref curve) = orig_edge.curve {
+                        let (t_min, t_max) = orig_edge.param_range;
+                        // Sample the original edge and check if p0 and p1 are on it
+                        let n_samples = 30;
+                        let mut p0_found = false;
+                        let mut p1_found = false;
+                        for k in 0..=n_samples {
+                            let t = t_min + (t_max - t_min) * (k as f64 / n_samples as f64);
+                            let ep = curve.point_at(t);
+                            if (ep.x - p0.x).powi(2) + (ep.y - p0.y).powi(2) + (ep.z - p0.z).powi(2) < tol * tol * 100.0 {
+                                p0_found = true;
+                            }
+                            if (ep.x - p1.x).powi(2) + (ep.y - p1.y).powi(2) + (ep.z - p1.z).powi(2) < tol * tol * 100.0 {
+                                p1_found = true;
+                            }
+                        }
+                        if p0_found && p1_found {
+                            found_edge = Some(orig_edge.clone());
+                            break;
+                        }
+                    }
+                }
+
+                if let Some(orig_edge) = found_edge {
+                    // Reuse the original edge — same ID → shared with adjacent faces
+                    edges.push(orig_edge.clone());
+                    coedges.push(CoEdge::new(orig_edge.id, true));
+                } else {
+                    // New segment from split (entry/exit point) — create a shared edge
+                    // that both poly_a and poly_b will reference
+                    let key = if p0.x < p1.x || (p0.x == p1.x && p0.y < p1.y) {
+                        (poly_idx, i)
+                    } else {
+                        (poly_idx, i)
+                    };
+                    let _ = key;
+
+                    // Check if we already created this edge for the other polygon
+                    let edge_key = format!("{:.6},{:.6},{:.6}-{:.6},{:.6},{:.6}",
+                        p0.x.min(p1.x), p0.y.min(p1.y), p0.z.min(p1.z),
+                        p0.x.max(p1.x), p0.y.max(p1.y), p0.z.max(p1.z));
+                    let edge_hash: u64 = edge_key.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+                    let map_key = (edge_hash as usize, 0usize);
+
+                    let edge = shared_split_edges.entry(map_key).or_insert_with(|| {
+                        Edge::new_line(p0, p1)
+                    }).clone();
+
+                    edges.push(edge.clone());
+                    coedges.push(CoEdge::new(edge.id, true));
+                }
             }
         }
 
