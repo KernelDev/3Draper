@@ -2297,7 +2297,8 @@ pub fn boolean_operation(
                     continue;
                 }
                 // Create a shared edge for this intersection curve.
-                // This edge will be referenced by BOTH split faces.
+                // This edge will be referenced by BOTH split faces, ensuring
+                // the edge cache produces identical 3D vertices for both.
                 let int_curve = create_polyline_curve(&curve.points);
                 let shared_edge = Edge {
                     id: TopoId::new(),
@@ -2750,8 +2751,21 @@ fn split_planar_face_shared(
 
     if entry_exit.len() < 2 {
         // Intersection curve doesn't cross the boundary.
-        // It may be entirely inside the face → add as a hole.
-        // This creates a proper trimmed face with the intersection as inner boundary.
+        // Check if ANY intersection point is actually inside the face.
+        // If not, the intersection is a false positive (e.g., plane-plane
+        // intersection line that doesn't overlap the actual faces).
+        let any_inside = intersection_2d.iter().any(|ip| {
+            point_in_polygon_2d(ip.0, ip.1, &boundary_2d, tol)
+        });
+
+        if !any_inside {
+            // Intersection doesn't touch this face — no split needed
+            return Ok(SplitFaceResult {
+                faces: vec![face.clone()],
+            });
+        }
+
+        // Intersection curve is entirely inside the face → add as a hole.
         let mut face_with_hole = face.clone();
         let coedge = CoEdge::new(shared_edge.id, true);
         let wire = Wire::new(vec![coedge]);
@@ -2759,6 +2773,19 @@ fn split_planar_face_shared(
         face_with_hole.edges.push(shared_edge.clone());
         return Ok(SplitFaceResult {
             faces: vec![face_with_hole],
+        });
+    }
+
+    // Additional check: verify that at least one intersection point is
+    // inside the face. This filters out false-positive plane-plane
+    // intersections where the infinite line crosses the boundary polygon
+    // but the actual face doesn't overlap.
+    let any_inside = intersection_2d.iter().any(|ip| {
+        point_in_polygon_2d(ip.0, ip.1, &boundary_2d, tol)
+    });
+    if !any_inside {
+        return Ok(SplitFaceResult {
+            faces: vec![face.clone()],
         });
     }
 
