@@ -2830,11 +2830,8 @@ fn triangulate_cylinder_face(face: &Face, cyl: &CylinderSurface, params: &Triang
                 let (hole_polylines, hole_uvs) = collect_face_holes_with_uv_from_cache(face, cache, &surface);
                 if !hole_polylines.is_empty() {
                     // Has holes — use general surface triangulation with holes
-                    for (hi, h) in hole_polylines.iter().enumerate() {
-                        eprintln!("  Hole {}: {} pts, first={:?}, last={:?}", hi, h.len(), h.first(), h.last());
-                    }
-                    eprintln!("  Boundary: first={:?}, last={:?}", dedup.first(), dedup.last());
-                    // Compute boundary UVs
+                    // Compute boundary UVs using PCurve from cache when available,
+                    // otherwise project points onto cylinder UV
                     let boundary_uvs: Vec<Point2d> = dedup.iter()
                         .map(|p| {
                             let (u, v) = cyl.project_point(p);

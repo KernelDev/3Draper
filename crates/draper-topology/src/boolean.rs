@@ -2746,8 +2746,19 @@ fn split_cylinder_face_multi_shared(
     };
 
     // Create the INNER band face (v1 to v2) — inside the other solid
-    let inner_coedge_bottom = CoEdge::new(edge_v1.id, false);
-    let inner_coedge_top = CoEdge::new(edge_v2.id, true);
+    // Use PCurves for the CoEdges so triangulation evaluates in UV space.
+    // The PCurve for a circle at height v on the cylinder is the line v=const
+    // in UV space: Line2d from (0, v) to (2π, v).
+    let mut inner_coedge_bottom = CoEdge::new(edge_v1.id, false);
+    inner_coedge_bottom.curve_2d = Some(Curve2d::Line(Line2d::new(
+        Point2d::new(2.0 * PI, v1),  // reversed: start at 2π
+        Point2d::new(0.0, v1),       // end at 0
+    )));
+    let mut inner_coedge_top = CoEdge::new(edge_v2.id, true);
+    inner_coedge_top.curve_2d = Some(Curve2d::Line(Line2d::new(
+        Point2d::new(0.0, v2),
+        Point2d::new(2.0 * PI, v2),
+    )));
     let inner_wire = Wire::new(vec![inner_coedge_bottom, inner_coedge_top]);
     let mut inner_face = Face::new(Surface::Cylinder(cyl.clone()), inner_wire);
     inner_face.edges = vec![edge_v1.clone(), edge_v2.clone()];
@@ -2761,7 +2772,17 @@ fn split_cylinder_face_multi_shared(
             cyl.axis, cyl.radius,
         );
         let bottom_edge = Edge { id: TopoId::new(), curve: Some(Curve3d::Circle(c.clone())), param_range: (0.0, 2.0*PI), vertex_start: None, vertex_end: None, start_vertex_point: Some(c.point_at(0.0)), end_vertex_point: Some(c.point_at(2.0*PI)), forward: true, tolerance: tol, degenerate: false, step_entity_id: None };
-        let wire = Wire::new(vec![CoEdge::new(bottom_edge.id, true), CoEdge::new(edge_v1.id, false)]);
+        let mut coedge_bottom = CoEdge::new(bottom_edge.id, true);
+        coedge_bottom.curve_2d = Some(Curve2d::Line(Line2d::new(
+            Point2d::new(0.0, v_min),
+            Point2d::new(2.0 * PI, v_min),
+        )));
+        let mut coedge_top = CoEdge::new(edge_v1.id, false);
+        coedge_top.curve_2d = Some(Curve2d::Line(Line2d::new(
+            Point2d::new(2.0 * PI, v1),
+            Point2d::new(0.0, v1),
+        )));
+        let wire = Wire::new(vec![coedge_bottom, coedge_top]);
         let mut f = Face::new(Surface::Cylinder(cyl.clone()), wire);
         f.edges = vec![bottom_edge, edge_v1.clone()];
         all_faces.push(f);
@@ -2774,7 +2795,17 @@ fn split_cylinder_face_multi_shared(
             cyl.axis, cyl.radius,
         );
         let top_edge = Edge { id: TopoId::new(), curve: Some(Curve3d::Circle(c.clone())), param_range: (0.0, 2.0*PI), vertex_start: None, vertex_end: None, start_vertex_point: Some(c.point_at(0.0)), end_vertex_point: Some(c.point_at(2.0*PI)), forward: true, tolerance: tol, degenerate: false, step_entity_id: None };
-        let wire = Wire::new(vec![CoEdge::new(edge_v2.id, false), CoEdge::new(top_edge.id, true)]);
+        let mut coedge_bottom = CoEdge::new(edge_v2.id, false);
+        coedge_bottom.curve_2d = Some(Curve2d::Line(Line2d::new(
+            Point2d::new(2.0 * PI, v2),
+            Point2d::new(0.0, v2),
+        )));
+        let mut coedge_top = CoEdge::new(top_edge.id, true);
+        coedge_top.curve_2d = Some(Curve2d::Line(Line2d::new(
+            Point2d::new(0.0, v_max),
+            Point2d::new(2.0 * PI, v_max),
+        )));
+        let wire = Wire::new(vec![coedge_bottom, coedge_top]);
         let mut f = Face::new(Surface::Cylinder(cyl.clone()), wire);
         f.edges = vec![edge_v2.clone(), top_edge];
         all_faces.push(f);
