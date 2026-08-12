@@ -16,9 +16,10 @@ use crate::entity::*;
 use crate::builder::ShapeBuilder;
 use draper_geometry::{
     Point3d, Direction3d, Vec3d,
-    Curve3d, Line, Circle, Ellipse,
+    Curve3d, Curve2d, Line, Circle, Ellipse,
+    Line2d, Circle2d,
     Surface, Plane, CylinderSurface, SphereSurface, ConeSurface,
-    ToleranceContext,
+    ToleranceContext, Point2d,
     intersection::intersect_line_cylinder,
 };
 use std::f64::consts::PI;
@@ -522,12 +523,23 @@ fn point_in_polygon_2d(px: f64, py: f64, polygon: &[(f64, f64)], _tol: f64) -> b
 // ============================================================
 
 /// Result of a surface-surface intersection.
+///
+/// Mirrors OCCT's `IntTools_Curve`: carries one 3D curve plus two PCurves
+/// (2D curves in the UV domain of each surface). The PCurves are critical
+/// for watertight topology — they allow each face to evaluate the intersection
+/// edge in its own UV space, guaranteeing identical 3D points.
 #[derive(Clone, Debug)]
 pub struct IntersectionCurve {
-    /// Points sampled along the intersection curve.
+    /// Points sampled along the intersection curve (for visualization/fallback).
     pub points: Vec<Point3d>,
-    /// Approximate curve representation (if available).
+    /// 3D curve representation (analytic: Circle, Line, Ellipse; or polyline).
     pub curve: Option<Curve3d>,
+    /// PCurve on surface A (2D curve in A's UV domain).
+    pub pcurve_a: Option<Curve2d>,
+    /// PCurve on surface B (2D curve in B's UV domain).
+    pub pcurve_b: Option<Curve2d>,
+    /// Tolerance = max deviation between 3D curve and surfaces.
+    pub tolerance: f64,
 }
 
 /// Intersect two surfaces and return intersection curves.
@@ -645,6 +657,9 @@ fn intersect_plane_plane(p: &Plane, q: &Plane, tol: f64) -> Vec<IntersectionCurv
     vec![IntersectionCurve {
         points,
         curve: Some(Curve3d::Line(line)),
+        pcurve_a: None,
+        pcurve_b: None,
+        tolerance: tol,
     }]
 }
 
@@ -743,9 +758,34 @@ fn intersect_plane_cylinder(plane: &Plane, cyl: &CylinderSurface, tol: f64) -> V
             })
             .collect();
 
+        // Build PCurve on the cylinder: v = signed_dist (constant height),
+        // u goes from 0 to 2π. This is a straight horizontal line in UV.
+        let v_on_cyl = signed_dist; // height along cylinder axis
+        let pcurve_cyl = Curve2d::Line(Line2d::new(
+            Point2d::new(0.0, v_on_cyl),
+            Point2d::new(2.0 * PI, v_on_cyl),
+        ));
+
+        // Build PCurve on the plane: a circle in the plane's UV domain.
+        // The plane's UV origin is at plane.origin, with u_dir and v_dir.
+        // The intersection circle has center at center_on_axis and radius cyl.radius.
+        // Project the circle center into plane UV:
+        let dcx = center_on_axis.x - plane.origin.x;
+        let dcy = center_on_axis.y - plane.origin.y;
+        let dcz = center_on_axis.z - plane.origin.z;
+        let center_u = dcx * plane.u_dir.x + dcy * plane.u_dir.y + dcz * plane.u_dir.z;
+        let center_v = dcx * plane.v_dir.x + dcy * plane.v_dir.y + dcz * plane.v_dir.z;
+        let pcurve_plane = Curve2d::Circle(Circle2d::new_full(
+            Point2d::new(center_u, center_v),
+            cyl.radius,
+        ));
+
         vec![IntersectionCurve {
             points,
             curve: Some(Curve3d::Circle(circle)),
+            pcurve_a: Some(pcurve_plane),   // PCurve on plane (surface A)
+            pcurve_b: Some(pcurve_cyl),     // PCurve on cylinder (surface B)
+            tolerance: tol,
         }]
     } else {
         // Ellipse intersection
@@ -793,6 +833,9 @@ fn intersect_plane_cylinder(plane: &Plane, cyl: &CylinderSurface, tol: f64) -> V
         vec![IntersectionCurve {
             points,
             curve: Some(Curve3d::Ellipse(ellipse)),
+            pcurve_a: None,
+            pcurve_b: None,
+            tolerance: tol,
         }]
     }
 }
@@ -819,6 +862,9 @@ fn intersect_plane_sphere(plane: &Plane, sphere: &SphereSurface, tol: f64) -> Ve
         return vec![IntersectionCurve {
             points: vec![point],
             curve: None,
+            pcurve_a: None,
+            pcurve_b: None,
+            tolerance: tol,
         }];
     }
 
@@ -846,6 +892,9 @@ fn intersect_plane_sphere(plane: &Plane, sphere: &SphereSurface, tol: f64) -> Ve
     vec![IntersectionCurve {
         points,
         curve: Some(Curve3d::Circle(circle)),
+        pcurve_a: None,
+        pcurve_b: None,
+        tolerance: tol,
     }]
 }
 
@@ -1255,11 +1304,17 @@ fn chain_points_into_curves(points: &[Point3d], max_gap: f64) -> Vec<Intersectio
             curves.push(IntersectionCurve {
                 points: curve_points,
                 curve: None,
+                pcurve_a: None,
+                pcurve_b: None,
+                tolerance: max_gap,
             });
         } else if component.len() == 1 {
             curves.push(IntersectionCurve {
                 points: vec![points[component[0]]],
                 curve: None,
+                pcurve_a: None,
+                pcurve_b: None,
+                tolerance: max_gap,
             });
         }
     }
@@ -2274,6 +2329,10 @@ pub fn boolean_operation(
         face_b_idx: usize,
         shared_edge: Edge,
         points: Vec<Point3d>,
+        /// PCurve on face A's surface (2D curve in A's UV domain)
+        pcurve_a: Option<Curve2d>,
+        /// PCurve on face B's surface (2D curve in B's UV domain)
+        pcurve_b: Option<Curve2d>,
     }
 
     let mut shared_intersections: Vec<SharedIntersection> = Vec::new();
@@ -2289,27 +2348,36 @@ pub fn boolean_operation(
                 None => continue,
             };
 
-            // Debug: log surface types
-
             let curves = intersect_surfaces(surf_a, surf_b, tol_ctx);
             for curve in curves {
                 if curve.points.len() < 2 {
                     continue;
                 }
                 // Create a shared edge for this intersection curve.
-                // This edge will be referenced by BOTH split faces, ensuring
-                // the edge cache produces identical 3D vertices for both.
-                let int_curve = create_polyline_curve(&curve.points);
+                // PRESERVE the analytic curve (Circle, Line, Ellipse) when
+                // available — don't flatten to polyline. This ensures the
+                // edge cache discretizes it identically for all sharing faces.
+                let (int_curve, param_range) = if let Some(ref analytic) = curve.curve {
+                    let pr = match analytic {
+                        Curve3d::Circle(_) => (0.0, 2.0 * PI),
+                        Curve3d::Line(_) => (0.0, 1.0),
+                        Curve3d::Ellipse(_) => (0.0, 2.0 * PI),
+                        _ => (0.0, 1.0),
+                    };
+                    (analytic.clone(), pr)
+                } else {
+                    (create_polyline_curve(&curve.points), (0.0, 1.0))
+                };
                 let shared_edge = Edge {
                     id: TopoId::new(),
                     curve: Some(int_curve),
-                    param_range: (0.0, 1.0),
+                    param_range,
                     vertex_start: None,
                     vertex_end: None,
                     start_vertex_point: Some(curve.points[0]),
                     end_vertex_point: Some(curve.points[curve.points.len() - 1]),
                     forward: true,
-                    tolerance: tol_ctx.coincidence_tolerance(),
+                    tolerance: curve.tolerance,
                     degenerate: false,
                     step_entity_id: None,
                 };
@@ -2318,6 +2386,8 @@ pub fn boolean_operation(
                     face_b_idx: ib,
                     shared_edge,
                     points: curve.points.clone(),
+                    pcurve_a: curve.pcurve_a.clone(),
+                    pcurve_b: curve.pcurve_b.clone(),
                 });
             }
         }
@@ -2358,14 +2428,18 @@ pub fn boolean_operation(
         // Combine all intersection points for this face
         let mut all_points: Vec<Point3d> = Vec::new();
         let mut all_edges: Vec<Edge> = Vec::new();
+        let mut all_pcurves: Vec<Option<Curve2d>> = Vec::new();
         for si in sis {
             all_points.extend(si.points.iter().cloned());
             all_edges.push(si.shared_edge.clone());
+            // Face A uses pcurve_a (PCurve on surface A)
+            all_pcurves.push(si.pcurve_a.clone());
         }
         let split_result = split_face_with_shared_edges(
             &faces_a[face_a_idx],
             &all_points,
             &all_edges,
+            &all_pcurves,
             tol_ctx,
         )?;
         if split_result.faces.len() > 1 {
@@ -2392,14 +2466,18 @@ pub fn boolean_operation(
         let sis = &b_intersections_by_face[&face_b_idx];
         let mut all_points: Vec<Point3d> = Vec::new();
         let mut all_edges: Vec<Edge> = Vec::new();
+        let mut all_pcurves: Vec<Option<Curve2d>> = Vec::new();
         for si in sis {
             all_points.extend(si.points.iter().cloned());
             all_edges.push(si.shared_edge.clone());
+            // Face B uses pcurve_b (PCurve on surface B)
+            all_pcurves.push(si.pcurve_b.clone());
         }
         let split_result = split_face_with_shared_edges(
             &faces_b[face_b_idx],
             &all_points,
             &all_edges,
+            &all_pcurves,
             tol_ctx,
         )?;
         if split_result.faces.len() > 1 {
@@ -2485,16 +2563,19 @@ fn split_face_with_shared_edge(
     face: &Face,
     intersection_points: &[Point3d],
     shared_edge: &Edge,
+    pcurve: Option<&Curve2d>,
     tol_ctx: &ToleranceContext,
 ) -> BooleanResult<SplitFaceResult> {
-    split_face_with_shared_edges(face, intersection_points, &[shared_edge.clone()], tol_ctx)
+    split_face_with_shared_edges(face, intersection_points, &[shared_edge.clone()], &[pcurve.cloned()], tol_ctx)
 }
 
 /// Split a face with multiple shared edges (for faces intersected by multiple curves).
+/// Each shared edge may have an associated PCurve on this face's surface.
 fn split_face_with_shared_edges(
     face: &Face,
     intersection_points: &[Point3d],
     shared_edges: &[Edge],
+    pcurves: &[Option<Curve2d>],
     tol_ctx: &ToleranceContext,
 ) -> BooleanResult<SplitFaceResult> {
     let tol = tol_ctx.coincidence_tolerance();
@@ -2516,8 +2597,9 @@ fn split_face_with_shared_edges(
 
     match surface {
         Surface::Plane(plane) => {
-            // For plane faces, use the first shared edge
-            split_planar_face_shared(face, plane, intersection_points, &shared_edges[0], tol)
+            // For plane faces, use the first shared edge + PCurve
+            let pc = pcurves.first().and_then(|p| p.clone());
+            split_planar_face_shared(face, plane, intersection_points, &shared_edges[0], pc, tol)
         }
         Surface::Cylinder(cyl) => {
             // For cylinder faces, pass ALL shared edges so the inner band
@@ -2715,6 +2797,7 @@ fn split_planar_face_shared(
     plane: &Plane,
     intersection_points: &[Point3d],
     shared_edge: &Edge,
+    pcurve: Option<Curve2d>,
     tol: f64,
 ) -> BooleanResult<SplitFaceResult> {
     // Get the face's boundary polygon
@@ -2767,7 +2850,10 @@ fn split_planar_face_shared(
 
         // Intersection curve is entirely inside the face → add as a hole.
         let mut face_with_hole = face.clone();
-        let coedge = CoEdge::new(shared_edge.id, true);
+        let mut coedge = CoEdge::new(shared_edge.id, true);
+        // Store the PCurve on the CoEdge so triangulation uses the analytic
+        // 2D curve in UV space (ensures watertight topology)
+        coedge.curve_2d = pcurve.clone();
         let wire = Wire::new(vec![coedge]);
         face_with_hole.add_hole(wire);
         face_with_hole.edges.push(shared_edge.clone());
