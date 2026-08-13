@@ -7763,22 +7763,52 @@ impl eframe::App for ViewerApp {
                                                 best_boundary);
                                         }
                                     }
-                                    self.current_solid = Some(solid);
+                                    self.current_solid = Some(solid.clone());
                                     self.current_nurbs_surface = None;
                                     self.detailed_instances.clear();
                                     self.instance_triangle_ranges.clear();
                                     let tri_count = mesh.triangle_count();
                                     if tri_count > 0 {
+                                        // Build FaceInfo for each face in the result solid
+                                        // so the tree panel can show/hide individual faces
+                                        // (like STEP import).
+                                        let vp_faces = build_vp_face_info(&solid, &mesh);
+
                                         let inst = draper_step::DetailedMeshInstance {
                                             name: "VP Result".to_string(),
                                             mesh: mesh.clone(),
-                                            faces: Vec::new(),
+                                            faces: vp_faces,
                                             transform: None,
                                             color: Some([0.7, 0.7, 0.75, 1.0]),
                                             brep_id: -1,
                                         };
                                         self.detailed_instances.push(inst);
                                         self.instance_triangle_ranges.push((0, tri_count));
+
+                                        // Build assembly tree with children for each face
+                                        let mut children = Vec::new();
+                                        let faces = solid.faces();
+                                        for (fi, face) in faces.iter().enumerate() {
+                                            let surf_type = match &face.surface {
+                                                Some(draper_geometry::Surface::Plane(_)) => "Plane",
+                                                Some(draper_geometry::Surface::Cylinder(_)) => "Cylinder",
+                                                Some(draper_geometry::Surface::Sphere(_)) => "Sphere",
+                                                Some(draper_geometry::Surface::Cone(_)) => "Cone",
+                                                Some(draper_geometry::Surface::Torus(_)) => "Torus",
+                                                _ => "Surface",
+                                            };
+                                            children.push(draper_step::AssemblyNode {
+                                                name: format!("Face {} ({})", fi, surf_type),
+                                                pd_id: 0,
+                                                brep_id: None,
+                                                instance_index: Some(0),
+                                                transform: None,
+                                                color: None,
+                                                layers: Vec::new(),
+                                                children: Vec::new(),
+                                            });
+                                        }
+
                                         self.assembly_tree = Some(draper_step::AssemblyNode {
                                             name: "VP Result".to_string(),
                                             pd_id: 0,
@@ -7787,7 +7817,7 @@ impl eframe::App for ViewerApp {
                                             transform: None,
                                             color: None,
                                             layers: Vec::new(),
-                                            children: Vec::new(),
+                                            children,
                                         });
                                     }
                                     self.mesh = mesh;
@@ -18146,6 +18176,109 @@ fn vp_node_colors(nt: &crate::ui::workspaces::NodeType) -> (egui::Color32, egui:
             (egui::Color32::from_rgb(0xa6, 0xe3, 0xa1), egui::Color32::from_rgb(0xa6, 0xe3, 0xa1))
         }
     }
+}
+
+/// Build FaceInfo for each face in a VP result solid.
+/// This enables the tree panel to show/hide individual faces like STEP import.
+fn build_vp_face_info(
+    solid: &draper_topology::Solid,
+    mesh: &draper_mesh::TriangleMesh,
+) -> Vec<draper_step::FaceInfo> {
+    use draper_geometry::Surface;
+
+    let faces = solid.faces();
+    let mut result = Vec::with_capacity(faces.len());
+
+    // If mesh has triangle_face_ids, use them to map triangles to faces.
+    // Otherwise, assign all triangles to face 0.
+    let tri_face_ids = mesh.triangle_face_ids.as_ref();
+
+    for (fi, face) in faces.iter().enumerate() {
+        let face_id = fi as u64; // Use face index as ID
+
+        let surface_type = match &face.surface {
+            Some(Surface::Plane(_)) => "Plane",
+            Some(Surface::Cylinder(_)) => "Cylinder",
+            Some(Surface::Sphere(_)) => "Sphere",
+            Some(Surface::Cone(_)) => "Cone",
+            Some(Surface::Torus(_)) => "Torus",
+            _ => "Surface",
+        }.to_string();
+
+        let surface = face.surface.clone().unwrap_or(Surface::Plane(
+            draper_geometry::Plane::from_origin_and_normal(
+                draper_geometry::Point3d::ORIGIN,
+                draper_geometry::Direction3d::Z,
+            ),
+        ));
+
+        // Find triangle range for this face
+        let (tri_start, tri_end) = if let Some(ids) = tri_face_ids {
+            let mut start = usize::MAX;
+            let mut end = 0usize;
+            for (ti, &fid) in ids.iter().enumerate() {
+                if fid == face_id {
+                    start = start.min(ti);
+                    end = end.max(ti + 1);
+                }
+            }
+            if start == usize::MAX { (0, 0) } else { (start, end) }
+        } else {
+            // No face IDs — assign all triangles to first face
+            if fi == 0 { (0, mesh.triangles.len()) } else { (0, 0) }
+        };
+
+        // Build outer boundary from edges
+        let outer_boundary: Vec<Vec<Point3d>> = {
+            let mut pts = Vec::new();
+            for edge in &face.edges {
+                if let Some(ref curve) = edge.curve {
+                    let (t_min, t_max) = edge.param_range;
+                    let n = 20;
+                    for i in 0..n {
+                        let t = t_min + (t_max - t_min) * (i as f64 / n as f64);
+                        pts.push(curve.point_at(t));
+                    }
+                }
+            }
+            if pts.is_empty() { Vec::new() } else { vec![pts] }
+        };
+
+        // Build inner boundaries (holes) from inner_wires
+        let inner_boundaries: Vec<Vec<Point3d>> = face.inner_wires.iter().map(|wire| {
+            let mut pts = Vec::new();
+            for coedge in &wire.coedges {
+                if let Some(edge) = face.edges.iter().find(|e| e.id == coedge.edge) {
+                    if let Some(ref curve) = edge.curve {
+                        let (t_min, t_max) = edge.param_range;
+                        let n = 20;
+                        for i in 0..n {
+                            let t = t_min + (t_max - t_min) * (i as f64 / n as f64);
+                            pts.push(curve.point_at(t));
+                        }
+                    }
+                }
+            }
+            pts
+        }).collect();
+
+        result.push(draper_step::FaceInfo {
+            face_id,
+            step_face_id: -1,
+            surface_type,
+            surface,
+            outer_boundary,
+            inner_boundaries,
+            outer_uv_boundary: Vec::new(),
+            inner_uv_boundaries: Vec::new(),
+            triangle_range: (tri_start, tri_end),
+            forward: face.forward,
+            uv_triangles: Vec::new(),
+            is_void: !face.forward,
+        });
+    }
+
+    result
 }
 
 /// VP helper: compute a model-scale metric (max dimension of bounding box)

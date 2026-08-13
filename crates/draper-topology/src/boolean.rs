@@ -2535,14 +2535,23 @@ pub fn boolean_operation(
                 if classification == FaceClassification::Inside
                     || classification == FaceClassification::OnBoundary
                 {
-                    let mut reversed = face.reversed();
-                    reversed.forward = !reversed.forward;
-                    // Replace any edge that geometrically matches a shared
-                    // intersection edge with the shared edge. This ensures
-                    // the cap face's boundary Circle uses the same Edge ID
-                    // as the cylinder lateral face → watertight topology.
-                    replace_matching_edges(&mut reversed, &shared_intersections);
-                    result_faces.push(reversed);
+                    // For Subtract (A - B), B-faces inside A become the cavity
+                    // walls (with reversed normal). BUT: only keep B-faces that
+                    // were SPLIT by an intersection curve — these are the faces
+                    // that form the cavity boundary (e.g., cylinder lateral
+                    // surface between the two intersection circles).
+                    //
+                    // B-faces that are entirely inside A and NOT split (e.g.,
+                    // cylinder cap disks that are fully embedded in A) are
+                    // INTERNAL faces that close the cavity — they must be
+                    // discarded to produce a proper through-hole.
+                    let was_split = was_face_split(face, &shared_intersections);
+                    if was_split {
+                        let mut reversed = face.reversed();
+                        reversed.forward = !reversed.forward;
+                        replace_matching_edges(&mut reversed, &shared_intersections);
+                        result_faces.push(reversed);
+                    }
                 }
             }
             BooleanOp::Intersect => {
@@ -3056,6 +3065,42 @@ fn split_planar_face_shared(
 /// Replace edges in a face that geometrically match a shared intersection edge.
 /// This ensures that cap faces (e.g., cylinder bottom/top disks) use the same
 /// Edge ID as the cylinder lateral face's boundary → watertight topology.
+/// Check if a face was split by any intersection curve.
+/// A face is "split" if any of its edges geometrically matches a shared
+/// intersection edge (i.e., the face's boundary was modified by the boolean).
+/// Unsplit faces that are entirely inside the other solid are internal
+/// faces (e.g., cylinder cap disks) and should be discarded for Subtract.
+fn was_face_split(
+    face: &Face,
+    shared_intersections: &[SharedIntersection],
+) -> bool {
+    for edge in &face.edges {
+        if let Some(ref curve) = edge.curve {
+            for si in shared_intersections {
+                if let Some(ref shared_curve) = si.shared_edge.curve {
+                    // Check if the edge curves match by sampling
+                    let n = 5;
+                    let mut all_match = true;
+                    for k in 0..n {
+                        let t = k as f64 / (n - 1) as f64;
+                        let p1 = curve.point_at(edge.param_range.0 + t * (edge.param_range.1 - edge.param_range.0));
+                        let p2 = shared_curve.point_at(si.shared_edge.param_range.0 + t * (si.shared_edge.param_range.1 - si.shared_edge.param_range.0));
+                        let d = (p1.x - p2.x).powi(2) + (p1.y - p2.y).powi(2) + (p1.z - p2.z).powi(2);
+                        if d > 1e-6 {
+                            all_match = false;
+                            break;
+                        }
+                    }
+                    if all_match {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 fn replace_matching_edges(
     face: &mut Face,
     shared_intersections: &[SharedIntersection],
