@@ -3964,7 +3964,7 @@ impl ViewerApp {
                 transform: None,
                 color: None,
                 layers: Vec::new(),
-                children: Vec::new(),
+                children: Vec::new(), face_id: None,
             });
             JsonModel::from_instances(self.detailed_instances.clone(), assembly, &self.current_model.name)
         } else {
@@ -4003,7 +4003,7 @@ impl ViewerApp {
                 transform: None,
                 color: None,
                 layers: Vec::new(),
-                children: Vec::new(),
+                children: Vec::new(), face_id: None,
             };
             JsonModel::from_instances(self.detailed_instances.clone(), assembly, &self.current_model.name)
         };
@@ -4458,6 +4458,50 @@ impl ViewerApp {
         let hidden_faces = &self.hidden_faces;
         let ranges = &self.instance_triangle_ranges;
         let face_ids = mesh.triangle_face_ids.as_ref();
+
+        // If face_ids is not available, fall back to drawing all edges
+        // (old behavior — shows internal triangle edges).
+        if face_ids.is_none() {
+            let mut edge_set: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+            for (i, tri) in mesh.triangles.iter().enumerate() {
+                let mut is_hidden = false;
+                let mut tri_inst_idx: Option<usize> = None;
+                for (idx, &(start, end)) in ranges.iter().enumerate() {
+                    if i >= start && i < end {
+                        tri_inst_idx = Some(idx);
+                        if hidden.contains(&idx) { is_hidden = true; }
+                        break;
+                    }
+                }
+                if is_hidden { continue; }
+                if let Some(idx) = tri_inst_idx {
+                    // No face_ids — can't check hidden_faces, skip
+                    let _ = idx;
+                }
+                let v0 = tri[0] as usize;
+                let v1 = tri[1] as usize;
+                let v2 = tri[2] as usize;
+                if v0 >= mesh.vertices.len() || v1 >= mesh.vertices.len() || v2 >= mesh.vertices.len() {
+                    continue;
+                }
+                for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                    let edge = if a < b { (a, b) } else { (b, a) };
+                    if edge_set.insert(edge) {
+                        let va = &mesh.vertices[a as usize];
+                        let vb = &mesh.vertices[b as usize];
+                        vertices.push(LineVertex {
+                            position: [va.x as f32, va.y as f32, va.z as f32],
+                            color: overlay_color,
+                        });
+                        vertices.push(LineVertex {
+                            position: [vb.x as f32, vb.y as f32, vb.z as f32],
+                            color: overlay_color,
+                        });
+                    }
+                }
+            }
+            return vertices;
+        }
 
         // Deduplicate edges: each shared edge between adjacent triangles is
         // drawn only once. Edges between triangles of the SAME face are
@@ -6474,7 +6518,7 @@ impl ViewerApp {
                 transform: None,
                 color: None,
                 layers: Vec::new(),
-                children: Vec::new(),
+                children: Vec::new(), face_id: None,
             });
             JsonModel::from_instances(self.detailed_instances.clone(), assembly, &self.current_model.name)
         } else {
@@ -6512,7 +6556,7 @@ impl ViewerApp {
                 transform: None,
                 color: None,
                 layers: Vec::new(),
-                children: Vec::new(),
+                children: Vec::new(), face_id: None,
             };
             JsonModel::from_instances(self.detailed_instances.clone(), assembly, &self.current_model.name)
         };
@@ -7814,6 +7858,7 @@ impl eframe::App for ViewerApp {
                                                 pd_id: 0,
                                                 brep_id: None,
                                                 instance_index: Some(0),
+                                                face_id: Some(fi as u64),
                                                 transform: None,
                                                 color: None,
                                                 layers: Vec::new(),
@@ -7826,6 +7871,7 @@ impl eframe::App for ViewerApp {
                                             pd_id: 0,
                                             brep_id: None,
                                             instance_index: Some(0),
+                                            face_id: None,
                                             transform: None,
                                             color: None,
                                             layers: Vec::new(),
@@ -8245,7 +8291,7 @@ impl eframe::App for ViewerApp {
                                 .max_height(300.0)
                                 .show(ui, |ui| {
                                     if let Some(ref tree) = assembly_tree_clone {
-                                        draw_assembly_node_static(ui, tree, selected_instance, &hidden_instances, &mut pending_instance_select, &mut pending_visibility_toggle, &mut pending_instance_isolate, &mut pending_subtree_hide, &mut pending_subtree_show, &mut pending_subtree_isolate, &open_tree_nodes, &scroll_to_tree_node);
+                                        draw_assembly_node_static(ui, tree, selected_instance, selected_face, &hidden_instances, &hidden_faces_clone, &mut pending_instance_select, &mut pending_face_select, &mut pending_visibility_toggle, &mut pending_face_visibility_toggle, &mut pending_instance_isolate, &mut pending_subtree_hide, &mut pending_subtree_show, &mut pending_subtree_isolate, &open_tree_nodes, &scroll_to_tree_node);
                                     } else if !detailed_instances_clone.is_empty() {
                                         for (i, inst) in detailed_instances_clone.iter().enumerate() {
                                             let is_selected = selected_instance == Some(i);
@@ -13770,7 +13816,7 @@ impl ViewerApp {
                         ui.heading(egui::RichText::new("Tree").size(13.0));
                         egui::ScrollArea::vertical().id_salt("mobile_tree_scroll").max_height(200.0).show(ui, |ui| {
                             if let Some(ref tree) = assembly_tree_clone {
-                                draw_assembly_node_static(ui, tree, selected_instance, &hidden_instances, &mut pending_instance_select, &mut pending_visibility_toggle, &mut pending_instance_isolate, &mut pending_subtree_hide, &mut pending_subtree_show, &mut pending_subtree_isolate, &open_tree_nodes, &scroll_to_tree_node);
+                                draw_assembly_node_static(ui, tree, selected_instance, selected_face, &hidden_instances, &hidden_faces_clone, &mut pending_instance_select, &mut pending_face_select, &mut pending_visibility_toggle, &mut pending_face_visibility_toggle, &mut pending_instance_isolate, &mut pending_subtree_hide, &mut pending_subtree_show, &mut pending_subtree_isolate, &open_tree_nodes, &scroll_to_tree_node);
                             } else if !detailed_instances_clone.is_empty() {
                                 for (i, inst) in detailed_instances_clone.iter().enumerate() {
                                     let is_selected = selected_instance == Some(i);
@@ -15060,9 +15106,13 @@ fn draw_assembly_node_static(
     ui: &mut egui::Ui,
     node: &AssemblyNode,
     selected_instance: Option<usize>,
+    selected_face: Option<(usize, u64)>,
     hidden_instances: &std::collections::HashSet<usize>,
+    hidden_faces: &std::collections::HashSet<(usize, u64)>,
     pending_instance_select: &mut Option<usize>,
+    pending_face_select: &mut Option<(usize, u64)>,
     pending_visibility_toggle: &mut Option<usize>,
+    pending_face_visibility_toggle: &mut Option<(usize, u64)>,
     pending_instance_isolate: &mut Option<usize>,
     pending_subtree_hide: &mut Option<Vec<usize>>,
     pending_subtree_show: &mut Option<Vec<usize>>,
@@ -15157,18 +15207,38 @@ fn draw_assembly_node_static(
             });
         }).body(|ui| {
             for child in &node.children {
-                draw_assembly_node_static(ui, child, selected_instance, hidden_instances, pending_instance_select, pending_visibility_toggle, pending_instance_isolate, pending_subtree_hide, pending_subtree_show, pending_subtree_isolate, open_tree_nodes, scroll_to_tree_node);
+                draw_assembly_node_static(ui, child, selected_instance, selected_face, hidden_instances, hidden_faces, pending_instance_select, pending_face_select, pending_visibility_toggle, pending_face_visibility_toggle, pending_instance_isolate, pending_subtree_hide, pending_subtree_show, pending_subtree_isolate, open_tree_nodes, scroll_to_tree_node);
             }
         });
     } else {
         // ─── Leaf node: draw visibility checkbox + isolate button + selectable label ───
         let label = format!("{}{}{}", node.name, brep_str, inst_str);
         ui.horizontal(|ui| {
-            // Visibility checkbox (eye icon equivalent)
-            // usize::MAX sentinel = failed instance, not selectable
-            if let Some(idx) = node.instance_index {
+            // Check if this is a face-level node (has face_id)
+            if let (Some(idx), Some(fid)) = (node.instance_index, node.face_id) {
+                // ─── Face-level node: per-face visibility + selection ───
+                let is_face_selected = selected_face == Some((idx, fid));
+                let is_face_visible = !hidden_faces.contains(&(idx, fid));
+                let eye_color = if is_face_visible {
+                    egui::Color32::from_rgb(80, 180, 80)
+                } else {
+                    egui::Color32::from_rgb(180, 80, 80)
+                };
+                let eye_text = if is_face_visible { "👁" } else { "  " };
+                if ui.add(egui::Label::new(egui::RichText::new(eye_text).size(11.0).color(eye_color)).sense(egui::Sense::click())).clicked() {
+                    *pending_face_visibility_toggle = Some((idx, fid));
+                }
+                // Selectable label — selects the face, not the instance
+                let response = ui.selectable_label(is_face_selected, egui::RichText::new(&label).size(11.0));
+                if scroll_to_tree_node.as_ref() == Some(&key) {
+                    response.scroll_to_me(Some(egui::Align::Center));
+                }
+                if response.clicked() {
+                    *pending_face_select = Some((idx, fid));
+                }
+            } else if let Some(idx) = node.instance_index {
+                // ─── Instance-level node ───
                 if idx == usize::MAX {
-                    // Failed instance — show red X, no toggle
                     ui.label(egui::RichText::new("X").size(11.0).color(egui::Color32::from_rgb(180, 80, 80)));
                 } else {
                     let is_visible = !hidden_instances.contains(&idx);
@@ -15181,10 +15251,6 @@ fn draw_assembly_node_static(
                     if ui.add(egui::Label::new(egui::RichText::new(eye_text).size(11.0).color(checkbox_color)).sense(egui::Sense::click())).clicked() {
                         *pending_visibility_toggle = Some(idx);
                     }
-                    // Isolate button — "solo" icon (◎). When clicked, hides all
-                    // OTHER instances so only this one remains visible. If this
-                    // instance is already the only visible one, clicking again
-                    // restores visibility of all instances (toggle behavior).
                     let isolate_btn = egui::Button::new(
                         egui::RichText::new("◎").size(11.0)
                     ).frame(false);
@@ -15194,17 +15260,11 @@ fn draw_assembly_node_static(
                         *pending_instance_isolate = Some(idx);
                     }
                 }
-            }
-            // Selectable label for the instance
-            let response = ui.selectable_label(is_selected, egui::RichText::new(&label).size(11.0));
-            // Scroll to this node if it's the scroll target
-            if scroll_to_tree_node.as_ref() == Some(&key) {
-                response.scroll_to_me(Some(egui::Align::Center));
-            }
-            if response.clicked() {
-                // Use instance_index for precise selection
-                // Skip failed instances (usize::MAX sentinel)
-                if let Some(idx) = node.instance_index {
+                let response = ui.selectable_label(is_selected, egui::RichText::new(&label).size(11.0));
+                if scroll_to_tree_node.as_ref() == Some(&key) {
+                    response.scroll_to_me(Some(egui::Align::Center));
+                }
+                if response.clicked() {
                     if idx != usize::MAX {
                         *pending_instance_select = Some(idx);
                     }

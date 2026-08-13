@@ -836,6 +836,8 @@ struct CachedAssemblyNode {
     pd_id: i64,
     brep_id: Option<i64>,
     instance_index: Option<usize>,
+    #[serde(default)]
+    face_id: Option<u64>,
     transform: Option<[[f64; 4]; 4]>,
     color: Option<[f32; 4]>,
     #[serde(default)]
@@ -878,6 +880,7 @@ fn serialize_assembly_tree(tree: &AssemblyNode) -> String {
             pd_id: node.pd_id,
             brep_id: node.brep_id,
             instance_index: node.instance_index,
+            face_id: node.face_id,
             transform: node.transform,
             color: node.color,
             layers: node.layers.clone(),
@@ -942,6 +945,7 @@ fn deserialize_assembly_tree(json: &str) -> Result<AssemblyNode, String> {
             pd_id: node.pd_id,
             brep_id: node.brep_id,
             instance_index: node.instance_index,
+            face_id: node.face_id,
             transform: node.transform,
             color: node.color,
             layers: node.layers,

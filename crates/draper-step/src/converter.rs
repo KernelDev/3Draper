@@ -483,6 +483,11 @@ pub struct AssemblyNode {
     /// Set only for leaf nodes. Multiple leaf nodes may share the same brep_id
     /// but each will have a unique instance_index (e.g., bolt at different positions).
     pub instance_index: Option<usize>,
+    /// Face ID for VP Result face nodes. When Some, this node represents
+    /// an individual face within an instance, and clicking it should select
+    /// that face (not the entire instance). Used for show/hide toggling
+    /// of individual faces from the tree panel.
+    pub face_id: Option<u64>,
     /// Transform from parent to this node.
     pub transform: Option<[[f64; 4]; 4]>,
     /// Color for this node.
@@ -3966,7 +3971,7 @@ impl<'a> StepConverter<'a> {
                 transform: None,
                 color: None,
                 layers: Vec::new(),
-                children: Vec::new(),
+                children: Vec::new(), face_id: None,
             };
             for brep in self.step.find_entities_by_type("MANIFOLD_SOLID_BREP") {
                 let name = self.get_brep_name(brep.id);
@@ -3979,7 +3984,7 @@ impl<'a> StepConverter<'a> {
                     transform: None,
                     color,
                     layers: Vec::new(),
-                    children: Vec::new(),
+                    children: Vec::new(), face_id: None,
                 });
             }
             node
@@ -4064,7 +4069,7 @@ impl<'a> StepConverter<'a> {
                 transform,
                 color,
                 layers,
-                children: Vec::new(),
+                children: Vec::new(), face_id: None,
             };
 
             // Attach already-built children (keyed by NAUO ID)
@@ -4087,7 +4092,7 @@ impl<'a> StepConverter<'a> {
             transform: None,
             color: None,
             layers: Vec::new(),
-            children: Vec::new(),
+            children: Vec::new(), face_id: None,
         })
     }
 

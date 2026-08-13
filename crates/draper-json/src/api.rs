@@ -780,6 +780,7 @@ impl JsonApi {
                 pd_id: -1,
                 brep_id: None,
                 instance_index: None,
+                face_id: None,
                 transform: None,
                 color: None,
                 layers: Vec::new(),
@@ -791,7 +792,7 @@ impl JsonApi {
                     transform: None,
                     color: None,
                     layers: Vec::new(),
-                    children: Vec::new(),
+                    children: Vec::new(), face_id: None,
                 }).collect(),
             };
             self.model = Some(JsonModel {
