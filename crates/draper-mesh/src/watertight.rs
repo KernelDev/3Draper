@@ -1780,15 +1780,6 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
         let c = root_map[tri[2] as usize];
         if a == b || b == c || a == c {
             removed_degenerate += 1;
-            // Log which face loses a triangle
-            let fid = face_ids.as_ref().and_then(|ids| ids.get(ti)).copied().unwrap_or(u64::MAX);
-            if removed_degenerate <= 10 {
-                let orig_a = tri[0]; let orig_b = tri[1]; let orig_c = tri[2];
-                eprintln!(
-                    "WELD_DEGEN: tri[{}] face_id={} degenerate after weld: ({},{},{}) → ({},{},{})",
-                    ti, fid, orig_a, orig_b, orig_c, a, b, c
-                );
-            }
             continue;
         }
         kept_tris.push([a, b, c]);
@@ -1848,7 +1839,9 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
         "WELD: removed {} degenerate + {} same-face duplicate triangles after welding (kept {} cross-face duplicates)",
         removed_degenerate, dup_removed, cross_face_dup_removed
     );
-    eprintln!("WELD_DETAIL: degenerate_removed={} same_face_dup_removed={} cross_face_dup_kept={}", removed_degenerate, dup_removed, cross_face_dup_removed);
+    if removed_degenerate > 0 || dup_removed > 0 || cross_face_dup_removed > 0 {
+        log::debug!("WELD_DETAIL: degenerate_removed={} same_face_dup_removed={} cross_face_dup_kept={}", removed_degenerate, dup_removed, cross_face_dup_removed);
+    }
 
     // Compact vertices
     compact_vertices(mesh);

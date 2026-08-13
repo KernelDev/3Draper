@@ -7810,7 +7810,7 @@ impl eframe::App for ViewerApp {
                                                 _ => "Surface",
                                             };
                                             children.push(draper_step::AssemblyNode {
-                                                name: format!("Face {} ({})", fi, surf_type),
+                                                name: format!("Face {} ({})", face.id.to_u64(), surf_type),
                                                 pd_id: 0,
                                                 brep_id: None,
                                                 instance_index: Some(0),
