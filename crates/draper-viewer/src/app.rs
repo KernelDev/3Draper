@@ -4460,10 +4460,12 @@ impl ViewerApp {
         let face_ids = mesh.triangle_face_ids.as_ref();
 
         // Deduplicate edges: each shared edge between adjacent triangles is
-        // drawn only once instead of twice. This cuts the vertex count by ~50%
-        // for manifold meshes and makes the overlay work for much larger models.
-        let mut edge_set: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+        // drawn only once. Edges between triangles of the SAME face are
+        // internal edges and are NOT drawn (they're not real B-Rep edges).
+        // Only edges between DIFFERENT faces (or boundary edges) are drawn.
+        let mut edge_face_map: std::collections::HashMap<(u32, u32), u64> = std::collections::HashMap::new();
 
+        // First pass: collect all edges and their face IDs
         for (i, tri) in mesh.triangles.iter().enumerate() {
             // Check if this triangle belongs to a hidden instance or hidden face
             let mut is_hidden = false;
@@ -4480,7 +4482,6 @@ impl ViewerApp {
             if is_hidden {
                 continue;
             }
-            // Skip triangles belonging to individually-hidden faces
             if let Some(idx) = tri_inst_idx {
                 if let Some(fid) = face_ids.and_then(|ids| ids.get(i)).copied() {
                     if hidden_faces.contains(&(idx, fid)) {
@@ -4492,27 +4493,38 @@ impl ViewerApp {
             let v0_idx = tri[0] as usize;
             let v1_idx = tri[1] as usize;
             let v2_idx = tri[2] as usize;
-            // Safety: skip triangles with out-of-bounds vertex indices
             if v0_idx >= mesh.vertices.len() || v1_idx >= mesh.vertices.len() || v2_idx >= mesh.vertices.len() {
-                log::warn!("Wireframe overlay: skipping triangle with OOB indices [{}, {}, {}] (max={})", v0_idx, v1_idx, v2_idx, mesh.vertices.len());
                 continue;
             }
 
-            // Generate edges with deduplication
+            let fid = face_ids.and_then(|ids| ids.get(i)).copied().unwrap_or(0);
             for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
                 let edge = if a < b { (a, b) } else { (b, a) };
-                if edge_set.insert(edge) {
-                    let va = &mesh.vertices[a as usize];
-                    let vb = &mesh.vertices[b as usize];
-                    vertices.push(LineVertex {
-                        position: [va.x as f32, va.y as f32, va.z as f32],
-                        color: overlay_color,
-                    });
-                    vertices.push(LineVertex {
-                        position: [vb.x as f32, vb.y as f32, vb.z as f32],
-                        color: overlay_color,
-                    });
-                }
+                edge_face_map.entry(edge)
+                    .and_modify(|existing| {
+                        // If edge is shared by different faces, mark as boundary
+                        if *existing != fid {
+                            *existing = u64::MAX; // sentinel: boundary between faces
+                        }
+                    })
+                    .or_insert(fid);
+            }
+        }
+
+        // Second pass: draw only boundary edges (between different faces)
+        for (&(a, b), &fid) in &edge_face_map {
+            if fid == u64::MAX {
+                // Edge is shared by different faces → real B-Rep edge → draw it
+                let va = &mesh.vertices[a as usize];
+                let vb = &mesh.vertices[b as usize];
+                vertices.push(LineVertex {
+                    position: [va.x as f32, va.y as f32, va.z as f32],
+                    color: overlay_color,
+                });
+                vertices.push(LineVertex {
+                    position: [vb.x as f32, vb.y as f32, vb.z as f32],
+                    color: overlay_color,
+                });
             }
         }
 
@@ -18194,7 +18206,7 @@ fn build_vp_face_info(
     let tri_face_ids = mesh.triangle_face_ids.as_ref();
 
     for (fi, face) in faces.iter().enumerate() {
-        let face_id = fi as u64; // Use face index as ID
+        let face_id = face.id.to_u64(); // Use TopoId as face ID (matches triangle_face_ids)
 
         let surface_type = match &face.surface {
             Some(Surface::Plane(_)) => "Plane",

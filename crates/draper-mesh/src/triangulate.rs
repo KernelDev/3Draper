@@ -1197,7 +1197,11 @@ fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams, cac
     let mut dedup_map = crate::mesh::VertexDedupMap::with_tolerance(adaptive_tol);
     let mut total_face_vertices = 0usize;
     for face in solid.faces() {
-        let face_mesh = triangulate_face_with_cache(face, params, cache);
+        let mut face_mesh = triangulate_face_with_cache(face, params, cache);
+        // Set triangle_face_ids so downstream code (tree panel, face selection,
+        // face visibility) can map triangles back to their source face.
+        let face_tri_count = face_mesh.triangles.len();
+        face_mesh.triangle_face_ids = Some(vec![face.id.to_u64(); face_tri_count]);
         total_face_vertices += face_mesh.vertices.len();
         mesh.merge_deduplicating(&face_mesh, &mut dedup_map);
     }
