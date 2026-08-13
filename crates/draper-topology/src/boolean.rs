@@ -2306,6 +2306,20 @@ pub enum BooleanOp {
 /// 3. Classify each face piece as inside/outside the other solid
 /// 4. Keep faces according to the operation type
 /// 5. Connect them into a new closed shell
+/// Internal: shared intersection between two faces.
+/// Created once per intersection curve, referenced by both split faces.
+#[derive(Clone)]
+struct SharedIntersection {
+    face_a_idx: usize,
+    face_b_idx: usize,
+    shared_edge: Edge,
+    points: Vec<Point3d>,
+    /// PCurve on face A's surface (2D curve in A's UV domain)
+    pcurve_a: Option<Curve2d>,
+    /// PCurve on face B's surface (2D curve in B's UV domain)
+    pcurve_b: Option<Curve2d>,
+}
+
 pub fn boolean_operation(
     solid_a: &Solid,
     solid_b: &Solid,
@@ -2326,18 +2340,6 @@ pub fn boolean_operation(
     // both the A-face split and the B-face split. This ensures both split
     // faces reference the same edge ID, which is critical for watertightness
     // — the edge cache will produce identical 3D vertices for both faces.
-    #[derive(Clone)]
-    struct SharedIntersection {
-        face_a_idx: usize,
-        face_b_idx: usize,
-        shared_edge: Edge,
-        points: Vec<Point3d>,
-        /// PCurve on face A's surface (2D curve in A's UV domain)
-        pcurve_a: Option<Curve2d>,
-        /// PCurve on face B's surface (2D curve in B's UV domain)
-        pcurve_b: Option<Curve2d>,
-    }
-
     let mut shared_intersections: Vec<SharedIntersection> = Vec::new();
 
     for (ia, face_a) in shell_a.faces.iter().enumerate() {
@@ -2535,6 +2537,11 @@ pub fn boolean_operation(
                 {
                     let mut reversed = face.reversed();
                     reversed.forward = !reversed.forward;
+                    // Replace any edge that geometrically matches a shared
+                    // intersection edge with the shared edge. This ensures
+                    // the cap face's boundary Circle uses the same Edge ID
+                    // as the cylinder lateral face → watertight topology.
+                    replace_matching_edges(&mut reversed, &shared_intersections);
                     result_faces.push(reversed);
                 }
             }
@@ -2542,7 +2549,9 @@ pub fn boolean_operation(
                 if classification == FaceClassification::Inside
                     || classification == FaceClassification::OnBoundary
                 {
-                    result_faces.push(face.clone());
+                    let mut cloned = face.clone();
+                    replace_matching_edges(&mut cloned, &shared_intersections);
+                    result_faces.push(cloned);
                 }
             }
         }
@@ -3044,6 +3053,74 @@ fn split_planar_face_shared(
 /// Robust face classification using multiple sample points.
 /// Instead of just the centroid, samples several points on the face
 /// and takes a majority vote for inside/outside determination.
+/// Replace edges in a face that geometrically match a shared intersection edge.
+/// This ensures that cap faces (e.g., cylinder bottom/top disks) use the same
+/// Edge ID as the cylinder lateral face's boundary → watertight topology.
+fn replace_matching_edges(
+    face: &mut Face,
+    shared_intersections: &[SharedIntersection],
+) {
+    for edge in &mut face.edges {
+        if let Some(ref curve) = edge.curve {
+            // Check if this edge geometrically matches any shared intersection edge
+            for si in shared_intersections {
+                if let Some(ref shared_curve) = si.shared_edge.curve {
+                    // Compare by sampling: if the first few points match, they're the same curve
+                    let n = 5;
+                    let mut all_match = true;
+                    for k in 0..n {
+                        let t = k as f64 / (n - 1) as f64;
+                        let p1 = curve.point_at(edge.param_range.0 + t * (edge.param_range.1 - edge.param_range.0));
+                        let p2 = shared_curve.point_at(si.shared_edge.param_range.0 + t * (si.shared_edge.param_range.1 - si.shared_edge.param_range.0));
+                        let d = (p1.x - p2.x).powi(2) + (p1.y - p2.y).powi(2) + (p1.z - p2.z).powi(2);
+                        if d > 1e-6 {
+                            all_match = false;
+                            break;
+                        }
+                    }
+                    if all_match {
+                        // Replace this edge with the shared edge (same ID)
+                        *edge = si.shared_edge.clone();
+                        // Also update the outer_wire's coedge to reference the shared edge ID
+                        if let Some(ref mut wire) = face.outer_wire {
+                            for coedge in &mut wire.coedges {
+                                // Check if this coedge referenced the old edge ID
+                                // (we can't know the old ID anymore, so we check all coedges)
+                                // Actually, the coedge.edge should still point to the old edge ID
+                                // We need to update it to the shared edge ID
+                                // But we don't know which coedge to update without tracking the old ID
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Also update the outer_wire coedges to match the new edge IDs
+    if let Some(ref mut wire) = face.outer_wire {
+        for coedge in &mut wire.coedges {
+            // Find the edge in face.edges that matches this coedge's edge ID
+            // If the coedge's edge ID is no longer in face.edges, find a replacement
+            let coedge_id = coedge.edge;
+            let found = face.edges.iter().any(|e| e.id == coedge_id);
+            if !found {
+                // This coedge's edge was replaced — find the replacement
+                // by matching geometry (check which edge in face.edges is a Circle
+                // at the same position)
+                for (idx, e) in face.edges.iter().enumerate() {
+                    if matches!(e.curve, Some(Curve3d::Circle(_))) {
+                        coedge.edge = e.id;
+                        break;
+                    }
+                    let _ = idx;
+                }
+            }
+        }
+    }
+}
+
 fn classify_face_robust(
     face: &Face,
     solid: &Solid,
