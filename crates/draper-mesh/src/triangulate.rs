@@ -1196,12 +1196,13 @@ fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams, cac
     let mut mesh = TriangleMesh::new();
     let mut dedup_map = crate::mesh::VertexDedupMap::with_tolerance(adaptive_tol);
     let mut total_face_vertices = 0usize;
-    for face in solid.faces() {
+    for (face_idx, face) in solid.faces().iter().enumerate() {
         let mut face_mesh = triangulate_face_with_cache(face, params, cache);
-        // Set triangle_face_ids so downstream code (tree panel, face selection,
-        // face visibility) can map triangles back to their source face.
+        // Set triangle_face_ids using SEQUENTIAL INDICES (0, 1, 2, ...)
+        // NOT face.id.to_u64(). This ensures consistency between
+        // triangulation, face info, tree panel, and model picking.
         let face_tri_count = face_mesh.triangles.len();
-        face_mesh.triangle_face_ids = Some(vec![face.id.to_u64(); face_tri_count]);
+        face_mesh.triangle_face_ids = Some(vec![face_idx as u64; face_tri_count]);
         total_face_vertices += face_mesh.vertices.len();
         mesh.merge_deduplicating(&face_mesh, &mut dedup_map);
     }

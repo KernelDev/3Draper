@@ -7810,7 +7810,7 @@ impl eframe::App for ViewerApp {
                                                 _ => "Surface",
                                             };
                                             children.push(draper_step::AssemblyNode {
-                                                name: format!("Face {} ({})", face.id.to_u64(), surf_type),
+                                                name: format!("Face {} ({})", fi, surf_type),
                                                 pd_id: 0,
                                                 brep_id: None,
                                                 instance_index: Some(0),
@@ -18206,7 +18206,7 @@ fn build_vp_face_info(
     let tri_face_ids = mesh.triangle_face_ids.as_ref();
 
     for (fi, face) in faces.iter().enumerate() {
-        let face_id = face.id.to_u64(); // Use TopoId as face ID (matches triangle_face_ids)
+        let face_id = fi as u64; // Sequential index — matches triangle_face_ids from triangulate_solid
 
         let surface_type = match &face.surface {
             Some(Surface::Plane(_)) => "Plane",
