@@ -2942,11 +2942,14 @@ fn split_planar_face_shared(
     // For watertightness, we create a map of "split edge" → shared Edge
     // so that both poly_a and poly_b reference the same Edge ID for
     // the same geometric segment.
+    //
+    // IMPORTANT: Consecutive segments that belong to the SAME original
+    // edge are MERGED into a single edge — this avoids micro-segments
+    // in the B-Rep that would create spurious edges in the viewport.
     let mut result_faces = Vec::new();
 
-    // Map: (p0_index, p1_index) → Edge, for segments that need shared edges
-    // (entry/exit split points). Key is sorted vertex pair for dedup.
-    let mut shared_split_edges: std::collections::HashMap<(usize, usize), Edge> = std::collections::HashMap::new();
+    // Map: edge_hash → Edge, for segments that need shared edges
+    let mut shared_split_edges: std::collections::HashMap<u64, Edge> = std::collections::HashMap::new();
 
     for poly_idx in 0..2 {
         let poly_2d = if poly_idx == 0 { &poly_a } else { &poly_b };
@@ -2960,16 +2963,23 @@ fn split_planar_face_shared(
             .collect();
 
         let n = points_3d.len();
-        let mut edges = Vec::new();
-        let mut coedges = Vec::new();
 
+        // First pass: classify each segment — which original edge does it belong to?
+        // Segments belonging to the same original edge will be merged.
+        #[derive(Clone)]
+        struct SegmentInfo {
+            p0: Point3d,
+            p1: Point3d,
+            is_intersection: bool,
+            orig_edge_id: Option<TopoId>,
+        }
+
+        let mut segments: Vec<SegmentInfo> = Vec::new();
         for i in 0..n {
             let j = (i + 1) % n;
             let p0 = points_3d[i];
             let p1 = points_3d[j];
 
-            // Check if this edge is part of the intersection curve
-            // (both endpoints are on the intersection curve)
             let p0_on_curve = intersection_points.iter().any(|ip| {
                 (ip.x - p0.x).powi(2) + (ip.y - p0.y).powi(2) + (ip.z - p0.z).powi(2) < tol * tol * 100.0
             });
@@ -2978,18 +2988,17 @@ fn split_planar_face_shared(
             });
 
             if p0_on_curve && p1_on_curve {
-                // Use the shared edge for the intersection curve segment
-                edges.push(shared_edge.clone());
-                coedges.push(CoEdge::new(shared_edge.id, true));
+                segments.push(SegmentInfo {
+                    p0, p1,
+                    is_intersection: true,
+                    orig_edge_id: None,
+                });
             } else {
-                // This is a boundary segment — try to reuse the original face's edge
-                // by matching the segment to an original edge.
-                // Find the original edge that contains both p0 and p1.
-                let mut found_edge = None;
+                // Find which original edge this segment belongs to
+                let mut found_id = None;
                 for orig_edge in &face.edges {
                     if let Some(ref curve) = orig_edge.curve {
                         let (t_min, t_max) = orig_edge.param_range;
-                        // Sample the original edge and check if p0 and p1 are on it
                         let n_samples = 30;
                         let mut p0_found = false;
                         let mut p1_found = false;
@@ -3004,40 +3013,93 @@ fn split_planar_face_shared(
                             }
                         }
                         if p0_found && p1_found {
-                            found_edge = Some(orig_edge.clone());
+                            found_id = Some(orig_edge.id);
                             break;
                         }
                     }
                 }
+                segments.push(SegmentInfo {
+                    p0, p1,
+                    is_intersection: false,
+                    orig_edge_id: found_id,
+                });
+            }
+        }
 
-                if let Some(orig_edge) = found_edge {
-                    // Reuse the original edge — same ID → shared with adjacent faces
+        // Second pass: merge consecutive segments with the same orig_edge_id
+        // into single edges. This eliminates micro-segments from split.
+        let mut merged_segments: Vec<SegmentInfo> = Vec::new();
+        for seg in &segments {
+            if let Some(last) = merged_segments.last_mut() {
+                // Merge if both are non-intersection, same orig_edge_id,
+                // and last.p1 == seg.p0 (connected)
+                if !seg.is_intersection && !last.is_intersection
+                    && seg.orig_edge_id == last.orig_edge_id
+                    && seg.orig_edge_id.is_some()
+                    && (last.p1.x - seg.p0.x).abs() < tol * 10.0
+                    && (last.p1.y - seg.p0.y).abs() < tol * 10.0
+                    && (last.p1.z - seg.p0.z).abs() < tol * 10.0
+                {
+                    // Merge: extend last segment's end to current segment's end
+                    last.p1 = seg.p1;
+                    continue;
+                }
+            }
+            merged_segments.push(seg.clone());
+        }
+
+        // Also merge wrap-around: if first and last merged segments have
+        // the same orig_edge_id and are connected, merge them
+        if merged_segments.len() >= 2 {
+            let first = merged_segments.first().unwrap();
+            let last = merged_segments.last().unwrap();
+            if !first.is_intersection && !last.is_intersection
+                && first.orig_edge_id == last.orig_edge_id
+                && first.orig_edge_id.is_some()
+                && (last.p1.x - first.p0.x).abs() < tol * 10.0
+                && (last.p1.y - first.p0.y).abs() < tol * 10.0
+                && (last.p1.z - first.p0.z).abs() < tol * 10.0
+            {
+                // Merge last into first, remove last
+                merged_segments.first_mut().unwrap().p0 = last.p0;
+                merged_segments.pop();
+            }
+        }
+
+        // Third pass: create edges and coedges from merged segments
+        let mut edges = Vec::new();
+        let mut coedges = Vec::new();
+
+        for seg in &merged_segments {
+            if seg.is_intersection {
+                // Use the shared edge for the intersection curve
+                edges.push(shared_edge.clone());
+                coedges.push(CoEdge::new(shared_edge.id, true));
+            } else if let Some(orig_id) = seg.orig_edge_id {
+                // Find the original edge and reuse it
+                if let Some(orig_edge) = face.edges.iter().find(|e| e.id == orig_id) {
                     edges.push(orig_edge.clone());
                     coedges.push(CoEdge::new(orig_edge.id, true));
                 } else {
-                    // New segment from split (entry/exit point) — create a shared edge
-                    // that both poly_a and poly_b will reference
-                    let key = if p0.x < p1.x || (p0.x == p1.x && p0.y < p1.y) {
-                        (poly_idx, i)
-                    } else {
-                        (poly_idx, i)
-                    };
-                    let _ = key;
-
-                    // Check if we already created this edge for the other polygon
-                    let edge_key = format!("{:.6},{:.6},{:.6}-{:.6},{:.6},{:.6}",
-                        p0.x.min(p1.x), p0.y.min(p1.y), p0.z.min(p1.z),
-                        p0.x.max(p1.x), p0.y.max(p1.y), p0.z.max(p1.z));
-                    let edge_hash: u64 = edge_key.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
-                    let map_key = (edge_hash as usize, 0usize);
-
-                    let edge = shared_split_edges.entry(map_key).or_insert_with(|| {
-                        Edge::new_line(p0, p1)
-                    }).clone();
-
-                    edges.push(edge.clone());
-                    coedges.push(CoEdge::new(edge.id, true));
+                    // Fallback: create new edge
+                    let e = Edge::new_line(seg.p0, seg.p1);
+                    let eid = e.id;
+                    edges.push(e);
+                    coedges.push(CoEdge::new(eid, true));
                 }
+            } else {
+                // New segment from split — create a shared edge
+                let edge_key_str = format!("{:.6},{:.6},{:.6}-{:.6},{:.6},{:.6}",
+                    seg.p0.x.min(seg.p1.x), seg.p0.y.min(seg.p1.y), seg.p0.z.min(seg.p1.z),
+                    seg.p0.x.max(seg.p1.x), seg.p0.y.max(seg.p1.y), seg.p0.z.max(seg.p1.z));
+                let edge_hash: u64 = edge_key_str.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+
+                let edge = shared_split_edges.entry(edge_hash).or_insert_with(|| {
+                    Edge::new_line(seg.p0, seg.p1)
+                }).clone();
+
+                edges.push(edge.clone());
+                coedges.push(CoEdge::new(edge.id, true));
             }
         }
 
