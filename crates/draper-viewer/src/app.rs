@@ -18337,38 +18337,114 @@ fn build_vp_face_info(
             if fi == 0 { (0, mesh.triangles.len()) } else { (0, 0) }
         };
 
-        // Build outer boundary from edges — use only edges referenced by outer_wire
-        // (not ALL face.edges, which may include split segments and shared edges
-        // that would create spurious lines in the viewport).
+        // Build outer boundary from edges — use only edges referenced by outer_wire.
+        // Merge consecutive collinear segments (from split) into single edges
+        // to avoid spurious lines in the viewport.
         let outer_boundary: Vec<Vec<Point3d>> = {
             if let Some(ref wire) = face.outer_wire {
-                let mut pts = Vec::new();
+                // Collect edge endpoints (start point of each coedge's edge)
+                let mut segments: Vec<(Point3d, Point3d)> = Vec::new();
                 for coedge in &wire.coedges {
                     if let Some(edge) = face.edges.iter().find(|e| e.id == coedge.edge) {
                         if let Some(ref curve) = edge.curve {
                             let (t_min, t_max) = edge.param_range;
-                            let n = 20;
-                            for i in 0..n {
-                                let t = t_min + (t_max - t_min) * (i as f64 / n as f64);
-                                pts.push(curve.point_at(t));
+                            let p0 = curve.point_at(t_min);
+                            let p1 = curve.point_at(t_max);
+                            if coedge.forward {
+                                segments.push((p0, p1));
+                            } else {
+                                segments.push((p1, p0));
                             }
                         }
                     }
                 }
-                if pts.is_empty() { Vec::new() } else { vec![pts] }
+                if segments.is_empty() {
+                    Vec::new()
+                } else {
+                    // Merge consecutive collinear segments:
+                    // If segment[i].end == segment[i+1].start AND they are collinear
+                    // (same direction), merge into one segment.
+                    let mut merged: Vec<(Point3d, Point3d)> = Vec::new();
+                    merged.push(segments[0]);
+                    for &(s, e) in &segments[1..] {
+                        let last = merged.last().unwrap();
+                        // Check if segments are connected and collinear
+                        let dx = last.1.x - last.0.x;
+                        let dy = last.1.y - last.0.y;
+                        let dz = last.1.z - last.0.z;
+                        let dx2 = e.x - s.x;
+                        let dy2 = e.y - s.y;
+                        let dz2 = e.z - s.z;
+                        // Check connection (end of last == start of current)
+                        let connected = (last.1.x - s.x).abs() < 1e-6
+                            && (last.1.y - s.y).abs() < 1e-6
+                            && (last.1.z - s.z).abs() < 1e-6;
+                        // Check collinearity (cross product ~ 0)
+                        let cross_x = dy * dz2 - dz * dy2;
+                        let cross_y = dz * dx2 - dx * dz2;
+                        let cross_z = dx * dy2 - dy * dx2;
+                        let cross_mag = (cross_x * cross_x + cross_y * cross_y + cross_z * cross_z).sqrt();
+                        let len1 = (dx * dx + dy * dy + dz * dz).sqrt();
+                        let len2 = (dx2 * dx2 + dy2 * dy2 + dz2 * dz2).sqrt();
+                        let is_collinear = cross_mag < 1e-6 * (len1 * len2).max(1e-12);
+                        if connected && is_collinear {
+                            // Merge: extend last segment to include current
+                            let last_mut = merged.last_mut().unwrap();
+                            last_mut.1 = e;
+                        } else {
+                            merged.push((s, e));
+                        }
+                    }
+                    // Convert merged segments to a polyline with sampled points
+                    let mut pts = Vec::new();
+                    for (p0, p1) in &merged {
+                        pts.push(*p0);
+                        // Sample intermediate points for curved edges (Circle, etc.)
+                        // For straight lines, just endpoints are enough
+                        let dx = p1.x - p0.x;
+                        let dy = p1.y - p0.y;
+                        let dz = p1.z - p0.z;
+                        let len = (dx * dx + dy * dy + dz * dz).sqrt();
+                        if len > 1e-6 {
+                            // If it's a curve (not straight), sample more points
+                            // Detect curve by checking if any edge in the merged range is a Circle
+                            // For simplicity, sample 20 points per segment
+                            let n = 20;
+                            for i in 1..n {
+                                let t = i as f64 / n as f64;
+                                pts.push(Point3d::new(
+                                    p0.x + t * dx,
+                                    p0.y + t * dy,
+                                    p0.z + t * dz,
+                                ));
+                            }
+                        }
+                    }
+                    // Close the loop
+                    if let Some(first) = pts.first() {
+                        pts.push(*first);
+                    }
+                    vec![pts]
+                }
             } else {
                 Vec::new()
             }
         };
 
         // Build inner boundaries (holes) from inner_wires
+        // Use the analytic curve (Circle) from the edge for proper curvature
         let inner_boundaries: Vec<Vec<Point3d>> = face.inner_wires.iter().map(|wire| {
             let mut pts = Vec::new();
             for coedge in &wire.coedges {
                 if let Some(edge) = face.edges.iter().find(|e| e.id == coedge.edge) {
                     if let Some(ref curve) = edge.curve {
                         let (t_min, t_max) = edge.param_range;
-                        let n = 20;
+                        // Use more samples for curves (Circle needs ~40 for smooth appearance)
+                        let n = match curve {
+                            draper_geometry::Curve3d::Circle(_) => 40,
+                            draper_geometry::Curve3d::Ellipse(_) => 40,
+                            _ => 20,
+                        };
                         for i in 0..n {
                             let t = t_min + (t_max - t_min) * (i as f64 / n as f64);
                             pts.push(curve.point_at(t));
