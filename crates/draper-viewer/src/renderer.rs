@@ -127,6 +127,7 @@ pub struct SceneCallback {
     pub resources: Arc<std::sync::Mutex<Option<SceneResources>>>,
     pub wireframe: bool,
     pub show_edges: bool,
+    pub edges_only: bool,
     pub show_wireframe_overlay: bool,
     pub viewport_width: u32,
     pub viewport_height: u32,
@@ -196,17 +197,20 @@ impl CallbackTrait for SceneCallback {
             &resources.mesh_pipeline
         };
 
-        mesh_pass.set_pipeline(pipeline);
-        mesh_pass.set_bind_group(0, &resources.mesh_bind_group, &[]);
-        mesh_pass.set_vertex_buffer(0, resources.vertex_buffer.slice(..));
-        mesh_pass.set_index_buffer(resources.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        mesh_pass.draw_indexed(0..resources.index_count, 0, 0..1);
+        // Skip mesh fill when edges_only mode is active — draw only B-Rep edges
+        if !self.edges_only {
+            mesh_pass.set_pipeline(pipeline);
+            mesh_pass.set_bind_group(0, &resources.mesh_bind_group, &[]);
+            mesh_pass.set_vertex_buffer(0, resources.vertex_buffer.slice(..));
+            mesh_pass.set_index_buffer(resources.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            mesh_pass.draw_indexed(0..resources.index_count, 0, 0..1);
+        }
 
         // Draw wireframe overlay on top of the filled mesh (triangle edges)
         // Uses LineList topology — works on ALL platforms including WebGPU/WASM.
         // Depth test (LessEqual) ensures only VISIBLE edges are drawn;
         // edges behind the solid surface are properly occluded.
-        if self.show_wireframe_overlay && resources.wireframe_overlay_vertex_count > 0 {
+        if self.show_wireframe_overlay && !self.edges_only && resources.wireframe_overlay_vertex_count > 0 {
             mesh_pass.set_pipeline(&resources.wireframe_overlay_line_pipeline);
             mesh_pass.set_bind_group(0, &resources.mesh_bind_group, &[]);
             mesh_pass.set_vertex_buffer(0, resources.wireframe_overlay_vertex_buffer.slice(..));

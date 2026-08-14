@@ -409,6 +409,9 @@ pub struct ViewerApp {
     wireframe: bool,
     /// Show B-Rep boundary edges.
     show_edges: bool,
+    /// Show only B-Rep edges (no surface fill). When true, mesh pass is
+    /// skipped entirely — only edge lines are drawn.
+    edges_only: bool,
     /// Show wireframe overlay (triangle mesh edges on top of filled surfaces).
     show_wireframe_overlay: bool,
     /// Wireframe overlay line vertices need GPU upload.
@@ -1398,6 +1401,7 @@ impl ViewerApp {
             camera,
             wireframe: false,
             show_edges: true,
+            edges_only: false,
             show_wireframe_overlay: false,
             wireframe_overlay_dirty: false,
             edge_dirty: false,
@@ -8000,8 +8004,12 @@ impl eframe::App for ViewerApp {
                     }
                 });
                 ui.menu_button("View", |ui| {
-                    ui.checkbox(&mut self.wireframe, "Wireframe (edges only)");
+                    ui.checkbox(&mut self.wireframe, "Wireframe (triangle edges)");
                     ui.checkbox(&mut self.show_edges, "Show Edges (B-Rep)");
+                    if ui.checkbox(&mut self.edges_only, "Edges Only (no fill)").changed() {
+                        // Auto-enable B-Rep edges when entering edges-only mode
+                        if self.edges_only { self.show_edges = true; }
+                    }
                     ui.checkbox(&mut self.show_wireframe_overlay, "Mesh Overlay (triangle edges)");
                     ui.checkbox(&mut self.show_axes, "Show axes");
                     ui.checkbox(&mut self.show_grid, "Show grid");
@@ -9118,6 +9126,9 @@ impl eframe::App for ViewerApp {
                 ui.heading(egui::RichText::new("Display").size(12.0));
                 ui.checkbox(&mut self.wireframe, "Wireframe");
                 ui.checkbox(&mut self.show_edges, "Show Edges");
+                if ui.checkbox(&mut self.edges_only, "Edges Only").changed() {
+                    if self.edges_only { self.show_edges = true; }
+                }
                 ui.checkbox(&mut self.show_wireframe_overlay, "Mesh Overlay");
                 ui.checkbox(&mut self.show_axes, "Show axes");
                 ui.checkbox(&mut self.show_grid, "Show grid");
@@ -10283,6 +10294,7 @@ impl eframe::App for ViewerApp {
                     resources: self.gpu_resources.clone(),
                     wireframe: self.wireframe,
                     show_edges: self.show_edges,
+                    edges_only: self.edges_only,
                     show_wireframe_overlay: self.show_wireframe_overlay,
                     viewport_width: width,
                     viewport_height: height,
