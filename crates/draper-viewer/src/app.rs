@@ -10444,15 +10444,37 @@ impl eframe::App for ViewerApp {
                     }
 
                     // ─── Display Style switcher (bottom-right corner of VIEWPORT) ───
-                    let mut style = if self.wireframe { crate::ui::DisplayStyle::Wireframe }
-                        else if self.show_edges { crate::ui::DisplayStyle::ShadedWithEdges }
-                        else { crate::ui::DisplayStyle::Shaded };
+                    let mut style = if self.edges_only && self.show_wireframe_overlay {
+                        crate::ui::DisplayStyle::EdgesWithMesh
+                    } else if self.edges_only {
+                        crate::ui::DisplayStyle::EdgesOnly
+                    } else if self.wireframe {
+                        crate::ui::DisplayStyle::Wireframe
+                    } else if self.show_edges && self.show_wireframe_overlay {
+                        crate::ui::DisplayStyle::ShadedWithEdgesAndMesh
+                    } else if self.show_wireframe_overlay {
+                        crate::ui::DisplayStyle::ShadedWithMesh
+                    } else if self.show_edges {
+                        crate::ui::DisplayStyle::ShadedWithEdges
+                    } else {
+                        crate::ui::DisplayStyle::Shaded
+                    };
                     crate::ui::view_modes::render_display_style_in_viewport(ui, &rect, &mut style);
-                    let new_wf = matches!(style, crate::ui::DisplayStyle::Wireframe);
-                    let new_edges = matches!(style, crate::ui::DisplayStyle::ShadedWithEdges);
-                    if new_wf != self.wireframe || new_edges != self.show_edges {
+                    let (new_wf, new_edges, new_edges_only, new_mesh) = match style {
+                        crate::ui::DisplayStyle::Wireframe => (true, false, false, false),
+                        crate::ui::DisplayStyle::Shaded => (false, false, false, false),
+                        crate::ui::DisplayStyle::ShadedWithEdges => (false, true, false, false),
+                        crate::ui::DisplayStyle::EdgesOnly => (false, true, true, false),
+                        crate::ui::DisplayStyle::ShadedWithMesh => (false, false, false, true),
+                        crate::ui::DisplayStyle::EdgesWithMesh => (false, true, true, true),
+                        crate::ui::DisplayStyle::ShadedWithEdgesAndMesh => (false, true, false, true),
+                    };
+                    if new_wf != self.wireframe || new_edges != self.show_edges
+                        || new_edges_only != self.edges_only || new_mesh != self.show_wireframe_overlay {
                         self.wireframe = new_wf;
                         self.show_edges = new_edges;
+                        self.edges_only = new_edges_only;
+                        self.show_wireframe_overlay = new_mesh;
                     }
                 }
 

@@ -32,6 +32,10 @@ pub fn render_status_bar(ctx: &egui::Context, state: &UiState) {
                     super::DisplayStyle::Wireframe => "Wireframe",
                     super::DisplayStyle::Shaded => "Shaded",
                     super::DisplayStyle::ShadedWithEdges => "Shaded + Edges",
+                    super::DisplayStyle::EdgesOnly => "Edges Only",
+                    super::DisplayStyle::ShadedWithMesh => "Shaded + Mesh",
+                    super::DisplayStyle::EdgesWithMesh => "Edges + Mesh",
+                    super::DisplayStyle::ShadedWithEdgesAndMesh => "All",
                 };
                 status_field(ui, "iso", style_label, fg);
                 ui.separator();

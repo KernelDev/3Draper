@@ -741,14 +741,24 @@ fn cross2d(o: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
 
 pub fn render_display_style_in_viewport(ui: &mut egui::Ui, viewport_rect: &egui::Rect, style: &mut DisplayStyle) {
     let margin = 10.0_f32;
-    let pw = 180.0_f32;
+    let pw = 280.0_f32;  // wider for 7 buttons
     let ph = 28.0_f32;
     let pr = egui::Rect::from_min_size(
         egui::pos2(viewport_rect.right() - pw - margin, viewport_rect.bottom() - ph - margin),
         egui::vec2(pw, ph),
     );
     let btn_w = pw / 3.0;
-    let labels = [(" Wire", DisplayStyle::Wireframe), (" Solid", DisplayStyle::Shaded), (" Both", DisplayStyle::ShadedWithEdges)];
+    let labels = [
+        ("Wire", DisplayStyle::Wireframe),
+        ("Solid", DisplayStyle::Shaded),
+        ("S+E", DisplayStyle::ShadedWithEdges),
+        ("Edges", DisplayStyle::EdgesOnly),
+        ("Mesh", DisplayStyle::ShadedWithMesh),
+        ("E+M", DisplayStyle::EdgesWithMesh),
+        ("All", DisplayStyle::ShadedWithEdgesAndMesh),
+    ];
+    let btn_count = labels.len() as f32;
+    let btn_w = pw / btn_count;
     let mut btns: Vec<(egui::Rect, bool, &str, DisplayStyle)> = Vec::new();
     for (i, (label, ds)) in labels.iter().enumerate() {
         let br = egui::Rect::from_min_size(egui::pos2(pr.left() + i as f32 * btn_w, pr.top()), egui::vec2(btn_w, ph));
@@ -800,6 +810,12 @@ pub fn render_display_style_switcher(ctx: &egui::Context, style: &mut DisplaySty
                         ui.selectable_value(style, DisplayStyle::Wireframe, "Wireframe");
                         ui.selectable_value(style, DisplayStyle::Shaded, "Shaded");
                         ui.selectable_value(style, DisplayStyle::ShadedWithEdges, "Shaded+Edges");
+                    });
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(style, DisplayStyle::EdgesOnly, "Edges Only");
+                        ui.selectable_value(style, DisplayStyle::ShadedWithMesh, "Shaded+Mesh");
+                        ui.selectable_value(style, DisplayStyle::EdgesWithMesh, "Edges+Mesh");
+                        ui.selectable_value(style, DisplayStyle::ShadedWithEdgesAndMesh, "All");
                     });
                 });
         });

@@ -48,9 +48,13 @@ pub fn viewport_context_menu(_ui: &mut egui::Ui, response: &egui::Response) -> O
         });
 
         ui.menu_button("Display", |ui| {
-            if ui.button("Wireframe").clicked() { action = Some(ContextAction::DisplayStyle("Wireframe".into())); ui.close_menu(); }
-            if ui.button("Shaded").clicked() { action = Some(ContextAction::DisplayStyle("Shaded".into())); ui.close_menu(); }
-            if ui.button("Shaded + Edges").clicked() { action = Some(ContextAction::DisplayStyle("Shaded+Edges".into())); ui.close_menu(); }
+            if ui.button("Wireframe (triangle edges)").clicked() { action = Some(ContextAction::DisplayStyle("Wireframe".into())); ui.close_menu(); }
+            if ui.button("Shaded (fill only)").clicked() { action = Some(ContextAction::DisplayStyle("Shaded".into())); ui.close_menu(); }
+            if ui.button("Shaded + Edges (fill + B-Rep)").clicked() { action = Some(ContextAction::DisplayStyle("Shaded+Edges".into())); ui.close_menu(); }
+            if ui.button("Edges Only (no fill)").clicked() { action = Some(ContextAction::DisplayStyle("EdgesOnly".into())); ui.close_menu(); }
+            if ui.button("Shaded + Mesh (fill + triangles)").clicked() { action = Some(ContextAction::DisplayStyle("ShadedWithMesh".into())); ui.close_menu(); }
+            if ui.button("Edges + Mesh (no fill)").clicked() { action = Some(ContextAction::DisplayStyle("EdgesWithMesh".into())); ui.close_menu(); }
+            if ui.button("All (fill + edges + mesh)").clicked() { action = Some(ContextAction::DisplayStyle("ShadedWithEdgesAndMesh".into())); ui.close_menu(); }
         });
 
         ui.separator();

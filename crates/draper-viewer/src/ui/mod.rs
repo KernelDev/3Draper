@@ -49,9 +49,20 @@ impl Default for Workspace {
 /// Display style for the viewport.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DisplayStyle {
+    /// Triangle wireframe only (PolygonMode::Line, no fill).
     Wireframe,
+    /// Shaded fill only (no edges).
     Shaded,
+    /// Shaded fill + B-Rep boundary edges.
     ShadedWithEdges,
+    /// B-Rep edges only, no fill (edges-only mode).
+    EdgesOnly,
+    /// Shaded fill + triangle mesh overlay.
+    ShadedWithMesh,
+    /// B-Rep edges + triangle mesh overlay, no fill.
+    EdgesWithMesh,
+    /// Shaded fill + B-Rep edges + triangle mesh overlay (all three).
+    ShadedWithEdgesAndMesh,
 }
 
 impl Default for DisplayStyle {
