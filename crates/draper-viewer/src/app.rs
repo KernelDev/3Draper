@@ -4506,10 +4506,12 @@ impl ViewerApp {
         // Deduplicate edges: each shared edge between adjacent triangles is
         // drawn only once. Edges between triangles of the SAME face are
         // internal edges and are NOT drawn (they're not real B-Rep edges).
-        // Only edges between DIFFERENT faces (or boundary edges) are drawn.
-        let mut edge_face_map: std::collections::HashMap<(u32, u32), u64> = std::collections::HashMap::new();
+        // Only edges between DIFFERENT faces (or mesh boundary edges) are drawn.
+        // We track: edge → (face_id, count). If count > 1 and same face → internal.
+        // If count > 1 and different face → boundary. If count == 1 → mesh boundary.
+        let mut edge_info: std::collections::HashMap<(u32, u32), (u64, u32)> = std::collections::HashMap::new();
 
-        // First pass: collect all edges and their face IDs
+        // First pass: collect all edges and their face IDs + count
         for (i, tri) in mesh.triangles.iter().enumerate() {
             // Check if this triangle belongs to a hidden instance or hidden face
             let mut is_hidden = false;
@@ -4517,20 +4519,14 @@ impl ViewerApp {
             for (idx, &(start, end)) in ranges.iter().enumerate() {
                 if i >= start && i < end {
                     tri_inst_idx = Some(idx);
-                    if hidden.contains(&idx) {
-                        is_hidden = true;
-                    }
+                    if hidden.contains(&idx) { is_hidden = true; }
                     break;
                 }
             }
-            if is_hidden {
-                continue;
-            }
+            if is_hidden { continue; }
             if let Some(idx) = tri_inst_idx {
                 if let Some(fid) = face_ids.and_then(|ids| ids.get(i)).copied() {
-                    if hidden_faces.contains(&(idx, fid)) {
-                        continue;
-                    }
+                    if hidden_faces.contains(&(idx, fid)) { continue; }
                 }
             }
 
@@ -4544,21 +4540,23 @@ impl ViewerApp {
             let fid = face_ids.and_then(|ids| ids.get(i)).copied().unwrap_or(0);
             for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
                 let edge = if a < b { (a, b) } else { (b, a) };
-                edge_face_map.entry(edge)
-                    .and_modify(|existing| {
-                        // If edge is shared by different faces, mark as boundary
-                        if *existing != fid {
-                            *existing = u64::MAX; // sentinel: boundary between faces
+                edge_info.entry(edge)
+                    .and_modify(|(existing_fid, count)| {
+                        *count += 1;
+                        if *existing_fid != fid {
+                            *existing_fid = u64::MAX; // different faces → boundary
                         }
                     })
-                    .or_insert(fid);
+                    .or_insert((fid, 1));
             }
         }
 
-        // Second pass: draw only boundary edges (between different faces)
-        for (&(a, b), &fid) in &edge_face_map {
-            if fid == u64::MAX {
-                // Edge is shared by different faces → real B-Rep edge → draw it
+        // Second pass: draw edges that are:
+        // - Between different faces (u64::MAX) → B-Rep edge
+        // - Mesh boundary (count == 1) → outer edge
+        // Skip edges within the same face (count > 1, same face_id)
+        for (&(a, b), &(fid, count)) in &edge_info {
+            if fid == u64::MAX || count == 1 {
                 let va = &mesh.vertices[a as usize];
                 let vb = &mesh.vertices[b as usize];
                 vertices.push(LineVertex {
@@ -8002,9 +8000,9 @@ impl eframe::App for ViewerApp {
                     }
                 });
                 ui.menu_button("View", |ui| {
-                    ui.checkbox(&mut self.wireframe, "Wireframe");
-                    ui.checkbox(&mut self.show_edges, "Show Edges");
-                    ui.checkbox(&mut self.show_wireframe_overlay, "Mesh Overlay");
+                    ui.checkbox(&mut self.wireframe, "Wireframe (edges only)");
+                    ui.checkbox(&mut self.show_edges, "Show Edges (B-Rep)");
+                    ui.checkbox(&mut self.show_wireframe_overlay, "Mesh Overlay (triangle edges)");
                     ui.checkbox(&mut self.show_axes, "Show axes");
                     ui.checkbox(&mut self.show_grid, "Show grid");
                     ui.checkbox(&mut self.show_structure, "Structure Panel");
@@ -15134,7 +15132,12 @@ fn draw_assembly_node_static(
 
     // Use instance_index for selection (exact mapping to instance)
     // usize::MAX sentinel means "failed triangulation" — not selectable
-    let is_selected = node.instance_index.map_or(false, |idx| idx != usize::MAX && selected_instance == Some(idx));
+    // For face-level nodes (has face_id), use face selection instead
+    let is_selected = if let (Some(idx), Some(fid)) = (node.instance_index, node.face_id) {
+        selected_face == Some((idx, fid))
+    } else {
+        node.instance_index.map_or(false, |idx| idx != usize::MAX && selected_instance == Some(idx))
+    };
 
     if has_children {
         // ─── Internal node (subassembly) ─────────────────────────────────
