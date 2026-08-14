@@ -4280,12 +4280,85 @@ impl ViewerApp {
     /// but the mesh vertices are already transformed to world space. So we must
     /// apply the instance transform to boundary points to match the rendered mesh.
     fn build_edge_line_vertices(&self) -> Vec<LineVertex> {
+        // Extract B-Rep edges DIRECTLY from the mesh triangles using
+        // triangle_face_ids. An edge is a B-Rep boundary edge if it is
+        // shared by triangles from DIFFERENT faces, or is a mesh boundary
+        // edge (only 1 triangle). This guarantees edges are 100% consistent
+        // with the triangulation — no micro-segments, no mismatched sampling.
         let mut edge_vertices: Vec<LineVertex> = Vec::new();
-
-        // Edge color: dark charcoal visible on light background
         let edge_color: [f32; 3] = [0.20, 0.20, 0.25];
 
-        /// Transform a Point3d by a 4×4 matrix (homogeneous coordinates).
+        let mesh = &self.mesh;
+        let face_ids = match mesh.triangle_face_ids.as_ref() {
+            Some(ids) => ids,
+            None => {
+                return self.build_edge_line_vertices_fallback();
+            }
+        };
+
+        let ranges = &self.instance_triangle_ranges;
+
+        // Build edge -> (face_id, count) map
+        let mut edge_info: std::collections::HashMap<(u32, u32), (u64, u32)> = std::collections::HashMap::new();
+        for (i, tri) in mesh.triangles.iter().enumerate() {
+            let mut is_hidden = false;
+            let mut tri_inst_idx: Option<usize> = None;
+            for (idx, &(start, end)) in ranges.iter().enumerate() {
+                if i >= start && i < end {
+                    tri_inst_idx = Some(idx);
+                    if self.hidden_instances.contains(&idx) { is_hidden = true; }
+                    break;
+                }
+            }
+            if is_hidden { continue; }
+            let fid = face_ids.get(i).copied().unwrap_or(0);
+            if let Some(idx) = tri_inst_idx {
+                if self.hidden_faces.contains(&(idx, fid)) { continue; }
+            }
+
+            for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                let edge = if a < b { (a, b) } else { (b, a) };
+                edge_info.entry(edge)
+                    .and_modify(|(existing_fid, count)| {
+                        *count += 1;
+                        if *existing_fid != fid {
+                            *existing_fid = u64::MAX;
+                        }
+                    })
+                    .or_insert((fid, 1));
+            }
+        }
+
+        // Draw B-Rep boundary edges: between different faces OR mesh boundary
+        for (&(a, b), &(fid, count)) in &edge_info {
+            if fid == u64::MAX || count == 1 {
+                let va = &mesh.vertices[a as usize];
+                let vb = &mesh.vertices[b as usize];
+                edge_vertices.push(LineVertex {
+                    position: [va.x as f32, va.y as f32, va.z as f32],
+                    color: edge_color,
+                });
+                edge_vertices.push(LineVertex {
+                    position: [vb.x as f32, vb.y as f32, vb.z as f32],
+                    color: edge_color,
+                });
+            }
+        }
+
+        if !self.extra_curve_lines.is_empty() {
+            edge_vertices.extend_from_slice(&self.extra_curve_lines);
+        }
+
+        edge_vertices
+    }
+
+    /// Fallback: build edge lines from face boundary data (used when
+    /// triangle_face_ids is not available, e.g. for STEP files without
+    /// face ID tracking).
+    fn build_edge_line_vertices_fallback(&self) -> Vec<LineVertex> {
+        let mut edge_vertices: Vec<LineVertex> = Vec::new();
+        let edge_color: [f32; 3] = [0.20, 0.20, 0.25];
+
         fn transform_point(p: &draper_geometry::Point3d, m: &[[f64; 4]; 4]) -> [f32; 3] {
             let x = m[0][0] * p.x + m[0][1] * p.y + m[0][2] * p.z + m[0][3];
             let y = m[1][0] * p.x + m[1][1] * p.y + m[1][2] * p.z + m[1][3];
@@ -4294,119 +4367,55 @@ impl ViewerApp {
         }
 
         for (inst_idx, inst) in self.detailed_instances.iter().enumerate() {
-            // Skip hidden instances — don't draw their edges
-            if self.hidden_instances.contains(&inst_idx) {
-                continue;
-            }
-
-            // Apply instance transform to boundary points to match the mesh
-            // (mesh vertices are already in world space, but boundary points are local)
+            if self.hidden_instances.contains(&inst_idx) { continue; }
             let tf = inst.transform.as_ref();
 
             for face in &inst.faces {
-                // Skip edges of individually-hidden faces
-                if self.hidden_faces.contains(&(inst_idx, face.face_id)) {
-                    continue;
-                }
-                // Outer boundary polylines
+                if self.hidden_faces.contains(&(inst_idx, face.face_id)) { continue; }
                 for polyline in &face.outer_boundary {
-                    if polyline.len() < 2 {
-                        continue;
-                    }
-                    // Draw ALL boundary points — no downsampling.
-                    // The boundary points come from the edge cache with the
-                    // same LOD-dependent density as the mesh, so edges and
-                    // mesh triangles are always consistent.
+                    if polyline.len() < 2 { continue; }
                     let mut prev_pos: Option<[f32; 3]> = None;
                     for p in polyline.iter() {
-                        let pos = if let Some(m) = tf {
-                            transform_point(p, m)
-                        } else {
-                            [p.x as f32, p.y as f32, p.z as f32]
-                        };
+                        let pos = if let Some(m) = tf { transform_point(p, m) } else { [p.x as f32, p.y as f32, p.z as f32] };
                         if let Some(pp) = prev_pos {
-                            edge_vertices.push(LineVertex {
-                                position: pp,
-                                color: edge_color,
-                            });
-                            edge_vertices.push(LineVertex {
-                                position: pos,
-                                color: edge_color,
-                            });
+                            edge_vertices.push(LineVertex { position: pp, color: edge_color });
+                            edge_vertices.push(LineVertex { position: pos, color: edge_color });
                         }
                         prev_pos = Some(pos);
                     }
-                    // Close the loop: connect last drawn point back to first
                     if let Some(first) = polyline.first() {
                         if let Some(last_pos) = prev_pos {
-                            let first_pos = if let Some(m) = tf {
-                                transform_point(first, m)
-                            } else {
-                                [first.x as f32, first.y as f32, first.z as f32]
-                            };
+                            let first_pos = if let Some(m) = tf { transform_point(first, m) } else { [first.x as f32, first.y as f32, first.z as f32] };
                             let dx = first_pos[0] - last_pos[0];
                             let dy = first_pos[1] - last_pos[1];
                             let dz = first_pos[2] - last_pos[2];
-                            let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-                            if dist > 1e-6 {
-                                edge_vertices.push(LineVertex {
-                                    position: last_pos,
-                                    color: edge_color,
-                                });
-                                edge_vertices.push(LineVertex {
-                                    position: first_pos,
-                                    color: edge_color,
-                                });
+                            if (dx * dx + dy * dy + dz * dz).sqrt() > 1e-6 {
+                                edge_vertices.push(LineVertex { position: last_pos, color: edge_color });
+                                edge_vertices.push(LineVertex { position: first_pos, color: edge_color });
                             }
                         }
                     }
                 }
-
-                // Inner boundary polylines (holes)
                 for polyline in &face.inner_boundaries {
-                    if polyline.len() < 2 {
-                        continue;
-                    }
-                    // Draw ALL boundary points — no downsampling.
+                    if polyline.len() < 2 { continue; }
                     let mut prev_pos: Option<[f32; 3]> = None;
                     for p in polyline.iter() {
-                        let pos = if let Some(m) = tf {
-                            transform_point(p, m)
-                        } else {
-                            [p.x as f32, p.y as f32, p.z as f32]
-                        };
+                        let pos = if let Some(m) = tf { transform_point(p, m) } else { [p.x as f32, p.y as f32, p.z as f32] };
                         if let Some(pp) = prev_pos {
-                            edge_vertices.push(LineVertex {
-                                position: pp,
-                                color: edge_color,
-                            });
-                            edge_vertices.push(LineVertex {
-                                position: pos,
-                                color: edge_color,
-                            });
+                            edge_vertices.push(LineVertex { position: pp, color: edge_color });
+                            edge_vertices.push(LineVertex { position: pos, color: edge_color });
                         }
                         prev_pos = Some(pos);
                     }
                     if let Some(first) = polyline.first() {
                         if let Some(last_pos) = prev_pos {
-                            let first_pos = if let Some(m) = tf {
-                                transform_point(first, m)
-                            } else {
-                                [first.x as f32, first.y as f32, first.z as f32]
-                            };
+                            let first_pos = if let Some(m) = tf { transform_point(first, m) } else { [first.x as f32, first.y as f32, first.z as f32] };
                             let dx = first_pos[0] - last_pos[0];
                             let dy = first_pos[1] - last_pos[1];
                             let dz = first_pos[2] - last_pos[2];
-                            let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-                            if dist > 1e-6 {
-                                edge_vertices.push(LineVertex {
-                                    position: last_pos,
-                                    color: edge_color,
-                                });
-                                edge_vertices.push(LineVertex {
-                                    position: first_pos,
-                                    color: edge_color,
-                                });
+                            if (dx * dx + dy * dy + dz * dz).sqrt() > 1e-6 {
+                                edge_vertices.push(LineVertex { position: last_pos, color: edge_color });
+                                edge_vertices.push(LineVertex { position: first_pos, color: edge_color });
                             }
                         }
                     }
@@ -4414,10 +4423,6 @@ impl ViewerApp {
             }
         }
 
-        // Append extra curve line strips (from curve-test visualizations).
-        // These are added to the same edge vertex buffer so they render with
-        // the same line pipeline as B-Rep edges, with depth testing against
-        // the solid mesh so curves behind geometry are properly occluded.
         if !self.extra_curve_lines.is_empty() {
             edge_vertices.extend_from_slice(&self.extra_curve_lines);
         }
