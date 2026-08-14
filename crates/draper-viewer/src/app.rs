@@ -18337,20 +18337,28 @@ fn build_vp_face_info(
             if fi == 0 { (0, mesh.triangles.len()) } else { (0, 0) }
         };
 
-        // Build outer boundary from edges
+        // Build outer boundary from edges — use only edges referenced by outer_wire
+        // (not ALL face.edges, which may include split segments and shared edges
+        // that would create spurious lines in the viewport).
         let outer_boundary: Vec<Vec<Point3d>> = {
-            let mut pts = Vec::new();
-            for edge in &face.edges {
-                if let Some(ref curve) = edge.curve {
-                    let (t_min, t_max) = edge.param_range;
-                    let n = 20;
-                    for i in 0..n {
-                        let t = t_min + (t_max - t_min) * (i as f64 / n as f64);
-                        pts.push(curve.point_at(t));
+            if let Some(ref wire) = face.outer_wire {
+                let mut pts = Vec::new();
+                for coedge in &wire.coedges {
+                    if let Some(edge) = face.edges.iter().find(|e| e.id == coedge.edge) {
+                        if let Some(ref curve) = edge.curve {
+                            let (t_min, t_max) = edge.param_range;
+                            let n = 20;
+                            for i in 0..n {
+                                let t = t_min + (t_max - t_min) * (i as f64 / n as f64);
+                                pts.push(curve.point_at(t));
+                            }
+                        }
                     }
                 }
+                if pts.is_empty() { Vec::new() } else { vec![pts] }
+            } else {
+                Vec::new()
             }
-            if pts.is_empty() { Vec::new() } else { vec![pts] }
         };
 
         // Build inner boundaries (holes) from inner_wires
