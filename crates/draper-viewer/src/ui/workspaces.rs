@@ -19,8 +19,16 @@ pub enum VpData {
     Geometry(Box<draper_topology::Solid>),
     /// Triangle mesh (from mesh boolean operations)
     Mesh(Box<draper_mesh::TriangleMesh>),
-    /// A 2D/3D polyline curve
+    /// A 2D/3D polyline curve (sampled points)
     Curve(Vec<draper_geometry::Point3d>),
+    /// Parametric curve — preserves Line/Circle/Arc/NurbsCurve type info.
+    Curve3d(Box<draper_geometry::Curve3d>),
+    /// Parametric surface — Plane/Cylinder/Sphere/NurbsSurface/etc.
+    Surface(Box<draper_geometry::Surface>),
+    /// Infinite plane reference (origin + normal + x_dir).
+    PlaneRef(Box<draper_geometry::Plane>),
+    /// 4×4 transformation matrix.
+    Transform(Box<draper_geometry::Transform>),
     /// Floating-point number
     Number(f64),
     /// Whole number
@@ -33,6 +41,10 @@ pub enum VpData {
     Vector([f64; 3]),
     /// Text string
     String(String),
+    /// Interval [min, max]
+    Domain { min: f64, max: f64 },
+    /// RGBA color
+    Color([f64; 4]),
     /// List of items (data tree leaf)
     List(Vec<VpData>),
     /// No data yet (not computed)
@@ -44,12 +56,19 @@ pub enum VpData {
 pub enum PortType {
     Geometry,
     Curve,
+    Curve3d,
+    Surface,
+    PlaneRef,
+    Mesh,
+    Transform,
     Number,
     Integer,
     Boolean,
     Point,
     Vector,
     String,
+    Domain,
+    Color,
     List,
     Any, // Accepts any type (for Bake, Panel, etc.)
 }
@@ -61,45 +80,62 @@ impl PortType {
         if *self == *other { return true; }
         // Number accepts Integer (promotion)
         if *self == PortType::Number && *other == PortType::Integer { return true; }
-        // Integer accepts Number (truncation)
         if *self == PortType::Integer && *other == PortType::Number { return true; }
         // Point accepts Vector and vice versa
         if *self == PortType::Point && *other == PortType::Vector { return true; }
         if *self == PortType::Vector && *other == PortType::Point { return true; }
-        // List accepts anything (wrap in single-element list)
+        // Curve3d accepts Curve (sampled) and vice versa
+        if *self == PortType::Curve3d && *other == PortType::Curve { return true; }
+        if *self == PortType::Curve && *other == PortType::Curve3d { return true; }
+        // Surface accepts PlaneRef
+        if *self == PortType::Surface && *other == PortType::PlaneRef { return true; }
+        // Geometry accepts Surface, Mesh
+        if *self == PortType::Geometry && (*other == PortType::Surface || *other == PortType::Mesh) { return true; }
+        // List accepts anything
         if *self == PortType::List { return true; }
-        // Any type accepts List (take first element)
         if *other == PortType::List { return true; }
         false
     }
 
-    /// Display color for this port type (for visual identification).
     pub fn color(&self) -> egui::Color32 {
         match self {
-            PortType::Geometry => egui::Color32::from_rgb(0x89, 0xb4, 0xfa), // blue
-            PortType::Curve => egui::Color32::from_rgb(0xa6, 0xe3, 0xa1),    // green
-            PortType::Number => egui::Color32::from_rgb(0xf9, 0xe2, 0xaf),   // yellow
-            PortType::Integer => egui::Color32::from_rgb(0xeb, 0xa0, 0xac),   // red
-            PortType::Boolean => egui::Color32::from_rgb(0xf5, 0xc2, 0xe7),  // pink
-            PortType::Point => egui::Color32::from_rgb(0xfa, 0xb3, 0x87),  // peach
-            PortType::Vector => egui::Color32::from_rgb(0x94, 0xe2, 0xd5),   // teal
-            PortType::String => egui::Color32::from_rgb(0xba, 0xc2, 0xde),   // lavender
-            PortType::List => egui::Color32::from_rgb(0xcb, 0xa6, 0xf7),     // purple
-            PortType::Any => egui::Color32::from_rgb(0x6c, 0x70, 0x86),      // gray
+            PortType::Geometry => egui::Color32::from_rgb(0x89, 0xb4, 0xfa),
+            PortType::Curve => egui::Color32::from_rgb(0xa6, 0xe3, 0xa1),
+            PortType::Curve3d => egui::Color32::from_rgb(0xa6, 0xe3, 0xa1),
+            PortType::Surface => egui::Color32::from_rgb(0x94, 0xe2, 0xd5),
+            PortType::PlaneRef => egui::Color32::from_rgb(0x94, 0xe2, 0xd5),
+            PortType::Mesh => egui::Color32::from_rgb(0x89, 0xd8, 0xb4),
+            PortType::Transform => egui::Color32::from_rgb(0xf5, 0xc2, 0xe7),
+            PortType::Number => egui::Color32::from_rgb(0xf9, 0xe2, 0xaf),
+            PortType::Integer => egui::Color32::from_rgb(0xeb, 0xa0, 0xac),
+            PortType::Boolean => egui::Color32::from_rgb(0xf5, 0xc2, 0xe7),
+            PortType::Point => egui::Color32::from_rgb(0xfa, 0xb3, 0x87),
+            PortType::Vector => egui::Color32::from_rgb(0x94, 0xe2, 0xd5),
+            PortType::String => egui::Color32::from_rgb(0xba, 0xc2, 0xde),
+            PortType::Domain => egui::Color32::from_rgb(0xf9, 0xe2, 0xaf),
+            PortType::Color => egui::Color32::from_rgb(0xf5, 0xa0, 0xa0),
+            PortType::List => egui::Color32::from_rgb(0xcb, 0xa6, 0xf7),
+            PortType::Any => egui::Color32::from_rgb(0x6c, 0x70, 0x86),
         }
     }
 
-    /// Short human-readable name for tooltips and status messages.
     pub fn name(&self) -> &'static str {
         match self {
             PortType::Geometry => "Geometry",
             PortType::Curve => "Curve",
+            PortType::Curve3d => "Curve3d",
+            PortType::Surface => "Surface",
+            PortType::PlaneRef => "Plane",
+            PortType::Mesh => "Mesh",
+            PortType::Transform => "Transform",
             PortType::Number => "Number",
             PortType::Integer => "Integer",
             PortType::Boolean => "Boolean",
             PortType::Point => "Point",
             PortType::Vector => "Vector",
             PortType::String => "String",
+            PortType::Domain => "Domain",
+            PortType::Color => "Color",
             PortType::List => "List",
             PortType::Any => "Any",
         }
@@ -243,6 +279,196 @@ pub enum NodeType {
     // ─── Output ───
     /// Bake to document.
     BakeToDoc,
+
+    // ───── Phase A: New Param Nodes ─────
+    /// Plane input (origin + normal).
+    PlaneInput { ox: f64, oy: f64, oz: f64, nx: f64, ny: f64, nz: f64 },
+    /// Domain input [min, max].
+    DomainInput { min: f64, max: f64 },
+    /// String text input.
+    StringInput { text: String },
+
+    // ───── Phase B: Analysis Nodes ─────
+    /// Compute volume of a solid.
+    Volume,
+    /// Compute surface area of a solid.
+    SurfaceArea,
+    /// Compute centroid of a solid.
+    Centroid,
+    /// Compute bounding box of geometry.
+    BoundingBox,
+    /// Distance between two points.
+    Distance,
+    /// Angle between two vectors.
+    Angle,
+    /// Mass properties (volume, area, centroid, moments).
+    MassProperties,
+
+    // ───── Phase C: Vector & Math Nodes ─────
+    /// Vector cross product.
+    Cross,
+    /// Vector dot product.
+    Dot,
+    /// Vector length.
+    VectorLength,
+    /// Vector unit (normalize).
+    Unit,
+    /// Vector reverse (negate).
+    Negative,
+    /// Reciprocal (1/x).
+    Reciprocal,
+    /// Arcsin.
+    Asin,
+    /// Arccos.
+    Acos,
+    /// Arctan.
+    Atan,
+    /// Arctan2(y, x).
+    Atan2,
+    /// Logarithm (base 10).
+    Log,
+    /// Natural logarithm.
+    Ln,
+    /// Exponential (e^x).
+    Exp,
+    /// Modulus (a % b).
+    Modulus,
+    /// Map value from one domain to another.
+    MapDomain { source_min: f64, source_max: f64, target_min: f64, target_max: f64 },
+    /// Point from two points (midpoint).
+    PointMidpoint,
+    /// Linear interpolation between two points.
+    PointLerp { t: f64 },
+    /// Vector from two points.
+    Vector2pt,
+
+    // ───── Phase D: Surface Creation Nodes ─────
+    /// Extrude a curve along a vector to create a solid.
+    Extrude { distance: f64 },
+    /// Revolve a curve around an axis to create a solid.
+    Revolve { angle_deg: f64 },
+    /// Loft through multiple curves.
+    Loft,
+    /// Sweep a profile along a path.
+    Sweep,
+    /// Create a ruled surface between two curves.
+    RuledSurface,
+    /// Create a plane surface (finite patch).
+    PlaneSurface,
+    /// Extrude to a point (tapered).
+    ExtrudePoint,
+    /// Extrude with taper angle.
+    ExtrudeTapered { distance: f64, taper_deg: f64 },
+
+    // ───── Phase E: Surface Eval & Modify ─────
+    /// Evaluate surface at (u, v).
+    EvaluateSurface,
+    /// Surface normal at (u, v).
+    SurfaceNormal,
+    /// Offset a solid by a distance (shell/thicken).
+    Shell { thickness: f64 },
+    /// Thicken a surface into a solid.
+    Thicken { thickness: f64 },
+    /// Offset solid surfaces.
+    OffsetSolid { distance: f64 },
+    /// Split solid with a plane.
+    SplitSolid,
+    /// Trim solid with a cutting surface.
+    TrimSolid,
+    /// Create a hole in a solid.
+    Hole { radius: f64, depth: f64 },
+
+    // ───── Phase F: Curve Nodes ─────
+    /// Arc by center, radius, start/end angles.
+    Arc { radius: f64, start_angle: f64, end_angle: f64 },
+    /// Arc by 3 points.
+    Arc3pt,
+    /// Ellipse by radii.
+    Ellipse { rx: f64, ry: f64 },
+    /// Polyline from points.
+    Polyline,
+    /// NURBS curve from control points.
+    NurbsCurve,
+    /// NURBS curve through points (interpolation).
+    NurbsCurveInterp,
+    /// Join multiple curves into one.
+    JoinCurves,
+    /// Offset a curve.
+    CurveOffset { distance: f64 },
+    /// Extend a curve.
+    Extend { length: f64 },
+    /// Flip curve direction.
+    Flip,
+    /// Rebuild curve with different point count.
+    Rebuild { count: u32 },
+    /// Point on curve at parameter t.
+    PointAt,
+    /// Tangent vector on curve at t.
+    Tangent,
+    /// Curve curvature at t.
+    Curvature,
+    /// Nearest point on curve to a test point.
+    NearestPoint,
+    /// Curve endpoints (start + end).
+    EndPoints,
+    /// Split curve at parameter.
+    SplitCurve { t: f64 },
+
+    // ───── Phase G: Transform Nodes ─────
+    /// Rotate around arbitrary axis.
+    RotateAxis { angle_deg: f64 },
+    /// Mirror across an arbitrary plane.
+    MirrorPlane,
+    /// Orient geometry from source plane to target plane.
+    Orient,
+    /// Project geometry onto a plane.
+    Project,
+    /// Array along a curve.
+    ArrayAlongCurve { count: u32 },
+    /// Array in a box pattern (Nx × Ny × Nz).
+    ArrayBox { nx: u32, ny: u32, nz: u32 },
+    /// Array on a surface (Nx × Ny).
+    ArrayOnSurface { nx: u32, ny: u32 },
+    /// Compose multiple transforms into one.
+    ComposeTransform,
+    /// Invert a transform.
+    InvertTransform,
+
+    // ───── Phase H: Intersect Nodes ─────
+    /// Curve-curve intersection.
+    CurveCurveIntersect,
+    /// Curve-surface intersection.
+    CurveSurfaceIntersect,
+    /// Surface-surface intersection.
+    SurfaceSurfaceIntersect,
+    /// Plane-plane intersection (line).
+    PlanePlaneIntersect,
+    /// Curve-plane intersection.
+    CurvePlaneIntersect,
+    /// Solid-plane intersection (section).
+    SolidPlaneIntersect,
+    /// Boolean split (A split by B → above + below).
+    BooleanSplit,
+
+    // ───── Phase I: Mesh Nodes ─────
+    /// Convert geometry to mesh.
+    ToMesh,
+    /// Mesh from box/sphere/cylinder.
+    MeshPrimitive,
+    /// Mesh area.
+    MeshArea,
+    /// Mesh volume.
+    MeshVolume,
+    /// Flip mesh normals.
+    MeshFlip,
+    /// Weld mesh vertices.
+    MeshWeld { tolerance: f64 },
+    /// Subdivide mesh.
+    MeshSubdivide { iterations: u32 },
+    /// Decimate (simplify) mesh.
+    MeshDecimate { target_ratio: f64 },
+    /// Smooth mesh.
+    MeshSmooth { iterations: u32 },
 }
 
 impl NodeType {
@@ -320,6 +546,93 @@ impl NodeType {
             NodeType::Concat => "Concat",
             // Output
             NodeType::BakeToDoc => "Bake to Doc",
+            // New nodes
+            NodeType::PlaneInput { .. } => "Plane",
+            NodeType::DomainInput { .. } => "Domain",
+            NodeType::StringInput { .. } => "String",
+            NodeType::Volume => "Volume",
+            NodeType::SurfaceArea => "Surface Area",
+            NodeType::Centroid => "Centroid",
+            NodeType::BoundingBox => "Bounding Box",
+            NodeType::Distance => "Distance",
+            NodeType::Angle => "Angle",
+            NodeType::MassProperties => "Mass Properties",
+            NodeType::Cross => "Cross",
+            NodeType::Dot => "Dot",
+            NodeType::VectorLength => "Vector Length",
+            NodeType::Unit => "Unit",
+            NodeType::Negative => "Negative",
+            NodeType::Reciprocal => "Reciprocal",
+            NodeType::Asin => "Asin",
+            NodeType::Acos => "Acos",
+            NodeType::Atan => "Atan",
+            NodeType::Atan2 => "Atan2",
+            NodeType::Log => "Log",
+            NodeType::Ln => "Ln",
+            NodeType::Exp => "Exp",
+            NodeType::Modulus => "Modulus",
+            NodeType::MapDomain { .. } => "Map Domain",
+            NodeType::PointMidpoint => "Midpoint",
+            NodeType::PointLerp { .. } => "Point Lerp",
+            NodeType::Vector2pt => "Vector 2pt",
+            NodeType::Extrude { .. } => "Extrude",
+            NodeType::Revolve { .. } => "Revolve",
+            NodeType::Loft => "Loft",
+            NodeType::Sweep => "Sweep",
+            NodeType::RuledSurface => "Ruled Surface",
+            NodeType::PlaneSurface => "Plane Surface",
+            NodeType::ExtrudePoint => "Extrude Point",
+            NodeType::ExtrudeTapered { .. } => "Extrude Tapered",
+            NodeType::EvaluateSurface => "Evaluate Surface",
+            NodeType::SurfaceNormal => "Surface Normal",
+            NodeType::Shell { .. } => "Shell",
+            NodeType::Thicken { .. } => "Thicken",
+            NodeType::OffsetSolid { .. } => "Offset Solid",
+            NodeType::SplitSolid => "Split Solid",
+            NodeType::TrimSolid => "Trim Solid",
+            NodeType::Hole { .. } => "Hole",
+            NodeType::Arc { .. } => "Arc",
+            NodeType::Arc3pt => "Arc 3pt",
+            NodeType::Ellipse { .. } => "Ellipse",
+            NodeType::Polyline => "Polyline",
+            NodeType::NurbsCurve => "NURBS Curve",
+            NodeType::NurbsCurveInterp => "NURBS Interp",
+            NodeType::JoinCurves => "Join Curves",
+            NodeType::CurveOffset { .. } => "Curve Offset",
+            NodeType::Extend { .. } => "Extend",
+            NodeType::Flip => "Flip",
+            NodeType::Rebuild { .. } => "Rebuild",
+            NodeType::PointAt => "Point At",
+            NodeType::Tangent => "Tangent",
+            NodeType::Curvature => "Curvature",
+            NodeType::NearestPoint => "Nearest Point",
+            NodeType::EndPoints => "End Points",
+            NodeType::SplitCurve { .. } => "Split Curve",
+            NodeType::RotateAxis { .. } => "Rotate Axis",
+            NodeType::MirrorPlane => "Mirror Plane",
+            NodeType::Orient => "Orient",
+            NodeType::Project => "Project",
+            NodeType::ArrayAlongCurve { .. } => "Array Along Curve",
+            NodeType::ArrayBox { .. } => "Array Box",
+            NodeType::ArrayOnSurface { .. } => "Array on Surface",
+            NodeType::ComposeTransform => "Compose",
+            NodeType::InvertTransform => "Invert Transform",
+            NodeType::CurveCurveIntersect => "CCX",
+            NodeType::CurveSurfaceIntersect => "CSX",
+            NodeType::SurfaceSurfaceIntersect => "SSX",
+            NodeType::PlanePlaneIntersect => "Plane-Plane",
+            NodeType::CurvePlaneIntersect => "Curve-Plane",
+            NodeType::SolidPlaneIntersect => "Solid-Plane",
+            NodeType::BooleanSplit => "Boolean Split",
+            NodeType::ToMesh => "To Mesh",
+            NodeType::MeshPrimitive => "Mesh Primitive",
+            NodeType::MeshArea => "Mesh Area",
+            NodeType::MeshVolume => "Mesh Volume",
+            NodeType::MeshFlip => "Mesh Flip",
+            NodeType::MeshWeld { .. } => "Mesh Weld",
+            NodeType::MeshSubdivide { .. } => "Mesh Subdivide",
+            NodeType::MeshDecimate { .. } => "Mesh Decimate",
+            NodeType::MeshSmooth { .. } => "Mesh Smooth",
         }
     }
 
@@ -346,6 +659,36 @@ impl NodeType {
             NodeType::ShiftList { .. } | NodeType::Subset { .. } |
             NodeType::Dispatch | NodeType::Weave | NodeType::Concat => "Tree",
             NodeType::BakeToDoc => "Output",
+            // New categories
+            NodeType::PlaneInput { .. } | NodeType::DomainInput { .. } | NodeType::StringInput { .. } => "Params",
+            NodeType::Volume | NodeType::SurfaceArea | NodeType::Centroid | NodeType::BoundingBox |
+            NodeType::Distance | NodeType::Angle | NodeType::MassProperties => "Analysis",
+            NodeType::Cross | NodeType::Dot | NodeType::VectorLength | NodeType::Unit |
+            NodeType::Negative | NodeType::Reciprocal | NodeType::Asin | NodeType::Acos |
+            NodeType::Atan | NodeType::Atan2 | NodeType::Log | NodeType::Ln |
+            NodeType::Exp | NodeType::Modulus | NodeType::MapDomain { .. } |
+            NodeType::PointMidpoint | NodeType::PointLerp { .. } | NodeType::Vector2pt => "Maths",
+            NodeType::Extrude { .. } | NodeType::Revolve { .. } | NodeType::Loft |
+            NodeType::Sweep | NodeType::RuledSurface | NodeType::PlaneSurface |
+            NodeType::ExtrudePoint | NodeType::ExtrudeTapered { .. } => "Surface",
+            NodeType::EvaluateSurface | NodeType::SurfaceNormal |
+            NodeType::Shell { .. } | NodeType::Thicken { .. } | NodeType::OffsetSolid { .. } |
+            NodeType::SplitSolid | NodeType::TrimSolid | NodeType::Hole { .. } => "Modify",
+            NodeType::Arc { .. } | NodeType::Arc3pt | NodeType::Ellipse { .. } |
+            NodeType::Polyline | NodeType::NurbsCurve | NodeType::NurbsCurveInterp |
+            NodeType::JoinCurves | NodeType::CurveOffset { .. } | NodeType::Extend { .. } |
+            NodeType::Flip | NodeType::Rebuild { .. } | NodeType::PointAt |
+            NodeType::Tangent | NodeType::Curvature | NodeType::NearestPoint |
+            NodeType::EndPoints | NodeType::SplitCurve { .. } => "Curve",
+            NodeType::RotateAxis { .. } | NodeType::MirrorPlane | NodeType::Orient |
+            NodeType::Project | NodeType::ArrayAlongCurve { .. } | NodeType::ArrayBox { .. } |
+            NodeType::ArrayOnSurface { .. } | NodeType::ComposeTransform | NodeType::InvertTransform => "Transform",
+            NodeType::CurveCurveIntersect | NodeType::CurveSurfaceIntersect |
+            NodeType::SurfaceSurfaceIntersect | NodeType::PlanePlaneIntersect |
+            NodeType::CurvePlaneIntersect | NodeType::SolidPlaneIntersect | NodeType::BooleanSplit => "Intersect",
+            NodeType::ToMesh | NodeType::MeshPrimitive | NodeType::MeshArea | NodeType::MeshVolume |
+            NodeType::MeshFlip | NodeType::MeshWeld { .. } | NodeType::MeshSubdivide { .. } |
+            NodeType::MeshDecimate { .. } | NodeType::MeshSmooth { .. } => "Mesh",
         }
     }
 
@@ -401,6 +744,7 @@ impl NodeType {
             NodeType::Weave => "Wv",
             NodeType::Concat => "Cat",
             NodeType::BakeToDoc => "Bake",
+            _ => "?",
         }
     }
 
@@ -514,6 +858,8 @@ impl NodeType {
             ],
             // Output
             NodeType::BakeToDoc => vec![PortDesc { name: "G", port_type: PortType::Geometry }],
+            // New nodes — default: no inputs (will be expanded per-node)
+            _ => vec![],
         }
     }
 
@@ -562,6 +908,8 @@ impl NodeType {
             NodeType::DivideCurve { .. } => vec![PortDesc { name: "P", port_type: PortType::List }],
             NodeType::EvaluateCurve => vec![PortDesc { name: "P", port_type: PortType::Point }],
             NodeType::CurveLength => vec![PortDesc { name: "L", port_type: PortType::Number }],
+            // New nodes — default: no outputs (will be expanded per-node)
+            _ => vec![],
         }
     }
 
