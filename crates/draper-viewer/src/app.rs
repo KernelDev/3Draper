@@ -18551,7 +18551,7 @@ fn solid_from_mesh(mesh: &draper_mesh::TriangleMesh) -> draper_topology::Solid {
 fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<draper_topology::Solid> {
     use crate::ui::workspaces::{NodeType, VpData};
     use draper_topology::ShapeBuilder;
-    use draper_geometry::{Point3d, Vec3d, Transform};
+    use draper_geometry::{Point3d, Vec3d, Transform, Direction3d};
 
     // Each node produces VpData (typed output).
     let mut results: std::collections::HashMap<u64, VpData> = std::collections::HashMap::new();
@@ -19192,7 +19192,373 @@ fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<draper_to
                     }
                 }
 
-                _ => {}
+                _ => {
+                    // ─── New node evaluation ───
+                    use crate::ui::workspaces::NodeType as NT;
+                    match &node.node_type {
+                        // ── Params ──
+                        NT::PlaneInput { ox, oy, oz, nx, ny, nz } => {
+                            let plane = draper_geometry::Plane::from_origin_and_normal(
+                                Point3d::new(*ox, *oy, *oz),
+                                Direction3d::new(*nx, *ny, *nz).unwrap_or(Direction3d::Z),
+                            );
+                            results.insert(node.id, VpData::PlaneRef(Box::new(plane)));
+                            changed = true;
+                        }
+                        NT::DomainInput { min, max } => {
+                            results.insert(node.id, VpData::Domain { min: *min, max: *max });
+                            changed = true;
+                        }
+                        NT::StringInput { text } => {
+                            results.insert(node.id, VpData::String(text.clone()));
+                            changed = true;
+                        }
+                        // ── Analysis ──
+                        NT::Volume => {
+                            if let Some(solid) = inputs.get(0).and_then(to_solid) {
+                                let vol = draper_topology::queries::solid_volume(&solid);
+                                results.insert(node.id, VpData::Number(vol));
+                                changed = true;
+                            }
+                        }
+                        NT::SurfaceArea => {
+                            if let Some(solid) = inputs.get(0).and_then(to_solid) {
+                                let area = draper_topology::queries::solid_surface_area(&solid);
+                                results.insert(node.id, VpData::Number(area));
+                                changed = true;
+                            }
+                        }
+                        NT::Centroid => {
+                            if let Some(solid) = inputs.get(0).and_then(to_solid) {
+                                let c = draper_topology::queries::solid_center_of_mass(&solid);
+                                results.insert(node.id, VpData::Point([c.x, c.y, c.z]));
+                                changed = true;
+                            }
+                        }
+                        NT::BoundingBox => {
+                            if let Some(solid) = inputs.get(0).and_then(to_solid) {
+                                let mut bmin = Point3d::new(f64::MAX, f64::MAX, f64::MAX);
+                                let mut bmax = Point3d::new(f64::MIN, f64::MIN, f64::MIN);
+                                for face in solid.faces() {
+                                    for edge in &face.edges {
+                                        if let Some(p) = edge.start_vertex_point {
+                                            bmin.x = bmin.x.min(p.x); bmin.y = bmin.y.min(p.y); bmin.z = bmin.z.min(p.z);
+                                            bmax.x = bmax.x.max(p.x); bmax.y = bmax.y.max(p.y); bmax.z = bmax.z.max(p.z);
+                                        }
+                                        if let Some(p) = edge.end_vertex_point {
+                                            bmin.x = bmin.x.min(p.x); bmin.y = bmin.y.min(p.y); bmin.z = bmin.z.min(p.z);
+                                            bmax.x = bmax.x.max(p.x); bmax.y = bmax.y.max(p.y); bmax.z = bmax.z.max(p.z);
+                                        }
+                                    }
+                                }
+                                results.insert(node.id, VpData::List(vec![
+                                    VpData::Point([bmin.x, bmin.y, bmin.z]),
+                                    VpData::Point([bmax.x, bmax.y, bmax.z]),
+                                ]));
+                                changed = true;
+                            }
+                        }
+                        NT::Distance => {
+                            let a = inputs.get(0).and_then(to_point);
+                            let b = inputs.get(1).and_then(to_point);
+                            if let (Some(a), Some(b)) = (a, b) {
+                                let d = ((a[0]-b[0]).powi(2) + (a[1]-b[1]).powi(2) + (a[2]-b[2]).powi(2)).sqrt();
+                                results.insert(node.id, VpData::Number(d));
+                                changed = true;
+                            }
+                        }
+                        NT::Angle => {
+                            let a = inputs.get(0).and_then(|d| match d { VpData::Vector(v) => Some(*v), _ => None });
+                            let b = inputs.get(1).and_then(|d| match d { VpData::Vector(v) => Some(*v), _ => None });
+                            if let (Some(a), Some(b)) = (a, b) {
+                                let dot = a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+                                let la = (a[0]*a[0]+a[1]*a[1]+a[2]*a[2]).sqrt();
+                                let lb = (b[0]*b[0]+b[1]*b[1]+b[2]*b[2]).sqrt();
+                                if la > 1e-10 && lb > 1e-10 {
+                                    let angle = (dot / (la * lb)).clamp(-1.0, 1.0).acos().to_degrees();
+                                    results.insert(node.id, VpData::Number(angle));
+                                    changed = true;
+                                }
+                            }
+                        }
+                        NT::MassProperties => {
+                            if let Some(solid) = inputs.get(0).and_then(to_solid) {
+                                let vol = draper_topology::queries::solid_volume(&solid);
+                                let c = draper_topology::queries::solid_center_of_mass(&solid);
+                                results.insert(node.id, VpData::List(vec![
+                                    VpData::Number(vol),
+                                    VpData::Point([c.x, c.y, c.z]),
+                                ]));
+                                changed = true;
+                            }
+                        }
+                        // ── Vector & Math ──
+                        NT::Cross => {
+                            let a = inputs.get(0).and_then(|d| match d { VpData::Vector(v) => Some(*v), _ => None });
+                            let b = inputs.get(1).and_then(|d| match d { VpData::Vector(v) => Some(*v), _ => None });
+                            if let (Some(a), Some(b)) = (a, b) {
+                                let va = Vec3d::new(a[0], a[1], a[2]);
+                                let vb = Vec3d::new(b[0], b[1], b[2]);
+                                let cross = va.cross(&vb);
+                                results.insert(node.id, VpData::Vector([cross.x, cross.y, cross.z]));
+                                changed = true;
+                            }
+                        }
+                        NT::Dot => {
+                            let a = inputs.get(0).and_then(|d| match d { VpData::Vector(v) => Some(*v), _ => None });
+                            let b = inputs.get(1).and_then(|d| match d { VpData::Vector(v) => Some(*v), _ => None });
+                            if let (Some(a), Some(b)) = (a, b) {
+                                results.insert(node.id, VpData::Number(a[0]*b[0] + a[1]*b[1] + a[2]*b[2]));
+                                changed = true;
+                            }
+                        }
+                        NT::VectorLength => {
+                            if let Some(v) = inputs.get(0).and_then(|d| match d { VpData::Vector(v) => Some(*v), _ => None }) {
+                                results.insert(node.id, VpData::Number((v[0]*v[0]+v[1]*v[1]+v[2]*v[2]).sqrt()));
+                                changed = true;
+                            }
+                        }
+                        NT::Unit => {
+                            if let Some(v) = inputs.get(0).and_then(|d| match d { VpData::Vector(v) => Some(*v), _ => None }) {
+                                let len = (v[0]*v[0]+v[1]*v[1]+v[2]*v[2]).sqrt();
+                                if len > 1e-10 {
+                                    results.insert(node.id, VpData::Vector([v[0]/len, v[1]/len, v[2]/len]));
+                                    changed = true;
+                                }
+                            }
+                        }
+                        NT::Negative => {
+                            if let Some(v) = inputs.get(0) {
+                                let result = match v {
+                                    VpData::Number(n) => VpData::Number(-n),
+                                    VpData::Vector(v) => VpData::Vector([-v[0], -v[1], -v[2]]),
+                                    VpData::Point(p) => VpData::Point([-p[0], -p[1], -p[2]]),
+                                    _ => v.clone(),
+                                };
+                                results.insert(node.id, result);
+                                changed = true;
+                            }
+                        }
+                        NT::Reciprocal => {
+                            if let Some(x) = inputs.get(0).and_then(to_number) {
+                                if x.abs() > 1e-10 { results.insert(node.id, VpData::Number(1.0 / x)); changed = true; }
+                            }
+                        }
+                        NT::Asin => { if let Some(x) = inputs.get(0).and_then(to_number) { results.insert(node.id, VpData::Number(x.asin().to_degrees())); changed = true; } }
+                        NT::Acos => { if let Some(x) = inputs.get(0).and_then(to_number) { results.insert(node.id, VpData::Number(x.acos().to_degrees())); changed = true; } }
+                        NT::Atan => { if let Some(x) = inputs.get(0).and_then(to_number) { results.insert(node.id, VpData::Number(x.atan().to_degrees())); changed = true; } }
+                        NT::Atan2 => {
+                            let y = inputs.get(0).and_then(to_number);
+                            let x = inputs.get(1).and_then(to_number);
+                            if let (Some(y), Some(x)) = (y, x) { results.insert(node.id, VpData::Number(y.atan2(x).to_degrees())); changed = true; }
+                        }
+                        NT::Log => { if let Some(x) = inputs.get(0).and_then(to_number) { results.insert(node.id, VpData::Number(x.log10())); changed = true; } }
+                        NT::Ln => { if let Some(x) = inputs.get(0).and_then(to_number) { results.insert(node.id, VpData::Number(x.ln())); changed = true; } }
+                        NT::Exp => { if let Some(x) = inputs.get(0).and_then(to_number) { results.insert(node.id, VpData::Number(x.exp())); changed = true; } }
+                        NT::Modulus => {
+                            let a = inputs.get(0).and_then(to_number);
+                            let b = inputs.get(1).and_then(to_number);
+                            if let (Some(a), Some(b)) = (a, b) { if b.abs() > 1e-10 { results.insert(node.id, VpData::Number(a % b)); changed = true; } }
+                        }
+                        NT::MapDomain { source_min, source_max, target_min, target_max } => {
+                            if let Some(v) = inputs.get(0).and_then(to_number) {
+                                let src_range = source_max - source_min;
+                                if src_range.abs() > 1e-10 {
+                                    let t = (v - source_min) / src_range;
+                                    let result = target_min + t * (target_max - target_min);
+                                    results.insert(node.id, VpData::Number(result));
+                                    changed = true;
+                                }
+                            }
+                        }
+                        NT::PointMidpoint => {
+                            let a = inputs.get(0).and_then(to_point);
+                            let b = inputs.get(1).and_then(to_point);
+                            if let (Some(a), Some(b)) = (a, b) {
+                                results.insert(node.id, VpData::Point([(a[0]+b[0])*0.5, (a[1]+b[1])*0.5, (a[2]+b[2])*0.5]));
+                                changed = true;
+                            }
+                        }
+                        NT::PointLerp { t } => {
+                            let a = inputs.get(0).and_then(to_point);
+                            let b = inputs.get(1).and_then(to_point);
+                            if let (Some(a), Some(b)) = (a, b) {
+                                let t_val = inputs.get(2).and_then(to_number).unwrap_or(*t);
+                                results.insert(node.id, VpData::Point([
+                                    a[0] + t_val * (b[0] - a[0]),
+                                    a[1] + t_val * (b[1] - a[1]),
+                                    a[2] + t_val * (b[2] - a[2]),
+                                ]));
+                                changed = true;
+                            }
+                        }
+                        NT::Vector2pt => {
+                            let a = inputs.get(0).and_then(to_point);
+                            let b = inputs.get(1).and_then(to_point);
+                            if let (Some(a), Some(b)) = (a, b) {
+                                results.insert(node.id, VpData::Vector([b[0]-a[0], b[1]-a[1], b[2]-a[2]]));
+                                changed = true;
+                            }
+                        }
+                        // ── Transform ──
+                        NT::RotateAxis { angle_deg } => {
+                            if let Some(solid) = inputs.get(0).and_then(to_solid) {
+                                let axis_pt = inputs.get(1).and_then(to_point).unwrap_or([0.0, 0.0, 0.0]);
+                                let axis_dir = inputs.get(2).and_then(|d| match d { VpData::Vector(v) => Some(*v), _ => None }).unwrap_or([0.0, 0.0, 1.0]);
+                                let angle = inputs.get(3).and_then(to_number).unwrap_or(*angle_deg);
+                                let dir = Direction3d::new(axis_dir[0], axis_dir[1], axis_dir[2]).unwrap_or(Direction3d::Z);
+                                let mut s = solid;
+                                ShapeBuilder::transform_solid(&mut s, &Transform::translation(-axis_pt[0], -axis_pt[1], -axis_pt[2]));
+                                ShapeBuilder::transform_solid(&mut s, &Transform::rotation_axis(&dir, angle.to_radians()));
+                                ShapeBuilder::transform_solid(&mut s, &Transform::translation(axis_pt[0], axis_pt[1], axis_pt[2]));
+                                results.insert(node.id, VpData::Geometry(Box::new(s)));
+                                changed = true;
+                            }
+                        }
+                        NT::MirrorPlane => {
+                            if let Some(solid) = inputs.get(0).and_then(to_solid) {
+                                let mut s = solid;
+                                ShapeBuilder::transform_solid(&mut s, &Transform::scaling(-1.0, 1.0, 1.0));
+                                results.insert(node.id, VpData::Geometry(Box::new(s)));
+                                changed = true;
+                            }
+                        }
+                        NT::ToMesh => {
+                            if let Some(solid) = inputs.get(0).and_then(to_solid) {
+                                let params = tri_params_for_lod(LodLevel::Medium);
+                                let mesh = triangulate_solid(&solid, &params);
+                                results.insert(node.id, VpData::Mesh(Box::new(mesh)));
+                                changed = true;
+                            }
+                        }
+                        NT::MeshArea => {
+                            if let Some(mesh) = inputs.get(0).and_then(|d| match d { VpData::Mesh(m) => Some((**m).clone()), _ => None }) {
+                                let area: f64 = mesh.triangles.iter().map(|tri| {
+                                    let v0 = mesh.vertices[tri[0] as usize];
+                                    let v1 = mesh.vertices[tri[1] as usize];
+                                    let v2 = mesh.vertices[tri[2] as usize];
+                                    let e1 = (v1.x - v0.x, v1.y - v0.y, v1.z - v0.z);
+                                    let e2 = (v2.x - v0.x, v2.y - v0.y, v2.z - v0.z);
+                                    let cx = e1.1 * e2.2 - e1.2 * e2.1;
+                                    let cy = e1.2 * e2.0 - e1.0 * e2.2;
+                                    let cz = e1.0 * e2.1 - e1.1 * e2.0;
+                                    0.5 * (cx*cx + cy*cy + cz*cz).sqrt()
+                                }).sum();
+                                results.insert(node.id, VpData::Number(area));
+                                changed = true;
+                            }
+                        }
+                        NT::MeshVolume => {
+                            if let Some(mesh) = inputs.get(0).and_then(|d| match d { VpData::Mesh(m) => Some((**m).clone()), _ => None }) {
+                                let vol: f64 = mesh.triangles.iter().map(|tri| {
+                                    let v0 = mesh.vertices[tri[0] as usize];
+                                    let v1 = mesh.vertices[tri[1] as usize];
+                                    let v2 = mesh.vertices[tri[2] as usize];
+                                    (v0.x * (v1.y * v2.z - v1.z * v2.y) +
+                                     v0.y * (v1.z * v2.x - v1.x * v2.z) +
+                                     v0.z * (v1.x * v2.y - v1.y * v2.x)) / 6.0
+                                }).sum();
+                                results.insert(node.id, VpData::Number(vol.abs()));
+                                changed = true;
+                            }
+                        }
+                        NT::MeshFlip => {
+                            if let Some(mut mesh) = inputs.get(0).and_then(|d| match d { VpData::Mesh(m) => Some((**m).clone()), _ => None }) {
+                                for tri in &mut mesh.triangles { tri.swap(1, 2); }
+                                results.insert(node.id, VpData::Mesh(Box::new(mesh)));
+                                changed = true;
+                            }
+                        }
+                        // ── Curve: Arc, Ellipse ──
+                        NT::Arc { radius, start_angle, end_angle } => {
+                            let pts: Vec<Point3d> = (0..=40).map(|i| {
+                                let t = *start_angle + (*end_angle - *start_angle) * (i as f64 / 40.0);
+                                let r = t.to_radians();
+                                Point3d::new(radius * r.cos(), radius * r.sin(), 0.0)
+                            }).collect();
+                            results.insert(node.id, VpData::Curve(pts));
+                            changed = true;
+                        }
+                        NT::Ellipse { rx, ry } => {
+                            let pts: Vec<Point3d> = (0..=60).map(|i| {
+                                let t = 2.0 * std::f64::consts::PI * (i as f64 / 60.0);
+                                Point3d::new(rx * t.cos(), ry * t.sin(), 0.0)
+                            }).collect();
+                            results.insert(node.id, VpData::Curve(pts));
+                            changed = true;
+                        }
+                        NT::Flip => {
+                            if let Some(curve) = inputs.get(0).and_then(|d| match d { VpData::Curve(c) => Some(c.clone()), _ => None }) {
+                                let mut pts = curve;
+                                pts.reverse();
+                                results.insert(node.id, VpData::Curve(pts));
+                                changed = true;
+                            }
+                        }
+                        NT::EndPoints => {
+                            if let Some(curve) = inputs.get(0).and_then(|d| match d { VpData::Curve(c) => Some(c.clone()), _ => None }) {
+                                if curve.len() >= 2 {
+                                    results.insert(node.id, VpData::List(vec![
+                                        VpData::Point([curve[0].x, curve[0].y, curve[0].z]),
+                                        VpData::Point([curve[curve.len()-1].x, curve[curve.len()-1].y, curve[curve.len()-1].z]),
+                                    ]));
+                                    changed = true;
+                                }
+                            }
+                        }
+                        NT::PointAt => {
+                            if let (Some(curve), Some(t)) = (
+                                inputs.get(0).and_then(|d| match d { VpData::Curve(c) => Some(c.clone()), _ => None }),
+                                inputs.get(1).and_then(to_number)
+                            ) {
+                                if !curve.is_empty() {
+                                    let idx = ((t.clamp(0.0, 1.0) * (curve.len() - 1) as f64).round() as usize).min(curve.len() - 1);
+                                    let p = curve[idx];
+                                    results.insert(node.id, VpData::Point([p.x, p.y, p.z]));
+                                    changed = true;
+                                }
+                            }
+                        }
+                        // ── Compose/Invert Transform ──
+                        NT::ComposeTransform => {
+                            let a = inputs.get(0).and_then(|d| match d { VpData::Transform(t) => Some((**t).clone()), _ => None });
+                            let b = inputs.get(1).and_then(|d| match d { VpData::Transform(t) => Some((**t).clone()), _ => None });
+                            if let (Some(a), Some(b)) = (a, b) {
+                                let composed = Transform::multiply(&a, &b);
+                                results.insert(node.id, VpData::Transform(Box::new(composed)));
+                                changed = true;
+                            }
+                        }
+                        NT::InvertTransform => {
+                            if let Some(t) = inputs.get(0).and_then(|d| match d { VpData::Transform(t) => Some((**t).clone()), _ => None }) {
+                                if let Some(inv) = t.inverse() {
+                                    results.insert(node.id, VpData::Transform(Box::new(inv)));
+                                    changed = true;
+                                }
+                            }
+                        }
+                        // ── Boolean Split ──
+                        NT::BooleanSplit => {
+                            let a = inputs.get(0).and_then(to_solid);
+                            let b = inputs.get(1).and_then(to_solid);
+                            if let (Some(a), Some(b)) = (a, b) {
+                                let scale = vp_solid_scale(&a).max(vp_solid_scale(&b));
+                                let tol_ctx = draper_geometry::ToleranceContext::from_model_scale(scale);
+                                let above = draper_topology::boolean::boolean_subtract(&a, &b, &tol_ctx).ok();
+                                let below = draper_topology::boolean::boolean_subtract(&b, &a, &tol_ctx).ok();
+                                let mut parts = Vec::new();
+                                if let Some(a) = above { parts.push(VpData::Geometry(Box::new(a))); }
+                                if let Some(b) = below { parts.push(VpData::Geometry(Box::new(b))); }
+                                if !parts.is_empty() {
+                                    results.insert(node.id, VpData::List(parts));
+                                    changed = true;
+                                }
+                            }
+                        }
+                        // ── Remaining nodes: stub ──
+                        _ => {}
+                    }
+                }
             }
         }
         if !changed { break; }
