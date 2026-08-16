@@ -858,8 +858,224 @@ impl NodeType {
             ],
             // Output
             NodeType::BakeToDoc => vec![PortDesc { name: "G", port_type: PortType::Geometry }],
-            // New nodes — default: no inputs (will be expanded per-node)
-            _ => vec![],
+            // ── Params ──
+            NodeType::PlaneInput { .. } | NodeType::DomainInput { .. } | NodeType::StringInput { .. } => vec![],
+            // ── Analysis ──
+            NodeType::Volume | NodeType::SurfaceArea | NodeType::Centroid |
+            NodeType::BoundingBox | NodeType::MassProperties => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+            ],
+            NodeType::Distance => vec![
+                PortDesc { name: "A", port_type: PortType::Point },
+                PortDesc { name: "B", port_type: PortType::Point },
+            ],
+            NodeType::Angle => vec![
+                PortDesc { name: "A", port_type: PortType::Vector },
+                PortDesc { name: "B", port_type: PortType::Vector },
+            ],
+            // ── Vector & Math ──
+            NodeType::Cross => vec![
+                PortDesc { name: "A", port_type: PortType::Vector },
+                PortDesc { name: "B", port_type: PortType::Vector },
+            ],
+            NodeType::Dot => vec![
+                PortDesc { name: "A", port_type: PortType::Vector },
+                PortDesc { name: "B", port_type: PortType::Vector },
+            ],
+            NodeType::VectorLength | NodeType::Unit | NodeType::Negative => vec![
+                PortDesc { name: "V", port_type: PortType::Vector },
+            ],
+            NodeType::Reciprocal | NodeType::Asin | NodeType::Acos | NodeType::Atan |
+            NodeType::Log | NodeType::Ln | NodeType::Exp | NodeType::Negative => vec![
+                PortDesc { name: "X", port_type: PortType::Number },
+            ],
+            NodeType::Atan2 | NodeType::Modulus => vec![
+                PortDesc { name: "A", port_type: PortType::Number },
+                PortDesc { name: "B", port_type: PortType::Number },
+            ],
+            NodeType::MapDomain { .. } => vec![
+                PortDesc { name: "V", port_type: PortType::Number },
+            ],
+            NodeType::PointMidpoint => vec![
+                PortDesc { name: "A", port_type: PortType::Point },
+                PortDesc { name: "B", port_type: PortType::Point },
+            ],
+            NodeType::PointLerp { .. } => vec![
+                PortDesc { name: "A", port_type: PortType::Point },
+                PortDesc { name: "B", port_type: PortType::Point },
+            ],
+            NodeType::Vector2pt => vec![
+                PortDesc { name: "A", port_type: PortType::Point },
+                PortDesc { name: "B", port_type: PortType::Point },
+            ],
+            // ── Surface Creation ──
+            NodeType::Extrude { .. } => vec![
+                PortDesc { name: "C", port_type: PortType::Curve },
+                PortDesc { name: "V", port_type: PortType::Vector },
+            ],
+            NodeType::Revolve { .. } => vec![
+                PortDesc { name: "C", port_type: PortType::Curve },
+                PortDesc { name: "A", port_type: PortType::Point },
+                PortDesc { name: "D", port_type: PortType::Vector },
+            ],
+            NodeType::Loft => vec![
+                PortDesc { name: "C", port_type: PortType::List },
+            ],
+            NodeType::Sweep => vec![
+                PortDesc { name: "P", port_type: PortType::Curve },
+                PortDesc { name: "R", port_type: PortType::Curve },
+            ],
+            NodeType::RuledSurface => vec![
+                PortDesc { name: "A", port_type: PortType::Curve },
+                PortDesc { name: "B", port_type: PortType::Curve },
+            ],
+            NodeType::PlaneSurface => vec![
+                PortDesc { name: "P", port_type: PortType::PlaneRef },
+            ],
+            NodeType::ExtrudePoint => vec![
+                PortDesc { name: "C", port_type: PortType::Curve },
+                PortDesc { name: "P", port_type: PortType::Point },
+            ],
+            NodeType::ExtrudeTapered { .. } => vec![
+                PortDesc { name: "C", port_type: PortType::Curve },
+                PortDesc { name: "V", port_type: PortType::Vector },
+            ],
+            // ── Surface Eval & Modify ──
+            NodeType::EvaluateSurface | NodeType::SurfaceNormal => vec![
+                PortDesc { name: "S", port_type: PortType::Surface },
+                PortDesc { name: "U", port_type: PortType::Number },
+                PortDesc { name: "V", port_type: PortType::Number },
+            ],
+            NodeType::Shell { .. } | NodeType::Thicken { .. } | NodeType::OffsetSolid { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+            ],
+            NodeType::SplitSolid => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+                PortDesc { name: "P", port_type: PortType::PlaneRef },
+            ],
+            NodeType::TrimSolid => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+                PortDesc { name: "S", port_type: PortType::Surface },
+            ],
+            NodeType::Hole { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+                PortDesc { name: "P", port_type: PortType::Point },
+                PortDesc { name: "D", port_type: PortType::Vector },
+            ],
+            // ── Curve ──
+            NodeType::Arc { .. } | NodeType::Ellipse { .. } => vec![],
+            NodeType::Arc3pt => vec![
+                PortDesc { name: "A", port_type: PortType::Point },
+                PortDesc { name: "B", port_type: PortType::Point },
+                PortDesc { name: "C", port_type: PortType::Point },
+            ],
+            NodeType::Polyline => vec![
+                PortDesc { name: "P", port_type: PortType::List },
+            ],
+            NodeType::NurbsCurve | NodeType::NurbsCurveInterp => vec![
+                PortDesc { name: "P", port_type: PortType::List },
+            ],
+            NodeType::JoinCurves => vec![
+                PortDesc { name: "C", port_type: PortType::List },
+            ],
+            NodeType::CurveOffset { .. } => vec![
+                PortDesc { name: "C", port_type: PortType::Curve },
+                PortDesc { name: "P", port_type: PortType::PlaneRef },
+            ],
+            NodeType::Extend { .. } => vec![
+                PortDesc { name: "C", port_type: PortType::Curve },
+            ],
+            NodeType::Flip | NodeType::Rebuild { .. } => vec![
+                PortDesc { name: "C", port_type: PortType::Curve },
+            ],
+            NodeType::PointAt | NodeType::Tangent | NodeType::Curvature => vec![
+                PortDesc { name: "C", port_type: PortType::Curve },
+                PortDesc { name: "T", port_type: PortType::Number },
+            ],
+            NodeType::NearestPoint => vec![
+                PortDesc { name: "C", port_type: PortType::Curve },
+                PortDesc { name: "P", port_type: PortType::Point },
+            ],
+            NodeType::EndPoints => vec![
+                PortDesc { name: "C", port_type: PortType::Curve },
+            ],
+            NodeType::SplitCurve { .. } => vec![
+                PortDesc { name: "C", port_type: PortType::Curve },
+                PortDesc { name: "T", port_type: PortType::Number },
+            ],
+            // ── Transform ──
+            NodeType::RotateAxis { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+                PortDesc { name: "A", port_type: PortType::Point },
+                PortDesc { name: "D", port_type: PortType::Vector },
+            ],
+            NodeType::MirrorPlane => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+                PortDesc { name: "P", port_type: PortType::PlaneRef },
+            ],
+            NodeType::Orient => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+                PortDesc { name: "S", port_type: PortType::PlaneRef },
+                PortDesc { name: "T", port_type: PortType::PlaneRef },
+            ],
+            NodeType::Project => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+                PortDesc { name: "P", port_type: PortType::PlaneRef },
+                PortDesc { name: "D", port_type: PortType::Vector },
+            ],
+            NodeType::ArrayAlongCurve { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+                PortDesc { name: "C", port_type: PortType::Curve },
+            ],
+            NodeType::ArrayBox { .. } | NodeType::ArrayOnSurface { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+            ],
+            NodeType::ComposeTransform => vec![
+                PortDesc { name: "A", port_type: PortType::Transform },
+                PortDesc { name: "B", port_type: PortType::Transform },
+            ],
+            NodeType::InvertTransform => vec![
+                PortDesc { name: "T", port_type: PortType::Transform },
+            ],
+            // ── Intersect ──
+            NodeType::CurveCurveIntersect => vec![
+                PortDesc { name: "A", port_type: PortType::Curve },
+                PortDesc { name: "B", port_type: PortType::Curve },
+            ],
+            NodeType::CurveSurfaceIntersect => vec![
+                PortDesc { name: "C", port_type: PortType::Curve },
+                PortDesc { name: "S", port_type: PortType::Surface },
+            ],
+            NodeType::SurfaceSurfaceIntersect => vec![
+                PortDesc { name: "A", port_type: PortType::Surface },
+                PortDesc { name: "B", port_type: PortType::Surface },
+            ],
+            NodeType::PlanePlaneIntersect => vec![
+                PortDesc { name: "A", port_type: PortType::PlaneRef },
+                PortDesc { name: "B", port_type: PortType::PlaneRef },
+            ],
+            NodeType::CurvePlaneIntersect => vec![
+                PortDesc { name: "C", port_type: PortType::Curve },
+                PortDesc { name: "P", port_type: PortType::PlaneRef },
+            ],
+            NodeType::SolidPlaneIntersect => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+                PortDesc { name: "P", port_type: PortType::PlaneRef },
+            ],
+            NodeType::BooleanSplit => vec![
+                PortDesc { name: "A", port_type: PortType::Geometry },
+                PortDesc { name: "B", port_type: PortType::Geometry },
+            ],
+            // ── Mesh ──
+            NodeType::ToMesh => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+            ],
+            NodeType::MeshPrimitive => vec![],
+            NodeType::MeshArea | NodeType::MeshVolume | NodeType::MeshFlip |
+            NodeType::MeshWeld { .. } | NodeType::MeshSubdivide { .. } |
+            NodeType::MeshDecimate { .. } | NodeType::MeshSmooth { .. } => vec![
+                PortDesc { name: "M", port_type: PortType::Mesh },
+            ],
         }
     }
 
@@ -908,8 +1124,106 @@ impl NodeType {
             NodeType::DivideCurve { .. } => vec![PortDesc { name: "P", port_type: PortType::List }],
             NodeType::EvaluateCurve => vec![PortDesc { name: "P", port_type: PortType::Point }],
             NodeType::CurveLength => vec![PortDesc { name: "L", port_type: PortType::Number }],
-            // New nodes — default: no outputs (will be expanded per-node)
-            _ => vec![],
+            // ── Params ──
+            NodeType::PlaneInput { .. } => vec![PortDesc { name: "P", port_type: PortType::PlaneRef }],
+            NodeType::DomainInput { .. } => vec![PortDesc { name: "D", port_type: PortType::Domain }],
+            NodeType::StringInput { .. } => vec![PortDesc { name: "S", port_type: PortType::String }],
+            // ── Analysis ──
+            NodeType::Volume => vec![PortDesc { name: "V", port_type: PortType::Number }],
+            NodeType::SurfaceArea => vec![PortDesc { name: "A", port_type: PortType::Number }],
+            NodeType::Centroid => vec![PortDesc { name: "C", port_type: PortType::Point }],
+            NodeType::BoundingBox => vec![
+                PortDesc { name: "Min", port_type: PortType::Point },
+                PortDesc { name: "Max", port_type: PortType::Point },
+            ],
+            NodeType::Distance => vec![PortDesc { name: "D", port_type: PortType::Number }],
+            NodeType::Angle => vec![PortDesc { name: "A", port_type: PortType::Number }],
+            NodeType::MassProperties => vec![
+                PortDesc { name: "V", port_type: PortType::Number },
+                PortDesc { name: "C", port_type: PortType::Point },
+            ],
+            // ── Vector & Math ──
+            NodeType::Cross => vec![PortDesc { name: "V", port_type: PortType::Vector }],
+            NodeType::Dot => vec![PortDesc { name: "R", port_type: PortType::Number }],
+            NodeType::VectorLength => vec![PortDesc { name: "L", port_type: PortType::Number }],
+            NodeType::Unit => vec![PortDesc { name: "V", port_type: PortType::Vector }],
+            NodeType::Negative => vec![PortDesc { name: "R", port_type: PortType::Any }],
+            NodeType::Reciprocal | NodeType::Asin | NodeType::Acos | NodeType::Atan |
+            NodeType::Log | NodeType::Ln | NodeType::Exp => vec![
+                PortDesc { name: "R", port_type: PortType::Number },
+            ],
+            NodeType::Atan2 | NodeType::Modulus => vec![
+                PortDesc { name: "R", port_type: PortType::Number },
+            ],
+            NodeType::MapDomain { .. } => vec![PortDesc { name: "R", port_type: PortType::Number }],
+            NodeType::PointMidpoint => vec![PortDesc { name: "P", port_type: PortType::Point }],
+            NodeType::PointLerp { .. } => vec![PortDesc { name: "P", port_type: PortType::Point }],
+            NodeType::Vector2pt => vec![PortDesc { name: "V", port_type: PortType::Vector }],
+            // ── Surface Creation ──
+            NodeType::Extrude { .. } | NodeType::Revolve { .. } | NodeType::Loft |
+            NodeType::Sweep | NodeType::ExtrudePoint | NodeType::ExtrudeTapered { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+            ],
+            NodeType::RuledSurface | NodeType::PlaneSurface => vec![
+                PortDesc { name: "S", port_type: PortType::Surface },
+            ],
+            // ── Surface Eval & Modify ──
+            NodeType::EvaluateSurface => vec![PortDesc { name: "P", port_type: PortType::Point }],
+            NodeType::SurfaceNormal => vec![PortDesc { name: "N", port_type: PortType::Vector }],
+            NodeType::Shell { .. } | NodeType::Thicken { .. } | NodeType::OffsetSolid { .. } |
+            NodeType::SplitSolid | NodeType::TrimSolid | NodeType::Hole { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+            ],
+            // ── Curve ──
+            NodeType::Arc { .. } | NodeType::Arc3pt | NodeType::Ellipse { .. } |
+            NodeType::Polyline | NodeType::NurbsCurve | NodeType::NurbsCurveInterp |
+            NodeType::JoinCurves | NodeType::CurveOffset { .. } | NodeType::Extend { .. } |
+            NodeType::Flip | NodeType::Rebuild { .. } => vec![
+                PortDesc { name: "C", port_type: PortType::Curve },
+            ],
+            NodeType::PointAt => vec![PortDesc { name: "P", port_type: PortType::Point }],
+            NodeType::Tangent => vec![PortDesc { name: "V", port_type: PortType::Vector }],
+            NodeType::Curvature => vec![PortDesc { name: "C", port_type: PortType::Number }],
+            NodeType::NearestPoint => vec![PortDesc { name: "P", port_type: PortType::Point }],
+            NodeType::EndPoints => vec![
+                PortDesc { name: "S", port_type: PortType::Point },
+                PortDesc { name: "E", port_type: PortType::Point },
+            ],
+            NodeType::SplitCurve { .. } => vec![
+                PortDesc { name: "A", port_type: PortType::Curve },
+                PortDesc { name: "B", port_type: PortType::Curve },
+            ],
+            // ── Transform ──
+            NodeType::RotateAxis { .. } | NodeType::MirrorPlane | NodeType::Orient |
+            NodeType::Project | NodeType::ArrayAlongCurve { .. } |
+            NodeType::ArrayBox { .. } | NodeType::ArrayOnSurface { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+            ],
+            NodeType::ComposeTransform | NodeType::InvertTransform => vec![
+                PortDesc { name: "T", port_type: PortType::Transform },
+            ],
+            // ── Intersect ──
+            NodeType::CurveCurveIntersect | NodeType::CurveSurfaceIntersect |
+            NodeType::SurfaceSurfaceIntersect | NodeType::CurvePlaneIntersect |
+            NodeType::SolidPlaneIntersect => vec![
+                PortDesc { name: "P", port_type: PortType::List },
+            ],
+            NodeType::PlanePlaneIntersect => vec![
+                PortDesc { name: "L", port_type: PortType::Curve },
+            ],
+            NodeType::BooleanSplit => vec![
+                PortDesc { name: "A", port_type: PortType::Geometry },
+                PortDesc { name: "B", port_type: PortType::Geometry },
+            ],
+            // ── Mesh ──
+            NodeType::ToMesh => vec![PortDesc { name: "M", port_type: PortType::Mesh }],
+            NodeType::MeshPrimitive => vec![PortDesc { name: "M", port_type: PortType::Mesh }],
+            NodeType::MeshArea => vec![PortDesc { name: "A", port_type: PortType::Number }],
+            NodeType::MeshVolume => vec![PortDesc { name: "V", port_type: PortType::Number }],
+            NodeType::MeshFlip | NodeType::MeshWeld { .. } | NodeType::MeshSubdivide { .. } |
+            NodeType::MeshDecimate { .. } | NodeType::MeshSmooth { .. } => vec![
+                PortDesc { name: "M", port_type: PortType::Mesh },
+            ],
         }
     }
 
