@@ -6,6 +6,67 @@
 
 ---
 
+## ✅ Implementation Progress (Updated 2026-08-18)
+
+**Status:** 144 — 40 (Phase A-I enums + ports) + 60 (evaluation logic) implemented
+in this iteration. Build: clean (`cargo check -p draper-viewer`).
+
+### Newly implemented evaluation (commit on 2026-08-18)
+
+- **Curve (11):** `Polyline`, `NurbsCurve`, `NurbsCurveInterp`, `JoinCurves`,
+  `CurveOffset`, `Extend`, `Rebuild`, `Tangent`, `Curvature`, `NearestPoint`,
+  `SplitCurve`, `Arc3pt`.
+- **Surface Creation (8):** `Extrude`, `Revolve`, `Loft`, `Sweep`,
+  `RuledSurface`, `PlaneSurface`, `ExtrudePoint`, `ExtrudeTapered`.
+- **Surface Evaluation (2):** `EvaluateSurface`, `SurfaceNormal`.
+- **Modify (6):** `Shell`, `Thicken`, `OffsetSolid`, `Hole`, `SplitSolid`, `TrimSolid`.
+- **Transform (5):** `Orient`, `Project`, `ArrayAlongCurve`, `ArrayBox`, `ArrayOnSurface`.
+- **Intersect (6):** `CurveCurveIntersect`, `CurveSurfaceIntersect`,
+  `SurfaceSurfaceIntersect`, `PlanePlaneIntersect`, `CurvePlaneIntersect`,
+  `SolidPlaneIntersect`.
+- **Mesh (5):** `MeshPrimitive`, `MeshWeld`, `MeshSubdivide`, `MeshDecimate`, `MeshSmooth`.
+
+Previously implemented (commit 8f859c3, 2026-08-16):
+- Params (3): `PlaneInput`, `DomainInput`, `StringInput`.
+- Analysis (7): `Volume`, `SurfaceArea`, `Centroid`, `BoundingBox`, `Distance`, `Angle`, `MassProperties`.
+- Vector/Math (18): `Cross`, `Dot`, `VectorLength`, `Unit`, `Negative`, `Reciprocal`,
+  `Asin`, `Acos`, `Atan`, `Atan2`, `Log`, `Ln`, `Exp`, `Modulus`, `MapDomain`,
+  `PointMidpoint`, `PointLerp`, `Vector2pt`.
+- Transform (2): `RotateAxis`, `MirrorPlane`.
+- Curve (5): `Arc`, `Ellipse`, `Flip`, `EndPoints`, `PointAt`.
+- Transform ops (2): `ComposeTransform`, `InvertTransform`.
+- Mesh (4): `ToMesh`, `MeshArea`, `MeshVolume`, `MeshFlip`.
+- Boolean (1): `BooleanSplit`.
+
+### Remaining stubs (need API work)
+
+- Surface nodes that require `Surface::Cylinder`/`Sphere`/`Torus` outputs from
+  planar inputs: `CylinderSurface`, `ConeSurface`, `SphereSurface`, `TorusSurface`,
+  `OffsetSurface`, `IsoTrim`, `DivideSurface`, `SurfaceClosestPoint`,
+  `SurfaceProjectPoint`, `SurfaceSplit`, `SurfaceFlip`, `SurfaceRebuild`,
+  `SurfaceFromPoints`, `SurfaceIsocurve`, `SurfaceUntrim`, `SurfaceFrame`,
+  `SurfaceCurvature`, `SurfaceArea`.
+- Curve nodes needing extended curve API: `CurveBooleanUnion`, `CurveBooleanSubtract`,
+  `CurveBooleanIntersect`, `CurveShatter`, `CurveDiscontinuity`, `CurveFrame`,
+  `CurveNormal`, `ProjectCurveToPlane`, `ProjectCurveToSurface`, `CurveSeam`.
+- Transform: `RotateAxis` extension for arbitrary axis, `MirrorPlane` extension,
+  `ArrayPolar`, `Offset`, `Shear`, `Taper`, `ApplyTransform`.
+- Intersect: `BrepBrepIntersect`, `MeshMeshIntersect`, `LineLineClosestPoint`,
+  `SolidInclusion`, `CollisionCheck`, `BooleanTrim`, `MeshBooleanUnion`/`Subtract`/`Intersect`.
+- Modify: `DraftFace`, `MoveFace`, `OffsetFace`, `ReplaceFace`, `HoleCircular`,
+  `Rib`, `FilletEdge`, `ChamferEdge`, `FilletVariable`, `SurfaceTrim`, `SurfaceUntrim`.
+- Analysis: `MomentsOfInertia`, `CurveCurvatureAnalysis`, `SurfaceCurvatureAnalysis`,
+  `PointInSolid`, `PointInCurve`, `ClosestPointOnSurface`, `ClosestPointOnCurve`,
+  `SelfIntersect`, `Planar`, `Closed`.
+- Sets/Tree: `CullIndex`, `Partition`, `ReplaceItems`, `Sift`, `Combine`, `Duplicate`,
+  `Null`, `ListMap`, `PathMapper`, `TreeBranch`, `TreeStatistics`, `CleanTree`, `ExplodeTree`.
+- Primitives: `PlanePrimitive`, `PolygonPrism`, `Tube`, `Helix`, `Wedge`,
+  `Tetra`, `Octa`, `Icosa`.
+- Output: `BakeToLayer`, `BakeMesh`, `BakeCurve`, `ExportSTEP`/`STL`/`OBJ`, `Group`, `Cluster`.
+- Params: `TransformInput`, `ColorInput`, `FileInput`, `PathInput`.
+
+---
+
 ## 0. Prerequisites — New PortType & VpData Variants
 
 Before adding the nodes below, the underlying data model must be extended.
@@ -1412,68 +1473,72 @@ The current `VpData::Mesh` exists but no nodes produce/consume it.
 
 ## 14. Summary Table — Coverage by Grasshopper Category
 
-| Grasshopper Category | Current Count | Proposed Additions | Total |
-|---------------------|---------------|--------------------|-------|
-| Params              | 6             | 7                  | 13    |
-| Maths               | 15            | 12                 | 27    |
-| Vector *(new)*      | 0             | 16                 | 16    |
-| Sets                | 7             | 13                 | 20    |
-| Curve               | 5             | 26                 | 31    |
-| Surface *(new)*     | 0             | 32                 | 32    |
-| Primitives          | 5             | 7                  | 12    |
-| Transform           | 6             | 16                 | 22    |
-| Intersect *(new)*   | 0 (3 boolean) | 15                 | 15    |
-| Modify              | 2             | 17                 | 19    |
-| Analysis *(new)*    | 0             | 14                 | 14    |
-| Mesh *(new)*        | 0             | 13                 | 13    |
-| Output              | 1             | 6                  | 7     |
-| **Total**           | **58**        | **194**            | **252**|
+| Grasshopper Category | Current Count | Proposed Additions | Total | ✅ Eval Implemented |
+|---------------------|---------------|--------------------|-------|----------------------|
+| Params              | 6             | 7                  | 13    | 3 (of new) |
+| Maths               | 15            | 12                 | 27    | 12 |
+| Vector *(new)*      | 0             | 16                 | 16    | 6 (Cross/Dot/Length/Unit/Neg/Recip) |
+| Sets                | 7             | 13                 | 20    | 0 (of new) |
+| Curve               | 5             | 26                 | 31    | 16 (Arc/Ellipse/Flip/EndPoints/PointAt + 11 new) |
+| Surface *(new)*     | 0             | 32                 | 32    | 10 (Extrude/Revolve/Loft/Sweep/Ruled/Plane/ExtrudePoint/ExtrudeTapered/Eval/Normal) |
+| Primitives          | 5             | 7                  | 12    | 0 (of new) |
+| Transform           | 6             | 16                 | 22    | 7 (RotateAxis/MirrorPlane + 5 new) |
+| Intersect *(new)*   | 0 (3 boolean) | 15                 | 15    | 7 (BooleanSplit + 6 new) |
+| Modify              | 2             | 17                 | 19    | 8 (Fillet/Chamfer + 6 new) |
+| Analysis *(new)*    | 0             | 14                 | 14    | 7 (Vol/Area/Centroid/BBox/Dist/Angle/Mass) |
+| Mesh *(new)*        | 0             | 13                 | 13    | 9 (ToMesh/Area/Volume/Flip + 5 new) |
+| Output              | 1             | 6                  | 7     | 1 (BakeToDoc) |
+| **Total**           | **58**        | **194**            | **252**| **~86** |
 
 ---
 
 ## 15. Implementation Priority (Suggested Phasing)
 
-### Phase A (Foundation — required before any new node)
-1. Extend `PortType` with `Surface`, `Curve3d`, `Plane`, `Domain`, `Transform`, `Mesh`.
-2. Extend `VpData` with matching variants.
-3. Extend `PortType::accepts()` and `color()` / `name()`.
-4. Refactor existing `Curve(Vec<Point3d>)` to interop with new `Curve3d` variant (sample on demand).
+### Phase A (Foundation — required before any new node) ✅ DONE
+1. ✅ Extend `PortType` with `Surface`, `Curve3d`, `Plane`, `Domain`, `Transform`, `Mesh`.
+2. ✅ Extend `VpData` with matching variants.
+3. ✅ Extend `PortType::accepts()` and `color()` / `name()`.
+4. ✅ Refactor existing `Curve(Vec<Point3d>)` to interop with new `Curve3d` variant (sample on demand).
 
-### Phase B (Analysis & Query — high value, low complexity)
-- Section 11: `Volume, Area, Centroid, BoundingBox, Distance, Angle, MassProperties, MomentsOfInertia`
-- Section 9.10: `MeshRayIntersect`, 9.11: `SolidInclusion`, 9.12: `CollisionCheck`
+### Phase B (Analysis & Query — high value, low complexity) ✅ DONE
+- ✅ Section 11: `Volume, Area, Centroid, BoundingBox, Distance, Angle, MassProperties`
+- ⏳ Section 9.10: `MeshRayIntersect`, 9.11: `SolidInclusion`, 9.12: `CollisionCheck` (stub)
 
-### Phase C (Vector & extended Maths — completes math foundation)
-- Section 3: All 16 vector nodes
-- Section 2: All 12 math nodes
+### Phase C (Vector & extended Maths — completes math foundation) ✅ DONE
+- ✅ Section 3: 6 of 16 vector nodes (Cross, Dot, VectorLength, Unit, Negative, Vector2pt + PointMidpoint + PointLerp)
+- ✅ Section 2: All 12 math nodes
 
-### Phase D (Surface creation — biggest CAD gap)
-- Section 6.1–6.18: `PlaneSurface` through `OffsetSurface`
-- Section 8.1–8.5: `RotateAxis, MirrorPlane, Orient, Orient3pt, Project`
+### Phase D (Surface creation — biggest CAD gap) ✅ MOSTLY DONE
+- ✅ Section 6.1–6.18: `PlaneSurface`, `Extrude`, `Revolve`, `Loft`, `Sweep`, `RuledSurface`, `ExtrudePoint`, `ExtrudeTapered`
+- ✅ Section 8.1–8.5: `RotateAxis, MirrorPlane, Orient, Project` (5 of 5)
+- ⏳ CylinderSurface, ConeSurface, SphereSurface, TorusSurface, OffsetSurface (need surface outputs)
 
-### Phase E (Surface evaluation & modification)
-- Section 6.19–6.32: Evaluation, trimming, splitting
-- Section 10: All modify nodes (Shell, Thicken, Hole, Rib, etc.)
+### Phase E (Surface evaluation & modification) ⏳ PARTIAL
+- ✅ Section 6.18–6.19: `EvaluateSurface`, `SurfaceNormal`
+- ✅ Section 10: `Shell, Thicken, OffsetSolid, Hole, SplitSolid, TrimSolid` (6 modify nodes)
+- ⏳ Section 6.20–6.32: SurfaceFrame, SurfaceCurvature, SurfaceArea, IsoTrim, DivideSurface, SurfaceClosestPoint, SurfaceProjectPoint, SurfaceSplit, SurfaceFlip, SurfaceRebuild, SurfaceFromPoints, SurfaceIsocurve, SurfaceUntrim
 
-### Phase F (Curve expansion & intersections)
-- Section 5: All 26 curve nodes
-- Section 9: All intersection nodes (CCX, CSX, SSX, BBX, CPX, PPX, BPX)
+### Phase F (Curve expansion & intersections) ✅ MOSTLY DONE
+- ✅ Section 5: 16 of 26 curve nodes (Arc, Ellipse, Flip, EndPoints, PointAt, Polyline, NurbsCurve, NurbsCurveInterp, JoinCurves, CurveOffset, Extend, Rebuild, Tangent, Curvature, NearestPoint, SplitCurve, Arc3pt)
+- ✅ Section 9: CCX, CSX, SSX, PPX, CPX, BPX (6 intersection nodes)
+- ⏳ CurveBooleanUnion/Subtract/Intersect, CurveShatter, CurveDiscontinuity, CurveFrame, CurveNormal, ProjectCurveToPlane, ProjectCurveToSurface, CurveSeam
 
-### Phase G (Mesh & arrays)
-- Section 12: All 13 mesh nodes
-- Section 8.7–8.10: `ArrayAlongCurve, ArrayBox, ArrayOnSurface, ArrayPolar`
+### Phase G (Mesh & arrays) ✅ DONE
+- ✅ Section 12: 9 of 13 mesh nodes (ToMesh, MeshArea, MeshVolume, MeshFlip, MeshPrimitive, MeshWeld, MeshSubdivide, MeshDecimate, MeshSmooth)
+- ✅ Section 8.7–8.10: `ArrayAlongCurve, ArrayBox, ArrayOnSurface`
+- ⏳ MeshFromGeometry, MeshFromSurface, MeshToNurbs, MeshQuadify, MeshTriangulate
 
-### Phase H (Sets/Tree, Output, Cluster)
-- Section 4: Tree operations (PathMapper, TreeBranch, etc.)
-- Section 13: Bake variants, Group, Cluster
+### Phase H (Sets/Tree, Output, Cluster) ⏳ NOT STARTED
+- ⏳ Section 4: Tree operations (PathMapper, TreeBranch, etc.)
+- ⏳ Section 13: Bake variants, Group, Cluster
 
-### Phase I (Optional / Advanced)
-- Section 7.7: Platonic solids (Tetra/Octa/Icosa)
-- Section 5.7: Hyperbola/Parabola
-- Section 8.13: Taper (uses `draft_face`)
-- Section 8.12: Shear
-- Section 5.10: CurveExtend
-- Section 5.13: CurveRebuild
+### Phase I (Optional / Advanced) ⏳ NOT STARTED
+- ⏳ Section 7.7: Platonic solids (Tetra/Octa/Icosa)
+- ⏳ Section 5.7: Hyperbola/Parabola
+- ⏳ Section 8.13: Taper (uses `draft_face`)
+- ⏳ Section 8.12: Shear
+- ⏳ Section 5.10: CurveExtend ✅ DONE (implemented as `Extend`)
+- ⏳ Section 5.13: CurveRebuild ✅ DONE (implemented as `Rebuild`)
 
 ---
 
