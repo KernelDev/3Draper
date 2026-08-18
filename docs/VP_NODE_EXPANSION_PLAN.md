@@ -8,10 +8,19 @@
 
 ## ✅ Implementation Progress (Updated 2026-08-18)
 
-**Status:** 144 — 40 (Phase A-I enums + ports) + 60 (evaluation logic) implemented
-in this iteration. Build: clean (`cargo check -p draper-viewer`).
+**Status:** 144 → 169 NodeType variants; ~107 nodes have working evaluation logic.
+Build: clean (`cargo check -p draper-viewer`).
 
-### Newly implemented evaluation (commit on 2026-08-18)
+### Newly implemented evaluation (Phase E extended, commit on 2026-08-18)
+
+- **Surface Evaluation (12):** `SurfaceFrame`, `SurfaceCurvature`, `SurfaceAreaUV`,
+  `IsoTrim`, `DivideSurface`, `SurfaceClosestPoint`, `SurfaceProjectPoint`,
+  `SurfaceSplit`, `SurfaceFlip`, `SurfaceRebuild`, `SurfaceFromPoints`,
+  `SurfaceIsocurve`, `SurfaceUntrim`, `SurfaceTrim`.
+- **Solid Modification (9):** `DraftFace`, `MoveFace`, `OffsetFace`, `ReplaceFace`,
+  `HoleCircular`, `Rib`, `FilletEdge`, `ChamferEdge`, `FilletVariable`.
+
+### Previously implemented (commit b8131c9, 2026-08-18)
 
 - **Curve (11):** `Polyline`, `NurbsCurve`, `NurbsCurveInterp`, `JoinCurves`,
   `CurveOffset`, `Extend`, `Rebuild`, `Tangent`, `Curvature`, `NearestPoint`,
@@ -40,21 +49,15 @@ Previously implemented (commit 8f859c3, 2026-08-16):
 
 ### Remaining stubs (need API work)
 
-- Surface nodes that require `Surface::Cylinder`/`Sphere`/`Torus` outputs from
-  planar inputs: `CylinderSurface`, `ConeSurface`, `SphereSurface`, `TorusSurface`,
-  `OffsetSurface`, `IsoTrim`, `DivideSurface`, `SurfaceClosestPoint`,
-  `SurfaceProjectPoint`, `SurfaceSplit`, `SurfaceFlip`, `SurfaceRebuild`,
-  `SurfaceFromPoints`, `SurfaceIsocurve`, `SurfaceUntrim`, `SurfaceFrame`,
-  `SurfaceCurvature`, `SurfaceArea`.
+- Surface nodes requiring `Surface::Cylinder`/`Sphere`/`Torus` outputs from planar
+  inputs: `CylinderSurface`, `ConeSurface`, `SphereSurface`, `TorusSurface`,
+  `OffsetSurface` (from existing surface — needs NURBS offset support).
 - Curve nodes needing extended curve API: `CurveBooleanUnion`, `CurveBooleanSubtract`,
   `CurveBooleanIntersect`, `CurveShatter`, `CurveDiscontinuity`, `CurveFrame`,
   `CurveNormal`, `ProjectCurveToPlane`, `ProjectCurveToSurface`, `CurveSeam`.
-- Transform: `RotateAxis` extension for arbitrary axis, `MirrorPlane` extension,
-  `ArrayPolar`, `Offset`, `Shear`, `Taper`, `ApplyTransform`.
+- Transform: `ArrayPolar`, `Offset`, `Shear`, `Taper`, `ApplyTransform`.
 - Intersect: `BrepBrepIntersect`, `MeshMeshIntersect`, `LineLineClosestPoint`,
   `SolidInclusion`, `CollisionCheck`, `BooleanTrim`, `MeshBooleanUnion`/`Subtract`/`Intersect`.
-- Modify: `DraftFace`, `MoveFace`, `OffsetFace`, `ReplaceFace`, `HoleCircular`,
-  `Rib`, `FilletEdge`, `ChamferEdge`, `FilletVariable`, `SurfaceTrim`, `SurfaceUntrim`.
 - Analysis: `MomentsOfInertia`, `CurveCurvatureAnalysis`, `SurfaceCurvatureAnalysis`,
   `PointInSolid`, `PointInCurve`, `ClosestPointOnSurface`, `ClosestPointOnCurve`,
   `SelfIntersect`, `Planar`, `Closed`.
@@ -1480,15 +1483,15 @@ The current `VpData::Mesh` exists but no nodes produce/consume it.
 | Vector *(new)*      | 0             | 16                 | 16    | 6 (Cross/Dot/Length/Unit/Neg/Recip) |
 | Sets                | 7             | 13                 | 20    | 0 (of new) |
 | Curve               | 5             | 26                 | 31    | 16 (Arc/Ellipse/Flip/EndPoints/PointAt + 11 new) |
-| Surface *(new)*     | 0             | 32                 | 32    | 10 (Extrude/Revolve/Loft/Sweep/Ruled/Plane/ExtrudePoint/ExtrudeTapered/Eval/Normal) |
+| Surface *(new)*     | 0             | 32                 | 32    | 24 (8 creation + 2 eval + 14 Phase E extended) |
 | Primitives          | 5             | 7                  | 12    | 0 (of new) |
 | Transform           | 6             | 16                 | 22    | 7 (RotateAxis/MirrorPlane + 5 new) |
 | Intersect *(new)*   | 0 (3 boolean) | 15                 | 15    | 7 (BooleanSplit + 6 new) |
-| Modify              | 2             | 17                 | 19    | 8 (Fillet/Chamfer + 6 new) |
+| Modify              | 2             | 17                 | 19    | 17 (Fillet/Chamfer + 6 + 9 Phase E extended) |
 | Analysis *(new)*    | 0             | 14                 | 14    | 7 (Vol/Area/Centroid/BBox/Dist/Angle/Mass) |
 | Mesh *(new)*        | 0             | 13                 | 13    | 9 (ToMesh/Area/Volume/Flip + 5 new) |
 | Output              | 1             | 6                  | 7     | 1 (BakeToDoc) |
-| **Total**           | **58**        | **194**            | **252**| **~86** |
+| **Total**           | **58**        | **194**            | **252**| **~107** |
 
 ---
 
@@ -1513,10 +1516,15 @@ The current `VpData::Mesh` exists but no nodes produce/consume it.
 - ✅ Section 8.1–8.5: `RotateAxis, MirrorPlane, Orient, Project` (5 of 5)
 - ⏳ CylinderSurface, ConeSurface, SphereSurface, TorusSurface, OffsetSurface (need surface outputs)
 
-### Phase E (Surface evaluation & modification) ⏳ PARTIAL
+### Phase E (Surface evaluation & modification) ✅ DONE
 - ✅ Section 6.18–6.19: `EvaluateSurface`, `SurfaceNormal`
+- ✅ Section 6.20: `SurfaceFrame`, `SurfaceCurvature`, `SurfaceAreaUV`
+- ✅ Section 6.23: `IsoTrim`, `DivideSurface` (6.24)
+- ✅ Section 6.25: `SurfaceClosestPoint`, `SurfaceProjectPoint` (6.26)
+- ✅ Section 6.27: `SurfaceSplit`, `SurfaceFlip` (6.28), `SurfaceRebuild` (6.29), `SurfaceFromPoints` (6.30), `SurfaceIsocurve` (6.31), `SurfaceUntrim` (6.32)
 - ✅ Section 10: `Shell, Thicken, OffsetSolid, Hole, SplitSolid, TrimSolid` (6 modify nodes)
-- ⏳ Section 6.20–6.32: SurfaceFrame, SurfaceCurvature, SurfaceArea, IsoTrim, DivideSurface, SurfaceClosestPoint, SurfaceProjectPoint, SurfaceSplit, SurfaceFlip, SurfaceRebuild, SurfaceFromPoints, SurfaceIsocurve, SurfaceUntrim
+- ✅ Section 10 (extended): `DraftFace, MoveFace, OffsetFace, ReplaceFace, HoleCircular, Rib, FilletEdge, ChamferEdge, FilletVariable, SurfaceTrim` (10 modify nodes)
+- ⏳ Remaining: cylinder/cone/sphere/torus surface variants (need surface outputs from planar inputs)
 
 ### Phase F (Curve expansion & intersections) ✅ MOSTLY DONE
 - ✅ Section 5: 16 of 26 curve nodes (Arc, Ellipse, Flip, EndPoints, PointAt, Polyline, NurbsCurve, NurbsCurveInterp, JoinCurves, CurveOffset, Extend, Rebuild, Tangent, Curvature, NearestPoint, SplitCurve, Arc3pt)

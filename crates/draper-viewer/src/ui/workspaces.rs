@@ -378,6 +378,56 @@ pub enum NodeType {
     /// Create a hole in a solid.
     Hole { radius: f64, depth: f64 },
 
+    // ───── Phase E (extended): Surface Evaluation & Modification ─────
+    /// Local frame at (u, v): origin + 3 axes from surface derivatives.
+    SurfaceFrame,
+    /// Principal curvatures & directions at (u, v).
+    SurfaceCurvature,
+    /// Surface area via numerical quadrature over UV domain.
+    SurfaceAreaUV { u_samples: u32, v_samples: u32 },
+    /// Extract a sub-patch of a surface [u0, u1] × [v0, v1].
+    IsoTrim { u0: f64, u1: f64, v0: f64, v1: f64 },
+    /// Grid of points/normals on surface.
+    DivideSurface { u_count: u32, v_count: u32 },
+    /// Find UV of closest point on surface to a 3D point.
+    SurfaceClosestPoint,
+    /// Project points onto surface along a direction.
+    SurfaceProjectPoint { direction: [f64; 3] },
+    /// Split surface at U or V iso-curve at given parameter.
+    SurfaceSplit { parameter: f64 },
+    /// Reverse surface normal direction.
+    SurfaceFlip,
+    /// Refit surface to a NURBS of given degree/counts.
+    SurfaceRebuild { u_degree: u32, v_degree: u32, u_count: u32, v_count: u32 },
+    /// Build NURBS surface from a control-point grid.
+    SurfaceFromPoints { u_count: u32, v_count: u32, degree: u32 },
+    /// Extract an iso-curve from a surface at given U or V parameter.
+    SurfaceIsocurve { direction: u32 }, // 0 = U-iso, 1 = V-iso
+    /// Remove all trims from a surface (return underlying surface).
+    SurfaceUntrim,
+    /// Trim a surface with closed curves in UV space.
+    SurfaceTrim,
+
+    // ───── Phase E (extended): Solid Modification ─────
+    /// Apply draft angle to a face (useful for molded parts).
+    DraftFace { angle_deg: f64 },
+    /// Translate a planar face of a solid by a vector.
+    MoveFace,
+    /// Offset a planar face of a solid by a distance.
+    OffsetFace { distance: f64 },
+    /// Replace a planar face of a solid with a different surface.
+    ReplaceFace,
+    /// Drill a circular hole at point C along axis N.
+    HoleCircular { radius: f64 },
+    /// Add a rib feature: extrude profile, union with base.
+    Rib { thickness: f64 },
+    /// Fillet specific edges (by index) of a solid.
+    FilletEdge { radius: f64 },
+    /// Chamfer specific edges (by index) of a solid.
+    ChamferEdge { distance: f64 },
+    /// Fillet with per-edge radius.
+    FilletVariable,
+
     // ───── Phase F: Curve Nodes ─────
     /// Arc by center, radius, start/end angles.
     Arc { radius: f64, start_angle: f64, end_angle: f64 },
@@ -591,6 +641,31 @@ impl NodeType {
             NodeType::SplitSolid => "Split Solid",
             NodeType::TrimSolid => "Trim Solid",
             NodeType::Hole { .. } => "Hole",
+            // Phase E (extended): Surface Eval & Modify
+            NodeType::SurfaceFrame => "Surface Frame",
+            NodeType::SurfaceCurvature => "Surface Curvature",
+            NodeType::SurfaceAreaUV { .. } => "Surface Area (UV)",
+            NodeType::IsoTrim { .. } => "Iso Trim",
+            NodeType::DivideSurface { .. } => "Divide Surface",
+            NodeType::SurfaceClosestPoint => "Surface Closest Point",
+            NodeType::SurfaceProjectPoint { .. } => "Surface Project Point",
+            NodeType::SurfaceSplit { .. } => "Surface Split",
+            NodeType::SurfaceFlip => "Surface Flip",
+            NodeType::SurfaceRebuild { .. } => "Surface Rebuild",
+            NodeType::SurfaceFromPoints { .. } => "Surface From Points",
+            NodeType::SurfaceIsocurve { .. } => "Surface Isocurve",
+            NodeType::SurfaceUntrim => "Surface Untrim",
+            NodeType::SurfaceTrim => "Surface Trim",
+            // Phase E (extended): Solid Modification
+            NodeType::DraftFace { .. } => "Draft Face",
+            NodeType::MoveFace => "Move Face",
+            NodeType::OffsetFace { .. } => "Offset Face",
+            NodeType::ReplaceFace => "Replace Face",
+            NodeType::HoleCircular { .. } => "Hole Circular",
+            NodeType::Rib { .. } => "Rib",
+            NodeType::FilletEdge { .. } => "Fillet Edge",
+            NodeType::ChamferEdge { .. } => "Chamfer Edge",
+            NodeType::FilletVariable => "Fillet Variable",
             NodeType::Arc { .. } => "Arc",
             NodeType::Arc3pt => "Arc 3pt",
             NodeType::Ellipse { .. } => "Ellipse",
@@ -673,7 +748,21 @@ impl NodeType {
             NodeType::ExtrudePoint | NodeType::ExtrudeTapered { .. } => "Surface",
             NodeType::EvaluateSurface | NodeType::SurfaceNormal |
             NodeType::Shell { .. } | NodeType::Thicken { .. } | NodeType::OffsetSolid { .. } |
-            NodeType::SplitSolid | NodeType::TrimSolid | NodeType::Hole { .. } => "Modify",
+            NodeType::SplitSolid | NodeType::TrimSolid | NodeType::Hole { .. } |
+            // Phase E (extended): Surface Eval & Modify
+            NodeType::SurfaceFrame | NodeType::SurfaceCurvature |
+            NodeType::SurfaceAreaUV { .. } | NodeType::IsoTrim { .. } |
+            NodeType::DivideSurface { .. } | NodeType::SurfaceClosestPoint |
+            NodeType::SurfaceProjectPoint { .. } | NodeType::SurfaceSplit { .. } |
+            NodeType::SurfaceFlip | NodeType::SurfaceRebuild { .. } |
+            NodeType::SurfaceFromPoints { .. } | NodeType::SurfaceIsocurve { .. } |
+            NodeType::SurfaceUntrim | NodeType::SurfaceTrim |
+            // Phase E (extended): Solid Modification
+            NodeType::DraftFace { .. } | NodeType::MoveFace |
+            NodeType::OffsetFace { .. } | NodeType::ReplaceFace |
+            NodeType::HoleCircular { .. } | NodeType::Rib { .. } |
+            NodeType::FilletEdge { .. } | NodeType::ChamferEdge { .. } |
+            NodeType::FilletVariable => "Modify",
             NodeType::Arc { .. } | NodeType::Arc3pt | NodeType::Ellipse { .. } |
             NodeType::Polyline | NodeType::NurbsCurve | NodeType::NurbsCurveInterp |
             NodeType::JoinCurves | NodeType::CurveOffset { .. } | NodeType::Extend { .. } |
@@ -962,6 +1051,100 @@ impl NodeType {
                 PortDesc { name: "P", port_type: PortType::Point },
                 PortDesc { name: "D", port_type: PortType::Vector },
             ],
+            // ── Phase E (extended): Surface Eval ──
+            NodeType::SurfaceFrame => vec![
+                PortDesc { name: "S", port_type: PortType::Surface },
+                PortDesc { name: "U", port_type: PortType::Number },
+                PortDesc { name: "V", port_type: PortType::Number },
+            ],
+            NodeType::SurfaceCurvature => vec![
+                PortDesc { name: "S", port_type: PortType::Surface },
+                PortDesc { name: "U", port_type: PortType::Number },
+                PortDesc { name: "V", port_type: PortType::Number },
+            ],
+            NodeType::SurfaceAreaUV { .. } => vec![
+                PortDesc { name: "S", port_type: PortType::Surface },
+            ],
+            NodeType::IsoTrim { .. } => vec![
+                PortDesc { name: "S", port_type: PortType::Surface },
+                PortDesc { name: "D", port_type: PortType::Domain },
+            ],
+            NodeType::DivideSurface { .. } => vec![
+                PortDesc { name: "S", port_type: PortType::Surface },
+            ],
+            NodeType::SurfaceClosestPoint => vec![
+                PortDesc { name: "S", port_type: PortType::Surface },
+                PortDesc { name: "P", port_type: PortType::Point },
+            ],
+            NodeType::SurfaceProjectPoint { .. } => vec![
+                PortDesc { name: "P", port_type: PortType::List },
+                PortDesc { name: "S", port_type: PortType::Surface },
+            ],
+            NodeType::SurfaceSplit { .. } => vec![
+                PortDesc { name: "S", port_type: PortType::Surface },
+            ],
+            NodeType::SurfaceFlip => vec![
+                PortDesc { name: "S", port_type: PortType::Surface },
+            ],
+            NodeType::SurfaceRebuild { .. } => vec![
+                PortDesc { name: "S", port_type: PortType::Surface },
+            ],
+            NodeType::SurfaceFromPoints { .. } => vec![
+                PortDesc { name: "P", port_type: PortType::List },
+            ],
+            NodeType::SurfaceIsocurve { .. } => vec![
+                PortDesc { name: "S", port_type: PortType::Surface },
+                PortDesc { name: "T", port_type: PortType::Number },
+            ],
+            NodeType::SurfaceUntrim => vec![
+                PortDesc { name: "S", port_type: PortType::Surface },
+            ],
+            NodeType::SurfaceTrim => vec![
+                PortDesc { name: "S", port_type: PortType::Surface },
+                PortDesc { name: "C", port_type: PortType::List },
+            ],
+            // ── Phase E (extended): Solid Modification ──
+            NodeType::DraftFace { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+                PortDesc { name: "F", port_type: PortType::Integer },
+                PortDesc { name: "D", port_type: PortType::Vector },
+            ],
+            NodeType::MoveFace => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+                PortDesc { name: "F", port_type: PortType::Integer },
+                PortDesc { name: "V", port_type: PortType::Vector },
+            ],
+            NodeType::OffsetFace { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+                PortDesc { name: "F", port_type: PortType::Integer },
+            ],
+            NodeType::ReplaceFace => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+                PortDesc { name: "F", port_type: PortType::Integer },
+                PortDesc { name: "S", port_type: PortType::Surface },
+            ],
+            NodeType::HoleCircular { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+                PortDesc { name: "C", port_type: PortType::Point },
+                PortDesc { name: "N", port_type: PortType::Vector },
+            ],
+            NodeType::Rib { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+                PortDesc { name: "P", port_type: PortType::Curve },
+                PortDesc { name: "D", port_type: PortType::Vector },
+            ],
+            NodeType::FilletEdge { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+                PortDesc { name: "E", port_type: PortType::List },
+            ],
+            NodeType::ChamferEdge { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+                PortDesc { name: "E", port_type: PortType::List },
+            ],
+            NodeType::FilletVariable => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+                PortDesc { name: "E", port_type: PortType::List },
+            ],
             // ── Curve ──
             NodeType::Arc { .. } | NodeType::Ellipse { .. } => vec![],
             NodeType::Arc3pt => vec![
@@ -1171,8 +1354,52 @@ impl NodeType {
             NodeType::EvaluateSurface => vec![PortDesc { name: "P", port_type: PortType::Point }],
             NodeType::SurfaceNormal => vec![PortDesc { name: "N", port_type: PortType::Vector }],
             NodeType::Shell { .. } | NodeType::Thicken { .. } | NodeType::OffsetSolid { .. } |
-            NodeType::SplitSolid | NodeType::TrimSolid | NodeType::Hole { .. } => vec![
+            NodeType::SplitSolid | NodeType::TrimSolid | NodeType::Hole { .. } |
+            // Phase E (extended): Solid Modification
+            NodeType::DraftFace { .. } | NodeType::MoveFace |
+            NodeType::OffsetFace { .. } | NodeType::ReplaceFace |
+            NodeType::HoleCircular { .. } | NodeType::Rib { .. } |
+            NodeType::FilletEdge { .. } | NodeType::ChamferEdge { .. } |
+            NodeType::FilletVariable => vec![
                 PortDesc { name: "G", port_type: PortType::Geometry },
+            ],
+            // Phase E (extended): Surface Eval outputs
+            NodeType::SurfaceFrame => vec![PortDesc { name: "F", port_type: PortType::PlaneRef }],
+            NodeType::SurfaceCurvature => vec![
+                PortDesc { name: "K1", port_type: PortType::Number },
+                PortDesc { name: "K2", port_type: PortType::Number },
+                PortDesc { name: "D1", port_type: PortType::Vector },
+                PortDesc { name: "D2", port_type: PortType::Vector },
+            ],
+            NodeType::SurfaceAreaUV { .. } => vec![PortDesc { name: "A", port_type: PortType::Number }],
+            NodeType::IsoTrim { .. } | NodeType::SurfaceFlip |
+            NodeType::SurfaceRebuild { .. } | NodeType::SurfaceUntrim | NodeType::SurfaceTrim => vec![
+                PortDesc { name: "S", port_type: PortType::Surface },
+            ],
+            NodeType::DivideSurface { .. } => vec![
+                PortDesc { name: "P", port_type: PortType::List },
+                PortDesc { name: "N", port_type: PortType::List },
+                PortDesc { name: "F", port_type: PortType::List },
+            ],
+            NodeType::SurfaceClosestPoint => vec![
+                PortDesc { name: "U", port_type: PortType::Number },
+                PortDesc { name: "V", port_type: PortType::Number },
+                PortDesc { name: "Q", port_type: PortType::Point },
+            ],
+            NodeType::SurfaceProjectPoint { .. } => vec![
+                PortDesc { name: "Q", port_type: PortType::List },
+                PortDesc { name: "U", port_type: PortType::List },
+                PortDesc { name: "V", port_type: PortType::List },
+            ],
+            NodeType::SurfaceSplit { .. } => vec![
+                PortDesc { name: "A", port_type: PortType::Surface },
+                PortDesc { name: "B", port_type: PortType::Surface },
+            ],
+            NodeType::SurfaceFromPoints { .. } => vec![
+                PortDesc { name: "S", port_type: PortType::Surface },
+            ],
+            NodeType::SurfaceIsocurve { .. } => vec![
+                PortDesc { name: "C", port_type: PortType::Curve },
             ],
             // ── Curve ──
             NodeType::Arc { .. } | NodeType::Arc3pt | NodeType::Ellipse { .. } |
