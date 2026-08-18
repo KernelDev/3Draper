@@ -21628,6 +21628,445 @@ fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<draper_to
                             }
                         }
 
+                        // ── Phase I (Optional/Advanced): Primitives ──
+                        NT::PlanePrimitive { width, height } => {
+                            // Rectangular planar solid via 4 corner points.
+                            let w = inputs.get(0).and_then(to_number).unwrap_or(*width);
+                            let h = inputs.get(1).and_then(to_number).unwrap_or(*height);
+                            let origin = inputs.get(2).and_then(to_point).unwrap_or([0.0, 0.0, 0.0]);
+                            let half_w = w * 0.5;
+                            let half_h = h * 0.5;
+                            let quad = vec![
+                                Point3d::new(origin[0] - half_w, origin[1] - half_h, origin[2]),
+                                Point3d::new(origin[0] + half_w, origin[1] - half_h, origin[2]),
+                                Point3d::new(origin[0] + half_w, origin[1] + half_h, origin[2]),
+                                Point3d::new(origin[0] - half_w, origin[1] + half_h, origin[2]),
+                            ];
+                            if let Some(f) = ShapeBuilder::make_polygon_face(&quad) {
+                                let shell = Shell::new_closed(vec![f]);
+                                let solid = Solid::new(shell);
+                                let plane = draper_geometry::Plane::from_origin_and_normal(
+                                    Point3d::new(origin[0], origin[1], origin[2]),
+                                    draper_geometry::Direction3d::Z,
+                                );
+                                results.insert(node.id, VpData::List(vec![
+                                    VpData::Geometry(Box::new(solid)),
+                                    VpData::Surface(Box::new(draper_geometry::Surface::Plane(plane))),
+                                ]));
+                                changed = true;
+                            }
+                        }
+                        NT::PolygonPrism { sides, radius, height } => {
+                            // Regular n-gonal prism: build profile then extrude.
+                            let n = *sides as usize;
+                            let r = inputs.get(0).and_then(to_number).unwrap_or(*radius);
+                            let h = inputs.get(1).and_then(to_number).unwrap_or(*height);
+                            if n >= 3 {
+                                let mut profile: Vec<Point3d> = (0..n).map(|i| {
+                                    let angle = 2.0 * std::f64::consts::PI * i as f64 / n as f64;
+                                    Point3d::new(r * angle.cos(), r * angle.sin(), 0.0)
+                                }).collect();
+                                profile.push(profile[0]); // close loop
+                                let top_pts: Vec<Point3d> = profile.iter()
+                                    .map(|p| Point3d::new(p.x, p.y, p.z + h))
+                                    .collect();
+                                let mut faces = Vec::new();
+                                // Side faces
+                                for i in 0..n {
+                                    let quad = vec![
+                                        profile[i], profile[i+1], top_pts[i+1], top_pts[i],
+                                    ];
+                                    if let Some(f) = ShapeBuilder::make_polygon_face(&quad) {
+                                        faces.push(f);
+                                    }
+                                }
+                                // Caps
+                                if let Some(f) = ShapeBuilder::make_polygon_face(&profile[..n]) { faces.push(f); }
+                                if let Some(f) = ShapeBuilder::make_polygon_face(&top_pts[..n]) { faces.push(f); }
+                                if !faces.is_empty() {
+                                    let shell = Shell::new_closed(faces);
+                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                    changed = true;
+                                }
+                            }
+                        }
+                        NT::Tube { radius } => {
+                            // Pipe along a curve: sweep a circle along path.
+                            if let Some(VpData::Curve(path_pts)) = inputs.get(0) {
+                                if path_pts.len() >= 2 {
+                                    let r = *radius;
+                                    let segments = 16; // circle segments
+                                    let n_path = path_pts.len();
+                                    let mut faces = Vec::new();
+                                    // For each path segment, build side faces
+                                    for i in 0..n_path - 1 {
+                                        let p_a = &path_pts[i];
+                                        let p_b = &path_pts[i + 1];
+                                        let tangent = draper_geometry::Vec3d::new(
+                                            p_b.x - p_a.x, p_b.y - p_a.y, p_b.z - p_a.z,
+                                        );
+                                        let t_len = (tangent.x*tangent.x + tangent.y*tangent.y + tangent.z*tangent.z).sqrt().max(1e-10);
+                                        let tn = [tangent.x / t_len, tangent.y / t_len, tangent.z / t_len];
+                                        // Perpendicular basis
+                                        let normal = if tn[2].abs() < tn[0].abs() && tn[2].abs() < tn[1].abs() {
+                                            [0.0, 0.0, 1.0]
+                                        } else if tn[0].abs() < tn[1].abs() {
+                                            [1.0, 0.0, 0.0]
+                                        } else {
+                                            [0.0, 1.0, 0.0]
+                                        };
+                                        let perp_x = tn[1] * normal[2] - tn[2] * normal[1];
+                                        let perp_y = tn[2] * normal[0] - tn[0] * normal[2];
+                                        let perp_z = tn[0] * normal[1] - tn[1] * normal[0];
+                                        let plen = (perp_x*perp_x + perp_y*perp_y + perp_z*perp_z).sqrt().max(1e-10);
+                                        let px = perp_x / plen; let py = perp_y / plen; let pz = perp_z / plen;
+                                        // Second perpendicular = tangent × first
+                                        let qx = tn[1] * pz - tn[2] * py;
+                                        let qy = tn[2] * px - tn[0] * pz;
+                                        let qz = tn[0] * py - tn[1] * px;
+                                        // Build circle cross-sections
+                                        let section_a: Vec<Point3d> = (0..segments).map(|k| {
+                                            let ang = 2.0 * std::f64::consts::PI * k as f64 / segments as f64;
+                                            let ca = ang.cos(); let sa = ang.sin();
+                                            Point3d::new(
+                                                p_a.x + r * (ca * px + sa * qx),
+                                                p_a.y + r * (ca * py + sa * qy),
+                                                p_a.z + r * (ca * pz + sa * qz),
+                                            )
+                                        }).collect();
+                                        let section_b: Vec<Point3d> = (0..segments).map(|k| {
+                                            let ang = 2.0 * std::f64::consts::PI * k as f64 / segments as f64;
+                                            let ca = ang.cos(); let sa = ang.sin();
+                                            Point3d::new(
+                                                p_b.x + r * (ca * px + sa * qx),
+                                                p_b.y + r * (ca * py + sa * qy),
+                                                p_b.z + r * (ca * pz + sa * qz),
+                                            )
+                                        }).collect();
+                                        for k in 0..segments {
+                                            let k_next = (k + 1) % segments;
+                                            let quad = vec![
+                                                section_a[k], section_a[k_next],
+                                                section_b[k_next], section_b[k],
+                                            ];
+                                            if let Some(f) = ShapeBuilder::make_polygon_face(&quad) {
+                                                faces.push(f);
+                                            }
+                                        }
+                                    }
+                                    // Caps (start and end)
+                                    let _ = (radius, segments); // already used
+                                    if !faces.is_empty() {
+                                        let shell = Shell::new_closed(faces);
+                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        }
+                        NT::Helix { radius, pitch, turns } => {
+                            // Helical curve: build via point sampling.
+                            let r = *radius;
+                            let p = *pitch;
+                            let t = *turns;
+                            let n_samples = 256;
+                            let pts: Vec<Point3d> = (0..=n_samples).map(|i| {
+                                let s = i as f64 / n_samples as f64;
+                                let angle = 2.0 * std::f64::consts::PI * t * s;
+                                let z = p * t * s;
+                                Point3d::new(r * angle.cos(), r * angle.sin(), z)
+                            }).collect();
+                            results.insert(node.id, VpData::Curve(pts));
+                            changed = true;
+                        }
+                        NT::Wedge { radius, angle_deg, height } => {
+                            // Wedge / pie-shape solid: arc segment + center, extruded.
+                            let r = *radius;
+                            let angle = angle_deg.to_radians();
+                            let h = *height;
+                            let segments = 16;
+                            // Build profile: center, arc from 0 to angle
+                            let mut profile: Vec<Point3d> = vec![Point3d::new(0.0, 0.0, 0.0)];
+                            for i in 0..=segments {
+                                let a = angle * i as f64 / segments as f64;
+                                profile.push(Point3d::new(r * a.cos(), r * a.sin(), 0.0));
+                            }
+                            // top profile (extruded by h)
+                            let top_profile: Vec<Point3d> = profile.iter()
+                                .map(|p| Point3d::new(p.x, p.y, p.z + h))
+                                .collect();
+                            let mut faces = Vec::new();
+                            // Bottom face
+                            if let Some(f) = ShapeBuilder::make_polygon_face(&profile) { faces.push(f); }
+                            // Top face
+                            if let Some(f) = ShapeBuilder::make_polygon_face(&top_profile) { faces.push(f); }
+                            // Side faces (each segment + verticals)
+                            for i in 0..profile.len() - 1 {
+                                let quad = vec![
+                                    profile[i], profile[i+1], top_profile[i+1], top_profile[i],
+                                ];
+                                if let Some(f) = ShapeBuilder::make_polygon_face(&quad) {
+                                    faces.push(f);
+                                }
+                            }
+                            if !faces.is_empty() {
+                                let shell = Shell::new_closed(faces);
+                                results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                changed = true;
+                            }
+                        }
+                        NT::Tetra { radius } => {
+                            // Regular tetrahedron with 4 vertices on a sphere of given radius.
+                            let r = *radius;
+                            // Standard tetrahedron vertices (one at top, three at base).
+                            let sqrt_8_9: f64 = (8.0_f64 / 9.0_f64).sqrt();
+                            let sqrt_2_9: f64 = (2.0_f64 / 9.0_f64).sqrt();
+                            let sqrt_2_3: f64 = (2.0_f64 / 3.0_f64).sqrt();
+                            let v = [
+                                Point3d::new(0.0, 0.0, r),
+                                Point3d::new(r * sqrt_8_9, 0.0, -r / 3.0),
+                                Point3d::new(-r * sqrt_2_9, r * sqrt_2_3, -r / 3.0),
+                                Point3d::new(-r * sqrt_2_9, -r * sqrt_2_3, -r / 3.0),
+                            ];
+                            // 4 triangular faces
+                            let faces_pts = vec![
+                                vec![v[0], v[1], v[2]],
+                                vec![v[0], v[2], v[3]],
+                                vec![v[0], v[3], v[1]],
+                                vec![v[1], v[3], v[2]],
+                            ];
+                            let mut faces = Vec::new();
+                            for pts in &faces_pts {
+                                if let Some(f) = ShapeBuilder::make_polygon_face(pts) {
+                                    faces.push(f);
+                                }
+                            }
+                            if !faces.is_empty() {
+                                let shell = Shell::new_closed(faces);
+                                results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                changed = true;
+                            }
+                        }
+                        NT::Octa { radius } => {
+                            // Regular octahedron with 6 vertices: (±r,0,0), (0,±r,0), (0,0,±r).
+                            let r = *radius;
+                            let v = [
+                                Point3d::new(r, 0.0, 0.0),
+                                Point3d::new(-r, 0.0, 0.0),
+                                Point3d::new(0.0, r, 0.0),
+                                Point3d::new(0.0, -r, 0.0),
+                                Point3d::new(0.0, 0.0, r),
+                                Point3d::new(0.0, 0.0, -r),
+                            ];
+                            // 8 triangular faces (top and bottom pyramids)
+                            let faces_pts = vec![
+                                vec![v[4], v[0], v[2]],
+                                vec![v[4], v[2], v[1]],
+                                vec![v[4], v[1], v[3]],
+                                vec![v[4], v[3], v[0]],
+                                vec![v[5], v[2], v[0]],
+                                vec![v[5], v[1], v[2]],
+                                vec![v[5], v[3], v[1]],
+                                vec![v[5], v[0], v[3]],
+                            ];
+                            let mut faces = Vec::new();
+                            for pts in &faces_pts {
+                                if let Some(f) = ShapeBuilder::make_polygon_face(pts) {
+                                    faces.push(f);
+                                }
+                            }
+                            if !faces.is_empty() {
+                                let shell = Shell::new_closed(faces);
+                                results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                changed = true;
+                            }
+                        }
+                        NT::Icosa { radius } => {
+                            // Regular icosahedron: 12 vertices based on golden ratio.
+                            let r = *radius;
+                            let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
+                            let norm = (1.0 + phi * phi).sqrt();
+                            let a = r / norm;
+                            let b = r * phi / norm;
+                            let v = [
+                                Point3d::new(0.0, a, b), Point3d::new(0.0, -a, b),
+                                Point3d::new(0.0, a, -b), Point3d::new(0.0, -a, -b),
+                                Point3d::new(a, b, 0.0), Point3d::new(-a, b, 0.0),
+                                Point3d::new(a, -b, 0.0), Point3d::new(-a, -b, 0.0),
+                                Point3d::new(b, 0.0, a), Point3d::new(-b, 0.0, a),
+                                Point3d::new(b, 0.0, -a), Point3d::new(-b, 0.0, -a),
+                            ];
+                            // 20 triangular faces
+                            let faces_idx: Vec<[usize; 3]> = vec![
+                                [0, 1, 8], [0, 8, 4], [0, 4, 5], [0, 5, 9], [0, 9, 1],
+                                [3, 2, 11], [3, 11, 7], [3, 7, 6], [3, 6, 10], [3, 10, 2],
+                                [1, 9, 7], [1, 7, 6], [1, 6, 8],
+                                [2, 10, 4], [2, 4, 8], [2, 8, 6],
+                                [4, 10, 5], [5, 10, 11], [5, 11, 9],
+                                [9, 11, 7],
+                            ];
+                            let mut faces = Vec::new();
+                            for idx in &faces_idx {
+                                let pts = vec![v[idx[0]], v[idx[1]], v[idx[2]]];
+                                if let Some(f) = ShapeBuilder::make_polygon_face(&pts) {
+                                    faces.push(f);
+                                }
+                            }
+                            if !faces.is_empty() {
+                                let shell = Shell::new_closed(faces);
+                                results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                changed = true;
+                            }
+                        }
+
+                        // ── Phase I: Curves ──
+                        NT::Hyperbola { semi_real, semi_imag } => {
+                            // Hyperbola via Hyperbola::new_xy.
+                            let a = *semi_real;
+                            let b = *semi_imag;
+                            let center = inputs.get(0).and_then(to_point).unwrap_or([0.0, 0.0, 0.0]);
+                            let h = draper_geometry::Hyperbola::new_xy(
+                                Point3d::new(center[0], center[1], center[2]), a, b,
+                            );
+                            // Sample t ∈ [-2, 2] (right branch only)
+                            let pts: Vec<Point3d> = (0..=64).map(|i| {
+                                let t = -2.0 + 4.0 * i as f64 / 64.0;
+                                h.point_at(t)
+                            }).collect();
+                            results.insert(node.id, VpData::Curve(pts));
+                            changed = true;
+                        }
+                        NT::Parabola { focal_dist } => {
+                            // Parabola via Parabola::new_xy.
+                            let f = *focal_dist;
+                            let vertex = inputs.get(0).and_then(to_point).unwrap_or([0.0, 0.0, 0.0]);
+                            let p = draper_geometry::Parabola::new_xy(
+                                Point3d::new(vertex[0], vertex[1], vertex[2]), f,
+                            );
+                            // Sample t ∈ [-2, 2]
+                            let pts: Vec<Point3d> = (0..=64).map(|i| {
+                                let t = -2.0 + 4.0 * i as f64 / 64.0;
+                                p.point_at(t)
+                            }).collect();
+                            results.insert(node.id, VpData::Curve(pts));
+                            changed = true;
+                        }
+
+                        // ── Phase I: Transforms ──
+                        NT::Shear { xy, xz, yx, yz, zx, zy } => {
+                            // Shear transform: build shear matrix directly.
+                            if let Some(solid) = inputs.get(0).and_then(to_solid) {
+                                let t = draper_geometry::Transform {
+                                    m: [
+                                        [1.0, *xy, *xz, 0.0],
+                                        [*yx, 1.0, *yz, 0.0],
+                                        [*zx, *zy, 1.0, 0.0],
+                                        [0.0, 0.0, 0.0, 1.0],
+                                    ],
+                                };
+                                let mut s = solid;
+                                ShapeBuilder::transform_solid(&mut s, &t);
+                                results.insert(node.id, VpData::Geometry(Box::new(s)));
+                                changed = true;
+                            }
+                        }
+                        NT::Taper { draft_angle_deg, height } => {
+                            // Apply draft to all faces of the solid.
+                            if let Some(solid) = inputs.get(0).and_then(to_solid) {
+                                let angle = inputs.get(1).and_then(to_number).unwrap_or(*draft_angle_deg);
+                                let mut result = solid;
+                                let n_faces = result.faces().len();
+                                for fi in 0..n_faces {
+                                    if let Ok(drafted) = draper_topology::operations::draft_face(&result, fi, angle) {
+                                        result = drafted;
+                                    }
+                                }
+                                let _ = height; // height not used directly (draft_face takes angle only)
+                                results.insert(node.id, VpData::Geometry(Box::new(result)));
+                                changed = true;
+                            }
+                        }
+                        NT::ApplyTransform => {
+                            // Apply an authored Transform to geometry.
+                            if let (Some(solid), Some(t)) = (
+                                inputs.get(0).and_then(to_solid),
+                                inputs.get(1).and_then(|d| match d {
+                                    VpData::Transform(t) => Some((**t).clone()),
+                                    _ => None,
+                                })
+                            ) {
+                                let mut s = solid;
+                                ShapeBuilder::transform_solid(&mut s, &t);
+                                results.insert(node.id, VpData::Geometry(Box::new(s)));
+                                changed = true;
+                            }
+                        }
+                        NT::ArrayPolar { count, angle_deg } => {
+                            // Polar array around arbitrary axis (default: Z axis through center).
+                            if let Some(solid) = inputs.get(0).and_then(to_solid) {
+                                let center = inputs.get(1).and_then(to_point).unwrap_or([0.0, 0.0, 0.0]);
+                                let axis_dir = inputs.get(2).and_then(|d| match d {
+                                    VpData::Vector(v) => Some(*v),
+                                    _ => None,
+                                }).unwrap_or([0.0, 0.0, 1.0]);
+                                let n = *count as usize;
+                                let total_angle = angle_deg.to_radians();
+                                let dir = draper_geometry::Direction3d::new(axis_dir[0], axis_dir[1], axis_dir[2])
+                                    .unwrap_or(draper_geometry::Direction3d::Z);
+                                let mut all_faces = Vec::new();
+                                for i in 0..n {
+                                    let angle = if n > 1 { total_angle * i as f64 / n as f64 } else { 0.0 };
+                                    let mut copy = solid.clone();
+                                    // Translate to origin (subtract center), rotate, translate back.
+                                    ShapeBuilder::transform_solid(&mut copy, &Transform::translation(-center[0], -center[1], -center[2]));
+                                    ShapeBuilder::transform_solid(&mut copy, &Transform::rotation_axis(&dir, angle));
+                                    ShapeBuilder::transform_solid(&mut copy, &Transform::translation(center[0], center[1], center[2]));
+                                    if let Some(shell) = copy.outer_shell.as_ref() {
+                                        all_faces.extend(shell.faces.iter().cloned());
+                                    }
+                                }
+                                if !all_faces.is_empty() {
+                                    let shell = Shell::new(all_faces);
+                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                    changed = true;
+                                }
+                            }
+                        }
+                        NT::Offset { distance, both_sides } => {
+                            // Offset solid along a direction (thickened copy).
+                            if let Some(solid_orig) = inputs.get(0).and_then(to_solid) {
+                                let direction = inputs.get(1).and_then(|d| match d {
+                                    VpData::Vector(v) => Some(*v),
+                                    _ => None,
+                                }).unwrap_or([0.0, 0.0, 1.0]);
+                                let dist = *distance;
+                                let mut s = solid_orig.clone();
+                                ShapeBuilder::transform_solid(&mut s, &Transform::translation(
+                                    direction[0] * dist, direction[1] * dist, direction[2] * dist,
+                                ));
+                                if *both_sides {
+                                    // Also offset in the opposite direction (merged result).
+                                    let mut s2 = solid_orig.clone();
+                                    ShapeBuilder::transform_solid(&mut s2, &Transform::translation(
+                                        -direction[0] * dist, -direction[1] * dist, -direction[2] * dist,
+                                    ));
+                                    // Merge faces of both copies
+                                    let mut all_faces = Vec::new();
+                                    if let Some(shell) = s.outer_shell.as_ref() {
+                                        all_faces.extend(shell.faces.iter().cloned());
+                                    }
+                                    if let Some(shell) = s2.outer_shell.as_ref() {
+                                        all_faces.extend(shell.faces.iter().cloned());
+                                    }
+                                    let shell = Shell::new(all_faces);
+                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                } else {
+                                    results.insert(node.id, VpData::Geometry(Box::new(s)));
+                                }
+                                changed = true;
+                            }
+                        }
+
                         // ── Remaining stubs (no API yet) ──
                         _ => {}
                     }

@@ -563,6 +563,42 @@ pub enum NodeType {
     Group { name: String },
     /// Wrap a sub-graph as a reusable node.
     Cluster { graph_path: String },
+
+    // ───── Phase I (Optional/Advanced): Primitives ─────
+    /// Rectangular planar solid (finite plane patch).
+    PlanePrimitive { width: f64, height: f64 },
+    /// Regular n-gonal prism.
+    PolygonPrism { sides: u32, radius: f64, height: f64 },
+    /// Pipe along a curve (sweep a circle along path).
+    Tube { radius: f64 },
+    /// Helical curve.
+    Helix { radius: f64, pitch: f64, turns: f64 },
+    /// Wedge / pie-shape solid.
+    Wedge { radius: f64, angle_deg: f64, height: f64 },
+    /// Tetrahedron (Platonic solid).
+    Tetra { radius: f64 },
+    /// Octahedron (Platonic solid).
+    Octa { radius: f64 },
+    /// Icosahedron (Platonic solid).
+    Icosa { radius: f64 },
+
+    // ───── Phase I (Optional/Advanced): Curves ─────
+    /// Hyperbola (conic section).
+    Hyperbola { semi_real: f64, semi_imag: f64 },
+    /// Parabola (conic section).
+    Parabola { focal_dist: f64 },
+
+    // ───── Phase I (Optional/Advanced): Transforms ─────
+    /// Shear transform (6 shear factors).
+    Shear { xy: f64, xz: f64, yx: f64, yz: f64, zx: f64, zy: f64 },
+    /// Apply draft angle to solid (useful for molded parts).
+    Taper { draft_angle_deg: f64, height: f64 },
+    /// Apply an authored Transform to geometry.
+    ApplyTransform,
+    /// Polar array around arbitrary axis.
+    ArrayPolar { count: u32, angle_deg: f64 },
+    /// Offset solid along a direction (creates a "thickened" copy).
+    Offset { distance: f64, both_sides: bool },
 }
 
 impl NodeType {
@@ -774,6 +810,24 @@ impl NodeType {
             NodeType::ExportOBJ { .. } => "Export OBJ",
             NodeType::Group { .. } => "Group",
             NodeType::Cluster { .. } => "Cluster",
+            // Phase I (Optional/Advanced): Primitives
+            NodeType::PlanePrimitive { .. } => "Plane Primitive",
+            NodeType::PolygonPrism { .. } => "Polygon Prism",
+            NodeType::Tube { .. } => "Tube",
+            NodeType::Helix { .. } => "Helix",
+            NodeType::Wedge { .. } => "Wedge",
+            NodeType::Tetra { .. } => "Tetrahedron",
+            NodeType::Octa { .. } => "Octahedron",
+            NodeType::Icosa { .. } => "Icosahedron",
+            // Phase I: Curves
+            NodeType::Hyperbola { .. } => "Hyperbola",
+            NodeType::Parabola { .. } => "Parabola",
+            // Phase I: Transforms
+            NodeType::Shear { .. } => "Shear",
+            NodeType::Taper { .. } => "Taper",
+            NodeType::ApplyTransform => "Apply Transform",
+            NodeType::ArrayPolar { .. } => "Array Polar",
+            NodeType::Offset { .. } => "Offset",
         }
     }
 
@@ -853,6 +907,13 @@ impl NodeType {
             NodeType::BakeToLayer { .. } | NodeType::BakeMesh { .. } | NodeType::BakeCurve { .. } |
             NodeType::ExportSTEP { .. } | NodeType::ExportSTL { .. } | NodeType::ExportOBJ { .. } |
             NodeType::Group { .. } | NodeType::Cluster { .. } => "Output",
+            // Phase I (Optional/Advanced): Primitives & Curves & Transforms
+            NodeType::PlanePrimitive { .. } | NodeType::PolygonPrism { .. } |
+            NodeType::Tube { .. } | NodeType::Wedge { .. } |
+            NodeType::Tetra { .. } | NodeType::Octa { .. } | NodeType::Icosa { .. } => "Primitives",
+            NodeType::Helix { .. } | NodeType::Hyperbola { .. } | NodeType::Parabola { .. } => "Curve",
+            NodeType::Shear { .. } | NodeType::Taper { .. } | NodeType::ApplyTransform |
+            NodeType::ArrayPolar { .. } | NodeType::Offset { .. } => "Transform",
         }
     }
 
@@ -1397,6 +1458,41 @@ impl NodeType {
             NodeType::Cluster { .. } => vec![
                 PortDesc { name: "I", port_type: PortType::List },
             ],
+            // Phase I (Optional/Advanced): Primitives
+            NodeType::PlanePrimitive { .. } => vec![],
+            NodeType::PolygonPrism { .. } => vec![],
+            NodeType::Tube { .. } => vec![
+                PortDesc { name: "C", port_type: PortType::Curve },
+            ],
+            NodeType::Helix { .. } => vec![],
+            NodeType::Wedge { .. } => vec![],
+            NodeType::Tetra { .. } | NodeType::Octa { .. } | NodeType::Icosa { .. } => vec![],
+            // Phase I: Curves
+            NodeType::Hyperbola { .. } | NodeType::Parabola { .. } => vec![
+                PortDesc { name: "C", port_type: PortType::Point },
+                PortDesc { name: "N", port_type: PortType::Vector },
+            ],
+            // Phase I: Transforms
+            NodeType::Shear { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+            ],
+            NodeType::Taper { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+                PortDesc { name: "A", port_type: PortType::Vector },
+            ],
+            NodeType::ApplyTransform => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+                PortDesc { name: "T", port_type: PortType::Transform },
+            ],
+            NodeType::ArrayPolar { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+                PortDesc { name: "C", port_type: PortType::Point },
+                PortDesc { name: "A", port_type: PortType::Vector },
+            ],
+            NodeType::Offset { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+                PortDesc { name: "N", port_type: PortType::Vector },
+            ],
         }
     }
 
@@ -1615,6 +1711,27 @@ impl NodeType {
             ],
             NodeType::Cluster { .. } => vec![
                 PortDesc { name: "O", port_type: PortType::List },
+            ],
+            // Phase I (Optional/Advanced): Primitives
+            NodeType::PlanePrimitive { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+                PortDesc { name: "S", port_type: PortType::Surface },
+            ],
+            NodeType::PolygonPrism { .. } | NodeType::Tube { .. } | NodeType::Wedge { .. } |
+            NodeType::Tetra { .. } | NodeType::Octa { .. } | NodeType::Icosa { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+            ],
+            NodeType::Helix { .. } => vec![
+                PortDesc { name: "C", port_type: PortType::Curve },
+            ],
+            // Phase I: Curves
+            NodeType::Hyperbola { .. } | NodeType::Parabola { .. } => vec![
+                PortDesc { name: "C", port_type: PortType::Curve },
+            ],
+            // Phase I: Transforms
+            NodeType::Shear { .. } | NodeType::Taper { .. } | NodeType::ApplyTransform |
+            NodeType::ArrayPolar { .. } | NodeType::Offset { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
             ],
         }
     }

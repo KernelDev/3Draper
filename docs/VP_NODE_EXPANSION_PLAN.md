@@ -8,10 +8,17 @@
 
 ## ✅ Implementation Progress (Updated 2026-08-18)
 
-**Status:** 169 → 190 NodeType variants; ~122 nodes have working evaluation logic.
+**Status:** 190 → 210 NodeType variants; ~137 nodes have working evaluation logic.
 Build: clean (`cargo check -p draper-viewer`).
 
-### Newly implemented evaluation (Phase H extended, commit on 2026-08-18)
+### Newly implemented evaluation (Phase I, commit on 2026-08-18)
+
+- **Primitives (8):** `PlanePrimitive`, `PolygonPrism`, `Tube`, `Helix`, `Wedge`,
+  `Tetra`, `Octa`, `Icosa`.
+- **Curves (2):** `Hyperbola`, `Parabola`.
+- **Transforms (5):** `Shear`, `Taper`, `ApplyTransform`, `ArrayPolar`, `Offset`.
+
+### Previously implemented (commit 506fa3b, 2026-08-18)
 
 - **Sets/Tree (12):** `CullIndex`, `Partition`, `ReplaceItems`, `Sift`, `Combine`,
   `Duplicate`, `NullItem`, `PathMapper`, `TreeBranch`, `TreeStatistics`,
@@ -63,14 +70,11 @@ Previously implemented (commit 8f859c3, 2026-08-16):
 - Curve nodes needing extended curve API: `CurveBooleanUnion`, `CurveBooleanSubtract`,
   `CurveBooleanIntersect`, `CurveShatter`, `CurveDiscontinuity`, `CurveFrame`,
   `CurveNormal`, `ProjectCurveToPlane`, `ProjectCurveToSurface`, `CurveSeam`.
-- Transform: `ArrayPolar`, `Offset`, `Shear`, `Taper`, `ApplyTransform`.
 - Intersect: `BrepBrepIntersect`, `MeshMeshIntersect`, `LineLineClosestPoint`,
   `SolidInclusion`, `CollisionCheck`, `BooleanTrim`, `MeshBooleanUnion`/`Subtract`/`Intersect`.
 - Analysis: `MomentsOfInertia`, `CurveCurvatureAnalysis`, `SurfaceCurvatureAnalysis`,
   `PointInSolid`, `PointInCurve`, `ClosestPointOnSurface`, `ClosestPointOnCurve`,
   `SelfIntersect`, `Planar`, `Closed`.
-- Primitives: `PlanePrimitive`, `PolygonPrism`, `Tube`, `Helix`, `Wedge`,
-  `Tetra`, `Octa`, `Icosa`.
 - Params: `TransformInput`, `ColorInput`, `FileInput`, `PathInput`.
 
 ---
@@ -1486,17 +1490,17 @@ The current `VpData::Mesh` exists but no nodes produce/consume it.
 | Params              | 6             | 7                  | 13    | 3 (of new) |
 | Maths               | 15            | 12                 | 27    | 12 |
 | Vector *(new)*      | 0             | 16                 | 16    | 6 (Cross/Dot/Length/Unit/Neg/Recip) |
-| Sets                | 7             | 13                 | 20    | 12 (Phase H: CullIndex/Partition/ReplaceItems/Sift/Combine/Duplicate/Null/PathMapper/TreeBranch/TreeStatistics/CleanTree/ExplodeTree) |
-| Curve               | 5             | 26                 | 31    | 16 (Arc/Ellipse/Flip/EndPoints/PointAt + 11 new) |
+| Sets                | 7             | 13                 | 20    | 12 (Phase H) |
+| Curve               | 5             | 26                 | 31    | 18 (Arc/Ellipse/Flip/EndPoints/PointAt + 11 new + Hyperbola/Parabola Phase I) |
 | Surface *(new)*     | 0             | 32                 | 32    | 24 (8 creation + 2 eval + 14 Phase E extended) |
-| Primitives          | 5             | 7                  | 12    | 0 (of new) |
-| Transform           | 6             | 16                 | 22    | 7 (RotateAxis/MirrorPlane + 5 new) |
+| Primitives          | 5             | 7                  | 12    | 7 (Phase I: PlanePrimitive/PolygonPrism/Tube/Helix/Wedge/Tetra/Octa/Icosa — 8 of 7) |
+| Transform           | 6             | 16                 | 22    | 12 (RotateAxis/MirrorPlane + 5 Phase F + 5 Phase I: Shear/Taper/ApplyTransform/ArrayPolar/Offset) |
 | Intersect *(new)*   | 0 (3 boolean) | 15                 | 15    | 7 (BooleanSplit + 6 new) |
 | Modify              | 2             | 17                 | 19    | 17 (Fillet/Chamfer + 6 + 9 Phase E extended) |
 | Analysis *(new)*    | 0             | 14                 | 14    | 7 (Vol/Area/Centroid/BBox/Dist/Angle/Mass) |
 | Mesh *(new)*        | 0             | 13                 | 13    | 9 (ToMesh/Area/Volume/Flip + 5 new) |
-| Output              | 1             | 6                  | 7     | 8 (BakeToDoc + 7 new: BakeToLayer/BakeMesh/BakeCurve/ExportSTEP/STL/OBJ/Group/Cluster) |
-| **Total**           | **58**        | **194**            | **252**| **~122** |
+| Output              | 1             | 6                  | 7     | 8 (BakeToDoc + 7 Phase H) |
+| **Total**           | **58**        | **194**            | **252**| **~137** |
 
 ---
 
@@ -1546,13 +1550,17 @@ The current `VpData::Mesh` exists but no nodes produce/consume it.
 - ✅ Section 13: All 8 output variants (BakeToLayer, BakeMesh, BakeCurve, ExportSTEP, ExportSTL, ExportOBJ, Group, Cluster)
 - ⏳ ListMap (4.8) — skipped (sub-graph reference, requires graph execution runtime)
 
-### Phase I (Optional / Advanced) ⏳ NOT STARTED
-- ⏳ Section 7.7: Platonic solids (Tetra/Octa/Icosa)
-- ⏳ Section 5.7: Hyperbola/Parabola
-- ⏳ Section 8.13: Taper (uses `draft_face`)
-- ⏳ Section 8.12: Shear
-- ⏳ Section 5.10: CurveExtend ✅ DONE (implemented as `Extend`)
-- ⏳ Section 5.13: CurveRebuild ✅ DONE (implemented as `Rebuild`)
+### Phase I (Optional / Advanced) ✅ DONE
+- ✅ Section 7.7: Platonic solids (Tetra/Octa/Icosa)
+- ✅ Section 5.7: Hyperbola/Parabola
+- ✅ Section 8.13: Taper (uses `draft_face`)
+- ✅ Section 8.12: Shear
+- ✅ Section 5.10: CurveExtend ✅ DONE (implemented as `Extend`)
+- ✅ Section 5.13: CurveRebuild ✅ DONE (implemented as `Rebuild`)
+- ✅ Section 7: PlanePrimitive, PolygonPrism, Tube, Helix, Wedge
+- ✅ Section 8.10: ArrayPolar
+- ✅ Section 8.11: Offset
+- ✅ Section 8.16: ApplyTransform
 
 ---
 
