@@ -519,6 +519,50 @@ pub enum NodeType {
     MeshDecimate { target_ratio: f64 },
     /// Smooth mesh.
     MeshSmooth { iterations: u32 },
+
+    // ───── Phase H (extended): Sets / Tree Operations ─────
+    /// Remove items at the given indices.
+    CullIndex { wrap: bool },
+    /// Split list into chunks of `size`.
+    Partition { size: u32 },
+    /// Replace items at indices `I` with values `V`.
+    ReplaceItems,
+    /// Like Dispatch but retains index positions in each output.
+    Sift,
+    /// Alternating interleave from two lists (vs. Concat which appends).
+    Combine,
+    /// Replicate a single item N times.
+    Duplicate { count: u32 },
+    /// Emit a null placeholder for list-padding operations.
+    NullItem,
+    /// Remap data-tree paths.
+    PathMapper { target_path: Vec<i32> },
+    /// Extract a single branch by path (index in list).
+    TreeBranch,
+    /// List all paths and item counts in a tree (list).
+    TreeStatistics,
+    /// Strip null items and empty branches.
+    CleanTree { remove_nulls: bool, remove_empty: bool },
+    /// Convert a tree (list of lists) into N separate list outputs.
+    ExplodeTree,
+
+    // ───── Phase H (extended): Output — Bake / Export ─────
+    /// Bake geometry into a named layer with optional color override.
+    BakeToLayer { layer_name: String, color: Option<[f64; 4]> },
+    /// Bake a mesh into the document.
+    BakeMesh { layer_name: String },
+    /// Bake a curve as a wire in the document.
+    BakeCurve { layer_name: String },
+    /// Export geometry to STEP file.
+    ExportSTEP { path: String },
+    /// Export geometry/mesh to STL file.
+    ExportSTL { path: String, binary: bool },
+    /// Export geometry/mesh to OBJ file.
+    ExportOBJ { path: String },
+    /// Group multiple solids into one named collection.
+    Group { name: String },
+    /// Wrap a sub-graph as a reusable node.
+    Cluster { graph_path: String },
 }
 
 impl NodeType {
@@ -708,6 +752,28 @@ impl NodeType {
             NodeType::MeshSubdivide { .. } => "Mesh Subdivide",
             NodeType::MeshDecimate { .. } => "Mesh Decimate",
             NodeType::MeshSmooth { .. } => "Mesh Smooth",
+            // Phase H (extended): Sets/Tree
+            NodeType::CullIndex { .. } => "Cull Index",
+            NodeType::Partition { .. } => "Partition",
+            NodeType::ReplaceItems => "Replace Items",
+            NodeType::Sift => "Sift",
+            NodeType::Combine => "Combine",
+            NodeType::Duplicate { .. } => "Duplicate",
+            NodeType::NullItem => "Null",
+            NodeType::PathMapper { .. } => "Path Mapper",
+            NodeType::TreeBranch => "Tree Branch",
+            NodeType::TreeStatistics => "Tree Statistics",
+            NodeType::CleanTree { .. } => "Clean Tree",
+            NodeType::ExplodeTree => "Explode Tree",
+            // Phase H (extended): Output
+            NodeType::BakeToLayer { .. } => "Bake To Layer",
+            NodeType::BakeMesh { .. } => "Bake Mesh",
+            NodeType::BakeCurve { .. } => "Bake Curve",
+            NodeType::ExportSTEP { .. } => "Export STEP",
+            NodeType::ExportSTL { .. } => "Export STL",
+            NodeType::ExportOBJ { .. } => "Export OBJ",
+            NodeType::Group { .. } => "Group",
+            NodeType::Cluster { .. } => "Cluster",
         }
     }
 
@@ -778,6 +844,15 @@ impl NodeType {
             NodeType::ToMesh | NodeType::MeshPrimitive | NodeType::MeshArea | NodeType::MeshVolume |
             NodeType::MeshFlip | NodeType::MeshWeld { .. } | NodeType::MeshSubdivide { .. } |
             NodeType::MeshDecimate { .. } | NodeType::MeshSmooth { .. } => "Mesh",
+            // Phase H (extended): Sets/Tree categories
+            NodeType::CullIndex { .. } | NodeType::Partition { .. } | NodeType::ReplaceItems |
+            NodeType::Sift | NodeType::Combine | NodeType::Duplicate { .. } | NodeType::NullItem |
+            NodeType::PathMapper { .. } | NodeType::TreeBranch | NodeType::TreeStatistics |
+            NodeType::CleanTree { .. } | NodeType::ExplodeTree => "Tree",
+            // Phase H (extended): Output categories
+            NodeType::BakeToLayer { .. } | NodeType::BakeMesh { .. } | NodeType::BakeCurve { .. } |
+            NodeType::ExportSTEP { .. } | NodeType::ExportSTL { .. } | NodeType::ExportOBJ { .. } |
+            NodeType::Group { .. } | NodeType::Cluster { .. } => "Output",
         }
     }
 
@@ -1259,6 +1334,69 @@ impl NodeType {
             NodeType::MeshDecimate { .. } | NodeType::MeshSmooth { .. } => vec![
                 PortDesc { name: "M", port_type: PortType::Mesh },
             ],
+            // Phase H (extended): Sets/Tree inputs
+            NodeType::CullIndex { .. } => vec![
+                PortDesc { name: "L", port_type: PortType::List },
+                PortDesc { name: "I", port_type: PortType::List },
+            ],
+            NodeType::Partition { .. } => vec![
+                PortDesc { name: "L", port_type: PortType::List },
+            ],
+            NodeType::ReplaceItems => vec![
+                PortDesc { name: "L", port_type: PortType::List },
+                PortDesc { name: "I", port_type: PortType::List },
+                PortDesc { name: "V", port_type: PortType::List },
+            ],
+            NodeType::Sift => vec![
+                PortDesc { name: "L", port_type: PortType::List },
+                PortDesc { name: "P", port_type: PortType::List },
+            ],
+            NodeType::Combine => vec![
+                PortDesc { name: "A", port_type: PortType::List },
+                PortDesc { name: "B", port_type: PortType::List },
+            ],
+            NodeType::Duplicate { .. } => vec![
+                PortDesc { name: "D", port_type: PortType::Any },
+            ],
+            NodeType::NullItem => vec![],
+            NodeType::PathMapper { .. } => vec![
+                PortDesc { name: "T", port_type: PortType::List },
+            ],
+            NodeType::TreeBranch => vec![
+                PortDesc { name: "T", port_type: PortType::List },
+                PortDesc { name: "P", port_type: PortType::Integer },
+            ],
+            NodeType::TreeStatistics => vec![
+                PortDesc { name: "T", port_type: PortType::List },
+            ],
+            NodeType::CleanTree { .. } => vec![
+                PortDesc { name: "T", port_type: PortType::List },
+            ],
+            NodeType::ExplodeTree => vec![
+                PortDesc { name: "T", port_type: PortType::List },
+            ],
+            // Phase H (extended): Output inputs
+            NodeType::BakeToLayer { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+            ],
+            NodeType::BakeMesh { .. } => vec![
+                PortDesc { name: "M", port_type: PortType::Mesh },
+            ],
+            NodeType::BakeCurve { .. } => vec![
+                PortDesc { name: "C", port_type: PortType::Curve },
+            ],
+            NodeType::ExportSTEP { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+            ],
+            NodeType::ExportSTL { .. } | NodeType::ExportOBJ { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Any },
+            ],
+            NodeType::Group { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::List },
+            ],
+            NodeType::Cluster { .. } => vec![
+                PortDesc { name: "I", port_type: PortType::List },
+            ],
         }
     }
 
@@ -1450,6 +1588,33 @@ impl NodeType {
             NodeType::MeshFlip | NodeType::MeshWeld { .. } | NodeType::MeshSubdivide { .. } |
             NodeType::MeshDecimate { .. } | NodeType::MeshSmooth { .. } => vec![
                 PortDesc { name: "M", port_type: PortType::Mesh },
+            ],
+            // Phase H (extended): Sets/Tree outputs
+            NodeType::CullIndex { .. } | NodeType::Partition { .. } |
+            NodeType::ReplaceItems | NodeType::Combine | NodeType::Duplicate { .. } |
+            NodeType::PathMapper { .. } | NodeType::CleanTree { .. } |
+            NodeType::TreeBranch | NodeType::ExplodeTree => vec![
+                PortDesc { name: "R", port_type: PortType::List },
+            ],
+            NodeType::Sift => vec![
+                PortDesc { name: "T", port_type: PortType::List },
+                PortDesc { name: "F", port_type: PortType::List },
+            ],
+            NodeType::NullItem => vec![PortDesc { name: "N", port_type: PortType::Any }],
+            NodeType::TreeStatistics => vec![
+                PortDesc { name: "Paths", port_type: PortType::List },
+                PortDesc { name: "Counts", port_type: PortType::List },
+            ],
+            // Phase H (extended): Output outputs
+            NodeType::BakeToLayer { .. } | NodeType::BakeMesh { .. } | NodeType::BakeCurve { .. } => vec![],
+            NodeType::ExportSTEP { .. } | NodeType::ExportSTL { .. } | NodeType::ExportOBJ { .. } => vec![
+                PortDesc { name: "S", port_type: PortType::String },
+            ],
+            NodeType::Group { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+            ],
+            NodeType::Cluster { .. } => vec![
+                PortDesc { name: "O", port_type: PortType::List },
             ],
         }
     }

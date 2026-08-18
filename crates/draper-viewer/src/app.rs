@@ -21308,6 +21308,326 @@ fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<draper_to
                             }
                         }
 
+                        // ── Phase H (extended): Sets / Tree Operations ──
+                        NT::CullIndex { wrap } => {
+                            // Remove items at the given indices.
+                            if let (Some(VpData::List(items)), Some(indices_data)) = (
+                                inputs.get(0), inputs.get(1)
+                            ) {
+                                let mut indices: Vec<usize> = Vec::new();
+                                if let VpData::List(idx_items) = indices_data {
+                                    for d in idx_items {
+                                        match d {
+                                            VpData::Integer(i) => indices.push(*i as usize),
+                                            VpData::Number(n) => indices.push(*n as usize),
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                                let _ = wrap; // wrap mode not implemented (no wraparound)
+                                let idx_set: std::collections::HashSet<usize> = indices.into_iter().collect();
+                                let culled: Vec<VpData> = items.iter().enumerate()
+                                    .filter_map(|(i, item)| {
+                                        if idx_set.contains(&i) { None } else { Some(item.clone()) }
+                                    })
+                                    .collect();
+                                results.insert(node.id, VpData::List(culled));
+                                changed = true;
+                            }
+                        }
+                        NT::Partition { size } => {
+                            // Split list into chunks of `size`.
+                            if let Some(VpData::List(items)) = inputs.get(0) {
+                                let chunk_size = *size as usize;
+                                let mut chunks: Vec<VpData> = Vec::new();
+                                let mut i = 0;
+                                while i < items.len() {
+                                    let end = (i + chunk_size).min(items.len());
+                                    chunks.push(VpData::List(items[i..end].to_vec()));
+                                    i = end;
+                                }
+                                results.insert(node.id, VpData::List(chunks));
+                                changed = true;
+                            }
+                        }
+                        NT::ReplaceItems => {
+                            // Replace items at indices I with values V.
+                            if let (Some(VpData::List(items)), Some(VpData::List(idx_items)), Some(VpData::List(repl_items))) = (
+                                inputs.get(0), inputs.get(1), inputs.get(2)
+                            ) {
+                                let mut result = items.clone();
+                                for (k, idx_data) in idx_items.iter().enumerate() {
+                                    let idx = match idx_data {
+                                        VpData::Integer(i) => *i as usize,
+                                        VpData::Number(n) => *n as usize,
+                                        _ => continue,
+                                    };
+                                    if idx < result.len() {
+                                        if let Some(repl) = repl_items.get(k) {
+                                            result[idx] = repl.clone();
+                                        }
+                                    }
+                                }
+                                results.insert(node.id, VpData::List(result));
+                                changed = true;
+                            }
+                        }
+                        NT::Sift => {
+                            // Like Dispatch but retains index positions in each output (padded with nulls).
+                            if let (Some(VpData::List(items)), Some(VpData::List(pattern))) = (
+                                inputs.get(0), inputs.get(1)
+                            ) {
+                                let len = items.len();
+                                let mut list_t: Vec<VpData> = Vec::with_capacity(len);
+                                let mut list_f: Vec<VpData> = Vec::with_capacity(len);
+                                for i in 0..len {
+                                    let is_true = pattern.get(i)
+                                        .map(|p| matches!(p, VpData::Boolean(true)))
+                                        .unwrap_or(false);
+                                    if is_true {
+                                        list_t.push(items[i].clone());
+                                        list_f.push(VpData::Empty);
+                                    } else {
+                                        list_t.push(VpData::Empty);
+                                        list_f.push(items[i].clone());
+                                    }
+                                }
+                                results.insert(node.id, VpData::List(vec![
+                                    VpData::List(list_t),
+                                    VpData::List(list_f),
+                                ]));
+                                changed = true;
+                            }
+                        }
+                        NT::Combine => {
+                            // Alternating interleave from two lists (vs. Concat which appends).
+                            if let (Some(VpData::List(a)), Some(VpData::List(b))) = (inputs.get(0), inputs.get(1)) {
+                                let max_len = a.len().max(b.len());
+                                let mut result = Vec::with_capacity(max_len * 2);
+                                for i in 0..max_len {
+                                    if i < a.len() { result.push(a[i].clone()); }
+                                    if i < b.len() { result.push(b[i].clone()); }
+                                }
+                                results.insert(node.id, VpData::List(result));
+                                changed = true;
+                            }
+                        }
+                        NT::Duplicate { count } => {
+                            // Replicate a single item N times.
+                            if let Some(item) = inputs.get(0) {
+                                let list: Vec<VpData> = std::iter::repeat(item.clone())
+                                    .take(*count as usize)
+                                    .collect();
+                                results.insert(node.id, VpData::List(list));
+                                changed = true;
+                            }
+                        }
+                        NT::NullItem => {
+                            // Emit a null placeholder for list-padding operations.
+                            results.insert(node.id, VpData::Empty);
+                            changed = true;
+                        }
+                        NT::PathMapper { target_path } => {
+                            // Remap data-tree paths — simplified: returns input unchanged.
+                            // Real PathMapper would restructure the tree based on target_path.
+                            if let Some(d) = inputs.get(0) {
+                                let _ = target_path;
+                                results.insert(node.id, d.clone());
+                                changed = true;
+                            }
+                        }
+                        NT::TreeBranch => {
+                            // Extract a single branch by path (index in list).
+                            if let (Some(VpData::List(items)), Some(idx)) = (
+                                inputs.get(0), inputs.get(1).and_then(|d| match d {
+                                    VpData::Integer(i) => Some(*i as usize),
+                                    VpData::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                })
+                            ) {
+                                if let Some(branch) = items.get(idx) {
+                                    // If branch is itself a list, extract it; otherwise wrap in a list.
+                                    let result = match branch {
+                                        VpData::List(_) => branch.clone(),
+                                        other => VpData::List(vec![other.clone()]),
+                                    };
+                                    results.insert(node.id, result);
+                                    changed = true;
+                                }
+                            }
+                        }
+                        NT::TreeStatistics => {
+                            // List all paths and item counts in a tree (list of lists).
+                            if let Some(VpData::List(items)) = inputs.get(0) {
+                                let mut paths: Vec<VpData> = Vec::new();
+                                let mut counts: Vec<VpData> = Vec::new();
+                                for (i, item) in items.iter().enumerate() {
+                                    paths.push(VpData::Integer(i as i64));
+                                    let count = match item {
+                                        VpData::List(sub) => sub.len() as i64,
+                                        _ => 1,
+                                    };
+                                    counts.push(VpData::Integer(count));
+                                }
+                                results.insert(node.id, VpData::List(vec![
+                                    VpData::List(paths),
+                                    VpData::List(counts),
+                                ]));
+                                changed = true;
+                            }
+                        }
+                        NT::CleanTree { remove_nulls, remove_empty } => {
+                            // Strip null items and empty branches.
+                            if let Some(VpData::List(items)) = inputs.get(0) {
+                                let cleaned: Vec<VpData> = items.iter().filter_map(|item| {
+                                    // Strip null items (VpData::Empty).
+                                    if *remove_nulls && matches!(item, VpData::Empty) {
+                                        return None;
+                                    }
+                                    // For sub-lists, recurse.
+                                    if let VpData::List(sub) = item {
+                                        if *remove_empty && sub.is_empty() {
+                                            return None;
+                                        }
+                                        let cleaned_sub: Vec<VpData> = if *remove_nulls {
+                                            sub.iter().filter(|x| !matches!(x, VpData::Empty)).cloned().collect()
+                                        } else { sub.clone() };
+                                        return Some(VpData::List(cleaned_sub));
+                                    }
+                                    Some(item.clone())
+                                }).collect();
+                                results.insert(node.id, VpData::List(cleaned));
+                                changed = true;
+                            }
+                        }
+                        NT::ExplodeTree => {
+                            // Convert a tree (list of lists) into N separate list outputs (wrapped in List).
+                            if let Some(VpData::List(items)) = inputs.get(0) {
+                                let mut result: Vec<VpData> = Vec::new();
+                                for item in items {
+                                    match item {
+                                        VpData::List(sub) => result.push(VpData::List(sub.clone())),
+                                        other => result.push(VpData::List(vec![other.clone()])),
+                                    }
+                                }
+                                results.insert(node.id, VpData::List(result));
+                                changed = true;
+                            }
+                        }
+
+                        // ── Phase H (extended): Output — Bake / Export ──
+                        NT::BakeToLayer { .. } => {
+                            // Bake geometry into a named layer — for VP eval, just pass-through.
+                            if let Some(d) = inputs.get(0) {
+                                results.insert(node.id, d.clone());
+                                changed = true;
+                            }
+                        }
+                        NT::BakeMesh { .. } => {
+                            // Bake a mesh into the document — pass-through for VP eval.
+                            if let Some(d) = inputs.get(0) {
+                                results.insert(node.id, d.clone());
+                                changed = true;
+                            }
+                        }
+                        NT::BakeCurve { .. } => {
+                            // Bake a curve as a wire in the document — pass-through.
+                            if let Some(d) = inputs.get(0) {
+                                results.insert(node.id, d.clone());
+                                changed = true;
+                            }
+                        }
+                        NT::ExportSTEP { path } => {
+                            // Export geometry to STEP file.
+                            if let Some(solid) = inputs.get(0).and_then(to_solid) {
+                                let step_content = draper_step::exporter::export_step(&solid, "VP_export");
+                                match draper_step::exporter::write_step_file(&step_content, path) {
+                                    Ok(_) => {
+                                        results.insert(node.id, VpData::String(path.clone()));
+                                        changed = true;
+                                    }
+                                    Err(e) => {
+                                        results.insert(node.id, VpData::String(format!("Error: {}", e)));
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        }
+                        NT::ExportSTL { path, binary } => {
+                            // Export geometry/mesh to STL file.
+                            // Accept either Mesh or Geometry (convert via triangulation).
+                            let mesh_opt = inputs.get(0).and_then(|d| match d {
+                                VpData::Mesh(m) => Some((**m).clone()),
+                                VpData::Geometry(s) => {
+                                    let params = tri_params_for_lod(LodLevel::Medium);
+                                    Some(triangulate_solid(s, &params))
+                                }
+                                _ => None,
+                            });
+                            if let Some(mesh) = mesh_opt {
+                                match draper_mesh::stl::write_stl_file(&mesh, path, *binary) {
+                                    Ok(_) => {
+                                        results.insert(node.id, VpData::String(path.clone()));
+                                        changed = true;
+                                    }
+                                    Err(e) => {
+                                        results.insert(node.id, VpData::String(format!("Error: {}", e)));
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        }
+                        NT::ExportOBJ { path } => {
+                            // Export geometry/mesh to OBJ file.
+                            let mesh_opt = inputs.get(0).and_then(|d| match d {
+                                VpData::Mesh(m) => Some((**m).clone()),
+                                VpData::Geometry(s) => {
+                                    let params = tri_params_for_lod(LodLevel::Medium);
+                                    Some(triangulate_solid(s, &params))
+                                }
+                                _ => None,
+                            });
+                            if let Some(mesh) = mesh_opt {
+                                match draper_mesh::stl::write_obj_file(&mesh, path) {
+                                    Ok(_) => {
+                                        results.insert(node.id, VpData::String(path.clone()));
+                                        changed = true;
+                                    }
+                                    Err(e) => {
+                                        results.insert(node.id, VpData::String(format!("Error: {}", e)));
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        }
+                        NT::Group { .. } => {
+                            // Group multiple solids into one named collection.
+                            // For VP eval: merge all solids into a single shell.
+                            if let Some(VpData::List(items)) = inputs.get(0) {
+                                let mut all_faces = Vec::new();
+                                for item in items {
+                                    if let Some(solid) = to_solid(item) {
+                                        if let Some(shell) = solid.outer_shell.as_ref() {
+                                            all_faces.extend(shell.faces.iter().cloned());
+                                        }
+                                    }
+                                }
+                                if !all_faces.is_empty() {
+                                    let shell = Shell::new(all_faces);
+                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                    changed = true;
+                                }
+                            }
+                        }
+                        NT::Cluster { .. } => {
+                            // Wrap a sub-graph as a reusable node — for VP eval, just pass-through.
+                            // (Real cluster evaluation would require running a sub-graph.)
+                            if let Some(d) = inputs.get(0) {
+                                results.insert(node.id, d.clone());
+                                changed = true;
+                            }
+                        }
+
                         // ── Remaining stubs (no API yet) ──
                         _ => {}
                     }

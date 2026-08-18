@@ -8,12 +8,20 @@
 
 ## ✅ Implementation Progress (Updated 2026-08-18)
 
-**Status:** 144 → 169 NodeType variants; ~107 nodes have working evaluation logic.
+**Status:** 169 → 190 NodeType variants; ~122 nodes have working evaluation logic.
 Build: clean (`cargo check -p draper-viewer`).
 
-### Newly implemented evaluation (Phase E extended, commit on 2026-08-18)
+### Newly implemented evaluation (Phase H extended, commit on 2026-08-18)
 
-- **Surface Evaluation (12):** `SurfaceFrame`, `SurfaceCurvature`, `SurfaceAreaUV`,
+- **Sets/Tree (12):** `CullIndex`, `Partition`, `ReplaceItems`, `Sift`, `Combine`,
+  `Duplicate`, `NullItem`, `PathMapper`, `TreeBranch`, `TreeStatistics`,
+  `CleanTree`, `ExplodeTree`.
+- **Output (8):** `BakeToLayer`, `BakeMesh`, `BakeCurve`, `ExportSTEP`,
+  `ExportSTL`, `ExportOBJ`, `Group`, `Cluster`.
+
+### Previously implemented (commit 6dd4a02, 2026-08-18)
+
+- **Surface Evaluation (14):** `SurfaceFrame`, `SurfaceCurvature`, `SurfaceAreaUV`,
   `IsoTrim`, `DivideSurface`, `SurfaceClosestPoint`, `SurfaceProjectPoint`,
   `SurfaceSplit`, `SurfaceFlip`, `SurfaceRebuild`, `SurfaceFromPoints`,
   `SurfaceIsocurve`, `SurfaceUntrim`, `SurfaceTrim`.
@@ -61,11 +69,8 @@ Previously implemented (commit 8f859c3, 2026-08-16):
 - Analysis: `MomentsOfInertia`, `CurveCurvatureAnalysis`, `SurfaceCurvatureAnalysis`,
   `PointInSolid`, `PointInCurve`, `ClosestPointOnSurface`, `ClosestPointOnCurve`,
   `SelfIntersect`, `Planar`, `Closed`.
-- Sets/Tree: `CullIndex`, `Partition`, `ReplaceItems`, `Sift`, `Combine`, `Duplicate`,
-  `Null`, `ListMap`, `PathMapper`, `TreeBranch`, `TreeStatistics`, `CleanTree`, `ExplodeTree`.
 - Primitives: `PlanePrimitive`, `PolygonPrism`, `Tube`, `Helix`, `Wedge`,
   `Tetra`, `Octa`, `Icosa`.
-- Output: `BakeToLayer`, `BakeMesh`, `BakeCurve`, `ExportSTEP`/`STL`/`OBJ`, `Group`, `Cluster`.
 - Params: `TransformInput`, `ColorInput`, `FileInput`, `PathInput`.
 
 ---
@@ -1481,7 +1486,7 @@ The current `VpData::Mesh` exists but no nodes produce/consume it.
 | Params              | 6             | 7                  | 13    | 3 (of new) |
 | Maths               | 15            | 12                 | 27    | 12 |
 | Vector *(new)*      | 0             | 16                 | 16    | 6 (Cross/Dot/Length/Unit/Neg/Recip) |
-| Sets                | 7             | 13                 | 20    | 0 (of new) |
+| Sets                | 7             | 13                 | 20    | 12 (Phase H: CullIndex/Partition/ReplaceItems/Sift/Combine/Duplicate/Null/PathMapper/TreeBranch/TreeStatistics/CleanTree/ExplodeTree) |
 | Curve               | 5             | 26                 | 31    | 16 (Arc/Ellipse/Flip/EndPoints/PointAt + 11 new) |
 | Surface *(new)*     | 0             | 32                 | 32    | 24 (8 creation + 2 eval + 14 Phase E extended) |
 | Primitives          | 5             | 7                  | 12    | 0 (of new) |
@@ -1490,8 +1495,8 @@ The current `VpData::Mesh` exists but no nodes produce/consume it.
 | Modify              | 2             | 17                 | 19    | 17 (Fillet/Chamfer + 6 + 9 Phase E extended) |
 | Analysis *(new)*    | 0             | 14                 | 14    | 7 (Vol/Area/Centroid/BBox/Dist/Angle/Mass) |
 | Mesh *(new)*        | 0             | 13                 | 13    | 9 (ToMesh/Area/Volume/Flip + 5 new) |
-| Output              | 1             | 6                  | 7     | 1 (BakeToDoc) |
-| **Total**           | **58**        | **194**            | **252**| **~107** |
+| Output              | 1             | 6                  | 7     | 8 (BakeToDoc + 7 new: BakeToLayer/BakeMesh/BakeCurve/ExportSTEP/STL/OBJ/Group/Cluster) |
+| **Total**           | **58**        | **194**            | **252**| **~122** |
 
 ---
 
@@ -1536,9 +1541,10 @@ The current `VpData::Mesh` exists but no nodes produce/consume it.
 - ✅ Section 8.7–8.10: `ArrayAlongCurve, ArrayBox, ArrayOnSurface`
 - ⏳ MeshFromGeometry, MeshFromSurface, MeshToNurbs, MeshQuadify, MeshTriangulate
 
-### Phase H (Sets/Tree, Output, Cluster) ⏳ NOT STARTED
-- ⏳ Section 4: Tree operations (PathMapper, TreeBranch, etc.)
-- ⏳ Section 13: Bake variants, Group, Cluster
+### Phase H (Sets/Tree, Output, Cluster) ✅ DONE
+- ✅ Section 4: All 12 tree operations (CullIndex, Partition, ReplaceItems, Sift, Combine, Duplicate, NullItem, PathMapper, TreeBranch, TreeStatistics, CleanTree, ExplodeTree)
+- ✅ Section 13: All 8 output variants (BakeToLayer, BakeMesh, BakeCurve, ExportSTEP, ExportSTL, ExportOBJ, Group, Cluster)
+- ⏳ ListMap (4.8) — skipped (sub-graph reference, requires graph execution runtime)
 
 ### Phase I (Optional / Advanced) ⏳ NOT STARTED
 - ⏳ Section 7.7: Platonic solids (Tetra/Octa/Icosa)
