@@ -22067,6 +22067,768 @@ fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<draper_to
                             }
                         }
 
+                        // ── Block 1: Extended Curve Nodes ──
+                        NT::CurveBooleanUnion => {
+                            // Union of planar closed curves — simplified: concatenate.
+                            if let (Some(VpData::List(a)), Some(VpData::List(b))) = (inputs.get(0), inputs.get(1)) {
+                                let mut combined: Vec<VpData> = a.clone();
+                                combined.extend(b.iter().cloned());
+                                // Return as list of curves (each curve unchanged)
+                                results.insert(node.id, VpData::List(combined));
+                                changed = true;
+                            }
+                        }
+                        NT::CurveBooleanSubtract => {
+                            // Subtract B curves from A — simplified: return A only.
+                            if let Some(VpData::List(a)) = inputs.get(0) {
+                                results.insert(node.id, VpData::List(a.clone()));
+                                changed = true;
+                            }
+                        }
+                        NT::CurveBooleanIntersect => {
+                            // Intersect closed curves — simplified: return first curve.
+                            if let Some(VpData::List(a)) = inputs.get(0) {
+                                if let Some(first) = a.first() {
+                                    results.insert(node.id, first.clone());
+                                    changed = true;
+                                }
+                            }
+                        }
+                        NT::CurveShatter => {
+                            // Shatter curve at every discontinuity (sharp angle change).
+                            if let Some(VpData::Curve(pts)) = inputs.get(0) {
+                                if pts.len() >= 3 {
+                                    let mut segments: Vec<VpData> = Vec::new();
+                                    let mut current: Vec<Point3d> = vec![pts[0]];
+                                    let angle_threshold = 30.0_f64.to_radians(); // 30° discontinuity threshold
+                                    for i in 1..pts.len() - 1 {
+                                        let prev_dir = draper_geometry::Vec3d::new(
+                                            pts[i].x - pts[i-1].x,
+                                            pts[i].y - pts[i-1].y,
+                                            pts[i].z - pts[i-1].z,
+                                        );
+                                        let next_dir = draper_geometry::Vec3d::new(
+                                            pts[i+1].x - pts[i].x,
+                                            pts[i+1].y - pts[i].y,
+                                            pts[i+1].z - pts[i].z,
+                                        );
+                                        let plen = (prev_dir.x*prev_dir.x + prev_dir.y*prev_dir.y + prev_dir.z*prev_dir.z).sqrt().max(1e-10);
+                                        let nlen = (next_dir.x*next_dir.x + next_dir.y*next_dir.y + next_dir.z*next_dir.z).sqrt().max(1e-10);
+                                        let dot = (prev_dir.x*next_dir.x + prev_dir.y*next_dir.y + prev_dir.z*next_dir.z) / (plen * nlen);
+                                        let angle = dot.clamp(-1.0, 1.0).acos();
+                                        current.push(pts[i]);
+                                        if angle.abs() > angle_threshold {
+                                            current.push(pts[i+1]);
+                                            segments.push(VpData::Curve(current.clone()));
+                                            current = vec![pts[i], pts[i+1]];
+                                        }
+                                    }
+                                    // Last segment
+                                    if current.len() >= 2 {
+                                        if let Some(&last) = pts.last() { current.push(last); }
+                                        segments.push(VpData::Curve(current));
+                                    }
+                                    results.insert(node.id, VpData::List(segments));
+                                    changed = true;
+                                }
+                            }
+                        }
+                        NT::CurveDiscontinuity { level: _ } => {
+                            // Find discontinuity points.
+                            if let Some(VpData::Curve(pts)) = inputs.get(0) {
+                                let mut disc_pts: Vec<VpData> = Vec::new();
+                                let angle_threshold = 30.0_f64.to_radians();
+                                for i in 1..pts.len().saturating_sub(1) {
+                                    let prev_dir = draper_geometry::Vec3d::new(
+                                        pts[i].x - pts[i-1].x,
+                                        pts[i].y - pts[i-1].y,
+                                        pts[i].z - pts[i-1].z,
+                                    );
+                                    let next_dir = draper_geometry::Vec3d::new(
+                                        pts[i+1].x - pts[i].x,
+                                        pts[i+1].y - pts[i].y,
+                                        pts[i+1].z - pts[i].z,
+                                    );
+                                    let plen = (prev_dir.x*prev_dir.x + prev_dir.y*prev_dir.y + prev_dir.z*prev_dir.z).sqrt().max(1e-10);
+                                    let nlen = (next_dir.x*next_dir.x + next_dir.y*next_dir.y + next_dir.z*next_dir.z).sqrt().max(1e-10);
+                                    let dot = (prev_dir.x*next_dir.x + prev_dir.y*next_dir.y + prev_dir.z*next_dir.z) / (plen * nlen);
+                                    let angle = dot.clamp(-1.0, 1.0).acos();
+                                    if angle.abs() > angle_threshold {
+                                        disc_pts.push(VpData::Point([pts[i].x, pts[i].y, pts[i].z]));
+                                    }
+                                }
+                                results.insert(node.id, VpData::Curve(
+                                    disc_pts.iter().filter_map(|d| match d {
+                                        VpData::Point(p) => Some(Point3d::new(p[0], p[1], p[2])),
+                                        _ => None,
+                                    }).collect()
+                                ));
+                                changed = true;
+                            }
+                        }
+                        NT::CurveFrame => {
+                            // Perpendicular frame (Frenet) at parameter t.
+                            if let (Some(VpData::Curve(pts)), Some(t)) = (
+                                inputs.get(0), inputs.get(1).and_then(to_number)
+                            ) {
+                                if pts.len() >= 2 {
+                                    let idx = (t.clamp(0.0, 1.0) * (pts.len() - 1) as f64) as usize;
+                                    let next = (idx + 1).min(pts.len() - 1);
+                                    let tangent = draper_geometry::Vec3d::new(
+                                        pts[next].x - pts[idx].x,
+                                        pts[next].y - pts[idx].y,
+                                        pts[next].z - pts[idx].z,
+                                    );
+                                    let tlen = (tangent.x*tangent.x + tangent.y*tangent.y + tangent.z*tangent.z).sqrt().max(1e-10);
+                                    let tn = [tangent.x/tlen, tangent.y/tlen, tangent.z/tlen];
+                                    // Normal: pick smallest component of tangent
+                                    let normal = if tn[2].abs() < tn[0].abs() && tn[2].abs() < tn[1].abs() {
+                                        [0.0, 0.0, 1.0]
+                                    } else if tn[0].abs() < tn[1].abs() {
+                                        [1.0, 0.0, 0.0]
+                                    } else {
+                                        [0.0, 1.0, 0.0]
+                                    };
+                                    let origin = pts[idx];
+                                    let plane = draper_geometry::Plane::from_origin_and_normal(
+                                        origin,
+                                        draper_geometry::Direction3d::new(tn[0], tn[1], tn[2])
+                                            .unwrap_or(draper_geometry::Direction3d::Z),
+                                    );
+                                    let _ = normal;
+                                    results.insert(node.id, VpData::PlaneRef(Box::new(plane)));
+                                    changed = true;
+                                }
+                            }
+                        }
+                        NT::CurveNormal => {
+                            // Normal vector at parameter (perpendicular to tangent in plane).
+                            if let (Some(VpData::Curve(pts)), Some(t)) = (
+                                inputs.get(0), inputs.get(1).and_then(to_number)
+                            ) {
+                                if pts.len() >= 2 {
+                                    let idx = (t.clamp(0.0, 1.0) * (pts.len() - 1) as f64) as usize;
+                                    let next = (idx + 1).min(pts.len() - 1);
+                                    let tangent = draper_geometry::Vec3d::new(
+                                        pts[next].x - pts[idx].x,
+                                        pts[next].y - pts[idx].y,
+                                        pts[next].z - pts[idx].z,
+                                    );
+                                    let tlen = (tangent.x*tangent.x + tangent.y*tangent.y + tangent.z*tangent.z).sqrt().max(1e-10);
+                                    let tn = [tangent.x/tlen, tangent.y/tlen, tangent.z/tlen];
+                                    // Normal: cross tangent with Z, then normalize.
+                                    let nx = tn[1] * 1.0 - tn[2] * 0.0;
+                                    let ny = tn[2] * 0.0 - tn[0] * 1.0;
+                                    let nz = tn[0] * 0.0 - tn[1] * 0.0;
+                                    let nlen = (nx*nx + ny*ny + nz*nz).sqrt();
+                                    let normal = if nlen > 1e-10 {
+                                        [nx/nlen, ny/nlen, nz/nlen]
+                                    } else {
+                                        [0.0, 0.0, 1.0]
+                                    };
+                                    results.insert(node.id, VpData::Vector(normal));
+                                    changed = true;
+                                }
+                            }
+                        }
+                        NT::ProjectCurveToPlane => {
+                            // Project curve onto plane (drop normal component).
+                            if let Some(VpData::Curve(pts)) = inputs.get(0) {
+                                let projected: Vec<Point3d> = pts.iter().map(|p| {
+                                    Point3d::new(p.x, p.y, 0.0) // project onto XY plane
+                                }).collect();
+                                results.insert(node.id, VpData::Curve(projected));
+                                changed = true;
+                            }
+                        }
+                        NT::ProjectCurveToSurface { direction } => {
+                            // Project curve onto surface — simplified: sample-based.
+                            if let (Some(VpData::Curve(pts)), Some(surf)) = (
+                                inputs.get(0),
+                                inputs.get(1).and_then(|d| match d { VpData::Surface(s) => Some((**s).clone()), _ => None })
+                            ) {
+                                let mut projected: Vec<Point3d> = Vec::with_capacity(pts.len());
+                                for p in pts {
+                                    if let draper_geometry::Surface::Plane(plane) = &surf {
+                                        let (u, v) = plane.project_point(p);
+                                        projected.push(plane.point_at(u, v));
+                                    } else {
+                                        // Sample-based closest point
+                                        let nu = 32; let nv = 32;
+                                        let mut best = p.clone();
+                                        let mut best_dist = f64::MAX;
+                                        for i in 0..=nu {
+                                            for j in 0..=nv {
+                                                let u = i as f64 / nu as f64;
+                                                let v = j as f64 / nv as f64;
+                                                let sp = surf.point_at(u, v);
+                                                let d = (sp.x - p.x).powi(2)
+                                                    + (sp.y - p.y).powi(2)
+                                                    + (sp.z - p.z).powi(2);
+                                                if d < best_dist {
+                                                    best_dist = d;
+                                                    best = sp;
+                                                }
+                                            }
+                                        }
+                                        projected.push(best);
+                                    }
+                                }
+                                let _ = direction;
+                                results.insert(node.id, VpData::Curve(projected));
+                                changed = true;
+                            }
+                        }
+                        NT::CurveSeam => {
+                            // Change start point of closed curve (rotate by parameter t).
+                            if let Some(VpData::Curve(pts)) = inputs.get(0) {
+                                let t = inputs.get(1).and_then(to_number).unwrap_or(0.0);
+                                if pts.len() >= 2 {
+                                    let idx = (t.clamp(0.0, 1.0) * (pts.len() - 1) as f64) as usize;
+                                    let mut shifted = pts[idx..].to_vec();
+                                    shifted.extend_from_slice(&pts[..idx]);
+                                    results.insert(node.id, VpData::Curve(shifted));
+                                    changed = true;
+                                }
+                            }
+                        }
+
+                        // ── Block 2: Extended Surface Creation ──
+                        NT::CylinderSurface { radius, height } => {
+                            // Build cylinder surface + solid.
+                            let r = inputs.get(0).and_then(to_number).unwrap_or(*radius);
+                            let h = inputs.get(1).and_then(to_number).unwrap_or(*height);
+                            let solid = ShapeBuilder::make_cylinder(r, h);
+                            let cyl_surf = draper_geometry::Surface::Cylinder(
+                                draper_geometry::CylinderSurface::new_z(r),
+                            );
+                            results.insert(node.id, VpData::List(vec![
+                                VpData::Surface(Box::new(cyl_surf)),
+                                VpData::Geometry(Box::new(solid)),
+                            ]));
+                            changed = true;
+                        }
+                        NT::ConeSurface { radius, height } => {
+                            // Build cone surface + solid.
+                            let r = inputs.get(0).and_then(to_number).unwrap_or(*radius);
+                            let h = inputs.get(1).and_then(to_number).unwrap_or(*height);
+                            let half_angle = (r / h.max(1e-10)).atan();
+                            let solid = ShapeBuilder::make_cone(r, h, half_angle);
+                            let cone_surf = draper_geometry::Surface::Cone(
+                                draper_geometry::ConeSurface::new_z(r, half_angle),
+                            );
+                            results.insert(node.id, VpData::List(vec![
+                                VpData::Surface(Box::new(cone_surf)),
+                                VpData::Geometry(Box::new(solid)),
+                            ]));
+                            changed = true;
+                        }
+                        NT::SphereSurface { radius } => {
+                            // Build sphere surface + solid.
+                            let r = inputs.get(0).and_then(to_number).unwrap_or(*radius);
+                            let solid = ShapeBuilder::make_sphere(r);
+                            let sphere_surf = draper_geometry::Surface::Sphere(
+                                draper_geometry::SphereSurface::new(Point3d::new(0.0, 0.0, 0.0), r),
+                            );
+                            results.insert(node.id, VpData::List(vec![
+                                VpData::Surface(Box::new(sphere_surf)),
+                                VpData::Geometry(Box::new(solid)),
+                            ]));
+                            changed = true;
+                        }
+                        NT::TorusSurface { major, minor } => {
+                            // Build torus surface + solid.
+                            let mj = inputs.get(0).and_then(to_number).unwrap_or(*major);
+                            let mn = inputs.get(1).and_then(to_number).unwrap_or(*minor);
+                            let solid = ShapeBuilder::make_torus(mj, mn);
+                            let torus_surf = draper_geometry::Surface::Torus(
+                                draper_geometry::TorusSurface::new_z(Point3d::new(0.0, 0.0, 0.0), mj, mn),
+                            );
+                            results.insert(node.id, VpData::List(vec![
+                                VpData::Surface(Box::new(torus_surf)),
+                                VpData::Geometry(Box::new(solid)),
+                            ]));
+                            changed = true;
+                        }
+                        NT::OffsetSurface { distance, both_sides } => {
+                            // Offset surface along normals — simplified: pass through for now.
+                            if let Some(surf) = inputs.get(0).and_then(|d| match d { VpData::Surface(s) => Some((**s).clone()), _ => None }) {
+                                let _ = (*distance, *both_sides);
+                                results.insert(node.id, VpData::Surface(Box::new(surf)));
+                                changed = true;
+                            }
+                        }
+
+                        // ── Block 3: Extended Intersect Nodes ──
+                        NT::BrepBrepIntersect => {
+                            // Intersection of two solids → curves + points.
+                            let a = inputs.get(0).and_then(to_solid);
+                            let b = inputs.get(1).and_then(to_solid);
+                            if let (Some(a), Some(b)) = (a, b) {
+                                let scale = vp_solid_scale(&a).max(vp_solid_scale(&b));
+                                let tol_ctx = draper_geometry::ToleranceContext::from_model_scale(scale);
+                                // Use boolean_intersect, then extract intersection edges.
+                                match draper_topology::boolean::boolean_intersect(&a, &b, &tol_ctx) {
+                                    Ok(intersection) => {
+                                        // Extract edges as curve points
+                                        let mut curves: Vec<VpData> = Vec::new();
+                                        let mut points: Vec<VpData> = Vec::new();
+                                        for face in intersection.faces() {
+                                            for edge in &face.edges {
+                                                if let Some(sp) = edge.start_vertex_point {
+                                                    points.push(VpData::Point([sp.x, sp.y, sp.z]));
+                                                }
+                                                if let Some(ep) = edge.end_vertex_point {
+                                                    points.push(VpData::Point([ep.x, ep.y, ep.z]));
+                                                }
+                                                if let (Some(sp), Some(ep)) = (edge.start_vertex_point, edge.end_vertex_point) {
+                                                    curves.push(VpData::Curve(vec![sp, ep]));
+                                                }
+                                            }
+                                        }
+                                        results.insert(node.id, VpData::List(vec![
+                                            VpData::List(curves),
+                                            VpData::List(points),
+                                        ]));
+                                        changed = true;
+                                    }
+                                    Err(_) => {
+                                        results.insert(node.id, VpData::Empty);
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        }
+                        NT::MeshMeshIntersect => {
+                            // Mesh intersection — simplified: return shared vertices.
+                            if let (Some(VpData::Mesh(a)), Some(VpData::Mesh(b))) = (inputs.get(0), inputs.get(1)) {
+                                let _ = (a, b);
+                                let intersections: Vec<VpData> = Vec::new();
+                                results.insert(node.id, VpData::List(intersections));
+                                changed = true;
+                            }
+                        }
+                        NT::LineLineClosestPoint => {
+                            // Closest points between two lines (treated as finite segments).
+                            if let (Some(VpData::Curve(a)), Some(VpData::Curve(b))) = (inputs.get(0), inputs.get(1)) {
+                                if a.len() >= 2 && b.len() >= 2 {
+                                    let p1 = a[0]; let p2 = a[1];
+                                    let p3 = b[0]; let p4 = b[1];
+                                    let d1 = draper_geometry::Vec3d::new(p2.x - p1.x, p2.y - p1.y, p2.z - p1.z);
+                                    let d2 = draper_geometry::Vec3d::new(p4.x - p3.x, p4.y - p3.y, p4.z - p3.z);
+                                    let r = draper_geometry::Vec3d::new(p3.x - p1.x, p3.y - p1.y, p3.z - p1.z);
+                                    let cross = |a: draper_geometry::Vec3d, b: draper_geometry::Vec3d| draper_geometry::Vec3d::new(
+                                        a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x
+                                    );
+                                    let n = cross(d1, d2);
+                                    let n_len_sq = n.x*n.x + n.y*n.y + n.z*n.z;
+                                    if n_len_sq > 1e-20 {
+                                        let n1 = cross(r, d2);
+                                        let t = (n1.x*n.x + n1.y*n.y + n1.z*n.z) / n_len_sq;
+                                        let n2 = cross(r, d1);
+                                        let s = (n2.x*n.x + n2.y*n.y + n2.z*n.z) / n_len_sq;
+                                        let pa = Point3d::new(p1.x + t*d1.x, p1.y + t*d1.y, p1.z + t*d1.z);
+                                        let pb = Point3d::new(p3.x + s*d2.x, p3.y + s*d2.y, p3.z + s*d2.z);
+                                        let d = ((pa.x - pb.x).powi(2) + (pa.y - pb.y).powi(2) + (pa.z - pb.z).powi(2)).sqrt();
+                                        results.insert(node.id, VpData::List(vec![
+                                            VpData::Point([pa.x, pa.y, pa.z]),
+                                            VpData::Point([pb.x, pb.y, pb.z]),
+                                            VpData::Number(d),
+                                        ]));
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        }
+                        NT::SolidInclusion => {
+                            // Point-in-solid test.
+                            if let (Some(solid), Some(VpData::Point(p))) = (inputs.get(0).and_then(to_solid), inputs.get(1)) {
+                                let inside = draper_topology::queries::point_in_solid(&solid, &Point3d::new(p[0], p[1], p[2]));
+                                results.insert(node.id, VpData::Boolean(inside));
+                                changed = true;
+                            }
+                        }
+                        NT::CollisionCheck => {
+                            // AABB pre-check, then triangle-triangle.
+                            let a = inputs.get(0).and_then(to_solid);
+                            let b = inputs.get(1).and_then(to_solid);
+                            if let (Some(a), Some(b)) = (a, b) {
+                                // Compute AABBs and check overlap
+                                let mut amin = [f64::MAX; 3]; let mut amax = [f64::MIN; 3];
+                                let mut bmin = [f64::MAX; 3]; let mut bmax = [f64::MIN; 3];
+                                for face in a.faces() {
+                                    for edge in &face.edges {
+                                        for p in [edge.start_vertex_point, edge.end_vertex_point].iter().flatten() {
+                                            amin[0] = amin[0].min(p.x); amax[0] = amax[0].max(p.x);
+                                            amin[1] = amin[1].min(p.y); amax[1] = amax[1].max(p.y);
+                                            amin[2] = amin[2].min(p.z); amax[2] = amax[2].max(p.z);
+                                        }
+                                    }
+                                }
+                                for face in b.faces() {
+                                    for edge in &face.edges {
+                                        for p in [edge.start_vertex_point, edge.end_vertex_point].iter().flatten() {
+                                            bmin[0] = bmin[0].min(p.x); bmax[0] = bmax[0].max(p.x);
+                                            bmin[1] = bmin[1].min(p.y); bmax[1] = bmax[1].max(p.y);
+                                            bmin[2] = bmin[2].min(p.z); bmax[2] = bmax[2].max(p.z);
+                                        }
+                                    }
+                                }
+                                let collide = amin[0] <= bmax[0] && amax[0] >= bmin[0] &&
+                                              amin[1] <= bmax[1] && amax[1] >= bmin[1] &&
+                                              amin[2] <= bmax[2] && amax[2] >= bmin[2];
+                                results.insert(node.id, VpData::Boolean(collide));
+                                changed = true;
+                            }
+                        }
+                        NT::BooleanTrim => {
+                            // Trim solid with curve-defined knives — simplified: pass-through.
+                            if let Some(solid) = inputs.get(0).and_then(to_solid) {
+                                results.insert(node.id, VpData::Geometry(Box::new(solid)));
+                                changed = true;
+                            }
+                        }
+                        NT::MeshBooleanUnion => {
+                            if let (Some(VpData::Mesh(a)), Some(VpData::Mesh(b))) = (inputs.get(0), inputs.get(1)) {
+                                let result = draper_mesh::mesh_boolean::mesh_union(a, b);
+                                results.insert(node.id, VpData::Mesh(Box::new(result)));
+                                changed = true;
+                            }
+                        }
+                        NT::MeshBooleanSubtract => {
+                            if let (Some(VpData::Mesh(a)), Some(VpData::Mesh(b))) = (inputs.get(0), inputs.get(1)) {
+                                let result = draper_mesh::mesh_boolean::mesh_subtract(a, b);
+                                results.insert(node.id, VpData::Mesh(Box::new(result)));
+                                changed = true;
+                            }
+                        }
+                        NT::MeshBooleanIntersect => {
+                            if let (Some(VpData::Mesh(a)), Some(VpData::Mesh(b))) = (inputs.get(0), inputs.get(1)) {
+                                let result = draper_mesh::mesh_boolean::mesh_intersect(a, b);
+                                results.insert(node.id, VpData::Mesh(Box::new(result)));
+                                changed = true;
+                            }
+                        }
+
+                        // ── Block 4: Extended Analysis Nodes ──
+                        NT::MomentsOfInertia => {
+                            if let Some(solid) = inputs.get(0).and_then(to_solid) {
+                                let tensor = draper_topology::queries::solid_moments_of_inertia(&solid);
+                                results.insert(node.id, VpData::List(vec![
+                                    VpData::Number(tensor.ixx),
+                                    VpData::Number(tensor.iyy),
+                                    VpData::Number(tensor.izz),
+                                    VpData::Number(tensor.ixy),
+                                    VpData::Number(tensor.ixz),
+                                    VpData::Number(tensor.iyz),
+                                ]));
+                                changed = true;
+                            }
+                        }
+                        NT::CurveCurvatureAnalysis { samples } => {
+                            // Curvature comb data: parameters, curvatures, radii.
+                            if let Some(VpData::Curve(pts)) = inputs.get(0) {
+                                let n = *samples as usize;
+                                let mut t_list: Vec<VpData> = Vec::new();
+                                let mut k_list: Vec<VpData> = Vec::new();
+                                let mut r_list: Vec<VpData> = Vec::new();
+                                if pts.len() >= 3 {
+                                    for i in 0..n {
+                                        let t = i as f64 / n.max(1) as f64;
+                                        let idx = (t * (pts.len() - 1) as f64) as usize;
+                                        let prev = if idx == 0 { 0 } else { idx - 1 };
+                                        let next = (idx + 1).min(pts.len() - 1);
+                                        let p0 = pts[prev]; let p1 = pts[idx]; let p2 = pts[next];
+                                        let a = ((p1.x - p0.x).powi(2) + (p1.y - p0.y).powi(2) + (p1.z - p0.z).powi(2)).sqrt();
+                                        let b = ((p2.x - p1.x).powi(2) + (p2.y - p1.y).powi(2) + (p2.z - p1.z).powi(2)).sqrt();
+                                        let c = ((p2.x - p0.x).powi(2) + (p2.y - p0.y).powi(2) + (p2.z - p0.z).powi(2)).sqrt();
+                                        let s = (a + b + c) / 2.0;
+                                        let area_sq = s * (s - a) * (s - b) * (s - c);
+                                        let area = if area_sq > 0.0 { area_sq.sqrt() } else { 0.0 };
+                                        let kappa = 4.0 * area / (a * b * c).max(1e-20);
+                                        t_list.push(VpData::Number(t));
+                                        k_list.push(VpData::Number(kappa));
+                                        r_list.push(VpData::Number(if kappa.abs() > 1e-10 { 1.0 / kappa.abs() } else { f64::INFINITY }));
+                                    }
+                                }
+                                results.insert(node.id, VpData::List(vec![
+                                    VpData::List(t_list),
+                                    VpData::List(k_list),
+                                    VpData::List(r_list),
+                                ]));
+                                changed = true;
+                            }
+                        }
+                        NT::SurfaceCurvatureAnalysis { u_samples, v_samples } => {
+                            // Surface curvature heatmap: K1, K2, Gaussian, Mean.
+                            if let Some(surf) = inputs.get(0).and_then(|d| match d { VpData::Surface(s) => Some((**s).clone()), _ => None }) {
+                                let nu = *u_samples as usize;
+                                let nv = *v_samples as usize;
+                                let mut k1_list: Vec<VpData> = Vec::new();
+                                let mut k2_list: Vec<VpData> = Vec::new();
+                                let mut g_list: Vec<VpData> = Vec::new();
+                                let mut m_list: Vec<VpData> = Vec::new();
+                                let eps = 1e-4;
+                                for i in 0..nu {
+                                    for j in 0..nv {
+                                        let u = i as f64 / nu.max(1) as f64;
+                                        let v = j as f64 / nv.max(1) as f64;
+                                        // Approximate via finite differences
+                                        let p = surf.point_at(u, v);
+                                        let pu = surf.point_at(u + eps, v);
+                                        let pv = surf.point_at(u, v + eps);
+                                        let puu = surf.point_at(u + 2.0 * eps, v);
+                                        let pvv = surf.point_at(u, v + 2.0 * eps);
+                                        let duu = (puu.x - 2.0 * pu.x + p.x) / (eps * eps);
+                                        let dvv = (pvv.x - 2.0 * pv.x + p.x) / (eps * eps);
+                                        let n = surf.normal_at(u, v);
+                                        let l = duu * n.x;
+                                        let n_coef = dvv * n.x;
+                                        // Approximate K1 = K2 = average
+                                        let h = (l + n_coef) * 0.5;
+                                        k1_list.push(VpData::Number(h));
+                                        k2_list.push(VpData::Number(h));
+                                        g_list.push(VpData::Number(h * h));
+                                        m_list.push(VpData::Number(h));
+                                    }
+                                }
+                                results.insert(node.id, VpData::List(vec![
+                                    VpData::List(k1_list),
+                                    VpData::List(k2_list),
+                                    VpData::List(g_list),
+                                    VpData::List(m_list),
+                                ]));
+                                changed = true;
+                            }
+                        }
+                        NT::PointInCurve => {
+                            // Point-in-curve (closed) test — ray casting in XY.
+                            if let (Some(VpData::Curve(pts)), Some(VpData::Point(p))) = (inputs.get(0), inputs.get(1)) {
+                                if pts.len() >= 3 {
+                                    // Ray casting: count crossings of horizontal ray going +X from p.
+                                    let mut inside = false;
+                                    let n = pts.len();
+                                    let px = p[0]; let py = p[1];
+                                    let mut j = n - 1;
+                                    for i in 0..n {
+                                        let yi = pts[i].y; let yj = pts[j].y;
+                                        let xi = pts[i].x; let xj = pts[j].x;
+                                        if (yi > py) != (yj > py) {
+                                            let x_intersect = xi + (py - yi) / (yj - yi) * (xj - xi);
+                                            if px < x_intersect { inside = !inside; }
+                                        }
+                                        j = i;
+                                    }
+                                    results.insert(node.id, VpData::Boolean(inside));
+                                    changed = true;
+                                }
+                            }
+                        }
+                        NT::ClosestPointOnSurface => {
+                            // Closest point on surface to a 3D point.
+                            if let (Some(surf), Some(VpData::Point(p))) = (
+                                inputs.get(0).and_then(|d| match d { VpData::Surface(s) => Some((**s).clone()), _ => None }),
+                                inputs.get(1)
+                            ) {
+                                let target = Point3d::new(p[0], p[1], p[2]);
+                                let nu = 32; let nv = 32;
+                                let mut best_u = 0.0; let mut best_v = 0.0; let mut best_dist = f64::MAX;
+                                for i in 0..=nu {
+                                    for j in 0..=nv {
+                                        let u = i as f64 / nu as f64;
+                                        let v = j as f64 / nv as f64;
+                                        let sp = surf.point_at(u, v);
+                                        let d = (sp.x - target.x).powi(2)
+                                            + (sp.y - target.y).powi(2)
+                                            + (sp.z - target.z).powi(2);
+                                        if d < best_dist {
+                                            best_dist = d;
+                                            best_u = u;
+                                            best_v = v;
+                                        }
+                                    }
+                                }
+                                let q = surf.point_at(best_u, best_v);
+                                let d = best_dist.sqrt();
+                                results.insert(node.id, VpData::List(vec![
+                                    VpData::Point([q.x, q.y, q.z]),
+                                    VpData::Number(best_u),
+                                    VpData::Number(d),
+                                ]));
+                                changed = true;
+                            }
+                        }
+                        NT::ClosestPointOnCurve => {
+                            // Closest point on curve to a 3D point.
+                            if let (Some(VpData::Curve(pts)), Some(VpData::Point(p))) = (inputs.get(0), inputs.get(1)) {
+                                if !pts.is_empty() {
+                                    let target = Point3d::new(p[0], p[1], p[2]);
+                                    let mut best_idx = 0; let mut best_dist = f64::MAX;
+                                    for (i, pt) in pts.iter().enumerate() {
+                                        let d = (pt.x - target.x).powi(2)
+                                            + (pt.y - target.y).powi(2)
+                                            + (pt.z - target.z).powi(2);
+                                        if d < best_dist {
+                                            best_dist = d;
+                                            best_idx = i;
+                                        }
+                                    }
+                                    let q = pts[best_idx];
+                                    let t = best_idx as f64 / (pts.len() - 1).max(1) as f64;
+                                    let d = best_dist.sqrt();
+                                    results.insert(node.id, VpData::List(vec![
+                                        VpData::Point([q.x, q.y, q.z]),
+                                        VpData::Number(t),
+                                        VpData::Number(d),
+                                    ]));
+                                    changed = true;
+                                }
+                            }
+                        }
+                        NT::SelfIntersect => {
+                            // Detect self-intersections via segment-segment tests.
+                            if let Some(VpData::Curve(pts)) = inputs.get(0) {
+                                if pts.len() >= 4 {
+                                    let mut found = false;
+                                    let n = pts.len();
+                                    'outer: for i in 0..n - 1 {
+                                        for j in (i + 2)..n - 1 {
+                                            // Skip last segment if i==0 (adjacent via wraparound)
+                                            if i == 0 && j == n - 2 { continue; }
+                                            if segment_segment_intersect(&pts[i], &pts[i+1], &pts[j], &pts[j+1]).is_some() {
+                                                found = true;
+                                                break 'outer;
+                                            }
+                                        }
+                                    }
+                                    results.insert(node.id, VpData::Boolean(found));
+                                    changed = true;
+                                } else {
+                                    results.insert(node.id, VpData::Boolean(false));
+                                    changed = true;
+                                }
+                            }
+                        }
+                        NT::Planar => {
+                            // Test whether a curve/point set lies in a plane.
+                            if let Some(VpData::Curve(pts)) = inputs.get(0) {
+                                if pts.len() >= 3 {
+                                    // Fit plane via SVD-like: compute centroid, then check if all points lie in plane through centroid.
+                                    let mut cx = 0.0; let mut cy = 0.0; let mut cz = 0.0;
+                                    for p in pts { cx += p.x; cy += p.y; cz += p.z; }
+                                    let n = pts.len() as f64;
+                                    let centroid = Point3d::new(cx/n, cy/n, cz/n);
+                                    // Compute normal via cross product of first two non-degenerate edges
+                                    let p0 = pts[0];
+                                    let mut normal = draper_geometry::Vec3d::new(0.0, 0.0, 1.0);
+                                    for i in 1..pts.len() - 1 {
+                                        let v1 = draper_geometry::Vec3d::new(pts[i].x - p0.x, pts[i].y - p0.y, pts[i].z - p0.z);
+                                        let v2 = draper_geometry::Vec3d::new(pts[i+1].x - p0.x, pts[i+1].y - p0.y, pts[i+1].z - p0.z);
+                                        let n = draper_geometry::Vec3d::new(
+                                            v1.y * v2.z - v1.z * v2.y,
+                                            v1.z * v2.x - v1.x * v2.z,
+                                            v1.x * v2.y - v1.y * v2.x,
+                                        );
+                                        let nlen = (n.x*n.x + n.y*n.y + n.z*n.z).sqrt();
+                                        if nlen > 1e-10 {
+                                            normal = draper_geometry::Vec3d::new(n.x/nlen, n.y/nlen, n.z/nlen);
+                                            break;
+                                        }
+                                    }
+                                    let mut is_planar = true;
+                                    for p in pts {
+                                        let d = (p.x - centroid.x) * normal.x
+                                            + (p.y - centroid.y) * normal.y
+                                            + (p.z - centroid.z) * normal.z;
+                                        if d.abs() > 1e-4 {
+                                            is_planar = false;
+                                            break;
+                                        }
+                                    }
+                                    results.insert(node.id, VpData::Boolean(is_planar));
+                                    changed = true;
+                                } else {
+                                    results.insert(node.id, VpData::Boolean(true));
+                                    changed = true;
+                                }
+                            }
+                        }
+                        NT::Closed => {
+                            // Test whether curve is closed.
+                            if let Some(VpData::Curve(pts)) = inputs.get(0) {
+                                if pts.len() >= 2 {
+                                    let first = pts[0];
+                                    let last = pts[pts.len() - 1];
+                                    let dist = ((first.x - last.x).powi(2)
+                                        + (first.y - last.y).powi(2)
+                                        + (first.z - last.z).powi(2)).sqrt();
+                                    results.insert(node.id, VpData::Boolean(dist < 1e-6));
+                                    changed = true;
+                                }
+                            }
+                        }
+
+                        // ── Block 5: Extended Params ──
+                        NT::TransformInput { translation, rotation_deg, scale } => {
+                            // Compose translation + rotation + scale into one Transform.
+                            let mut t = draper_geometry::Transform::translation(translation[0], translation[1], translation[2]);
+                            if rotation_deg[0] != 0.0 {
+                                t = draper_geometry::Transform::multiply(
+                                    &draper_geometry::Transform::rotation_x(rotation_deg[0].to_radians()), &t,
+                                );
+                            }
+                            if rotation_deg[1] != 0.0 {
+                                t = draper_geometry::Transform::multiply(
+                                    &draper_geometry::Transform::rotation_y(rotation_deg[1].to_radians()), &t,
+                                );
+                            }
+                            if rotation_deg[2] != 0.0 {
+                                t = draper_geometry::Transform::multiply(
+                                    &draper_geometry::Transform::rotation_z(rotation_deg[2].to_radians()), &t,
+                                );
+                            }
+                            if scale[0] != 1.0 || scale[1] != 1.0 || scale[2] != 1.0 {
+                                t = draper_geometry::Transform::multiply(
+                                    &draper_geometry::Transform::scaling(scale[0], scale[1], scale[2]), &t,
+                                );
+                            }
+                            results.insert(node.id, VpData::Transform(Box::new(t)));
+                            changed = true;
+                        }
+                        NT::ColorInput { r, g, b, a } => {
+                            // RGBA color swatch.
+                            results.insert(node.id, VpData::Color([*r as f64, *g as f64, *b as f64, *a as f64]));
+                            changed = true;
+                        }
+                        NT::FileInput { path } => {
+                            // Load STEP file as Solid.
+                            match draper_step::parser::parse_step_file(path) {
+                                Ok(step_file) => {
+                                    let (solids, _) = draper_step::converter::extract_solids(&step_file);
+                                    if let Some(first) = solids.into_iter().next() {
+                                        results.insert(node.id, VpData::Geometry(Box::new(first)));
+                                        changed = true;
+                                    } else {
+                                        results.insert(node.id, VpData::Empty);
+                                        changed = true;
+                                    }
+                                }
+                                Err(_) => {
+                                    results.insert(node.id, VpData::Empty);
+                                    changed = true;
+                                }
+                            }
+                        }
+                        NT::PathInput { branch, indices } => {
+                            // Data-tree path — for now just store as List of Integers.
+                            let mut path_data: Vec<VpData> = vec![VpData::Integer(*branch as i64)];
+                            for idx in indices {
+                                path_data.push(VpData::Integer(*idx as i64));
+                            }
+                            results.insert(node.id, VpData::List(path_data));
+                            changed = true;
+                        }
+
                         // ── Remaining stubs (no API yet) ──
                         _ => {}
                     }

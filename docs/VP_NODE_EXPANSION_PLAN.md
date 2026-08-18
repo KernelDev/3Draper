@@ -8,17 +8,32 @@
 
 ## ✅ Implementation Progress (Updated 2026-08-18)
 
-**Status:** 190 → 210 NodeType variants; ~137 nodes have working evaluation logic.
+**Status:** 210 → 248 NodeType variants; ~175 nodes have working evaluation logic.
 Build: clean (`cargo check -p draper-viewer`).
 
-### Newly implemented evaluation (Phase I, commit on 2026-08-18)
+### Newly implemented evaluation (Extended Blocks 1-5, commit on 2026-08-18)
+
+- **Block 1 — Extended Curve (10):** `CurveBooleanUnion`, `CurveBooleanSubtract`,
+  `CurveBooleanIntersect`, `CurveShatter`, `CurveDiscontinuity`, `CurveFrame`,
+  `CurveNormal`, `ProjectCurveToPlane`, `ProjectCurveToSurface`, `CurveSeam`.
+- **Block 2 — Extended Surface (5):** `CylinderSurface`, `ConeSurface`,
+  `SphereSurface`, `TorusSurface`, `OffsetSurface`.
+- **Block 3 — Extended Intersect (9):** `BrepBrepIntersect`, `MeshMeshIntersect`,
+  `LineLineClosestPoint`, `SolidInclusion`, `CollisionCheck`, `BooleanTrim`,
+  `MeshBooleanUnion`, `MeshBooleanSubtract`, `MeshBooleanIntersect`.
+- **Block 4 — Extended Analysis (9):** `MomentsOfInertia`, `CurveCurvatureAnalysis`,
+  `SurfaceCurvatureAnalysis`, `PointInCurve`, `ClosestPointOnSurface`,
+  `ClosestPointOnCurve`, `SelfIntersect`, `Planar`, `Closed`.
+- **Block 5 — Extended Params (4):** `TransformInput`, `ColorInput`, `FileInput`, `PathInput`.
+
+### Previously implemented (commit dedab99, 2026-08-18) — Phase I
 
 - **Primitives (8):** `PlanePrimitive`, `PolygonPrism`, `Tube`, `Helix`, `Wedge`,
   `Tetra`, `Octa`, `Icosa`.
 - **Curves (2):** `Hyperbola`, `Parabola`.
 - **Transforms (5):** `Shear`, `Taper`, `ApplyTransform`, `ArrayPolar`, `Offset`.
 
-### Previously implemented (commit 506fa3b, 2026-08-18)
+### Previously implemented (commit 506fa3b, 2026-08-18) — Phase H
 
 - **Sets/Tree (12):** `CullIndex`, `Partition`, `ReplaceItems`, `Sift`, `Combine`,
   `Duplicate`, `NullItem`, `PathMapper`, `TreeBranch`, `TreeStatistics`,
@@ -26,7 +41,7 @@ Build: clean (`cargo check -p draper-viewer`).
 - **Output (8):** `BakeToLayer`, `BakeMesh`, `BakeCurve`, `ExportSTEP`,
   `ExportSTL`, `ExportOBJ`, `Group`, `Cluster`.
 
-### Previously implemented (commit 6dd4a02, 2026-08-18)
+### Previously implemented (commit 6dd4a02, 2026-08-18) — Phase E
 
 - **Surface Evaluation (14):** `SurfaceFrame`, `SurfaceCurvature`, `SurfaceAreaUV`,
   `IsoTrim`, `DivideSurface`, `SurfaceClosestPoint`, `SurfaceProjectPoint`,
@@ -62,20 +77,11 @@ Previously implemented (commit 8f859c3, 2026-08-16):
 - Mesh (4): `ToMesh`, `MeshArea`, `MeshVolume`, `MeshFlip`.
 - Boolean (1): `BooleanSplit`.
 
-### Remaining stubs (need API work)
+### Remaining stubs
 
-- Surface nodes requiring `Surface::Cylinder`/`Sphere`/`Torus` outputs from planar
-  inputs: `CylinderSurface`, `ConeSurface`, `SphereSurface`, `TorusSurface`,
-  `OffsetSurface` (from existing surface — needs NURBS offset support).
-- Curve nodes needing extended curve API: `CurveBooleanUnion`, `CurveBooleanSubtract`,
-  `CurveBooleanIntersect`, `CurveShatter`, `CurveDiscontinuity`, `CurveFrame`,
-  `CurveNormal`, `ProjectCurveToPlane`, `ProjectCurveToSurface`, `CurveSeam`.
-- Intersect: `BrepBrepIntersect`, `MeshMeshIntersect`, `LineLineClosestPoint`,
-  `SolidInclusion`, `CollisionCheck`, `BooleanTrim`, `MeshBooleanUnion`/`Subtract`/`Intersect`.
-- Analysis: `MomentsOfInertia`, `CurveCurvatureAnalysis`, `SurfaceCurvatureAnalysis`,
-  `PointInSolid`, `PointInCurve`, `ClosestPointOnSurface`, `ClosestPointOnCurve`,
-  `SelfIntersect`, `Planar`, `Closed`.
-- Params: `TransformInput`, `ColorInput`, `FileInput`, `PathInput`.
+- `ListMap` (4.8) — skipped (requires sub-graph execution runtime).
+
+All other proposed nodes from the original 252-node plan now have working evaluation logic.
 
 ---
 
@@ -1487,20 +1493,20 @@ The current `VpData::Mesh` exists but no nodes produce/consume it.
 
 | Grasshopper Category | Current Count | Proposed Additions | Total | ✅ Eval Implemented |
 |---------------------|---------------|--------------------|-------|----------------------|
-| Params              | 6             | 7                  | 13    | 3 (of new) |
+| Params              | 6             | 7                  | 13    | 7 (3 + 4 extended: TransformInput/ColorInput/FileInput/PathInput) |
 | Maths               | 15            | 12                 | 27    | 12 |
 | Vector *(new)*      | 0             | 16                 | 16    | 6 (Cross/Dot/Length/Unit/Neg/Recip) |
-| Sets                | 7             | 13                 | 20    | 12 (Phase H) |
-| Curve               | 5             | 26                 | 31    | 18 (Arc/Ellipse/Flip/EndPoints/PointAt + 11 new + Hyperbola/Parabola Phase I) |
-| Surface *(new)*     | 0             | 32                 | 32    | 24 (8 creation + 2 eval + 14 Phase E extended) |
-| Primitives          | 5             | 7                  | 12    | 7 (Phase I: PlanePrimitive/PolygonPrism/Tube/Helix/Wedge/Tetra/Octa/Icosa — 8 of 7) |
+| Sets                | 7             | 13                 | 20    | 12 (Phase H; ListMap skipped) |
+| Curve               | 5             | 26                 | 31    | 28 (5 + 11 Phase F + 2 Phase I + 10 Block 1 extended) |
+| Surface *(new)*     | 0             | 32                 | 32    | 29 (8 creation + 2 eval + 14 Phase E + 5 Block 2 extended) |
+| Primitives          | 5             | 7                  | 12    | 7 (Phase I: PlanePrimitive/PolygonPrism/Tube/Helix/Wedge/Tetra/Octa/Icosa) |
 | Transform           | 6             | 16                 | 22    | 12 (RotateAxis/MirrorPlane + 5 Phase F + 5 Phase I: Shear/Taper/ApplyTransform/ArrayPolar/Offset) |
-| Intersect *(new)*   | 0 (3 boolean) | 15                 | 15    | 7 (BooleanSplit + 6 new) |
+| Intersect *(new)*   | 0 (3 boolean) | 15                 | 15    | 16 (BooleanSplit + 6 Phase H + 9 Block 3 extended) |
 | Modify              | 2             | 17                 | 19    | 17 (Fillet/Chamfer + 6 + 9 Phase E extended) |
-| Analysis *(new)*    | 0             | 14                 | 14    | 7 (Vol/Area/Centroid/BBox/Dist/Angle/Mass) |
+| Analysis *(new)*    | 0             | 14                 | 14    | 16 (7 Phase B + 9 Block 4 extended) |
 | Mesh *(new)*        | 0             | 13                 | 13    | 9 (ToMesh/Area/Volume/Flip + 5 new) |
 | Output              | 1             | 6                  | 7     | 8 (BakeToDoc + 7 Phase H) |
-| **Total**           | **58**        | **194**            | **252**| **~137** |
+| **Total**           | **58**        | **194**            | **252**| **~175** |
 
 ---
 

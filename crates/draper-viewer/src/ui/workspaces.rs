@@ -599,6 +599,90 @@ pub enum NodeType {
     ArrayPolar { count: u32, angle_deg: f64 },
     /// Offset solid along a direction (creates a "thickened" copy).
     Offset { distance: f64, both_sides: bool },
+
+    // ───── Extended Curve Nodes ─────
+    /// Boolean union of planar closed curves.
+    CurveBooleanUnion,
+    /// Boolean subtract of planar closed curves.
+    CurveBooleanSubtract,
+    /// Boolean intersect of planar closed curves.
+    CurveBooleanIntersect,
+    /// Shatter curves at every discontinuity.
+    CurveShatter,
+    /// Find points where continuity drops below level.
+    CurveDiscontinuity { level: u32 },
+    /// Perpendicular frame at parameter (Frenet frame).
+    CurveFrame,
+    /// Normal vector at parameter (in plane perpendicular to tangent).
+    CurveNormal,
+    /// Project curve onto plane (drop normal component).
+    ProjectCurveToPlane,
+    /// Project curve onto surface along direction; result is a PCurve.
+    ProjectCurveToSurface { direction: Option<[f64; 3]> },
+    /// For closed curves, change the start point.
+    CurveSeam,
+
+    // ───── Extended Surface Creation Nodes ─────
+    /// Cylinder surface (lateral only).
+    CylinderSurface { radius: f64, height: f64 },
+    /// Cone surface (lateral).
+    ConeSurface { radius: f64, height: f64 },
+    /// Sphere surface.
+    SphereSurface { radius: f64 },
+    /// Torus surface.
+    TorusSurface { major: f64, minor: f64 },
+    /// Offset surface along normals.
+    OffsetSurface { distance: f64, both_sides: bool },
+
+    // ───── Extended Intersect Nodes ─────
+    /// Intersection of two solids → curves + points.
+    BrepBrepIntersect,
+    /// Mesh-mesh intersection → polylines.
+    MeshMeshIntersect,
+    /// Closest points between two lines.
+    LineLineClosestPoint,
+    /// Point-in-solid test.
+    SolidInclusion,
+    /// Collision check between two solids.
+    CollisionCheck,
+    /// Trim solid with curve-defined knives.
+    BooleanTrim,
+    /// Mesh boolean union.
+    MeshBooleanUnion,
+    /// Mesh boolean subtract.
+    MeshBooleanSubtract,
+    /// Mesh boolean intersect.
+    MeshBooleanIntersect,
+
+    // ───── Extended Analysis Nodes ─────
+    /// Moments of inertia (6 components).
+    MomentsOfInertia,
+    /// Curve curvature comb data (samples).
+    CurveCurvatureAnalysis { samples: u32 },
+    /// Surface curvature heatmap data.
+    SurfaceCurvatureAnalysis { u_samples: u32, v_samples: u32 },
+    /// Point-in-curve (closed) test.
+    PointInCurve,
+    /// Closest point on surface (with distance output).
+    ClosestPointOnSurface,
+    /// Closest point on curve (with distance output).
+    ClosestPointOnCurve,
+    /// Detect self-intersections.
+    SelfIntersect,
+    /// Test whether curve/point set is planar.
+    Planar,
+    /// Test whether curve/surface is closed.
+    Closed,
+
+    // ───── Extended Params Nodes ─────
+    /// Author a 4x4 transform directly.
+    TransformInput { translation: [f64; 3], rotation_deg: [f64; 3], scale: [f64; 3] },
+    /// RGBA color swatch.
+    ColorInput { r: f32, g: f32, b: f32, a: f32 },
+    /// Load a CAD file (STEP/IGES) as a parameter.
+    FileInput { path: String },
+    /// Data-tree path for PathMapper, TreeBranch.
+    PathInput { branch: u32, indices: Vec<i32> },
 }
 
 impl NodeType {
@@ -828,6 +912,48 @@ impl NodeType {
             NodeType::ApplyTransform => "Apply Transform",
             NodeType::ArrayPolar { .. } => "Array Polar",
             NodeType::Offset { .. } => "Offset",
+            // Extended Curve
+            NodeType::CurveBooleanUnion => "Curve Boolean Union",
+            NodeType::CurveBooleanSubtract => "Curve Boolean Subtract",
+            NodeType::CurveBooleanIntersect => "Curve Boolean Intersect",
+            NodeType::CurveShatter => "Curve Shatter",
+            NodeType::CurveDiscontinuity { .. } => "Curve Discontinuity",
+            NodeType::CurveFrame => "Curve Frame",
+            NodeType::CurveNormal => "Curve Normal",
+            NodeType::ProjectCurveToPlane => "Project Curve to Plane",
+            NodeType::ProjectCurveToSurface { .. } => "Project Curve to Surface",
+            NodeType::CurveSeam => "Curve Seam",
+            // Extended Surface
+            NodeType::CylinderSurface { .. } => "Cylinder Surface",
+            NodeType::ConeSurface { .. } => "Cone Surface",
+            NodeType::SphereSurface { .. } => "Sphere Surface",
+            NodeType::TorusSurface { .. } => "Torus Surface",
+            NodeType::OffsetSurface { .. } => "Offset Surface",
+            // Extended Intersect
+            NodeType::BrepBrepIntersect => "Brep | Brep Intersect",
+            NodeType::MeshMeshIntersect => "Mesh | Mesh Intersect",
+            NodeType::LineLineClosestPoint => "Line-Line Closest Point",
+            NodeType::SolidInclusion => "Solid Inclusion",
+            NodeType::CollisionCheck => "Collision Check",
+            NodeType::BooleanTrim => "Boolean Trim",
+            NodeType::MeshBooleanUnion => "Mesh Boolean Union",
+            NodeType::MeshBooleanSubtract => "Mesh Boolean Subtract",
+            NodeType::MeshBooleanIntersect => "Mesh Boolean Intersect",
+            // Extended Analysis
+            NodeType::MomentsOfInertia => "Moments of Inertia",
+            NodeType::CurveCurvatureAnalysis { .. } => "Curve Curvature Analysis",
+            NodeType::SurfaceCurvatureAnalysis { .. } => "Surface Curvature Analysis",
+            NodeType::PointInCurve => "Point in Curve",
+            NodeType::ClosestPointOnSurface => "Closest Point on Surface",
+            NodeType::ClosestPointOnCurve => "Closest Point on Curve",
+            NodeType::SelfIntersect => "Self Intersect",
+            NodeType::Planar => "Planar",
+            NodeType::Closed => "Closed",
+            // Extended Params
+            NodeType::TransformInput { .. } => "Transform Input",
+            NodeType::ColorInput { .. } => "Color Input",
+            NodeType::FileInput { .. } => "File Input",
+            NodeType::PathInput { .. } => "Path Input",
         }
     }
 
@@ -914,6 +1040,30 @@ impl NodeType {
             NodeType::Helix { .. } | NodeType::Hyperbola { .. } | NodeType::Parabola { .. } => "Curve",
             NodeType::Shear { .. } | NodeType::Taper { .. } | NodeType::ApplyTransform |
             NodeType::ArrayPolar { .. } | NodeType::Offset { .. } => "Transform",
+            // Extended Curve
+            NodeType::CurveBooleanUnion | NodeType::CurveBooleanSubtract |
+            NodeType::CurveBooleanIntersect | NodeType::CurveShatter |
+            NodeType::CurveDiscontinuity { .. } | NodeType::CurveFrame |
+            NodeType::CurveNormal | NodeType::ProjectCurveToPlane |
+            NodeType::ProjectCurveToSurface { .. } | NodeType::CurveSeam => "Curve",
+            // Extended Surface
+            NodeType::CylinderSurface { .. } | NodeType::ConeSurface { .. } |
+            NodeType::SphereSurface { .. } | NodeType::TorusSurface { .. } |
+            NodeType::OffsetSurface { .. } => "Surface",
+            // Extended Intersect
+            NodeType::BrepBrepIntersect | NodeType::MeshMeshIntersect |
+            NodeType::LineLineClosestPoint | NodeType::SolidInclusion |
+            NodeType::CollisionCheck | NodeType::BooleanTrim |
+            NodeType::MeshBooleanUnion | NodeType::MeshBooleanSubtract |
+            NodeType::MeshBooleanIntersect => "Intersect",
+            // Extended Analysis
+            NodeType::MomentsOfInertia | NodeType::CurveCurvatureAnalysis { .. } |
+            NodeType::SurfaceCurvatureAnalysis { .. } | NodeType::PointInCurve |
+            NodeType::ClosestPointOnSurface | NodeType::ClosestPointOnCurve |
+            NodeType::SelfIntersect | NodeType::Planar | NodeType::Closed => "Analysis",
+            // Extended Params
+            NodeType::TransformInput { .. } | NodeType::ColorInput { .. } |
+            NodeType::FileInput { .. } | NodeType::PathInput { .. } => "Params",
         }
     }
 
@@ -1493,6 +1643,81 @@ impl NodeType {
                 PortDesc { name: "G", port_type: PortType::Geometry },
                 PortDesc { name: "N", port_type: PortType::Vector },
             ],
+            // Extended Curve inputs
+            NodeType::CurveBooleanUnion | NodeType::CurveBooleanSubtract |
+            NodeType::CurveBooleanIntersect => vec![
+                PortDesc { name: "A", port_type: PortType::List },
+                PortDesc { name: "B", port_type: PortType::List },
+            ],
+            NodeType::CurveShatter | NodeType::CurveDiscontinuity { .. } |
+            NodeType::ProjectCurveToPlane | NodeType::CurveSeam => vec![
+                PortDesc { name: "C", port_type: PortType::Curve },
+            ],
+            NodeType::CurveFrame | NodeType::CurveNormal => vec![
+                PortDesc { name: "C", port_type: PortType::Curve },
+                PortDesc { name: "T", port_type: PortType::Number },
+            ],
+            NodeType::ProjectCurveToSurface { .. } => vec![
+                PortDesc { name: "C", port_type: PortType::Curve },
+                PortDesc { name: "S", port_type: PortType::Surface },
+            ],
+            // Extended Surface inputs
+            NodeType::CylinderSurface { .. } | NodeType::ConeSurface { .. } |
+            NodeType::TorusSurface { .. } => vec![
+                PortDesc { name: "P", port_type: PortType::PlaneRef },
+            ],
+            NodeType::SphereSurface { .. } => vec![
+                PortDesc { name: "C", port_type: PortType::Point },
+            ],
+            NodeType::OffsetSurface { .. } => vec![
+                PortDesc { name: "S", port_type: PortType::Surface },
+            ],
+            // Extended Intersect inputs
+            NodeType::BrepBrepIntersect | NodeType::MeshMeshIntersect |
+            NodeType::LineLineClosestPoint | NodeType::CollisionCheck => vec![
+                PortDesc { name: "A", port_type: PortType::Any },
+                PortDesc { name: "B", port_type: PortType::Any },
+            ],
+            NodeType::SolidInclusion | NodeType::PointInCurve => vec![
+                PortDesc { name: "G", port_type: PortType::Any },
+                PortDesc { name: "P", port_type: PortType::Point },
+            ],
+            NodeType::BooleanTrim => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+                PortDesc { name: "C", port_type: PortType::List },
+            ],
+            NodeType::MeshBooleanUnion | NodeType::MeshBooleanSubtract |
+            NodeType::MeshBooleanIntersect => vec![
+                PortDesc { name: "A", port_type: PortType::Mesh },
+                PortDesc { name: "B", port_type: PortType::Mesh },
+            ],
+            // Extended Analysis inputs
+            NodeType::MomentsOfInertia => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+            ],
+            NodeType::CurveCurvatureAnalysis { .. } => vec![
+                PortDesc { name: "C", port_type: PortType::Curve },
+            ],
+            NodeType::SurfaceCurvatureAnalysis { .. } => vec![
+                PortDesc { name: "S", port_type: PortType::Surface },
+            ],
+            NodeType::ClosestPointOnSurface => vec![
+                PortDesc { name: "S", port_type: PortType::Surface },
+                PortDesc { name: "P", port_type: PortType::Point },
+            ],
+            NodeType::ClosestPointOnCurve => vec![
+                PortDesc { name: "C", port_type: PortType::Curve },
+                PortDesc { name: "P", port_type: PortType::Point },
+            ],
+            NodeType::SelfIntersect => vec![
+                PortDesc { name: "C", port_type: PortType::Any },
+            ],
+            NodeType::Planar | NodeType::Closed => vec![
+                PortDesc { name: "C", port_type: PortType::Any },
+            ],
+            // Extended Params inputs (none — these are pure parameter nodes)
+            NodeType::TransformInput { .. } | NodeType::ColorInput { .. } |
+            NodeType::FileInput { .. } | NodeType::PathInput { .. } => vec![],
         }
     }
 
@@ -1732,6 +1957,87 @@ impl NodeType {
             NodeType::Shear { .. } | NodeType::Taper { .. } | NodeType::ApplyTransform |
             NodeType::ArrayPolar { .. } | NodeType::Offset { .. } => vec![
                 PortDesc { name: "G", port_type: PortType::Geometry },
+            ],
+            // Extended Curve outputs
+            NodeType::CurveBooleanUnion | NodeType::CurveBooleanSubtract |
+            NodeType::CurveBooleanIntersect | NodeType::CurveShatter |
+            NodeType::CurveDiscontinuity { .. } | NodeType::ProjectCurveToPlane |
+            NodeType::ProjectCurveToSurface { .. } | NodeType::CurveSeam => vec![
+                PortDesc { name: "R", port_type: PortType::Curve },
+            ],
+            NodeType::CurveFrame => vec![
+                PortDesc { name: "F", port_type: PortType::PlaneRef },
+            ],
+            NodeType::CurveNormal => vec![
+                PortDesc { name: "N", port_type: PortType::Vector },
+            ],
+            // Extended Surface outputs
+            NodeType::CylinderSurface { .. } | NodeType::ConeSurface { .. } |
+            NodeType::SphereSurface { .. } | NodeType::TorusSurface { .. } |
+            NodeType::OffsetSurface { .. } => vec![
+                PortDesc { name: "S", port_type: PortType::Surface },
+            ],
+            // Extended Intersect outputs
+            NodeType::BrepBrepIntersect => vec![
+                PortDesc { name: "C", port_type: PortType::List },
+                PortDesc { name: "P", port_type: PortType::List },
+            ],
+            NodeType::MeshMeshIntersect => vec![
+                PortDesc { name: "L", port_type: PortType::List },
+            ],
+            NodeType::LineLineClosestPoint => vec![
+                PortDesc { name: "PA", port_type: PortType::Point },
+                PortDesc { name: "PB", port_type: PortType::Point },
+                PortDesc { name: "D", port_type: PortType::Number },
+            ],
+            NodeType::SolidInclusion | NodeType::PointInCurve | NodeType::CollisionCheck |
+            NodeType::Planar | NodeType::Closed | NodeType::SelfIntersect => vec![
+                PortDesc { name: "B", port_type: PortType::Boolean },
+            ],
+            NodeType::BooleanTrim => vec![
+                PortDesc { name: "R", port_type: PortType::Geometry },
+            ],
+            NodeType::MeshBooleanUnion | NodeType::MeshBooleanSubtract |
+            NodeType::MeshBooleanIntersect => vec![
+                PortDesc { name: "M", port_type: PortType::Mesh },
+            ],
+            // Extended Analysis outputs
+            NodeType::MomentsOfInertia => vec![
+                PortDesc { name: "Ixx", port_type: PortType::Number },
+                PortDesc { name: "Iyy", port_type: PortType::Number },
+                PortDesc { name: "Izz", port_type: PortType::Number },
+                PortDesc { name: "Ixy", port_type: PortType::Number },
+                PortDesc { name: "Ixz", port_type: PortType::Number },
+                PortDesc { name: "Iyz", port_type: PortType::Number },
+            ],
+            NodeType::CurveCurvatureAnalysis { .. } => vec![
+                PortDesc { name: "T", port_type: PortType::List },
+                PortDesc { name: "K", port_type: PortType::List },
+                PortDesc { name: "R", port_type: PortType::List },
+            ],
+            NodeType::SurfaceCurvatureAnalysis { .. } => vec![
+                PortDesc { name: "K1", port_type: PortType::List },
+                PortDesc { name: "K2", port_type: PortType::List },
+                PortDesc { name: "G", port_type: PortType::List },
+                PortDesc { name: "M", port_type: PortType::List },
+            ],
+            NodeType::ClosestPointOnSurface | NodeType::ClosestPointOnCurve => vec![
+                PortDesc { name: "Q", port_type: PortType::Point },
+                PortDesc { name: "T", port_type: PortType::Number },
+                PortDesc { name: "D", port_type: PortType::Number },
+            ],
+            // Extended Params outputs
+            NodeType::TransformInput { .. } => vec![
+                PortDesc { name: "T", port_type: PortType::Transform },
+            ],
+            NodeType::ColorInput { .. } => vec![
+                PortDesc { name: "C", port_type: PortType::Color },
+            ],
+            NodeType::FileInput { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+            ],
+            NodeType::PathInput { .. } => vec![
+                PortDesc { name: "P", port_type: PortType::Any },
             ],
         }
     }
