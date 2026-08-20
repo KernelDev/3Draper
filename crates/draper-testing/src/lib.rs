@@ -21,6 +21,7 @@ pub mod area;
 pub mod volume;
 pub mod validity;
 pub mod normals;
+pub mod golden;
 
 pub use primitives::*;
 pub use combinations::*;
@@ -35,3 +36,4 @@ pub use area::*;
 pub use volume::*;
 pub use validity::*;
 pub use normals::*;
+pub use golden::*;
