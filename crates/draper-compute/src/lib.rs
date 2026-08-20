@@ -265,6 +265,9 @@ impl NurbsComputePipeline {
     }
 
     /// Evaluate a NURBS surface on the GPU for N UV parameter pairs.
+    ///
+    /// Creates storage buffers, dispatches the compute shader, and reads back
+    /// the results. Falls back to None if GPU dispatch fails.
     pub fn evaluate_batch(
         &self,
         surface: &NurbsSurfaceSOA,
@@ -281,12 +284,158 @@ impl NurbsComputePipeline {
             count, surface.n_u, surface.n_v, surface.u_degree, surface.v_degree
         );
 
-        // Full implementation: create storage buffers, dispatch, readback
-        // This requires buffer creation utilities that are available in
-        // wgpu::util — which needs the wgpu "util" feature.
-        // For now, this is the API skeleton. The CPU fallback
-        // (NurbsSurfaceSOA::evaluate_batch) provides identical results.
-        None
+        let device = &self.device;
+        let queue = &self.queue;
+
+        // ── Create input storage buffers ──
+        let cp_x_bytes = bytemuck::cast_slice(&surface.cp_x);
+        let cp_y_bytes = bytemuck::cast_slice(&surface.cp_y);
+        let cp_z_bytes = bytemuck::cast_slice(&surface.cp_z);
+        let weights_bytes = bytemuck::cast_slice(&surface.weights);
+        let u_knots_bytes = bytemuck::cast_slice(&surface.u_knots);
+        let v_knots_bytes = bytemuck::cast_slice(&surface.v_knots);
+        let u_params_bytes = bytemuck::cast_slice(&u_params[..count]);
+        let v_params_bytes = bytemuck::cast_slice(&v_params[..count]);
+
+        let out_size = (count * std::mem::size_of::<f32>()) as wgpu::BufferAddress;
+
+        let create_storage = |label: &str, _data: &[u8], read_only: bool| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: out_size,
+                usage: if read_only {
+                    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST
+                } else {
+                    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC
+                },
+                mapped_at_creation: false,
+            })
+        };
+
+        let create_staging = |label: &str| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: out_size,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+
+        let create_input = |label: &str, data: &[u8]| {
+            let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: data.len() as wgpu::BufferAddress,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            queue.write_buffer(&buf, 0, data);
+            buf
+        };
+
+        let buf_cp_x = create_input("cp_x", cp_x_bytes);
+        let buf_cp_y = create_input("cp_y", cp_y_bytes);
+        let buf_cp_z = create_input("cp_z", cp_z_bytes);
+        let buf_weights = create_input("weights", weights_bytes);
+        let buf_u_knots = create_input("u_knots", u_knots_bytes);
+        let buf_v_knots = create_input("v_knots", v_knots_bytes);
+        let buf_u_params = create_input("u_params", u_params_bytes);
+        let buf_v_params = create_input("v_params", v_params_bytes);
+
+        // ── Create output storage buffers (STORAGE | COPY_SRC) ──
+        let buf_out_x = create_storage("out_x", &[], false);
+        let buf_out_y = create_storage("out_y", &[], false);
+        let buf_out_z = create_storage("out_z", &[], false);
+
+        // Staging buffers for CPU readback (MAP_READ | COPY_DST)
+        let staging_x = create_staging("staging_x");
+        let staging_y = create_staging("staging_y");
+        let staging_z = create_staging("staging_z");
+
+        // ── Create uniform buffer ──
+        let params = NurbsEvalParams {
+            u_degree: surface.u_degree as u32,
+            v_degree: surface.v_degree as u32,
+            n_u: surface.n_u as u32,
+            n_v: surface.n_v as u32,
+            count: count as u32,
+            u_knot_count: surface.u_knots.len() as u32,
+            v_knot_count: surface.v_knots.len() as u32,
+            _pad: 0,
+        };
+        let params_bytes = bytemuck::bytes_of(&params);
+        let buf_params = create_input("params", params_bytes);
+
+        // ── Create bind group ──
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("NURBS eval bind group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: buf_cp_x.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: buf_cp_y.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: buf_cp_z.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: buf_weights.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: buf_u_knots.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: buf_v_knots.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: buf_u_params.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 7, resource: buf_v_params.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 8, resource: buf_out_x.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 9, resource: buf_out_y.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 10, resource: buf_out_z.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 11, resource: buf_params.as_entire_binding() },
+            ],
+        });
+
+        // ── Dispatch compute ──
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("NURBS eval encoder"),
+        });
+
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("NURBS eval pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            let workgroups = (count as u32 + 63) / 64; // Round up to workgroup_size=64
+            pass.dispatch_workgroups(workgroups, 1, 1);
+        }
+
+        // Copy output buffers to staging buffers for CPU readback
+        encoder.copy_buffer_to_buffer(&buf_out_x, 0, &staging_x, 0, out_size);
+        encoder.copy_buffer_to_buffer(&buf_out_y, 0, &staging_y, 0, out_size);
+        encoder.copy_buffer_to_buffer(&buf_out_z, 0, &staging_z, 0, out_size);
+
+        queue.submit(std::iter::once(encoder.finish()));
+
+        // ── Read back results from staging buffers ──
+        let slice_x = staging_x.slice(..);
+        slice_x.map_async(wgpu::MapMode::Read, |_| {});
+
+        let slice_y = staging_y.slice(..);
+        slice_y.map_async(wgpu::MapMode::Read, |_| {});
+
+        let slice_z = staging_z.slice(..);
+        slice_z.map_async(wgpu::MapMode::Read, |_| {});
+
+        // Poll device to complete GPU work
+        let _ = device.poll(wgpu::Maintain::Wait);
+
+        let out_x: Vec<f32> = {
+            let data = slice_x.get_mapped_range();
+            bytemuck::cast_slice(&data).to_vec()
+        };
+        let out_y: Vec<f32> = {
+            let data = slice_y.get_mapped_range();
+            bytemuck::cast_slice(&data).to_vec()
+        };
+        let out_z: Vec<f32> = {
+            let data = slice_z.get_mapped_range();
+            bytemuck::cast_slice(&data).to_vec()
+        };
+
+        log::info!("GPU NURBS eval complete: {} points evaluated", count);
+        Some((out_x, out_y, out_z))
     }
 }
 
