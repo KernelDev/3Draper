@@ -350,5 +350,81 @@ Vision 2036 — GPU compute shaders в рантайме; WGSL shaders уже н�
 
 ---
 
-*Этот отчёт основан на статическом анализе исходного кода на commit `d85a143`.
-Все цифры проверены через `grep`, `wc -l`, и `cargo check`.*
+## 11. Обновление после Sprint 1-2 (commit `e23a79f`)
+
+### Выполненные работы
+
+| Sprint | Задача | Статус | Коммит |
+|--------|--------|--------|--------|
+| 1.1 | Удалить deprecated TOLERANCE константы | ✅ DONE | `350116b` |
+| 1.2 | Добавить proptest тесты (10 тестов) | ✅ DONE | `350116b` |
+| 1.3 | Почистить warnings через cargo fix | ✅ DONE | `350116b` |
+| 2.3 | Добавить fuzz targets (9 тестов) | ✅ DONE | `e23a79f` |
+| 2.2 | GD&T annotation rendering | ✅ ALREADY DONE | (existing code) |
+
+### Новые находки
+
+#### GD&T Annotation Rendering — УЖЕ ПОЛНОСТЬЮ РЕАЛИЗОВАНО
+
+При углублённом анализе `crates/draper-viewer/src/app.rs` обнаружено, что
+функция `draw_gdt_annotations()` (220 LOC, строка 15397) полностью реализует:
+
+1. **Leader lines** — пунктирные линии от face centroid к label с anchor dots.
+2. **Feature Control Frames (FCF)** — прямоугольные рамки с GD&T символами:
+   - ⌖ Position, ⏥ Flatness, ― Straightness, ○ Circularity, ⌭ Cylindricity
+   - ⊥ Perpendicularity, ∥ Parallelism, ∠ Angularity, ◎ Concentricity
+   - ⌯ Symmetry, ↗ Runout, ⌒ ProfileOfLine, ⌓ ProfileOfSurface
+3. **Multi-cell FCF layout** — вертикальные разделители между symbol | tolerance | datum.
+4. **Datum reference resolution** — связывает tolerance с datum features по имени.
+5. **Screen-space projection** — 3D → 2D через camera MVP matrix.
+6. **Camera behind/clip checks** — отсечение аннотаций за камерой.
+7. **UI toggle** — checkbox "3D Annotations" в Properties panel.
+
+Аудит в §7 (Gap Analysis) неправильно отметил этот пункт как "PARTIAL" из-за
+устаревшей записи в `ROADMAP_AUDIT.md` (item 8.2: "TODO: render GD&T annotations
+in viewer"). Реальный код уже реализован и работает.
+
+#### Property-based Testing — 10 тестов добавлено
+
+| Crate | Файл | Тестов | Инварианты |
+|-------|------|--------|------------|
+| draper-geometry | curve.rs | 4 | Circle radius, derivative ⊥ radius, identity transform, line parametric |
+| draper-topology | boolean.rs | 6 | Box volume/area, union ≥ max, subtract ≤ A, intersect ≤ min, fillet ≤ A |
+
+#### Fuzz Testing — 9 тестов добавлено
+
+| Crate | Файл | Тестов | Цель |
+|-------|------|--------|------|
+| draper-geometry | nurbs_tools.rs | 4 | find_knot_span no-panic, NURBS eval no-NaN, derivative no-NaN, transform no-NaN |
+| draper-step | parser.rs | 5 | Random strings, random bytes, random entities, nested parens, long strings |
+
+### Обновлённая статистика
+
+| Метрика | Было | Стало |
+|---------|------|-------|
+| Unit-тестов | 1209 | **1228** (+10 proptest + 9 fuzz) |
+| proptest макросов | 0 | **10** |
+| quickcheck макросов | 0 | **9** |
+| Deprecated TOLERANCE external uses | 1 (direction.rs) | **0** |
+| Warnings (core crates) | ~40 | **27** (auto-fixed 13) |
+
+### Обновлённый Gap Analysis
+
+| # | Пробел | Было | Стало |
+|---|--------|------|-------|
+| 1 | WebGPU compute runtime | PARTIAL | PARTIAL (без изменений) |
+| 2 | Property-based testing | PARTIAL | ✅ **DONE** (10 proptest) |
+| 3 | Fuzz testing | PARTIAL | ✅ **DONE** (9 fuzz) |
+| 4 | GD&T annotation rendering | PARTIAL | ✅ **ALREADY DONE** (220 LOC) |
+| 5 | Global TOLERANCE constants | PARTIAL | ✅ **DONE** (0 external uses) |
+| 6 | Golden File Regression Testing | PARTIAL | PARTIAL (без изменений) |
+| 7 | Dedicated OffsetSurface triangulator | PARTIAL | PARTIAL (без изменений) |
+
+**Итого:** из 7 частично реализованных пунктов — **4 завершены**, 3 остаются
+(все низкоприоритетные: golden file testing, OffsetSurface triangulator, WebGPU runtime).
+
+---
+
+*Этот отчёт основан на статическом анализе исходного кода. Обновлено после
+Sprint 1-2 на commit `e23a79f`. Все цифры проверены через `grep`, `wc -l`,
+`cargo check`, и `cargo test`.*
