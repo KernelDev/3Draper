@@ -2706,7 +2706,7 @@ impl Surface {
                 // Project onto base surface
                 o.base.project_point(point)
             }
-            Surface::Ruled(r) => {
+            Surface::Ruled(_r) => {
                 // Use curve1's param range start as approximation
                 // (full implementation would use closest_point_on_curve)
                 (0.0, 0.0)

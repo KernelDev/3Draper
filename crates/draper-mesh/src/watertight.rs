@@ -912,8 +912,8 @@ pub fn fix_inconsistent_winding(mesh: &mut TriangleMesh) -> usize {
                     continue;
                 }
 
-                let (ref_a, ref_b) = ref_dir.unwrap();
-                let (neigh_a, neigh_b) = neigh_dir.unwrap();
+                let (ref_a, _ref_b) = ref_dir.unwrap();
+                let (neigh_a, _neigh_b) = neigh_dir.unwrap();
 
                 // Consistent winding: ref goes A→B, neighbor goes B→A
                 // Inconsistent winding: both go A→B (or both B→A)
@@ -1910,7 +1910,7 @@ pub fn repair_t_junctions(mesh: &mut TriangleMesh, tolerance: f64) -> usize {
     let explosion_threshold = (initial_tri_count.saturating_mul(3)).max(50000);
 
     for _iter in 0..max_iterations {
-        let n_verts = mesh.vertices.len();
+        let _n_verts = mesh.vertices.len();
 
         // Build edge → triangle list map.
         let mut edge_tris: HashMap<(u32, u32), Vec<(usize, u32)>> = HashMap::new();
@@ -2264,7 +2264,7 @@ fn incremental_insert_t_junctions(
 
     // For each edge with T-junctions, insert them one at a time.
     // T-junctions are sorted by t (ascending) along the edge direction.
-    for &(mut ea, mut eb, ref tjs) in edge_splits {
+    for &(mut ea, eb, ref tjs) in edge_splits {
         for &(_, vi) in tjs {
             // Find the triangle that has edge (ea, eb).
             // After each insertion, the edge is split: (ea, eb) becomes
@@ -2533,7 +2533,7 @@ pub fn fill_boundary_gaps(mesh: &mut TriangleMesh, max_loop_size: usize) -> usiz
             let v1 = loop_verts[1];
             let edge_key = (v0.min(v1), v0.max(v1));
 
-            let (tri_idx, opp) = match boundary_tris.get(&edge_key) {
+            let (tri_idx, _opp) = match boundary_tris.get(&edge_key) {
                 Some(&info) => info,
                 None => continue,
             };

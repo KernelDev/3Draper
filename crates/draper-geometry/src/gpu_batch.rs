@@ -16,7 +16,7 @@
 //! Future: the same SOA layout can be directly uploaded to GPU storage
 //! buffers and evaluated in a WGSL compute shader with minimal adaptation.
 
-use crate::{Point3d, NurbsSurface};
+use crate::NurbsSurface;
 
 /// SOA (Structure of Arrays) representation of a NURBS surface.
 ///

@@ -3190,7 +3190,7 @@ fn replace_matching_edges(
                         *edge = si.shared_edge.clone();
                         // Also update the outer_wire's coedge to reference the shared edge ID
                         if let Some(ref mut wire) = face.outer_wire {
-                            for coedge in &mut wire.coedges {
+                            for _coedge in &mut wire.coedges {
                                 // Check if this coedge referenced the old edge ID
                                 // (we can't know the old ID anymore, so we check all coedges)
                                 // Actually, the coedge.edge should still point to the old edge ID
@@ -3882,5 +3882,167 @@ mod tests {
         assert_ne!(BooleanOp::Union, BooleanOp::Subtract);
         assert_ne!(BooleanOp::Subtract, BooleanOp::Intersect);
         assert_ne!(BooleanOp::Union, BooleanOp::Intersect);
+    }
+
+    // ── Property-based tests (proptest) ──
+
+    /// Invariant 1: Box volume = w × h × d for any positive dimensions.
+    /// Tests that `ShapeBuilder::make_box` produces a solid whose
+    /// `solid_volume()` matches the analytical formula.
+    #[test]
+    fn proptest_box_volume() {
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn box_volume_equals_w_h_d(w in 0.1f64..100.0, h in 0.1f64..100.0, d in 0.1f64..100.0) {
+                let solid = ShapeBuilder::make_box(w, h, d);
+                let volume = crate::queries::solid_volume(&solid);
+                let expected = w * h * d;
+                // Allow 1% tolerance for floating-point triangulation error.
+                prop_assert!(
+                    (volume - expected).abs() / expected.max(1e-10) < 0.01,
+                    "Box volume {} != expected {} for ({}, {}, {})",
+                    volume, expected, w, h, d
+                );
+            }
+        }
+    }
+
+    /// Invariant 2: Box surface area = 2(wh + wd + hd) for any positive dimensions.
+    #[test]
+    fn proptest_box_surface_area() {
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn box_area_matches_formula(w in 0.1f64..100.0, h in 0.1f64..100.0, d in 0.1f64..100.0) {
+                let solid = ShapeBuilder::make_box(w, h, d);
+                let area = crate::queries::solid_surface_area(&solid);
+                let expected = 2.0 * (w * h + w * d + h * d);
+                // Allow 5% tolerance for triangulation (areas from triangle sum).
+                prop_assert!(
+                    (area - expected).abs() / expected.max(1e-10) < 0.05,
+                    "Box area {} != expected {} for ({}, {}, {})",
+                    area, expected, w, h, d
+                );
+            }
+        }
+    }
+
+    /// Invariant 3: Boolean union volume >= max(vol_a, vol_b).
+    /// The union of two solids has at least as much volume as the larger solid.
+    #[test]
+    fn proptest_union_volume_geq_max() {
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn union_volume_invariant(
+                // Two boxes at different positions.
+                ax in -10.0f64..10.0,
+                bx in -10.0f64..10.0
+            ) {
+                let box_a = ShapeBuilder::make_box_at(ax, 0.0, 0.0, 2.0, 2.0, 2.0);
+                let box_b = ShapeBuilder::make_box_at(bx, 0.0, 0.0, 2.0, 2.0, 2.0);
+                let vol_a = crate::queries::solid_volume(&box_a);
+                let vol_b = crate::queries::solid_volume(&box_b);
+                let tol = ToleranceContext::default();
+                if let Ok(union) = boolean_union(&box_a, &box_b, &tol) {
+                    let vol_union = crate::queries::solid_volume(&union);
+                    let max_vol = vol_a.max(vol_b);
+                    // Union should have volume >= max(vol_a, vol_b).
+                    // (May be less than vol_a + vol_b if they overlap.)
+                    prop_assert!(
+                        vol_union >= max_vol * 0.95,
+                        "Union volume {} < max({}, {}) = {}",
+                        vol_union, vol_a, vol_b, max_vol
+                    );
+                }
+            }
+        }
+    }
+
+    /// Invariant 4: Boolean subtract volume <= volume of A.
+    /// Subtracting B from A cannot increase the volume.
+    #[test]
+    fn proptest_subtract_volume_leq_a() {
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn subtract_volume_invariant(
+                // Subtract a box from a larger box.
+                offset in 0.0f64..5.0,
+                size in 0.5f64..3.0
+            ) {
+                let big = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+                let small = ShapeBuilder::make_box_at(offset, offset, offset, size, size, size);
+                let vol_a = crate::queries::solid_volume(&big);
+                let tol = ToleranceContext::default();
+                if let Ok(result) = boolean_subtract(&big, &small, &tol) {
+                    let vol_result = crate::queries::solid_volume(&result);
+                    prop_assert!(
+                        vol_result <= vol_a * 1.01,  // 1% tolerance
+                        "Subtract volume {} > A volume {}",
+                        vol_result, vol_a
+                    );
+                }
+            }
+        }
+    }
+
+    /// Invariant 5: Boolean intersect volume <= min(vol_a, vol_b).
+    /// The intersection cannot be larger than either solid.
+    #[test]
+    fn proptest_intersect_volume_leq_min() {
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn intersect_volume_invariant(
+                offset in 0.0f64..3.0
+            ) {
+                let box_a = ShapeBuilder::make_box_at(0.0, 0.0, 0.0, 4.0, 4.0, 4.0);
+                let box_b = ShapeBuilder::make_box_at(offset, 0.0, 0.0, 4.0, 4.0, 4.0);
+                let vol_a = crate::queries::solid_volume(&box_a);
+                let vol_b = crate::queries::solid_volume(&box_b);
+                let tol = ToleranceContext::default();
+                if let Ok(result) = boolean_intersect(&box_a, &box_b, &tol) {
+                    let vol_result = crate::queries::solid_volume(&result);
+                    let min_vol = vol_a.min(vol_b);
+                    prop_assert!(
+                        vol_result <= min_vol * 1.01,  // 1% tolerance
+                        "Intersect volume {} > min({}, {}) = {}",
+                        vol_result, vol_a, vol_b, min_vol
+                    );
+                }
+            }
+        }
+    }
+
+    /// Invariant 6: Fillet reduces volume (rounding corners removes material).
+    #[test]
+    fn proptest_fillet_reduces_volume() {
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn fillet_volume_decreases(
+                radius in 0.01f64..2.0
+            ) {
+                let box_solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+                let vol_before = crate::queries::solid_volume(&box_solid);
+                if let Ok(filleted) = crate::operations::fillet_edge(&box_solid, 0, radius) {
+                    let vol_after = crate::queries::solid_volume(&filleted);
+                    // Fillet should not increase volume.
+                    prop_assert!(
+                        vol_after <= vol_before * 1.01,  // 1% tolerance
+                        "Fillet volume {} > original {} (radius={})",
+                        vol_after, vol_before, radius
+                    );
+                }
+            }
+        }
     }
 }

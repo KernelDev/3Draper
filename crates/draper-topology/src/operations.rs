@@ -13,7 +13,7 @@ use crate::builder::ShapeBuilder;
 use crate::boolean::boolean_subtract;
 use draper_geometry::{
     Point3d, Direction3d, Vec3d,
-    Curve3d, Line, Surface, Plane, NurbsCurve,
+    Curve3d, Line, Surface, Plane,
     Transform, ToleranceContext,
 };
 use std::f64::consts::PI;
@@ -1184,7 +1184,7 @@ fn point_segment_distance(p1: &Point3d, p2: &Point3d, p3: &Point3d, p4: &Point3d
         return r.length();
     }
     if a < 1e-15 {
-        let s = 0.0_f64;
+        let _s = 0.0_f64;
         let t = f.clamp(0.0, 1.0);
         let closest = Vec3d::new(p3.x + t * d2.x - p1.x, p3.y + t * d2.y - p1.y, p3.z + t * d2.z - p1.z);
         return closest.length();
@@ -1412,7 +1412,7 @@ pub fn loft_wires(wires: &[Vec<Point3d>]) -> Result<Solid, ModelingError> {
     }
 
     // Validate all wires have the same point count
-    for (i, wire) in wires.iter().enumerate() {
+    for (_i, wire) in wires.iter().enumerate() {
         if wire.len() != n_points {
             return Err(ModelingError::TooFewPoints(wire.len()));
         }
@@ -1462,7 +1462,7 @@ pub fn loft_wires(wires: &[Vec<Point3d>]) -> Result<Solid, ModelingError> {
 pub fn move_face_planar(solid: &Solid, face_index: usize, translation: Vec3d) -> Result<Solid, String> {
     let mut new_solid = solid.clone();
     let faces_len = new_solid.faces().len();
-    let mut faces_iter = new_solid.faces_mut();
+    let faces_iter = new_solid.faces_mut();
     let face = faces_iter.into_iter().nth(face_index)
         .ok_or_else(|| format!("Face index {} out of range (solid has {} faces)",
             face_index, faces_len))?;
@@ -1517,7 +1517,7 @@ pub fn replace_face_planar(
 ) -> Result<Solid, String> {
     let mut new_solid = solid.clone();
     let faces_len = new_solid.faces().len();
-    let mut faces_iter = new_solid.faces_mut();
+    let faces_iter = new_solid.faces_mut();
     let face = faces_iter.into_iter().nth(face_index)
         .ok_or_else(|| format!("Face index {} out of range (solid has {} faces)",
             face_index, faces_len))?;
@@ -1547,7 +1547,7 @@ pub fn split_face(
     }
     let mut new_solid = solid.clone();
     let faces_len = new_solid.faces().len();
-    let mut faces_iter = new_solid.faces_mut();
+    let faces_iter = new_solid.faces_mut();
     let face = faces_iter.into_iter().nth(face_index)
         .ok_or_else(|| format!("Face index {} out of range (solid has {} faces)",
             face_index, faces_len))?;

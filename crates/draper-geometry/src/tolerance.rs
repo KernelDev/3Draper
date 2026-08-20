@@ -6,15 +6,27 @@
 //! This ensures correct behavior across different model scales (micron to kilometer).
 
 /// Default geometric tolerance (1e-6 mm = 1 nanometer).
+/// Used internally to initialize `ToleranceContext` defaults.
+/// External code should use `ToleranceContext` instead.
+#[doc(hidden)]
 pub const DEFAULT_ABSOLUTE_TOLERANCE: f64 = 1e-6;
 
 /// Default angular tolerance in radians (approximately 0.001 degrees).
+/// Used internally to initialize `ToleranceContext` defaults.
+/// External code should use `ToleranceContext` instead.
+#[doc(hidden)]
 pub const DEFAULT_ANGULAR_TOLERANCE: f64 = 1e-5;
 
 /// Default parametric tolerance for curve/surface parameter comparisons.
+/// Used internally to initialize `ToleranceContext` defaults.
+/// External code should use `ToleranceContext` instead.
+#[doc(hidden)]
 pub const DEFAULT_PARAMETRIC_TOLERANCE: f64 = 1e-8;
 
 /// Default relative tolerance.
+/// Used internally to initialize `ToleranceContext` defaults.
+/// External code should use `ToleranceContext` instead.
+#[doc(hidden)]
 pub const DEFAULT_RELATIVE_TOLERANCE: f64 = 1e-8;
 
 /// Context-aware tolerance system for geometric computations.

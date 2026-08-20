@@ -4993,7 +4993,7 @@ fn try_strip_triangulation_ruled_nurbs(
     // This preserves ALL original points from `template_rail` and interpolates
     // `rail` to those same arc-length fractions.
     // Returns a Vec of (Point3d, Point2d, original_boundary_index_or_None).
-    let resample_to_positions = |rail: &[usize], template_rail: &[usize], bnd_pts: &[Point3d], bnd_uvs: &[Point2d]|
+    let _resample_to_positions = |rail: &[usize], template_rail: &[usize], bnd_pts: &[Point3d], bnd_uvs: &[Point2d]|
         -> Vec<(Point3d, Point2d, Option<usize>)>
     {
         if rail.is_empty() || template_rail.is_empty() {
@@ -5024,7 +5024,7 @@ fn try_strip_triangulation_ruled_nurbs(
 
         // For each template point, interpolate the rail to the same arc-length fraction
         let mut out: Vec<(Point3d, Point2d, Option<usize>)> = Vec::with_capacity(template_rail.len());
-        for (k, &tmpl_idx) in template_rail.iter().enumerate() {
+        for (k, &_tmpl_idx) in template_rail.iter().enumerate() {
             // Arc-length fraction for this template point
             let frac = if template_total > 1e-15 { template_cum[k] / template_total } else { k as f64 / template_rail.len().max(1) as f64 };
             let target_len = frac * rail_total;

@@ -3,7 +3,6 @@
 //! Geometric intersection algorithms.
 
 use crate::{Point3d, Vec3d, curve::*, surface::*, tolerance::ToleranceContext};
-use crate::error::GeometryError;
 
 /// Error type for B-spline fitting failures.
 #[derive(Clone, Debug)]
@@ -462,7 +461,7 @@ pub fn intersect_plane_cylinder(
         };
         let u_len = (u_axis.x * u_axis.x + u_axis.y * u_axis.y + u_axis.z * u_axis.z).sqrt();
         let u_unit = Vec3d::new(u_axis.x / u_len, u_axis.y / u_len, u_axis.z / u_len);
-        let v_axis = Vec3d::new(
+        let _v_axis = Vec3d::new(
             n.y * u_unit.z - n.z * u_unit.y,
             n.z * u_unit.x - n.x * u_unit.z,
             n.x * u_unit.y - n.y * u_unit.x,

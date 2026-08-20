@@ -1472,4 +1472,120 @@ mod tests {
         assert!((mag_arc - mag_trimmed).abs() < 1e-12,
             "derivative magnitudes should match: arc={} vs trimmed={}", mag_arc, mag_trimmed);
     }
+
+    // ── Property-based tests (proptest) ──
+
+    /// Invariant: Circle point_at(t) lies on the circle (distance from center = radius).
+    #[test]
+    fn proptest_circle_points_on_circle() {
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn circle_point_at_radius(
+                radius in 0.001f64..1000.0,
+                t in -10.0f64..10.0
+            ) {
+                let circle = Circle::new_xy(Point3d::new(0.0, 0.0, 0.0), radius);
+                let p = circle.point_at(t);
+                let dist = (p.x * p.x + p.y * p.y + p.z * p.z).sqrt();
+                prop_assert!(
+                    (dist - radius).abs() / radius.max(1e-10) < 0.001,
+                    "Circle point_at({}) distance {} != radius {}",
+                    t, dist, radius
+                );
+            }
+        }
+    }
+
+    /// Invariant: Circle derivative is perpendicular to the radius vector.
+    /// P'(t) · P(t) = 0 for circles (tangent ⊥ radius).
+    #[test]
+    fn proptest_circle_derivative_perpendicular() {
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn circle_derivative_dot_point_zero(
+                radius in 0.001f64..1000.0,
+                t in -10.0f64..10.0
+            ) {
+                let circle = Circle::new_xy(Point3d::new(0.0, 0.0, 0.0), radius);
+                let p = circle.point_at(t);
+                let d = circle.derivative_at(t);
+                let dot = p.x * d.x + p.y * d.y + p.z * d.z;
+                let scale = radius * radius; // Expected magnitude of dot ~ r²
+                prop_assert!(
+                    dot.abs() / scale.max(1e-10) < 0.01,
+                    "Circle derivative not ⊥ radius: dot={} (scale={})",
+                    dot, scale
+                );
+            }
+        }
+    }
+
+    /// Invariant: Transform identity preserves points.
+    /// Applying identity transform to a curve should return the same curve.
+    #[test]
+    fn proptest_transform_identity_preserves_curve() {
+        use proptest::prelude::*;
+        use crate::Transform;
+
+        proptest! {
+            #[test]
+            fn identity_transform_preserves_circle(
+                radius in 0.001f64..1000.0,
+                cx in -100.0f64..100.0,
+                cy in -100.0f64..100.0,
+                t in -10.0f64..10.0
+            ) {
+                let circle = Circle::new_xy(Point3d::new(cx, cy, 0.0), radius);
+                let curve = Curve3d::Circle(circle);
+                let identity = Transform::identity();
+                let transformed = curve.transform(&identity);
+                let p1 = curve.point_at(t);
+                let p2 = transformed.point_at(t);
+                prop_assert!(
+                    (p1.x - p2.x).abs() < 1e-10 && (p1.y - p2.y).abs() < 1e-10 && (p1.z - p2.z).abs() < 1e-10,
+                    "Identity transform changed point: ({},{},{}) -> ({},{},{})",
+                    p1.x, p1.y, p1.z, p2.x, p2.y, p2.z
+                );
+            }
+        }
+    }
+
+    /// Invariant: Line point_at(t) = origin + t * direction.
+    #[test]
+    fn proptest_line_parametric() {
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn line_point_at_formula(
+                ox in -100.0f64..100.0,
+                oy in -100.0f64..100.0,
+                oz in -100.0f64..100.0,
+                t in -100.0f64..100.0
+            ) {
+                let dir = Direction3d::new(1.0, 0.0, 0.0).unwrap();
+                let line = Line::new(Point3d::new(ox, oy, oz), dir);
+                let p = line.point_at(t);
+                prop_assert!(
+                    (p.x - (ox + t)).abs() < 1e-10,
+                    "Line x={} != expected {}",
+                    p.x, ox + t
+                );
+                prop_assert!(
+                    (p.y - oy).abs() < 1e-10,
+                    "Line y={} != expected {}",
+                    p.y, oy
+                );
+                prop_assert!(
+                    (p.z - oz).abs() < 1e-10,
+                    "Line z={} != expected {}",
+                    p.z, oz
+                );
+            }
+        }
+    }
 }

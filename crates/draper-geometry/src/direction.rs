@@ -2,8 +2,14 @@
 // Copyright (c) 2026 KernelDev
 //! Direction (unit vector) in 3D space.
 
-use crate::tolerance::DEFAULT_ABSOLUTE_TOLERANCE;
 use std::fmt;
+
+/// Threshold for detecting near-zero length vectors during direction construction.
+/// Directions are geometric primitives (always normalized) — this threshold is
+/// independent of model scale. A value of 1e-10 ensures that vectors shorter than
+/// ~1e-10 are rejected as degenerate, which is appropriate for double-precision
+/// floating-point normals and tangents.
+const ZERO_VECTOR_THRESHOLD: f64 = 1e-10;
 
 /// A unit direction vector in 3D space. Always normalized.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -26,7 +32,7 @@ impl Direction3d {
     /// Returns None if the vector has zero length.
     pub fn new(x: f64, y: f64, z: f64) -> Option<Self> {
         let len = (x * x + y * y + z * z).sqrt();
-        if len.abs() < DEFAULT_ABSOLUTE_TOLERANCE {
+        if len.abs() < ZERO_VECTOR_THRESHOLD {
             None
         } else {
             Some(Self { x: x / len, y: y / len, z: z / len })
@@ -47,7 +53,7 @@ impl Direction3d {
         let cz = self.x * other.y - self.y * other.x;
         // Result should be unit length since inputs are unit
         let len = (cx * cx + cy * cy + cz * cz).sqrt();
-        if len.abs() < DEFAULT_ABSOLUTE_TOLERANCE {
+        if len.abs() < ZERO_VECTOR_THRESHOLD {
             Direction3d::Z // Fallback
         } else {
             Direction3d { x: cx / len, y: cy / len, z: cz / len }
