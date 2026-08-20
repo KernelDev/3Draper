@@ -683,6 +683,13 @@ pub enum NodeType {
     FileInput { path: String },
     /// Data-tree path for PathMapper, TreeBranch.
     PathInput { branch: u32, indices: Vec<i32> },
+
+    // ───── Sub-graph Operations ─────
+    /// Apply a list of operations to every item in the input list.
+    /// Operations: negate/abs/sqrt/sin/cos/tan/log10/ln/exp/reciprocal/double/
+    /// halve/square/cube/radians/degrees/add:N/mul:N/pow:N/normalize/length/
+    /// scale:N/upper/lower/trim/len. Separated by `;`.
+    ListMap { operations: String },
 }
 
 impl NodeType {
@@ -954,6 +961,7 @@ impl NodeType {
             NodeType::ColorInput { .. } => "Color Input",
             NodeType::FileInput { .. } => "File Input",
             NodeType::PathInput { .. } => "Path Input",
+            NodeType::ListMap { .. } => "List Map",
         }
     }
 
@@ -1064,6 +1072,7 @@ impl NodeType {
             // Extended Params
             NodeType::TransformInput { .. } | NodeType::ColorInput { .. } |
             NodeType::FileInput { .. } | NodeType::PathInput { .. } => "Params",
+            NodeType::ListMap { .. } => "Tree",
         }
     }
 
@@ -1718,6 +1727,9 @@ impl NodeType {
             // Extended Params inputs (none — these are pure parameter nodes)
             NodeType::TransformInput { .. } | NodeType::ColorInput { .. } |
             NodeType::FileInput { .. } | NodeType::PathInput { .. } => vec![],
+            NodeType::ListMap { .. } => vec![
+                PortDesc { name: "L", port_type: PortType::List },
+            ],
         }
     }
 
@@ -2038,6 +2050,9 @@ impl NodeType {
             ],
             NodeType::PathInput { .. } => vec![
                 PortDesc { name: "P", port_type: PortType::Any },
+            ],
+            NodeType::ListMap { .. } => vec![
+                PortDesc { name: "R", port_type: PortType::List },
             ],
         }
     }

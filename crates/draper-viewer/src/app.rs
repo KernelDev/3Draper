@@ -22829,6 +22829,30 @@ fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<draper_to
                             changed = true;
                         }
 
+                        // ── Sub-graph Operations: ListMap ──
+                        NT::ListMap { operations } => {
+                            // Apply a sequence of operations to every item in the input list.
+                            // Operations are separated by `;`. Each operation is one of:
+                            //   negate, abs, sqrt, sin, cos, tan, log10, ln, exp, reciprocal,
+                            //   double, halve, square, cube, radians, degrees,
+                            //   add:N, mul:N, pow:N  (where N is a literal number).
+                            if let Some(VpData::List(items)) = inputs.get(0) {
+                                let ops: Vec<String> = operations.split(';')
+                                    .map(|s| s.trim().to_string())
+                                    .filter(|s| !s.is_empty())
+                                    .collect();
+                                let mapped: Vec<VpData> = items.iter().map(|item| {
+                                    let mut current = item.clone();
+                                    for op in &ops {
+                                        current = apply_list_map_op(&current, op);
+                                    }
+                                    current
+                                }).collect();
+                                results.insert(node.id, VpData::List(mapped));
+                                changed = true;
+                            }
+                        }
+
                         // ── Remaining stubs (no API yet) ──
                         _ => {}
                     }
@@ -22844,6 +22868,144 @@ fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<draper_to
         .and_then(|n| results.get(&n.id))
         .or_else(|| graph.nodes.iter().rev().find_map(|n| results.get(&n.id)))
         .and_then(|d| to_solid(d))
+}
+
+/// Helper: apply a single ListMap operation to a VpData item.
+///
+/// Supported operations (numeric):
+///   - `negate`, `abs`, `sqrt`, `sin`, `cos`, `tan`, `log10`, `ln`, `exp`, `reciprocal`
+///   - `double`, `halve`, `square`, `cube`, `radians`, `degrees`
+///   - `add:N`, `mul:N`, `pow:N` (where N is a literal number, e.g. `add:5.0`)
+///
+/// Supported operations (vector/point):
+///   - `negate` (negates each component)
+///   - `normalize`, `length` (returns Number for vector)
+///   - `scale:N` (multiplies each component by N)
+///   - `add:N` for vectors/points (adds N to each component)
+///
+/// For unsupported data types, returns the input unchanged.
+fn apply_list_map_op(item: &crate::ui::workspaces::VpData, op: &str) -> crate::ui::workspaces::VpData {
+    use crate::ui::workspaces::VpData;
+    // Parse the operation and optional argument.
+    let (op_name, arg_str) = if let Some(colon_pos) = op.find(':') {
+        (op[..colon_pos].trim(), Some(&op[colon_pos + 1..]))
+    } else {
+        (op.trim(), None)
+    };
+    let arg: Option<f64> = arg_str.and_then(|s| s.trim().parse::<f64>().ok());
+
+    match item {
+        VpData::Number(n) => {
+            let n = *n;
+            let result = match op_name {
+                "negate" => -n,
+                "abs" => n.abs(),
+                "sqrt" => if n >= 0.0 { n.sqrt() } else { n },
+                "sin" => n.sin(),
+                "cos" => n.cos(),
+                "tan" => n.tan(),
+                "log10" => n.log10(),
+                "ln" => n.ln(),
+                "exp" => n.exp(),
+                "reciprocal" => if n.abs() > 1e-10 { 1.0 / n } else { f64::INFINITY },
+                "double" => n * 2.0,
+                "halve" => n * 0.5,
+                "square" => n * n,
+                "cube" => n * n * n,
+                "radians" => n.to_radians(),
+                "degrees" => n.to_degrees(),
+                "add" => n + arg.unwrap_or(0.0),
+                "sub" => n - arg.unwrap_or(0.0),
+                "mul" => n * arg.unwrap_or(1.0),
+                "div" => {
+                    let d = arg.unwrap_or(1.0);
+                    if d.abs() > 1e-10 { n / d } else { n }
+                }
+                "pow" => n.powf(arg.unwrap_or(1.0)),
+                "min" => n.min(arg.unwrap_or(n)),
+                "max" => n.max(arg.unwrap_or(n)),
+                _ => n, // unknown op: return unchanged
+            };
+            VpData::Number(result)
+        }
+        VpData::Integer(i) => {
+            // Apply on numbers, return as Integer if result is whole, else Number.
+            let as_number = apply_list_map_op(&VpData::Number(*i as f64), op);
+            match as_number {
+                VpData::Number(n) => {
+                    if n.fract() == 0.0 && n.is_finite() {
+                        VpData::Integer(n as i64)
+                    } else {
+                        VpData::Number(n)
+                    }
+                }
+                other => other,
+            }
+        }
+        VpData::Vector(v) => {
+            let v_arr = *v;
+            match op_name {
+                "negate" => VpData::Vector([-v_arr[0], -v_arr[1], -v_arr[2]]),
+                "normalize" => {
+                    let len = (v_arr[0]*v_arr[0] + v_arr[1]*v_arr[1] + v_arr[2]*v_arr[2]).sqrt();
+                    if len > 1e-10 {
+                        VpData::Vector([v_arr[0]/len, v_arr[1]/len, v_arr[2]/len])
+                    } else {
+                        VpData::Vector(v_arr)
+                    }
+                }
+                "length" => {
+                    let len = (v_arr[0]*v_arr[0] + v_arr[1]*v_arr[1] + v_arr[2]*v_arr[2]).sqrt();
+                    VpData::Number(len)
+                }
+                "scale" => {
+                    let s = arg.unwrap_or(1.0);
+                    VpData::Vector([v_arr[0]*s, v_arr[1]*s, v_arr[2]*s])
+                }
+                "add" => {
+                    let a = arg.unwrap_or(0.0);
+                    VpData::Vector([v_arr[0]+a, v_arr[1]+a, v_arr[2]+a])
+                }
+                "double" => VpData::Vector([v_arr[0]*2.0, v_arr[1]*2.0, v_arr[2]*2.0]),
+                "halve" => VpData::Vector([v_arr[0]*0.5, v_arr[1]*0.5, v_arr[2]*0.5]),
+                _ => VpData::Vector(v_arr), // unknown op: return unchanged
+            }
+        }
+        VpData::Point(p) => {
+            let p_arr = *p;
+            match op_name {
+                "negate" => VpData::Point([-p_arr[0], -p_arr[1], -p_arr[2]]),
+                "scale" => {
+                    let s = arg.unwrap_or(1.0);
+                    VpData::Point([p_arr[0]*s, p_arr[1]*s, p_arr[2]*s])
+                }
+                "add" => {
+                    let a = arg.unwrap_or(0.0);
+                    VpData::Point([p_arr[0]+a, p_arr[1]+a, p_arr[2]+a])
+                }
+                "double" => VpData::Point([p_arr[0]*2.0, p_arr[1]*2.0, p_arr[2]*2.0]),
+                "halve" => VpData::Point([p_arr[0]*0.5, p_arr[1]*0.5, p_arr[2]*0.5]),
+                _ => VpData::Point(p_arr),
+            }
+        }
+        VpData::Boolean(b) => {
+            match op_name {
+                "not" | "negate" => VpData::Boolean(!*b),
+                _ => VpData::Boolean(*b),
+            }
+        }
+        VpData::String(s) => {
+            match op_name {
+                "upper" => VpData::String(s.to_uppercase()),
+                "lower" => VpData::String(s.to_lowercase()),
+                "trim" => VpData::String(s.trim().to_string()),
+                "len" | "length" => VpData::Integer(s.len() as i64),
+                _ => VpData::String(s.clone()),
+            }
+        }
+        // Lists, Geometry, Mesh, Surface, etc.: pass through unchanged.
+        other => other.clone(),
+    }
 }
 
 /// Helper: segment-segment intersection in 3D (returns None if skew or non-intersecting).
