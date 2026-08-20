@@ -1109,6 +1109,8 @@ dependencies = [
  "earcutr",
  "env_logger",
  "log",
+ "quickcheck",
+ "quickcheck_macros",
  "rayon",
  "serde",
  "serde_json",

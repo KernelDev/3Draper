@@ -882,6 +882,7 @@ impl std::error::Error for StepParseError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quickcheck_macros::quickcheck;
 
     #[test]
     fn test_parse_simple_step() {
@@ -1139,5 +1140,58 @@ END-ISO-10303-21;
         assert!(result.is_ok());
         let file = result.unwrap();
         assert_eq!(file.entities.len(), 2);
+    }
+
+    // ── Fuzz tests (quickcheck) ──
+    // Goal: STEP parser must NEVER panic on arbitrary input.
+    // All malformed inputs should return Err(StepParseError), not crash.
+
+    /// Fuzz 1: Random byte strings must not panic the parser.
+    #[quickcheck]
+    fn fuzz_parse_random_string(input: String) -> bool {
+        // The parser should either succeed or return an error — never panic.
+        let result = parse_step(&input);
+        result.is_ok() || result.is_err()
+    }
+
+    /// Fuzz 2: Random byte slices (including non-UTF8) must not panic.
+    #[quickcheck]
+    fn fuzz_parse_random_bytes(input: Vec<u8>) -> bool {
+        // Try to parse as string — if invalid UTF-8, parser should handle gracefully.
+        if let Ok(s) = std::str::from_utf8(&input) {
+            let _ = parse_step(s);
+        }
+        // No panic = pass.
+        true
+    }
+
+    /// Fuzz 3: Strings with STEP-like structure but random entity IDs.
+    #[quickcheck]
+    fn fuzz_parse_random_step_entities(entity_id: i64, entity_type: String) -> bool {
+        let step_str = format!("{} = {};\nENDSEC;\nENDISO-10303-21;", entity_id, entity_type);
+        let _ = parse_step(&step_str);
+        // No panic = pass.
+        true
+    }
+
+    /// Fuzz 4: Deeply nested parentheses (stack overflow test).
+    #[quickcheck]
+    fn fuzz_parse_nested_parens(depth: u16) -> bool {
+        let depth = (depth % 50) as usize;  // Cap at 50 levels
+        let open = "(".repeat(depth);
+        let close = ")".repeat(depth);
+        let step_str = format!("1 = TEST{}{};", open, close);
+        let _ = parse_step(&step_str);
+        true
+    }
+
+    /// Fuzz 5: Very long strings.
+    #[quickcheck]
+    fn fuzz_parse_long_string(len: u16) -> bool {
+        let len = (len as usize) * 100;  // Up to ~6.5MB
+        let s = "A".repeat(len);
+        let step_str = format!("1 = TEST('{}');", s);
+        let _ = parse_step(&step_str);
+        true
     }
 }

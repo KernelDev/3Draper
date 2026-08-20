@@ -678,6 +678,7 @@ mod tests {
     use super::*;
     use crate::curve::NurbsCurve;
     use crate::Point3d;
+    use quickcheck_macros::quickcheck;
 
     fn make_quadratic_bezier() -> NurbsCurve {
         NurbsCurve {
@@ -990,5 +991,123 @@ mod tests {
         assert_eq!(find_knot_span(&knots, degree, 1.5, n), 3);
         assert_eq!(find_knot_span(&knots, degree, 2.5, n), 4);
         assert_eq!(find_knot_span(&knots, degree, 3.0, n), 4); // At the end
+    }
+
+    // ── Fuzz tests (quickcheck) ──
+    // Goal: NURBS evaluation must NEVER panic or produce NaN/Inf
+    // for any combination of control points, weights, and knot vectors.
+
+    /// Fuzz 1: find_knot_span must not panic on any valid knot vector and parameter.
+    #[quickcheck]
+    fn fuzz_find_knot_span(n_ctrl: u8, degree: u8, t_frac: u8) -> bool {
+        let n = (n_ctrl as usize).max(2);
+        let p = (degree as usize).min(n - 1).max(1);
+        // Build clamped uniform knot vector.
+        let n_knots = n + p + 1;
+        let mut knots = vec![0.0; n_knots];
+        for i in 0..(n - p) {
+            knots[p + i] = i as f64;
+        }
+        // Normalize last to 1.0
+        let max_knot = knots[n_knots - 1].max(1.0);
+        for k in &mut knots {
+            *k /= max_knot;
+        }
+        let t = (t_frac as f64) / 255.0;  // [0, 1]
+        // Must not panic.
+        let _ = find_knot_span(&knots, p, t, n);
+        true
+    }
+
+    /// Fuzz 2: NURBS curve evaluation must not produce NaN or Inf.
+    #[quickcheck]
+    fn fuzz_nurbs_eval_no_nan(
+        n_ctrl: u8,
+        degree: u8,
+        t_frac: u8,
+        seed_x: u8,
+        seed_y: u8,
+        seed_z: u8,
+    ) -> bool {
+        let n = (n_ctrl as usize).max(2).min(20);  // Cap at 20 control points
+        let p = (degree as usize).min(n - 1).max(1);
+        // Build clamped uniform knot vector.
+        let n_knots = n + p + 1;
+        let mut knots = vec![0.0; n_knots];
+        for i in 0..=(n - p) {
+            knots[p + i] = i as f64;
+        }
+        for i in 0..p {
+            knots[n_knots - 1 - i] = (n - p) as f64;
+        }
+        // Generate control points from seeds.
+        let control_points: Vec<crate::Point3d> = (0..n).map(|i| {
+            let s = (i as f64) + 1.0;
+            crate::Point3d::new(
+                ((seed_x.wrapping_add(i as u8)) as f64) / 10.0 * s,
+                ((seed_y.wrapping_add(i as u8)) as f64) / 10.0 * s,
+                ((seed_z.wrapping_add(i as u8)) as f64) / 10.0 * s,
+            )
+        }).collect();
+        let weights = vec![1.0; n];
+        let nurbs = crate::NurbsCurve { degree: p, control_points, weights, knots };
+        let t = (t_frac as f64) / 255.0;  // [0, 1]
+        let curve = crate::Curve3d::Nurbs(nurbs);
+        let p = curve.point_at(t);
+        // Result must be finite (no NaN or Inf).
+        p.x.is_finite() && p.y.is_finite() && p.z.is_finite()
+    }
+
+    /// Fuzz 3: NURBS derivative must not produce NaN or Inf.
+    #[quickcheck]
+    fn fuzz_nurbs_derivative_no_nan(
+        n_ctrl: u8,
+        degree: u8,
+        t_frac: u8,
+    ) -> bool {
+        let n = (n_ctrl as usize).max(2).min(20);
+        let p = (degree as usize).min(n - 1).max(1);
+        let n_knots = n + p + 1;
+        let mut knots = vec![0.0; n_knots];
+        for i in 0..=(n - p) {
+            knots[p + i] = i as f64;
+        }
+        for i in 0..p {
+            knots[n_knots - 1 - i] = (n - p) as f64;
+        }
+        let control_points: Vec<crate::Point3d> = (0..n).map(|i| {
+            crate::Point3d::new(i as f64, (i as f64) * 0.5, 0.0)
+        }).collect();
+        let weights = vec![1.0; n];
+        let nurbs = crate::NurbsCurve { degree: p, control_points, weights, knots };
+        let t = (t_frac as f64) / 255.0;
+        let d = nurbs.derivative_at(t);
+        d.x.is_finite() && d.y.is_finite() && d.z.is_finite()
+    }
+
+    /// Fuzz 4: Transform application must not produce NaN.
+    #[quickcheck]
+    fn fuzz_transform_no_nan(
+        tx: f64, ty: f64, tz: f64,
+        sx: f64, sy: f64, sz: f64,
+        angle: f64,
+    ) -> bool {
+        // Skip extreme/non-finite values.
+        if !tx.is_finite() || !ty.is_finite() || !tz.is_finite() { return true; }
+        if !sx.is_finite() || !sy.is_finite() || !sz.is_finite() { return true; }
+        if !angle.is_finite() { return true; }
+        // Skip zero/negative/extreme scales.
+        if sx.abs() < 1e-10 || sy.abs() < 1e-10 || sz.abs() < 1e-10 { return true; }
+        if sx.abs() > 1e10 || sy.abs() > 1e10 || sz.abs() > 1e10 { return true; }
+
+        let t = crate::Transform::translation(tx, ty, tz);
+        let s = crate::Transform::scaling(sx, sy, sz);
+        let r = crate::Transform::rotation_z(angle);
+        let combined = crate::Transform::multiply(&t, &s);
+        let combined = crate::Transform::multiply(&combined, &r);
+
+        let p = crate::Point3d::new(1.0, 2.0, 3.0);
+        let transformed = combined.m[0][0] * p.x + combined.m[0][1] * p.y + combined.m[0][2] * p.z + combined.m[0][3];
+        transformed.is_finite()
     }
 }

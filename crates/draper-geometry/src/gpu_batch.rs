@@ -17,6 +17,7 @@
 //! buffers and evaluated in a WGSL compute shader with minimal adaptation.
 
 use crate::NurbsSurface;
+use crate::Point3d;
 
 /// SOA (Structure of Arrays) representation of a NURBS surface.
 ///
