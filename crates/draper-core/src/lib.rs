@@ -16,6 +16,7 @@ pub mod error;
 pub mod step_to_usd;
 pub mod iga;
 pub mod digital_twin;
+pub mod quantum_hash;
 
 pub use document::*;
 pub use operations::*;
@@ -26,3 +27,4 @@ pub use error::*;
 pub use step_to_usd::*;
 pub use iga::*;
 pub use digital_twin::*;
+pub use quantum_hash::*;
