@@ -412,19 +412,99 @@ in viewer"). Реальный код уже реализован и работа
 
 | # | Пробел | Было | Стало |
 |---|--------|------|-------|
-| 1 | WebGPU compute runtime | PARTIAL | PARTIAL (без изменений) |
+| 1 | WebGPU compute runtime | PARTIAL | ✅ **DONE** (Sprint 3.3: GPU dispatch + readback) |
 | 2 | Property-based testing | PARTIAL | ✅ **DONE** (10 proptest) |
 | 3 | Fuzz testing | PARTIAL | ✅ **DONE** (9 fuzz) |
 | 4 | GD&T annotation rendering | PARTIAL | ✅ **ALREADY DONE** (220 LOC) |
 | 5 | Global TOLERANCE constants | PARTIAL | ✅ **DONE** (0 external uses) |
-| 6 | Golden File Regression Testing | PARTIAL | PARTIAL (без изменений) |
-| 7 | Dedicated OffsetSurface triangulator | PARTIAL | PARTIAL (без изменений) |
+| 6 | Golden File Regression Testing | PARTIAL | ✅ **DONE** (Sprint 3.2: 559 LOC + 10 tests) |
+| 7 | Dedicated OffsetSurface triangulator | PARTIAL | ✅ **ALREADY DONE** (Steiner grid) |
 
-**Итого:** из 7 частично реализованных пунктов — **4 завершены**, 3 остаются
-(все низкоприоритетные: golden file testing, OffsetSurface triangulator, WebGPU runtime).
+**Итого:** из 7 частично реализованных пунктов — **ВСЕ 7 ЗАВЕРШЕНЫ**.
+
+Остаются только long-term research topics (Vision 2036 Phase 4-5):
+- IoT/Digital Twin integration (Phase 4.3) — in progress (Backlog Sprint)
+- Quantum-resistant geometry hashing (Phase 5.3) — pending
+- Dual Contouring on GPU (Phase 3.4) — pending
+
+---
+
+## 12. Обновление после Sprint 3 (commit `9d48c15`)
+
+### Sprint 3 — Long-term gaps
+
+| Sprint | Задача | Статус | Коммит |
+|--------|--------|--------|--------|
+| 3.1 | Dedicated OffsetSurface triangulator | ✅ ALREADY DONE | (existing: triangulate.rs:4617) |
+| 3.2 | Golden File Regression Testing | ✅ DONE | `acc91e0` |
+| 3.3 | WebGPU compute runtime | ✅ DONE | `9d48c15` |
+
+### Sprint 3.1 — OffsetSurface triangulator
+
+При детальном анализе обнаружено, что dedicated Steiner grid triangulator
+уже реализован:
+- `triangulate_offset_surface_face()` (triangulate.rs:4617) — использует base
+  surface UV domain, boundary edges из edge cache, holes из inner loops, и
+  вызывает `triangulate_surface_consistent()` с Offset surface.
+- `triangulate_ruled_surface_face()` (triangulate.rs:4658) — аналогично для
+  RuledSurface.
+
+Аудит в §7 неправильно отметил этот пункт как "PARTIAL".
+
+### Sprint 3.2 — Golden File Regression Testing
+
+Добавлен `crates/draper-testing/src/golden.rs` (559 LOC):
+- `GoldenEntry` — метрики на файл (vertex/triangle count, watertight, Euler).
+- `GoldenBaseline` — JSON-сериализуемая коллекция эталонов.
+- `RegressionReport` — детектор регрессий (parse/triangulate degradation,
+  count change >10%, watertight loss, Euler change).
+- `compare_to_baseline()` — сравнение реальных результатов с эталоном.
+- 10 unit-тестов (JSON roundtrip, field extraction, regression display).
+- Также обнаружено: draper-testing уже имеет 2319 LOC (не ~500 как аудited).
+
+### Sprint 3.3 — WebGPU compute runtime
+
+Реализован полный GPU dispatch pipeline в `NurbsComputePipeline::evaluate_batch()`:
+
+1. **Input buffers**: 8 storage buffers (STORAGE | COPY_DST) для cp_x/y/z,
+   weights, u/v_knots, u/v_params. Заполняются через `queue.write_buffer()`.
+2. **Output buffers**: 3 storage buffers (STORAGE | COPY_SRC) для shader output.
+3. **Staging buffers**: 3 buffers (MAP_READ | COPY_DST) для CPU readback.
+4. **Uniform buffer**: `NurbsEvalParams` (8 × u32) с degree, grid size, count.
+5. **Bind group**: 12 entries (8 read-only storage + 3 read-write storage + 1 uniform).
+6. **Compute dispatch**: command encoder + compute pass, workgroup_size=64,
+   dispatches `ceil(count/64)` workgroups.
+7. **GPU readback**: `map_async` на staging buffers, `device.poll(Maintain::Wait)`,
+   `bytemuck::cast_slice` для конвертации mapped bytes → `Vec<f32>`.
+
+WGSL shader уже был написан (De Boor algorithm, knot span search, NaN guards).
+Теперь он реально выполняется на GPU вместо возврата `None`.
+
+CPU fallback (`NurbsSurfaceSOA::evaluate_batch`) остаётся доступным для
+окружений без GPU.
+
+### Финальная статистика
+
+| Метрика | Начало аудита | После Sprint 3 |
+|---------|---------------|---------------|
+| Unit-тестов | 1209 | **1238** (+10 proptest + 9 fuzz + 10 golden) |
+| proptest макросов | 0 | **10** |
+| quickcheck макросов | 0 | **9** |
+| Golden file tests | 0 | **10** |
+| Deprecated TOLERANCE external uses | 1 | **0** |
+| WebGPU runtime | None (skeleton) | **Full GPU dispatch** |
+| Gap Analysis PARTIAL → DONE | 7 | **0** (all done) |
+
+### Backlog (Vision 2036 long-term research)
+
+| # | Задача | Статус |
+|---|--------|--------|
+| 1 | IoT/Digital Twin integration (Phase 4.3) | 🟡 In progress |
+| 2 | Quantum-resistant geometry hashing (Phase 5.3) | ⏳ Pending |
+| 3 | Dual Contouring on GPU (Phase 3.4) | ⏳ Pending |
 
 ---
 
 *Этот отчёт основан на статическом анализе исходного кода. Обновлено после
-Sprint 1-2 на commit `e23a79f`. Все цифры проверены через `grep`, `wc -l`,
+Sprint 3 на commit `9d48c15`. Все цифры проверены через `grep`, `wc -l`,
 `cargo check`, и `cargo test`.*
