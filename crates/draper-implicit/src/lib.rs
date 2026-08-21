@@ -16,6 +16,9 @@
 //! - f32 precision for GPU compatibility
 
 pub mod generative;
+pub mod dual_contouring;
+
+pub use dual_contouring::*;
 
 use draper_geometry::Point3d;
 
