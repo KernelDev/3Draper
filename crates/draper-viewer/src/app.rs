@@ -18548,7 +18548,7 @@ fn solid_from_mesh(mesh: &draper_mesh::TriangleMesh) -> draper_topology::Solid {
 
 /// VP helper: evaluate the graph and return the result solid.
 /// Walks connections topologically: primitives first, then modifiers.
-fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<draper_topology::Solid> {
+pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<draper_topology::Solid> {
     use crate::ui::workspaces::{NodeType, VpData};
     use draper_topology::ShapeBuilder;
     use draper_geometry::{Point3d, Vec3d, Transform, Direction3d};

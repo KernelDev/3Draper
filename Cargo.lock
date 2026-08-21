@@ -972,6 +972,7 @@ dependencies = [
  "draper-mesh",
  "draper-step",
  "draper-topology",
+ "draper-viewer",
  "env_logger",
  "log",
 ]
