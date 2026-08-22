@@ -92,11 +92,15 @@ fn main() {
             let n_faces = s.faces().len();
             println!("✓ VP evaluation produced a Solid with {} faces", n_faces);
 
+            // Create examples/ directory
+            let dir = "examples";
+            std::fs::create_dir_all(dir).ok();
+
             // ── Export STEP ──
             println!("\nExporting to STEP...");
             let step_content = export_step(s, "engine_bracket");
-            let step_path = "download/engine_bracket.step";
-            match write_step_file(&step_content, step_path) {
+            let step_path = format!("{}/engine_bracket.step", dir);
+            match write_step_file(&step_content, &step_path) {
                 Ok(_) => println!("✓ STEP exported: {} ({} bytes)", step_path, step_content.len()),
                 Err(e) => eprintln!("✗ STEP export failed: {}", e),
             }
@@ -110,30 +114,30 @@ fn main() {
 
             // ── Export STL (binary) ──
             println!("\nExporting to STL (binary)...");
-            let stl_path = "download/engine_bracket.stl";
-            match stl::write_stl_file(&mesh, stl_path, true) {
-                Ok(_) => println!("✓ STL exported: {}", stl_path),
+            let stl_path = format!("{}/engine_bracket.stl", dir);
+            match stl::write_stl_file(&mesh, &stl_path, true) {
+                Ok(_) => println!("✓ STL exported: {}", &stl_path),
                 Err(e) => eprintln!("✗ STL export failed: {}", e),
             }
 
             // ── Export STL (ASCII) ──
             println!("\nExporting to STL (ASCII)...");
-            let stl_ascii_path = "download/engine_bracket_ascii.stl";
-            match stl::write_stl_file(&mesh, stl_ascii_path, false) {
-                Ok(_) => println!("✓ STL (ASCII) exported: {}", stl_ascii_path),
+            let stl_ascii_path = format!("{}/engine_bracket_ascii.stl", dir);
+            match stl::write_stl_file(&mesh, &stl_ascii_path, false) {
+                Ok(_) => println!("✓ STL (ASCII) exported: {}", &stl_ascii_path),
                 Err(e) => eprintln!("✗ STL (ASCII) export failed: {}", e),
             }
 
             // ── Export OBJ ──
             println!("\nExporting to OBJ...");
-            let obj_path = "download/engine_bracket.obj";
-            match stl::write_obj_file(&mesh, obj_path) {
-                Ok(_) => println!("✓ OBJ exported: {}", obj_path),
+            let obj_path = format!("{}/engine_bracket.obj", dir);
+            match stl::write_obj_file(&mesh, &obj_path) {
+                Ok(_) => println!("✓ OBJ exported: {}", &obj_path),
                 Err(e) => eprintln!("✗ OBJ export failed: {}", e),
             }
 
             println!("\n=== Done! ===");
-            println!("Files saved to download/:");
+            println!("Files saved to {}/:", dir);
             println!("  - engine_bracket.step  (STEP AP214)");
             println!("  - engine_bracket.stl   (STL binary)");
             println!("  - engine_bracket_ascii.stl (STL ASCII)");

@@ -1,0 +1,177 @@
+solid 3Draper
+  facet normal 0 0 1
+    outer loop
+      vertex 48 20 -10
+      vertex -40 -20 -10
+      vertex 1000 -20 -10
+    endloop
+  endfacet
+  facet normal 0 1 0
+    outer loop
+      vertex -40 -20 -10
+      vertex -40 -20 10
+      vertex 40 -20 10
+    endloop
+  endfacet
+  facet normal 0 1 0
+    outer loop
+      vertex -40 -20 -10
+      vertex 40 -20 10
+      vertex 1000 -20 30
+    endloop
+  endfacet
+  facet normal 0 1 0
+    outer loop
+      vertex 1000 -20 30
+      vertex 0 -20 -10
+      vertex -40 -20 -10
+    endloop
+  endfacet
+  facet normal 1 0 0
+    outer loop
+      vertex -40 20 -10
+      vertex -40 20 10
+      vertex -40 -20 10
+    endloop
+  endfacet
+  facet normal 1 0 0
+    outer loop
+      vertex -40 20 -10
+      vertex -40 -20 10
+      vertex -40 -1000 30
+    endloop
+  endfacet
+  facet normal 1 0 0
+    outer loop
+      vertex -40 -1000 30
+      vertex -40 0 -10
+      vertex -40 20 -10
+    endloop
+  endfacet
+  facet normal -1 0 0
+    outer loop
+      vertex 40 -20 -10
+      vertex 40 -20 10
+      vertex 40 20 10
+    endloop
+  endfacet
+  facet normal -1 0 0
+    outer loop
+      vertex 40 20 10
+      vertex 40 20 -10
+      vertex 40 -20 -10
+    endloop
+  endfacet
+  facet normal 1 0 0
+    outer loop
+      vertex -40 -20 10
+      vertex -40 -20 -10
+      vertex -40 0 -10
+    endloop
+  endfacet
+  facet normal 1 0 0
+    outer loop
+      vertex -40 -20 10
+      vertex -40 0 -10
+      vertex -40 -1 -10
+    endloop
+  endfacet
+  facet normal 0 1 0
+    outer loop
+      vertex 40 -20 10
+      vertex 40 -20 -10
+      vertex 0 -20 -10
+    endloop
+  endfacet
+  facet normal 0 1 0
+    outer loop
+      vertex 40 -20 10
+      vertex 0 -20 -10
+      vertex 1 -20 -10
+    endloop
+  endfacet
+  facet normal 0 0 -1
+    outer loop
+      vertex 0 -20 10
+      vertex 40 -20 10
+      vertex 48 20 10
+    endloop
+  endfacet
+  facet normal 0 0 -1
+    outer loop
+      vertex 0 -20 10
+      vertex 48 20 10
+      vertex -40 -20 10
+    endloop
+  endfacet
+  facet normal 0 0 1
+    outer loop
+      vertex -1 -20 -10
+      vertex 0 -20 -10
+      vertex 48 20 -10
+    endloop
+  endfacet
+  facet normal 0 0 1
+    outer loop
+      vertex 48 20 -10
+      vertex -40 20 -10
+      vertex -1 -20 -10
+    endloop
+  endfacet
+  facet normal 0 1 0
+    outer loop
+      vertex 40 -20 35
+      vertex 40 -20 5
+      vertex 20 -20 5
+    endloop
+  endfacet
+  facet normal 0 1 0
+    outer loop
+      vertex 20 -20 5
+      vertex 20 -20 35
+      vertex 40 -20 35
+    endloop
+  endfacet
+  facet normal 0 -1 0
+    outer loop
+      vertex 40 20 35
+      vertex 20 20 35
+      vertex 20 20 5
+    endloop
+  endfacet
+  facet normal 0 -1 0
+    outer loop
+      vertex 20 20 5
+      vertex 40 20 5
+      vertex 40 20 35
+    endloop
+  endfacet
+  facet normal 1 0 0
+    outer loop
+      vertex 20 20 35
+      vertex 20 -20 35
+      vertex 20 -20 5
+    endloop
+  endfacet
+  facet normal 1 0 0
+    outer loop
+      vertex 20 -20 5
+      vertex 20 20 5
+      vertex 20 20 35
+    endloop
+  endfacet
+  facet normal -1 0 0
+    outer loop
+      vertex 40 20 35
+      vertex 40 20 5
+      vertex 40 -20 5
+    endloop
+  endfacet
+  facet normal -1 0 0
+    outer loop
+      vertex 40 -20 5
+      vertex 40 -20 35
+      vertex 40 20 35
+    endloop
+  endfacet
+endsolid 3Draper
