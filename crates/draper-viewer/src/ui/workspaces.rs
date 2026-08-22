@@ -2738,3 +2738,888 @@ impl OptimizePreset {
         }
     }
 }
+
+// ============================================================
+// VP Graph Serialization (Save / Load / Import / Export)
+// ============================================================
+//
+// JSON format (human-readable, no serde dependency):
+//
+// ```json
+// {
+//   "version": 1,
+//   "next_id": 42,
+//   "nodes": [
+//     { "id": 0, "type": "NumberSlider", "fields": {"value": 42.0, "min": 0.0, "max": 100.0}, "x": 0.0, "y": 0.0 },
+//     { "id": 1, "type": "Box", "fields": {"width": 10.0, "height": 5.0, "depth": 3.0}, "x": 100.0, "y": 0.0 }
+//   ],
+//   "connections": [
+//     { "from_node": 0, "from_port": 0, "to_node": 1, "to_port": 0 }
+//   ]
+// }
+// ```
+
+impl VpGraph {
+    /// Serialize the entire graph to a JSON string.
+    pub fn to_json(&self) -> String {
+        let mut s = String::with_capacity(4096);
+        s.push_str("{\n");
+        s.push_str(&format!("  \"version\": 1,\n"));
+        s.push_str(&format!("  \"next_id\": {},\n", self.next_id));
+
+        // Nodes
+        s.push_str("  \"nodes\": [\n");
+        for (i, node) in self.nodes.iter().enumerate() {
+            s.push_str("    {");
+            s.push_str(&format!("\"id\": {}, ", node.id));
+            let (type_name, fields_json) = node_type_to_json(&node.node_type);
+            s.push_str(&format!("\"type\": \"{}\", ", type_name));
+            s.push_str(&format!("\"fields\": {}, ", fields_json));
+            s.push_str(&format!("\"x\": {}, \"y\": {}", node.x, node.y));
+            s.push_str("}");
+            if i < self.nodes.len() - 1 { s.push(','); }
+            s.push('\n');
+        }
+        s.push_str("  ],\n");
+
+        // Connections
+        s.push_str("  \"connections\": [\n");
+        for (i, conn) in self.connections.iter().enumerate() {
+            s.push_str("    {");
+            s.push_str(&format!(
+                "\"from_node\": {}, \"from_port\": {}, \"to_node\": {}, \"to_port\": {}",
+                conn.from_node, conn.from_port, conn.to_node, conn.to_port
+            ));
+            s.push_str("}");
+            if i < self.connections.len() - 1 { s.push(','); }
+            s.push('\n');
+        }
+        s.push_str("  ]\n");
+        s.push_str("}\n");
+        s
+    }
+
+    /// Deserialize a graph from a JSON string.
+    pub fn from_json(json: &str) -> Result<Self, String> {
+        let mut graph = VpGraph::new();
+
+        // Parse next_id
+        if let Some(val) = extract_json_value(json, "\"next_id\"") {
+            graph.next_id = val.trim().trim_end_matches(',').parse::<u64>().unwrap_or(0);
+        }
+
+        // Parse nodes
+        let nodes_str = extract_json_array(json, "\"nodes\"").unwrap_or_default();
+        for node_str in split_json_objects(&nodes_str) {
+            let id = extract_json_value(&node_str, "\"id\"")
+                .and_then(|v| v.trim().trim_end_matches(',').parse::<u64>().ok())
+                .ok_or("Missing node id")?;
+            let type_name = extract_json_string(&node_str, "\"type\"")
+                .ok_or("Missing node type")?;
+            let fields_str = extract_json_object(&node_str, "\"fields\"")
+                .unwrap_or_default();
+            let x = extract_json_value(&node_str, "\"x\"")
+                .and_then(|v| v.trim().trim_end_matches(',').parse::<f32>().ok())
+                .unwrap_or(0.0);
+            let y = extract_json_value(&node_str, "\"y\"")
+                .and_then(|v| v.trim().trim_end_matches(',').parse::<f32>().ok())
+                .unwrap_or(0.0);
+            let node_type = node_type_from_json(&type_name, &fields_str)?;
+            graph.nodes.push(VpNode { id, node_type, x, y });
+        }
+
+        // Parse connections
+        let conns_str = extract_json_array(json, "\"connections\"").unwrap_or_default();
+        for conn_str in split_json_objects(&conns_str) {
+            let from_node = extract_json_value(&conn_str, "\"from_node\"")
+                .and_then(|v| v.trim().trim_end_matches(',').parse::<u64>().ok())
+                .ok_or("Missing from_node")?;
+            let from_port = extract_json_value(&conn_str, "\"from_port\"")
+                .and_then(|v| v.trim().trim_end_matches(',').parse::<usize>().ok())
+                .ok_or("Missing from_port")?;
+            let to_node = extract_json_value(&conn_str, "\"to_node\"")
+                .and_then(|v| v.trim().trim_end_matches(',').parse::<u64>().ok())
+                .ok_or("Missing to_node")?;
+            let to_port = extract_json_value(&conn_str, "\"to_port\"")
+                .and_then(|v| v.trim().trim_end_matches(',').parse::<usize>().ok())
+                .ok_or("Missing to_port")?;
+            graph.connections.push(VpConnection {
+                from_node, from_port, to_node, to_port,
+            });
+        }
+
+        Ok(graph)
+    }
+
+    /// Save the entire graph to a file.
+    pub fn save_to_file(&self, path: &str) -> Result<(), String> {
+        let json = self.to_json();
+        std::fs::write(path, json).map_err(|e| format!("Failed to write file: {}", e))
+    }
+
+    /// Load a graph from a file. Replaces the current graph.
+    pub fn load_from_file(path: &str) -> Result<Self, String> {
+        let json = std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
+        Self::from_json(&json)
+    }
+
+    /// Export selected nodes (and their internal connections) to a JSON string.
+    ///
+    /// Node IDs are remapped to start from 0. Connections between selected
+    /// nodes are preserved; connections to unselected nodes are dropped.
+    pub fn export_selected(&self, selected_ids: &[u64]) -> String {
+        let selected_set: std::collections::HashSet<u64> = selected_ids.iter().copied().collect();
+
+        // Build ID remap (old → new)
+        let mut id_remap: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+        for (i, &old_id) in selected_ids.iter().enumerate() {
+            id_remap.insert(old_id, i as u64);
+        }
+
+        let mut s = String::with_capacity(2048);
+        s.push_str("{\n");
+        s.push_str("  \"version\": 1,\n");
+        s.push_str(&format!("  \"next_id\": {},\n", selected_ids.len()));
+
+        // Nodes (remapped)
+        s.push_str("  \"nodes\": [\n");
+        for (i, &old_id) in selected_ids.iter().enumerate() {
+            if let Some(node) = self.nodes.iter().find(|n| n.id == old_id) {
+                let new_id = id_remap[&old_id];
+                let (type_name, fields_json) = node_type_to_json(&node.node_type);
+                s.push_str("    {");
+                s.push_str(&format!("\"id\": {}, ", new_id));
+                s.push_str(&format!("\"type\": \"{}\", ", type_name));
+                s.push_str(&format!("\"fields\": {}, ", fields_json));
+                s.push_str(&format!("\"x\": {}, \"y\": {}", node.x, node.y));
+                s.push_str("}");
+                if i < selected_ids.len() - 1 { s.push(','); }
+                s.push('\n');
+            }
+        }
+        s.push_str("  ],\n");
+
+        // Connections (only between selected nodes, remapped)
+        s.push_str("  \"connections\": [\n");
+        let filtered_conns: Vec<&VpConnection> = self.connections.iter()
+            .filter(|c| selected_set.contains(&c.from_node) && selected_set.contains(&c.to_node))
+            .collect();
+        for (i, conn) in filtered_conns.iter().enumerate() {
+            let new_from = id_remap[&conn.from_node];
+            let new_to = id_remap[&conn.to_node];
+            s.push_str("    {");
+            s.push_str(&format!(
+                "\"from_node\": {}, \"from_port\": {}, \"to_node\": {}, \"to_port\": {}",
+                new_from, conn.from_port, new_to, conn.to_port
+            ));
+            s.push_str("}");
+            if i < filtered_conns.len() - 1 { s.push(','); }
+            s.push('\n');
+        }
+        s.push_str("  ]\n");
+        s.push_str("}\n");
+        s
+    }
+
+    /// Import nodes from a JSON string into this graph.
+    ///
+    /// Imported nodes get new IDs (appended to the current graph's ID space).
+    /// Connections are remapped to the new IDs.
+    /// Returns the list of new node IDs.
+    pub fn import_from_json(&mut self, json: &str) -> Result<Vec<u64>, String> {
+        let sub_graph = VpGraph::from_json(json)?;
+
+        // Build ID remap (old sub_graph ID → new ID in self)
+        let mut id_remap: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+        let mut new_ids = Vec::new();
+
+        for node in &sub_graph.nodes {
+            let new_id = self.next_id;
+            self.next_id += 1;
+            id_remap.insert(node.id, new_id);
+            new_ids.push(new_id);
+            self.nodes.push(VpNode {
+                id: new_id,
+                node_type: node.node_type.clone(),
+                x: node.x,
+                y: node.y,
+            });
+        }
+
+        // Import connections with remapped IDs
+        for conn in &sub_graph.connections {
+            if let (Some(&new_from), Some(&new_to)) = (
+                id_remap.get(&conn.from_node),
+                id_remap.get(&conn.to_node),
+            ) {
+                self.connections.push(VpConnection {
+                    from_node: new_from,
+                    from_port: conn.from_port,
+                    to_node: new_to,
+                    to_port: conn.to_port,
+                });
+            }
+        }
+
+        Ok(new_ids)
+    }
+
+    /// Get all node IDs.
+    pub fn all_node_ids(&self) -> Vec<u64> {
+        self.nodes.iter().map(|n| n.id).collect()
+    }
+
+    /// Remove a node and all its connections by ID.
+    pub fn remove_node(&mut self, id: u64) -> bool {
+        let before = self.nodes.len();
+        self.nodes.retain(|n| n.id != id);
+        let removed = self.nodes.len() < before;
+        if removed {
+            self.connections.retain(|c| c.from_node != id && c.to_node != id);
+        }
+        removed
+    }
+
+    /// Clear the entire graph.
+    pub fn clear(&mut self) {
+        self.nodes.clear();
+        self.connections.clear();
+        self.next_id = 0;
+    }
+}
+
+// ── JSON helpers ──
+
+/// Extract a value string after a key in JSON.
+/// Returns the raw text between the colon after the key and the next comma/newline.
+fn extract_json_value(json: &str, key: &str) -> Option<String> {
+    let pos = json.find(key)?;
+    let rest = &json[pos + key.len()..];
+    let colon_pos = rest.find(':')?;
+    let after_colon = &rest[colon_pos + 1..];
+    let trimmed = after_colon.trim_start();
+    let end = trimmed.find(|c: char| c == ',' || c == '\n' || c == '}').unwrap_or(trimmed.len());
+    Some(trimmed[..end].trim().to_string())
+}
+
+/// Extract a quoted string value after a key.
+fn extract_json_string(json: &str, key: &str) -> Option<String> {
+    let val = extract_json_value(json, key)?;
+    let val = val.trim();
+    if val.starts_with('"') {
+        // Find the closing quote (not the opening one)
+        let after_open = &val[1..];
+        if let Some(end) = after_open.find('"') {
+            return Some(after_open[..end].to_string());
+        }
+    }
+    None
+}
+
+/// Extract the content of a JSON array after a key.
+/// Returns the text between the opening [ and matching ].
+fn extract_json_array(json: &str, key: &str) -> Option<String> {
+    let pos = json.find(key)?;
+    let rest = &json[pos + key.len()..];
+    let bracket_pos = rest.find('[')?;
+    let after_open = &rest[bracket_pos + 1..];
+    // Find matching ] (accounting for nesting)
+    let mut depth = 1;
+    let mut end = 0;
+    for (i, ch) in after_open.char_indices() {
+        match ch {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 { end = i; break; }
+            }
+            _ => {}
+        }
+    }
+    Some(after_open[..end].to_string())
+}
+
+/// Extract the content of a JSON object after a key.
+/// Returns the text between the opening { and matching }.
+fn extract_json_object(json: &str, key: &str) -> Option<String> {
+    let pos = json.find(key)?;
+    let rest = &json[pos + key.len()..];
+    let colon_pos = rest.find(':')?;
+    let after_colon = &rest[colon_pos + 1..].trim_start();
+    if !after_colon.starts_with('{') { return None; }
+    let after_open = &after_colon[1..];
+    let mut depth = 1;
+    let mut end = 0;
+    for (i, ch) in after_open.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 { end = i; break; }
+            }
+            _ => {}
+        }
+    }
+    Some(after_open[..end].to_string())
+}
+
+/// Split a JSON array body into individual object strings.
+fn split_json_objects(array_body: &str) -> Vec<String> {
+    let mut objects = Vec::new();
+    let mut depth = 0;
+    let mut start = 0;
+    for (i, ch) in array_body.char_indices() {
+        match ch {
+            '{' => {
+                if depth == 0 { start = i; }
+                depth += 1;
+            }
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    objects.push(array_body[start..=i].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    objects
+}
+
+/// Extract a float field from a JSON object string.
+fn json_float(obj: &str, key: &str) -> Option<f64> {
+    let needle = format!("\"{}\"", key);
+    let pos = obj.find(&needle)?;
+    let rest = &obj[pos + needle.len()..];
+    let colon = rest.find(':')?;
+    let val = &rest[colon + 1..];
+    let trimmed = val.trim_start();
+    let end = trimmed.find(|c: char| c == ',' || c == '}').unwrap_or(trimmed.len());
+    trimmed[..end].trim().parse::<f64>().ok()
+}
+
+/// Extract a u32 field from a JSON object string.
+fn json_u32(obj: &str, key: &str) -> Option<u32> {
+    json_float(obj, key).map(|v| v as u32)
+}
+
+/// Extract a bool field from a JSON object string.
+fn json_bool(obj: &str, key: &str) -> Option<bool> {
+    let needle = format!("\"{}\"", key);
+    let pos = obj.find(&needle)?;
+    let rest = &obj[pos + needle.len()..];
+    let colon = rest.find(':')?;
+    let val = &rest[colon + 1..].trim_start();
+    if val.starts_with("true") { Some(true) }
+    else if val.starts_with("false") { Some(false) }
+    else { None }
+}
+
+/// Extract a string field from a JSON object string.
+fn json_string(obj: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{}\"", key);
+    let pos = obj.find(&needle)?;
+    let rest = &obj[pos + needle.len()..];
+    let colon = rest.find(':')?;
+    let val = &rest[colon + 1..].trim_start();
+    if val.starts_with('"') {
+        let inner = &val[1..];
+        if let Some(end) = inner.find('"') {
+            return Some(inner[..end].to_string());
+        }
+    }
+    None
+}
+
+/// Extract an i64 field from a JSON object string.
+fn json_i64(obj: &str, key: &str) -> Option<i64> {
+    json_float(obj, key).map(|v| v as i64)
+}
+
+// ── NodeType serialization ──
+
+/// Convert a NodeType to (type_name, fields_json).
+fn node_type_to_json(nt: &NodeType) -> (&'static str, String) {
+    match nt {
+        NodeType::NumberSlider { value, min, max } => ("NumberSlider", format!(
+            "{{\"value\":{},\"min\":{},\"max\":{}}}", value, min, max)),
+        NodeType::IntegerInput { value } => ("IntegerInput", format!("{{\"value\":{}}}", value)),
+        NodeType::BooleanToggle { value } => ("BooleanToggle", format!("{{\"value\":{}}}", value)),
+        NodeType::PointInput { x, y, z } => ("PointInput", format!("{{\"x\":{},\"y\":{},\"z\":{}}}", x, y, z)),
+        NodeType::VectorInput { x, y, z } => ("VectorInput", format!("{{\"x\":{},\"y\":{},\"z\":{}}}", x, y, z)),
+        NodeType::Panel => ("Panel", "{}".to_string()),
+        NodeType::Add => ("Add", "{}".to_string()),
+        NodeType::Subtract => ("Subtract", "{}".to_string()),
+        NodeType::Multiply => ("Multiply", "{}".to_string()),
+        NodeType::Divide => ("Divide", "{}".to_string()),
+        NodeType::Sin => ("Sin", "{}".to_string()),
+        NodeType::Cos => ("Cos", "{}".to_string()),
+        NodeType::Tan => ("Tan", "{}".to_string()),
+        NodeType::Abs => ("Abs", "{}".to_string()),
+        NodeType::Sqrt => ("Sqrt", "{}".to_string()),
+        NodeType::Pow => ("Pow", "{}".to_string()),
+        NodeType::Round => ("Round", "{}".to_string()),
+        NodeType::Min => ("Min", "{}".to_string()),
+        NodeType::Max => ("Max", "{}".to_string()),
+        NodeType::Average => ("Average", "{}".to_string()),
+        NodeType::Expression { expr } => ("Expression", format!("{{\"expr\":\"{}\"}}", escape_json(&expr))),
+        NodeType::Series { start, step, count } => ("Series", format!(
+            "{{\"start\":{},\"step\":{},\"count\":{}}}", start, step, count)),
+        NodeType::Range { domain_min, domain_max, count } => ("Range", format!(
+            "{{\"domain_min\":{},\"domain_max\":{},\"count\":{}}}", domain_min, domain_max, count)),
+        NodeType::ListLength => ("ListLength", "{}".to_string()),
+        NodeType::ListItem => ("ListItem", "{}".to_string()),
+        NodeType::Reverse => ("Reverse", "{}".to_string()),
+        NodeType::Sort => ("Sort", "{}".to_string()),
+        NodeType::CullPattern => ("CullPattern", "{}".to_string()),
+        NodeType::Box { width, height, depth } => ("Box", format!(
+            "{{\"width\":{},\"height\":{},\"depth\":{}}}", width, height, depth)),
+        NodeType::Sphere { radius } => ("Sphere", format!("{{\"radius\":{}}}", radius)),
+        NodeType::Cylinder { radius, height } => ("Cylinder", format!("{{\"radius\":{},\"height\":{}}}", radius, height)),
+        NodeType::Cone { bottom_radius, top_radius, height } => ("Cone", format!(
+            "{{\"bottom_radius\":{},\"top_radius\":{},\"height\":{}}}", bottom_radius, top_radius, height)),
+        NodeType::Torus { major_radius, minor_radius } => ("Torus", format!(
+            "{{\"major_radius\":{},\"minor_radius\":{}}}", major_radius, minor_radius)),
+        NodeType::Line => ("Line", "{}".to_string()),
+        NodeType::Circle { radius } => ("Circle", format!("{{\"radius\":{}}}", radius)),
+        NodeType::DivideCurve { count } => ("DivideCurve", format!("{{\"count\":{}}}", count)),
+        NodeType::EvaluateCurve => ("EvaluateCurve", "{}".to_string()),
+        NodeType::CurveLength => ("CurveLength", "{}".to_string()),
+        NodeType::Move { x, y, z } => ("Move", format!("{{\"x\":{},\"y\":{},\"z\":{}}}", x, y, z)),
+        NodeType::Rotate { x_deg, y_deg, z_deg } => ("Rotate", format!(
+            "{{\"x_deg\":{},\"y_deg\":{},\"z_deg\":{}}}", x_deg, y_deg, z_deg)),
+        NodeType::Scale { x, y, z } => ("Scale", format!("{{\"x\":{},\"y\":{},\"z\":{}}}", x, y, z)),
+        NodeType::Mirror { plane } => ("Mirror", format!(
+            "{{\"plane\":\"{}\"}}", match plane {
+                MirrorPlane::XY => "XY", MirrorPlane::XZ => "XZ", MirrorPlane::YZ => "YZ",
+            })),
+        NodeType::LinearArray { count, spacing } => ("LinearArray", format!(
+            "{{\"count\":{},\"spacing\":{}}}", count, spacing)),
+        NodeType::CircularArray { count, angle } => ("CircularArray", format!(
+            "{{\"count\":{},\"angle\":{}}}", count, angle)),
+        NodeType::BooleanUnion => ("BooleanUnion", "{}".to_string()),
+        NodeType::BooleanSubtract => ("BooleanSubtract", "{}".to_string()),
+        NodeType::BooleanIntersect => ("BooleanIntersect", "{}".to_string()),
+        NodeType::Fillet { radius } => ("Fillet", format!("{{\"radius\":{}}}", radius)),
+        NodeType::Chamfer { distance } => ("Chamfer", format!("{{\"distance\":{}}}", distance)),
+        NodeType::Graft => ("Graft", "{}".to_string()),
+        NodeType::Flatten => ("Flatten", "{}".to_string()),
+        NodeType::CrossRef => ("CrossRef", "{}".to_string()),
+        NodeType::ShiftList { amount } => ("ShiftList", format!("{{\"amount\":{}}}", amount)),
+        NodeType::Subset { start, count } => ("Subset", format!(
+            "{{\"start\":{},\"count\":{}}}", start, count)),
+        NodeType::Dispatch => ("Dispatch", "{}".to_string()),
+        NodeType::Weave => ("Weave", "{}".to_string()),
+        NodeType::Concat => ("Concat", "{}".to_string()),
+        NodeType::BakeToDoc => ("BakeToDoc", "{}".to_string()),
+        // Phase A-I: Extended nodes — serialize with fields
+        NodeType::PlaneInput { ox, oy, oz, nx, ny, nz } => ("PlaneInput", format!(
+            "{{\"ox\":{},\"oy\":{},\"oz\":{},\"nx\":{},\"ny\":{},\"nz\":{}}}", ox, oy, oz, nx, ny, nz)),
+        NodeType::DomainInput { min, max } => ("DomainInput", format!("{{\"min\":{},\"max\":{}}}", min, max)),
+        NodeType::StringInput { text } => ("StringInput", format!("{{\"text\":\"{}\"}}", escape_json(text))),
+        NodeType::Volume => ("Volume", "{}".to_string()),
+        NodeType::SurfaceArea => ("SurfaceArea", "{}".to_string()),
+        NodeType::Centroid => ("Centroid", "{}".to_string()),
+        NodeType::BoundingBox => ("BoundingBox", "{}".to_string()),
+        NodeType::Distance => ("Distance", "{}".to_string()),
+        NodeType::Angle => ("Angle", "{}".to_string()),
+        NodeType::MassProperties => ("MassProperties", "{}".to_string()),
+        NodeType::Cross => ("Cross", "{}".to_string()),
+        NodeType::Dot => ("Dot", "{}".to_string()),
+        NodeType::VectorLength => ("VectorLength", "{}".to_string()),
+        NodeType::Unit => ("Unit", "{}".to_string()),
+        NodeType::Negative => ("Negative", "{}".to_string()),
+        NodeType::Reciprocal => ("Reciprocal", "{}".to_string()),
+        NodeType::Asin => ("Asin", "{}".to_string()),
+        NodeType::Acos => ("Acos", "{}".to_string()),
+        NodeType::Atan => ("Atan", "{}".to_string()),
+        NodeType::Atan2 => ("Atan2", "{}".to_string()),
+        NodeType::Log => ("Log", "{}".to_string()),
+        NodeType::Ln => ("Ln", "{}".to_string()),
+        NodeType::Exp => ("Exp", "{}".to_string()),
+        NodeType::Modulus => ("Modulus", "{}".to_string()),
+        NodeType::MapDomain { source_min, source_max, target_min, target_max } => ("MapDomain",
+            format!("{{\"source_min\":{},\"source_max\":{},\"target_min\":{},\"target_max\":{}}}",
+                source_min, source_max, target_min, target_max)),
+        NodeType::PointMidpoint => ("PointMidpoint", "{}".to_string()),
+        NodeType::PointLerp { t } => ("PointLerp", format!("{{\"t\":{}}}", t)),
+        NodeType::Vector2pt => ("Vector2pt", "{}".to_string()),
+        NodeType::Extrude { distance } => ("Extrude", format!("{{\"distance\":{}}}", distance)),
+        NodeType::Revolve { angle_deg } => ("Revolve", format!("{{\"angle_deg\":{}}}", angle_deg)),
+        NodeType::Loft => ("Loft", "{}".to_string()),
+        NodeType::Sweep => ("Sweep", "{}".to_string()),
+        NodeType::RuledSurface => ("RuledSurface", "{}".to_string()),
+        NodeType::PlaneSurface => ("PlaneSurface", "{}".to_string()),
+        NodeType::ExtrudePoint => ("ExtrudePoint", "{}".to_string()),
+        NodeType::ExtrudeTapered { distance, taper_deg } => ("ExtrudeTapered",
+            format!("{{\"distance\":{},\"taper_deg\":{}}}", distance, taper_deg)),
+        NodeType::EvaluateSurface => ("EvaluateSurface", "{}".to_string()),
+        NodeType::SurfaceNormal => ("SurfaceNormal", "{}".to_string()),
+        NodeType::Shell { thickness } => ("Shell", format!("{{\"thickness\":{}}}", thickness)),
+        NodeType::Thicken { thickness } => ("Thicken", format!("{{\"thickness\":{}}}", thickness)),
+        NodeType::OffsetSolid { distance } => ("OffsetSolid", format!("{{\"distance\":{}}}", distance)),
+        NodeType::SplitSolid => ("SplitSolid", "{}".to_string()),
+        NodeType::TrimSolid => ("TrimSolid", "{}".to_string()),
+        NodeType::Hole { radius, depth } => ("Hole", format!("{{\"radius\":{},\"depth\":{}}}", radius, depth)),
+        // Default for all remaining variants — store as type name only
+        other => {
+            let label = other.label();
+            (label, "{}".to_string())
+        }
+    }
+}
+
+/// Parse a NodeType from (type_name, fields_json).
+fn node_type_from_json(type_name: &str, fields: &str) -> Result<NodeType, String> {
+    Ok(match type_name {
+        "NumberSlider" => NodeType::NumberSlider {
+            value: json_float(fields, "value").unwrap_or(0.0),
+            min: json_float(fields, "min").unwrap_or(0.0),
+            max: json_float(fields, "max").unwrap_or(100.0),
+        },
+        "IntegerInput" => NodeType::IntegerInput { value: json_i64(fields, "value").unwrap_or(0) },
+        "BooleanToggle" => NodeType::BooleanToggle { value: json_bool(fields, "value").unwrap_or(false) },
+        "PointInput" => NodeType::PointInput {
+            x: json_float(fields, "x").unwrap_or(0.0),
+            y: json_float(fields, "y").unwrap_or(0.0),
+            z: json_float(fields, "z").unwrap_or(0.0),
+        },
+        "VectorInput" => NodeType::VectorInput {
+            x: json_float(fields, "x").unwrap_or(0.0),
+            y: json_float(fields, "y").unwrap_or(0.0),
+            z: json_float(fields, "z").unwrap_or(0.0),
+        },
+        "Panel" => NodeType::Panel,
+        "Add" => NodeType::Add,
+        "Subtract" => NodeType::Subtract,
+        "Multiply" => NodeType::Multiply,
+        "Divide" => NodeType::Divide,
+        "Sin" => NodeType::Sin,
+        "Cos" => NodeType::Cos,
+        "Tan" => NodeType::Tan,
+        "Abs" => NodeType::Abs,
+        "Sqrt" => NodeType::Sqrt,
+        "Pow" => NodeType::Pow,
+        "Round" => NodeType::Round,
+        "Min" => NodeType::Min,
+        "Max" => NodeType::Max,
+        "Average" => NodeType::Average,
+        "Expression" => NodeType::Expression { expr: json_string(fields, "expr").unwrap_or_default() },
+        "Series" => NodeType::Series {
+            start: json_float(fields, "start").unwrap_or(0.0),
+            step: json_float(fields, "step").unwrap_or(1.0),
+            count: json_u32(fields, "count").unwrap_or(10),
+        },
+        "Range" => NodeType::Range {
+            domain_min: json_float(fields, "domain_min").unwrap_or(0.0),
+            domain_max: json_float(fields, "domain_max").unwrap_or(1.0),
+            count: json_u32(fields, "count").unwrap_or(10),
+        },
+        "ListLength" => NodeType::ListLength,
+        "ListItem" => NodeType::ListItem,
+        "Reverse" => NodeType::Reverse,
+        "Sort" => NodeType::Sort,
+        "CullPattern" => NodeType::CullPattern,
+        "Box" => NodeType::Box {
+            width: json_float(fields, "width").unwrap_or(1.0),
+            height: json_float(fields, "height").unwrap_or(1.0),
+            depth: json_float(fields, "depth").unwrap_or(1.0),
+        },
+        "Sphere" => NodeType::Sphere { radius: json_float(fields, "radius").unwrap_or(1.0) },
+        "Cylinder" => NodeType::Cylinder {
+            radius: json_float(fields, "radius").unwrap_or(1.0),
+            height: json_float(fields, "height").unwrap_or(1.0),
+        },
+        "Cone" => NodeType::Cone {
+            bottom_radius: json_float(fields, "bottom_radius").unwrap_or(1.0),
+            top_radius: json_float(fields, "top_radius").unwrap_or(0.0),
+            height: json_float(fields, "height").unwrap_or(1.0),
+        },
+        "Torus" => NodeType::Torus {
+            major_radius: json_float(fields, "major_radius").unwrap_or(1.0),
+            minor_radius: json_float(fields, "minor_radius").unwrap_or(0.1),
+        },
+        "Line" => NodeType::Line,
+        "Circle" => NodeType::Circle { radius: json_float(fields, "radius").unwrap_or(1.0) },
+        "DivideCurve" => NodeType::DivideCurve { count: json_u32(fields, "count").unwrap_or(10) },
+        "EvaluateCurve" => NodeType::EvaluateCurve,
+        "CurveLength" => NodeType::CurveLength,
+        "Move" => NodeType::Move {
+            x: json_float(fields, "x").unwrap_or(0.0),
+            y: json_float(fields, "y").unwrap_or(0.0),
+            z: json_float(fields, "z").unwrap_or(0.0),
+        },
+        "Rotate" => NodeType::Rotate {
+            x_deg: json_float(fields, "x_deg").unwrap_or(0.0),
+            y_deg: json_float(fields, "y_deg").unwrap_or(0.0),
+            z_deg: json_float(fields, "z_deg").unwrap_or(0.0),
+        },
+        "Scale" => NodeType::Scale {
+            x: json_float(fields, "x").unwrap_or(1.0),
+            y: json_float(fields, "y").unwrap_or(1.0),
+            z: json_float(fields, "z").unwrap_or(1.0),
+        },
+        "Mirror" => NodeType::Mirror {
+            plane: match json_string(fields, "plane").as_deref() {
+                Some("XZ") => MirrorPlane::XZ,
+                Some("YZ") => MirrorPlane::YZ,
+                _ => MirrorPlane::XY,
+            },
+        },
+        "LinearArray" => NodeType::LinearArray {
+            count: json_u32(fields, "count").unwrap_or(2),
+            spacing: json_float(fields, "spacing").unwrap_or(1.0),
+        },
+        "CircularArray" => NodeType::CircularArray {
+            count: json_u32(fields, "count").unwrap_or(4),
+            angle: json_float(fields, "angle").unwrap_or(360.0),
+        },
+        "BooleanUnion" => NodeType::BooleanUnion,
+        "BooleanSubtract" => NodeType::BooleanSubtract,
+        "BooleanIntersect" => NodeType::BooleanIntersect,
+        "Fillet" => NodeType::Fillet { radius: json_float(fields, "radius").unwrap_or(1.0) },
+        "Chamfer" => NodeType::Chamfer { distance: json_float(fields, "distance").unwrap_or(1.0) },
+        "Graft" => NodeType::Graft,
+        "Flatten" => NodeType::Flatten,
+        "CrossRef" => NodeType::CrossRef,
+        "ShiftList" => NodeType::ShiftList { amount: json_i64(fields, "amount").unwrap_or(0) as i32 },
+        "Subset" => NodeType::Subset {
+            start: json_u32(fields, "start").unwrap_or(0),
+            count: json_u32(fields, "count").unwrap_or(1),
+        },
+        "Dispatch" => NodeType::Dispatch,
+        "Weave" => NodeType::Weave,
+        "Concat" => NodeType::Concat,
+        "BakeToDoc" => NodeType::BakeToDoc,
+        "PlaneInput" => NodeType::PlaneInput {
+            ox: json_float(fields, "ox").unwrap_or(0.0),
+            oy: json_float(fields, "oy").unwrap_or(0.0),
+            oz: json_float(fields, "oz").unwrap_or(0.0),
+            nx: json_float(fields, "nx").unwrap_or(0.0),
+            ny: json_float(fields, "ny").unwrap_or(0.0),
+            nz: json_float(fields, "nz").unwrap_or(1.0),
+        },
+        "DomainInput" => NodeType::DomainInput {
+            min: json_float(fields, "min").unwrap_or(0.0),
+            max: json_float(fields, "max").unwrap_or(1.0),
+        },
+        "StringInput" => NodeType::StringInput { text: json_string(fields, "text").unwrap_or_default() },
+        "Volume" => NodeType::Volume,
+        "SurfaceArea" => NodeType::SurfaceArea,
+        "Centroid" => NodeType::Centroid,
+        "BoundingBox" => NodeType::BoundingBox,
+        "Distance" => NodeType::Distance,
+        "Angle" => NodeType::Angle,
+        "MassProperties" => NodeType::MassProperties,
+        "Cross" => NodeType::Cross,
+        "Dot" => NodeType::Dot,
+        "VectorLength" => NodeType::VectorLength,
+        "Unit" => NodeType::Unit,
+        "Negative" => NodeType::Negative,
+        "Reciprocal" => NodeType::Reciprocal,
+        "Asin" => NodeType::Asin,
+        "Acos" => NodeType::Acos,
+        "Atan" => NodeType::Atan,
+        "Atan2" => NodeType::Atan2,
+        "Log" => NodeType::Log,
+        "Ln" => NodeType::Ln,
+        "Exp" => NodeType::Exp,
+        "Modulus" => NodeType::Modulus,
+        "MapDomain" => NodeType::MapDomain {
+            source_min: json_float(fields, "source_min").unwrap_or(0.0),
+            source_max: json_float(fields, "source_max").unwrap_or(1.0),
+            target_min: json_float(fields, "target_min").unwrap_or(0.0),
+            target_max: json_float(fields, "target_max").unwrap_or(1.0),
+        },
+        "PointMidpoint" => NodeType::PointMidpoint,
+        "PointLerp" => NodeType::PointLerp { t: json_float(fields, "t").unwrap_or(0.5) },
+        "Vector2pt" => NodeType::Vector2pt,
+        "Extrude" => NodeType::Extrude { distance: json_float(fields, "distance").unwrap_or(1.0) },
+        "Revolve" => NodeType::Revolve { angle_deg: json_float(fields, "angle_deg").unwrap_or(360.0) },
+        "Loft" => NodeType::Loft,
+        "Sweep" => NodeType::Sweep,
+        "RuledSurface" => NodeType::RuledSurface,
+        "PlaneSurface" => NodeType::PlaneSurface,
+        "ExtrudePoint" => NodeType::ExtrudePoint,
+        "ExtrudeTapered" => NodeType::ExtrudeTapered {
+            distance: json_float(fields, "distance").unwrap_or(1.0),
+            taper_deg: json_float(fields, "taper_deg").unwrap_or(0.0),
+        },
+        "EvaluateSurface" => NodeType::EvaluateSurface,
+        "SurfaceNormal" => NodeType::SurfaceNormal,
+        "Shell" => NodeType::Shell { thickness: json_float(fields, "thickness").unwrap_or(1.0) },
+        "Thicken" => NodeType::Thicken { thickness: json_float(fields, "thickness").unwrap_or(1.0) },
+        "OffsetSolid" => NodeType::OffsetSolid { distance: json_float(fields, "distance").unwrap_or(1.0) },
+        "SplitSolid" => NodeType::SplitSolid,
+        "TrimSolid" => NodeType::TrimSolid,
+        "Hole" => NodeType::Hole {
+            radius: json_float(fields, "radius").unwrap_or(1.0),
+            depth: json_float(fields, "depth").unwrap_or(1.0),
+        },
+        "ToMesh" => NodeType::ToMesh,
+        "MeshArea" => NodeType::MeshArea,
+        "MeshVolume" => NodeType::MeshVolume,
+        "MeshFlip" => NodeType::MeshFlip,
+        // Fallback: try to match by label
+        other => {
+            // For unknown types, create a Panel as placeholder
+            log::warn!("Unknown NodeType '{}' during deserialization, creating Panel", other);
+            NodeType::Panel
+        }
+    })
+}
+
+/// Escape special JSON characters in a string.
+fn escape_json(s: &str) -> String {
+    s.replace('\\', "\\\\")
+     .replace('"', "\\\"")
+     .replace('\n', "\\n")
+     .replace('\r', "\\r")
+     .replace('\t', "\\t")
+}
+
+#[cfg(test)]
+mod vp_serialize_tests {
+    use super::*;
+
+    #[test]
+    fn test_graph_json_roundtrip() {
+        let mut g = VpGraph::new();
+        let a = g.add_node(NodeType::NumberSlider { value: 42.0, min: 0.0, max: 100.0 }, 0.0, 0.0);
+        let b = g.add_node(NodeType::Box { width: 10.0, height: 5.0, depth: 3.0 }, 100.0, 0.0);
+        let c = g.add_node(NodeType::BooleanUnion, 200.0, 0.0);
+        g.connect(a, 0, c, 0);
+        g.connect(b, 0, c, 1);
+
+        let json = g.to_json();
+        let g2 = VpGraph::from_json(&json).unwrap();
+
+        assert_eq!(g2.node_count(), 3);
+        assert_eq!(g2.connection_count(), 2);
+        assert_eq!(g2.next_id, 3);
+
+        // Check first node
+        match &g2.nodes[0].node_type {
+            NodeType::NumberSlider { value, min, max } => {
+                assert!((value - 42.0).abs() < 1e-10);
+                assert!((min - 0.0).abs() < 1e-10);
+                assert!((max - 100.0).abs() < 1e-10);
+            }
+            other => panic!("Expected NumberSlider, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_export_selected() {
+        let mut g = VpGraph::new();
+        let a = g.add_node(NodeType::Box { width: 5.0, height: 5.0, depth: 5.0 }, 0.0, 0.0);
+        let b = g.add_node(NodeType::Sphere { radius: 3.0 }, 100.0, 0.0);
+        let _c = g.add_node(NodeType::BooleanUnion, 200.0, 0.0);
+
+        let json = g.export_selected(&[a, b]);
+        let g2 = VpGraph::from_json(&json).unwrap();
+        assert_eq!(g2.node_count(), 2);
+        // IDs should be remapped to 0 and 1
+        assert_eq!(g2.nodes[0].id, 0);
+        assert_eq!(g2.nodes[1].id, 1);
+    }
+
+    #[test]
+    fn test_import_into_graph() {
+        let mut g1 = VpGraph::new();
+        let a = g1.add_node(NodeType::Box { width: 5.0, height: 5.0, depth: 5.0 }, 0.0, 0.0);
+        let b = g1.add_node(NodeType::Sphere { radius: 3.0 }, 100.0, 0.0);
+        let c = g1.add_node(NodeType::BooleanUnion, 200.0, 0.0);
+        g1.connect(a, 0, c, 0);
+        g1.connect(b, 0, c, 1);
+
+        let json = g1.to_json();
+
+        let mut g2 = VpGraph::new();
+        g2.add_node(NodeType::Cylinder { radius: 2.0, height: 10.0 }, 0.0, 0.0); // existing node
+        let new_ids = g2.import_from_json(&json).unwrap();
+
+        assert_eq!(new_ids.len(), 3);
+        assert_eq!(g2.node_count(), 4); // 1 existing + 3 imported
+        assert_eq!(g2.connection_count(), 2); // 2 connections imported
+    }
+
+    #[test]
+    fn test_empty_graph_serialize() {
+        let g = VpGraph::new();
+        let json = g.to_json();
+        let g2 = VpGraph::from_json(&json).unwrap();
+        assert_eq!(g2.node_count(), 0);
+        assert_eq!(g2.connection_count(), 0);
+    }
+
+    #[test]
+    fn test_all_field_types_roundtrip() {
+        let mut g = VpGraph::new();
+        g.add_node(NodeType::NumberSlider { value: 5.0, min: 0.0, max: 10.0 }, 0.0, 0.0);
+        g.add_node(NodeType::BooleanToggle { value: true }, 0.0, 50.0);
+        g.add_node(NodeType::PointInput { x: 1.0, y: 2.0, z: 3.0 }, 0.0, 100.0);
+        g.add_node(NodeType::VectorInput { x: 0.0, y: 1.0, z: 0.0 }, 0.0, 150.0);
+        g.add_node(NodeType::Fillet { radius: 2.5 }, 0.0, 200.0);
+        g.add_node(NodeType::Series { start: 0.0, step: 0.5, count: 20 }, 0.0, 250.0);
+
+        let json = g.to_json();
+        let g2 = VpGraph::from_json(&json).unwrap();
+
+        assert_eq!(g2.node_count(), 6);
+
+        // Check Fillet
+        match &g2.nodes[4].node_type {
+            NodeType::Fillet { radius } => assert!((radius - 2.5).abs() < 1e-10),
+            other => panic!("Expected Fillet, got {:?}", other),
+        }
+
+        // Check Series
+        match &g2.nodes[5].node_type {
+            NodeType::Series { start, step, count } => {
+                assert!((start - 0.0).abs() < 1e-10);
+                assert!((step - 0.5).abs() < 1e-10);
+                assert_eq!(*count, 20);
+            }
+            other => panic!("Expected Series, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_save_load_file() {
+        let mut g = VpGraph::new();
+        g.add_node(NodeType::Box { width: 5.0, height: 5.0, depth: 5.0 }, 0.0, 0.0);
+
+        let path = "/tmp/vp_test_graph.json";
+        g.save_to_file(path).unwrap();
+        let g2 = VpGraph::load_from_file(path).unwrap();
+        assert_eq!(g2.node_count(), 1);
+
+        // Cleanup
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_remove_node() {
+        let mut g = VpGraph::new();
+        let a = g.add_node(NodeType::Box { width: 5.0, height: 5.0, depth: 5.0 }, 0.0, 0.0);
+        let b = g.add_node(NodeType::Sphere { radius: 3.0 }, 100.0, 0.0);
+        let c = g.add_node(NodeType::BooleanUnion, 200.0, 0.0);
+        g.connect(a, 0, c, 0);
+        g.connect(b, 0, c, 1);
+
+        assert!(g.remove_node(b));
+        assert_eq!(g.node_count(), 2);
+        assert_eq!(g.connection_count(), 1); // Only a→c remains
+    }
+
+    #[test]
+    fn test_clear_graph() {
+        let mut g = VpGraph::new();
+        g.add_node(NodeType::Box { width: 5.0, height: 5.0, depth: 5.0 }, 0.0, 0.0);
+        g.add_node(NodeType::Sphere { radius: 3.0 }, 100.0, 0.0);
+        g.clear();
+        assert_eq!(g.node_count(), 0);
+        assert_eq!(g.next_id, 0);
+    }
+}
