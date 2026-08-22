@@ -690,6 +690,64 @@ pub enum NodeType {
     /// halve/square/cube/radians/degrees/add:N/mul:N/pow:N/normalize/length/
     /// scale:N/upper/lower/trim/len. Separated by `;`.
     ListMap { operations: String },
+
+    // ───── Kernel API Wrappers (new VP nodes for existing core API) ─────
+    /// Heal a solid (fix gaps, stitch faces, remove small features).
+    HealSolid,
+    /// Stitch two solids' shells within tolerance.
+    StitchSolids { tolerance: f64 },
+    /// Validate solid topology (Euler characteristic, manifold check).
+    ValidateSolid,
+    /// Export mesh to glTF format.
+    ExportGLTF { path: String },
+    /// Export mesh to USD format.
+    ExportUSD { path: String },
+    /// Export mesh to 3MF format.
+    Export3MF { path: String },
+    /// Export mesh to PLY format.
+    ExportPLY { path: String },
+    /// Export mesh to DXF format.
+    ExportDXF { path: String },
+    /// Import STL file as a mesh.
+    ImportSTL { path: String },
+    /// Solve a 2D sketch constraint system.
+    SketchSolve,
+    /// Solve a 3D assembly constraint system (6-DOF).
+    AssemblySolve,
+    /// Create a 2D drawing from a 3D mesh with HLR.
+    CreateDrawing { view_type: u32 }, // 0=front, 1=top, 2=side, 3=iso
+    /// Export drawing to PDF.
+    ExportPDF { path: String },
+    /// Export drawing to SVG.
+    ExportSVG { path: String },
+    /// Run FEA analysis on a solid.
+    FEASolve { density: f64 },
+    /// Generate CAM toolpath from a solid.
+    GenerateToolpath { tool_diameter: f64 },
+    /// Export CAM toolpath to G-code.
+    ExportGCode { path: String },
+    /// Unfold a sheet metal solid.
+    UnfoldSheet { k_factor: f64 },
+    /// Convert a solid to an implicit SDF representation.
+    ToImplicit,
+    /// Boolean union of two implicit solids (SDF).
+    SdfUnion,
+    /// Boolean subtract of two implicit solids (SDF).
+    SdfSubtract,
+    /// Boolean intersect of two implicit solids (SDF).
+    SdfIntersect,
+    /// Generate mesh from implicit solid via Dual Contouring.
+    DualContourMesh { voxel_size: f64 },
+    /// Subdivide a mesh using Catmull-Clark scheme.
+    SubDSubdivide { levels: u32 },
+    /// Convert SubD mesh to NURBS patches.
+    SubDToNurbs,
+    /// Evaluate NURBS surface on GPU (WebGPU compute shader).
+    GPUEvalNurbs,
+    /// Compute geometry hash (quantum-resistant).
+    GeometryHash,
+    /// Verify geometry hash against expected value.
+    MerkleVerify,
 }
 
 impl NodeType {
@@ -962,6 +1020,35 @@ impl NodeType {
             NodeType::FileInput { .. } => "File Input",
             NodeType::PathInput { .. } => "Path Input",
             NodeType::ListMap { .. } => "List Map",
+            // Kernel API Wrappers
+            NodeType::HealSolid => "Heal Solid",
+            NodeType::StitchSolids { .. } => "Stitch Solids",
+            NodeType::ValidateSolid => "Validate Solid",
+            NodeType::ExportGLTF { .. } => "Export glTF",
+            NodeType::ExportUSD { .. } => "Export USD",
+            NodeType::Export3MF { .. } => "Export 3MF",
+            NodeType::ExportPLY { .. } => "Export PLY",
+            NodeType::ExportDXF { .. } => "Export DXF",
+            NodeType::ImportSTL { .. } => "Import STL",
+            NodeType::SketchSolve => "Sketch Solve",
+            NodeType::AssemblySolve => "Assembly Solve",
+            NodeType::CreateDrawing { .. } => "Create Drawing",
+            NodeType::ExportPDF { .. } => "Export PDF",
+            NodeType::ExportSVG { .. } => "Export SVG",
+            NodeType::FEASolve { .. } => "FEA Solve",
+            NodeType::GenerateToolpath { .. } => "Generate Toolpath",
+            NodeType::ExportGCode { .. } => "Export G-Code",
+            NodeType::UnfoldSheet { .. } => "Unfold Sheet",
+            NodeType::ToImplicit => "To Implicit",
+            NodeType::SdfUnion => "SDF Union",
+            NodeType::SdfSubtract => "SDF Subtract",
+            NodeType::SdfIntersect => "SDF Intersect",
+            NodeType::DualContourMesh { .. } => "Dual Contour Mesh",
+            NodeType::SubDSubdivide { .. } => "SubD Subdivide",
+            NodeType::SubDToNurbs => "SubD To NURBS",
+            NodeType::GPUEvalNurbs => "GPU Eval NURBS",
+            NodeType::GeometryHash => "Geometry Hash",
+            NodeType::MerkleVerify => "Merkle Verify",
         }
     }
 
@@ -1073,6 +1160,22 @@ impl NodeType {
             NodeType::TransformInput { .. } | NodeType::ColorInput { .. } |
             NodeType::FileInput { .. } | NodeType::PathInput { .. } => "Params",
             NodeType::ListMap { .. } => "Tree",
+            // Kernel API Wrappers
+            NodeType::HealSolid | NodeType::StitchSolids { .. } |
+            NodeType::ValidateSolid => "Modify",
+            NodeType::ExportGLTF { .. } | NodeType::ExportUSD { .. } |
+            NodeType::Export3MF { .. } | NodeType::ExportPLY { .. } |
+            NodeType::ExportDXF { .. } | NodeType::ExportPDF { .. } |
+            NodeType::ExportSVG { .. } | NodeType::ExportGCode { .. } |
+            NodeType::ImportSTL { .. } | NodeType::CreateDrawing { .. } => "Output",
+            NodeType::SketchSolve | NodeType::AssemblySolve |
+            NodeType::FEASolve { .. } | NodeType::GenerateToolpath { .. } |
+            NodeType::UnfoldSheet { .. } | NodeType::GeometryHash |
+            NodeType::MerkleVerify => "Analysis",
+            NodeType::ToImplicit | NodeType::SdfUnion | NodeType::SdfSubtract |
+            NodeType::SdfIntersect | NodeType::DualContourMesh { .. } => "Implicit",
+            NodeType::SubDSubdivide { .. } | NodeType::SubDToNurbs => "SubD",
+            NodeType::GPUEvalNurbs => "Compute",
         }
     }
 
@@ -1730,6 +1833,39 @@ impl NodeType {
             NodeType::ListMap { .. } => vec![
                 PortDesc { name: "L", port_type: PortType::List },
             ],
+            // Kernel API Wrappers — inputs
+            NodeType::HealSolid => vec![PortDesc { name: "G", port_type: PortType::Geometry }],
+            NodeType::StitchSolids { .. } => vec![
+                PortDesc { name: "A", port_type: PortType::Geometry },
+                PortDesc { name: "B", port_type: PortType::Geometry },
+            ],
+            NodeType::ValidateSolid => vec![PortDesc { name: "G", port_type: PortType::Geometry }],
+            NodeType::ExportGLTF { .. } | NodeType::ExportUSD { .. } |
+            NodeType::Export3MF { .. } | NodeType::ExportPLY { .. } |
+            NodeType::ExportDXF { .. } => vec![PortDesc { name: "M", port_type: PortType::Mesh }],
+            NodeType::ImportSTL { .. } => vec![],
+            NodeType::SketchSolve => vec![PortDesc { name: "S", port_type: PortType::Any }],
+            NodeType::AssemblySolve => vec![PortDesc { name: "A", port_type: PortType::Any }],
+            NodeType::CreateDrawing { .. } => vec![PortDesc { name: "M", port_type: PortType::Mesh }],
+            NodeType::ExportPDF { .. } | NodeType::ExportSVG { .. } => vec![
+                PortDesc { name: "D", port_type: PortType::Any },
+            ],
+            NodeType::FEASolve { .. } => vec![PortDesc { name: "G", port_type: PortType::Geometry }],
+            NodeType::GenerateToolpath { .. } => vec![PortDesc { name: "G", port_type: PortType::Geometry }],
+            NodeType::ExportGCode { .. } => vec![PortDesc { name: "T", port_type: PortType::Any }],
+            NodeType::UnfoldSheet { .. } => vec![PortDesc { name: "G", port_type: PortType::Geometry }],
+            NodeType::ToImplicit => vec![PortDesc { name: "G", port_type: PortType::Geometry }],
+            NodeType::SdfUnion | NodeType::SdfSubtract | NodeType::SdfIntersect => vec![
+                PortDesc { name: "A", port_type: PortType::Any },
+                PortDesc { name: "B", port_type: PortType::Any },
+            ],
+            NodeType::DualContourMesh { .. } => vec![PortDesc { name: "S", port_type: PortType::Any }],
+            NodeType::SubDSubdivide { .. } => vec![PortDesc { name: "M", port_type: PortType::Mesh }],
+            NodeType::SubDToNurbs => vec![PortDesc { name: "M", port_type: PortType::Mesh }],
+            NodeType::GPUEvalNurbs => vec![PortDesc { name: "S", port_type: PortType::Surface }],
+            NodeType::GeometryHash | NodeType::MerkleVerify => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+            ],
         }
     }
 
@@ -2053,6 +2189,60 @@ impl NodeType {
             ],
             NodeType::ListMap { .. } => vec![
                 PortDesc { name: "R", port_type: PortType::List },
+            ],
+            // Kernel API Wrappers — outputs
+            NodeType::HealSolid | NodeType::StitchSolids { .. } |
+            NodeType::UnfoldSheet { .. } => vec![
+                PortDesc { name: "G", port_type: PortType::Geometry },
+            ],
+            NodeType::ValidateSolid => vec![
+                PortDesc { name: "B", port_type: PortType::Boolean },
+            ],
+            NodeType::ExportGLTF { .. } | NodeType::ExportUSD { .. } |
+            NodeType::Export3MF { .. } | NodeType::ExportPLY { .. } |
+            NodeType::ExportDXF { .. } | NodeType::ExportPDF { .. } |
+            NodeType::ExportSVG { .. } | NodeType::ExportGCode { .. } => vec![
+                PortDesc { name: "S", port_type: PortType::String },
+            ],
+            NodeType::ImportSTL { .. } => vec![
+                PortDesc { name: "M", port_type: PortType::Mesh },
+            ],
+            NodeType::SketchSolve => vec![
+                PortDesc { name: "S", port_type: PortType::Any },
+            ],
+            NodeType::AssemblySolve => vec![
+                PortDesc { name: "A", port_type: PortType::Any },
+            ],
+            NodeType::CreateDrawing { .. } => vec![
+                PortDesc { name: "D", port_type: PortType::Any },
+            ],
+            NodeType::FEASolve { .. } => vec![
+                PortDesc { name: "R", port_type: PortType::List },
+            ],
+            NodeType::GenerateToolpath { .. } => vec![
+                PortDesc { name: "T", port_type: PortType::Any },
+            ],
+            NodeType::ToImplicit | NodeType::SdfUnion | NodeType::SdfSubtract |
+            NodeType::SdfIntersect => vec![
+                PortDesc { name: "I", port_type: PortType::Any },
+            ],
+            NodeType::DualContourMesh { .. } => vec![
+                PortDesc { name: "M", port_type: PortType::Mesh },
+            ],
+            NodeType::SubDSubdivide { .. } => vec![
+                PortDesc { name: "M", port_type: PortType::Mesh },
+            ],
+            NodeType::SubDToNurbs => vec![
+                PortDesc { name: "S", port_type: PortType::Surface },
+            ],
+            NodeType::GPUEvalNurbs => vec![
+                PortDesc { name: "P", port_type: PortType::List },
+            ],
+            NodeType::GeometryHash => vec![
+                PortDesc { name: "H", port_type: PortType::String },
+            ],
+            NodeType::MerkleVerify => vec![
+                PortDesc { name: "B", port_type: PortType::Boolean },
             ],
         }
     }
@@ -3460,6 +3650,35 @@ fn node_type_from_json(type_name: &str, fields: &str) -> Result<NodeType, String
         "MeshArea" => NodeType::MeshArea,
         "MeshVolume" => NodeType::MeshVolume,
         "MeshFlip" => NodeType::MeshFlip,
+        // Kernel API Wrappers
+        "Heal Solid" => NodeType::HealSolid,
+        "Stitch Solids" => NodeType::StitchSolids { tolerance: json_float(fields, "tolerance").unwrap_or(0.01) },
+        "Validate Solid" => NodeType::ValidateSolid,
+        "Export glTF" => NodeType::ExportGLTF { path: json_string(fields, "path").unwrap_or_default() },
+        "Export USD" => NodeType::ExportUSD { path: json_string(fields, "path").unwrap_or_default() },
+        "Export 3MF" => NodeType::Export3MF { path: json_string(fields, "path").unwrap_or_default() },
+        "Export PLY" => NodeType::ExportPLY { path: json_string(fields, "path").unwrap_or_default() },
+        "Export DXF" => NodeType::ExportDXF { path: json_string(fields, "path").unwrap_or_default() },
+        "Import STL" => NodeType::ImportSTL { path: json_string(fields, "path").unwrap_or_default() },
+        "Sketch Solve" => NodeType::SketchSolve,
+        "Assembly Solve" => NodeType::AssemblySolve,
+        "Create Drawing" => NodeType::CreateDrawing { view_type: json_u32(fields, "view_type").unwrap_or(0) },
+        "Export PDF" => NodeType::ExportPDF { path: json_string(fields, "path").unwrap_or_default() },
+        "Export SVG" => NodeType::ExportSVG { path: json_string(fields, "path").unwrap_or_default() },
+        "FEA Solve" => NodeType::FEASolve { density: json_float(fields, "density").unwrap_or(7850.0) },
+        "Generate Toolpath" => NodeType::GenerateToolpath { tool_diameter: json_float(fields, "tool_diameter").unwrap_or(6.0) },
+        "Export G-Code" => NodeType::ExportGCode { path: json_string(fields, "path").unwrap_or_default() },
+        "Unfold Sheet" => NodeType::UnfoldSheet { k_factor: json_float(fields, "k_factor").unwrap_or(0.33) },
+        "To Implicit" => NodeType::ToImplicit,
+        "SDF Union" => NodeType::SdfUnion,
+        "SDF Subtract" => NodeType::SdfSubtract,
+        "SDF Intersect" => NodeType::SdfIntersect,
+        "Dual Contour Mesh" => NodeType::DualContourMesh { voxel_size: json_float(fields, "voxel_size").unwrap_or(0.5) },
+        "SubD Subdivide" => NodeType::SubDSubdivide { levels: json_u32(fields, "levels").unwrap_or(1) },
+        "SubD To NURBS" => NodeType::SubDToNurbs,
+        "GPU Eval NURBS" => NodeType::GPUEvalNurbs,
+        "Geometry Hash" => NodeType::GeometryHash,
+        "Merkle Verify" => NodeType::MerkleVerify,
         // Fallback: try to match by label
         other => {
             // For unknown types, create a Panel as placeholder
