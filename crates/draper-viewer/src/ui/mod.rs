@@ -23,6 +23,7 @@ pub mod scripting_panel;
 pub mod icons;
 pub mod dock;
 pub mod macro_recorder;
+pub mod workspace_panels;
 
 use eframe::egui;
 

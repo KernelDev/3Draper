@@ -8039,6 +8039,25 @@ impl eframe::App for ViewerApp {
                             }
                         });
                 }
+
+                // ── Right-side tools panel for non-VP workspaces ──
+                // Each workspace (Modeling, Sketch, SM, CAM, FEA, Drawing, AI)
+                // gets a contextual side panel with real operations on the
+                // current document mesh. VP workspace is skipped because it
+                // has its own left+right layout (canvas + 3D viewport).
+                if self.brepcad_workspace != crate::ui::Workspace::VisualProgramming {
+                    let mut status_msg: Option<String> = None;
+                    crate::ui::workspace_panels::show_workspace_panel(
+                        ctx,
+                        self.brepcad_workspace,
+                        &self.mesh,
+                        &mut |msg: String| { status_msg = Some(msg); },
+                    );
+                    if let Some(msg) = status_msg {
+                        self.brepcad_status_msg = msg;
+                    }
+                }
+
             } else {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
