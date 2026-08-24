@@ -7220,12 +7220,18 @@ impl eframe::App for ViewerApp {
                             });
                         });
 
-                    // ── VP Canvas (center — interactive node graph) ──
+                    // ── VP Canvas (LEFT side — interactive node graph) ──
                     // Each node is an egui::Area with interactive parameter widgets.
                     // Coordinates: node.x / node.y are CANVAS-RELATIVE offsets.
                     // Screen position = canvas_rect.min + (node.x, node.y).
                     // This keeps nodes inside the canvas and consistent with connection lines.
-                    egui::CentralPanel::default()
+                    //
+                    // Layout: SidePanel::left (node canvas) | CentralPanel (3D viewport)
+                    // The 3D viewport renders the live-preview solid so the user can
+                    // see the result of their VP graph immediately.
+                    let vp_canvas_width = (ctx.screen_rect().width() * 0.55).round().max(420.0);
+                    egui::SidePanel::left("brepcad_vp_canvas")
+                        .exact_width(vp_canvas_width)
                         .frame(egui::Frame::new().fill(egui::Color32::from_rgb(0x0d, 0x0d, 0x1a)))
                         .show(ctx, |ui| {
                             let available = ui.available_size();
@@ -9959,13 +9965,10 @@ impl eframe::App for ViewerApp {
         } // end if enable_brepcad_ui
 
         // === Central 3D viewport ===
-        // Fix #2: Skip the main viewport when VP workspace is active —
-        // the VP workspace renders its own CentralPanel at line 6787.
-        // Having two CentralPanels in the same frame causes the second
-        // one to get zero space, and its content overlaps the VP canvas.
-        if self.enable_brepcad_ui && self.brepcad_workspace == crate::ui::Workspace::VisualProgramming {
-            // VP workspace already rendered its own CentralPanel — skip.
-        } else {
+        // In VP workspace the canvas lives in SidePanel::left (see line ~7116),
+        // so this CentralPanel automatically occupies the remaining right side
+        // and shows the live-preview solid. In all other workspaces, this is
+        // the only viewport and fills the whole central area.
         egui::CentralPanel::default()
             .frame(egui::Frame::default()
                 .fill(egui::Color32::from_rgb(0x1a, 0x1a, 0x2a))
@@ -11010,7 +11013,6 @@ impl eframe::App for ViewerApp {
                     }
                 }
             });
-        } // end of else (Fix #2: skip viewport when VP workspace active)
 
         // ═══════════════════════════════════════════════════════════════════════
         // === MOBILE UI — floating buttons + overlay panels ===
